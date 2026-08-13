@@ -38,14 +38,13 @@ def _count_redis_servers() -> int:
 # directly (reaper internals, guard tests, concurrency tests, repro scripts,
 # projection lifecycle suites). New files must be added here deliberately —
 # the source-scan test below fails otherwise (issue #1005 leak-rate
-# regression guard). Generated from the 2026-08-12 audit (31 files).
+# regression guard). Generated from the 2026-08-12 audit (31 files); #1012 conversion shrank it to 29.
 RAW_EMBEDDED_ALLOWLIST = {
+    "_embedded.py",
     "fixtures/redis-guard/bad_relative_path.py",
     "fixtures/redis-guard/good_absolute_path.py",
     "repro/reproduce_redislite_leak.py",
-    "test_analyze.py",
     "test_backup_e2e.py",
-    "test_backup_sweep.py",
     "test_config.py",
     "test_de2e1_entity_extraction.py",
     "test_embedded_concurrency.py",
@@ -63,9 +62,8 @@ RAW_EMBEDDED_ALLOWLIST = {
     "test_migrate_db.py",
     "test_ops_safety.py",
     "test_pre_migration_safety.py",
-    "test_projection_lifecycle.py",
-    "test_projection_version_gate.py",
     "test_projection.py",
+    "test_projection_lifecycle.py",
     "test_reaper.py",
     "test_redis_guard.py",
     "test_remove_context_migration.py",
