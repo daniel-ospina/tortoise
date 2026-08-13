@@ -1337,7 +1337,7 @@ class TortoiseSDK:
         #    a failure leaves the graph untouched.
         edges_result = proj.g.query(
             "MATCH (op:Point {is_operator:true})-[r]->(old:Point {id:$old_id}) "
-            "RETURN op.id, type(r), r.idx",
+            "RETURN op.id, type(r), r.idx, op.label",
             params={"old_id": old_id},
         )
         from .security import validate_rel_type
@@ -1368,6 +1368,17 @@ class TortoiseSDK:
         transferred = 0
         for row in edges_result.result_set:
             op_id, edge_type, idx = row[0], row[1], row[2]
+            op_label = row[3] if len(row) > 3 else None
+            if op_label == "alreadyDecided":
+                # #1080 review: dedup context edges must NOT be re-pointed at
+                # the replacement — an alreadyDecided IMPL on the superseded
+                # prior declares the OLD decision a duplicate, not the new one.
+                _logger.info(
+                    "supersede_point: keeping alreadyDecided operator %s "
+                    "attached to the superseded point %s (dedup context edge)",
+                    op_id, old_id,
+                )
+                continue
             # Create new edge: operator → new point (same idx preserves source/target position)
             proj.g.query(
                 f"MATCH (op:Point {{id:$op_id}}), (new:Point {{id:$new_id}}) "
@@ -1612,6 +1623,84 @@ class TortoiseSDK:
                     direction="unidirectional")
                 dedup_wired = True
 
+        # Temporal wiring at promotion (W-4, #786): a MERGED temporal
+        # candidate whose prior was LIVE at extraction gets its NAND now
+        # (live→live), or — for an explicit replacement — the prior is
+        # superseded (CORRECTS + outdated:true). Targets are validated
+        # BEFORE the CAS (mirroring the dedup block) so a stale/terminal
+        # target can never produce a live point with no event (#1080 review).
+        temporal_wired = False
+        superseded = False
+        temporal_targets = point.get("temporal_target_ids") or []
+        if point.get("temporal_target_id") and point.get("temporal_target_id") not in temporal_targets:
+            temporal_targets.append(point["temporal_target_id"])
+        live_targets: list[str] = []
+        if (point.get("temporal_candidate")
+                and point.get("temporal_reviewed") == "merge"):
+            for tgt in temporal_targets:
+                trow = proj.g.query(
+                    "MATCH (n:Point {id:$id}) RETURN n.status",
+                    params={"id": tgt},
+                ).result_set
+                if not trow:
+                    # MISSING node (stale target) — distinct from an unset
+                    # status node, which is live by the canonical read model
+                    # (#1080 round-2 review: missing targets crashed the
+                    # NAND create AFTER the CAS).
+                    _logger.warning(
+                        "promote_point: temporal target %s for %s no longer "
+                        "exists — skipping the wire", tgt, point_id)
+                    continue
+                tstatus = trow[0][0] or "live"
+                if tstatus == "live":
+                    live_targets.append(tgt)
+                else:
+                    _logger.warning(
+                        "promote_point: temporal target %s for %s is %s — "
+                        "skipping the wire", tgt, point_id, tstatus)
+        if live_targets and point.get("temporal_replacement"):
+            for tgt in live_targets:
+                try:
+                    self.supersede_point(tgt, point_id)
+                    superseded = True
+                except ValueError as exc:
+                    _logger.warning(
+                        "promote_point: supersede of %s failed for %s: %s",
+                        tgt, point_id, exc)
+        elif live_targets:
+            for tgt in live_targets:
+                exists = proj.g.query(
+                    "MATCH (op:Point {is_operator:true})-[:NAND]->"
+                    "(:Point {id:$cand}), "
+                    "(op)-[:NAND]->(:Point {id:$prior}) RETURN count(op)",
+                    params={"cand": point_id, "prior": tgt},
+                ).result_set
+                if exists and exists[0][0] > 0:
+                    continue
+                # Cross-guard: never NAND a pair already linked by an
+                # alreadyDecided IMPL (dedup+temporal conflict, #1080).
+                dup = proj.g.query(
+                    "MATCH (op:Point {label:'alreadyDecided'})-[:IMPL]->"
+                    "(:Point {id:$cand}), "
+                    "(op)-[:IMPL]->(:Point {id:$prior}) RETURN count(op)",
+                    params={"cand": point_id, "prior": tgt},
+                ).result_set
+                if dup and dup[0][0] > 0:
+                    _logger.warning(
+                        "promote_point: %s already linked to %s by an "
+                        "alreadyDecided IMPL — skipping temporal NAND",
+                        point_id, tgt)
+                    continue
+                try:
+                    self.create_operator("NAND", point_id, [tgt])
+                    temporal_wired = True
+                except ValueError as exc:
+                    # A racing delete between validation and create must
+                    # never leave a live point without its event (#1080).
+                    _logger.warning(
+                        "promote_point: NAND wiring to %s failed for %s: %s",
+                        tgt, point_id, exc)
+
         # R16 zombie-operator prevention: promote incident draft operators
         # once ALL their endpoint Points are live.
         promoted_ops = self._promote_incident_operators(proj, point_id, now)
@@ -1622,6 +1711,10 @@ class TortoiseSDK:
                   "operator_nodes_promoted": promoted_ops}
         if dedup_wired:
             result["dedup_wired"] = True
+        if temporal_wired:
+            result["temporal_wired"] = True
+        if superseded:
+            result["superseded"] = True
         if race_detected:
             result["race_detected"] = True
             result["race_warning"] = (
@@ -1681,6 +1774,90 @@ class TortoiseSDK:
         """
         from .mining import quarantine_batch as _qb
         return _qb(self._get_proj(), batch_id, reason=reason)
+
+    # ── Temporal belief timeline (W-4, #786, DE2E-6) ───────────────
+
+    def belief_timeline(self, topic: str, limit: int = 50) -> list[dict]:
+        """Dated, ordered belief chain for a topic (plan §6.1, J-4, DE2E-6).
+
+        Returns decision Points aboutObject-connected to the topic entity,
+        ordered by validFrom ascending, each shaped as
+        {content, pointKind, validFrom, status, linked_by, related} where
+        linked_by is the temporal edge (NAND via an operator, or CORRECTS via
+        supersede_point) to the NEXT point in the chain, and related holds
+        the linked point ids.
+        """
+        if limit < 1:
+            raise ValueError(f"limit must be >= 1, got {limit}")
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (p:Point {pointKind:'decision'})-[:aboutObject]->"
+            "(o:Object) "
+            "WHERE (p.is_operator IS NULL OR p.is_operator = false) "
+            "AND (o.name = $topic OR o.canonical_name = $topic) "
+            "RETURN p.id, p.content, p.validFrom, p.status, p.outdated "
+            "ORDER BY p.validFrom LIMIT $limit",
+            params={"topic": topic, "limit": limit},
+        ).result_set
+        entries = [list(r) for r in rows]
+        # Superseded priors dropped out of the topic query (supersede_point
+        # transferred their aboutObject edges) — re-attach them via the
+        # CORRECTS chain so the timeline keeps the outdated belief (#1080).
+        if entries:
+            topic_ids = [r[0] for r in entries]
+            old_rows = proj.g.query(
+                "MATCH (cur:Point)-[:CORRECTS]->(old:Point {pointKind:'decision'}) "
+                "WHERE cur.id IN $ids "
+                "RETURN old.id, old.content, old.validFrom, old.status, "
+                "       old.outdated ORDER BY old.validFrom",
+                params={"ids": topic_ids},
+            ).result_set
+            known = {r[0] for r in entries}
+            for r in old_rows:
+                if r[0] not in known:
+                    entries.append(list(r))
+            # Globally ordered by validFrom (superseded priors appended).
+            entries.sort(key=lambda e: (e[2] is None, e[2] or ""))
+        out = []
+        ids = [e[0] for e in entries]
+        for pid, content, vf, status, outdated in entries[-limit:]:
+            # Temporal link to the NEXT point in the chain.
+            linked_by = None
+            related = []
+            for other_id in ids:
+                if other_id == pid:
+                    continue
+                nand = proj.g.query(
+                    "MATCH (op:Point {is_operator:true})-[:NAND]->"
+                    "(:Point {id:$a}), "
+                    "(op)-[:NAND]->(:Point {id:$b}) RETURN count(op)",
+                    params={"a": pid, "b": other_id},
+                ).result_set
+                if nand and nand[0][0] > 0:
+                    linked_by = "NAND"
+                    related.append(other_id)
+                    break
+                corr = proj.g.query(
+                    "MATCH (:Point {id:$a})-[:CORRECTS]->(:Point {id:$b}) "
+                    "RETURN count(*)",
+                    params={"a": pid, "b": other_id},
+                ).result_set
+                if corr and corr[0][0] > 0:
+                    linked_by = "CORRECTS"
+                    related.append(other_id)
+                    break
+            entry = {
+                "content": content,
+                "pointKind": "decision",
+                "validFrom": vf,
+                "status": status,
+                "linked_by": linked_by,
+                "related": related,
+            }
+            if outdated:
+                entry["outdated"] = True
+            out.append(entry)
+        return out
 
     # ── Content dedup queue (W-2, #784) ─────────────────────────────
     # Content candidates are DRAFT decision Points flagged by the two-tier
@@ -1801,12 +1978,39 @@ class TortoiseSDK:
         proj = self._get_proj()
         if candidate_type == "entity":
             return []  # #783 partial — entity queue tracked for epic completion
-        if candidate_type != "content":
+        if candidate_type not in ("content", "temporal"):
             raise ValueError(
-                f"candidate_type must be 'content' or 'entity', got {candidate_type!r}")
+                f"candidate_type must be 'content', 'temporal' or 'entity', "
+                f"got {candidate_type!r}")
+        if candidate_type == "content":
+            rows = proj.g.query(
+                "MATCH (n:Point) "
+                "WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL "
+                "AND n.status = 'draft' "
+                "AND (n.is_operator IS NULL OR n.is_operator = false) "
+                "RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $limit",
+                params={"limit": limit},
+            ).result_set
+            out = []
+            for (props,) in rows:
+                out.append({
+                    "id": props.get("id"),
+                    "content": props.get("content"),
+                    "pointKind": props.get("pointKind"),
+                    "method": props.get("dedup_method"),
+                    "similarity": props.get("dedup_similarity"),
+                    "target_id": props.get("dedup_target_id"),
+                    "existing_id": props.get("dedup_target_id"),  # §6.1 alias
+                    "candidate_type": "content",
+                    "status": props.get("dedup_reviewed") or "pending",
+                    "batch_id": props.get("batch_id"),
+                })
+            return out
+        # Temporal candidates (W-4, #786): contradictory/replacement decision
+        # Points whose prior was LIVE at extraction — wire at promotion.
         rows = proj.g.query(
             "MATCH (n:Point) "
-            "WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL "
+            "WHERE n.temporal_candidate = true AND n.temporal_reviewed IS NULL "
             "AND n.status = 'draft' "
             "AND (n.is_operator IS NULL OR n.is_operator = false) "
             "RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $limit",
@@ -1818,12 +2022,11 @@ class TortoiseSDK:
                 "id": props.get("id"),
                 "content": props.get("content"),
                 "pointKind": props.get("pointKind"),
-                "method": props.get("dedup_method"),
-                "similarity": props.get("dedup_similarity"),
-                "target_id": props.get("dedup_target_id"),
-                "existing_id": props.get("dedup_target_id"),  # §6.1 alias
-                "candidate_type": "content",
-                "status": props.get("dedup_reviewed") or "pending",
+                "target_id": props.get("temporal_target_id"),
+                "existing_id": props.get("temporal_target_id"),
+                "replacement": bool(props.get("temporal_replacement")),
+                "candidate_type": "temporal",
+                "status": props.get("temporal_reviewed") or "pending",
                 "batch_id": props.get("batch_id"),
             })
         return out
@@ -1850,8 +2053,38 @@ class TortoiseSDK:
         if not rows:
             raise ValueError(f"No point {candidate_id!r}")
         props = rows[0][0]
-        if not props.get("dedup_candidate"):
-            raise ValueError(f"Point {candidate_id!r} is not a dedup candidate")
+        is_temporal = bool(props.get("temporal_candidate"))
+        if not (props.get("dedup_candidate") or is_temporal):
+            raise ValueError(
+                f"Point {candidate_id!r} is not a dedup/temporal candidate")
+        if is_temporal:
+            # Temporal candidates: mark reviewed; the wire/supersede happens
+            # at promotion (live-prior rule — never draft→live wiring).
+            # Idempotent: re-approving with the SAME action is a no-op (no
+            # duplicate event — #1080 review).
+            if props.get("temporal_reviewed") == action:
+                return {"candidate_id": candidate_id, "action": action,
+                        "candidate_type": "temporal",
+                        "wired": False,
+                        "deferred_to_promotion": action == "merge",
+                        "target_id": props.get("temporal_target_id"),
+                        "already_reviewed": True}
+            proj.g.query(
+                "MATCH (n:Point {id:$id}) SET n.temporal_reviewed = $a, "
+                "n.reviewed = true",
+                params={"id": candidate_id, "a": action},
+            )
+            if action == "reject":
+                self._emit_event("DedupeRejected",
+                                 point=self.get_point(candidate_id))
+            else:
+                self._emit_event("DedupeRecorded",
+                                 point=self.get_point(candidate_id))
+            return {"candidate_id": candidate_id, "action": action,
+                    "candidate_type": "temporal",
+                    "wired": False,
+                    "deferred_to_promotion": action == "merge",
+                    "target_id": props.get("temporal_target_id")}
         target_id = props.get("dedup_target_id")
         proj.g.query(
             "MATCH (n:Point {id:$id}) SET n.dedup_reviewed = $a, n.reviewed = true",
