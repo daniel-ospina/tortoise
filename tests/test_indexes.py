@@ -17,12 +17,22 @@ import pytest
 from tortoise.projection import FalkorProjection
 
 EXPECTED_RANGE = {
-    "Point": ["id", "pointKind", "content_hash", "is_operator"],
+    "Point": ["id", "pointKind", "content_hash"],
     "Document": ["id", "documentKind"],
     "Subject": ["id", "name"],
     "Object": ["id", "name"],
     "Event": ["eventId"],
     "Source": ["id", "url"],
+}
+
+# #522: the is_operator RANGE index is created on SERVER (docker/FalkorDB
+# Cloud) mode only — embedded redislite merges per-property indexes into a
+# composite whose is_operator entries go stale across process reopen (the
+# crash-recovery bug), so _ensure_indexes skips it there and `= false`
+# falls back to a correct full scan.
+EXPECTED_RANGE_SERVER = {
+    **EXPECTED_RANGE,
+    "Point": ["id", "pointKind", "content_hash", "is_operator"],
 }
 
 
@@ -57,11 +67,22 @@ def _range_indexes(proj):
 
 def test_entity_key_indexes_exist(proj):
     idx = _range_indexes(proj)
-    for label, fields in EXPECTED_RANGE.items():
+    # Embedded (path=) mode: is_operator index intentionally absent (#522 —
+    # see EXPECTED_RANGE_SERVER).
+    expected = EXPECTED_RANGE
+    if not getattr(proj, "_is_embedded", False):
+        expected = EXPECTED_RANGE_SERVER
+    for label, fields in expected.items():
         assert label in idx, f"no indexes for {label}: {idx}"
         for f in fields:
             assert "RANGE" in idx[label].get(f, []), \
                 f"{label}.{f} index missing: {idx[label]}"
+    if getattr(proj, "_is_embedded", False):
+        # Embedded: the stale is_operator composite must NOT be present —
+        # its presence breaks `= false` lookups across process reopen (#522).
+        point_fields = idx.get("Point", {})
+        assert "is_operator" not in point_fields, \
+            f"embedded Point index must not include is_operator: {point_fields}"
 
 
 def test_indexes_idempotent_reinit():
