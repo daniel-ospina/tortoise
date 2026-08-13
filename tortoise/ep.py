@@ -889,7 +889,7 @@ class TortoiseEP:
                             "(degenerate, #780). Inputs: [%s]",
                             op_id, stripped, len(full_inputs),
                             ", ".join(
-                                f"{cid[:8]}={s or 'live'}"
+                                f"{cid.split('-')[-1]}={s or 'live'}"
                                 for cid, s in zip(full_inputs, op_input_status[op_id])
                             ),
                         )

@@ -56,7 +56,23 @@ doc_status: live
 >   (documented derivation cache — see §11) and `sourceDate` (evidence-age clock).
 > - §5: pointKind vocabulary gains `assessment` (agent source evaluations).
 > - §10: recency-modulation decision log (per-field/per-sourceType decay deferred).
-> **Convention:** camelCase throughout. `kind` = classification tag on an entity. `predicate` = named edge between entities. Capture-path/pipeline fields keep their code spelling (snake_case) — e.g. `doc_status`, `file_hash`, `is_episodic`, `c_cal`, `story_arc`, `passes_frequency_gate`, `provenance_spans` (v3.6, #909).
+> > **Changelog v3.7 (2026-08-12, core hypothesis — state-centric model):**
+> - §2: state-centric model block — the graph stores STATE (Objects + lifecycle
+>   + derived confidence) + POINTS (the logic) + EVENTS (timeline incl.
+>   decision-as-event); decisions are NOT first-class Points.
+> - §5 (v3.8): extraction point kind = `statement` ONLY; `observation` removed
+>   (anything can be called one) and `hypothesis` folded into confidence
+>   semantics (a conjecture is a low-confidence statement) — both join the
+>   legacy write kinds.
+> - §5 (v3.7): Point kinds — extraction write kinds = statement/observation/hypothesis;
+>   decision/vision/strategy/plan/goal/target/humanApproval/event marked LEGACY
+>   (write-compat only). Object kinds gain the commitment-state family
+>   (strategy/plan/goal/target). Event kinds gain `occurrence` + `turn`; the
+>   decision-as-event semantics documented.
+> - Pack-mapping item: product-strategy option pointKinds (useCase/userJourney/
+>   jobToBeDone/valueProposition) → objectKinds.
+
+**Convention:** camelCase throughout. `kind` = classification tag on an entity. `predicate` = named edge between entities. Capture-path/pipeline fields keep their code spelling (snake_case) — e.g. `doc_status`, `file_hash`, `is_episodic`, `c_cal`, `story_arc`, `passes_frequency_gate`, `provenance_spans` (v3.6, #909).
 
 ---
 
@@ -86,6 +102,25 @@ Each layer answers a different question. All four are live mechanisms.
 | **Epistemic** | What do we believe and why? | Point, Operator (IMPL/NAND + label + EP confidence) | Operators connect epistemic targets (Event→Point, Point→Point). Belief strength = EP confidence, computed by propagation. |
 | **Episodic** | What happened when? | Event | Verbs. Append-only, timestamped. Reified middle node: (Subject)-[performs]->(Event)-[produces]->(Object). |
 | **Procedural** | What is the current state of work? | Event + projected status on Object | **Status is derived, not stored.** An Object's status (in_progress, completed, failed) is projected at query time from its event stream — the events are the truth, the status is a read-only projection. |
+
+> **State-centric model (core hypothesis, 2026-08-12 — the graph stores STATE, not decisions):**
+> The record is three layers. **State** — Objects/options carry their lifecycle
+> (promoted/deprecated/superseded — the Episodic layer's events are the truth;
+> status is a read-only projection) and their **confidence** (derived from the
+> attached Points). **Points** — the logic: statements (pointKind `statement` —
+> the only extraction point kind; hypothesis folded into confidence) connected
+> to the state they argue about (aboutObject); IMPL/NAND/MITIGATES among them
+> move the object's confidence. **Events** — what happened, for
+> context: occurrences AND the **decision-as-event** (eventKind `decision`,
+> aboutObject → the object(s) it resolved). The graph says *"this state is
+> based on these reasons"* — never *"this decision was made because of these
+> reasons"*. The decision dimension stays queryable as a timeline (events),
+> but decisions are NOT first-class Points. Point kinds `decision`/`vision`/
+> `strategy`/`plan`/`goal`/`target`/`humanApproval`/`event` are LEGACY write
+> kinds (§5) — extraction emits `statement` Points only, Event nodes, and
+> lifecycle writes on Objects. State confidence is derived at
+> read time from the attached Points' EP confidence (§11) — never stored
+> independently on the Object.
 
 **Structural vs Epistemic Edges**
 
@@ -238,7 +273,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 |-------|------|----------|-------------|------|---------|
 | `id` | ULID | ✅ | `dc:identifier` | ✅ | Unique identifier — ULID preferred (`create_point`); content-addressed `pt_<sha>` ids are a **sanctioned id form** (deterministic — the commit endpoint's idempotency anchor, #909 §4.3 #10) |
 | `content` | string | ✅ | `schema:text` | ✅ | The claim text |
-| `pointKind` | string | ✅ | — | ✅ | Classification tag: statement, decision, vision, strategy, plan, goal, target, observation, hypothesis + pack pointKinds |
+| `pointKind` | string | ✅ | — | ✅ | Classification tag — extraction writes `statement` (option B); decision/vision/strategy/plan/goal/target/observation/hypothesis/humanApproval/event are legacy write kinds (§5) + pack pointKinds |
 | `is_operator` | bool | — | — | ✅ | true for operator Points |
 | `op_type` | string | — | — | ✅ | IMPL / NAND (operator Points only) |
 | `status` | string | — | `pav:status` | ✅ | Lifecycle: draft, live, retracted, superseded, outdated, archived (#432). **challenged is a derived condition** (presence of a NAND operator edge on a live point), not a stored status (§5). draft inert for computation; retracted/superseded/archived are terminal |
@@ -360,23 +395,47 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 ### Point Kind Vocabulary (core)
 
 ```
-statement, decision, vision, strategy, plan, goal, target, observation, hypothesis,
-humanApproval   # #531: decision Point for a filed human approval
-event           # episodic turn Points from the regex capture path (sdk.py:924) — registered #909 §4.3 #9
+statement    # the LOGIC layer — THE extraction write kind (state-centric, option B 2026-08-12)
+decision, vision, strategy, plan, goal, target, humanApproval, event   # LEGACY write kinds (write-compat only)
 ```
+> **State-centric alignment (2026-08-12, option B):** Points are the LOGIC layer
+> only, and the logic is one kind: **`statement`** — the asserted belief.
+> `hypothesis` is FOLDED INTO CONFIDENCE semantics (a conjecture is a
+> low-confidence statement); `observation` is removed (anything can be called
+> one). `decision`/`humanApproval` are TIMELINE kinds → Event nodes (eventKind
+> `decision`/`humanApproval`); `vision`/`strategy`/`plan`/`goal`/`target` are
+> STATE kinds → Object kinds (commitment-state family, below); `event` is
+> removed (issue #1013 — episodic records are Event nodes with eventKind
+> `occurrence`/`turn`). The legacy kinds remain valid write kinds for
+> compatibility; extraction emits `statement` only.
 
 ### Object Kind Vocabulary (core)
 
 ```
-Project, WorkItem, document, tag, user, skill, tool, agent, workflow, agreement, standard, other
+Project, WorkItem, document, tag, user, skill, tool, agent, workflow, agreement, standard, other,
+strategy, plan, goal, target    # commitment-state family (state-centric, 2026-08-12) — states that
+                                # commitments produce; carry lifecycle + derived confidence
 ```
+> **State-centric alignment (2026-08-12):** `strategy`/`plan`/`goal`/`target`
+> are STATE objects (superseded when a new commitment lands — the old strategy
+> is deprecated, the new one promoted). Pack pointKinds used as options
+> (product-strategy: useCase, userJourney, jobToBeDone, valueProposition) are
+> OPTION/STATE kinds — pack-mapping item: promote to objectKinds (near-miss
+> convention until the pack amendment).
 
 ### Event Kind Vocabulary (core)
 
 ```
 meeting, decision, experiment, deployment, review, friction, extraction,
-documentCreated, roleCreated, pointAdded, sessionCaptured, AgentSession, humanApproval  # #531
+documentCreated, roleCreated, pointAdded, sessionCaptured, AgentSession, humanApproval,  # #531
+occurrence, turn    # state-centric (2026-08-12): occurrence = generic extracted occurrence;
+                    # turn = capture turn records (replaces pointKind 'event', issue #1013)
 ```
+> **State-centric alignment (2026-08-12):** eventKind `decision` is the
+> TIMELINE record of a commitment (the resolution is expressed as lifecycle
+> writes on the state objects); `occurrence` covers extracted happenings;
+> `turn` covers capture turn records. The Episodic layer is the truth for
+> lifecycle: Object status is projected from its event stream (§2).
 
 > **#909 §4.3 #1:** `AgentSession` (EXACT code spelling — capital A; sdk.py `ingest_corpus`/session_indexer.py) is the canonical kind for session-capture Events; `sessionCaptured` (the core kind written by the regex capture path) is an **alias of the same concept** — both remain valid kinds, **no migration**.
 
