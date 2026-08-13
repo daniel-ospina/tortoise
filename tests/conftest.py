@@ -111,6 +111,7 @@ def shared_embedded_db():
 
     Restored 2026-08-08 (#647): the D11 conftest rewrite (#578) dropped this
     fixture but seven test files (test_ep_selector, test_ranking,
+    test_recall_gaps_subgraph, test_recall_state,
     test_sdk_legacy_coverage, test_search_sessions_temporal,
     test_session_semantic_search) still depend on it. Kept via #281: the
     branch's own copy survived its merge of main (main had dropped the
@@ -120,7 +121,7 @@ def shared_embedded_db():
     # Issue #1005: superseded by lifecycle finalize (tortoise.FalkorDB /
     # TortoiseSDK close on GC) + the _redislite_hygiene session sweeps below;
     # kept because the fixture's shared path is still the cheap way for the
-    # five dependent files to share one server.
+    # seven dependent files to share one server.
     """
     import tempfile as _tf
     db_path = os.path.join(_tf.mkdtemp(prefix="tortoise_shared_embedded_"), "shared.db")
