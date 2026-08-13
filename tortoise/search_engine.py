@@ -750,7 +750,7 @@ def get_relationships(graph, point_ids: list[str]) -> dict[str, list[dict]]:
             "MATCH (n)-[r:IMPL|NAND|hasPart]-(op:Point {is_operator:true}) "
             "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point) "
             "WHERE other.id <> n.id "
-            "  AND (other.is_operator IS NULL OR other.is_operator = false) "
+            "  AND other.is_operator = false "
             "RETURN n.id, op.op_type AS mechanism, "
             "  coalesce(op.label, '') AS predicate, "
             "  op.id AS operator_id, other.id AS related_id, "

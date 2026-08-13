@@ -121,7 +121,7 @@ async def list_points(
         raise HTTPException(status_code=400, detail=f"kind must be one of {sorted(known_kinds())}")
     sdk = _sdk()
     proj = sdk._get_proj()
-    conditions = ["(n.is_operator IS NULL OR n.is_operator = false)"]
+    conditions = ["n.is_operator = false"]
     params: dict = {"limit": limit}
     if kind:
         conditions.append("n.pointKind = $kind")
@@ -175,7 +175,7 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100)):
         try:
             proj = sdk._get_proj()
             query = (
-                "MATCH (n:Point) WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+                "MATCH (n:Point) WHERE n.is_operator = false "
                 "AND toLower(n.content) CONTAINS toLower($q) "
                 "RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $limit"
             )

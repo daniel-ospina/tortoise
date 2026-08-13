@@ -1561,7 +1561,7 @@ async def list_points(
             raise HTTPException(status_code=400, detail=f"kind must be one of {sorted(allowed)}")
     sdk = _make_sdk(namespace=team["team_id"])
     proj = sdk._get_proj()
-    conditions = ["(n.is_operator IS NULL OR n.is_operator = false)"]
+    conditions = ["n.is_operator = false"]
     # #432 Task 2: retracted points (status='retracted') are EXCLUDED from the
     # default listing surface — tombstone contract: retrievable by id via
     # GET /v1/points/{id}, not by list. No include param on REST v1 (surface

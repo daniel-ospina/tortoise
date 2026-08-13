@@ -173,7 +173,7 @@ def _retrieve_topic_neighborhood(
                 edge_type = "aboutSubject" if entity_label == "Subject" else "aboutObject"
                 point_rows = graph.query(
                     f"MATCH (p:Point)-[:{edge_type}]->(e:{entity_label} {{name: $name}}) "
-                    "WHERE (p.is_operator IS NULL OR p.is_operator = false) "
+                    "WHERE p.is_operator = false "
                     "  AND (p.status IS NULL OR p.status <> 'retracted') "
                     "RETURN p.id, p.content, p.pointKind "
                     "LIMIT $max_seeds",
@@ -195,7 +195,7 @@ def _retrieve_topic_neighborhood(
     try:
         point_rows = graph.query(
             "MATCH (p:Point) "
-            "WHERE (p.is_operator IS NULL OR p.is_operator = false) "
+            "WHERE p.is_operator = false "
             "  AND (p.status IS NULL OR p.status <> 'retracted') "
             "  AND (toLower(coalesce(p.content, '')) CONTAINS toLower($topic) "
             "       OR toLower(coalesce(p.pointKind, '')) CONTAINS toLower($topic)) "
@@ -234,7 +234,7 @@ def _retrieve_topic_neighborhood(
                         "WHERE n.id IN $ids AND m.id <> n.id "
                         "  AND (n.status IS NULL OR n.status <> 'retracted') "
                         "  AND (m.status IS NULL OR m.status <> 'retracted') "
-                        "  AND (m.is_operator IS NULL OR m.is_operator = false) "
+                        "  AND m.is_operator = false "
                         "RETURN DISTINCT m.id, m.content, m.pointKind",
                         params={"ids": batch},
                     ).result_set
