@@ -210,9 +210,19 @@ class TestPromotionPolicy:
             "connections": [{"from": "pA", "to": "pB", "operator": "IMPL"}],
         }
         res = sdk.ingest(bundle, promotion_policy="gated")
-        pA, _ = res["ids"]["points"]
+        pA, pB = res["ids"]["points"]
         assert sdk.get_point(pA)["status"] == "draft"
 
+        # CYCLE-26 REVIEW FIX (P2): assert the OPERATOR node and the TARGET
+        # also stay draft under explicit gated (not just the source) — closes
+        # the gap that a gated-explicit operator-write regression would ship
+        # green.
+        op_id = next(
+            i for i in res["ids"]["connections"]
+            if isinstance(i, str)
+        )
+        assert sdk.get_point(op_id)["status"] == "draft"
+        assert sdk.get_point(pB)["status"] == "draft"
     def test_invalid_promotion_policy_raises_naming_valid_values(self, sdk):
         # every invalid value raises ValueError naming the param AND the valid
         # values (cycle-21 message-content pin)

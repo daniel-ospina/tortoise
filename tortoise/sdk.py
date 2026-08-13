@@ -2343,9 +2343,12 @@ class TortoiseSDK:
         - promotion_policy: "gated" (DEFAULT, Q2) — points stay draft;
           connections never promote (operator path: promote_source=False via
           #780 — the operator node is created draft and the source is NOT
-          auto-promoted). "auto" — #131 parity preserved: source points
-          promote on wire (today's behavior). ORTHOGONAL to granularity:
-          both modes honor the same policy.
+          auto-promoted). "auto" — #131 parity preserved: a source point
+          promotes on wire when its FIRST operator edge is created
+          (CYCLE-26 REVIEW FIX P2: NOT retroactive — re-ingest dedup of an
+          existing operator does not retro-promote a previously-gated
+          source). ORTHOGONAL to granularity: both modes honor the same
+          policy.
         - Idempotent-ish: points dedup by (content_hash, pointKind) via
           create_point(dedup=True); sources merge by url; Subject/Object
           merge by name; operator connections dedup by (op_type, input set);
