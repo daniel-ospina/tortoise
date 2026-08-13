@@ -360,6 +360,18 @@
       cursor: pointer;
       transition: color 0.2s, border-color 0.2s;
     }
+    .btn {
+      display: inline-block;
+      margin-top: 0.75rem;
+      padding: 0.5rem 0.9rem;
+      border-radius: 6px;
+      background: var(--accent);
+      color: var(--bg);
+      font-family: var(--mono);
+      font-size: 0.8rem;
+      font-weight: 600;
+      text-decoration: none;
+    }
     .btn-ghost:hover {
       color: var(--accent);
       border-color: var(--accent);
@@ -973,9 +985,9 @@ you up to 6 yes/no questions and set up your Tortoise memory.
       // #1082 (PR1 — P2-FIX-D): double-provision guard. RLS hides NULL-
       // user_id membership rows from authenticated, so a claimable anon
       // team is INVISIBLE to the query above — minting here would orphan it
-      // (the claim path needs exactly one NULL-user_id owner row). Before
-      // provisioning, ask the server (service-role, key-scoped) whether a
-      // claimable team exists for the presented key: if so, route to the
+      // (the claim path needs exactly one NULL-user_id owner row). The
+      // routing signal is the tt_claim_pending marker cookie (see
+      // claimStatusGuard — no server round-trip): if present, route to the
       // dashboard claim card instead of minting a stray team.
       if (await claimStatusGuard(session)) {
         return;
@@ -1149,9 +1161,10 @@ you up to 6 yes/no questions and set up your Tortoise memory.
       // #745c hid the artifact cards entirely; epic #529 (J5/T7b) keeps the
       // MCP card visible with env-indirection Block A forms (no literal key —
       // HARNESS_CONFIGS detect the masked placeholder and never interpolate
-      // it). Route to the MCP panel: the setup prompt has no key to embed and
-      // the SDK quickstart has no env form (would render a masked
-      // `--api-key ••••••`) — but #1147 redirects to the dashboard anyway.
+      // it). #1147 redirects to the dashboard after a short hold; the manual
+      // env forms rendered here are the dashboard-unreachable fallback (the
+      // redirect is a best-effort setTimeout — if the dashboard never loads,
+      // the user still has the key-less path with their saved key).
       choosePath("mcp");
       const mcpCard = document.getElementById("mcp-card");
       if (mcpCard) { mcpCard.classList.remove("hidden"); renderMcpConfig(); renderDeliverySteps(); renderSetupPrompt(); }
@@ -1381,7 +1394,7 @@ tortoise create-point "Hello world" --kind statement`;
     const HARNESS_VARIANT_SLUG = { claude: "claude-code", codex: "codex", cursor: "cursor", pi: "pi" };
     // True only for a freshly revealed key; returning visits keep the masked
     // placeholder and get env-indirection forms only (#529 J5/T7b).
-    function _usableKey(key) { return typeof key === "string" && key.startsWith("tt_"); }
+    function _usableKey(key) { return typeof key === "string" && key.startsWith("tt_") && !key.includes("YOUR_KEY"); }
 
     // Canonical cursor/pi JSON blocks, wrapped in TORTOISE_CFG_BEGIN/END
     // markers so tests extract+parse exactly what the user copies (epic #529
@@ -1484,6 +1497,28 @@ ${JSON.stringify({ mcpServers: { tortoise: { url: MCP_URL, headers: { Authorizat
       pi: "append it to AGENTS.md in this project (pi auto-loads AGENTS.md)",
     };
 
+    // Manual-mode env-var forms: the key-less alternative for fresh users
+    // too (the toggle labels this "env-var form"). Normal mode (one-click)
+    // keeps the harness-optimal paste paths (literal key where the harness
+    // needs it, env-var where it doesn't). MUST be defined before the eval-
+    // time renderMcpConfig() call below (const TDZ).
+    const ENV_CONFIGS = {
+      claude: (key) => `# File alternative (.mcp.json) — env expansion, no literal key on disk:
+# {"mcpServers":{"tortoise":{"type":"http","url":"${MCP_URL}","headers":{"Authorization":"Bearer \${TORTOISE_API_KEY}"}}}}
+# Note: a url entry without "type" is skipped by Claude Code; project-scope
+# .mcp.json servers ask for a one-time approval on first use.
+export TORTOISE_API_KEY=${key}`,
+      codex: (key) => `export TORTOISE_API_KEY=${key}
+codex mcp add tortoise --url ${MCP_URL} --bearer-token-env-var TORTOISE_API_KEY`,
+      cursor: (key) => `# Save as .cursor/mcp.json (env form — no literal key on disk).
+# First: export TORTOISE_API_KEY=${key}
+${JSON.stringify(CURSOR_MCP_CONFIG_ENV, null, 2)}`,
+      pi: (key) => `# Save as .mcp.json (env form — no literal key on disk; merge if one exists).
+# First: export TORTOISE_API_KEY=${key}
+${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}`,
+    };
+    let manualMode = false;
+
     let currentHarness = "claude";
     // Render the default (Claude Code) MCP config on load so the box is never
     // empty (#745a) — switchHarness/copyMcpConfig re-render on interaction,
@@ -1517,7 +1552,9 @@ ${JSON.stringify({ mcpServers: { tortoise: { url: MCP_URL, headers: { Authorizat
 
     function renderMcpConfig() {
       const key = document.getElementById("api-key").textContent.trim();
-      const text = HARNESS_CONFIGS[currentHarness](key);
+      const text = manualMode
+        ? ENV_CONFIGS[currentHarness](key)
+        : HARNESS_CONFIGS[currentHarness](key);
       document.getElementById("mcp-config-text").textContent = text;
     }
 
@@ -1611,6 +1648,7 @@ ${JSON.stringify({ mcpServers: { tortoise: { url: MCP_URL, headers: { Authorizat
       if (!manual) return;
       const opening = manual.classList.contains("hidden");
       manual.classList.toggle("hidden");
+      manualMode = opening;
       // Primary flow vs manual flow: show one instruction set at a time.
       const primaryFlow = document.getElementById("one-click-flow");
       if (primaryFlow) primaryFlow.classList.toggle("hidden", opening);
@@ -1703,7 +1741,7 @@ ${JSON.stringify({ mcpServers: { tortoise: { url: MCP_URL, headers: { Authorizat
         return;
       }
       if (!(await copyWithFallback(text, "btn-copy-setup"))) return;
-      fireCopyBeacon("prompt");
+      fireCopyBeacon("setup");
       flashCopied("btn-copy-setup");
     }
 
