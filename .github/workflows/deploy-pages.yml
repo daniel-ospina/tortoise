@@ -112,7 +112,10 @@ jobs:
           fi
           # jq is available on ubuntu runners (the DNS-sync step uses it) and
           # is whitespace-robust vs grep on raw JSON.
-          if ! echo "$LIST" | jq -e '.result[]?.name == "tortoise-dashboard"' >/dev/null 2>&1; then
+          # P1 (review): jq -e on a multi-element array exits on the LAST
+          # output — order-dependent false-fail. any() collapses to one
+          # boolean: exit 0 iff SOME project matches.
+          if ! echo "$LIST" | jq -e 'any(.result[]?; .name == "tortoise-dashboard")' >/dev/null 2>&1; then
             echo "::error::tortoise-dashboard project not in the token's visible Pages projects."
             echo "projects visible: $(echo "$LIST" | jq -r '.result[]?.name' | tr '\n' ' ' || true)"
             exit 1
