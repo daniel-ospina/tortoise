@@ -18,7 +18,7 @@ from mcp.types import ToolAnnotations
 from pydantic import ValidationError as PydanticValidationError
 from tortoise.auth import is_dev_mode as _is_dev_mode
 from tortoise.config import is_db_uri as _is_db_uri
-from tortoise.sdk import TortoiseSDK
+from tortoise.sdk import TortoiseSDK, INGEST_GRANULARITIES, INGEST_PROMOTION_POLICIES
 from tortoise import monitoring
 from tortoise.mcp_auth import (_current_team_id, _current_team_limits,
                                _transport_mode, _get_team_sdk,
@@ -548,7 +548,12 @@ def _scrub_analyze_answer(answer: str) -> str:
     return answer[:2000]
 
 
-# #329: quota error codes (registered alongside the other ERR_* in mcp_auth).
+# #329: quota error codes. NOTE: the ERR_* namespace is split — the
+# auth-side codes (ERR_UNAUTHORIZED/-32001, ERR_RATE_LIMIT/-32002,
+# ERR_EXCLUDED/-32004, ERR_REGISTRY/-32005, ERR_SUSPENDED/-32006) live in
+# mcp_auth.py; the quota + tool-validation codes live HERE in mcp_server.py.
+# Pre-existing collision: ERR_QUOTA=-32006 (here) vs ERR_SUSPENDED=-32006
+# (mcp_auth) — tracked as a follow-up (client cannot distinguish the two).
 ERR_QUOTA = -32006
 ERR_QUOTA_SERVER = -32007
 # Application-defined pre-SDK param errors (tool-level validation that never
@@ -1729,8 +1734,15 @@ def tortoise_ingest(bundle: Any = None, granularity: str = "bulk",
     granularity='bulk' (default): aggregated {created, ids, nudges}.
     granularity='granular': per-item results for agent step-by-step control.
     promotion_policy='gated' (DEFAULT, Q2): points stay draft, connections
-    never promote (operator path: promote_source=False via #780).
-    promotion_policy='auto': #131 parity — source points promote on wire.
+    never promote (operator path: promote_source=False via #780). Per-item
+    status:'live' is REJECTED under gated (INGEST_CONTRACT row 9 — no bypass
+    of the gated contract; use promotion_policy='auto' or promote after
+    ingest via the SDK's update_point(status='live')).
+    promotion_policy='auto': #131 parity — source points promote on wire
+    (only draft/null-status sources; retracted/deprecated are never
+    resurrected); the operator node is written without a status property
+    (live by projection — the #780 asymmetry). Deduped connections never
+    retro-promote (promotion fires on FIRST edge creation only).
     Idempotent-ish: points dedup by content hash + kind, sources by url,
     operators by input set.
     """
@@ -1740,12 +1752,24 @@ def tortoise_ingest(bundle: Any = None, granularity: str = "bulk",
     if not isinstance(bundle, dict):
         return {"error": "bundle must be a dict with points/entities/sources/"
                           "connections sections", "code": ERR_INVALID}
-    if granularity not in ("bulk", "granular"):
+    if granularity not in INGEST_GRANULARITIES:
         return {"error": f"granularity must be 'bulk' or 'granular', got "
                           f"{granularity!r}", "code": ERR_INVALID}
-    if promotion_policy not in ("gated", "auto"):
+    if promotion_policy not in INGEST_PROMOTION_POLICIES:
         return {"error": f"promotion_policy must be 'gated' or 'auto', got "
                           f"{promotion_policy!r}", "code": ERR_INVALID}
+    # Row-9 guard (SDK-side, mirrors ingest()): under gated, an explicit
+    # status:'live' on a point item is a violation. Handled here pre-SDK so
+    # MCP clients get the structured ERR_INVALID shape, not a generic error.
+    if promotion_policy == "gated":
+        for i, item in enumerate(bundle.get("points") or []):
+            if isinstance(item, dict) and item.get("status") == "live":
+                return {"error": f"points[{i}] status:'live' is not allowed under "
+                                  f"promotion_policy 'gated' — pass "
+                                  f"promotion_policy='auto' for explicit live, or "
+                                  f"keep draft and promote via "
+                                  f"update_point(status='live')",
+                        "code": ERR_INVALID}
     return _safe(_quota_gated(_get_team_sdk().ingest, "points",
                           abuse_weight=lambda r, a, k: int(((r or {}).get("created") or {}).get("points") or 0)),
                  bundle, granularity=granularity, promotion_policy=promotion_policy)

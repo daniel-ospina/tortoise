@@ -37,6 +37,12 @@ POINT_STATUS_VALUES = frozenset({'draft', 'live', 'retracted', 'superseded', 'ou
 STALE_TERMINAL_STATUSES = frozenset(
     {'retracted', 'superseded', 'outdated', 'archived'})
 
+# Epic #902 W4 A0 — single-source valid-value sets for ingest() (consumed by
+# the SDK validation AND the MCP pre-validation so the two layers cannot
+# drift; INGEST_CONTRACT.md §2/§5 pins the exact values + error shapes).
+INGEST_GRANULARITIES = ("bulk", "granular")
+INGEST_PROMOTION_POLICIES = ("gated", "auto")
+
 # #913: whole-graph mode=add cap — pairwise scoring is O(n²) in time AND
 # memory (dense cosine matrix + pair dict); a read-only MCP call must not
 # OOM a hosted server (#329/#579 bounding precedent). The unscoped candidate
@@ -2355,20 +2361,27 @@ class TortoiseSDK:
           structural edges MERGE. Document/Event entities are append-only
           occurrence records — re-ingest duplicates them by design.
         - EP-safe: created points default to status='draft' (#131 draft→live
-          lifecycle) unless the item carries status=... — pass status='live'
-          explicitly to opt into EP propagation. Connection-driven promotion
-          (source → live on first edge) only happens under
-          promotion_policy="auto".
+          lifecycle). Per-item status:'live' is ONLY allowed under
+          promotion_policy='auto' — under gated it is rejected (INGEST
+          CONTRACT §2.1 / row 9: no bypass of the gated contract; the
+          sanctioned route is promotion_policy='auto' or
+          update_point(status='live') after ingest). Connection-driven
+          promotion (source → live on first edge) only happens under
+          promotion_policy='auto', and only for draft/null-status sources
+          (retracted/deprecated terminal sources are never resurrected).
+          Under auto the operator node is written WITHOUT a status property
+          (live by projection — the #780 asymmetry: gated writes explicit
+          draft on the operator, auto writes none).
 
         Returns {granularity, created: {points, entities, sources, connections},
         deduped: {...}, ids: {points, entities, sources, connections, refs},
         nudges: [...]} (+ results for granularity='granular').
         """
-        if granularity not in ("bulk", "granular"):
+        if granularity not in INGEST_GRANULARITIES:
             raise ValueError(
                 f"ingest: granularity must be 'bulk' or 'granular', got {granularity!r}"
             )
-        if promotion_policy not in ("gated", "auto"):
+        if promotion_policy not in INGEST_PROMOTION_POLICIES:
             raise ValueError(
                 f"ingest: promotion_policy must be 'gated' or 'auto', got {promotion_policy!r}"
             )
@@ -2377,6 +2390,19 @@ class TortoiseSDK:
                 f"ingest: bundle must be a dict with points/entities/sources/"
                 f"connections sections, got {type(bundle).__name__}"
             )
+        # Row 9 of INGEST_CONTRACT.md: under gated, an explicit status:'live'
+        # on a point item is a violation — the Q2-lock must not be bypassable
+        # via the bundle's own status field (the sanctioned routes are
+        # promotion_policy='auto' or update_point(status='live') after ingest).
+        if promotion_policy == "gated":
+            for i, item in enumerate(bundle.get("points") or []):
+                if isinstance(item, dict) and item.get("status") == "live":
+                    raise ValueError(
+                        f"ingest: points[{i}] status:'live' is not allowed under "
+                        f"promotion_policy 'gated' — pass promotion_policy='auto' "
+                        f"for explicit live, or keep draft and promote via "
+                        f"update_point(status='live')"
+                    )
         from .projection.edges import _VALID_EDGE_PREDICATES
 
         proj = self._get_proj()

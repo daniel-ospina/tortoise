@@ -791,6 +791,16 @@ class TestIngestPromotionPolicy:
         assert res["code"] == mcp_mod.ERR_INVALID == -32003
         assert "bulk" in res["error"] and "granular" in res["error"]
 
+    def test_mcp_gated_rejects_explicit_live_item(self):
+        # INGEST_CONTRACT row 9 at the MCP layer: explicit status:'live' under
+        # gated returns the structured ERR_INVALID shape naming the routes.
+        res = mcp_mod.tortoise_ingest(
+            bundle={"points": [{"kind": "claim", "content": "A",
+                                 "status": "live"}]})
+        assert res["code"] == mcp_mod.ERR_INVALID == -32003
+        assert "not allowed under promotion_policy 'gated'" in res["error"]
+        assert "promotion_policy='auto'" in res["error"]
+
     def _sdk_backed_ingest(self, request, monkeypatch, tmp_path, **kw):
         import os
         from tortoise.sdk import TortoiseSDK

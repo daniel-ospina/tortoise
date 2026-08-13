@@ -153,6 +153,8 @@ class TestIngestFullBundle:
         assert "ref" not in source
 
     def test_points_default_to_draft_unless_specified(self, sdk):
+        # Per-item status:'live' is only allowed under promotion_policy='auto'
+        # (INGEST_CONTRACT row 9: under gated it is a violation).
         bundle = {
             "points": [
                 {"kind": "claim", "content": "draft point, no connections"},
@@ -160,7 +162,7 @@ class TestIngestFullBundle:
             ],
             "connections": [],
         }
-        res = sdk.ingest(bundle)
+        res = sdk.ingest(bundle, promotion_policy="auto")
         pid_draft, pid_live = res["ids"]["points"]
         assert sdk.get_point(pid_draft)["status"] == "draft"
         assert sdk.get_point(pid_live)["status"] == "live"
@@ -312,6 +314,36 @@ class TestPromotionPolicy:
         # third positional arg raises TypeError (agents opt in explicitly).
         with pytest.raises(TypeError):
             sdk.ingest({"points": []}, "bulk", "auto")
+
+    def test_gated_rejects_explicit_live_item(self, sdk):
+        # INGEST_CONTRACT row 9: under gated, an explicit status:'live' on a
+        # point item is a violation — the Q2 lock is not bypassable via the
+        # bundle's own status field.
+        bundle = {
+            "points": [
+                {"ref": "pA", "kind": "claim", "content": "A",
+                 "status": "live"},
+            ],
+            "connections": [],
+        }
+        with pytest.raises(ValueError) as exc:
+            sdk.ingest(bundle)
+        msg = str(exc.value)
+        assert "status:'live' is not allowed under promotion_policy 'gated'" in msg
+        assert "promotion_policy='auto'" in msg and "update_point" in msg
+
+    def test_auto_allows_explicit_live_item(self, sdk):
+        # Same item is sanctioned under auto (the row-9 route).
+        bundle = {
+            "points": [
+                {"ref": "pA", "kind": "claim", "content": "A",
+                 "status": "live"},
+            ],
+            "connections": [],
+        }
+        res = sdk.ingest(bundle, promotion_policy="auto")
+        pA = res["ids"]["points"][0]
+        assert sdk.get_point(pA)["status"] == "live"
 
     def test_auto_not_retroactive_on_dedup(self, sdk):
         # "Promotes when its FIRST edge is created": a re-ingest under auto
