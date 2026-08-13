@@ -127,6 +127,7 @@ env:
     tests/test_hosted_api.py
     tests/test_hosted_backup.py
     tests/test_indexes.py
+    tests/test_backfill_sources.py
     tests/test_ingest.py
     tests/test_mcp_http.py
     tests/test_migrate_db.py

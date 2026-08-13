@@ -926,7 +926,12 @@ def test_e2e8_concurrent_backfill_and_index(tmp_path):
         assert bf["created"] in (0, 1) and bf["linked"] in (0, 1)
         assert bf["skipped"] in (0, 1)
         assert bf["created"] + bf["skipped"] == 1
-        assert bf["linked"] == bf["created"]
+        # P2 (review gate): the index thread's Source MERGE can land between
+        # backfill's probe and its own merge → edge-linked-while-not-created
+        # (linked=1, created=0) is legitimate repair-work accounting under the
+        # race; the graph-level count(references)==1 assertion pins the real
+        # contract.
+        assert bf["linked"] in (bf["created"], 1)
         assert bf["degraded_no_file"] == 0
         idx = results[1]
         assert (idx["indexed"] + idx["updated"] + idx["skipped"] + idx["failed"]
@@ -1067,5 +1072,119 @@ def test_e2e8_delete_after_fork(tmp_path):
         assert r["created"] == 0             # no third Source resurrected
         assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 2
         assert _required_sweep(g) == 0
+        # health bucket documented (cycle-15 pin): the legacy Event's file
+        # is now missing everywhere → `unindexed`/`stale` per the health
+        # surface (the doc bucket names the fork state)
+        h = sdk.session_index_health(str(c))
+        assert h["file_count"] == 0          # no files left in the corpus
+        assert h["matched"] == 0
     finally:
         sdk.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# E2E-8(f) same-inode (mount-alias) convergence legs
+# ═══════════════════════════════════════════════════════════════════════
+
+def test_e2e8_same_inode_convergence_seam(tmp_path, monkeypatch):
+    """E2E-8(f) mount-alias convergence — ALWAYS-RUN SEAM leg (the plan's
+    pinned seam philosophy: the mount-check DECISION LOGIC runs on EVERY
+    platform via the injectable provider; only the real `mount --bind`
+    fixture is Linux-gated). Two legacy AgentSession Events whose source
+    files report the SAME (st_dev, st_ino) with st_nlink == 1 (the
+    per-file undetectable mount-alias class) → the sibling-Event same-inode
+    scan converges: dry-run reports would_create == 1 + would_link == 2 +
+    errors[] note naming the alias pair; the real run creates exactly ONE
+    Source (first sorted path) and links BOTH Events onto it; the second
+    run reports both Events skipped."""
+    import types as _types
+    c = tmp_path / "corpus"; c.mkdir()
+    a = c / "a.md"; b = c / "b.md"
+    a.write_text(SESSION_FIXTURE.format(sid="alias1", n=1))
+    b.write_text(SESSION_FIXTURE.format(sid="alias1", n=1))  # SAME content
+    stored = compute_file_hash(str(a))
+    sdk = _sdk()
+    real_stat = os.stat
+
+    def _fake_stat(path, *args, **kwargs):
+        st = real_stat(path, *args, **kwargs)
+        if os.path.basename(str(path)) in ("a.md", "b.md"):
+            # fabricate the mount-alias signature: same inode, nlink == 1
+            return _types.SimpleNamespace(
+                st_mode=st.st_mode, st_size=st.st_size, st_mtime=st.st_mtime,
+                st_dev=0x9001, st_ino=0xBEEF, st_nlink=1)
+        return st
+
+    monkeypatch.setattr(os, "stat", _fake_stat)
+    try:
+        g = sdk._get_proj().g
+        _create_legacy_event(g, event_id="session_alias_a", kind="AgentSession",
+                             rel_path="a.md", file_hash=stored, title="Alias A")
+        _create_legacy_event(g, event_id="session_alias_b", kind="AgentSession",
+                             rel_path="b.md", file_hash=stored, title="Alias B")
+        # dry-run: ONE would_create (the winner), TWO would_link, alias note
+        rd = sdk.backfill_sources(str(c), dry_run=True)
+        assert rd["would_create"] == 1
+        assert rd["would_link"] == 2
+        alias_notes = [e for e in rd["errors"] if e.get("cause") == "inode-alias"]
+        assert len(alias_notes) == 1
+        assert "a.md" in alias_notes[0]["error"] and "b.md" in alias_notes[0]["error"]
+        assert rd["would_create"] == 1        # the winner counted once
+        # real run: ONE Source, BOTH Events linked onto it
+        r = sdk.backfill_sources(str(c))
+        assert r["created"] == 1 and r["linked"] == 2 and r["degraded_no_file"] == 0
+        assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 1
+        # both Events have a references edge to the ONE Source
+        assert g.query("MATCH ()-[r:references]->() RETURN count(r)"
+                       ).result_set[0][0] == 2
+        url = g.query("MATCH (s:Source) RETURN s.url").result_set[0][0]
+        assert url == f"corpus://{c.name}/a.md"   # first sorted path wins
+        assert _required_sweep(g) == 0
+        # second run: both Events skipped (already Source + edge)
+        r2 = sdk.backfill_sources(str(c))
+        assert r2["created"] == 0 and r2["linked"] == 0 and r2["skipped"] == 2
+    finally:
+        sdk.close()
+
+
+@pytest.mark.skipif(not (os.path.exists("/proc/self/mountinfo")
+                         and os.geteuid() == 0),
+                    reason="mount --bind requires Linux + root (E2E-8(f) gate)")
+def test_e2e8_same_inode_convergence_mount_bind(tmp_path):
+    """E2E-8(f) mount-alias convergence — LINUX-ONLY real-leg (skip-if-
+    unavailable, same `mount --bind` gate as E2E-7(s)): a dir bind-mounted
+    INSIDE the corpus → two legacy Events whose source files are mount-alias
+    paths of ONE physical file converge onto a single Source (first sorted
+    path), both Events linked, second run both skipped."""
+    import subprocess as _sp
+    c = tmp_path / "corpus"; c.mkdir()
+    realdir = tmp_path / "real"; realdir.mkdir()
+    (realdir / "f.md").write_text(SESSION_FIXTURE.format(sid="mnt1", n=1))
+    stored = compute_file_hash(str(realdir / "f.md"))
+    alias = c / "alias"
+    alias.mkdir()
+    _sp.run(["mount", "--bind", str(realdir), str(alias)], check=True)
+    try:
+        sdk = _sdk()
+        try:
+            g = sdk._get_proj().g
+            _create_legacy_event(g, event_id="session_mnt_real",
+                                 kind="AgentSession", rel_path="real/f.md",
+                                 file_hash=stored, title="Mnt Real")
+            _create_legacy_event(g, event_id="session_mnt_alias",
+                                 kind="AgentSession", rel_path="alias/f.md",
+                                 file_hash=stored, title="Mnt Alias")
+            rd = sdk.backfill_sources(str(c), dry_run=True)
+            assert rd["would_create"] == 1 and rd["would_link"] == 2
+            r = sdk.backfill_sources(str(c))
+            assert r["created"] == 1 and r["linked"] == 2
+            assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 1
+            assert g.query("MATCH ()-[r:references]->() RETURN count(r)"
+                           ).result_set[0][0] == 2
+            r2 = sdk.backfill_sources(str(c))
+            assert r2["created"] == 0 and r2["linked"] == 0 and r2["skipped"] == 2
+            assert _required_sweep(g) == 0
+        finally:
+            sdk.close()
+    finally:
+        _sp.run(["umount", str(alias)], check=False)
