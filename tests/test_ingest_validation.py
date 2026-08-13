@@ -138,6 +138,13 @@ class TestPhase1Phase2Parity:
                 "connections": [{"from": "pA", "to": [5], "operator": "IMPL"}]},
             "non-string kind": {"points": [
                 {"kind": 5, "content": "x"}]},
+            "non-string content + direct connection": {
+                "points": [
+                    {"ref": "p1", "kind": "statement", "content": 5},
+                    {"ref": "p2", "kind": "statement", "content": "b"},
+                ],
+                "connections": [
+                    {"from": "p1", "to": "p2", "operator": "IMPL"}]},
         }
         for name, bundle in cases.items():
             self._assert_both_phases(sdk, bundle)

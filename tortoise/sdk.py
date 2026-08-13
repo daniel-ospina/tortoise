@@ -3057,8 +3057,12 @@ class TortoiseSDK:
                 if section != "points":
                     continue
                 content = item.get("content")
-                if content is None:
-                    continue  # shape violation already reported (check 1)
+                if content is None or not isinstance(content, str):
+                    # REVIEW-FIX P1 (cycle-26): non-string content would crash
+                    # _find_terminal_dedup_hit -> _content_hash (AttributeError
+                    # 'int' object has no attribute 'encode') — shape violation
+                    # already reported (check 1), skip the dedup-hit scan.
+                    continue
                 kind = item.get("kind") or "statement"
                 hit = self._find_terminal_dedup_hit(content, kind)
                 if hit:
