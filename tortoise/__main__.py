@@ -619,7 +619,7 @@ def _cmd_signup(args) -> int:
     of Mem0's 4-command key mint and Hindsight's npx self-install. Saves
     the config to .tortoise so `tortoise create-point` etc. work immediately.
     """
-    import json, sys, uuid
+    import json, os, sys, uuid
     from pathlib import Path
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
@@ -639,6 +639,17 @@ def _cmd_signup(args) -> int:
             data = json.loads(resp.read())
     except HTTPError as e:
         body = e.read().decode() if e.fp else ""
+        if e.code == 429:
+            # #1081 P3: friendly retry window + support pointer instead of the
+            # raw JSON body. Retry-After is the RFC 7231 contract; tolerate
+            # both seconds and (hypothetically) HTTP-date via isdigit guard.
+            retry = (e.headers.get("Retry-After")
+                     if e.headers and e.headers.get("Retry-After") else None)
+            when = f"{int(retry)}s" if (retry and retry.isdigit()) else "later"
+            print(f"Signup rate limit reached — try again in {when}. "
+                  "Need more keys? Contact support@premiselabs.co.",
+                  file=sys.stderr)
+            return 1
         print(f"Signup failed ({e.code}): {body}", file=sys.stderr)
         return 1
     except (URLError, ValueError, json.JSONDecodeError) as e:
