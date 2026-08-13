@@ -9,6 +9,8 @@ Rules (env-overridable thresholds):
 - R2  key_create:   count    > 10  / 24h     -> stage-1 flag, stage-2 suspend
 - R3  reads:        > 100 / 5min per-key OR per-team -> notify Owner only
 - R4  geo:          first unseen CF-IPCountry per team -> notify Owner
+- R8 signup_velocity: N anon signups/IP/window (breach >= threshold) ->
+                     notify ops only (BILLING_NOTIFY_TO; never suspends)
 
 Two-stage staging with EPISODE semantics (scoping delta 13 + code-review
 fixes): flags are PER-RULE (flag event rows carry the rule). Stage 2
@@ -50,8 +52,10 @@ EVENT_FLAG_CLEAR = "flag_clear"  # episode end (clean eval or un-suspend)
 EVENT_SUSPEND = "suspend"
 EVENT_UNSUSPEND = "unsuspend"
 EVENT_READ_VELOCITY = "read_velocity"
+EVENT_SIGNUP_VELOCITY = "signup_velocity"
 
-ALERT_TYPES = (EVENT_FLAG, EVENT_SUSPEND, EVENT_AUTH_IP, EVENT_READ_VELOCITY)
+ALERT_TYPES = (EVENT_FLAG, EVENT_SUSPEND, EVENT_AUTH_IP, EVENT_READ_VELOCITY,
+               EVENT_SIGNUP_VELOCITY)
 
 
 def _int_env(name: str, default: int) -> int:
@@ -445,6 +449,7 @@ def _alert_dict(row: dict) -> dict:
         EVENT_SUSPEND: "Team auto-suspended due to unusual activity",
         EVENT_AUTH_IP: f"Access from new location: {row.get('country') or 'unknown'}",
         EVENT_READ_VELOCITY: "Unusual read velocity detected on an API key",
+        EVENT_SIGNUP_VELOCITY: f"Signup velocity breach: {details.get('count', '?')} anon signups from {details.get('ip', '?')}",
     }
     at = row.get("created_at")
     return {
@@ -666,6 +671,143 @@ def record_read(key_id: str | None, team_id: str | None,
                 now: float | None = None):
     """Module-level seam (monkeypatchable) over the shared tracker."""
     return READ_TRACKER.record_read(key_id, team_id, now)
+
+
+# ── R8: signup-velocity tracker (in-memory, notify-only) ───────────────────
+
+class SignupVelocityTracker:
+    """>N anonymous signups per IP per window → notify ops once per window.
+
+    Anon teams have NULL user_id, so R3/R4 owner-notify resolves nothing —
+    R8 is the OPS-visible farming signal (BILLING_NOTIFY_TO fallback, the
+    documented anon path, notify.py:153). In-memory by design (mirrors
+    ReadVelocityTracker/R3): R8 NEVER suspends, so deploy-reset damage is
+    bounded to a notify. The durable multi-instance sweeper over audit_events
+    is a documented follow-on (idx_audit_ip_time ships in #1081; sweeper
+    contract in docs/scoping/scoping-1081-agent-signup-abuse.md).
+
+    Two feeds:
+    - record_signup  — SUCCESSFUL mint path (consensus: blocked farmers must
+      not inflate the success count with attempts). Breach on >= threshold:
+      threshold = allowance (2/24h) so the feed fires exactly when an IP
+      consumes its entire anonymous allowance (the designed review signal).
+    - record_block   — the signup limiter's 429 (the unmistakable farming
+      evidence). Same dedup key as the success feed (bare ip) — one ops
+      email per (ip, window), never two (P1-FIX-2).
+    """
+
+    def __init__(self, threshold: int | None = None, window_s: int | None = None):
+        self.threshold = threshold if threshold is not None else _int_env(
+            "TORTOISE_ABUSE_SIGNUP_THRESHOLD",
+            _int_env("TORTOISE_SIGNUP_IP_LIMIT", 2))  # P3-5: defaults follow allowance
+        self.window_s = window_s if window_s is not None else _int_env(
+            "TORTOISE_ABUSE_SIGNUP_WINDOW_S", 86400)
+        self._by_ip: dict[str, list[float]] = defaultdict(list)
+        self._notified: dict[str, float] = {}  # bare ip -> last notify ts
+        self._lock = threading.Lock()
+
+    def reset(self) -> None:
+        """Test seam: clear per-IP counts and dedup state (P1-FIX-10 —
+        module-scoped TestClient shares one host across tests)."""
+        with self._lock:
+            self._by_ip.clear()
+            self._notified.clear()
+
+    def record_signup(self, ip: str | None, team_id: str | None = None,
+                      now: float | None = None) -> tuple[str, str] | None:
+        """Success-path feed: count minted teams per IP per window.
+        Returns ('ip', ip) on breach (len >= threshold), else None. Notify
+        dedup once per window per IP (bare-ip key, shared with block path)."""
+        if abuse_disabled() or not ip:
+            return None
+        now = now if now is not None else time.time()
+        cutoff = now - self.window_s
+        breach: tuple[str, str] | None = None
+        with self._lock:
+            bucket = self._by_ip[ip]
+            bucket[:] = [t for t in bucket if t > cutoff]
+            bucket.append(now)
+            if len(bucket) >= self.threshold:
+                breach = ("ip", ip)
+            if len(self._by_ip) > 10_000:
+                # re-wrap: a dict-comprehension replace would lose defaultdict
+                # semantics and KeyError on NEW ips after the prune (caught by
+                # test_memory_bound — 10,100 distinct IPs)
+                self._by_ip = defaultdict(
+                    list, {k: v for k, v in self._by_ip.items()
+                           if any(t > cutoff for t in v)})
+            self._notified = {k: t for k, t in self._notified.items()
+                              if now - t < self.window_s}
+            if breach is not None:
+                last = self._notified.get(ip)
+                if last is not None and now - last < self.window_s:
+                    return None  # already notified this window
+                self._notified[ip] = now
+        if breach is not None:
+            self._notify("velocity", ip, team_id, {"count": len(bucket)})
+        return breach
+
+    def record_block(self, ip: str | None, team_id: str | None = None,
+                     now: float | None = None) -> None:
+        """Block-path feed: the signup limiter 429'd this IP. Same dedup key
+        (bare ip) as the success feed — the 429 after a 2-mint allowance is
+        dedup-suppressed (one email per episode, P1-FIX-2)."""
+        if abuse_disabled() or not ip:
+            return
+        now = now if now is not None else time.time()
+        with self._lock:
+            self._notified = {k: t for k, t in self._notified.items()
+                              if now - t < self.window_s}
+            last = self._notified.get(ip)
+            if last is not None and now - last < self.window_s:
+                return
+            self._notified[ip] = now
+        self._notify("blocked", ip, team_id, {})
+
+    def _notify(self, reason: str, ip: str, team_id: str | None,
+                details: dict) -> None:
+        # P4-FIX: payload carries count ALWAYS (block path details={} → count
+        # 0 is fine; _alert_dict reads details.get('count')).
+        details = dict(details)  # do not mutate caller's dict
+        details.setdefault("count", 0)
+        # Dashboard alert row (best-effort; minted team anchors the FK).
+        store = None
+        try:
+            from tortoise.supabase_control import get_abuse_store
+            store = get_abuse_store()
+            if team_id:
+                store.record_event(
+                    team_id, EVENT_SIGNUP_VELOCITY,
+                    details={"ip": ip, "reason": reason, **details})
+        except Exception:
+            logger.debug("signup-velocity event record failed (%s)", ip)
+        try:
+            from tortoise.notify import notify_abuse
+            # anon team → no email → BILLING_NOTIFY_TO ops fallback
+            notify_abuse("abuse_signup_velocity",
+                         {"team_id": team_id, "email": None},
+                         {"ip": ip, "reason": reason,
+                          "count": details.get("count", 0),
+                          "threshold": self.threshold,
+                          "window_s": self.window_s,
+                          "appeal_url": appeal_url()})
+        except Exception:
+            logger.debug("signup-velocity notify failed (%s)", ip)
+
+
+SIGNUP_TRACKER = SignupVelocityTracker()
+
+
+def record_signup(ip: str | None, team_id: str | None = None,
+                  now: float | None = None) -> tuple[str, str] | None:
+    """Module-level seam (monkeypatchable) over the shared tracker."""
+    return SIGNUP_TRACKER.record_signup(ip, team_id, now)
+
+
+def record_signup_block(ip: str | None, team_id: str | None = None,
+                        now: float | None = None) -> None:
+    """Module-level seam for the 429 path."""
+    SIGNUP_TRACKER.record_block(ip, team_id, now)
 
 
 # ── R4: geo (CF-IPCountry header, fail-open) ───────────────────────────────

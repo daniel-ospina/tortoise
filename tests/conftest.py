@@ -265,15 +265,29 @@ def _redislite_hygiene():
 
 
 @pytest.fixture(autouse=True)
-def _reset_register_rate_limit():
-    """/v1/register rate limiter is in-memory per process (3/hour/IP, #498).
-
-    pytest runs all test files in ONE process, so onboarding/register tests
-    in earlier files consume the budget of later files (429s in
-    test_onboarding_integration, #493). Reset per test — the limiter's
-    cross-test persistence has no value here (each test uses a fresh IP-less
-    TestClient context).
-    """
+def _reset_ip_rate_limits():
+    """#498 register + #1081 signup IP limiters are in-memory per process and
+    share one TestClient host across a module — reset both per test."""
+    # P3-FIX-6: getattr-guard so the red phase (before _SIGNUP_BUCKETS exists)
+    # does not ImportError the whole suite; also reset the R8 tracker
+    # (order-dependent dedup flake guard — module-scoped testclient host).
+    import tortoise.hosted_api as ha_mod
     from tortoise.hosted_api import _register_buckets
     _register_buckets.clear()
+    signup_buckets = getattr(ha_mod, "_SIGNUP_BUCKETS", None)
+    if signup_buckets is not None:
+        signup_buckets.clear()
+    try:
+        from tortoise.abuse import SIGNUP_TRACKER
+        SIGNUP_TRACKER.reset()
+    except (ImportError, AttributeError):
+        pass
     yield
+    _register_buckets.clear()
+    if signup_buckets is not None:
+        signup_buckets.clear()
+    try:
+        from tortoise.abuse import SIGNUP_TRACKER
+        SIGNUP_TRACKER.reset()
+    except (ImportError, AttributeError):
+        pass

@@ -344,15 +344,34 @@ class TestAgentSignup:
         r = tc.post("/v1/agent/signup", json={})
         assert r.status_code == 500
 
-    def test_rate_limit_query_shape(self, client):
-        """#741: the server-side identity is fresh per request, so the
-        identity-based count is 0 by construction — replaying a client
-        identity never 429s (dead-limit parity with the registry path)."""
+    def test_rate_limit_query_shape(self, client, monkeypatch):
+        """#1081: the old per-identity count was dead (#741 — server-side
+        identity is fresh per request) and has been REMOVED. The per-IP
+        signup limiter (2/24h) is the compensating control; the 3rd mint
+        from one IP 429s in Supabase mode too (mode-independent store)."""
         tc, fake, _ = client
-        ident = "anon-client-chosen"
-        for _ in range(4):
-            r = tc.post("/v1/agent/signup", json={"identity": ident})
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        for _ in range(2):
+            r = tc.post("/v1/agent/signup", json={"identity": "anon-client-chosen"})
             assert r.status_code == 200, r.text
+        r = tc.post("/v1/agent/signup", json={"identity": "anon-client-chosen"})
+        assert r.status_code == 429, r.text
+
+    def test_signup_caps_match_free_tier(self, client):
+        """#1081 (indicator 3): provision_team's p_* params must mirror
+        tier_limits("free") exactly — a pricing-drift regression must never
+        silently un-cap anon teams in Supabase mode."""
+        from tortoise.pricing import tier_limits
+        tc, fake, _ = client
+        r = tc.post("/v1/agent/signup", json={})
+        assert r.status_code == 200, r.text
+        fn, p = next(c for c in fake.rpc_calls if c[0] == "provision_team")
+        lim = tier_limits("free")
+        assert p["p_max_users"] == lim["max_users_per_team"]
+        assert p["p_max_graphs"] == lim["max_graphs_per_team"]
+        assert p["p_ops_allowance"] == lim["included_write_ops_per_month"]
+        assert p["p_graph_size_cap"] == lim["max_graph_nodes"]
+        assert p["p_tier"] == "free"
 
 
 # ── POST /v1/register (email provision via provision_team RPC) ─────────────

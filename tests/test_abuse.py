@@ -32,9 +32,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tortoise import abuse
 from tortoise.abuse import (AbuseEngine, MemoryAbuseStore, ReadVelocityTracker,
-                            check_new_country, clear_suspended,
-                            is_suspended_signal, mark_suspended,
-                            resolve_country, reset_geo_cache)
+                            SignupVelocityTracker, check_new_country,
+                            clear_suspended, is_suspended_signal,
+                            mark_suspended, resolve_country, reset_geo_cache)
 from tests.fake_control_plane import FakeControlPlane
 
 
@@ -374,6 +374,60 @@ class TestReadVelocity:
         now = time.time()
         for i in range(200):
             assert tr.record_read("key1", "t1", now=now) is None
+
+
+# ── R8: signup velocity (in-memory, notify-only) ────────────────────────────
+
+class TestSignupVelocity:
+    def test_success_feed_breach_notifies_once(self, monkeypatch, notified):
+        # P1-FIX-2: breach on >= — the success feed fires on the 2nd mint
+        # ("IP consumed its entire allowance" = the designed review signal).
+        tr = SignupVelocityTracker(threshold=2, window_s=3600)
+        assert tr.record_signup("1.2.3.4", team_id="t1") is None
+        breach = tr.record_signup("1.2.3.4", team_id="t2")  # 2nd mint = breach
+        assert breach == ("ip", "1.2.3.4")
+        assert [c[0] for c in notified] == ["abuse_signup_velocity"]
+        assert len(notified) == 1
+        # dedup: further mints in the same window do NOT re-notify
+        tr.record_signup("1.2.3.4", team_id="t3")
+        assert len(notified) == 1
+
+    def test_window_expiry_rearms(self, monkeypatch, notified):
+        tr = SignupVelocityTracker(threshold=2, window_s=60)
+        for i in range(2):
+            tr.record_signup("9.9.9.9", team_id=f"t{i}", now=1000.0 + i)
+        assert len(notified) == 1
+        # window expires → a fresh burst is a NEW episode (re-notify)
+        for i in range(2):
+            tr.record_signup("9.9.9.9", team_id=f"t{i}", now=2000.0 + i)
+        assert len(notified) == 2
+
+    def test_block_path_same_episode(self, monkeypatch, notified):
+        # P1-FIX-2: success breach (2nd mint) + 429 block dedup to ONE email
+        # per (ip, window) — same dedup key, never two.
+        tr = SignupVelocityTracker(threshold=2, window_s=3600)
+        tr.record_signup("1.2.3.4", team_id="t1")
+        tr.record_signup("1.2.3.4", team_id="t2")   # success breach → notify
+        tr.record_block("1.2.3.4")                    # 429 path → dedup'd
+        tr.record_block("1.2.3.4")
+        assert len(notified) == 1
+
+    def test_kill_switch(self, monkeypatch, notified):
+        monkeypatch.setenv("TORTOISE_ABUSE_DISABLED", "1")
+        tr = SignupVelocityTracker(threshold=1, window_s=3600)
+        assert tr.record_signup("1.2.3.4", team_id="t1") is None
+
+    def test_memory_bound(self, monkeypatch, notified):
+        # P1-B: the prune drops STALE entries (R3 precedent) — feed 10,100
+        # distinct IPs where the first 200 have old `now` timestamps outside
+        # the window; assert they are pruned and live entries survive.
+        tr = SignupVelocityTracker(threshold=1000, window_s=3600)
+        base = 1_000_000.0
+        for i in range(10_100):
+            now = base - 7200 if i < 200 else base  # first 200 stale (>window)
+            tr.record_signup(f"10.{(i // 250) % 250}.{i % 250}", team_id=f"t{i}", now=now)
+        # 10,100 > 10,000 → prune ran; 200 stale dropped, 9,900 live remain
+        assert len(tr._by_ip) == 9_900
 
 
 # ── R4: geo ─────────────────────────────────────────────────────────────────

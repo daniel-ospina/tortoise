@@ -92,6 +92,94 @@ class FakeControlPlane:
                              "period": p.get("p_period"),
                              "write_ops": n})
             return None  # PostgREST minimal — no echo
+        if fn == "claim_membership":
+            # Emulate migration 20260813000003's SQL semantics over the
+            # in-memory rows (mirrors the real SECURITY DEFINER function):
+            #  1. resolve team from api_keys (lookup_hash + revoked_at IS
+            #     NULL; REJECT created_via='bootstrap' session keys and
+            #     expired keys)
+            #  2. idempotent re-claim: owner (team_id, user_id) → noop
+            #  3. find the NULL-user_id active owner row → 409 already_claimed
+            #     when absent
+            #  4. merge/promote when a (user_id, team_id) row exists (drop
+            #     identity row first, copy key material, reactivate) else
+            #     plain link (user_id set, identity NULL)
+            #  5. teams.email overwrite (unconditional); cross-team collision
+            #     → email_in_use (uq_teams_email parity)
+            #  6. drop leftover placeholder (team_id='')
+            # Errors raise RuntimeError with the RPC code embedded (the real
+            # RPC raises → PostgREST 400 → supabase_control.claim_membership
+            # maps the code via _CLAIM_ERROR_CODES).
+            p = body or {}
+            lookup = p.get("p_lookup_hash") or ""
+            user_id = p.get("p_user_id")
+            email = p.get("p_email")
+            if not lookup:
+                raise RuntimeError("claim_membership:key_required")
+            if not user_id:
+                raise RuntimeError("claim_membership:user_required")
+            key = next((k for k in self.tables.get("api_keys", [])
+                        if k.get("lookup_hash") == lookup
+                        and k.get("revoked_at") is None), None)
+            if key is None:
+                raise RuntimeError("claim_membership:key_not_found")
+            if key.get("created_via") == "bootstrap":
+                raise RuntimeError("claim_membership:key_not_claimable")
+            from datetime import datetime, timezone
+            exp = key.get("expires_at")
+            if exp is not None and isinstance(exp, str) \
+                    and exp <= datetime.now(timezone.utc).isoformat():
+                raise RuntimeError("claim_membership:key_expired")
+            team_id = key["team_id"]
+            mem_rows = self.tables.setdefault("team_memberships", [])
+
+            # idempotent re-claim (noop success)
+            if any(m.get("team_id") == team_id and m.get("user_id") == user_id
+                   and m.get("role") == "owner" and m.get("status") == "active"
+                   for m in mem_rows):
+                self._claim_set_email(team_id, email)
+                return None
+
+            owner = next((m for m in mem_rows
+                          if m.get("team_id") == team_id
+                          and m.get("role") == "owner"
+                          and m.get("user_id") is None
+                          and m.get("status") == "active"), None)
+            if owner is None:
+                raise RuntimeError("claim_membership:already_claimed")
+
+            # uq_teams_email parity: verify the email is free BEFORE any
+            # mutation — the real RPC's unique violation rolls the whole
+            # transaction back (owner stays anon on email_in_use).
+            if any(t.get("id") != team_id and t.get("email") == email
+                   for t in self.tables.get("teams", [])):
+                raise RuntimeError("claim_membership:email_in_use")
+
+            existing = next((m for m in mem_rows
+                             if m.get("user_id") == user_id
+                             and m.get("team_id") == team_id), None)
+            if existing is not None:
+                # merge/promote: drop identity row FIRST, then promote
+                mem_rows.remove(owner)
+                existing.update({"role": "owner", "status": "active",
+                                 "identity": None,
+                                 "lookup_hash": existing.get("lookup_hash")
+                                                or owner.get("lookup_hash"),
+                                 "key_hash": existing.get("key_hash")
+                                             or owner.get("key_hash")})
+            else:
+                owner["user_id"] = user_id
+                owner["identity"] = None
+
+            # drop leftover placeholder (team_id='') for the user
+            mem_rows[:] = [m for m in mem_rows
+                           if not (m.get("user_id") == user_id
+                                   and m.get("team_id") == "")]
+            # email overwrite (collision already verified above)
+            for t in self.tables.get("teams", []):
+                if t.get("id") == team_id:
+                    t["email"] = email
+            return None
         if fn != "provision_team":
             return None
         p = body or {}
@@ -173,6 +261,16 @@ class FakeControlPlane:
             self._trigger_key_create(team_id, f"key_{team_id}_{lookup[:12]}",
                                      "provisioned")
         return None
+
+    def _claim_set_email(self, team_id: str, email: str) -> None:
+        """uq_teams_email parity: teams.email overwrite, cross-team collision
+        → claim_membership:email_in_use (the fake mirrors the unique index)."""
+        for t in self.tables.get("teams", []):
+            if t.get("id") != team_id and t.get("email") == email:
+                raise RuntimeError("claim_membership:email_in_use")
+        for t in self.tables.get("teams", []):
+            if t.get("id") == team_id:
+                t["email"] = email
 
     def _trigger_key_create(self, team_id: str, key_id: str,
                             created_via: str | None) -> None:

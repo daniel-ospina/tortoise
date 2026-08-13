@@ -155,7 +155,16 @@ async def verify_session_jwt(request: Request) -> dict:
     user_id = payload.get("sub")
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid session token")
-    return {"user_id": user_id, "email": payload.get("email")}
+    return {
+        "user_id": user_id,
+        "email": payload.get("email"),
+        # #1082 (claim path): app_metadata is user-level, always present,
+        # survives token refresh — unlike `amr` which is optional and
+        # refresh-mutated to `token_refresh`. The claim endpoint asserts
+        # app_metadata.providers ∩ {github, google} ≠ ∅ (provider-verified
+        # email invariant). Additive key — existing callers read known keys.
+        "app_metadata": payload.get("app_metadata") or {},
+    }
 
 
 async def get_current_user(request: Request) -> dict:
