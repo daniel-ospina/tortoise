@@ -273,7 +273,7 @@
       <a href="https://tortoise.premiselabs.co/">Product</a>
       <a href="/docs">Docs</a>
     </nav>
-    <a class="login" href="https://app.premiselabs.co">Login</a>
+    <a class="login" href="/signin.html">Login</a>
   </div>
 
   <div class="container">
@@ -359,6 +359,22 @@
     const SUPABASE_URL = "https://ybetwichurajbfswfeqa.supabase.co";
     const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InliZXR3aWNodXJhamJmc3dmZXFhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUyNzgzNDYsImV4cCI6MjEwMDg1NDM0Nn0.YHysJAebPualDNDQTU5bnGBUHg5guLe8eBadm0LiEiY";
     const WELCOME_URL = "/welcome.html";
+    // #1082 (PR1): claim-intent routing — when a claim is IN FLIGHT
+    // (non-secret tt_claim_pending marker set by the dashboard claim card
+    // on app.premiselabs.co — the raw tt_ key never leaves app-origin
+    // sessionStorage, P1-2), OAuth must land on the dashboard CLAIM ROUTE
+    // (?claim=1), NEVER welcome.html (its Phase-2 mint would orphan the
+    // claimable anon team).
+    const DASHBOARD_URL = "https://app.premiselabs.co";
+    function claimRedirectTarget() {
+      try {
+        const m = document.cookie.match(/(?:^|; )tt_claim_pending=([^;]*)/);
+        if (m) {
+          return DASHBOARD_URL + "/?claim=1";
+        }
+      } catch (e) { /* fall through to welcome */ }
+      return window.location.origin + WELCOME_URL;
+    }
 
     // #801: server-side signup — the hosted API creates the Supabase auth
     // user via the GoTrue admin API with email_confirm=true so NO
@@ -718,7 +734,7 @@
         const { data, error } = await supabaseClient.auth.signInWithOAuth({
           provider: provider,
           options: {
-            redirectTo: window.location.origin + WELCOME_URL,
+            redirectTo: claimRedirectTarget(),
           },
         });
 

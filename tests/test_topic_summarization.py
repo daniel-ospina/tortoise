@@ -41,9 +41,16 @@ TEST_GRAPH = "tortoise_test_592_topic_summarization"
 
 
 @pytest.fixture(scope="module")
-def sdk():
-    """Module-scoped SDK with isolated test graph. Cleaned up after."""
-    sdk = TortoiseSDK(db_path=None, namespace=TEST_GRAPH)
+def sdk(tmp_path_factory):
+    """Module-scoped SDK on an isolated tmp DB (never the dev default DB).
+
+    #522: uses a fresh tmp file per run — the previous db_path=None form
+    wrote into ~/.tortoise/tortoise.db, coupling test outcomes to the
+    developer machine's legacy index state (stale composite Point index
+    broke `is_operator = false` lookups there).
+    """
+    base = tmp_path_factory.mktemp("topic_summarization")
+    sdk = TortoiseSDK(str(base / "topic.db"), namespace=TEST_GRAPH)
     yield sdk
     # Cleanup: delete all test nodes
     try:

@@ -87,7 +87,7 @@ class TestRegistryEquivalence:
         recall, #922 update/delete/operator_action/create_edge, #927
         overview/get, #932 ingest)."""
         from tortoise.tool_registry import TOOL_REGISTRY
-        assert len(TOOL_REGISTRY) == 79, f"Expected 79, got {len(TOOL_REGISTRY)}"
+        assert len(TOOL_REGISTRY) == 84, f"Expected 84, got {len(TOOL_REGISTRY)}"
         names = {t.name for t in TOOL_REGISTRY}
         onboarding = {"tortoise_onboarding_demo_create", "tortoise_onboarding_state",
                       "tortoise_onboarding_session_recording",
@@ -110,6 +110,11 @@ class TestRegistryEquivalence:
         for name in ("tortoise_list_tags", "tortoise_suggest_entry_points",
                      "tortoise_get_events"):
             assert name in names, f"Missing tool: {name}"
+        # Phase-4 mining/promotion/dedup/timeline surface (#787)
+        phase4 = {"tortoise_mine_conversations", "tortoise_list_dedup_candidates",
+                  "tortoise_approve_merge", "tortoise_promote_point",
+                  "tortoise_belief_timeline"}
+        assert phase4 <= names, f"Missing #787 tools: {phase4 - names}"
 
     def test_no_duplicate_names(self):
         """No two registry entries share the same name."""

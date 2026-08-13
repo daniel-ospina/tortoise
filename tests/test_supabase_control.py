@@ -19,9 +19,11 @@ os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
 from tortoise.auth import lookup_hash
 from tortoise.supabase_control import (
+    ClaimError,
     InvitationError,
     active_api_keys,
     api_key_by_id,
+    claim_membership,
     expired_bootstrap_keys,
     get_control_plane,
     github_credentials,
@@ -30,6 +32,7 @@ from tortoise.supabase_control import (
     invitation_accept,
     invitation_mint,
     invitation_rescind,
+    is_anon_team,
     is_supabase_enabled,
     membership_count_since,
     membership_for_user_team,
@@ -1208,11 +1211,37 @@ class TestMeteringSeam:
         spy = _Spy()
         assert metering_increment(spy, "team-1", "2026-08", 2) == 2
         assert metering_increment(spy, "team-1", "2026-08", 4) == 6
+        # #953: the RPC body carries p_nodes_written (epic #909 W-4 commit
+        # cost driver; default 0 on plain increments).
         assert spy.rpc_calls == [
             ("metering_increment", {"p_team_id": "team-1",
-                                    "p_period": "2026-08", "p_n": 2}),
+                                    "p_period": "2026-08", "p_n": 2,
+                                    "p_nodes_written": 0}),
             ("metering_increment", {"p_team_id": "team-1",
-                                    "p_period": "2026-08", "p_n": 4}),
+                                    "p_period": "2026-08", "p_n": 4,
+                                    "p_nodes_written": 0}),
+        ]
+
+    def test_metering_increment_passes_nodes_written(self):
+        """#953: a non-zero nodes_written flows through to the RPC body."""
+        from tortoise.supabase_control import metering_increment
+        from tests.fake_control_plane import FakeControlPlane
+
+        class _Spy(FakeControlPlane):
+            def __init__(self):
+                super().__init__({"metering_records": []})
+                self.rpc_calls = []
+
+            def rpc(self, fn, body):
+                self.rpc_calls.append((fn, body))
+                return None
+
+        spy = _Spy()
+        metering_increment(spy, "team-1", "2026-08", 3, nodes_written=5)
+        assert spy.rpc_calls == [
+            ("metering_increment", {"p_team_id": "team-1",
+                                    "p_period": "2026-08", "p_n": 3,
+                                    "p_nodes_written": 5}),
         ]
 
     def test_metering_increment_readback_failure_returns_delta(self):
@@ -1307,3 +1336,191 @@ class TestResolveTeamLimitsSupabase:
         assert limits["max_users"] is None  # unlimited, not pricing default
         assert limits["max_graphs"] is None
         assert limits["max_points"] == 500000
+
+
+# ── Claim seam (#1082, PR1 — 20260813000003) ────────────────────────────────
+# TestClaimSeam exercises the Python claim_membership wrapper + is_anon_team
+# over the FakeControlPlane emulation (which mirrors the SQL RPC semantics).
+
+
+def _provision_anon_team(fake: FakeControlPlane, *, team_id: str, identity: str,
+                         api_key: str, lookup: str | None = None,
+                         email: str | None = None) -> None:
+    """Provision an anonymous (NULL user_id) team via the fake RPC."""
+    provision_team(fake, **{
+        "p_user_id": None, "p_identity": identity, "p_team_id": team_id,
+        "p_team_name": f"Anon {team_id}", "p_api_key": api_key,
+        "p_key_hash": "salt:hash",
+        "p_lookup_hash": lookup or lookup_hash(api_key),
+        "p_graph_name": f"team_{team_id}", "p_email": email,
+        "p_key_prefix": api_key[:10], "p_tier": "free",
+        "p_max_users": 1, "p_max_graphs": 1, "p_ops_allowance": 10000,
+        "p_graph_size_cap": 10000,
+    })
+
+
+class TestClaimSeam:
+    def test_claim_links_owner_clears_identity_overwrites_email(self, fake):
+        """link + clear-identity + email-overwrite (P1-FIX-B/P2-FIX-K): the
+        NULL-user_id owner row gets user_id + identity=NULL, and teams.email
+        is overwritten with the verified OAuth email — same key intact."""
+        _provision_anon_team(fake, team_id="team-claim-1",
+                             identity="anon-claim-1", api_key="tt_claim_1")
+        claim_membership(fake, lookup_hash=lookup_hash("tt_claim_1"),
+                         user_id="user-claim", email="verified@example.com")
+
+        rows = fake.tables["team_memberships"]
+        owner = next(r for r in rows if r["team_id"] == "team-claim-1")
+        assert owner["user_id"] == "user-claim"
+        assert owner["identity"] is None
+        assert owner["role"] == "owner"
+        assert owner["status"] == "active"
+        team = next(t for t in fake.tables["teams"]
+                    if t["id"] == "team-claim-1")
+        assert team["email"] == "verified@example.com"
+        # same key still resolves (indicator 1) — api_keys row untouched
+        assert resolve_api_key(fake, "tt_claim_1")["team_id"] == "team-claim-1"
+        # anon predicate flips
+        assert is_anon_team(fake, "team-claim-1") is False
+
+    def test_claim_merge_promotes_existing_member(self, fake):
+        """P3-FIX-R/P4: an existing (user, team) row is promoted to owner
+        with the identity row's key material; a 'removed' row reactivates."""
+        _provision_anon_team(fake, team_id="team-merge-1",
+                             identity="anon-merge-1", api_key="tt_merge_1")
+        fake.seed("team_memberships", [{
+            "id": "mem-user-merge", "user_id": "user-merge",
+            "team_id": "team-merge-1", "role": "member", "status": "removed",
+            "identity": None, "lookup_hash": None, "key_hash": "old-hash",
+        }])
+        claim_membership(fake, lookup_hash=lookup_hash("tt_merge_1"),
+                         user_id="user-merge", email="m@example.com")
+
+        rows = [r for r in fake.tables["team_memberships"]
+                if r["team_id"] == "team-merge-1"]
+        assert len(rows) == 1, f"merge must collapse to one row: {rows}"
+        row = rows[0]
+        assert row["user_id"] == "user-merge"
+        assert row["role"] == "owner"
+        assert row["status"] == "active"  # removed row reactivated (P4)
+        # key material copied from the identity row (same-key continuity)
+        assert row["lookup_hash"] == lookup_hash("tt_merge_1")
+
+    def test_second_claim_409(self, fake):
+        """first-claim-wins: a DIFFERENT user's claim raises ClaimError 409
+        already_claimed after the team is claimed."""
+        _provision_anon_team(fake, team_id="team-wins-1",
+                             identity="anon-wins-1", api_key="tt_wins_1")
+        claim_membership(fake, lookup_hash=lookup_hash("tt_wins_1"),
+                         user_id="user-a", email="a@example.com")
+        with pytest.raises(ClaimError) as ei:
+            claim_membership(fake, lookup_hash=lookup_hash("tt_wins_1"),
+                             user_id="user-b", email="b@example.com")
+        assert ei.value.status == 409
+        assert ei.value.code == "already_claimed"
+
+    def test_claim_idempotent_same_user(self, fake):
+        """P3-FIX-Q: re-claim by the SAME user is a noop success."""
+        _provision_anon_team(fake, team_id="team-idem-1",
+                             identity="anon-idem-1", api_key="tt_idem_1")
+        claim_membership(fake, lookup_hash=lookup_hash("tt_idem_1"),
+                         user_id="user-a", email="a@example.com")
+        claim_membership(fake, lookup_hash=lookup_hash("tt_idem_1"),
+                         user_id="user-a", email="a2@example.com")  # no raise
+        rows = [r for r in fake.tables["team_memberships"]
+                if r["team_id"] == "team-idem-1"]
+        assert len(rows) == 1
+
+    def test_claim_rejects_non_owner_row(self, fake):
+        """non-owner-reject: an anon MEMBER row (role != 'owner') is never
+        linked — the RPC only claims owner rows."""
+        _provision_anon_team(fake, team_id="team-nonown-1",
+                             identity="anon-nonown-1", api_key="tt_nonown_1")
+        for r in fake.tables["team_memberships"]:
+            if r["team_id"] == "team-nonown-1" and r["user_id"] is None:
+                r["role"] = "member"  # demote to anon member
+        with pytest.raises(ClaimError) as ei:
+            claim_membership(fake, lookup_hash=lookup_hash("tt_nonown_1"),
+                             user_id="user-a", email="a@example.com")
+        assert ei.value.code == "already_claimed"
+        row = next(r for r in fake.tables["team_memberships"]
+                   if r["team_id"] == "team-nonown-1")
+        assert row["user_id"] is None
+        assert row["identity"] == "anon-nonown-1"
+
+    def test_claim_leaves_unrelated_null_user_rows_untouched(self, fake):
+        """null-row-untouched: anon rows on OTHER teams (or non-owner rows on
+        the same team) are never touched by a claim."""
+        _provision_anon_team(fake, team_id="team-t1",
+                             identity="anon-t1", api_key="tt_t1")
+        _provision_anon_team(fake, team_id="team-t2",
+                             identity="anon-t2", api_key="tt_t2")
+        claim_membership(fake, lookup_hash=lookup_hash("tt_t1"),
+                         user_id="user-a", email="a@example.com")
+        other = next(r for r in fake.tables["team_memberships"]
+                     if r["team_id"] == "team-t2")
+        assert other["user_id"] is None
+        assert other["identity"] == "anon-t2"
+
+    def test_claim_bootstrap_key_rejected(self, fake):
+        """implementer advisory 1: session keys (created_via='bootstrap') can
+        never claim — future-proofs merge/promote against member→owner."""
+        _provision_anon_team(fake, team_id="team-boot-1",
+                             identity="anon-boot-1", api_key="tt_boot_1")
+        # add a bootstrap session key for the SAME team
+        fake.seed("api_keys", [{
+            "id": "key-sess-1", "team_id": "team-boot-1",
+            "lookup_hash": lookup_hash("tt_sess_1"), "created_via": "bootstrap",
+            "created_by": "anon-boot-1", "expires_at": None, "revoked_at": None,
+        }])
+        with pytest.raises(ClaimError) as ei:
+            claim_membership(fake, lookup_hash=lookup_hash("tt_sess_1"),
+                             user_id="user-a", email="a@example.com")
+        assert ei.value.code == "key_not_claimable"
+
+    def test_claim_unknown_key_404(self, fake):
+        with pytest.raises(ClaimError) as ei:
+            claim_membership(fake, lookup_hash=lookup_hash("tt_nope"),
+                             user_id="user-a", email="a@example.com")
+        assert ei.value.code == "key_not_found"
+        assert ei.value.status == 404
+
+    def test_claim_email_in_use_on_cross_team_collision(self, fake):
+        """P3-FIX-S: uq_teams_email parity — a cross-team verified-email
+        collision rejects the claim (atomic rollback: owner stays anon)."""
+        _provision_anon_team(fake, team_id="team-e1", identity="anon-e1",
+                             api_key="tt_e1", email="shared@example.com")
+        _provision_anon_team(fake, team_id="team-e2", identity="anon-e2",
+                             api_key="tt_e2")
+        with pytest.raises(ClaimError) as ei:
+            claim_membership(fake, lookup_hash=lookup_hash("tt_e2"),
+                             user_id="user-a", email="shared@example.com")
+        assert ei.value.code == "email_in_use"
+        row = next(r for r in fake.tables["team_memberships"]
+                   if r["team_id"] == "team-e2")
+        assert row["user_id"] is None  # txn rolled back
+
+    def test_claim_drops_leftover_placeholder(self, fake):
+        """P3-FIX-Q tail: the user's placeholder row (team_id='') is dropped
+        on claim — fresh, merge, AND idempotent paths."""
+        _provision_anon_team(fake, team_id="team-ph-1",
+                             identity="anon-ph-1", api_key="tt_ph_1")
+        fake.seed("team_memberships", [{
+            "id": "ph-user", "user_id": "user-a", "team_id": "",
+            "role": "owner", "status": "active", "identity": None,
+        }])
+        claim_membership(fake, lookup_hash=lookup_hash("tt_ph_1"),
+                         user_id="user-a", email="a@example.com")
+        assert not any(r["team_id"] == "" and r["user_id"] == "user-a"
+                       for r in fake.tables["team_memberships"])
+
+    def test_is_anon_team_predicate(self, fake):
+        """The shared anon predicate: EXISTS active owner with user_id NULL.
+        NOT the email proxy (reg- teams with teams.email set are anon)."""
+        _provision_anon_team(fake, team_id="team-anon-p", identity="anon-p",
+                             api_key="tt_anon_p", email="reg@example.com")
+        assert is_anon_team(fake, "team-anon-p") is True  # email set but anon
+        claim_membership(fake, lookup_hash=lookup_hash("tt_anon_p"),
+                         user_id="user-a", email="reg@example.com")
+        assert is_anon_team(fake, "team-anon-p") is False
+        assert is_anon_team(fake, "no-such-team") is False

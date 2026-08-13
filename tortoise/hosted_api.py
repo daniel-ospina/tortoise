@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json as _json
 import logging
+import math
 import os
 import threading
 import time
@@ -26,7 +27,7 @@ from contextlib import asynccontextmanager
 from tortoise.audit_events import AuditLogger
 from tortoise.auth import hash_api_key
 from tortoise.security import redact_error  # billing webhook + checkout error logging
-from tortoise.session_auth import get_current_user
+from tortoise.session_auth import get_current_user, verify_session_jwt
 from tortoise.quota import DEFAULT_MAX_SESSIONS  # used by get_current_team (#754 P0: missing import → 500 on every agent_signup auth)
 from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op without key)
     api_key_created,
@@ -35,8 +36,10 @@ from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op with
     tenant_provisioned,
 )  # E1–E8 session endpoints (D1)
 import hmac
+from collections.abc import Hashable
 
 from tortoise.sdk import TortoiseSDK, _content_hash
+from tortoise.abuse import _int_env  # #1081 signup limiter env knobs (abuse.py:57)
 from tortoise.mcp_server import create_http_app
 from tortoise.hosted_backup import (
     MemoryStorage,
@@ -501,6 +504,42 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 app.add_middleware(RateLimitMiddleware, max_per_minute=100)
 
 
+class ClientIPMiddleware(BaseHTTPMiddleware):
+    """Resolve the real client IP into ``request.state.client_ip`` (#1081).
+
+    Fly Proxy sets ``Fly-Client-IP`` from the connection peer and overwrites
+    any client-supplied value (X-Forwarded-For is documented "treat with
+    caution" — uvicorn only trusts it from 127.0.0.1, so behind the proxy
+    ``request.client.host`` is the PROXY's IP). All per-IP limiters
+    (#498 register 3/hr, #302 sensitive-op, #1081 signup 2/24h) key on
+    ``request.state.client_ip`` (fallback: ``request.client.host``) —
+    without this resolution every per-IP limiter collapses to a GLOBAL
+    cap behind the proxy.
+
+    #1081 review P2-2: the header is trusted ONLY when
+    ``TORTOISE_TRUST_FLY_CLIENT_IP=1`` (set in the hosted Fly image).
+    Fail-closed otherwise — an app reachable without the proxy (local dev,
+    selfhost, staging, direct port exposure, misconfigured org) must never
+    let a client set its own ``Fly-Client-IP`` (that would reset every
+    per-IP limiter key and the R8 tracker).
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        if os.environ.get("TORTOISE_TRUST_FLY_CLIENT_IP") == "1":
+            request.state.client_ip = (
+                request.headers.get("Fly-Client-IP")
+                or (request.client.host if request.client else None)
+            )
+        else:
+            request.state.client_ip = (
+                request.client.host if request.client else None
+            )
+        return await call_next(request)
+
+
+app.add_middleware(ClientIPMiddleware)
+
+
 class HSTSMiddleware(BaseHTTPMiddleware):
     """Add Strict-Transport-Security header to every response."""
 
@@ -553,14 +592,20 @@ async def _async_audit(
     resource_type: str | None = None,
     resource_id: str | None = None,
     actor_user_id: str | None = None,
+    detail: dict | None = None,
 ) -> None:
     """Async-safe audit event writer. Offloads sync psycopg2 to thread pool.
 
     actor_user_id records the JWT-session user for session-plane operations
-    (owner export/delete, #302) — key-plane paths leave it None (the key
-    creator is not the caller).
+    (owner export/delete, #302; team_claim #1082) — key-plane paths leave it
+    None (the key creator is not the caller). ``detail`` is a free-form JSONB
+    payload (audit_events.detail, 20260813000003) — team_claim stores
+    provider/email/user_id.
     """
-    ip = request.client.host if request.client else None
+    # #1081 review P2-1: the durable sweeper queries audit_events by
+    # ip_address — record the REAL client IP (state.client_ip set by
+    # ClientIPMiddleware), never the Fly proxy IP (request.client.host).
+    ip = getattr(request.state, "client_ip", None) or (request.client.host if request.client else None)
     ua = request.headers.get("user-agent")
     await asyncio.to_thread(
         _audit_logger.append,
@@ -571,6 +616,7 @@ async def _async_audit(
         resource_id=resource_id,
         ip_address=ip,
         user_agent=ua,
+        detail=detail,
     )
 
 
@@ -845,7 +891,7 @@ async def _audit_auth_failure(request: Request, reason: str) -> None:
 
     Offloaded to a thread to avoid blocking the 401 response.
     """
-    ip = request.client.host if request.client else None
+    ip = getattr(request.state, "client_ip", None) or (request.client.host if request.client else None)
     try:
         await asyncio.to_thread(
             _audit_logger.append,
@@ -1217,7 +1263,7 @@ async def _verify_turnstile(token: str | None, ip: str | None) -> bool:
 async def _check_turnstile(request: Request, body: dict) -> None:
     """400 when the secret is configured and the challenge fails."""
     token = body.get("cf-turnstile-response") or body.get("turnstile_token")
-    ip = request.client.host if request.client else None
+    ip = getattr(request.state, "client_ip", None) or (request.client.host if request.client else None)
     if not await _verify_turnstile(token, ip):
         raise HTTPException(
             status_code=400,
@@ -1279,6 +1325,10 @@ class TeamInfoResponse(BaseModel):
     write_ops_period: str = ""
     overage_eligible: bool = False
     overage_cost_usd: float | None = None
+    # #1082 (PR1): anon teams (NULL-user_id active owner — Supabase mode)
+    # render the dashboard claim card. Registry mode: always False (no
+    # claim path in selfhost v1).
+    anon: bool = False
 
 
 # ── Billing: Checkout + Portal request/response models (#310, Task 5) ───────
@@ -1401,78 +1451,217 @@ DEFAULT_ONBOARDING_STATE = {
 }
 
 
-# ── IP-based Rate Limiter for /v1/register (#498) ─────────────────
+# ── IP-based rate limiters (#498, #302, #1081) ────────────────────
+# One parametrized primitive; three bucket stores. #1081: the register and
+# sensitive-op limiters were near-identical copies — a third copy for the
+# agent-signup path would be drift. Register (+signup/email) and sensitive-op
+# semantics are byte-identical to the pre-refactor behavior; the signup
+# limiter is a NEW, separate per-IP store with env-tunable knobs.
 
 _register_buckets: dict[str, list[float]] = defaultdict(list)
 _register_lock = asyncio.Lock()
 _REGISTER_MAX_PER_HOUR = 3
 
-
-async def _check_register_rate_limit(request: Request) -> None:
-    """IP-based rate limit: 3 registrations per hour per IP."""
-    if os.environ.get("RATE_LIMIT_DISABLED") == "1":
-        return
-    if not request.client or not request.client.host:
-        return
-    ip = request.client.host
-    now = time.time()
-    async with _register_lock:
-        bucket = _register_buckets[ip]
-        bucket[:] = [t for t in bucket if now - t < 3600]
-        if len(bucket) >= _REGISTER_MAX_PER_HOUR:
-            raise HTTPException(
-                status_code=429,
-                detail="Too many registration attempts. Please try again later.",
-                headers={"Retry-After": "3600"},
-            )
-        bucket.append(now)
-        # #750.2: bound memory growth — when the dict exceeds 10k IPs, drop
-        # buckets whose entries are all older than the 1h window (dead weight).
-        if len(_register_buckets) > 10_000:
-            stale = [ip for ip, b in _register_buckets.items()
-                     if not any(now - t < 3600 for t in b)]
-            for ip in stale:
-                del _register_buckets[ip]
-
-
-# ── Sensitive-op rate limits (E2E-6-D, #302) ─────────────────────────────
-# Owner-only endpoints (team export / team delete) get their own per-IP
-# hourly budget on top of the global 100/min middleware: export is a heavy
-# read (full graph scan), delete is an irreversible write. Mirrors the
-# register limiter pattern (RATE_LIMIT_DISABLED=1 opts out in tests).
 _SENSITIVE_OP_LIMITS = {"export": 20, "team_delete": 5}  # per hour per IP
 _SENSITIVE_BUCKETS: dict[tuple[str, str], list[float]] = defaultdict(list)
 _SENSITIVE_LOCK = asyncio.Lock()
 
+# Agent-signup limiter: OWN store, NOT shared with /v1/register or
+# /v1/signup/email (locked by test_shared_ip_bucket_3_per_hour). Default
+# 2 signups / 24h per IP — "3rd signup in rolling 24h → 429" (issue decision).
+_SIGNUP_BUCKETS: dict[str, list[float]] = defaultdict(list)
+_SIGNUP_LOCK = asyncio.Lock()
+# P2-1: retained R8 feed tasks (create_task must hold a reference — asyncio GC).
+# #1081 review P3: dict is pruned via done-callback — every distinct IP
+# leaving a completed task would otherwise grow unbounded under the
+# rotating-IP farm this control defends against.
+_SIGNUP_FEED_TASKS: dict[str, asyncio.Task] = {}
 
-async def _check_sensitive_op_rate_limit(request: Request, op: str) -> None:
-    """Per-IP hourly budget for sensitive team ops (export / team_delete)."""
+
+def _retain_feed_task(key: str, task: asyncio.Task) -> None:
+    """Retain an R8 feed task with done-callback cleanup (#1081 review P3).
+
+    Pops only when the entry is STILL this task — a same-key replacement
+    (a second signup/block from one IP within the first task's lifetime)
+    must not have its only strong reference dropped by the FIRST task's
+    done-callback (that would let asyncio GC collect the running
+    replacement mid-execution → lost record_signup/record_signup_block).
+    """
+    _SIGNUP_FEED_TASKS[key] = task
+
+    def _cleanup(_t):
+        if _SIGNUP_FEED_TASKS.get(key) is _t:
+            _SIGNUP_FEED_TASKS.pop(key, None)
+
+    task.add_done_callback(_cleanup)
+
+
+def _normalize_mapped_ipv6(ip):
+    """Return the IPv4 address for an IPv4-mapped IPv6 (::ffff:a.b.c.d or
+    ::ffff:7f00:1), else the input unchanged. Prevents a dual-stack client
+    from presenting two bucket keys for one address (#1081 review P4)."""
+    if isinstance(ip, str) and ip.startswith("::ffff:") and len(ip) > 7:
+        try:
+            import ipaddress as _ipa
+            mapped = _ipa.ip_address(ip).ipv4_mapped
+            if mapped is not None:
+                return str(mapped)
+        except ValueError:
+            pass
+    return ip
+
+
+async def _check_ip_bucket_rate_limit(
+    request: Request, *,
+    buckets: dict, lock: asyncio.Lock, limit: int, window_s: int,
+    detail: str | dict, retry_after_s: int | None = None,
+    key: Hashable | None = None, max_entries: int = 10_000,
+) -> None:
+    """Per-IP sliding-window rate limit over a caller-owned bucket store.
+
+    Shared by /v1/register (3/hr), sensitive ops (export/team_delete), and
+    /v1/agent/signup (2/24h). RATE_LIMIT_DISABLED=1 opts out (test env).
+    Raises HTTPException(429) with Retry-After when the window is exhausted.
+    Memory bound: when the store exceeds max_entries, drop buckets whose
+    entries are all older than window_s (dead weight — #750.2 precedent).
+
+    P1-FIX-1: bucket key is the caller-supplied `key` (required at wrappers)
+    — the sensitive-op store is keyed (ip, op) composite; a bare-ip default
+    would silently merge export/delete budgets (locked by
+    test_export_rate_limited_independently). P2-FIX-5: retry_after_s=None
+    computes time-until-oldest-entry-expires (sliding-window precision).
+    """
     if os.environ.get("RATE_LIMIT_DISABLED") == "1":
         return
     if not request.client or not request.client.host:
         return
+    ip = key if key is not None else request.client.host
+    # P2-2 (coherence): normalize IPv4-mapped IPv6 so a dual-stack client
+    # cannot present two keys for one address. Handles both dotted-quad
+    # (::ffff:1.2.3.4) and hex (::ffff:7f00:1) forms via ipaddress.
+    ip = _normalize_mapped_ipv6(ip)
+    now = time.time()
+    async with lock:
+        bucket = buckets[ip]
+        bucket[:] = [t for t in bucket if now - t < window_s]
+        if len(bucket) >= limit:
+            # #1081 review P4: ceil — int() floors and can understate (and
+            # yield 0 for near-expiry windows); a client retrying exactly at
+            # the advertised value must not get a surprise 429.
+            remaining = (math.ceil(bucket[0] + window_s - now)
+                         if retry_after_s is None else retry_after_s)
+            raise HTTPException(
+                status_code=429,
+                detail=detail,
+                headers={"Retry-After": str(remaining)},
+            )
+        bucket.append(now)
+        if len(buckets) > max_entries:
+            stale = [ip for ip, b in buckets.items()
+                     if not any(now - t < window_s for t in b)]
+            for ip in stale:
+                del buckets[ip]
+
+
+async def _check_register_rate_limit(request: Request) -> None:
+    """3 registrations per hour per IP — shared by /v1/register +
+    /v1/signup/email (unchanged contract, #498/#863)."""
+    await _check_ip_bucket_rate_limit(
+        request, buckets=_register_buckets, lock=_register_lock,
+        limit=_REGISTER_MAX_PER_HOUR, window_s=3600,
+        key=(getattr(request.state, "client_ip", None)
+             or (request.client.host if request.client else None)),
+        detail="Too many registration attempts. Please try again later.",
+        retry_after_s=3600)
+
+
+async def _check_sensitive_op_rate_limit(request: Request, op: str) -> None:
+    """Per-IP hourly budget for sensitive team ops (export / team_delete)."""
     max_per_hour = _SENSITIVE_OP_LIMITS.get(op)
     if max_per_hour is None:
         return
+    # P1-FIX-1: composite (ip, op) key — export and delete keep independent
+    # budgets (locked by test_export_rate_limited_independently).
+    # P3-3 (phase-7): normalize IPv4-mapped IPv6 HERE (tuple bypasses the
+    # helper's isinstance guard) — shared helper handles hex form too
+    # (#1081 review P4).
+    _ip = (getattr(request.state, "client_ip", None)
+           or (request.client.host if request.client else None))
+    _ip = _normalize_mapped_ipv6(_ip)
+    await _check_ip_bucket_rate_limit(
+        request, buckets=_SENSITIVE_BUCKETS, lock=_SENSITIVE_LOCK,
+        limit=max_per_hour, window_s=3600,
+        key=(_ip, op),
+        detail=f"Rate limit exceeded for {op}. Please try again later.",
+        retry_after_s=3600)
+
+
+async def _check_signup_ip_rate_limit(request: Request) -> None:
+    """2 anonymous signups / 24h per IP — agent path ONLY.
+
+    Separate bucket store from the register limiter (the shared store is
+    locked by test_shared_ip_bucket_3_per_hour). Env-tunable; read at call
+    time so tests monkeypatch without reload:
+    TORTOISE_SIGNUP_IP_LIMIT (default 2), TORTOISE_SIGNUP_IP_WINDOW_S
+    (default 86400). The 429 detail carries the support pointer (P2 #8) —
+    hard-limit posture with a documented appeal path.
+    """
+    window_s = _int_env("TORTOISE_SIGNUP_IP_WINDOW_S", 86400)
+    await _check_ip_bucket_rate_limit(
+        request, buckets=_SIGNUP_BUCKETS, lock=_SIGNUP_LOCK,
+        limit=_int_env("TORTOISE_SIGNUP_IP_LIMIT", 2),
+        window_s=window_s,
+        key=(getattr(request.state, "client_ip", None)
+             or (request.client.host if request.client else None)),
+        detail={
+            "error_code": "over_signup_ip_rate_limit",
+            "message": ("Too many anonymous signups from this IP (max 2 per 24h). "
+                        "Try again later or contact support@premiselabs.co."),
+            # ISSUE-3 (phase-7): NO retry_after_s body field — Retry-After
+            # header is the RFC 7231 contract (#863 precedent); body/header
+            # duplication would drift (computed remaining vs flat window).
+        },
+        retry_after_s=None)  # computed sliding-window remaining (P2-FIX-5)
+
+
+# ── Claim limiter (#1082, PR1 — P3-FIX-H restated) ────────────────────────
+# POST /v1/claim is an identity-LINKING endpoint (ATO-adjacent): a brute-
+# forced key × JWT pairing must be bounded. Explicit 24h-window bucket
+# (2/24h per IP) — NOT the hourly register bucket shape: a legitimate claim
+# is a ONE-TIME human act, so a 2/24h budget never trips a real user while
+# capping an automated farm. Mirrors the register/sensitive-op limiter
+# posture (#1081's per-IP pattern; RATE_LIMIT_DISABLED=1 opts out in tests).
+_CLAIM_MAX_PER_24H = 2
+_CLAIM_WINDOW = 24 * 3600
+_CLAIM_BUCKETS: dict[str, list[float]] = defaultdict(list)
+_CLAIM_LOCK = asyncio.Lock()
+
+
+async def _check_claim_rate_limit(request: Request) -> None:
+    """IP-based rate limit: 2 claim attempts per rolling 24h per IP."""
+    if os.environ.get("RATE_LIMIT_DISABLED") == "1":
+        return
+    if not request.client or not request.client.host:
+        return
     ip = request.client.host
     now = time.time()
-    key = (ip, op)
-    async with _SENSITIVE_LOCK:
-        bucket = _SENSITIVE_BUCKETS[key]
-        bucket[:] = [t for t in bucket if now - t < 3600]
-        if len(bucket) >= max_per_hour:
+    async with _CLAIM_LOCK:
+        bucket = _CLAIM_BUCKETS[ip]
+        bucket[:] = [t for t in bucket if now - t < _CLAIM_WINDOW]
+        if len(bucket) >= _CLAIM_MAX_PER_24H:
             raise HTTPException(
                 status_code=429,
-                detail=f"Rate limit exceeded for {op}. Please try again later.",
-                headers={"Retry-After": "3600"},
+                detail=("Too many claim attempts (max 2 per 24h). "
+                        "Please try again later."),
+                headers={"Retry-After": "86400"},
             )
         bucket.append(now)
         # Bound memory growth: drop dead buckets beyond 10k entries.
-        if len(_SENSITIVE_BUCKETS) > 10_000:
-            stale = [k for k, b in _SENSITIVE_BUCKETS.items()
-                     if not any(now - t < 3600 for t in b)]
-            for k in stale:
-                del _SENSITIVE_BUCKETS[k]
+        if len(_CLAIM_BUCKETS) > 10_000:
+            stale = [ip for ip, b in _CLAIM_BUCKETS.items()
+                     if not any(now - t < _CLAIM_WINDOW for t in b)]
+            for ip in stale:
+                del _CLAIM_BUCKETS[ip]
 
 
 # ── Endpoints ─────────────────────────────────────────────────────
@@ -1561,7 +1750,7 @@ async def list_points(
             raise HTTPException(status_code=400, detail=f"kind must be one of {sorted(allowed)}")
     sdk = _make_sdk(namespace=team["team_id"])
     proj = sdk._get_proj()
-    conditions = ["(n.is_operator IS NULL OR n.is_operator = false)"]
+    conditions = ["n.is_operator = false"]
     # #432 Task 2: retracted points (status='retracted') are EXCLUDED from the
     # default listing surface — tombstone contract: retrievable by id via
     # GET /v1/points/{id}, not by list. No include param on REST v1 (surface
@@ -1764,7 +1953,30 @@ async def team_info(team: dict = Depends(get_current_team)):
         write_ops_period=usage["period"],
         overage_eligible=usage["overage_eligible"],
         overage_cost_usd=usage["overage_cost_usd"],
+        # #1082 (PR1): anon flag drives the dashboard claim card — the shared
+        # is_anon_team predicate (Supabase mode only; registry = False).
+        anon=_team_is_anon(team["team_id"]),
     )
+
+
+def _team_is_anon(team_id: str) -> bool:
+    """True when the team is an unclaimed anon team (Supabase mode only).
+
+    The shared is_anon_team predicate (active owner membership with user_id
+    NULL) — the same predicate the claim RPC and the PR2 anon ceiling use.
+    Registry mode (selfhost): False — no claim path in v1.
+    """
+    from tortoise.supabase_control import (
+        get_control_plane, is_anon_team, is_supabase_enabled,
+    )
+    if not is_supabase_enabled():
+        return False
+    try:
+        return is_anon_team(get_control_plane(), team_id)
+    except Exception:
+        # Fail-closed on control-plane errors: never render the claim card
+        # on a resolution failure (the card is an affordance, not auth).
+        return False
 
 
 @app.get("/v1/team/alerts")
@@ -4696,13 +4908,30 @@ async def agent_signup(request: Request):
     team_memberships + api_keys land in one transaction and the minted key
     resolves via api_keys.lookup_hash. No registry write, no half-team.
     The registry path stays for selfhost."""
-    # #308 (R6 security-review fix): the per-identity limit below is dead by
+    # #308 (R6 security-review fix): the per-identity limit below was dead by
     # design (#741: identity is server-side and fresh per request), so the
-    # shared per-IP register bucket (3/hour) is the compensating control for
-    # this mint seam. CAPTCHA itself is intentionally NOT applied here —
-    # headless agents cannot solve a challenge; the IP bucket bounds the
-    # automated team+key minting vector instead.
-    await _check_register_rate_limit(request)
+    # per-IP SIGNUP limiter (2/24h, own store, #1081) is the compensating
+    # control for this mint seam. CAPTCHA itself is intentionally NOT applied
+    # here — headless agents cannot solve a challenge; the IP bucket bounds
+    # the automated team+key minting vector instead.
+    # #741(a): identity is ALWAYS server-side — client-supplied identity and
+    # x-device-id are ignored (a client-chosen identity trivially bypasses the
+    # per-identity rate limit). The CLI generates its own identity server-side.
+    from tortoise import abuse as _abuse  # R8 signup-velocity feed (#1081)
+    try:
+        await _check_signup_ip_rate_limit(request)
+    except HTTPException as exc:
+        if exc.status_code == 429:
+            # P2-2 (phase-7): same fire-and-forget pattern as the success feed —
+            # the 429 response must NOT absorb ops email latency (up to ~15s
+            # Resend). Retained in _SIGNUP_FEED_TASKS (P2-1: create_task must
+            # hold a reference — asyncio GC).
+            _retain_feed_task("block-" + (getattr(request.state, "client_ip", None)
+                or (request.client.host if request.client else None)),
+                asyncio.create_task(asyncio.to_thread(_abuse.record_signup_block,
+                    getattr(request.state, "client_ip", None)
+                    or (request.client.host if request.client else None))))
+        raise
 
     # #741(a): identity is ALWAYS server-side — client-supplied identity and
     # x-device-id are ignored (a client-chosen identity trivially bypasses the
@@ -4713,36 +4942,18 @@ async def agent_signup(request: Request):
     import uuid as _uuid
     identity = f"anon-{_uuid.uuid4().hex[:12]}"
 
-    from datetime import datetime, timezone as _tz, timedelta
+    from datetime import datetime, timezone as _tz
     from tortoise.auth import hash_api_key as _hash, lookup_hash as _lookup_hash
     from tortoise.pricing import tier_limits
     from tortoise.supabase_control import (
-        get_control_plane, is_supabase_enabled, membership_count_since,
+        get_control_plane, is_supabase_enabled,
         provision_team,
     )
 
-    # Per-identity rate limit: max 3 signups per identity per hour. The
-    # server-side identity is fresh per request (#741), so the count is 0 by
-    # construction — the limit is dead by design; the query is kept for
-    # shape parity (Supabase: identity-based count on team_memberships;
-    # registry: Membership node count).
-    cutoff = (datetime.now(_tz.utc) - timedelta(hours=1)).isoformat()
-    if is_supabase_enabled():
-        try:
-            recent = membership_count_since(
-                get_control_plane(), cutoff=cutoff, identity=identity)
-        except Exception:
-            # Fail-closed: a rate-limit read error is a 500, never a pass.
-            raise HTTPException(status_code=500, detail="Agent signup failed")
-    else:
-        sdk = _make_sdk(namespace="registry")
-        reg = sdk._get_registry()
-        recent = reg.query(
-            "MATCH (m:Membership {user_id:$uid}) WHERE m.created_at > $cutoff RETURN count(m)",
-            params={"uid": identity, "cutoff": cutoff},
-        ).result_set[0][0]
-    if recent >= 3:
-        raise HTTPException(status_code=429, detail="Too many signups from this device — try again later")
+    # #1081: the per-identity count was removed — #741 makes it dead by
+    # construction (server-side identity is fresh per request, count always
+    # 0) and it cost a DB round-trip + a fail-closed 500 branch per signup.
+    # The per-IP signup limiter (2/24h) is the compensating control.
 
     team_id = _uuid.uuid4().hex[:26]
     team_name = f"agent-{team_id[:6]}"
@@ -4791,6 +5002,13 @@ async def agent_signup(request: Request):
         except Exception:
             raise HTTPException(status_code=500, detail="Agent signup failed")
         await _async_audit(request, team_id, "agent_signup", resource_type="team", resource_id=team_id)
+        # P3-D/P3-6: notify_abuse is sync httpx — fire-and-forget so ops email
+        # latency never delays the cold-start mint (best-effort telemetry; #310)
+        _retain_feed_task("signup-" + (getattr(request.state, "client_ip", None)
+            or (request.client.host if request.client else None)),
+            asyncio.create_task(asyncio.to_thread(_abuse.record_signup,
+                getattr(request.state, "client_ip", None)
+                or (request.client.host if request.client else None), team_id)))
         return {"key": api_key, "team_id": team_id, "team_name": team_name, "graph_name": graph_name,
                 "identity": identity, "tier": "free"}
 
@@ -4819,6 +5037,13 @@ async def agent_signup(request: Request):
         sdk._graph_create(team_id, "default", kind="default", namespace=graph_name)
 
         await _async_audit(request, team_id, "agent_signup", resource_type="team", resource_id=team_id)
+        # P3-D/P3-6: fire-and-forget success-path feed (ops email latency
+        # must never delay the mint response)
+        _retain_feed_task("signup-" + (getattr(request.state, "client_ip", None)
+            or (request.client.host if request.client else None)),
+            asyncio.create_task(asyncio.to_thread(_abuse.record_signup,
+                getattr(request.state, "client_ip", None)
+                or (request.client.host if request.client else None), team_id)))
     except HTTPException:
         raise
     except Exception:
@@ -4835,6 +5060,203 @@ async def agent_signup(request: Request):
 
     return {"key": api_key, "team_id": team_id, "team_name": team_name, "graph_name": graph_name,
             "identity": identity, "tier": "free"}
+
+
+# ── Claim path (#1082, PR1 — indicators 1,2,3,5) ───────────────────────────
+#
+# POST /v1/claim attaches a provider-verified Supabase identity to an
+# anonymous (zero-email) team. GoTrue-native transport (ZERO new server-side
+# OAuth): the platform already ships client OAuth (signup.html:713,
+# signin.html:755, dashboard PKCE). Claim = ONE endpoint requiring BOTH
+# credentials in one request:
+#   · Authorization: Bearer <fresh Supabase session JWT> — verified
+#     server-side via JWKS (session_auth.verify_session_jwt)
+#   · body.api_key: the pasted tt_ key — the key-possession anchor
+#     (structurally the ONLY anchor: anon rows are identity-anchored and
+#     teams.email is NULL, so no logged-in identity can match an unclaimed
+#     team; the key gate also blocks the E1 session-rotation ATO ladder)
+#
+# Provider-verified-email invariant (P2-FIX-J, cycle-2/3 refined):
+# app_metadata.providers ∩ {github, google} ≠ ∅ (app_metadata is user-level,
+# always present, survives token refresh — unlike `amr` which is optional and
+# refresh-mutated to `token_refresh`). Secondary confirmatory conjunct:
+# GoTrue /auth/v1/user email_confirmed_at (AND, never OR). Fail-closed on
+# null email AND on email+password-only sessions (a confirmed password
+# session must NOT claim + overwrite teams.email). NOTE: a password login on
+# a github-LINKED account legitimately passes the invariant (providers
+# accumulates on linking) — intended semantics, documented.
+#
+# The claim_membership RPC resolves the team from api_keys.lookup_hash ONLY
+# (authoritative key→team binding) — client team_id/identity are
+# structurally rejected (the RPC signature has no such args; solution-verify
+# P1). Rate-limited 2/24h per IP (24h-window bucket, P3-FIX-H restated).
+#
+# CLAIM_CALLBACK/redirectTo NEVER routes to welcome.html (welcome Phase-2
+# mints a NEW team when the membership query is empty — RLS hides NULL-
+# user_id rows — which would orphan the claimable anon team).
+
+
+async def _gotrue_email_confirmed(request: Request) -> bool:
+    """GoTrue /auth/v1/user ``email_confirmed_at`` conjunct (AND, never OR).
+
+    The provider-invariant (app_metadata.providers ∩ {github,google} ≠ ∅) is
+    the primary assertion; email_confirmed_at is the confirmatory conjunct.
+    Fail-closed: an unreachable/non-2xx GoTrue rejects the claim (the
+    conjunct cannot be verified) — mirror of the invariant's AND semantics.
+    """
+    auth = request.headers.get("Authorization", "")
+    url = (os.environ.get("SUPABASE_URL", "").rstrip("/")
+           + "/auth/v1/user")
+    if not url.startswith("http"):
+        return False
+    import httpx as _httpx
+    try:
+        async with _httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(
+                url,
+                headers={"Authorization": auth,
+                         "apikey": os.environ.get("SUPABASE_ANON_KEY", "")},
+            )
+        if resp.status_code != 200:
+            return False
+        user = resp.json()
+        return bool(user.get("email_confirmed_at"))
+    except Exception:
+        return False
+
+
+@app.post("/v1/claim")
+async def claim_team(request: Request):
+    """Attach a provider-verified identity to an anonymous team (#1082)."""
+    await _check_claim_rate_limit(request)
+
+    # 1. session JWT (401 on missing/invalid/expired).
+    session = await verify_session_jwt(request)
+    user_id = session["user_id"]
+    email = session.get("email")
+
+    # 2. provider-verified-email invariant (before key work — cheap).
+    app_meta = session.get("app_metadata") or {}
+    providers = app_meta.get("providers") or []
+    if not (set(providers) & {"github", "google"}):
+        raise HTTPException(
+            status_code=403,
+            detail=("Claim requires a GitHub or Google sign-in (provider-"
+                    "verified email). Sign in with GitHub or Google, then "
+                    "try again."),
+        )
+    if not email:
+        raise HTTPException(
+            status_code=400,
+            detail="No verified email on this account — cannot claim.",
+        )
+    # email_confirmed_at conjunct (AND, never OR) — fail-closed.
+    if not await _gotrue_email_confirmed(request):
+        raise HTTPException(
+            status_code=403,
+            detail=("Your email is not confirmed — cannot claim an "
+                    "anonymous team. Confirm your email and try again."),
+        )
+
+    # 3. pasted key — the key-possession anchor.
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    api_key = (body or {}).get("api_key") or ""
+    if not isinstance(api_key, str) or not api_key.startswith("tt_"):
+        raise HTTPException(status_code=400,
+                            detail="api_key (tt_...) is required")
+
+    # 4. resolve the pasted key through the SAME auth path (revocation,
+    #    expiry, suspension, abuse hooks) — 401 on invalid/revoked keys.
+    team = await _get_current_team_supabase(request, api_key)
+    team_id = team["team_id"]
+
+    # 5. fail-closed: the resolved team must still be anon (an unclaimed
+    #    owner row). First-claim-wins; a claimed team is a 409 even when the
+    #    key still resolves (the idempotent re-claim below is scoped to the
+    #    SAME user — the RPC returns idempotent success then).
+    from tortoise.supabase_control import (
+        ClaimError, claim_membership, get_control_plane, is_anon_team,
+    )
+    cp = get_control_plane()
+    if not is_anon_team(cp, team_id):
+        raise HTTPException(status_code=409,
+                            detail="Team has already been claimed")
+
+    # 6. claim_membership service-role RPC (same key, same team, memories
+    #    intact).
+    from tortoise.auth import lookup_hash as _lookup_hash
+    try:
+        claim_membership(cp, lookup_hash=_lookup_hash(api_key),
+                         user_id=user_id, email=email)
+    except ClaimError as e:
+        raise HTTPException(status_code=e.status, detail=e.message)
+
+    # 7. audit team_claim — provider/email/user_id in detail (0002 has no
+    #    provider/email columns; 20260813000003 added detail JSONB).
+    await _async_audit(
+        request, team_id, "team_claim",
+        resource_type="team", resource_id=team_id,
+        actor_user_id=user_id,
+        detail={"provider": sorted(set(providers)), "email": email,
+                "user_id": user_id},
+    )
+    return {"team_id": team_id, "status": "claimed", "tier": team["tier"]}
+
+
+@app.get("/v1/claim/status")
+async def claim_status(request: Request):
+    """Claimability probe for the welcome double-provision guard (P2-FIX-D)
+    and the dashboard claim card.
+
+    Identity-scoped (session JWT required) + key-scoped (service-role
+    lookup): the Phase-2 mint calls this BEFORE provisioning a new team so
+    an existing claimable anon team is never orphaned by a stray mint (RLS
+    hides NULL-user_id rows from authenticated, so the welcome page cannot
+    see the anon owner row directly).
+
+    #1082 review P1-2: the key travels ONLY via the ``X-Claim-Key`` header
+    — a query-string api_key would land in access logs (the key is the
+    graph read/write credential). Query form is NOT accepted.
+
+    Returns:
+        {"claimable": true, "team_id": ...}  — key resolves to an unclaimed
+            anon team; the user should claim it (dashboard claim card)
+        {"claimable": false, "claimed": true}  — already claimed by this
+            user (idempotent re-claim is safe)
+        {"claimable": false}  — key unknown / team claimed by another /
+            registry mode (no claim path in selfhost v1)
+        {"claimable": false, "need_key": true}  — no key presented
+    """
+    session = await verify_session_jwt(request)  # 401 on invalid
+    api_key = request.headers.get("X-Claim-Key")
+    if not api_key or not api_key.startswith("tt_"):
+        return {"claimable": False, "need_key": True}
+    from tortoise.supabase_control import (
+        get_control_plane, is_anon_team, is_supabase_enabled, resolve_api_key,
+    )
+    if not is_supabase_enabled():
+        # Selfhost (registry mode): no claim path in v1 (requires Supabase
+        # JWKS + RPC) — the welcome guard is a no-op.
+        return {"claimable": False, "unsupported": True}
+    try:
+        team = resolve_api_key(get_control_plane(), api_key)
+    except Exception:
+        # Fail-closed on control-plane errors: never report claimable.
+        return {"claimable": False}
+    if team is None:
+        return {"claimable": False}
+    team_id = team["team_id"]
+    if not is_anon_team(get_control_plane(), team_id):
+        # Already claimed — distinguish this-user idempotency for the UI.
+        from tortoise.supabase_control import membership_for_user_team
+        if membership_for_user_team(get_control_plane(), session["user_id"],
+                                    team_id) is not None:
+            return {"claimable": False, "claimed": True, "team_id": team_id}
+        return {"claimable": False}
+    return {"claimable": True, "team_id": team_id}
 
 
 @app.post("/v1/session/key")

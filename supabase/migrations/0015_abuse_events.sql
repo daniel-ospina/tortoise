@@ -39,6 +39,9 @@ CREATE INDEX IF NOT EXISTS idx_abuse_events_team_rule_time
 -- RLS: service_role manages all; no browser surface reads abuse telemetry.
 ALTER TABLE public.abuse_events ENABLE ROW LEVEL SECURITY;
 
+-- Idempotent (2026-08-13, P0 #1001): the remote already carried this policy
+-- from a pre-renumber migration; without the DROP, db push fails on reapply.
+DROP POLICY IF EXISTS abuse_events_service_role_all ON public.abuse_events;
 CREATE POLICY abuse_events_service_role_all ON public.abuse_events
     FOR ALL
     TO service_role

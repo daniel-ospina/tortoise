@@ -35,7 +35,9 @@ interface UseOntologyTypesReturn {
 
 /**
  * Hardcoded fallback — used when the API is unreachable.
- * Mirrors ONTOLOGY_TYPES from server/main.py for graceful degradation.
+ * Mirrors _CANONICAL_KINDS in server/main.py for graceful degradation.
+ * NOTE: keep in sync with the server's core + product-strategy entries
+ * (colors/labels/contexts) so fallback and live data look identical.
  */
 const FALLBACK_TYPES: OntologyType[] = [
   { objectKind: 'customerSegment', label: 'Customer Segment', color: '#7aa2f7', description: '', icon: 'users', context: 'product-strategy' },
@@ -44,8 +46,9 @@ const FALLBACK_TYPES: OntologyType[] = [
   { objectKind: 'useCase', label: 'Use Case', color: '#e0af68', description: '', icon: 'play-circle', context: 'product-strategy' },
   { objectKind: 'feature', label: 'Feature', color: '#ff9e64', description: '', icon: 'puzzle-piece', context: 'product-strategy' },
   { objectKind: 'userJourney', label: 'User Journey', color: '#7dcfff', description: '', icon: 'map', context: 'product-strategy' },
-  { objectKind: 'workflow', label: 'Workflow', color: '#c0caf5', description: '', icon: 'git-branch', context: 'product-strategy' },
   { objectKind: 'requirement', label: 'Requirement', color: '#f7768e', description: '', icon: 'clipboard-check', context: 'product-strategy' },
+  { objectKind: 'statement', label: 'Statement', color: '#c0caf5', description: '', icon: 'file-text', context: 'core' },
+  { objectKind: 'decision', label: 'Decision', color: '#7aa2f7', description: '', icon: 'check-square', context: 'core' },
 ];
 
 function buildMaps(types: OntologyType[]): Pick<UseOntologyTypesReturn, 'labels' | 'colors'> {

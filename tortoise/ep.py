@@ -622,7 +622,7 @@ class TortoiseEP:
                 rows = self.g.query(
                     "MATCH (a:Point {id:$id})-[r:IMPL|NAND]-(b:Point) "
                     f"{where} "
-                    "AND (b.is_operator IS NULL OR b.is_operator = false) "
+                    "AND b.is_operator = false "
                     "AND b.op_type IS NULL "
                     "RETURN DISTINCT b.id",
                     params={"id": seed_id},
@@ -662,9 +662,9 @@ class TortoiseEP:
                     dir_rows = self.g.query(
                         "MATCH (a:Point {id:$id})-[r:IMPL|NAND]-(b:Point) "
                         f"{where} "
-                        "AND (a.is_operator IS NULL OR a.is_operator = false) "
+                        "AND a.is_operator = false "
                         "AND a.op_type IS NULL "
-                        "AND (b.is_operator IS NULL OR b.is_operator = false) "
+                        "AND b.is_operator = false "
                         "AND b.op_type IS NULL "
                         "RETURN DISTINCT b.id",
                         params={"id": claim_id},
@@ -790,9 +790,9 @@ class TortoiseEP:
         # wins) — unsupported; creation paths must not duplicate edges.
         dir_rows = self.g.query(
             "MATCH (a:Point)-[r:IMPL|NAND]->(b:Point) "
-            "WHERE (a.is_operator IS NULL OR a.is_operator = false) "
+            "WHERE a.is_operator = false "
             "AND a.op_type IS NULL "
-            "AND (b.is_operator IS NULL OR b.is_operator = false) "
+            "AND b.is_operator = false "
             "AND b.op_type IS NULL "
             "AND (a.id IN $ids OR b.id IN $ids) "
             f"{('AND ' + live_a + ' AND ' + live_b + ' ') if live_a else ''}"
@@ -952,7 +952,7 @@ class TortoiseEP:
     def get_contested_claims(self, variance_threshold: float = 0.04) -> list[dict]:
         rows = self.g.query(
             "MATCH (n:Point) "
-            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "WHERE n.is_operator = false "
             "WITH n, coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS a, "
             "     coalesce(n.posterior_beta, n.ep_beta, 1.0) AS b "
             "WITH n, a, b, (a*b)/((a+b)*(a+b)*(a+b+1)) AS v "

@@ -8,7 +8,7 @@ entities as Object nodes (deterministic obj_sha256 canonical id via
 ObjectRegistered), wires aboutObject Point+Event side, aboutEvent provenance
 anchors, and the extractedFrom → Source → references → Event chain. No
 Subject stubs (legacy auto-detect bypassed). Dedup is a later stage — the
-dedup_hits key is counted only.
+dedup_hits reflects the two-tier W-2 content dedup (#784).
 
 Architecture (from plan WF4):
   Conversation transcript → extractor (Points + Operators) →
@@ -33,6 +33,152 @@ from .extractor import (
 from .ids import ulid, now_iso, content_hash
 
 logger = logging.getLogger(__name__)
+
+
+# ── Phase-4 EP-safe batch commit (#785, epic 2026-08-09-insight-mining-p2p4) ──
+# W-3 state machine: a batch is ACTIVE while being written, QUARANTINED when
+# W-3 verification fails (EP drift / batch failure), COMMITTED when W-3 passes
+# (drafts enter the review queue; quarantine recovery = re-run pass → committed).
+# Quarantine is BATCH-level (plan §3 state machine) — NOT a Point status:
+# a quarantined batch's Points stay `draft` until re-review. State lives in a
+# `:Batch` marker node (operational metadata, like :GraphEvent — not ONTOLOGY
+# content; no new Point statuses, POINT_STATUS_VALUES unchanged).
+#
+# NOTE (review #944): :Batch state is NOT JSONL-rebuilt — rebuild_all wipes
+# marker nodes (they are not :Point nodes and no batch-state events exist),
+# so after a rebuild quarantined batches become unregistered and their Points
+# are promotable again. Tracked with the W-3 pipeline wiring follow-up; until
+# then, quarantine is an in-session safety lock, not a durable one.
+BATCH_STATUS_ACTIVE = "active"
+BATCH_STATUS_QUARANTINED = "quarantined"
+BATCH_STATUS_COMMITTED = "committed"
+BATCH_STATUS_VALUES = frozenset({
+    BATCH_STATUS_ACTIVE, BATCH_STATUS_QUARANTINED, BATCH_STATUS_COMMITTED,
+})
+
+
+# Grounding drift ceiling (W-3 / Gate B): snapshot mean grounding of live
+# non-operator Points pre/post batch must not move more than 2% mean absolute.
+def _default_grounding_fn():
+    """Resolve the Gate B `mean_grounding()` helper (plan §7 DE2E-4).
+
+    TODO(#779): mean_grounding() lands with the Gate B tooling issue. Until
+    then the grounding gate is RECORDED as unavailable/skipped (never crashes
+    the commit), while the structural W-3 checks (draft-only + no auto-wire)
+    stay hard gates. The interface is pinned: ``mean_grounding() -> float``
+    (mean over `confidence` of live non-operator Points, full live Point set).
+    """
+    try:
+        from tortoise.analyze import mean_grounding  # type: ignore[attr-defined]
+        return mean_grounding
+    except Exception:  # noqa: BLE001 — #779 not merged yet
+        return None
+
+
+def _batch_node(proj, batch_id: str) -> dict | None:
+    """Raw :Batch node properties, or None when the batch has no state node."""
+    rows = proj.g.query(
+        "MATCH (b:Batch {id:$id}) RETURN properties(b)",
+        params={"id": batch_id},
+    ).result_set
+    return rows[0][0] if rows else None
+
+
+def batch_status(proj, batch_id: str) -> dict | None:
+    """Read a batch's lifecycle state: {batch_id, status, reason, ...} | None.
+
+    None = no :Batch node (batch not registered — nothing quarantined). Used by
+    promote_point (sdk.py) for the quarantine lock.
+    """
+    node = _batch_node(proj, batch_id)
+    if node is None:
+        return None
+    return {
+        "batch_id": batch_id,
+        "status": node.get("status", BATCH_STATUS_ACTIVE),
+        "reason": node.get("reason"),
+        "quarantinedAt": node.get("quarantinedAt"),
+        "committedAt": node.get("committedAt"),
+        "pointCount": node.get("pointCount"),
+    }
+
+
+def _upsert_batch(proj, batch_id: str, *, status: str,
+                  reason: str | None = None,
+                  point_count: int | None = None) -> dict:
+    """Create-or-update the :Batch state node (idempotent)."""
+    if not batch_id or not isinstance(batch_id, str):
+        raise ValueError(f"batch_id must be a non-empty string, got {batch_id!r}")
+    if status not in BATCH_STATUS_VALUES:
+        raise ValueError(
+            f"Invalid batch status {status!r}. Must be one of: "
+            f", ".join(sorted(BATCH_STATUS_VALUES)))
+    now = _now()
+    sets = ["b.status=$status", "b.updatedAt=$now"]
+    params = {"id": batch_id, "status": status, "now": now}
+    if reason is not None:
+        sets.append("b.reason=$reason")
+        params["reason"] = reason
+    if status == BATCH_STATUS_QUARANTINED:
+        # preserve the original quarantine timestamp on re-quarantine
+        sets.append("b.quarantinedAt=coalesce(b.quarantinedAt, $now)")
+    if status == BATCH_STATUS_COMMITTED:
+        sets.append("b.committedAt=$now")  # review #944: declared field was never written
+        if reason is None:
+            sets.append("b.reason=null")  # cleared on recovery
+            # quarantinedAt is EPISODE state — clear it when the batch
+            # recovers so a later re-quarantine records the NEW episode
+            # (#944 review).
+            sets.append("b.quarantinedAt=null")
+    if point_count is not None:
+        sets.append("b.pointCount=$pointCount")
+        params["pointCount"] = point_count
+    proj.g.query(
+        "MERGE (b:Batch {id:$id}) SET " + ", ".join(sets),
+        params=params,
+    )
+    return batch_status(proj, batch_id)
+
+
+def quarantine_batch(proj, batch_id: str, *, reason: str) -> dict:
+    """Mark a batch quarantined — blocks promote_point on its Points (W-3).
+
+    Test/ops primitive (plan §6.1): quarantine is the drift-fail path of
+    EpSafeCommit; callers that force it directly (tests, ops) must pass the
+    documented W-3 failure reason. Idempotent — re-quarantine updates the
+    reason and keeps the original quarantine timestamp.
+    """
+    if not reason or not isinstance(reason, str):
+        raise ValueError("quarantine_batch requires a non-empty reason")
+    _upsert_batch(proj, batch_id, status=BATCH_STATUS_QUARANTINED, reason=reason)
+    return {
+        "batch_id": batch_id,
+        "blocked": True,
+        "reason": reason,
+        "status": BATCH_STATUS_QUARANTINED,
+    }
+
+
+def list_quarantined(proj) -> list[dict]:
+    """List all quarantined batches: [{batch_id, reason, quarantinedAt, ...}] (newest first)."""
+    rows = proj.g.query(
+        "MATCH (b:Batch {status:$st}) RETURN properties(b) "
+        "ORDER BY b.updatedAt DESC",
+        params={"st": BATCH_STATUS_QUARANTINED},
+    ).result_set
+    out = []
+    for (props,) in rows:
+        bid = props.get("id")
+        if bid is None:
+            continue
+        out.append({
+            "batch_id": bid,
+            "status": BATCH_STATUS_QUARANTINED,
+            "reason": props.get("reason"),
+            "quarantinedAt": props.get("quarantinedAt"),
+            "pointCount": props.get("pointCount"),
+        })
+    return out
 
 
 def _now() -> str:
@@ -81,6 +227,11 @@ class ConversationMiner:
         session_started_at: str | None = None,
         extract_entities: bool = True,
         entity_stage=None,
+        batch_id: str | None = None,
+        content_dedup: bool = True,
+        dedup_threshold: float = 0.60,
+        session_date: str | None = None,
+        sdk=None,
     ) -> dict:
         """Run extraction pipeline on a conversation transcript.
 
@@ -89,14 +240,29 @@ class ConversationMiner:
         {entities, objects, dedup_hits, drafts}:
           - entities: number of extracted entity mentions
           - objects:  number of Object nodes reified/wired for those entities
-          - dedup_hits: 0 — the dedup stage is a later issue; key counted only
+          - dedup_hits: number of duplicate decision Points flagged by the
+            two-tier content dedup (W-2, #784); dedup_wired/dedup_deferred
+            break down draft-prior (wired) vs live-prior (deferred) hits
           - drafts:  number of extraction Points created with status 'draft'
+
+        Phase-4 (W-3, #990): every extraction Point is stamped with a
+        ``batch_id`` (auto-generated per call when not given, plan §4.4) and
+        the batch runs the EpSafeCommit W-3 gate (draft-only, no auto-wire,
+        grounding drift ≤2% via mean_grounding — #779). Additive result keys:
+          - batch_id: the batch this call produced
+          - batch_status: "committed" (W-3 pass — drafts enter the review
+            queue), "quarantined" (W-3 fail — promote_point is blocked on
+            the batch's Points until a re-run passes, J-5), or "not_gated"
+            (standalone log mode — no projection, gate skipped)
+          - batch_reason: the W-3 failure reason when quarantined, or the
+            skip explanation when not_gated
 
         ``entity_stage`` injects a deterministic mock (EntityStageMock, plan
         §7 preamble) for tests; None → LLM stage (or rule fallback when no
         model is configured).
         """
         started_at = session_started_at or _now()
+        batch_id = batch_id or ulid()
 
         # 1. Run extractor: Points + IMPL/NAND operators
         extractor = self._make_extractor()
@@ -121,7 +287,7 @@ class ConversationMiner:
         # 5. Phase-2 entity extraction + Object reification (W-1, DE2E-1)
         entities: list[dict] = []
         objects_wired = 0
-        dedup_hits = 0  # dedup stage is a later issue (#784-ish) — key counted only
+        dedup_hits = 0  # #784: real count comes from dedup_report below
         drafts = sum(1 for p in points if p.get("status", "draft") == "draft")
         if extract_entities:
             try:
@@ -136,6 +302,81 @@ class ConversationMiner:
                 transcript, source_id, api, entities, points, events,
             )
 
+        # Phase-4 (W-3, #990): stamp the batch on every extraction Point
+        # (post-hoc bulk write — the extractor is untouched), then run the
+        # EpSafeCommit gate over the batch. Pass → committed (drafts enter
+        # the review queue); fail → batch quarantined (promote_point blocks).
+        point_ids = [p.get("id") for p in points if p.get("id")]
+        if point_ids and api.projection is not None:
+            api.projection.g.query(
+                "MATCH (n:Point) WHERE n.id IN $ids SET n.batch_id = $bid",
+                params={"ids": point_ids, "bid": batch_id},
+            )
+        # W-2 content dedup (#784): flag duplicate decision Points against
+        # existing decisions (hash + embedding tiers); draft priors get the
+        # "already decided" IMPL wired immediately, live priors defer to
+        # promotion (Variant C). Requires the SDK for operator creation —
+        # flag-only when sdk is None.
+        dedup_report = None
+        dedup_error = None
+        if content_dedup and point_ids and sdk is not None:
+            try:
+                dedup_report = sdk._dedup_content_candidates(
+                    point_ids, threshold=dedup_threshold, sdk_for_wiring=sdk)
+            except Exception as exc:
+                # Surface, don't swallow: a silent no-op made the feature look
+                # like 'no duplicates found' (#784 review).
+                logger.exception("content dedup failed for batch %s", batch_id)
+                dedup_error = f"content dedup failed: {exc}"
+
+        # Phase-4 temporal wiring (W-4, #786): validFrom + NAND/CORRECTS
+        # candidates for contradictory decision Points.
+        temporal_report = None
+        if api.projection is not None and point_ids:
+            try:
+                temporal_report = self._temporal_wire(
+                    transcript, source_id, api, point_ids,
+                    session_date=session_date, sdk=sdk)
+            except Exception:
+                logger.exception("temporal wiring failed for batch %s", batch_id)
+
+        batch_status = "not_gated"
+        batch_reason = "no projection — W-3 gate skipped (standalone log mode)"
+        if api.projection is not None:
+            from tortoise.analyze import grounding_snapshot
+            # EpSafeCommit/quarantine_batch are module-level (defined below);
+            # reference via module for clarity at the call site.
+            from . import mining as _mining
+            try:
+                # Grounding drift protects the LIVE graph against batch
+                # side-effects. Actual ordering: extraction has already
+                # completed here, and extraction writes only drafts (excluded
+                # from the live-only mean), so pre and post normally agree
+                # (~0 drift) — the check guards against concurrent live
+                # changes landing between the two reads (e.g. a parallel
+                # promote_point on the same graph), which would trip the
+                # ≤2% mean ceiling and quarantine the batch.
+                pre = grounding_snapshot(api.projection)["mean"]
+                gate = _mining.EpSafeCommit(api.projection, batch_id)
+                res = gate.run(point_ids, grounding_before=pre,
+                               grounding_after=grounding_snapshot(
+                                   api.projection)["mean"])
+                if res["ok"]:
+                    batch_status = "committed"
+                    batch_reason = None
+                else:
+                    batch_status = "quarantined"
+                    batch_reason = res.get("reason")
+            except Exception:
+                logger.exception("W-3 gate failed for batch %s — quarantining", batch_id)
+                try:
+                    _mining.quarantine_batch(api.projection, batch_id,
+                                             reason="W-3 gate error (pipeline wiring)")
+                except Exception:
+                    logger.exception("quarantine_batch failed for %s", batch_id)
+                batch_status = "quarantined"
+                batch_reason = "W-3 gate error (pipeline wiring)"
+
         return {
             "events": len(events),
             "points": len(points),
@@ -143,9 +384,145 @@ class ConversationMiner:
             "event_ids": event_ids,
             "entities": len(entities),
             "objects": objects_wired,
-            "dedup_hits": dedup_hits,
+            
             "drafts": drafts,
+            "batch_id": batch_id,
+            "batch_status": batch_status,
+            "batch_reason": batch_reason,
+            "dedup_hits": (dedup_report or {}).get("hits", dedup_hits),
+            "dedup_wired": (dedup_report or {}).get("wired_draft_to_draft", 0),
+            "dedup_deferred": (dedup_report or {}).get("deferred_live_prior", 0),
+            "dedup_error": dedup_error,
+            "temporal_wired": (temporal_report or {}).get("wired_nand", 0),
+            "temporal_candidates": (temporal_report or {}).get("candidates", 0),
+            "temporal_replacements": (temporal_report or {}).get(
+                "replacement_candidates", 0),
         }
+
+    # ── Phase-4 temporal belief wiring (W-4, #786, DE2E-6) ────────
+    # #438 boundary carve-out: TemporalWire runs ONLY inside the mining
+    # post-pass (this method, called from mine()) with explicit
+    # source_session provenance — it never discovers connections between
+    # EXISTING points without a conversation trigger.
+
+    # Refute cues → contradictory (NAND); supersede cues → explicit
+    # replacement (CORRECTS via supersede_point after review).
+    _TEMPORAL_REFUTE_CUES = (
+        "wrong", "revert", "disagree", "incorrect", "no longer",
+        "not correct", "mistake", "changed our mind", "supersede",
+        "replacement", "replace",
+    )
+    _TEMPORAL_REPLACE_CUES = ("supersede", "changed our mind", "replacement",
+                             "replace")
+
+    def _temporal_wire(self, transcript: str, source_id: str, api,
+                       point_ids: list[str],
+                       session_date: str | None = None,
+                       sdk=None) -> dict:
+        """W-4 post-pass: stamp validFrom and wire temporal NAND/CORRECTS
+        edges between conversation-extracted decision Points (#786).
+
+        For each new DRAFT decision Point sharing an aboutObject Object with
+        a prior decision Point:
+          - prior DRAFT → NAND draft-to-draft (create_operator
+            promote_source=False — operator node is draft too)
+          - prior LIVE → NO wire at extraction; the point is surfaced as a
+            temporal candidate (live-prior rule, R11) and the NAND is wired
+            at promotion (live→live, promote_point)
+          - explicit-replacement cues → replacement candidate; after review
+            + promotion the prior is superseded (CORRECTS + outdated:true)
+
+        validFrom = session frontmatter date (R5 — NOT ingest time); fallback
+        ingestedAt (documented).
+
+        Returns {"wired_nand": n, "candidates": n, "replacement_candidates": n}.
+        """
+        proj = getattr(api, "projection", None)
+        if proj is None or not point_ids:
+            return {"wired_nand": 0, "candidates": 0, "replacement_candidates": 0}
+        # Normalize the session date to an ISO-8601 string: YAML frontmatter
+        # can yield datetime.date objects ('date: 2026-07-01') which crash the
+        # SET, and non-ISO strings corrupt ORDER BY chronology (#1080 review).
+        if session_date is None:
+            vf = _now()
+        elif hasattr(session_date, "isoformat"):
+            # YAML frontmatter dates arrive as datetime.date/datetime objects
+            # ('date: 2026-07-01') — normalize to ISO-8601 (#1080 review).
+            vf = session_date.isoformat()
+        else:
+            vf = str(session_date)
+        report = {"wired_nand": 0, "candidates": 0, "replacement_candidates": 0}
+        wired_pairs: set[tuple[str, str]] = set()  # (newer, older) — one NAND per pair
+        for pid in point_ids:
+            rows = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.content, n.pointKind, n.status",
+                params={"id": pid},
+            ).result_set
+            if not rows:
+                continue
+            content, kind, status = rows[0]
+            if kind != "decision" or status != "draft" or not content:
+                continue
+            # validFrom: real session date, not ingest time (R5).
+            proj.g.query(
+                "MATCH (n:Point {id:$id}) SET n.validFrom = $vf",
+                params={"id": pid, "vf": vf},
+            )
+            low = content.lower()
+            if not any(c in low for c in self._TEMPORAL_REFUTE_CUES):
+                continue
+            replace = any(c in low for c in self._TEMPORAL_REPLACE_CUES)
+            # Prior decisions on the same topic (shared aboutObject Object).
+            priors = proj.g.query(
+                "MATCH (p:Point {id:$pid})-[:aboutObject]->(o:Object)"
+                "<-[:aboutObject]-(prior:Point) "
+                "WHERE prior.id <> $pid "
+                "AND prior.pointKind = 'decision' "
+                "AND (prior.status = 'draft' OR prior.status = 'live') "
+                "RETURN prior.id, prior.status",
+                params={"pid": pid},
+            ).result_set
+            if not priors:
+                continue
+            for prior_id, prior_status in priors:
+                if prior_status == "draft":
+                    # Draft-to-draft NAND (operator node draft too) — exactly
+                    # one per pair even when both sides carry refute cues
+                    # (#1080 review: the loop would otherwise wire D2→D1 AND
+                    # D1→D2, doubling the EP penalty).
+                    pair = tuple(sorted((pid, prior_id)))
+                    if pair in wired_pairs:
+                        continue
+                    wired_pairs.add(pair)
+                    if sdk is not None:
+                        sdk.create_operator("NAND", pid, [prior_id],
+                                            promote_source=False)
+                        report["wired_nand"] += 1
+                else:
+                    # Live prior → review-queue candidate, wire at promotion.
+                    # Target list (a single slot would silently drop earlier
+                    # live priors — #1080 review).
+                    current = proj.g.query(
+                        "MATCH (n:Point {id:$id}) RETURN n.temporal_target_ids",
+                        params={"id": pid},
+                    ).result_set
+                    ids = list(current[0][0] or []) if current and current[0][0] else []
+                    if prior_id not in ids:
+                        ids.append(prior_id)
+                    proj.g.query(
+                        "MATCH (n:Point {id:$id}) "
+                        "SET n.temporal_candidate = true, "
+                        "n.temporal_target_ids = $ts, "
+                        "n.temporal_target_id = $t, "
+                        "n.temporal_replacement = $r, "
+                        "n.source_session = $ss",
+                        params={"id": pid, "ts": ids, "t": prior_id,
+                                "r": replace, "ss": source_id},
+                    )
+                    report["candidates"] += 1
+                    if replace:
+                        report["replacement_candidates"] += 1
+        return report
 
     # ── Phase-2 entity reification (W-1 write phase, DE2E-1) ──────
 
@@ -514,23 +891,36 @@ def mine_conversation(
     entity_stage=None,
     content_dedup: bool = True,
     dedup_threshold: float | None = None,
+    session_date: str | None = None,
+    sdk=None,
 ) -> dict:
     """Convenience: mine a conversation transcript → Events + Points + Objects.
 
     Returns (plan §6.1, back-compatible): Phase-1 keys {events, points,
-    operators, event_ids} plus Phase-2 {entities, objects, dedup_hits, drafts}.
-    ``content_dedup``/``dedup_threshold`` are accepted for the pinned API
-    surface but the dedup stage itself is a later issue — dedup_hits is
-    always 0 from this entry point (DE2E-3).
+    operators, event_ids} plus Phase-2 {entities, objects, dedup_hits, drafts}
+    plus Phase-4 {batch_id, batch_status, batch_reason} (W-3 wiring, #990 —
+    see ConversationMiner.mine for the exact semantics, incl. the
+    "not_gated" standalone-log state).
+    ``content_dedup`` (default True) enables the two-tier content dedup for
+    decision Points (W-2, #784); ``dedup_threshold`` defaults to the pinned
+    review band 0.60 (θ from the calibration milestone). Pass ``sdk=`` to
+    enable operator wiring (draft-prior alreadyDecided links); without it
+    dedup is skipped entirely (a warning is logged).
     """
-    if content_dedup:
-        logger.info("content dedup stage not yet implemented — "
-                    "dedup_hits always 0 (DE2E-3)")
+    if content_dedup and sdk is None:
+        logger.warning(
+            "content dedup enabled but no sdk passed to mine_conversation — "
+            "dedup is skipped entirely (pass sdk= to enable; #784)")
     miner = ConversationMiner(model)
     return miner.mine(transcript, source_id, api,
                       participants=participants,
                       extract_entities=extract_entities,
-                      entity_stage=entity_stage)
+                      entity_stage=entity_stage,
+                      batch_id=None,  # auto-generated per call (#990)
+                      content_dedup=content_dedup,
+                      dedup_threshold=dedup_threshold,
+                      session_date=session_date,
+                      sdk=sdk)
 
 
 def mine_corpus(
@@ -578,6 +968,8 @@ def mine_corpus_with_sdk(
     progress_file: str | None = None,
     model: Any | None = None,
     event_log_path: str | None = None,
+    content_dedup: bool = True,
+    dedup_threshold: float = 0.60,
 ) -> dict:
     """Batch-mine a session corpus (J-1, plan §6.1) through an existing SDK.
 
@@ -753,9 +1145,22 @@ def mine_corpus_with_sdk(
         # wiring, wrong per-session event content, re-mine stacking).
         api.current_run = ulid()
         try:
+            # #786: session frontmatter date becomes validFrom (R5 — real
+            # session date, not ingest time); fallback ingestedAt.
+            session_date = None
+            try:
+                from .session_indexer import _parse_frontmatter
+                fm = _parse_frontmatter(text)
+                session_date = fm.get("date") or fm.get("startedAt")
+            except Exception:
+                session_date = None
             res = miner.mine(text, f"session_{session_id}", api,
                              extract_entities=extract_entities,
-                             participants=ConversationMiner._extract_participants(text))
+                             participants=ConversationMiner._extract_participants(text),
+                             content_dedup=content_dedup,
+                             dedup_threshold=dedup_threshold,
+                             session_date=session_date,
+                             sdk=sdk)
             entities += res["entities"]
             objects += res["objects"]
             dedup_hits += res["dedup_hits"]
@@ -794,3 +1199,220 @@ def mine_corpus_with_sdk(
         "drafts": drafts,
         "errors": errors,
     }
+
+# ── Phase-4 EP-safe batch commit gate (#785) ──────────────────────────
+
+class EpSafeCommit:
+    """W-3 EP-safe batch commit gate (plan §2 W-3, §4.5, §7 DE2E-8).
+
+    Verifies an extraction batch BEFORE it enters the review queue:
+      1. every extraction Point is `status: draft` (no SDK #131 edge
+         auto-promotion leak for extraction paths)
+      2. no operator auto-wire — batch operator nodes are not live AND every
+         incident operator edge connects only draft endpoints (W-2/W-4
+         draft-to-draft-only rule; live prior → review queue, never a draft→live
+         edge)
+      3. mean-grounding snapshot drift pre/post batch ≤ max_grounding_drift
+         (Gate B tooling; #779 `mean_grounding`)
+
+    Pass → batch COMMITTED (drafts enter the review queue; a previously
+    quarantined batch is un-quarantined by the re-run pass — recovery loop,
+    J-5). Fail → batch QUARANTINED (promote_point blocks on its Points until
+    the cause is fixed and the batch re-runs clean).
+
+    `proj` is a FalkorProjection (or anything exposing ``.g.query``) — the
+    mining pipeline passes ``api.projection``; SDK callers pass
+    ``sdk._get_proj()``. `grounding_fn` is the injectable mean-grounding seam:
+    ``Callable[[], float]``; None resolves `tortoise.analyze.mean_grounding`
+    (#779) and records the gate as unavailable/skipped until it lands.
+    """
+
+    def __init__(self, proj, batch_id: str, *,
+                 max_grounding_drift: float = 0.02,
+                 grounding_fn=None):
+        self.proj = proj
+        self.batch_id = batch_id
+        self.max_grounding_drift = max_grounding_drift
+        self._grounding_fn = grounding_fn if grounding_fn is not None \
+            else _default_grounding_fn()
+
+    # ── W-3 check 1: all extraction Points draft ───────────────────
+    def verify_draft_only(self, point_ids: list[str]) -> list[dict]:
+        """Return violations: batch Points that are not (explicitly) draft.
+
+        Missing/unknown Points and any non-draft status (live/retracted/…) are
+        violations — the batch must be 100% draft or it fails closed.
+        """
+        point_ids = list(point_ids)
+        if not point_ids:
+            return []
+        rows = self.proj.g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, n.status",
+            params={"ids": point_ids},
+        ).result_set
+        by_id = {row[0]: row[1] for row in rows}
+        violations = []
+        for pid in point_ids:
+            status = by_id.get(pid)
+            if pid not in by_id:
+                violations.append({"id": pid, "reason": "not_found"})
+            elif status != "draft":
+                violations.append({"id": pid, "reason": "status_not_draft",
+                                   "status": status})
+        return violations
+
+    # ── W-3 check 2: no operator auto-wire ─────────────────────────
+    def verify_no_auto_wire(self, point_ids: list[str], *,
+                            operator_ids: list[str] | None = None) -> list[dict]:
+        """Return auto-wire violations for the batch's operator subgraph.
+
+        Checks every incident operator node (given explicitly or discovered
+        from the batch Points' edges): the operator node itself must not be
+        live (extraction creates draft operator nodes — #780
+        `create_operator(promote_source=False)`; on main the event path
+        defaults operator nodes to live, which IS the R7 leak this catches),
+        and every edge endpoint must be draft (draft-to-draft only).
+        """
+        point_ids = list(point_ids)
+        if operator_ids is None:
+            if not point_ids:
+                return []
+            rows = self.proj.g.query(
+                "MATCH (o:Point {is_operator:true})-[r]->(n:Point) "
+                "WHERE n.id IN $ids RETURN DISTINCT o.id",
+                params={"ids": point_ids},
+            ).result_set
+            operator_ids = [row[0] for row in rows]
+        violations = []
+        for oid in operator_ids:
+            op_rows = self.proj.g.query(
+                "MATCH (o:Point {id:$id}) RETURN o.status",
+                params={"id": oid},
+            ).result_set
+            if not op_rows:
+                violations.append({"id": oid, "reason": "operator_not_found"})
+                continue
+            op_status = op_rows[0][0]
+            # Canonical read model (tortoise/live.py): a missing raw status is
+            # LIVE (projection coalesce default) — the pre-#780 create_operator
+            # path writes no status, so the R7 leak manifests as raw NULL
+            # (#944 review). Explicit 'draft' is the ONLY clean state.
+            if (op_status or "live") == "live":
+                violations.append({"id": oid, "reason": "operator_node_live",
+                                   "status": op_status})
+            # endpoints: every operator edge target must be draft
+            eps = self.proj.g.query(
+                "MATCH (o:Point {id:$oid})-[r]->(s:Point) "
+                "RETURN s.id, s.status",
+                params={"oid": oid},
+            ).result_set
+            for sid, st in eps:
+                # missing status = implicit live (projection coalesce default)
+                if (st or "live") != "draft":
+                    violations.append({
+                        "id": oid, "reason": "endpoint_live",
+                        "endpoint_id": sid, "status": st,
+                    })
+        return violations
+
+    # ── W-3 check 3: grounding snapshot drift ──────────────────────
+    def _grounding_check(self, grounding_before: float | None,
+                         grounding_after: float | None) -> dict:
+        if self._grounding_fn is None:
+            return {
+                "status": "skipped",
+                "note": "mean_grounding unavailable until #779 — gate skipped",
+                "before": grounding_before, "after": grounding_after,
+                "drift": None, "max_drift": self.max_grounding_drift,
+            }
+        if grounding_before is None:
+            # Fail closed once the Gate B helper exists: a caller that skips
+            # the pre-snapshot gets a hard gate, not a silent skip (#944
+            # review). Pre-#779 the fn is None and this branch is unreachable.
+            return {
+                "status": "fail",
+                "note": "grounding_before required when mean_grounding is available",
+                "before": None, "after": grounding_after,
+                "drift": None, "max_drift": self.max_grounding_drift,
+            }
+        try:
+            after = grounding_after if grounding_after is not None \
+                else self._grounding_fn()
+            drift = abs(after - grounding_before)
+        except Exception as exc:  # noqa: BLE001 — fail closed on runtime error
+            return {
+                "status": "fail",
+                "note": f"grounding computation error: {exc}",
+                "before": grounding_before, "after": grounding_after,
+                "drift": None, "max_drift": self.max_grounding_drift,
+            }
+        ok = drift <= self.max_grounding_drift
+        return {
+            "status": "pass" if ok else "fail",
+            "before": grounding_before, "after": after, "drift": drift,
+            "max_drift": self.max_grounding_drift,
+        }
+
+    # ── W-3 gate ───────────────────────────────────────────────────
+    def run(self, point_ids: list[str], *,
+            operator_ids: list[str] | None = None,
+            grounding_before: float | None = None,
+            grounding_after: float | None = None) -> dict:
+        """Run the full W-3 gate over a completed extraction batch.
+
+        Returns {batch_id, ok, committed, quarantined, checks, reason}.
+        Pass → :Batch status committed (un-quarantines on recovery re-run).
+        Fail → quarantine_batch() with the first failing check's reason.
+        """
+        non_draft = self.verify_draft_only(point_ids)
+        auto_wired = self.verify_no_auto_wire(point_ids, operator_ids=operator_ids)
+        grounding = self._grounding_check(grounding_before, grounding_after)
+
+        checks = {
+            "all_points_draft": not non_draft,
+            "non_draft_points": non_draft,
+            "no_auto_wire": not auto_wired,
+            "auto_wired": auto_wired,
+            "grounding": grounding,
+            "non_empty": len(point_ids) > 0,
+        }
+        failures = []
+        if not point_ids:
+            # Fail closed: an all-fail extraction produces zero Points and
+            # must quarantine (plan J-1) — a vacuous pass would mark a
+            # nonexistent batch committed (#944 review).
+            failures.append("empty_batch")
+        if non_draft:
+            failures.append("points_not_draft")
+        if auto_wired:
+            failures.append("operator_auto_wire")
+        if grounding.get("status") == "fail":
+            failures.append("grounding_drift")
+
+        prev = _batch_node(self.proj, self.batch_id)
+        if failures:
+            reason = (
+                f"W-3 failed: {', '.join(failures)} "
+                f"({len(point_ids)} points, batch {self.batch_id})"
+            )
+            quarantine_batch(self.proj, self.batch_id, reason=reason)
+            return {
+                "batch_id": self.batch_id,
+                "ok": False,
+                "committed": False,
+                "quarantined": True,
+                "reason": reason,
+                "checks": checks,
+            }
+
+        recovered = (prev or {}).get("status") == BATCH_STATUS_QUARANTINED
+        _upsert_batch(self.proj, self.batch_id, status=BATCH_STATUS_COMMITTED,
+                      point_count=len(point_ids))
+        return {
+            "batch_id": self.batch_id,
+            "ok": True,
+            "committed": True,
+            "quarantined": False,
+            "recovered": recovered,
+            "checks": checks,
+        }
