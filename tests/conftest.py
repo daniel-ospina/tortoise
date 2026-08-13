@@ -170,10 +170,24 @@ def _redislite_hygiene():
             if not lock.acquire():
                 return {"skipped": "reaper-lock-held"}
             try:
-                acted = _run_sweep(
-                    dry_run=False, batch_size=50, only_safe=only_safe,
-                    jobs=8, kill_pacing=0.4)
-                return {"reaped": len(acted)}
+                # Full end-sweep: disable the boot cooldown — at session end
+                # no new client can appear, so servers younger than the 30s
+                # cooldown are still safe to reap (otherwise the last minute
+                # of the suite's servers leak until the next suite; observed
+                # as 13 orphans on CI, issue #1005 follow-up).
+                prev = os.environ.get("TORTOISE_REAPER_MIN_UPTIME")
+                if not only_safe:
+                    os.environ["TORTOISE_REAPER_MIN_UPTIME"] = "0"
+                try:
+                    acted = _run_sweep(
+                        dry_run=False, batch_size=50, only_safe=only_safe,
+                        jobs=8, kill_pacing=0.4)
+                    return {"reaped": len(acted)}
+                finally:
+                    if prev is None:
+                        os.environ.pop("TORTOISE_REAPER_MIN_UPTIME", None)
+                    else:
+                        os.environ["TORTOISE_REAPER_MIN_UPTIME"] = prev
             finally:
                 lock.release()
         except Exception as exc:  # never fail the suite over hygiene
