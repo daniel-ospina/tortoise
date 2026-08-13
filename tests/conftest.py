@@ -208,6 +208,26 @@ def _redislite_hygiene():
         """
         import subprocess as _sp
         my_pid = os.getpid()
+        # Ancestors of THIS suite's invocation (runner shell → bash -c step →
+        # timeout → stdbuf → python) carry "pytest" in their cmdline (the step
+        # script text) but are NOT foreign suites. Without the ancestry skip,
+        # the CI step wrapper false-positives and the end-sweep defers forever
+        # — every suite leaks its servers (observed as 13 orphans on test (b),
+        # issue #1005). Genuine concurrent suites (different process tree) are
+        # not ancestors and are still detected below.
+        ancestors: set[int] = set()
+        pid = my_pid
+        for _ in range(64):  # bounded walk to init
+            try:
+                ppid = int(_sp.run(["ps", "-o", "ppid=", "-p", str(pid)],
+                                   capture_output=True, text=True, timeout=5
+                                   ).stdout.strip())
+            except (_sp.TimeoutExpired, OSError, ValueError):
+                break
+            if ppid <= 0 or ppid == pid:
+                break
+            ancestors.add(ppid)
+            pid = ppid
         try:
             out = _sp.run(["pgrep", "-f", "pytest"], capture_output=True,
                           text=True, timeout=10)
@@ -215,7 +235,7 @@ def _redislite_hygiene():
             return True  # unknown -> fail closed (defer full sweep)
         for line in out.stdout.splitlines():
             pid = line.strip()
-            if not pid.isdigit() or int(pid) == my_pid:
+            if not pid.isdigit() or int(pid) == my_pid or int(pid) in ancestors:
                 continue
             try:
                 ppid = int(_sp.run(["ps", "-o", "ppid=", "-p", pid],

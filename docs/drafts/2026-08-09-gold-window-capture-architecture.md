@@ -1,6 +1,6 @@
 ---
 title: "Gold Window Draft — 2026-08-09 capture-architecture session"
-type: gold-window
+type: operations
 domain: operations
 doc_status: draft
 created: 2026-08-09

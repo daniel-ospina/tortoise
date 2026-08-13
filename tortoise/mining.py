@@ -230,6 +230,7 @@ class ConversationMiner:
         batch_id: str | None = None,
         content_dedup: bool = True,
         dedup_threshold: float = 0.60,
+        session_date: str | None = None,
         sdk=None,
     ) -> dict:
         """Run extraction pipeline on a conversation transcript.
@@ -328,6 +329,17 @@ class ConversationMiner:
                 logger.exception("content dedup failed for batch %s", batch_id)
                 dedup_error = f"content dedup failed: {exc}"
 
+        # Phase-4 temporal wiring (W-4, #786): validFrom + NAND/CORRECTS
+        # candidates for contradictory decision Points.
+        temporal_report = None
+        if api.projection is not None and point_ids:
+            try:
+                temporal_report = self._temporal_wire(
+                    transcript, source_id, api, point_ids,
+                    session_date=session_date, sdk=sdk)
+            except Exception:
+                logger.exception("temporal wiring failed for batch %s", batch_id)
+
         batch_status = "not_gated"
         batch_reason = "no projection — W-3 gate skipped (standalone log mode)"
         if api.projection is not None:
@@ -381,7 +393,136 @@ class ConversationMiner:
             "dedup_wired": (dedup_report or {}).get("wired_draft_to_draft", 0),
             "dedup_deferred": (dedup_report or {}).get("deferred_live_prior", 0),
             "dedup_error": dedup_error,
+            "temporal_wired": (temporal_report or {}).get("wired_nand", 0),
+            "temporal_candidates": (temporal_report or {}).get("candidates", 0),
+            "temporal_replacements": (temporal_report or {}).get(
+                "replacement_candidates", 0),
         }
+
+    # ── Phase-4 temporal belief wiring (W-4, #786, DE2E-6) ────────
+    # #438 boundary carve-out: TemporalWire runs ONLY inside the mining
+    # post-pass (this method, called from mine()) with explicit
+    # source_session provenance — it never discovers connections between
+    # EXISTING points without a conversation trigger.
+
+    # Refute cues → contradictory (NAND); supersede cues → explicit
+    # replacement (CORRECTS via supersede_point after review).
+    _TEMPORAL_REFUTE_CUES = (
+        "wrong", "revert", "disagree", "incorrect", "no longer",
+        "not correct", "mistake", "changed our mind", "supersede",
+        "replacement", "replace",
+    )
+    _TEMPORAL_REPLACE_CUES = ("supersede", "changed our mind", "replacement",
+                             "replace")
+
+    def _temporal_wire(self, transcript: str, source_id: str, api,
+                       point_ids: list[str],
+                       session_date: str | None = None,
+                       sdk=None) -> dict:
+        """W-4 post-pass: stamp validFrom and wire temporal NAND/CORRECTS
+        edges between conversation-extracted decision Points (#786).
+
+        For each new DRAFT decision Point sharing an aboutObject Object with
+        a prior decision Point:
+          - prior DRAFT → NAND draft-to-draft (create_operator
+            promote_source=False — operator node is draft too)
+          - prior LIVE → NO wire at extraction; the point is surfaced as a
+            temporal candidate (live-prior rule, R11) and the NAND is wired
+            at promotion (live→live, promote_point)
+          - explicit-replacement cues → replacement candidate; after review
+            + promotion the prior is superseded (CORRECTS + outdated:true)
+
+        validFrom = session frontmatter date (R5 — NOT ingest time); fallback
+        ingestedAt (documented).
+
+        Returns {"wired_nand": n, "candidates": n, "replacement_candidates": n}.
+        """
+        proj = getattr(api, "projection", None)
+        if proj is None or not point_ids:
+            return {"wired_nand": 0, "candidates": 0, "replacement_candidates": 0}
+        # Normalize the session date to an ISO-8601 string: YAML frontmatter
+        # can yield datetime.date objects ('date: 2026-07-01') which crash the
+        # SET, and non-ISO strings corrupt ORDER BY chronology (#1080 review).
+        if session_date is None:
+            vf = _now()
+        elif hasattr(session_date, "isoformat"):
+            # YAML frontmatter dates arrive as datetime.date/datetime objects
+            # ('date: 2026-07-01') — normalize to ISO-8601 (#1080 review).
+            vf = session_date.isoformat()
+        else:
+            vf = str(session_date)
+        report = {"wired_nand": 0, "candidates": 0, "replacement_candidates": 0}
+        wired_pairs: set[tuple[str, str]] = set()  # (newer, older) — one NAND per pair
+        for pid in point_ids:
+            rows = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.content, n.pointKind, n.status",
+                params={"id": pid},
+            ).result_set
+            if not rows:
+                continue
+            content, kind, status = rows[0]
+            if kind != "decision" or status != "draft" or not content:
+                continue
+            # validFrom: real session date, not ingest time (R5).
+            proj.g.query(
+                "MATCH (n:Point {id:$id}) SET n.validFrom = $vf",
+                params={"id": pid, "vf": vf},
+            )
+            low = content.lower()
+            if not any(c in low for c in self._TEMPORAL_REFUTE_CUES):
+                continue
+            replace = any(c in low for c in self._TEMPORAL_REPLACE_CUES)
+            # Prior decisions on the same topic (shared aboutObject Object).
+            priors = proj.g.query(
+                "MATCH (p:Point {id:$pid})-[:aboutObject]->(o:Object)"
+                "<-[:aboutObject]-(prior:Point) "
+                "WHERE prior.id <> $pid "
+                "AND prior.pointKind = 'decision' "
+                "AND (prior.status = 'draft' OR prior.status = 'live') "
+                "RETURN prior.id, prior.status",
+                params={"pid": pid},
+            ).result_set
+            if not priors:
+                continue
+            for prior_id, prior_status in priors:
+                if prior_status == "draft":
+                    # Draft-to-draft NAND (operator node draft too) — exactly
+                    # one per pair even when both sides carry refute cues
+                    # (#1080 review: the loop would otherwise wire D2→D1 AND
+                    # D1→D2, doubling the EP penalty).
+                    pair = tuple(sorted((pid, prior_id)))
+                    if pair in wired_pairs:
+                        continue
+                    wired_pairs.add(pair)
+                    if sdk is not None:
+                        sdk.create_operator("NAND", pid, [prior_id],
+                                            promote_source=False)
+                        report["wired_nand"] += 1
+                else:
+                    # Live prior → review-queue candidate, wire at promotion.
+                    # Target list (a single slot would silently drop earlier
+                    # live priors — #1080 review).
+                    current = proj.g.query(
+                        "MATCH (n:Point {id:$id}) RETURN n.temporal_target_ids",
+                        params={"id": pid},
+                    ).result_set
+                    ids = list(current[0][0] or []) if current and current[0][0] else []
+                    if prior_id not in ids:
+                        ids.append(prior_id)
+                    proj.g.query(
+                        "MATCH (n:Point {id:$id}) "
+                        "SET n.temporal_candidate = true, "
+                        "n.temporal_target_ids = $ts, "
+                        "n.temporal_target_id = $t, "
+                        "n.temporal_replacement = $r, "
+                        "n.source_session = $ss",
+                        params={"id": pid, "ts": ids, "t": prior_id,
+                                "r": replace, "ss": source_id},
+                    )
+                    report["candidates"] += 1
+                    if replace:
+                        report["replacement_candidates"] += 1
+        return report
 
     # ── Phase-2 entity reification (W-1 write phase, DE2E-1) ──────
 
@@ -750,6 +891,7 @@ def mine_conversation(
     entity_stage=None,
     content_dedup: bool = True,
     dedup_threshold: float | None = None,
+    session_date: str | None = None,
     sdk=None,
 ) -> dict:
     """Convenience: mine a conversation transcript → Events + Points + Objects.
@@ -777,6 +919,7 @@ def mine_conversation(
                       batch_id=None,  # auto-generated per call (#990)
                       content_dedup=content_dedup,
                       dedup_threshold=dedup_threshold,
+                      session_date=session_date,
                       sdk=sdk)
 
 
@@ -1002,11 +1145,21 @@ def mine_corpus_with_sdk(
         # wiring, wrong per-session event content, re-mine stacking).
         api.current_run = ulid()
         try:
+            # #786: session frontmatter date becomes validFrom (R5 — real
+            # session date, not ingest time); fallback ingestedAt.
+            session_date = None
+            try:
+                from .session_indexer import _parse_frontmatter
+                fm = _parse_frontmatter(text)
+                session_date = fm.get("date") or fm.get("startedAt")
+            except Exception:
+                session_date = None
             res = miner.mine(text, f"session_{session_id}", api,
                              extract_entities=extract_entities,
                              participants=ConversationMiner._extract_participants(text),
                              content_dedup=content_dedup,
                              dedup_threshold=dedup_threshold,
+                             session_date=session_date,
                              sdk=sdk)
             entities += res["entities"]
             objects += res["objects"]

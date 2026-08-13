@@ -7,11 +7,12 @@ Available graphs (in Docker / OrbStack):
   - falkordb (127.0.0.1:6379) password=falkordb → graph "tortoise" (test/dev, 481 claims)
 
 To switch graphs, set env vars:
-  FALKORDB_HOST, FALKORDB_PORT, FALKORDB_PASSWORD, FALKORDB_GRAPH
+  FALKORDB_HOST, FALKORDB_PORT, FALKORDB_USERNAME, FALKORDB_PASSWORD,
+  FALKORDB_SSL (1 for rediss-style TLS), FALKORDB_GRAPH
 """
 from __future__ import annotations
 
-import random, math, zlib
+import random, math, zlib, sys
 from collections import Counter
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,14 +21,22 @@ from pydantic import BaseModel
 from falkordb import FalkorDB
 import os
 
+# connection.py lives beside main.py; make the import work both as a script
+# (python3 server/main.py) and as a module (uvicorn main:app).
+if __package__ in (None, ""):
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from connection import build_connection_kwargs, graph_name
+
 app = FastAPI(title="Tortoise Graph Viz")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 # ── FalkorDB connection (defaults work on any new machine via docker-compose) ──
-DB_HOST = os.environ.get("FALKORDB_HOST", "localhost")
-DB_PORT = int(os.environ.get("FALKORDB_PORT", "16379"))
-DB_PASSWORD = os.environ.get("FALKORDB_PASSWORD", None)
-DB_GRAPH = os.environ.get("FALKORDB_GRAPH", "tortoise")
+# Env contract (see server/connection.py + .env.example):
+#   FALKORDB_HOST / FALKORDB_PORT — connection endpoint
+#   FALKORDB_USERNAME / FALKORDB_PASSWORD — FalkorDB Cloud + ACL-auth instances (#1079)
+#   FALKORDB_SSL=1 — TLS (rediss-style endpoints) (#1079)
+#   FALKORDB_GRAPH — graph to select
+DB_GRAPH = graph_name()
 CONTEXT_DEFAULT = "product-strategy"
 
 # ── Agent discovery protocol ──
@@ -35,8 +44,9 @@ CONTEXT_DEFAULT = "product-strategy"
 # Override with: export TORTOISE_HOST=http://host:port
 # The /api/health endpoint returns which graph is active and all available graphs.
 
-kwargs = {"host": DB_HOST, "port": DB_PORT}
-if DB_PASSWORD: kwargs["password"] = DB_PASSWORD
+kwargs = build_connection_kwargs()
+DB_HOST = kwargs["host"]
+DB_PORT = kwargs["port"]
 import time
 for attempt in range(1, 31):  # retry for ~30s
     try:
