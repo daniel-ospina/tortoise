@@ -64,6 +64,45 @@ interface ProvisionResponse {
 //   AUTH_HOOK_SECRET='v1,whsec_...'   (value from Dashboard → Auth → Hooks)
 const AUTH_HOOK_SECRET_ENV = "AUTH_HOOK_SECRET";
 
+// ── CORS / origin allowlist ─────────────────────────────────────────────
+// The welcome page (website/welcome.html) calls this function DIRECTLY from
+// the browser via the JWT path (#527/#802): fetch(PROVISION_URL, { method:
+// "POST", headers: { Authorization: Bearer <jwt>, Content-Type: json } }).
+// A non-simple Content-Type forces a CORS preflight (OPTIONS), so without
+// CORS headers the browser blocks EVERY signup with "No
+// 'Access-Control-Allow-Origin' header" (production incident 2026-08-13).
+// Same allowlist as waitlist-subscribe: the welcome page is served on every
+// host of the Cloudflare Pages project (static asset pass-through), so the
+// company host and *.pages.dev previews are covered too. Auth-hook calls
+// (server-side, no Origin) are unaffected — they are not CORS-bound.
+const ALLOWED_ORIGINS = [
+  "https://premiselabs.co",
+  "https://tortoise.premiselabs.co",
+  "https://premise-labs.pages.dev",
+];
+const ORIGIN_SUFFIXES = [".premise-labs.pages.dev"];
+const LOCAL_ORIGINS = ["http://localhost:8788", "http://127.0.0.1:8788"];
+
+function originAllowed(origin: string | null): string | null {
+  if (!origin) return null; // no Origin (auth hook, curl, server-side) → treated as allowed
+  if (ALLOWED_ORIGINS.includes(origin) || LOCAL_ORIGINS.includes(origin)) return origin;
+  for (const suffix of ORIGIN_SUFFIXES) {
+    if (origin.endsWith(suffix)) return origin;
+  }
+  return null;
+}
+
+// Single response helper — ACAO + Vary: Origin on EVERY path so the browser
+// can always read error bodies (400/401/403/405/500/502). Never echo an
+// un-allowlisted request origin back (would grant CORS to arbitrary sites);
+// server-side callers with no Origin get the first allowlisted origin.
+function json(body: unknown, status: number, corsOrigin: string | null): Response {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  headers["Access-Control-Allow-Origin"] = corsOrigin ?? ALLOWED_ORIGINS[0];
+  headers["Vary"] = "Origin";
+  return new Response(JSON.stringify(body), { status, headers });
+}
+
 /**
  * Authenticate the caller. Returns the verified caller identity, or null
  * when the request cannot be authenticated (→ the handler answers 401).
@@ -131,9 +170,34 @@ async function authenticateCaller(
 }
 
 Deno.serve(async (req: Request) => {
-  // Only accept POST from Supabase Auth webhooks
+  const corsOrigin = originAllowed(req.headers.get("origin"));
+  const requestOrigin = req.headers.get("origin");
+
+  // CORS preflight — respond BEFORE the method gate so the browser's
+  // OPTIONS probe succeeds (a 405 on preflight blocks the POST too).
+  if (req.method === "OPTIONS") {
+    if (requestOrigin && !originAllowed(requestOrigin)) {
+      return json({ error: "Origin not allowed" }, 403, corsOrigin);
+    }
+    return new Response(null, {
+      status: 204,
+      headers: {
+        "Access-Control-Allow-Origin": corsOrigin ?? ALLOWED_ORIGINS[0],
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "authorization, content-type",
+        "Vary": "Origin",
+      },
+    });
+  }
+
+  // Only accept POST (Supabase Auth webhooks / welcome-page JWT calls)
   if (req.method !== "POST") {
-    return new Response("Method not allowed", { status: 405 });
+    return json({ error: "Method not allowed" }, 405, corsOrigin);
+  }
+
+  // Origin gate (browser requests carry Origin; auth hooks/curl omit it)
+  if (requestOrigin && !originAllowed(requestOrigin)) {
+    return json({ error: "Origin not allowed" }, 403, corsOrigin);
   }
 
   try {
@@ -145,13 +209,13 @@ Deno.serve(async (req: Request) => {
     // the provisioning target. The public anon key is NOT sufficient.
     const caller = await authenticateCaller(req, rawBody);
     if (!caller) {
-      return new Response(
-        JSON.stringify({
+      return json(
+        {
           error:
             "Unauthorized: expected a signed Supabase auth-hook request or " +
             "a user JWT matching the provisioning target",
-        }),
-        { status: 401, headers: { "Content-Type": "application/json" } }
+        },
+        401, corsOrigin
       );
     }
 
@@ -159,10 +223,7 @@ Deno.serve(async (req: Request) => {
     try {
       body = JSON.parse(rawBody) as HookPayload;
     } catch {
-      return new Response(
-        JSON.stringify({ error: "invalid JSON body" }),
-        { status: 400, headers: { "Content-Type": "application/json" } }
-      );
+      return json({ error: "invalid JSON body" }, 400, corsOrigin);
     }
 
     // The provisioning target must BE the authenticated caller. A signed
@@ -177,13 +238,13 @@ Deno.serve(async (req: Request) => {
       targetId !== caller.id.toLowerCase() ||
       targetEmail !== caller.email.toLowerCase()
     ) {
-      return new Response(
-        JSON.stringify({
+      return json(
+        {
           error:
             "Forbidden: provisioning target does not match the " +
             "authenticated caller",
-        }),
-        { status: 403, headers: { "Content-Type": "application/json" } }
+        },
+        403, corsOrigin
       );
     }
 
@@ -197,10 +258,7 @@ Deno.serve(async (req: Request) => {
     // FalkorDB namespaces when called manually with a malformed payload).
     const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     if (!UUID_RE.test(user_id)) {
-      return new Response(
-        JSON.stringify({ error: "invalid user_id format" }),
-        { status: 400, headers: { "Content-Type": "application/json" } }
-      );
+      return json({ error: "invalid user_id format" }, 400, corsOrigin);
     }
 
     // Generate team name from provider display name, fallback to email prefix
@@ -245,9 +303,9 @@ Deno.serve(async (req: Request) => {
       // function's own container and threw uncaught (500 "Error invoking
       // hook"). Fail with a clear, diagnosable error instead (dogfood 2026-08-08).
       console.error("tenant-provision: FASTAPI_URL is not set in Supabase secrets");
-      return new Response(
-        JSON.stringify({ error: "Provisioning misconfigured (FASTAPI_URL missing). Please contact support." }),
-        { status: 500, headers: { "Content-Type": "application/json" } }
+      return json(
+        { error: "Provisioning misconfigured (FASTAPI_URL missing). Please contact support." },
+        500, corsOrigin
       );
     }
     const fastApiKey = Deno.env.get("FASTAPI_INTERNAL_KEY") || "";
@@ -303,10 +361,7 @@ Deno.serve(async (req: Request) => {
         "provision_team failed for " + safeName + ":",
         provisionError
       );
-      return new Response(
-        JSON.stringify({ error: "Provisioning failed. Please try again." }),
-        { status: 502, headers: { "Content-Type": "application/json" } }
-      );
+      return json({ error: "Provisioning failed. Please try again." }, 502, corsOrigin);
     }
 
     // ── Fix #7854: Trigger demo graph seeding ──────────────────────────
@@ -338,17 +393,11 @@ Deno.serve(async (req: Request) => {
       graph_name: `team_${teamId}`,
     };
 
-    return new Response(JSON.stringify(response), {
-      status: 201,
-      headers: { "Content-Type": "application/json" },
-    });
+    return json(response, 201, corsOrigin);
 
   } catch (err) {
     console.error("tenant-provision error:", err);
-    return new Response(
-      JSON.stringify({ error: "Internal server error" }),
-      { status: 500, headers: { "Content-Type": "application/json" } }
-    );
+    return json({ error: "Internal server error" }, 500, corsOrigin);
   }
 });
 

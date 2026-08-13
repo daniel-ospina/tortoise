@@ -84,3 +84,86 @@ def test_shared_lookup_implements_plan_construction():
     assert "pepper + key" in src
     # the digest input must be pepper concatenated BEFORE the key
     assert "pepper + key" in src.replace(" ", "") or "encode(pepper + key)" in src
+
+
+# ── CORS regression guards (production incident 2026-08-13) ──────────────────
+# The welcome page calls tenant-provision DIRECTLY from the browser (JWT path,
+# #527/#802). A `Content-Type: application/json` + `Authorization: Bearer`
+# POST forces a CORS preflight; the function previously returned 405 with NO
+# CORS headers, so every browser signup was blocked with "No
+# 'Access-Control-Allow-Origin' header". These guards pin the fix: preflight
+# handled before the method gate, CORS headers on EVERY response path, and an
+# origin allowlist covering the welcome page's hosts (mirrors
+# waitlist-subscribe's proven pattern).
+
+def test_edge_function_answers_cors_preflight():
+    """OPTIONS (preflight) must be answered 204 BEFORE the method gate, with
+    methods/headers the welcome page actually sends."""
+    src = EDGE_FN.read_text()
+    assert 'if (req.method === "OPTIONS")' in src, (
+        "OPTIONS preflight must be handled before the POST method gate"
+    )
+    assert 'if (req.method !== "POST")' in src
+    # Preflight must come first (file order = runtime order).
+    assert (
+        src.index('req.method === "OPTIONS"')
+        < src.index('req.method !== "POST"')
+    ), "preflight must precede the method gate"
+    assert "status: 204" in src, "preflight must return 204"
+    assert '"Access-Control-Allow-Methods": "POST, OPTIONS"' in src
+    # welcome.html sends Authorization: Bearer + Content-Type: json
+    assert '"Access-Control-Allow-Headers": "authorization, content-type"' in src
+
+
+def test_edge_function_sends_cors_headers_on_every_response():
+    """Every response path must carry Access-Control-Allow-Origin + Vary so the
+    browser can read success AND error bodies. Guarded via the single json()
+    helper: no bare Response may remain outside it / the preflight."""
+    src = EDGE_FN.read_text()
+    assert "function json(" in src, "responses must go through the CORS json() helper"
+    assert 'headers["Access-Control-Allow-Origin"] = corsOrigin ?? ALLOWED_ORIGINS[0];' in src
+    assert 'headers["Vary"] = "Origin";' in src
+    # The exact pre-incident regression: bare 405 with no CORS headers.
+    assert 'new Response("Method not allowed", { status: 405 })' not in src, (
+        "method gate must answer through json() (CORS headers), not a bare 405"
+    )
+    # Every remaining new Response must be ONE OF: the json() helper itself
+    # (`{ status, headers }` — headers carries ACAO+Vary) or the preflight
+    # (inline `"Access-Control-Allow-Origin"` map). A Response whose options
+    # only name `corsOrigin` in a THIRD constructor position would be a
+    # silent no-op — the Response constructor takes (body, init) only — so
+    # any other pattern fails this check.
+    import re
+
+    for match in re.finditer(r"new Response\s*\(", src):
+        chunk = src[match.start():match.start() + 300]
+        assert (
+            "{ status, headers }" in chunk
+            or '"Access-Control-Allow-Origin"' in chunk
+        ), (
+            f"Response at offset {match.start()} lacks CORS headers "
+            f"(Response(body, init) only — a third corsOrigin arg is ignored):\n{chunk}"
+        )
+
+
+def test_edge_function_allowlists_welcome_page_origins():
+    """The allowlist must cover every host the welcome page is served on:
+    the tortoise product host (the reported failure origin), the company host,
+    Cloudflare previews, and local wrangler dev."""
+    src = EDGE_FN.read_text()
+    assert "https://tortoise.premiselabs.co" in src
+    assert "https://premiselabs.co" in src
+    assert ".premise-labs.pages.dev" in src
+    assert "http://127.0.0.1:8788" in src and "http://localhost:8788" in src
+
+
+def test_edge_function_rejects_unknown_origins():
+    """Non-allowlisted browser origins must get 403 with CORS headers — never
+    an echoed ACAO (would grant arbitrary sites access to team minting)."""
+    src = EDGE_FN.read_text()
+    assert 'if (requestOrigin && !originAllowed(requestOrigin))' in src, (
+        "browser requests must pass the origin allowlist gate"
+    )
+    assert 'json({ error: "Origin not allowed" }, 403, corsOrigin)' in src
+    # No wildcard CORS anywhere — team minting must stay origin-scoped.
+    assert '"Access-Control-Allow-Origin": "*"' not in src
