@@ -12,8 +12,12 @@ created a composite `:Point(id, pointKind, content_hash, content,
 is_operator)` index whose boolean-false lookups silently miss (verified on
 a 19k-point DB — `= false` returned 0 while `<> true` returned the full
 non-operator set). The composite is dropped and the canonical per-property
-indexes (id/pointKind/content_hash/is_operator) are recreated, matching
-projection `_ensure_indexes`.
+indexes are recreated, matching projection `_ensure_indexes` — with one
+exception: on embedded falkordblite/redislite, `is_operator` is NOT
+recreated (the persisted bool type table degrades across reopen, so the
+indexed `= false` form silently returns 0 — the code drops it on open;
+see _ensure_indexes / #522 / #1015). The backfill therefore gates the
+is_operator index recreation on non-embedded backends only.
 
 Requires #327's Point.is_operator RANGE index (already on main).
 
@@ -47,7 +51,13 @@ _LEGACY_COMPOSITE_INDEX = (
 
 
 # Canonical per-property Point indexes — mirror projection._ensure_indexes.
-_CANONICAL_POINT_PROPS = ("id", "pointKind", "content_hash", "is_operator")
+# is_operator is deliberately NOT in the embedded-safe set: falkordblite/
+# redislite degrades the persisted bool type table across reopen, so an
+# indexed `= false` silently returns 0 (see _ensure_indexes / #522 / #1015).
+# On embedded the recreate below is skipped (and _ensure_indexes drops any
+# stale is_operator index on open); non-embedded gets the #522 perf index.
+_CANONICAL_POINT_PROPS = ("id", "pointKind", "content_hash")
+_NON_EMBEDDED_ONLY_PROPS = ("is_operator",)
 
 
 def test_guard(graph_name: str, yes: bool = False) -> None:
@@ -134,12 +144,20 @@ def main():
             sys.exit(1)
 
     # Recreate canonical per-property indexes (idempotent — errors on
-    # already-indexed are expected and ignored).
+    # already-indexed are expected and ignored). is_operator is recreated
+    # on non-embedded only — embedded drops it on open (bool type-table
+    # degradation, see _ensure_indexes).
     for prop in _CANONICAL_POINT_PROPS:
         try:
             proj.g.query(f"CREATE INDEX FOR (n:Point) ON (n.{prop})")
         except Exception:
             pass  # already indexed — expected
+    if not getattr(proj, "_is_embedded", False):
+        for prop in _NON_EMBEDDED_ONLY_PROPS:
+            try:
+                proj.g.query(f"CREATE INDEX FOR (n:Point) ON (n.{prop})")
+            except Exception:
+                pass  # already indexed — expected
 
     # Verify: no NULLs remain
     after = proj.g.query(
@@ -155,10 +173,11 @@ def main():
     # Sanity: the whole point of #522 is that `= false` returns the full
     # non-operator population. On docker FalkorDB (hosted production) the
     # boolean comparison always works post-backfill. On embedded redislite,
-    # a legacy attribute type table can persist string-typed is_operator in
-    # the db file (verified: `= false` matches 0 while `<> true` matches all,
-    # even after index drop) — warn loudly with remediation instead of
-    # blocking, because the code rewrite remains correct on the hosted path.
+    # indexed `= false` is unreliable (the is_operator index is dropped on
+    # open — #1015/#1069) but the label-scan form is correct, so a post-
+    # backfill divergence here means either a stale index survived or a
+    # legacy string-typed attribute table persists — warn loudly with
+    # remediation instead of blocking.
     false_count = proj.g.query(
         "MATCH (n:Point) WHERE n.is_operator = false RETURN count(n)"
     ).result_set[0][0]
