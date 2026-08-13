@@ -2841,6 +2841,697 @@ class TortoiseSDK:
         ("IMPL", "NAND", "composedOf", "decomposesInto", "contains", "wraps")
     )
 
+    # ── Shared pre-validation check helpers (epic #902 W4 A1) ────────────
+    #
+    # Checks 1-8 from plan §5.2, extracted from the checks originally raised
+    # mid-write inside ingest(). Consumed by BOTH `_validate_bundle` (Phase 1
+    # — collects ALL violations, zero mutation) and ingest()'s write path
+    # (Phase 2 — defense-in-depth raises). The SAME helper emits the SAME
+    # message in both phases, so Phase-1/2 parity holds by construction
+    # (asserted by the parity unit test).
+    #
+    # CYCLE-25 (ontology v3.8): pointKind `statement` is THE write kind;
+    # legacy kinds are write-compat-only; `event` is REJECTED (episodic
+    # records are entity items type:'event' with eventKind); a point item
+    # WITHOUT kind DEFAULTS to `statement`. `quote` (≤200 chars) is a
+    # permitted point-item field; `c_cal` is calibrated-pipeline-write-only
+    # (a bundle carrying it is a violation).
+    #
+    # CYCLE-26 (GATE-2 Q3): check 5's fail-closed policy-feasibility
+    # rejection is REMOVED — gated operator-requiring connections are
+    # ACCEPTED (the operator's EP activity is derived: ≥2 connected points
+    # live — A9 #1059). The RETAINED piece: gated + explicit status:"live"
+    # on a point item is a violation (no bypass of the gated contract).
+
+    _INGEST_TERMINAL_STATUSES = frozenset(("superseded", "retracted"))
+    _INGEST_DIRECTION_VALUES = frozenset(("bidirectional", "unidirectional"))
+    _INGEST_LEGACY_WRITE_KINDS = frozenset((
+        "decision", "vision", "strategy", "plan", "goal", "target",
+        "humanApproval", "observation", "hypothesis",
+    ))
+
+    def _check_item_shape(self, section: str, index: int, item: Any,
+                          violations: list[dict]) -> None:
+        """Check 1 — section item shape (dict-ness + required fields, incl.
+        the CYCLE-25 quote/c_cal rules) and check 8 — the ingest-scoped
+        batch_id guard (a bundle item carrying `batch_id` is a violation;
+        the server computes and stamps it, §4.2)."""
+        if not isinstance(item, dict):
+            violations.append({
+                "section": section, "index": index,
+                "message": f"ingest: {section}[{index}] must be a dict",
+            })
+            return
+        if "batch_id" in item:
+            violations.append({
+                "section": section, "index": index,
+                "message": f"ingest: {section}[{index}] batch_id is "
+                           f"server-managed and cannot be set on bundle items",
+            })
+        if section == "points":
+            # kind is OPTIONAL (CYCLE-25: kind-absent defaults to
+            # 'statement'); content is required.
+            if item.get("content") is None or not isinstance(item.get("content"), str):
+                # REVIEW-FIX P1 (cycle-26): non-string content is a Phase-1
+                # violation (Phase 2 would AttributeError at _content_hash
+                # mid-write after earlier sections commit).
+                violations.append({
+                    "section": section, "index": index,
+                    "message": f"ingest: points[{index}] requires 'content'",
+                })
+            quote = item.get("quote")
+            if quote is not None and (not isinstance(quote, str) or len(quote) > 200):
+                violations.append({
+                    "section": section, "index": index,
+                    "message": f"ingest: points[{index}] quote exceeds 200 "
+                               f"characters (provenance quote cap, v3.6 #11)",
+                })
+            if "c_cal" in item:
+                violations.append({
+                    "section": section, "index": index,
+                    "message": f"ingest: points[{index}] c_cal is "
+                               f"calibrated-pipeline-write-only — ingest never "
+                               f"writes calibrated confidence",
+                })
+        elif section == "sources":
+            url = item.get("url")
+            if not url or not isinstance(url, str):
+                violations.append({
+                    "section": section, "index": index,
+                    "message": f"ingest: sources[{index}] requires a "
+                               f"non-empty 'url'",
+                })
+            if not item.get("sourceKind"):
+                violations.append({
+                    "section": section, "index": index,
+                    "message": f"ingest: sources[{index}] requires 'sourceKind'",
+                })
+        elif section == "entities":
+            _etype_v = item.get("type")
+            etype = (_etype_v if isinstance(_etype_v, str) else "").strip().lower()
+            if not etype:
+                violations.append({
+                    "section": section, "index": index,
+                    "message": f"ingest: entities[{index}] requires 'type' "
+                               f"(subject|object|event|document)",
+                })
+            elif etype not in ("subject", "object", "event", "document"):
+                violations.append({
+                    "section": section, "index": index,
+                    "message": f"ingest: entities[{index}] type must be "
+                               f"subject|object|event|document, got {etype!r}",
+                })
+            if not item.get("name"):
+                violations.append({
+                    "section": section, "index": index,
+                    "message": f"ingest: entities[{index}] requires 'name'",
+                })
+            if etype == "event" and not item.get("eventKind"):
+                violations.append({
+                    "section": section, "index": index,
+                    "message": f"ingest: entities[{index}] type='event' "
+                               f"requires 'eventKind'",
+                })
+            if etype == "document" and not item.get("documentKind"):
+                violations.append({
+                    "section": section, "index": index,
+                    "message": f"ingest: entities[{index}] type='document' "
+                               f"requires 'documentKind'",
+                })
+        # connections: only dict-ness + the batch_id guard here — the
+        # connection contract is check 4's job.
+
+    def _check_kind(self, kind: Any, index: int, violations: list[dict]) -> None:
+        """Check 2 — CYCLE-25 point-kind vocabulary (ontology v3.8).
+
+        Accepts `statement` (THE extraction write kind — canonical) plus the
+        legacy write-compat kinds (decision/vision/strategy/plan/goal/target/
+        humanApproval/observation/hypothesis) for back-compat — and any other
+        kind, since the kind registry is descriptive (warnings), not
+        restrictive. REJECTS pointKind `event` (REMOVED, #1013 — episodic
+        records are entity items type:'event' with eventKind). A point item
+        WITHOUT kind is LEGAL and defaults to `statement` — the default is
+        applied by the write path, not flagged here.
+        """
+        if kind is None:
+            return
+        if not isinstance(kind, str):
+            # REVIEW-FIX P2 (cycle-26): a non-string kind must not silently
+            # write pointKind:<int> into the graph — Phase-1 violation.
+            violations.append({
+                "section": "points", "index": index,
+                "message": f"pointKind must be a string, got "
+                           f"{type(kind).__name__}",
+            })
+            return
+        if kind == "event":
+            violations.append({
+                "section": "points", "index": index,
+                "message": "pointKind 'event' is not a write kind — use an "
+                           "entity item with type:'event' and eventKind "
+                           "('occurrence'/'turn') for episodic records",
+            })
+
+    def _check_refs(self, bundle: dict, violations: list[dict]) -> None:
+        """Check 3 (ref-table half) — duplicate refs across the whole bundle
+        and ULID-shadowing rejection (a ref shaped like a real ULID would
+        make refs.get(x, x) silently address an existing node)."""
+        seen: dict[str, str] = {}
+        for section in ("sources", "points", "entities"):
+            for i, item in enumerate(bundle.get(section) or []):
+                if not isinstance(item, dict):
+                    continue  # shape violation already reported (check 1)
+                ref = item.get("ref")
+                if not ref:
+                    continue
+                if _is_ulid(str(ref)):
+                    violations.append({
+                        "section": section, "index": i,
+                        "message": f"ingest: {section}[{i}] ref {ref!r} is "
+                                   f"shaped like a real ULID — refs are "
+                                   f"bundle-local labels, not node ids (a ULID-"
+                                   f"shaped ref would silently shadow an "
+                                   f"existing node)",
+                    })
+                    continue
+                if ref in seen:
+                    violations.append({
+                        "section": section, "index": i,
+                        "message": f"ingest: duplicate bundle ref {ref!r} "
+                                   f"({section}) — refs must be unique across "
+                                   f"the bundle",
+                    })
+                else:
+                    seen[ref] = section
+
+    def _connection_route(self, conn: dict) -> str:
+        """Route classification for a connection item: 'direct' for plain
+        IMPL/NAND (operator-less per §8 — the terminal-status guard is
+        direct-edge-scoped), 'operator' for mitigation/reify:true/part-whole,
+        'relation' otherwise."""
+        if "operator" not in conn:
+            return "relation"
+        if conn["operator"] in ("IMPL", "NAND") and not conn.get("mitigation") \
+                and not conn.get("reify"):
+            return "direct"
+        return "operator"
+
+    @staticmethod
+    def _canonical_direction(op_type: str, direction: str | None) -> str | None:
+        """CYCLE-25 per-op_type absent↔default canonicalization (ontology v3.6
+        #5): direction-ABSENT canonicalizes per op_type — IMPL → "bidirectional",
+        NAND → "unidirectional" (the extraction default); other operator types
+        keep create_operator's bidirectional default. Absent is NOT a distinct
+        value in the §5.2.7 comparison."""
+        if direction is not None:
+            return direction
+        return "unidirectional" if op_type == "NAND" else "bidirectional"
+
+    def _check_connection(self, index: int, conn: Any,
+                          violations: list[dict]) -> None:
+        """Check 4 — the connection contract (pure; no graph access).
+
+        exactly one of relation/operator; from/to presence; to shape/emptiness
+        (zero-target rows c8(i-iv)); operator/relation vocabulary; self-edge
+        rejection on IMPL/NAND; multi-target rejection on plain IMPL/NAND
+        (cycle-7); §8 field validity (direction/confidence/weight/mitigation)
+        + route-scoped attribute rejection (cycle-13: relation carries
+        direction/confidence/weight; operator route carries confidence/weight).
+        """
+        if not isinstance(conn, dict):
+            return  # dict-ness already reported by check 1
+        if "from" not in conn or "to" not in conn:
+            violations.append({
+                "section": "connections", "index": index,
+                "message": f"ingest: connections[{index}] requires 'from' "
+                           f"and 'to'",
+            })
+            return
+        tos = conn["to"]
+        if not isinstance(tos, (list, str)):
+            violations.append({
+                "section": "connections", "index": index,
+                "message": f"ingest: connections[{index}] 'to' must be a "
+                           f"list or string, got {type(tos).__name__}",
+            })
+        frm = conn.get("from")
+        if not isinstance(frm, str):
+            # REVIEW-FIX P1 (cycle-26): non-string from is a Phase-1 violation
+            # (Phase 2 would raise 'Points [5] do not exist' AFTER points are
+            # committed — partial mutation, J2/E2E-1 zero-mutation violation).
+            violations.append({
+                "section": "connections", "index": index,
+                "message": f"ingest: connections[{index}] 'from' must be a "
+                           f"string ref, got {type(frm).__name__}",
+            })
+        if isinstance(tos, list) and not tos:
+            violations.append({
+                "section": "connections", "index": index,
+                "message": f"ingest: connections[{index}] 'to' cannot be "
+                           f"empty — at least one target is required",
+            })
+        elif isinstance(tos, list):
+            for t in tos:
+                if not isinstance(t, str):
+                    violations.append({
+                        "section": "connections", "index": index,
+                        "message": f"ingest: connections[{index}] 'to' items "
+                                   f"must be string refs, got "
+                                   f"{type(t).__name__}",
+                    })
+                    break
+        has_rel = "relation" in conn
+        has_op = "operator" in conn
+        if has_rel == has_op:
+            violations.append({
+                "section": "connections", "index": index,
+                "message": f"ingest: connections[{index}] must carry exactly "
+                           f"one of 'relation' (structural edge) or 'operator' "
+                           f"(IMPL/NAND reification)",
+            })
+            return
+        if has_op:
+            op_type = conn["operator"]
+            if op_type not in self._INGEST_OPERATOR_TYPES:
+                violations.append({
+                    "section": "connections", "index": index,
+                    "message": f"ingest: connections[{index}] operator must "
+                               f"be one of {sorted(self._INGEST_OPERATOR_TYPES)}, "
+                               f"got {op_type!r}",
+                })
+            frm = conn.get("from")
+            to_list = tos if isinstance(tos, list) else [tos]
+            if op_type in ("IMPL", "NAND") and (frm == tos or frm in to_list):
+                violations.append({
+                    "section": "connections", "index": index,
+                    "message": f"ingest: connections[{index}] self-edges are "
+                               f"not allowed on IMPL/NAND — from and to "
+                               f"address the same endpoint (EP cavity risk)",
+                })
+            route = self._connection_route(conn)
+            if route == "direct" and isinstance(tos, list) and len(tos) > 1:
+                violations.append({
+                    "section": "connections", "index": index,
+                    "message": f"ingest: connections[{index}] multi-item 'to' "
+                               f"on a plain IMPL/NAND connection is not "
+                               f"supported — split into singular connections, "
+                               f"or use the operator route (reify:true or "
+                               f"mitigation) for multi-input fan-out",
+                })
+            direction = conn.get("direction")
+            if direction is not None and direction not in self._INGEST_DIRECTION_VALUES:
+                violations.append({
+                    "section": "connections", "index": index,
+                    "message": f"ingest: connections[{index}] direction must "
+                               f"be 'bidirectional' or 'unidirectional', got "
+                               f"{direction!r}",
+                })
+            if route == "operator":
+                # cycle-13 route scoping: create_operator accepts no
+                # confidence/weight (they are plain direct-edge attributes).
+                for key in ("confidence", "weight"):
+                    if key in conn:
+                        violations.append({
+                            "section": "connections", "index": index,
+                            "message": f"ingest: connections[{index}] {key} is "
+                                       f"not allowed on the operator route "
+                                       f"(reify:true/mitigation) — it belongs "
+                                       f"on plain IMPL/NAND direct edges",
+                        })
+            else:
+                for key in ("confidence", "weight"):
+                    val = conn.get(key)
+                    if val is not None and not (isinstance(val, (int, float))
+                                                and not isinstance(val, bool)
+                                                and 0 <= val <= 1):
+                        violations.append({
+                            "section": "connections", "index": index,
+                            "message": f"ingest: connections[{index}] {key} must "
+                                       f"be a number in [0, 1], got {val!r}",
+                        })
+            mitigation = conn.get("mitigation")
+            if mitigation is not None:
+                if not isinstance(mitigation, dict):
+                    violations.append({
+                        "section": "connections", "index": index,
+                        "message": f"ingest: connections[{index}] mitigation must "
+                                   f"be a dict {{reason, strength}}",
+                    })
+                else:
+                    reason = mitigation.get("reason")
+                    if not reason or not isinstance(reason, str):
+                        violations.append({
+                            "section": "connections", "index": index,
+                            "message": f"ingest: connections[{index}] "
+                                       f"mitigation.reason must be a non-empty "
+                                       f"string",
+                        })
+                    strength = mitigation.get("strength")
+                    if strength is None or not (isinstance(strength, (int, float))
+                                                and not isinstance(strength, bool)
+                                                and 0 <= strength <= 1):
+                        violations.append({
+                            "section": "connections", "index": index,
+                            "message": f"ingest: connections[{index}] "
+                                       f"mitigation.strength must be a number "
+                                       f"in [0, 1], got {strength!r}",
+                        })
+        else:
+            rel = conn["relation"]
+            from .projection.edges import _VALID_EDGE_PREDICATES
+            if rel != "extractedFrom" and rel not in _VALID_EDGE_PREDICATES:
+                violations.append({
+                    "section": "connections", "index": index,
+                    "message": f"ingest: connections[{index}] unknown relation "
+                               f"{rel!r} — must be a structural predicate or "
+                               f"'extractedFrom'",
+                })
+            # cycle-13 route scoping: relation connections carry none of the
+            # §8 edge attributes (direction/confidence/weight).
+            for key in ("direction", "confidence", "weight"):
+                if key in conn:
+                    violations.append({
+                        "section": "connections", "index": index,
+                        "message": f"ingest: connections[{index}] {key} is not "
+                                   f"allowed on relation connections (structural "
+                                   f"edges) — it belongs on plain IMPL/NAND "
+                                   f"direct edges",
+                    })
+
+    def _fetch_endpoint_info(self, values: set[str]) -> dict[str, dict]:
+        """ONE batched query resolving external endpoint existence, label
+        (node type) and status for a set of raw ids/urls (review fix: existence
+        alone cannot distinguish, since extractedFrom legitimately targets
+        Sources)."""
+        if not values:
+            return {}
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (n) WHERE n.id IN $vals OR n.url IN $vals "
+            "OR n.eventId IN $vals "
+            "RETURN coalesce(n.id, n.url, n.eventId) AS key, "
+            "head(labels(n)) AS label, n.is_operator, n.status",
+            params={"vals": sorted(values)},
+        ).result_set
+        out: dict[str, dict] = {}
+        for key, label, is_op, status in rows:
+            out[key] = {"label": label, "is_operator": bool(is_op),
+                        "status": status}
+        return out
+
+    def _find_terminal_dedup_hit(self, content: str, kind: str) -> str | None:
+        """Read-only NFC-keyed dedup MATCH (mirrors create_point's dedup key)
+        restricted to TERMINAL hits — the Phase-1 mechanism behind the
+        bundle-local-refs-resolving-to-terminal-points guard (cycle-17/18)."""
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (n:Point {content_hash:$ch}) WHERE n.is_operator = false "
+            "AND n.pointKind = $kind AND n.status IN $terminal RETURN n.id LIMIT 1",
+            params={"ch": _content_hash(content), "kind": kind,
+                    "terminal": sorted(self._INGEST_TERMINAL_STATUSES)},
+        ).result_set
+        return rows[0][0] if rows else None
+
+    def _check_endpoints(self, bundle: dict, violations: list[dict]) -> None:
+        """Check 3 (endpoint half) — typed endpoints (external + bundle-local,
+        cycle-2) and the direct-edge terminal-status guard (cycle-3, refined
+        cycle-17/18). Operator/direct-edge connections require plain-Point
+        endpoints; direct-edge connections (plain IMPL/NAND) additionally
+        reject terminal (superseded/retracted) endpoints. Bundle-local refs
+        resolving to EXISTING (dedup-hit) terminal points are Phase-1
+        violations (never a Phase-2 raise)."""
+        local: dict[str, tuple[str, dict]] = {}
+        for section in ("sources", "points", "entities"):
+            for item in bundle.get(section) or []:
+                if isinstance(item, dict) and item.get("ref"):
+                    local[item["ref"]] = (section, item)
+        external: set[str] = set()
+        conns: list[tuple[int, dict, str, list]] = []
+        for i, conn in enumerate(bundle.get("connections") or []):
+            if not isinstance(conn, dict) or "operator" not in conn:
+                continue
+            frm = conn.get("from")
+            tos = conn.get("to")
+            to_list = tos if isinstance(tos, list) else [tos]
+            route = self._connection_route(conn)
+            for v in [frm] + to_list:
+                if isinstance(v, str) and v not in local:
+                    external.add(v)
+            conns.append((i, conn, route, [frm] + to_list))
+        node_info = self._fetch_endpoint_info(external)
+        entity_labels = {"subject": "Subject", "object": "Object",
+                         "event": "Event", "document": "Document"}
+        for i, conn, route, vals in conns:
+            for v in vals:
+                if not isinstance(v, str):
+                    continue
+                if v in local:
+                    section, item = local[v]
+                    if section != "points" or item.get("is_operator"):
+                        if section == "sources":
+                            label = "Source"
+                        elif section == "entities":
+                            label = entity_labels.get(
+                                str(item.get("type") or "").strip().lower(),
+                                "entity")
+                        else:
+                            label = "operator-shaped point item"
+                        violations.append({
+                            "section": "connections", "index": i,
+                            "message": f"ingest: connections[{i}] bundle-local "
+                                       f"endpoint {v!r} must be a plain Point — "
+                                       f"got a {label} item",
+                        })
+                else:
+                    info = node_info.get(v)
+                    if info is None:
+                        violations.append({
+                            "section": "connections", "index": i,
+                            "message": f"ingest: connections[{i}] external "
+                                       f"endpoint {v!r} does not exist",
+                        })
+                    elif info["label"] != "Point" or info["is_operator"]:
+                        got = ("operator Point" if info["is_operator"]
+                               else info["label"] or "unknown node type")
+                        violations.append({
+                            "section": "connections", "index": i,
+                            "message": f"ingest: connections[{i}] endpoint "
+                                       f"{v!r} must be a plain Point — got a "
+                                       f"{got} endpoint",
+                        })
+                    elif route == "direct" and info["status"] in self._INGEST_TERMINAL_STATUSES:
+                        violations.append({
+                            "section": "connections", "index": i,
+                            "message": f"ingest: connections[{i}] endpoint "
+                                       f"{v!r} is {info['status']} — new direct "
+                                       f"edges to terminal points are rejected",
+                        })
+        # Bundle-local dedup-hit terminal guard (cycle-17/18) — Phase-1 ONLY.
+        for i, conn, route, vals in conns:
+            if route != "direct":
+                continue
+            for v in vals:
+                if not isinstance(v, str) or v not in local:
+                    continue
+                section, item = local[v]
+                if section != "points":
+                    continue
+                content = item.get("content")
+                if content is None or not isinstance(content, str):
+                    # REVIEW-FIX P1 (cycle-26): non-string content would crash
+                    # _find_terminal_dedup_hit -> _content_hash (AttributeError
+                    # 'int' object has no attribute 'encode') — shape violation
+                    # already reported (check 1), skip the dedup-hit scan.
+                    continue
+                kind = item.get("kind") or "statement"
+                hit = self._find_terminal_dedup_hit(content, kind)
+                if hit:
+                    violations.append({
+                        "section": "connections", "index": i,
+                        "message": f"ingest: connections[{i}] bundle-local "
+                                   f"endpoint {v!r} resolves to terminal point "
+                                   f"{hit!r} (dedup hit) — new direct edges to "
+                                   f"terminal points are rejected",
+                    })
+
+    def _check_endpoint_race(self, index: int, conn: dict,
+                             refs: dict[str, str], violations: list[dict]) -> None:
+        """Phase-2 defense-in-depth (check 3): re-verify endpoints right
+        before the connection write — a node deleted/superseded between
+        Phase-1 validation and this write is the race class this exists for.
+        Reuses the SAME message shapes as Phase 1 (Phase-1/2 parity)."""
+        if not isinstance(conn, dict) or "operator" not in conn:
+            return
+        route = self._connection_route(conn)
+        frm = conn.get("from")
+        tos = conn.get("to")
+        vals = []
+        for v in ([frm] + (tos if isinstance(tos, list) else [tos])):
+            vals.append(refs.get(v, v) if isinstance(v, str) else v)
+        external = {v for v in vals if isinstance(v, str)}
+        info = self._fetch_endpoint_info(external)
+        for v in vals:
+            if not isinstance(v, str):
+                continue
+            info_i = info.get(v)
+            if info_i is None:
+                violations.append({
+                    "section": "connections", "index": index,
+                    "message": f"ingest: connections[{index}] external "
+                               f"endpoint {v!r} does not exist",
+                })
+            elif info_i["label"] != "Point" or info_i["is_operator"]:
+                got = ("operator Point" if info_i["is_operator"]
+                       else info_i["label"] or "unknown node type")
+                violations.append({
+                    "section": "connections", "index": index,
+                    "message": f"ingest: connections[{index}] endpoint "
+                               f"{v!r} must be a plain Point — got a {got} "
+                               f"endpoint",
+                })
+            elif route == "direct" and info_i["status"] in self._INGEST_TERMINAL_STATUSES:
+                violations.append({
+                    "section": "connections", "index": index,
+                    "message": f"ingest: connections[{index}] endpoint "
+                               f"{v!r} is {info_i['status']} — new direct edges "
+                               f"to terminal points are rejected",
+                })
+
+    def _connections_conflict(self, ca: dict, cb: dict) -> bool:
+        """§5.2.7 conflict predicate for a same from/to/operator pair.
+
+        Conflicts: differing canonical direction (per op_type), differing
+        confidence/weight/mitigation.strength; label-absent as a DISTINCT
+        value (absent-vs-present → conflict); label-differing on the
+        direct-edge path (label joins the predicate there); mitigation-reason
+        conflict on same-label pairs. Identical pairs are clean dedup.
+        """
+        op = ca["operator"]
+        if self._canonical_direction(op, ca.get("direction")) != \
+                self._canonical_direction(op, cb.get("direction")):
+            return True
+        if ca.get("confidence") != cb.get("confidence"):
+            return True
+        if ca.get("weight") != cb.get("weight"):
+            return True
+        ma, mb = ca.get("mitigation"), cb.get("mitigation")
+        sa = ma.get("strength") if isinstance(ma, dict) else None
+        sb = mb.get("strength") if isinstance(mb, dict) else None
+        if sa != sb:
+            return True
+        la, lb = ca.get("label"), cb.get("label")
+        if la != lb:
+            if la is None or lb is None:
+                return True  # label-absent is a DISTINCT value (cycle-14)
+            if self._connection_route(ca) == "direct" \
+                    or self._connection_route(cb) == "direct":
+                return True  # label joins the direct-edge predicate (cycle-8)
+            # both operator-routed with differing labels → LEGAL (two
+            # operators; _find_operator's key includes label).
+        elif isinstance(ma, dict) and isinstance(mb, dict) and sa == sb \
+                and ma.get("reason") != mb.get("reason"):
+            return True  # mitigation-reason conflict, same-label pairs
+        return False
+
+    def _check_duplicates(self, bundle: dict, violations: list[dict]) -> None:
+        """Check 7 — intra-bundle duplicate connections (§5.2.7).
+
+        Identical duplicates (same from/to/operator with identical direction
+        (canonicalized per op_type), confidence, weight, mitigation.strength,
+        label) are clean dedup — NO violation. Conflicting duplicates are
+        violations (fail-closed — _find_operator's key lacks strength, so
+        acceptance would be order-dependent). Reversed-pair bidirectional
+        contradictions (a→b AND b→a, IMPL/NAND) are violations.
+        """
+        ops = [(i, c) for i, c in enumerate(bundle.get("connections") or [])
+               if isinstance(c, dict) and "operator" in c]
+        for a in range(len(ops)):
+            for b in range(a + 1, len(ops)):
+                ia, ca = ops[a]
+                ib, cb = ops[b]
+                if (ca.get("from") != cb.get("from")
+                        or ca.get("to") != cb.get("to")
+                        or ca["operator"] != cb["operator"]):
+                    continue
+                if self._connections_conflict(ca, cb):
+                    violations.append({
+                        "section": "connections", "index": ib,
+                        "message": f"ingest: connections[{ia}] and "
+                                   f"connections[{ib}] are conflicting "
+                                   f"duplicates — same from/to/operator with "
+                                   f"differing direction/confidence/weight/"
+                                   f"mitigation/label is ambiguous (identical "
+                                   f"duplicates dedup cleanly)",
+                    })
+        for a in range(len(ops)):
+            for b in range(a + 1, len(ops)):
+                ia, ca = ops[a]
+                ib, cb = ops[b]
+                if ca["operator"] not in ("IMPL", "NAND") \
+                        or cb["operator"] not in ("IMPL", "NAND"):
+                    continue
+                if ca.get("from") == cb.get("to") and ca.get("to") == cb.get("from"):
+                    da = self._canonical_direction(ca["operator"], ca.get("direction"))
+                    db = self._canonical_direction(cb["operator"], cb.get("direction"))
+                    if da == "bidirectional" or db == "bidirectional":
+                        violations.append({
+                            "section": "connections", "index": ib,
+                            "message": f"ingest: connections[{ia}] and "
+                                       f"connections[{ib}] are reversed-pair "
+                                       f"contradictions — a bidirectional edge "
+                                       f"already covers both directions",
+                        })
+
+    def _check_gated_status(self, bundle: dict, promotion_policy: str,
+                            violations: list[dict]) -> None:
+        """Check 5 (RETAINED piece, CYCLE-26) — under gated, an explicit
+        status:'live' on a point item is a violation (no bypass of the gated
+        contract; the sanctioned routes are promotion_policy='auto' or
+        update_point(status='live') after ingest)."""
+        if promotion_policy != "gated":
+            return
+        # CYCLE-26 merge resolution: match the SHIPPED A0 semantics (PR #1073
+        # _first_non_draft_status) — ANY status other than the exact canonical
+        # "draft" on a point item is a violation (no bypass; status:'draft'
+        # accepted as a no-op). Phase-1/2 parity via the shared helper.
+        for i, item in enumerate(bundle.get("points") or []):
+            if isinstance(item, dict) and item.get("status") not in (None, "draft"):
+                violations.append({
+                    "section": "points", "index": i,
+                    "message": f"ingest: points[{i}] status:{item.get('status')!r} "
+                               f"is not allowed under promotion_policy 'gated' "
+                               f"— under gated points stay draft; pass "
+                               f"promotion_policy='auto' for explicit live, or "
+                               f"keep draft and promote via "
+                               f"update_point(status='live')",
+                })
+
+    def _validate_bundle(self, bundle: dict, *,
+                         promotion_policy: str = "gated") -> list[dict]:
+        """Phase-1 validation (epic #902 A1 — plan §5.2 checks 1-8).
+
+        Pure and zero-mutation: walks ALL sections and returns EVERY violation
+        as {section, index, message} (aggregated, never fail-fast).
+        Mode-invariant — runs identically for granularity='bulk' and
+        'granular'. Consumes the same shared check helpers as ingest()'s
+        Phase-2 defense-in-depth raises, so Phase 1 catches every violation
+        class Phase 2 can raise (asserted by the parity unit test).
+        """
+        violations: list[dict] = []
+        for section in ("sources", "points", "entities"):
+            for i, item in enumerate(bundle.get(section) or []):
+                self._check_item_shape(section, i, item, violations)
+                if section == "points" and isinstance(item, dict):
+                    self._check_kind(item.get("kind"), i, violations)
+        for i, conn in enumerate(bundle.get("connections") or []):
+            self._check_item_shape("connections", i, conn, violations)
+            self._check_connection(i, conn, violations)
+        self._check_refs(bundle, violations)
+        self._check_endpoints(bundle, violations)
+        self._check_duplicates(bundle, violations)
+        self._check_gated_status(bundle, promotion_policy, violations)
+        return violations
+
     def ingest(self, bundle: dict, granularity: str = "bulk", *,
                promotion_policy: str = "gated") -> dict:
         """Heterogeneous bulk write (epic #888 W4, design ref PR #912).
@@ -2916,23 +3607,21 @@ class TortoiseSDK:
                 f"ingest: bundle must be a dict with points/entities/sources/"
                 f"connections sections, got {type(bundle).__name__}"
             )
-        # Row 9 of INGEST_CONTRACT.md: under gated, points must stay draft —
-        # ANY effective status other than the exact canonical "draft" on a
-        # point item is a violation (no bypass of the gated contract; the
-        # sanctioned routes are promotion_policy='auto' or
-        # update_point(status='live') after ingest). Shared helper keeps the
-        # SDK and MCP layers identical (PR #1073).
-        if promotion_policy == "gated":
-            bad = _first_non_draft_status(bundle.get("points"))
-            if bad is not None:
-                i, st = bad
-                raise ValueError(
-                    f"ingest: points[{i}] status:{st!r} is not allowed under "
-                    f"promotion_policy 'gated' — under gated points stay "
-                    f"draft; pass promotion_policy='auto' for explicit live, "
-                    f"or keep draft and promote via update_point(status='live')"
-                )
-        from .projection.edges import _VALID_EDGE_PREDICATES
+        # Row 9 of INGEST_CONTRACT.md: under gated, an explicit status:'live'
+        # on a point item is a violation — the Q2-lock must not be bypassable
+        # via the bundle's own status field (the sanctioned routes are
+        # promotion_policy='auto' or update_point(status='live') after ingest).
+        # This is check 5's RETAINED piece (CYCLE-26) — enforced by the shared
+        # _check_gated_status helper below (see _validate_bundle).
+
+        # ── Phase 1 — shared check helpers (plan §5.2 checks 1-8): collect
+        # ALL violations with ZERO mutation before any write. Fail-fast raise
+        # carries the first violation's message (the shipped message contract);
+        # the A2 failure contract upgrades this to BundleValidationError with
+        # ALL violations (.violations, .as_dict()).
+        violations = self._validate_bundle(bundle, promotion_policy=promotion_policy)
+        if violations:
+            raise ValueError(violations[0]["message"])
 
         proj = self._get_proj()
         refs: dict[str, str] = {}          # ref → canonical id (or url for sources)
@@ -2967,17 +3656,17 @@ class TortoiseSDK:
                 source_refs.add(ref)
 
         # ── 1. Sources (first: points may reference them via extractedFrom) ──
+        # Phase-2 defense-in-depth: the shared shape helper re-checks the raw
+        # item right before the write (the same helper Phase 1 ran — parity).
         for i, item in enumerate(bundle.get("sources") or []):
-            if not isinstance(item, dict):
-                raise ValueError(f"ingest: sources[{i}] must be a dict")
+            viols: list[dict] = []
+            self._check_item_shape("sources", i, item, viols)
+            if viols:
+                raise ValueError(viols[0]["message"])
             item = dict(item)
             ref = item.pop("ref", None)
             url = item.pop("url", None)
             source_kind = item.pop("sourceKind", None)
-            if not url or not isinstance(url, str):
-                raise ValueError(f"ingest: sources[{i}] requires a non-empty 'url'")
-            if not source_kind:
-                raise ValueError(f"ingest: sources[{i}] requires 'sourceKind'")
             existed = proj.g.query(
                 "MATCH (s:Source {url:$url}) RETURN count(s)",
                 params={"url": url},
@@ -3002,16 +3691,20 @@ class TortoiseSDK:
 
         # ── 2. Points (default status='draft', #131) ────────────────────
         for i, item in enumerate(bundle.get("points") or []):
-            if not isinstance(item, dict):
-                raise ValueError(f"ingest: points[{i}] must be a dict")
+            viols = []
+            self._check_item_shape("points", i, item, viols)
+            if viols:
+                raise ValueError(viols[0]["message"])
             item = dict(item)
             ref = item.pop("ref", None)
-            kind = item.pop("kind", None)
+            # CYCLE-25: kind-absent DEFAULTS to 'statement' (v3.8 canonical —
+            # the extraction write kind). Legacy kinds are write-compat; the
+            # event kind is rejected by the shared _check_kind helper (check 2).
+            kind = item.pop("kind", None) or "statement"
+            self._check_kind(kind, i, viols)
+            if viols:
+                raise ValueError(viols[0]["message"])
             content = item.pop("content", None)
-            if not kind:
-                raise ValueError(f"ingest: points[{i}] requires 'kind'")
-            if content is None:
-                raise ValueError(f"ingest: points[{i}] requires 'content'")
             # extractedFrom may address a bundle source by its local ref
             if isinstance(item.get("extractedFrom"), str) \
                     and item["extractedFrom"] in source_refs:
@@ -3038,17 +3731,14 @@ class TortoiseSDK:
 
         # ── 3. Entities (subject/object merge by name; event/document append) ─
         for i, item in enumerate(bundle.get("entities") or []):
-            if not isinstance(item, dict):
-                raise ValueError(f"ingest: entities[{i}] must be a dict")
+            viols = []
+            self._check_item_shape("entities", i, item, viols)
+            if viols:
+                raise ValueError(viols[0]["message"])
             item = dict(item)
             ref = item.pop("ref", None)
             etype = (item.pop("type", None) or "").strip().lower()
             name = item.pop("name", None)
-            if not etype:
-                raise ValueError(f"ingest: entities[{i}] requires 'type' "
-                                 f"(subject|object|event|document)")
-            if not name:
-                raise ValueError(f"ingest: entities[{i}] requires 'name'")
             # Entity props that wire edges may address earlier bundle items
             # by local ref (points + entities are registered by now).
             for key in ("authoredBy", "ownedBy", "managedBy",
@@ -3072,17 +3762,11 @@ class TortoiseSDK:
                 canonical = node.get("id") or name
             elif etype == "event":
                 event_kind = item.pop("eventKind", None)
-                if not event_kind:
-                    raise ValueError(f"ingest: entities[{i}] type='event' "
-                                     f"requires 'eventKind'")
                 node = self.create_event(name, event_kind, **item)
                 canonical = node.get("eventId") or node.get("id") or name
                 existed = []  # Event records are append-only — never deduped
             elif etype == "document":
                 doc_kind = item.pop("documentKind", None)
-                if not doc_kind:
-                    raise ValueError(f"ingest: entities[{i}] type='document' "
-                                     f"requires 'documentKind'")
                 node = self.create_document(name, doc_kind, **item)
                 canonical = node.get("id") or name
                 existed = []  # Document records are append-only — never deduped
@@ -3104,28 +3788,22 @@ class TortoiseSDK:
                                 "deduped": bool(existed)})
 
         # ── 4. Connections (nodes exist — resolve refs, apply reification) ──
+        # Phase-2 defense-in-depth: the shared contract helper + a live
+        # endpoint re-verify run right before each write — a node deleted/
+        # superseded between Phase-1 validation and this write is the race
+        # class the re-check exists for (same helpers, same messages — parity).
         for i, conn in enumerate(bundle.get("connections") or []):
-            if not isinstance(conn, dict):
-                raise ValueError(f"ingest: connections[{i}] must be a dict")
-            if "from" not in conn or "to" not in conn:
-                raise ValueError(f"ingest: connections[{i}] requires 'from' and 'to'")
-            has_rel, has_op = "relation" in conn, "operator" in conn
-            if has_rel == has_op:
-                raise ValueError(
-                    f"ingest: connections[{i}] must carry exactly one of "
-                    f"'relation' (structural edge) or 'operator' "
-                    f"(IMPL/NAND reification)"
-                )
+            viols = []
+            self._check_item_shape("connections", i, conn, viols)
+            self._check_connection(i, conn, viols)
+            self._check_endpoint_race(i, conn, refs, viols)
+            if viols:
+                raise ValueError(viols[0]["message"])
             src = refs.get(conn["from"], conn["from"])
             to_list = conn["to"] if isinstance(conn["to"], list) else [conn["to"]]
             dsts = [refs.get(x, x) for x in to_list]
-            if has_op:
+            if "operator" in conn:
                 op_type = conn["operator"]
-                if op_type not in self._INGEST_OPERATOR_TYPES:
-                    raise ValueError(
-                        f"ingest: connections[{i}] operator must be one of "
-                        f"{sorted(self._INGEST_OPERATOR_TYPES)}, got {op_type!r}"
-                    )
                 label = conn.get("label")
                 direction = conn.get("direction")
                 existing = self._find_operator(op_type, [src] + dsts,
@@ -3160,11 +3838,6 @@ class TortoiseSDK:
                     conn_result = {"relation": rel, "from": src, "to": dsts[0],
                                    "deduped": bool(existed and existed[0][0])}
                 else:
-                    if rel not in _VALID_EDGE_PREDICATES:
-                        raise ValueError(
-                            f"ingest: connections[{i}] unknown relation {rel!r} — "
-                            f"must be a structural predicate or 'extractedFrom'"
-                        )
                     existed = proj.g.query(
                         f"MATCH (a)-[r:{rel}]->(b) "
                         "WHERE (a.id = $f OR a.eventId = $f OR a.url = $f) "
