@@ -669,7 +669,9 @@ def main():
                             params={"eid": event_id, "props": props, "embedding": embedding}
                         )
                         print(json.dumps({"status": "ingested", "eventId": event_id}))
-                    # Wire INSTANTIATES edges to issue/PR Objects (parity with ingest_corpus)
+                    # Wire aboutObject edges to issue/PR Objects (ONTOLOGY v3.2
+                    # §3.2 — INSTANTIATES was removed from the predicate set;
+                    # #781 re-verified the ingest path is INSTANTIATES-free).
                     try:
                         from tortoise.sdk import TortoiseSDK
                         _sdk = TortoiseSDK()
