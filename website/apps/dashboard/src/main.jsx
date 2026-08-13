@@ -4,6 +4,8 @@ import './index.css'
 
 const API_BASE = 'https://api.premiselabs.co'
 const KEY_STORAGE = 'tortoise_api_key'
+// #1148-ux: remember the last auth method so the login card can surface it
+const LAST_AUTH_METHOD = 'tortoise_last_auth_method'
 // #1082 (PR1): the pasted claim key must survive the OAuth redirect (same-tab
 // PKCE round-trip). sessionStorage is origin-scoped and same-tab — NEVER put
 // the key in `redirectTo` (GoTrue embeds it in the OAuth state URL → leak).
@@ -15,9 +17,6 @@ const KEY_STORAGE = 'tortoise_api_key'
 const CLAIM_KEY_STORAGE = 'tt_claim_key'
 const CLAIM_PENDING_COOKIE = 'tt_claim_pending'
 
-function readClaimKeyStorage() {
-  try { return sessionStorage.getItem(CLAIM_KEY_STORAGE) || '' } catch { return '' }
-}
 
 // Non-secret claim-intent marker (parent domain): lets the welcome page's
 // Phase-2 mint guard and the signin/signup claim-intent routing on
@@ -81,7 +80,17 @@ try {
 }
 
 function App() {
+  // #1148-ux: last auth method (login card "Last used" pills)
+  const [lastAuthMethod, setLastAuthMethod] = React.useState(() => {
+    try { return localStorage.getItem(LAST_AUTH_METHOD) || '' } catch { return '' }
+  })
   const [apiKey, setApiKey] = React.useState(() => localStorage.getItem(KEY_STORAGE) || '')
+  // #1148-ux review: combined login/signup card
+  const [authIsSignup, setAuthIsSignup] = React.useState(false)
+  const [authEmail, setAuthEmail] = React.useState('')
+  const [authPassword, setAuthPassword] = React.useState('')
+  const [authBusy, setAuthBusy] = React.useState(false)
+  const [authShowApiKey, setAuthShowApiKey] = React.useState(false) // #1148-ux: API-key login revealed on click
   const [authed, setAuthed] = React.useState(false)
   const [team, setTeam] = React.useState(null)
   const [keys, setKeys] = React.useState([])
@@ -116,6 +125,61 @@ function App() {
   })
   const [claimBusy, setClaimBusy] = React.useState(false)
   const [claimError, setClaimError] = React.useState('')
+  // #1148-ux review: email+password claim (third identity option)
+  const [claimShowEmail, setClaimShowEmail] = React.useState(false)
+  const [claimEmail, setClaimEmail] = React.useState('')
+  const [claimPassword, setClaimPassword] = React.useState('')
+
+  // #1148: dashboard API-login toggle state (claimed teams). The flag rides
+  // the /v1/team response (dashboard_key_login, default true). Toggle is
+  // owner-only + session-authed server-side (PATCH /v1/team/dashboard-login);
+  // optimistic local update, revert on error.
+  const [toggleBusy, setToggleBusy] = React.useState(false)
+  const [toggleError, setToggleError] = React.useState('')
+  async function toggleDashboardKeyLogin() {
+    if (!team || toggleBusy) return
+    setToggleBusy(true)
+    setToggleError('')
+    const next = team.dashboard_key_login === false
+    const prev = team
+    try {
+      // Optimistic flip; the server returns the authoritative team row.
+      setTeam({ ...team, dashboard_key_login: next })
+      // P3-3 (review): session-authed ONLY — never the raw API key (the key
+      // is the very credential being disabled; self-lockout hazard).
+      if (!sessionTokenRef.current) {
+        setTeam(prev)
+        setToggleError('Sign in with your Tortoise account to change this setting.')
+        return
+      }
+      const res = await fetch(`${API_BASE}/v1/team/dashboard-login`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${sessionTokenRef.current}`,
+        },
+        body: JSON.stringify({ enabled: next }),
+      })
+      if (res.ok) {
+        const t = await res.json()
+        if (t && t.team_id) setTeam(t)
+      } else {
+        let msg = `Couldn't update (HTTP ${res.status}).`
+        try {
+          const b = await res.json()
+          if (b && b.detail) msg = typeof b.detail === 'string' ? b.detail : JSON.stringify(b.detail)
+        } catch { /* non-JSON body */ }
+        setTeam(prev)
+        setToggleError(msg)
+      }
+    } catch (e) {
+      setTeam(prev)
+      setToggleError((e && e.message) || `Couldn't update — try again.`)
+    } finally {
+      setToggleBusy(false)
+    }
+  }
+
   const [tab, setTab] = React.useState('overview')
   const [authMode, setAuthMode] = React.useState('session') // 'session' | 'apikey'
   const [checking, setChecking] = React.useState(true)
@@ -124,6 +188,31 @@ function App() {
   const [graphs, setGraphs] = React.useState([])
   const [currentTeamId, setCurrentTeamId] = React.useState(null)
   const [currentGraphId, setCurrentGraphId] = React.useState(null)
+  const [accountMenuOpen, setAccountMenuOpen] = React.useState(false) // #1148-ux: account blob dropdown
+  const accountBlobRef = React.useRef(null) // #1148-ux review P2-4/P3-1: outside-click + Escape close
+  React.useEffect(() => {
+    if (!accountMenuOpen) return
+    function onPointerDown(e) {
+      if (accountBlobRef.current && !accountBlobRef.current.contains(e.target)) {
+        setAccountMenuOpen(false)
+      }
+    }
+    function onKeyDown(e) {
+      if (e.key === 'Escape') setAccountMenuOpen(false)
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [accountMenuOpen])
+  // #1148-ux: current team name for the account blob (derived from the
+  // teams list; falls back to the team row name).
+  const currentTeamName =
+    teams.find((t) => t.team_id === currentTeamId)?.team_name
+    || team?.team_name
+    || ''
 
 
   const [members, setMembers] = React.useState(null) // null = not loaded / no access
@@ -500,6 +589,58 @@ function App() {
     }
   }
 
+  // #1148-ux review: OAuth login OR signup (Supabase auto-creates the account
+  // on first sign-in — no need to discover which one you are).
+  async function authProvider(provider) {
+    if (!supabaseClient) { setError('Auth is not configured on this deployment.'); return }
+    setError('')
+    setAuthBusy(true)
+    try { localStorage.setItem(LAST_AUTH_METHOD, provider); setLastAuthMethod(provider) } catch { /* best-effort */ }
+    try {
+      const { data, error } = await supabaseClient.auth.signInWithOAuth({
+        provider: provider,
+        options: { redirectTo: `${window.location.origin}${window.location.pathname}` },
+      })
+      if (error) { setError(error.message || 'Sign-in failed — try again.') ; return }
+      if (data?.url) { window.location.href = data.url }
+    } catch (err) {
+      setError((err && err.message) || 'Sign-in failed — try again.')
+    } finally {
+      setAuthBusy(false)
+    }
+  }
+
+  // #1148-ux review: email+password login or signup
+  async function authEmailPassword() {
+    if (!supabaseClient) { setError('Auth is not configured on this deployment.'); return }
+    setError('')
+    setAuthBusy(true)
+    try {
+      const result = authIsSignup
+        ? await supabaseClient.auth.signUp({ email: authEmail.trim(), password: authPassword })
+        : await supabaseClient.auth.signInWithPassword({ email: authEmail.trim(), password: authPassword })
+      if (result.error) {
+        // Map common Supabase errors to plain copy.
+        const m = result.error.message || ''
+        if (m.includes('already registered') || m.includes('already been registered')) {
+          setError('That email is already registered — log in instead, or continue with GitHub/Google.')
+        } else if (m.includes('Invalid login')) {
+          setError('Invalid email or password.')
+        } else {
+          setError(result.error.message || 'Something went wrong — try again.')
+        }
+        return
+      }
+      try { localStorage.setItem(LAST_AUTH_METHOD, 'email'); setLastAuthMethod('email') } catch { /* best-effort */ }
+      // After login/signup, the onAuthStateChange handler picks up the session
+      // and mints the bootstrap key — nothing else to do here.
+    } catch (err) {
+      setError((err && err.message) || 'Something went wrong — try again.')
+    } finally {
+      setAuthBusy(false)
+    }
+  }
+
   async function login() {
     setError('')
     setBusy(true)
@@ -508,6 +649,7 @@ function App() {
       setTeam(t)
       setAuthed(true)
       setAuthMode('apikey') // P5 (code-review): makes the session-only notices live for API-key users
+      try { localStorage.setItem(LAST_AUTH_METHOD, 'apikey'); setLastAuthMethod('apikey') } catch { /* best-effort */ }
       setMembersStatus('denied') // Fix D (review round 2): no session → members view unavailable; never 'Loading…' forever
       apiKeyRef.current = apiKey // Round-22 (P1): createKey's branch-2 guard compares against the LIVE key — API-key auth never populated the ref, so every createKey bailed and keys were silently invisible
       localStorage.setItem(KEY_STORAGE, apiKey)
@@ -527,9 +669,12 @@ function App() {
   // to an anon team (same key, same graph, memories intact).
   async function claimSignIn(provider) {
     setClaimError('')
-    const k = (claimKey || '').trim()
+    // #1148-ux review: the user is ALREADY authenticated (key login) — the
+    // claim uses the session key, never a re-paste. Prefer the live ref, then
+    // the stored key.
+    const k = (apiKeyRef.current || localStorage.getItem(KEY_STORAGE) || '').trim()
     if (!k.startsWith('tt_')) {
-      setClaimError('Enter a valid tt_ key — the one printed when the team was minted.')
+      setClaimError('Your API key is missing from this session — sign out and sign back in with your key, then connect a login.')
       return
     }
     if (!supabaseClient) {
@@ -568,6 +713,46 @@ function App() {
     }
   }
 
+  async function claimEmailPassword() {
+    // #1148-ux review: third identity option — attach email+password. The
+    // server creates the Supabase auth user (admin API, #801 path) and links
+    // the anonymous membership to it (claim_membership RPC) — same key, same
+    // graph. Session key comes from the ref (already authed).
+    setClaimError('')
+    const k = (apiKeyRef.current || localStorage.getItem(KEY_STORAGE) || '').trim()
+    if (!k.startsWith('tt_') || !claimEmail.includes('@') || claimPassword.length < 6) {
+      setClaimError('Enter a valid email and a password of at least 6 characters.')
+      return
+    }
+    setClaimBusy(true)
+    try {
+      const res = await fetch(`${API_BASE}/v1/claim/email`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ api_key: k, email: claimEmail.trim(), password: claimPassword }),
+      })
+      if (res.ok) {
+        setClaimShowEmail(false)
+        setClaimEmail('')
+        setClaimPassword('')
+        setClaimError('')
+        // Reload team state — the claim may have flipped anon/claimed.
+        window.location.reload()
+        return
+      }
+      let msg = `Couldn't connect (HTTP ${res.status}).`
+      try {
+        const b = await res.json()
+        if (b && b.detail) msg = typeof b.detail === 'string' ? b.detail : JSON.stringify(b.detail)
+      } catch { /* non-JSON body */ }
+      setClaimError(msg)
+    } catch (e) {
+      setClaimError((e && e.message) || `Couldn't connect — try again.`)
+    } finally {
+      setClaimBusy(false)
+    }
+  }
+
   async function performClaim(sessionToken, key) {
     // POST /v1/claim — both credentials in ONE request: session JWT
     // (Authorization) + pasted tt_ key (body).
@@ -583,6 +768,7 @@ function App() {
   }
 
   async function logout() {
+    setAccountMenuOpen(false) // #1148-ux: close the blob dropdown on logout
     localStorage.removeItem(KEY_STORAGE)
     setApiKey('')
     apiKeyRef.current = null
@@ -1056,6 +1242,30 @@ function App() {
     }
   }
 
+  async function toggleKeyEnabled(keyId, currentEnabled) {
+    // #1148-ux review: enable/disable an API key. Server PATCH flips the
+    // key's enabled flag (default true = new keys are on). Optimistic local
+    // update; revert on error. A disabled key stops authenticating but stays
+    // listed (re-enabled anytime).
+    setCapNotice('')
+    setError('')
+    const next = !currentEnabled
+    setKeys((prev) => prev.map((k) => k.id === keyId ? { ...k, enabled: next } : k))
+    try {
+      const updated = await api(`/v1/team/keys/${keyId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: next }),
+      })
+      if (updated && updated.id) {
+        setKeys((prev) => prev.map((k) => k.id === keyId ? { ...k, enabled: updated.enabled !== false } : k))
+      }
+    } catch (e) {
+      setKeys((prev) => prev.map((k) => k.id === keyId ? { ...k, enabled: currentEnabled } : k))
+      setError((e && e.message) || `Couldn't toggle the key — try again.`)
+    }
+  }
+
   async function revokeKey(keyId, opts = {}) {
     // Round-20 (P2): capture team at call — a mid-flight switch must not let
     // this revoke's re-mint clobber the new team's active key/localStorage or
@@ -1247,24 +1457,220 @@ function App() {
         <div className="auth-card">
           <div className="logo">Tortoise</div>
           <h1>Dashboard</h1>
-          <p className="dim">{authMode === 'session' ? 'Sign in with your account key, or enter an API key to manage your team.' : 'Enter your API key to manage your team, keys, and sessions.'}</p>
-          <form onSubmit={(e) => { e.preventDefault(); login() }}>
+          {/* #1148-ux review: one screen, two modes. OAuth buttons work for
+              BOTH login and signup (Supabase auto-creates the account on first
+              sign-in) — no need to discover which one you are. Email+password
+              switches semantics per mode; API key is a login-only option. */}
+          <div className="auth-mode-toggle" role="tablist" aria-label="Log in or sign up">
+            <button
+              role="tab"
+              aria-selected={!authIsSignup}
+              className={!authIsSignup ? 'active' : ''}
+              onClick={() => { setAuthIsSignup(false); setError('') }}
+            >
+              Log in
+            </button>
+            <button
+              role="tab"
+              aria-selected={authIsSignup}
+              className={authIsSignup ? 'active' : ''}
+              onClick={() => { setAuthIsSignup(true); setError('') }}
+            >
+              Sign up
+            </button>
+          </div>
+
+          {/* OAuth — login OR signup, zero friction */}
+          <div className="auth-providers">
+            <button className="btn-provider" onClick={() => authProvider('github')} disabled={authBusy}>
+              <svg className="provider-icon" viewBox="0 0 16 16" width="18" height="18" aria-hidden="true" fill="currentColor">
+                <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/>
+              </svg>
+              Continue with GitHub
+              {lastAuthMethod === 'github' && <span className="last-used" aria-label="Last used">Last used</span>}
+            </button>
+            <button className="btn-provider" onClick={() => authProvider('google')} disabled={authBusy}>
+              <svg className="provider-icon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+                <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z"/>
+                <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+                <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+              </svg>
+              Continue with Google
+              {lastAuthMethod === 'google' && <span className="last-used" aria-label="Last used">Last used</span>}
+            </button>
+          </div>
+
+          {/* #1148-ux review: API-key login is a FIRST-CLASS option (anon
+              bootstrap / agents), not a buried secondary — prominent box right
+              under the OAuth buttons. */}
+          {/* #1148-ux review: API-key login is a BUTTON first — click reveals
+              the input (keeps the card clean; the input + submit only render
+              on demand). */}
+          <div className={`auth-apikey auth-apikey-prominent${authShowApiKey ? ' has-form' : ''}`}>
+            {!authShowApiKey ? (
+              <button
+                type="button"
+                className="btn-provider"
+                onClick={() => { setAuthShowApiKey(true); setError('') }}
+                disabled={authBusy}
+              >
+                <span className="key-icon" aria-hidden="true">🔑</span>
+                Log in with API key
+                {lastAuthMethod === 'apikey' && <span className="last-used" aria-label="Last used">Last used</span>}
+              </button>
+            ) : (
+              <form
+                className="auth-apikey-form"
+                onSubmit={(e) => { e.preventDefault(); login() }}
+              >
+                <div className="auth-apikey-label">
+                  <span>API key</span>
+                  <button
+                    type="button"
+                    className="link auth-apikey-back"
+                    onClick={() => setAuthShowApiKey(false)}
+                    disabled={busy}
+                  >← back</button>
+                </div>
+                <input
+                  type="password"
+                  placeholder="tt_..."
+                  aria-label="API key"
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                  autoFocus
+                  autoComplete="one-time-code"
+                />
+                <button type="submit" disabled={busy || !apiKey.trim()}>
+                  {busy ? 'Connecting…' : 'Log in with API key'}
+                </button>
+              </form>
+            )}
+          </div>
+
+          <div className="divider">or</div>
+
+          {/* Email + password (login) or create account (signup) */}
+          <form
+            className="auth-email-form"
+            onSubmit={(e) => { e.preventDefault(); authEmailPassword() }}
+          >
+            <input
+              type="email"
+              placeholder="you@example.com"
+              aria-label="Email"
+              value={authEmail}
+              onChange={(e) => { setAuthEmail(e.target.value); setError('') }}
+              autoComplete="email"
+            />
             <input
               type="password"
-              placeholder="tt_..."
-              aria-label="API key"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              autoFocus
-              autoComplete="one-time-code" // Round-26: one-shot secret — accurate hint, silences the username-field heuristic
+              placeholder="Password"
+              aria-label="Password"
+              value={authPassword}
+              onChange={(e) => { setAuthPassword(e.target.value); setError('') }}
+              autoComplete={authIsSignup ? 'new-password' : 'current-password'}
+              minLength={6}
             />
-            <button type="submit" disabled={busy || !apiKey.trim()}>
-              {busy ? 'Connecting…' : 'Connect'}
+            <button type="submit" disabled={authBusy || !authEmail.includes('@') || authPassword.length < 6}>
+              {authBusy ? 'Please wait…' : (authIsSignup ? 'Create account' : 'Log in')}
+              {!authIsSignup && lastAuthMethod === 'email' && <span className="last-used" aria-label="Last used">Last used</span>}
             </button>
           </form>
+
+
           {error && <div className="error">{error}</div>}
-          <p className="dim small">No key? <a href="https://tortoise.premiselabs.co/signup" target="_blank" rel="noreferrer">Create a free account</a> (GitHub, Google, or email) — you'll get one on the welcome page. Prefer zero-email? Run <code>tortoise signup</code> in your terminal.</p>
         </div>
+      </div>
+    )
+  }
+
+  // #1148-ux review: the dashboard is SESSION-gated. A key-login user on a
+  // CLAIMED team is redirected to session sign-in (key login is only a
+  // bootstrap for anonymous teams). An ANON team sees the full-page Protect
+  // screen (the path to session auth) — no tabs, no content.
+  if (authed && authMode !== 'session' && team && !team.anon) {
+    // Claimed team via key login → require session. Redirect to sign-in.
+    return (
+      <div className="auth-wrap">
+        <div className="auth-card">
+          <div className="logo">Tortoise</div>
+          <h1>Dashboard</h1>
+          <p className="dim">
+            This team requires a GitHub/Google sign-in to manage the dashboard
+            (API keys remain valid for graph operations).
+          </p>
+          <p className="dim small">
+            <a href="https://tortoise.premiselabs.co/signin.html" target="_blank" rel="noreferrer">
+              Sign in with GitHub or Google →
+            </a>
+          </p>
+        </div>
+      </div>
+    )
+  }
+  if (authed && authMode !== 'session' && team && team.anon) {
+    // ANON team via key login → full-page Protect screen (connect a login to
+    // get session access). No tabs, no content — session is the gate.
+    return (
+      <div className="app">
+        <header>
+          <div className="logo">Tortoise</div>
+        </header>
+        <main>
+          <div className="protect-banner protect-full">
+            <h2 className="protect-banner-title">🔐 Protect your account</h2>
+            <p>
+              Attach your GitHub or Google account to enable key rotation and
+              recovery. Otherwise your account is unrecoverable if you lose your
+              API key.
+            </p>
+            <div className="claim-actions">
+              <button onClick={() => claimSignIn('github')} disabled={claimBusy}>
+                {claimBusy ? 'Redirecting…' : 'Connect GitHub'}
+              </button>
+              <button onClick={() => claimSignIn('google')} disabled={claimBusy}>
+                Connect Google login
+              </button>
+              <button className="ghost" onClick={() => setClaimShowEmail(!claimShowEmail)} disabled={claimBusy}>
+                Connect email and password
+              </button>
+            </div>
+            {claimShowEmail && (
+              <form
+                className="inline-form claim-email-form"
+                onSubmit={(e) => { e.preventDefault(); claimEmailPassword() }}
+              >
+                <input
+                  type="email"
+                  placeholder="you@example.com"
+                  aria-label="Email"
+                  value={claimEmail}
+                  onChange={(e) => { setClaimEmail(e.target.value); setClaimError('') }}
+                  autoComplete="email"
+                />
+                <input
+                  type="password"
+                  placeholder="Password (min 6 chars)"
+                  aria-label="Password"
+                  value={claimPassword}
+                  onChange={(e) => { setClaimPassword(e.target.value); setClaimError('') }}
+                  autoComplete="new-password"
+                  minLength={6}
+                />
+                <button type="submit" disabled={claimBusy || !claimEmail.includes('@') || claimPassword.length < 6}>
+                  {claimBusy ? 'Connecting…' : 'Connect email & password'}
+                </button>
+              </form>
+            )}
+            {claimError && <p className="error" role="alert">{claimError}</p>}
+            <p className="dim small">
+              Prefer zero-email? You can keep using your API key for graph
+              operations — this is only about dashboard access.
+            </p>
+          </div>
+        </main>
       </div>
     )
   }
@@ -1278,29 +1684,64 @@ function App() {
           <button className={tab === 'keys' ? 'active' : ''} onClick={() => { setTab('keys'); setSelectedSessionId(null); setSessionDetail(null); }}>API Keys</button>
           <button className={tab === 'graphs' ? 'active' : ''} onClick={() => setTab('graphs')}>Graphs</button>
           <button className={tab === 'members' ? 'active' : ''} onClick={() => setTab('members')}>Members</button>
-          <button className={tab === 'sessions' ? 'active' : ''} onClick={() => { setTab('sessions'); setSelectedSessionId(null); setSessionDetail(null); }}>Sessions</button>
         </nav>
-        <div className="switchers">
-          <select
-            value={currentTeamId || ''}
-            onChange={(e) => e.target.value && switchTeam(e.target.value)}
-            aria-label="Team"
+        {/* #1148-ux: account blob — GitHub/Vercel/Linear pattern: current
+            workspace name + avatar top-right; dropdown switches team and
+            signs out. Replaces the bare team <select> (which read as "No
+            team" and gave no account context). */}
+        <div className="account-blob" ref={accountBlobRef}>
+          <button
+            className="account-blob-btn"
+            onClick={() => setAccountMenuOpen(!accountMenuOpen)}
+            onKeyDown={(e) => { if (e.key === 'Escape') setAccountMenuOpen(false) }}
+            aria-haspopup="menu"
+            aria-expanded={accountMenuOpen}
+            aria-label={`Account menu — ${currentTeamName || 'No team'}`}
           >
-            {teams.length === 0 && <option value="">No team</option>}
-            {teams.map((t) => (
-              <option key={t.team_id} value={t.team_id}>{t.team_name}</option>
-            ))}
-          </select>
-          <select
-            value={currentGraphId || ''}
-            onChange={(e) => setCurrentGraphId(e.target.value)}
-            aria-label="Graph"
-          >
-            {graphs.length === 0 && <option value="">No graph</option>}
-            {graphs.map((g) => (
-              <option key={g.graph_id} value={g.graph_id}>{g.name}</option>
-            ))}
-          </select>
+            <span className="account-avatar" aria-hidden="true">
+              {(currentTeamName || 'T').charAt(0).toUpperCase()}
+            </span>
+            <span className="account-name">{currentTeamName || 'No team'}</span>
+            <span className="account-chevron" aria-hidden="true">▾</span>
+          </button>
+          {accountMenuOpen && (
+            /* P2-1 (a11y, cycle-2): drop role=menu/menuitem — the full APG
+               menu pattern (arrow-key roving focus) isn't implemented, and a
+               declared menu contract without arrow nav is worse than none.
+               Disclosure pattern: labeled group + plain buttons (needs no
+               arrow-key handling; Tab + Enter work natively). */
+            <div className="account-menu" role="group" aria-label="Account actions">
+              {/* P3-4 (review): hide the switch section for single-team users
+                  (anon key-login has no session → teams is empty; showing
+                  "Switch team → No team" reads broken). */}
+              {teams.length > 1 && (
+                <>
+                  <div className="account-menu-label">Switch team</div>
+                  {teams.map((t) => (
+                    <button
+                      key={t.team_id}
+                      className={t.team_id === currentTeamId ? 'active' : ''}
+                      aria-current={t.team_id === currentTeamId ? 'true' : undefined}
+                      onClick={() => {
+                        if (t.team_id !== currentTeamId) switchTeam(t.team_id)
+                        setAccountMenuOpen(false)
+                      }}
+                    >
+                      <span className="account-avatar small" aria-hidden="true">
+                        {(t.team_name || 'T').charAt(0).toUpperCase()}
+                      </span>
+                      <span>{t.team_name}</span>
+                      {t.team_id === currentTeamId && <span className="account-check" aria-hidden="true">✓</span>}
+                    </button>
+                  ))}
+                </>
+              )}
+              <div className="account-menu-divider" />
+              <button className="account-menu-logout" onClick={logout}>
+                Log out
+              </button>
+            </div>
+          )}
         </div>
         {team && team.tier !== 'team' && (
           <a className="tier-badge" href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">
@@ -1313,7 +1754,6 @@ function App() {
         {team && team.tier === 'team' && (
           <span className="tier-badge tier-team">Team tier</span>
         )}
-        <button className="ghost" onClick={logout}>Log out</button>
       </header>
 
       <main>
@@ -1368,102 +1808,79 @@ function App() {
           <section className="overview">
             <h2>Overview</h2>
             <div className="cards">
-              <div className="card"><div className="card-val">{team.point_count ?? 0}</div><div className="card-label">Points</div></div>
+              <div className="card"><div className="card-val">{team.point_count ?? 0}</div><div className="card-label">Data points</div></div>
               <div className="card"><div className="card-val">{authMode === 'session' && graphsLoaded ? graphs.length : '—'}</div><div className="card-label">Graphs</div></div>
               <div className="card"><div className="card-val">{membersStatus === 'ok' ? members.length : '—'}</div><div className="card-label">Users</div></div>
               <div className="card"><div className="card-val">{backupInfo ? (backupInfo.count || 'none') : '—'}</div><div className="card-label">Backups</div></div>
               <div className="card"><div className="card-val">{keys.length}</div><div className="card-label">API Keys</div></div>
-              <div className="card"><div className="card-val">{sessions.length}</div><div className="card-label">Sessions</div></div>
               <div className="card"><div className="card-val">{team.tier || 'free'}</div><div className="card-label">Plan{team.subscription_status ? ` · ${team.subscription_status}` : ''}</div></div>
             </div>
-            {team.tier === 'free' && (
-              <p className="dim small">Upgrade for more graphs, backups, and team members — <a href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">see pricing</a>.</p>
-            )}
-            <p className="dim small">Team ID: <code>{team.team_id}</code></p>
-            <p className="dim small">
-              Limits: {team.max_points ?? '—'} points · {team.max_api_keys ?? '—'} API keys · {team.max_graphs ?? '—'} graphs
-            </p>
-            <div className="billing-actions">
-              {hasActiveSubscription ? (
-                <button className="ghost" onClick={manageBilling}>Manage billing</button>
-              ) : (
-                <button className="ghost" onClick={upgrade} disabled={checkoutPending}>
-                  {checkoutPending ? 'Opening checkout…' : 'Upgrade'}
-                </button>
-              )}
-            </div>
-            <div className="quickstart">
-              <h3>Your first point</h3>
-              <pre>{`curl -X POST https://api.premiselabs.co/v1/points \\
-  -H "Authorization: Bearer ${apiKey.slice(0, 12)}…" \\
-  -H "Content-Type: application/json" \\
-  -d '{"content": "hello graph", "kind": "statement"}'`}</pre>
-            </div>
+            {/* #1148-ux review: Team ID / Limits / billing-actions / quickstart
+                removed — noise (the quickstart lives on the empty state; limits
+                are not actionable here). */}
           </section>
         )}
 
         {tab === 'keys' && (
           <section>
-            {/* #1082 (PR1): claim card — renders when the resolved team is
-                anon (apikey-mode entry — a pre-claim anon owner has NO
-                session by definition). Paste the tt_ key → fresh OAuth
-                (GitHub/Google) → POST /v1/claim. redirectTo is the dashboard
-                claim route (?claim=1), NEVER welcome.html (its Phase-2 mint
-                would orphan the claimable team). */}
-            {team && team.anon && (
-              <div className="claim-card">
-                <h3>Claim this anonymous team</h3>
-                <p className="dim">
-                  This team was minted without a verified identity (zero-email).
-                  Attach your GitHub or Google account to unlock dashboard
-                  session access — same key, same graph, memories intact.
-                </p>
-                {!claimKey ? (
-                  <div className="inline-form">
-                    <input
-                      placeholder="Paste your tt_ key"
-                      aria-label="Paste your tt_ key"
-                      value={claimKey}
-                      onChange={(e) => setClaimKey(e.target.value)}
-                      autoComplete="one-time-code"
-                    />
-                    <button onClick={() => claimSignIn('github')} disabled={claimBusy}>
-                      {claimBusy ? 'Redirecting…' : 'Save key & sign in with GitHub'}
-                    </button>
-                    <button className="ghost" onClick={() => claimSignIn('google')} disabled={claimBusy}>
-                      with Google
-                    </button>
-                  </div>
-                ) : (
-                  <div className="inline-form">
-                    <code className="key-value">{claimKey.slice(0, 12)}…</code>
-                    <button onClick={() => claimSignIn('github')} disabled={claimBusy}>
-                      {claimBusy ? 'Redirecting…' : 'Sign in with GitHub'}
-                    </button>
-                    <button className="ghost" onClick={() => claimSignIn('google')} disabled={claimBusy}>
-                      Sign in with Google
-                    </button>
-                    <button
-                      className="ghost small"
-                      onClick={() => { setClaimKey(''); setClaimError('') }}
-                      disabled={claimBusy}
-                    >
-                      Change key
-                    </button>
-                  </div>
-                )}
-                {claimError && <div className="error">{claimError}</div>}
-                <p className="dim small">
-                  You'll sign in with GitHub or Google (a fresh provider-verified
-                  identity), then come back here with the team unlocked.
-                </p>
+            {/* #1148-ux review: graph selector restyled — page-scoped context
+                control, dark theme. */}
+            <div className="page-graph-selector">
+              <label htmlFor="page-graph-select">Graph</label>
+              <select
+                id="page-graph-select"
+                value={currentGraphId || ''}
+                onChange={(e) => e.target.value && setCurrentGraphId(e.target.value)}
+              >
+                {graphs.length === 0 && <option value="">No graph</option>}
+                {graphs.map((g) => (
+                  <option key={g.graph_id} value={g.graph_id}>{g.name}</option>
+                ))}
+              </select>
+            </div>
+            {/* #1148: dashboard API-login toggle — claimed teams only.
+                Anon teams get the prominent Protect banner instead (above
+                the tabs); this toggle lets a claimed owner stop using a raw
+                API key as a dashboard login credential. Key remains valid
+                for graph operations; management actions (keys, backups,
+                billing) require session sign-in when disabled. */}
+            {/* #1148 review P2-3/P3-2/P3-3: owner-only + session-authed only
+                (a key-login user or member must not see/flip this — the
+                server enforces session+owner; the API-key auth fallback is
+                dropped to avoid self-lockout). Switch is labeled by the
+                SETTING ("API key dashboard login"), not the action. */}
+            {team && !team.anon && isOwnerAdmin && authMode === 'session' && (
+              <div className="toggle-row">
+                <button
+                  className="switch"
+                  role="switch"
+                  aria-checked={team.dashboard_key_login !== false}
+                  data-on={team.dashboard_key_login !== false}
+                  onClick={toggleDashboardKeyLogin}
+                  disabled={toggleBusy}
+                  aria-label="API key dashboard login"
+                />
+                <div className="toggle-body">
+                  <h4>
+                    API key dashboard login{' '}
+                    {team.dashboard_key_login !== false && <span style={{ color: 'var(--accent,#06b6d4)' }}>(recommended: disable)</span>}
+                    {team.dashboard_key_login === false && <span style={{ color: 'var(--green,#4ade80)' }}>disabled ✓</span>}
+                  </h4>
+                  <p>
+                    We recommend disabling your API key as a dashboard sign-in
+                    method. The key stays valid for graph operations — managing
+                    keys, restoring backups, and billing will require your
+                    GitHub/Google sign-in instead.
+                  </p>
+                  {toggleError && <p className="error" role="alert">{toggleError}</p>}
+                </div>
               </div>
             )}
             <div className="row">
               <h2>API Keys</h2>
               <button onClick={createKey} disabled={busy}>+ New key</button>
             </div>
-            <p className="dim small">Lost your key? <button className="link" onClick={recoverKey} disabled={busy}>Generate a new one</button> — works without an existing key (session-authenticated).</p>
+            {/* #1148-ux review: "Lost your key? Generate a new one" removed — the + New key button already covers it. */}
             {capNotice && (
               <div className="cap-notice" style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', margin: '0.5rem 0 1rem', padding: '0.6rem 0.85rem', border: '1px solid var(--border, #d0d7de)', borderRadius: 8, background: 'var(--bg-soft, #f6f8fa)' }}>
                 <span className="dim small">{capNotice}</span>
@@ -1493,9 +1910,24 @@ function App() {
                     <td>{fmtTime(k.created_at || k.createdAt)}</td>
                     <td>{k.revoked_at ? <span className="revoked">revoked</span> : isSessionKey(k) ? <span className="live">ephemeral · session</span> : <span className="live">active</span>}</td>
                     <td>{!k.revoked_at && !isSessionKey(k) && (
-                      <span style={{ display: 'inline-flex', gap: '0.35rem' }}>
-                        <button className="ghost small" onClick={() => regenerateKey(k.id)}>Regenerate</button>
-                        <button className="ghost small" onClick={() => revokeKey(k.id)}>Revoke</button>
+                      <span className="key-actions">
+                        {/* #1148-ux review: on/off toggle (new keys default on) */}
+                        <button
+                          className="key-toggle"
+                          role="switch"
+                          aria-checked={k.enabled !== false}
+                          data-on={k.enabled !== false}
+                          onClick={() => toggleKeyEnabled(k.id, k.enabled !== false)}
+                          aria-label={`Toggle key ${k.key_prefix || k.id?.slice(0, 8)}`}
+                        />
+                        {/* #1148-ux review: trash = delete with confirmation
+                            (revokeKey already confirm()s) */}
+                        <button
+                          className="ghost small key-trash"
+                          onClick={() => revokeKey(k.id)}
+                          aria-label={`Delete key ${k.key_prefix || k.id?.slice(0, 8)}`}
+                          title="Delete key"
+                        >🗑</button>
                       </span>
                     )}</td>
                   </tr>
@@ -1507,9 +1939,6 @@ function App() {
 
         {tab === 'graphs' && (
           <section>
-            {authMode !== 'session' && (
-              <p className="dim small">Graphs are session-authenticated — sign in with your Tortoise account to view and create them.</p>
-            )}
             <div className="row">
               <h2>Graphs</h2>
               {authMode === 'session' ? (
@@ -1530,7 +1959,6 @@ function App() {
             <table>
               <thead><tr><th>Name</th><th>Kind</th><th>Graph ID</th></tr></thead>
               <tbody>
-                {authMode !== 'session' && <tr><td colSpan="3" className="dim">Sign in with your Tortoise account to view graphs.</td></tr>}
                 {authMode === 'session' && graphs.length === 0 && <tr><td colSpan="3" className="dim">No graphs yet — create your first one above.</td></tr>}
                 {graphs.map((g) => (
                   <tr key={g.graph_id}>
@@ -1568,9 +1996,6 @@ function App() {
             {!isOwnerAdmin && (
               <p className="dim small">Only owners and admins can manage members.</p>
             )}
-            {authMode !== 'session' && (
-              <p className="dim small">Members are session-authenticated — sign in with your Tortoise account to view them.</p>
-            )}
             {team && team.tier !== 'team' && isOwnerAdmin && (
               <p className="dim small">Invites require the Team tier — <a href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">upgrade to add teammates</a>.</p>
             )}
@@ -1607,108 +2032,7 @@ function App() {
           </section>
         )}
 
-        {tab === 'sessions' && !selectedSessionId && (
-          <section>
-            <h2>Sessions</h2>
-            {sessions.length === 0 ? (
-              <p className="dim">No sessions yet. Sessions appear when your agents capture conversations.</p>
-            ) : (
-              <table>
-                <thead><tr><th>ID</th><th>Turns / Extracted</th><th>Created</th></tr></thead>
-                <tbody>
-                  {sessions.map((s) => (
-                    <tr
-                      key={s.id || s.session_id}
-                      className="clickable"
-                      tabIndex={0}
-                      role="button"
-                      aria-label={`View session ${(s.id || s.session_id || '').slice(0, 16)} details`}
-                      onClick={() => {
-                        setSelectedSessionId(s.id || s.session_id)
-                        setSessionDetail(null)
-                        fetchSessionDetail(s.id || s.session_id)
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' || e.key === ' ') {
-                          e.preventDefault()
-                          setSelectedSessionId(s.id || s.session_id)
-                          setSessionDetail(null)
-                          fetchSessionDetail(s.id || s.session_id)
-                        }
-                      }}
-                    >
-                      <td><code>{(s.id || s.session_id || '').slice(0, 16)}…</code></td>
-                      <td>{s.turns != null ? `${s.turns} turn${s.turns !== 1 ? 's' : ''}` : '—'}{s.extracted != null ? ` · ${s.extracted} extracted` : ''}</td>
-                      <td>{fmtTime(s.created_at || s.createdAt)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </section>
-        )}
-
-        {tab === 'sessions' && selectedSessionId && (
-          <section>
-            <div className="row">
-              <h2>Session Detail</h2>
-              <button className="ghost" onClick={() => { setSelectedSessionId(null); setSessionDetail(null); }}>← Back to sessions</button>
-            </div>
-            {detailLoading ? (
-              <p className="dim">Loading session…</p>
-            ) : sessionDetail ? (
-              <div className="session-detail">
-                <div className="cards">
-                  <div className="card"><div className="card-val">{sessionDetail.turns ?? 0}</div><div className="card-label">Turns</div></div>
-                  <div className="card"><div className="card-val">{sessionDetail.extracted ?? 0}</div><div className="card-label">Extracted Points</div></div>
-                </div>
-                <p className="dim small">Session ID: <code>{sessionDetail.id}</code> · Created: {fmtTime(sessionDetail.created_at)}</p>
-
-                {sessionDetail.turn_points && sessionDetail.turn_points.length > 0 && (
-                  <div className="session-section">
-                    <h3>Conversation Turns ({sessionDetail.turn_points.length})</h3>
-                    <div className="turn-list">
-                      {sessionDetail.turn_points.map((turn, i) => (
-                        <div key={turn.id || i} className={`turn-item turn-${turn.role}`}>
-                          <div className="turn-header">
-                            <span className="turn-role">{turn.role}</span>
-                            <span className="turn-index">Turn {i + 1}</span>
-                          </div>
-                          <div className="turn-content">{turn.content}</div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {sessionDetail.extracted_points && sessionDetail.extracted_points.length > 0 && (
-                  <div className="session-section">
-                    <h3>Extracted Points ({sessionDetail.extracted_points.length})</h3>
-                    <div className="extracted-list">
-                      {sessionDetail.extracted_points.map((ep, i) => (
-                        <div key={ep.id || i} className={`extracted-item extracted-${ep.kind}`}>
-                          <div className="extracted-header">
-                            <span className={`kind-badge kind-${ep.kind}`}>{ep.kind}</span>
-                            <span className="dim small">{ep.id ? ep.id.slice(0, 12) + '…' : ''}</span>
-                          </div>
-                          <div className="extracted-content">{ep.content}</div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {(!sessionDetail.turn_points || sessionDetail.turn_points.length === 0) &&
-                 (!sessionDetail.extracted_points || sessionDetail.extracted_points.length === 0) && (
-                  <p className="dim">No turns or extracted points found for this session.</p>
-                )}
-              </div>
-            ) : (
-              <p className="dim">Could not load session detail.</p>
-            )}
-          </section>
-        )}
-      </main>
+              </main>
     </div>
   )
 }
