@@ -8,6 +8,7 @@ premise-labs/.wrangler/
 :memory:
 # Runtime artifacts
 .coverage
+.cors-tmp-*/
 tortoise.db
 *.db
 backups/
