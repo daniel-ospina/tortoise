@@ -1734,10 +1734,12 @@ def tortoise_ingest(bundle: Any = None, granularity: str = "bulk",
     granularity='bulk' (default): aggregated {created, ids, nudges}.
     granularity='granular': per-item results for agent step-by-step control.
     promotion_policy='gated' (DEFAULT, Q2): points stay draft, connections
-    never promote (operator path: promote_source=False via #780). Per-item
-    status:'live' is REJECTED under gated (INGEST_CONTRACT row 9 — no bypass
-    of the gated contract; use promotion_policy='auto' or promote after
-    ingest via the SDK's update_point(status='live')).
+    never promote (operator path: promote_source=False via #780). ANY
+    effective status other than 'draft' on a point item is REJECTED under
+    gated (INGEST_CONTRACT row 9 — no bypass of the gated contract; case
+    variants, nested props={...}, and terminal statuses included; use
+    promotion_policy='auto' or promote after ingest via the SDK's
+    update_point(status='live')).
     promotion_policy='auto': #131 parity — source points promote on wire
     (only draft/null-status sources; retracted/deprecated are never
     resurrected); the operator node is written without a status property
@@ -1758,10 +1760,11 @@ def tortoise_ingest(bundle: Any = None, granularity: str = "bulk",
     if promotion_policy not in INGEST_PROMOTION_POLICIES:
         return {"error": f"promotion_policy must be 'gated' or 'auto', got "
                           f"{promotion_policy!r}", "code": ERR_INVALID}
-    # Row-9 guard (SDK-side, mirrors ingest()): under gated, an explicit
-    # status:'live' on a point item is a violation. Effective status is
-    # checked (top-level OR nested props={...}, case-insensitive) so the
-    # nested/case-variant bypasses are closed (PR #1073 re-review P0s).
+    # Row-9 guard (SDK-side, mirrors ingest()): under gated, points must stay
+    # draft — ANY effective status other than 'draft' (top-level OR nested
+    # props={...}, case-insensitive) is a violation. Rejects 'Live',
+    # props:{"status":"live"}, AND canonical terminal statuses that EP would
+    # treat as live (PR #1073 re-review P0s + P1).
     if promotion_policy == "gated":
         for i, item in enumerate(bundle.get("points") or []):
             if not isinstance(item, dict):
@@ -1770,11 +1773,11 @@ def tortoise_ingest(bundle: Any = None, granularity: str = "bulk",
             nested = item.get("props")
             if st is None and isinstance(nested, dict):
                 st = nested.get("status")
-            if st is not None and str(st).strip().lower() == "live":
-                return {"error": f"points[{i}] status:'live' is not allowed under "
-                                  f"promotion_policy 'gated' — pass "
-                                  f"promotion_policy='auto' for explicit live, or "
-                                  f"keep draft and promote via "
+            if st is not None and str(st).strip().lower() != "draft":
+                return {"error": f"points[{i}] status:{st!r} is not allowed under "
+                                  f"promotion_policy 'gated' — under gated points "
+                                  f"stay draft; pass promotion_policy='auto' for "
+                                  f"explicit live, or keep draft and promote via "
                                   f"update_point(status='live')",
                         "code": ERR_INVALID}
     return _safe(_quota_gated(_get_team_sdk().ingest, "points",

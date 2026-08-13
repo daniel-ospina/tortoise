@@ -802,11 +802,15 @@ class TestIngestPromotionPolicy:
         assert "promotion_policy='auto'" in res["error"]
 
     def test_mcp_gated_rejects_nested_props_and_case_variant(self):
-        # PR #1073 re-review P0s at the MCP layer: nested props={status:live}
-        # and case variants must both return ERR_INVALID under gated.
+        # PR #1073 re-review P0s/P1 at the MCP layer: nested props={status:live},
+        # case variants, and canonical terminal statuses must all return
+        # ERR_INVALID under gated.
         for item in ({"kind": "claim", "content": "A",
                       "props": {"status": "live"}},
-                     {"kind": "claim", "content": "A", "status": "Live"}):
+                     {"kind": "claim", "content": "A", "status": "Live"},
+                     {"kind": "claim", "content": "A", "status": "retracted"},
+                     {"kind": "claim", "content": "A",
+                      "props": {"status": "archived"}}):
             res = mcp_mod.tortoise_ingest(
                 bundle={"points": [item]})
             assert res["code"] == mcp_mod.ERR_INVALID == -32003

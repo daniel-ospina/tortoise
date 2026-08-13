@@ -364,7 +364,7 @@ class TestPromotionPolicy:
     def test_gated_rejects_case_variant_status(self, sdk):
         # PR #1073 re-review P0: case variants must not bypass the guard —
         # EP treats every status except exact 'draft' as live.
-        for bad in ("Live", "LIVE", "lIve"):
+        for bad in ("Live", "LIVE", "lIve", " live ", "\tlive\n"):
             bundle = {
                 "points": [
                     {"ref": "pA", "kind": "claim", "content": "A",
@@ -376,16 +376,32 @@ class TestPromotionPolicy:
                 sdk.ingest(bundle)
             assert "not allowed under promotion_policy 'gated'" in str(exc.value)
 
+    def test_gated_rejects_terminal_status(self, sdk):
+        # PR #1073 re-review P1: canonical terminal statuses are EP-LIVE under
+        # gated ( _live_only excludes only exact 'draft') and no fresh point
+        # can legitimately carry them (terminal states come from retract/-
+        # supersede flows) — fail-closed under gated, top-level and nested.
+        for bad in ("retracted", "superseded", "outdated", "archived"):
+            for item in (
+                {"ref": "pA", "kind": "claim", "content": "A", "status": bad},
+                {"ref": "pA", "kind": "claim", "content": "A",
+                 "props": {"status": bad}},
+            ):
+                bundle = {"points": [item], "connections": []}
+                with pytest.raises(ValueError) as exc:
+                    sdk.ingest(bundle)
+                assert "not allowed under promotion_policy 'gated'" in str(
+                    exc.value)
+
     def test_create_point_rejects_non_canonical_status(self, sdk):
         # Fail-closed vocabulary validation on the create path (PR #1073
-        # re-review P0): a non-canonical status must not be storable — it
-        # would otherwise be treated as EP-live by _live_only.
-        with pytest.raises(ValueError) as exc:
-            sdk.create_point("claim", "junk status", status="Live")
-        assert "Invalid status" in str(exc.value)
-        with pytest.raises(ValueError) as exc:
-            sdk.create_point("claim", "junk status", status="draft ")  # trailing ws
-        assert "Invalid status" in str(exc.value)
+        # re-review P0/P1): a non-canonical status must not be storable — it
+        # would otherwise be treated as EP-live by _live_only. Non-str values
+        # (including unhashable list/dict) raise ValueError, not TypeError.
+        for bad in ("Live", "draft ", "live\n", ["live"], {"x": 1}, None):
+            with pytest.raises(ValueError) as exc:
+                sdk.create_point("claim", "junk status", status=bad)
+            assert "Invalid status" in str(exc.value)
 
     def test_auto_not_retroactive_on_dedup(self, sdk):
         # "Promotes when its FIRST edge is created": a re-ingest under auto

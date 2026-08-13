@@ -191,7 +191,7 @@ policy):
 
 | Policy | Points | Connections |
 |---|---|---|
-| `"gated"` (default — shipped since A0, epic #902) | stay `draft`; an explicit `status:"live"` item is a violation (row 9) | never promote. Direct edges: no promotion. Operator path: `promote_source=False` → operator created `draft`, source **not** auto-promoted. |
+| `"gated"` (default — shipped since A0, epic #902) | stay `draft`; ANY effective status other than `"draft"` on a point item is a violation (row 9 — case variants, nested `props={...}`, and terminal statuses included) | never promote. Direct edges: no promotion. Operator path: `promote_source=False` → operator created `draft`, source **not** auto-promoted. |
 | `"auto"` (opt-in parity mode) | source points promote on write (#131 parity) | source of an operator-requiring connection is auto-promoted to `live` (draft/null-status sources only; terminal sources never resurrected). Operator node written without a status property (live by projection, the #780 asymmetry). Deduped connections never retro-promote — promotion fires on **first edge creation** only. |
 
 `promotion_policy` is orthogonal to granularity — the same bundle via
@@ -300,7 +300,7 @@ callers get a `ValueError` subclass (`BundleValidationError`) with
 | 6 | Endpoint typing | `external endpoint 'ghost-id' does not exist`; `connection endpoint must be a plain Point, got a Source` | Direct-edge and operator-requiring connections need existing plain-Point endpoints (or bundle-local refs to point items). |
 | 7 | Terminal endpoints | `endpoint '01J8…' is superseded/retracted — new direct edges to terminal points are rejected` | Point the connection at a live/draft point; supersede transfers are the mechanism to repoint. |
 | 8 | Conflicting duplicates | `same-pair IMPL connections with differing direction/confidence are ambiguous`; label / direction / mitigation-reason conflicts | Identical duplicates are cleanly deduped; **conflicting** duplicates are rejected fail-closed. Unify the conflicting attribute, or use label-differing pairs (legal on the operator route). |
-| 9 | `status:"live"` under gated | `status:'live' is not allowed under promotion_policy 'gated'` | Use `promotion_policy="auto"` for explicit live, or keep draft and promote via `tortoise_update_point(status="live")` (the interim promotion route — see [§11](#11-promotion--ep)). |
+| 9 | any effective status other than `"draft"` under gated (case variants, `props:{...}` nesting, terminal statuses) | `status:'X' is not allowed under promotion_policy 'gated'` | Use `promotion_policy="auto"` for explicit live, or keep draft and promote via `tortoise_update_point(status="live")` (the interim promotion route — see [§11](#11-promotion--ep)). |
 | 10 | `batch_id` in bundle | `batch_id is server-managed and cannot be set on bundle items` (**planned**) | Remove it; the server computes and stamps it. |
 | 11 | `c_cal` on a bundle item | `c_cal is calibrated-pipeline-write-only` (**planned**) | Never send `c_cal` through ingest; calibrated confidence is written only by the calibration pipeline. |
 | 12 | `quote` over cap | `quote exceeds 200 characters` (**planned**, Phase 1) | Truncate the provenance quote to ≤200 chars. |
