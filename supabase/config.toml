@@ -186,6 +186,10 @@ password_requirements = ""
 
 [auth.rate_limit]
 # Number of emails that can be sent per hour. Requires auth.email.smtp to be enabled.
+# 2/hr is DEV-ONLY and intentional (local inbucket testing; keeps the bucket
+# branch exercisable — see #801/#863). Hosted project runs the shared 30/hr
+# project-wide bucket (custom SMTP) — headroom + 429 alerting there is a
+# dashboard/ops item (#885), NOT this file.
 email_sent = 2
 # Number of SMS messages that can be sent per hour. Requires auth.sms to be enabled.
 sms_sent = 30
@@ -201,10 +205,29 @@ token_verifications = 30
 web3 = 30
 
 # Configure one of the supported captcha providers: `hcaptcha`, `turnstile`.
-# [auth.captcha]
-# enabled = true
-# provider = "hcaptcha"
-# secret = ""
+# GoTrue captcha (#885) — gates the public email-sending endpoints
+# (POST /auth/v1/signup | recover | resend | magiclink | otp; /token on recent
+# GoTrue). When enabled, those requests MUST carry a valid captcha token
+# (gotrue_meta_security.captcha_token) or GoTrue answers 400. Email-change
+# (PUT /auth/v1/user) is NOT gated — authenticated route, no captcha hook
+# (see #885 / the #863 plan acceptance (a)).
+#
+# FAIL-CLOSED by design: GoTrue refuses to boot while enabled with an empty
+# secret (conf.CaptchaConfiguration.Validate → "captcha provider secret is
+# empty"), so there is no silent fail-open. This is the OPPOSITE of the #308
+# app-level _check_turnstile check (hosted API), which fails OPEN while the
+# secret is unset.
+#
+# Scope: this block governs LOCAL (supabase start) + SELFHOST only. The hosted
+# project (ybetwichurajbfswfeqa) is dashboard-managed — the human step is
+# Dashboard → Auth → Security → CAPTCHA with the same TURNSTILE_SECRET_KEY.
+# Local dev: set TURNSTILE_SECRET_KEY in .env (a Turnstile TEST secret works
+# for localhost) or flip enabled = false for local-only work. The PUBLIC site
+# key is client-side (widget) only — GoTrue never reads it.
+[auth.captcha]
+enabled = true
+provider = "turnstile"
+secret = "env(TURNSTILE_SECRET_KEY)"
 
 [auth.email]
 # Allow/disallow new user signups via email to your project.

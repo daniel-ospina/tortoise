@@ -17,6 +17,10 @@
 # Usage:  bash supabase/tests/run_schema_tests.sh
 # Requires: supabase CLI + Docker (supabase start / db reset); psql or
 #           docker CLI to run the assertion SQL.
+# NOTE (#885): config.toml now enables [auth.captcha] (fail-closed). If
+#           `supabase start` fails to boot the auth container, set
+#           TURNSTILE_SECRET_KEY in .env (Turnstile TEST secret) or
+#           temporarily flip [auth.captcha] enabled = false locally.
 # ============================================================================
 set -euo pipefail
 
