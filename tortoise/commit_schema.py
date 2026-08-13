@@ -849,7 +849,6 @@ def adjudicate_budget(
     prior_created: int,
     delta: int,
     first_adjudication: bool,
-    is_episodic: bool = False,
     point_ids: Iterable[str] = (),
 ) -> BudgetDecision:
     """Per-session cumulative budget check on the RECONCILED net-new delta.
@@ -869,11 +868,6 @@ def adjudicate_budget(
     Order matters (W-3 [4]): the ceiling check runs post-reconciliation,
     pre-write — it counts net-new, which only the reconciliation knows.
     """
-    if is_episodic:
-        return BudgetDecision(
-            "ok", prior_created + delta,
-            reason="episodic session — exempt from the value-points budget",
-        )
     cumulative = prior_created + delta
     if cumulative > BUDGET_CEILING:
         return BudgetDecision(
@@ -974,12 +968,16 @@ def plan_commit(
             ),
         )
     reconcile = reconcile_payload(payload, state)
-    delta = 0 if state.is_episodic else reconcile.net_new
+    # The budget numerator is net-new NON-EPISODIC nodes (plan §6.1). The
+    # Session's own is_episodic flag is the QUOTA discriminator, NOT a budget
+    # exemption — value points from the commit endpoint are non-episodic and
+    # always count (review fix, PR #953: the previous exemption let a held
+    # re-submission bypass the ceiling — Session C).
+    delta = reconcile.net_new
     budget = adjudicate_budget(
         prior_created=state.value_nodes_created,
         delta=delta,
         first_adjudication=is_first_adjudication(record),
-        is_episodic=state.is_episodic,
         point_ids=[
             pr.point.id for pr in reconcile.points
             if pr.action in ("new", "supersede")
