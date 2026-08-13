@@ -575,7 +575,8 @@ class InvitationError(Exception):
 
 
 def invitation_mint(cp, team_id: str, email: str, role: str,
-                    invited_by: str, expires_days: int = 7) -> dict:
+                    invited_by: str, expires_days: int = 7,
+                    inviter_email: str | None = None) -> dict:
     """Create a pending invitations row; returns the plaintext token ONCE.
 
     The token is minted here and stored only as ``lookup_hash`` (SHA-256(pepper
@@ -627,6 +628,7 @@ def invitation_mint(cp, team_id: str, email: str, role: str,
                 "lookup_hash": _lookup_hash(token),
                 "role": role,
                 "invited_by": invited_by,
+                "inviter_email": inviter_email,
                 "email": email,
                 "status": "pending",
                 "expires_at": expires_at,
@@ -798,6 +800,37 @@ def invitation_accept(cp, token: str, user_id: str,
             pass
         raise
     return {"team_id": inv["team_id"], "role": inv["role"]}
+
+
+def invitation_info_by_token(cp, token: str) -> dict | None:
+    """Public invite-info lookup by plaintext token (#1177).
+
+    Returns the display fields for the accept page: team_id, role, expires_at,
+    inviter_email — or None for unknown/expired/consumed tokens. The token is
+    matched via its lookup_hash (O(1) index, same as accept). Only display-safe
+    fields are returned: never the lookup_hash or the invitee email.
+    """
+    from datetime import datetime
+    from tortoise.auth import lookup_hash as _lookup_hash
+
+    rows = cp.query(
+        "invitations",
+        select=["id", "team_id", "role", "inviter_email", "expires_at",
+                "status", "accepted_at"],
+        filters=[("lookup_hash", "eq", _lookup_hash(token))],
+    )
+    if not rows:
+        return None
+    row = rows[0]
+    # Consumed or revoked invites are not accept-able — treat as unknown.
+    if row.get("status") not in (None, "pending") or row.get("accepted_at"):
+        return None
+    return {
+        "team_id": row["team_id"],
+        "role": row.get("role", "member"),
+        "inviter_email": row.get("inviter_email"),
+        "expires_at": row.get("expires_at"),
+    }
 
 
 def invitation_rescind(cp, invitation_id: str, team_id: str,
