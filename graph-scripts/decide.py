@@ -179,7 +179,7 @@ def main():
 
             try:
                 op = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)],
-                                         context=ctx, label=label)
+                                         label=label)
                 created_ops[(src, op_type, tgt)] = op["id"]
                 all_operator_ids.append(op["id"])
                 print(f"  ✓ {src} --{op_type}--> {tgt}")
@@ -192,7 +192,7 @@ def main():
             op_type = te.get("op_type", "NAND")
             tgt = te["target"]
             try:
-                top = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)], context=ctx)
+                top = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)])
                 all_operator_ids.append(top["id"])
                 print(f"  ⚡ truth: {src} --{op_type}--> {tgt}")
             except Exception as e:
@@ -212,7 +212,7 @@ def main():
                 # (prevents duplicate operators feeding EP twice).
                 op_id = created_ops.get((src, op_type, tgt))
                 if op_id is None:
-                    op = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)], context=ctx)
+                    op = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)])
                     op_id = op["id"]
                     all_operator_ids.append(op_id)
                 sdk.mitigate_operator(op_id, reason, strength)
@@ -227,7 +227,7 @@ def main():
                 print(f"  (context-free mode: {len(all_operator_ids)} operator factors)")
                 result = sdk.compute_confidence(factors=all_operator_ids)
             else:
-                result = sdk.compute_confidence(context=ctx)
+                result = sdk.compute_confidence()
             print(f"\n✓ EP computed: {result['iterations']} iterations, "
                   f"converged={result['converged']}")
             confs = result.get("confidences", {})

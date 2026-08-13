@@ -145,14 +145,14 @@ for pid, content in all_points.items():
 # ── Create operators (edges) ──
 for src, op_type, tgt in edges:
     try:
-        sdk.create_operator(op_type, point_ids[src], [point_ids[tgt]], context=ctx)
+        sdk.create_operator(op_type, point_ids[src], [point_ids[tgt]])
         print(f"  ✓ {src} --{op_type}--> {tgt}")
     except Exception as e:
         print(f"  ⚠ {src} --{op_type}--> {tgt}: {e}")
 
 # ── Compute confidence per option ──
 try:
-    result = sdk.compute_confidence(context=ctx)
+    result = sdk.compute_confidence()
     print(f"\n✓ EP computed: {result['iterations']} iterations, converged={result['converged']}")
     confs = result.get("confidences", {})
     opt_conf = {}

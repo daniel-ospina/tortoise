@@ -98,7 +98,7 @@ class AuditLogger:
     ) -> None:
         """Append an audit event.
 
-        ``detail`` is a free-form JSONB payload (20260813000003 added the
+        ``detail`` is a free-form JSONB payload (20260813000004 added the
         column; team_claim stores provider/email/user_id — 0002 has no
         provider/email columns).
 
