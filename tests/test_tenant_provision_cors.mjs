@@ -200,6 +200,17 @@ try {
   assert.ok(jwtBody.api_key && jwtBody.api_key.startsWith("tt_"), "JWT 201 body must include the minted api_key");
   assert.equal(jwtBody.team_name, "test", "team name derives from display_name");
 
+  // Non-string provider metadata display_name must NOT crash the 500 path
+  // (issue #1132): team name falls back to the email prefix.
+  __setJwtUser({ id: USER_ID, email: EMAIL, user_metadata: { display_name: 123 } });
+  const dnRes = await call("POST", jwtHeaders, JSON.stringify({ user_id: USER_ID, email: EMAIL }));
+  check("JWT POST, non-string metadata display_name → 201 (no 500, email-prefix team)",
+    dnRes,
+    { status: 201, acao: FALLBACK, vary: true });
+  const dnBody = JSON.parse(await dnRes.text());
+  assert.equal(dnBody.team_name, "t", "team name falls back to email prefix (t@t.co)");
+  __setJwtUser({ id: USER_ID, email: EMAIL, user_metadata: { display_name: "Test" } });
+
   check("JWT POST, target mismatch (user A mints for user B) → 403 with CORS",
     await call("POST", jwtHeaders, JSON.stringify({ user_id: "99999999-9999-9999-9999-999999999999", email: "other@x.co" })),
     { status: 403, acao: FALLBACK, vary: true });

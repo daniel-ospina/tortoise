@@ -89,6 +89,27 @@ function App() {
   const [error, setError] = React.useState('')
   const [busy, setBusy] = React.useState(false)
   const [newKey, setNewKey] = React.useState(null)
+  const [capNotice, setCapNotice] = React.useState('') // #1147: tier-cap upgrade prompt (keys tab)
+
+  // #1147: build the tier-cap notice. The server's 402 detail carries the
+  // real limit ('Team api_keys limit reached (N). Upgrade your plan to
+  // increase it.') — /v1/team does NOT return max_api_keys, so parse it
+  // instead of trusting a client-side hardcode.
+  function upgradeNoticeFrom(message, team_) {
+    const m = String(message || '').match(/limit reached \((\d+)\)/)
+    const limit = m ? m[1] : (team_?.max_api_keys ?? '2')
+    return `You've reached your plan's limit of ${limit} API keys. Upgrade to add more — or regenerate an existing key instead.`
+  }
+
+  // #1147: shared mint — POST /v1/team/keys and return the plaintext key.
+  async function mintKey(activeKey) {
+    const k = await api('/v1/team/keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(activeKey ? { Authorization: `Bearer ${activeKey}` } : {}) },
+      body: '{}',
+    })
+    return k.api_key || k.key || k
+  }
   // #1082 (PR1): claim-card state — paste tt_ key → OAuth → POST /v1/claim.
   const [claimKey, setClaimKey] = React.useState(() => {
     try { return sessionStorage.getItem(CLAIM_KEY_STORAGE) || '' } catch { return '' }
@@ -648,6 +669,7 @@ function App() {
     // P3 (code-review): reset stale team-scoped state at the top so a rapid
     // switch never flashes the previous team's members/graphs, and record the
     // requested team as current for staleness guards.
+    setCapNotice('') // #1147: a cap banner from the previous team must not stick
     const prevTeamId = currentTeamId
     const prevKey = apiKey
     const tok = sessionTokenRef.current
@@ -950,6 +972,7 @@ function App() {
     // against the ref after the await (the round-16 mutation pattern).
     const _teamAtCall = currentTeamId
     if (busy) return // Round-27: in-function double-click guard (disabled attr is click-path only)
+    setCapNotice('')
     setError('')
     setBusy(true)
     try {
@@ -958,11 +981,7 @@ function App() {
       // a key created with it lands on the wrong team.
       const _apiKeyAtCall = apiKey
       const activeKey = _teamAtCall ? (teamKeysRef.current[_teamAtCall] || _apiKeyAtCall) : _apiKeyAtCall
-      const k = await api('/v1/team/keys', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...(activeKey ? { Authorization: `Bearer ${activeKey}` } : {}) },
-        body: '{}',
-      })
+      const newKeyVal = await mintKey(activeKey)
       // Identity guard BEFORE any UI write: a team switch during the POST must
       // not render this team's plaintext key card or key table under the new
       // team's header (switchTeam's setNewKey(null) already ran for the new team).
@@ -979,22 +998,71 @@ function App() {
       // mid-switch window (cache[B] empty, apiKey already moved to A's key
       // from a prior switch).
       if (cachedForTeam ? activeKey !== cachedForTeam : activeKey !== apiKeyRef.current) return
-      setNewKey(k.api_key || k.key || k)
+      setNewKey(newKeyVal)
       await loadAll(activeKey)
     } catch (e) {
       // Round-18: a stale request's error must not land under the new team
-      if (teamIdRef.current === _teamAtCall) setError(e.message)
+      if (teamIdRef.current === _teamAtCall) {
+        // #1147: a tier-cap 402 (hosted_api._check_team_limit) is a LIMIT,
+        // not an error — surface the upgrade prompt with the real cap.
+        if (e.status === 402) {
+          setCapNotice(upgradeNoticeFrom(e.message, team))
+          setError('')
+        } else {
+          setError(e.message)
+        }
+      }
     } finally {
       setBusy(false)
     }
   }
 
-  async function revokeKey(keyId) {
+  async function regenerateKey(keyId) {
+    // #1147: rotate = mint the REPLACEMENT first (the old key still
+    // authorizes the request), then revoke the old — a single mint (no
+    // bootstrap-pool growth), works in both auth modes, and the replacement
+    // becomes the active key (shown once). Available on every tier:
+    // regenerating does not grow the key count.
+    if (busy) return
+    if (!confirm('Regenerate this API key? A new key is created and the current one is revoked (shown once). Applications using the old key will stop working.')) return
+    setCapNotice('')
+    setError('')
+    setBusy(true)
+    try {
+      const _teamAtCall = currentTeamId
+      const activeKey = _teamAtCall ? (teamKeysRef.current[_teamAtCall] || apiKey) : apiKey
+      const newKeyVal = await mintKey(activeKey)
+      // Revoke the old key — skip its bootstrap re-mint (we already hold the
+      // replacement; the re-mint exists only for revoke-without-replacement).
+      await revokeKey(keyId, { skipConfirm: true, skipBootstrap: true })
+      if (teamIdRef.current !== _teamAtCall) return
+      // Install the replacement as the team's active data-plane key.
+      setNewKey(newKeyVal)
+      if (_teamAtCall) teamKeysRef.current[_teamAtCall] = newKeyVal
+      if (localStorage.getItem(KEY_STORAGE) === apiKey) localStorage.setItem(KEY_STORAGE, newKeyVal)
+      apiKeyRef.current = newKeyVal
+      await loadAll(newKeyVal)
+    } catch (e) {
+      if (teamIdRef.current === currentTeamId) {
+        if (e.status === 402) {
+          setCapNotice(upgradeNoticeFrom(e.message, team))
+          setError('')
+        } else {
+          setError(e.message)
+        }
+      }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function revokeKey(keyId, opts = {}) {
     // Round-20 (P2): capture team at call — a mid-flight switch must not let
     // this revoke's re-mint clobber the new team's active key/localStorage or
     // land the old team's key table under the new header.
     const _teamAtCall = currentTeamId
-    if (!confirm('Revoke this API key? Applications using it will stop working.')) return
+    if (!opts.skipConfirm && !confirm('Revoke this API key? Applications using it will stop working.')) return
+    setCapNotice('')
     setError('')
     try {
       await api(`/v1/team/keys/${keyId}`, { method: 'DELETE' })
@@ -1005,7 +1073,7 @@ function App() {
       // per-team cache + localStorage now hold a dead key — re-mint so the
       // app doesn't 401 on the next switch/reload.
       const cached = _teamAtCall ? teamKeysRef.current[_teamAtCall] : null
-      if (cached && keyId === keyIdFromValue(cached)) {
+      if (cached && keyId === keyIdFromValue(cached) && !opts.skipBootstrap) {
         delete teamKeysRef.current[currentTeamId]
         if (localStorage.getItem(KEY_STORAGE) === cached) localStorage.removeItem(KEY_STORAGE)
         const tok = sessionTokenRef.current
@@ -1396,6 +1464,18 @@ function App() {
               <button onClick={createKey} disabled={busy}>+ New key</button>
             </div>
             <p className="dim small">Lost your key? <button className="link" onClick={recoverKey} disabled={busy}>Generate a new one</button> — works without an existing key (session-authenticated).</p>
+            {capNotice && (
+              <div className="cap-notice" style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', margin: '0.5rem 0 1rem', padding: '0.6rem 0.85rem', border: '1px solid var(--border, #d0d7de)', borderRadius: 8, background: 'var(--bg-soft, #f6f8fa)' }}>
+                <span className="dim small">{capNotice}</span>
+                {team?.checkout_price_id ? (
+                  <button className="ghost small" onClick={upgrade} disabled={checkoutPending}>
+                    {checkoutPending ? 'Opening checkout…' : 'Upgrade'}
+                  </button>
+                ) : (
+                  <a className="ghost small" href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">See pricing</a>
+                )}
+              </div>
+            )}
             {newKey && (
               <div className="new-key">
                 <strong>Your new key (shown once):</strong>
@@ -1412,7 +1492,12 @@ function App() {
                     <td><code>{k.key_prefix || k.id?.slice(0, 12)}</code></td>
                     <td>{fmtTime(k.created_at || k.createdAt)}</td>
                     <td>{k.revoked_at ? <span className="revoked">revoked</span> : isSessionKey(k) ? <span className="live">ephemeral · session</span> : <span className="live">active</span>}</td>
-                    <td>{!k.revoked_at && !isSessionKey(k) && <button className="ghost small" onClick={() => revokeKey(k.id)}>Revoke</button>}</td>
+                    <td>{!k.revoked_at && !isSessionKey(k) && (
+                      <span style={{ display: 'inline-flex', gap: '0.35rem' }}>
+                        <button className="ghost small" onClick={() => regenerateKey(k.id)}>Regenerate</button>
+                        <button className="ghost small" onClick={() => revokeKey(k.id)}>Revoke</button>
+                      </span>
+                    )}</td>
                   </tr>
                 ))}
               </tbody>
