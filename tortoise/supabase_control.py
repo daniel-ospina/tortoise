@@ -409,9 +409,17 @@ def resolve_api_key(cp, token: str) -> dict | None:
         return None
     team_row = team_rows[0]
 
-    tier = team_row.get("tier") or "free"
+    # #1082 PR2: anon-ceiling derivation at the auth boundary — an
+    # unclaimed zero-email team resolves to the reduced ``anon`` tier until
+    # claimed (owner user_id linked). Fail-open to stored tier on error.
+    from tortoise.quota import derived_tier
+    tier = derived_tier({**team_row, "id": team_id})
     from tortoise.pricing import tier_limits
     lim = tier_limits(tier)
+    anon_override = tier == "anon"  # #1082 PR2: stored caps were minted at
+    # free values (agent_signup provisions tier='free' columns); when the
+    # unclaimed-owner predicate derives anon, override read-time with the
+    # reduced anon tier values — never leave free caps on an anon team.
     max_users = team_row.get("max_users")
     max_graphs = team_row.get("max_graphs")
     graph_size_cap = team_row.get("graph_size_cap")
@@ -421,10 +429,15 @@ def resolve_api_key(cp, token: str) -> dict | None:
         "tier": tier,
         # max_users/max_graphs: preserve None (unlimited, Team tier) and fall
         # back to pricing when the column is missing (mirrors registry path).
-        "max_users": max_users if max_users is not None else lim["max_users_per_team"],
-        "max_graphs": max_graphs if max_graphs is not None else lim["max_graphs_per_team"],
-        # points counter counts graph nodes → graph_size_cap (#310 GAP-B)
-        "max_points": int(graph_size_cap) if graph_size_cap is not None else lim["max_graph_nodes"],
+        # anon tier overrides BOTH stored and pricing (reduced caps bind).
+        "max_users": (lim["max_users_per_team"] if anon_override
+                      else (max_users if max_users is not None else lim["max_users_per_team"])),
+        "max_graphs": (lim["max_graphs_per_team"] if anon_override
+                       else (max_graphs if max_graphs is not None else lim["max_graphs_per_team"])),
+        # points counter counts graph nodes → graph_size_cap (#310 GAP-B);
+        # anon tier forces the reduced node cap.
+        "max_points": (int(lim["max_graph_nodes"]) if anon_override
+                       else (int(graph_size_cap) if graph_size_cap is not None else lim["max_graph_nodes"])),
         # 0006 teams has no max_api_keys/max_sessions columns — pricing/defaults
         "max_api_keys": lim["max_api_keys"],
         "max_sessions": DEFAULT_MAX_SESSIONS,
@@ -1402,9 +1415,13 @@ def webhook_event_marker(cp, event_id: str, etype: str) -> bool:
 
 def team_tier(cp, team_id: str) -> str | None:
     """Current tier from the teams row (webhook analytics twin of the
-    registry tier read)."""
+    registry tier read). #1082 PR2: derives the anon ceiling — an
+    unclaimed zero-email team resolves to ``anon`` until claimed."""
     rows = cp.query("teams", select=["tier"], filters=[("id", "eq", team_id)])
-    return rows[0].get("tier") if rows else None
+    if not rows:
+        return None
+    from tortoise.quota import derived_tier
+    return derived_tier({"tier": rows[0].get("tier"), "id": team_id})
 
 
 # ── Write-op metering (post-#669 flip fix — #669) ───────────────────────────

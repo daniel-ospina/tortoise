@@ -473,3 +473,119 @@ class TestClaimStatusEndpoint:
         assert r.status_code == 200, r.text
         assert r.json()["claimable"] is False
         assert r.json()["unsupported"] is True
+
+
+# ── PR2: anon-tier ceiling (#1082, indicator 4) ────────────────────────────
+
+
+class TestAnonCeiling:
+    """Indicator 4: unclaimed zero-email teams resolve to the reduced
+    ``anon`` tier; claimed teams lift to full free (same key, same team).
+
+    The derivation lives in quota.derived_tier() (shared helper) and is
+    applied at resolve_api_key (auth boundary), resolve_team_limits, and
+    team_tier (metering/analytics source). Registry mode NO-OPs (Supabase-
+    mode-only ceiling in v1).
+    """
+
+    def test_unclaimed_anon_team_resolves_anon_tier(self, client, fake,
+                                                    monkeypatch):
+        """Unclaimed anon team → /v1/team shows anon tier; limits resolve
+        to the reduced anon caps (1,000 ops / 1,000 nodes / 1 key)."""
+        key, team_id = _provision_anon(client, fake)
+        r = client.get("/v1/team", headers={"Authorization": f"Bearer {key}"})
+        assert r.status_code == 200, r.text
+        team = r.json()
+        assert team["tier"] == "anon", team
+        assert team.get("anon") is True  # claim card renders
+        # write_ops_limit derives via metering (team_tier → derived_tier →
+        # anon) — the anon tier is 1/10th of free (1,000 ops).
+        assert team.get("write_ops_limit") == 1000, team
+        # The reduced CAPS bind at the limits resolution layer.
+        from tortoise.quota import resolve_team_limits
+        lim = resolve_team_limits(team_id)
+        assert lim["tier"] == "anon", lim
+        assert lim.get("max_points") == 1000, lim  # 1k node cap
+        assert lim.get("max_api_keys") == 1, lim  # 1 key on anon tier
+
+    def test_claimed_team_lifts_to_free_same_key(self, client, fake,
+                                                 monkeypatch):
+        """After claim (owner user_id linked), the SAME key resolves free:
+        tier free, full 10k caps, anon flag False."""
+        key, team_id = _provision_anon(client, fake)
+        # claim with a github-provider session
+        user_id = f"user-{uuid.uuid4().hex[:8]}"
+        _patch_verify(monkeypatch, _jwt(user_id, providers=["github"]))
+        r = client.post("/v1/claim", json={"api_key": key})
+        assert r.status_code == 200, r.text
+
+        r = client.get("/v1/team", headers={"Authorization": f"Bearer {key}"})
+        assert r.status_code == 200, r.text
+        team = r.json()
+        assert team["tier"] == "free", team
+        assert team.get("anon") is False
+        assert team.get("write_ops_limit") == 10000, team
+        from tortoise.quota import resolve_team_limits
+        lim = resolve_team_limits(team_id)
+        assert lim["tier"] == "free", lim
+        assert lim.get("max_points") == 10000, lim
+        assert lim.get("max_api_keys") == 2, lim
+
+    def test_reg_team_capped_until_claimed(self, client, fake, monkeypatch):
+        """reg- teams (email set at mint, owner user_id NULL) are ALSO anon-
+        tier until claimed — the predicate is membership-based, never the
+        teams.email proxy (solution-verify P2 / parity fixture class 3)."""
+        # reg- path: /v1/register with an email
+        import json as _json
+        reg_email = f"reg-{uuid.uuid4().hex[:8]}@example.com"
+        r = client.post("/v1/register", json={"email": reg_email,
+                                              "password": "password123"})
+        assert r.status_code == 200, r.text
+        reg_key = r.json()["api_key"]
+
+        r = client.get("/v1/team", headers={"Authorization": f"Bearer {reg_key}"})
+        assert r.status_code == 200, r.text
+        team = r.json()
+        assert team["tier"] == "anon", team  # email set, still unclaimed
+
+        user_id = f"user-{uuid.uuid4().hex[:8]}"
+        _patch_verify(monkeypatch, _jwt(user_id, email=reg_email,
+                                        providers=["google"]))
+        r = client.post("/v1/claim", json={"api_key": reg_key})
+        assert r.status_code == 200, r.text
+        r = client.get("/v1/team", headers={"Authorization": f"Bearer {reg_key}"})
+        assert r.json()["tier"] == "free"
+
+    def test_derived_tier_registry_mode_noop(self, fake, monkeypatch):
+        """Registry mode: derived_tier returns the stored tier (no anon
+        ceiling) — selfhost is operator-controlled (v1 scope decision)."""
+        from tortoise.quota import derived_tier
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
+        # No control plane → fail-open to stored tier
+        assert derived_tier({"tier": "free", "id": "t-x"}) == "free"
+
+    def test_parity_claim_rpc_resolve_limits(self, client, fake, monkeypatch):
+        """Parity: the claim RPC's is_anon_team predicate, resolve_api_key,
+        and resolve_team_limits agree on the same fixture (anon then
+        claimed) — the drift guard from solution-verify P1-C."""
+        from tortoise.quota import resolve_team_limits
+        from tortoise.supabase_control import is_anon_team
+
+        key, team_id = _provision_anon(client, fake)
+        # Before claim: predicate true, api-key tier anon, limits anon
+        assert is_anon_team(fake, team_id) is True
+        r = client.get("/v1/team", headers={"Authorization": f"Bearer {key}"})
+        assert r.json()["tier"] == "anon"
+        lim = resolve_team_limits(team_id)
+        assert lim["tier"] == "anon", lim
+
+        # After claim: predicate false, api-key tier free, limits free
+        user_id = f"user-{uuid.uuid4().hex[:8]}"
+        _patch_verify(monkeypatch, _jwt(user_id, providers=["github"]))
+        r = client.post("/v1/claim", json={"api_key": key})
+        assert r.status_code == 200, r.text
+        assert is_anon_team(fake, team_id) is False
+        r = client.get("/v1/team", headers={"Authorization": f"Bearer {key}"})
+        assert r.json()["tier"] == "free"
+        lim = resolve_team_limits(team_id)
+        assert lim["tier"] == "free", lim
