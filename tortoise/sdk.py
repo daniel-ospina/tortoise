@@ -14,6 +14,7 @@ from typing import Any
 from .domain_loader import known_kinds, register_kind
 from .ids import ulid
 from . import monitoring
+from . import file_indexer  # noqa: F401 — import-time sourceKind registration (§4.4)
 from .projection import FalkorProjection
 from .quota import MAX_EXTRACTIONS_PER_TURN, MAX_SESSION_TURNS
 import threading
@@ -4764,10 +4765,10 @@ class TortoiseSDK:
                     f"progress_file {progress_file!r} not under TORTOISE_INGEST_BASE_DIR."
                 )
 
-        # Canonical boundary regex lives in session_indexer (#280 review round 6):
+        # Canonical boundary regex lives in file_indexer (#280 review round 6):
         # hoisted so extract/health/ingest can never drift apart again (the round-5
         # bug was exactly two copies diverging → permanent sweep non-convergence).
-        from .session_indexer import _FM_RE
+        from .file_indexer import _FM_RE
         ingested, updated, skipped, failed = 0, 0, 0, 0
         errors: list[dict] = []
         now = datetime.now(timezone.utc).isoformat()
@@ -7395,8 +7396,9 @@ class TortoiseSDK:
         ingest_corpus, never silently re-indexed (#280 review P2).
         """
         from pathlib import Path
+        from .file_indexer import compute_file_hash
         from .session_indexer import (
-            compute_file_hash, extract_session_id, session_corpus_dir,
+            extract_session_id, session_corpus_dir,
         )
 
         dir_path = Path(directory or session_corpus_dir())
