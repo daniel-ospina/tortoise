@@ -1,4 +1,4 @@
--- Migration 20260813000003: claim_membership RPC — anonymous team attaches a
+-- Migration 20260813000004: claim_membership RPC — anonymous team attaches a
 -- provider-verified identifier (#1082, PR1 — indicators 1,2,3,5).
 --
 -- Zero-email teams (anon-/reg- identity rows, NULL user_id) can't complete
@@ -72,7 +72,7 @@ BEGIN
     ) d;
     IF v_dup_owners > 0 THEN
         RAISE EXCEPTION
-            '20260813000003 abort: % team(s) have MULTIPLE active owner rows '
+            '20260813000004 abort: % team(s) have MULTIPLE active owner rows '
             '(uq_member_owner would fail) — reconcile owners before applying '
             '(see docs/plans/2026-08-13-1082-claim-path.md)',
             v_dup_owners;
@@ -87,7 +87,7 @@ BEGIN
     ) d;
     IF v_dup_emails > 0 THEN
         RAISE EXCEPTION
-            '20260813000003 abort: % duplicate team email(s) (uq_teams_email '
+            '20260813000004 abort: % duplicate team email(s) (uq_teams_email '
             'would fail) — reconcile before applying',
             v_dup_emails;
     END IF;

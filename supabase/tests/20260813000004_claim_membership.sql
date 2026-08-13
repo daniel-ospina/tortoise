@@ -1,5 +1,5 @@
 -- ============================================================================
--- SQL-level verification for migration 20260813000003 (issue #1082, PR1)
+-- SQL-level verification for migration 20260813000004 (issue #1082, PR1)
 -- Claim path: anonymous team attaches a provider-verified identifier via the
 -- SECURITY DEFINER claim_membership RPC. This suite locks the FULL binding:
 --
@@ -24,7 +24,7 @@
 --
 -- HOW TO RUN (no Docker — PGlite harness):
 --   npm --prefix supabase/tests/pglite run validate
---   (applies migrations 0001–20260813000003 + runs this suite with
+--   (applies migrations 0001–20260813000004 + runs this suite with
 --   ON_ERROR_STOP semantics; the #769/#770 suites run first)
 --
 -- Every assertion RAISEs on failure; with ON_ERROR_STOP=1 any failure exits
@@ -63,7 +63,7 @@ VALUES ('00000000-0000-0000-0000-000000000000'::uuid,
 ON CONFLICT (id) DO NOTHING;
 
 -- ============================================================================
--- SECTION 1 — catalog state (20260813000003 applied cleanly)
+-- SECTION 1 — catalog state (20260813000004 applied cleanly)
 -- ============================================================================
 DO $$ BEGIN
   PERFORM tests.assert(

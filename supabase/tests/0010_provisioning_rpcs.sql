@@ -351,7 +351,7 @@ DO $$ BEGIN
     'identity rotation: api_keys accumulates the rotated key row');
 END $$;
 
--- the owner ≤1 invariant (20260813000003 uq_member_owner — P3-FIX-P): a
+-- the owner ≤1 invariant (20260813000004 uq_member_owner — P3-FIX-P): a
 -- SECOND identity attempting owner co-provision on an already-owned team is
 -- REJECTED (anon teams are single-owner — the claim path needs exactly one
 -- NULL-user owner row to attach a verified identifier to). M:N membership
