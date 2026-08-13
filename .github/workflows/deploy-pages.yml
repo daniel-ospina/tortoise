@@ -69,6 +69,74 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: 367c7ecf27e1b1b092d04fe9915a1e56
 
+  # ── Dashboard (app.premiselabs.co → tortoise-dashboard Pages) ──────────
+  # #1112: wire the dashboard into CI — closes #1086 + #1109 (two
+  # stale-bundle incidents caused by the manual-only deploy.sh). The
+  # dashboard's dist/ IS committed (merges carry it); this job rebuilds +
+  # redeploys it on every website/** change. Same wrangler auth pattern as
+  # the premise-labs job above (no new secrets).
+  deploy-dashboard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: website/apps/dashboard/package-lock.json
+      - name: Build dashboard (vite)
+        run: |
+          cd website/apps/dashboard
+          npm ci
+          npm run build
+      - name: Pre-flight — token can see tortoise-dashboard project (P2-1)
+        # The CLOUDFLARE_API_TOKEN may be scoped per-project; assert the
+        # dashboard project is visible BEFORE deploying so a 403-scoped
+        # token fails fast (loud, at the right step) instead of silently
+        # skipping the deploy.
+        run: |
+          LIST=$(curl -s --max-time 20 "https://api.cloudflare.com/client/v4/accounts/367c7ecf27e1b1b092d04fe9915a1e56/pages/projects?per_page=100"             -H "Authorization: Bearer ${{ secrets.CLOUDFLARE_API_TOKEN }}")
+          if ! echo "$LIST" | grep -q '"tortoise-dashboard"'; then
+            echo "::error::CLOUDFLARE_API_TOKEN cannot list the tortoise-dashboard Pages project — check token scope (Cloudflare Pages:Edit for tortoise-dashboard)."
+            echo "projects visible: $(echo "$LIST" | grep -oE '"name":"[^"]+"' | head -20 || true)"
+            exit 1
+          fi
+          echo "tortoise-dashboard project visible — deploying"
+      - name: Deploy to Cloudflare Pages (tortoise-dashboard project)
+        run: |
+          cd website/apps/dashboard
+          npx --yes wrangler@4 pages deploy dist --project-name=tortoise-dashboard --branch=main
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: 367c7ecf27e1b1b092d04fe9915a1e56
+      - name: Post-deploy poll (app.premiselabs.co serves the new bundle hash)
+        # The failure mode of both #1086 and #1109: nothing verified the
+        # dashboard deploy. Poll until the served index.html references the
+        # bundle hash we JUST BUILT (build step runs before this — the
+        # committed dist hash is stale by definition).
+        run: |
+          # P3-1: compare BOTH js and css refs — a vite CSS-only change keeps
+          # the JS hash identical, so a stale page with a new JS ref would
+          # false-pass on JS alone.
+          EXPECTED=$(grep -oE 'assets/index-[A-Za-z0-9_-]+\.(js|css)' website/apps/dashboard/dist/index.html | sort || true)
+          if [ -z "$EXPECTED" ]; then
+            echo "::error::build produced no assets/index-*.js|css ref — cannot verify deploy (P4-2)"
+            exit 1
+          fi
+          echo "expected bundle refs: $EXPECTED"
+          MAX_ATTEMPTS=20
+          for i in $(seq 1 $MAX_ATTEMPTS); do
+            SERVED=$(curl -s --max-time 20 https://app.premiselabs.co/ | grep -oE 'assets/index-[A-Za-z0-9_-]+\.(js|css)' | sort || true)
+            if [ "$SERVED" = "$EXPECTED" ]; then
+              echo "dashboard deploy verified — app.premiselabs.co serves the new bundle (attempt $i)"
+              exit 0
+            fi
+            echo "attempt $i/$MAX_ATTEMPTS: served differs from expected, retrying in 30s..."
+            sleep 30
+          done
+          echo "::error::dashboard bundle not live after $MAX_ATTEMPTS attempts (~10 min) — expected: $EXPECTED"
+          exit 1
+
   # ── Post-deploy verification: legal pages E2E suite (#677) ───────────
   verify-legal:
     needs: deploy
