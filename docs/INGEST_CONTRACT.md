@@ -297,7 +297,7 @@ callers get a `ValueError` subclass (`BundleValidationError`) with
 |---|---|---|---|
 | 1 | Item shape | `points[0] must be a dict` / `points[1] requires 'kind'` / `sources[2] requires 'sourceKind'` | Fix the item; shape is validated per section. |
 | 2 | Point kind vocabulary | `pointKind 'event' is not a write kind` (**planned**) | Use `statement` (canonical) or a legacy write-compat kind; episodic records are **entity items** `type:"event"` with `eventKind` (`occurrence`/`turn`) — never a Point. |
-| 3 | Ref misuse | `duplicate bundle ref 'pA'` / `refs shaped like real ULIDs are rejected` | Refs must be unique, bundle-local labels; don't address real ids through refs. |
+| 3 | Ref misuse | `duplicate bundle ref 'pA'` (shipped); `refs shaped like real ULIDs are rejected` (**planned** — Phase 1) | Refs must be unique, bundle-local labels; don't address real ids through refs. |
 | 4 | Connection contract | `connections[1] must carry exactly one of 'relation' or 'operator'`; `connections[0] requires 'from' and 'to'`; `connections[2]: 'to' must be a list or string`; `connections[3]: multi-item 'to' on a plain IMPL/NAND connection` (**planned**) | Exactly one of relation/operator; `from`+`to` present; singular `to` on plain direct edges (multi-input → `mitigation`/`reify:true`); self-edges rejected on IMPL/NAND. |
 | 5 | Unknown types / fields | `connections[4] operator must be one of ['IMPL','NAND', …]`; `connections[5] unknown relation 'SUPPORTS'`; `reify:true connection carrying 'confidence' is rejected` (**planned** — route-scoped fields) | Operator ∈ IMPL/NAND; relation ∈ the structural predicate set ∪ `extractedFrom`; drop attributes that don't belong on the route. |
 | 6 | Endpoint typing | `external endpoint 'ghost-id' does not exist`; `connection endpoint must be a plain Point, got a Source` | Direct-edge and operator-requiring connections need existing plain-Point endpoints (or bundle-local refs to point items). |
@@ -389,7 +389,7 @@ with the exact retry action:
 | 6 | `ERR_REGISTRY` `{error, code}` | 503 — team registry (key→team resolution) unavailable. The `-32099` **static-auth-misconfigured** variant ("Static auth misconfigured: no API key set") is a server configuration problem. | Transient → **backoff-retry**. The `-32099` static-misconfig variant → **operator fix (config), don't retry**. |
 | 7 | Phase-2 failure `{error}` — **no code** | A write failed mid-commit; partial state is committed. The error names the section/index/item; it carries the already-computed `batch_id`. | **Re-send converges** — the retry dedups what committed and writes the rest. Audit via `batch_id` first if you like. |
 | 8 | Transport death — **no response** | The call may have committed anything. | **Re-send the identical bundle**; exactly-once convergence ([§7](#7-kill-recovery)). |
-| 9 | `EmbeddedStoreBusyError` — named class prefix in `{error}` | Cross-process contention on an embedded store (another process holds the db). | **Do NOT retry until the holder exits.** Unlike phase-2 partial-state errors, re-sending while the store is busy does **not** converge — it re-errors. (Fail-fast replaces the old silent second-daemon behavior.) |
+| 9 | `EmbeddedStoreBusyError` — named class prefix in `{error}` (**planned**) | Cross-process contention on an embedded store (another process holds the db). **planned:** fail-fast with a named error replaces today's blocking flock-with-timeout handling. | **planned:** do **NOT** retry until the holder exits. Unlike phase-2 partial-state errors, re-sending while the store is busy does **not** converge — it re-errors. (Fail-fast replaces the old silent second-daemon behavior.) |
 
 **planned:** `ERR_BUNDLE_INVALID` is a new exported constant classified as a
 client error (4xx-class) — the dedicated-branch mapping
@@ -413,10 +413,11 @@ the `{error}`-only shape whose retry action is different.
 - **How to check usage:** `tortoise team info` → `GET /v1/team` returns
   `point_count` plus user/graph limits. **Known mismatch:** `GET /v1/team`
   exposes only `point_count` — there is **no points-limit field**, and the
-  REST count is a raw `MATCH (n:Point)` while the enforced predicate counts
-  non-episodic Points; the displayed number can under-report or over-report
-  vs the enforced check. Treat `tortoise team info` as usage signal, not
-  limit truth.
+  REST count is a raw `MATCH (n:Point)` (all Points, including episodic)
+  while the enforced predicate counts non-episodic Points; the displayed
+  number therefore **over-reports (or matches)** the enforced count, and the
+  limit itself is not displayed at all. Treat `tortoise team info` as usage
+  signal, not limit truth.
 - **`ERR_QUOTA` action: stop retrying and escalate.** The quota message's
   "Upgrade your plan" wording references a billing path that does not exist
   yet; the real escalation is support / an operator raising the team's
@@ -444,9 +445,10 @@ Additional posture rules:
   search; structure (edges, `batch_id`, EP) is unaffected.
 - HTTP tenant mode writes to a fresh `team_{id}` namespace — data written over
   stdio stays in the `tortoise` graph; they are separate namespaces.
-- Cross-process embedded contention is handled by the fail-fast
+- Cross-process embedded contention: **planned** — this release adds the fail-fast
   `EmbeddedStoreBusyError` contract ([§8 row 9](#8-when-your-ingest-fails-error-code--action));
-  never a silent second daemon.
+  today, concurrent embedded writers are serialized by a blocking
+  flock-with-timeout (no silent second daemon either way).
 
 ---
 
