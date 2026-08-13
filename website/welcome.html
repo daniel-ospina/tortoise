@@ -364,6 +364,10 @@
       color: var(--accent);
       border-color: var(--accent);
     }
+    .btn-ghost:focus-visible, .btn-primary:focus-visible, .harness-tab:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
     .btn-primary {
       display: block;
       width: 100%;
@@ -649,7 +653,7 @@
       <div class="chooser" id="chooser" role="group" aria-label="How do you want to use Tortoise?">
         <p class="chooser-q">How do you want to use Tortoise?</p>
         <div class="chooser-grid">
-          <button class="chooser-card" id="choose-mcp" onclick="choosePath('mcp')" aria-describedby="mcp-desc">
+          <button class="chooser-card" id="choose-mcp" onclick="choosePath('mcp')" aria-describedby="mcp-desc" type="button">
             <span class="chooser-icon" aria-hidden="true">
               <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
@@ -663,7 +667,7 @@
               <span class="chooser-cta">Set up my agent →</span>
             </span>
           </button>
-          <button class="chooser-card" id="choose-sdk" onclick="choosePath('sdk')" aria-describedby="sdk-desc">
+          <button class="chooser-card" id="choose-sdk" onclick="choosePath('sdk')" aria-describedby="sdk-desc" type="button">
             <span class="chooser-icon" aria-hidden="true">
               <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <polyline points="16 18 22 12 16 6"/>
@@ -694,7 +698,8 @@
           <button class="harness-tab" data-harness="cursor" aria-pressed="false" onclick="switchHarness('cursor')">Cursor</button>
           <button class="harness-tab" data-harness="pi" aria-pressed="false" onclick="switchHarness('pi')">Pi</button>
         </div>
-        <button class="btn-primary" id="btn-copy-setup" onclick="copySetupPrompt()">
+        <div id="one-click-flow">
+        <button class="btn-primary" id="btn-copy-setup" onclick="copySetupPrompt()" type="button">
           <span>Copy setup prompt</span>
         </button>
         <p class="steps">
@@ -708,8 +713,10 @@
         <p class="note">
           The prompt adds the MCP server and saves the onboarding flow so your next session
           runs setup automatically. Key embedded in the prompt — it will appear in your chat
-          history (and, for Claude Code, in your local config). Prefer it not to? <a href="#" onclick="toggleManual(event)">Use manual setup (env-var form)</a>
+          history, your shell history, and (for Claude Code) your local config. Prefer it not
+          to? <a href="#" id="manual-toggle-link" onclick="toggleManual(event)" aria-expanded="false" aria-controls="manual-setup">Use manual setup (env-var form)</a>
         </p>
+        </div>
         <div id="manual-setup" class="hidden">
           <div class="card-label" style="margin:0.5rem 0 0.75rem;">Manual setup</div>
           <div class="snippet" id="mcp-snippet">
@@ -1225,6 +1232,12 @@ you up to 6 yes/no questions and set up your Tortoise memory.
 
     async function copySnippet() {
       const key = document.getElementById("api-key").textContent;
+      // Never copy a masked key (#745c — the SDK snippet has no env form; a
+      // returning visitor's masked placeholder must not reach the clipboard).
+      if (!_usableKey(key)) {
+        flashCopyFailure("btn-copy-snippet", "no key on this visit — copy your key from the dashboard");
+        return;
+      }
       const snippet = `# Install Tortoise
 pip install tortoise-graph
 
@@ -1447,9 +1460,12 @@ ${JSON.stringify({ mcpServers: { tortoise: { url: MCP_URL, headers: { Authorizat
     const HARNESS_INSTALL = {
       claude: (key) => `Run this command:\nclaude mcp add --transport http tortoise ${MCP_URL} --header "Authorization: Bearer ${key}"`,
       codex: (key) => `Run these commands:\nexport TORTOISE_API_KEY=${key}\ncodex mcp add tortoise --url ${MCP_URL} --bearer-token-env-var TORTOISE_API_KEY`,
-      cursor: (key) => `Create .cursor/mcp.json in this project with:\n${JSON.stringify(CURSOR_MCP_CONFIG_ENV, null, 2)}\n(First run: export TORTOISE_API_KEY=${key} — the config references the env var, not the key.)`,
-      pi: (key) => `Create or merge .mcp.json in this project with:\n${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}\n(First run: export TORTOISE_API_KEY=${key} — the config references the env var, not the key.)`,
+      cursor: (key) => `Create .cursor/mcp.json in this project with:\n${JSON.stringify(CURSOR_MCP_CONFIG_ENV, null, 2)}\n(First: export TORTOISE_API_KEY=${key} — the config references the env var, not the key.)`,
+      pi: (key) => `Create or merge .mcp.json in this project with:\n${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}\n(First: export TORTOISE_API_KEY=${key} — the config references the env var, not the key.)`,
     };
+    // Env vars die with the shell — the restart promise (step 3) only holds
+    // if the key survives: persist it to the user's shell profile.
+    const HARNESS_PERSIST = (key) => `Persist the key for future sessions — add this line to your shell profile\n(~/.zshrc, ~/.bashrc, or equivalent):\nexport TORTOISE_API_KEY=${key}`;
     const HARNESS_AUTOLOAD = {
       claude: "save it to CLAUDE.md in this project (Claude Code auto-loads CLAUDE.md every session)",
       codex: "save it to AGENTS.md in this project (Codex auto-loads AGENTS.md)",
@@ -1513,6 +1529,18 @@ ${JSON.stringify({ mcpServers: { tortoise: { url: MCP_URL, headers: { Authorizat
         const manual = document.getElementById("manual-setup");
         if (manual) manual.classList.add("hidden");
       }
+      // Focus management: move focus into the shown surface so keyboard/SR
+      // users aren't dropped to <body> when the focused element is hidden.
+      if (path === "mcp") {
+        const tab = document.querySelector("#mcp-card .harness-tab");
+        if (tab) tab.focus();
+      } else if (path === "sdk") {
+        const back = document.querySelector("#sdk-card .btn-ghost");
+        if (back) back.focus();
+      } else if (chooser) {
+        const first = chooser.querySelector(".chooser-card");
+        if (first) first.focus();
+      }
     }
 
     // The single setup prompt: agent installs the MCP server now and persists
@@ -1522,27 +1550,47 @@ ${JSON.stringify({ mcpServers: { tortoise: { url: MCP_URL, headers: { Authorizat
     function setupPromptText(key) {
       const harness = currentHarness;
       const name = HARNESS_NAMES[harness];
-      return `Set up Tortoise memory for me. I use ${name}.\n\n1. Connect the Tortoise MCP server with this API key: ${key}\n${HARNESS_INSTALL[harness](key)}\n\n2. Fetch the onboarding instructions from ${variantPromptUrl(harness)} and ${HARNESS_AUTOLOAD[harness]}.\n\n3. When both are done, tell me to restart you. On your next session,\nfollow the saved instructions and walk me through setup — ask the\nquestions one at a time.`;
+      return `Set up Tortoise memory for me. I use ${name}.\n\n1. Connect the Tortoise MCP server with this API key: ${key}\n${HARNESS_INSTALL[harness](key)}\n\n2. ${HARNESS_PERSIST(key)}\n\n3. Fetch the onboarding instructions from ${variantPromptUrl(harness)} and ${HARNESS_AUTOLOAD[harness]}.\n\n4. When both are done, tell me to restart you. On your next session,\nfollow the saved instructions and walk me through setup — ask the\nquestions one at a time.`;
     }
 
     function renderSetupPrompt() {
       const nameEl = document.getElementById("harness-name");
       if (nameEl) nameEl.textContent = HARNESS_NAMES[currentHarness];
       const el = document.getElementById("setup-prompt-text");
-      if (!el) return;
       const key = document.getElementById("api-key").textContent.trim();
-      el.textContent = _usableKey(key)
-        ? setupPromptText(key)
-        : "(Your key was already revealed once — use Manual setup below with the key you saved.)";
+      const usable = _usableKey(key);
+      if (el) {
+        el.textContent = usable
+          ? setupPromptText(key)
+          : "(Your key isn't available on this visit — use Manual setup below with the key you saved.)";
+      }
+      // Returning visitor / masked key: the one-click prompt has no key to
+      // embed — disable the primary CTA, collapse the primary flow, and
+      // surface the key-less env-var manual forms (#529 J5/T7b contract).
+      const btn = document.getElementById("btn-copy-setup");
+      if (btn) btn.disabled = !usable;
+      const primaryFlow = document.getElementById("one-click-flow");
+      if (primaryFlow) primaryFlow.classList.toggle("hidden", !usable);
+      const manual = document.getElementById("manual-setup");
+      if (manual) manual.classList.toggle("hidden", usable);
     }
 
     function toggleManual(e) {
       if (e) e.preventDefault();
       const manual = document.getElementById("manual-setup");
-      if (manual) manual.classList.toggle("hidden");
+      if (!manual) return;
+      const opening = manual.classList.contains("hidden");
+      manual.classList.toggle("hidden");
+      // Primary flow vs manual flow: show one instruction set at a time.
+      const primaryFlow = document.getElementById("one-click-flow");
+      if (primaryFlow) primaryFlow.classList.toggle("hidden", opening);
+      const link = document.getElementById("manual-toggle-link");
+      if (link) link.setAttribute("aria-expanded", String(opening));
       renderMcpConfig();
       renderDeliverySteps();
-      loadVariantPrompt();
+      // Fetch the variant prompt only when opening (and never twice per
+      // harness) — not on every toggle.
+      if (opening && promptLoadedFor !== currentHarness) loadVariantPrompt();
     }
 
     // Block B: fetch the active harness's variant prompt; on ANY failure fall
@@ -1552,9 +1600,12 @@ ${JSON.stringify({ mcpServers: { tortoise: { url: MCP_URL, headers: { Authorizat
       const el = document.getElementById("prompt-text");
       const btn = document.getElementById("btn-copy-prompt");
       if (!el) return;
+      const harness = currentHarness;
+      // Already loaded for this harness — don't re-fetch (also skips the
+      // eval-time prefetch once the default harness's prompt is cached).
+      if (promptLoadedFor === harness) return;
       el.textContent = "(Loading prompt…)";
       if (btn) btn.disabled = true;
-      const harness = currentHarness;
       fetch(variantPromptUrl(harness))
         .then(r => { if (!r.ok) throw new Error("variant " + r.status); return r.text(); })
         .catch(() => fetch(PROMPT_URL).then(r => { if (!r.ok) throw new Error("canonical " + r.status); return r.text(); }))
@@ -1629,9 +1680,17 @@ ${JSON.stringify({ mcpServers: { tortoise: { url: MCP_URL, headers: { Authorizat
 
     function flashCopied(btnId) {
       const btn = document.getElementById(btnId);
-      const old = btn.textContent;
-      btn.textContent = "Copied!";
-      setTimeout(() => { btn.textContent = old; }, 1500);
+      if (!btn) return;
+      // Preserve the inner <span> (icon/label) — swap its text, not the whole
+      // button's DOM (copySnippet already used this pattern).
+      const textEl = btn.querySelector("span");
+      const origText = textEl ? textEl.textContent : btn.textContent;
+      if (textEl) textEl.textContent = "Copied!";
+      else btn.textContent = "Copied!";
+      setTimeout(() => {
+        if (textEl) textEl.textContent = origText;
+        else btn.textContent = origText;
+      }, 1500);
     }
 
     // Fetch the default harness's variant prompt on load (best-effort;
