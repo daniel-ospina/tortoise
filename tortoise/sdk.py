@@ -7591,7 +7591,10 @@ class TortoiseSDK:
         # parent-dir chain before any read; fail closed on outside-root source.
         from .index_walk import mount_source_for_file
         ms = mount_source_for_file(_os.path.realpath(path), str(root), ingest_base)
-        if ms and ms.get("fail"):
+        # REVIEW-FIX P1 (cycle-26): mount_source_for_file returns list[dict] —
+        # any() over the entries (the earlier fix called .get on the list and
+        # AttributeError'd on BOTH the warn and fail cells).
+        if ms and any(n.get("fail") for n in ms):
             return {"status": "failed", "reason": "escape",
                     "retryable": False}
         result = self._index_process_unit(
@@ -8308,30 +8311,34 @@ class TortoiseSDK:
                         event_id = resolved_eid
                         out["eventId"] = event_id
                         if rejected:
-                            # REVIEW-FIX P2 (cycle-26): ALL suffix widths
+                            # REVIEW-FIX P2/P1 (cycle-26): ALL suffix widths
                             # (8/12/16) taken by other-source meetings — never
                             # a silent clobber: no EventRecorded emission, no
                             # edge wiring, an errors[] entry, and the unit is
                             # bucketed failed (the §4.2 mechanism's "never a
                             # silent clobber" guarantee; the journaled
                             # candidate would otherwise replay props onto the
-                            # colliding meeting's Event).
-                            result["errors"].append(
-                                {"file": str(path),
-                                 "error": f"meeting eventId {event_id} "
-                                          f"collides at all suffix widths "
-                                          f"(sha256 [:8]/[:12]/[:16]) — "
-                                          f"refusing to clobber; re-name the "
-                                          f"file or split the meeting",
-                                 "retryable": False,
-                                 "cause": "structural"})
+                            # colliding meeting's Event). The caller appends
+                            # out["error"] to the run's errors[] (REVIEW-FIX
+                            # P1: this unit has NO access to the run result
+                            # dict — the earlier fix referenced a phantom
+                            # `result` and NameError'd).
+                            out["error"] = {
+                                "file": str(path),
+                                "error": f"meeting eventId {event_id} "
+                                         f"collides at all suffix widths "
+                                         f"(sha256 [:8]/[:12]/[:16]) — "
+                                         f"refusing to clobber; re-name the "
+                                         f"file or split the meeting",
+                                "retryable": False,
+                                "cause": "structural"}
                             out["status"] = "failed"
                             out["reason"] = "meeting-id-collision"
                             out["retryable"] = False
                             return {k: v for k, v in out.items() if k in (
                                 "status", "url", "eventId", "documentId",
                                 "sourceKind", "reason", "retryable",
-                                "skipped_reason", "errors")}
+                                "skipped_reason", "error")}
                         repair_work = not base_complete or merge_outcome == "updated"
                     else:
                         self._doc_write(frontmatter, doc_id, title, abs_path, url)
@@ -8664,9 +8671,15 @@ class TortoiseSDK:
             inner, guard=True, guard_source_file=sf_rel)
         # journal: emit-on-every-write with the RESOLVED id (candidate on hit,
         # suffixed on reject — the suffixed Event is the one that exists live).
-        payload = {k: v for k, v in {**inner, "eventId": resolved}.items()
-                   if k != "id"}
-        self._emit_event("EventRecorded", id=resolved, **payload)
+        # REVIEW-FIX P2 (cycle-26): when the guard exhausts ALL suffix widths
+        # and returns the BARE candidate with rejected=True (the all-widths-
+        # taken cell — `resolved == candidate` is the OTHER meeting's id),
+        # NO emission: the journal would otherwise replay this file's payload
+        # onto the colliding meeting's Event via the plain-replay ON MATCH SET.
+        if not (rejected and resolved == candidate):
+            payload = {k: v for k, v in {**inner, "eventId": resolved}.items()
+                       if k != "id"}
+            self._emit_event("EventRecorded", id=resolved, **payload)
         return resolved, rejected
 
     def _doc_write(self, frontmatter, doc_id, title, abs_path, source_url) -> None:
