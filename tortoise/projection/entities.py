@@ -93,14 +93,25 @@ class _EntityHandlers:
         never drift from the incrementally-applied graph on node properties.
         """
         op = p.get("operator")
-        prov = p.get("provenance", {})
+        if not isinstance(op, dict):
+            # #331 (review r5): parity with _create_edges' r4 guard — a
+            # truthy non-dict operator (e.g. a bare string) must degrade
+            # to no-operator, not AttributeError in op.get("op_type").
+            op = None
+        prov = p.get("provenance")
+        if not isinstance(prov, dict):
+            # #331 (review r3): explicit null / string provenance must not
+            # crash the Falkor path (parity with _apply_one's guard).
+            prov = {}
 
         # Compute embedding for non-operator Points (#7778)
         embedding = None
-        if not op:
+        # #331 (review r4): only embed real content — an empty string
+        # produced a junk vector in the HNSW index.
+        if not op and p.get("content"):
             try:
                 from tortoise.embeddings import compute_embedding
-                embedding = compute_embedding(p["content"])
+                embedding = compute_embedding(p.get("content", ""))
             except Exception:
                 pass
 
@@ -120,8 +131,8 @@ class _EntityHandlers:
             "n.updatedAt=$now",
         ]
         params = {
-            "id": p["id"], "content": p["content"],
-            "isop": bool(op), "opt": op["op_type"] if op else None,
+            "id": p["id"], "content": p.get("content", ""),
+            "isop": bool(op), "opt": op.get("op_type") if op else None,
             "pk": p.get("pointKind"),
             "st": p.get("status"),
             "ab": p.get("authoredBy"),
@@ -173,6 +184,23 @@ class _EntityHandlers:
 
     def _delete(self, pid: str) -> None:
         self.g.query("MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": pid})
+
+    def _retract(self, pid: str) -> None:
+        """Mark a Point as retracted instead of hard-deleting (#689).
+
+        Retracted points are hidden from normal reads (get_point, query,
+        paginated_query all filter status='retracted') but remain queryable via
+        raw Cypher. This preserves data integrity — retraction is reversible.
+
+        Historical note: prior to #689, retraction hard-deleted points via
+        DETACH DELETE. Points retracted before this change are irrecoverably
+        lost (the content existed only in the projection, and the projection
+        deleted it). Future retractions leave this tombstone.
+        """
+        self.g.query(
+            "MATCH (n:Point {id:$id}) SET n.status = 'retracted', n.updatedAt = $now",
+            params={"id": pid, "now": _now_iso()},
+        )
 
     # ── Entity nodes ───────────────────────────────────────────────
 
@@ -395,6 +423,11 @@ class _EntityHandlers:
         object_type = inner.get("objectType", "")  # 'Document' | 'Object' | '' (legacy)
         if obj:
             if object_type == "Document":
+                # #329: the minted Document id is tenant-influenced (event
+                # props passthrough) — validate it so it can never be a host
+                # path (the read side also fails closed via resolve_under_base).
+                from tortoise.security import validate_document_id
+                validate_document_id(str(obj))
                 self.g.query(
                     "MERGE (d:Document {id:$id}) "
                     "ON CREATE SET d.title=$id, d.documentKind='transcript'",

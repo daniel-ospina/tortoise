@@ -2,7 +2,7 @@
 """Migrate operator Points to have explicit `direction` property (ONTOLOGY v3.1 #189).
 
 Sets `direction` on every existing operator Point, preserving current semantics:
-  - NAND → "bidirectional" (always was symmetric)
+  - NAND → "bidirectional" (the #753 creation default for all op types)
   - IMPL with hasPart/partOf label → "bidirectional" (composition hierarchies)
   - All other IMPL (addresses, supports, no label) → "unidirectional"
 

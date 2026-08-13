@@ -7,13 +7,17 @@
   <meta name="description" content="Sign in to your Tortoise account and continue building your knowledge graph.">
   <meta name="theme-color" content="#060b14">
   <style>
+    .hidden {
+      display: none;
+    }
+
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     :root {
       --bg: #060b14;
       --surface: #0d1a2d;
       --text: #cbd5e1;
-      --text-dim: #64748b;
+      --text-dim: #94a3b8;
       --accent: #06b6d4;
       --accent-hover: #0891b2;
       --green: #4ade80;
@@ -34,7 +38,7 @@
     .topbar .logo { font-family: var(--serif, Georgia, serif); font-size: 1.15rem; color: var(--text, #cbd5e1); text-decoration: none; }
     .topbar .logo span { color: var(--accent, #06b6d4); }
     .topbar nav { flex: 1; display: flex; gap: 16px; }
-    .topbar nav a { color: var(--text-dim, #64748b); text-decoration: none; font-size: 14px; }
+    .topbar nav a { color: var(--text-dim, #94a3b8); text-decoration: none; font-size: 14px; }
     .topbar nav a:hover, .topbar nav a.active { color: var(--accent, #06b6d4); }
     .topbar .login { background: var(--accent, #06b6d4); color: #04121a; padding: 6px 16px; border-radius: 6px; text-decoration: none; font-weight: 600; font-size: 14px; }
     .topbar .login:hover { background: var(--accent-hover, #0891b2); }
@@ -204,6 +208,32 @@
       display: block;
     }
 
+    .recovery-link {
+      margin-top: 0.75rem;
+      text-align: center;
+      font-size: 13px;
+      color: var(--text-dim);
+    }
+
+    .recovery-link a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    .recovery-link a:hover {
+      text-decoration: underline;
+    }
+
+    #recovery-note {
+      background: rgba(74, 222, 128, 0.08);
+      border: 1px solid rgba(74, 222, 128, 0.3);
+      border-radius: 8px;
+      padding: 0.75rem 1rem;
+      color: var(--green);
+      font-size: 13px;
+      margin-bottom: 1rem;
+    }
+
     .footer {
       text-align: center;
       margin-top: 1.5rem;
@@ -239,7 +269,7 @@
   <div class="topbar">
     <a class="logo" href="/">Tortoise<span>.</span></a>
     <nav>
-      <a href="/product.html">Product</a>
+      <a href="https://tortoise.premiselabs.co/">Product</a>
       <a href="/docs">Docs</a>
     </nav>
     <a class="login" href="https://app.premiselabs.co">Login</a>
@@ -251,7 +281,7 @@
     </div>
     <h1>Sign in to your account</h1>
 
-    <div id="error" class="error"></div>
+    <div id="error" class="error" role="alert"></div>
 
     <div class="providers">
       <button class="btn-provider" onclick="signInWithProvider('github')" id="btn-github">
@@ -275,7 +305,7 @@
 
     <div class="divider">or</div>
 
-    <form id="email-form" onsubmit="signInWithEmail(event)">
+    <form id="email-form" method="post" action="/signin" onsubmit="signInWithEmail(event)">
       <div class="form-group">
         <label for="email">Email</label>
         <input type="email" id="email" name="email" placeholder="you@example.com" required autocomplete="email">
@@ -285,15 +315,43 @@
         <input type="password" id="password" name="password" placeholder="••••••••" required autocomplete="current-password">
       </div>
       <button type="submit" class="btn-submit" id="btn-submit">Sign in</button>
+      <p class="recovery-link"><a href="#" id="forgot-link" onclick="showRecovery(event)">Forgot password?</a></p>
     </form>
 
+    <!-- #863: password-recovery request link. POSTs to GoTrue /auth/v1/recover
+         through resetPasswordForEmail; guarded by the same two-tier lockout as
+         signup.html (email bucket → 1h, per-IP → 60s) so recovery spam can
+         never burn the shared project-wide email bucket from this browser.
+         method=post + action per the #527 form-safety contract (no GET echo). -->
+    <form id="recovery-form" class="hidden" method="post" action="/signin" onsubmit="recoverPassword(event)">
+      <div class="form-group">
+        <label for="recovery-email">Email</label>
+        <input type="email" id="recovery-email" name="recovery-email" placeholder="you@example.com" required autocomplete="email">
+      </div>
+      <button type="submit" class="btn-submit" id="btn-recovery">Send reset link</button>
+      <p class="recovery-link"><a href="#" id="back-to-signin" onclick="showSignIn(event)">Back to sign in</a></p>
+    </form>
+    <div id="recovery-note" class="hidden" role="status">
+      <p id="recovery-note-text"></p>
+      <p class="recovery-link"><a href="#" onclick="showSignIn(event)">Back to sign in</a></p>
+    </div>
+
+    <noscript>
+      <div class="error visible" role="alert">Please enable JavaScript to sign in.</div>
+    </noscript>
+
     <div class="footer">
-      Don't have an account? <a href="/signup.html">Sign up</a>
+      Don't have an account? <a href="/signup.html">Sign up</a> ·
+      <a href="/privacy">Privacy Policy</a> · <a href="/tos">Terms of Service</a> ·
+      <a href="/license">License</a> · <a href="/dpa">DPA</a>
     </div>
   </div>
 
-  <!-- Supabase JS client from CDN -->
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <!-- Supabase JS client from CDN. onerror belt (#527): if the CDN is
+       blocked (ad-blocker/CSP/outage), surface a clear message instead of a
+       dead form — the historical trigger for the credential-echo bug. -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"
+          onerror="(function(){var e=document.getElementById('error');if(e){e.textContent='Sign in is temporarily unavailable (script blocked). Please try again later.';e.classList.add('visible');}})()"></script>
   <script>
     // ── Configuration ──────────────────────────────────────────────────────
     const SUPABASE_URL = "https://ybetwichurajbfswfeqa.supabase.co";
@@ -313,9 +371,28 @@
     // Guard: check if the anon key placeholder was replaced at deploy time
     const isConfigured = supabaseAnonKey && !supabaseAnonKey.includes("{{");
 
-    let supabase = null;
+    let supabaseClient = null;
     if (isConfigured) {
-      supabase = window.supabase.createClient(supabaseUrl, supabaseAnonKey);
+      // typeof check + try/catch (#527): if the CDN script failed to load,
+      // window.supabase is undefined and createClient would THROW, killing
+      // this entire script block at parse time (the historical 2026-08-08
+      // bug that left the form as a static shell echoing credentials into
+      // the URL). Guard so the form degrades to a clear error instead.
+      if (typeof window.supabase !== "undefined") {
+        try {
+          supabaseClient = window.supabase.createClient(supabaseUrl, supabaseAnonKey);
+        } catch (err) {
+          console.error("supabase client init failed:", err);
+        }
+      } else {
+        console.warn("supabase CDN script did not load — auth disabled");
+      }
+      if (!supabaseClient) {
+        document.querySelectorAll("button").forEach(function(btn) { btn.disabled = true; });
+        var errorEl = document.getElementById("error");
+        errorEl.textContent = "Sign in is temporarily unavailable (script blocked). Please try again later.";
+        errorEl.classList.add("visible");
+      }
     } else {
       console.warn("SUPABASE_ANON_KEY not configured — auth disabled");
       document.querySelectorAll("button").forEach(function(btn) { btn.disabled = true; });
@@ -323,6 +400,10 @@
       errorEl.textContent = "Sign in is not configured yet. Please contact support.";
       errorEl.classList.add("visible");
     }
+    // Expose the client on window for the watchdog script block (a top-level
+    // `let` does NOT create a window property — the watchdog must not show a
+    // false "temporarily unavailable" on healthy loads, #527).
+    window.supabaseClient = supabaseClient;
 
     // ── Error display ──────────────────────────────────────────────────────
     function showError(message) {
@@ -336,80 +417,455 @@
       el.classList.remove("visible");
     }
 
+    // ── Error humanization (#527) ────────────────────────────────────────
+    // Supabase surfaces raw engine messages ("Email rate limit exceeded",
+    // "Provider is not enabled") that mean nothing to end users. Map by
+    // error_code first (stable), then by message substring (legacy), with a
+    // friendly catch-all. Known codes:
+    // https://supabase.com/docs/guides/auth/error-codes
+    //
+    // #863 mechanism-accurate 429 copy: the email-send limit is PROJECT-WIDE
+    // (custom SMTP 30/hr for ALL users) — over_email_send_rate_limit is NOT a
+    // per-network problem. These constants must stay ABOVE the AUTH_ERROR_MAP
+    // literal (TDZ: the map evaluates at script load; a `const` referenced
+    // before its declaration kills the whole inline script — the #527 class).
+    const EMAIL_BUCKET_RATE_LIMIT_COPY = "Signup emails are temporarily exhausted (too many signups right now). Try again in about an hour.";
+    const NETWORK_RATE_LIMIT_COPY = "Too many attempts from this network. Please wait about an hour and try again.";
+    const AUTH_ERROR_MAP = [
+      {
+        // Email-bucket entry FIRST with the "email_rate_limit" pseudo-code so
+        // the substring pass matches an "email rate limit exceeded" message
+        // BEFORE the network entry's bare "rate limit" (dead-code trap, #863).
+        codes: ["over_email_send_rate_limit", "email_rate_limit"],
+        message: EMAIL_BUCKET_RATE_LIMIT_COPY,
+      },
+      {
+        codes: ["over_request_rate_limit", "over_request_rate_limit_ip", "rate_limit"],
+        message: NETWORK_RATE_LIMIT_COPY,
+      },
+      {
+        codes: ["email_address_invalid"],
+        message: "That email address doesn't look valid. Check it and try again.",
+      },
+      {
+        codes: ["invalid_credentials"],
+        message: "Invalid email or password. Please try again.",
+      },
+      {
+        codes: ["email_not_confirmed"],
+        message: "Please confirm your email address before signing in. Check your inbox (and spam) for the confirmation link.",
+      },
+      {
+        codes: ["weak_password"],
+        message: "Password is too weak. Use at least 8 characters with a mix of letters, numbers, and symbols.",
+      },
+      {
+        codes: ["user_already_exists", "email_exists", "user_exists"],
+        message: "An account with this email already exists. Please sign in instead.",
+      },
+      {
+        codes: ["provider_disabled"],
+        message: "This sign-in option is temporarily unavailable. Try email instead.",
+      },
+    ];
+
+    function humanizeAuthError(error) {
+      if (!error) return "Something went wrong. Please try again.";
+      const code = error.code || "";
+      const msg = (error.message || error.msg || error.error_description || "").toLowerCase();
+      for (const entry of AUTH_ERROR_MAP) {
+        if (entry.codes.includes(code)) return entry.message;
+        for (const c of entry.codes) {
+          if (msg.includes(c.replace(/_/g, " "))) return entry.message;
+        }
+      }
+      if (msg.includes("already registered") || msg.includes("already exists") || msg.includes("already been registered")) {
+        return "An account with this email already exists. Please sign in instead.";
+      }
+      if (msg.includes("email rate limit")) {
+        return EMAIL_BUCKET_RATE_LIMIT_COPY;
+      }
+      if (msg.includes("rate limit")) {
+        return NETWORK_RATE_LIMIT_COPY;
+      }
+      if (msg.includes("provider is not enabled") || msg.includes("provider disabled") || msg.includes("unsupported provider")) {
+        return "This sign-in option is temporarily unavailable. Try email instead.";
+      }
+      if (msg.includes("invalid login credentials") || msg.includes("invalid email or password")) {
+        return "Invalid email or password. Please try again.";
+      }
+      if (msg.includes("email not confirmed")) {
+        return "Please confirm your email address before signing in. Check your inbox (and spam) for the confirmation link.";
+      }
+      if (msg.includes("network") || msg.includes("failed to fetch")) {
+        return "Couldn't reach the sign-in service. Check your connection and try again.";
+      }
+      return "Something went wrong. Please try again in a moment.";
+    }
+
+    // ── Rate-limit lockout (#863, mirroring #801 on signup.html) ──────────
+    // The GoTrue email-send bucket is PROJECT-WIDE (custom SMTP: 30 sends/hr
+    // for ALL users) — POST /auth/v1/recover and POST /auth/v1/user send
+    // through the same bucket as signup, and an unguarded client that
+    // re-submits after a 429 burns it for every other visitor. On an
+    // EMAIL-bucket error, lock THIS browser out of the recovery surface for
+    // 1h (sessionStorage-persisted), disable the recovery submit, and show a
+    // live countdown. Per-IP auth-attempt limits (over_request_rate_limit*)
+    // get a short 60s lockout only (two-tier; do NOT flatten them into the
+    // 1h email-bucket lockout).
+    //
+    // Tier-aware gating: the email tier locks ONLY the recovery button —
+    // sign-in never sends email and must stay usable during an email-bucket
+    // lockout. The short tier (per-IP auth-attempt limits) locks both.
+    // Keys are page-scoped (tortoise_signin_*): a signup-page lockout must
+    // not disable sign-in here; the server is the real gate cross-surface.
+    const RATE_LIMIT_CODES = ["over_email_send_rate_limit", "over_request_rate_limit", "over_request_rate_limit_ip", "rate_limit"];
+    const RATE_LIMIT_LOCKOUT_MS = 60 * 60 * 1000;   // email bucket — 1h (matches the hourly window)
+    const SHORT_RATE_LIMIT_LOCKOUT_MS = 60 * 1000;  // per-IP auth-attempt limits — 60s
+    const RATE_LIMIT_KEY = "tortoise_signin_rate_limited_until";
+    const RATE_LIMIT_TIER_KEY = "tortoise_signin_rate_limit_tier";  // "email" | "short" — copy must not decay with remaining time
+    let rateLimitTimer = null;
+    let rateLimitUntil = 0;      // in-memory mirror — the lockout still holds when sessionStorage is unavailable (#801 code-review)
+    let rateLimitTier = "short"; // in-memory tier mirror — copy stays correct when storage is cleared mid-lockout
+
+    function isEmailBucketError(error) {
+      if (!error) return false;
+      const code = error.code || "";
+      const msg = (error.message || error.msg || error.error_description || "").toLowerCase();
+      return code === "over_email_send_rate_limit"
+        || msg.includes("email rate limit")
+        || (code === "rate_limit" && msg.includes("email"));
+    }
+
+    function isRateLimitError(error) {
+      if (!error) return false;
+      const code = error.code || "";
+      const msg = (error.message || error.msg || error.error_description || "").toLowerCase();
+      if (RATE_LIMIT_CODES.includes(code)) return true;
+      for (const c of RATE_LIMIT_CODES) {
+        if (msg.includes(c.replace(/_/g, " "))) return true;
+      }
+      return msg.includes("email rate limit") || msg.includes("rate limit");
+    }
+
+    function rateLimitRemainingMs() {
+      try {
+        const stored = parseInt(sessionStorage.getItem(RATE_LIMIT_KEY) || "0", 10);
+        const until = Number.isFinite(stored) ? Math.max(stored, rateLimitUntil) : rateLimitUntil;
+        return Math.max(0, until - Date.now());
+      } catch (e) { return Math.max(0, rateLimitUntil - Date.now()); }
+    }
+
+    function setRateLimitLockout(error) {
+      // Two-tier: email-bucket exhaustion → 1h; per-IP auth-attempt limits → 60s.
+      const ms = isEmailBucketError(error) ? RATE_LIMIT_LOCKOUT_MS : SHORT_RATE_LIMIT_LOCKOUT_MS;
+      // Never-shrink invariant: a later 60s (or shorter) lockout must never
+      // truncate an active longer lockout (both tiers share one key).
+      rateLimitUntil = Math.max(rateLimitUntil, Date.now() + ms);
+      // Monotonic tier: the copy is pinned at set-time (a 1h lockout must
+      // keep its "about an hour" copy for its whole life, never decaying
+      // into the minute copy as time passes — #801 code-review P2).
+      rateLimitTier = (rateLimitTier === "email" || isEmailBucketError(error)) ? "email" : "short";
+      try {
+        const existing = parseInt(sessionStorage.getItem(RATE_LIMIT_KEY) || "0", 10);
+        const until = Math.max(Number.isFinite(existing) ? existing : 0, rateLimitUntil);
+        sessionStorage.setItem(RATE_LIMIT_KEY, String(until));
+        sessionStorage.setItem(RATE_LIMIT_TIER_KEY, rateLimitTier);
+      } catch (e) {}
+      applyRateLimitLockout();
+    }
+
+    // Tier-aware lockout copy: the email bucket maps to the #863
+    // mechanism-accurate "temporarily exhausted" literal; the short per-IP
+    // tier must not contradict the live countdown it shows. Tier is read
+    // from storage (set at lockout time) — deriving it from remaining time
+    // would decay the copy mid-lockout.
+    function rateLimitMessage() {
+      if (rateLimitRemainingMs() <= 0) return "";
+      let tier = rateLimitTier;
+      try { tier = sessionStorage.getItem(RATE_LIMIT_TIER_KEY) || tier; } catch (e) {}
+      if (tier === "email") {
+        return EMAIL_BUCKET_RATE_LIMIT_COPY;
+      }
+      return "Too many attempts from this network. Please try again in a minute.";
+    }
+
+    function applyRateLimitLockout() {
+      if (rateLimitTimer) { clearInterval(rateLimitTimer); rateLimitTimer = null; }
+      const btn = document.getElementById("btn-submit");
+      const recoveryBtn = document.getElementById("btn-recovery");
+      const restore = function (b) {
+        if (!b) return;
+        if (b.dataset.originalLabel) {
+          b.textContent = b.dataset.originalLabel;
+          delete b.dataset.originalLabel;
+        }
+        b.disabled = false;
+      };
+      const update = function () {
+        const ms = rateLimitRemainingMs();
+        if (ms <= 0) {
+          restore(btn);
+          restore(recoveryBtn);
+          // Lockout over: drop the stale rate-limit message + tier so the
+          // form reads clean (#801 code-review P4).
+          clearError();
+          rateLimitTier = "short";
+          try { sessionStorage.removeItem(RATE_LIMIT_TIER_KEY); } catch (e) {}
+          if (rateLimitTimer) { clearInterval(rateLimitTimer); rateLimitTimer = null; }
+          return;
+        }
+        const totalSec = Math.max(0, Math.floor(ms / 1000));
+        const label = "Try again in "
+          + String(Math.floor(totalSec / 60)).padStart(2, "0") + ":"
+          + String(totalSec % 60).padStart(2, "0");
+        const emailTier = rateLimitTier === "email";
+        // Email tier: lock ONLY the recovery button (email-sending surface).
+        // Sign-in never sends email — it must stay usable. Short tier: both.
+        const locked = emailTier ? [recoveryBtn] : [btn, recoveryBtn];
+        [btn, recoveryBtn].forEach(function (b) {
+          if (!b) return;
+          if (locked.indexOf(b) !== -1) {
+            // P2 hardening: never capture an empty label (setLoading's spinner
+            // swaps innerHTML → textContent "" mid-request). Guard on trimmed
+            // truthiness so the label restore can never blank the button.
+            if (!b.dataset.originalLabel && b.textContent.trim()) {
+              b.dataset.originalLabel = b.textContent;
+            }
+            b.textContent = label;
+            b.disabled = true;
+          } else {
+            restore(b);
+          }
+        });
+      };
+      update();
+      // Only run the ticking interval while a lockout is actually pending — an
+      // idle interval's first tick could re-enable the submit mid-request
+      // (double-submit → duplicate recovery email → bucket burn, #863).
+      if (rateLimitRemainingMs() > 0) rateLimitTimer = setInterval(update, 1000);
+    }
+    // On load: honor a persisted lockout (and explain why the button is off).
+    // The tier must be synced from storage FIRST — applyRateLimitLockout's
+    // gating depends on it (email tier leaves sign-in enabled).
+    // Skip when the CDN guard already surfaced "temporarily unavailable"
+    // (#527 — a blocked supabase-js CDN must stay in its fail-closed state).
+    if (window.supabaseClient && rateLimitRemainingMs() > 0) {
+      try { rateLimitTier = sessionStorage.getItem(RATE_LIMIT_TIER_KEY) || rateLimitTier; } catch (e) {}
+      showError(rateLimitMessage());
+      applyRateLimitLockout();
+    }
+
+    // ── Recovery flow (#863) ──────────────────────────────────────────────
+    // "Forgot password?" toggles the recovery request form; the reset-password
+    // landing lives on /welcome.html (the recovery email redirects there —
+    // same allow-listed target the #801 signup confirmation flow uses).
+    function showRecovery(event) {
+      if (event) event.preventDefault();
+      clearError();
+      document.getElementById("email-form").classList.add("hidden");
+      document.getElementById("recovery-form").classList.remove("hidden");
+      document.getElementById("recovery-note").classList.add("hidden");
+      const el = document.getElementById("recovery-email");
+      if (el) el.focus();
+    }
+
+    function showSignIn(event) {
+      if (event) event.preventDefault();
+      clearError();
+      document.getElementById("email-form").classList.remove("hidden");
+      document.getElementById("recovery-form").classList.add("hidden");
+      document.getElementById("recovery-note").classList.add("hidden");
+    }
+
+    let recoveryInFlight = false;  // #863: double-submit guard — two rapid
+    // clicks must never fire two recovery emails against the shared bucket.
+
+    async function recoverPassword(event) {
+      event.preventDefault();
+      if (recoveryInFlight) return;
+      recoveryInFlight = true;
+      if (!supabaseClient) { showError("Auth not configured."); recoveryInFlight = false; return; }
+      if (rateLimitRemainingMs() > 0) {
+        showError(rateLimitMessage());
+        applyRateLimitLockout();
+        recoveryInFlight = false;
+        return;
+      }
+      clearError();
+      setLoading(true);
+      try {
+        const email = document.getElementById("recovery-email").value.trim();
+        if (!email) {
+          showError("Please enter your email address.");
+          return;
+        }
+        const { error } = await supabaseClient.auth.resetPasswordForEmail(email, {
+          redirectTo: window.location.origin + WELCOME_URL,
+        });
+        if (error) {
+          if (isRateLimitError(error)) {
+            setRateLimitLockout(error);
+            showError(isEmailBucketError(error) ? EMAIL_BUCKET_RATE_LIMIT_COPY : rateLimitMessage());
+          } else {
+            showError(humanizeAuthError(error));
+          }
+          return;
+        }
+        // GoTrue returns 200 whether or not the account exists (no account
+        // enumeration). Success: swap the form for the note.
+        document.getElementById("recovery-form").classList.add("hidden");
+        const note = document.getElementById("recovery-note");
+        note.classList.remove("hidden");
+        document.getElementById("recovery-note-text").textContent =
+          "If an account exists for that email, a reset link is on its way. Check your inbox (and spam). If the reset page doesn't open, request a new link.";
+      } catch (err) {
+        console.error("recoverPassword:", err);
+        showError(humanizeAuthError(err));
+      } finally {
+        recoveryInFlight = false;
+        setLoading(false);
+        applyRateLimitLockout();
+        // P4: the clearError() above wiped the lockout explanation — restore
+        // it when a lockout is still active so the user knows why the form
+        // is disabled.
+        if (rateLimitRemainingMs() > 0) showError(rateLimitMessage());
+      }
+    }
+
     // ── Loading state ──────────────────────────────────────────────────────
+    // Saves the full innerHTML (provider SVG icons included) and restores it,
+    // so OAuth button icons survive an error cycle (#751).
     function setLoading(loading) {
       document.querySelectorAll("button").forEach((btn) => {
         btn.disabled = loading;
         if (loading) {
-          btn.dataset.originalText = btn.textContent;
+          if (!btn.dataset.originalHTML) btn.dataset.originalHTML = btn.innerHTML;
           btn.innerHTML = '<span class="loading-spinner"></span>';
         } else {
-          btn.textContent = btn.dataset.originalText || btn.textContent;
+          if (btn.dataset.originalHTML) {
+            btn.innerHTML = btn.dataset.originalHTML;
+            delete btn.dataset.originalHTML;
+          }
         }
       });
     }
 
     // ── OAuth sign in ──────────────────────────────────────────────────────
     async function signInWithProvider(provider) {
-      if (!supabase) { showError("Auth not configured."); return; }
+      if (!supabaseClient) { showError("Auth not configured."); return; }
       clearError();
       setLoading(true);
+      try {
+        const { data, error } = await supabaseClient.auth.signInWithOAuth({
+          provider: provider,
+          options: {
+            redirectTo: window.location.origin + WELCOME_URL,
+          },
+        });
 
-      const { data, error } = await supabase.auth.signInWithOAuth({
-        provider: provider,
-        options: {
-          redirectTo: window.location.origin + WELCOME_URL,
-        },
-      });
+        if (error) {
+          showError(humanizeAuthError(error));
+          return;
+        }
 
-      if (error) {
-        showError(error.message);
+        // Supabase OAuth redirects the user, so we don't need to do anything else
+        if (data?.url) {
+          window.location.href = data.url;
+        }
+      } catch (err) {
+        console.error("signInWithProvider:", err);
+        showError(humanizeAuthError(err));
+      } finally {
         setLoading(false);
-        return;
-      }
-
-      // Supabase OAuth redirects the user, so we don't need to do anything else
-      if (data?.url) {
-        window.location.href = data.url;
+        applyRateLimitLockout();   // re-apply the lockout state (#863)
+        // P4: signInWithProvider's clearError() wiped the lockout explanation
+        // — restore it when a lockout is still active. But never overwrite an
+        // error this attempt already surfaced (validation, auth, network —
+        // #863 review P2: the lockout copy must not mask a real message).
+        const errEl = document.getElementById("error");
+        const errVisible = errEl && errEl.classList.contains("visible");
+        if (rateLimitRemainingMs() > 0 && !errVisible) showError(rateLimitMessage());
       }
     }
 
     // ── Email/password sign in ─────────────────────────────────────────────
     async function signInWithEmail(event) {
       event.preventDefault();
-      if (!supabase) { showError("Auth not configured."); return; }
+      if (!supabaseClient) { showError("Auth not configured."); return; }
       clearError();
       setLoading(true);
+      try {
+        const email = document.getElementById("email").value.trim();
+        const password = document.getElementById("password").value;
 
-      const email = document.getElementById("email").value.trim();
-      const password = document.getElementById("password").value;
-
-      if (!password) {
-        showError("Please enter your password.");
-        setLoading(false);
-        return;
-      }
-
-      const { data, error } = await supabase.auth.signInWithPassword({
-        email: email,
-        password: password,
-      });
-
-      if (error) {
-        if (error.message.includes("Invalid login credentials") || error.message.includes("Invalid email or password")) {
-          showError("Invalid email or password. Please try again.");
-        } else if (error.message.includes("Email not confirmed")) {
-          showError("Please confirm your email address before signing in.");
-        } else {
-          showError(error.message);
+        if (!password) {
+          showError("Please enter your password.");
+          return;
         }
-        setLoading(false);
-        return;
-      }
 
-      // Redirect to welcome page
-      window.location.href = WELCOME_URL;
+        const { data, error } = await supabaseClient.auth.signInWithPassword({
+          email: email,
+          password: password,
+        });
+
+        if (error) {
+          // #863: sign-in 429s are per-IP auth-attempt limits
+          // (over_request_rate_limit_ip — signInWithPassword never sends
+          // email) → short 60s tier + network copy. The generic path also
+          // stays correct if an email-bucket code ever surfaces here.
+          if (isRateLimitError(error)) {
+            setRateLimitLockout(error);
+            showError(isEmailBucketError(error) ? EMAIL_BUCKET_RATE_LIMIT_COPY : rateLimitMessage());
+          } else {
+            showError(humanizeAuthError(error));
+          }
+          return;
+        }
+
+        // Redirect to welcome page
+        window.location.href = WELCOME_URL;
+      } catch (err) {
+        console.error("signInWithEmail:", err);
+        showError(humanizeAuthError(err));
+      } finally {
+        setLoading(false);
+        applyRateLimitLockout();   // re-apply tier gating AFTER setLoading re-enables buttons
+        // #863 review P2: only restore the lockout copy when this attempt
+        // surfaced no error of its own (validation / auth / network) — the
+        // lockout message must not mask the real message.
+        const errEl = document.getElementById("error");
+        const errVisible = errEl && errEl.classList.contains("visible");
+        if (rateLimitRemainingMs() > 0 && !errVisible) showError(rateLimitMessage());
+      }
     }
+  </script>
+<script src="/consent.js" defer></script>
+
+  <!-- Watchdog (#527): if the Supabase CDN script never arrives (slow
+       network, blocked CDN), surface a clear "temporarily unavailable" state
+       instead of a dead form. Idempotent: does nothing when the client is
+       present (window.supabaseClient set by the main script) or an error is
+       already showing; clears itself if the client arrives late. -->
+  <script>
+    (function () {
+      function showWatchdogError() {
+        var el = document.getElementById("error");
+        if (!el) return;
+        if (window.supabaseClient || el.classList.contains("visible")) return;
+        el.textContent = "Sign in is temporarily unavailable (script blocked). Please try again later.";
+        el.classList.add("visible");
+      }
+      function clearWatchdogError() {
+        var el = document.getElementById("error");
+        if (!el) return;
+        if (window.supabaseClient && el.textContent.indexOf("temporarily unavailable") !== -1) {
+          el.classList.remove("visible");
+        }
+      }
+      setTimeout(showWatchdogError, 6000);
+      setTimeout(clearWatchdogError, 10000);
+    })();
   </script>
 </body>
 </html>

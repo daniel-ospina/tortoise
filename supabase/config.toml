@@ -213,7 +213,10 @@ enable_signup = true
 # addresses. If disabled, only the new email is required to confirm.
 double_confirm_changes = true
 # If enabled, users need to confirm their email address before signing in.
-enable_confirmations = false
+# Local prod parity (#801): prod has confirmations ON (SMTP-era, #832); local
+# email goes to inbucket, so the confirmation branch + 429 UX are exercisable
+# locally. NOTE: [auth.sms].enable_confirmations stays false — different setting.
+enable_confirmations = true
 # If enabled, users will need to reauthenticate or have logged in recently to change their password.
 secure_password_change = false
 # Controls the minimum amount of time that must pass before sending another signup confirmation or password reset email.
@@ -272,8 +275,11 @@ max_frequency = "5s"
 
 # Auth hook after_user_created is configured on the REMOTE project (Management API)
 # — CLI v2.90 cannot parse [auth.hook.after_user_created] in config.toml.
-# Remote state: hook_after_user_created_enabled=true,
-#   uri=https://ybetwichurajbfswfeqa.functions.supabase.co/tenant-provision
+# Remote state (2026-08-10, #832): hook_after_user_created is DISABLED on this
+# plan (its Standard-Webhooks signature could never be verified) and
+# AUTH_HOOK_SECRET was removed from tenant-provision — the function's hook
+# path fails CLOSED (401). Client-side provisioning (welcome page JWT path)
+# is the production path (#802/#839).
 
 # This hook runs before a token is issued and allows you to add additional claims based on the authentication method used.
 # [auth.hook.custom_access_token]
@@ -426,6 +432,16 @@ s3_secret_key = "env(S3_SECRET_KEY)"
 # ── Edge Functions ────────────────────────────────────────────────
 # tenant-provision is invoked by the after_user_created auth hook.
 # Auth hooks call WITHOUT a user JWT → verify_jwt must be false
-# (Supabase Auth signs the hook request itself).
+# (Supabase Auth signs the hook request itself with the hook secret).
+# Caller auth is enforced INSIDE the function (#802): it verifies the
+# Standard-Webhooks signature against AUTH_HOOK_SECRET (hook calls) or a
+# user JWT whose identity matches the provisioning target (direct calls).
+# The public anon key alone returns 401.
 [functions.tenant-provision]
+verify_jwt = false
+
+# waitlist-subscribe is called from the premiselabs.co landing page waitlist
+# form (#373) — anonymous browser POSTs carry NO user JWT → verify_jwt must
+# be false or every submission 401s before the function runs.
+[functions.waitlist-subscribe]
 verify_jwt = false

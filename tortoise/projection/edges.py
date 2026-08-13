@@ -8,17 +8,44 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# Canonical structural-edge predicate vocabulary (ONTOLOGY §3.2/§3.3 + #391).
+# Hoisted from create_edge so SDK surfaces (e.g. TortoiseSDK.ingest, epic #888
+# W4) can validate relation names WITHOUT string-duplicating the set.
+_VALID_EDGE_PREDICATES = frozenset({
+    'performs', 'produces', 'uses', 'authoredBy', 'ownedBy', 'managedBy',
+    'hasMember', 'holdsRole', 'memberOf', 'reportsTo',
+    'participatesIn', 'hasPart', 'related', 'dependsOn', 'references',
+    'wasDerivedFrom',
+    # #391: about* edges (ONTOLOGY §3.2/§3.3) were only creatable via
+    # create_about_edge — the generic create_edge set missed them.
+    'aboutSubject', 'aboutObject', 'aboutEvent', 'aboutDocument',
+    'aboutSource', 'aboutAction',
+})
+
+
 class _EdgeHandlers:
     """Mixin: edge creation, about edges, source linking, edge stats."""
 
     def _create_edges(self, p: dict) -> None:
         """Create typed edges for an operator Point. Auto-creates stub nodes
         for missing source Points referenced by short IDs (#6713)."""
-        op = p["operator"]
+        op = p.get("operator")
+        if not isinstance(op, dict):
+            # #331 (review r4): a truthy non-dict operator value must
+            # degrade to no edges, not AttributeError in op.get().
+            return
+        # #331 (review r3): .get() — a malformed operator dict without
+        # op_type/inputs must degrade to no typed edges, not KeyError.
         rel_type = {"NAND": "NAND", "IMPL": "IMPL",
                      "composedOf": "hasPart", "decomposesInto": "hasPart",
-                     "contains": "hasPart", "wraps": "hasPart"}.get(op["op_type"])
-        for idx, src in enumerate(op["inputs"]):
+                     "contains": "hasPart", "wraps": "hasPart"}.get(op.get("op_type"))
+        import logging as _logging
+        _log = _logging.getLogger(__name__)
+        for idx, src in enumerate(op.get("inputs") or []):
+            # #331 (review r4): non-string inputs members are malformed —
+            # skip (len()/Cypher param would raise).
+            if not isinstance(src, str):
+                continue
             # ponytail: auto-create stub if source Point doesn't exist.
             # Short numeric IDs are orphan refs from cross-file wiring scripts.
             if len(src) < 20:  # short IDs (non-ULID) are suspect
@@ -27,12 +54,24 @@ class _EdgeHandlers:
                     params={"sid": src}
                 ).result_set[0][0]
                 if not exists:
+                    # #329: bounded stub auto-creation — at the per-instance cap
+                    # we STOP creating stubs and SKIP the edge to the missing
+                    # node (fail-safe: no partial edge, no crash, warning logged).
+                    if getattr(self, "_autocreated_stubs", 0) >= getattr(
+                            self, "_max_autocreated_stubs", 500):
+                        _log.warning(
+                            "stub auto-creation cap reached (%d) — skipping "
+                            "missing source %r (edge not created)",
+                            getattr(self, "_max_autocreated_stubs", 500), src,
+                        )
+                        continue
                     self.g.query(
                         "CREATE (s:Point {id:$sid}) "
                         "SET s.content='[missing]', "
                         "    s.is_operator=false",
                         params={"sid": src}
                     )
+                    self._autocreated_stubs = getattr(self, "_autocreated_stubs", 0) + 1
             if rel_type is not None:
                 # Known op_type → typed edge + reverse INPUT
                 self.g.query(
@@ -160,11 +199,13 @@ class _EdgeHandlers:
                     created = True
         return created
 
-    def _link_source(self, point_id: str, source_ref: str, source_kind: str = "document") -> None:
-        """Link Point → Source via extractedFrom edge (Ontology v2.5).
+    def _link_source(self, point_id: str, source_ref: str, source_kind: str = "document", *, label: str = "Point") -> None:
+        """Link entity → Source via extractedFrom edge (Ontology v3.3).
 
         Creates stub Source if missing, keyed on url. sourceKind defaults to 'document'
         but connectors pass specific values (github_issue, slack_message, linear_card, etc.).
+        ``label`` selects the source-side entity label — Point (default) or Document
+        (create_document provenance, #394).
         """
         self.g.query(
             "MERGE (s:Source {url:$url}) "
@@ -173,7 +214,7 @@ class _EdgeHandlers:
             params={"url": source_ref, "sk": source_kind, "now": _now_iso()},
         )
         self.g.query(
-            "MATCH (n:Point {id:$pid}), (s:Source {url:$url}) "
+            f"MATCH (n:{label} {{id:$pid}}), (s:Source {{url:$url}}) "
             "MERGE (n)-[:extractedFrom]->(s)",
             params={"pid": point_id, "url": source_ref},
         )
@@ -236,12 +277,7 @@ class _EdgeHandlers:
     def create_edge(self, source_id: str, target_id: str, predicate: str) -> bool:
         """Create a named edge between two entities by their IDs.
         Matches target by id OR eventId (Event nodes use eventId as key)."""
-        valid_predicates = {
-            'performs', 'produces', 'uses', 'authoredBy', 'ownedBy', 'managedBy',
-            'hasMember', 'holdsRole', 'memberOf', 'reportsTo',
-            'participatesIn', 'hasPart', 'related', 'dependsOn', 'references',
-            'wasDerivedFrom'
-        }
+        valid_predicates = _VALID_EDGE_PREDICATES
         if predicate not in valid_predicates:
             raise ValueError(f"Unknown predicate: {predicate}")
         # Resolve endpoints via index-backed labeled lookups (issue #327).
@@ -252,6 +288,23 @@ class _EdgeHandlers:
         targets = self._resolve_entity(target_id, by_id=True, by_eventId=True)
         if not sources or not targets:
             return False
+        # #390: mirror create_owned_by's circular-DAG guard for ownedBy — the
+        # generic create_edge path must not bypass it. The new edge is
+        # source -[:ownedBy]-> target; a cycle would close iff target already
+        # (transitively) owns source. Same varlen 1..10 traversal + all
+        # resolved (target, source) pairs as create_owned_by.
+        if predicate == 'ownedBy':
+            for t in targets:
+                for s in sources:
+                    cycle = self.g.query(
+                        f"MATCH (t:{t['label']} {{{t['key']}:$tid}}) "
+                        f"MATCH (s:{s['label']} {{{s['key']}:$sid}}) "
+                        f"MATCH path = (t)-[:ownedBy*1..10]->(s) RETURN count(path) > 0",
+                        params={"tid": t["value"], "sid": s["value"]},
+                    )
+                    if cycle.result_set and cycle.result_set[0][0]:
+                        raise ValueError(
+                            f"Circular ownership: {target_id} already owned by {source_id}")
         created = False
         for s in sources:
             for t in targets:

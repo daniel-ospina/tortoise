@@ -14,7 +14,7 @@
       --surface: #0d1a2d;
       --surface-hover: #12223d;
       --text: #cbd5e1;
-      --text-dim: #64748b;
+      --text-dim: #94a3b8;
       --accent: #06b6d4;
       --accent-hover: #0891b2;
       --green: #4ade80;
@@ -51,9 +51,10 @@
     pre code { background: none; padding: 0; }
 
     table { width: 100%; border-collapse: collapse; margin: 12px 0 24px; font-size: 14px; }
+    .table-wrap { overflow-x: auto; }
     th { text-align: left; color: var(--text-dim); font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; padding: 8px 12px; border-bottom: 1px solid var(--border); }
     td { padding: 8px 12px; border-bottom: 1px solid rgba(30, 41, 59, 0.5); }
-    td code { font-size: 12px; }
+    td code { font-size: 12px; word-break: break-word; }
 
     .method { display: inline-block; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 4px; margin-right: 8px; }
     .get { background: rgba(74, 222, 128, 0.15); color: var(--green); }
@@ -73,7 +74,7 @@
   <div class="topbar">
     <a class="logo" href="/">Tortoise<span>.</span></a>
     <nav>
-      <a href="/product.html">Product</a>
+      <a href="https://tortoise.premiselabs.co/">Product</a>
       <a href="/docs" class="active">Docs</a>
     </nav>
     <a class="login" href="https://app.premiselabs.co">Login</a>
@@ -99,7 +100,7 @@
     <h2 id="how">How it works</h2>
     <div class="card">
       <h3>The data model</h3>
-      <p>Everything is a <code>Point</code>: an atomic claim with an <code>id</code>, <code>content</code> (text), <code>pointKind</code>, and a <code>status</code>. The core kind vocabulary (ontology v3.1 §5) is: <code>statement</code>, <code>decision</code>, <code>vision</code>, <code>strategy</code>, <code>plan</code>, <code>goal</code>, <code>target</code>, <code>observation</code>, <code>hypothesis</code> — plus <code>evidence</code> and domain kinds registered by expansion packs.</p>
+      <p>Everything is a <code>Point</code>: an atomic claim with an <code>id</code>, <code>content</code> (text), <code>pointKind</code>, and a <code>status</code>. The core kind vocabulary (ontology v3.4 §5) is: <code>statement</code>, <code>decision</code>, <code>vision</code>, <code>strategy</code>, <code>plan</code>, <code>goal</code>, <code>target</code>, <code>observation</code>, <code>hypothesis</code> — plus <code>evidence</code> and domain kinds registered by expansion packs.</p>
       <p class="callout">The hosted API currently accepts a subset: <code>statement</code>, <code>decision</code>, <code>evidence</code>, <code>observation</code>, <code>hypothesis</code> (tracked in issue #7881). The graph and SDK accept the full vocabulary.</p>
       <ul>
         <li><code>status: draft</code> — created but not yet connected (not counted in confidence)</li>
@@ -136,7 +137,7 @@
     <h2 id="quickstart">Quickstart (5 minutes)</h2>
     <div class="card">
       <h3>1. Create an account</h3>
-      <p>Sign up at <a href="https://tortoise.premiselabs.co/signup">tortoise.premiselabs.co/signup</a>. You'll get an API key on the welcome page — copy it. It's shown once.</p>
+      <p>Sign up at <a href="/signup">tortoise.premiselabs.co/signup</a>. You'll get an API key on the welcome page — copy it. It's shown once.</p>
     </div>
     <div class="card">
       <h3>2. Write your first Point</h3>
@@ -160,8 +161,25 @@
     <h2 id="mcp">Connect your agent (MCP)</h2>
     <p>The fastest way to give an agent Tortoise memory is the <strong>MCP server</strong> — no code required. Your agent (Claude Code, Cursor, Claude Desktop, or any MCP client) reads and writes your Tortoise graph automatically.</p>
     <div class="card">
-      <h3>Setup</h3>
+      <h3>Setup — hosted (no install)</h3>
       <p>Add this to your MCP config (replace <code>tt_YOUR_KEY</code> with your API key):</p>
+      <pre><code>{
+  "mcpServers": {
+    "tortoise": {
+      "type": "streamable-http",
+      "url": "https://api.premiselabs.co/mcp/",
+      "headers": {
+        "Authorization": "Bearer tt_YOUR_KEY"
+      }
+    }
+  }
+}</code></pre>
+      <p>Paste into <code>.mcp.json</code> (Claude Code), <code>.cursor/mcp.json</code> (Cursor), or <code>claude_desktop_config.json</code> (Claude Desktop). Restart your client.</p>
+      <p class="callout">The hosted MCP server runs on our infrastructure over Streamable HTTP — no Python or <code>tortoise</code> install needed. Your client just needs network access to <code>https://api.premiselabs.co/mcp/</code>.</p>
+    </div>
+    <div class="card">
+      <h3>Setup — self-hosted (stdio)</h3>
+      <p>Running Tortoise on your own infrastructure? Point the MCP client at a local process over stdio instead (see the <a href="/self-hosted">self-hosted guide</a>):</p>
       <pre><code>{
   "mcpServers": {
     "tortoise": {
@@ -174,8 +192,7 @@
     }
   }
 }</code></pre>
-      <p>Paste into <code>.mcp.json</code> (Claude Code), <code>.cursor/mcp.json</code> (Cursor), or <code>claude_desktop_config.json</code> (Claude Desktop). Restart your client.</p>
-      <p class="callout">Need <code>python3</code> and <code>tortoise</code> installed where the client runs? <code>pip install tortoise</code> — the MCP server ships with the package.</p>
+      <p class="callout">Need <code>python3</code> and <code>tortoise</code> installed where the client runs? <code>pip install tortoise-graph</code> — the MCP server ships with the package.</p>
     </div>
     <div class="card">
       <h3>What your agent can do</h3>
@@ -190,6 +207,7 @@
 
     <h2 id="api">API reference</h2>
     <p>Base URL: <code>https://api.premiselabs.co</code>. All endpoints require <code>Authorization: Bearer tt_&lt;key&gt;</code>.</p>
+    <div class="table-wrap">
     <table>
       <thead><tr><th>Endpoint</th><th>Method</th><th>Purpose</th></tr></thead>
       <tbody>
@@ -205,6 +223,7 @@
         <tr><td><code>/v1/sessions</code></td><td><span class="method post">POST</span></td><td>Record a session</td></tr>
       </tbody>
     </table>
+    </div>
 
     <div class="callout">
       <strong>Note:</strong> The <code>context</code> field is deprecated (removed from Point metadata). Use <code>kind</code> to classify content.
@@ -213,7 +232,7 @@
     <h2 id="next">Next steps</h2>
     <ul>
       <li>Explore the <a href="https://app.premiselabs.co">dashboard</a> — manage keys and sessions</li>
-      <li>Read the <a href="/product.html">product story</a></li>
+      <li>Read the <a href="https://tortoise.premiselabs.co/">product story</a></li>
       <li>Questions? Email <a href="mailto:hello@premiselabs.co">hello@premiselabs.co</a></li>
     </ul>
   </div>

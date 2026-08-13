@@ -19,7 +19,7 @@ created: 2026-08-07
 **Team:** organisation-design-team
 **Role:** (unset)
 
-**Architecture:** The onboarding flow spans four surfaces: (1) a dynamic welcome page that presents the one-artifact after signup, (2) an agent-side onboarding prompt (markdown block) that drives the yes/no conversation, (3) new MCP tools and REST endpoints for GitHub connect, demo graph **verification**, and onboarding state tracking, and (4) funnel analytics events. The welcome page (premise-labs/) talks to Supabase for auth/key delivery; the agent prompt talks to the hosted API (tortoise/hosted_api.py) via MCP tools (registry-driven, per #454); the hosted API manages onboarding state as properties on the Team node in the registry graph. Phase 1 produces design artifacts only (no code); Phase 2 implements all build components per the owner override removing the traction gate.
+**Architecture:** The onboarding flow spans four surfaces: (1) a dynamic welcome page that presents the one-artifact after signup, (2) an agent-side onboarding prompt (markdown block) that drives the yes/no conversation, (3) new MCP tools and REST endpoints for GitHub connect, demo graph **verification**, and onboarding state tracking, and (4) funnel analytics events. The welcome page (website/) talks to Supabase for auth/key delivery; the agent prompt talks to the hosted API (tortoise/hosted_api.py) via MCP tools (registry-driven, per #454); the hosted API manages onboarding state as properties on the Team node in the registry graph. Phase 1 produces design artifacts only (no code); Phase 2 implements all build components per the owner override removing the traction gate.
 
 ### Pattern Research
 
@@ -45,8 +45,8 @@ created: 2026-08-07
 
 | # | Surface | System A | System B | Type | Test Layer | Bug Flags |
 |---|---------|----------|----------|------|------------|-----------|
-| 1 | Welcome page → Supabase Auth | `premise-labs/welcome.html` | Supabase Auth + `user_teams` table | Browser JS → REST | Playwright E2E (`test-e2e`) | Auth session expiry during polling; `user_teams` row not yet provisioned |
-| 2 | Welcome page → API key display | `premise-labs/welcome.html` | Supabase `user_teams.api_key` | JS polling → DB read | Playwright E2E | Key shows "pending" past 30s timeout; key is null |
+| 1 | Welcome page → Supabase Auth | `website/welcome.html` | Supabase Auth + `user_teams` table | Browser JS → REST | Playwright E2E (`test-e2e`) | Auth session expiry during polling; `user_teams` row not yet provisioned |
+| 2 | Welcome page → API key display | `website/welcome.html` | Supabase `user_teams.api_key` | JS polling → DB read | Playwright E2E | Key shows "pending" past 30s timeout; key is null |
 | 3 | Agent prompt → MCP server | Agent (Claude/Codex/Cursor/Pi) | `tortoise/mcp_server.py` + `tortoise/tool_registry.py` (**58 registry entries; 54 HTTP-visible** — registry-driven per #454) | MCP Streamable HTTP | Manual smoke test (no MCP test harness) + unit tests for new tools | Agent hallucinates tool names; auth fails silently |
 | 4 | Agent prompt → Hosted API (new endpoints) | Agent via MCP tools | `tortoise/hosted_api.py` | MCP → FastAPI → FalkorDB | Integration test (`test-integration`) with test tenant | Tenant isolation leak; rate limit on GitHub API |
 | 5 | GitHub OAuth → Hosted API | GitHub OAuth App | `tortoise/hosted_api.py` (callback) | OAuth 2.0 redirect → REST | Manual + Playwright for callback flow | CSRF state mismatch; token expiry; app not approved |
@@ -139,7 +139,7 @@ Write the exact MCP config the user needs for each of the 4 supported harnesses.
 
 **Key-substitution requirement (plan-review P1):** the artifact NEVER ships with the literal `tt_YOUR_KEY` placeholder as a copyable value. The welcome page must render the config block with the user's **real API key already substituted** (the page holds it from `user_teams`). If the key is not yet provisioned, the copy action is disabled with a "key still provisioning" state rather than copying the placeholder. The `tt_YOUR_KEY` token is documentation-only (shown as an example in the design doc), and every E2E clipboard assertion (Task 16) must verify the copied config contains the real `tt_` key, not the placeholder (see `test_copy_contains_real_key`).
 
-**Path note (plan-review P2):** `premise-labs/` may be renamed to `website/` by implementation time (PR #206). All path references in this plan use `premise-labs/`; introduce a single path variable in the design doc (e.g., `$WEB_DIR`) and note the possible rename so the artifact build does not hardcode the old folder name.
+**Path note (plan-review P2):** The landing dir was renamed `premise-labs/` → `website/` (PR #206) after this plan was drafted; all path references in this plan use `website/`. Introduce a single path variable in the design doc (e.g., `$WEB_DIR`) so the artifact build does not hardcode the folder name.
 
 **Step 2: Draft the onboarding prompt block**
 
@@ -242,7 +242,7 @@ Regardless of answers, Q6 always runs:
 
 ### Task 3: Welcome Page Flow Design (Design Doc + Wireframe)
 
-**Intent:** Design the updated welcome page (`premise-labs/welcome.html`) that presents the one-artifact, shows onboarding progress, and guides the user through the paste flow. The current page shows API key + MCP config + quickstart — it needs the onboarding artifact and clearer flow.
+**Intent:** Design the updated welcome page (`website/welcome.html`) that presents the one-artifact, shows onboarding progress, and guides the user through the paste flow. The current page shows API key + MCP config + quickstart — it needs the onboarding artifact and clearer flow.
 **Acceptance:** A design doc (`06-welcome-page-design.md`) with: (a) wireframe/sketch of the updated welcome page layout, (b) the three states (loading → ready → post-onboarding), (c) content for all sections, (d) how the one-artifact is presented and copied, (e) what changes from the current `welcome.html`.
 **Files:**
 - Create: `docs/epics/2026-08-07-hosted-onboarding-235/06-welcome-page-design.md`
@@ -496,7 +496,7 @@ signup_completed (100%)
 **Acceptance:** `POST /v1/register` accepts email+password, creates a Supabase user, and returns the key produced by the existing webhook provisioning path (or a "pending" state while that runs). The existing `welcome.html` polling flow continues to work. Re-registering the same email returns 409 (no key re-exposure). Per-IP and per-email rate limiting protects the endpoint.
 **Files:**
 - Modify: `tortoise/hosted_api.py` — add `POST /v1/register` endpoint
-- Modify: `premise-labs/welcome.html` — optionally update to use new endpoint directly
+- Modify: `website/welcome.html` — optionally update to use new endpoint directly
 - Create: `tests/test_hosted_register.py` — integration tests
 - Create: `supabase/functions/register/` — Supabase edge function (optional, alternative to direct API call)
 
@@ -826,10 +826,10 @@ async def update_onboarding_state(body: OnboardingStateUpdate, team: dict = Depe
 
 ### Task 12: Welcome Page v2 (Dynamic, with Onboarding Artifact)
 
-**Intent:** Update `premise-labs/welcome.html` to include the one-artifact block, per-harness instructions, and a visual onboarding flow. Replace the current "MCP config" + "Quickstart" sections with the unified onboarding artifact.
+**Intent:** Update `website/welcome.html` to include the one-artifact block, per-harness instructions, and a visual onboarding flow. Replace the current "MCP config" + "Quickstart" sections with the unified onboarding artifact.
 **Acceptance:** The updated welcome page shows: (a) API key card (kept), (b) the one-artifact block with per-harness tabs and a single "Copy onboarding setup" button that copies BOTH blocks with the **real API key substituted** (never the `tt_YOUR_KEY` placeholder), (c) a numbered flow diagram (1→2→3→4), (d) post-onboarding state showing completion checkmarks, driven by polling the client-safe `GET /v1/onboarding/state/progress` endpoint (5s cadence). No JavaScript framework dependency — keep the current vanilla HTML/CSS/JS pattern.
 **Files:**
-- Modify: `premise-labs/welcome.html` — add one-artifact section, harness tabs, post-onboarding state
+- Modify: `website/welcome.html` — add one-artifact section, harness tabs, post-onboarding state
 
 **Step 1: Rebuild the "Ready" state layout**
 
@@ -907,18 +907,18 @@ Fire `artifact_copied` on copy button clicks (include harness + section info —
 **Intent:** Deploy the onboarding prompt so it's accessible from the welcome page and can be updated independently of the welcome page code. The prompt is a markdown file served as static content or stored as a snippet.
 **Acceptance:** The onboarding prompt is served at a stable URL (e.g., `https://premiselabs.co/onboarding-prompt.md` or embedded in the hosted API at `GET /v1/onboarding/prompt`). The welcome page links to it. The prompt content matches what was designed in Task 4. Updating the prompt does not require redeploying the API.
 **Files:**
-- Create: `premise-labs/onboarding-prompt.md` — the canonical prompt file
-- Modify: `premise-labs/welcome.html` — reference the prompt from the artifact section
+- Create: `website/onboarding-prompt.md` — the canonical prompt file
+- Modify: `website/welcome.html` — reference the prompt from the artifact section
 - Modify: `tortoise/hosted_api.py` — optional: serve prompt via API
 - Modify: `tortoise/claude-hooks/CLAUDE.tortoise.md` — add a link to the onboarding prompt
 
 **Step 1: Save canonical prompt**
 
-Write the final prompt from Task 4 to `premise-labs/onboarding-prompt.md`.
+Write the final prompt from Task 4 to `website/onboarding-prompt.md`.
 
 **Step 2: Serve the prompt**
 
-Option A: Serve as static file from premise-labs (simplest).
+Option A: Serve as static file from website (simplest).
 Option B: Serve via hosted API at `GET /v1/onboarding/prompt` (allows dynamic personalization later).
 
 **Step 3: Update welcome.html**
@@ -953,7 +953,7 @@ Paste the prompt into a fresh Claude Code session. Verify the agent follows the 
 **Acceptance:** All events from the analytics schema fire at the correct moments. Events are stored in the existing `audit_events` table (via `TORTOISE_AUDIT_DSN` + `AuditLogger`, `operation` = event name, `properties` JSONB — plan-review P1-10) with the client sink `POST /v1/analytics/events` for browser-side events. A simple dashboard query shows funnel conversion rates. No PII in event payloads.
 **Files:**
 - Modify: `tortoise/hosted_api.py` — add analytics event emission on key endpoints
-- Modify: `premise-labs/welcome.html` — add client-side analytics events
+- Modify: `website/welcome.html` — add client-side analytics events
 - Create: `tests/test_analytics_events.py` — verify events fire
 - Create: Postgres migration — `ALTER TABLE audit_events ADD COLUMN properties JSONB` (extend existing table; see Step 1)
 
@@ -1254,6 +1254,6 @@ Phase 1 design artifacts (Tasks 1–6) inform but do not gate Phase 2. Build tas
 
 **P2 fixes (applied)**
 - Tool counts corrected everywhere (56→58 registry / 54 HTTP-visible; 63→65-68 family replaced by explicit totals; HTTP-visible language added).
-- URLs centralized (P1-18) + note added that `premise-labs/` may be renamed to `website/` by implementation time (PR #206) — path variable note at Task 1.
+- URLs centralized (P1-18) + note added that `website/` may be renamed to `website/` by implementation time (PR #206) — path variable note at Task 1.
 - "Tasks 7–15 can start in parallel" prose replaced with an explicit 4-wave partial order (state store + register first; GitHub/demo next; MCP tools + analytics after their endpoints; frontend + E2E last).
 - GitHub scopes aligned (Step 1 vs Step 2); Q6 → "Verification"; mobile/accessibility note (long-string wrapping, tab targets) added to Task 3; Phase 1 validation step (paste draft artifact into 1–2 real harness sessions before freezing the prompt) added to Task 4.

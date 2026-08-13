@@ -4,11 +4,11 @@
 
 ## Project Identity
 
-Premise Labs is the company behind **Tortoise** — a Python graph engine backed by FalkorDB that powers agent memory (semantic, epistemic, episodic, procedural). This repo (`daniel-ospina/premise-labs`) contains:
+Premise Labs is the company behind **Tortoise** — a Python graph engine backed by FalkorDB that powers agent memory (semantic, epistemic, episodic, procedural). This repo (`daniel-ospina/tortoise`) contains:
 - **`tortoise/`** — Python SDK, MCP server, EP belief propagation engine
 - **`apps/graph-viz/`** — React ontology visualization frontend
 - **`docs/`** — Architecture, ontology, legal, product strategy
-- **`premise-labs/`** — Company landing page
+- **`website/`** — Company landing page
 
 ## Model
 
@@ -59,5 +59,5 @@ When suggesting a new conversation, always provide the exact prompt the user can
 
 ## Related Repos
 
-- **El Dato (main app):** `daniel-ospina/eldato` — the consumer of Tortoise. Contains `operations/skills/`, the memory system plan (`docs/epics/2026-07-14-memory-system/`), and the agent-infra that dispatches Tortoise operations.
-- **Agent Infra:** Lives in the El Dato repo under `operations/skills/` — commit-workflow, code-review, epic-workflow, and other agent skills consume Tortoise via MCP.
+- **El Dato (main app):** `daniel-ospina/eldato` — the consumer of Tortoise. Contains `operations/skills/` and the memory system plan (`docs/epics/2026-07-14-memory-system/`).
+- **Agent Infra:** `daniel-ospina/agent-infra` — its own repo: Pi extensions, skills, and commit-workflow, code-review, epic-workflow, and other agent skills consume Tortoise via MCP.

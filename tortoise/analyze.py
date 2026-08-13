@@ -9,6 +9,8 @@ from __future__ import annotations
 import json, os, re
 from typing import Any
 
+from .live import _live_only
+
 
 # ═══════════════════════════════════════════════════════════════════
 # Template Registry
@@ -81,9 +83,11 @@ TEMPLATES: dict[str, dict] = {
         "cypher": """
             MATCH (c:Point)
             WHERE (c.is_operator IS NULL OR c.is_operator = false)
-              AND c.ep_alpha IS NOT NULL AND c.ep_beta IS NOT NULL
-            WITH c, (c.ep_alpha * c.ep_beta) / 
-               ((c.ep_alpha + c.ep_beta)^2 * (c.ep_alpha + c.ep_beta + 1)) as variance
+              AND (c.posterior_alpha IS NOT NULL OR c.ep_alpha IS NOT NULL)
+            WITH c, coalesce(c.posterior_alpha, c.ep_alpha, 1.0) AS a,
+                 coalesce(c.posterior_beta, c.ep_beta, 1.0) AS b
+            WITH c, a, b, (a * b) / 
+               ((a + b)^2 * (a + b + 1)) as variance
             RETURN c.id, c.content, coalesce(c.confidence,0.5) as conf, variance
             ORDER BY variance DESC LIMIT $limit
         """,
@@ -110,9 +114,11 @@ TEMPLATES: dict[str, dict] = {
         "cypher": """
             MATCH (c:Point)
             WHERE c.content CONTAINS $entity
-              AND c.ep_alpha IS NOT NULL
+              AND (c.posterior_alpha IS NOT NULL OR c.ep_alpha IS NOT NULL)
             RETURN c.id, c.content, coalesce(c.confidence,0.5) as conf,
-                   c.ep_alpha, c.ep_beta, c.createdAt
+                   coalesce(c.posterior_alpha, c.ep_alpha, 1.0) as a,
+                   coalesce(c.posterior_beta, c.ep_beta, 1.0) as b,
+                   c.createdAt
             ORDER BY c.createdAt DESC LIMIT $limit
         """,
         "format": lambda rows: _format_timeline(rows),
@@ -151,8 +157,14 @@ def _format_ranked(rows: list, label: str) -> str:
         return f"No {label} claims found."
     lines = [f"Top {label} claims:"]
     for i, r in enumerate(rows[:10], 1):
-        conf = r[2] if len(r) > 2 else r[2] if len(r) > 2 else "?"
-        lines.append(f"  {i}. \"{r[1][:80]}\" (confidence: {float(conf):.2f})")
+        try:
+            conf = float(r[2])
+            content = r[1][:80] if r[1] is not None else ""
+        except (TypeError, ValueError, IndexError):
+            conf = None  # non-numeric/missing confidence → degrade, don't crash
+            content = (r[1][:80] if len(r) > 1 and r[1] is not None else "")
+        val = f"  {i}. \"{content}\"" + (f" (confidence: {conf:.2f})" if conf is not None else "")
+        lines.append(val)
     return "\n".join(lines)
 
 
@@ -168,9 +180,16 @@ def _format_uncertain(rows: list) -> str:
 def _format_chain(rows: list) -> str:
     if not rows:
         return "No evidence chain found."
-    lines = ["Evidence chain (ordered by proximity):"]
+    lines = ["Evidence chain (ordered by confidence):"]
     for r in rows[:10]:
-        lines.append(f"  [{r[3]} hops] \"{r[1][:80]}\" (conf: {r[2]:.2f})")
+        # evidence_chain template returns 3 columns: id, content, conf
+        try:
+            conf = float(r[2])
+            conf_txt = f" (conf: {conf:.2f})"
+        except (TypeError, ValueError, IndexError):
+            conf_txt = ""  # non-numeric/missing confidence → degrade, don't crash
+        content = r[1][:80] if len(r) > 1 and r[1] is not None else ""
+        lines.append(f"  \"{content}\"{conf_txt}")
     return "\n".join(lines)
 
 
@@ -222,23 +241,48 @@ def _extract_entity(question: str, trigger: str) -> str:
 # LLM Integration (optional — keyword match handles 80% of queries)
 # ═══════════════════════════════════════════════════════════════════
 
+# #329: provider-key pairing — a key is ONLY ever sent to the provider that
+# issued it. (The old code used `OPENAI_API_KEY or DEEPSEEK_API_KEY` and always
+# POSTed to api.deepseek.com — the OpenAI key was exfiltrated to DeepSeek.)
+_LLM_PROVIDERS: dict[str, tuple[str, str]] = {
+    "DEEPSEEK_API_KEY": ("https://api.deepseek.com/v1/chat/completions", "deepseek-chat"),
+    "OPENAI_API_KEY": ("https://api.openai.com/v1/chat/completions", "gpt-4o-mini"),
+}
+# Priority order when multiple keys are set (deepseek first — historical default).
+_LLM_PROVIDER_PRIORITY: tuple[str, ...] = ("DEEPSEEK_API_KEY", "OPENAI_API_KEY")
+
+
 def llm_classify(question: str) -> tuple[str, dict] | None:
-    """Use LLM to classify intent + extract params when keyword match fails."""
-    api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
-    if not api_key:
+    """Use LLM to classify intent + extract params when keyword match fails.
+
+    #329: picks the provider whose OWN env key is set; an empty-string key is
+    treated as unset. The chosen key is only sent to its own provider's URL.
+    Returns None (keyword-only fallback) when no key is set or the provider
+    request fails — a provider outage never falls through to another provider
+    (that would leak the wrong key too).
+    """
+    import urllib.request
+    api_key = None
+    provider_url = None
+    provider_model = None
+    for env_name in _LLM_PROVIDER_PRIORITY:
+        candidate = os.environ.get(env_name)
+        if candidate:  # non-empty string
+            api_key, (provider_url, provider_model) = candidate, _LLM_PROVIDERS[env_name]
+            break
+    if api_key is None:
         return None  # fall back to keyword only
 
     try:
-        import urllib.request
         body = json.dumps({
-            "model": "deepseek-chat",
+            "model": provider_model,
             "temperature": 0,
             "response_format": {"type": "json_object"},
             "messages": [{"role": "system", "content": LLM_PROMPT},
                          {"role": "user", "content": question}],
         }).encode()
         req = urllib.request.Request(
-            "https://api.deepseek.com/v1/chat/completions",
+            provider_url,
             data=body,
             headers={"Content-Type": "application/json",
                      "Authorization": f"Bearer {api_key}"},
@@ -287,13 +331,18 @@ def _inject_subgraph_filter(cypher: str, vars: list[str],
 
 def _bfs_select_operators(proj, anchors: list[str], max_hops: int = 1,
                           rel_filter: str = "IMPL|NAND",
-                          direction: str = "both") -> set[str]:
+                          direction: str = "both",
+                          include_draft: bool = False) -> set[str]:
     """BFS subgraph selection from anchor Points — returns set of operator Point IDs.
 
     Shared helper for both compute_confidence and tortoise_analyze.
     Expands from anchor Points along operator edges (IMPL|NAND) for max_hops hops.
     IMPL edges respect direction; NAND always traversed bidirectionally.
     Capped at 200 operator IDs.
+
+    With include_draft=False (default, #780): draft anchors, draft operators
+    and draft frontier points are excluded — the shared live-only filter at
+    the analyze-path call site of the four-factor-extraction set.
     """
     import logging
     _log = logging.getLogger(__name__)
@@ -301,6 +350,20 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int = 1,
     frontier: set[str] = set(anchors)
     visited: set[str] = set(anchors)
     rel_types = set(rel_filter.split("|"))
+
+    live_op = f"AND {_live_only('op.status', include_draft)}" if not include_draft else ""
+    live_t = f"AND {_live_only('target.status', include_draft)}" if not include_draft else ""
+    live_p = f"AND {_live_only('p.status', include_draft)}" if not include_draft else ""
+
+    if not include_draft and frontier:
+        rows = proj.g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids AND n.status = 'draft' RETURN n.id",
+            params={"ids": list(frontier)},
+        ).result_set
+        draft_anchors = {r[0] for r in rows}
+        if draft_anchors:
+            frontier -= draft_anchors
+            visited -= draft_anchors
 
     for hop in range(max_hops):
         if not frontier:
@@ -325,7 +388,7 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int = 1,
                 if d == "incoming":
                     rows = proj.g.query(
                         f"MATCH (op:Point {{is_operator:true}})-[:{rel}]->(p:Point) "
-                        "WHERE p.id IN $frontier "
+                        f"WHERE p.id IN $frontier {live_op} "
                         "RETURN DISTINCT op.id",
                         params={"frontier": frontier_list},
                     ).result_set
@@ -335,7 +398,7 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int = 1,
                 else:  # outgoing
                     rows = proj.g.query(
                         f"MATCH (op:Point {{is_operator:true}})-[:{rel}]->(target:Point) "
-                        "WHERE op.id IN $frontier "
+                        f"WHERE op.id IN $frontier {live_op} {live_t} "
                         "RETURN DISTINCT target.id",
                         params={"frontier": frontier_list},
                     ).result_set
@@ -359,7 +422,7 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int = 1,
             ops_list = list(new_ops)
             rows = proj.g.query(
                 "MATCH (op:Point {is_operator:true})-[r:IMPL|NAND]->(p:Point) "
-                "WHERE op.id IN $ops "
+                f"WHERE op.id IN $ops {live_p} "
                 "RETURN DISTINCT p.id",
                 params={"ops": ops_list},
             ).result_set
@@ -415,7 +478,8 @@ def analyze(question: str, proj=None, *,
     pattern_name, params = result
     tmpl = TEMPLATES.get(pattern_name)
     if tmpl is None:
-        return {"answer": f"Unknown pattern: {pattern_name}", "raw": [], "pattern": None, "query": None}
+        # #329: pattern_name comes from the LLM (untrusted) — never echo it raw
+        return {"answer": "Unknown pattern requested.", "raw": [], "pattern": None, "query": None}
 
     # 2. Execute Cypher
     cypher = tmpl["cypher"]
@@ -428,18 +492,178 @@ def analyze(question: str, proj=None, *,
         try:
             rows = proj.g.query(cypher, params=params).result_set
         except Exception as e:
-            return {"answer": f"Query error: {e}", "raw": [], "pattern": pattern_name, "query": cypher}
+            # #329: redact — tenants must not see raw DB errors or query text
+            from .security import redact_error
+            return {"answer": f"Query error: {redact_error(e)}", "raw": [], "pattern": pattern_name, "query": None}
 
-    # 3. Format
+    # 3. Format (wrapped — a malformed value must degrade, never crash the
+    # whole analyze surface; security: redacted, no raw internals)
     formatter = tmpl.get("format")
-    if formatter:
-        answer = formatter(rows)
-    else:
-        answer = f"Found {len(rows)} results."
+    try:
+        if formatter:
+            answer = formatter(rows)
+        else:
+            answer = f"Found {len(rows)} results."
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).exception(
+            "analyze formatter failed for pattern %s", pattern_name)
+        from .security import redact_error
+        answer = f"Formatting error: {redact_error(e)}"
 
     return {
         "answer": answer,
         "raw": [[str(v) for v in row] for row in rows[:20]],
         "pattern": pattern_name,
         "query": cypher,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Gate B Tooling (epic-264 #779) — mean grounding + drift snapshot
+# ═══════════════════════════════════════════════════════════════════
+
+# Mean-absolute drift ceiling. MUST stay 0.02 — EpSafeCommit's
+# max_grounding_drift (#785 seam) consumes this contract; tests pin the value.
+MAX_GROUNDING_DRIFT = 0.02
+# Max single-point absolute delta ceiling (R12: mean-absolute can mask
+# per-point flips — the ≤5% max single-point target from the #779 issue).
+MAX_POINT_DRIFT = 0.05
+
+
+def _resolve_proj(proj):
+    """Resolve a projection when None (lazy import — sdk/analyze are
+    mutually imported at call sites, never at module load)."""
+    if proj is not None:
+        return proj
+    from tortoise.sdk import TortoiseSDK
+    return TortoiseSDK()._get_proj()
+
+
+def mean_grounding(proj=None) -> float:
+    """Mean over ``confidence`` of live non-operator Points (DE2E-4, #779).
+
+    Gate B snapshot metric: sample = full live Point set, mean of the
+    ``confidence`` property. Live semantics follow the #780 shared
+    ``_live_only`` filter — legacy NULL-status Points are LIVE
+    (``coalesce($st, n.status, 'live')`` write default), ``status: draft``
+    Points are excluded. Operator Points (``is_operator: true``) are
+    excluded. An empty live set returns 0.0.
+
+    Missing-confidence extension (DELIBERATE, beyond the pinned DE2E-4
+    formula): a live Point with no ``confidence`` contributes 0.5 to the
+    mean (``coalesce(p.confidence, 0.5)`` — repo-wide NULL-confidence
+    convention). The DE2E-4 plan formula assumes every Point carries a
+    confidence; this implementation deliberately extends it so a
+    confidence-less Point degrades the mean toward neutral 0.5 instead of
+    erroring or being silently dropped (which would skew the mean upward).
+    Asserted in ``test_mean_grounding_null_confidence_imputed_zero_five``.
+
+    Consumed by #785's EpSafeCommit seam (resolves
+    ``tortoise.analyze.mean_grounding``) for the pre/post batch check.
+    """
+    proj = _resolve_proj(proj)
+    rows = proj.g.query(
+        "MATCH (p:Point) "
+        f"WHERE (p.is_operator IS NULL OR p.is_operator = false) AND {_live_only('p.status')} "
+        "RETURN coalesce(p.confidence, 0.5)"
+    ).result_set
+    if not rows:
+        return 0.0
+    return sum(float(r[0]) for r in rows) / len(rows)
+
+
+def grounding_snapshot(proj=None) -> dict:
+    """Pre/post batch grounding sample (Gate B tooling).
+
+    Returns per-point confidences so BOTH ceilings can be checked: the
+    ≤2% mean-absolute ceiling (``MAX_GROUNDING_DRIFT``) and the ≤5% max
+    single-point absolute delta (``MAX_POINT_DRIFT``, R12).
+
+    Returns:
+        {"count": int, "mean": float, "points": {id: confidence},
+         "sampled_at": ISO-8601 UTC}
+    """
+    proj = _resolve_proj(proj)
+    rows = proj.g.query(
+        "MATCH (p:Point) "
+        f"WHERE (p.is_operator IS NULL OR p.is_operator = false) AND {_live_only('p.status')} "
+        "RETURN p.id, coalesce(p.confidence, 0.5)"
+    ).result_set
+    points = {r[0]: float(r[1]) for r in rows}
+    mean = sum(points.values()) / len(points) if points else 0.0
+    from datetime import datetime, timezone
+    return {
+        "count": len(points),
+        "mean": mean,
+        "points": points,
+        "sampled_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def grounding_drift(pre: dict, post: dict, *,
+                    max_mean_drift: float = MAX_GROUNDING_DRIFT,
+                    max_point_drift: float = MAX_POINT_DRIFT) -> dict:
+    """Compare pre/post batch grounding snapshots (Gate B drift check).
+
+    Ceilings: ≤2% mean absolute (matches EpSafeCommit's
+    ``max_grounding_drift=0.02`` — the #785 seam) and ≤5% max single-point
+    absolute delta (R12 — a mean-absolute check alone can mask per-point
+    flips). Both the per-point deltas AND the mean term are computed over
+    the ID intersection (``common``) only: a Point created or deleted
+    between snapshots is new/removed content, not a regression, and must
+    not fail the check — a set-size change must not shift the mean past
+    the ≤2% ceiling either. ``mean_abs_delta`` is the intersection-scoped
+    delta (ignores pre/post ``mean`` fields; recomputed from ``points``).
+
+    Returns:
+        {"passed": bool, "mean_abs_delta": float,
+         "max_point_abs_delta": float, "mean_ceiling": float,
+         "point_ceiling": float, "pre_count": int, "post_count": int,
+         "overlap": int} — plus "reason": "no_common_points" when the ID
+        intersection is empty (review round 2: a total replacement must
+        FAIL CLOSED, never vacuously pass).
+    """
+    pre_points = pre.get("points", {})
+    post_points = post.get("points", {})
+    # Means are recomputed over the ID intersection only — a set-size
+    # change (created/deleted Points) must not shift the mean past the
+    # ceiling (review P2: full-set means can drift on add/remove alone).
+    common = set(pre_points) & set(post_points)
+    if not common:
+        # Zero shared Point ids (total replacement): both recomputed means
+        # are 0.0, so the ceilings would trivially pass — a vacuous pass
+        # (pre 0.90 → post 0.30 reported True before this fix). Fail closed
+        # with an explicit signal instead of a silent 0.0-delta pass.
+        return {
+            "passed": False,
+            "reason": "no_common_points",
+            "overlap": 0,
+            "mean_abs_delta": 0.0,
+            "max_point_abs_delta": 0.0,
+            "mean_ceiling": max_mean_drift,
+            "point_ceiling": max_point_drift,
+            "pre_count": pre.get("count", 0),
+            "post_count": post.get("count", 0),
+        }
+    pre_mean = sum(float(pre_points[pid]) for pid in common) / len(common)
+    post_mean = sum(float(post_points[pid]) for pid in common) / len(common)
+    mean_abs_delta = abs(post_mean - pre_mean)
+    max_point_abs_delta = max(
+        (abs(float(post_points[pid]) - float(pre_points[pid])) for pid in common),
+        default=0.0,
+    )
+    passed = (
+        mean_abs_delta <= max_mean_drift
+        and max_point_abs_delta <= max_point_drift
+    )
+    return {
+        "passed": passed,
+        "mean_abs_delta": mean_abs_delta,
+        "max_point_abs_delta": max_point_abs_delta,
+        "mean_ceiling": max_mean_drift,
+        "point_ceiling": max_point_drift,
+        "pre_count": pre.get("count", 0),
+        "post_count": post.get("count", 0),
+        "overlap": len(common),
     }

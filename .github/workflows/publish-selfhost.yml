@@ -1,0 +1,96 @@
+# Publish Tortoise Self-Host image to GHCR (#338 D2/T4.2)
+# Image: ghcr.io/daniel-ospina/tortoise-selfhost:${GITHUB_REF_NAME}
+# Build + publish on tag v* or manual dispatch; smoke job verifies the image
+# boots (embedded eval) and serves /health + the MCP initialize handshake.
+name: Publish Self-Host Image
+
+on:
+  push:
+    branches: [main]   # publishes :latest for the README quickstart
+    tags: ['v*']       # publishes semver tags
+  workflow_dispatch:
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.meta.outputs.tags }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/daniel-ospina/tortoise-selfhost
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and publish
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.selfhost
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  smoke:
+    needs: build-and-publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run self-host image (embedded eval) and verify
+        run: |
+          set -euo pipefail
+          # Use the tag the build job actually published (single source of
+          # truth — works for tag pushes, main pushes, and manual dispatch).
+          IMG="$(echo "${{ needs.build-and-publish.outputs.image }}" | cut -d',' -f1)"
+          docker run -d --name tortoise-smoke -p 18000:8000 \
+            -e TORTOISE_DB_URI='' \
+            -e TORTOISE_DB_PATH=/data/smoke.db \
+            "$IMG"
+          trap 'docker rm -f tortoise-smoke >/dev/null 2>&1 || true' EXIT
+
+          # Wait for /health (up to 60s)
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:18000/health >/dev/null 2>&1; then
+              echo "health OK"
+              break
+            fi
+            [ "$i" = "60" ] && { echo "::error::image never became healthy"; exit 1; }
+            sleep 1
+          done
+
+          # Readiness touches the real DB path (embedded eval) — catches DB
+          # misconfiguration the initialize handshake would miss.
+          curl -fsS http://127.0.0.1:18000/health/ready | grep -q '"ready"' \
+            || { echo "::error::health/ready not ready (embedded DB broken)"; exit 1; }
+          echo "health/ready OK"
+
+          # MCP initialize handshake (auth_mode=none — no key set, loopback smoke).
+          # -L: Starlette Mount serves the sub-app at /mcp/ and 307s POST /mcp
+          # → /mcp/ (trailing-slash redirect). Real MCP clients follow the
+          # redirect; bare curl -fsS does not, which made this smoke fail on
+          # every run since it shipped (#fix). -L mirrors client behavior.
+          curl -fsSL -X POST http://127.0.0.1:18000/mcp \
+            -H 'Content-Type: application/json' \
+            -H 'Accept: application/json, text/event-stream' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}' \
+            | grep -q '"result"' || { echo "::error::MCP initialize handshake failed"; exit 1; }
+          echo "MCP initialize OK"

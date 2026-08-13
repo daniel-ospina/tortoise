@@ -6,9 +6,119 @@ Phase 0 (#7748): Foundation — FalkorDB indexes, RRF fusion, degradation chain,
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from dataclasses import dataclass, asdict, field
 from typing import Literal
+
+
+# ── Circuit breaker (#249) ──────────────────────────────────────────────────
+# Per-strategy breaker: trips after consecutive slow/failed queries so a
+# wedged FalkorDB (or a pathological query) stops consuming caller time and
+# DB resources. While OPEN the strategy short-circuits to degradation
+# (empty results → RRF falls through to the next strategy / TF-IDF fallback).
+# HALF_OPEN after cooldown lets exactly one probe through; success closes.
+# Thread-safe: strategies run concurrently (degradation_chain's executor)
+# and search calls share the module-level breakers.
+
+
+class _CircuitBreaker:
+    """Minimal thread-safe circuit breaker for a search strategy.
+
+    State machine: CLOSED → (fail_threshold failures) → OPEN →
+    (cooldown_seconds elapsed) → HALF_OPEN → (probe success) → CLOSED
+    or (probe failure) → OPEN. At most one HALF_OPEN probe is in flight.
+    """
+
+    __slots__ = ("fail_threshold", "cooldown_seconds", "_fails", "_open_until",
+                 "_probing", "_lock")
+
+    def __init__(self, fail_threshold: int = 3, cooldown_seconds: float = 30.0):
+        self.fail_threshold = fail_threshold
+        self.cooldown_seconds = cooldown_seconds
+        self._fails = 0
+        self._open_until = 0.0  # 0.0 == CLOSED; monotonic deadline while OPEN
+        self._probing = False
+        self._lock = threading.Lock()
+
+    def allow(self) -> bool:
+        """True if a query may run: CLOSED, or the single HALF_OPEN probe."""
+        with self._lock:
+            if self._open_until == 0.0:
+                return True  # CLOSED
+            now = time.monotonic()
+            if now < self._open_until:
+                return False  # OPEN
+            # Cooldown expired → HALF_OPEN; exactly one caller probes.
+            if self._probing:
+                return False
+            self._probing = True
+            return True
+
+    def is_open(self) -> bool:
+        """True if the breaker is currently OPEN (read-only status check)."""
+        with self._lock:
+            return 0.0 < self._open_until and time.monotonic() < self._open_until
+
+    def record_success(self) -> None:
+        with self._lock:
+            self._fails = 0
+            self._open_until = 0.0
+            self._probing = False
+
+    def record_failure(self) -> None:
+        with self._lock:
+            self._fails += 1
+            self._probing = False
+            if self._fails >= self.fail_threshold:
+                self._open_until = time.monotonic() + self.cooldown_seconds
+                logger.warning(
+                    "Circuit breaker OPEN for search strategy (%d consecutive failures, "
+                    "%.0fs cooldown)",
+                    self._fails, self.cooldown_seconds,
+                )
+
+    def reset(self) -> None:
+        with self._lock:
+            self._fails = 0
+            self._open_until = 0.0
+            self._probing = False
+
+
+_BREAKERS: dict[str, _CircuitBreaker] = {}
+_BREAKERS_LOCK = threading.Lock()
+
+
+def _breaker(name: str) -> _CircuitBreaker:
+    """Get (creating if needed) the circuit breaker for a strategy."""
+    with _BREAKERS_LOCK:
+        b = _BREAKERS.get(name)
+        if b is None:
+            b = _CircuitBreaker()
+            _BREAKERS[name] = b
+        return b
+
+
+def reset_circuit_breakers() -> None:
+    """Reset all breaker state (used by tests and after DB recovery)."""
+    for b in _BREAKERS.values():
+        b.reset()
+
+
+def _breaker_allow(name: str) -> bool:
+    """True if the strategy may run (breaker CLOSED or the single HALF_OPEN
+    probe)."""
+    return _breaker(name).allow()
+
+
+def _breaker_record(name: str, success: bool) -> None:
+    """Record an outcome. Success closes the breaker; failure counts toward
+    tripping (a HALF_OPEN probe that fails re-opens immediately)."""
+    b = _breaker(name)
+    if success:
+        b.record_success()
+    else:
+        b.record_failure()
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +143,24 @@ class EpEvidence:
 class EpBreakdown:
     confidence_mean: float = 0.0
     evidence: EpEvidence | None = None
+    # Structural ratio nand/(impl+nand) — kept for backward compat. It answers
+    # "how much of the incoming evidence is contradiction" but is NOT a
+    # posterior-stability measure: a claim with 1 IMPL + 1 NAND that EP
+    # converged tightly still reads 0.5.
     contention: float = 0.0
+    # True EP posterior variance v = αβ/((α+β)²(α+β+1)) from the persisted
+    # ep_alpha/ep_beta — the epistemically correct "is this claim destabilized"
+    # signal (same formula as TortoiseEP.get_contested_claims).
+    variance: float = 0.0
+    # variance > CONTESTED_VARIANCE_THRESHOLD → the claim's posterior is
+    # contested: competing evidence is actively destabilizing it. Surface this
+    # as a first-class flag so agents treat the claim as disputed, not merely
+    # high/low probability.
+    contested: bool = False
+    # Whether this point has persisted EP data (ep_alpha / ep_beta).
+    # False means the point is uncalibrated — Beta(1,1) default priors
+    # produce variance 0.0833 but that is NOT a signal of contestation.
+    has_ep: bool = False
 
     def __post_init__(self):
         if self.evidence is None:
@@ -113,33 +240,47 @@ def run_fts_query(
     Returns n.url for source (canonical key, #448), n.eventId for event,
     n.id for all other entity types.
 
-    Note: timeout_ms is checked AFTER the query completes (post-hoc).
-    A slow query still consumes DB resources — this is a soft guard,
-    not a connection-level kill. For connection-level timeout, set it
-    at the FalkorDB driver level. (#18)
+    Note: the connection-level `timeout` is passed straight to the FalkorDB
+    driver (Graph.query(timeout=...)) so a slow query is killed server-side,
+    not merely observed. The post-hoc check below remains as a safety net
+    for drivers that ignore the timeout. (#249) The per-strategy circuit
+    breaker additionally short-circuits after consecutive slow/failed
+    queries so a wedged DB stops eating caller latency.
     """
     if entity_type == "operator":
         # Operators are Points with is_operator=true — match label via CONTAINS
+        if not _breaker_allow("fts"):
+            logger.warning("FTS circuit breaker OPEN — skipping FTS strategy")
+            return []
         try:
             start = time.monotonic()
             cypher = (
                 "MATCH (n:Point) "
-                "WHERE n.is_operator = true AND toLower(n.label) CONTAINS toLower($query) "
+                "WHERE n.is_operator = true AND (n.status IS NULL OR n.status <> 'retracted') "
+                "  AND toLower(n.label) CONTAINS toLower($query) "
                 "RETURN n.id, 1.0 AS score "
                 "ORDER BY score DESC "
                 "LIMIT $limit"
             )
             rows = graph.query(
-                cypher, params={"query": query, "limit": limit}
+                cypher, params={"query": query, "limit": limit}, timeout=timeout_ms
             ).result_set
             elapsed = (time.monotonic() - start) * 1000
             if elapsed > timeout_ms:
+                # #561: post-hoc latency warning only — a driver that ignored
+                # the timeout returned rows; keep them (real hangs are killed
+                # server-side by the driver-level timeout, surfacing as an
+                # exception → breaker failure below).
                 logger.warning("FTS query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
-                return []
+            _breaker_record("fts", True)
             return [(row[0], float(row[1])) for row in rows]
         except Exception as e:
             logger.warning("Operator FTS query failed: %s", e)
+            _breaker_record("fts", False)
             return []
+    if not _breaker_allow("fts"):
+        logger.warning("FTS circuit breaker OPEN — skipping FTS strategy")
+        return []
     label = entity_type.capitalize()  # point→Point, event→Event, subject→Subject
     # #448: three-way id_field — source→url (canonical key, #149),
     # event→eventId, else→id
@@ -149,30 +290,44 @@ def run_fts_query(
         id_field = "eventId"
     else:
         id_field = "id"
+    # #689: retracted Points must not leak into FTS results.
+    if label == "Point":
+        status_filter = "WHERE node.status IS NULL OR node.status <> 'retracted' "
+    else:
+        status_filter = ""
     try:
         start = time.monotonic()
         cypher = (
             f"CALL db.idx.fulltext.queryNodes('{label}', $query) "
             "YIELD node, score "
+            + status_filter +
             f"RETURN node.{id_field}, score "
             "ORDER BY score DESC "
             "LIMIT $limit"
         )
         rows = graph.query(
-            cypher, params={"query": query, "limit": limit}
+            cypher, params={"query": query, "limit": limit}, timeout=timeout_ms
         ).result_set
-        # Post-hoc timeout check (see docstring for rationale)
+        # Post-hoc timeout check (see docstring for rationale) — #561: log
+        # latency, return the results (the driver-level timeout is the real
+        # hang-killer; results received = normal completion for the breaker).
         elapsed = (time.monotonic() - start) * 1000
         if elapsed > timeout_ms:
             logger.warning("FTS query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
-            return []
+        _breaker_record("fts", True)
         return [(row[0], float(row[1])) for row in rows]
     except Exception as e:
         msg = str(e).lower()
         if "index" in msg or "not found" in msg or "does not exist" in msg:
+            # Benign — expected in embedded FalkorDBLite (no FTS index) and for
+            # labels without an index. Degrades quietly; does NOT count toward
+            # tripping the breaker (a healthy deployment with one index-less
+            # label must not disable FTS for all labels). (#249 review P1-1)
             logger.info("FTS index not available — skipping FTS strategy")
+            _breaker_record("fts", True)
         else:
             logger.warning("FTS query failed: %s", e)
+            _breaker_record("fts", False)
         return []
 
 
@@ -197,11 +352,16 @@ def run_vector_query(
     Operators are Points with is_operator=true — they query the Point label.
     (#172)
 
-    Note: timeout_ms is checked AFTER the query completes (post-hoc).
-    A slow query still consumes DB resources — this is a soft guard,
-    not a connection-level kill. (#18)
+    Note: the connection-level `timeout` is passed straight to the FalkorDB
+    driver (Graph.query(timeout=...)) so a slow query is killed server-side.
+    The post-hoc check remains as a safety net for drivers that ignore the
+    timeout, and the per-strategy circuit breaker short-circuits after
+    consecutive slow/failed queries. (#249)
     """
     if not query_vec:
+        return []
+    if not _breaker_allow("vector"):
+        logger.warning("Vector circuit breaker OPEN — skipping vector strategy")
         return []
 
     # Operators are Points with is_operator=true — match the Point label
@@ -218,21 +378,28 @@ def run_vector_query(
 
     # Docker/server mode → try index-accelerated vector search (#7777)
     if not is_embedded:
+        # #689: retracted Points must not leak into vector results.
+        if label == "Point":
+            vec_status_filter = "WHERE node.status IS NULL OR node.status <> 'retracted' "
+        else:
+            vec_status_filter = ""
         try:
             start = time.monotonic()
             cypher = (
                 f"CALL db.idx.vector.queryNodes('{label}', 'embedding', $query_vec, $limit) "
                 "YIELD node "
+                + vec_status_filter +
                 f"RETURN node.{id_field} "
                 "LIMIT $limit"
             )
             rows = graph.query(
-                cypher, params={"query_vec": query_vec, "limit": limit}
+                cypher, params={"query_vec": query_vec, "limit": limit}, timeout=timeout_ms
             ).result_set
             elapsed = (time.monotonic() - start) * 1000
             if elapsed > timeout_ms:
+                # #561: latency warning only — keep the rows.
                 logger.warning("Vector query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
-                return []
+            _breaker_record("vector", True)
             # Index results are ranked by similarity; assign rank-based scores.
             # RRF fusion uses rank not absolute scores; single-strategy mode
             # gets reasonable descending ordering.
@@ -244,7 +411,9 @@ def run_vector_query(
                 logger.info("Vector index not available — falling back to brute-force")
             else:
                 logger.warning("Vector index query failed, falling back to brute-force: %s", e)
-            # Fall through to brute-force below
+            # Fall through to brute-force below — the OUTCOME is recorded by
+            # whichever path finishes (success or the brute-force except), so
+            # one logical query counts at most once. (#249 review P1-2)
 
     # Brute-force (embedded mode or index query failed)
     try:
@@ -255,10 +424,15 @@ def run_vector_query(
         # vecf32() so vector search actually runs. Stored embeddings must be
         # vecf32-encoded too (a single plain-list node poisons the whole
         # MATCH — see _upsert_event / session indexers).
+        # #689: retracted Points must not leak into vector results.
+        if label == "Point":
+            bf_status_clause = " AND (n.status IS NULL OR n.status <> 'retracted')"
+        else:
+            bf_status_clause = ""
         cypher = (
             f"MATCH (n:{label}) "
-            "WHERE n.embedding IS NOT NULL "
-            "WITH vecf32($query_vec) AS _qv, n "
+            "WHERE n.embedding IS NOT NULL" + bf_status_clause +
+            " WITH vecf32($query_vec) AS _qv, n "
             "WITH n, vec.euclideanDistance(n.embedding, _qv) AS distance "
             "WHERE distance IS NOT NULL "
             f"RETURN n.{id_field}, 1.0 / (1.0 + distance) AS score "
@@ -266,27 +440,31 @@ def run_vector_query(
             "LIMIT $limit"
         )
         rows = graph.query(
-            cypher, params={"query_vec": query_vec, "limit": limit}
+            cypher, params={"query_vec": query_vec, "limit": limit}, timeout=timeout_ms
         ).result_set
         elapsed = (time.monotonic() - start) * 1000
         if elapsed > timeout_ms:
+            # #561: latency warning only — return the results.
             logger.warning("Vector query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
-            return []
+        _breaker_record("vector", True)
         return [(row[0], float(row[1])) for row in rows]
     except Exception as e:
         msg = str(e).lower()
         if "index" in msg or "not found" in msg or "does not exist" in msg:
             logger.info("Vector index not available — skipping vector strategy")
+            _breaker_record("vector", True)
         elif "embedding" in msg and "null" in msg:
             logger.info("No Points with embeddings — skipping vector strategy")
+            _breaker_record("vector", True)
         else:
             logger.warning("Vector query failed: %s", e)
+            _breaker_record("vector", False)
         return []
 
 
 def run_structural_query(
     graph, kind: str | None,
-    entity_type: str = "point", limit: int = 20
+    entity_type: str = "point", limit: int = 20, timeout_ms: int = 500
 ) -> list[tuple[str, float]]:
     """Run structural/kind query via range indexes.
 
@@ -294,6 +472,10 @@ def run_structural_query(
                  'subject' (subjectKind), 'operator' (op_type, Point nodes with is_operator=true),
                  'source' (sourceKind), 'document' (documentKind), 'object' (objectKind).
     Returns matching entities with a score of 1.0 (exact match) or 0.5 (partial match).
+
+    #249: the driver-level timeout is passed through so a wedged DB cannot
+    hang the structural strategy (the third leg of the degradation chain);
+    the per-strategy breaker short-circuits after consecutive failures.
     """
     if entity_type == "operator":
         # Operators are Points with is_operator=true, kind=op_type
@@ -317,6 +499,9 @@ def run_structural_query(
         id_field = "eventId"
     else:
         id_field = "id"
+    if not _breaker_allow("structural"):
+        logger.warning("Structural circuit breaker OPEN — skipping structural strategy")
+        return []
     try:
         conditions = []
         params = {}
@@ -327,8 +512,14 @@ def run_structural_query(
             params["kind"] = kind
 
         if not conditions:
-            return []  # No filters — caller should use full-scan path instead
+            # No filters — caller should use full-scan path instead. Normal
+            # completion: record success so a HALF_OPEN probe never latches.
+            _breaker_record("structural", True)
+            return []
 
+        # #689: retracted Points must not leak into structural results.
+        if label_str == "Point":
+            conditions.append("(n.status IS NULL OR n.status <> 'retracted')")
         where_clause = " AND ".join(conditions)
         cypher = (
             f"MATCH (n:{label_str}) "
@@ -337,7 +528,7 @@ def run_structural_query(
             f"LIMIT $limit"
         )
         params["limit"] = limit
-        rows = graph.query(cypher, params=params).result_set
+        rows = graph.query(cypher, params=params, timeout=timeout_ms).result_set
 
         # Score: 1.0 if kind matched, 0.5 for no-kind broad scan
         results = []
@@ -345,9 +536,16 @@ def run_structural_query(
             pid = row[0]
             match_score = 1.0 if kind else 0.5
             results.append((pid, match_score))
+        _breaker_record("structural", True)
         return results
     except Exception as e:
-        logger.warning("Structural query failed: %s", e)
+        msg = str(e).lower()
+        if "index" in msg or "not found" in msg or "does not exist" in msg:
+            logger.info("Structural index not available — skipping structural strategy")
+            _breaker_record("structural", True)
+        else:
+            logger.warning("Structural query failed: %s", e)
+            _breaker_record("structural", False)
         return []
 
 
@@ -453,11 +651,30 @@ def degradation_chain(
 
 # ── EP annotation ────────────────────────────────────────────────────────────
 
+# Variance threshold above which a claim's posterior is considered contested.
+# Must match TortoiseEP.get_contested_claims (tortoise/ep.py).
+CONTESTED_VARIANCE_THRESHOLD = 0.04
+
+
+def _beta_variance(alpha: float, beta: float) -> float:
+    """Variance of the Beta(α, β) posterior: αβ/((α+β)²(α+β+1)).
+
+    Max is 1/12 ≈ 0.0833 at α=β=1 (uninformative prior). Same formula as
+    TortoiseEP.get_contested_claims.
+    """
+    s = alpha + beta
+    if s <= 0:
+        return 0.0
+    return (alpha * beta) / (s * s * (s + 1))
+
+
 def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
     """Fetch EP confidence breakdown for a batch of Point IDs.
 
     Single Cypher query — NOT N+1. Returns EpBreakdown per Point ID.
     Points with no EP data get EpBreakdown with confidence_mean=0.0, contention=0.0.
+    variance/contested are computed from the PERSISTED posterior (posterior_alpha/beta, falling back to ep_alpha/beta priors)
+    (posterior stability), not from edge ratios.
     """
     if not point_ids:
         return {}
@@ -474,19 +691,28 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
             "  CASE WHEN impl_count + nand_count > 0 "
             "    THEN toFloat(nand_count) / (impl_count + nand_count) "
             "    ELSE 0.0 "
-            "  END AS contention "
+            "  END AS contention, "
+            "  coalesce(n.posterior_alpha, n.ep_alpha, 1.0) AS alpha, coalesce(n.posterior_beta, n.ep_beta, 1.0) AS beta, "
+            "  (n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) AS has_ep "
         )
         rows = graph.query(cypher, params={"ids": point_ids}).result_set
 
         breakdowns: dict[str, EpBreakdown] = {}
         for row in rows:
-            pid, impl, nand, contention = row[0], int(row[1]), int(row[2]), float(row[3])
+            pid, impl, nand, contention, alpha, beta, has_ep = row[0], int(row[1]), int(row[2]), float(row[3]), float(row[4]), float(row[5]), row[6]
             total = impl + nand
             confidence_mean = impl / total if total > 0 else 0.0
+            variance = _beta_variance(alpha, beta)
             breakdowns[pid] = EpBreakdown(
                 confidence_mean=confidence_mean,
                 evidence=EpEvidence(impl_count=impl, nand_count=nand, total=total),
                 contention=contention,
+                variance=round(variance, 6),
+                # Contested only when EP actually ran: an uncalibrated point
+                # (no persisted α/β → defaults to 1/1 → v=1/12) is NOT
+                # contested, it's unmeasured.
+                contested=bool(has_ep) and variance > CONTESTED_VARIANCE_THRESHOLD,
+                has_ep=bool(has_ep),
             )
 
         # Fill in defaults for IDs with no edges

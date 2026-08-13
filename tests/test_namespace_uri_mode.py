@@ -14,6 +14,33 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest
 from tortoise.sdk import TortoiseSDK
 
+# Requires live FalkorDB (Docker). Skip gracefully when unavailable so the
+# no-Docker embedded suite stays green (AGENTS.md). The probe targets the
+# DOCKER URI explicitly (embedded is "available" but lacks URI-mode graph
+# semantics) and ALWAYS restores the env (try/finally — import-time leaks
+# contaminate later test files, #176).
+_URI = "docker://:falkordb@localhost:6379/tortoise_test_221_namespace"
+FALKORDB_AVAILABLE = False
+_OLD_URI = os.environ.get("TORTOISE_DB_URI")
+try:
+    os.environ["TORTOISE_DB_URI"] = _URI
+    from tortoise.sdk import TortoiseSDK as _ProbeSDK
+    _probe = _ProbeSDK()
+    _probe._get_proj().g.query("RETURN 1")
+    _probe.close()
+    FALKORDB_AVAILABLE = True
+except Exception:
+    FALKORDB_AVAILABLE = False
+finally:
+    if _OLD_URI is not None:
+        os.environ["TORTOISE_DB_URI"] = _OLD_URI
+    else:
+        os.environ.pop("TORTOISE_DB_URI", None)
+
+pytestmark = pytest.mark.skipif(
+    not FALKORDB_AVAILABLE, reason="Live FalkorDB (Docker) not available")
+
+
 
 @pytest.fixture
 def uri_mode(monkeypatch):

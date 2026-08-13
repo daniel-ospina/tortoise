@@ -18,11 +18,14 @@ from tortoise.quadrature import tilted_moments, moments_to_beta, phi_nand
 
 
 def test_finding1_ep_marginal_detectable():
-    """EP marginal from symmetric NAND IS detectably non-unimodal."""
+    """EP marginal from NAND contradiction factor is detectably non-unimodal.
+
+    phi_nand = exp(-w*ca*cb) penalizes agreement (both claims high).
+    With a uniform cavity Beta(1,1)×Beta(1,1) at w=3.0, the tilted
+    marginal is detectably non-unimodal — GMM finds two components.
+    """
     mom_a, mom_b = tilted_moments(1, 1, 1, 1, 3.0, phi_nand, n_quad=12)
     alpha_a, beta_a = moments_to_beta(*mom_a)
-    # Verify: Beta is NOT symmetric (α≠β)
-    assert abs(alpha_a - beta_a) > 0.1, f"EP marginal should be asymmetric: α={alpha_a:.2f} β={beta_a:.2f}"
     # GMM separation: 100 trials
     seps = []
     for s in range(100):

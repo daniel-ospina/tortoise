@@ -19,8 +19,11 @@ def scan_incomplete_cards(card_dir: Path, suffix: str = ".card"
     Returns list of card data dicts for recovery processing.
     Does NOT modify files — caller decides what to do.
 
-    A card is "incomplete" if it exists but has no matching
-    `card_completed` event in the event log referenced by the card dir.
+    A card is "incomplete" if it exists and has no `completed_at`
+    field in its card file — detection is FIELD-based, not event-log
+    based: the event log is never consulted here (a cardCompleted event
+    in the log does not mark a card complete; only the card file's
+    `completed_at` field does).
     """
     if not card_dir.exists():
         return []
@@ -33,8 +36,8 @@ def scan_incomplete_cards(card_dir: Path, suffix: str = ".card"
             data = json.loads(cf.read_text())
         except (json.JSONDecodeError, OSError):
             continue
-        # ponytail: incomplete = no 'completed_at' field. Caller
-        # may add richer detection (check event log for matching completion).
+        # #331: incomplete = no 'completed_at' field (field-based).
+        # Callers that need event-log confirmation do their own lookup.
         if "completed_at" not in data:
             incomplete.append(data)
     return incomplete

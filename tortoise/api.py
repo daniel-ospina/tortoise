@@ -64,7 +64,9 @@ class EventAPI:
             "content": content,
             "operator": operator,
             "provenance": prov,
-            "status": "live",
+            # #432: parity with the SDK default — points enter as draft and go
+            # live when first operator edge is created (#131).
+            "status": "draft",
             "createdAt": now_iso(),
         }
 
@@ -125,10 +127,35 @@ class EventAPI:
 
     def add_operator(self, op_type, inputs, provenance, *,
                      content=None, corrects=None) -> str:
-        assert op_type in ("NAND", "IMPL"), f"unknown gate {op_type!r}"
-        _inputs = [x["id"] if isinstance(x, dict) and "id" in x
-                   else x.id if hasattr(x, "id") else x
-                   for x in inputs]
+        # #331: explicit validation — a bare assert vanishes under python -O,
+        # and non-string inputs crashed the label join below.
+        if not isinstance(op_type, str) or op_type not in ("NAND", "IMPL"):
+            raise ValueError(f"unknown gate {op_type!r}")
+        if inputs is None:
+            raise TypeError("add_operator: inputs must be a list of point ids")
+        if isinstance(inputs, str):
+            # #331 (review r2): a bare string is a single id, never char-split
+            # (parity with merge_points).
+            inputs = [inputs]
+        _inputs = []
+        for x in inputs:
+            if isinstance(x, dict):
+                if not isinstance(x.get("id"), str):
+                    raise TypeError(
+                        f"add_operator: input dict missing string 'id': {x!r}")
+                _inputs.append(x["id"])
+            elif hasattr(x, "id"):
+                if not isinstance(x.id, str):
+                    raise TypeError(
+                        f"add_operator: input {x!r} has non-string .id "
+                        f"{x.id!r}")
+                _inputs.append(x.id)
+            elif isinstance(x, str):
+                _inputs.append(x)
+            else:
+                raise TypeError(
+                    "add_operator: input must be a point id string, a dict "
+                    f"with 'id', or an object with .id — got {type(x).__name__}: {x!r}")
         label = content or f"{op_type}({', '.join(_inputs)})"
         p = self._point(label, provenance,
                         operator={"op_type": op_type, "inputs": _inputs})
@@ -187,6 +214,12 @@ class EventAPI:
         return ev["event_id"]
 
     def merge_points(self, keep_id, merge_ids, *, corrects=None) -> str:
+        # #331: None/empty merge input must not crash (list(None) raises
+        # TypeError); a bare string is a single id, never char-split.
+        if merge_ids is None:
+            merge_ids = []
+        elif isinstance(merge_ids, str):
+            merge_ids = [merge_ids]
         ev = self._emit("PointsMerged", keep_id=keep_id, merge_ids=list(merge_ids),
                         corrects=corrects)
         return ev["event_id"]
@@ -199,12 +232,20 @@ class EventAPI:
                    createdAt=now_iso())
         return sid
 
-    def add_object(self, name: str, object_kind: str = "other") -> str:
-        """Emit ObjectRegistered event. Returns the object's id."""
-        oid = ulid()
+    def add_object(self, name: str, object_kind: str = "other", *,
+                   id: str | None = None, **props) -> str:
+        """Emit ObjectRegistered event. Returns the object's id.
+
+        ``id``: deterministic canonical id override (epic #264 plan §4.1 —
+        obj_sha256 scheme); default ulid() unchanged (back-compat). Extra props
+        (e.g. canonical_name, title) are persisted by the projection's
+        extra-props handler. The projection MERGEs Object by name — a re-run
+        with the same name never creates a duplicate node (idempotent
+        reification, DE2E-1/DE2E-8).
+        """
+        oid = id or ulid()
         self._emit("ObjectRegistered", id=oid, name=name,
-                   object_kind=object_kind,
-                   createdAt=now_iso())
+                   object_kind=object_kind, createdAt=now_iso(), **props)
         return oid
 
     def add_document(self, doc_id: str, title: str, *,

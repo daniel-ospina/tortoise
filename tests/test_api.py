@@ -62,9 +62,10 @@ def test_reprocess_retracts_superseded_points():
         f"retracted ids {retracted_ids} should contain {p1}"
     )
 
-    # Verify fold: old point gone
+    # Verify fold: old point is a tombstone (status='retracted'), not hard-deleted (#689)
     points = fold(events)
-    assert p1 not in points, "superseded point must not survive fold"
+    assert p1 in points, "superseded point tombstone must survive fold (#689)"
+    assert points[p1].get("status") == "retracted"
 
     print("PASS test_reprocess_retracts_superseded_points")
 
@@ -92,7 +93,10 @@ def test_reprocess_retracts_only_old_run_points():
 
     points = fold(events)
     assert new_c in points
-    assert old_a not in points and old_b not in points
+    # #689: old points are tombstones, not hard-deleted
+    assert old_a in points and old_b in points
+    assert points[old_a].get("status") == "retracted"
+    assert points[old_b].get("status") == "retracted"
 
     print("PASS test_reprocess_retracts_only_old_run_points")
 
@@ -205,13 +209,14 @@ def test_add_operator_normalizes_object_inputs():
 
 
 def test_add_operator_invalid_type():
-    """Invalid op_type raises AssertionError."""
+    """Invalid op_type raises ValueError (#331: explicit validation, not a
+    bare assert that vanishes under python -O)."""
     api, _log = _api()
     prov = provenance("doc.txt", [0, 1], "x", extracted_by="test@0")
     try:
         api.add_operator("XOR", ["a"], prov)
         assert False, "should have raised"
-    except AssertionError as e:
+    except ValueError as e:
         assert "XOR" in str(e)
     print("PASS test_add_operator_invalid_type")
 
@@ -273,7 +278,9 @@ def test_begin_ingest_force():
     assert r2.run_id != r1.run_id, "force=True must produce a new run_id"
 
     points = fold(log.read_all())
-    assert old not in points, "forced reprocess must retract old points"
+    # #689: tombstone — old point exists with status='retracted'
+    assert old in points, "forced reprocess must leave tombstone (#689)"
+    assert points[old].get("status") == "retracted"
     print("PASS test_begin_ingest_force")
 
 
@@ -447,3 +454,78 @@ def test_add_event_emits_eventrecorded():
     assert evs[0]["object"] == "doc-1"
     assert evs[0]["objectType"] == "Document"
     assert evs[0]["uses"] == [{"name": "tortoise-capture", "kind": "skill"}]
+
+
+# ── #331: crash-vector regression tests ────────────────────────────────
+
+def test_merge_points_none_inputs_graceful():
+    """#331: merge_points(None) must not raise TypeError — treat as empty."""
+    api, log = _api()
+    prov = provenance("doc.txt", [0, 1], "x", extracted_by="test@0")
+    a = api.add_point("point a", prov)
+
+    eid = api.merge_points(a, None)
+    assert eid
+    events = [e for e in log.read_all() if e["type"] == "PointsMerged"]
+    assert len(events) == 1
+    assert events[0]["keep_id"] == a
+    assert events[0]["merge_ids"] == []
+
+    # empty list must behave identically
+    eid2 = api.merge_points(a, [])
+    assert eid2
+    print("PASS test_merge_points_none_inputs_graceful")
+
+
+def test_merge_points_single_string_id():
+    """#331: a bare string merge id is treated as one id, not char-split."""
+    api, log = _api()
+    prov = provenance("doc.txt", [0, 1], "x", extracted_by="test@0")
+    a = api.add_point("point a", prov)
+    api.merge_points(a, "p-xyz")
+    events = [e for e in log.read_all() if e["type"] == "PointsMerged"]
+    assert events[0]["merge_ids"] == ["p-xyz"]
+    print("PASS test_merge_points_single_string_id")
+
+
+def test_add_operator_rejects_non_string_inputs():
+    """#331: non-string operator inputs must raise TypeError, not crash
+    in the label join."""
+    api, _log = _api()
+    prov = provenance("doc.txt", [0, 1], "x", extracted_by="test@0")
+    for bad in ([1, 2], [None], [b"bytes"], [{"no_id": 1}], 42, None):
+        try:
+            api.add_operator("IMPL", bad, prov)
+            assert False, f"should have raised TypeError for {bad!r}"
+        except TypeError:
+            pass
+    print("PASS test_add_operator_rejects_non_string_inputs")
+
+
+def test_add_operator_rejects_non_string_op_type():
+    """#331: non-string op_type must raise ValueError (a bare assert vanishes
+    under python -O — validate explicitly)."""
+    api, _log = _api()
+    prov = provenance("doc.txt", [0, 1], "x", extracted_by="test@0")
+    for bad in (None, 123, b"NAND", ["NAND"]):
+        try:
+            api.add_operator(bad, ["a"], prov)
+            assert False, f"should have raised ValueError for {bad!r}"
+        except ValueError as e:
+            assert "gate" in str(e)
+    print("PASS test_add_operator_rejects_non_string_op_type")
+
+def test_add_operator_single_string_input_not_char_split():
+    """#331 (review r2): a bare string inputs arg is ONE point id, never
+    char-split (parity with merge_points)."""
+    api, log = _api()
+    prov = provenance("doc.txt", [0, 1], "x", extracted_by="test@0")
+    a = api.add_point("point a", prov)
+    b = api.add_point("point b", prov)
+    api.add_operator("IMPL", a, prov)  # bare string, not [a]
+    events = [e for e in log.read_all() if e["type"] == "OperatorAdded"]
+    assert len(events) == 1
+    op = events[0]["point"]["operator"]
+    assert op["inputs"] == [a], f"bare string was char-split: {op['inputs']!r}"
+    print("PASS test_add_operator_single_string_input_not_char_split")
+

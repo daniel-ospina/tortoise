@@ -4,11 +4,20 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Tortoise Dashboard</title>
+    <link rel="icon" href="data:," /> <!-- Round-7: kill the favicon.ico 404 console error -->
     <meta name="theme-color" content="#060b14" />
-    <script type="module" crossorigin src="/assets/index-B_d5G6j8.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-CIm5TN-E.css">
+    <script type="module" crossorigin src="/assets/index-B20ahbvQ.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-CgXIoRVs.css">
   </head>
   <body>
     <div id="root"></div>
+    <!-- Supabase JS (UMD) — provides window.supabase for session auth (D5 #572).
+         P4 (code-review): pinned @supabase/supabase-js@2.112.2 and SELF-HOSTED — the
+         jsdelivr UMD path is a floating range and is served with a dynamically
+         generated banner ("Do NOT use SRI with dynamically generated files"), so an
+         SRI hash there could silently break. Self-hosting pins the exact bundle,
+         removes the CDN supply-chain surface (script runs with cookie + key access),
+         and needs no integrity hash (same-origin). -->
+    <script src="/vendor/supabase-2.112.2.min.js"></script>
   </body>
 </html>

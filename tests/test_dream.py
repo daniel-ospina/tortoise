@@ -29,7 +29,9 @@ def sdk():
 
 
 def _make_claim(sdk, content: str, kind: str = "statement") -> dict:
-    return sdk.create_point(kind, content, dedup=False)
+    # #992: EP tests model live claims — create_point defaults to draft since #943
+    # (#780 draft filter strips draft inputs from operators, making them degenerate).
+    return sdk.create_point(kind, content, dedup=False, status="live")
 
 
 class TestDreamIncremental:

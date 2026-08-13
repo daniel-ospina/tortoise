@@ -66,20 +66,28 @@ class TestRegistryEquivalence:
         from tortoise.mcp_auth import HTTP_ALLOWED
 
         derived = frozenset(t.name for t in TOOL_REGISTRY if t.http_policy)
-        # Exact count: 64 tools - 4 excluded (team_create, backfill_v25,
-        # ingest_corpus, index_sessions) = 60 (incl. 6 onboarding tools #498/#499/#500)
-        assert len(HTTP_ALLOWED) == 60, f"Expected 60, got {len(HTTP_ALLOWED)}"
-        assert len(derived) == 60
+        # Derived == literal (no manual sync — #454), and the documented
+        # exclusions hold: team_create, backfill_v25, ingest_corpus,
+        # index_sessions (privilege/schema/path-traversal) and tortoise_dream
+        # (#329 whole-graph EP is CPU-heavy — tenant HTTP excluded).
         assert derived == HTTP_ALLOWED, (
             f"Derived HTTP_ALLOWED mismatch:\n"
             f"  In derived but not set: {derived - HTTP_ALLOWED}\n"
             f"  In set but not derived: {HTTP_ALLOWED - derived}"
         )
+        for excluded in ("tortoise_team_create", "tortoise_backfill_v25",
+                         "tortoise_ingest_corpus", "tortoise_index_sessions",
+                         "tortoise_dream"):
+            assert excluded not in HTTP_ALLOWED, f"{excluded} must be HTTP-excluded"
 
     def test_registry_count(self):
-        """64 tools — 58 existing + 6 onboarding tools (#498/#499/#500)."""
+        """79 tools — 60 existing + 6 onboarding (#498/#499/#500) + 1
+        human-approval (#531) + 1 #540 + 2 #432 (events_poll, retract_point)
+        + 1 #913 (review_connections) + 8 W1–W4 consolidations (#907/#918
+        recall, #922 update/delete/operator_action/create_edge, #927
+        overview/get, #932 ingest)."""
         from tortoise.tool_registry import TOOL_REGISTRY
-        assert len(TOOL_REGISTRY) == 64, f"Expected 64, got {len(TOOL_REGISTRY)}"
+        assert len(TOOL_REGISTRY) == 79, f"Expected 79, got {len(TOOL_REGISTRY)}"
         names = {t.name for t in TOOL_REGISTRY}
         onboarding = {"tortoise_onboarding_demo_create", "tortoise_onboarding_state",
                       "tortoise_onboarding_session_recording",
@@ -87,6 +95,21 @@ class TestRegistryEquivalence:
                       "tortoise_onboarding_github_status",
                       "tortoise_onboarding_github_index"}
         assert onboarding <= names, f"Missing onboarding tools: {onboarding - names}"
+        assert "tortoise_file_human_approval" in names, "Missing #531 human-approval tool"
+        assert "tortoise_review_connections" in names, "Missing #913 review_connections tool"
+        assert "tortoise_events_poll" in names, "Missing #432 events_poll tool"
+        assert "tortoise_retract_point" in names, "Missing #432 retract_point tool"
+        # W1–W4 consolidated tools (#888): recall (W1), update/delete/
+        # operator_action/create_edge (W2), overview/get (W3), ingest (W4)
+        w_consolidations = {"tortoise_recall", "tortoise_update", "tortoise_delete",
+                            "tortoise_operator_action", "tortoise_create_edge",
+                            "tortoise_overview", "tortoise_get", "tortoise_ingest"}
+        assert w_consolidations <= names, (
+            f"Missing W1–W4 tools: {w_consolidations - names}")
+        # #454-era surface tools covered by this PR's tests
+        for name in ("tortoise_list_tags", "tortoise_suggest_entry_points",
+                     "tortoise_get_events"):
+            assert name in names, f"Missing tool: {name}"
 
     def test_no_duplicate_names(self):
         """No two registry entries share the same name."""
@@ -103,6 +126,68 @@ class TestRegistryEquivalence:
         for name in excluded:
             assert name in by_name, f"Missing tool: {name}"
             assert by_name[name].http_policy is False, f"{name} should be excluded"
+
+
+class TestCurationGroups:
+    """Epic #888 no-regret: GROUP_BY_NAME coherence fixes (#888 item 3).
+
+    retract_point and events_poll previously fell through to the implicit
+    "memory" default via GROUP_BY_NAME.get(t.name, "memory") — events_poll is
+    a CDC/subscription tool that belongs in "sessions", and retract_point
+    belongs explicitly with the lifecycle tools in "memory" (#432).
+    """
+
+    def test_retract_point_explicitly_in_memory(self):
+        from tortoise.tool_registry import TOOL_REGISTRY
+        entry = next(t for t in TOOL_REGISTRY if t.name == "tortoise_retract_point")
+        assert entry.group == "memory", f"got {entry.group}"
+
+    def test_events_poll_in_sessions_group(self):
+        from tortoise.tool_registry import TOOL_REGISTRY
+        entry = next(t for t in TOOL_REGISTRY if t.name == "tortoise_events_poll")
+        assert entry.group == "sessions", f"got {entry.group}"
+
+    def test_groups_reachable_via_helpers(self):
+        """tools_by_group / tool_groups expose the corrected groups (#523)."""
+        from tortoise.tool_registry import tools_by_group, tool_groups
+        memory = {t.name for t in tools_by_group("memory")}
+        assert "tortoise_retract_point" in memory
+        groups = tool_groups()
+        assert "tortoise_events_poll" in groups["sessions"]
+
+
+class TestDescriptionImprovements:
+    """Epic #888 no-regret item 4: sharpened descriptions for the top-confused
+    tools (query family, search, entity_profile vs list_topics) so agents can
+    pick the right tool from the tools/list descriptions alone.
+    """
+
+    @staticmethod
+    def _desc(name: str) -> str:
+        from tortoise.tool_registry import TOOL_REGISTRY
+        return next(t for t in TOOL_REGISTRY if t.name == name).description
+
+    def test_query_description_covers_merged_params(self):
+        d = self._desc("tortoise_query")
+        assert "offset" in d and "limit" in d and "tag" in d, d
+        assert "tortoise_search" in d, "must point at the semantic alternative"
+
+    def test_search_description_distinguishes_from_query(self):
+        d = self._desc("tortoise_search")
+        assert "semantic" in d.lower(), d
+        assert "tortoise_query" in d, "must point at the structural alternative"
+
+    def test_entity_profile_distinguished_from_list_topics(self):
+        ep = self._desc("tortoise_entity_profile")
+        lt = self._desc("tortoise_list_topics")
+        assert "BFS" in ep and "tortoise_list_topics" in ep, ep
+        assert "neighbor" in lt.lower() and "tortoise_entity_profile" in lt, lt
+
+    def test_query_aliases_marked_deprecated(self):
+        pq = self._desc("tortoise_paginated_query")
+        qt = self._desc("tortoise_query_points_by_tag")
+        assert "DEPRECATED" in pq and "tortoise_query" in pq, pq
+        assert "DEPRECATED" in qt and "tortoise_query" in qt, qt
 
 
 class TestFastMCPAdapter:

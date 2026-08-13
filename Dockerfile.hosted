@@ -8,13 +8,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl build-essential \
     && rm -rf /var/lib/apt/lists/*
 
+# Layer 0: production dependencies — ONE install command (#494).
+# requirements.txt is GENERATED from pyproject.toml → uv.lock
+# (`uv export --frozen --no-dev --no-editable`) and pinned with == + hashes
+# (pip verifies the hashes at install). Never hand-edit it — the
+# deploy-hosted.yml parity gate fails the deploy if it drifts from the lock.
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Layer 1: bake the embedding model (90MB) — only rebuilds when pyproject.toml changes.
-# This layer is cached across source-only changes, making deploys incremental.
+# Layer 1: bake the embedding model (90MB) — cached unless the layer inputs
+# change (pyproject.toml here, or any earlier layer: requirements.txt, base
+# image). Source-only changes reuse the cache, making deploys incremental.
+#
+# DOCUMENTED DRIFT DECISION (#494): the [embeddings]/[backups] extras resolve
+# against the live index at build time (not the lock), and a future extras
+# release COULD pull a main dep past its lock pin (the parity gate compares
+# requirements.txt vs the lock — it cannot see inside the built image).
+# Accepted for now: sentence-transformers is upper-bounded (<6), the bake is
+# cached across deploys, and the extras are deliberately NOT in
+# requirements.txt (deploy-slim intent). Lock-pinning the extras too is a
+# separate follow-up if the index drift ever bites.
 COPY pyproject.toml .
-RUN pip install --no-cache-dir '.[embeddings]' \
+RUN pip install --no-cache-dir '.[embeddings]' '.[backups]' '.[postgres]' \
     # Both HF_HOME and SENTENCE_TRANSFORMERS_HOME must point at /app/model so
     # the build-time download lands EXACTLY where runtime looks: ST uses
     # SENTENCE_TRANSFORMERS_HOME directly as its cache dir
@@ -26,9 +41,12 @@ RUN pip install --no-cache-dir '.[embeddings]' \
         || (echo 'FATAL: embedding model cache not at /app/model/models--sentence-transformers--all-MiniLM-L6-v2' >&2; exit 1)
 
 # Layer 2: source code (fast, no model download — reuses Layer 1 cache)
+# --no-deps: package-only install. Dependencies were already installed
+# lock-pinned in Layer 0 — this must NOT re-resolve anything (#494).
 ARG CACHEBUST=1
 COPY tortoise/ tortoise/
-RUN pip install --no-cache-dir -e .
+COPY product/pricing.json product/pricing.json
+RUN pip install --no-cache-dir -e . --no-deps
 
 # Embedding model cache — all-MiniLM-L6-v2 is pre-downloaded to /app/model at
 # build time (above) so runtime loading is pure local I/O with no HuggingFace

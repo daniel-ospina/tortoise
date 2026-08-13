@@ -9,6 +9,7 @@ downstream changes when it's swapped in.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Protocol
 
@@ -21,6 +22,8 @@ _SUPPORT_PHRASES = ("given that",)
 _REFUTE_SINGLE_RE = re.compile(r'\b(but|however|although)\b', re.IGNORECASE)
 _REFUTE_PHRASES = ("not relevant", "doesn't follow", "on the contrary", "except that")
 _PUNC = re.compile(r'[,.!?;:\'\"()\[\]{}]')  # strip before phrase-matching (#8)
+
+logger = logging.getLogger(__name__)
 
 def _has_cue(text: str, single_re: re.Pattern, phrases: tuple[str, ...]) -> bool:
     return bool(single_re.search(text)) or any(p in text for p in phrases)
@@ -171,6 +174,35 @@ def _is_claim(text: str) -> bool:
     return False
 
 
+def _cue_gate_pairs(pairs: list[tuple[str, str, dict]], texts: dict[str, str],
+                   api: EventAPI) -> None:
+    """Apply the cue-word gate over (src, dst, provenance) pairs.
+
+    Support cues (because/since/therefore/...) → IMPL; refute cues
+    (but/however/although/...) → NAND. Pairs without cues create nothing.
+    Similarity gating is the CALLER's responsibility (candidates from
+    find_cross_lens_matches, or none for the all-pairs fallback). #399:
+    candidates never become operators from similarity alone — this is the
+    deterministic verifier; the LLM relation model is the #6306 verifier.
+
+    Direction: deterministic (src → dst as given); operators are
+    bidirectional by default (ONTOLOGY §3.1), so cue-side directionality is
+    left to the #6306 LLM verifier.
+    """
+    for src, dst, prov in pairs:
+        ti_clean = _PUNC.sub('', f" {texts[src]} ")
+        tj_clean = _PUNC.sub('', f" {texts[dst]} ")
+        gate = None
+        if _has_cue(ti_clean, _SUPPORT_SINGLE_RE, _SUPPORT_PHRASES) or \
+           _has_cue(tj_clean, _SUPPORT_SINGLE_RE, _SUPPORT_PHRASES):
+            gate = "IMPL"
+        elif _has_cue(ti_clean, _REFUTE_SINGLE_RE, _REFUTE_PHRASES) or \
+             _has_cue(tj_clean, _REFUTE_SINGLE_RE, _REFUTE_PHRASES):
+            gate = "NAND"
+        if gate:
+            api.add_operator(gate, inputs=[src, dst], provenance=prov)
+
+
 class MockExtractor:
     """Heuristic, deterministic extractor for the M0 spine."""
 
@@ -178,8 +210,14 @@ class MockExtractor:
 
     def run(self, transcript: str, source_id: str, api: EventAPI,
             *, multi_source: bool = False) -> None:
+        # #399: documented #6306 integration point — always present (any mode).
+        self._last_candidates: list[dict] = []
         if multi_source:
-            # Multi-source mode: claim extraction → embedding pre-filter → cue-word gate typing
+            # Multi-source mode: claim extraction → embedding pre-filter → cue-word gate typing.
+            # #399: cross-vocabulary matching via lens-keyed candidates (cross_lens module);
+            # the old ≥3-shared-content-words semantic-agreement gate is removed (it killed
+            # zero-word-overlap pairs by design). Candidates NEVER become operators from
+            # similarity alone — the cue-word gate decides IMPL vs NAND direction.
             pids = []
             for speaker, text, span in _utterances(transcript):
                 if not _is_claim(text):
@@ -190,74 +228,66 @@ class MockExtractor:
                 pid = api.add_point(content=text, provenance=prov,
                                     extractedFrom=source_id)
                 pids.append((pid, text.lower(), prov))
-            
+
             # Use embedding pre-filter if available
             try:
-                from tortoise.embeddings import find_cross_source_matches
-                # Build points dict from API's stored points
-                # We need to reconstruct from the log — simple approach: use what we collected
+                from tortoise.cross_lens import find_cross_lens_matches
+                # Build points dict from what we collected. #399 root-cause #2: keep the
+                # LENS identity — source_id was dropped before. In multi_source mode
+                # the transcript MERGES utterances from different sources, and the
+                # speaker is that source discriminator ("These statements come from
+                # DIFFERENT sources" — LLMExtractor multi_source prompt). So the lens
+                # here is the speaker; the uniform source_id stays for provenance and
+                # for #6306's multi-document fold (lens_key="source" / derivation).
                 all_points = {}
                 for pid_i, ti, pvi in pids:
                     sp = pvi.get('speaker', 'unknown') if isinstance(pvi, dict) else 'unknown'
-                    all_points[pid_i] = {"content": ti, "speaker": sp}
-                
-                emb_matches = find_cross_source_matches(all_points, threshold=0.40)
-                matched_pairs = set()
-                for m in emb_matches:
-                    matched_pairs.add((m['src'], m['dst']))
-                
-                # Only create operators for embedding-matched pairs with cue words
-                for i in range(len(pids)):
-                    pi, ti, pvi = pids[i]
-                    for j in range(i + 1, len(pids)):
-                        pj, tj, pvj = pids[j]
-                        if (pi, pj) not in matched_pairs and (pj, pi) not in matched_pairs:
-                            continue
-                        # Check cue words for gate type
-                        gate = None
-                        ti_clean = _PUNC.sub('', f" {ti} ")
-                        tj_clean = _PUNC.sub('', f" {tj} ")
-                        if _has_cue(ti_clean, _SUPPORT_SINGLE_RE, _SUPPORT_PHRASES) or _has_cue(tj_clean, _SUPPORT_SINGLE_RE, _SUPPORT_PHRASES):
-                            gate = "IMPL"
-                        elif _has_cue(ti_clean, _REFUTE_SINGLE_RE, _REFUTE_PHRASES) or _has_cue(tj_clean, _REFUTE_SINGLE_RE, _REFUTE_PHRASES):
-                            gate = "NAND"
-                        if gate:
-                            api.add_operator(gate, inputs=[pi, pj], provenance=pvi)
-                        elif (pi, pj) in matched_pairs:
-                            # Semantic agreement: similar claims from different sources = IMPL
-                            # But require shared noun phrase to avoid weak thematic connections
-                            words_i = set(ti.split())
-                            words_j = set(tj.split())
-                            shared = words_i & words_j
-                            # Need at least 3 shared content words (not just stopwords)
-                            stopwords = {'the','a','an','is','are','was','were','be','been','being',
-                                        'have','has','had','do','does','did','will','would','could',
-                                        'should','may','might','can','shall','to','of','in','for',
-                                        'on','with','at','by','from','as','into','through','during',
-                                        'and','but','or','nor','not','so','yet','both','either','neither',
-                                        'if','then','else','when','where','why','how','this','that','these','those',
-                                        'it','its','they','them','their','we','our','i','my','you','your',
-                                        'more','less','very','also','just','only','now','still','already'}
-                            shared_content = shared - stopwords
-                            if len(shared_content) >= 3:
-                                api.add_operator("IMPL", inputs=[pi, pj], provenance=pvi)
+                    all_points[pid_i] = {"content": ti, "speaker": sp, "source": source_id}
+
+                candidates = find_cross_lens_matches(all_points, lens_key="speaker")
+                self._last_candidates = list(candidates)
+                texts_by_pid = {pid: ti for pid, ti, _ in pids}
+                provs_by_pid = {pid: pv for pid, _, pv in pids}
+                if candidates:
+                    degraded = any(c.get("degraded") for c in candidates)
+                    if degraded:
+                        logger.info(
+                            "multi-source: cross-lens matching degraded to TF-IDF "
+                            "(%d candidates) — candidates remain similarity-gated",
+                            len(candidates),
+                        )
+                    # Similarity-gated cue-gate: candidates (real embeddings or
+                    # TF-IDF degraded) are the embedding pre-filter; cue words
+                    # decide IMPL vs NAND direction. Non-cued candidates stay in
+                    # _last_candidates for the #6306 LLM verifier — never
+                    # operators from similarity alone.
+                    pairs = [(m["src"], m["dst"], provs_by_pid[m["src"]])
+                             for m in candidates]
+                    _cue_gate_pairs(pairs, texts_by_pid, api)
+                else:
+                    # No candidates above threshold — keep the similarity gate:
+                    # no operators (pre-#399 success-path semantics; only the
+                    # exception fallback below is all-pairs).
+                    logger.info(
+                        "multi-source: no cross-lens candidates above threshold "
+                        "(%d points, all same lens) — no operators",
+                        len(pids),
+                    )
             except Exception:
                 # Fallback: cue-word only all-pairs (noisy but works)
                 # (catches ImportError for missing dependencies AND runtime errors
                 #  like sklearn ValueError on empty vocabulary)
-                for i in range(len(pids)):
-                    for j in range(i + 1, len(pids)):
-                        pi, ti, pvi = pids[i]
-                        pj, tj, pvj = pids[j]
-                        gate = None
-                        ti_clean = _PUNC.sub('', f" {ti} ")
-                        tj_clean = _PUNC.sub('', f" {tj} ")
-                        if _has_cue(ti_clean, _SUPPORT_SINGLE_RE, _SUPPORT_PHRASES) or _has_cue(tj_clean, _SUPPORT_SINGLE_RE, _SUPPORT_PHRASES):
-                            gate = "IMPL"
-                        elif _has_cue(ti_clean, _REFUTE_SINGLE_RE, _REFUTE_PHRASES) or _has_cue(tj_clean, _REFUTE_SINGLE_RE, _REFUTE_PHRASES):
-                            gate = "NAND"
-                        if gate:
-                            api.add_operator(gate, inputs=[pi, pj], provenance=pvi)
+                logger.warning(
+                    "multi-source: cross-lens matching unavailable — "
+                    "all-pairs cue-gate fallback",
+                    exc_info=True,
+                )
+                texts_by_pid = {pid: ti for pid, ti, _ in pids}
+                provs_by_pid = {pid: pv for pid, _, pv in pids}
+                pairs = [(pids[i][0], pids[j][0], provs_by_pid[pids[i][0]])
+                         for i in range(len(pids))
+                         for j in range(i + 1, len(pids))]
+                _cue_gate_pairs(pairs, texts_by_pid, api)
         else:
             # Sequential mode (original): only connect consecutive utterances
             prev_pid = None
@@ -277,6 +307,158 @@ class MockExtractor:
                     api.add_operator(gate, inputs=[prev_pid, pid],
                                      provenance=prov)
                 prev_pid = pid
+
+
+# ---------------------------------------------------------------------------
+# Phase-2 entity stage (epic #264 plan W-1 / §5.1 / §7 — issue #782 DE2E-1).
+# ---------------------------------------------------------------------------
+
+# W-1 rules pre-filter: reuse the EXISTING issues/prs metadata regex
+# (session_indexer.py:204 — repo#NNN pattern). Deliberately NOT
+# _graph_entity_keywords: that is a name-substring matcher against existing
+# graph entities, valid only as the known-Object pre-filter for R4 cost control.
+_ISSUE_REF_RE = re.compile(r"([a-zA-Z0-9_-]+)#(\d+)")
+
+# objectKind vocab reuse (issue #782 complexity table + plan §4.1):
+# Project, WorkItem, document, tag, user, skill, tool, agent, workflow,
+# agreement, standard, other.
+_OBJECT_KIND_VOCAB = frozenset({
+    "project", "workitem", "document", "tag", "user", "skill", "tool",
+    "agent", "workflow", "agreement", "standard", "other",
+})
+
+
+def _normalize_object_kind(kind: str) -> str:
+    """DE2E-N7: unknown objectKind values fall back to 'other'."""
+    k = str(kind or "other").strip().lower()
+    return k if k in _OBJECT_KIND_VOCAB else "other"
+
+
+def _intersect_object_kinds(kinds: list[str] | None) -> list[str]:
+    """DE2E-review (objectKind vocab): the LLM prompt vocab must not be wider
+    than the validator vocab — kinds that cannot survive _normalize_object_kind
+    (DE2E-N7) silently collapse to 'other' and mislead the model ("Prefer
+    specific kinds" while 26 of 38 prompt kinds are dropped). Intersect the
+    resolved vocab (domain_loader known_kinds/domain_kinds) with
+    _OBJECT_KIND_VOCAB so the model only sees kinds that survive."""
+    if not kinds:
+        return sorted(_OBJECT_KIND_VOCAB)
+    merged: list[str] = []
+    for k in kinds:
+        ks = str(k).strip().lower()
+        if ks in _OBJECT_KIND_VOCAB and ks not in merged:
+            merged.append(ks)
+    return merged or sorted(_OBJECT_KIND_VOCAB)
+
+
+def _canonical_name(name: str) -> str:
+    """Plan §4.1: normalized entity name — lowercase, whitespace-collapsed
+    ("port  16379" == "port 16379"), punctuation-stripped for matching; the
+    display `title` preserves the original mention."""
+    return _PUNC.sub("", re.sub(r"\s+", " ", name.lower().strip()))
+
+
+def _normalize_entity(e) -> dict | None:
+    """Normalize one raw entity dict into the Phase-2 contract shape
+    {name, objectKind, canonical_candidates, span, confidence}."""
+    if not isinstance(e, dict) or not e.get("name"):
+        return None
+    name = str(e["name"]).strip()
+    if not name:
+        return None
+    span = e.get("span")
+    if not (isinstance(span, list) and len(span) == 2
+            and all(isinstance(x, int) for x in span) and span[0] <= span[1]):
+        span = None
+    return {
+        "name": name,
+        "objectKind": _normalize_object_kind(e.get("objectKind")),
+        "canonical_candidates": [str(c) for c in (e.get("canonical_candidates") or [])],
+        "span": span,
+        "confidence": float(e.get("confidence", 0.5)),
+    }
+
+
+def _rule_fallback_entities(transcript: str) -> list[dict]:
+    """DE2E-N2 rule/keyword fallback: extract KNOWN reference entities
+    (issue/PR refs repo#NNN → objectKind workitem) with deterministic spans.
+    Returns [] when no known refs are present — never raises."""
+    out: list[dict] = []
+    seen: set[tuple[int, int]] = set()
+    for m in _ISSUE_REF_RE.finditer(transcript):
+        span = (m.start(), m.end())
+        if span in seen:
+            continue
+        seen.add(span)
+        ent = _normalize_entity({
+            "name": m.group(0),
+            "objectKind": "workitem",
+            "canonical_candidates": [m.group(0)],
+            "span": list(span),
+            "confidence": 1.0,
+        })
+        if ent:
+            out.append(ent)
+    return out
+
+
+class EntityStageMock:
+    """Deterministic Phase-2 entity-stage fixture (plan §7 preamble).
+
+    Same pattern as MockExtractor: offline, no LLM, no network. Maps seed
+    transcript fragments (substring keys) to fixed entity sets; char spans are
+    located deterministically via str.find. Optional failure injection for
+    DE2E-N2 (LLM failure → rule/keyword fallback).
+    """
+
+    version = "entity-mock@0"
+
+    def __init__(self, entities_by_key: dict[str, list[dict]] | None = None,
+                 *, fail_first_call: bool = False):
+        self.entities_by_key = dict(entities_by_key or {})
+        self.fail_first_call = fail_first_call
+        self.calls = 0
+
+    def run(self, transcript: str, source_id: str) -> list[dict]:
+        self.calls += 1
+        if self.fail_first_call and self.calls == 1:
+            raise RuntimeError("entity stage failure (fixture: fail_first_call)")
+        out: list[dict] = []
+        for key, ents in self.entities_by_key.items():
+            if key not in transcript:
+                continue
+            for e in ents:
+                name = str(e.get("name") or key)
+                span = e.get("span")
+                if span is None:
+                    start = transcript.find(name)
+                    span = [start, start + len(name)] if start >= 0 else None
+                try:
+                    ent = _normalize_entity({
+                        "name": name,
+                        "objectKind": e.get("objectKind", "other"),
+                        "canonical_candidates": e.get("canonical_candidates") or [name],
+                        "span": span,
+                        "confidence": e.get("confidence", 1.0),
+                    })
+                except Exception:
+                    # per-entity brittleness: skip only the bad entity
+                    logger.debug("skipping malformed fixture entity %r", e,
+                                 exc_info=True)
+                    continue
+                if ent:
+                    out.append(ent)
+        return out
+
+
+def entity_stage_fixture(entities_by_key: dict[str, list[dict]] | None = None) -> EntityStageMock:
+    """Default DE2E-1 fixture: port 16379 → other, FalkorDB → tool,
+    tortoise#123 → workitem."""
+    return EntityStageMock(entities_by_key or {
+        "port 16379": [{"name": "port 16379", "objectKind": "other"}],
+        "FalkorDB": [{"name": "FalkorDB", "objectKind": "tool"}],
+        "tortoise#123": [{"name": "tortoise#123", "objectKind": "workitem"}],
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -336,12 +518,27 @@ _DEFAULT_POINT_KIND_DESCRIPTIONS: list[tuple[str, str]] = [
 ]
 
 
-def _build_pointkind_prompt(point_kinds: list[str] | None = None) -> str:
+def _build_pointkind_prompt(point_kinds: list[str] | dict[str, str] | None = None) -> str:
     """Build the pointKind list for the LLM prompt.
 
-    If point_kinds is provided, use those values (bare names for domain kinds).
-    Otherwise use default descriptions.
+    - None → core defaults with descriptions.
+    - list[str] → bare names (legacy domain mode).
+    - dict[str, str] → kind semantics (#951): ``- kind: description`` lines;
+      kinds without a pack description fall back to the core defaults, then
+      to the bare name (pack kindDefs are the vocabulary source, the
+      defaults are the core fallback — research-r6 §5.4).
     """
+    if isinstance(point_kinds, dict) and point_kinds:
+        core_descs = dict(_DEFAULT_POINT_KIND_DESCRIPTIONS)
+        lines = []
+        for kind, desc in point_kinds.items():
+            if desc:
+                lines.append(f"- {kind}: {desc}")
+            elif kind in core_descs:
+                lines.append(f"- {kind}: {core_descs[kind]}")
+            else:
+                lines.append(f"- {kind}")
+        return "\n".join(lines)
     if point_kinds:
         lines = [f"- {k}" for k in point_kinds]
     else:
@@ -353,7 +550,9 @@ def _warn_unrecognized_kinds(extracted_kinds: set[str]) -> None:
     """Warn if any extracted pointKind values are not in the known registry.
 
     Prints warnings to stderr. Unknown kinds are accepted (open vocabulary) but
-    agents should know when the LLM invents a new kind.
+    agents should know when the LLM invents a new kind. Uses the bucket-scoped
+    ``kind_is_known(kind, "pointKind")`` (#951 — previously a silent TypeError,
+    research-r6 §1.2).
     """
     try:
         from tortoise.domain_loader import kind_is_known
@@ -363,7 +562,7 @@ def _warn_unrecognized_kinds(extracted_kinds: set[str]) -> None:
             print(
                 f"⚠ unrecognized pointKind values: {sorted(unknown)}. "
                 f"These will be stored but may not match any registered ontology. "
-                f"Register them via domain manifest if intentional.",
+                f"Register them via a pack manifest (or register_kind) if intentional.",
                 file=sys.stderr,
             )
     except Exception:
@@ -649,6 +848,80 @@ class _SemanticStage:
         }
 
 
+_ENTITY_CONV_SYS = (
+    "TASK: extract_conversation_entities\n"
+    "Extract named OBJECT entities from the conversation transcript: tools, "
+    "products, documents, projects, work items (issues/PRs), skills, agents, "
+    "workflows, agreements, standards, tags, users, etc. Do NOT extract "
+    "speakers/subjects as entities — only the things they act on or reference. "
+    "Object kinds: {object_kinds}\n\n"
+    'Return JSON: {{"entities": [{{"name": "...", "objectKind": "...", '
+    '"canonical_candidates": ["canonical variant", ...], '
+    '"span": [start_char, end_char], "confidence": 0.9]}}}}\n\n'
+    "Rules:\n"
+    "- Only extract entities that appear verbatim in the transcript.\n"
+    "- `name` = the exact mention (display form).\n"
+    "- `canonical_candidates` = normalized/alias variants of the name (lowercase, "
+    "abbreviations, issue refs without repo prefix) used for cross-session dedup.\n"
+    "- `span` = zero-based character offsets of the name in the transcript.\n"
+    "- Prefer specific kinds over 'other'.\n"
+    '- If no entities are found, return {{"entities": []}}.\n'
+)
+
+
+class EntityStage(_SemanticStage):
+    """Phase-2 conversation entity stage — extends _SemanticStage with span +
+    canonical_candidates prompt params (plan W-1 / §5.1 / §6.1).
+
+    Object-only output: [{name, objectKind, canonical_candidates, span,
+    confidence}] — one dict per extracted entity mention. The S7
+    `extract_entities` document surface (Subjects+Objects) is untouched
+    (DE2E-N12: `extract_conversation_entities` is the renamed Phase-2 API).
+    """
+
+    def __init__(self, model, *, object_kinds: list[str] | None = None):
+        super().__init__(model, object_kinds=_intersect_object_kinds(
+            object_kinds or [
+                "project", "workitem", "document", "tag", "user", "skill",
+                "tool", "agent", "workflow", "agreement", "standard", "other",
+            ],
+        ))
+        self._system = _ENTITY_CONV_SYS
+
+    def run(self, transcript: str, source_id: str) -> list[dict]:
+        """LLM call for conversation entity extraction. Raises on parse failure
+        — the caller (extract_conversation_entities) applies the rule fallback."""
+        system = self._system.format(object_kinds=", ".join(self.object_kinds))
+        out = self.model.complete(
+            system=system,
+            user=json.dumps({
+                "context": f"conversation:{source_id}",
+                "transcript": transcript,
+            }),
+        )
+        raw = _json(out).get("entities", [])
+        if not isinstance(raw, list):
+            # DE2E-review (parse brittleness): a non-list entities payload is a
+            # parse failure — raise so the caller's rule fallback runs instead
+            # of silently returning [] (which drops valid entities AND skips
+            # the fallback).
+            raise ValueError(
+                f"entities must be a JSON list, got {type(raw).__name__}: "
+                f"{str(raw)[:120]!r}"
+            )
+        entities: list[dict] = []
+        for e in raw:
+            try:
+                ent = _normalize_entity(e)
+            except Exception:
+                # per-entity brittleness: skip only the bad entity, keep the rest
+                logger.debug("skipping malformed entity %r", e, exc_info=True)
+                continue
+            if ent:
+                entities.append(ent)
+        return entities
+
+
 class LLMExtractor:
     """Cheap point model + large relation model, same Extractor interface as the
     mock. Spans/quotes come from the deterministic segmenter, so provenance
@@ -708,12 +981,21 @@ class LLMExtractor:
         if max_utterances:
             sections = sections[:max_utterances]
 
-        # Resolve domain pointKinds for the prompt
+        # Resolve domain pointKinds for the prompt. #951 (epic #909 slice 4c):
+        # previously called the nonexistent domain_kinds() — AttributeError
+        # swallowed by the ponytail, so the pack vocabulary never reached the
+        # prompt (research-r6 §1.2). Now the adapter returns pack kind
+        # SEMANTICS (kind → description from pack kindDefs; core defaults are
+        # the fallback in _build_pointkind_prompt).
         point_kinds = None
         if domain:
             try:
-                from tortoise.domain_loader import domain_kinds
-                point_kinds = domain_kinds(domain, "pointKind")
+                from tortoise.domain_loader import domain_kinds, domain_kind_semantics
+                semantics = domain_kind_semantics(domain, "pointKind")
+                if semantics:
+                    point_kinds = semantics  # pack kind semantics
+                else:
+                    point_kinds = domain_kinds(domain, "pointKind")
             except Exception:
                 pass  # ponytail: use defaults if loader fails
 
@@ -842,7 +1124,9 @@ class LLMExtractor:
         if not is_doc:
             return {"subjects": 0, "objects": 0, "entities": []}
 
-        # Build kind vocabularies from domain loader
+        # Build kind vocabularies from the domain_loader adapter (#951):
+        # domain_kinds()/known_kinds(bucket) previously did not exist — the
+        # TypeError fell through to the defaults below.
         subject_kinds = None
         object_kinds = None
         try:
@@ -905,6 +1189,50 @@ class LLMExtractor:
             "entities": sorted(all_entity_names),
         }
 
+    def extract_conversation_entities(self, transcript: str, source_id: str, api: EventAPI, *,
+                                      model=None, domain: str | None = None,
+                                      entity_stage=None) -> list[dict]:
+        """Phase-2: conversation entity extraction → Object-only entity dicts
+        [{name, canonical_candidates, objectKind, span, confidence}].
+
+        RENAMED API vs the S7 `extract_entities` (document Subjects+Objects) so
+        the two extraction tasks never collide (DE2E-N12). `entity_stage` is an
+        injectable deterministic mock (EntityStageMock) for tests; None → LLM
+        EntityStage with domain-aware objectKind vocab via domain_loader.
+        LLM failure → rule/keyword fallback extracting known refs (DE2E-N2).
+        """
+        if entity_stage is None:
+            object_kinds = None
+            try:
+                from tortoise.domain_loader import domain_kinds, known_kinds
+                if domain:
+                    object_kinds = domain_kinds(domain, "objectKind")
+                else:
+                    object_kinds = list(known_kinds("objectKind"))
+            except Exception:
+                pass  # ponytail: use the default conversation vocab
+            entity_stage = EntityStage(model or self.points.model,
+                                       object_kinds=object_kinds)
+        try:
+            raw = entity_stage.run(transcript, source_id)
+        except Exception:
+            logger.warning(
+                "extract_conversation_entities: entity stage failed for %s — "
+                "rule/keyword fallback (DE2E-N2)", source_id, exc_info=True,
+            )
+            raw = _rule_fallback_entities(transcript)
+        out: list[dict] = []
+        for e in raw or []:
+            try:
+                ent = _normalize_entity(e)
+            except Exception:
+                # per-entity brittleness: skip only the bad entity
+                logger.debug("skipping malformed entity %r", e, exc_info=True)
+                continue
+            if ent:
+                out.append(ent)
+        return out
+
 
 # -- Module-level convenience API ------------------------------------------------
 
@@ -943,3 +1271,49 @@ def extract_from_document(
         "points": 0, "operators": 0, "sections": 0,
         "point_ids": [], "failed_sections": [],
     })
+
+
+def extract_conversation_entities(
+    transcript: str,
+    source_id: str,
+    api: EventAPI,
+    *,
+    model=None,
+    entity_stage=None,
+    domain: str | None = None,
+) -> list[dict]:
+    """Phase-2 convenience: conversation entity extraction → Object-only list
+    [{name, canonical_candidates, objectKind, span, confidence}].
+
+    ``model=None`` + ``entity_stage=None`` → rule/keyword fallback only
+    (deterministic, no LLM — the safe default for MockExtractor pipelines).
+    ``entity_stage`` injects a deterministic mock (EntityStageMock).
+    """
+    if model is not None:
+        extractor = LLMExtractor(model, model)
+        return extractor.extract_conversation_entities(
+            transcript, source_id, api, model=model, domain=domain,
+            entity_stage=entity_stage,
+        )
+    if entity_stage is not None:
+        try:
+            raw = entity_stage.run(transcript, source_id)
+        except Exception:
+            logger.warning(
+                "extract_conversation_entities: injected stage failed — "
+                "rule/keyword fallback (DE2E-N2)", exc_info=True,
+            )
+            raw = _rule_fallback_entities(transcript)
+    else:
+        raw = _rule_fallback_entities(transcript)
+    out: list[dict] = []
+    for e in raw or []:
+        try:
+            ent = _normalize_entity(e)
+        except Exception:
+            # per-entity brittleness: skip only the bad entity
+            logger.debug("skipping malformed entity %r", e, exc_info=True)
+            continue
+        if ent:
+            out.append(ent)
+    return out

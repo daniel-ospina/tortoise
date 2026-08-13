@@ -60,6 +60,11 @@ class Dreamer:
         Reuses the fast-path selector (analyze._bfs_select_operators, capped
         at 200 operators) and TortoiseEP.run with batch I/O. Returns
         {iterations, converged, affected_claims}.
+
+        #780: draft Points/operators are EXCLUDED by default (EP only runs
+        over live claims); there is no include_draft escape hatch on this
+        surface — call TortoiseEP.run(include_draft=True) directly for
+        legacy behavior.
         """
         if not anchors:
             return {"iterations": 0, "converged": True, "affected_claims": []}

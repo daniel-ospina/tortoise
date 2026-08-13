@@ -8,9 +8,12 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -18,6 +21,27 @@ from tortoise.extractor import MockModel                                        
 from tortoise.ingest import build_model, main                                             # noqa: E402
 from tortoise.models import OllamaModel, OpenAICompatModel                                # noqa: E402
 from tortoise.projection import FalkorProjection                                          # noqa: E402
+
+# ── Live-FalkorDB availability (mirrors tests/test_hnsw_vector_index.py) ──
+# #125 capture/upgrade tests connect to docker://localhost:16379 (live
+# FalkorDB, not embedded). Probe at module load so they skip gracefully in
+# CI where no Docker FalkorDB is running (#493).
+FALKORDB_AVAILABLE = False
+try:
+    _old_uri = os.environ.get("TORTOISE_DB_URI")
+    os.environ["TORTOISE_DB_URI"] = "docker://:@localhost:16379/tortoise_test_ingest125"
+    _probe = FalkorProjection.from_uri(os.environ["TORTOISE_DB_URI"])
+    _probe.close()  # construction itself connects — raises on refusal
+    FALKORDB_AVAILABLE = True
+except Exception:
+    FALKORDB_AVAILABLE = False
+finally:
+    if _old_uri is not None:
+        os.environ["TORTOISE_DB_URI"] = _old_uri
+    else:
+        os.environ.pop("TORTOISE_DB_URI", None)
+
+_live_db = pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="Live FalkorDB (Docker) not available")
 
 
 # ---------------------------------------------------------------------------
@@ -27,6 +51,39 @@ from tortoise.projection import FalkorProjection                                
 
 def _tmp(name):
     return os.path.join(tempfile.mkdtemp(prefix="tortoise_"), name)
+
+
+def _docker_falkor_reachable() -> bool:
+    """Socket probe: is a live Docker FalkorDB reachable?
+
+    The #125/#133 capture + upgrade tests need a live FalkorDB on
+    FALKORDB_HOST:PORT (default localhost:16379). Embedded CI has no
+    container — probe before connecting so the suite skips instead of
+    raising redis ConnectionError (Error 111/61).
+    """
+    import socket
+    host = os.environ.get("FALKORDB_HOST", "localhost")
+    port = int(os.environ.get("FALKORDB_PORT", "16379"))
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(1.0)
+    try:
+        s.connect((host, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def _require_live_falkor() -> bool:
+    """True when a live FalkorDB is reachable; otherwise skip under pytest
+    (or return False in plain-script mode, matching the _skip_if_no_falkor
+    self-skip convention) — never raise ConnectionError."""
+    if _docker_falkor_reachable():
+        return True
+    if "pytest" in sys.modules:
+        pytest.skip("live FalkorDB (FALKORDB_HOST:PORT) not reachable")
+    return False
 
 
 def _transcript(text, ext=".txt"):
@@ -458,12 +515,15 @@ if __name__ == "__main__":
 # ------------------------------------------------------------------ #125 capture-metadata (live DB)
 
 
+@_live_db
 def test_capture_metadata_creates_document_no_points():
     """#125: --capture-metadata creates Document + sessionCaptured Event,
     ZERO Points, and does NOT block a later full extraction (no begin_ingest)."""
     import json
     uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_ingest125")
     db = uri  # live DB URI
+    if not _require_live_falkor():
+        return
     log = _tmp("events_capture.jsonl")
     # Flush the test graph (test-prefixed — safe) for hermetic Point count
     from tortoise.projection import FalkorProjection as _FP
@@ -513,10 +573,13 @@ def test_capture_metadata_creates_document_no_points():
     assert not any("IngestStarted" in ln for ln in lines), "capture must not write IngestStarted"
 
 
+@_live_db
 def test_full_ingest_unaffected_and_not_blocked_by_capture():
     """#125: full ingest (no flag) extracts Points; a prior capture does NOT block it."""
     uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_ingest125")
     db = uri
+    if not _require_live_falkor():
+        return
     log1 = _tmp("events_capture2.jsonl")
     # Flush test graph for hermetic assertions
     from tortoise.projection import FalkorProjection as _FP
@@ -547,12 +610,15 @@ def test_full_ingest_unaffected_and_not_blocked_by_capture():
 # ------------------------------------------------------------------ #133 proportional extraction v1 (live DB)
 
 
+@_live_db
 def test_capture_defaults_doc_status_captured():
     """#133 P0: --capture-metadata with NO doc_status in frontmatter
     must default the Document to doc_status='captured' (not 'draft')."""
     import json
     uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_133")
     db = uri
+    if not _require_live_falkor():
+        return
     log = _tmp("events_133_capdefault.jsonl")
     from tortoise.projection import FalkorProjection as _FP
     _f = _FP.from_uri(uri)
@@ -579,12 +645,15 @@ def test_capture_defaults_doc_status_captured():
         proj.close()
 
 
+@_live_db
 def test_needs_extraction_flag_surfaces_and_drives_upgrade_all():
     """#133: needs_extraction frontmatter → Document property → --upgrade-all
     discovers and upgrades the Document (e2e bridge)."""
     import json
     uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_133")
     db = uri
+    if not _require_live_falkor():
+        return
     log = _tmp("events_133_ne.jsonl")
     from tortoise.projection import FalkorProjection as _FP
     _f = _FP.from_uri(uri)
@@ -611,12 +680,15 @@ def test_needs_extraction_flag_surfaces_and_drives_upgrade_all():
         proj.close()
 
 
+@_live_db
 def test_upgrade_on_already_extracted_is_noop():
     """#133: --upgrade on a Document already doc_status='extracted' → no-op
     'doc already extracted, skipped' (idempotency)."""
     import json
     uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_133")
     db = uri
+    if not _require_live_falkor():
+        return
     log = _tmp("events_133_noop.jsonl")
     from tortoise.projection import FalkorProjection as _FP
     _f = _FP.from_uri(uri)
@@ -655,29 +727,37 @@ def test_upgrade_on_already_extracted_is_noop():
 
 
 
-def test_upgrade_all_without_transcript_does_not_crash():
+def test_upgrade_all_without_transcript_does_not_crash(monkeypatch, tmp_path):
     """#133 P0: --upgrade-all with NO positional transcript must not crash
-    (regression: args.transcript.name raised AttributeError on None)."""
+    (regression: args.transcript.name raised AttributeError on None).
+
+    #329: embedded DB (pre-created file so ingest uses the embedded path)
+    + TORTOISE_INGEST_BASE_DIR set to the corpus root so the operator's own
+    file re-upgrades (fail-closed default would skip it)."""
     import json
-    uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_133")
-    db = uri
-    log = _tmp("events_133_ua.jsonl")
-    from tortoise.projection import FalkorProjection as _FP
-    _f = _FP.from_uri(uri)
-    _f.g.query("MATCH (n) DETACH DELETE n")
-    _f.close()
     from tortoise.projection import FalkorProjection
-    # Real file at a resolvable path — doc_id = file path (ingest convention)
-    real_file = _tmp("doc-a.md")
-    Path(real_file).write_text(
+    db = _tmp("db_133_ua.db")
+    # Create a real embedded DB at the path so ingest uses the embedded branch
+    # (Path.exists() gate) instead of falling back to Docker. A bare touch()
+    # breaks redislite (it expects to own the file format).
+    _seed = FalkorProjection(db)
+    _seed.close()
+    log = _tmp("events_133_ua.jsonl")
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", str(corpus))
+    from tortoise.projection import FalkorProjection
+    # Real file under the base — doc sourcePath = file path (ingest convention)
+    real_file = corpus / "doc-a.md"
+    real_file.write_text(
         "---\ntitle: A\ndoc_status: captured\n---\n\n## User\nhi\n",
         encoding="utf-8")
-    proj = FalkorProjection.from_uri(uri)
+    proj = FalkorProjection(db)
     try:
         proj.g.query(
             "CREATE (d:Document {id:$id, title:'A', doc_status:'captured', "
             "sourcePath:$sp})",
-            params={"id": real_file, "sp": real_file},
+            params={"id": str(real_file), "sp": str(real_file)},
         )
     finally:
         proj.close()
@@ -686,14 +766,88 @@ def test_upgrade_all_without_transcript_does_not_crash():
             "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
     with patch("sys.argv", args):
         _run_main(None)
-    # Doc should now be extracted (upgrade ran)
-    from tortoise.projection import FalkorProjection
-    proj = FalkorProjection.from_uri(uri)
+    # Doc should now be extracted (upgrade ran — file is under the base)
+    proj = FalkorProjection(db)
     try:
         rows = proj.g.query(
             "MATCH (d:Document) WHERE d.sourcePath = $sp RETURN d.doc_status",
-            params={"sp": real_file},
+            params={"sp": str(real_file)},
         ).result_set
         assert rows and rows[0][0] == "extracted", f"expected extracted, got {rows}"
+    finally:
+        proj.close()
+
+
+def test_upgrade_all_fail_closed_outside_base(monkeypatch, tmp_path):
+    """#329: upgrade-all with a sourcePath OUTSIDE the base is skipped
+    (fail-closed) — a tenant-set /etc/passwd-style path is never read."""
+    import json
+    from tortoise.projection import FalkorProjection
+    db = _tmp("db_133_fc.db")
+    _seed = FalkorProjection(db)
+    _seed.close()
+    log = _tmp("events_133_fc.jsonl")
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", str(corpus))
+    from tortoise.projection import FalkorProjection
+    # Tenant-crafted Document pointing at a path outside the base
+    proj = FalkorProjection(db)
+    try:
+        proj.g.query(
+            "CREATE (d:Document {id:'doc-evil', title:'Evil', "
+            "doc_status:'captured', sourcePath:$sp})",
+            params={"sp": "/etc/passwd"},
+        )
+    finally:
+        proj.close()
+    args = ["ingest", "--db", db, "--log", log, "--upgrade-all",
+            "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
+    with patch("sys.argv", args):
+        _run_main(None)
+    # Doc NOT extracted — the file was never read
+    proj = FalkorProjection(db)
+    try:
+        rows = proj.g.query(
+            "MATCH (d:Document {id:'doc-evil'}) RETURN d.doc_status",
+        ).result_set
+        assert rows[0][0] == "captured", f"expected captured (fail-closed), got {rows[0][0]}"
+    finally:
+        proj.close()
+
+
+def test_upgrade_all_unset_base_skips_everything(monkeypatch, tmp_path):
+    """#329: TORTOISE_INGEST_BASE_DIR unset → fail-closed skip (nothing read)."""
+    monkeypatch.delenv("TORTOISE_INGEST_BASE_DIR", raising=False)
+    from tortoise.projection import FalkorProjection
+    db = _tmp("db_133_nb.db")
+    _seed = FalkorProjection(db)
+    _seed.close()
+    log = _tmp("events_133_nb.jsonl")
+    # REAL valid markdown doc at an absolute path (would be read+extracted
+    # without containment)
+    real = _tmp("doc-real.md")
+    Path(real).write_text(
+        "---\ntitle: Real\ndoc_status: captured\n---\n\n## User\nreal content\n",
+        encoding="utf-8")
+    proj = FalkorProjection(db)
+    try:
+        proj.g.query(
+            "CREATE (d:Document {id:'doc-x', title:'X', doc_status:'captured', "
+            "sourcePath:$sp})",
+            params={"sp": real},
+        )
+    finally:
+        proj.close()
+    args = ["ingest", "--db", db, "--log", log, "--upgrade-all",
+            "--point-model", "mock:cheap", "--relation-model", "mock:reason"]
+    with patch("sys.argv", args):
+        _run_main(None)
+    proj = FalkorProjection(db)
+    try:
+        rows = proj.g.query(
+            "MATCH (d:Document {id:'doc-x'}) RETURN d.doc_status",
+        ).result_set
+        assert rows[0][0] == "captured"
     finally:
         proj.close()

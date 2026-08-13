@@ -1,0 +1,360 @@
+"""Per-team quota enforcement shared by REST and MCP (#329, #683, #686).
+
+Design: limits are resolved ONCE by the authenticated caller
+(``hosted_api.get_current_team`` / MCP ``TeamResolutionMiddleware``) via
+``resolve_team_limits`` and passed to ``enforce_team_limit`` — never re-fetched
+per write.
+
+Fail-closed decision (#686)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Counting is **fail-closed**: any counting exception raises
+``QuotaCheckError`` (server error), never a silent pass.
+
+Rationale:
+- **Money at stake.** Fail-open would let free-tier teams exceed paid limits
+  undetected during a DB outage — direct revenue risk and abuse vector.
+- **Fail-closed is the secure default.** When you can't verify, don't grant.
+- **Customer harm from fail-closed is bounded.** A DB outage that breaks
+  count queries typically also breaks the actual write (same store) — we're
+  failing fast, not adding net-new unavailability.
+- **Alerting mitigates ops risk.** Every count failure is logged at ERROR
+  level with team_id and resource, so operators see the outage immediately
+  and can decide whether to temporarily disable enforcement.
+
+Import topology: stdlib-only at module level; ``tortoise.sdk`` imported
+function-level inside the helpers to avoid any cycle (hosted_api → mcp_server
+→ mcp_auth → sdk is the canonical direction; quota is a leaf consumer).
+
+No team context (stdio/operator) → ``enforce_team_limit(None, ...)`` returns
+cleanly (skip) — mirrors REST ``_check_team_limit``'s ``if not team_id: return``.
+Batch caps are unconditional in both modes.
+
+Downgrade-over-limit decision (#683)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+When a team downgrades (e.g. Pro→Free) while over the NEW tier's limits
+(e.g. 2 memberships but Free allows only 1), the downgrade MUST be BLOCKED
+with a clear error message listing which limits the team exceeds.
+
+Rationale and decisions:
+- **Block downgrade (not graceful-degrade).** Allowing a downgrade that
+  immediately locks out members or breaks graphs creates a trust-destroying
+  experience: the dashboard shows Free features, but the team has 2 members
+  and 2 graphs — inconsistent and confusing.
+- **No silent pass.** Trust requires that published limits are real limits.
+  If a team can be over-limit on a lower tier, the limits aren't real.
+- **No auto-delete.** Never delete data to fit a downgrade. The team must
+  explicitly remove members/graphs before the downgrade can proceed.
+- **Stripe webhook downgrade path (future, #310).** When the
+  ``customer.subscription.updated`` webhook processes a tier downgrade, the
+  ``mirror_subscription`` handler should check limits via this module BEFORE
+  applying the new tier: if the team exceeds the new tier's limits, the
+  downgrade must be rejected (log + alert), keeping the team at its current
+  tier until the over-limit condition is resolved by the team owner.
+
+  Until #310 lands the Stripe integration, there is no user-facing tier-change
+  REST endpoint — the decision is a documented policy, not a live code path.
+  The ``team_update`` SDK method (registry-level, no REST surface) allows
+  tier/limit writes for operational relief; it does NOT check downgrade
+  preconditions (operator intent overrides).
+"""
+from __future__ import annotations
+
+import logging
+import os
+import tempfile
+
+_logger = logging.getLogger(__name__)
+
+
+def _make_sdk(*, namespace: str | None = None):
+    """Build a TortoiseSDK with hosted_api._make_sdk's precedence (inline copy —
+    quota is a leaf consumer and must not import hosted_api).
+
+    URI mode (docker:// / redis:// / rediss://) when TORTOISE_DB_URI is set;
+    else embedded via TORTOISE_DB_PATH (default /data/tortoise.db) with a
+    tempfile fallback when the volume is unwritable (test env).
+    """
+    from tortoise.sdk import TortoiseSDK  # function-level: avoid cycles
+    if os.environ.get("TORTOISE_DB_URI"):
+        return TortoiseSDK(namespace=namespace)
+    db_path = os.environ.get("TORTOISE_DB_PATH", "/data/tortoise.db")
+    try:
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    except OSError:
+        db_path = os.path.join(tempfile.gettempdir(), "tortoise.db")
+    return TortoiseSDK(db_path=db_path, namespace=namespace)
+
+
+# ── Batch-cap constants (unconditional — both modes) ───────────────────────
+MAX_CHECKPOINT_ITEMS = 500
+MAX_FILE_DECISION_OPTIONS = 50
+MAX_FILE_DECISION_EVIDENCE = 100
+MAX_TAGS_PER_POINT = 50
+MAX_OPERATOR_TARGETS = 500
+MAX_SESSION_TURNS = 500
+MAX_EXTRACTIONS_PER_TURN = 200
+MAX_ANALYZE_LLM_PER_MIN = 60
+MAX_DREAM_FULL_PER_HOUR = 6
+
+# ── Value-first mining budget + Layer-1 payload caps (epic #909 §4.4) ────
+# Per-session CUMULATIVE budget: net-new non-episodic delta, post-
+# reconciliation (consumed by the commit endpoint, epic #909 slice 5).
+# soft → WARN telemetry at 15; hard 25 → hold (PL3); ceiling 50 → 402.
+MAX_VALUE_POINTS_PER_SESSION = {"soft": 15, "hard": 25, "ceiling": 50}
+# Layer-1 RAW payload point count cap → 422. Deliberately NAMED differently
+# from the budget ceiling (also 50) to prevent wiring the wrong 50 (plan
+# R-decoupling, §4.4): the raw cap is independent of the budget check.
+MAX_PAYLOAD_POINTS = 50
+# Layer-1 per-type payload caps → 422 (independent, not summed).
+MAX_ENTITIES = 500
+MAX_OPERATORS = 500
+
+# ── Default limits ──────────────────────────────────────────────────────────
+# max_points/max_api_keys have NO constant here — they resolve from
+# tortoise.pricing.tier_limits (product/pricing.json) so a legacy team without
+# stored limits gets pricing-correct caps, never the stale 1000/20 consts that
+# contradicted pricing.json (#310 GAP-B, review fix 2). max_sessions has no
+# pricing.json field — flat 1000 across tiers (matches REST today).
+DEFAULT_MAX_SESSIONS = 1000
+
+_RESOURCE_LIMIT_KEYS = {
+    "points": "max_points",
+    "api_keys": "max_api_keys",
+    "sessions": "max_sessions",
+    "users": "max_users",
+    "graphs": "max_graphs",
+}
+
+
+class QuotaExceededError(Exception):
+    """Team is at/over its resource limit — the write must be rejected (402)."""
+
+
+class QuotaCheckError(Exception):
+    """Quota counting/config failed — fail closed (500/503), never pass."""
+
+
+def resolve_team_limits(team_id: str) -> dict:
+    """Resolve a team's limits from the control plane.
+
+    Supabase mode (post-#669 flip): the teams row via the service-role
+    seam — the registry is DELETED and querying it would auto-recreate the
+    empty graph (post-flip verification finding, #669). Registry mode: the
+    Team node, as before.
+
+    Missing Team → QuotaCheckError (fail-closed; the auth layer should
+    guarantee key→team mapping). Missing attributes → defaults
+    (aligned with product/pricing.json free tier).
+    """
+    if not team_id:
+        raise QuotaCheckError("resolve_team_limits requires a team_id")
+    from tortoise.supabase_control import (
+        get_control_plane, is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        rows = get_control_plane().query(
+            "teams",
+            select=["tier", "max_users", "max_graphs", "graph_size_cap",
+                    "ops_allowance"],
+            filters=[("id", "eq", team_id)],
+        )
+        if not rows:
+            raise QuotaCheckError(f"Team {team_id!r} not found in control plane")
+        row = rows[0]
+        tier = row.get("tier") or "free"
+        from tortoise.pricing import tier_limits
+        lim = tier_limits(tier)
+        # Mirror the registry shape EXACTLY (review P2, PR #911): NULL
+        # max_users/max_graphs = UNLIMITED (Team tier) — preserve None,
+        # never substitute pricing defaults (enforce_team_limit treats an
+        # explicit None limit as unlimited; substituting finite caps would
+        # hard-cap legacy/migrated rows). max_points ← graph_size_cap
+        # (GAP-B); max_api_keys/max_sessions fall back to pricing/defaults.
+        mu = row.get("max_users")
+        mg = row.get("max_graphs")
+        mp = row.get("graph_size_cap")
+        return {
+            "team_id": team_id, "tier": tier,
+            "max_users": int(mu) if mu is not None else None,
+            "max_graphs": int(mg) if mg is not None else None,
+            "max_points": int(mp) if mp is not None else lim["max_graph_nodes"],
+            "max_api_keys": lim["max_api_keys"],
+            "max_sessions": DEFAULT_MAX_SESSIONS,
+        }
+    reg = _make_sdk(namespace="registry")
+    rows = reg._get_registry().query(
+        "MATCH (t:Team {id:$id}) "
+        "RETURN t.tier, t.max_users, t.max_graphs, "
+        "t.max_points, t.max_api_keys, t.max_sessions",
+        params={"id": team_id},
+    ).result_set
+    if not rows:
+        raise QuotaCheckError(f"Team {team_id!r} not found in registry")
+    tier, mu, mg, mp, mak, ms = rows[0]
+    tier = tier or "free"
+    from tortoise.pricing import tier_limits
+    lim = tier_limits(tier)
+    return {
+        "team_id": team_id,
+        "tier": tier,
+        # max_users/max_graphs: None means unlimited (Team tier); preserve it.
+        "max_users": int(mu) if mu is not None else None,
+        "max_graphs": int(mg) if mg is not None else None,
+        "max_points": int(mp) if mp is not None else lim["max_graph_nodes"],
+        "max_api_keys": int(mak) if mak is not None else lim["max_api_keys"],
+        "max_sessions": int(ms) if ms is not None else DEFAULT_MAX_SESSIONS,
+    }
+
+
+def count_team_usage(team_id: str, resource: str, sdk=None) -> int:
+    """Count current usage for a resource. Raises QuotaCheckError on failure.
+
+    Public so callers needing the raw count (e.g. extraction-aware estimates)
+    can use it without duplicating the fail-closed handling.
+
+    Supported resources: points, api_keys, sessions, users, graphs.
+    """
+    return _count_resource(team_id, resource, sdk=sdk)
+
+
+def _count_resource(team_id: str, resource: str, sdk=None) -> int:
+    """Count current usage for a resource. Raises QuotaCheckError on failure.
+
+    Supported resources:
+    - points: non-episodic Points in tenant graph (the Point-level
+      ``is_episodic`` flag is the quota discriminator — #947, epic #909
+      §4.4; legacy Points without the flag count as non-episodic,
+      fail-closed, until graph-scripts/backfill_is_episodic.py backfills
+      them, R-18)
+    - api_keys: active (non-revoked) APIKey nodes in registry
+    - sessions: Session nodes in tenant graph (MATCH (s:Session) — NOT the
+      all-nodes count; #947 P0)
+    - users: active Membership nodes in registry
+    - graphs: Graph nodes in registry
+    """
+    try:
+        # ── Registry-scoped counts (api_keys, users, graphs) ──
+        if resource in ("api_keys", "users", "graphs"):
+            # #765 (plan Task 8 quota paths): in Supabase control-plane mode
+            # the count reads Supabase via the seam — post-flip the registry
+            # is DELETED, so a registry count would fail-open (0 nodes) or
+            # 500. Mirrors the registry predicates exactly:
+            #   api_keys: revoked_at IS NULL (expired rows still count)
+            #   users:    status IS NULL OR status = 'active'
+            #   graphs:   the default graph derived from teams.graph_name
+            #             (no graphs table in the plan data model — custom
+            #             graphs are not tracked in Supabase mode).
+            # Selfhost (registry mode) keeps the registry count.
+            from tortoise.supabase_control import (
+                get_control_plane, graph_metadata, is_supabase_enabled,
+            )
+            if is_supabase_enabled():
+                cp = get_control_plane()
+                if resource == "api_keys":
+                    rows = cp.query(
+                        "api_keys", select=["id"],
+                        filters=[("team_id", "eq", team_id),
+                                 ("revoked_at", "is", None)],
+                    )
+                    return len(rows)
+                if resource == "users":
+                    rows = cp.query(
+                        "team_memberships", select=["status"],
+                        filters=[("team_id", "eq", team_id)],
+                    )
+                    return len([r for r in rows
+                                if r.get("status") in (None, "active")])
+                # graphs: default graph exists whenever the team row does
+                return len(graph_metadata(cp, team_id))
+            reg = (sdk if sdk is not None and getattr(sdk, "_namespace", None) == "registry"
+                   else _make_sdk(namespace="registry"))
+            if resource == "api_keys":
+                rows = reg._get_registry().query(
+                    "MATCH (k:APIKey {team_id: $tid}) WHERE k.revoked_at IS NULL RETURN count(k)",
+                    params={"tid": team_id},
+                ).result_set
+            elif resource == "users":
+                rows = reg._get_registry().query(
+                    "MATCH (m:Membership {team_id: $tid}) "
+                    "WHERE m.status IS NULL OR m.status = 'active' RETURN count(m)",
+                    params={"tid": team_id},
+                ).result_set
+            else:  # graphs
+                rows = reg._get_registry().query(
+                    "MATCH (g:Graph {team_id: $tid}) RETURN count(g)",
+                    params={"tid": team_id},
+                ).result_set
+            return int(rows[0][0])
+
+        # ── Tenant-graph-scoped counts (sessions, points) ──
+        if sdk is None:
+            sdk = _make_sdk(namespace=team_id)
+        if resource == "sessions":
+            # #947 (epic #909 §4.4, W-4): the P0 — count Session nodes, NOT
+            # all nodes. Pre-fix this fell through to MATCH (n) (~25 nodes
+            # per captured session) → false 402 after ~40 captures.
+            rows = sdk._get_proj().g.query(
+                "MATCH (s:Session) RETURN count(s)",
+            ).result_set
+            return int(rows[0][0])
+        # points: non-episodic Points only — the Point-level is_episodic flag
+        # is the discriminator. A MISSING flag counts as non-episodic
+        # (fail-closed, R-18): legacy regex-path captures lack it and must be
+        # backfilled episodic by graph-scripts/backfill_is_episodic.py, else
+        # false 402s persist for existing capture users.
+        rows = sdk._get_proj().g.query(
+            "MATCH (n:Point) "
+            "WHERE n.is_episodic IS NULL OR n.is_episodic = false "
+            "RETURN count(n)",
+        ).result_set
+        return int(rows[0][0])
+    except QuotaCheckError:
+        raise
+    except Exception as e:
+        from .security import redact_error
+        redacted = redact_error(e)
+        _logger.error(
+            "quota count failed (fail-closed): team=%s resource=%s error=%s",
+            team_id, resource, redacted,
+        )
+        raise QuotaCheckError(f"quota count failed for {resource}: {redacted}") from e
+
+
+def enforce_team_limit(limits: dict | None, resource: str, sdk=None) -> None:
+    """Reject a write when the team is at/over its resource limit.
+
+    Args:
+        limits: resolved team limits dict (from resolve_team_limits or the
+            authenticated caller). None → skip (stdio/operator, no team).
+        resource: "points" | "api_keys" | "sessions" | "users" | "graphs".
+        sdk: pre-built team SDK (REST callers already hold one) — optional.
+
+    Raises:
+        QuotaExceededError: team at/over limit (402-equivalent).
+        QuotaCheckError: counting failed (fail-closed).
+    """
+    if limits is None:
+        return  # stdio/operator — no team context
+    team_id = limits.get("team_id")
+    if not team_id:
+        return
+    limit_key = _RESOURCE_LIMIT_KEYS.get(resource)
+    if limit_key is None:
+        raise QuotaCheckError(f"unknown quota resource: {resource!r}")
+    limit = limits.get(limit_key)
+    if limit is None:
+        # An explicitly-None limit means UNLIMITED (Team tier: users/graphs
+        # stored null) — skip enforcement (#683). Distinguish from a MISSING
+        # key, which is fail-closed (#310 GAP-B): never silently fall back to
+        # lenient caps.
+        if limit_key in limits:
+            return
+        if resource == "sessions":
+            limit = DEFAULT_MAX_SESSIONS
+        else:
+            raise QuotaCheckError(f"team limits missing {limit_key} for resource {resource!r}")
+    count = _count_resource(team_id, resource, sdk=sdk)
+    if count >= limit:
+        raise QuotaExceededError(
+            f"Team {resource} limit reached ({limit}). Upgrade your plan to increase it."
+        )

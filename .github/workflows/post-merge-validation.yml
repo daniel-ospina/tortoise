@@ -1,0 +1,101 @@
+# Post-merge validation (#559)
+#
+# Closes the "done means merged, not verified" gap: every PR merged into main
+# runs the test suite against the merged head and posts the result on the PR.
+# On FAIL it also flags the linked issue (parsed from "Closes #N" in the PR
+# body) so an issue can never be silently 'done' while its change is red.
+#
+# Warn-only by design (mirrors post-deploy-verify): it detects problems and
+# makes them visible; it does not roll back. The issue stays open until the
+# failure is resolved and re-validated.
+#
+# Note: runs the embedded-FalkorDBLite suite. Tests needing a live FalkorDB
+# self-skip via _skip_if_no_falkor. A per-test timeout turns any hang into a
+# fast, visible failure instead of a 6h CI budget burn.
+
+name: Post-merge validation
+
+on:
+  pull_request:
+    types: [closed]
+
+concurrency:
+  group: postmerge-validation
+  cancel-in-progress: false
+
+# The comment step posts on the PR and the linked issue — the default
+# read-only token for pull_request events cannot do that.
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  validate:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'  # pyproject requires-python >= 3.12 (mirrors python-ci.yml)
+      - name: Install
+        run: |
+          set -o pipefail  # don't let `tail` mask a pip failure
+          # pytest-asyncio: tests/test_github_indexer.py uses @pytest.mark.asyncio
+          # (mirrors the python-ci.yml '.[test,embeddings]' surface, #493).
+          pip install -e '.[embeddings]' falkordblite pytest pytest-timeout pytest-asyncio 2>&1 | tail -2
+      - name: Run tests (embedded suite, per-test timeout)
+        id: tests
+        run: |
+          # 90s per-test: embedded redislite EP tests take ~25-35s locally
+          # (slowest ~33s on this hardware), more on CI runners. Still a hang
+          # detector — just not a speed gate.
+          # pipefail: without it the pipeline's exit status is `tail`'s (0) and
+          # pytest failures are silently masked — steps.tests.outcome would be
+          # 'success' even when the suite is red.
+          set -o pipefail
+          # tests/e2e has dedicated jobs (welcome-e2e, legal-e2e, signup/billing
+          # e2e in their own workflows) and needs pytest-playwright browsers this
+          # job does not install — post-merge-validation covers the
+          # unit/integration suite only.
+          python -m pytest tests/ -q --timeout=90 --ignore=tests/e2e 2>&1 | tail -25
+      - name: Comment result on PR
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          # github-script v7 does not expose `steps` in the JS scope (and
+          # rejects undeclared `with:` inputs) — pass the tests step outcome via
+          # an expression-evaluated env var instead.
+          TESTS_OUTCOME: ${{ steps.tests.outcome }}
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const passed = process.env.TESTS_OUTCOME === 'success';
+            const body = passed
+              ? `✅ **Post-merge validation PASSED** — merge ${pr.merge_commit_sha.slice(0, 8)} verified on main.`
+              : `❌ **Post-merge validation FAILED** — the merged change broke the test suite (see run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}). The linked issue must NOT be considered done until this is resolved.`;
+            await github.rest.issues.createComment({
+              issue_number: pr.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body,
+            });
+            if (!passed) {
+              // Flag the linked issue ("Closes #N" / "Fixes #N" in the body)
+              const m = (pr.body || '').match(/(?:closes|fixes|resolves)\s+#(\d+)/i);
+              if (m) {
+                await github.rest.issues.createComment({
+                  issue_number: parseInt(m[1], 10),
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  body: `⚠️ The PR that closed this issue (#${pr.number}) **failed post-merge validation** — see run ${context.runId}. Keeping this visible until the failure is resolved; the issue is not considered done.`,
+                });
+              }
+            }
+      - name: Fail the check
+        if: steps.tests.outcome == 'failure'
+        run: exit 1

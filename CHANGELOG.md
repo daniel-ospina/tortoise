@@ -4,6 +4,77 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Self-hosted trust (#942)
+
+The durable multi-writer path is now the documented default; embedded
+FalkorDBLite is honestly bounded to single-writer eval.
+
+- **Docs flip**: README quickstart, docs/quickstart-selfhosted.md,
+  website/self-hosted.html, and infra-runbook §4.5 lead with
+  `docker compose up -d` (daemon + FalkorDB sidecar: AOF, named volume,
+  healthcheck, loopback-published sidecar port). Embedded is labeled
+  single-agent eval only everywhere; the self-hosted.html comparison table
+  is now a decision table; `.env.example`/canonical host URI unified on
+  `docker://:falkordb@localhost:6379/tortoise`.
+- **CI proof**: new pre-merge job `test-concurrency-falkor` runs the TRUE
+  cross-worker concurrency tests against a real `falkordb/falkordb-server`
+  service container (`test_seq_is_monotonic_under_concurrency_live_falkor`
+  — 8 workers, one shared graph, contiguous global seqs; and
+  `test_concurrent_writers_live_falkor_no_lost_writes` — 5 processes, no
+  lost writes). Both skip visibly when `TORTOISE_DB_URI` is unset; the job
+  fails if they skip (anti-vacuity guard) and enforces the docs flip with a
+  consistency grep.
+- **Honest guard**: embedded mode now emits a loud SINGLE-WRITER / EVAL-ONLY
+  banner at every runtime entrypoint — `serve --http` (any auth mode), the
+  daemon, the stdio MCP entrypoint (`tortoise serve` /
+  `python -m tortoise.mcp_server`), `tortoise key create` (the team-mode
+  minting moment), and `tortoise init`. `--auth tenant` on embedded is
+  marked single-agent eval only (decision: WARN, not refuse — documented in
+  #942).
+
+### Added — service model (#338)
+
+Tortoise is repositioned from a pip library to a **service** (MongoDB-style):
+run it, connect your tools over MCP.
+
+- **Self-host daemon** (`tortoise.selfhost`): thin single-tenant service —
+  MCP Streamable HTTP at `/mcp` + `/health` + `/health/ready`; `auth_mode`
+  param on `create_http_app` (`tenant` default = hosted byte-identical;
+  `static` = API key; `none` = localhost-bound eval); `tortoise-serve http`
+  CLI.
+- **MCP client** (`tortoise.mcp_client`): thin driver over fastmcp's built-in
+  client — zero new deps; graceful degradation (daemon down → skip).
+- **Connectors**: twenty bridge converted SDK→MCP (`integrations/` now has
+  zero engine imports).
+- **Docker**: `Dockerfile.selfhost` + GHCR publish workflow +
+  `docker-compose.yml` (daemon + FalkorDB sidecar, AOF on) — durable
+  self-host reference.
+- **License**: Business Source License 1.1 — free self-hosted production use
+  under $5M annual revenue; MPL 2.0 conversion after 4 years; hosted =
+  commercial with free tier. See `docs/license-notes.md` (clause → precedent).
+- **`.mcp.json`**: tortoise entry points at the daemon (`http://localhost:8000/mcp`).
+
+### Fixed — EP NAND under-propagation (#855)
+
+Restored genuine cascade propagation through IMPL chains. Two root causes:
+- **NAND base weight**: plain NAND carried the generic weight 1.0 vs
+  `phi_nand`'s documented w=8.0 default → 8× weaker contradiction potential.
+  Now `NAND_BASE_WEIGHT = 8.0` (mitigated NAND 8×2=16 → clamped 10.0).
+- **`phi_impl` coupling**: product coupling `exp(w·ca·cb)` was insensitive to
+  source strength — a contradicted source's weakness didn't reach its
+  dependents. Changed to **difference (level-matching) coupling**
+  `exp(-w·(ca-cb)²)`: the target tracks the source's level, so damage
+  cascades downstream (C1 drop 0.001 → 0.022; B feedback 0.000 → 0.006).
+
+**Also ships:** NAND factor messages no longer receive the evidence-scaled
+proportional boost (would crush weak claims at w=8); EP default convergence
+tolerance tightened 1e-3 → 1e-4 (more iterations per run).
+
+**Behavior note:** difference coupling adds a small (~0.008) downward drag on
+strong sources supporting weak targets (deliberate level-matching semantics,
+per the canonical SVBP reference). The #86 bidirectional-IMPL NAND-style
+back-message hack was removed — its role is now handled by the coupling.
+
 ### Fixed — redislite embedded process leak (issue #176)
 
 The embedded (redislite) mode leaked one `redis-server` OS process per

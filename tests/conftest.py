@@ -1,103 +1,98 @@
-"""Pytest configuration — test graph isolation guard (#99) + per-test isolation (#221).
+"""D11 #578 — shared fixtures for the epic E2E suite.
 
-Forces ALL integration tests onto an isolated graph name starting with
-'tortoise_test_' so that the SDK-level DETACH DELETE guard passes, and
-no test can affect the real graph (falkordb-personal:16379/tortoise).
-
-The default URI uses the test FalkorDB container (port 6379) with an
-isolated graph name. Individual test files or CI can override via
-TORTOISE_DB_URI env var as long as the graph name starts with
-'test_' or 'tortoise_test'.
-
-Per-test isolation (#221): an autouse fixture recomposes TORTOISE_DB_URI
-per test so every test gets its OWN graph name
-(``tortoise_test_<session>_<testname>``). Whole-graph ``DETACH DELETE``
-calls then only ever wipe the test's own graph — order-dependence from
-shared-graph pollution is eliminated structurally.
+provision_test_user: creates a provisioned test user (team + membership +
+key) with tier + demo_seed control. Tier injection writes the Team node
+directly (no user-facing tier path in v1). Used by E2E-1/3/4/5/10/11/12/13.
 """
 from __future__ import annotations
 
 import os
-import re
-import sys
 import tempfile
-import uuid
 
 import pytest
 
-# ── Embedded-mode dependency guard (#450) ──────────────────────────────────
-# falkordblite (not plain redislite) provides redislite.falkordb_client.
-# Catch the gap early so a fresh checkout doesn't silently fail 69+ tests.
-try:
-    from redislite.falkordb_client import FalkorDB  # noqa: F401
-except ImportError:
-    print(
-        "\n⚠️  falkordblite NOT installed — embedded-mode tests will fail.\n"
-        "    Fix: pip install falkordblite>=0.10\n"
-        "    (plain redislite does NOT include the FalkorDB embedded client)\n",
-        file=sys.stderr,
-    )
+os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
+
+from tortoise.sdk import TortoiseSDK
+from tortoise.pricing import tier_limits
 
 
-# ── Test graph isolation ───────────────────────────────────────────────────
-# Generate a unique graph name per test session so parallel pytest runs
-# do not collide. The graph name starts with 'tortoise_test_' which is
-# required by the FalkorProjection._assert_test_graph() guard for
-# DETACH DELETE operations.
-TEST_GRAPH = f"tortoise_test_{uuid.uuid4().hex[:8]}"
+@pytest.fixture
+def provision_test_user():
+    created = []
 
-# Default to the test FalkorDB container (not the real graph at 16379).
-# Individual test files / CI can override via the env var as long as
-# the graph name starts with 'test_' or 'tortoise_test'.
-_TEST_DEFAULT_URI = f"docker://:falkordb@localhost:6379/{TEST_GRAPH}"
+    def factory(tier: str = "free", demo_seed: bool = True):
+        tmpdir = tempfile.mkdtemp()
+        sdk = TortoiseSDK(os.path.join(tmpdir, "e2e.db"), namespace="e2e-tests")
+        team = sdk.team_create(f"e2e-{os.urandom(4).hex()}")
+        lim = tier_limits(tier)
+        # #310 (review fix 16b): mirror production CREATE semantics — write
+        # max_points (= max_graph_nodes, GAP-B mapping) + max_sessions too.
+        sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.tier=$tier, t.max_graphs=$mg, "
+            "t.max_users=$mu, t.max_api_keys=$mk, t.max_points=$mp, "
+            "t.max_sessions=$ms, t.ops_allowance=$ops, t.graph_size_cap=$nodes",
+            params={"id": team["id"], "tier": tier,
+                    "mg": lim["max_graphs_per_team"], "mu": lim["max_users_per_team"],
+                    "mk": lim["max_api_keys"], "mp": lim["max_graph_nodes"],
+                    "ms": 1000, "ops": lim["included_write_ops_per_month"],
+                    "nodes": lim["max_graph_nodes"]},
+        )
+        if demo_seed:
+            try:
+                sdk._graph_create(team["id"], "demo", kind="custom")
+            except Exception:
+                pass
+        user_id = f"user-{os.urandom(4).hex()}"
+        sdk.membership_create(team["id"], user_id, "owner")
+        created.append(sdk)
+        return {"sdk": sdk, "team_id": team["id"], "api_key": team["api_key"],
+                "graph_name": team["graph_name"], "team_name": team["name"],
+                "user_id": user_id}
 
-os.environ.setdefault("TORTOISE_DB_URI", _TEST_DEFAULT_URI)
-
-# Per-worker uniqueness (xdist-safe): the session UUID is combined with
-# the worker PID so parallel workers never collide on graph names.
-_WORKER_UUID = f"{uuid.uuid4().hex[:8]}_{os.getpid()}"
-
-# Tests that MUST keep whole-graph DETACH DELETE on their own graph
-# (they verify the guard itself). Marked with @pytest.mark.allow_graph_delete
-# — the per-test fixture still isolates them to their own graph, so the
-# wipe stays safe; the marker documents intent and permits a future
-# collection-time lint to require it.
-_ALLOW_GRAPH_DELETE_MARK = "allow_graph_delete"
+    yield factory
+    for sdk in created:
+        try:
+            sdk.close()
+        except Exception:
+            pass
 
 
-def _recompose_graph_name(base_uri: str, new_graph: str) -> str:
-    """Replace the graph-name segment of a connection URI.
+@pytest.fixture
+def test_user(provision_test_user):
+    return provision_test_user(tier="free", demo_seed=True)
 
-    URI-scheme-aware (#221): docker:// / redis:// / rediss:// URIs get their
-    path (graph name) replaced, preserving query strings and fragments.
-    Embedded file-path URIs pass through UNCHANGED — they are inherently
-    isolated per-test via the per-test DB path, and a naive rewrite would
-    corrupt them.
 
-    Returns the original URI if the scheme is not one of the supported
-    graph-addressed schemes.
+@pytest.fixture
+def sdk_factory(tmp_path):
+    """Shared embedded-SDK factory for the #432 suite (Tasks 1/2/3/5).
+
+    Each call builds a TortoiseSDK on a FRESH embedded redislite DB file under
+    the per-test tmp_path (unique per call), so concurrent workers (threads)
+    each get an isolated graph. Embedded-vs-docker concurrency note
+    (plan-review P2): the embedded redislite server is shared per-path but is
+    NOT multi-connection-safe — two TortoiseSDK instances on the SAME path in
+    one process each open their own server and last-close wins on the DB file.
+    Tests that need cross-SDK sharing on one graph must run against a live
+    FalkorDB (TORTOISE_DB_URI=docker://...) instead; the seq-atomicity test
+    (Task 3) follows the plan's per-worker fresh-SDK construction.
+
+    ensure_schema=False (default): :GraphEvent schema is created lazily by
+    append_event on first emit (Task 3). ensure_schema=True eagerly installs
+    it (used by the duplicate-append test).
     """
-    from urllib.parse import urlparse, urlunparse
-    parsed = urlparse(base_uri)
-    if parsed.scheme not in ("docker", "redis", "rediss"):
-        return base_uri
-    # Pathless URI: append the per-test graph so isolation still applies
-    # (P2, #221): docker://host:6379 → docker://host:6379/<graph>
-    return urlunparse(parsed._replace(path=f"/{new_graph}"))
+    import os
 
+    def factory(_tmp_path=None, *, ensure_schema=False, namespace=None):
+        base = _tmp_path if _tmp_path is not None else tmp_path
+        db_path = os.path.join(str(base), f"evt-{os.urandom(4).hex()}.db")
+        sdk = TortoiseSDK(db_path, namespace=namespace)
+        if ensure_schema:
+            from tortoise import event_store
+            event_store.ensure_event_schema(sdk._get_proj())
+        return sdk
 
-def _sanitize_node_name(name: str) -> str:
-    """Sanitize a pytest node id into a safe graph-name fragment."""
-    # node ids look like test_foo.py::TestClass::test_bar[param]
-    fragment = name.split("::")[-1]
-    fragment = re.sub(r"[^A-Za-z0-9_]", "_", fragment)
-    fragment = fragment[:40]
-    # P3 (#221): append a short hash so long parameterized names whose first
-    # 40 sanitized chars collide (e.g. [ctx-a] vs [ctx-b]) still get unique
-    # graphs.
-    import hashlib
-    suffix = hashlib.blake2b(name.encode(), digest_size=3).hexdigest()
-    return f"{fragment or 'test'}_{suffix}"
+    return factory
 
 
 @pytest.fixture(scope="session")
@@ -110,55 +105,155 @@ def shared_embedded_db():
     isolates it), so state never leaks across tests while the subprocess
     count stays at 1.
 
+    Restored 2026-08-08 (#647): the D11 conftest rewrite (#578) dropped this
+    fixture but five test files (test_ep_selector, test_ranking,
+    test_sdk_legacy_coverage, test_search_sessions_temporal,
+    test_session_semantic_search) still depend on it. Kept via #281: the
+    branch's own copy survived its merge of main (main had dropped the
+    fixture at that point; the #647 restoration landed on main afterward).
+
     # TODO(#176): stopgap — remove when the redislite root-cause fix lands.
+    # Issue #1005: superseded by lifecycle finalize (tortoise.FalkorDB /
+    # TortoiseSDK close on GC) + the _redislite_hygiene session sweeps below;
+    # kept because the fixture's shared path is still the cheap way for the
+    # five dependent files to share one server.
     """
     import tempfile as _tf
     db_path = os.path.join(_tf.mkdtemp(prefix="tortoise_shared_embedded_"), "shared.db")
     yield db_path
 
 
-@pytest.fixture(autouse=True)
-def _per_test_graph(monkeypatch, request):
-    """Give every test its own graph name on the session DB connection.
+@pytest.fixture(scope="session", autouse=True)
+def _redislite_hygiene():
+    """Bound redislite orphan accumulation (#1005).
 
-    Intercepts ALL SDK constructions during the test (they read
-    TORTOISE_DB_URI at construction), including direct from_uri callers
-    that read the env var at use-time. Module-level URI captures are
-    handled individually in their test files (R3/R4, #221).
+    Session start: register this suite in the active-suite registry and run
+    a CONCURRENCY-SAFE sweep (dir-gone/stale records only — never a live
+    server of a concurrently running suite, which may sit at 0 clients
+    between tests). Session end: run a full sweep, but only when no other
+    suite is still active — otherwise defer to the last suite standing.
+
+    Sweeps acquire the reaper singleton lock and are batch-capped so a
+    dirty machine cannot stall suite startup.
     """
-    base_uri = os.environ.get("TORTOISE_DB_URI", "")
-    if not base_uri:
-        yield
-        return
-    test_name = _sanitize_node_name(request.node.name)
-    graph = f"tortoise_test_{_WORKER_UUID}_{test_name}"
-    monkeypatch.setenv("TORTOISE_DB_URI", _recompose_graph_name(base_uri, graph))
-    yield
-    # No teardown needed — the next test gets a fresh graph name.
-    # Graphs accumulate on the shared server between tests (harmless —
-    # each is private to its test).
+    import uuid
 
-
-def pytest_configure(config):
-    """Register the allow_graph_delete marker (P4, #221)."""
-    config.addinivalue_line(
-        "markers",
-        "allow_graph_delete: test legitimately wipes its own graph (guard-testing)",
+    from tortoise.embedded_reaper import (
+        ACTIVE_SUITES_DIR,
+        _ReaperLock,
+        _run_sweep,
+        active_suite_tokens,
     )
 
+    marker_dir = ACTIVE_SUITES_DIR
+    token = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    marker_path = None
+    try:
+        os.makedirs(marker_dir, exist_ok=True)
+        marker_path = os.path.join(marker_dir, token)
+        with open(marker_path, "w") as fh:
+            fh.write(f"pid={os.getpid()}\n")
+    except OSError:
+        # never fail the suite over hygiene; remove any partial marker so a
+        # poison file cannot degrade every future suite's sweep to only-safe
+        # (the foreign-pytest guard still covers the markerless case)
+        if marker_path:
+            try:
+                os.remove(marker_path)
+            except OSError:
+                pass
+        marker_path = None
 
-def pytest_collection_modifyitems(config, items):
-    """Attach the allow_graph_delete marker to marked items."""
-    for item in items:
-        if _ALLOW_GRAPH_DELETE_MARK in item.keywords:
-            item.add_marker(getattr(pytest.mark, _ALLOW_GRAPH_DELETE_MARK))
+    def _sweep(only_safe: bool) -> dict:
+        try:
+            lock = _ReaperLock()
+            if not lock.acquire():
+                return {"skipped": "reaper-lock-held"}
+            try:
+                # Full end-sweep: disable the boot cooldown — at session end
+                # no new client can appear, so servers younger than the 30s
+                # cooldown are still safe to reap (otherwise the last minute
+                # of the suite's servers leak until the next suite; observed
+                # as 13 orphans on CI, issue #1005 follow-up).
+                prev = os.environ.get("TORTOISE_REAPER_MIN_UPTIME")
+                if not only_safe:
+                    os.environ["TORTOISE_REAPER_MIN_UPTIME"] = "0"
+                try:
+                    acted = _run_sweep(
+                        dry_run=False, batch_size=50, only_safe=only_safe,
+                        jobs=8, kill_pacing=0.4)
+                    return {"reaped": len(acted)}
+                finally:
+                    if prev is None:
+                        os.environ.pop("TORTOISE_REAPER_MIN_UPTIME", None)
+                    else:
+                        os.environ["TORTOISE_REAPER_MIN_UPTIME"] = prev
+            finally:
+                lock.release()
+        except Exception as exc:  # never fail the suite over hygiene
+            return {"error": str(exc)}
+
+    # Session start: only dir-gone/stale records are safe while other suites
+    # may be mid-run (their per-test servers are 0-client between tests).
+    start_result = _sweep(only_safe=True)
+    print(f"[redislite-hygiene] start sweep: {start_result}")
+
+    yield
+
+    def _foreign_suites_active() -> bool:
+        """True when pytest processes outside this suite's process tree are
+        running. Catches suites running the pre-#1005 conftest, which do not
+        write active-suite markers — without this, our full end-sweep could
+        kill another suite's between-tests idle server (issue #1005 P1).
+        """
+        import subprocess as _sp
+        my_pid = os.getpid()
+        try:
+            out = _sp.run(["pgrep", "-f", "pytest"], capture_output=True,
+                          text=True, timeout=10)
+        except (_sp.TimeoutExpired, OSError):
+            return True  # unknown -> fail closed (defer full sweep)
+        for line in out.stdout.splitlines():
+            pid = line.strip()
+            if not pid.isdigit() or int(pid) == my_pid:
+                continue
+            try:
+                ppid = int(_sp.run(["ps", "-o", "ppid=", "-p", pid],
+                                   capture_output=True, text=True, timeout=5
+                                   ).stdout.strip())
+            except (_sp.TimeoutExpired, OSError, ValueError):
+                return True
+            if ppid != my_pid:
+                return True
+        return False
+
+    # Session end: remove our marker first, then check for other active
+    # suites (markers) AND foreign pytest processes (old-conftest suites).
+    # Full sweep only when we are the last suite standing.
+    if marker_path:
+        try:
+            os.remove(marker_path)
+        except OSError:
+            pass
+    others = [t for t in active_suite_tokens() if t != token]
+    foreign = _foreign_suites_active()
+    end_result = _sweep(only_safe=bool(others) or foreign)
+    print(f"[redislite-hygiene] end sweep (other-suites={len(others)}, "
+          f"foreign-pytest={foreign}): {end_result}")
+
+
 
 
 @pytest.fixture(autouse=True)
-def _set_stdio_transport_mode():
-    """#236: new _safe() gate rejects when _transport_mode is None; stdio tests
-    must run in stdio mode (mirrors main())."""
-    from tortoise.mcp_auth import _transport_mode
-    token = _transport_mode.set("stdio")
+def _reset_register_rate_limit():
+    """/v1/register rate limiter is in-memory per process (3/hour/IP, #498).
+
+    pytest runs all test files in ONE process, so onboarding/register tests
+    in earlier files consume the budget of later files (429s in
+    test_onboarding_integration, #493). Reset per test — the limiter's
+    cross-test persistence has no value here (each test uses a fresh IP-less
+    TestClient context).
+    """
+    from tortoise.hosted_api import _register_buckets
+    _register_buckets.clear()
     yield
-    _transport_mode.reset(token)

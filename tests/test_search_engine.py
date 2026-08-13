@@ -11,6 +11,25 @@ from tortoise.search_engine import (
     EpBreakdown, EpEvidence, annotate_ep_batch,
 )
 
+# ── Live-FalkorDB availability (mirrors tests/test_hnsw_vector_index.py) ──
+# test_sdk_document_search_returns_metadata connects to docker://localhost:16379.
+# Probe at module load so it skips gracefully in embedded-only CI (#493).
+FALKORDB_AVAILABLE = False
+try:
+    from tortoise.projection import FalkorProjection as _FP
+    _old_uri = os.environ.get("TORTOISE_DB_URI")
+    os.environ["TORTOISE_DB_URI"] = "docker://:@localhost:16379/tortoise_test_sdk125"
+    _probe = _FP.from_uri(os.environ["TORTOISE_DB_URI"])
+    _probe.close()
+    FALKORDB_AVAILABLE = True
+except Exception:
+    FALKORDB_AVAILABLE = False
+finally:
+    if _old_uri is not None:
+        os.environ["TORTOISE_DB_URI"] = _old_uri
+    else:
+        os.environ.pop("TORTOISE_DB_URI", None)
+
 
 class TestClassifyQuery:
     def test_full_scan(self):
@@ -109,6 +128,7 @@ class TestAnnotateEpBatch:
 # ------------------------------------------------------------------ #125 SDK document metadata
 
 
+@pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="Live FalkorDB (Docker) not available")
 def test_sdk_document_search_returns_metadata():
     """#125: tortoise_search(entity_type='document') returns capture metadata.
     #167: includes sourcePath in results."""

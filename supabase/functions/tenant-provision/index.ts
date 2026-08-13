@@ -1,8 +1,34 @@
 // Tenant provisioning Edge Function
-// Triggered on auth.users INSERT via Supabase Auth webhook
-// Creates Team node in registry graph, provisions FalkorDB namespace, generates API key
+// Triggered on auth.users INSERT via the Supabase Auth `after_user_created`
+// webhook. Writes the master list into Supabase ONLY — teams +
+// team_memberships + api_keys in ONE atomic transaction via the
+// provision_team SECURITY DEFINER RPC (migration 0010, #669 plan Task 2 /
+// #770), then seeds the team's demo knowledge graph via the FastAPI data
+// plane (/internal/demo — FalkorDB knowledge graphs stay untouched; the
+// control_plane registry graph is NEVER written here: E2E-1).
+//
+// ── CALLER AUTH (#802) ─────────────────────────────────────────────────
+// The function MUST be deployed with verify_jwt=false (--no-verify-jwt):
+// Supabase Auth hooks carry NO user JWT — the platform signs the hook
+// request itself with the hook secret (Standard Webhooks / Svix signature).
+// Because of that the function verifies the caller itself, and the public
+// anon key alone is NOT sufficient to mint teams/API keys:
+//
+//   1. Auth-hook calls → raw-body Standard-Webhooks signature verified
+//      against AUTH_HOOK_SECRET (the secret configured on the
+//      after_user_created hook; format `v1,whsec_...`, generated in
+//      Dashboard → Authentication → Hooks). See Supabase docs
+//      "Auth Hooks → Send email hook" for the canonical pattern.
+//   2. Direct calls → must present a USER JWT (Authorization: Bearer)
+//      whose identity (id + email) matches the user_id/email being
+//      provisioned — a user can only provision FOR THEMSELVES.
+//
+// Anything else → 401. Missing/unverifiable signature fails CLOSED
+// (mirrors the FASTAPI_URL / TORTOISE_SECRET_PEPPER fail-closed pattern).
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { Webhook } from "https://esm.sh/standardwebhooks@1.0.0";
+import { lookupHash } from "../_shared/lookup.ts";
 
 // Supabase Auth hook payload: { metadata: {...}, user: { id, email, user_metadata, ... } }
 // Also tolerates a direct { user_id, email, display_name } payload for manual testing.
@@ -19,11 +45,89 @@ interface HookPayload {
   display_name?: string;
 }
 
+// Caller identity established by authentication (hook signature or JWT).
+interface CallerIdentity {
+  id: string;
+  email: string;
+  display_name?: string;
+}
+
 interface ProvisionResponse {
   team_id: string;
   team_name: string;
   api_key: string;
   graph_name: string;
+}
+
+// Env var holding the after_user_created hook secret (v1,whsec_...).
+// Set via: supabase secrets set --project-ref ybetwichurajbfswfeqa \
+//   AUTH_HOOK_SECRET='v1,whsec_...'   (value from Dashboard → Auth → Hooks)
+const AUTH_HOOK_SECRET_ENV = "AUTH_HOOK_SECRET";
+
+/**
+ * Authenticate the caller. Returns the verified caller identity, or null
+ * when the request cannot be authenticated (→ the handler answers 401).
+ */
+async function authenticateCaller(
+  req: Request,
+  rawBody: string
+): Promise<CallerIdentity | null> {
+  // ── Path 1: user JWT (direct callers) ────────────────────────────────
+  // Verify the token against Supabase Auth. The identity match against the
+  // provisioning target is enforced by the caller (see handler) so user A
+  // cannot mint teams/keys for user B.
+  const authz = req.headers.get("authorization") ?? "";
+  if (authz.startsWith("Bearer ")) {
+    const token = authz.slice("Bearer ".length).trim();
+    if (!token) return null;
+    const supabase = createClient(
+      Deno.env.get("SUPABASE_URL") ?? "",
+      Deno.env.get("SUPABASE_ANON_KEY") ?? "",
+      { auth: { persistSession: false, autoRefreshToken: false } }
+    );
+    const { data, error } = await supabase.auth.getUser(token);
+    if (error || !data.user?.id || !data.user.email) return null;
+    return {
+      id: data.user.id,
+      email: data.user.email,
+      display_name:
+        (data.user.user_metadata as { display_name?: string } | undefined)
+          ?.display_name,
+    };
+  }
+
+  // ── Path 2: Supabase Auth hook (after_user_created) ─────────────────
+  // GoTrue signs the raw body with the hook secret (Standard Webhooks:
+  // webhook-id / webhook-timestamp / webhook-signature headers). Fail
+  // CLOSED while the secret is unprovisioned so the function can never
+  // fall back to trusting unsigned requests.
+  const hookSecret = Deno.env.get(AUTH_HOOK_SECRET_ENV);
+  if (!hookSecret) {
+    console.error(
+      "tenant-provision: AUTH_HOOK_SECRET is not set (#802). Configure the " +
+        "after_user_created hook secret (Dashboard → Authentication → Hooks) " +
+        "and run: supabase secrets set --project-ref ybetwichurajbfswfeqa " +
+        "AUTH_HOOK_SECRET='v1,whsec_...'"
+    );
+    return null;
+  }
+  try {
+    const webhook = new Webhook(hookSecret.replace(/^v1,whsec_/, ""));
+    // Headers → plain object (webhook-signature / webhook-id / webhook-timestamp).
+    const headers: Record<string, string> = {};
+    req.headers.forEach((v, k) => { headers[k] = v; });
+    const payload = webhook.verify(rawBody, headers) as HookPayload;
+    const user = payload.user;
+    if (!user?.id || !user.email) return null;
+    return {
+      id: user.id,
+      email: user.email,
+      display_name: user.user_metadata?.display_name,
+    };
+  } catch (err) {
+    console.error("tenant-provision: hook signature verification failed:", err);
+    return null;
+  }
 }
 
 Deno.serve(async (req: Request) => {
@@ -33,21 +137,61 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    const body = await req.json() as HookPayload;
+    // Read the RAW body first — the hook signature covers the raw bytes,
+    // so the body must be verified before it is parsed/re-serialized.
+    const rawBody = await req.text();
 
-    // Auth hook sends user object nested under `user`; direct payloads send top-level fields.
-    const user = body.user;
-    const user_id = user?.id || body.user_id;
-    const email = user?.email || body.email;
-    const display_name =
-      user?.user_metadata?.display_name || body.display_name || undefined;
-
-    if (!user_id || !email) {
+    // Caller auth (#802): signed auth-hook request OR user JWT matching
+    // the provisioning target. The public anon key is NOT sufficient.
+    const caller = await authenticateCaller(req, rawBody);
+    if (!caller) {
       return new Response(
-        JSON.stringify({ error: "user_id and email required" }),
+        JSON.stringify({
+          error:
+            "Unauthorized: expected a signed Supabase auth-hook request or " +
+            "a user JWT matching the provisioning target",
+        }),
+        { status: 401, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    let body: HookPayload;
+    try {
+      body = JSON.parse(rawBody) as HookPayload;
+    } catch {
+      return new Response(
+        JSON.stringify({ error: "invalid JSON body" }),
         { status: 400, headers: { "Content-Type": "application/json" } }
       );
     }
+
+    // The provisioning target must BE the authenticated caller. A signed
+    // hook payload only ever names the user GoTrue just created, and a JWT
+    // caller may only provision for themselves — user A cannot mint teams
+    // or API keys for user B (#802).
+    const targetId = (body.user?.id || body.user_id || "").toLowerCase();
+    const targetEmail = (body.user?.email || body.email || "").toLowerCase();
+    if (
+      !targetId ||
+      !targetEmail ||
+      targetId !== caller.id.toLowerCase() ||
+      targetEmail !== caller.email.toLowerCase()
+    ) {
+      return new Response(
+        JSON.stringify({
+          error:
+            "Forbidden: provisioning target does not match the " +
+            "authenticated caller",
+        }),
+        { status: 403, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    // Identity comes from the VERIFIED caller, not the (possibly forged)
+    // body fields.
+    const user_id = caller.id;
+    const email = caller.email;
+    const display_name = caller.display_name || body.display_name || undefined;
 
     // Validate user_id is a UUID before provisioning (avoids orphaned
     // FalkorDB namespaces when called manually with a malformed payload).
@@ -70,8 +214,21 @@ Deno.serve(async (req: Request) => {
     // Ensure starts with alphanumeric per Team.name regex
     const safeName = /^[a-zA-Z0-9]/.test(teamName) ? teamName : `u-${teamName}`;
 
-    // Generate ULID for team_id
-    const teamId = crypto.randomUUID().replace(/-/g, "").substring(0, 26);
+    // Generate a DETERMINISTIC team_id per user — SHA-256(user_id) truncated
+    // to 26 hex chars. Retries (hook redelivery after a lost response, or a
+    // direct-JWT re-invocation) must be true same-payload retries: a fresh
+    // random id on every call would let provision_team's step-3 INSERT create
+    // a SECOND team + membership + api_keys row (code-review P2, PR #847 —
+    // the old update_user_team placeholder-only UPDATE could never duplicate,
+    // so this is a new idempotency requirement introduced by the RPC).
+    const teamIdDigest = await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(user_id)
+    );
+    const teamId = Array.from(new Uint8Array(teamIdDigest))
+      .map(b => b.toString(16).padStart(2, "0"))
+      .join("")
+      .substring(0, 26);
 
     // Generate API key
     const apiKeyBytes = new Uint8Array(32);
@@ -82,72 +239,102 @@ Deno.serve(async (req: Request) => {
     const apiKey = `tt_${apiKeyHex}`;
 
     // Call internal FastAPI to provision the namespace
-    const fastApiUrl = Deno.env.get("FASTAPI_URL") || "http://localhost:8000";
+    const fastApiUrl = Deno.env.get("FASTAPI_URL") || "";
+    if (!fastApiUrl) {
+      // localhost:8000 was the old default — it points at the edge
+      // function's own container and threw uncaught (500 "Error invoking
+      // hook"). Fail with a clear, diagnosable error instead (dogfood 2026-08-08).
+      console.error("tenant-provision: FASTAPI_URL is not set in Supabase secrets");
+      return new Response(
+        JSON.stringify({ error: "Provisioning misconfigured (FASTAPI_URL missing). Please contact support." }),
+        { status: 500, headers: { "Content-Type": "application/json" } }
+      );
+    }
     const fastApiKey = Deno.env.get("FASTAPI_INTERNAL_KEY") || "";
 
-    // Hash once, reuse for both consumers (each call mints a fresh salt —
-    // calling twice would store two different hashes for the same key).
+    // Fail CLOSED on a missing pepper at the lookupHash call site (not just
+    // via hashApiKey's own guard): without the pepper, lookup_hash would be
+    // SHA-256(key) — a digest that can never match tortoise/auth.py's
+    // lookup_hash() (real/dev pepper) → every provisioned key silently fails
+    // Task 3 auth. Explicit guard so reordering the two calls can't regress
+    // this (code-review P2, PR #847).
+    const pepper = Deno.env.get("TORTOISE_SECRET_PEPPER") || "";
+    if (!pepper) {
+      throw new Error(
+        "TORTOISE_SECRET_PEPPER is not set. Set it in Supabase secrets — " +
+        "provisioned lookup_hash values cannot be verified without a stable pepper."
+      );
+    }
+    // ── Fix #7852/#770: write the master list to Supabase in ONE atomic
+    // transaction (teams + team_memberships + api_keys) via the
+    // provision_team SECURITY DEFINER RPC (migration 0010). The RPC is
+    // idempotent: it reconciles the on_auth_user_created placeholder row
+    // (team_id='' / key_hash='pending') in place, so exactly one membership
+    // row and one api_keys row exist per provisioned team (plan §4.1 step 6,
+    // P2-5 concurrency contract). key_hash (salted PBKDF2, continuity) and
+    // lookup_hash (SHA-256(pepper + key) — the auth lookup anchor, E2E-6)
+    // are computed HERE, never in SQL (the pepper lives in app code only).
+    //
+    // Failure is FATAL now (unlike the old best-effort update_user_team
+    // write): the FalkorDB registry is no longer written, so without this
+    // transaction the team exists NOWHERE. The user can retry — the RPC is
+    // idempotent.
     const keyHash = await hashApiKey(apiKey);
+    const lookupHashHex = await lookupHash(apiKey, pepper);
 
-    const provisionRes = await fetch(`${fastApiUrl}/internal/provision`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${fastApiKey}`,
-      },
-      body: JSON.stringify({
-        team_id: teamId,
-        team_name: safeName,
-        api_key_hash: keyHash,
-        created_by: user_id,
-      }),
+    const supabase = createClient(
+      Deno.env.get("SUPABASE_URL")!,
+      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
+    );
+    const { error: provisionError } = await supabase.rpc("provision_team", {
+      p_user_id: user_id,
+      p_identity: null,
+      p_team_id: teamId,
+      p_team_name: safeName,
+      p_api_key: apiKey, // plaintext — shown once on welcome page, then nulled
+      p_key_hash: keyHash,
+      p_lookup_hash: lookupHashHex,
+      p_graph_name: `team_${teamId}`,
+      p_email: email,
+      p_key_prefix: apiKey.slice(0, 10),
     });
-
-    if (!provisionRes.ok) {
-      const errText = await provisionRes.text();
-      console.error(`Provision failed for ${safeName}: ${errText}`);
+    if (provisionError) {
+      console.error(
+        "provision_team failed for " + safeName + ":",
+        provisionError
+      );
       return new Response(
         JSON.stringify({ error: "Provisioning failed. Please try again." }),
         { status: 502, headers: { "Content-Type": "application/json" } }
       );
     }
 
-    // ── Fix #7852: Write plaintext API key to user_teams ───────────────
-    const supabase = createClient(
-      Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
-    );
-    // Upsert: the on_auth_user_created trigger pre-inserts a placeholder row
-    // (key_hash='pending') for this user_id, so plain insert would violate
-    // the UNIQUE(user_id) constraint. Upsert on user_id updates that row.
-    const { error: userTeamsError } = await supabase.from("user_teams").upsert({
-      user_id: user_id,
-      team_id: teamId,
-      team_name: safeName,
-      api_key: apiKey,  // plaintext — shown once on welcome page
-      key_hash: keyHash,
-      graph_name: `team_${teamId}`,
-    }, { onConflict: "user_id" });
-    if (userTeamsError) {
-      console.error("Failed to write user_teams:", userTeamsError);
-      // Don't fail the whole provisioning — the key is already in the response
-    }
-
     // ── Fix #7854: Trigger demo graph seeding ──────────────────────────
-    await fetch(`${fastApiUrl}/v1/internal/demo`, {
+    // Data plane ONLY: /internal/demo writes the team's knowledge graph
+    // (FalkorDB, graph team_{team_id} — created on first write). It never
+    // touches the control_plane registry graph (E2E-1: zero registry
+    // writes). The old /internal/provision call is GONE — it wrote the
+    // registry (Team/APIKey/Membership nodes), which the plan moves to
+    // Supabase entirely. AbortSignal.timeout bounds the await so a slow
+    // demo seed can never blow the hook deadline mid-retry (code-review P2,
+    // PR #847 — the RPC has already committed at this point; the hook
+    // redelivers the whole request, and deterministic team_id makes that a
+    // harmless no-op).
+    await fetch(`${fastApiUrl}/internal/demo`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "Authorization": `Bearer ${fastApiKey}`,
       },
       body: JSON.stringify({ team_id: teamId }),
+      signal: AbortSignal.timeout(10_000),
     }).catch((e) => console.error("Demo seed failed:", e));
 
     const response: ProvisionResponse = {
       team_id: teamId,
       team_name: safeName,
       api_key: apiKey,
-      // Must match the value upserted into user_teams above (team_${teamId}).
+      // Must match the value upserted into team_memberships above (team_${teamId}).
       graph_name: `team_${teamId}`,
     };
 

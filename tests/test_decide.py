@@ -17,6 +17,23 @@ import pytest
 
 from tortoise.sdk import TortoiseSDK
 
+# Requires live FalkorDB (Docker). Skip gracefully when unavailable so the
+# no-Docker embedded suite stays green (AGENTS.md). Mirrors the probe pattern
+# in tests/test_integration_search.py.
+FALKORDB_AVAILABLE = False
+try:
+    from tortoise.sdk import TortoiseSDK as _ProbeSDK
+    _probe = _ProbeSDK()
+    _probe._get_proj().g.query("RETURN 1")
+    _probe.close()
+    FALKORDB_AVAILABLE = True
+except Exception:
+    pass
+
+pytestmark = pytest.mark.skipif(
+    not FALKORDB_AVAILABLE, reason="Live FalkorDB (Docker) not available")
+
+
 
 @pytest.fixture
 def sdk():
@@ -126,12 +143,12 @@ class TestDecideWiring:
     def test_compute_confidence_with_anchors(self, sdk):
         """EP computes confidence for points via anchors-based selection."""
         # Create two options
-        opt_a = sdk.create_point("option", "Option A")
-        opt_b = sdk.create_point("option", "Option B")
+        opt_a = sdk.create_point("option", "Option A", status="live")
+        opt_b = sdk.create_point("option", "Option B", status="live")
 
         # Evidence strongly supports A, opposes B
-        ev1 = sdk.create_point("evidence", "A is better")
-        ev2 = sdk.create_point("evidence", "B has problems")
+        ev1 = sdk.create_point("evidence", "A is better", status="live")
+        ev2 = sdk.create_point("evidence", "B has problems", status="live")
 
         sdk.create_operator("IMPL", ev1["id"], [opt_a["id"]])
         sdk.create_operator("NAND", ev2["id"], [opt_b["id"]])
@@ -192,17 +209,17 @@ class TestDecideWiring:
     def test_full_wiring_produces_ranked_output(self, sdk):
         """End-to-end: create options + criteria + findings, wire edges, compute confidence."""
         # Options
-        opt_a = sdk.create_point("option", "Option A")
-        opt_b = sdk.create_point("option", "Option B")
+        opt_a = sdk.create_point("option", "Option A", status="live")
+        opt_b = sdk.create_point("option", "Option B", status="live")
 
         # Criteria
-        crit_1 = sdk.create_point("criterion", "Security")
-        crit_2 = sdk.create_point("criterion", "Adoption")
+        crit_1 = sdk.create_point("criterion", "Security", status="live")
+        crit_2 = sdk.create_point("criterion", "Adoption", status="live")
 
         # Findings
-        f1 = sdk.create_point("evidence", "A is secure")
-        f2 = sdk.create_point("evidence", "A has wide adoption")
-        f3 = sdk.create_point("evidence", "B has security issues")
+        f1 = sdk.create_point("evidence", "A is secure", status="live")
+        f2 = sdk.create_point("evidence", "A has wide adoption", status="live")
+        f3 = sdk.create_point("evidence", "B has security issues", status="live")
 
         # Wire: criteria → options
         sdk.create_operator("IMPL", crit_1["id"], [opt_a["id"]])
@@ -237,12 +254,12 @@ class TestDecideContextFree:
         """Wire 2 options + findings, run compute_confidence(factors=...),
         and assert a ranked table is produced with numeric confidences."""
         # Options
-        opt_a = sdk.create_point("option", "Option A")
-        opt_b = sdk.create_point("option", "Option B")
+        opt_a = sdk.create_point("option", "Option A", status="live")
+        opt_b = sdk.create_point("option", "Option B", status="live")
 
         # Findings
-        f1 = sdk.create_point("evidence", "A is strongly supported")
-        f2 = sdk.create_point("evidence", "B has major issues")
+        f1 = sdk.create_point("evidence", "A is strongly supported", status="live")
+        f2 = sdk.create_point("evidence", "B has major issues", status="live")
 
         # Collect operator IDs as the CLI would for --context-free mode
         operator_ids: list[str] = []
@@ -259,7 +276,7 @@ class TestDecideContextFree:
         operator_ids.append(op3["id"])
 
         # Extra IMPL for A to create clear separation
-        f3 = sdk.create_point("evidence", "A is also cost-effective")
+        f3 = sdk.create_point("evidence", "A is also cost-effective", status="live")
         op4 = sdk.create_operator("IMPL", f3["id"], [opt_a["id"]])
         operator_ids.append(op4["id"])
 
@@ -303,12 +320,12 @@ class TestDecideContextFree:
         ranked output within tolerance (not identical — different EP scopes —
         but same relative ordering)."""
         # Options
-        opt_a = sdk.create_point("option", "Option A")
-        opt_b = sdk.create_point("option", "Option B")
+        opt_a = sdk.create_point("option", "Option A", status="live")
+        opt_b = sdk.create_point("option", "Option B", status="live")
 
         # Findings
-        f1 = sdk.create_point("evidence", "A is good")
-        f2 = sdk.create_point("evidence", "B is bad")
+        f1 = sdk.create_point("evidence", "A is good", status="live")
+        f2 = sdk.create_point("evidence", "B is bad", status="live")
 
         operator_ids: list[str] = []
 
@@ -336,15 +353,94 @@ class TestDecideContextFree:
         a_an = get_mean(anchor_confs, opt_a["id"])
         b_an = get_mean(anchor_confs, opt_b["id"])
 
-        # Both modes should rank Option A above Option B
-        if all(v is not None for v in [a_cf, b_cf, a_an, b_an]):
-            assert a_cf > b_cf, (
-                f"Context-free: Expected A ({a_cf:.4f}) > B ({b_cf:.4f})"
-            )
-            assert a_an > b_an, (
-                f"Anchors: Expected A ({a_an:.4f}) > B ({b_an:.4f})"
-            )
-            # Confidences should be within reasonable tolerance
-            assert abs(a_cf - a_an) < 0.5, (
-                f"A confidence divergence: cf={a_cf:.4f} anchors={a_an:.4f}"
-            )
+        # Both modes should rank Option A above Option B. Fail loudly
+        # instead of passing vacuously if EP produced no confidences
+        # (draft-filter degeneracy would silently zero them — #992).
+        assert all(v is not None for v in [a_cf, b_cf, a_an, b_an]), (
+            f"EP produced no confidences (a_cf={a_cf}, b_cf={b_cf}, "
+            f"a_an={a_an}, b_an={b_an}) — draft-filter degeneracy?"
+        )
+        assert a_cf > b_cf, (
+            f"Context-free: Expected A ({a_cf:.4f}) > B ({b_cf:.4f})"
+        )
+        assert a_an > b_an, (
+            f"Anchors: Expected A ({a_an:.4f}) > B ({b_an:.4f})"
+        )
+        # Confidences should be within reasonable tolerance
+        assert abs(a_cf - a_an) < 0.5, (
+            f"A confidence divergence: cf={a_cf:.4f} anchors={a_an:.4f}"
+        )
+
+
+class TestIssue400EPFixes:
+    """#400: EP N+1 factor extraction + create_operator validation + empty-result signal."""
+
+    def test_batch_factor_extraction_has_both_inputs(self, sdk):
+        """Batch extract_svbp_factors returns operators with all inputs (not N+1 drops)."""
+        opt_a = sdk.create_point("option", "Option A", status="live")
+        opt_b = sdk.create_point("option", "Option B", status="live")
+        ev = sdk.create_point("evidence", "Both good", status="live")
+
+        # Create operator with source + 2 targets (3 inputs total)
+        op = sdk.create_operator("IMPL", ev["id"], [opt_a["id"], opt_b["id"]])
+
+        proj = sdk._get_proj()
+        factors, _ = proj.extract_svbp_factors()
+
+        # Find our operator in the extracted factors
+        op_factor = None
+        for f in factors:
+            if f[0] == op["id"]:
+                op_factor = f
+                break
+
+        assert op_factor is not None, f"Operator {op['id']} not found in extracted factors"
+        _op_id, op_type, input_ids, weight = op_factor
+        assert op_type == "IMPL"
+        assert weight == 1.0
+        # Should have all 3 inputs: source (ev) + 2 targets (opt_a, opt_b)
+        assert len(input_ids) >= 2, \
+            f"Expected >=2 inputs, got {len(input_ids)}: {input_ids}"
+        assert ev["id"] in input_ids
+        assert opt_a["id"] in input_ids
+        assert opt_b["id"] in input_ids
+
+    def test_create_operator_missing_endpoint_raises(self, sdk):
+        """create_operator with missing source or target raises ValueError (no silent drop)."""
+        ev = sdk.create_point("evidence", "Real evidence")
+        fake_id = "nonexistent-point-000000"
+
+        # Missing target
+        with pytest.raises(ValueError, match="do not exist"):
+            sdk.create_operator("IMPL", ev["id"], [fake_id])
+
+        # Missing source
+        with pytest.raises(ValueError, match="do not exist"):
+            sdk.create_operator("IMPL", fake_id, [ev["id"]])
+
+    def test_compute_confidence_empty_signals_no_factors(self, sdk):
+        """compute_confidence on empty graph returns diagnostic='no_factors'."""
+        result = sdk.compute_confidence()
+        assert result["iterations"] == 0
+        assert result["converged"] is True
+        assert result.get("diagnostic") == "no_factors", (
+            f"Expected diagnostic='no_factors' on empty graph, got {result}"
+        )
+        assert result["confidences"] == {}
+
+    def test_nand_operator_gets_weight_3(self, sdk):
+        """NAND operators get weight 3.0 in factor extraction (batch query preserves this)."""
+        opt_a = sdk.create_point("option", "Option A", status="live")
+        opt_b = sdk.create_point("option", "Option B", status="live")
+        ev = sdk.create_point("evidence", "A opposes B", status="live")
+
+        op = sdk.create_operator("NAND", ev["id"], [opt_a["id"], opt_b["id"]])
+
+        proj = sdk._get_proj()
+        factors, _ = proj.extract_svbp_factors()
+
+        nand_factors = [f for f in factors if f[0] == op["id"]]
+        assert len(nand_factors) == 1
+        _op_id, op_type, _inputs, weight = nand_factors[0]
+        assert op_type == "NAND"
+        assert weight == 3.0, f"Expected NAND weight 3.0, got {weight}"

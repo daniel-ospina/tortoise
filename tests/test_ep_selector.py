@@ -63,7 +63,7 @@ def _fresh_sdk():
 def _make_claim(sdk: TortoiseSDK, content: str,
                 kind: str = "statement") -> dict:
     """Create a non-operator claim Point."""
-    return sdk.create_point(kind, content, dedup=False)
+    return sdk.create_point(kind, content, dedup=False, status="live")  # #780 default excludes drafts
 
 
 def _make_finding(sdk: TortoiseSDK, content: str) -> dict:

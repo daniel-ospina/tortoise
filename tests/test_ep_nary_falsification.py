@@ -20,17 +20,15 @@ live FalkorDB while still exercising the real factor-update arithmetic
 and the real run() loop.
 
 Measured behavior (w=3, neutral Beta(1,1) cavities, damping=1.0;
-message norms are L1 = |η1|+|η2|):
-  - isolated 2-input NAND:   per-claim msg |η| ≈ 0.218, factor total 0.436
-  - 4-input NAND:             per-claim |η| ≈ 0.193–0.205, factor total 0.785
-                              (1.80× binary — claim-count-scaled over-pull, #326)
-  - 6-input NAND:             factor total 1.172 (2.69× binary, #326)
-  - reversed input order → per-claim messages shift by up to 0.0057
-                              (order-dependent decomposition, #326)
-  - the per-claim message is NOT amplified 3×: _msg_cache is keyed per
-    claim, so pair writes overwrite (last-pair-wins) and the posterior
-    sees one message per claim. Over-counting appears at factor level:
-    n surviving per-claim messages (~0.20 each) vs 2 (~0.218) in binary.
+message norms are L1 = |η1|+|η2|) — AFTER the #326 fix:
+  - isolated 2-input NAND:   per-claim msg |η| = 1.158, factor total 2.316
+  - 4/6-input NAND:           factor total ratio vs binary = 1.000
+                              (weight conserved across pairs, #326; the
+                              test asserts within ±5% of the binary total)
+  - per-claim after scaling:  binary per-claim × 2/n (0.579 for n=4), i.e.
+                              the binary total shared across n claims
+  - reversed input order → per-claim messages identical (diff ~1e-15 —
+                              clean-state accumulation, #326)
 """
 from __future__ import annotations
 
@@ -109,8 +107,9 @@ def test_nary_nand_decomposes_into_all_pairs():
     pairs = {frozenset(c[2]) for c in pairs_calls}
     assert len(pairs) == 6, f"expected 6 distinct pairs, got {pairs}"
 
-    # _msg_cache is keyed (op, claim, rel) → per-claim last-pair-wins:
-    # one surviving message per claim, each a downward NAND pull.
+    # Accumulate-then-scale (#326): each claim receives ONE scaled message
+    # (the per-pair contributions summed, then scaled by 2/(n(n-1))), each a
+    # downward NAND pull.
     assert set(k[1] for k in ep._msg_cache) == {"a", "b", "c", "d"}
     for key, (ma, mb) in ep._msg_cache.items():
         assert _msg_norm((ma, mb)) > 0.0, f"degenerate message for {key}"
@@ -145,13 +144,14 @@ def test_nary_impl_only_source_to_targets():
 
 
 def test_nary_nand_per_claim_pull_matches_binary_pair():
-    """Per-claim surviving pull ≈ isolated binary pair (cache overwrite).
+    """Per-claim pull stays within a bounded band of the binary pair's.
 
-    Characterization test: despite C(4,2)=6 pair applications, each claim
-    accumulates ONE message (per-claim cache key, last-pair-wins), so the
-    per-claim pull stays close to the isolated binary pair at the same
-    weight rather than amplifying 3×. The over-counting manifests at
-    FACTOR level (total pull) — see test_nary_nand_weight_not_overcounted.
+    After #326's accumulate-then-scale conservation fix, each claim of an
+    n-ary factor receives (2/n) × the binary per-claim pull (the binary
+    TOTAL is shared across n claims). For n=4 that is exactly 0.5× the
+    binary per-claim — the band [0.45, 0.6] leaves margin for quadrature
+    drift while pinning the conservation semantics (and failing the
+    original last-pair-wins over-pull).
     """
     w = 3.0
     ep_nary = _make_ep(["a", "b", "c", "d"])
@@ -162,58 +162,138 @@ def test_nary_nand_per_claim_pull_matches_binary_pair():
 
     msg_bin = _msg_norm(ep_bin._msg_cache[("op", "a", "NAND")])
     msg_nary = _msg_norm(ep_nary._msg_cache[("op", "a", "NAND")])
-    assert 0.5 * msg_bin <= msg_nary <= 2.0 * msg_bin, (
+    # n=4: per-claim = 2/n × binary = 0.5× exactly. Band [0.45, 0.6] leaves
+    # margin for quadrature drift while FAILING the original #326 behavior
+    # (per-claim ≈0.88-0.94× binary, last-pair-wins at full weight — outside
+    # the band).
+    assert 0.45 * msg_bin <= msg_nary <= 0.6 * msg_bin, (
         f"per-claim nary pull {msg_nary:.4f} drifted from binary {msg_bin:.4f}"
     )
 
 
-@pytest.mark.xfail(
-    reason="#326: n-ary NAND total pull scales with claim count — the "
-           "surviving per-claim messages (~0.20 each at w=3) sum to 1.8× "
-           "binary's total at n=4 and ~2.7× at n=6 instead of staying at "
-           "weight w; messages are also input-order-dependent "
-           "(max shift ~0.006 at w=3).",
-    strict=True,
-)
 def test_nary_nand_weight_not_overcounted():
     """Regression test for #326: n-ary weight over-counting corruption.
 
-    A 4-input NAND decomposes into C(4,2)=6 pairwise factors. Intended
-    semantics (ONTOLOGY v3.1): the operator carries ONE weight w — the
-    factor's TOTAL pull must equal the isolated 2-input factor's total
-    pull at the same weight, NOT scale with arity. Additionally, a
-    symmetric factor must be input-order-invariant: reversing the input
-    order (same participants, same weight) must not change per-claim
-    messages.
+    A 4-input NAND decomposes into C(4,2)=6 pairwise factors. The operator
+    carries ONE weight w (#326 design decision, pinned by the #420/#536
+    falsification suite): the factor's TOTAL pull must equal the isolated
+    2-input factor's total pull at the same weight, NOT scale with arity.
+    Additionally, a symmetric factor must be input-order-invariant:
+    reversing the input order must not change per-claim messages.
 
-    Current code violates both (measured at w=3: total pull 1.80× binary;
-    reversed order shifts per-claim |η| by up to 0.0057). This test FAILS
-    on current code (hence xfail) and must start PASSING when #326 lands
-    (weight normalized across pairs, order-independent decomposition).
+    The accumulate-then-scale fix (#326) computes every pair from a clean
+    cavity state (input-order-invariant), accumulates per claim, and
+    scales by 2/(n(n-1)) so the total equals the binary factor's exactly.
     """
     w = 3.0
-
-    ep_nary = _make_ep(["a", "b", "c", "d"])
-    ep_nary._update_factor("op", "NAND", ["a", "b", "c", "d"], weight=w)
-
     ep_bin = _make_ep(["a", "b"])
     ep_bin._update_factor("op", "NAND", ["a", "b"], weight=w)
 
-    # (a) total pull must not scale with arity
-    assert _total_pull(ep_nary) <= 1.25 * _total_pull(ep_bin), (
-        f"nary(4) total pull {_total_pull(ep_nary):.4f} vs binary "
-        f"{_total_pull(ep_bin):.4f} — arity-scaled weight over-counting (#326)"
-    )
+    # (a) total pull must be CONSERVED (ratio ~1.0) at every arity — the
+    # operator carries ONE weight w, so n-ary and binary totals match.
+    for n in (4, 6):
+        ids = [chr(ord("a") + i) for i in range(n)]
+        ep_nary = _make_ep(ids)
+        ep_nary._update_factor("op", "NAND", ids, weight=w)
+        total_ratio = _total_pull(ep_nary) / _total_pull(ep_bin)
+        assert 0.95 <= total_ratio <= 1.05, (
+            f"nary({n}) total pull ratio {total_ratio:.4f} vs binary "
+            f"{_total_pull(ep_bin):.4f} — weight over-counting (#326)"
+        )
 
-    # (b) order-invariance: same factor, reversed input order
+    # (b) order-invariance: same 4-input factor, reversed input order
+    ep_fwd = _make_ep(["a", "b", "c", "d"])
+    ep_fwd._update_factor("op", "NAND", ["a", "b", "c", "d"], weight=w)
     ep_rev = _make_ep(["d", "c", "b", "a"])
     ep_rev._update_factor("op", "NAND", ["d", "c", "b", "a"], weight=w)
-    fwd = {k[1]: v for k, v in ep_nary._msg_cache.items()}
+    fwd = {k[1]: v for k, v in ep_fwd._msg_cache.items()}
     rev = {k[1]: v for k, v in ep_rev._msg_cache.items()}
     for cid in fwd:
         assert abs(fwd[cid][0] - rev[cid][0]) < 1e-3, (
             f"order-dependent message for {cid}: fwd {fwd[cid]} vs rev {rev[cid]}"
         )
+
+
+def test_nary_impl_star_conserves_binary_total():
+    """Star topology (IMPL source→targets): total pull conserved vs binary.
+
+    #326: a 4-input IMPL (source + 3 targets) decomposes into 3 pairs; the
+    star scale 1/(n-1) keeps the TOTAL equal to the binary IMPL's total at
+    the same weight. Targets are diluted 1/(n-1) (evidence dilution across
+    siblings); the source's accumulated back-message scales back to the
+    binary source message.
+    """
+    w = 3.0
+    bin_ep = _make_ep(["s", "t"])
+    bin_ep._update_factor("op", "IMPL", ["s", "t"], weight=w)
+    star_ep = _make_ep(["s", "t1", "t2", "t3"])
+    star_ep._update_factor("op", "IMPL", ["s", "t1", "t2", "t3"], weight=w)
+
+    ratio = _total_pull(star_ep) / _total_pull(bin_ep)
+    assert 0.95 <= ratio <= 1.05, f"IMPL star total ratio {ratio:.4f}"
+
+
+def test_nary_directed_nand_star_conserves():
+    """Directed NAND (source attacks each target): star conservation and NO
+    source message (#795/#326 semantics)."""
+    w = 3.0
+    bin_ep = _make_ep(["s", "t"])
+    bin_ep._update_factor("op", "NAND", ["s", "t"], weight=w,
+                          direction="unidirectional")
+    star_ep = _make_ep(["s", "t1", "t2", "t3"])
+    star_ep._update_factor("op", "NAND", ["s", "t1", "t2", "t3"], weight=w,
+                           direction="unidirectional")
+
+    ratio = _total_pull(star_ep) / _total_pull(bin_ep)
+    assert 0.95 <= ratio <= 1.05, f"directed NAND star total ratio {ratio:.4f}"
+    # targets get downward pulls; the source gets NO message (unidirectional)
+    assert ("op", "s", "NAND") not in star_ep._msg_cache
+    for cid in ("t1", "t2", "t3"):
+        ma, mb = star_ep._msg_cache[("op", cid, "NAND")]
+        assert ma < 0.0, f"directed NAND target {cid} not attacked: {(ma, mb)}"
+
+
+def test_nary_directed_star_clears_stale_source_message():
+    """Directed NAND: a stale source message (from a pre-migration
+    bidirectional run, persisted by _flush_cache) must be CLEARED, never
+    re-accumulated as a fresh pair contribution (#326 directed-path
+    corruption)."""
+    w = 3.0
+    ep = _make_ep(["s", "t1", "t2", "t3"])
+    ep._msg_cache[("op", "s", "NAND")] = (0.5, 0.3)  # stale bidirectional-era
+    ep._update_factor("op", "NAND", ["s", "t1", "t2", "t3"], weight=w,
+                      direction="unidirectional")
+    assert ep._msg_cache.get(("op", "s", "NAND")) == (0.0, 0.0), (
+        "stale source message must be cleared for directed NAND"
+    )
+
+
+def test_nary_cacheless_direct_call_conserves():
+    """Direct _update_factor call on a fresh instance (no _msg_cache — graph
+    mode) must apply the SAME accumulate-then-scale semantics, never the old
+    per-pair over-counting (#326 retained-bug fallback)."""
+    w = 3.0
+    written: list[tuple[str, str]] = []
+
+    class _G:
+        def query(self, cypher, params=None):
+            if "SET r.msg_alpha" in cypher:
+                written.append((params["oid"], params["cid"]))
+            return types.SimpleNamespace(result_set=[])
+
+    ep = TortoiseEP(types.SimpleNamespace(g=_G()), damping=1.0, n_quad=8)
+    assert not hasattr(ep, "_msg_cache"), "fresh instance has no msg cache"
+    ep._update_factor("op", "NAND", ["a", "b", "c", "d"], weight=w)
+    # exactly ONE scaled message written per claim (graph mode) — the old
+    # per-pair fallback wrote 12 (6 pairs × 2 claims)
+    claims = {c for _, c in written}
+    assert len(written) == 4, f"expected 4 writes, got {len(written)}"
+    assert claims == {"a", "b", "c", "d"}, f"wrote {claims}"
+    # the attribute must NOT be left behind in graph mode (hasattr selects
+    # graph I/O in _update_claim_posterior)
+    assert not hasattr(ep, "_msg_cache")
+    # and the sibling API must not crash on the fresh instance
+    ep._update_claim_posterior("a")
 
 
 def test_nary_with_less_than_two_inputs_is_noop():
@@ -238,15 +318,17 @@ class _RecordingEP(TortoiseEP):
         super().__init__(*args, **kwargs)
         self._node_cache = {}
         self._msg_cache = {}
+        self._final_node_cache: dict = {}
+        self._final_msg_cache: dict = {}
         self.flushed = 0
         self._affected = set()
         self._factors = []
 
     # ── Stubbed I/O boundary ──
-    def _affected_claims(self, operator_ids, max_hops=2):
+    def _affected_claims(self, operator_ids, max_hops=2, include_draft=False):
         return set(self._affected)
 
-    def _affected_factors(self, affected_claims):
+    def _affected_factors(self, affected_claims, include_draft=False):
         return list(self._factors)
 
     def _load_cache(self, affected_claims):
@@ -258,6 +340,12 @@ class _RecordingEP(TortoiseEP):
 
     def _flush_cache(self):
         self.flushed += 1
+
+    def _clear_caches(self) -> None:
+        """Snapshot final posterior state before run() clears caches (#330)."""
+        self._final_node_cache = dict(getattr(self, "_node_cache", {}))
+        self._final_msg_cache = dict(getattr(self, "_msg_cache", {}))
+        super()._clear_caches()
 
 
 def test_run_empty_affected_claims_early_returns():
@@ -304,7 +392,6 @@ def test_run_reports_non_convergence_honestly():
         ("op1", "IMPL", ["a", "b"], 5.0, None, "bidirectional"),
         ("op2", "NAND", ["a", "b"], 5.0, None, "bidirectional"),
     ]
-    ep._node_cache = {"a": (1.0, 1.0), "b": (1.0, 1.0)}
 
     iters, converged = ep.run(["op1", "op2"], max_hops=0)
     assert iters == 10, f"expected max_iter=10 exhausted, got {iters}"
@@ -322,13 +409,13 @@ def test_run_converges_with_gentle_factor():
     ep = _RecordingEP(_stub_proj(), damping=0.5, max_iter=50, tol=1e-3)
     ep._affected = {"a", "b"}
     ep._factors = [("op", "NAND", ["a", "b"], 1.0, None, "bidirectional")]
-    ep._node_cache = {"a": (1.0, 1.0), "b": (1.0, 1.0)}
 
     iters, converged = ep.run(["op"], max_hops=0)
     assert converged is True, f"gentle NAND should converge, got ({iters}, {converged})"
     assert 0 < iters < 50
     assert ep.flushed == 1
     # Posterior moved: message arrived and shifted the Beta posterior away
-    # from the neutral (1,1) prior.
-    a, b = ep._node_cache["a"]
+    # from the neutral (1,1) prior. Read the snapshot taken before run()'s
+    # _clear_caches (#330) — _node_cache is deleted post-run.
+    a, b = ep._final_node_cache["a"]
     assert a != 1.0 or b != 1.0, "posterior should be updated after convergence"

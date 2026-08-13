@@ -157,3 +157,102 @@ def test_webhook_url_verification():
             assert r.read().decode() == "test-challenge-abc"
     finally:
         sc.stop_webhook()
+
+
+# ── #331: webhook double-start resource leak + swallowed exceptions ──
+
+def test_webhook_start_is_idempotent():
+    """#331: starting twice must not double-bind the socket (pre-fix:
+    second HTTPServer(...) raised Address already in use / orphaned thread)."""
+    import urllib.request
+    sc = SlackConnector(config={
+        "token": "xoxb-test",
+        "webhook_port": 18995,
+        "signing_secret": "",
+    })
+    port1 = sc.start_webhook()
+    server1 = sc._server
+    port2 = sc.start_webhook()  # double-start — must be idempotent
+    assert port1 == port2
+    assert sc._server is server1, "second start must not replace the server"
+
+    # Original socket must still be serving (url_verification challenge)
+    payload = json.dumps({"type": "url_verification",
+                          "challenge": "challenge-abc"}).encode()
+    req = urllib.request.Request(
+        f"http://localhost:{port1}/", data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=5) as r:
+        assert r.status == 200
+        assert r.read().decode() == "challenge-abc"
+    sc.stop_webhook()
+
+    # stop + restart must work (socket fully released)
+    port3 = sc.start_webhook()
+    assert port3 == port1
+    sc.stop_webhook()
+
+
+def test_webhook_processing_error_returns_500():
+    """#331: an exception while processing an event must be LOGGED and
+    answered with HTTP 500 — not silently dropped."""
+    import urllib.error
+    import urllib.request
+
+    def boom(ev):
+        raise RuntimeError("downstream failed")
+
+    sc = SlackConnector(config={
+        "token": "xoxb-test",
+        "webhook_port": 18994,
+        "signing_secret": "",
+    })
+    port = sc.start_webhook(on_event=boom)
+    try:
+        payload = json.dumps({
+            "type": "event_callback",
+            "event": {"type": "message", "text": "hello",
+                      "ts": "1690000000.000001", "user": "u1"},
+        }).encode()
+        req = urllib.request.Request(
+            f"http://localhost:{port}/", data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            assert False, "expected HTTP 500"
+        except urllib.error.HTTPError as e:
+            assert e.code == 500
+        except urllib.error.URLError:
+            assert False, "handler must respond with 500, not drop the connection"
+    finally:
+        sc.stop_webhook()
+
+
+def test_webhook_non_dict_payload_returns_400():
+    """#331 (review r4): valid JSON that is not an object (array/string)
+    must get HTTP 400 — not an AttributeError-dropped connection."""
+    import urllib.error
+    import urllib.request
+
+    sc = SlackConnector(config={
+        "token": "xoxb-test",
+        "webhook_port": 18995,
+        "signing_secret": "",
+    })
+    port = sc.start_webhook()
+    try:
+        req = urllib.request.Request(
+            f"http://localhost:{port}/", data=b"[1, 2, 3]",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            assert False, "expected HTTP 400"
+        except urllib.error.HTTPError as e:
+            assert e.code == 400
+        except urllib.error.URLError:
+            assert False, "handler must respond with 400, not drop the connection"
+    finally:
+        sc.stop_webhook()

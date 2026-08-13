@@ -6,11 +6,14 @@ Requires: LINEAR_API_KEY env var. Zero Python deps outside stdlib.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def _now_iso() -> str:
@@ -54,9 +57,26 @@ class LinearConnector:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 data = json.loads(resp.read())
                 if "errors" in data:
-                    return {}  # ponytail: GraphQL-level errors, surface if needed
+                    # #331: GraphQL-level errors (e.g. undeclared variables,
+                    # schema drift) must be visible — a silent {} looks like
+                    # "no data" and hides broken queries.
+                    # #331 (review r5): a malformed errors payload (null,
+                    # string, non-dict entries) must not crash the connector
+                    # while surfacing someone else's malformed response.
+                    errs = data["errors"]
+                    if isinstance(errs, list):
+                        msg = "; ".join(
+                            e.get("message", str(e)) if isinstance(e, dict) else str(e)
+                            for e in errs
+                        )
+                    else:
+                        msg = str(errs)
+                    logger.warning("Linear GraphQL errors: %s", msg)
+                    return {}
                 return data
-        except (urllib.error.URLError, json.JSONDecodeError, OSError):
+        except (urllib.error.URLError, json.JSONDecodeError, OSError) as e:
+            # #331: transport/HTTP failures must be logged, not swallowed.
+            logger.warning("Linear GraphQL request failed: %s", e)
             return {}
 
     # ── Polling ────────────────────────────────────────────────────
@@ -106,9 +126,15 @@ class LinearConnector:
                 if (ev := self._issue_to_event(issue))]
 
     def _poll_cycles(self) -> list[dict]:
+        # #331 (review r5): Query.cycles has no teamId argument in the
+        # Linear schema (verified against linear/linear schema.graphql:
+        # cycles takes after/before/filter/first/includeArchived/last/
+        # orderBy) — team filtering goes through filter: CycleFilter,
+        # same pattern as _poll_issues. Passing teamId directly is a
+        # GraphQL validation error in every configuration.
         query = """
-        query Cycles($first: Int!) {
-          cycles(first: $first) {
+        query Cycles($first: Int!, $filter: CycleFilter) {
+          cycles(first: $first, filter: $filter) {
             nodes {
               id
               number
@@ -124,7 +150,7 @@ class LinearConnector:
         """
         variables: dict[str, Any] = {"first": min(self.limit, 50)}
         if self.team_id:
-            variables["teamId"] = self.team_id
+            variables["filter"] = {"team": {"id": {"eq": self.team_id}}}
         result = self._query(query, variables)
         cycles = result.get("data", {}).get("cycles", {}).get("nodes", [])
         return [ev for cycle in (cycles or [])

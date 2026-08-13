@@ -5,15 +5,18 @@ mounted at /mcp on the hosted FastAPI app. Imports ONLY tortoise.sdk +
 starlette — mcp_server imports from here (one-directional; no circular import).
 
 Design: per-request team-scoped SDK via ContextVar. TeamResolutionMiddleware
-validates the Bearer tt_ token against the control-plane registry
-(apikey_verify) and sets _current_team_id / _transport_mode. Tools resolve the
-request-scoped SDK via _get_team_sdk(). Fail-closed: if _transport_mode is None
-(unset/misconfigured), _safe() rejects ALL operations — it never depends on
-is_dev_mode(), which returns True in hosted production (TORTOISE_API_KEY unset).
+validates the Bearer tt_ token against the control plane — Supabase
+(lookup_hash, #767 plan Task 3) when SUPABASE_URL + service key are set,
+otherwise the FalkorDB registry (apikey_verify) — and sets
+_current_team_id / _transport_mode. Tools resolve the request-scoped SDK via
+_get_team_sdk(). Fail-closed: if _transport_mode is None (unset/misconfigured),
+_safe() rejects ALL operations — it never depends on is_dev_mode(), which
+returns True in hosted production (TORTOISE_API_KEY unset).
 """
 from __future__ import annotations
 
 import asyncio
+import hmac
 import os
 import time
 from collections import OrderedDict, defaultdict
@@ -27,8 +30,19 @@ from starlette.responses import JSONResponse
 from tortoise.sdk import TortoiseSDK
 
 # ── ContextVars ─────────────────────────────────────────────────────────────
+# Reserved placeholder team id for selfhost transports (auth_mode "static"/"none",
+# #338): no tenant resolution happens, and the graph namespace is isolated under
+# team_selfhost. Quota is N/A for this placeholder — selfhost has no billing.
+SELFHOST_TEAM_ID = "selfhost"
 _current_team_id: ContextVar[str | None] = ContextVar("_current_team_id", default=None)
+# #329: resolved team quota limits (from the registry Team node), cached 60s
+# with the auth cache so MCP write tools enforce the SAME limits REST sees.
+_current_team_limits: ContextVar[dict | None] = ContextVar("_current_team_limits", default=None)
 _transport_mode: ContextVar[str | None] = ContextVar("_transport_mode", default=None)
+# Curation group for the active MCP app (#523) — set per request by the app's
+# middleware so the shared tools/list transform filters correctly even when
+# multiple apps exist in one process.
+_tool_group: ContextVar[str | None] = ContextVar("_tool_group", default=None)
 
 # mcp_server.py owns lazy SDK init (URI resolution, 3x retry, test-swap
 # pattern). mcp_auth delegates via a function-level import to avoid the
@@ -61,11 +75,14 @@ def _get_team_sdk() -> TortoiseSDK:
 from tortoise.tool_registry import get_http_allowed as _get_http_allowed
 HTTP_ALLOWED: frozenset[str] = _get_http_allowed()
 
+
 # JSON-RPC error codes (D9)
 ERR_UNAUTHORIZED = -32001
 ERR_RATE_LIMIT = -32002
 ERR_EXCLUDED = -32004
 ERR_REGISTRY = -32005
+# #308 (R5): suspended team — mirrors REST 403 SUSPENDED (appeal link in data)
+ERR_SUSPENDED = -32006
 
 
 def _jsonrpc_error(code: int, message: str, data: dict | None = None,
@@ -84,9 +101,11 @@ def _jsonrpc_error(code: int, message: str, data: dict | None = None,
 class TeamResolutionMiddleware(BaseHTTPMiddleware):
     """Bearer tt_ token → team_id ContextVar. 401 pre-tool-leak (D3, D17).
 
-    Uses TortoiseSDK.apikey_verify() — the same registry O(keys) salted-hash
-    scan the REST get_current_team uses. Bounded 60s true-LRU cache protects
-    against MCP init bursts.
+    Supabase-backed (#767): resolves via tortoise.supabase_control.resolve_api_key
+    (lookup_hash exact-match; api_keys.revoked_at authoritative; tier/quota from
+    teams) — the SAME shared function REST get_current_team uses. Registry
+    apikey_verify (O(keys) salted-hash scan) stays for selfhost. Bounded 60s
+    true-LRU cache protects against MCP init bursts.
     """
 
     def __init__(self, app, *, max_cache: int = 10000,
@@ -94,7 +113,7 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
         self._registry_sdk = registry_sdk  # test injection
         self._init_lock = asyncio.Lock()
-        self._cache: OrderedDict[str, tuple[float, dict]] = OrderedDict()
+        self._cache: OrderedDict[str, tuple[float, dict, dict]] = OrderedDict()  # (ts, team, limits)
         self._max_cache = max_cache
 
     async def _get_registry_sdk(self) -> TortoiseSDK:
@@ -124,12 +143,30 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
         now = time.time()
         cached = self._cache.get(token)
         if cached and now - cached[0] < 60:
-            team = cached[1]
+            # #308 (delta 14): a suspension signal forces a FRESH resolution —
+            # a cached entry can never serve a suspended team. The set is a
+            # cache-invalidation signal only; durable suspended_at decides.
+            from tortoise.abuse import is_suspended_signal
+            if is_suspended_signal(cached[1].get("team_id") or ""):
+                cached = None
+        if cached and now - cached[0] < 60:
+            team, limits = cached[1], cached[2]
             self._cache.move_to_end(token)  # true LRU
         else:
             try:
-                sdk = await self._get_registry_sdk()
-                team = sdk.apikey_verify(token)
+                # #767 (plan Task 3): Supabase-backed resolution (lookup_hash)
+                # when the control plane is Supabase-backed — the SAME shared
+                # function REST get_current_team uses (single source of truth,
+                # REST + MCP cannot drift). Registry apikey_verify stays for
+                # selfhost.
+                from tortoise.supabase_control import (
+                    get_control_plane, is_supabase_enabled, resolve_api_key,
+                )
+                if is_supabase_enabled():
+                    team = resolve_api_key(get_control_plane(), token)
+                else:
+                    sdk = await self._get_registry_sdk()
+                    team = sdk.apikey_verify(token)
             except Exception:
                 # Registry down → 503, never 500/stack-trace
                 return _jsonrpc_error(
@@ -144,23 +181,159 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
                     "Expected format: Authorization: Bearer tt_<key>",
                     status=401,
                 )
+            # #308 (R5): durable suspension check — the sole rejection
+            # authority. Pop the LRU entry so a re-resolution is required
+            # after un-suspension; clear the signal when the fresh
+            # resolution says the team is NOT suspended (AC8 self-heal).
+            from tortoise.abuse import (appeal_url, clear_suspended,
+                                        is_suspended_signal, suspended_message)
+            suspended_at = team.get("suspended_at")
+            if suspended_at is None and not is_supabase_enabled():
+                # Registry mode: apikey_verify returns no suspension state —
+                # read the durable Team prop the abuse store writes (delta 4).
+                try:
+                    sdk = await self._get_registry_sdk()
+                    rows = sdk._get_registry().query(
+                        "MATCH (t:Team {id: $id}) RETURN t.suspended_at",
+                        params={"id": team.get("team_id")},
+                    ).result_set
+                    suspended_at = rows[0][0] if rows else None
+                except Exception:
+                    suspended_at = None  # best-effort selfhost enforcement
+            if suspended_at is not None:
+                self._cache.pop(token, None)
+                return _jsonrpc_error(
+                    ERR_SUSPENDED, suspended_message(),
+                    {"code": "SUSPENDED", "appeal_url": appeal_url()},
+                    status=403,
+                )
+            if is_suspended_signal(team.get("team_id") or ""):
+                clear_suspended(team.get("team_id") or "")
+            if is_supabase_enabled():
+                # The Supabase resolution already carries tier/quota from the
+                # teams row (one round-trip) — use it directly as the limits
+                # dict so REST and MCP enforce identical limits (#329).
+                limits = team
+            else:
+                # #329: resolve quota limits (registry Team node) — fail-closed
+                # enforcement still applies with defaults if resolution fails.
+                from tortoise.quota import resolve_team_limits
+                try:
+                    limits = resolve_team_limits(team["team_id"])
+                except Exception:
+                    limits = {"team_id": team["team_id"]}
             if len(self._cache) >= self._max_cache:
                 self._cache.popitem(last=False)  # evict LRU
-            self._cache[token] = (now, team)
+            self._cache[token] = (now, team, limits)
         _current_team_id.set(team["team_id"])
+        _current_team_limits.set(limits)
         _transport_mode.set("http")
+        # #308 (R4, delta 10): geo check on EVERY post-auth request —
+        # cache-hit and cache-miss alike, so an IP-rotation burst cannot ride
+        # the 60s LRU past detection. Best-effort; in-process seen-cache makes
+        # the hot path allocation-free (durable lookup once/team/24h).
+        try:
+            from tortoise import abuse as _abuse
+            if not _abuse.abuse_disabled():
+                country = _abuse.resolve_country(request.headers)
+                if country and team.get("team_id"):
+                    await asyncio.to_thread(
+                        _abuse.check_new_country, team["team_id"], country,
+                        _abuse.get_engine().store)
+        except Exception:
+            pass  # best-effort — geo telemetry never breaks the request
         # No .reset() needed: Starlette creates a fresh asyncio task per request;
         # ContextVars are copy-on-write per task (verified by
         # test_contextvar_not_leaked_to_next_request).
         return await call_next(request)
 
 
-class MCPRateLimitMiddleware(BaseHTTPMiddleware):
-    """Per-key token bucket for ALL POSTs to /mcp (D8). 429 JSON-RPC -32002."""
+class TransportModeMiddleware(BaseHTTPMiddleware):
+    """Self-host transport init (auth_mode="static" | "none", #338).
 
-    def __init__(self, app, max_per_minute: int = 100):
+    TeamResolutionMiddleware sets these ContextVars for tenant mode; selfhost
+    modes have no tenant resolution, so this middleware initializes them:
+    _transport_mode="http" (passes _safe()'s fail-closed gate — auth was
+    enforced at transport: static key check or localhost-bound none mode) and
+    _current_team_id="selfhost" (isolated team_selfhost graph namespace).
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        _transport_mode.set("http")
+        _current_team_id.set(SELFHOST_TEAM_ID)
+        return await call_next(request)
+
+
+class ToolGroupMiddleware(BaseHTTPMiddleware):
+    """Set the curation group ContextVar per request (#523).
+
+    The tools/list transform is registered ONCE on the shared module-level mcp
+    instance, so per-app group scoping must come from request context — not
+    capture at app construction (which would let the first app win).
+    """
+
+    def __init__(self, app, *, tool_group: str | None):
+        super().__init__(app)
+        self._tool_group = tool_group
+
+    async def dispatch(self, request: Request, call_next):
+        _tool_group.set(self._tool_group)
+        return await call_next(request)
+
+
+class StaticKeyMiddleware(BaseHTTPMiddleware):
+    """Static API-key auth for single-tenant self-host (auth_mode="static").
+
+    Validates a single configured key (TORTOISE_API_KEY) with constant-time
+    compare. Fail-closed: if api_key is None (misconfiguration), all POSTs
+    are rejected 503 — never allow unauthenticated writes.
+    """
+
+    def __init__(self, app, *, api_key: str | None):
+        super().__init__(app)
+        self._api_key = api_key
+
+    async def dispatch(self, request: Request, call_next):
+        # GET metadata route + DELETE (stateless no-op) skip auth, matching
+        # TeamResolutionMiddleware behavior.
+        if request.method != "POST":
+            return await call_next(request)
+        if self._api_key is None:
+            return JSONResponse(
+                {"jsonrpc": "2.0", "error": {"code": -32099, "message": "Static auth misconfigured: no API key set."}, "id": None},
+                status_code=503,
+            )
+        auth = request.headers.get("Authorization", "")
+        if not auth.startswith("Bearer "):
+            return _jsonrpc_error(
+                ERR_UNAUTHORIZED,
+                "Unauthorized: missing Bearer token.",
+                status=401,
+            )
+        token = auth[7:]
+        if not hmac.compare_digest(token.encode(), self._api_key.encode()):
+            return _jsonrpc_error(
+                ERR_UNAUTHORIZED,
+                "Unauthorized: invalid API key.",
+                status=401,
+            )
+        return await call_next(request)
+
+
+class MCPRateLimitMiddleware(BaseHTTPMiddleware):
+    """Per-key token bucket for ALL POSTs to /mcp (D8). 429 JSON-RPC -32002.
+
+    limit_get=True (parent app / #525): rate-limits GETs too — /v1/* endpoints
+    accept the static key and would otherwise be an unthrottled brute-force
+    surface. The /mcp sub-app keeps the default (GET = metadata/SSE only).
+    """
+
+    def __init__(self, app, max_per_minute: int = 100, limit_get: bool = False,
+                 paths_prefix: tuple[str, ...] = ()):
         super().__init__(app)
         self.max_per_minute = max_per_minute
+        self._limit_get = limit_get
+        self._paths_prefix = paths_prefix
         self._buckets: dict[str, list[float]] = defaultdict(list)
         self._lock = asyncio.Lock()
         self._last_cleanup = time.time()
@@ -169,8 +342,10 @@ class MCPRateLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         if self._disabled:
             return await call_next(request)
-        if request.method != "POST":
-            return await call_next(request)  # GET metadata not rate-limited
+        if self._paths_prefix and not any(request.url.path.startswith(p) for p in self._paths_prefix):
+            return await call_next(request)  # scope to /v1 (code-review P2, #525)
+        if request.method != "POST" and not self._limit_get:
+            return await call_next(request)  # GET metadata not rate-limited (unless limit_get)
         auth = request.headers.get("Authorization", "")
         if auth.startswith("Bearer "):
             key_id = auth[7:]

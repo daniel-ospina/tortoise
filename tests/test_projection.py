@@ -7,11 +7,14 @@ Runnable without pytest:  .venv/bin/python tests/test_projection.py
 """
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import sys
 import tempfile
 
 import pytest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -59,6 +62,29 @@ def _has_falkor() -> bool:
 
 def _skip_if_no_falkor() -> bool:
     return not _has_falkor()
+
+
+def _docker_falkor_reachable() -> bool:
+    """Socket probe: is a live Docker FalkorDB reachable?
+
+    The `live_proj` fixture needs a live FalkorDB on FALKORDB_HOST:PORT
+    (default localhost:16379). Embedded CI has no container — probe before
+    connecting so the fixture skips instead of raising redis
+    ConnectionError (Error 111/61). _skip_if_no_falkor only covers
+    redislite import availability, not Docker connectivity.
+    """
+    import socket
+    host = os.environ.get("FALKORDB_HOST", "localhost")
+    port = int(os.environ.get("FALKORDB_PORT", "16379"))
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(1.0)
+    try:
+        s.connect((host, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
 
 
 # ----------------------------------------------------------------- _apply_one
@@ -133,7 +159,9 @@ def test_apply_one_point_retracted():
     points: dict[str, dict] = {"p1": {"id": "p1", "content": "old"}}
     ev = {"type": "PointRetracted", "id": "p1"}
     _apply_one(points, ev)
-    assert "p1" not in points
+    # #689: tombstone, not hard delete — point exists with status='retracted'
+    assert "p1" in points
+    assert points["p1"]["status"] == "retracted"
 
 
 def test_apply_one_point_retracted_missing():
@@ -183,7 +211,9 @@ def test_fold_multiple_events():
         {"type": "PointRetracted", "id": "p1"},
     ]
     result = fold(events)
-    assert "p1" not in result
+    # #689: tombstone — p1 exists with status='retracted', p2 is live
+    assert "p1" in result
+    assert result["p1"]["status"] == "retracted"
     assert result["p2"]["content"] == "two"
 
 
@@ -193,7 +223,10 @@ def test_fold_revise_then_retract():
         {"type": "PointRevised", "id": "p1", "new_content": "b"},
         {"type": "PointRetracted", "id": "p1"},
     ]
-    assert fold(events) == {}
+    result = fold(events)
+    # #689: tombstone — p1 exists with status='retracted'
+    assert "p1" in result
+    assert result["p1"]["status"] == "retracted"
 
 
 # -------------------------------------------------------------------- split
@@ -248,7 +281,9 @@ def test_inmemory_apply():
                 "point": {"id": "p1", "content": "hello", "context": "ctx"}})
     assert proj.points["p1"]["content"] == "hello"
     proj.apply({"type": "PointRetracted", "id": "p1"})
-    assert "p1" not in proj.points
+    # #689: tombstone — point exists with status='retracted'
+    assert "p1" in proj.points
+    assert proj.points["p1"]["status"] == "retracted"
 
 
 def test_inmemory_rebuild():
@@ -362,8 +397,10 @@ def test_falkor_apply_point_retracted():
         proj.apply({"type": "PointAdded",
                      "point": {"id": "p1", "content": "hello", "context": "ctx"}})
         proj.apply({"type": "PointRetracted", "id": "p1"})
-        r = proj.query("MATCH (n:Point {id:'p1'}) RETURN count(n)").result_set
-        assert r[0][0] == 0
+        # #689: tombstone — node exists with status='retracted'
+        r = proj.query("MATCH (n:Point {id:'p1'}) RETURN n.status").result_set
+        assert len(r) == 1
+        assert r[0][0] == "retracted"
     finally:
         proj.close()
 
@@ -386,6 +423,77 @@ def test_falkor_apply_points_merged():
         ).result_set[0][0] == 0
     finally:
         proj.close()
+
+
+def test_falkor_apply_points_merged_nested_format():
+    """Regression #325: a nested-format PointsMerged event (merge_ids inside
+    `point`) must delete merged nodes. The apply() handler used to read the
+    RAW event instead of the normalized one, so nested-format merges were a
+    silent no-op (merged points survived)."""
+    if _skip_if_no_falkor():
+        return
+    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    try:
+        proj.apply({"type": "PointAdded",
+                     "point": {"id": "a", "content": "A", "context": "ctx"}})
+        proj.apply({"type": "PointAdded",
+                     "point": {"id": "b", "content": "B", "context": "ctx"}})
+        # Script/nested format: point subfields wrapped under `point`
+        proj.apply({"type": "PointsMerged",
+                     "point": {"keep_id": "a", "merge_ids": ["b"]}})
+        assert proj.query(
+            "MATCH (n:Point {id:'a'}) RETURN count(n)"
+        ).result_set[0][0] == 1, "keep_id point must survive the merge"
+        assert proj.query(
+            "MATCH (n:Point {id:'b'}) RETURN count(n)"
+        ).result_set[0][0] == 0, "merged point b must be deleted (nested format)"
+    finally:
+        proj.close()
+
+
+def test_norm_handles_non_dict_point():
+    """Regression #325: _norm must not crash when `point` is a non-dict
+    (e.g. a legacy string ID). Old code did `{**ev, **ev["point"]}` on any
+    truthy point → TypeError: 'str' object is not a mapping."""
+    from tortoise.projection import _norm
+
+    # String point → passed through unchanged (no crash)
+    ev = {"type": "PointAdded", "point": "legacy-id-123"}
+    out = _norm(ev)
+    assert out["point"] == "legacy-id-123"
+    # dict point → merged (normal behavior preserved)
+    ev2 = {"type": "PointAdded", "point": {"id": "p1", "content": "x"}}
+    out2 = _norm(ev2)
+    assert out2["id"] == "p1" and out2["content"] == "x"
+    # empty dict point → unchanged
+    ev3 = {"type": "PointAdded", "point": {}}
+    assert _norm(ev3) == ev3
+    # missing point → unchanged
+    ev4 = {"type": "PointRetracted", "id": "p9"}
+    assert _norm(ev4) == ev4
+
+
+def test_falkor_apply_ignores_non_dict_point():
+    """Regression #325: apply() with a non-dict point must skip the event
+    (no crash, no partial write)."""
+    if _skip_if_no_falkor():
+        return
+    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    try:
+        proj.apply({"type": "PointAdded", "point": "legacy-id-123"})
+        # no Point node created, no exception raised
+        n = proj.g.query("MATCH (n:Point) RETURN count(n)").result_set[0][0]
+        assert n == 0, f"expected 0 points after malformed PointAdded, got {n}"
+    finally:
+        proj.close()
+
+
+def test_apply_one_non_dict_point_skipped():
+    """Regression #325: fold()/_apply_one must skip non-dict point events."""
+    from tortoise.projection import _apply_one
+    points: dict[str, dict] = {}
+    _apply_one(points, {"type": "PointAdded", "point": "legacy-id"})
+    assert points == {}
 
 
 def test_falkor_nand_operator():
@@ -790,6 +898,35 @@ def test_falkor_rebuild_all_empty_dir():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_falkor_rebuild_all_ignores_non_dict_point():
+    """Regression #325: rebuild_all must skip (not crash on) a PointAdded with
+    a non-dict point across ALL passes (1a/1b/2) — parity with apply()."""
+    if _skip_if_no_falkor():
+        return
+    d = tempfile.mkdtemp(prefix="tortoise_badpoint_")
+    try:
+        import json
+        log_path = os.path.abspath(os.path.join(d, "events.jsonl"))
+        with open(log_path, "w") as f:
+            f.write(json.dumps({"type": "PointAdded", "point": "legacy-id-123"}) + "\n")
+            f.write(json.dumps({"type": "PointAdded",
+                                "point": {"id": "ok-1", "content": "fine",
+                                          "context": "ctx"}}) + "\n")
+        proj = FalkorProjection(_tmp("g_badpoint.db"), graph_name="test")
+        try:
+            result = proj.rebuild_all(d)
+            assert result["nodes"] == 1, f"expected 1 valid node, got {result['nodes']}"
+            rows = proj.g.query(
+                "MATCH (n:Point {id:'ok-1'}) RETURN count(n)"
+            ).result_set
+            assert rows[0][0] == 1, "valid point must survive rebuild"
+        finally:
+            proj.close()
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def test_falkor_rebuild_all_with_retractions():
     if _skip_if_no_falkor():
         return
@@ -806,9 +943,9 @@ def test_falkor_rebuild_all_with_retractions():
         proj = FalkorProjection(_tmp("g_retract.db"), graph_name="test")
         try:
             result = proj.rebuild_all(d)
-            # b was retracted after being added
+            # b was retracted — leaves a tombstone (#689)
             node_count = proj.query("MATCH (n:Point) RETURN count(n)").result_set[0][0]
-            assert node_count == 2  # a + op, b was retracted
+            assert node_count == 3  # a + op + b tombstone
         finally:
             proj.close()
     finally:
@@ -1292,6 +1429,8 @@ if __name__ == "__main__":
 @pytest.fixture
 def live_proj():
     """Live FalkorProjection on a test-prefixed graph (safe via test_guard)."""
+    if not _docker_falkor_reachable():
+        pytest.skip("live FalkorDB (FALKORDB_HOST:PORT) not reachable")
     uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_proj125")
     proj = FalkorProjection.from_uri(uri)
     # Clean the test graph (test-prefixed — test_guard permits; production blocked)
@@ -1451,7 +1590,6 @@ class TestVocabEdgeValidation:
         """create_edge rejects 'instantiates' — Action dissolved in v3.0."""
         if _skip_if_no_falkor():
             return
-        import pytest
         proj = FalkorProjection(_tmp("g.db"), graph_name="test")
         try:
             proj._upsert({"id": "a", "content": "A", "context": "ctx"})
@@ -1501,16 +1639,153 @@ class TestVocabEdgeValidation:
             proj.close()
 
     def test_valid_predicates_no_longer_contains_instantiates(self):
-        """#214: validate that valid_predicates set no longer includes instantiates."""
+        """#214: validate that valid_predicates set no longer includes instantiates.
+
+        Vocabulary lives in the module-level _VALID_EDGE_PREDICATES (hoisted from
+        create_edge for SDK reuse — epic #888 W4 ingest); create_edge validates
+        against the same constant.
+        """
         if _skip_if_no_falkor():
             return
-        import inspect
-        from tortoise.projection.edges import _EdgeHandlers
-        src = inspect.getsource(_EdgeHandlers.create_edge)
-        assert "'instantiates'" not in src
-        assert "'dependsOn'" in src
-        assert "'reportsTo'" in src
-        assert "'related'" in src
+        from tortoise.projection.edges import _VALID_EDGE_PREDICATES
+        assert "instantiates" not in _VALID_EDGE_PREDICATES
+        assert "dependsOn" in _VALID_EDGE_PREDICATES
+        assert "reportsTo" in _VALID_EDGE_PREDICATES
+        assert "related" in _VALID_EDGE_PREDICATES
+
+
+class TestCreateEdgeAboutPredicates:
+    """#391: about* predicates must be creatable via generic create_edge."""
+
+    def _proj(self):
+        proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+        proj._upsert({"id": "p1", "content": "claim", "context": "ctx"})
+        proj._upsert({"id": "p2", "content": "other", "context": "ctx"})
+        proj._upsert_subject({"id": "s1", "name": "Alice"})
+        proj._upsert_object({"id": "o1", "name": "Widget", "object_kind": "product"})
+        proj._upsert_document({"id": "d1", "title": "Doc"})
+        proj._upsert_event({"id": "e1", "eventKind": "review"})
+        proj._upsert_source({"id": "src1", "url": "https://x.dev/a"})
+        return proj
+
+    def test_about_edges_accepted_by_create_edge(self):
+        """Each documented about* predicate is accepted and creates the edge."""
+        if _skip_if_no_falkor():
+            return
+        proj = self._proj()
+        try:
+            cases = [
+                ("aboutSubject", "s1"), ("aboutObject", "o1"),
+                ("aboutEvent", "e1"), ("aboutDocument", "d1"),
+                ("aboutSource", "src1"),
+            ]
+            for rel, tid in cases:
+                assert proj.create_edge("p1", tid, rel) is True, rel
+                rows = proj.g.query(
+                    f"MATCH (:Point {{id:'p1'}})-[:{rel}]->(t) "
+                    f"RETURN t.id"
+                ).result_set
+                assert [r[0] for r in rows] == [tid], f"{rel}: {rows}"
+            # aboutAction (Action dissolved in v3.0 — predicate kept for
+            # legacy edge types; endpoints are whatever resolves)
+            assert proj.create_edge("p1", "p2", "aboutAction") is True
+            rows = proj.g.query(
+                "MATCH (:Point {id:'p1'})-[:aboutAction]->(t) RETURN t.id"
+            ).result_set
+            assert [r[0] for r in rows] == ["p2"]
+        finally:
+            proj.close()
+
+    def test_about_edges_idempotent_on_recreate(self):
+        """Re-creating the same about edge is a no-op (MERGE semantics)."""
+        if _skip_if_no_falkor():
+            return
+        proj = self._proj()
+        try:
+            assert proj.create_edge("p1", "s1", "aboutSubject") is True
+            assert proj.create_edge("p1", "s1", "aboutSubject") is True
+            rows = proj.g.query(
+                "MATCH (:Point {id:'p1'})-[:aboutSubject]->(:Subject {id:'s1'}) RETURN count(*)"
+            ).result_set
+            assert rows[0][0] == 1
+        finally:
+            proj.close()
+
+
+class TestOwnedByDagGuard:
+    """#390: generic create_edge must not bypass the ownedBy circular-DAG guard."""
+
+    def _proj(self, ids=("a", "b", "c")):
+        proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+        for pid in ids:
+            proj._upsert({"id": pid, "content": pid.upper(), "context": "ctx"})
+        return proj
+
+    def test_direct_cycle_rejected(self):
+        """a→b then b→a must raise — same guard as create_owned_by."""
+        if _skip_if_no_falkor():
+            return
+        proj = self._proj()
+        try:
+            assert proj.create_edge("a", "b", "ownedBy") is True
+            with pytest.raises(ValueError, match="Circular ownership"):
+                proj.create_edge("b", "a", "ownedBy")
+            # the rejected call must not have created the edge
+            rows = proj.g.query(
+                "MATCH (:Point {id:'b'})-[:ownedBy]->(:Point {id:'a'}) RETURN count(*)"
+            ).result_set
+            assert rows[0][0] == 0
+        finally:
+            proj.close()
+
+    def test_transitive_cycle_rejected(self):
+        """a→b→c then c→a must raise (2-hop cycle closes)."""
+        if _skip_if_no_falkor():
+            return
+        proj = self._proj()
+        try:
+            proj.create_edge("a", "b", "ownedBy")
+            proj.create_edge("b", "c", "ownedBy")
+            with pytest.raises(ValueError, match="Circular ownership"):
+                proj.create_edge("c", "a", "ownedBy")
+        finally:
+            proj.close()
+
+    def test_acyclic_chain_accepted(self):
+        """Valid ownership chains still pass through create_edge."""
+        if _skip_if_no_falkor():
+            return
+        proj = self._proj()
+        try:
+            assert proj.create_edge("a", "b", "ownedBy") is True
+            assert proj.create_edge("b", "c", "ownedBy") is True
+            rows = proj.g.query(
+                "MATCH (:Point)-[:ownedBy]->(:Point) RETURN count(*)"
+            ).result_set
+            assert rows[0][0] == 2
+        finally:
+            proj.close()
+
+    def test_guard_consistent_with_create_owned_by(self):
+        """create_owned_by and create_edge agree on the same cycle either way."""
+        if _skip_if_no_falkor():
+            return
+        # edge created via create_edge blocks create_owned_by
+        proj = self._proj(ids=("a", "b"))
+        try:
+            proj.create_edge("a", "b", "ownedBy")   # a owned by b
+            with pytest.raises(ValueError, match="Circular ownership"):
+                proj.create_owned_by("b", "a")       # b owned by a → cycle
+        finally:
+            proj.close()
+        # edge created via create_owned_by blocks create_edge
+        proj = self._proj(ids=("a", "b"))
+        try:
+            proj.create_owned_by("a", "b")           # a owned by b
+            with pytest.raises(ValueError, match="Circular ownership"):
+                proj.create_edge("b", "a", "ownedBy")
+        finally:
+            proj.close()
 
 
 def test_falkor_rebuild_all_parity_with_apply():
@@ -1618,3 +1893,883 @@ def test_falkor_rebuild_all_parity_with_apply():
     finally:
         import shutil
         shutil.rmtree(d, ignore_errors=True)
+
+
+# ── #329: stub-node auto-creation cap ───────────────────────────────
+
+def test_stub_creation_bounded_at_cap():
+    """#329: short-ID stub auto-creation stops at the per-instance cap; at-cap
+    behavior is fail-safe (no stub, no partial edge, warning logged).
+
+    The cap is read from the instance attr ``_max_autocreated_stubs`` — the
+    old env-var (TORTOISE_MAX_AUTOCREATED_STUBS) was never wired in code.
+    """
+    import tempfile, os
+    from tortoise.projection import FalkorProjection
+
+    db = os.path.join(tempfile.mkdtemp(prefix="tortoise_stubcap_"), "test.db")
+    proj = FalkorProjection(db)
+    proj._max_autocreated_stubs = 2
+    try:
+        # Three OperatorAdded events referencing three distinct short ids
+        for i, sid in enumerate(("s1", "s2", "s3")):
+            proj.apply({
+                "type": "OperatorAdded",
+                "point": {"id": f"op{i}", "content": f"NAND({sid})",
+                          "operator": {"op_type": "NAND", "inputs": [sid]}},
+            })
+        # Only 2 stubs created (cap), 3rd missing source skipped
+        stubs = proj.g.query(
+            "MATCH (s:Point) WHERE s.content='[missing]' RETURN count(s)"
+        ).result_set[0][0]
+        assert stubs == 2, f"expected 2 stubs, got {stubs}"
+        # No partial edge to the skipped source
+        edges = proj.g.query(
+            "MATCH (o:Point {id:'op2'})-[r]->() RETURN count(r)"
+        ).result_set[0][0]
+        assert edges == 0, f"expected no partial edge from op2, got {edges}"
+    finally:
+        proj.close()
+
+
+def test_falkor_rebuild_all_revision_before_add():
+    """#21 regression: a PointRevised in an alphabetically-EARLIER file must be
+    applied to the point whose PointAdded lives in a LATER file. The two-pass
+    rebuild (Pass 1a creates ALL nodes before Pass 1b applies revisions) makes
+    this structurally safe — this test pins it so a future one-pass refactor
+    can't silently re-introduce lost revisions."""
+    if _skip_if_no_falkor():
+        return
+    d = tempfile.mkdtemp(prefix="tortoise_21_")
+    try:
+        # b.jsonl sorts AFTER a.jsonl → PointAdded lands in the later file.
+        log_b = EventLog(os.path.join(d, "b.jsonl"))
+        api_b = EventAPI(log_b, initiated_by="extractor", agent_id="test")
+        prov = provenance("doc.txt", [0, 10], "quote", extracted_by="test@0")
+        pid = api_b.add_point("original content", prov)
+
+        # a.jsonl sorts FIRST → its PointRevised for pid is seen before any
+        # PointAdded when files are read in sorted order.
+        log_a = EventLog(os.path.join(d, "a.jsonl"))
+        api_a = EventAPI(log_a, initiated_by="extractor", agent_id="test")
+        api_a.revise_point(pid, new_content="revised content", corrects=[])
+
+        proj = FalkorProjection(_tmp("g_rebuild_21.db"), graph_name="test")
+        try:
+            proj.rebuild_all(d)
+            r = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.content",
+                params={"id": pid},
+            ).result_set
+            assert r and r[0][0] == "revised content", \
+                f"revision lost: expected 'revised content', got {r}"
+        finally:
+            proj.close()
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+def test_falkor_revise_point_wipes_stale_embedding_on_compute_failure():
+    """#19 regression: PointRevised with a raising compute_embedding must NOT
+    leave the stale embedding — the except block wipes it (embedding = None)
+    so SET overwrites the graph value instead of preserving the old vector."""
+    if _skip_if_no_falkor():
+        return
+    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    try:
+        proj.apply({"type": "PointAdded",
+                     "point": {"id": "p1", "content": "old content", "context": "ctx"}})
+        # Seed a stale embedding as if it had been computed before the failure.
+        proj.g.query(
+            "MATCH (n:Point {id:'p1'}) SET n.embedding = vecf32($emb)",
+            params={"emb": [0.1] * 384},
+        )
+        # PointRevised whose embedding recompute raises → must wipe, not keep.
+        with mock.patch("tortoise.embeddings.compute_embedding",
+                        side_effect=RuntimeError("model load failed")):
+            proj.apply({"type": "PointRevised", "id": "p1", "new_content": "new content"})
+        r = proj.g.query(
+            "MATCH (n:Point {id:'p1'}) RETURN n.content, n.embedding IS NULL"
+        ).result_set
+        assert r[0][0] == "new content"
+        assert r[0][1] is True, "stale embedding survived a failed recompute (#19)"
+    finally:
+        proj.close()
+
+
+# ── #548: SDK-created points survive rebuild_all ──────────────────────────
+
+
+def test_falkor_rebuild_all_with_sdk_points():
+    """#548: SDK-created points (with event_log_path) survive rebuild_all.
+
+    SDK write paths emit PointAdded/OperatorAdded events to the log.
+    rebuild_all replays them → full parity between the incrementally-built
+    graph and the rebuilt graph.
+    """
+    if _skip_if_no_falkor():
+        return
+    from tortoise.sdk import TortoiseSDK
+
+    d = tempfile.mkdtemp(prefix="tortoise_sdk_rebuild_")
+    try:
+        db_path = os.path.join(d, "tortoise.db")
+        events_path = os.path.join(d, "events.jsonl")
+
+        # Create points via SDK (event_log_path configured)
+        sdk = TortoiseSDK(db_path=db_path, event_log_path=events_path)
+        try:
+            p1 = sdk.create_point("statement", "SDK point alpha",
+                                  authoredBy="alice", tags=["important"])
+            p2 = sdk.create_point("statement", "SDK point beta",
+                                  authoredBy="bob")
+            # Operator linking p2 → p1
+            op = sdk.create_operator("IMPL", p2["id"], [p1["id"]])
+            p3 = sdk.create_point("observation", "SDK point gamma")
+            # Update a point
+            sdk.update_point(p3["id"], content="SDK point gamma REVISED")
+        finally:
+            sdk.close()
+
+        # Verify the event log was written
+        from tortoise.log import EventLog
+        log_events = EventLog(events_path).read_all()
+        assert len(log_events) >= 5, (
+            f"Expected at least 5 SDK events (3 PointAdded + 1 OperatorAdded "
+            f"+ 1 PointRevised), got {len(log_events)}")
+        # Check event types
+        types = [e["type"] for e in log_events]
+        assert "PointAdded" in types
+        assert "OperatorAdded" in types
+        assert "PointRevised" in types
+        assert all(e.get("initiated_by") == "sdk" for e in log_events), \
+            "SDK events must have initiated_by='sdk'"
+
+        # Close the original SDK's DB so rebuild_all can open its own
+        # (the original projection is closed via sdk.close() above)
+
+        # ── Rebuild into a fresh graph from the event log ───
+        proj = FalkorProjection(
+            os.path.join(d, "rebuilt.db"), graph_name="test")
+        try:
+            result = proj.rebuild_all(d)
+            assert result["nodes"] >= 4, (
+                f"Expected at least 4 nodes (3 points + 1 operator), "
+                f"got {result['nodes']}")
+            assert result["edges"] >= 2, (
+                f"Expected at least 2 edges (IMPL from operator), "
+                f"got {result['edges']}")
+
+            # Verify all points exist with their properties
+            for pid, expected_content in [
+                (p1["id"], "SDK point alpha"),
+                (p2["id"], "SDK point beta"),
+                (p3["id"], "SDK point gamma REVISED"),
+                (op["id"], None),  # operator content varies
+            ]:
+                rows = proj.g.query(
+                    "MATCH (n:Point {id:$id}) RETURN n.content, n",
+                    params={"id": pid},
+                ).result_set
+                assert len(rows) == 1, f"Point {pid} not found after rebuild"
+                if expected_content is not None:
+                    assert rows[0][0] == expected_content, (
+                        f"Point {pid} content mismatch: "
+                        f"expected {expected_content!r}, got {rows[0][0]!r}")
+
+            # Verify operator edges survived
+            edge_count = proj.g.query(
+                f"MATCH (n:Point {{id:$oid}})-[r]->(m:Point {{id:$tid}}) "
+                f"RETURN count(r)",
+                params={"oid": op["id"], "tid": p1["id"]},
+            ).result_set[0][0]
+            assert edge_count >= 1, "Operator edge not recreated after rebuild"
+        finally:
+            proj.close()
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_falkor_rebuild_all_snapshot_preserves_sdk_points():
+    """#548 transitional: SDK points created WITHOUT event_log_path are
+    preserved via rebuild_all's graph snapshot.
+
+    Simulates existing graphs where SDK-created points predate the event
+    log fix. rebuild_all snapshots the graph before wiping and injects
+    synthetic events for points that have no JSONL counterpart.
+    """
+    if _skip_if_no_falkor():
+        return
+    from tortoise.sdk import TortoiseSDK
+
+    d = tempfile.mkdtemp(prefix="tortoise_snapshot_")
+    try:
+        db_path = os.path.join(d, "tortoise.db")
+        events_path = os.path.join(d, "events.jsonl")
+
+        # Create SDK points WITHOUT event_log_path (simulating pre-#548)
+        sdk = TortoiseSDK(db_path=db_path, event_log_path=None)
+        try:
+            p1 = sdk.create_point("statement", "Legacy SDK claim ONE",
+                                  authoredBy="alice")
+            p2 = sdk.create_point("statement", "Legacy SDK claim TWO",
+                                  authoredBy="bob")
+            # Operator (also without log)
+            op = sdk.create_operator("IMPL", p2["id"], [p1["id"]])
+        finally:
+            sdk.close()
+
+        # Also create an EventAPI-written event in the JSONL log
+        # (simulating the normal extractor path)
+        log = EventLog(events_path)
+        log.append({
+            "type": "PointAdded",
+            "point": {"id": "evt-001", "content": "EventAPI claim",
+                      "pointKind": "statement", "status": "live",
+                      "createdAt": "2026-08-01T00:00:00Z"},
+            "projection_version": 2,
+            "initiated_by": "extractor",
+        })
+
+        # ── rebuild_all on the SAME db_path (snapshot from SDK graph) ───
+        # The snapshot queries the existing graph BEFORE wiping, so
+        # SDK-created points without JSONL events are preserved.
+        # Must use the same graph_name as the SDK ("tortoise" is default).
+        proj = FalkorProjection(db_path, graph_name="tortoise")
+        try:
+            result = proj.rebuild_all(d)
+
+            # Should have 4+ nodes: p1, p2, op, evt-001
+            assert result["nodes"] >= 4, (
+                f"Expected at least 4 nodes, got {result['nodes']}")
+
+            # All points should be present
+            for pid, expected in [
+                (p1["id"], "Legacy SDK claim ONE"),
+                (p2["id"], "Legacy SDK claim TWO"),
+                ("evt-001", "EventAPI claim"),
+            ]:
+                rows = proj.g.query(
+                    "MATCH (n:Point {id:$id}) RETURN n.content",
+                    params={"id": pid},
+                ).result_set
+                assert len(rows) == 1, (
+                    f"Point {pid} not found after rebuild")
+                assert rows[0][0] == expected, (
+                    f"Point {pid} content mismatch: "
+                    f"expected {expected!r}, got {rows[0][0]!r}")
+
+            # Operator edges should be recreated
+            edge_rows = proj.g.query(
+                f"MATCH (n:Point {{id:$oid}})-[r]->(m:Point {{id:$tid}}) "
+                f"RETURN type(r)",
+                params={"oid": op["id"], "tid": p1["id"]},
+            ).result_set
+            assert len(edge_rows) >= 1, (
+                "Operator edge not recreated from snapshot")
+        finally:
+            proj.close()
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_falkor_rebuild_all_eventapi_regression():
+    """#548: existing EventAPI-written events still replay identically.
+
+    No regression — rebuild_all with only EventAPI events must produce
+    the same graph as apply().
+    """
+    if _skip_if_no_falkor():
+        return
+    d = tempfile.mkdtemp(prefix="tortoise_eventapi_reg_")
+    try:
+        # Create EventAPI events in a JSONL log
+        log = EventLog(os.path.join(d, "events.jsonl"))
+        now = "2026-08-01T00:00:00.000000+00:00"
+        events = [
+            {"event_id": "e0", "ts": now, "type": "IngestStarted",
+             "initiated_by": "extractor", "agent_id": "test",
+             "run_id": "r1",
+             "key": {"kind": "doc", "value": "reg.txt"},
+             "extractor_version": "1"},
+            {"event_id": "e1", "ts": now, "type": "PointAdded",
+             "initiated_by": "extractor", "agent_id": "test",
+             "projection_version": 2,
+             "point": {"id": "p-reg-1", "content": "regression claim A",
+                       "status": "live", "createdAt": now,
+                       "pointKind": "statement",
+                       "authoredBy": "alice", "confidence": 0.7}},
+            {"event_id": "e2", "ts": now, "type": "PointAdded",
+             "initiated_by": "extractor", "agent_id": "test",
+             "projection_version": 2,
+             "point": {"id": "p-reg-2", "content": "regression claim B",
+                       "status": "live", "createdAt": now,
+                       "pointKind": "statement",
+                       "authoredBy": "alice", "confidence": 0.6}},
+            {"event_id": "e3", "ts": now, "type": "PointRetracted",
+             "initiated_by": "extractor", "agent_id": "test",
+             "id": "p-reg-2"},
+        ]
+        for ev in events:
+            log.append(ev)
+
+        # Build via apply
+        projA = FalkorProjection(
+            os.path.join(d, "a.db"), graph_name="test")
+        projB = FalkorProjection(
+            os.path.join(d, "b.db"), graph_name="test")
+        try:
+            for ev in log.read_all():
+                projA.apply(ev)
+            result = projB.rebuild_all(d)
+
+            # p-reg-1 survives, p-reg-2 was retracted (tombstone per #689)
+            assert result["nodes"] >= 1, (
+                f"Expected at least 1 node (p-reg-1 survives, p-reg-2 tombstone), "
+                f"got {result['nodes']}")
+
+            # Both graphs should have p-reg-1
+            for proj in (projA, projB):
+                rows = proj.g.query(
+                    "MATCH (n:Point {id:'p-reg-1'}) "
+                    "RETURN n.content, n.confidence"
+                ).result_set
+                assert len(rows) == 1, "p-reg-1 not found"
+                assert rows[0][0] == "regression claim A"
+                assert rows[0][1] == 0.7
+
+            # p-reg-2 was retracted — a tombstone (status='retracted') survives
+            # in both apply and rebuild paths (#689: no more hard deletes).
+            for proj in (projA, projB):
+                rows = proj.g.query(
+                    "MATCH (n:Point {id:'p-reg-2'}) RETURN n.status"
+                ).result_set
+                assert len(rows) == 1, "p-reg-2 tombstone must exist"
+                assert rows[0][0] == "retracted", (
+                    "p-reg-2 should be a retracted tombstone, not hard-deleted (#689)")
+        finally:
+            projA.close()
+            projB.close()
+    finally:
+        import shutil
+        shutil.rmtree(d, ignore_errors=True)
+# ── #689: retraction tombstone semantics ───────────────────────────────────
+
+def test_retract_tombstone_inmemory():
+    """PointRetracted leaves a tombstone (status='retracted') instead of hard-deleting."""
+    from tortoise.projection import _apply_one
+    points: dict[str, dict] = {"p1": {"id": "p1", "content": "hello", "pointKind": "statement"}}
+    _apply_one(points, {"type": "PointRetracted", "id": "p1"})
+    # Tombstone present
+    assert "p1" in points
+    assert points["p1"]["status"] == "retracted"
+    # Original content preserved for recovery
+    assert points["p1"]["content"] == "hello"
+
+
+def test_retract_tombstone_falkor():
+    """FalkorProjection retraction leaves a node with status='retracted'."""
+    if _skip_if_no_falkor():
+        return
+    proj = FalkorProjection(_tmp("g_tombstone.db"), graph_name="test")
+    try:
+        proj.apply({"type": "PointAdded",
+                     "point": {"id": "p1", "content": "hello", "pointKind": "statement"}})
+        proj.apply({"type": "PointRetracted", "id": "p1"})
+        # Tombstone exists in raw graph
+        r = proj.query(
+            "MATCH (n:Point {id:'p1'}) RETURN n.status, n.content"
+        ).result_set
+        assert len(r) == 1
+        assert r[0][0] == "retracted"
+        assert r[0][1] == "hello"  # content preserved
+    finally:
+        proj.close()
+
+
+def test_retract_tombstone_get_point_hidden():
+    """SDK get_point returns the retracted tombstone (full fidelity per #432);
+    query/paginated_query hide it by default (see test_retract_tombstone_skipped_in_query)."""
+    if _skip_if_no_falkor():
+        return
+    from tortoise.sdk import TortoiseSDK
+    sdk = TortoiseSDK(db_path=_tmp("g_sdk_retracted.db"))
+    try:
+        p = sdk.create_point("statement", "visible at first")
+        pid = p["id"]
+        assert sdk.get_point(pid) != {}
+        # Apply retraction via the projection raw path (simulates event replay)
+        sdk._get_proj().apply({"type": "PointRetracted", "id": pid})
+        # #432 contract: get_point keeps returning the tombstone (full fidelity)
+        assert sdk.get_point(pid) != {}
+        assert sdk.get_point(pid).get("status") == "retracted"
+        # Raw query can also find it
+        r = sdk._get_proj().query(
+            "MATCH (n:Point {id:$id}) RETURN n.status", id=pid
+        ).result_set
+        assert len(r) == 1
+        assert r[0][0] == "retracted"
+    finally:
+        sdk.close()
+
+
+def test_retract_tombstone_skipped_in_query():
+    """SDK query/paginated_query skip retracted points."""
+    if _skip_if_no_falkor():
+        return
+    from tortoise.sdk import TortoiseSDK
+    sdk = TortoiseSDK(db_path=_tmp("g_sdk_query_ret.db"))
+    try:
+        p1 = sdk.create_point("statement", "keep me")
+        p2 = sdk.create_point("statement", "retract me")
+        # Retract p2
+        sdk._get_proj().apply({"type": "PointRetracted", "id": p2["id"]})
+        # query should only return p1
+        results = sdk.query(kind="statement")
+        ids = {r["id"] for r in results}
+        assert p1["id"] in ids
+        assert p2["id"] not in ids, "retracted point must not appear in query"
+        # paginated_query same
+        page = sdk.paginated_query(kind="statement")
+        page_ids = {r["id"] for r in page["results"]}
+        assert p1["id"] in page_ids
+        assert p2["id"] not in page_ids
+    finally:
+        sdk.close()
+
+
+def test_retract_missing_point_noop():
+    """Retracting a non-existent point is a no-op (idempotent)."""
+    if _skip_if_no_falkor():
+        return
+    proj = FalkorProjection(_tmp("g_noop.db"), graph_name="test")
+    try:
+        proj.apply({"type": "PointRetracted", "id": "nonexistent"})
+        # No crash, no stray nodes created
+        r = proj.query("MATCH (n) RETURN count(n)").result_set
+        assert r[0][0] == 0
+    finally:
+        proj.close()
+
+
+# ── #689 review fixes: retracted points excluded from search/EP/evidence ───
+
+def test_retract_tombstone_excluded_from_structural_search():
+    """Retracted points are NOT returned by run_structural_query (#689 review)."""
+    if _skip_if_no_falkor():
+        return
+    from tortoise.search_engine import run_structural_query
+    proj = FalkorProjection(_tmp("g_ret_struct.db"), graph_name="test")
+    try:
+        # Create two points
+        proj.apply({"type": "PointAdded",
+                     "point": {"id": "p_keep", "content": "keep me",
+                               "pointKind": "statement"}})
+        proj.apply({"type": "PointAdded",
+                     "point": {"id": "p_ret", "content": "retract me",
+                               "pointKind": "statement"}})
+        # Retract one
+        proj.apply({"type": "PointRetracted", "id": "p_ret"})
+        # Structural query by kind should only return the live point
+        results = run_structural_query(proj.g, "statement", entity_type="point", limit=10)
+        ids = {r[0] for r in results}
+        assert "p_keep" in ids, "live point must appear in structural results"
+        assert "p_ret" not in ids, "retracted point must NOT appear in structural results"
+    finally:
+        proj.close()
+
+
+def test_retract_tombstone_excluded_from_vector_search():
+    """Retracted points are NOT returned by run_vector_query (#689 review).
+
+    Uses the brute-force (embedded) path. FalkorDBLite vec.euclideanDistance
+    requires vecf32-encoded embeddings; the test creates points WITHOUT
+    embeddings to ensure the vector query path (not index path) is exercised,
+    then verifies the status filter is present in the brute-force Cypher by
+    asserting retracted points are excluded at the MATCH level before any
+    distance computation.
+    """
+    if _skip_if_no_falkor():
+        return
+    from tortoise.search_engine import run_vector_query
+    proj = FalkorProjection(_tmp("g_ret_vec.db"), graph_name="test")
+    try:
+        # Create two points with embeddings (vecf32 encoded for FalkorDBLite).
+        # We use the FalkorDB vecf32 function directly via Cypher to ensure
+        # the embedding is stored in the format the brute-force query expects.
+        import struct
+        emb_keep = [0.1] * 384
+        emb_ret = [0.2] * 384
+        emb_keep_bytes = struct.pack(f"<{len(emb_keep)}f", *emb_keep)
+        emb_ret_bytes = struct.pack(f"<{len(emb_ret)}f", *emb_ret)
+        proj.apply({"type": "PointAdded",
+                     "point": {"id": "p_keep", "content": "keep me",
+                               "pointKind": "statement"}})
+        proj.apply({"type": "PointAdded",
+                     "point": {"id": "p_ret", "content": "retract me",
+                               "pointKind": "statement"}})
+        # Store embeddings via Cypher to ensure correct FalkorDB vector type
+        proj.g.query(
+            "MATCH (n:Point {id:'p_keep'}) SET n.embedding = vecf32($e)",
+            params={"e": emb_keep},
+        )
+        proj.g.query(
+            "MATCH (n:Point {id:'p_ret'}) SET n.embedding = vecf32($e)",
+            params={"e": emb_ret},
+        )
+        proj.apply({"type": "PointRetracted", "id": "p_ret"})
+        # Brute-force vector query should filter retracted before distance.
+        dummy_vec = [0.1] * 384
+        results = run_vector_query(proj.g, dummy_vec, limit=10, is_embedded=True,
+                                   entity_type="point")
+        ids = {r[0] for r in results}
+        assert "p_keep" in ids, (
+            "live point with embedding must appear in vector search "
+            f"(got ids={ids})"
+        )
+        assert "p_ret" not in ids, (
+            "retracted point must NOT appear in vector search results"
+        )
+    finally:
+        proj.close()
+
+
+def test_retract_tombstone_excluded_from_svbp_factors():
+    """extract_svbp_factors excludes retracted operators and claims (#689 review)."""
+    if _skip_if_no_falkor():
+        return
+    proj = FalkorProjection(_tmp("g_ret_svbp.db"), graph_name="test")
+    try:
+        # Create claims
+        proj.apply({"type": "PointAdded",
+                     "point": {"id": "c_good", "content": "good claim",
+                               "pointKind": "statement"}})
+        proj.apply({"type": "PointAdded",
+                     "point": {"id": "c_ret", "content": "retracted claim",
+                               "pointKind": "statement"}})
+        # Create operator that references both
+        proj.apply({"type": "PointAdded",
+                     "point": {"id": "op1", "content": "operator",
+                               "pointKind": "operator",
+                               "is_operator": True, "op_type": "IMPL"}})
+        # Wire operator → both claims (simulate IMPL edges)
+        proj.g.query(
+            "MATCH (o:Point {id:'op1'}), (c:Point {id:'c_good'}) "
+            "CREATE (o)-[:IMPL]->(c)"
+        )
+        proj.g.query(
+            "MATCH (o:Point {id:'op1'}), (c:Point {id:'c_ret'}) "
+            "CREATE (o)-[:IMPL]->(c)"
+        )
+        # Retract the bad claim
+        proj.apply({"type": "PointRetracted", "id": "c_ret"})
+        # extract_svbp_factors should only see the good claim
+        factors, _evidence = proj.extract_svbp_factors()
+        # factors: [(op_id, op_type, [input_ids], weight), ...]
+        for _op_id, _op_type, input_ids, _weight in factors:
+            assert "c_ret" not in input_ids, (
+                "retracted claim must NOT appear as an SVBP factor input"
+            )
+    finally:
+        proj.close()
+
+
+def test_retract_tombstone_excluded_from_evidence():
+    """_hydrate_evidence excludes retracted baselines (#689 review)."""
+    if _skip_if_no_falkor():
+        return
+    from tortoise.sdk import TortoiseSDK
+    sdk = TortoiseSDK(db_path=_tmp("g_ret_evidence.db"))
+    try:
+        p1 = sdk.create_point("statement", "keep baseline")
+        p2 = sdk.create_point("statement", "retracted baseline")
+        # Set baselines on both
+        sdk.set_point_baseline(p1["id"], 2.0, 8.0)
+        sdk.set_point_baseline(p2["id"], 3.0, 7.0)
+        # Retract p2
+        sdk._get_proj().apply({"type": "PointRetracted", "id": p2["id"]})
+        # Hydrate evidence — should only load p1
+        sdk._evidence = {}  # clear cache
+        sdk._hydrate_evidence()
+        assert p1["id"] in sdk._evidence, "live baseline must be hydrated"
+        assert p2["id"] not in sdk._evidence, (
+            "retracted baseline must NOT be hydrated into evidence"
+        )
+    finally:
+        sdk.close()
+
+
+def test_retract_tombstone_hosted_list_excludes_retracted():
+    """GET /v1/points raw query pattern excludes retracted points (#689 review)."""
+    if _skip_if_no_falkor():
+        return
+    # Simulate the hosted API query pattern for GET /v1/points
+    proj = FalkorProjection(_tmp("g_ret_hosted.db"), graph_name="test")
+    try:
+        proj.apply({"type": "PointAdded",
+                     "point": {"id": "h_keep", "content": "visible",
+                               "pointKind": "statement"}})
+        proj.apply({"type": "PointAdded",
+                     "point": {"id": "h_ret", "content": "hidden",
+                               "pointKind": "statement"}})
+        proj.apply({"type": "PointRetracted", "id": "h_ret"})
+        # Replicate the hosted API query (non-operator, no kind filter)
+        conditions = [
+            "(n.is_operator IS NULL OR n.is_operator = false)",
+            "(n.status IS NULL OR n.status <> 'retracted')",
+        ]
+        query = (
+            "MATCH (n:Point) WHERE "
+            + " AND ".join(conditions)
+            + " RETURN properties(n) ORDER BY n.createdAt DESC LIMIT 10"
+        )
+        rows = proj.g.query(query).result_set
+        ids = {r[0].get("id") for r in rows}
+        assert "h_keep" in ids, "live point must appear in list"
+        assert "h_ret" not in ids, "retracted point must NOT appear in list"
+    finally:
+        proj.close()
+
+
+# ── #331: missing event keys ──
+
+def test_apply_one_missing_type_skipped():
+    """#331: events without a 'type' key must not crash fold/apply."""
+    points = {}
+    _apply_one(points, {})
+    _apply_one(points, {"point": {"id": "p1", "content": "x"}})  # nested point, no type
+    _apply_one(points, {"type": None})
+    _apply_one(points, {"type": 42})
+    assert points == {}
+
+
+def test_apply_one_point_added_missing_id_skipped():
+    """#331: PointAdded without an id must not crash (no key to index by)."""
+    points = {}
+    _apply_one(points, {"type": "PointAdded", "point": {"content": "no id"}})
+    assert points == {}
+    _apply_one(points, {"type": "OperatorAdded", "point": {"operator": {"op_type": "IMPL"}}})
+    assert points == {}
+
+
+def test_apply_one_non_dict_provenance_no_crash():
+    """#331: null/non-dict provenance must not crash speaker flattening."""
+    points = {}
+    _apply_one(points, {"type": "PointAdded",
+                        "point": {"id": "p1", "content": "x", "provenance": None}})
+    assert points["p1"]["id"] == "p1"
+    _apply_one(points, {"type": "PointAdded",
+                        "point": {"id": "p2", "content": "y", "provenance": "junk"}})
+    assert points["p2"]["id"] == "p2"
+
+
+def test_falkor_apply_non_dict_operator_no_crash():
+    """#331 (review r5): a truthy non-dict operator (bare string) must
+    degrade to no-operator in _upsert_point_props — parity with the r4
+    guard in _create_edges — not AttributeError in op.get('op_type')."""
+    if _skip_if_no_falkor():
+        return
+    proj = FalkorProjection(_tmp("g.db"), graph_name="test")
+    try:
+        proj.apply({"type": "PointAdded",
+                    "point": {"id": "p-op-str", "content": "x", "operator": "IMPL"}})
+        # Point written, flagged as non-operator
+        row = proj.g.query(
+            "MATCH (n:Point {id:'p-op-str'}) RETURN n.is_operator"
+        ).result_set
+        assert row and row[0][0] is False, \
+            "non-dict operator must degrade to is_operator=false"
+    finally:
+        proj.close()
+
+
+def test_fold_missing_type_events_skipped():
+    """#331: fold over a log containing malformed events must not raise."""
+    pts = fold([
+        {},
+        {"type": "PointAdded", "point": {"id": "a", "content": "x", "provenance": {}}},
+        {"type": "NopeUnknown"},
+    ])
+    assert set(pts) == {"a"}
+
+
+def test_inmemory_apply_missing_keys_no_crash():
+    """#331: InMemoryProjection.apply tolerates missing event keys."""
+    proj = InMemoryProjection()
+    proj.apply({})
+    proj.apply({"type": "PointRetracted"})  # no id
+    proj.apply({"type": "PointRevised"})    # no id
+    proj.apply({"type": "PointsMerged"})    # no merge_ids
+    assert proj.points == {}
+
+
+def test_falkor_apply_missing_keys_no_crash():
+    """#331: FalkorProjection.apply tolerates missing event keys (embedded)."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    proj = FalkorProjection(_tmp("tortoise.db"))
+    try:
+        proj.apply({})
+        proj.apply({"type": "PointRetracted"})  # no id — no crash
+        proj.apply({"type": "PointRevised"})    # no id — no crash
+        proj.apply({"type": "PointsMerged"})    # no merge_ids
+        proj.apply({"type": "PointsMerged", "keep_id": "p9",
+                    "merge_ids": None})          # explicit null
+        proj.apply({"type": "PointAdded"})        # no 'point' key at all
+        proj.apply(None)                          # r4: non-dict event
+        proj.apply([])                            # r4: non-dict event
+        # r3: non-dict provenance must not AttributeError in the Falkor path
+        proj.apply({"type": "PointAdded",
+                    "point": {"id": "pn1", "content": "null prov",
+                              "provenance": None}})
+        proj.apply({"type": "PointAdded",
+                    "point": {"id": "pn2", "content": "string prov",
+                              "provenance": "junk"}})
+        # a valid event still lands
+        proj.apply({"type": "PointAdded",
+                    "point": {"id": "p1", "content": "x", "provenance": {}}})
+        rows = proj.g.query("MATCH (n:Point {id:'p1'}) RETURN count(n)").result_set
+        assert rows[0][0] == 1
+        rows = proj.g.query("MATCH (n:Point) WHERE n.id IN ['pn1','pn2'] "
+                            "RETURN count(n)").result_set
+        assert rows[0][0] == 2, "non-dict-provenance points must land"
+    finally:
+        proj.close()
+
+
+# ── #331 (review r2): backend-parity regression tests ──
+
+def test_apply_one_merge_ids_explicit_null_no_crash():
+    """#331 (review r2): an explicit "merge_ids": null in the log must not
+    raise TypeError in the fold (dict.get(key, []) only covers missing)."""
+    points = {"p1": {"id": "p1"}}
+    _apply_one(points, {"type": "PointsMerged", "keep_id": "p9",
+                        "merge_ids": None})
+    assert points == {"p1": {"id": "p1"}}
+
+
+def test_falkor_apply_point_added_missing_id_no_crash():
+    """#331 (review r2): FalkorProjection.apply with a PointAdded whose
+    point dict has no id must skip, not KeyError in _upsert."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    proj = FalkorProjection(_tmp("tortoise.db"))
+    try:
+        proj.apply({"type": "PointAdded", "point": {"content": "no id"}})
+        proj.apply({"type": "OperatorAdded", "point": {"content": "no id"}})
+        # nothing landed
+        rows = proj.g.query("MATCH (n:Point) RETURN count(n)").result_set
+        assert rows[0][0] == 0
+        # and a valid event still lands after the skips
+        proj.apply({"type": "PointAdded",
+                    "point": {"id": "p2", "content": "y", "provenance": {}}})
+        rows = proj.g.query("MATCH (n:Point {id:'p2'}) RETURN count(n)").result_set
+        assert rows[0][0] == 1
+    finally:
+        proj.close()
+
+
+def test_falkor_apply_merge_ids_explicit_null_no_crash():
+    """#331 (review r2): explicit "merge_ids": null must not crash the
+    Falkor handler either."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    proj = FalkorProjection(_tmp("tortoise.db"))
+    try:
+        proj.apply({"type": "PointAdded",
+                    "point": {"id": "p1", "content": "x", "provenance": {}}})
+        proj.apply({"type": "PointsMerged", "keep_id": "p9",
+                    "merge_ids": None})
+        rows = proj.g.query("MATCH (n:Point {id:'p1'}) RETURN count(n)").result_set
+        assert rows[0][0] == 1  # untouched, no crash
+    finally:
+        proj.close()
+
+
+def test_apply_one_non_dict_events_skipped():
+    """#331 (review r4): non-dict events (raw JSON null/array/string lines)
+    must be skipped by the fold, not AttributeError in _norm."""
+    points = {}
+    for bad in (None, [], "x", 42):
+        _apply_one(points, bad)
+    assert points == {}
+    # fold over a mixed log survives
+    result = fold([None, {"type": "PointAdded",
+                          "point": {"id": "p1", "content": "x"}}, [], "junk"])
+    assert set(result.keys()) == {"p1"}
+
+
+def test_apply_one_non_string_ids_skipped():
+    """#331 (review r4): truthy non-string ids (list/dict) must be skipped,
+    not raise TypeError (unhashable) in the fold's index ops."""
+    points = {}
+    _apply_one(points, {"type": "PointAdded", "point": {"id": ["x"], "content": "c"}})
+    _apply_one(points, {"type": "PointAdded", "point": {"id": {"a": 1}, "content": "c"}})
+    _apply_one(points, {"type": "PointRevised", "id": ["x"], "new_content": "n"})
+    _apply_one(points, {"type": "PointRetracted", "id": ["x"]})
+    _apply_one(points, {"type": "PointsMerged", "keep_id": "p",
+                        "merge_ids": [["x"], {"a": 1}, None]})
+    assert points == {}
+
+
+def test_apply_one_point_key_missing_entirely():
+    """#331 (review r3): a valid type with NO 'point' key must be skipped
+    by the isinstance guard, not KeyError at ev['point']."""
+    points = {}
+    _apply_one(points, {"type": "PointAdded"})
+    _apply_one(points, {"type": "OperatorAdded"})
+    assert points == {}
+
+
+def test_retract_without_id_skipped_everywhere():
+    """#331 (review r3): a PointRetracted carrying only event_id must NOT
+    retract anything — fold parity (an event id is not a point id)."""
+    points = {"p1": {"id": "p1", "status": "live"}}
+    _apply_one(points, {"type": "PointRetracted", "event_id": "ev-999"})
+    assert points["p1"]["status"] == "live"
+
+
+def test_rebuild_all_tolerates_malformed_events():
+    """#331 (review r3): rebuild_all must skip, not crash, on:
+    - PointAdded/OperatorAdded with missing point id (incl. operator-carrying)
+    - explicit null merge_ids
+    - PointRetracted carrying only event_id (must NOT retract p1)
+    """
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    d = tempfile.mkdtemp(prefix="tortoise_rebuild_331_")
+    try:
+        events = [
+            None,           # r4: raw JSON null line
+            [],             # r4: raw JSON array line
+            {"type": "PointAdded",
+             "point": {"id": "p1", "content": "valid", "provenance": {}}},
+            {"type": "PointAdded", "point": {"content": "no id"}},
+            {"type": "OperatorAdded",
+             "point": {"content": "no id",
+                       "operator": {"op_type": "IMPL", "inputs": ["p1"]}}},
+            {"type": "PointAdded"},  # no point key at all
+            {"type": "PointsMerged", "keep_id": "p1", "merge_ids": None},
+            {"type": "PointRetracted", "event_id": "ev-999"},
+        ]
+        with open(os.path.join(d, "events.jsonl"), "w") as f:
+            for ev in events:
+                f.write(json.dumps(ev) + "\n")
+            f.write(json.dumps({"type": "PointAdded",
+                                "point": {"id": ["x"], "content": "bad id"}}) + "\n")
+        proj = FalkorProjection(_tmp("g_rebuild_331.db"), graph_name="test")
+        try:
+            result = proj.rebuild_all(d)
+            assert result["nodes"] >= 1
+            rows = proj.g.query(
+                "MATCH (n:Point {id:'p1'}) RETURN n.status").result_set
+            # p1 landed and was NOT retracted by the event_id-only event
+            assert rows and rows[0][0] != "retracted"
+            rows = proj.g.query("MATCH (n:Point) RETURN count(n)").result_set
+            assert rows[0][0] == 1, "malformed points must not land"
+        finally:
+            proj.close()
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+

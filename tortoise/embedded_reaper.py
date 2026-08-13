@@ -14,6 +14,11 @@ Classification (dual-signal):
 NEVER_KILL: anything classified protected (stable singleton, path-based
 servers, boot-cooldown servers, unknown patterns). Only candidates may be
 reaped, and only after liveness + CLIENT LIST verification (see reap()).
+
+Probing is read-only and fail-closed: CLIENT LIST goes over a plain unix
+socket (redis-cli or raw RESP) and never kills or mutates the probed
+server (#849); if the client state cannot be determined the server is
+skipped, never killed.
 """
 from __future__ import annotations
 
@@ -32,7 +37,99 @@ logger = logging.getLogger(__name__)
 
 MIN_UPTIME_DEFAULT = 30
 PROBE_TIMEOUT = 2.0  # seconds for raw socket probes
+# Socket-level timeout for raw RESP probes. A live local server answers in
+# milliseconds; 0.5s is generous and keeps sweeps fast at hundreds of
+# unresponsive orphans (issue #1005 — the 2s timeout made serial sweeps
+# take minutes).
+PROBE_SOCKET_TIMEOUT = 0.5
 _AUTOGEN_DIRNAME = re.compile(r"^(redislite_|tmp)[a-zA-Z0-9_]+$")
+
+# Ephemeral tmp-tree prefixes (under the system tempdir) that test code
+# creates with tempfile.mkdtemp — servers rooted in these trees are
+# disposable once their clients are gone (issue #1005). User-home dirs
+# (tortoise-test-home-*, tortoise-lifecycle-*) are NOT under the tempdir,
+# so the tempdir-containment check keeps them protected.
+EPHEMERAL_PREFIXES = (
+    "redislite_", "tmp", "pytest-of-", "tortoise_", "tortoise-",
+    "tortoise_test_", "tortoise_shared_embedded_", "tortoise_m0_",
+    "tortoise-hardreject-", "tortoise-concurrency-", "tt_", "pack_v3_bad_",
+)
+
+# Marker dir for active pytest suites (conftest writes/removes one file per
+# suite session; the reaper consults it so a sweep never kills a concurrent
+# suite's between-tests idle server — issue #1005 P1).
+ACTIVE_SUITES_DIR = os.path.join(
+    os.path.realpath(tempfile.gettempdir()), ".tortoise", "active_suites")
+
+# Default kill pacing (seconds between serial SIGTERMs) — synchronized
+# shutdown bursts ARE the bgsave storm this module exists to prevent.
+KILL_PACING_DEFAULT = 0.5
+DEFAULT_BATCH_SIZE = 50
+
+
+def _is_ephemeral_dir(dbdir_real: str, tmpdir_real: str) -> bool:
+    """True when dbdir sits under the system tempdir AND any path component
+    BELOW the tempdir root starts with a known ephemeral test prefix
+    (issue #1005).
+
+    Uses strict relative_to containment (not string startswith — /tmp2 must
+    not match a /tmp tempdir) and excludes the tempdir root itself: on Linux
+    the tempdir IS /tmp, so the root's own 'tmp' component must never
+    classify everything beneath it as ephemeral. Checks all components, not
+    just the basename: pytest tmp trees nest servers as
+    pytest-of-<user>/pytest-N/<test_name>/… where the dbdir basename is the
+    test name. The containment check is the safety boundary: user-home test
+    dirs (tortoise-test-home-*, tortoise-lifecycle-*) never match.
+    """
+    try:
+        rel = Path(dbdir_real).relative_to(Path(tmpdir_real))
+    except ValueError:
+        return False
+    return any(part.startswith(EPHEMERAL_PREFIXES) for part in rel.parts)
+
+
+def active_suite_tokens() -> list[str]:
+    """List active pytest-suite marker tokens (filenames in ACTIVE_SUITES_DIR).
+
+    Each marker is created by a suite's conftest at session start and removed
+    at session end. Stale markers (pid dead — suite SIGKILLed) are treated as
+    absent so one crash cannot permanently degrade later suites' sweeps to
+    only-safe (issue #1005 review P2). Empty when no other suite is mid-run.
+    """
+    try:
+        entries = os.listdir(ACTIVE_SUITES_DIR)
+    except OSError:
+        return []
+    tokens = []
+    for e in entries:
+        if e.startswith("."):
+            continue
+        try:
+            text = Path(ACTIVE_SUITES_DIR, e).read_text()
+        except OSError:
+            continue
+        if not text.strip():
+            continue  # empty/partial marker (failed write) -> stale
+        m = re.search(r"pid=(\d+)", text)
+        if not m:
+            continue  # no parsable pid -> stale
+        try:
+            pid = int(m.group(1))
+            alive = _pid_alive(pid)
+        except (ValueError, OverflowError, OSError):
+            continue  # malformed pid -> stale, never fail the sweep
+        if not alive:
+            continue  # stale marker from a killed suite
+        tokens.append(e)
+    return tokens
+
+
+def _dir_missing_on_disk(dbdir: str | None) -> bool:
+    """True when the registry's DB dir no longer exists (pytest cleaned it at
+    session end, or the creating suite is gone). A server whose data dir is
+    gone cannot serve anyone — safe to reap regardless of concurrency.
+    """
+    return bool(dbdir) and not os.path.exists(dbdir)
 
 
 def _parse_min_uptime() -> int:
@@ -123,8 +220,13 @@ def _uptime_seconds(pid: int) -> float | None:
     """Return process uptime in seconds, or None if the PID is not alive.
 
     macOS: ps -o etime gives [[dd-]hh:]mm:ss; Linux /proc/<pid>/stat is
-    preferred but ps -o etime works on both.
+    preferred but ps -o etime works on both. Consults the per-sweep
+    _PROC_INFO_CACHE when available (issue #1005 — one batched ps call
+    instead of one subprocess spawn per server).
     """
+    cached = _PROC_INFO_CACHE.get(pid)
+    if cached is not None:
+        return cached["etime"]
     try:
         out = subprocess.run(
             ["ps", "-o", "etime=", "-p", str(pid)],
@@ -246,6 +348,9 @@ def _derive_real_pid_macos(socket_path: str) -> int | None:
 
 
 def _cmdline(pid: int) -> str:
+    cached = _PROC_INFO_CACHE.get(pid)
+    if cached is not None:
+        return cached["cmdline"]
     try:
         out = subprocess.run(
             ["ps", "-o", "command=", "-p", str(pid)],
@@ -280,38 +385,95 @@ def _probe_socket(socket_path: str) -> str:
         return "undetermined"
 
 
-def _client_list(socket_path: str) -> list[dict]:
-    """CLIENT LIST over the unix socket using a raw RESP connection.
+def _client_list(socket_path: str) -> list[dict] | None:
+    """CLIENT LIST over the unix socket — read-only, never kills the server.
 
-    Uses redislite's own client (which is a redis client) via subprocess-free
-    approach: we shell to redis-cli if available, else parse via raw RESP.
-    Returns list of client dicts; empty on failure.
+    Raw RESP in-process first (issue #1005 perf: spawning a redis-cli
+    subprocess per probed server costs ~1s each at hundreds of orphans);
+    falls back to redis-cli when the raw probe fails. NEVER constructs a
+    redislite client here: its close() terminates the orphan server being
+    probed (issue #849 — fail-open kill).
+
+    Returns parsed client dicts, or None if the probe failed (no listener,
+    timeout, malformed reply). None means "client state unknown" — callers
+    MUST fail closed (skip reaping). [] means the server reported zero
+    clients.
     """
-    # Prefer redis-cli (no python redis dependency, no spawn risk).
+    # Fast path: raw RESP over a plain unix socket (no subprocess spawn).
+    raw = _raw_resp_client_list(socket_path)
+    if raw is not None:
+        return raw
+    # Fallback: redis-cli (still no redislite client — see docstring).
     try:
         out = subprocess.run(
             ["redis-cli", "-s", socket_path, "CLIENT", "LIST"],
             capture_output=True, text=True, timeout=PROBE_TIMEOUT,
         )
-        if out.returncode == 0 and out.stdout.strip():
-            return _parse_client_list(out.stdout)
+        if out.returncode == 0:
+            # rc 0 with empty stdout = zero clients (empty bulk string) —
+            # a valid verdict, don't double-probe via the raw fallback.
+            return _parse_client_list(out.stdout if out.stdout else "")
     except (subprocess.TimeoutExpired, OSError):
         pass
-    # Fallback: raw RESP via the redislite client API (execute_command).
+    return None
+
+
+def _raw_resp_client_list(socket_path: str) -> list[dict] | None:
+    """CLIENT LIST via raw RESP over a plain unix socket.
+
+    Non-destructive by construction: a plain socket connect/send/close never
+    mutates or terminates the probed server (issue #849: the previous
+    fallback built a redislite FalkorDB client whose close() KILLED the
+    orphan it was probing — fail-open data loss on the no-redis-cli path).
+
+    Returns parsed clients, or None on any connect/read/parse failure so
+    callers fail closed (never reap a server whose client state is unknown).
+    """
     try:
-        from redislite.falkordb_client import FalkorDB
-        db = FalkorDB(unix_socket_path=socket_path)
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(PROBE_SOCKET_TIMEOUT)
         try:
-            raw = db.execute_command("CLIENT", "LIST")
-            return _parse_client_list(raw if isinstance(raw, str) else "")
+            s.connect(socket_path)
+            s.sendall(b"*2\r\n$6\r\nCLIENT\r\n$4\r\nLIST\r\n")
+            raw = _read_resp_reply(s)
         finally:
-            try:
-                db.close()
-            except Exception:
-                pass
-    except Exception:
-        return []
-    return []
+            s.close()
+    except OSError:  # includes socket.timeout (Python 3.10+)
+        return None
+    if raw is None:
+        return None
+    return _parse_client_list(raw)
+
+
+def _read_resp_reply(sock: socket.socket) -> str | None:
+    """Read one RESP reply; return the bulk-string payload (CLIENT LIST).
+
+    Returns None for non-bulk replies (-ERR, +OK, integers) or on
+    truncation/malformed input — callers fail closed on None.
+    """
+    buf = b""
+    while b"\r\n" not in buf:
+        chunk = sock.recv(4096)
+        if not chunk:
+            return None
+        if len(buf) + len(chunk) > 1 << 20:  # 1 MiB sanity cap
+            return None
+        buf += chunk
+    head, rest = buf.split(b"\r\n", 1)
+    if not head.startswith(b"$"):
+        return None
+    try:
+        length = int(head[1:])
+    except ValueError:
+        return None
+    if length < 0 or length > 1 << 20:
+        return None
+    while len(rest) < length + 2:
+        chunk = sock.recv(4096)
+        if not chunk:
+            return None
+        rest += chunk
+    return rest[:length].decode("utf-8", errors="replace")
 
 
 def _parse_client_list(raw: str) -> list[dict]:
@@ -328,14 +490,19 @@ def _parse_client_list(raw: str) -> list[dict]:
     return clients
 
 
-def _active_client_count(socket_path: str) -> int:
+def _active_client_count(socket_path: str) -> int | None:
     """Count non-reaper clients (SKIPME semantics).
 
-    Our probing connection (redis-cli) is the freshly-created one with
-    age ~0 and idle ~0. Any connection with age >= 2s is a pre-existing
-    real client. Named clients are also real users regardless of age.
+    Our probing connection is the freshly-created one with age ~0 and
+    idle ~0. Any connection with age >= 2s is a pre-existing real client.
+    Named clients are also real users regardless of age.
+
+    Returns None when the probe failed — the caller must fail closed
+    (a server whose client state is unknown must never be reaped).
     """
     clients = _client_list(socket_path)
+    if clients is None:
+        return None
     count = 0
     for c in clients:
         if c.get("name"):
@@ -350,14 +517,147 @@ def _active_client_count(socket_path: str) -> int:
     return count
 
 
-def discover() -> list[dict]:
-    """Scan tempdir for redislite orphans; return classified records.
+_UNIXSOCKET_RE = re.compile(r"unixsocket:(\S+)")
 
-    Each record: {pid, socket_path, dbdir, client_count, uptime,
-    classification, settings}.
+# Per-sweep process-info cache (issue #1005): populated with ONE batched ps
+# call in discover(), consulted by _cmdline/_uptime_seconds so classifying
+# hundreds of servers costs one subprocess spawn, not hundreds.
+_PROC_INFO_CACHE: dict[int, dict] = {}
+
+
+def _batch_process_info(pids: list[int]) -> dict[int, dict]:
+    """One ps call for all pids: {pid: {cmdline, etime}}."""
+    if not pids:
+        return {}
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "pid=,etime=,command=",
+             "-p", ",".join(str(p) for p in pids)],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return {}
+    result: dict[int, dict] = {}
+    for line in out.stdout.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) < 2:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        result[pid] = {"etime": _parse_etime(parts[1]),
+                       "cmdline": parts[2] if len(parts) > 2 else ""}
+    return result
+
+
+def _pgrep_redis_servers() -> list[int]:
+    """Live redislite redis-server PIDs via pgrep (issue #1005 perf).
+
+    O(servers) instead of scanning the whole tempdir (which holds tens of
+    thousands of stale dirs on a leaky machine). Returns [] when pgrep is
+    unavailable.
+    """
+    try:
+        out = subprocess.run(
+            ["pgrep", "-f", "redislite/bin/redis-server"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    pids: list[int] = []
+    for line in out.stdout.splitlines():
+        line = line.strip()
+        if line.isdigit():
+            pids.append(int(line))
+    return pids
+
+
+def _socket_dir_from_cmdline(pid: int) -> str | None:
+    """Extract the unixsocket dir from a redis-server cmdline."""
+    cmdline = _cmdline(pid)
+    m = _UNIXSOCKET_RE.search(cmdline)
+    if not m:
+        return None
+    sock = m.group(1)
+    return os.path.dirname(os.path.realpath(sock))
+
+
+def discover(jobs: int = 1, max_tempdir_entries: int = 5000) -> list[dict]:
+    """Scan for redislite orphans; return classified records.
+
+    Two passes (issue #1005 perf — the tempdir accumulates tens of thousands
+    of stale dirs, making a full walk minutes-long under load):
+      1. Live servers via pgrep + cmdline unixsocket extraction — O(servers).
+      2. Tempdir walk for stale sockets / synthetic dirs, ONLY when the
+         tempdir is small (st_nlink <= max_tempdir_entries). On leaky
+         machines the walk is skipped with a warning — stale-socket
+         detection degrades gracefully instead of stalling the sweep.
+
+    jobs>1 parallelizes per-dir classification. Fail-closed semantics are
+    per-record and unchanged under parallelism.
     """
     results = []
     tmpdir = _real_gettempdir()
+
+    # Pass 1: live servers (authoritative pid comes from pgrep).
+    live_pids = _pgrep_redis_servers()
+    seen_dirs: set[str] = set()
+
+    # One batched ps for all live pids (issue #1005 perf).
+    global _PROC_INFO_CACHE
+    _PROC_INFO_CACHE = _batch_process_info(live_pids)
+    try:
+        return _discover_from_live(live_pids, jobs, tmpdir, seen_dirs,
+                                   max_tempdir_entries)
+    finally:
+        _PROC_INFO_CACHE = {}
+
+
+def _discover_from_live(live_pids, jobs, tmpdir, seen_dirs,
+                        max_tempdir_entries):
+    """Classification half of discover() (separated so the proc-info cache
+    has a deterministic lifetime)."""
+    results = []
+
+    def _classify_live(pid: int) -> dict | None:
+        sock_dir = _socket_dir_from_cmdline(pid)
+        if not sock_dir:
+            return None
+        socket_path = os.path.join(sock_dir, "redis.socket")
+        rec = _classify_dir(sock_dir, socket_path)
+        if rec is None:
+            return None
+        rec["pid"] = pid  # pgrep pid is authoritative for live servers
+        rec["_live"] = True
+        return rec
+
+    if jobs > 1 and len(live_pids) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=jobs) as pool:
+            for rec in pool.map(_classify_live, live_pids):
+                if rec is not None:
+                    results.append(rec)
+                    seen_dirs.add(os.path.dirname(rec["socket_path"]))
+    else:
+        for pid in live_pids:
+            rec = _classify_live(pid)
+            if rec is not None:
+                results.append(rec)
+                seen_dirs.add(os.path.dirname(rec["socket_path"]))
+
+    # Pass 2: tempdir walk (stale sockets + synthetic dirs in tests). Skip
+    # when the tempdir is pathologically large — the walk is the cost that
+    # made sweeps stall at 64k dirs (issue #1005).
+    try:
+        entry_count = os.stat(tmpdir).st_nlink
+    except OSError:
+        entry_count = 0
+    if entry_count > max_tempdir_entries:
+        logger.warning(
+            "tempdir has %s entries — skipping stale-socket walk "
+            "(issue #1005 perf guard)", entry_count)
+        return results
 
     try:
         entries = list(os.scandir(tmpdir))
@@ -365,6 +665,7 @@ def discover() -> list[dict]:
         logger.warning("permission denied scanning tempdir %s: %s", tmpdir, e)
         return results
 
+    dirs = []
     for entry in entries:
         if not entry.is_dir():
             continue
@@ -372,15 +673,35 @@ def discover() -> list[dict]:
             socket_path = os.path.join(entry.path, "redis.socket")
             if not os.path.exists(socket_path):
                 continue
-            record = _classify_dir(entry.path, socket_path)
-            if record is not None:
-                results.append(record)
-        except PermissionError:
-            logger.warning("permission denied dir skipped: %s", entry.path)
-            continue
-        except OSError:
+            if os.path.realpath(entry.path) in seen_dirs:
+                continue
+            dirs.append((entry.path, socket_path))
+        except (PermissionError, OSError):
             logger.warning("dir skipped (OSError): %s", entry.path)
             continue
+
+    if jobs > 1 and len(dirs) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=jobs) as pool:
+            futures = [
+                pool.submit(_classify_dir, d, s) for d, s in dirs]
+            for fut in futures:
+                try:
+                    rec = fut.result()
+                except Exception as exc:  # per-record isolation
+                    logger.warning("classification failed: %s", exc)
+                    continue
+                if rec is not None:
+                    results.append(rec)
+    else:
+        for d, s in dirs:
+            try:
+                rec = _classify_dir(d, s)
+            except Exception as exc:  # per-record isolation
+                logger.warning("classification failed: %s", exc)
+                continue
+            if rec is not None:
+                results.append(rec)
     return results
 
 
@@ -392,6 +713,10 @@ def _classify_dir(dbdir: str, socket_path: str) -> dict | None:
     tmpdir_real = _real_gettempdir()
 
     classification = _classify(socket_real, dbdir_real, tmpdir_real, registry)
+    # Issue #1005: servers whose registry dir is gone (pytest cleaned the tmp
+    # tree at session end) are always reaping-safe — the owning suite ended.
+    reg_dir = (registry or {}).get("dir", (registry or {}).get("dbdir", ""))
+    dir_missing = _dir_missing_on_disk(reg_dir)
     pid = None
     if registry and registry.get("pidfile"):
         try:
@@ -402,12 +727,16 @@ def _classify_dir(dbdir: str, socket_path: str) -> dict | None:
     uptime = _uptime_seconds(pid) if pid else None
     client_count = 0
     if classification == "candidate" and pid and _pid_alive(pid):
-        client_count = _active_client_count(socket_real)
+        # None (probe failed) means unknown — reap() will fail closed.
+        # Keep the record field an int (None is internal to the probe).
+        cc = _active_client_count(socket_real)
+        client_count = 0 if cc is None else cc
 
     return {
         "pid": pid,
         "socket_path": socket_real,
         "dbdir": dbdir_real,
+        "dir_missing": dir_missing,
         "client_count": client_count,
         "uptime": uptime,
         "classification": classification,
@@ -433,10 +762,11 @@ def _classify(socket_real: str, dbdir_real: str, tmpdir_real: str,
     # No registry at all -> cannot confirm path-based; treat conservatively
     # via dirname pattern + .db-file presence (old-format fallback).
     if registry is None:
-        if _dir_has_db_file(dbdir_real):
+        if _dir_has_db_file(dbdir_real) and not _is_ephemeral_dir(dbdir_real, tmpdir_real):
             return "protected"
         basename = os.path.basename(dbdir_real)
-        if not _AUTOGEN_DIRNAME.match(basename):
+        if not (_AUTOGEN_DIRNAME.match(basename)
+                or _is_ephemeral_dir(dbdir_real, tmpdir_real)):
             logger.warning(
                 "unrecognized dir pattern, treating as protected: %s", dbdir_real)
             return "protected"
@@ -446,10 +776,13 @@ def _classify(socket_real: str, dbdir_real: str, tmpdir_real: str,
     # Signal 1: registry 'dir' is a USER dir (not auto tempdir) -> path-based.
     reg_dbdir = registry.get("dir", registry.get("dbdir", ""))
     reg_dbdir_real = os.path.realpath(reg_dbdir) if reg_dbdir else ""
+    # Issue #1005: ephemeral TEST tmp trees (tortoise_*, tt_*, pytest-of-*,
+    # pack_v3_bad_*) count as autogen — servers rooted there are disposable
+    # once their clients are gone. User-home dirs stay protected (the
+    # tempdir-containment check below is the safety boundary).
     is_autogen_dbdir = bool(
         reg_dbdir_real
-        and reg_dbdir_real.startswith(tmpdir_real)
-        and _AUTOGEN_DIRNAME.match(os.path.basename(reg_dbdir_real))
+        and _is_ephemeral_dir(reg_dbdir_real, tmpdir_real)
     )
     if not is_autogen_dbdir and reg_dbdir_real:
         if reg_dbdir_real.startswith(tmpdir_real):
@@ -458,16 +791,20 @@ def _classify(socket_real: str, dbdir_real: str, tmpdir_real: str,
         return "protected"
 
     # Signal 2: dbfilename is the generic 'redis.db' (no-path) vs user name.
+    # Issue #1005: in an ephemeral TEST tree the filename signal does not
+    # protect — the tree is disposable regardless of the db filename.
     db_filename = registry.get("dbfilename", "")
-    if db_filename and db_filename != "redis.db":
+    if db_filename and db_filename != "redis.db" \
+            and not _is_ephemeral_dir(reg_dbdir_real, tmpdir_real):
         return "protected"
 
     # Old-format registry (no dbfilename field): .db file present -> protected.
     if "dbfilename" in registry and registry.get("dbfilename") is None:
-        if _dir_has_db_file(dbdir_real):
+        if _dir_has_db_file(dbdir_real) and not _is_ephemeral_dir(dbdir_real, tmpdir_real):
             return "protected"
         basename = os.path.basename(dbdir_real)
-        if not _AUTOGEN_DIRNAME.match(basename):
+        if not (_AUTOGEN_DIRNAME.match(basename)
+                or _is_ephemeral_dir(dbdir_real, tmpdir_real)):
             logger.warning(
                 "unrecognized dir pattern, treating as protected: %s", dbdir_real)
             return "protected"
@@ -530,12 +867,19 @@ def phase1_probe(record: dict) -> dict:
 
 
 def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = None,
-         sigterm_timeout: float = 10.0) -> list[dict]:
+         sigterm_timeout: float = 10.0, kill_pacing: float = KILL_PACING_DEFAULT,
+         only_safe: bool = False) -> list[dict]:
     """Reap candidate records safely (plan Task 2). Returns acted-upon list.
 
     Only 'candidate' records are killed, and only after CLIENT LIST shows 0
     active clients (double-checked). Path-based / protected / stale_socket /
     undetermined records are NEVER killed here.
+
+    only_safe=True (issue #1005 concurrency guard): restrict to dir-gone
+    (dir_missing) candidates — the owning suite's tmp tree was cleaned, so
+    the server cannot belong to a running suite. Live ephemeral servers
+    with 0 clients are skipped so a concurrent suite's between-tests idle
+    server is never killed.
     """
     acted = []
     killed = 0
@@ -549,6 +893,12 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
                     "skipping path-based/non-candidate server: %s",
                     record.get("socket_path"))
             continue
+        if only_safe and not (record.get("dir_missing")
+                              or classification == "stale_socket"):
+            logger.info(
+                "concurrent-suite guard: skipping live ephemeral candidate %s",
+                record.get("socket_path"))
+            continue
 
         # Liveness-first: never kill a dead PID's leftovers via connect.
         if not record.get("pid") or not _pid_alive(record["pid"]):
@@ -558,11 +908,21 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
 
         # Double-check CLIENT LIST (before+after).
         clients_before = _active_client_count(record["socket_path"])
+        if clients_before is None:
+            logger.warning(
+                "CLIENT LIST probe failed, skipping (fail closed): %s",
+                record.get("socket_path"))
+            continue
         if clients_before > 0:
             logger.info("server has %d active client(s), skipping: %s",
                         clients_before, record["socket_path"])
             continue
         clients_after = _active_client_count(record["socket_path"])
+        if clients_after is None:
+            logger.warning(
+                "CLIENT LIST re-probe failed, skipping (fail closed): %s",
+                record.get("socket_path"))
+            continue
         if clients_after > 0:
             logger.info("server gained a client between checks, skipping: %s",
                         record["socket_path"])
@@ -580,6 +940,8 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
                        record["pid"], record["socket_path"])
         acted.append(record)
         killed += 1
+        if kill_pacing > 0:
+            time.sleep(kill_pacing)  # avoid synchronized shutdown bursts (#1005)
     return acted
 
 
@@ -667,13 +1029,20 @@ def _parse_timeout(cli_value: str | None) -> int:
     return TIMEOUT_DEFAULT
 
 
-def _run_sweep(dry_run: bool, batch_size: int | None) -> list[dict]:
-    """Discover + classify + reap; return acted-upon records."""
-    records = discover()
+def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
+               jobs: int = 8, kill_pacing: float = KILL_PACING_DEFAULT) -> list[dict]:
+    """Discover + classify + reap; return acted-upon records.
+
+    jobs>1 parallelizes the per-candidate CLIENT LIST probes (the dominant
+    cost at hundreds of leaked servers — issue #1005); kills stay serial
+    with pacing.
+    """
+    records = discover(jobs=jobs)
     candidates = [r for r in records if r["classification"] == "candidate"]
     # Phase 1: resolve stale-PID records via probe before any kill
     resolved = [phase1_probe(r) for r in candidates]
-    return reap(resolved, dry_run=dry_run, batch_size=batch_size)
+    return reap(resolved, dry_run=dry_run, batch_size=batch_size,
+                kill_pacing=kill_pacing, only_safe=only_safe)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -692,8 +1061,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--no-dry-run", action="store_true",
                         help="Actually kill orphans (default is dry-run)")
-    parser.add_argument("--batch-size", type=int, default=None,
-                        help="Limit kills per run")
+    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE,
+                        help=f"Limit kills per run (default {DEFAULT_BATCH_SIZE})")
+    parser.add_argument("--jobs", type=int, default=8,
+                        help="Parallel probe workers (default 8)")
+    parser.add_argument("--only-safe", action="store_true",
+                        help="Only reap dir-gone/stale records (concurrent-suite "
+                             "safe; issue #1005)")
     parser.add_argument("--json", action="store_true",
                         help="Machine-readable JSON output")
     parser.add_argument("--timeout", type=str, default=None,
@@ -718,7 +1092,9 @@ def main(argv: list[str] | None = None) -> int:
         signal.signal(signal.SIGALRM, _alarm_handler)
         signal.alarm(timeout)
         acted = _run_sweep(dry_run=not args.no_dry_run,
-                           batch_size=args.batch_size)
+                           batch_size=args.batch_size,
+                           only_safe=args.only_safe,
+                           jobs=args.jobs)
         signal.alarm(0)
     finally:
         lock.release()

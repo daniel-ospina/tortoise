@@ -14,16 +14,65 @@ from __future__ import annotations
 
 import os
 import sys
+import pytest
 import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-# Isolated test graph — never the production graph
-os.environ["TORTOISE_DB_URI"] = "docker://:falkordb@localhost:6379/tortoise_test_dir_impl_fix"
+# Isolated test graph — never the production graph.
+# NOTE: the docker URI is set INSIDE the autouse fixture (per-test, restored
+# after) — NOT at import time. An import-time set leaks into every later test
+# file (they inherit it → Error 111 on localhost:6379 → the #176
+# contamination pattern), because pytest imports all modules before running
+# any test.
 
 from tortoise.sdk import TortoiseSDK
 from tortoise.ep import TortoiseEP
 from tortoise.weights import compute_operator_weight
+
+# Requires live FalkorDB (Docker). Skip gracefully when unavailable so the
+# no-Docker embedded suite stays green (AGENTS.md). Mirrors the probe pattern
+# in tests/test_integration_search.py. The probe targets the DOCKER URI
+# explicitly — embedded mode is "available" but does not provide the docker
+# graph semantics these tests need.
+_DB_URI = "docker://:falkordb@localhost:6379/tortoise_test_dir_impl_fix"
+FALKORDB_AVAILABLE = False
+_OLD_URI = os.environ.get("TORTOISE_DB_URI")
+try:
+    os.environ["TORTOISE_DB_URI"] = _DB_URI
+    from tortoise.sdk import TortoiseSDK as _ProbeSDK
+    _probe = _ProbeSDK()
+    _probe._get_proj().g.query("RETURN 1")
+    _probe.close()
+    FALKORDB_AVAILABLE = True
+except Exception:
+    pass
+finally:
+    if _OLD_URI is not None:
+        os.environ["TORTOISE_DB_URI"] = _OLD_URI
+    else:
+        os.environ.pop("TORTOISE_DB_URI", None)
+
+pytestmark = pytest.mark.skipif(
+    not FALKORDB_AVAILABLE, reason="Live FalkorDB (Docker) not available")
+
+
+@pytest.fixture(autouse=True)
+def _isolated_db_uri():
+    """Set the isolated docker URI for THIS test, restore after.
+
+    The URI is scoped per-test (autouse) so no later test file inherits a
+    stale docker URI — the #176 contamination pattern that made the full
+    suite order-dependent.
+    """
+    _old = os.environ.get("TORTOISE_DB_URI")
+    os.environ["TORTOISE_DB_URI"] = _DB_URI
+    yield
+    if _old is not None:
+        os.environ["TORTOISE_DB_URI"] = _old
+    else:
+        os.environ.pop("TORTOISE_DB_URI", None)
+
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -332,11 +381,10 @@ def test_nand_bidirectional():
 
         # Claim should be contested away from the strong-support fixed point.
         # With directional IMPL the T0 source pushes the claim strongly, and
-        # the NAND defeat (phi_nand T0-vs-T0 ~ 0.637, "moderate dampening")
-        # partially counters it — the claim settles around 0.74 (support
-        # dominates moderate contradiction), NOT 0.5. The regression guard is
-        # that the claim is materially below the pure-support case and above
-        # the pure-contradiction case (#86).
+        # the NAND contradiction potential phi_nand = exp(-w*ca*cb) penalizes
+        # agreement — at weight=1.0 the T0-vs-T0 coupling is ~0.44, which
+        # partially counters the IMPL support. The claim settles below the
+        # pure-support case and above the pure-contradiction case (#86).
         assert 0.50 < cc["mean"] < 0.85, \
             f"❌ Claim outside contested range: {cc['mean']:.4f}"
         print(f"  ✅ Claim contested by NAND: {cc['mean']:.4f} (in 0.50-0.85)")

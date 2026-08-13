@@ -1,7 +1,30 @@
+---
+title: "Tortoise EP Source Credibility Validation — Experiment Design"
+type: data
+domain: data
+status: live
+created: 2026-07-29
+updated: 2026-08-07
+ownedBy: epistemic-team
+subjects:
+  team: epistemic-team
+doc_status: live
+aboutSubjects: epistemic-team
+aboutObjects: Source, Point, Operator
+---
+
+---
+title: "Tortoise EP Source Credibility Validation — Experiment Design"
+aboutSubjects: epistemic-team
+aboutObjects: Source, Point, Operator
+---
+
 # Tortoise EP Source Credibility Validation — Experiment Design
 
-**Status:** Design (pre-implementation)
+**Status:** Design — PRIOR-LEVEL REFERENCE MODEL (implemented in #398 as the real-path
+inheritance formula; the Situations below remain the #341 test-suite spec)
 **Created:** 2026-07-29
+**Updated:** 2026-08-07 (#398 — see annotations)
 **Epic:** #TODO — Source credibility log-scale aggregation
 **Goal:** Validate that planned log-scale source credibility aggregation produces correct,
 monotonic, anti-Sybil EP belief propagation across linear, loopy, and contradictory graphs.
@@ -29,6 +52,14 @@ to a Beta evidence prior on the Point the source is extracted from.
 
 **Current behavior** (as of 2026-07-29, `_apply_source_inheritance` in `sdk.py`):
 highest-tier-wins — only the best single source is used.
+
+> **#398 (2026-08-07):** the planned behavior below is IMPLEMENTED as the real-path
+> inheritance formula (`tortoise/source_credibility.py::aggregate_prior`), with two
+> real-path refinements: (a) decay is applied per-TIER keyed on the tier's most-recent
+> source (`decay_t`), preserving anti-Sybil under age; (b) per-source assessment factors
+> (clamped [0.1, 2.0]) modulate `base_pc` — see docs/plans/2026-08-07-source-credibility.md.
+> NAND → negative pseudo-count (§1.3) is a PRIOR-LEVEL model used by the #341 tests;
+> the real-path inheritance is positive-only (NAND contradiction is EP's factor domain).
 
 **Planned behavior:** When N same-tier sources support the same Point via
 `extractedFrom` edges, aggregate them with log-scale dampening:
@@ -72,7 +103,7 @@ For NAND sources (contradictory), the pseudo-count contributes to `total_pc_neg`
 - **Evidence priors** are set via `set_point_baseline(point_id, α, β)` and injected
   as natural-parameter offsets before message accumulation.
 - **EP convergence** uses damped message passing with Gauss-Jacobi quadrature (n=8),
-  tolerance 1e-3, max 50 iterations.
+  tolerance 1e-4 (#855 tightened from 1e-3), max 50 iterations.
 
 ### 1.5 Graph Topology
 
@@ -277,6 +308,11 @@ assert abs(conf_1000xT4 - conf_1xT3) < 0.05
 
 ---
 
+> **#398 annotation (S5/S6):** monotonicity ("adding evidence never decreases
+> confidence") is scoped to **uniform-weight source addition** — assessment/decay
+> factors are time-varying by design (a down-assessment legitimately lowers a
+> source's weight).
+
 ### Situation 5: 2 Gold + Add T4 (Ceiling Effect)
 
 **Goal:** Verify that adding a low-tier source to strong existing evidence
@@ -361,7 +397,15 @@ assert conf_with_T4 > conf_baseline
 
 ### Situation 8: 1 Gold + 1 NAND Source (Contradictory Signals)
 
-**Goal:** Verify that NAND edges correctly reduce confidence from contradictory sources.
+> **#398 annotation:** PRIOR-LEVEL model — tests construct the negative pseudo-count
+> prior via `set_point_baseline` directly; graph-level NAND operators are NOT built.
+> Real-path contradiction is handled by the EP NAND factor (`ep.py`), which may yield
+> different magnitudes than this prior-level table (polarization vs neutralization).
+> The #341 suite keeps this prior-level spec; the real-path NAND behavior is covered by
+> `tests/test_source_inheritance_own.py::TestNANDRealPath`.
+
+**Goal:** Verify that negative pseudo-count priors (from contradictory sources) reduce
+confidence.
 
 **Setup:** Scenario A extended with NAND:
 - Source_T0 →[extractedFrom]→ Point_A (positive, pc_pos=9)
@@ -404,6 +448,10 @@ assert conf_T4_NAND_alone < 0.50
 ---
 
 ### Situation 9: T4 Source + Mitigate Edge (Drops but Stays Above No-Source)
+
+> **#398 annotation:** PRIOR-LEVEL model — no `extractedFrom`-edge mitigation property
+> exists in the schema; edge-level mitigation is DEFERRED (schema addition, follow-up).
+> The #341 tests keep this linear-scaling spec via direct prior construction.
 
 **Goal:** Verify edge mitigation correctly attenuates source credibility without
 going below the no-information baseline.

@@ -275,6 +275,39 @@ def test_dispatch_all_fail():
     print("✓ dispatch all fail → OrchestratorError")
 
 
+def test_dispatch_harvests_completed_results_after_deadline():
+    """#331 (review r5): when the FIRST ontology in iteration order burns
+    the shared deadline, later ontologies whose futures ALREADY completed
+    must still contribute their results — not be misreported as timeouts
+    (order-sensitive silent data loss)."""
+    import time as _time
+
+    db = MagicMock()
+
+    def _select_graph(name):
+        g = MagicMock()
+        if name == "epistemic":  # slow: burns the whole deadline
+            def _slow_query(cypher):
+                _time.sleep(1.0)
+                result = MagicMock()
+                result.result_set = []
+                return result
+            g.query = _slow_query
+        else:  # fast: completes immediately
+            data = [[[1, ["Event"], [["content", "evt1"]]]]]
+            g.query = lambda cypher: MagicMock(result_set=data)
+        return g
+
+    db.select_graph = _select_graph
+    # Slow ontology FIRST: waiting for it consumes the deadline before the
+    # fast one is harvested.
+    results, errors = dispatch(["epistemic", "episodic"], db, timeout=0.3)
+    assert "episodic" in results, \
+        "completed fast result must be harvested even after the deadline"
+    assert errors.get("epistemic") == "timeout"
+    print("✓ dispatch harvests completed results after deadline")
+
+
 def test_dispatch_no_cypher_template():
     db = MagicMock()
     try:
@@ -590,3 +623,89 @@ if __name__ == "__main__":
             print(f"✗ {t.__name__} FAILED: {e}")
             raise
     print(f"\n─── {passed}/{len(tests)} passed ───")
+
+
+# ── #331: fake dispatch timeout + _parseNode malformed-input crash ──
+
+def test_dispatch_enforces_deadline():
+    """#331: dispatch must return at ~timeout even when an ontology query
+    hangs. Pre-fix the executor context-manager exit blocked on
+    shutdown(wait=True) until the hung query finished (timeout was fake)."""
+    import time
+    from types import SimpleNamespace
+    from tortoise.memory_orchestrator import dispatch
+
+    class _SlowGraph:
+        def query(self, cypher, params=None):
+            time.sleep(2.0)
+            return SimpleNamespace(result_set=[[1]])
+
+    class _FastGraph:
+        def query(self, cypher, params=None):
+            return SimpleNamespace(result_set=[[1]])
+
+    db = MagicMock()
+    db.select_graph = lambda name: _SlowGraph() if name == "episodic" else _FastGraph()
+
+    # Fast ontology first: it completes instantly; the hanging one then burns
+    # the shared deadline. dispatch must return at ~timeout regardless.
+    start = time.monotonic()
+    results, errors = dispatch(["epistemic", "episodic"], db, timeout=0.2)
+    elapsed = time.monotonic() - start
+
+    assert "epistemic" in results
+    assert errors.get("episodic") == "timeout"
+    assert elapsed < 1.5, \
+        f"dispatch blocked {elapsed:.2f}s on a hung query — deadline not enforced"
+    print("✓ dispatch deadline enforced")
+
+
+def test_parse_node_malformed_inputs_no_crash():
+    """#331: malformed node shapes must not crash _parseNode/dispatch."""
+    from tortoise.memory_orchestrator import _parseNode
+    for bad in (None, [], [1], [1, []], [1, ["L"], "junk"], "junk", 42):
+        try:
+            result = _parseNode(bad)
+        except Exception as e:  # noqa: BLE001
+            assert False, f"_parseNode({bad!r}) raised {type(e).__name__}: {e}"
+        assert isinstance(result, dict), f"_parseNode({bad!r}) -> {result!r}"
+    print("✓ _parseNode malformed inputs")
+
+
+def test_parse_node_partial_properties_tolerated():
+    """#331: malformed [[k,v]] pairs are skipped, valid ones survive."""
+    from tortoise.memory_orchestrator import _parseNode
+    node = [7, ["Point"], [["content", "ok"], ["bad", "pair", "extra"], "nope"]]
+    result = _parseNode(node)
+    assert result["id"] == "7"
+    assert result["type"] == "Point"
+    assert result["content"] == "ok"
+    print("✓ _parseNode partial properties")
+
+def test_parse_node_unhashable_property_key_no_crash():
+    """#331 (review r2): a property pair with an unhashable key (e.g.
+    [["k"], "v"]) must be skipped, not raise TypeError mid-dispatch."""
+    from tortoise.memory_orchestrator import _parseNode
+    node = [9, ["Point"], [[["k"], "v"], ["content", "ok"]]]
+    result = _parseNode(node)
+    assert result["id"] == "9"
+    assert result["type"] == "Point"
+    assert result["content"] == "ok"
+    assert len(result) == 3  # id, type, content — junk pair dropped
+    print("✓ _parseNode unhashable property key")
+
+
+def test_parse_node_dict_preserves_existing_id_type():
+    """#331 (review r2): a dict-shaped node keeps its own id/type —
+    the unknown fallback only fills MISSING keys."""
+    from tortoise.memory_orchestrator import _parseNode
+    result = _parseNode({"id": "p1", "type": "Person", "name": "Ada"})
+    assert result["id"] == "p1"
+    assert result["type"] == "Person"
+    assert result["name"] == "Ada"
+    # and a dict without id/type still degrades instead of crashing
+    result2 = _parseNode({"name": "x"})
+    assert result2["id"] == "unknown"
+    assert result2["type"] == "unknown"
+    print("✓ _parseNode dict preserves id/type")
+

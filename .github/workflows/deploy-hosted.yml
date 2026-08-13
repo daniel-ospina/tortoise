@@ -1,4 +1,42 @@
 # Deploy Tortoise Hosted API to Fly.io
+#
+# ══ #669 FLIP SEQUENCE (issue #771, plan Task 10.2 — no auth-blackout) ════
+# This workflow is step 3 of the single-deploy flip. The FULL sequence:
+#   1. Pre-deploy gate PASSES: `.github/scripts/verify-cutover` (CI job
+#      `flip-gate` in ci.yml; the operator additionally runs it --live with
+#      prod creds: TORTOISE_DB_URI + SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY).
+#   2. Dispatch `supabase-deploy` (workflow_dispatch-only since #771):
+#      migrations + waitlist-subscribe + tenant-provision Edge Functions.
+#   3. DISPATCH THIS WORKFLOW — the app flips to reading Supabase (#767).
+#      Steps 2+3 are the "single deploy": never run step 3 without step 2
+#      (the app would read Supabase before the Edge Function writes it) and
+#      never let step 2 sit alone (new signups' keys would be unreadable).
+#   4. Post-flip verification incl. E2E-7 (#766, the next issue).
+#   5. Registry delete (point of no return, owner informed):
+#      TORTOISE_DB_URI=... .github/scripts/delete-registry --confirm
+#      (TORTOISE_SUPPRESS_ENUM_DELTA=1 on the app for the flip window).
+# ══════════════════════════════════════════════════════════════════════════
+#
+# Token scoping (#660): the deploy step uses a deploy-only token
+# (FLY_API_TOKEN_DEPLOY, created via `fly tokens create deploy`). The
+# secrets-set step still uses the full FLY_API_TOKEN because `flyctl
+# secrets set` requires full org access. Operator setup:
+#   fly tokens create deploy --app tortoise-y4mjjq
+#   gh secret set FLY_API_TOKEN_DEPLOY --body "<token>"
+# After rotation, remove the old FLY_API_TOKEN from the secrets-set step
+# (create a new full-scope token, set as FLY_API_TOKEN, delete old).
+# See docs/ops/fly-token-hardening.md for full runbook.
+#
+# Stripe billing ops checklist (owner-executed, #310 — see
+# docs/plans/2026-08-08-310-stripe-billing.md §6 Runtime Prerequisites):
+#   1. Register webhook endpoint https://api.premiselabs.co/webhooks/stripe
+#      with events: checkout.session.completed, invoice.payment_failed,
+#      customer.subscription.updated, customer.subscription.deleted.
+#   2. Enable the Customer Portal config (subscription management).
+#   3. Create the 8 price ids (4 tiers × monthly/annual, annual −20%) and
+#      paste them into STRIPE_PRICE_IDS (existing Apresto account — do NOT
+#      create a new Stripe account; keep test/live key separation).
+#   4. Set RESEND_API_KEY + BILLING_NOTIFY_TO on Fly (already in GH secrets).
 name: Deploy Hosted API
 
 on:
@@ -11,29 +49,140 @@ on:
       - 'entrypoint.sh'
       - 'requirements.txt'
       - 'pyproject.toml'
+      - 'uv.lock'
   workflow_dispatch:
+
+concurrency:
+  group: deploy-hosted
+  cancel-in-progress: true
 
 jobs:
   deploy-api:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: '3.12'
+          # Pin the uv version that generated uv.lock — a patch bump (e.g.
+          # 0.12.2 → 0.12.3) can flag the lock as stale under --check (#493).
+          version: '0.12.3'
+      - name: Dependency parity gate — pyproject ↔ uv.lock ↔ requirements.txt (#494)
+        # Fail-closed: the image installs ONLY from requirements.txt, so a
+        # drifted lock or hand-edited requirements file must never deploy.
+        # Comment lines + the "." line (uv exports the root project as a
+        # non-editable local path) are stripped from both sides — the
+        # committed file intentionally omits it.
+        run: |
+          uv lock --check
+          uv export --frozen --no-dev --no-editable | grep -vE '^#|^\.$' > /tmp/expected-reqs.txt
+          grep -vE '^#|^\.$' requirements.txt > /tmp/committed-reqs.txt
+          diff -u /tmp/committed-reqs.txt /tmp/expected-reqs.txt
       - uses: superfly/flyctl-actions/setup-flyctl@master
       - name: Verify secrets exist
         run: |
+          # Core secrets are mandatory — the API cannot boot without them.
           if [ -z "${{ secrets.FASTAPI_INTERNAL_KEY }}" ] || [ -z "${{ secrets.TORTOISE_SECRET_PEPPER }}" ] || [ -z "${{ secrets.FALKORDB_CLOUD_URI }}" ]; then
             echo "::error::FASTAPI_INTERNAL_KEY, TORTOISE_SECRET_PEPPER, and FALKORDB_CLOUD_URI must be set in GitHub secrets"
             exit 1
           fi
+          # Stripe billing (#310): the two keys are hard-required so a deploy
+          # never ships with billing silently dead. STRIPE_PRICE_IDS / Resend /
+          # BILLING_* are warn-only — they degrade lazily at runtime (billing
+          # endpoints 503, notifications skipped) until configured.
+          if [ -z "${{ secrets.STRIPE_SECRET_KEY }}" ] || [ -z "${{ secrets.STRIPE_WEBHOOK_SECRET }}" ]; then
+            echo "::error::STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET must be set in GitHub secrets"
+            exit 1
+          fi
+          if [ -z "${{ secrets.STRIPE_PRICE_IDS }}" ]; then
+            echo "::warning::STRIPE_PRICE_IDS not set — checkout/webhook tier resolution disabled until configured"
+          fi
+          if [ -z "${{ secrets.RESEND_API_KEY }}" ] || [ -z "${{ secrets.BILLING_NOTIFY_TO }}" ]; then
+            echo "::warning::RESEND_API_KEY/BILLING_NOTIFY_TO not set — billing email notifications disabled until configured"
+          fi
+          # Backup (TORTOISE_BACKUP_KEY + R2_*) is env-gated at runtime and
+          # Pro-tier-only — missing secrets degrade gracefully (backup
+          # endpoints 402/503), so warn instead of blocking the deploy (#545).
+          if [ -z "${{ secrets.TORTOISE_BACKUP_KEY }}" ]; then
+            echo "::warning::TORTOISE_BACKUP_KEY not set — backups disabled until configured"
+          fi
+          if [ -z "${{ secrets.R2_ACCOUNT_ID }}" ] || [ -z "${{ secrets.R2_BUCKET }}" ]; then
+            echo "::warning::R2_* secrets not fully set — backup storage disabled until configured"
+          fi
       - name: Set all app secrets on Fly.io (keeps in sync with GitHub/Supabase)
         run: |
-          flyctl secrets set \
-            FASTAPI_INTERNAL_KEY="${{ secrets.FASTAPI_INTERNAL_KEY }}" \
-            TORTOISE_SECRET_PEPPER="${{ secrets.TORTOISE_SECRET_PEPPER }}" \
-            FALKORDB_CLOUD_URI="${{ secrets.FALKORDB_CLOUD_URI }}" \
-            --app tortoise-y4mjjq
+          ARGS="FASTAPI_INTERNAL_KEY=${{ secrets.FASTAPI_INTERNAL_KEY }} TORTOISE_SECRET_PEPPER=${{ secrets.TORTOISE_SECRET_PEPPER }} FALKORDB_CLOUD_URI=${{ secrets.FALKORDB_CLOUD_URI }}"
+          # Stripe billing (#310): pass all billing secrets when present.
+          ARGS="$ARGS STRIPE_SECRET_KEY=${{ secrets.STRIPE_SECRET_KEY }} STRIPE_WEBHOOK_SECRET=${{ secrets.STRIPE_WEBHOOK_SECRET }}"
+          [ -n "${{ secrets.STRIPE_PRICE_IDS }}" ] && ARGS="$ARGS STRIPE_PRICE_IDS=${{ secrets.STRIPE_PRICE_IDS }}"
+          [ -n "${{ secrets.RESEND_API_KEY }}" ] && ARGS="$ARGS RESEND_API_KEY=${{ secrets.RESEND_API_KEY }}"
+          [ -n "${{ secrets.BILLING_NOTIFY_TO }}" ] && ARGS="$ARGS BILLING_NOTIFY_TO=${{ secrets.BILLING_NOTIFY_TO }}"
+          [ -n "${{ secrets.BILLING_SUCCESS_URL }}" ] && ARGS="$ARGS BILLING_SUCCESS_URL=${{ secrets.BILLING_SUCCESS_URL }}"
+          [ -n "${{ secrets.BILLING_CANCEL_URL }}" ] && ARGS="$ARGS BILLING_CANCEL_URL=${{ secrets.BILLING_CANCEL_URL }}"
+          # Optional (env-gated at runtime): only pass when set, so unconfigured
+          # backups / GitHub OAuth never fail the deploy.
+          [ -n "${{ secrets.TORTOISE_BACKUP_KEY }}" ] && ARGS="$ARGS TORTOISE_BACKUP_KEY=${{ secrets.TORTOISE_BACKUP_KEY }}"
+          [ -n "${{ secrets.R2_ACCOUNT_ID }}" ] && ARGS="$ARGS R2_ACCOUNT_ID=${{ secrets.R2_ACCOUNT_ID }}"
+          [ -n "${{ secrets.R2_ACCESS_KEY_ID }}" ] && ARGS="$ARGS R2_ACCESS_KEY_ID=${{ secrets.R2_ACCESS_KEY_ID }}"
+          [ -n "${{ secrets.R2_SECRET_ACCESS_KEY }}" ] && ARGS="$ARGS R2_SECRET_ACCESS_KEY=${{ secrets.R2_SECRET_ACCESS_KEY }}"
+          [ -n "${{ secrets.R2_BUCKET }}" ] && ARGS="$ARGS R2_BUCKET=${{ secrets.R2_BUCKET }}"
+          # Backup sweep (#596): dual-channel alerting needs the Telegram pair +
+          # the GitHub PAT; BACKUP_SWEEP_ENABLED=true only when ALL required
+          # syncable secrets are present (fail-closed default — a missing
+          # secret keeps the sweep off, never crashes the boot, #545).
+          [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && ARGS="$ARGS TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}"
+          [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ] && ARGS="$ARGS TELEGRAM_CHAT_ID=${{ secrets.TELEGRAM_CHAT_ID }}"
+          [ -n "${{ secrets.DR_ISSUES_PAT }}" ] && ARGS="$ARGS DR_ISSUES_PAT=${{ secrets.DR_ISSUES_PAT }}"
+          [ -n "${{ secrets.BACKUP_ALERT_ASSIGNEE }}" ] && ARGS="$ARGS BACKUP_ALERT_ASSIGNEE=${{ secrets.BACKUP_ALERT_ASSIGNEE }}"
+          [ -n "${{ secrets.BACKUP_SIMULATE_ENABLED }}" ] && ARGS="$ARGS BACKUP_SIMULATE_ENABLED=${{ secrets.BACKUP_SIMULATE_ENABLED }}"
+          if [ -n "${{ secrets.TORTOISE_BACKUP_KEY }}" ] && [ -n "${{ secrets.R2_ACCOUNT_ID }}" ] && [ -n "${{ secrets.R2_ACCESS_KEY_ID }}" ] && [ -n "${{ secrets.R2_SECRET_ACCESS_KEY }}" ] && [ -n "${{ secrets.R2_BUCKET }}" ] && [ -n "${{ secrets.TELEGRAM_BOT_TOKEN }}" ] && [ -n "${{ secrets.TELEGRAM_CHAT_ID }}" ] && [ -n "${{ secrets.DR_ISSUES_PAT }}" ] && [ -n "${{ secrets.BACKUP_ALERT_ASSIGNEE }}" ]; then
+            ARGS="$ARGS BACKUP_SWEEP_ENABLED=true"
+            echo "::notice::BACKUP_SWEEP_ENABLED=true — all backup-sweep secrets present"
+            # REGISTRY_STREAM_KEY is deliberately NOT synced from GH (#661).
+            # The operator must set it out-of-band on Fly:
+            #   fly secrets set REGISTRY_STREAM_KEY=... --app tortoise-y4mjjq
+            # When BACKUP_SWEEP_ENABLED=true, a missing REGISTRY_STREAM_KEY
+            # fails-closed at config-load time (the app boots but /sweep 503s).
+            echo "::notice::REGISTRY_STREAM_KEY — ensure the operator has set this Fly secret out-of-band (#661)"
+          else
+            echo "::warning::backup sweep secrets incomplete — BACKUP_SWEEP_ENABLED left off (fail-closed)"
+          fi
+          # GitHub OAuth (#542): GH_CLIENT_ID/GH_CLIENT_SECRET (GitHub reserves GITHUB_* prefix) + encryption key —
+          # warn-only until the OAuth app is registered and secrets set.
+          if [ -z "${{ secrets.GH_CLIENT_ID }}" ] || [ -z "${{ secrets.GH_CLIENT_SECRET }}" ]; then
+            echo "::warning::GH_CLIENT_ID/GH_CLIENT_SECRET not set — GitHub OAuth disabled until configured (#542)"
+          fi
+          if [ -z "${{ secrets.TORTOISE_ENCRYPTION_KEY }}" ]; then
+            echo "::warning::TORTOISE_ENCRYPTION_KEY not set — token encryption unavailable until configured (#542)"
+          fi
+          [ -n "${{ secrets.GH_CLIENT_ID }}" ] && ARGS="$ARGS GITHUB_CLIENT_ID=${{ secrets.GH_CLIENT_ID }}"
+          [ -n "${{ secrets.GH_CLIENT_SECRET }}" ] && ARGS="$ARGS GITHUB_CLIENT_SECRET=${{ secrets.GH_CLIENT_SECRET }}"
+          [ -n "${{ secrets.GH_CALLBACK_URL }}" ] && ARGS="$ARGS GITHUB_CALLBACK_URL=${{ secrets.GH_CALLBACK_URL }}"
+          [ -n "${{ secrets.TORTOISE_ENCRYPTION_KEY }}" ] && ARGS="$ARGS TORTOISE_ENCRYPTION_KEY=${{ secrets.TORTOISE_ENCRYPTION_KEY }}"
+          # #528 server analytics (PostHog) — absent key → analytics module no-ops.
+          [ -n "${{ secrets.POSTHOG_API_KEY }}" ] && ARGS="$ARGS POSTHOG_API_KEY=${{ secrets.POSTHOG_API_KEY }}"
+          [ -n "${{ secrets.POSTHOG_HOST }}" ] && ARGS="$ARGS POSTHOG_HOST=${{ secrets.POSTHOG_HOST }}"
+          # #308 signup CAPTCHA (Cloudflare Turnstile) — absent secret → API
+          # fails open (signup works, warning logged), matching the optional
+          # env-gated feature pattern.
+          [ -n "${{ secrets.TURNSTILE_SECRET_KEY }}" ] && ARGS="$ARGS TURNSTILE_SECRET_KEY=${{ secrets.TURNSTILE_SECRET_KEY }}"
+          flyctl secrets set --stage $ARGS --app tortoise-y4mjjq
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-      - run: flyctl deploy --remote-only --wait-timeout 300 --app tortoise-y4mjjq
+      - name: Deploy (retry through Fly lease/API races)
+        # Uses app-scoped deploy token (#660). NOTE (verified 2026-08-09):
+        # app-scoped deploy tokens CAN still manage this app's secrets —
+        # the security win is APP-scoping (org-wide blast radius → one app),
+        # not secrets isolation. The secrets-set step above keeps the
+        # full-scope FLY_API_TOKEN for cross-app/org operations.
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if flyctl deploy --remote-only --wait-timeout 420 --app tortoise-y4mjjq; then
+              exit 0
+            fi
+            echo "::warning::deploy attempt $attempt failed — waiting 45s before retry (Fly lease/API race)"
+            sleep 45
+          done
+          exit 1
         env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN_DEPLOY }}

@@ -1,9 +1,11 @@
 # Product Strategy Domain Extension
 # Product, Feature, Customer, Competitor, Market concepts.
+# Manifest v3 (epic #909, research-r6 §4) — kindDefs, productDelivery chain,
+# extractable relations, extraction activation + enforcement config.
 
 namespace: product-strategy
 name: "Product Strategy"
-version: "0.1.0"
+version: "0.2.0"          # bumped: extractor-readable business logic (R6)
 tier: free
 description: "Product strategy concepts — products, features, customers, competitors, markets"
 
@@ -17,9 +19,16 @@ ontology:
     - competitor
     - customerSegment
     - market
+    - requirement        # NEW — chain step 5; equivalent to dev:requirement
+    - architecture       # NEW — chain step 6; the design/structural artifact
 
   subclassOf:
     feature: WorkItem
+    requirement: WorkItem
+    architecture: Document
+
+  equivalentTo:
+    requirement: [dev:requirement]
 
   pointKinds:
     - jobToBeDone
@@ -33,6 +42,67 @@ ontology:
     - productSpec
     - featureSpec
 
+  # ── NEW: per-kind extractor metadata ─────────────────────────────────────
+  kindDefs:
+    product:
+      description: "A marketable offering the company sells"
+      examples: ["Tortoise", "El Dato"]
+      nearMisses: [feature]
+    feature:
+      description: "A capability of the product that delivers value to a customer segment"
+      synonyms: ["capability", "function"]
+      nearMisses: [product, requirement]
+    customer:
+      description: "An organization or person who buys or uses the product"
+      nearMisses: [customerSegment]
+    customerSegment:
+      description: "A group of customers with shared needs the product targets"
+      synonyms: ["segment", "target market"]
+      nearMisses: [customer, market]
+    market:
+      description: "The competitive arena the product operates in"
+      nearMisses: [customerSegment]
+    competitor:
+      description: "An organization offering a product that competes with ours"
+    useCase:
+      description: "A concrete scenario in which a user achieves a goal using the product"
+      synonyms: ["use case"]
+      examples: ["As a PM I can see the roadmap so I can plan releases"]
+      nearMisses: [userJourney, jobToBeDone, requirement]
+      enforcement: retry      # confusable group → corrective retry before accept
+    userJourney:
+      description: "The ordered steps a user takes to complete a goal with the product"
+      synonyms: ["journey", "flow"]
+      examples: ["signup → first import → first query → subscribe"]
+      nearMisses: [useCase, workflow]
+      enforcement: retry
+    jobToBeDone:
+      description: "The underlying job a customer hires the product to do"
+      synonyms: ["jtbd"]
+      nearMisses: [useCase]
+    valueProposition:
+      description: "Why a customer segment should choose this product over alternatives"
+      synonyms: ["value prop"]
+    workflow:
+      description: "A reusable procedural sequence (core kind; chain step 4)"
+      nearMisses: [userJourney]
+    requirement:
+      description: "A stated need a feature must satisfy (≡ dev:requirement)"
+      nearMisses: [useCase, feature]
+    architecture:
+      description: "The design and structural decisions for how a solution is built"
+      synonyms: ["architecture design"]
+      nearMisses: [feature]
+
+  # ── NEW: the owner's business-logic chain, first-class ──────────────────
+  chains:
+    - id: productDelivery
+      name: "Product Delivery Chain"
+      description: "How product strategy flows into shipped architecture"
+      steps: [useCase, feature, userJourney, workflow, requirement, architecture]
+      enforcement: warn       # bypass → warn (block is opt-in per pack)
+
+  # ── relations: existing 4 + 2 new chain edges (extractable) ─────────────
   relations:
     - predicate: contains
       mechanism: IMPL
@@ -59,9 +129,33 @@ ontology:
       fromKind: product-strategy:product
       toKind: product-strategy:customerSegment
 
+    - predicate: addresses                     # NEW — chain edge the extractor may assert
+      mechanism: IMPL
+      semantics: addresses
+      fromKind: product-strategy:useCase
+      toKind: product-strategy:feature
+      extractable: true
+
+    - predicate: addresses
+      mechanism: IMPL
+      semantics: addresses
+      fromKind: product-strategy:requirement
+      toKind: product-strategy:architecture
+      extractable: true
+
   hierarchies:
     - path: "Product → Feature"
       type: hasPart
+
+# ── NEW: extraction activation + enforcement config ───────────────────────
+extraction:
+  active: true
+  sourceTypes: [conversation, document]
+  enforcement:
+    default: warn
+    kinds:
+      useCase: retry
+      userJourney: retry
 
 connectors: []
 tools: []

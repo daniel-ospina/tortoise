@@ -1,0 +1,42 @@
+# Tortoise Self-Host — Docker image (#338 D2/T4.1)
+# Thin single-tenant daemon: MCP Streamable HTTP at /mcp + /health.
+# NO Supabase, NO hosted machinery. DB: external FalkorDB via TORTOISE_DB_URI
+# (recommended, see docker-compose.yml) or embedded FalkorDBLite (eval only —
+# NOT durable; see docs/license-notes.md §4 and the 2026-08-05 incident #101).
+#
+# Modeled on Dockerfile.hosted (bookworm variant avoids Docker Hub anonymous
+# rate limits; build pattern + python-ci job structure).
+FROM python:3.12-slim-bookworm
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY tortoise/ tortoise/
+COPY pyproject.toml .
+# --no-deps on the editable install: dependencies come from the lock-pinned
+# requirements.txt above; extras resolve here once, at build time (#494).
+RUN pip install --no-cache-dir '.[embeddings]' \
+    && pip install --no-cache-dir -e . --no-deps
+
+# NOTE: unlike Dockerfile.hosted (which bakes the embedding model at build
+# time because Fly's sandbox blocks runtime network), self-host runs on the
+# operator's own Docker — the model downloads on first use, on demand.
+ENV HF_HOME=/app/model
+ENV SENTENCE_TRANSFORMERS_HOME=/app/model
+
+EXPOSE 8000
+
+# Embedded-eval DB path (code-review P1, #338): the engine resolves
+# TORTOISE_DB_PATH (via config.resolve_db_path) — make /data exist and point
+# the default there so the documented `docker run` eval path works and
+# /health/ready matches the engine's real DB.
+RUN mkdir -p /data
+ENV TORTOISE_DB_PATH=/data/tortoise.db
+
+CMD ["uvicorn", "tortoise.selfhost:app", "--host", "0.0.0.0", "--port", "8000"]

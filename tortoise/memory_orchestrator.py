@@ -126,7 +126,20 @@ def dispatch(
     import time
     deadline = time.monotonic() + timeout
 
-    with ThreadPoolExecutor(max_workers=len(ontologies)) as ex:
+    # #331: explicit executor (not `with`) — ThreadPoolExecutor.__exit__
+    # calls shutdown(wait=True), which BLOCKS until every in-flight query
+    # finishes. A hung ontology query would then defeat the per-future
+    # deadline entirely (timeout was fake). wait=False lets the deadline
+    # actually bound dispatch.
+    #
+    # Known trade-off (code-review r2): a timed-out query's worker thread
+    # keeps running until the query returns — ThreadPoolExecutor workers
+    # are non-daemon and concurrent.futures' atexit hook joins them, so a
+    # query that NEVER returns delays interpreter shutdown. cancel_futures
+    # drops queued-but-unstarted work; the FalkorDB client's socket timeout
+    # (docker mode) is what bounds the running ones.
+    ex = ThreadPoolExecutor(max_workers=len(ontologies))
+    try:
         # Submit all futures in parallel, then wait per-future with timeout
         pending: dict[str, Future] = {}
         for ont in ontologies:
@@ -136,16 +149,20 @@ def dispatch(
             pending[ont] = ex.submit(_queryOntology, db, ont, cypherMap[ont], cypherParams)
 
         for ont, f in pending.items():
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                errors[ont] = "timeout"
-                continue
+            # #331 (review r5): clamp remaining to >= 0 instead of
+            # shortcutting — f.result(timeout=0) returns an
+            # already-completed future immediately, so a fast ontology
+            # listed after a slow one keeps its result instead of being
+            # misreported as a timeout (order-sensitive data loss).
+            remaining = max(deadline - time.monotonic(), 0.0)
             try:
                 results[ont] = f.result(timeout=remaining)
             except TimeoutError:
                 errors[ont] = "timeout"
             except Exception as e:
                 errors[ont] = str(e)
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
 
     if not results and errors:
         raise OrchestratorError(errors)
@@ -173,6 +190,8 @@ def _parseNode(node: Any) -> dict:
 
     FalkorDB 1.6+ returns Node objects with .id, .labels, .properties.
     Also handles raw list form [id, [labels], [[k,v],...]] for testing.
+    Malformed node shapes (None, short lists, junk) degrade to a dict
+    with unknown id/type instead of crashing the dispatch (#331).
     """
     if hasattr(node, 'properties'):
         # FalkorDB Node object
@@ -180,10 +199,34 @@ def _parseNode(node: Any) -> dict:
         props["id"] = str(node.id)
         props["type"] = node.labels[0] if node.labels else "unknown"
         return props
+    # Dict-shaped node: preserve any existing keys — only fill id/type
+    # when absent (code-review r2: unconditional overwrite corrupted
+    # valid dict nodes into id='unknown').
+    if isinstance(node, dict):
+        props = dict(node)
+        props.setdefault("id", "unknown")
+        props.setdefault("type", "unknown")
+        return props
     # Raw list form: [id, [labels], [[k, v], ...]]
-    props = {k: v for k, v in node[2]}
-    props["id"] = str(node[0])
-    props["type"] = node[1][0] if node[1] else "unknown"
+    props: dict[str, Any] = {}
+    if (isinstance(node, (list, tuple)) and len(node) >= 3
+            and isinstance(node[2], (list, tuple))):
+        for pair in node[2]:
+            # Only well-formed [k, v] pairs with a hashable key survive;
+            # anything else is malformed and skipped (e.g.
+            # ['bad','pair','extra'], 'junk', [[...], v] — code-review r2:
+            # an unhashable key raised TypeError mid-dispatch).
+            if (isinstance(pair, (list, tuple)) and len(pair) == 2
+                    and isinstance(pair[0], (str, int, float, bool))):
+                props[pair[0]] = pair[1]
+    node_id = (node[0] if isinstance(node, (list, tuple)) and len(node) >= 1
+               else None)
+    labels = (node[1] if isinstance(node, (list, tuple)) and len(node) >= 2
+              else None)
+    props["id"] = str(node_id) if node_id is not None else "unknown"
+    props["type"] = (labels[0]
+                     if isinstance(labels, (list, tuple)) and labels
+                     else "unknown")
     return props
 
 

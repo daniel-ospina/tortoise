@@ -18,7 +18,7 @@
     :root {
       --bg: #060b14;
       --text: #cbd5e1;
-      --text-dim: #64748b;
+      --text-dim: #94a3b8;
       --accent: #06b6d4;
       --accent-glow: rgba(6, 182, 212, 0.35);
       --green: #4ade80;
@@ -38,7 +38,7 @@
       -webkit-font-smoothing: antialiased;
     }
 
-    #scroll-wrapper { height: 600vh; position: relative; }
+    #scroll-wrapper { height: 630vh; position: relative; }
 
     canvas {
       position: fixed; top: 0; left: 0; width: 100%; height: 100%;
@@ -54,23 +54,98 @@
       box-sizing: border-box;
     }
 
-    /* Specific beats get pointer events for interactive elements */
-    #beat-cta { pointer-events: auto; overflow-y: auto; }
+    /* Text selection: beats receive pointer events ONLY while visible. The
+       full-screen overlay must never swallow clicks when invisible (#744), so
+       GSAP toggles .pe-on from the scrubbed opacity — visible beat = selectable
+       text, faded-out beats = click-through. */
+    .beat.pe-on { pointer-events: auto; user-select: text; }
+
+    /* Beats are fixed full-viewport crossfade overlays — ONLY for short story
+       beats (hero/capture/recall/reason). Pricing + CTA are NORMAL document-flow
+       sections (real scroll, working links, no clipping) below the narrative. */
+    .content-section {
+      position: relative; z-index: 2; background: var(--bg);
+      opacity: 1; pointer-events: auto;
+      padding: 6rem 2rem 5rem; box-sizing: border-box;
+    }
+
+    /* Pricing section (El Dato component shape, Tortoise colors) */
+    #pricing-section { text-align: center; }
+    #pricing-section h2 { font-family: var(--serif); font-size: clamp(1.6rem, 3.5vw, 2.6rem); font-weight: 400; color: var(--text); text-align: center; margin-bottom: 0.4rem; }
+    #pricing-section .pricing-sub { color: var(--text); text-align: center; max-width: 640px; margin: 0 auto 2rem; font-size: 14px; }
+    .pricing-toggle { display: flex; align-items: center; gap: 0.25rem; background: #0d1a2d; border: 1px solid var(--border, #1e293b); border-radius: 9999px; padding: 0.25rem; margin: 0 auto 2.5rem; width: fit-content; }
+    .pricing-toggle button { padding: 0.375rem 1.25rem; border-radius: 9999px; border: 1px solid #d1d5db; font-size: 0.875rem; font-weight: 500; cursor: pointer; background: transparent; color: var(--text-dim); transition: all 0.15s; font-family: var(--mono); }
+    .pricing-toggle button.active { background: var(--accent); color: #04121a; border-color: var(--accent); }
+    .pricing-toggle .badge { display: inline-block; font-size: 0.625rem; font-weight: 700; padding: 0.125rem 0.375rem; border-radius: 9999px; background: var(--green); color: #04121a; margin-left: 0.375rem; }
+    .pricing-grid { display: flex; justify-content: center; gap: 1.5rem; flex-wrap: wrap; max-width: 1100px; margin: 0 auto; }
+    .pricing-card { background: #0d1a2d; border: 1px solid #1e293b; border-radius: 1rem; padding: 1.75rem; position: relative; max-width: 250px; flex: 1; min-width: 230px; transition: border-color 0.2s; }
+    .pricing-card.popular { border: 2px solid var(--accent); }
+    .popular-tag { position: absolute; top: -0.75rem; left: 50%; transform: translateX(-50%); background: var(--accent); color: #04121a; font-size: 0.75rem; font-weight: 600; padding: 0.25rem 1rem; border-radius: 9999px; white-space: nowrap; }
+    .pricing-card h3 { font-size: 1.1rem; margin-bottom: 0.4rem; color: var(--text); }
+    .price { font-size: 2rem; font-weight: 700; color: var(--text); }
+    .price span { font-size: 0.9rem; font-weight: 400; color: var(--text-dim); }
+    .billing { font-size: 0.8rem; color: var(--text-dim); margin-bottom: 1.25rem; }
+    .features { display: flex; flex-direction: column; gap: 0.55rem; margin-bottom: 1.25rem; }
+    .feature { display: flex; align-items: center; gap: 0.5rem; font-size: 0.8rem; color: var(--text); }
+    .feature svg { width: 0.9rem; height: 0.9rem; flex-shrink: 0; }
+    .feature .x { color: #f87171; margin-right: 0.25rem; }
+    .feature .muted { color: var(--text-dim); opacity: 0.7; }
+    .pricing-card .btn { display: block; text-align: center; background: var(--accent); color: #04121a; padding: 0.6rem 1rem; border-radius: 0.5rem; text-decoration: none; font-weight: 600; font-size: 0.85rem; transition: background 0.2s; }
+    .pricing-card .btn:hover { background: var(--accent-hover, #0891b2); }
+    .pricing-card .btn.secondary { background: #1e293b; color: var(--text); }
+    .pricing-usage { text-align: center; color: var(--text); font-size: 0.85rem; margin: 1.75rem auto 0; }
+
+    .selfhost { max-width: 900px; margin: 2rem auto 0; background: #0d1a2d; border: 1px solid #1e293b; border-radius: 1rem; padding: 1.5rem; }
+    .selfhost h4 { color: var(--green); font-size: 0.95rem; margin-bottom: 0.5rem; }
+    .selfhost p { color: var(--text); font-size: 0.85rem; margin-bottom: 0.75rem; }
+    .selfhost .license { color: var(--text-dim); font-size: 0.8rem; margin-bottom: 1rem; }
+    .selfhost .actions { display: flex; gap: 1rem; flex-wrap: wrap; justify-content: center; }
+    .selfhost a { color: var(--accent); text-decoration: none; font-size: 0.85rem; border: 1px solid var(--accent); padding: 0.5rem 1rem; border-radius: 0.5rem; }
+    .selfhost a:hover { background: var(--accent); color: #04121a; }
 
     #beat-hero { opacity: 1; }
 
-    /* Scroll indicator */
-    #scroll-hint {
-      position: fixed; bottom: 3.5rem; left: 50%; transform: translateX(-50%);
-      z-index: 3; pointer-events: none;
-      width: 0; height: 0;
-      border-left: 12px solid transparent;
-      border-right: 12px solid transparent;
-      border-top: 16px solid var(--accent);
-      opacity: 1;
-    }
-
     /* Hero headline */
+    /* Beat number (01 · Ingest, etc.) */
+    .beat-num {
+      font-family: var(--mono);
+      color: var(--accent);
+      font-size: 0.8em;
+      letter-spacing: 0.08em;
+      margin-right: 0.1em;
+    }
+    .beat h2 {
+      font-family: var(--serif);
+      font-size: clamp(1.5rem, 3vw, 2.2rem);
+      font-weight: 400;
+      color: var(--text);
+      text-align: center;
+    }
+    .beat h2 span { color: var(--accent); }
+
+    /* Workflow beats (01-04): soft dark backdrop behind the text so it reads
+       cleanly over the animated graph. A radial gradient + backdrop blur —
+       strongest right behind the text, fading out at the edges. */
+    .beat.workflow { position: fixed; }
+    .beat.workflow::before {
+      content: "";
+      position: absolute; top: 50%; left: 50%;
+      width: min(92vw, 880px); height: auto;
+      aspect-ratio: 16 / 9;
+      transform: translate(-50%, -50%);
+      background: radial-gradient(ellipse at center,
+        rgba(6, 11, 20, 0.82) 0%,
+        rgba(6, 11, 20, 0.55) 45%,
+        rgba(6, 11, 20, 0) 72%);
+      border-radius: 2rem;
+      pointer-events: none;
+      z-index: 0;
+    }
+    .beat.workflow h2, .beat.workflow p {
+      position: relative; z-index: 1;
+      text-shadow: 0 1px 3px rgba(6, 11, 20, 0.9), 0 0 24px rgba(6, 11, 20, 0.9);
+    }
+    .beat h2 + p { margin-top: 1.25rem; }
     #beat-hero h1 {
       font-family: var(--serif);
       font-size: clamp(1.8rem, 4vw, 3.2rem);
@@ -85,24 +160,17 @@
     #beat-hero .hero-sub {
       margin-top: 1.25rem;
       max-width: 560px;
-      color: var(--text-dim);
+      color: var(--text);
       font-size: clamp(0.95rem, 1.6vw, 1.1rem);
       line-height: 1.6;
     }
-    #beat-hero .hero-sub-value {
-      margin-top: 1.1rem;
-      color: var(--text);
-    }
-    #beat-hero .hero-sub-overmcp {
-      margin-top: 1.1rem;
-      color: var(--accent);
-    }
+
 
     /* Sub-beats */
     .beat p {
       font-family: var(--mono);
       font-size: clamp(0.85rem, 1.5vw, 1.05rem);
-      color: var(--text-dim);
+      color: var(--text);
       text-align: center;
       max-width: 560px;
       line-height: 1.7;
@@ -111,7 +179,13 @@
     .beat p em { color: var(--accent); font-style: normal; }
 
     /* CTA */
-    #beat-cta .cta-start {
+    /* Hero CTA — same look as the CTA section's button, centered in the beat.
+       The .beat overlay is pointer-events:none (fixed crossfade layers), so
+       the CTA must only receive events while its beat is visible. .beat.pe-on
+       (toggled by GSAP from the scrubbed opacity) sets pointer-events:auto on
+       the beat, which inherits to this link; when the beat fades out the link
+       becomes click-through — no mid-scroll accidental navigation (#881). */
+    #beat-hero .cta-start {
       display: inline-block;
       background: var(--accent);
       color: var(--bg);
@@ -122,182 +196,39 @@
       text-decoration: none;
       cursor: pointer;
       transition: background 0.2s, transform 0.2s;
-      margin-bottom: 2rem;
+      margin-top: 2.25rem;
     }
-    #beat-cta .cta-start:hover {
+    #beat-hero .cta-start:hover {
       background: #0891b2;
       transform: scale(1.02);
     }
-    #beat-cta .cta-subtle {
-      margin-top: 0;
-      margin-bottom: 1rem;
-      color: var(--text-dim);
-      font-size: 0.8rem;
+
+    #cta-section { text-align: center; }
+    #cta-section .social-links {
+      display: flex;
+      gap: 1.5rem;
+      justify-content: center;
+      margin-top: 2rem;
     }
-    #beat-cta .cta-step {
-      margin: 0.35rem 0 0.35rem;
-      color: var(--text);
-      font-size: 0.78rem;
-      text-align: left;
-      width: 100%;
-      max-width: 480px;
+    #cta-section .social-link {
+      color: #fff;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      transition: color 0.2s, opacity 0.2s;
     }
-    #beat-cta form {
-      display: flex; gap: 0.75rem; max-width: 400px; width: 100%;
+    #cta-section .social-link svg {
+      width: 24px;
+      height: 24px;
+      display: block;
     }
-    #beat-cta input[type="email"] {
-      flex: 1;
-      background: var(--bg);
-      border: 1px solid var(--text-dim);
-      color: var(--text);
-      padding: 0.7rem 1rem;
-      font-family: var(--mono);
-      font-size: 0.85rem;
-      border-radius: 0;
-    }
-    #beat-cta input[type="email"]:focus {
-      outline: none;
-      border-color: var(--accent);
-    }
-    #beat-cta button {
-      background: var(--bg);
-      color: var(--accent);
-      border: 1px solid var(--accent);
-      padding: 0.7rem 1.25rem;
-      font-family: var(--mono);
-      font-size: 0.85rem;
-      cursor: pointer;
-      transition: background 0.2s, color 0.2s;
-    }
-    #beat-cta button:hover {
-      background: var(--accent);
-      color: var(--bg);
-    }
-    #beat-cta .twitter-link {
-      margin-top: 1.5rem;
-      color: var(--text-dim);
-      text-decoration: none;
-      font-size: 0.8rem;
-      transition: color 0.2s;
-    }
-    #beat-cta .twitter-link:hover { color: var(--accent); }
+    #cta-section .social-link:hover { color: var(--accent); opacity: 0.85; }
 
     /* Success state */
-    #beat-cta .success-msg {
-      display: none;
-      color: var(--green);
-      font-size: 0.85rem;
-      text-align: center;
-      margin-top: 0.5rem;
-    }
 
     /* MCP snippet */
-    #beat-cta .mcp-snippet {
-      margin-top: 1.25rem;
-      margin-bottom: 1rem;
-      background: #0d1a2d; /* solid surface — readability */
-      border: 1px solid rgba(6, 182, 212, 0.2);
-      padding: 0.875rem 1rem;
-      border-radius: 4px;
-      text-align: left;
-      max-width: 480px;
-      width: 100%;
-      box-sizing: border-box;
-    }
-    #beat-cta .mcp-snippet .snippet-label {
-      font-size: 0.7rem;
-      text-transform: uppercase;
-      letter-spacing: 0.06em;
-      color: var(--text-dim);
-      margin-bottom: 0.5rem;
-    }
-    #beat-cta .mcp-snippet pre {
-      margin: 0;
-      overflow-x: auto;
-    }
-    #beat-cta .mcp-snippet code {
-      display: block;
-      color: var(--accent);
-      font-family: var(--mono);
-      font-size: 0.72rem;
-      line-height: 1.6;
-      white-space: pre-wrap;
-      word-break: break-word;
-    }
-    #beat-cta .mcp-snippet .snippet-note {
-      margin-top: 0.6rem;
-      font-size: 0.68rem;
-      color: var(--text-dim);
-      line-height: 1.4;
-    }
-    #beat-cta .copy-config-btn {
-      display: inline-block;
-      margin-top: 0.6rem;
-      padding: 0.4rem 0.9rem;
-      background: var(--accent);
-      color: var(--bg);
-      border: none;
-      border-radius: 4px;
-      font-family: var(--mono);
-      font-size: 0.72rem;
-      cursor: pointer;
-      transition: background 0.2s;
-    }
-    #beat-cta .copy-config-btn:hover {
-      background: #0891b2;
-    }
-    #beat-cta .copy-config-btn.copied {
-      background: var(--green);
-    }
 
     /* CLI snippet — demoted below MCP */
-    #beat-cta .cli-snippet {
-      margin-top: 0;
-      margin-bottom: 1.25rem;
-      background: #0a1626; /* solid surface — readability */
-      border: 1px solid rgba(6, 182, 212, 0.12);
-      padding: 0.625rem 1rem;
-      border-radius: 4px;
-      text-align: left;
-      max-width: 420px;
-      width: 100%;
-      box-sizing: border-box;
-      overflow-x: auto;
-    }
-    #beat-cta .cli-snippet .snippet-label {
-      font-size: 0.7rem;
-      text-transform: uppercase;
-      letter-spacing: 0.06em;
-      color: var(--text-dim);
-      margin-bottom: 0.4rem;
-    }
-    #beat-cta .cli-snippet code {
-      display: block;
-      color: var(--accent);
-      font-family: var(--mono);
-      font-size: 0.78rem;
-      line-height: 1.7;
-      white-space: pre-wrap;
-      word-break: break-word;
-    }
-
-    /* Self-hosting link */
-    #beat-cta .selfhost-link {
-      margin-top: 1.25rem;
-      color: var(--text-dim);
-      text-decoration: none;
-      font-size: 0.78rem;
-      transition: color 0.2s;
-    }
-    #beat-cta .selfhost-link:hover { color: var(--accent); }
-
-    /* Mobile */
-    @media (max-width: 640px) {
-      #beat-cta form { flex-direction: column; }
-      #beat-cta input[type="email"],
-      #beat-cta button { width: 100%; text-align: center; }
-      #scroll-wrapper { height: 800vh; }
-    }
 
     /* Subtle fade at bottom edges */
     #vignette {
@@ -305,80 +236,106 @@
       pointer-events: none; z-index: 2;
       background: radial-gradient(ellipse at center, transparent 55%, var(--bg) 85%);
     }
+
+    /* Legal footer */
+    .legal-footer {
+      position: relative; z-index: 2;   /* paint above the fixed graph canvas */
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 1rem 2rem;
+      padding: 2.5rem 2.5rem 3rem;
+      background: var(--bg);
+      color: var(--text-dim);
+      font-size: 0.78rem;
+      font-family: var(--mono);
+    }
+    .footer-logo { line-height: 0; }
+    .footer-logo img {
+      height: 44px;
+      width: auto;
+      opacity: 0.85;
+      filter: drop-shadow(0 0 14px rgba(34, 211, 238, 0.25));
+      transition: opacity 0.2s, filter 0.2s;
+    }
+    .footer-logo:hover img {
+      opacity: 1;
+      filter: drop-shadow(0 0 18px rgba(34, 211, 238, 0.45));
+    }
+    .footer-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem 1.5rem;
+    }
+    .legal-footer a {
+      color: var(--text-dim);
+      text-decoration: none;
+      transition: color 0.2s;
+    }
+    .legal-footer a:hover { color: var(--accent); }
   </style>
 </head>
 <body>
   <canvas id="graph-canvas"></canvas>
   <div id="vignette"></div>
-  <div id="scroll-hint"></div>
 
   <div id="scroll-wrapper">
     <section id="beat-hero" class="beat">
-      <h1>Your agents remember <span>why</span>, not just what.</h1>
-      <p class="hero-sub">Tortoise is a computational memory graph. Every relationship expresses how one belief affects another — when new evidence arrives, confidence propagates and your agent&rsquo;s world model updates.</p>
-      <p class="hero-sub hero-sub-value">Your agents make better decisions, waste fewer tokens, and their thinking becomes auditable and collaborative.</p>
-      <p class="hero-sub hero-sub-overmcp">Over MCP.</p>
+      <h1>Memory that makes your agents <span>smarter</span></h1>
+      <p class="hero-sub">Tortoise is the memory and reasoning system that enables your agents to make complex decisions without losing track of the variables or being swayed by the last message. They don&rsquo;t just recall facts. They understand why decisions were made and reason with auditable world models.</p>
+      <a href="/signup" class="cta-start hero-cta">Connect your agent →</a>
     </section>
-    <section id="beat-capture" class="beat">
-      <h2>Capture</h2>
-      <p>Agent sessions flow into a semantic graph automatically.</p>
-      <div class="cli-snippet">
-        <code>$ tortoise session capture --file chat.json</code>
-        <code>✓ 47 turns → 12 decisions, 8 claims, 3 hypotheses</code>
-      </div>
+    <section id="beat-how" class="beat">
+      <h2>A <span>computational</span> memory graph</h2>
+      <p>Every relationship expresses how one belief affects another. When new evidence arrives, confidence propagates through the graph and your agent&rsquo;s world model evolves.<br><br>Every decision becomes auditable and programmable. Your agents build on each other&rsquo;s work instead of wasting tokens reconstructing context.</p>
     </section>
-    <section id="beat-recall" class="beat">
-      <h2>Recall</h2>
-      <p>Future agents query the past — and answer from what you decided.</p>
-      <div class="cli-snippet">
-        <code>$ tortoise_suggest_entry_points("database architecture")</code>
-        <code>→ "Last session you decided FalkorDB Cloud (confidence 0.9)"</code>
-      </div>
+    <section id="beat-ingest" class="beat workflow">
+      <h2><span class="beat-num">01</span> · Ingest</h2>
+      <p>Automatically ingest agent sessions, GitHub issues, documents, Slack messages, Linear tasks, or any other data you want to connect. Index files for faster search or extract and organize logical claims to feed your agents&rsquo; world model.</p>
     </section>
-    <section id="beat-reason" class="beat">
-      <h2>Reason</h2>
-      <p>Belief propagation surfaces what's true — and what's been contradicted.</p>
-      <div class="cli-snippet">
-        <code>IMPL  a → b    confidence: 0.87</code>
-        <code>NAND  c → a    confidence: 0.72</code>
-      </div>
+    <section id="beat-reason" class="beat workflow">
+      <h2><span class="beat-num">02</span> · Reason</h2>
+      <p>Turn separate facts into a world model. Skills and MCP tools to analyze sources and organize arguments, evidence, alternatives, and decisions into logical graphs. Agents can reason across complex webs of variables while new evidence automatically updates confidence throughout the graph.</p>
     </section>
-    <section id="beat-cta" class="beat">
-      <a href="/signup" class="cta-start">Connect your agent →</a>
-      <p class="cta-subtle">5,000 Points free. No credit card. Start building in minutes.</p>
-      <p class="cta-step">1 · Sign up to get your API key, then either:</p>
-      <!-- MCP config — the agent integration path -->
-      <div class="mcp-snippet">
-        <div class="snippet-label">A · Connect your agent (MCP)</div>
-        <pre><code id="mcp-config-code">{
-  "mcpServers": {
-    "tortoise": {
-      "command": "python3",
-      "args": ["-m", "tortoise.mcp_server"],
-      "env": {
-        "TORTOISE_API_KEY": "tt_YOUR_KEY",
-        "TORTOISE_API_URL": "https://api.premiselabs.co"
-      }
-    }
-  }
-}</code></pre>
-        <button class="copy-config-btn" id="btn-copy-config" onclick="copyMcpConfig()"><span>Copy config</span></button>
-        <p class="snippet-note">Paste into <code>.mcp.json</code> (Claude Code), <code>.cursor/mcp.json</code> (Cursor), or <code>claude_desktop_config.json</code> (Claude Desktop). Replace <code>tt_YOUR_KEY</code> with the API key from signup — your agent then reads and writes Tortoise memory automatically.</p>
-      </div>
-      <p class="cta-step">2 · For scripting and automation, use the CLI:</p>
-      <div class="cli-snippet">
-        <div class="snippet-label">B · CLI quickstart</div>
-        <code>$ pip install git+https://github.com/daniel-ospina/tortoise.git</code>
-        <code>$ tortoise init --api-key &lt;key&gt;</code>
-        <code>$ tortoise create-point "Hello world" --kind statement</code>
-        <code>$ tortoise session capture --file chat.json</code>
-      </div>
-      <a class="selfhost-link" href="https://github.com/daniel-ospina/tortoise" target="_blank" rel="noopener">Self-hosting docs →</a>
-      <a class="selfhost-link" href="/docs">Docs</a>
-      <a class="selfhost-link" href="https://app.premiselabs.co">Login →</a>
-      <a class="twitter-link" href="https://x.com/premiselabs" target="_blank" rel="noopener">@premiselabs</a>
+    <section id="beat-recall" class="beat workflow">
+      <h2><span class="beat-num">03</span> · Recall</h2>
+      <p>Retrieve what matters, not just what matches. Combine graph traversal, vector search, and semantic retrieval with controls for time decay, confidence, and contradiction.</p>
+    </section>
+    <section id="beat-automate" class="beat workflow">
+      <h2><span class="beat-num">04</span> · Automate</h2>
+      <p>Set automated actions when confidence changes on a specific node. Use webhooks to trigger workflows, update systems, or coordinate agents as your world model evolves.</p>
     </section>
   </div>
+
+  <!-- Pricing — normal document-flow section (below the scroll narrative) -->
+    <section id="pricing-section" class="content-section">
+      <h2>Pricing</h2>
+      <p class="pricing-sub">Start free. Scale when your agents do — you pay for usage, not seats.</p>
+
+      <div class="pricing-toggle">
+        <button id="btn-monthly" class="active" aria-pressed="true" onclick="setBilling('monthly')">Monthly</button>
+        <button id="btn-annual" aria-pressed="false" onclick="setBilling('annual')"><span>Annual</span> <span class="badge" id="annual-badge">-20%</span></button>
+      </div>
+
+      <div class="pricing-grid" id="pricing-grid" aria-live="polite"><!-- cards rendered by pricing.js --></div>
+
+      <p class="pricing-usage" id="pricing-usage-line"></p>
+
+      <div class="selfhost" id="selfhost-section"></div>
+  </section>
+
+  <!-- CTA — normal document-flow section -->
+  <section id="cta-section" class="content-section">
+      <div class="social-links">
+        <a class="social-link" href="https://x.com/premiselabs" target="_blank" rel="noopener" aria-label="Premise Labs on X (Twitter)">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231L18.244 2.25Zm-1.161 17.52h1.833L7.084 4.126H5.117L17.083 19.77Z"/></svg>
+        </a>
+        <a class="social-link" href="https://www.linkedin.com/company/premiselabs" target="_blank" rel="noopener" aria-label="Premise Labs on LinkedIn">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.225 0z"/></svg>
+        </a>
+      </div>
+  </section>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/ScrollTrigger.min.js"></script>
@@ -462,8 +419,11 @@
 
     nodes.forEach((node, i) => {
       const stagger = i * 0.02;
-      tl.to(node, { _x: node.sx, _y: node.sy, r: node.r, duration: 0.12 }, 0.10 + stagger);
-      tl.to(node, { _x: node.tx, _y: node.ty, r: node.tr, duration: 0.5 }, 0.22 + stagger);
+      // Function-based values: GSAP re-reads node.sx/tx each tick, so
+      // distributeNodes() on resize re-targets the running tweens (the
+      // graph actually redistributes to the new viewport — #733-5).
+      tl.to(node, { _x: () => node.sx, _y: () => node.sy, r: () => node.r, duration: 0.12 }, 0.10 + stagger);
+      tl.to(node, { _x: () => node.tx, _y: () => node.ty, r: () => node.tr, duration: 0.5 }, 0.22 + stagger);
     });
 
     /* ── Render loop ── */
@@ -511,11 +471,35 @@
     draw();
 
     /* ── Content beats (opacity scrubbed to scroll) ── */
-    const beats = ['beat-hero', 'beat-capture', 'beat-recall', 'beat-reason', 'beat-cta'];
+    const beats = ['beat-hero', 'beat-how', 'beat-ingest', 'beat-reason', 'beat-recall', 'beat-automate'];
+
+    // ── Canvas zoom during the workflow beats (3-6) ──
+    // The graph animation reads as noise behind the workflow text. Zoom the
+    // canvas (CSS transform only — doesn't touch the drawing) so the
+    // background recedes: starts at 1x for beats 1-2, zooms gradually
+    // through the workflow beats, reaching 3x by the last beat (04 · Automate).
+    gsap.fromTo(canvas,
+      { scale: 1 },
+      {
+        scale: 2.2,
+        scrollTrigger: {
+          trigger: '#scroll-wrapper',
+          start: '30% top',   // zoom begins as beats 1-2 end (~0.30)
+          end: '90% top',     // reaches 3x by the last workflow beat (~0.90)
+          scrub: 0.6,
+        },
+      }
+    );
 
     const beatSpan = 0.11;
-    const gapSpan = 0.015;
+    const gapSpan = 0.05;
     const step = beatSpan + gapSpan;
+
+    /* Toggle .pe-on with visibility so text is selectable only while its beat
+       is on screen — invisible beats stay click-through (#744). */
+    const syncPE = (el) => {
+      el.classList.toggle('pe-on', parseFloat(gsap.getProperty(el, 'opacity')) > 0.05);
+    };
 
     beats.forEach((id, i) => {
       const el = document.getElementById(id);
@@ -523,22 +507,11 @@
       const peak = start + beatSpan;
 
       if (i === 0) {
-        // Pulse independently, kill on scroll
-        const pulse = gsap.to('#scroll-hint', {
-          opacity: 0.4, y: 6, duration: 1.5, yoyo: true, repeat: -1, ease: 'power1.inOut'
-        });
-        gsap.to('#scroll-hint', {
-          opacity: 0,
-          scrollTrigger: {
-            trigger: '#scroll-wrapper',
-            start: '10% top',
-            end: '14% top',
-            scrub: 1,
-            onEnter: () => pulse.kill(),
-          }
-        });
+        // Hero starts visible (CSS opacity: 1) — selectable from load.
+        el.classList.add('pe-on');
         gsap.to(el, {
           opacity: 0, y: -20,
+          onUpdate: () => syncPE(el),
           scrollTrigger: {
             trigger: '#scroll-wrapper',
             start: '1% top',
@@ -556,6 +529,7 @@
         { opacity: 0, y: 20 },
         {
           opacity: 1, y: 0,
+          onUpdate: () => syncPE(el),
           scrollTrigger: {
             trigger: '#scroll-wrapper',
             start: `${fadeInStart * 100}% top`,
@@ -565,38 +539,21 @@
         }
       );
 
-      if (i < beats.length - 1) {
-        const fadeOutStart = i === 1 ? 0.20 : peak;
-        gsap.to(el, {
-          opacity: 0, y: -20,
-          scrollTrigger: {
-            trigger: '#scroll-wrapper',
-            start: `${fadeOutStart * 100}% top`,
-            end: `${(fadeOutStart + 0.04) * 100}% top`,
-            scrub: 0.5,
-          }
-        });
-      }
+      // Fade out at each beat's natural peak with a fast finish — the gap
+      // (gapSpan 0.05 > fadeOut 0.03) guarantees the NEXT beat fades in only
+      // after THIS beat has fully disappeared.
+      const fadeOutStart = peak;
+      gsap.to(el, {
+        opacity: 0, y: -20,
+        onUpdate: () => syncPE(el),
+        scrollTrigger: {
+          trigger: '#scroll-wrapper',
+          start: `${fadeOutStart * 100}% top`,
+          end: `${(fadeOutStart + 0.03) * 100}% top`,
+          scrub: 0.5,
+        }
+      });
     });
-
-    // ── Copy MCP config ───────────────────────────────────────────
-    function copyMcpConfig() {
-      const codeEl = document.getElementById("mcp-config-code");
-      if (!codeEl) return;
-      copyToClipboard(codeEl.textContent.trim());
-
-      const btn = document.getElementById("btn-copy-config");
-      const textEl = btn.querySelector("span");
-      const origText = textEl ? textEl.textContent : btn.textContent;
-      btn.classList.add("copied");
-      if (textEl) textEl.textContent = "Copied!";
-      else btn.textContent = "Copied!";
-      setTimeout(() => {
-        btn.classList.remove("copied");
-        if (textEl) textEl.textContent = origText;
-        else btn.textContent = origText;
-      }, 2000);
-    }
 
     async function copyToClipboard(text) {
       try {
@@ -613,6 +570,101 @@
       }
     }
 
+    // ── Pricing section (data mirror of product/pricing.json — single source) ──
+    const PRICING = {
+      display: {
+        annual_discount_pct: 20,
+        annual_default: true,
+        license_self_hosted: "BSL 1.1 + $5M AUG (free <$5M trailing-12mo revenue); Mozilla Public License 2.0 (MPL-2.0) conversion after 4 years; hosted excluded from grant",
+        overage_line: "$5 per additional 10k write ops",
+      },
+      tiers: {
+        free: { price: 0, graphs: 1, users: 1, ops: 10000, nodes: 10000, keys: 2, overage: false, popular: false, features: ["1 graph", "1 collaborator", "10,000 write ops/mo", "10,000-node graph", "2 API keys", "Unlimited integrations"], excluded: ["Overage"] },
+        solo: { price: 9, graphs: 2, users: 1, ops: 10000, nodes: 25000, keys: 5, overage: false, popular: false, features: ["2 graphs", "1 collaborator", "10,000 write ops/mo", "25,000-node graph", "5 API keys", "Unlimited integrations"], excluded: ["Overage"] },
+        pro: { price: 25, graphs: "∞", users: 2, ops: 50000, nodes: 100000, keys: 10, overage: true, popular: true, features: ["Unlimited graphs", "2 collaborators", "50,000 write ops/mo", "100,000-node graph", "10 API keys", "Unlimited integrations", "Usage-based overage"], excluded: [] },
+        team: { price: 149, graphs: "∞", users: "∞", ops: 200000, nodes: 600000, keys: 20, overage: true, popular: false, features: ["Unlimited graphs", "Unlimited collaborators (invites + RBAC)", "200,000 write ops/mo", "600,000-node graph", "20 API keys", "Unlimited integrations", "Usage-based overage", "Priority support"], excluded: [] }
+      }
+    };
+
+    let currentBilling = 'monthly';
+
+    function fmtPrice(price) {
+      // Annual: effective PER-MONTH price big, total billed small (common practice).
+      // Round ONCE (per-month), then derive the total so the two never disagree
+      // (e.g. $7/mo × 12 must equal $84, not $86).
+      if (currentBilling === 'annual') {
+        if (price === 0) return { big: '$0', total: 'Free forever' };
+        const disc = PRICING.display.annual_discount_pct / 100;
+        const perMonth = Math.max(1, Math.round(price * 12 * (1 - disc) / 12));
+        const total = perMonth * 12;
+        return { big: `$${perMonth}`, total: `$${total} billed annually` };
+      }
+      return { big: `$${price}`, total: 'Billed monthly' };
+    }
+
+    function checkSvg() {
+      return '<svg viewBox="0 0 24 24" fill="none" stroke="#4ade80" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+    }
+
+    function renderPricing() {
+      const grid = document.getElementById('pricing-grid');
+      const names = ['free', 'solo', 'pro', 'team'];
+      grid.innerHTML = names.map((name) => {
+        const t = PRICING.tiers[name];
+        const label = name.charAt(0).toUpperCase() + name.slice(1);
+        const popular = t.popular ? '<span class="popular-tag">Most popular</span>' : '';
+        const features = t.features.map((f) => `<div class="feature">${checkSvg()} <span>${f}</span></div>`).join('');
+        const excluded = t.excluded.map((f) => `<div class="feature"><span class="x">✕</span> <span class="muted">${f}</span></div>`).join('');
+        const cta = name === 'free' ? 'Start free' : 'Get started';
+        return `<div class="pricing-card${t.popular ? ' popular' : ''}">
+          ${popular}
+          <h3>${label}</h3>
+          <div class="price">${fmtPrice(t.price).big}<span>/mo</span></div>
+          <p class="billing">${fmtPrice(t.price).total}</p>
+          <div class="features">${features}${excluded}</div>
+          <a href="/signup" class="btn${name === 'free' ? ' secondary' : ''}">${cta}</a>
+        </div>`;
+      }).join('');
+      document.getElementById('pricing-usage-line').textContent = `${PRICING.display.overage_line} — applies to Pro and Team`;
+    }
+
+    function renderSelfHost() {
+      document.getElementById('selfhost-section').innerHTML = `
+        <h4>Self-hosted</h4>
+        <p class="license">${PRICING.display.license_self_hosted}</p>
+        <div class="actions">
+          <a href="/self-hosted">Self-hosted setup guide →</a>
+          <a href="https://github.com/daniel-ospina/tortoise" target="_blank" rel="noopener">Self-host on GitHub →</a>
+          <a href="/signup">Migrate to cloud anytime →</a>
+        </div>`;
+    }
+
+    function setBilling(mode) {
+      currentBilling = mode;
+      document.getElementById('btn-monthly').classList.toggle('active', mode === 'monthly');
+      document.getElementById('btn-annual').classList.toggle('active', mode === 'annual');
+      document.getElementById('btn-monthly').setAttribute('aria-pressed', String(mode === 'monthly'));
+      document.getElementById('btn-annual').setAttribute('aria-pressed', String(mode === 'annual'));
+      renderPricing();
+    }
+
+    // Init pricing (annual is default per pricing.json display.annual_default)
+    if (PRICING.display.annual_default) setBilling('annual'); else setBilling('monthly');
+    renderSelfHost();
+
   </script>
+
+  <footer class="legal-footer">
+    <a href="https://premiselabs.co" class="footer-logo" aria-label="Premise Labs">
+      <img src="/assets/premiselabs-logo.png" alt="Premise Labs" width="160" height="98" />
+    </a>
+    <nav class="footer-links" aria-label="Legal">
+      <a href="/privacy">Privacy Policy</a>
+      <a href="/tos">Terms of Service</a>
+      <a href="/license">License</a>
+      <a href="/dpa">DPA</a>
+    </nav>
+  </footer>
+<script src="/consent.js" defer></script>
 </body>
 </html>

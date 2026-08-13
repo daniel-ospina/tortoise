@@ -18,7 +18,7 @@
     :root {
       --bg: #060b14;
       --text: #cbd5e1;
-      --text-dim: #64748b;
+      --text-dim: #94a3b8;
       --accent: #06b6d4;
       --accent-glow: rgba(6, 182, 212, 0.35);
       --green: #4ade80;
@@ -53,8 +53,13 @@
       padding: 2rem;
     }
 
-    /* Specific beats get pointer events for interactive elements */
-    #beat-cta { pointer-events: auto; }
+    /* Interactive beats: the fixed full-screen overlays must never swallow
+       clicks when invisible — only their interactive children get pointer
+       events (#744). Beats without interactive children inherit
+       pointer-events: none from .beat. */
+    #beat-cta { pointer-events: none; }
+    #beat-cta form, #beat-cta a, #beat-cta button { pointer-events: auto; }
+    #beat-tortoise a { pointer-events: auto; }
 
     #beat-hero { opacity: 1; }
 
@@ -105,6 +110,26 @@
     }
     #beat-tortoise h2 span { color: var(--accent); }
 
+    /* Learn more CTA below the Tortoise reveal */
+    #beat-tortoise .cta-start {
+      display: inline-block;
+      margin-top: 2rem;
+      background: var(--accent);
+      color: var(--bg);
+      border: none;
+      padding: 0.85rem 2rem;
+      font-family: var(--mono);
+      font-size: 0.95rem;
+      font-weight: 600;
+      text-decoration: none;
+      cursor: pointer;
+      transition: background 0.2s, transform 0.2s;
+    }
+    #beat-tortoise .cta-start:hover {
+      background: #0891b2;
+      transform: scale(1.02);
+    }
+
     /* Lab name */
     #beat-lab h3 {
       font-family: var(--mono);
@@ -116,31 +141,8 @@
       text-transform: uppercase;
     }
     #beat-lab h3 strong { color: var(--text); font-weight: 400; }
-    #beat-lab p { margin-top: 1.25rem; }
 
     /* CTA */
-    #beat-cta .cta-start {
-      display: inline-block;
-      background: var(--accent);
-      color: var(--bg);
-      border: none;
-      padding: 0.85rem 2rem;
-      font-family: var(--mono);
-      font-size: 0.95rem;
-      font-weight: 600;
-      text-decoration: none;
-      cursor: pointer;
-      transition: background 0.2s;
-      margin-bottom: 2rem;
-    }
-    #beat-cta .cta-start:hover {
-      background: var(--accent-hover);
-    }
-    #beat-cta .cta-subtle {
-      font-size: 0.75rem;
-      color: var(--text-dim);
-      margin-bottom: 1rem;
-    }
     #beat-cta form {
       display: flex; gap: 0.75rem; max-width: 400px; width: 100%;
     }
@@ -172,16 +174,26 @@
       background: var(--accent);
       color: var(--bg);
     }
-    #beat-cta .twitter-link {
+    #beat-cta .social-links {
+      display: flex;
+      gap: 1.5rem;
       margin-top: 1.5rem;
-      color: var(--text-dim);
-      text-decoration: none;
-      font-size: 0.8rem;
-      transition: color 0.2s;
     }
-    #beat-cta .twitter-link:hover { color: var(--accent); }
+    #beat-cta .social-link {
+      color: #fff;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      transition: color 0.2s, opacity 0.2s;
+    }
+    #beat-cta .social-link svg {
+      width: 24px;
+      height: 24px;
+      display: block;
+    }
+    #beat-cta .social-link:hover { color: var(--accent); opacity: 0.85; }
 
-    /* Success state */
+    /* Success / message states */
     #beat-cta .success-msg {
       display: none;
       color: var(--green);
@@ -189,26 +201,29 @@
       text-align: center;
       margin-top: 0.5rem;
     }
-
-    /* CTA button */
-    #beat-cta .cta-start {
-      display: inline-block;
-      background: var(--accent);
-      color: var(--bg);
-      padding: 0.9rem 2rem;
-      font-family: var(--mono);
-      font-size: 1rem;
-      text-decoration: none;
-      transition: background 0.2s, transform 0.2s;
-    }
-    #beat-cta .cta-start:hover {
-      background: #0891b2;
-      transform: scale(1.02);
-    }
-    #beat-cta .cta-subtle {
-      margin-top: 1rem;
-      color: var(--text-dim);
+    #beat-cta .error-msg {
+      display: none;
+      color: #f87171;
       font-size: 0.8rem;
+      text-align: center;
+      margin-top: 0.5rem;
+    }
+    #beat-cta .error-msg.visible,
+    #beat-cta .success-msg.visible { display: block; }
+
+    /* Honeypot — visually hidden, never visible to humans (bots fill it) */
+    #waitlist-form .hp-field {
+      position: absolute;
+      left: -9999px;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      opacity: 0;
+    }
+
+    #waitlist-form button[disabled] {
+      opacity: 0.6;
+      cursor: wait;
     }
 
     /* CLI snippet */
@@ -229,22 +244,18 @@
       line-height: 1.8;
     }
 
-    /* Self-hosting link */
-    #beat-cta .selfhost-link {
-      margin-top: 1.25rem;
-      color: var(--text-dim);
-      text-decoration: none;
-      font-size: 0.78rem;
-      transition: color 0.2s;
-    }
-    #beat-cta .selfhost-link:hover { color: var(--accent); }
-
     /* Mobile */
     @media (max-width: 640px) {
       #beat-cta form { flex-direction: column; }
       #beat-cta input[type="email"],
       #beat-cta button { width: 100%; text-align: center; }
       #scroll-wrapper { height: 800vh; }
+    }
+
+    /* Short viewports: #beat-cta is a fixed full-height beat — allow the
+       form stack to scroll instead of clipping the email input / links */
+    @media (max-height: 520px) {
+      #beat-cta { justify-content: flex-start; overflow-y: auto; }
     }
 
     /* Subtle fade at bottom edges */
@@ -269,17 +280,27 @@
     </section>
     <section id="beat-tortoise" class="beat">
       <h2><span>Tortoise</span> — a memory system where agents learn.</h2>
+      <a href="https://tortoise.premiselabs.co" class="cta-start">Learn more →</a>
     </section>
     <section id="beat-lab" class="beat">
       <h3><strong>Premise Labs</strong></h3>
     </section>
     <section id="beat-cta" class="beat">
-      <a href="https://tortoise.premiselabs.co" class="cta-start">Learn more →</a>
-      <p class="cta-subtle">Meet Tortoise — the memory graph for AI agents.</p>
-      <a class="selfhost-link" href="/docs">Docs</a>
-      <a class="selfhost-link" href="https://github.com/daniel-ospina/tortoise" target="_blank" rel="noopener">Self-hosting docs →</a>
-      <a class="selfhost-link" href="https://app.premiselabs.co">Login →</a>
-      <a class="twitter-link" href="https://x.com/premiselabs" target="_blank" rel="noopener">@premiselabs</a>
+      <form id="waitlist-form" novalidate>
+        <input type="email" name="email" placeholder="your@email.com" aria-label="Email address" autocomplete="email" required>
+        <input type="text" name="hp" class="hp-field" tabindex="-1" autocomplete="off" aria-hidden="true">
+        <button type="submit">Stay in touch</button>
+      </form>
+      <p class="success-msg" id="waitlist-msg" role="status"></p>
+      <p class="error-msg" id="waitlist-error" role="alert"></p>
+      <div class="social-links">
+        <a class="social-link" href="https://x.com/premiselabs" target="_blank" rel="noopener" aria-label="Premise Labs on X (Twitter)">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231L18.244 2.25Zm-1.161 17.52h1.833L7.084 4.126H5.117L17.083 19.77Z"/></svg>
+        </a>
+        <a class="social-link" href="https://www.linkedin.com/company/premiselabs" target="_blank" rel="noopener" aria-label="Premise Labs on LinkedIn">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433c-1.144 0-2.063-.926-2.063-2.065 0-1.138.92-2.063 2.063-2.063 1.14 0 2.064.925 2.064 2.063 0 1.139-.925 2.065-2.064 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.225 0z"/></svg>
+        </a>
+      </div>
     </section>
   </div>
 
@@ -482,6 +503,136 @@
       }
     });
 
+    /* ── Waitlist form (#373) ── */
+    const WAITLIST_ENDPOINT = 'https://ybetwichurajbfswfeqa.supabase.co/functions/v1/waitlist-subscribe';
+    // Empty until a Turnstile site key is provisioned (human step). When set,
+    // the widget + script are injected and a token is sent with each submit.
+    const TURNSTILE_SITE_KEY = '';
+
+    (function () {
+      const form = document.getElementById('waitlist-form');
+      const msg = document.getElementById('waitlist-msg');
+      const err = document.getElementById('waitlist-error');
+      const emailInput = form.querySelector('input[name="email"]');
+      const button = form.querySelector('button[type="submit"]');
+
+      let turnstileToken = null;
+
+      function showMsg(text) {
+        err.classList.remove('visible');
+        err.textContent = '';
+        msg.classList.add('visible');
+        msg.textContent = text;   // live region must be rendered before content
+      }
+
+      function showError(text) {
+        msg.classList.remove('visible');
+        msg.textContent = '';
+        err.classList.add('visible');
+        err.textContent = text;
+      }
+
+      function resetStates() {
+        msg.classList.remove('visible');
+        err.classList.remove('visible');
+      }
+
+      // Turnstile widget — injected only when a site key is configured.
+      // Widget config lives on the .cf-turnstile div (script data-* attrs are
+      // ignored); callbacks clear the token on expiry/error so stale tokens
+      // can't 400 real users.
+      if (TURNSTILE_SITE_KEY) {
+        const widget = document.createElement('div');
+        widget.className = 'cf-turnstile';
+        widget.setAttribute('data-sitekey', TURNSTILE_SITE_KEY);
+        widget.setAttribute('data-callback', 'onTurnstileToken');
+        widget.setAttribute('data-expired-callback', 'onTurnstileExpired');
+        widget.setAttribute('data-error-callback', 'onTurnstileError');
+        form.appendChild(widget);
+        // Assign callbacks BEFORE appending the async script so the widget
+        // render (next task) always finds them, regardless of script flags.
+        window.onTurnstileToken = function (token) { turnstileToken = token; };
+        window.onTurnstileExpired = function () { turnstileToken = null; };
+        window.onTurnstileError = function () { turnstileToken = null; };
+        const script = document.createElement('script');
+        script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
+        script.async = true;
+        script.defer = true;
+        document.head.appendChild(script);
+      }
+
+      let submitting = false;
+
+      form.addEventListener('submit', async function (e) {
+        e.preventDefault();
+        if (submitting) return;
+        resetStates();
+
+        const email = emailInput.value.trim();
+        if (!email) {
+          showError('Please enter your email address.');
+          emailInput.focus();
+          return;
+        }
+        if (!emailInput.checkValidity()) {
+          showError('Please enter a valid email address.');
+          emailInput.focus();
+          return;
+        }
+        if (TURNSTILE_SITE_KEY && !turnstileToken) {
+          showError('Please complete the verification check first.');
+          return;
+        }
+
+        submitting = true;
+        form.setAttribute('aria-busy', 'true');
+        button.disabled = true;
+        button.textContent = 'Sending…';
+
+        const payload = {
+          email: email,
+          hp: form.querySelector('input[name="hp"]').value || ''
+        };
+        if (TURNSTILE_SITE_KEY) {
+          payload['cf-turnstile-response'] = turnstileToken || '';
+        }
+
+        try {
+          const res = await fetch(WAITLIST_ENDPOINT, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          if (res.ok) {
+            const data = await res.json().catch(() => ({}));
+            if (data && data.message) {
+              showMsg(data.message);
+            } else {
+              showMsg('Thanks — we\'ll be in touch.');
+            }
+            emailInput.value = '';
+          } else {
+            const data = await res.json().catch(() => ({}));
+            showError(data && data.error ? data.error : 'Something went wrong — please try again.');
+          }
+        } catch (networkErr) {
+          showError('Something went wrong — please try again.');
+        } finally {
+          submitting = false;
+          form.removeAttribute('aria-busy');
+          button.disabled = false;
+          button.textContent = 'Stay in touch';
+          // Turnstile tokens are single-use — clear + re-render after submit
+          if (TURNSTILE_SITE_KEY) {
+            turnstileToken = null;
+            if (window.turnstile) {
+              try { window.turnstile.reset(); } catch (e) { /* widget may be mid-render */ }
+            }
+          }
+          emailInput.focus();
+        }
+      });
+    })();
 
   </script>
 </body>

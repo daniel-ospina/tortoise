@@ -15,18 +15,56 @@ from __future__ import annotations
 
 import os
 import sys
+import pytest
 import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-# Isolated test graph — never the production graph
-os.environ["TORTOISE_DB_URI"] = (
-    "docker://:falkordb@localhost:6379/tortoise_test_dir_impl"
-)
+# Isolated test graph — never the production graph.
+# NOTE: the docker URI is set INSIDE the autouse fixture (per-test, restored
+# after) — NOT at import time. An import-time set leaks into every later test
+# file (#176 contamination).
 
 from tortoise.sdk import TortoiseSDK
 from tortoise.ep import TortoiseEP
 from tortoise.weights import compute_operator_weight
+
+# Requires live FalkorDB (Docker). Skip gracefully when unavailable so the
+# no-Docker embedded suite stays green (AGENTS.md). Probe targets the DOCKER
+# URI explicitly (embedded is "available" but lacks docker graph semantics).
+_DB_URI = "docker://:falkordb@localhost:6379/tortoise_test_dir_impl"
+FALKORDB_AVAILABLE = False
+_OLD_URI = os.environ.get("TORTOISE_DB_URI")
+try:
+    os.environ["TORTOISE_DB_URI"] = _DB_URI
+    from tortoise.sdk import TortoiseSDK as _ProbeSDK
+    _probe = _ProbeSDK()
+    _probe._get_proj().g.query("RETURN 1")
+    _probe.close()
+    FALKORDB_AVAILABLE = True
+except Exception:
+    pass
+finally:
+    if _OLD_URI is not None:
+        os.environ["TORTOISE_DB_URI"] = _OLD_URI
+    else:
+        os.environ.pop("TORTOISE_DB_URI", None)
+
+pytestmark = pytest.mark.skipif(
+    not FALKORDB_AVAILABLE, reason="Live FalkorDB (Docker) not available")
+
+
+@pytest.fixture(autouse=True)
+def _isolated_db_uri():
+    """Set the isolated docker URI for THIS test, restore after (env-leak guard, #176)."""
+    _old = os.environ.get("TORTOISE_DB_URI")
+    os.environ["TORTOISE_DB_URI"] = _DB_URI
+    yield
+    if _old is not None:
+        os.environ["TORTOISE_DB_URI"] = _old
+    else:
+        os.environ.pop("TORTOISE_DB_URI", None)
+
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -299,8 +337,9 @@ def test_haspart_nand_affects_whole():
     print(f"  ✅ Part refuted: {p_mean:.4f} < 0.80")
 
     # Whole should be reduced by the hasPart back-message. The reduction
-    # signal is bounded by phi_nand coupling (T0-vs-T0 ~ 0.637 = "moderate
-    # dampening" per quadrature docs) so the whole settles just at/under its
+    # uses the NAND contradiction potential phi_nand = exp(-w*ca*cb) which
+    # penalizes agreement — at weight=1.0 (default operator weight),
+    # T0-vs-T0 coupling is ~0.44 so the whole settles just at/under its
     # prior rather than cratering. Assert the DIRECTIONAL effect: without the
     # back-message the whole stays at ~0.914 (weak positive agreement push);
     # with it, it is pulled down to/under the prior (~0.910). The regression
@@ -356,12 +395,12 @@ def test_nand_symmetric():
     print(f"\n  Claim A: mean={a_mean:.4f}")
     print(f"  Claim B: mean={b_mean:.4f}")
 
-    # Both should show symmetric NAND coupling. NOTE: phi_nand(T0,T0) ~ 0.637
-    # gives "moderate dampening" per quadrature docs, and the cavity/boost
-    # mechanics can hold strong priors near their baseline — the assertion is
-    # that BOTH move together (symmetry preserved) and stay in a sane band,
-    # not that they crater toward 50% (which the documented coupling doesn't
-    # produce for two T0 claims). Symmetry is the regression guard for #86.
+    # Both should show symmetric NAND coupling. phi_nand = exp(-w*ca*cb) is
+    # a contradiction potential — it penalizes agreement (both high) and
+    # is compatible with disagreement (one high, one low). With weight=1.0
+    # (default operator weight) and EP damping, symmetric NAND drives both
+    # claims downward from their T0 priors while preserving symmetry.
+    # Symmetry is the regression guard for #86.
     assert abs(a_mean - b_mean) < 0.01, (
         f"❌ NAND not symmetric: A={a_mean:.4f} B={b_mean:.4f}"
     )
