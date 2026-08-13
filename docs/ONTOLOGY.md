@@ -60,7 +60,11 @@ doc_status: live
 > - §2: state-centric model block — the graph stores STATE (Objects + lifecycle
 >   + derived confidence) + POINTS (the logic) + EVENTS (timeline incl.
 >   decision-as-event); decisions are NOT first-class Points.
-> - §5: Point kinds — extraction write kinds = statement/observation/hypothesis;
+> - §5 (v3.8): extraction point kind = `statement` ONLY; `observation` removed
+>   (anything can be called one) and `hypothesis` folded into confidence
+>   semantics (a conjecture is a low-confidence statement) — both join the
+>   legacy write kinds.
+> - §5 (v3.7): Point kinds — extraction write kinds = statement/observation/hypothesis;
 >   decision/vision/strategy/plan/goal/target/humanApproval/event marked LEGACY
 >   (write-compat only). Object kinds gain the commitment-state family
 >   (strategy/plan/goal/target). Event kinds gain `occurrence` + `turn`; the
@@ -103,17 +107,18 @@ Each layer answers a different question. All four are live mechanisms.
 > The record is three layers. **State** — Objects/options carry their lifecycle
 > (promoted/deprecated/superseded — the Episodic layer's events are the truth;
 > status is a read-only projection) and their **confidence** (derived from the
-> attached Points). **Points** — the logic: statements/observations/hypotheses
-> connected to the state they argue about (aboutObject); IMPL/NAND/MITIGATES
-> among them move the object's confidence. **Events** — what happened, for
+> attached Points). **Points** — the logic: statements (pointKind `statement` —
+> the only extraction point kind; hypothesis folded into confidence) connected
+> to the state they argue about (aboutObject); IMPL/NAND/MITIGATES among them
+> move the object's confidence. **Events** — what happened, for
 > context: occurrences AND the **decision-as-event** (eventKind `decision`,
 > aboutObject → the object(s) it resolved). The graph says *"this state is
 > based on these reasons"* — never *"this decision was made because of these
 > reasons"*. The decision dimension stays queryable as a timeline (events),
 > but decisions are NOT first-class Points. Point kinds `decision`/`vision`/
 > `strategy`/`plan`/`goal`/`target`/`humanApproval`/`event` are LEGACY write
-> kinds (§5) — extraction emits `statement`/`observation`/`hypothesis` Points,
-> Event nodes, and lifecycle writes on Objects. State confidence is derived at
+> kinds (§5) — extraction emits `statement` Points only, Event nodes, and
+> lifecycle writes on Objects. State confidence is derived at
 > read time from the attached Points' EP confidence (§11) — never stored
 > independently on the Object.
 
@@ -268,7 +273,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 |-------|------|----------|-------------|------|---------|
 | `id` | ULID | ✅ | `dc:identifier` | ✅ | Unique identifier — ULID preferred (`create_point`); content-addressed `pt_<sha>` ids are a **sanctioned id form** (deterministic — the commit endpoint's idempotency anchor, #909 §4.3 #10) |
 | `content` | string | ✅ | `schema:text` | ✅ | The claim text |
-| `pointKind` | string | ✅ | — | ✅ | Classification tag: statement, decision, vision, strategy, plan, goal, target, observation, hypothesis + pack pointKinds |
+| `pointKind` | string | ✅ | — | ✅ | Classification tag — extraction writes `statement` (option B); decision/vision/strategy/plan/goal/target/observation/hypothesis/humanApproval/event are legacy write kinds (§5) + pack pointKinds |
 | `is_operator` | bool | — | — | ✅ | true for operator Points |
 | `op_type` | string | — | — | ✅ | IMPL / NAND (operator Points only) |
 | `status` | string | — | `pav:status` | ✅ | Lifecycle: draft, live, retracted, superseded, outdated, archived (#432). **challenged is a derived condition** (presence of a NAND operator edge on a live point), not a stored status (§5). draft inert for computation; retracted/superseded/archived are terminal |
@@ -390,16 +395,19 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 ### Point Kind Vocabulary (core)
 
 ```
-statement, observation, hypothesis    # the LOGIC layer — extraction write kinds (state-centric, 2026-08-12)
+statement    # the LOGIC layer — THE extraction write kind (state-centric, option B 2026-08-12)
 decision, vision, strategy, plan, goal, target, humanApproval, event   # LEGACY write kinds (write-compat only)
 ```
-> **State-centric alignment (2026-08-12):** Points are the LOGIC layer only.
-> `decision`/`humanApproval` are TIMELINE kinds → Event nodes (eventKind
+> **State-centric alignment (2026-08-12, option B):** Points are the LOGIC layer
+> only, and the logic is one kind: **`statement`** — the asserted belief.
+> `hypothesis` is FOLDED INTO CONFIDENCE semantics (a conjecture is a
+> low-confidence statement); `observation` is removed (anything can be called
+> one). `decision`/`humanApproval` are TIMELINE kinds → Event nodes (eventKind
 > `decision`/`humanApproval`); `vision`/`strategy`/`plan`/`goal`/`target` are
 > STATE kinds → Object kinds (commitment-state family, below); `event` is
 > removed (issue #1013 — episodic records are Event nodes with eventKind
 > `occurrence`/`turn`). The legacy kinds remain valid write kinds for
-> compatibility; extraction never emits them.
+> compatibility; extraction emits `statement` only.
 
 ### Object Kind Vocabulary (core)
 
