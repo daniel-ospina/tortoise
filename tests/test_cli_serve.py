@@ -759,16 +759,10 @@ def test_key_create_wildcard_bind_prints_lan_note(local_db, bind, port):
     Wildcard + non-default port must also show it."""
     db, key, env, cli_sdk = local_db
     env["TORTOISE_DB_PATH"] = str(db)
-<<<<<<< HEAD
-    # Single-writer contract (#942 probe): the subprocess must be the sole
-    # owner of the embedded DB — close the fixture's in-process SDK first
-    # (redislite shuts down with SAVE on last-connection close).
-=======
     # #1102: the subprocess opens the SAME embedded DB — close the fixture's
     # live handle first or the #942 single-writer probe (EmbeddedStoreBusy)
     # makes the subprocess exit 1 (redislite shuts the server down on the
     # last connection close, so the subprocess reloads the RDB fresh).
->>>>>>> origin/main
     cli_sdk.close()
     proc = subprocess.run(
         [sys.executable, "-m", "tortoise", "key", "create", "--name", "test",
@@ -786,13 +780,8 @@ def test_key_create_default_bind_still_prints_mirror_hint(local_db):
     a custom serve setup) — regression guard for the elif branch."""
     db, key, env, cli_sdk = local_db
     env["TORTOISE_DB_PATH"] = str(db)
-<<<<<<< HEAD
-    # Single-writer contract (#942 probe): close the fixture SDK so the
-    # subprocess is the sole owner of the embedded DB.
-=======
     # #1102: same single-writer constraint as the wildcard-bind test — close
     # the fixture's live handle before the subprocess.
->>>>>>> origin/main
     cli_sdk.close()
     proc = subprocess.run(
         [sys.executable, "-m", "tortoise", "key", "create", "--name", "test"],
