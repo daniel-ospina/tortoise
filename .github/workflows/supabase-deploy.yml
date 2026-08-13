@@ -60,6 +60,42 @@ jobs:
       # flip (auth-blackout window). See the flip sequence above.
       - name: Link project
         run: supabase link --project-ref "$SUPABASE_PROJECT_REF"
+      - name: Verify required edge-function secrets (#1121)
+        # Fail fast BEFORE deploy: if any secret the tenant-provision success
+        # path reads is missing, every signup 500s/502s at runtime with no
+        # deploy-time signal (post-#1110 hardening — CORS was masking
+        # missing-secret failures). AUTH_HOOK_SECRET is deliberately NOT
+        # required (hook path inert since #832); SUPABASE_SERVICE_ROLE_KEY is
+        # a platform-reserved secret auto-injected into edge functions, so it
+        # is WARN-only here (secrets list may omit reserved names).
+        # NOTE: current CLI (v2.x) prints `secrets list --output json` as a
+        # JSON array — parse with jq, never grep for `NAME<TAB>` (old format).
+        if: github.event_name == 'workflow_dispatch' && env.SUPABASE_ACCESS_TOKEN != ''
+        run: |
+          set -euo pipefail
+          required=(FASTAPI_URL FASTAPI_INTERNAL_KEY TORTOISE_SECRET_PEPPER)
+          out="$(supabase secrets list --output json --project-ref "$SUPABASE_PROJECT_REF")" \
+            || { echo "::error::supabase secrets list failed — cannot verify tenant-provision secrets"; exit 1; }
+          # Recursive: handles BOTH the JSON array ([{name,value}]) and the
+          # object wrapper ({"secrets":[...]}) output shapes.
+          present() { printf '%s' "$out" | jq -e --arg n "$1" \
+            '[.. | objects | select(has("name")) | .name] | any(. == $n)' >/dev/null; }
+          missing=()
+          for name in "${required[@]}"; do
+            if ! present "$name"; then missing+=("$name"); fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::MISSING Supabase secrets required by tenant-provision:"
+            for name in "${missing[@]}"; do echo "::error::  $name"; done
+            echo "::error::Set them with: supabase secrets set --project-ref $SUPABASE_PROJECT_REF <NAME>='...'"
+            exit 1
+          fi
+          if present SUPABASE_SERVICE_ROLE_KEY; then
+            echo "✅ Required secrets present: ${required[*]} SUPABASE_SERVICE_ROLE_KEY"
+          else
+            echo "::warning::SUPABASE_SERVICE_ROLE_KEY not listed by secrets list (platform-reserved, auto-injected) — assuming present"
+            echo "✅ Required secrets present: ${required[*]}"
+          fi
       - name: Apply migrations
         # Token-based push (login role) — no DB password secret needed.
         # Proven 2026-08-10 against the premise-labs project.

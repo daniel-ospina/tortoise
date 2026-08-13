@@ -28,7 +28,7 @@ import assert from "node:assert";
 import { createHmac } from "node:crypto";
 import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { __setRpcResult } from "./edge-function-stubs/supabase-js.ts";
+import { __setJwtUser, __setRpcResult } from "./edge-function-stubs/supabase-js.ts";
 
 const REPO_ROOT = new URL("..", import.meta.url).pathname;
 const EDGE_FN = join(REPO_ROOT, "supabase/functions/tenant-provision/index.ts");
@@ -110,6 +110,8 @@ function check(name, res, expect) {
       res.headers.get("access-control-allow-methods") === expect.allowMethods) &&
     (expect.allowHeaders === undefined ||
       res.headers.get("access-control-allow-headers") === expect.allowHeaders) &&
+    (expect.maxAge === undefined ||
+      res.headers.get("access-control-max-age") === expect.maxAge) &&
     (expect.vary ? vary !== null && vary.toLowerCase().includes("origin") : true);
   results.push({ name, ok, status: res.status, acao, vary });
   checks.push(name);
@@ -122,7 +124,7 @@ try {
   // ── Phase 1: unauthenticated (env empty) — browser-facing gates ────────
   check("preflight from welcome-page origin → 204 + allowlisted ACAO",
     await call("OPTIONS", { origin: PROD }),
-    { status: 204, acao: PROD, allowMethods: "POST, OPTIONS", allowHeaders: "authorization, content-type", vary: true });
+    { status: 204, acao: PROD, allowMethods: "POST, OPTIONS", allowHeaders: "authorization, content-type", maxAge: "600", vary: true });
   check("preflight from unknown origin → 403 (never echo evil origin)",
     await call("OPTIONS", { origin: EVIL }),
     { status: 403, acao: FALLBACK, vary: true });
@@ -183,6 +185,44 @@ try {
   assert.ok(okBody.api_key && okBody.api_key.startsWith("tt_"), "201 body must include the minted api_key");
   assert.ok(okBody.team_id, "201 body must include team_id");
   console.log("      (success body: team_id=" + okBody.team_id + " api_key=" + okBody.api_key.slice(0, 10) + "…)");
+
+  // ── Phase 3: user-JWT path (Path 1 — the ONLY live auth path; the auth
+  //    hook is inert post-#832, so this is what welcome.html actually hits) ──
+  __setJwtUser({ id: USER_ID, email: EMAIL, user_metadata: { display_name: "Test" } });
+  __setRpcResult({ error: null });
+  const jwtHeaders = { authorization: "Bearer test-token", "content-type": "application/json" };
+
+  const jwtOkRes = await call("POST", jwtHeaders, JSON.stringify({ user_id: USER_ID, email: EMAIL }));
+  check("JWT POST, target matches → 201 with CORS (the live signup path)",
+    jwtOkRes,
+    { status: 201, acao: FALLBACK, vary: true });
+  const jwtBody = JSON.parse(await jwtOkRes.text());
+  assert.ok(jwtBody.api_key && jwtBody.api_key.startsWith("tt_"), "JWT 201 body must include the minted api_key");
+  assert.equal(jwtBody.team_name, "test", "team name derives from display_name");
+
+  check("JWT POST, target mismatch (user A mints for user B) → 403 with CORS",
+    await call("POST", jwtHeaders, JSON.stringify({ user_id: "99999999-9999-9999-9999-999999999999", email: "other@x.co" })),
+    { status: 403, acao: FALLBACK, vary: true });
+  check("JWT POST, type-confused secondary field → 400 with CORS",
+    await call("POST", jwtHeaders, JSON.stringify({ user_id: USER_ID, email: EMAIL, display_name: 123 })),
+    { status: 400, acao: FALLBACK, vary: true });
+
+  // A JWT that fails getUser() must answer 401 — clear the stub user first.
+  __setJwtUser(null);
+  check("JWT POST, invalid JWT (no user in token) → 401 with CORS",
+    await call("POST", jwtHeaders, JSON.stringify({ user_id: USER_ID, email: EMAIL })),
+    { status: 401, acao: FALLBACK, vary: true });
+
+  // Mirror the ACTUAL browser sequence (2026-08-13 incident): preflight +
+  // POST with Origin: https://tortoise.premiselabs.co + Bearer JWT.
+  __setJwtUser({ id: USER_ID, email: EMAIL, user_metadata: { display_name: "Test" } });
+  check("JWT POST from welcome-page Origin → 201 + acao=PROD (full browser flow)",
+    await call("POST", { ...jwtHeaders, origin: PROD }, JSON.stringify({ user_id: USER_ID, email: EMAIL })),
+    { status: 201, acao: PROD, vary: true });
+  check("JWT POST from unknown Origin → 403 + fallback acao (origin gate first)",
+    await call("POST", { ...jwtHeaders, origin: EVIL }, JSON.stringify({ user_id: USER_ID, email: EMAIL })),
+    { status: 403, acao: FALLBACK, vary: true });
+  __setJwtUser(null);
 
   // ── Report ─────────────────────────────────────────────────────────────
   for (const r of results) {
