@@ -1487,11 +1487,13 @@ class TortoiseSDK:
             Points are live, so a contradiction never stays a dead draft
             operator after its claims go live.
 
-        NOTE (review #944): the quarantine lock is a read-then-CAS — a
-        quarantine landing between the batch_status read and the CAS can race
-        a promotion through (window is milliseconds; the flow is
-        single-operator). Fully atomic batch+point locking is tracked with
-        the W-3 pipeline wiring (#785 follow-up).
+        NOTE (review #944/#990): the quarantine lock is a read-then-CAS —
+        FalkorDBLite has no EXISTS subqueries, so the batch check cannot fold
+        into the CAS. #990 added a post-CAS re-check that SURFACES a lost
+        race instead of hiding it: when a quarantine lands between the read
+        and the CAS, the promotion completes but the response carries
+        ``race_detected: true`` + ``race_warning`` (the point is live while
+        its batch is quarantined — an operator action is required).
 
         Raises ValueError if the Point does not exist.
         """
@@ -1551,14 +1553,37 @@ class TortoiseSDK:
                     "promoted": False, "blocked": True,
                     "reason": "not_draft"}
 
+        # Post-CAS race re-check (#990): the quarantine lock is a
+        # read-then-CAS (two statements — FalkorDBLite has no EXISTS
+        # subqueries), so a quarantine landing between the batch_status read
+        # and the CAS can race a promotion through. Surface the race instead
+        # of hiding it: the point is live, but the batch is quarantined.
+        race_detected = False
+        if batch_id:
+            from .mining import batch_status
+            bs = batch_status(proj, batch_id)
+            if bs is not None and bs["status"] == "quarantined":
+                race_detected = True
+                _logger.warning(
+                    "promote_point: batch %s quarantined concurrently with "
+                    "promotion of %s (TOCTOU race, #990) — point is live but "
+                    "batch is quarantined",
+                    batch_id, point_id,
+                )
+
         # R16 zombie-operator prevention: promote incident draft operators
         # once ALL their endpoint Points are live.
         promoted_ops = self._promote_incident_operators(proj, point_id, now)
 
         self._emit_event("PointPromoted", point=self.get_point(point_id))
-        return {"id": point_id, "status": "live", "promoted": True,
-                "reviewed": True,
-                "operator_nodes_promoted": promoted_ops}
+        result = {"id": point_id, "status": "live", "promoted": True,
+                  "reviewed": True,
+                  "operator_nodes_promoted": promoted_ops}
+        if race_detected:
+            result["race_detected"] = True
+            result["race_warning"] = (
+                "batch quarantined concurrently with promotion — point is live")
+        return result
 
     def _promote_incident_operators(self, proj, point_id: str, now: str) -> list[str]:
         """R16: promote draft operator nodes incident to a freshly-live Point.
