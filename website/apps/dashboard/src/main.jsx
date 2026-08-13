@@ -1056,7 +1056,7 @@ function App() {
             </button>
           </form>
           {error && <div className="error">{error}</div>}
-          <p className="dim small">No key? <a href="https://tortoise.premiselabs.co/signup" target="_blank" rel="noreferrer">Sign up</a> — you'll get one on the welcome page.</p>
+          <p className="dim small">No key? <a href="https://tortoise.premiselabs.co/signup" target="_blank" rel="noreferrer">Create a free account</a> (GitHub, Google, or email) — you'll get one on the welcome page. Prefer zero-email? Run <code>tortoise signup</code> in your terminal.</p>
         </div>
       </div>
     )
