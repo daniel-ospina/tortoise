@@ -801,6 +801,17 @@ class TestIngestPromotionPolicy:
         assert "not allowed under promotion_policy 'gated'" in res["error"]
         assert "promotion_policy='auto'" in res["error"]
 
+    def test_mcp_gated_rejects_nested_props_and_case_variant(self):
+        # PR #1073 re-review P0s at the MCP layer: nested props={status:live}
+        # and case variants must both return ERR_INVALID under gated.
+        for item in ({"kind": "claim", "content": "A",
+                      "props": {"status": "live"}},
+                     {"kind": "claim", "content": "A", "status": "Live"}):
+            res = mcp_mod.tortoise_ingest(
+                bundle={"points": [item]})
+            assert res["code"] == mcp_mod.ERR_INVALID == -32003
+            assert "not allowed under promotion_policy 'gated'" in res["error"]
+
     def _sdk_backed_ingest(self, request, monkeypatch, tmp_path, **kw):
         import os
         from tortoise.sdk import TortoiseSDK

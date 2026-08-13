@@ -1759,11 +1759,18 @@ def tortoise_ingest(bundle: Any = None, granularity: str = "bulk",
         return {"error": f"promotion_policy must be 'gated' or 'auto', got "
                           f"{promotion_policy!r}", "code": ERR_INVALID}
     # Row-9 guard (SDK-side, mirrors ingest()): under gated, an explicit
-    # status:'live' on a point item is a violation. Handled here pre-SDK so
-    # MCP clients get the structured ERR_INVALID shape, not a generic error.
+    # status:'live' on a point item is a violation. Effective status is
+    # checked (top-level OR nested props={...}, case-insensitive) so the
+    # nested/case-variant bypasses are closed (PR #1073 re-review P0s).
     if promotion_policy == "gated":
         for i, item in enumerate(bundle.get("points") or []):
-            if isinstance(item, dict) and item.get("status") == "live":
+            if not isinstance(item, dict):
+                continue
+            st = item.get("status")
+            nested = item.get("props")
+            if st is None and isinstance(nested, dict):
+                st = nested.get("status")
+            if st is not None and str(st).strip().lower() == "live":
                 return {"error": f"points[{i}] status:'live' is not allowed under "
                                   f"promotion_policy 'gated' — pass "
                                   f"promotion_policy='auto' for explicit live, or "

@@ -346,6 +346,47 @@ class TestPromotionPolicy:
         pA = res["ids"]["points"][0]
         assert sdk.get_point(pA)["status"] == "live"
 
+    def test_gated_rejects_nested_props_status_live(self, sdk):
+        # PR #1073 re-review P0: the props={"status": "live"} convention is
+        # flattened by create_point (_coerce_props) — the guard must catch
+        # the EFFECTIVE status, not just the top-level key.
+        bundle = {
+            "points": [
+                {"ref": "pA", "kind": "claim", "content": "A",
+                 "props": {"status": "live"}},
+            ],
+            "connections": [],
+        }
+        with pytest.raises(ValueError) as exc:
+            sdk.ingest(bundle)
+        assert "not allowed under promotion_policy 'gated'" in str(exc.value)
+
+    def test_gated_rejects_case_variant_status(self, sdk):
+        # PR #1073 re-review P0: case variants must not bypass the guard —
+        # EP treats every status except exact 'draft' as live.
+        for bad in ("Live", "LIVE", "lIve"):
+            bundle = {
+                "points": [
+                    {"ref": "pA", "kind": "claim", "content": "A",
+                     "status": bad},
+                ],
+                "connections": [],
+            }
+            with pytest.raises(ValueError) as exc:
+                sdk.ingest(bundle)
+            assert "not allowed under promotion_policy 'gated'" in str(exc.value)
+
+    def test_create_point_rejects_non_canonical_status(self, sdk):
+        # Fail-closed vocabulary validation on the create path (PR #1073
+        # re-review P0): a non-canonical status must not be storable — it
+        # would otherwise be treated as EP-live by _live_only.
+        with pytest.raises(ValueError) as exc:
+            sdk.create_point("claim", "junk status", status="Live")
+        assert "Invalid status" in str(exc.value)
+        with pytest.raises(ValueError) as exc:
+            sdk.create_point("claim", "junk status", status="draft ")  # trailing ws
+        assert "Invalid status" in str(exc.value)
+
     def test_auto_not_retroactive_on_dedup(self, sdk):
         # "Promotes when its FIRST edge is created": a re-ingest under auto
         # of an already-deduped operator does NOT retro-promote the source.

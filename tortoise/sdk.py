@@ -753,6 +753,15 @@ class TortoiseSDK:
             pid = ulid()
         # Points enter as draft, go live when first edge is created (#131)
         status = props.pop("status", "draft")
+        # Fail-closed vocabulary validation (mirrors update_point at ~line 1089):
+        # a non-canonical status (case variant, junk, typo) would otherwise be
+        # stored verbatim and treated as EP-LIVE by _live_only (which excludes
+        # only exact 'draft') — a silent-promotion hole (PR #1073 review P0).
+        if status not in POINT_STATUS_VALUES:
+            raise ValueError(
+                f"Invalid status {status!r}. Valid statuses: "
+                f"{sorted(POINT_STATUS_VALUES)}"
+            )
 
         # Compute embedding (Phase 1A, #7698) — stored as Point property
         embedding = None
@@ -2870,11 +2879,22 @@ class TortoiseSDK:
             )
         # Row 9 of INGEST_CONTRACT.md: under gated, an explicit status:'live'
         # on a point item is a violation — the Q2-lock must not be bypassable
-        # via the bundle's own status field (the sanctioned routes are
-        # promotion_policy='auto' or update_point(status='live') after ingest).
+        # via the bundle's own status field (sanctioned routes: promotion_policy
+        # ='auto' or update_point(status='live') after ingest). The effective
+        # status is checked (top-level OR the nested props={...} convention
+        # that create_point flattens via _coerce_props), case-insensitive —
+        # 'Live'/'LIVE' and props:{"status":"live"} cannot slip past (PR #1073
+        # re-review P0s). create_point's own vocabulary validation is the
+        # fail-closed backstop for any other non-canonical value.
         if promotion_policy == "gated":
             for i, item in enumerate(bundle.get("points") or []):
-                if isinstance(item, dict) and item.get("status") == "live":
+                if not isinstance(item, dict):
+                    continue
+                st = item.get("status")
+                nested = item.get("props")
+                if st is None and isinstance(nested, dict):
+                    st = nested.get("status")
+                if st is not None and str(st).strip().lower() == "live":
                     raise ValueError(
                         f"ingest: points[{i}] status:'live' is not allowed under "
                         f"promotion_policy 'gated' — pass promotion_policy='auto' "

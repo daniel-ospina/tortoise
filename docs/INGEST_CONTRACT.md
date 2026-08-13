@@ -192,7 +192,7 @@ policy):
 | Policy | Points | Connections |
 |---|---|---|
 | `"gated"` (default — shipped since A0, epic #902) | stay `draft`; an explicit `status:"live"` item is a violation (row 9) | never promote. Direct edges: no promotion. Operator path: `promote_source=False` → operator created `draft`, source **not** auto-promoted. |
-| `"auto"` (opt-in parity mode) | source points promote on write (#131 parity) | source of an operator-requiring connection is auto-promoted to `live` (draft/null-status sources only; terminal sources never resurrected). Operator node written without a status property (live by projection, the #780 asymmetry). |
+| `"auto"` (opt-in parity mode) | source points promote on write (#131 parity) | source of an operator-requiring connection is auto-promoted to `live` (draft/null-status sources only; terminal sources never resurrected). Operator node written without a status property (live by projection, the #780 asymmetry). Deduped connections never retro-promote — promotion fires on **first edge creation** only. |
 
 `promotion_policy` is orthogonal to granularity — the same bundle via
 `bulk` vs `granular` honors the same policy (E2E-5 proves graph parity).
@@ -379,7 +379,7 @@ with the exact retry action:
 | # | Error shape | Meaning | Action |
 |---|---|---|---|
 | 1 | `ERR_BUNDLE_INVALID` `{error, code, violations[]}` | Phase-1 validation failed; zero mutations; deterministic. | **Fix the bundle; never re-send unchanged.** All violations are in the response. |
-| 2 | `ERR_INVALID` `{error, code}` | Pre-SDK param error (bad `granularity` / `promotion_policy`). Message names the valid values. | **Fix the param; never re-send.** Deterministic. |
+| 2 | `ERR_INVALID` `{error, code}` | Pre-SDK param error (bad `granularity` / `promotion_policy`) and the row-9 guard (`status:'live'` on a point item under gated — shipped as this shape until the Phase-1 `ERR_BUNDLE_INVALID`/`BundleValidationError` migration lands). Message names the valid values / the sanctioned routes. | **Fix the param; never re-send.** Deterministic. |
 | 3 | `ERR_QUOTA` `{error, code}` | Team cap reached. The check is pre-write **count-then-act** — even a fully-deduped (zero-delta) call is rejected at cap. May arrive **after** Phase-2 commit (writes landed; the response carries the already-computed `batch_id` so you can verify what committed). Cap is **cumulative node count, not rate-based**. | **Stop retrying; escalate** ([§9 Quota](#9-quota)). Once headroom is granted, resubmit **once** — an all-`deduped` response confirms presence. |
 | 4 | `ERR_QUOTA_SERVER` `{error, code}` | Transient quota-counting failure (fail-closed). | **Backoff-retry** (transient). |
 | 5 | `ERR_UNAUTHORIZED` `{error, code}` | 401 — missing/invalid `Bearer tt_<key>`. | **Fix credentials; never retry.** |
