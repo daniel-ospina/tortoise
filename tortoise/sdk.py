@@ -1561,19 +1561,14 @@ class TortoiseSDK:
         # before validation produced phantoms on corrupt-edge data).
         self._emit_event("PointSuperseded", {"id": old_id, "new_id": new_id}, id=old_id)
 
-        # 1. Mark old superseded + outdated + create CORRECTS edge (same as invalidate)
-        # #432: status='superseded' alongside the legacy outdated=true flag
-        # (back-compat for consumers reading the flag; #690 will consolidate).
-        proj.g.query(
-            "MATCH (n:Point {id:$id}) SET n.status = 'superseded', "
-            "n.outdated = true, n.updatedAt = $now",
-            params={"id": old_id, "now": now},
-        )
-        proj.g.query(
-            "MATCH (a:Point {id:$new_id}), (b:Point {id:$old_id}) "
-            "MERGE (a)-[:CORRECTS]->(b)",
-            params={"new_id": new_id, "old_id": old_id},
-        )
+        # CYCLE-26 REVIEW-FIX P1 (cycle-7 pin): the superseded-status write +
+        # CORRECTS edge MOVE AFTER the transfers (2a / 2a-DIRECT / 2b). The
+        # transfers read old's edges directly and don't depend on the status;
+        # under the pinned order a crash mid-transfer leaves old NOT yet
+        # terminal, and a RE-RUN converges (the terminal guard never fires
+        # on the retry). The old order (status first) left a terminal point
+        # with EP-active incident direct edges and no remediation short of
+        # rebuild_all.
 
         # 2a. Transfer operator edges (IMPL, NAND, hasPart) — preserve provenance
 
@@ -1619,29 +1614,61 @@ class TortoiseSDK:
             if direction == "out":
                 dq = ("MATCH (old:Point {id:$old_id})-[r:IMPL|NAND]->(t) "
                       "RETURN type(r), r, t.id, ID(r)")
-                mk = "MATCH (new:Point {id:$new_id}), (t:Point {id:$tid}) "
-                mk += "MERGE (new)-[nr:IMPL|NAND]->(t)"
             else:
                 dq = ("MATCH (t)-[r:IMPL|NAND]->(old:Point {id:$old_id}) "
                       "RETURN type(r), r, t.id, ID(r)")
-                mk = "MATCH (t:Point {id:$tid}), (new:Point {id:$new_id}) "
-                mk += "MERGE (t)-[nr:IMPL|NAND]->(new)"
             rows = proj.g.query(dq, params={"old_id": old_id}).result_set
+            # Filter: exclude edges whose OTHER endpoint is an operator Point
+            # (REVIEW-FIX P2 — a mitigation-style (m)-[:IMPL]->(op) edge has
+            # an operator target; 2a owns op->input edges and runs first;
+            # repointing an operator target would create a topology
+            # create_direct_edge itself rejects). Operators carry
+            # is_operator=true.
+            plain = []
+            if rows:
+                other_ids = [row[2] for row in rows]
+                op_rows = proj.g.query(
+                    "MATCH (p:Point) WHERE p.id IN $ids AND "
+                    "coalesce(p.is_operator, false) = true RETURN p.id",
+                    params={"ids": other_ids},
+                ).result_set
+                op_set = {r[0] for r in op_rows}
+                plain = [row for row in rows if row[2] not in op_set]
+            rows = plain
             for row in rows:
                 rtype, r, tid, rid = row[0], row[1], row[2], row[3]
                 # FalkorDB returns an Edge object — read its properties.
                 rdict = dict(r.properties) if hasattr(r, "properties") else {}
-                # EMIT-BEFORE-TRANSFER: the REPOINT descriptor (plan §4.4 —
-                # A10's pass-2b repoint apply consumes it post-rebuild).
+                if tid == new_id:
+                    # REVIEW-FIX P1 (cycle-26): the edge already terminates at
+                    # the successor — repointing would CREATE A PHANTOM
+                    # SELF-EDGE (new)->(new) (the MERGE runs before the old
+                    # delete, and no existing (new)->(new) edge collapses it).
+                    # The old edge is DELETED and NO repoint descriptor is
+                    # emitted (pass-2b must not recreate the self-edge
+                    # post-rebuild). E2E-11.6: zero direct edges incident to
+                    # a superseded point, live AND post-rebuild.
+                    proj.g.query(
+                        f"MATCH (a)-[r:{rtype}]->(b) WHERE ID(r) = $rid DELETE r",
+                        params={"rid": rid},
+                    )
+                    transferred += 1
+                    continue
                 _attrs = {k: v for k, v in rdict.items()
                           if k in ("direction", "confidence", "weight",
                                    "label", "batch_id")}
+                # EMIT-BEFORE-TRANSFER: the REPOINT descriptor (plan §4.4 —
+                # A10's pass-2b repoint apply consumes it post-rebuild).
+                # Flat descriptor shape (REVIEW-FIX P2: match
+                # DirectEdgeCreated's §4.4 canonical flat shape — A10's
+                # pass-2b reads the same fields from both record types).
                 self._emit_event(
                     "DirectEdgeRepoint",
-                    id=f"{old_id}->{new_id}:{rtype}:{rid}",
+                    id=f"{old_id}->{new_id}:{rtype}",
                     src=(tid if direction == "in" else new_id),
                     tgt=(new_id if direction == "in" else tid),
-                    edge_type=rtype, attrs=_attrs,
+                    edge_type=rtype,
+                    **{k: v for k, v in _attrs.items()},
                 )
                 # MERGE-collapse (count()==1 twin guard): the MERGE matches
                 # the bare pattern; if the target edge already exists it
@@ -1676,22 +1703,21 @@ class TortoiseSDK:
                             "b": (new_id if direction == "in" else tid),
                             "attrs": _keep},
                 )
-                if tid == new_id:
-                    # In-pass edge (new)->(old): repointing would create a
-                    # self-edge (new)->(new) — instead the edge is DELETED
-                    # (a superseded point must have zero incident direct
-                    # edges; E2E-11.6 asserts the invariant).
+                # Delete the OLD edge by its internal id (precision),
+                # constrained to the old point's incident edges (REVIEW-FIX
+                # P2: never graph-wide — internal ids may be reused).
+                if direction == "out":
                     proj.g.query(
-                        f"MATCH (a)-[r:{rtype}]->(b) WHERE ID(r) = $rid DELETE r",
-                        params={"rid": rid},
+                        f"MATCH (old:Point {{id:$old_id}})-[r:{rtype}]->() "
+                        f"WHERE ID(r) = $rid DELETE r",
+                        params={"rid": rid, "old_id": old_id},
                     )
-                    transferred += 1
-                    continue
-                # Delete the OLD edge by its internal id (precision).
-                proj.g.query(
-                    f"MATCH (a)-[r:{rtype}]->(b) WHERE ID(r) = $rid DELETE r",
-                    params={"rid": rid},
-                )
+                else:
+                    proj.g.query(
+                        f"MATCH ()-[r:{rtype}]->(old:Point {{id:$old_id}}) "
+                        f"WHERE ID(r) = $rid DELETE r",
+                        params={"rid": rid, "old_id": old_id},
+                    )
                 transferred += 1
 
         # 2b. Transfer plain structural edges (#122) — about*, extractedFrom, wasDerivedFrom, etc.
@@ -1721,6 +1747,23 @@ class TortoiseSDK:
                     params={"old_id": old_id, "tid": target_graph_id},
                 )
                 transferred += 1
+
+        # 1. Mark old superseded + outdated + create CORRECTS edge — AFTER the
+        # transfers (CYCLE-26 REVIEW-FIX P1 / plan §5.3 cycle-7 pin: the crash
+        # window between the status write and the transfers is closed by
+        # re-run convergence; this block is the last mutation before dreaming).
+        # #432: status='superseded' alongside the legacy outdated=true flag
+        # (back-compat for consumers reading the flag; #690 will consolidate).
+        proj.g.query(
+            "MATCH (n:Point {id:$id}) SET n.status = 'superseded', "
+            "n.outdated = true, n.updatedAt = $now",
+            params={"id": old_id, "now": now},
+        )
+        proj.g.query(
+            "MATCH (a:Point {id:$new_id}), (b:Point {id:$old_id}) "
+            "MERGE (a)-[:CORRECTS]->(b)",
+            params={"new_id": new_id, "old_id": old_id},
+        )
 
         # Dreaming (#85): supersede changes the propagation graph around both.
         self._mark_dirty([old_id, new_id])
@@ -4417,22 +4460,23 @@ class TortoiseSDK:
                         "now": _now_iso()},
             )
 
-        # JSONL edge descriptor (plan §4.4) — emitted on created==True; A10's
-        # pass-2b replays it post-rebuild.
-        if created:
-            # The JSONL event log (#548) carries `id` + `extra` (payload is
-            # graph-store-only) — the descriptor fields ride as extra kwargs;
-            # A10's pass-2b reads them back for rebuild replay (plan §4.4).
-            self._emit_event(
-                "DirectEdgeCreated",
-                id=f"{source_id}->{target_id}:{op_type}",
-                src=source_id, tgt=target_id, edge_type=op_type,
-                direction=direction,
-                **({"confidence": float(confidence)} if confidence is not None else {}),
-                **({"weight": float(weight)} if weight is not None else {}),
-                **({"label": label} if label is not None else {}),
-                **({"batch_id": batch_id} if batch_id is not None else {}),
-            )
+        # JSONL edge descriptor (plan §4.4) — emitted on EVERY write (the
+        # MERGE-keyed replay is idempotent, so dedup-hit emissions are
+        # harmless, and the crash window closes: a crash between the MERGE
+        # and the emission on attempt 1 is recovered by attempt 2's emission —
+        # a created-only gate would lose the edge from the log forever on
+        # crash-retry). REVIEW-FIX P1 (cycle-26): last-writer-wins attr
+        # updates must replay the FINAL attrs post-rebuild.
+        self._emit_event(
+            "DirectEdgeCreated",
+            id=f"{source_id}->{target_id}:{op_type}",
+            src=source_id, tgt=target_id, edge_type=op_type,
+            direction=direction,
+            **({"confidence": float(confidence)} if confidence is not None else {}),
+            **({"weight": float(weight)} if weight is not None else {}),
+            **({"label": label} if label is not None else {}),
+            **({"batch_id": batch_id} if batch_id is not None else {}),
+        )
 
         self._mark_dirty([source_id, target_id])
         return {"direct_edge": op_type, "from": source_id, "to": target_id,

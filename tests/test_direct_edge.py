@@ -135,24 +135,26 @@ class TestCreateDirectEdge:
         sdk.create_direct_edge("IMPL", pc, pd, promote_source=False)
         assert sdk.get_point(pc)["status"] == "draft"
 
-    def test_descriptor_emitted_on_create_only(self, sdk, tmp_path):
-        import tortoise.sdk as sdkmod
+    def test_descriptor_emitted_on_every_write(self, sdk, tmp_path):
+        # REVIEW-FIX P1 (cycle-26): the descriptor is emitted on EVERY write
+        # (MERGE-keyed replay is idempotent; a created-only gate loses the
+        # edge from the rebuild log on crash-retry AND fails to replay the
+        # last-writer-wins attrs post-rebuild).
+        import json
         log_path = str(tmp_path / "events.jsonl")
-        # rebuild the SDK with an explicit event log path
         db = os.path.join(tempfile.mkdtemp(prefix="s8_"), "test.db")
         s2 = TortoiseSDK(db, event_log_path=log_path)
         pa, pb = _two_points(s2)
-        s2.create_direct_edge("IMPL", pa, pb, batch_id="b1", label="L")
-        s2.create_direct_edge("IMPL", pa, pb)  # dedup — no emit
-        lines = [l for l in open(log_path) if "DirectEdgeCreated" in l]
-        assert len(lines) == 1
-        import json
-        rec = json.loads(lines[0])
-        assert rec["type"] == "DirectEdgeCreated"
-        # JSONL carries the descriptor fields at top level (id + extra).
-        assert rec["src"] == pa and rec["tgt"] == pb
-        assert rec["edge_type"] == "IMPL"
-        assert rec["batch_id"] == "b1"
+        s2.create_direct_edge("IMPL", pa, pb, batch_id="b1", label="v1")
+        s2.create_direct_edge("IMPL", pa, pb, batch_id="b1", label="v2")  # dedup hit
+        lines = [json.loads(l) for l in open(log_path)
+                 if "DirectEdgeCreated" in l]
+        assert len(lines) == 2, "every write emits a descriptor"
+        # the LAST descriptor carries the FINAL attrs (last-writer-wins replay)
+        assert lines[-1]["src"] == pa and lines[-1]["tgt"] == pb
+        assert lines[-1]["edge_type"] == "IMPL"
+        assert lines[-1]["label"] == "v2"
+        assert lines[-1]["batch_id"] == "b1"
         s2.close()
 
 
@@ -174,9 +176,12 @@ class TestSupersedeDirectEdges:
             "MATCH ()-[r:IMPL|NAND]->(a:Point {id:$id}) "
             "RETURN count(r)", params={"id": pa}).result_set[0][0]
         assert n == 0 and n2 == 0
-        # pc now has: pc->pb (was pa->pb, attrs preserved) and pc->pc? no —
-        # the NAND pc->pa becomes pc->pc (self) which MERGE-collapses to the
-        # existing edge; the IMPL pa->pb becomes pc->pb.
+        # REVIEW-FIX P1 (cycle-26): ZERO self-edges anywhere (the phantom
+        # (new)->(new) leak is closed).
+        self_edges = proj.g.query(
+            "MATCH (a)-[r:IMPL|NAND]->(b) WHERE a.id = b.id RETURN count(r)"
+        ).result_set[0][0]
+        assert self_edges == 0, "no self-edges after supersede"
         n_pc_pb = proj.g.query(
             "MATCH (a:Point {id:$a})-[r:IMPL]->(b:Point {id:$b}) "
             "RETURN r.label, r.confidence, r.batch_id",
@@ -197,7 +202,29 @@ class TestSupersedeDirectEdges:
         lines = [json.loads(l) for l in open(log_path)
                  if "DirectEdgeRepoint" in l]
         assert len(lines) == 1
-        # JSONL carries the descriptor fields at top level.
+        # Flat descriptor shape (matches DirectEdgeCreated).
         assert lines[0]["tgt"] == pb
-        assert lines[0]["attrs"].get("batch_id") == "b1"
+        assert lines[0].get("batch_id") == "b1"
         s2.close()
+
+
+class TestSupersedeOutPassTopology:
+    def test_out_edge_to_successor_deleted_no_self_edge(self, sdk):
+        # REVIEW-FIX P1 (cycle-26): (old)->(successor) out-edge must be
+        # DELETED (repointing would create a self-edge), never repointed.
+        pa, pb = _two_points(sdk)
+        sdk.create_direct_edge("IMPL", pa, pb)  # pa->pb where pb is the successor
+        sdk.supersede_point(pa, pb)
+        proj = sdk._get_proj()
+        self_edges = proj.g.query(
+            "MATCH (a)-[r:IMPL|NAND]->(b) WHERE a.id = b.id RETURN count(r)"
+        ).result_set[0][0]
+        assert self_edges == 0
+        # pa has zero incident direct edges (superseded)
+        out = proj.g.query(
+            "MATCH (a:Point {id:$id})-[r:IMPL|NAND]->() RETURN count(r)",
+            params={"id": pa}).result_set[0][0]
+        inn = proj.g.query(
+            "MATCH ()-[r:IMPL|NAND]->(a:Point {id:$id}) RETURN count(r)",
+            params={"id": pa}).result_set[0][0]
+        assert out == 0 and inn == 0
