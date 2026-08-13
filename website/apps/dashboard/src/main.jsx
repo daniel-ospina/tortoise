@@ -13,6 +13,8 @@ const KEY_STORAGE = 'tortoise_api_key'
 // team) travels as a NON-SECRET marker cookie (tt_claim_pending=1) — it
 // carries no credential, only a routing signal.
 const CLAIM_KEY_STORAGE = 'tt_claim_key'
+const INVITE_TOKEN_STORAGE = 'tortoise.inviteToken'
+const [banner, setBanner] = React.useState('')
 const CLAIM_PENDING_COOKIE = 'tt_claim_pending'
 
 function readClaimKeyStorage() {
@@ -350,6 +352,47 @@ function App() {
         // Phase-2 mint is never reached (redirectTo targets the dashboard
         // claim route, NOT welcome.html), so the claimable anon team is
         // never orphaned by a stray mint.
+        // #1177: ?invite_token=... — the invite-accept page routes here with
+        // the token stashed in sessionStorage (same-tab, same-origin) after
+        // OAuth/email sign-in. POST /v1/invites/accept once a session exists;
+        // success is surfaced and the param is stripped (no resubmit on
+        // refresh — same precedent as ?claim=1).
+        const inviteTokenParam = new URLSearchParams(window.location.search).get('invite_token')
+        if (inviteTokenParam) {
+          try {
+            sessionStorage.setItem(INVITE_TOKEN_STORAGE, inviteTokenParam)
+          } catch { /* best-effort */ }
+          window.history.replaceState({}, '', window.location.pathname)
+        }
+        const stashedInvite = (() => {
+          try { return sessionStorage.getItem(INVITE_TOKEN_STORAGE) || '' } catch { return '' }
+        })()
+        if (stashedInvite && session.access_token) {
+          try {
+            const inviteRes = await fetch(`${API_BASE}/v1/invites/accept`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
+              body: JSON.stringify({ token: stashedInvite }),
+            })
+            if (inviteRes.ok) {
+              try { sessionStorage.removeItem(INVITE_TOKEN_STORAGE) } catch { /* best-effort */ }
+              setBanner('Welcome to the team! Your membership is active.')
+            } else {
+              let inviteMsg = `Could not accept invite (HTTP ${inviteRes.status}).`
+              try {
+                const b = await inviteRes.json()
+                if (b && b.detail) inviteMsg = typeof b.detail === 'string' ? b.detail : JSON.stringify(b.detail)
+              } catch { /* non-JSON body */ }
+              if (inviteRes.status !== 409) { // already a member — not an error worth a banner
+                setBanner(inviteMsg)
+              }
+              try { sessionStorage.removeItem(INVITE_TOKEN_STORAGE) } catch { /* best-effort */ }
+            }
+          } catch (e) {
+            setBanner((e && e.message) || 'Could not accept invite — try again.')
+          }
+        }
+
         const claimParam = new URLSearchParams(window.location.search).get('claim')
         if (claimParam === '1') {
           let claimKeyStored = ''
@@ -1271,6 +1314,12 @@ function App() {
 
   return (
     <div className="app">
+      {banner && (
+        <div className="banner" style={{ background: 'var(--surface,#0d1a2d)', borderBottom: '1px solid var(--border,#1e293b)', color: 'var(--green,#4ade80)', padding: '0.6rem 1.5rem', fontSize: 13, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span>{banner}</span>
+          <button className="ghost small" onClick={() => setBanner('')} aria-label="Dismiss">✕</button>
+        </div>
+      )}
       <header>
         <div className="logo">Tortoise</div>
         <nav>
