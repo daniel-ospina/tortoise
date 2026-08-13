@@ -7578,6 +7578,22 @@ class TortoiseSDK:
                     "retryable": False}
         # corpus_root default resolution (§6.1 I6 pin).
         root, name = self._index_resolve_corpus_root(path, corpus_root, corpus_name)
+        # REVIEW-FIX P1 (cycle-26): TORTOISE_INDEX_NO_NETWORK honored at the
+        # NEW-PATH call boundary REGARDLESS of extract_metadata (cycle-10/12
+        # pin; index_file is a new-path boundary — S14 precedence unit test
+        # "var set + flag True → resolved False" covers this path too).
+        if self._index_no_network():
+            extract_metadata = False
+        # REVIEW-FIX P1 (cycle-26): index_file OUTSIDE-ROOT mount-source class
+        # (§6.4 cycle-7 — the (s2) class: realpath resolves in-root, st_nlink
+        # == 1, "the mount-source check is the ONLY catch"). index_file is the
+        # THIRD mount_source_for seam consumer — check the resolved file's
+        # parent-dir chain before any read; fail closed on outside-root source.
+        from .index_walk import mount_source_for_file
+        ms = mount_source_for_file(_os.path.realpath(path), str(root), ingest_base)
+        if ms and ms.get("fail"):
+            return {"status": "failed", "reason": "escape",
+                    "retryable": False}
         result = self._index_process_unit(
             Path(path), corpus_root=root, corpus_name=name,
             file_type_declared=file_type, extract_metadata=extract_metadata,
@@ -7709,6 +7725,13 @@ class TortoiseSDK:
         from pathlib import Path
         from .index_walk import (walk_markdown, compute_dispositions,
                                  DISP_ESCAPE, DISP_UNRECONCILED, DISP_STRUCTURAL)
+        # REVIEW-FIX P2: file_type validated PRE-WALK (never mid-walk after
+        # partial writes — the plan pins "validation, not a bucket").
+        if file_type not in ("auto", "agent_session", "meeting", "doc"):
+            raise ValueError(
+                f"index_directory: unknown file_type {file_type!r} — "
+                f"expected auto|agent_session|meeting|doc"
+            )
         walked = walk_markdown(corpus_root, base=ingest_base)
         result["file_count"] = len(walked.files)
         result["ignored"] = walked.ignored
@@ -7717,7 +7740,8 @@ class TortoiseSDK:
         for m in walked.mount_warnings:
             result["errors"].append(
                 {"file": f"(mount) {m}", "error": m, "retryable": False,
-                 "cause": "escape"})
+                 "cause": "structural"})  # REVIEW-FIX P2: warn-not-fail mount
+        # entries are NOT escapes — "escape" is reserved for real rejections
         disp = compute_dispositions(walked.files, corpus_root,
                                     banned_prefixes=walked.banned_prefixes)
 
@@ -8283,6 +8307,31 @@ class TortoiseSDK:
                             source_date)
                         event_id = resolved_eid
                         out["eventId"] = event_id
+                        if rejected:
+                            # REVIEW-FIX P2 (cycle-26): ALL suffix widths
+                            # (8/12/16) taken by other-source meetings — never
+                            # a silent clobber: no EventRecorded emission, no
+                            # edge wiring, an errors[] entry, and the unit is
+                            # bucketed failed (the §4.2 mechanism's "never a
+                            # silent clobber" guarantee; the journaled
+                            # candidate would otherwise replay props onto the
+                            # colliding meeting's Event).
+                            result["errors"].append(
+                                {"file": str(path),
+                                 "error": f"meeting eventId {event_id} "
+                                          f"collides at all suffix widths "
+                                          f"(sha256 [:8]/[:12]/[:16]) — "
+                                          f"refusing to clobber; re-name the "
+                                          f"file or split the meeting",
+                                 "retryable": False,
+                                 "cause": "structural"})
+                            out["status"] = "failed"
+                            out["reason"] = "meeting-id-collision"
+                            out["retryable"] = False
+                            return {k: v for k, v in out.items() if k in (
+                                "status", "url", "eventId", "documentId",
+                                "sourceKind", "reason", "retryable",
+                                "skipped_reason", "errors")}
                         repair_work = not base_complete or merge_outcome == "updated"
                     else:
                         self._doc_write(frontmatter, doc_id, title, abs_path, url)
@@ -8498,6 +8547,12 @@ class TortoiseSDK:
             "keywords": metadata.get("keywords", []),
             "topics": metadata.get("topics", []),
             "message_count": int(frontmatter.get("message_count", 0) or 0),
+            # REVIEW-FIX P2 (cycle-26): startedAt/capturedAt are ONLY set on
+            # CREATE — the MERGE's ON MATCH arm preserves the recorded
+            # timestamps (a repair re-run of a hash-unchanged unit must not
+            # drift capturedAt, pinned = ingest time). The conditional MERGE
+            # below branches ON CREATE SET full / ON MATCH SET additive
+            # (without startedAt/capturedAt).
             "startedAt": now,
             "capturedAt": now,   # cycle-25(b): capture/ingest transaction time
             "content_metadata": _json.dumps({
@@ -8523,11 +8578,21 @@ class TortoiseSDK:
                     props["keywords"], props["topics"])
             except Exception:  # noqa: BLE001 — degrade, never abort
                 embedding = None
+        # REVIEW-FIX P2 (cycle-26): timestamps preserved on MATCH — the MERGE
+        # splits ON CREATE (full props incl. startedAt/capturedAt) vs ON MATCH
+        # (additive props WITHOUT the timestamps), so a repair re-run of a
+        # hash-unchanged unit never drifts capturedAt (pinned = ingest time).
+        # The CASE-guarded embedding clause stays the ONLY embedding write.
+        create_props = {k: v for k, v in props.items()
+                        if k not in ("startedAt", "capturedAt")}
         proj.g.query(
-            "MERGE (e:Event {eventId:$eid}) SET e += $props, "
+            "MERGE (e:Event {eventId:$eid}) "
+            "ON CREATE SET e += $props "
+            "ON MATCH SET e += $match_props, "
             "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) "
             "ELSE e.embedding END",
-            params={"eid": event_id, "props": props, "embedding": embedding},
+            params={"eid": event_id, "props": props,
+                    "match_props": create_props, "embedding": embedding},
         )
         self._connect_issue_objects(event_id, metadata)
         # JOURNALING CONTRACT (a): emit-on-every-write; embedding rides the

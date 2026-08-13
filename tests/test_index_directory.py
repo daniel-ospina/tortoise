@@ -390,21 +390,30 @@ def test_size_guard_bad_env(monkeypatch):
 def test_size_guard_toctou(corpus, monkeypatch):
     # TOCTOU: patched pre-read stat reports under-limit while the read returns
     # over-limit bytes → failed closed (T3-owned S2 unit, §6.4 cycle-4).
-    monkeypatch.setenv("TORTOISE_MAX_FILE_MB", "0.0001")
+    # REVIEW-FIX P2 (cycle-26): patch os.stat (the pre-read size guard's call —
+    # os.lstat is the walker's inode/type call and was never consulted here)
+    # AND make the REAL file exceed the limit so layer-1 passes (the lying
+    # stat claims 10 bytes) and the layer-2 bounded-read length re-check MUST
+    # catch the over-limit read (the old 0.0001MB limit tripped layer-1 first
+    # — the test passed for the wrong reason and never exercised the layer-2
+    # TOCTOU the pin demands).
+    monkeypatch.setenv("TORTOISE_MAX_FILE_MB", "0.001")  # 1KB limit
+    # make the real file exceed the limit (layer-2 must catch it)
+    (corpus / "s1.md").write_text(SESSION_FIXTURE * 10)  # ~7KB > 1KB
     p = corpus / "s1.md"
     sdk = _sdk()
     try:
-        real_lstat = os.lstat
-        def _lying_lstat(path, *a, **kw):
+        real_stat = os.stat
+        def _lying_stat(path, *a, **kw):
             if str(path) == str(p):
-                # stat-only lie: under-limit size, regular-file mode
+                # stat-only lie: under-limit size (10 bytes), regular-file mode
                 import types
                 return types.SimpleNamespace(
                     st_mode=stat.S_IFREG | 0o644, st_size=10, st_mtime=0.0,
                     st_dev=1, st_ino=1, st_nlink=1)
-            return real_lstat(path, *a, **kw)
-        # patch the pre-read stat call (as imported by the read path)
-        monkeypatch.setattr(os, "lstat", _lying_lstat)
+            return real_stat(path, *a, **kw)
+        # patch the pre-read size-guard stat call (the layer-1 guard)
+        monkeypatch.setattr(os, "stat", _lying_stat)
         r = sdk.index_directory(str(corpus), extract_metadata=False)
         errs = [e for e in r["errors"] if e["file"] == "s1.md"]
         assert errs and errs[0]["cause"] == "size"
