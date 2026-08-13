@@ -58,17 +58,25 @@ def test_rapid_open_close_no_hang():
 
 
 def test_finalize_cleans_on_gc():
-    """weakref.finalize: dropping the last reference + gc.collect() cleans
-    the server without an explicit close()."""
+    """Issue #1005: weakref.finalize cannot clean the server on GC — a
+    bound-method callback keeps the projection alive (never fires), and a
+    weakref arg is dead at callback time. The lifecycle contract is now:
+    context managers / explicit close for mid-session, atexit for process
+    exit, and the reaper for hard-killed strays. This test pins the new
+    contract: after GC, the projection is still alive ONLY if something
+    strong references it (atexit does, until exit); the server close must
+    not be expected from GC."""
     from tortoise.projection import FalkorProjection
     path = _tmp_db("fin.db")
     proj = FalkorProjection(path)
     proj_ref = proj
     del proj
     gc.collect()
-    # The finalize should have run; the underlying db should be closed.
-    # Accessing _closed on the still-referenced object shows state.
-    assert proj_ref._closed is True or proj_ref._finalizer is not None
+    # atexit holds a bound method -> the projection stays alive until exit;
+    # close() must be idempotent and __exit__ must close the db.
+    with proj_ref:
+        pass
+    assert proj_ref._closed is True
 
 
 def test_atexit_cleanup_fires_on_process_exit():

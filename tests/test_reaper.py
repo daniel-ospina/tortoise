@@ -249,7 +249,13 @@ def test_discover_protects_path_based_server_with_old_settings(tmp_path):
 
 def test_discover_unknown_old_settings_pattern_defaults_protected(tmp_path, caplog):
     """Pre-#90 .settings, no db_filename, no .db file, non-matching dirname
-    -> protected with WARNING, never crash, never killable."""
+    -> protected (boot cooldown: no live pid) — never crash, never killable.
+
+    Issue #1005 semantics: the dir sits inside an ephemeral pytest tmp tree,
+    so it is no longer flagged as an 'unrecognized pattern' (the tree itself
+    is known-ephemeral); protection now comes from the boot cooldown. The
+    unrecognized-pattern warning only applies outside ephemeral trees.
+    """
     dbdir = tmp_path / "my-custom-name"  # non-matching dirname
     dbdir.mkdir()
     socket_path = dbdir / "redis.socket"
@@ -264,8 +270,6 @@ def test_discover_unknown_old_settings_pattern_defaults_protected(tmp_path, capl
         matches = [s for s in found if str(dbdir) in s.get("dbdir", "")]
         assert matches, "unknown-pattern server not discovered"
         assert matches[0]["classification"] == "protected"
-    assert "unrecognized dir pattern" in caplog.text.lower() or \
-        "treating as protected" in caplog.text.lower()
 
 
 # ── Error isolation ─────────────────────────────────────────────────
@@ -857,3 +861,99 @@ def test_cli_singleton_lock_released_on_sigkill(monkeypatch):
     # should run normally (lock released via kernel), not 'already running'
     assert rc == 0
     assert "already running" not in (out + err).lower()
+
+
+# ── Issue #1005: ephemeral-test-tree classification + concurrency guard ──
+
+def test_is_ephemeral_dir_recognizes_test_prefixes():
+    """Ephemeral markers: any basename prefix under the tempdir."""
+    from tortoise.embedded_reaper import _is_ephemeral_dir, _real_gettempdir
+    tmp = _real_gettempdir()
+    assert _is_ephemeral_dir(os.path.join(tmp, "tortoise_shared_embedded_x"), tmp)
+    assert _is_ephemeral_dir(os.path.join(tmp, "tortoise_m0_x"), tmp)
+    assert _is_ephemeral_dir(os.path.join(tmp, "tt_own_x"), tmp)
+    assert _is_ephemeral_dir(os.path.join(tmp, "pytest-of-user"), tmp)
+    assert _is_ephemeral_dir(os.path.join(tmp, "pack_v3_bad_x"), tmp)
+    assert not _is_ephemeral_dir(os.path.join(tmp, "unknown-prefix-x"), tmp)
+    # user-home dirs are NOT under the tempdir -> never ephemeral
+    assert not _is_ephemeral_dir("/Users/u/tortoise-test-home-1", tmp)
+
+
+def test_is_ephemeral_dir_linux_tmp_root_never_matches():
+    """Regression (#1005 review P1): on Linux the tempdir root IS /tmp —
+    the root's own 'tmp' component must never classify everything beneath
+    it as ephemeral, and /tmp2 siblings must not match via string prefix."""
+    from tortoise.embedded_reaper import _is_ephemeral_dir
+    assert not _is_ephemeral_dir("/tmp/unknown-prefix-x", "/tmp")
+    assert not _is_ephemeral_dir("/tmp/myapp", "/tmp")
+    assert not _is_ephemeral_dir("/tmp2/something", "/tmp")
+    assert not _is_ephemeral_dir("/tmp", "/tmp")  # the root itself
+    assert _is_ephemeral_dir("/tmp/pytest-of-user/pytest-1/test_x", "/tmp")
+    assert _is_ephemeral_dir("/tmp/tortoise_test_abc", "/tmp")
+    assert _is_ephemeral_dir("/tmp/tt_own_1", "/tmp")
+
+
+def test_classify_path_server_under_ephemeral_tree_is_candidate(monkeypatch):
+    """Path-based server whose dir is an ephemeral test tree -> candidate
+    (previously 'protected' — the #1005 dominant leak source)."""
+    from tortoise.embedded_reaper import _classify, _real_gettempdir
+    monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
+    tmp = _real_gettempdir()
+    dbdir = os.path.join(tmp, "tortoise_shared_embedded_abc")
+    socket_dir = os.path.join(tmp, "redislite_xyz")
+    registry = {"dir": dbdir, "dbfilename": "shared.db", "pidfile": "/nonexistent/pid"}
+    assert _classify(socket_dir, dbdir, tmp, registry) == "candidate"
+
+
+def test_classify_dir_marks_dir_missing(tmp_path, monkeypatch):
+    """Registry dir removed (pytest cleaned the tree) -> dir_missing=True,
+    which makes the record safe under concurrent suites."""
+    from tortoise.embedded_reaper import _classify_dir
+    monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
+    socket_dir = tmp_path / "redislite_sock"
+    socket_dir.mkdir()
+    (socket_dir / "redis.socket").touch()
+    gone_dir = tmp_path / "gone"
+    registry_file = socket_dir / "x.settings"
+    registry_file.write_text(
+        '{"dir": "%s", "dbfilename": "redis.db"}' % str(gone_dir))
+    record = _classify_dir(str(socket_dir), str(socket_dir / "redis.socket"))
+    assert record is not None
+    assert record["dir_missing"] is True
+
+
+def test_reap_only_safe_skips_live_ephemeral_without_killing(monkeypatch):
+    """only_safe=True must skip live ephemeral candidates (0-client between
+    tests of a concurrent suite) and only act on dir_missing records."""
+    from tortoise.embedded_reaper import reap
+    killed = []
+
+    def fake_kill(pid, timeout):
+        killed.append(pid)
+
+    monkeypatch.setattr("tortoise.embedded_reaper._kill", fake_kill)
+    live = {"classification": "candidate", "dir_missing": False,
+            "socket_path": "/tmp/s1", "pid": 424242}
+    gone = {"classification": "candidate", "dir_missing": True,
+            "socket_path": "/tmp/s2", "pid": 424243}
+    acted = reap([live, gone], dry_run=False, only_safe=True)
+    assert acted == []  # gone's pid is dead -> skipped at liveness check
+    assert killed == []  # nothing was killed
+
+
+def test_active_suite_tokens_lists_markers(monkeypatch, tmp_path):
+    """active_suite_tokens() returns non-hidden marker filenames only, and
+    skips stale markers whose pid is dead (#1005 review P2)."""
+    from tortoise.embedded_reaper import ACTIVE_SUITES_DIR, active_suite_tokens
+    marker_dir = tmp_path / "active_suites"
+    marker_dir.mkdir(parents=True)
+    (marker_dir / "1234-abc").write_text(f"pid={os.getpid()}\n")
+    (marker_dir / "99999999-dead").write_text("pid=99999999\n")  # dead by
+    # construction on macOS AND Linux (99999999 > pid_max on both)
+    (marker_dir / "poison-empty").write_text("")
+    (marker_dir / "poison-bad").write_text("pid=" + "9" * 100)  # OverflowError
+    (marker_dir / ".hidden").write_text("x")
+    monkeypatch.setattr("tortoise.embedded_reaper.ACTIVE_SUITES_DIR",
+                        str(marker_dir))
+    # malformed/empty/stale markers are skipped; only the live one counts
+    assert active_suite_tokens() == ["1234-abc"]
