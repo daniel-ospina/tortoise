@@ -9,6 +9,7 @@ import hashlib
 import json as _json
 import logging
 import re
+import stat
 from typing import Any
 
 from .domain_loader import known_kinds, register_kind
@@ -256,7 +257,105 @@ def _save_progress(progress_file: str, directory: str, total: int, processed: in
         pass  # progress file is best-effort
 
 
-# Module-level cached registry for kind expansion
+# ── Index workflow (epic #900 T3) module helpers ──────────────────────────
+# Connection-level retry budget for the bounded-abort disposition (E2E-19 /
+# §6.4): DB write failures are per-file failed{retryable:true} while the
+# connection can recover, up to this many consecutive failures — then the run
+# aborts with a partial report (aborted/aborted_reason).
+_INDEX_DB_RETRY_BUDGET = 3
+
+# In-process per-url locks serializing the Source conditional MERGE + outcome
+# detection (E2E-9 threads leg): the embedded FalkorDBLite executes concurrent
+# same-key MERGEs in a parallel executor that reports "Nodes created: 1" for
+# BOTH writers (and even re-fires both ON CREATE branches — commit order
+# nondeterministic), so the counter-authority outcome needs the writers
+# serialized. The threads leg is single-process (one daemon, per-thread SDK
+# instances) — an in-process lock suffices; the bolt:// subprocess leg's stats
+# are honest (and the __runId marker backstops cross-process ambiguity).
+_source_merge_lock_guard = threading.Lock()
+_source_merge_locks: dict[str, threading.Lock] = {}
+
+# Embedded db paths this PROCESS has opened (the §5.3 busy probe passes
+# same-process daemon reuse — the registry records the DAEMON pid, which is
+# never our own python pid).
+_embedded_busy_known: set[str] = set()
+_embedded_busy_guard = threading.Lock()
+
+
+# Per-corpus in-process run locks: the embedded FalkorDBLite's cross-connection
+# MERGE semantics are broken under concurrency (observed: the ON CREATE branch
+# re-fires against an existing key created by ANOTHER connection — the
+# counter-authority outcome then lies). The threads leg (E2E-9) runs in ONE
+# process, so serializing whole index_directory runs per corpus makes the
+# second run's gate see the first's completed units → honest fast-path skips
+# (the plan's "later completions report skipped/updated honestly"). The bolt://
+# subprocess leg is cross-process (no shared lock) but server-mode stats/MERGE
+# are honest there. This is an ORCHESTRATION-side serialization — the
+# write-path machinery (conditional MERGE, repair carve-out) is unchanged.
+_index_run_lock_guard = threading.Lock()
+_index_run_locks: dict[str, threading.Lock] = {}
+
+
+def _index_run_lock_for(key: str) -> threading.Lock:
+    with _index_run_lock_guard:
+        lock = _index_run_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _index_run_locks[key] = lock
+        return lock
+
+
+def _mark_embedded_opened(db_path: str) -> None:
+    with _embedded_busy_guard:
+        _embedded_busy_known.add(str(db_path))
+
+
+def _source_merge_lock_for(url: str) -> threading.Lock:
+    with _source_merge_lock_guard:
+        lock = _source_merge_locks.get(url)
+        if lock is None:
+            lock = threading.Lock()
+            _source_merge_locks[url] = lock
+        return lock
+
+
+def _resolve_under_base_realpath(candidate: str, base: str) -> str | None:
+    """Realpath-resolved containment check (the index_file path argument gets
+    the same resolved-target discipline as progress_file/directory — §6.4
+    cycle-7 pin: an in-base symlink whose target resolves OUTSIDE the base
+    raises; a lexical check alone would pass the #329 argument-path test)."""
+    import os as _os
+    try:
+        real = _os.path.realpath(candidate)
+        from pathlib import Path
+        Path(real).relative_to(Path(_os.path.realpath(base)))
+        return real
+    except (ValueError, OSError):
+        return None
+
+
+def _classify_db_failure(e: BaseException) -> str | None:
+    """Map an exception to the §6.4 DB-failure cause-class (E2E-19 naming):
+    ``db`` when the write path hit the graph engine (ResponseError /
+    ConnectionError / TimeoutError / ENOSPC-family); None otherwise (the
+    per-file handler re-buckets it as structural)."""
+    import os as _os
+    try:
+        import redis.exceptions as _re
+        if isinstance(e, (_re.ResponseError, _re.ConnectionError,
+                          _re.TimeoutError, _re.BusyLoadingError,
+                          _re.InvalidResponse)):
+            return "db"
+    except Exception:  # noqa: BLE001
+        pass
+    if isinstance(e, OSError) and getattr(e, "errno", None) in (
+            getattr(_os, "ENOSPC", None), getattr(_os, "EIO", None),
+            getattr(_os, "EROFS", None)):
+        return "db"
+    return None
+
+
+# ── Module-level cached registry for kind expansion
 _registry_cache: "PackRegistry | None" = None
 _registry_lock = threading.Lock()
 
@@ -328,6 +427,14 @@ class TortoiseSDK:
         self._namespace = namespace
         self._event_log_path = event_log_path
         self._event_log = None  # lazy-init EventLog (#548)
+        # Epic #900 §5.3 (cycle-21): cross-process embedded overlap probe —
+        # fail-fast when another PROCESS holds this embedded store (redislite
+        # pid-registry + liveness probe). Same-process threads reuse the daemon
+        # by construction — the process-local opened-set passes them (the
+        # registry records the DAEMON pid, which is never our own python pid).
+        if self._db_uri is None and self._db_path:
+            self._probe_embedded_busy(self._db_path)
+            _mark_embedded_opened(self._db_path)
         self._proj: FalkorProjection | None = None
         self._ep = None  # lazy-init TortoiseEP
         self._evidence: dict[str, tuple[float, float]] = {}
@@ -345,6 +452,50 @@ class TortoiseSDK:
         # paths mark affected claims dirty; dream()/lazy-read consume them.
         self._dirty_roots: set[str] = set()
         self._dreamer = None  # lazy-init Dreamer
+
+    def _probe_embedded_busy(self, db_path: str) -> None:
+        """Epic #900 §5.3: fail-fast on cross-process embedded overlap.
+
+        Reads the redislite daemon registry (``<db_path>.settings`` → the
+        recorded ``pidfile``) and liveness-probes the recorded pid: a LIVE
+        holder that is NOT this process raises ``EmbeddedStoreBusyError``
+        (naming db_path + holder pid) — never a silent second daemon
+        (two in-memory copies = split-brain on the default embedded topology).
+        Same-process opens (paths in ``_embedded_busy_known`` — threads reuse
+        the daemon by construction) and dead-pid leftovers (crash residue)
+        pass.
+        """
+        import os as _os
+        import json as _json
+        from pathlib import Path as _Path
+        if not db_path or str(db_path) == ":memory:":
+            return
+        if str(db_path) in _embedded_busy_known:
+            return  # this process already owns/holds the daemon — threads reuse
+        registry = _Path(db_path).with_name(_Path(db_path).name + ".settings")
+        if not registry.is_file():
+            return
+        try:
+            settings = _json.loads(registry.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 — registry unreadable ⇒ no probe
+            return
+        pidfile = settings.get("pidfile")
+        if not pidfile or not _os.path.isfile(str(pidfile)):
+            return
+        try:
+            pid = int(_Path(pidfile).read_text().strip())
+        except Exception:  # noqa: BLE001
+            return
+        if pid <= 0:
+            return
+        try:
+            _os.kill(pid, 0)  # liveness probe
+        except ProcessLookupError:
+            return  # dead daemon (crash residue) — safe to open
+        except PermissionError:
+            pass  # exists but not ours to signal — still a live holder
+        from tortoise.exceptions import EmbeddedStoreBusyError
+        raise EmbeddedStoreBusyError(db_path, pid)
 
     def _get_proj(self) -> FalkorProjection:
         if self._proj is None:
@@ -7657,10 +7808,21 @@ class TortoiseSDK:
 
     # ── Entity CRUD (ONTOLOGY v2.5 §3, all 7 types) ──────────────────
 
-    def _create_entity(self, label: str, id_val: str, props: dict, event_type: str) -> dict:
-        """Generic entity creation. Applies to graph via projection (event log + FalkorDB)."""
+    def _create_entity(self, label: str, id_val: str, props: dict, event_type: str,
+                       *, _skip_sanitize: bool = False) -> dict:
+        """Generic entity creation. Applies to graph via projection (event log + FalkorDB).
+
+        ``_skip_sanitize=True`` (epic #900 T3, create_source's sanctioned
+        source_path route): the caller has already extracted the server-
+        managed ``source_path``/``source_path`` keys into an explicit kwarg and
+        sanitized the remainder — bypassing ``_sanitize_props`` would otherwise
+        fail-closed on the sanctioned key (the sanitizer's own docstring carves
+        out ``api.add_document(source_path=)``; create_source(source_path=) is
+        the mirror route).
+        """
         # #329: id + sourcePath/source_path are server-managed — reject
-        props = _sanitize_props(props, reject_id=True)
+        if not _skip_sanitize:
+            props = _sanitize_props(props, reject_id=True)
         proj = self._get_proj()
         # Build event dict
         event = {"type": event_type, "id": id_val, **props}
@@ -7678,7 +7840,12 @@ class TortoiseSDK:
         if label == "Source":
             event["url"] = id_val
         # Apply through projection (writes to JSONL + FalkorDB)
-        proj.apply(event)
+        apply_result = proj.apply(event)
+        if label == "Source":
+            # epic #900 T3: thread the conditional-MERGE QueryResult so
+            # create_source can attribute the counter-authority outcome
+            # (nodes_created) from the single statement (pin b).
+            proj._source_merge_result = apply_result
         # #452: Subject/Object MERGE by name (content-hash dedup).
         # When the name already exists, the fresh id_val never lands on the
         # node (ON CREATE never fires).  Re-fetch the canonical id from the
@@ -8087,6 +8254,1328 @@ class TortoiseSDK:
         ).result_set
         return rows[0][0] if rows else None
 
+    def index_file(self, path: str,
+                   file_type: str | None = None,   # "agent_session"|"meeting"|"doc"|None(auto)
+                   *, corpus_root: str | None = None,
+                   corpus_name: str | None = None,
+                   extract_metadata: bool = True,
+                   llm_model: str | None = "gpt-5-mini",
+                   embedding_repair_backoff: float | None = None,
+                   ) -> dict:
+        """One idempotent unit operation (epic #900 T3; A8). Returns:
+        {"status": "indexed"|"updated"|"skipped"|"failed",
+         "url": str, "eventId"|"documentId": str, "sourceKind": str,
+         "reason"?: str,              # skipped/failed explanation. SKIPPED reasons
+                                       # (PINNED): "unchanged" | "lock-held"
+                                       # (retryable:true) | "duplicate-sessionId" |
+                                       # "symlink-duplicate" | "inode-duplicate" |
+                                       # "embedding-unavailable"
+         "retryable"?: bool}
+        `updated` is TWO-ARMED: (a) hash-diff MERGE — in-place update + version
+        bump; (b) repair work with UNCHANGED hash (unit completion / embedding
+        heal) — NO version bump.
+        Raises: ValueError — unsafe path (#329), file outside corpus_root,
+        unknown file_type value, unresolved corpus_root (§6.1 I6 default
+        resolution: nearest ancestor equal to TORTOISE_INGEST_BASE_DIR, else
+        explicit corpus_root demanded).
+        """
+        import os as _os
+        from pathlib import Path
+        # #329: single-file path validation — absolute, no `..`, and under
+        # TORTOISE_INGEST_BASE_DIR when set (same family as ingest_corpus).
+        if not isinstance(path, str) or not path:
+            raise ValueError("index_file: path must be a non-empty string")
+        raw_base = _os.environ.get("TORTOISE_INGEST_BASE_DIR")
+        ingest_base = _os.path.realpath(_os.path.expanduser(raw_base)) if raw_base else None
+        if not _os.path.isabs(path) or ".." in Path(path).parts:
+            raise ValueError(
+                f"Unsafe path {path!r} — must be absolute with no '..' components."
+            )
+        if ingest_base is not None and _resolve_under_base_realpath(path, ingest_base) is None:
+            raise ValueError(
+                f"Unsafe path {path!r} — resolves outside "
+                f"TORTOISE_INGEST_BASE_DIR ({ingest_base})."
+            )
+        if not _os.path.exists(path):
+            return {"status": "failed", "reason": "file not found",
+                    "retryable": False}
+        # corpus_root default resolution (§6.1 I6 pin).
+        root, name = self._index_resolve_corpus_root(path, corpus_root, corpus_name)
+        # REVIEW-FIX P1 (cycle-26): TORTOISE_INDEX_NO_NETWORK honored at the
+        # NEW-PATH call boundary REGARDLESS of extract_metadata (cycle-10/12
+        # pin; index_file is a new-path boundary — S14 precedence unit test
+        # "var set + flag True → resolved False" covers this path too).
+        if self._index_no_network():
+            extract_metadata = False
+        # REVIEW-FIX P1 (cycle-26): index_file OUTSIDE-ROOT mount-source class
+        # (§6.4 cycle-7 — the (s2) class: realpath resolves in-root, st_nlink
+        # == 1, "the mount-source check is the ONLY catch"). index_file is the
+        # THIRD mount_source_for seam consumer — check the resolved file's
+        # parent-dir chain before any read; fail closed on outside-root source.
+        from .index_walk import mount_source_for_file
+        ms = mount_source_for_file(_os.path.realpath(path), str(root), ingest_base)
+        # REVIEW-FIX P1 (cycle-26): mount_source_for_file returns list[dict] —
+        # any() over the entries (the earlier fix called .get on the list and
+        # AttributeError'd on BOTH the warn and fail cells).
+        if ms and any(n.get("fail") for n in ms):
+            return {"status": "failed", "reason": "escape",
+                    "retryable": False}
+        result = self._index_process_unit(
+            Path(path), corpus_root=root, corpus_name=name,
+            file_type_declared=file_type, extract_metadata=extract_metadata,
+            llm_model=llm_model, repair_backoff=self._index_repair_backoff(
+                embedding_repair_backoff),
+            fast_skip_key=None, disposition=None,
+            election_owner=None, single_file=True,
+        )
+        return {k: v for k, v in result.items() if k in (
+            "status", "url", "eventId", "documentId", "sourceKind",
+            "reason", "retryable")}
+
+    def index_directory(self, directory: str,
+                        *, file_type: str = "auto",
+                        corpus_name: str | None = None,
+                        extract_metadata: bool = True,
+                        llm_model: str | None = "gpt-5-mini",
+                        embedding_repair_backoff: float | None = None,
+                        progress_file: str | None = None,
+                        ) -> dict:
+        """Batch walk (custom bounded walker, W1 cycle-4 pin). Returns:
+        {"directory", "corpus_name", "file_count", "indexed", "updated",
+         "skipped", "failed", "aborted", "ignored", "errors": [...],
+         "by_kind": {kind: count}, "aborted_reason"?}
+        Invariant: indexed + updated + skipped + failed + aborted == file_count.
+        file_count counts `*.md` files ONLY (non-md walk entries land in
+        `ignored`, never in file_count or the four buckets); aborted = files
+        never reached because the run aborted (bounded-abort disposition,
+        E2E-19); aborted_reason names the DB-failure class when aborted > 0.
+        errors[] entries carry the cause-class token (decode/size/escape/
+        structural/filename/db/lock) + the rel-path + limit values where
+        applicable (§6.4 cycle-21).
+        Raises: ValueError — #329 boundary violations (directory +
+        progress_file, realpath-resolved; symlink roots resolving outside the
+        base, E2E-7(v1)); TORTOISE_MAX_FILE_MB garbage/<=0.
+        """
+        import os as _os
+        from pathlib import Path
+        from .security import resolve_under_base as _rub
+        from .index_walk import (walk_markdown, compute_dispositions,
+                                 DISP_ESCAPE, DISP_UNRECONCILED,
+                                 DISP_STRUCTURAL)
+        raw_base = _os.environ.get("TORTOISE_INGEST_BASE_DIR")
+        ingest_base = _os.path.realpath(_os.path.expanduser(raw_base)) if raw_base else None
+
+        # ── directory-argument resolution (cycle-7): the DIRECTORY argument
+        # gets the SAME realpath-resolved treatment as progress_file — an
+        # in-base symlink root whose target resolves OUTSIDE the base raises
+        # ValueError BEFORE any walk (E2E-7(v1)); inside → indexes normally
+        # with realpath-derived urls (E2E-7(v2)).
+        if not isinstance(directory, str) or not directory:
+            raise ValueError("index_directory: directory must be a non-empty string")
+        if not _os.path.isabs(directory) or ".." in Path(directory).parts:
+            raise ValueError(
+                f"Unsafe directory {directory!r} — must be absolute with no "
+                f"'..' components (#329)."
+            )
+        dir_path = Path(directory)
+        if not dir_path.is_dir():
+            # cycle-12 disposition: nonexistent walk root = zero-count no-op
+            # (legacy session_index_health is_dir() parity — the backgrounded
+            # hook must never see an unhandled FileNotFoundError traceback).
+            return {"directory": str(dir_path), "corpus_name": corpus_name or "",
+                    "file_count": 0, "indexed": 0, "updated": 0,
+                    "skipped": 0, "failed": 0, "aborted": 0, "ignored": 0,
+                    "errors": [], "by_kind": {}}
+        resolved_dir = _os.path.realpath(str(dir_path))
+        if ingest_base is not None and _rub(resolved_dir, ingest_base) is None:
+            raise ValueError(
+                f"Unsafe directory {directory!r} — its resolved target "
+                f"{resolved_dir!r} is outside TORTOISE_INGEST_BASE_DIR "
+                f"({ingest_base})."
+            )
+
+        # ── progress_file bounds (cycle-6): REALPATH-RESOLVED through
+        # resolve_under_base BEFORE any walk/write; nothing may materialize at
+        # a resolved target outside the base (E2E-10(g3)).
+        if progress_file is not None:
+            if not isinstance(progress_file, str) or not progress_file:
+                raise ValueError("progress_file must be a non-empty string.")
+            if not _os.path.isabs(progress_file):
+                raise ValueError(f"progress_file must be absolute: {progress_file!r}")
+            if ".." in Path(progress_file).parts:
+                raise ValueError(f"progress_file contains '..': {progress_file!r}")
+            if ingest_base is not None and _rub(progress_file, ingest_base) is None:
+                raise ValueError(
+                    f"progress_file {progress_file!r} not under "
+                    f"TORTOISE_INGEST_BASE_DIR (resolved-target discipline, "
+                    f"§6.4/E2E-10(g3))."
+                )
+
+        corpus_root = Path(resolved_dir)
+        corpus_name = corpus_name or corpus_root.name
+        max_bytes = self._index_max_bytes()
+        repair_backoff = self._index_repair_backoff(embedding_repair_backoff)
+        # TORTOISE_INDEX_NO_NETWORK (test-only, cycle-10): FORCES
+        # extract_metadata=False-equivalent omission at the NEW-PATH call
+        # boundary regardless of the flag (NEVER inside the shared
+        # `_session_embedding` — the legacy path must still embed; SC4).
+        if self._index_no_network():
+            extract_metadata = False
+
+        result = {
+            "directory": str(corpus_root),
+            "corpus_name": corpus_name,
+            "file_count": 0, "indexed": 0, "updated": 0, "skipped": 0,
+            "failed": 0, "aborted": 0, "ignored": 0,
+            "errors": [], "by_kind": {}, "aborted_reason": None,
+        }
+
+        # ── bounded walk + pre-write dispositions ─────────────────────
+        # Per-corpus run lock: serializes concurrent index_directory runs on
+        # the SAME corpus in this process (the threads leg; the embedded
+        # engine's cross-connection MERGE semantics cannot provide a race-safe
+        # counter outcome otherwise). Different corpora parallelize.
+        with _index_run_lock_for("dir:" + resolved_dir):
+            return self._index_directory_locked(
+                corpus_root, corpus_name, file_type, extract_metadata,
+                llm_model, repair_backoff, progress_file, ingest_base, result,
+                keys={} if progress_file is None else self._index_load_progress(
+                    progress_file, str(corpus_root)))
+
+    def _index_directory_locked(self, corpus_root, corpus_name, file_type,
+                                extract_metadata, llm_model, repair_backoff,
+                                progress_file, ingest_base, result,
+                                keys) -> dict:
+        """The locked body of index_directory (see the caller)."""
+        import os as _os
+        from pathlib import Path
+        from .index_walk import (walk_markdown, compute_dispositions,
+                                 DISP_ESCAPE, DISP_UNRECONCILED, DISP_STRUCTURAL)
+        # REVIEW-FIX P2: file_type validated PRE-WALK (never mid-walk after
+        # partial writes — the plan pins "validation, not a bucket").
+        if file_type not in ("auto", "agent_session", "meeting", "doc"):
+            raise ValueError(
+                f"index_directory: unknown file_type {file_type!r} — "
+                f"expected auto|agent_session|meeting|doc"
+            )
+        walked = walk_markdown(corpus_root, base=ingest_base)
+        result["file_count"] = len(walked.files)
+        result["ignored"] = walked.ignored
+        for derr in walked.dir_errors:
+            result["errors"].append({**derr, "cause": "structural"})
+        for m in walked.mount_warnings:
+            result["errors"].append(
+                {"file": f"(mount) {m}", "error": m, "retryable": False,
+                 "cause": "structural"})  # REVIEW-FIX P2: warn-not-fail mount
+        # entries are NOT escapes — "escape" is reserved for real rejections
+        disp = compute_dispositions(walked.files, corpus_root,
+                                    banned_prefixes=walked.banned_prefixes)
+
+        # ── resume checkpoint (fast-skip keys; §5.3) — the caller already
+        # loaded them (keys param); stale/corrupt → empty → full re-run.
+        checkpoint_counter = 0
+
+        proj = self._get_proj()
+        # Primary-election map (W4 duplicate-sessionId row; derived-id
+        # collisions included): FIRST sorted rel-path owns the Event.
+        session_owners: dict[str, str] = {}
+        # Connection-level DB retry budget (E2E-19 recover-vs-abort pin).
+        db_streak = 0
+        aborted_reason: str | None = None
+        processed = 0
+
+        try:
+            for path, _st in walked.files:
+                rel = _os.path.relpath(str(path), str(corpus_root))
+                key = keys.get(rel)
+                # flag-conditional fast-skip (cycle-7): True-recorded keys are
+                # fast-skippable by either flag; False-recorded keys are
+                # RE-EXAMINED by a True run (the completeness gate must run).
+                if key is not None and extract_metadata and not key.get("metadata", False):
+                    key = None
+                sid_claim = key.get("sid") if key is not None else None
+                if sid_claim is not None:
+                    session_owners.setdefault(sid_claim, rel)
+                disposition = disp.by_path.get(str(path))
+                if disposition in (DISP_ESCAPE, DISP_UNRECONCILED, DISP_STRUCTURAL):
+                    session_owners.setdefault(sid_claim or "", "")
+                per_file = self._index_process_unit(
+                    path, corpus_root=corpus_root, corpus_name=corpus_name,
+                    file_type_declared=(None if file_type == "auto" else file_type),
+                    extract_metadata=extract_metadata, llm_model=llm_model,
+                    repair_backoff=repair_backoff, fast_skip_key=key,
+                    disposition=disposition, election_owner=session_owners,
+                    single_file=False,
+                )
+                processed += 1
+                status = per_file["status"]
+                if per_file.get("skipped_reason") == "duplicate-sessionId":
+                    result["skipped"] += 1
+                elif status == "indexed":
+                    result["indexed"] += 1
+                elif status == "updated":
+                    result["updated"] += 1
+                elif status == "skipped":
+                    result["skipped"] += 1
+                else:
+                    result["failed"] += 1
+                kind = per_file.get("sourceKind")
+                if kind:
+                    result["by_kind"][kind] = result["by_kind"].get(kind, 0) + 1
+                err = per_file.get("error")
+                if err:
+                    result["errors"].append(err)
+                # fast-skip key recording discipline (§5.3): completed-under-
+                # pin-(a) units only — failed/lock-held/embedding-unavailable/
+                # embedding-NULL-under-True units are NEVER keyed (re-attempted
+                # honestly on resume, E2E-10(e3)/(e5)).
+                if progress_file is not None and per_file.get("keyed") and key is None:
+                    keys[rel] = per_file.get("fast_skip_key")
+                elif per_file.get("keyed") and key is not None:
+                    keys[rel] = per_file.get("fast_skip_key") or key
+                checkpoint_counter += 1
+                if progress_file is not None and checkpoint_counter % 100 == 0:
+                    self._index_save_progress(
+                        progress_file, str(corpus_root), corpus_name,
+                        extract_metadata, result, keys)
+                # DB-failure bounded abort (E2E-19/§6.4): recoverable failures
+                # are per-file failed{retryable:true} up to the connection
+                # retry budget; then the run aborts with honest `aborted`.
+                if per_file.get("db_failure"):
+                    db_streak += 1
+                    if db_streak >= _INDEX_DB_RETRY_BUDGET or not proj._probe_ok():
+                        aborted_reason = per_file.get("db_reason", "db")
+                        break
+                else:
+                    db_streak = 0
+        finally:
+            if progress_file is not None:
+                self._index_save_progress(
+                    progress_file, str(corpus_root), corpus_name,
+                    extract_metadata, result, keys)
+        if aborted_reason is not None:
+            remaining = len(walked.files) - processed
+            result["aborted"] = max(remaining, 0)
+            result["aborted_reason"] = aborted_reason
+        return result
+
+    # ── T3 internal helpers ────────────────────────────────────────────
+
+    def _index_resolve_corpus_root(self, file_path: str, corpus_root: str | None,
+                                   corpus_name: str | None) -> tuple:
+        """§6.1 I6 pin: index_file's corpus_root default resolution.
+
+        Explicit param → realpath-resolved. Else the nearest ancestor of the
+        file that equals TORTOISE_INGEST_BASE_DIR; else ValueError demanding
+        an explicit corpus_root (never an implicit walk-root guess). Guarantees
+        single-file + directory-sweep entry points derive the SAME corpus://
+        url for the same file (E2E-4 cross-entry-point variant).
+        """
+        import os as _os
+        from pathlib import Path
+        if corpus_root is not None:
+            root = Path(_os.path.realpath(str(corpus_root)))
+            # the file must resolve under the declared root (escape policy)
+            from .file_indexer import _resolve_rel_path
+            _resolve_rel_path(file_path, root)  # raises ValueError on escape
+            return root, (corpus_name or root.name)
+        base = _os.environ.get("TORTOISE_INGEST_BASE_DIR")
+        if base:
+            base_real = _os.path.realpath(_os.path.expanduser(base))
+            p = Path(_os.path.realpath(str(file_path)))
+            while True:
+                if str(p) == base_real:
+                    return p, (corpus_name or p.name)
+                parent = p.parent
+                if parent == p:
+                    break
+                p = parent
+            raise ValueError(
+                f"index_file: file {file_path!r} is not under "
+                f"TORTOISE_INGEST_BASE_DIR ({base_real}) and no corpus_root "
+                f"was given — pass corpus_root explicitly (§6.1 I6)."
+            )
+        raise ValueError(
+            f"index_file: corpus_root required — TORTOISE_INGEST_BASE_DIR is "
+            f"unset and no corpus_root was given (§6.1 I6)."
+        )
+
+    def _index_max_bytes(self) -> int:
+        """Two-layer size-guard threshold (§6.4): env TORTOISE_MAX_FILE_MB as
+        float MB (default 50); invalid/garbage → pre-walk ValueError; <= 0 →
+        fail-closed ValueError (cycle-11 pin, E2E-7(p))."""
+        import os as _os
+        raw = _os.environ.get("TORTOISE_MAX_FILE_MB", "50")
+        try:
+            mb = float(raw)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"TORTOISE_MAX_FILE_MB must be a float number of MiB, got "
+                f"{raw!r}") from None
+        if mb <= 0:
+            raise ValueError(
+                f"TORTOISE_MAX_FILE_MB must be > 0 (got {raw!r}) — a "
+                f"0/negative limit silently fails every non-empty file."
+            )
+        return int(mb * 1024 * 1024)
+
+    def _index_repair_backoff(self, explicit: float | None) -> float:
+        """Embedding-repair backoff (hours) precedence (cycle-7/8): explicit
+        kwarg > env TORTOISE_EMBEDDING_REPAIR_BACKOFF_HOURS > 24h default."""
+        import os as _os
+        if explicit is not None:
+            return float(explicit)
+        raw = _os.environ.get("TORTOISE_EMBEDDING_REPAIR_BACKOFF_HOURS")
+        if raw is not None and str(raw).strip():
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                pass
+        return 24.0
+
+    def _index_no_network(self) -> bool:
+        import os as _os
+        return _os.environ.get("TORTOISE_INDEX_NO_NETWORK", "").strip().lower() in (
+            "1", "true", "yes")
+
+    def _index_read_file(self, path, max_bytes: int):
+        """Layer-2 BOUNDED BINARY read (§6.4 cycle-4 pin).
+
+        The cap counts BYTES (a text-mode read(n) caps CHARACTERS — a
+        TOCTOU-grown multibyte file could allocate ~4× the cap); the bounded
+        buffer is incrementally UTF-8-decoded with universal-newline
+        translation and hashed as TEXT. Returns (text, error_reason|None):
+        over-limit → (None, 'size'); truncation mid-multibyte-sequence →
+        decode failure → (None, 'decode') — never a truncated-buffer hash
+        reaching hash_text. This is the SINGLE read (pin c): the returned
+        buffer is BOTH hashed and parsed.
+        """
+        with open(path, "rb") as f:
+            buf = f.read(max_bytes + 1)
+        if len(buf) > max_bytes:
+            return None, "size"
+        try:
+            text = buf.decode("utf-8")
+        except UnicodeDecodeError:
+            return None, "decode"
+        # universal-newline translation (matches compute_file_hash's text-mode
+        # read — the canonical hash is CRLF-immune, §4.5).
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        return text, None
+
+    def _index_gate_read(self, url: str, event_id: str | None,
+                         doc_id: str | None) -> dict:
+        """Fast-path ROUTER read (NEVER the counter authority, §5.1 pin b).
+
+        Returns source existence/hash/version + unit completeness (Source AND
+        Event/Document AND references edge — the CURRENT derived identity,
+        §5.1 pin (a)) + embedding/marker state for the embedding clause.
+        """
+        proj = self._get_proj()
+        g = {"source": False, "hash": None, "version": None,
+             "entity": False, "edge": False, "embedding": None,
+             "marker": None, "stored_source_file": None}
+        rows = proj.g.query(
+            "MATCH (s:Source {url:$url}) RETURN s.contentHash, s.version",
+            params={"url": url},
+        ).result_set
+        if rows:
+            g["source"] = True
+            g["hash"] = rows[0][0]
+            g["version"] = rows[0][1]
+        if event_id:
+            rows = proj.g.query(
+                "MATCH (e:Event {eventId:$eid}) RETURN e.embedding, "
+                "e.embeddingRepairFailedAt, e.source_file",
+                params={"eid": event_id},
+            ).result_set
+            if rows:
+                g["entity"] = True
+                g["embedding"] = rows[0][0]
+                g["marker"] = rows[0][1]
+                g["stored_source_file"] = rows[0][2]
+        elif doc_id:
+            rows = proj.g.query(
+                "MATCH (d:Document {id:$did}) RETURN 1",
+                params={"did": doc_id},
+            ).result_set
+            g["entity"] = bool(rows)
+        rows = proj.g.query(
+            "MATCH (s:Source {url:$url})-[:references]->(n) RETURN count(n)",
+            params={"url": url},
+        ).result_set
+        g["edge"] = bool(rows and rows[0][0])
+        return g
+
+    def _index_process_unit(self, path, *, corpus_root, corpus_name,
+                            file_type_declared, extract_metadata, llm_model,
+                            repair_backoff, fast_skip_key, disposition,
+                            election_owner, single_file: bool) -> dict:
+        """The per-file unit op — the whole W1 pipeline for ONE file.
+
+        Returns a per-file result dict consumed by index_file/index_directory:
+        {status, reason?, retryable?, url?, eventId?, documentId?, sourceKind?,
+         skipped_reason?, error? (errors[] entry), keyed? (fast-skip
+         eligibility), fast_skip_key? (dict), db_failure?, db_reason?}
+        """
+        import os as _os
+        import time as _time
+        from pathlib import Path
+        from .file_indexer import (
+            hash_text, parse_frontmatter, classify_file, derive_source_url,
+            derive_session_id, derive_meeting_event_id, derive_document_id,
+            source_kind_for_classifier, normalize_source_date,
+        )
+        out = {"status": "failed", "keyed": False, "db_failure": False}
+        proj = self._get_proj()
+        rel = _os.path.relpath(str(path), str(corpus_root))
+        abs_path = str(path)
+        # realpath-relativized stored form (§4.2 cycle-16 form pin — the
+        # meeting guard's canonical source_file and the session #320 rel-path
+        # convention family).
+        try:
+            sf_rel = _os.path.relpath(_os.path.realpath(abs_path),
+                                      _os.path.realpath(str(corpus_root)))
+        except ValueError:
+            sf_rel = rel
+        url = None
+
+        def _fail(error: str, *, retryable: bool, cause: str) -> dict:
+            out["error"] = {"file": rel, "error": error,
+                             "retryable": retryable, "cause": cause}
+            out["reason"] = error
+            out["retryable"] = retryable
+            return out
+
+        def _skip(reason: str, *, retryable: bool = False,
+                  detail: str = "") -> dict:
+            out["status"] = "skipped"
+            out["skipped_reason"] = reason
+            out["reason"] = reason if not detail else f"{reason} ({detail})"
+            out["retryable"] = retryable
+            if retryable:
+                out["error"] = {"file": rel, "error": out["reason"],
+                                 "retryable": True, "cause": "lock"}
+            return out
+
+        # ── pre-write dispositions (computed on the sorted walk list) ──
+        if disposition is not None:
+            if disposition == "symlink-duplicate":
+                return _skip("symlink-duplicate")
+            if disposition == "inode-duplicate":
+                out["error"] = {"file": rel,
+                                 "error": "inode-duplicate: mount/firmlink "
+                                           "alias of an indexed path — "
+                                           "deduped to ONE Source per "
+                                           "physical file (W4 mount row)",
+                                 "retryable": False, "cause": "structural"}
+                return _skip("inode-duplicate")
+            if disposition == "escape":
+                return _fail("escape rejected: path/mount resolves outside "
+                             "the corpus root — never read",
+                             retryable=False, cause="escape")
+            if disposition == "unreconciled":
+                return _fail("hardlink alias cannot be proven root-local "
+                             "(st_nlink > in-walk count) — stat-only "
+                             "rejection, never read (W4 hardlink row)",
+                             retryable=False, cause="escape")
+            if disposition == "structural":
+                return _fail("non-regular file (FIFO/socket/dir-named-.md) "
+                             "— S_ISREG check failed before any open "
+                             "(E2E-7(w))", retryable=False, cause="structural")
+
+        # ── resume fast-skip (cycle-4): stat (size, mtime) match → skipped
+        # WITHOUT open/read/hash — the checkpoint avoids a full-corpus re-hash.
+        if fast_skip_key is not None:
+            try:
+                st = _os.lstat(abs_path)
+                if (st.st_size == fast_skip_key.get("size")
+                        and st.st_mtime == fast_skip_key.get("mtime")):
+                    out["status"] = "skipped"
+                    out["skipped_reason"] = "unchanged"
+                    out["reason"] = "unchanged"
+                    out["keyed"] = True
+                    out["fast_skip_key"] = fast_skip_key
+                    return out
+            except OSError:
+                pass  # vanished since the checkpoint → full fast path
+
+        # ── pre-read stat: S_ISREG + layer-1 size guard (before any open) ──
+        # os.stat (FOLLOWS symlinks): a symlink entry's lstat shows the link
+        # itself (S_IFLNK) — the type/size guard must see the RESOLVED target
+        # (symlink disposition/escape already handled pre-write). Broken/loop
+        # symlinks raise OSError here → failed structural.
+        try:
+            st = _os.stat(abs_path)
+        except OSError as e:
+            if isinstance(e, PermissionError):
+                return _fail(f"permission denied: {e}", retryable=True,
+                             cause="structural")
+            return _fail(f"stat failed: {e}", retryable=False,
+                         cause="structural")
+        if not stat.S_ISREG(st.st_mode):
+            return _fail("non-regular file — S_ISREG check before any open "
+                         "(E2E-7(w))".strip(), retryable=False,
+                         cause="structural")
+        max_bytes = self._index_max_bytes()
+        if st.st_size > max_bytes:
+            return _fail(
+                f"file exceeds size guard ({max_bytes} bytes, "
+                f"TORTOISE_MAX_FILE_MB) — rejected before any read (layer-1 "
+                f"stat, §6.4)", retryable=False, cause="size")
+
+        # ── single read (pin c): bounded binary read → decode → hash+parse ──
+        try:
+            text, read_err = self._index_read_file(abs_path, max_bytes)
+        except IsADirectoryError:
+            return _fail("IsADirectoryError: entry named *.md is a directory",
+                         retryable=False, cause="structural")
+        except PermissionError as e:
+            return _fail(f"permission denied: {e}", retryable=True,
+                         cause="structural")
+        except OSError as e:
+            return _fail(f"open failed: {e}", retryable=False,
+                         cause="structural")
+        if read_err == "size":
+            return _fail(
+                f"file grew past the size guard between stat and read "
+                f"(layer-2 bounded read, {max_bytes} bytes) — failed closed",
+                retryable=False, cause="size")
+        if read_err == "decode":
+            return _fail("non-UTF-8 content (decode failure) — never hashed",
+                         retryable=False, cause="decode")
+        content_hash = hash_text(text)
+        frontmatter = parse_frontmatter(text)
+
+        # ── classify + identity (T1 OWNS derivation; T3 consumes) ──
+        try:
+            classifier = classify_file(frontmatter, path, file_type_declared)
+            url = derive_source_url(path, corpus_root, corpus_name)
+        except (UnicodeEncodeError, ValueError) as e:
+            # undecodable-filename guard (cycle-12): derive_source_url's
+            # quote() raises UnicodeEncodeError on surrogate filenames — a
+            # per-file catch at the ENTRY point, never inside the pure
+            # function; the run completes (E2E-7(x)). ValueError from the
+            # escape rejection → cause-class `escape` (§6.4 cycle-21).
+            if isinstance(e, UnicodeEncodeError):
+                return _fail(f"identity derivation failed: {e}",
+                             retryable=False, cause="filename")
+            if "escape" in str(e):
+                return _fail(f"identity derivation failed: {e}",
+                             retryable=False, cause="escape")
+            raise
+        kind = source_kind_for_classifier(classifier)
+        out["sourceKind"] = kind
+        out["url"] = url
+        source_date = None
+        # §4.1 per-path sourceDate consumption: session/meeting paths consume
+        # startedAt/date/created; the DOC path consumes created/updated ONLY
+        # (date/startedAt whitelisted-but-DROPPED — E2E-7(u2)).
+        if classifier == "doc":
+            source_date = normalize_source_date(
+                frontmatter.get("created") or frontmatter.get("updated"))
+        else:
+            source_date = normalize_source_date(
+                frontmatter.get("startedAt") or frontmatter.get("date")
+                or frontmatter.get("created"))
+        title = str(frontmatter.get("title") or Path(path).stem)
+
+        event_id = None
+        doc_id = None
+        session_id = None
+        if classifier == "agent_session":
+            session_id = derive_session_id(frontmatter, Path(path).stem)
+            event_id = f"session_{session_id}"
+            out["eventId"] = event_id
+        elif classifier == "meeting":
+            def _sf_lookup(candidate: str) -> str | None:
+                rows = proj.g.query(
+                    "MATCH (e:Event {eventId:$eid}) RETURN e.source_file",
+                    params={"eid": candidate},
+                ).result_set
+                return rows[0][0] if rows else None
+            event_id = derive_meeting_event_id(
+                frontmatter, path, _sf_lookup, source_file=sf_rel)
+            out["eventId"] = event_id
+        else:
+            doc_id = derive_document_id(path, corpus_root)
+            out["documentId"] = doc_id
+
+        # ── primary election (directory mode) + single-file duplicate rule ──
+        # FIRST sorted rel-path owns the Event (W4 row; derived-id collisions
+        # included): the walk is sorted and units process in order, so the
+        # first unit per session_id claims the Event here — the loop's
+        # fast-skip sid_claim (keyed files) uses setdefault, so this claim is
+        # idempotent across resume.
+        non_primary = False
+        if not single_file and session_id is not None and election_owner is not None:
+            election_owner.setdefault(session_id, rel)
+            owner = election_owner[session_id]
+            if owner != rel:
+                non_primary = True
+
+        # ── session lock (sessions only; §5.3 acquisition-point pin) ──
+        lock = None
+        if classifier == "agent_session" and not non_primary:
+            from .index_lock import SessionIndexLock
+            lock = SessionIndexLock(session_id)
+            try:
+                status = lock.acquire()
+            except (OSError, AttributeError, ImportError) as e:
+                lock = None
+                return _skip("lock-held", retryable=True,
+                             detail=f"lock unavailable: {e}")
+            if status == "held":
+                lock_detail = str(getattr(lock, "detail", ""))
+                lock.release()
+                lock = None
+                return _skip("lock-held", retryable=True, detail=lock_detail)
+
+        try:
+            # ── GATE (fast-path router; completeness per §5.1 pin (a)) ──
+            gate = self._index_gate_read(url, event_id, doc_id)
+            if non_primary:
+                complete = gate["source"]  # election-suppressed: Source-existence ONLY
+                base_complete = complete
+                hash_unchanged = (gate["hash"] == content_hash)
+                embedding_incomplete = False
+            else:
+                base_complete = bool(gate["source"] and gate["entity"] and gate["edge"])
+                hash_unchanged = (gate["hash"] == content_hash)
+                # embedding completeness clause (pin (a), cycle-5): for
+                # agent_session units under extract_metadata=True, completeness
+                # ADDITIONALLY requires e.embedding IS NOT NULL — a session
+                # indexed during an outage would otherwise stay None forever
+                # (every later run reports skipped and the embedding never
+                # heals). Election-suppressed (non-primary) units are
+                # Source-existence-only — no Event exists to hold e.embedding.
+                embedding_incomplete = bool(
+                    classifier == "agent_session" and extract_metadata
+                    and gate["entity"] and gate["embedding"] is None)
+                complete = base_complete and not embedding_incomplete
+            # single-file duplicate-sessionId rule (W4 row; no election context)
+            single_dup = False
+            if (single_file and classifier == "agent_session"
+                    and gate["entity"]
+                    and gate["stored_source_file"] is not None
+                    and gate["stored_source_file"] != sf_rel):
+                single_dup = True
+
+            if (not non_primary and not single_dup and complete
+                    and hash_unchanged):
+                # ── fast path: conditional MERGE only (skipped expected) ──
+                merge_outcome = self._index_source_merge(
+                    url, kind, source_date, content_hash, title, abs_path,
+                    gate_v=gate["version"])
+                if merge_outcome == "updated":
+                    out["status"] = "updated"
+                    out["reason"] = "updated"
+                else:
+                    out["status"] = "skipped"
+                    out["skipped_reason"] = "unchanged"
+                    out["reason"] = "unchanged"
+                out["keyed"] = True
+                out["fast_skip_key"] = {
+                    "size": st.st_size, "mtime": st.st_mtime,
+                    "metadata": extract_metadata,
+                    "sid": session_id if (session_id and not non_primary) else None,
+                }
+                return out
+
+            # ── write path: Source (conditional MERGE) → Event/Document → edge ──
+            merge_outcome = self._index_source_merge(
+                url, kind, source_date, content_hash, title, abs_path,
+                gate_v=gate["version"])
+            repair_work = False
+            embedding_only_incomplete = bool(
+                embedding_incomplete and base_complete and hash_unchanged)
+            if not non_primary and not single_dup and (not complete or not hash_unchanged):
+                if embedding_only_incomplete:
+                    # unit otherwise complete — only the embedding clause is
+                    # unmet (pin (a)): repair-only path (heal/suppress/marker),
+                    # NEVER a metadata re-write.
+                    attempt, _ts = self._embedding_repair_attempt(
+                        event_id, frontmatter, text, title, repair_backoff,
+                        gate["marker"])
+                    if attempt == "healed":
+                        repair_work = True
+                    else:
+                        # failed OR suppressed → skipped embedding-unavailable
+                        # (a failed repair performs NO unit-completion write →
+                        # never updated; marker already recorded inside).
+                        out["status"] = "skipped"
+                        out["skipped_reason"] = "embedding-unavailable"
+                        out["reason"] = "embedding-unavailable"
+                        out["retryable"] = True
+                        out["error"] = {"file": rel,
+                                         "error": "embedding repair failed and is "
+                                                   "within the repair-backoff window "
+                                                   "— suppressed (zero embedding calls)",
+                                         "retryable": True, "cause": "db"}
+                        return out
+                else:
+                    # unit-completion work (repair carve-out, pin (b))
+                    if classifier == "agent_session":
+                        embed_val = self._session_event_write(
+                            frontmatter, text, path, event_id, session_id,
+                            content_hash, title, extract_metadata, llm_model,
+                            sf_rel, rel)
+                        # failed embedding on an EXISTING Event → record the
+                        # repair marker (mixed precedence pin: unit work still
+                        # reports updated; the marker bounds the NEXT run).
+                        if (embed_val is None and extract_metadata
+                                and gate["entity"]):
+                            self._record_embedding_marker(event_id)
+                        repair_work = not base_complete or merge_outcome == "updated"
+                    elif classifier == "meeting":
+                        resolved_eid, rejected = self._meeting_event_write(
+                            frontmatter, path, event_id, content_hash, sf_rel,
+                            source_date)
+                        event_id = resolved_eid
+                        out["eventId"] = event_id
+                        if rejected:
+                            # REVIEW-FIX P2/P1 (cycle-26): ALL suffix widths
+                            # (8/12/16) taken by other-source meetings — never
+                            # a silent clobber: no EventRecorded emission, no
+                            # edge wiring, an errors[] entry, and the unit is
+                            # bucketed failed (the §4.2 mechanism's "never a
+                            # silent clobber" guarantee; the journaled
+                            # candidate would otherwise replay props onto the
+                            # colliding meeting's Event). The caller appends
+                            # out["error"] to the run's errors[] (REVIEW-FIX
+                            # P1: this unit has NO access to the run result
+                            # dict — the earlier fix referenced a phantom
+                            # `result` and NameError'd).
+                            out["error"] = {
+                                "file": str(path),
+                                "error": f"meeting eventId {event_id} "
+                                         f"collides at all suffix widths "
+                                         f"(sha256 [:8]/[:12]/[:16]) — "
+                                         f"refusing to clobber; re-name the "
+                                         f"file or split the meeting",
+                                "retryable": False,
+                                "cause": "structural"}
+                            out["status"] = "failed"
+                            out["reason"] = "meeting-id-collision"
+                            out["retryable"] = False
+                            return {k: v for k, v in out.items() if k in (
+                                "status", "url", "eventId", "documentId",
+                                "sourceKind", "reason", "retryable",
+                                "skipped_reason", "error")}
+                        repair_work = not base_complete or merge_outcome == "updated"
+                    else:
+                        self._doc_write(frontmatter, doc_id, title, abs_path, url)
+                        repair_work = not base_complete or merge_outcome == "updated"
+                    # wire (Source)-[:references]->(Event|Document) — plain edge
+                    target = event_id if classifier != "doc" else doc_id
+                    label = "Event" if classifier != "doc" else "Document"
+                    proj.link_source_to_entity(url, target, label)
+
+            # ── embedding repair (sessions; extract_metadata=True) — runs only
+            # when the FULL write path just executed but the embedding attempt
+            # inside it failed AND the Event pre-existed (the repair-only
+            # branch above is NOT re-entered; its failed case already returned).
+            embed_skip = False
+            if (classifier == "agent_session" and not non_primary
+                    and not single_dup and extract_metadata
+                    and gate["embedding"] is None and gate["entity"]
+                    and not embedding_only_incomplete
+                    and not repair_work and merge_outcome in ("skipped", "updated")):
+                attempt, _ts = self._embedding_repair_attempt(
+                    event_id, frontmatter, text, title, repair_backoff,
+                    gate["marker"])
+                if attempt == "healed":
+                    repair_work = True
+                elif attempt == "suppressed":
+                    embed_skip = True
+
+            # ── counter attribution ──
+            if non_primary:
+                out["status"] = "indexed" if merge_outcome == "indexed" else \
+                    ("updated" if merge_outcome == "updated" else "skipped")
+                if out["status"] == "skipped":
+                    out["skipped_reason"] = "unchanged"
+                out["keyed"] = True
+            elif single_dup:
+                # Source update visible via fields/counters; status stays
+                # skipped (E2E-14 single-file variant)
+                out["status"] = "skipped"
+                out["skipped_reason"] = "duplicate-sessionId"
+                out["reason"] = ("duplicate sessionId (primary="
+                                  f"{gate['stored_source_file']})")
+                out["keyed"] = True
+            elif embed_skip:
+                out["status"] = "skipped"
+                out["skipped_reason"] = "embedding-unavailable"
+                out["reason"] = "embedding-unavailable"
+                out["retryable"] = True
+                out["error"] = {"file": rel,
+                                 "error": "embedding repair failed and is "
+                                           "within the repair-backoff window "
+                                           "— suppressed (zero embedding calls)",
+                                 "retryable": True, "cause": "db"}
+            elif repair_work and merge_outcome == "skipped":
+                out["status"] = "updated"
+                out["reason"] = "updated (repair work with unchanged hash)"
+                out["keyed"] = True
+            elif merge_outcome == "indexed":
+                out["status"] = "indexed"
+                out["reason"] = "indexed"
+                # initial index during an embedding outage: warning, NEVER
+                # silent (E2E-11(c)); NO marker (the first repair attempt
+                # happens on the next extract_metadata=True run — E2E-11(d)).
+                if (classifier == "agent_session" and extract_metadata
+                        and not gate["entity"]):
+                    ev_state = proj.g.query(
+                        "MATCH (e:Event {eventId:$eid}) RETURN e.embedding",
+                        params={"eid": event_id},
+                    ).result_set
+                    if not ev_state or ev_state[0][0] is None:
+                        out["error"] = {"file": rel,
+                                         "error": "indexed with embedding=None "
+                                                   "(model unavailable) — will be "
+                                                   "repaired on a later "
+                                                   "extract_metadata=True run",
+                                         "retryable": False, "cause": "db"}
+                out["keyed"] = True
+            elif merge_outcome == "updated":
+                out["status"] = "updated"
+                out["reason"] = "updated"
+                out["keyed"] = True
+            else:
+                out["status"] = "skipped"
+                out["skipped_reason"] = "unchanged"
+                out["reason"] = "unchanged"
+                out["keyed"] = True
+            # keyed discipline (pin (a)): embedding-NULL under extract_metadata
+            # = True is NEVER keyed (resume re-attempts through the gate).
+            if (out["status"] in ("indexed", "updated")
+                    and classifier == "agent_session" and extract_metadata
+                    and event_id is not None):
+                ev_state = proj.g.query(
+                    "MATCH (e:Event {eventId:$eid}) RETURN e.embedding",
+                    params={"eid": event_id},
+                ).result_set
+                if not ev_state or ev_state[0][0] is None:
+                    out["keyed"] = False  # incomplete under pin (a) — never keyed
+            if out["keyed"]:
+                out["fast_skip_key"] = {
+                    "size": st.st_size, "mtime": st.st_mtime,
+                    "metadata": extract_metadata,
+                    "sid": session_id if (session_id and not non_primary) else None,
+                }
+            return out
+        except Exception as e:  # noqa: BLE001 — per-file isolation (never abort)
+            db_class = _classify_db_failure(e)
+            if db_class:
+                out["db_failure"] = True
+                out["db_reason"] = db_class
+                out["status"] = "failed"
+                out["retryable"] = True
+                out["error"] = {"file": rel,
+                                 "error": f"db write failure ({db_class}): {e}",
+                                 "retryable": True, "cause": "db"}
+            else:
+                out["status"] = "failed"
+                out["retryable"] = False
+                out["error"] = {"file": rel, "error": str(e),
+                                 "retryable": False, "cause": "structural"}
+            return out
+        finally:
+            if lock is not None:
+                lock.release()
+
+    def _index_source_merge(self, url, kind, source_date, content_hash, title,
+                            abs_path, *, gate_v) -> str:
+        """The conditional single-statement Source MERGE (via create_source) —
+        outcome = COUNTER AUTHORITY (pin b): ON CREATE → 'indexed'; ON MATCH
+        hash-diff → 'updated'; ON MATCH hash-equal → 'skipped'. Never from the
+        pre-gate read (concurrent runs cannot double-count a file they all
+        pre-read as absent).
+
+        CREATED DETECTION: the embedded FalkorDBLite reports ``Nodes created:
+        1`` for BOTH of two concurrent same-key MERGEs (server-side
+        parallel-executor quirk) — ``nodes_created`` is NOT a race-safe
+        discriminator there. The ON CREATE branch therefore records the
+        caller's per-run token (``s.__runId``); re-reading it after the merge
+        tells us whether THIS run's CREATE fired (token matches ⇒ we created ⇒
+        the token is then removed — a crash-stray vanishes on rebuild). On
+        bolt:// (server mode) the same mechanism holds (the MERGE is atomic).
+        Matched outcomes use the version delta bracketing the merge (bumped ⇒
+        the conditional SET fired).
+        """
+        from .ids import ulid as _ulid
+        rid = _ulid()
+        lock = _source_merge_lock_for(url)
+        with lock:
+            # Serialized per-url: the embedded parallel executor cannot give a
+            # race-safe creator signal for concurrent same-key MERGEs; the
+            # lock makes the single-statement MERGE + detection atomic w.r.t.
+            # other index writers (threads leg). bolt:// stats stay honest.
+            self.create_source(
+                url, kind, sourceDate=source_date, source_path=abs_path,
+                contentHash=content_hash, title=title, _searchText=title,
+                format="markdown", _merge_run_id=rid)
+            proj = self._get_proj()
+            rows = proj.g.query(
+                "MATCH (s:Source {url:$url}) RETURN s.__runId, s.version",
+                params={"url": url},
+            ).result_set
+            run_id = rows[0][0] if rows else None
+            v = int(rows[0][1]) if rows and rows[0][1] is not None else 0
+            if run_id == rid:
+                # OUR ON CREATE fired — this run created the Source.
+                try:
+                    proj.g.query(
+                        "MATCH (s:Source {url:$url}) REMOVE s.__runId",
+                        params={"url": url},
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                return "indexed"
+            if gate_v is None:
+                # concurrent create between gate and merge — our ON MATCH either
+                # bumped (hash-diff) or not
+                return "updated" if v >= 2 else "skipped"
+            return "updated" if v > gate_v else "skipped"
+
+    def _session_event_write(self, frontmatter, text, path, event_id, session_id,
+                             content_hash, title, extract_metadata, llm_model,
+                             sf_rel, rel) -> list | None:
+        """Session Event write — raw-MERGE wrapper mirroring legacy #320
+        semantics (E2E-10(a) cycle-18 target pin: NOT _upsert_event): locking,
+        metadata tiers, embeddings, _connect_issue_objects, INSTANTIATES edges.
+        CYCLE-25: sourceKind value agentSession (v3.6 #6); capturedAt = ingest
+        time; no is_episodic/story_arc on the index path. Journals EventRecorded
+        (contract (a), emit-on-every-write) with the live embedding as the
+        replay carrier. Returns the computed embedding (None = unavailable —
+        the caller records the repair marker when the Event pre-existed)."""
+        import json as _json
+        from datetime import datetime, timezone
+        from .session_indexer import (
+            extract_keywords_from_frontmatter as _kw_fallback,
+            extract_metadata as _extract,
+        )
+        proj = self._get_proj()
+        now = datetime.now(timezone.utc).isoformat()
+        if extract_metadata:
+            try:
+                metadata = _extract(text, llm_model)
+            except Exception:  # noqa: BLE001 — tiered fallback
+                metadata = _kw_fallback(text)
+        else:
+            metadata = _kw_fallback(text)
+        name = str(frontmatter.get("title") or Path(path).stem)
+        props = {
+            "id": event_id,  # ensure Event node has id for edge matching (#122)
+            "name": metadata.get("summary", name),
+            "eventKind": "AgentSession",
+            "session_id": session_id,
+            "agent": str(frontmatter.get("agent", "pi")),
+            "source_file": sf_rel,
+            "file_hash": content_hash,
+            "keywords": metadata.get("keywords", []),
+            "topics": metadata.get("topics", []),
+            "message_count": int(frontmatter.get("message_count", 0) or 0),
+            # REVIEW-FIX P2 (cycle-26): startedAt/capturedAt are ONLY set on
+            # CREATE — the MERGE's ON MATCH arm preserves the recorded
+            # timestamps (a repair re-run of a hash-unchanged unit must not
+            # drift capturedAt, pinned = ingest time). The conditional MERGE
+            # below branches ON CREATE SET full / ON MATCH SET additive
+            # (without startedAt/capturedAt).
+            "startedAt": now,
+            "capturedAt": now,   # cycle-25(b): capture/ingest transaction time
+            "content_metadata": _json.dumps({
+                "schema_version": 1,
+                "summary": metadata.get("summary", ""),
+                "narrative_arc": metadata.get("narrative_arc", []),
+                "issues": metadata.get("issues", []),
+                "prs": metadata.get("prs", []),
+                "critical_decisions": metadata.get("critical_decisions", []),
+            }),
+            "eventStatus": "completed",
+            "classificationLevel": "internal",
+            "format": "markdown",
+        }
+        # embedding — short-circuited to None under extract_metadata=False
+        # (I15 pin) or NO_NETWORK; CASE-guarded $embedding is the ONLY node-
+        # write surface (never rides $props).
+        embedding = None
+        if extract_metadata:
+            try:
+                embedding = self._session_embedding(
+                    props["name"], metadata.get("summary", ""),
+                    props["keywords"], props["topics"])
+            except Exception:  # noqa: BLE001 — degrade, never abort
+                embedding = None
+        # REVIEW-FIX P2 (cycle-26): timestamps preserved on MATCH — the MERGE
+        # splits ON CREATE (full props incl. startedAt/capturedAt) vs ON MATCH
+        # (additive props WITHOUT the timestamps), so a repair re-run of a
+        # hash-unchanged unit never drifts capturedAt (pinned = ingest time).
+        # The CASE-guarded embedding clause stays the ONLY embedding write.
+        create_props = {k: v for k, v in props.items()
+                        if k not in ("startedAt", "capturedAt")}
+        proj.g.query(
+            "MERGE (e:Event {eventId:$eid}) "
+            "ON CREATE SET e += $props "
+            "ON MATCH SET e += $match_props, "
+            "e.embedding = CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) "
+            "ELSE e.embedding END",
+            params={"eid": event_id, "props": props,
+                    "match_props": create_props, "embedding": embedding},
+        )
+        self._connect_issue_objects(event_id, metadata)
+        # JOURNALING CONTRACT (a): emit-on-every-write; embedding rides the
+        # journaled payload (the sanctioned replay carrier, cycle-18/19).
+        payload = {k: v for k, v in props.items() if k != "id"}
+        self._emit_event("EventRecorded", id=event_id, **{
+            **payload, "embedding": embedding, "eventId": event_id,
+            "eventKind": "AgentSession"})
+        return embedding
+
+    def _record_embedding_marker(self, event_id: str) -> None:
+        """Targeted marker SET (pin (a) cycle-7): e.embeddingRepairFailedAt =
+        $ts touching NO other Event key (NOT a partial-prop re-write — the
+        E2E-11(d) prop-snapshot guard asserts preservation)."""
+        from datetime import datetime, timezone
+        try:
+            proj = self._get_proj()
+            proj.g.query(
+                "MATCH (e:Event {eventId:$eid}) "
+                "SET e.embeddingRepairFailedAt = $ts",
+                params={"eid": event_id,
+                        "ts": datetime.now(timezone.utc).isoformat()},
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _meeting_event_write(self, frontmatter, path, candidate, content_hash,
+                             sf_rel, source_date) -> tuple:
+        """Meeting Event write — the meeting-scoped source_file-aware GUARD
+        (§4.2 cycle-12/13/17/18): returns (resolved_event_id, guard_rejected).
+        The guard-rejected step emits NO EventRecorded; the suffix follow-up
+        journals exactly once with the suffixed id (cycle-14/18)."""
+        import json as _json
+        proj = self._get_proj()
+        participants = frontmatter.get("participants") or []
+        if isinstance(participants, str):
+            participants = [participants]
+        participants = [str(p) for p in participants]
+        topics = frontmatter.get("topics") or []
+        if not isinstance(topics, list):
+            topics = [topics]
+        topics = [str(t) for t in topics]
+        # content_metadata: decisions + absorbed whitelisted non-contract
+        # extras (cycle-8 per-path consumption pin — never node props).
+        absorbed = {}
+        for k in ("sessionId", "session_id", "agent", "created", "updated",
+                  "domain"):
+            if k in frontmatter and frontmatter[k] is not None:
+                absorbed[k] = frontmatter[k]
+        content_metadata = {"schema_version": 1,
+                            "decisions": frontmatter.get("decisions") or []}
+        content_metadata.update(absorbed)
+        inner = {
+            "id": candidate,
+            "eventId": candidate,
+            "eventKind": "meeting",
+            "title": str(frontmatter.get("title") or Path(path).stem),
+            "startedAt": source_date or "",
+            "topics": topics,
+            "participants": participants,
+            "content_metadata": _json.dumps(content_metadata, default=str),
+            "file_hash": content_hash,
+            "source_file": sf_rel,
+            "format": "markdown",
+            "classificationLevel": "internal",
+            "eventStatus": "completed",
+        }
+        resolved, rejected = proj._upsert_event(
+            inner, guard=True, guard_source_file=sf_rel)
+        # journal: emit-on-every-write with the RESOLVED id (candidate on hit,
+        # suffixed on reject — the suffixed Event is the one that exists live).
+        # REVIEW-FIX P2 (cycle-26): when the guard exhausts ALL suffix widths
+        # and returns the BARE candidate with rejected=True (the all-widths-
+        # taken cell — `resolved == candidate` is the OTHER meeting's id),
+        # NO emission: the journal would otherwise replay this file's payload
+        # onto the colliding meeting's Event via the plain-replay ON MATCH SET.
+        if not (rejected and resolved == candidate):
+            payload = {k: v for k, v in {**inner, "eventId": resolved}.items()
+                       if k != "id"}
+            self._emit_event("EventRecorded", id=resolved, **payload)
+        return resolved, rejected
+
+    def _doc_write(self, frontmatter, doc_id, title, abs_path, source_url) -> None:
+        """Document path — via the journaled DocumentCreated event (route pin):
+        proj.apply honors the source_url override (#205 auto-wire onto the REAL
+        Source — no phantom) and the embedding-suppression flag (cycle-19); the
+        event rides the JSONL so replay reproduces the edge. Frontmatter→ev-dict
+        WHITELIST (cycle-7/8): doc handled set only — title/documentKind/domain/
+        doc_status/topics; everything else DROPPED (authoredBy never persisted;
+        date/startedAt whitelisted-but-dropped → sourceDate falls to ingestedAt)."""
+        proj = self._get_proj()
+        doc_kind = (str(frontmatter.get("type") or frontmatter.get("documentKind")
+                        or frontmatter.get("document_kind") or ""))
+        topics = frontmatter.get("topics") or []
+        if not isinstance(topics, list):
+            topics = [topics]
+        topics = [str(t) for t in topics]
+        ev = {
+            "type": "DocumentCreated",
+            "id": doc_id,
+            "title": title,
+            "document_kind": doc_kind or "brief",  # §8.3 flag 1 fallback
+            "doc_status": str(frontmatter.get("doc_status") or "draft"),
+            "format": "markdown",
+            "source_path": str(abs_path),
+            "source_url": source_url,
+            "suppress_embedding": True,
+            "topics": topics,
+        }
+        if frontmatter.get("domain") is not None:
+            ev["domain"] = str(frontmatter["domain"])
+        proj.apply(ev)
+        payload = {k: v for k, v in ev.items() if k not in ("type", "id")}
+        self._emit_event("DocumentCreated", id=doc_id, **payload)
+
+    def _embedding_repair_attempt(self, event_id, frontmatter, text, title,
+                                  repair_backoff, marker) -> tuple:
+        """Embedding repair (sessions; §5.1 pin (a) cycle-6/7/8). Returns
+        (attempt, marker_ts): 'healed' | 'suppressed' | 'failed'.
+
+        Backoff: a FAILED repair attempt records e.embeddingRepairFailedAt
+        (targeted SET touching no other key) and reports skipped
+        'embedding-unavailable' — a failed attempt performs NO unit-completion
+        write, so it is NEVER updated. Subsequent runs suppress the network
+        retry while elapsed <= the backoff window (ZERO embedding calls). On
+        success the embedding heals (carve-out updated, no version bump) via a
+        JOURNALED EventRecorded emission (survives rebuild) + marker clear.
+        """
+        import time as _time
+        from datetime import datetime, timezone
+        from .session_indexer import extract_keywords_from_frontmatter as _kw_fallback
+        if marker is not None:
+            try:
+                elapsed_h = (datetime.now(timezone.utc)
+                             - datetime.fromisoformat(marker).replace(tzinfo=timezone.utc))
+                if elapsed_h.total_seconds() / 3600.0 <= repair_backoff:
+                    return ("suppressed", None)
+            except (TypeError, ValueError):
+                pass  # unparseable marker → re-attempt
+        proj = self._get_proj()
+        try:
+            metadata = _kw_fallback(text)
+            embedding = self._session_embedding(
+                str(frontmatter.get("title") or title), metadata.get("summary", ""),
+                metadata.get("keywords", []), metadata.get("topics", []))
+        except Exception:  # noqa: BLE001 — outage (429/timeout/500)
+            embedding = None
+        if embedding is None:
+            # failed attempt → targeted marker write (BOOKKEEPING, not unit
+            # work) — the unit is NEVER updated by this run.
+            ts = datetime.now(timezone.utc).isoformat()
+            try:
+                proj.g.query(
+                    "MATCH (e:Event {eventId:$eid}) "
+                    "SET e.embeddingRepairFailedAt = $ts",
+                    params={"eid": event_id, "ts": ts},
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            return ("failed", ts)
+        # heal — the CASE-guarded $embedding is the ONLY embedding node-write
+        # surface (never $props); the marker clear is a targeted REMOVE.
+        proj.g.query(
+            "MATCH (e:Event {eventId:$eid}) SET "
+            "e.embedding = CASE WHEN $embedding IS NOT NULL THEN "
+            "vecf32($embedding) ELSE e.embedding END, "
+            "e.embeddingRepairFailedAt = null",
+            params={"eid": event_id, "embedding": embedding},
+        )
+        # journaled EventRecorded emission = the heal write surface (cycle-8):
+        # a healed embedding SURVIVES rebuild; only the marker resets.
+        rows = proj.g.query(
+            "MATCH (e:Event {eventId:$eid}) RETURN properties(e)",
+            params={"eid": event_id},
+        ).result_set
+        if rows:
+            props = {k: v for k, v in rows[0][0].items()
+                     if k not in ("embedding", "embeddingRepairFailedAt",
+                                  "_searchText", "id")}
+            self._emit_event("EventRecorded", id=event_id, **{
+                **props, "embedding": embedding, "eventId": event_id})
+        return ("healed", None)
+
+    def _index_save_progress(self, progress_file: str, directory: str,
+                             corpus_name: str, extract_metadata: bool,
+                             result: dict, keys: dict) -> None:
+        """Atomic checkpoint write (temp+rename — torn-checkpoint guard,
+        E2E-10(h)); a write failure degrades to no-checkpoint semantics, never
+        crashes (E2E-19(c))."""
+        import os as _os
+        import tempfile
+        from datetime import datetime, timezone
+        try:
+            payload = {
+                "started": datetime.now(timezone.utc).isoformat(),
+                "directory": directory,
+                "corpus_name": corpus_name,
+                "extract_metadata": extract_metadata,
+                "counters": {k: result.get(k, 0) for k in (
+                    "file_count", "indexed", "updated", "skipped", "failed",
+                    "aborted", "ignored")},
+                "keys": keys,
+            }
+            fd, tmp = tempfile.mkstemp(
+                dir=_os.path.dirname(_os.path.abspath(progress_file)) or ".",
+                prefix=".idx-", suffix=".tmp")
+            try:
+                with _os.fdopen(fd, "w", encoding="utf-8") as f:
+                    _json.dump(payload, f)
+                _os.replace(tmp, progress_file)
+            except Exception:  # noqa: BLE001
+                try:
+                    _os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+        except Exception:  # noqa: BLE001 — progress file is best-effort
+            _logger.warning("index progress checkpoint write failed — "
+                            "degrading to no-checkpoint (E2E-19(c))")
+
+    def _index_load_progress(self, progress_file: str,
+                             directory: str) -> dict:
+        """Load fast-skip keys — stale/corrupt checkpoints (g1/g2) and
+        directory mismatches → no-checkpoint (full honest re-run)."""
+        try:
+            with open(progress_file, encoding="utf-8") as f:
+                data = _json.load(f)
+            if data.get("directory") != directory:
+                return {}
+            keys = data.get("keys") or {}
+            return {k: v for k, v in keys.items() if isinstance(v, dict)}
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def _journal_line_state(self, event_id: str) -> dict | None:
+        """Latest journaled EventRecorded payload for event_id (repair-detection
+        mechanism, cycle-17/18: re-emit iff NO line OR the recorded state
+        differs from the live write)."""
+        log = self._get_event_log()
+        if log is None:
+            return None
+        try:
+            lines = log.read_all()
+        except Exception:  # noqa: BLE001
+            return None
+        state = None
+        for ev in lines:
+            if (ev.get("type") == "EventRecorded"
+                    and (ev.get("id") == event_id
+                         or ev.get("eventId") == event_id)):
+                state = ev
+        return state
+
     def index_sessions(self, directory: str, extract_metadata: bool = True,
                        llm_model: str | None = "gpt-5-mini",
                        progress_file: str | None = None) -> dict:
@@ -8277,6 +9766,8 @@ class TortoiseSDK:
 
     def create_source(self, url: str, sourceKind: str, *,
                       tier: str | None = None, sourceDate: str | None = None,
+                      source_path: str | None = None,
+                      _merge_run_id: str | None = None,
                       **props) -> dict:
         """Create (or merge) a Source node (issue #398 Task 6).
 
@@ -8290,6 +9781,28 @@ class TortoiseSDK:
         ``sourceDate`` is the evidence-age clock for decay (falls back to
         ``ingestedAt`` — the documented pipeline-arrival proxy). Invalid tier
         values raise ValueError.
+
+        Epic #900 T3 extensions (plan §4.1/§5.1 pins b/d):
+          - ``source_path=`` — the SANCTIONED route for the ``sourcePath``
+            secondary prop (mirrors the ``api.add_document(source_path=)``
+            precedent the sanitizer's docstring carves out): the path is
+            pre-validated under the corpus root / TORTOISE_INGEST_BASE_DIR by
+            the indexer, and props-passthrough of ``sourcePath``/``source_path``
+            stays rejected by ``_sanitize_props`` (fail-closed, #329). The
+            write path emits the ev key ``source_path`` → ``s.sourcePath`` on
+            the node (camelCase; ``_SOURCE_HANDLED`` membership keeps the
+            snake_case key from persisting verbatim).
+          - the Source MERGE is CONDITIONAL (single statement, pin b): the ON
+            MATCH version/updatedAt/contentHash/title/``_searchText`` bump
+            fires ONLY when the stored contentHash differs (a stub Source with
+            NULL contentHash is completed). The MERGE outcome (via
+            ``proj._source_merge_result`` nodes_created) is the counter
+            authority for the index path.
+          - JOURNALING CONTRACT (a) (cycle-18): the write path emits a
+            SourceCreated JSONL line on EVERY write (emit-on-every-write — a
+            create-only cadence would revert updated Sources to create-time
+            state post-rebuild); replay re-MERGEs by url and the hash-diff-gated
+            bump lands at the live converged value.
         """
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         if not url or not url.strip():
@@ -8305,6 +9818,18 @@ class TortoiseSDK:
                 )
         if sourceKind in TIER_PRIORS and tier is None:
             tier = sourceKind  # tier-form sourceKind mirrors to credibilityTier
+        # #329: props passthrough of the server-managed sourcePath keys stays
+        # fail-closed — ONLY the sanctioned source_path= keyword route carries
+        # it (the sanitizer's docstring carve-out; §4.1). ``id`` overrides are
+        # equally server-managed (node identity) — rejected here because
+        # ``_create_entity``'s reject_id is bypassed for the sanctioned route.
+        for _k in ("sourcePath", "source_path", "id"):
+            if _k in props:
+                raise ValueError(
+                    f"{_k!r} is a server-managed field and cannot be set via "
+                    f"props — use the sanctioned create_source(source_path=) "
+                    f"keyword (epic #900 §4.1)."
+                )
         ev = {
             "url": url,
             "sourceKind": sourceKind,
@@ -8312,11 +9837,32 @@ class TortoiseSDK:
                 __import__('datetime').timezone.utc).isoformat(),
             **props,
         }
+        if source_path is not None:
+            ev["source_path"] = str(source_path)
         if tier is not None:
             ev["credibilityTier"] = tier
         if sourceDate is not None:
             ev["sourceDate"] = sourceDate
-        result = self._create_entity("Source", url, ev, "SourceCreated")
+        if _merge_run_id is not None:
+            # internal run token: the race-safe CREATE discriminator for the
+            # conditional-MERGE outcome (the embedded backend's nodes_created
+            # stats are unreliable under concurrent same-key MERGEs). Rides
+            # the ev dict to _upsert_source (popped by apply) and is stripped
+            # from the journaled payload below.
+            ev["_merge_run_id"] = _merge_run_id
+        proj = self._get_proj()
+        proj._source_merge_result = None
+        result = self._create_entity("Source", url, ev, "SourceCreated",
+                                     _skip_sanitize=True)
+        # Journaling contract (a): emit-on-every-write SourceCreated. Best-
+        # effort (no-op when no event_log_path configured) — never crashes the
+        # write (mirrors _emit_event's discipline). The internal run token
+        # never rides the journaled payload.
+        try:
+            payload = {k: v for k, v in ev.items() if k != "_merge_run_id"}
+            self._emit_event("SourceCreated", id=url, **payload)
+        except Exception:  # noqa: BLE001 — journaling must not break the write
+            _logger.warning("SourceCreated journal emission failed for %s — continuing", url)
         # Write events invalidate the inheritance gate + reliability cache
         self._invalidate_inheritance_gate_for_source(url)
         self._clear_reliability_cache(url)
