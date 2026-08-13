@@ -272,13 +272,54 @@ class TestIpv6Normalization:
 
     def test_limiter_hex_form_single_bucket(self, client, monkeypatch):
         """The limiter keys on the NORMALIZED ip — hex ::ffff:7f00:1 and
-        127.0.0.1 are the same bucket (2 mints then 429)."""
+        127.0.0.1 are the same bucket (2 mints then 429 on the 3rd)."""
         monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
         import tortoise.hosted_api as ha_mod
+        from tortoise.hosted_api import _check_signup_ip_rate_limit, app
         ha_mod._SIGNUP_BUCKETS.clear()
-        # Simulate a dual-stack client: same normalized address, two forms.
-        # The bucket key comes from request.state.client_ip — exercise the
-        # normalization via the helper directly on the bucket store.
-        from tortoise.hosted_api import _normalize_mapped_ipv6
-        ip = _normalize_mapped_ipv6("::ffff:7f00:1")
-        assert ip == "127.0.0.1"
+
+        class _Req:
+            client = type("C", (), {"host": "127.0.0.1"})()
+            state = type("S", (), {"client_ip": "::ffff:7f00:1"})()
+
+        import pytest, asyncio
+        async def _run():
+            await _check_signup_ip_rate_limit(_Req())
+            await _check_signup_ip_rate_limit(_Req())  # 2nd mint (same bucket)
+            with pytest.raises(Exception) as ei:
+                await _check_signup_ip_rate_limit(_Req())  # 3rd → 429
+            assert getattr(ei.value, "status_code", None) == 429
+        asyncio.run(_run())
+        # Cleanup so the module-scoped client isn't burned.
+        ha_mod._SIGNUP_BUCKETS.clear()
+
+    def test_retain_feed_task_replacement_keeps_ref(self, monkeypatch):
+        """Regression for the review P3 GC race: a same-key replacement task
+        must keep its only strong reference when the FIRST task completes."""
+        import asyncio
+        import tortoise.hosted_api as ha_mod
+        from tortoise.hosted_api import _retain_feed_task
+
+        ha_mod._SIGNUP_FEED_TASKS.clear()
+        loop = asyncio.new_event_loop()
+        try:
+            async def _slow(secs):
+                await asyncio.sleep(secs)
+                return "done"
+
+            # t1 completes FIRST while t2 (the replacement) is still running:
+            # t1's done-callback must NOT pop the entry holding t2 (that
+            # would drop t2's only strong reference → asyncio GC could
+            # collect the live replacement mid-execution).
+            t1 = loop.create_task(_slow(0.02))
+            _retain_feed_task("k", t1)
+            t2 = loop.create_task(_slow(0.2))
+            _retain_feed_task("k", t2)  # replacement under same key
+            loop.run_until_complete(asyncio.sleep(0.05))  # t1 done; t2 pending
+            assert ha_mod._SIGNUP_FEED_TASKS["k"] is t2, (
+                "t1's done-callback must not drop the still-running t2")
+            loop.run_until_complete(t2)  # t2 completes → its own callback pops
+            assert "k" not in ha_mod._SIGNUP_FEED_TASKS
+        finally:
+            loop.close()
+            ha_mod._SIGNUP_FEED_TASKS.clear()
