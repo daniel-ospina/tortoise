@@ -450,10 +450,6 @@
         Team: <strong id="team-name">—</strong> &nbsp;·&nbsp; Tier: <strong>Free</strong>
       </div>
 
-      <p style="font-size:0.82rem;color:var(--text-dim);text-align:center;margin:1rem 0 0.25rem;">
-        Your key is ready. Two ways to use it: connect your agent (MCP) for memory that
-        follows you, or call the API directly to build memory into your own product.
-      </p>
       <div class="card" id="reveal-block">
         <div class="card-label">Your API key</div>
         <div class="api-key-display">
@@ -479,16 +475,18 @@
       </div>
 
       <div class="card hidden" id="returning-block">
-        <div class="card-label">Your team is ready!</div>
         <p style="font-size:0.85rem;color:var(--text-dim);line-height:1.5;">
-          Your API key was already created and can't be shown again (it's shown exactly once).
-          Open the dashboard to manage your keys, or generate a new one if you lost it.
+          Taking you to your dashboard — manage keys, teams, and limits there.
         </p>
-        <p style="margin-top:0.75rem;"><a href="https://app.premiselabs.co" style="color:var(--accent);">Lost your key? Open Dashboard →</a></p>
+        <p style="margin-top:0.75rem;"><a href="https://app.premiselabs.co" style="color:var(--accent);">Open Dashboard →</a></p>
       </div>
 
             <div class="card" id="mcp-card">
-        <div class="card-label">Use Tortoise — connect your agent <span style="font-weight:400;font-size:0.72rem;color:var(--text-dim);">(MCP — no install needed)</span></div>
+        <div class="card-label">Connect our toolbox <span style="font-weight:400;font-size:0.72rem;color:var(--text-dim);">(MCP)</span></div>
+        <p style="font-size:0.82rem;color:var(--text-dim);margin:0 0 0.75rem;">
+          Pick your agent below — then copy the config and paste it into your agent. It connects
+          Tortoise to your agent; the onboarding prompt below runs your setup.
+        </p>
         <div class="harness-tabs" id="harness-tabs" style="display:flex;gap:0.5rem;margin-bottom:0.75rem;flex-wrap:wrap;">
           <button class="harness-tab active" data-harness="claude" aria-pressed="true" onclick="switchHarness('claude')">Claude Code</button>
           <button class="harness-tab" data-harness="codex" aria-pressed="false" onclick="switchHarness('codex')">Codex</button>
@@ -890,8 +888,17 @@ you up to 6 yes/no questions and set up your Tortoise memory.
       document.getElementById("team-name").textContent = row.team_name;
       const revealEl = document.getElementById("reveal-block");
       if (revealEl) revealEl.classList.add("hidden");
+      // Returning visitor: the key was shown exactly once and is nulled. The
+      // dashboard is the hub for key management — route there instead of
+      // dead-ending on a "can't be shown again" card (#1147). The hold card
+      // above paints first (short delay), and location.href (not replace)
+      // keeps the welcome page in history so Back works if the dashboard is
+      // unreachable.
       const returningEl = document.getElementById("returning-block");
       if (returningEl) returningEl.classList.remove("hidden");
+      setTimeout(() => {
+        window.location.href = "https://app.premiselabs.co";
+      }, 1200);
       const dashBtn = document.getElementById("btn-dashboard");
       if (dashBtn) dashBtn.classList.remove("hidden");
       // Returning visitor: the key was shown exactly once and is nulled.
