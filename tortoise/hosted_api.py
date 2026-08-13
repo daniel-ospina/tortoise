@@ -122,18 +122,20 @@ def _make_sdk(*, namespace: str | None = None) -> TortoiseSDK:
 # Built BEFORE _lifespan references it (no unbound reference). Mounted at /mcp
 # — the MCP app carries its own auth/rate-limit/security middleware stack;
 # FastAPI parent middleware does NOT propagate to mounted sub-apps.
-_MCP_ALLOWED_ORIGINS = [
+# CORS allowlist shared with the parent app (single source of truth, #1002).
+_ALLOWED_ORIGINS = [
     "https://premiselabs.co",
     "https://app.premiselabs.co",
     "https://api.premiselabs.co",
+    "https://tortoise.premiselabs.co",
     "https://tortoise-y4mjjq.fly.dev",
 ]
 
-_MCP_ALLOWED_HOSTS = [o.split("//")[1].split("/")[0] for o in _MCP_ALLOWED_ORIGINS if "//" in o]
+_ALLOWED_HOSTS = [o.split("//")[1].split("/")[0] for o in _ALLOWED_ORIGINS if "//" in o]
 
 mcp_http_app = create_http_app(
-    allowed_origins=_MCP_ALLOWED_ORIGINS,
-    allowed_hosts=_MCP_ALLOWED_HOSTS,
+    allowed_origins=_ALLOWED_ORIGINS,
+    allowed_hosts=_ALLOWED_HOSTS,
     rate_limit=100,
 )
 
@@ -310,7 +312,7 @@ app = FastAPI(title="Tortoise Hosted API", version="0.1.0", lifespan=_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://premiselabs.co", "https://app.premiselabs.co", "https://api.premiselabs.co", "https://tortoise-y4mjjq.fly.dev"],
+    allow_origins=_ALLOWED_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
