@@ -3,6 +3,7 @@ __pycache__/
 .worktrees/
 __pycache__/
 *.egg-info/
+.venv/
 .wrangler/
 premise-labs/.wrangler/
 :memory:
