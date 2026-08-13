@@ -165,27 +165,6 @@ class TestIngestFullBundle:
         assert sdk.get_point(pid_draft)["status"] == "draft"
         assert sdk.get_point(pid_live)["status"] == "live"
 
-    def test_source_of_impl_promoted_draft_to_live(self, sdk):
-        # #131 lifecycle alias — the full behavior (source live, target draft,
-        # operator status-absent) is covered in
-        # TestPromotionPolicy::test_auto_promotes_source_live; this test stays
-        # as a focused regression at the original location under the new
-        # gated default (promotion only fires under promotion_policy="auto").
-        bundle = {
-            "points": [
-                {"ref": "pA", "kind": "claim", "content": "A implies B"},
-                {"ref": "pB", "kind": "claim", "content": "B"},
-            ],
-            "connections": [
-                {"from": "pA", "to": "pB", "operator": "IMPL"},
-            ],
-        }
-        res = sdk.ingest(bundle, promotion_policy="auto")
-        pA, pB = res["ids"]["points"]
-        assert sdk.get_point(pA)["status"] == "live"   # promoted by edge creation
-        assert sdk.get_point(pB)["status"] == "draft"  # target stays draft
-
-
 # ── promotion_policy (epic #902 W4 A0) ─────────────────────────────
 
 class TestPromotionPolicy:
@@ -235,13 +214,14 @@ class TestPromotionPolicy:
         assert sdk.get_point(pA)["status"] == "draft"
 
     def test_invalid_promotion_policy_raises_naming_valid_values(self, sdk):
-        with pytest.raises(ValueError, match="promotion_policy"):
-            sdk.ingest({"points": []}, promotion_policy="atomic")
-        # message must name the valid values (cycle-21 message-content pin)
-        with pytest.raises(ValueError) as exc:
-            sdk.ingest({"points": []}, promotion_policy="nope")
-        msg = str(exc.value)
-        assert "gated" in msg and "auto" in msg
+        # every invalid value raises ValueError naming the param AND the valid
+        # values (cycle-21 message-content pin)
+        for bad in ("atomic", "nope"):
+            with pytest.raises(ValueError) as exc:
+                sdk.ingest({"points": []}, promotion_policy=bad)
+            msg = str(exc.value)
+            assert "promotion_policy" in msg
+            assert "gated" in msg and "auto" in msg
 
     def test_gated_granular_parity(self, sdk):
         # Policy is ORTHOGONAL to granularity (E2E-5): gated holds in both
@@ -372,12 +352,10 @@ class TestGranularity:
         assert "results" not in res
 
     def test_invalid_granularity_raises(self, sdk):
-        with pytest.raises(ValueError, match="granularity"):
+        with pytest.raises(ValueError, match="granularity") as exc:
             sdk.ingest({"points": []}, granularity="atomic")
         # message-content half of the contract: valid values named (mirror of
         # the promotion_policy pin)
-        with pytest.raises(ValueError) as exc:
-            sdk.ingest({"points": []}, granularity="atomic")
         assert "bulk" in str(exc.value) and "granular" in str(exc.value)
 
 

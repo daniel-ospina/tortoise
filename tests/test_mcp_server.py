@@ -843,6 +843,18 @@ class TestIngestPromotionPolicy:
         pA, _ = res["ids"]["points"]
         assert mcp_mod.tortoise_get_point(pA)["status"] == "live"
 
+    def test_mcp_gated_granular_parity(self, request, monkeypatch, tmp_path):
+        # E2E-5 second cell at the MCP layer: gated default holds in granular
+        # mode (no forced-auto window on the granular code path).
+        res = self._sdk_backed_ingest(
+            request, monkeypatch, tmp_path, granularity="granular")
+        assert "error" not in res, res
+        assert res["granularity"] == "granular"
+        pA, _ = res["ids"]["points"]
+        op_id = res["ids"]["connections"][0]
+        assert mcp_mod.tortoise_get_point(pA)["status"] == "draft"
+        assert mcp_mod.tortoise_get_point(op_id)["status"] == "draft"
+
 
 class TestStdioEntrypointToolRegistration:
     """#993 regression — `python -m tortoise.mcp_server` must serve the tool
