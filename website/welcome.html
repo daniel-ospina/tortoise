@@ -1191,7 +1191,9 @@ you up to 6 yes/no questions and set up your Tortoise memory.
       document.getElementById("api-key").textContent = data.api_key;
       document.getElementById("snippet-key").textContent = data.api_key;
       // MCP config must reflect the revealed key, not the masked placeholder
-      // (#745a) — re-render now that #api-key holds the real key.
+      // (#745a) — re-render now that #api-key holds the real key. Fresh
+      // reveal: default to the one-click flow (manual env forms collapsed).
+      resetToOneClick();
       renderMcpConfig();
       renderSetupPrompt();
       // Reveal path: key shown; returning-visit block stays hidden; dashboard btn shown
@@ -1557,8 +1559,13 @@ ${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}`,
 
     function renderMcpConfig() {
       const key = document.getElementById("api-key").textContent.trim();
+      // Masked key (returning visitor): never interpolate the raw bullets —
+      // substitute the tt_YOUR_KEY placeholder the manual note references
+      // (matches HARNESS_CONFIGS' masked branch; ENV_CONFIGS otherwise
+      // renders the literal key).
+      const effectiveKey = _usableKey(key) ? key : "tt_YOUR_KEY";
       const text = manualMode
-        ? ENV_CONFIGS[currentHarness](key)
+        ? ENV_CONFIGS[currentHarness](effectiveKey)
         : HARNESS_CONFIGS[currentHarness](key);
       document.getElementById("mcp-config-text").textContent = text;
     }
@@ -1583,9 +1590,12 @@ ${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}`,
         if (manual) manual.classList.add("hidden");
         manualMode = false;
       }
-      // Re-derive both flows from the key state on entry, so a previous
+      // Re-derive the flow from the key state on entry, so a previous
       // manual-toggle can't leak an empty MCP card across Back → re-enter.
       if (path === "mcp") {
+        const key = document.getElementById("api-key").textContent.trim();
+        if (_usableKey(key)) resetToOneClick();
+        else forceManualMode();
         renderSetupPrompt();
         renderMcpConfig();
       }
@@ -1624,22 +1634,41 @@ ${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}`,
           ? setupPromptText(key)
           : "(Your key isn't available on this visit — use Manual setup below with the key you saved.)";
       }
-      // Returning visitor / masked key: the one-click prompt has no key to
-      // embed — disable the primary CTA, collapse the primary flow, and
-      // surface the key-less env-var manual forms (#529 J5/T7b contract).
       const btn = document.getElementById("btn-copy-setup");
       if (btn) btn.disabled = !usable;
+      // Masked key: the one-click prompt has no key to embed — force the
+      // key-less env-var manual forms (#529 J5/T7b). Usable key: leave the
+      // user's manual/one-click state untouched (toggleManual owns it — a
+      // harness-tab switch must NOT collapse an open manual section).
+      if (!usable) forceManualMode();
+    }
+
+    // Fresh-reveal default: one-click flow, manual collapsed.
+    function resetToOneClick() {
+      manualMode = false;
       const primaryFlow = document.getElementById("one-click-flow");
-      if (primaryFlow) primaryFlow.classList.toggle("hidden", !usable);
+      if (primaryFlow) primaryFlow.classList.remove("hidden");
       const manual = document.getElementById("manual-setup");
-      const manualShown = !usable;
-      if (manual) manual.classList.toggle("hidden", !manualShown);
-      // Toggle row + placeholder note follow the key state.
+      if (manual) manual.classList.add("hidden");
       const toggleRow = document.getElementById("manual-toggle-row");
-      if (toggleRow) toggleRow.classList.toggle("hidden", !usable);
+      if (toggleRow) toggleRow.classList.remove("hidden");
       const placeholderNote = document.getElementById("manual-placeholder-note");
-      if (placeholderNote) placeholderNote.classList.toggle("hidden", usable);
-      syncManualAria(manualShown);
+      if (placeholderNote) placeholderNote.classList.add("hidden");
+      syncManualAria(false);
+    }
+
+    // Masked-key state: key-less env-var manual forms, primary flow hidden.
+    function forceManualMode() {
+      manualMode = true;
+      const primaryFlow = document.getElementById("one-click-flow");
+      if (primaryFlow) primaryFlow.classList.add("hidden");
+      const manual = document.getElementById("manual-setup");
+      if (manual) manual.classList.remove("hidden");
+      const toggleRow = document.getElementById("manual-toggle-row");
+      if (toggleRow) toggleRow.classList.add("hidden");
+      const placeholderNote = document.getElementById("manual-placeholder-note");
+      if (placeholderNote) placeholderNote.classList.remove("hidden");
+      syncManualAria(true);
     }
 
     function syncManualAria(manualShown) {
@@ -1796,6 +1825,7 @@ ${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}`,
     <a href="/tos">Terms of Service</a>
     <a href="/license">License</a>
     <a href="/dpa">DPA</a>
+    <a href="/security">Security</a>
   </footer>
 <script src="/consent.js" defer></script>
 </body>

@@ -318,6 +318,31 @@ class Telemetry(BaseModel):
         return v
 
 
+class CommitEvent(BaseModel):
+    """An episodic record — an Event NODE (issue #1013: NEVER a point with
+    pointKind event). eventKind from the ontology vocabulary."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    eventKind: str = Field(min_length=1)
+    content: str = Field(min_length=1, max_length=1000)
+    edu_index: int | None = None
+    confidence: float = 0.9
+    about_entities: list[str] = Field(default_factory=list)
+    source_ref: str = Field(min_length=1)  # REQUIRED — resolves to a Source
+    captured_at: str | None = None
+
+    @field_validator("id")
+    @classmethod
+    def _content_addressed_id(cls, v: str) -> str:
+        if not v.startswith("ev_"):
+            raise ValueError(
+                "event id must use the content-addressed ev_<sha> form"
+            )
+        return v
+
+
 class CommitPayload(BaseModel):
     """The full POST /v1/sessions/commit request body (§6.1)."""
 
@@ -334,6 +359,7 @@ class CommitPayload(BaseModel):
     sources: list[Source] = Field(default_factory=list)
     entities: list[Entity] = Field(default_factory=list)
     points: list[Point] = Field(default_factory=list)
+    events: list[CommitEvent] = Field(default_factory=list)  # #1013: Event nodes
     operators: list[Operator] = Field(default_factory=list)
     telemetry: Telemetry
 
@@ -506,6 +532,23 @@ def validate_layer1(
         (o.src, o.dst, o.op_type) for o in payload.operators
     }
 
+    # Events (#1013): eventKind in the closed event vocab; about_entities
+    # referential; source_ref required.
+    EVENT_KINDS = {"decision", "occurrence", "deployment", "review",
+                   "extraction", "meeting", "experiment", "friction", "turn",
+                   "sessionCaptured", "AgentSession", "documentCreated",
+                   "roleCreated", "pointAdded", "humanApproval"}
+    for i, ev in enumerate(payload.events):
+        if ev.eventKind not in EVENT_KINDS:
+            add(f"events[{i}].eventKind",
+                f"eventKind {ev.eventKind!r} not in the ontology event vocabulary")
+        for name in ev.about_entities:
+            if name not in entity_names:
+                add(f"events[{i}].about_entities",
+                    f"entity {name!r} not in the emitted entities[]")
+        if not ev.source_ref:
+            add(f"events[{i}].source_ref", "source_ref is REQUIRED (R4)")
+
     # Closed vocab — pointKind AND sourceKind (ontology §5, amendment #5/#6).
     for i, pt in enumerate(payload.points):
         if pt.pointKind not in vocab.point_kinds:
@@ -561,6 +604,7 @@ def validate_layer1(
     expected = compute_client_commit_id(
         payload.session_id, payload.points, payload.entities,
         payload.operators, payload.summary, payload.story_arc,
+        payload.events,   # #1013: events are part of the canonical
     )
     if payload.client_commit_id != expected:
         add("client_commit_id",
@@ -657,6 +701,7 @@ def canonical_payload(
     operators: Iterable[Any],
     summary: str,
     story_arc: str,
+    events: Iterable[Any] = (),
 ) -> str:
     """Deterministic canonical JSON over the §6.1 commitment fields.
 
@@ -698,6 +743,15 @@ def canonical_payload(
                 key=lambda o: (_f(o, "src"), _f(o, "dst"), _f(o, "op_type")),
             )
         ],
+        "events": [
+            {
+                "id": _f(e, "id"),
+                "eventKind": _f(e, "eventKind"),
+                "content": _f(e, "content"),
+                "about_entities": sorted(_f(e, "about_entities") or []),
+            }
+            for e in sorted(events, key=lambda x: _f(x, "id"))
+        ],
     }
     return json.dumps(_round3(canonical), sort_keys=True, separators=(",", ":"))
 
@@ -709,12 +763,14 @@ def compute_client_commit_id(
     operators: Iterable[Any],
     summary: str,
     story_arc: str,
+    events: Iterable[Any] = (),
 ) -> str:
     """SHA-256 over the canonical payload (ids.content_hash — the existing
-    idempotency-key primitive, plan §6.1)."""
+    idempotency-key primitive, plan §6.1). Events are part of the canonical
+    (issue #1013): changing an event changes the commit id."""
     return content_hash(
         canonical_payload(session_id, points, entities, operators,
-                          summary, story_arc)
+                          summary, story_arc, events)
     )
 
 

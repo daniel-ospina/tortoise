@@ -173,6 +173,10 @@ class TestLazyReadConsistency:
     def test_compute_confidence_auto_dreams_before_auto_extract(self, sdk):
         a = _make_claim(sdk, "c1")
         b = _make_claim(sdk, "c2")
+        # #344: neutral Beta(1,1) baselines — the fail-closed gate runs before
+        # the auto-dream, so the graph must be calibrated first.
+        sdk.set_point_baseline(a["id"], 1, 1)
+        sdk.set_point_baseline(b["id"], 1, 1)
         sdk.create_operator("IMPL", b["id"], [a["id"]])
         # Force dirty state.
         sdk._dirty_roots.add(a["id"])

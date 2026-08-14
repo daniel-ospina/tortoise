@@ -22,7 +22,8 @@ unconfigured environment skips gracefully with a clear message.
 Env contract for the local server (see plan docs/plans/2026-08-12-303-hosted-e2e-suite.md):
   TORTOISE_DB_PATH (absolute), TORTOISE_CONTROL_PLANE=registry,
   SUPABASE_URL=<local JWKS mock>, TORTOISE_SECRET_PEPPER, FASTAPI_INTERNAL_KEY,
-  RATE_LIMIT_DISABLED=1, TORTOISE_SESSION_EXTRACTION=regex,
+  RATE_LIMIT_DISABLED=1, TORTOISE_SESSION_LLM_MOCK=1 (#822 test seam —
+  offline MockModel LLM extraction; the regex mode knob is removed),
   TORTOISE_BACKUP_KEY (base64 32B), TORTOISE_BACKUP_STORAGE=memory (#303 seam),
   BACKUP_WATCHER_DISABLED=1, TORTOISE_PRICING_PATH=<fixture>,
   STRIPE_WEBHOOK_SECRET + STRIPE_PRICE_IDS (local catalog — zero Stripe network),
@@ -234,7 +235,7 @@ def _build_server_env(db_path: str, jwks_url: str, *, bare: bool) -> dict:
         "TORTOISE_SECRET_PEPPER": SECRET_PEPPER,
         "FASTAPI_INTERNAL_KEY": INTERNAL_KEY,
         "RATE_LIMIT_DISABLED": "1",
-        "TORTOISE_SESSION_EXTRACTION": "regex",
+        "TORTOISE_SESSION_LLM_MOCK": "1",  # #822: offline MockModel LLM extraction
         "TORTOISE_BACKUP_KEY": base64.b64encode(os.urandom(32)).decode(),
         "TORTOISE_BACKUP_STORAGE": "memory",
         "BACKUP_WATCHER_DISABLED": "1",

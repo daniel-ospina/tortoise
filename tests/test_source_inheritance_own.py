@@ -231,6 +231,7 @@ class TestNANDRealPath:
                 # draft filter (create_point defaults to draft since #943), making
                 # the NAND operator degenerate and silently excluded from EP.
                 b = sdk.create_point("statement", "contradiction target", status="live")
+                sdk.set_point_baseline(b["id"], 1, 1)  # #344: neutral baseline (gate active)
                 op = sdk.create_operator("NAND", a, [b["id"]])
                 sdk._apply_source_inheritance(recency_decay=1.0)
                 result = sdk.compute_confidence()

@@ -73,7 +73,7 @@ recorded here so implementation does not re-derive):**
 | 4 | System | Graph writes: Session counters, Event agentSession, Document transcript, Source bridge, Points/entities/operators | MERGE idempotent writes | Team graph contains points/entities/operators with full provenance chain; **extraction-emitted NANDs are written `unidirectional` by default (new-claim-attacks-existing), with bidirectional ONLY for the rare explicit mutual-restatement case (addendum §1) — so a later query shows the attack direction correctly (E2E-6, prepares P9/A8 surfacing)** |
 | 5 | P1 | Queries the team graph ("what did we decide in that session?") | Search/query surface | Decision points surface with source_ref → resolvable Source → Document |
 
-**Edge cases:** (a) provider key missing → mode-dependent per `TORTOISE_SESSION_EXTRACTION`: `required` → fail-closed local error, NO regex fallback; `auto`/`regex` → deterministic regex capture baseline (capture still works); (b) empty session (no value) → J-2; (c) network failure mid-commit → client retries with same `client_commit_id`: if the previous attempt FULLY wrote (:CommitRecord fully_written), L1 returns `duplicate:true` (zero writes, zero write-ops billed); otherwise L2 MERGE reconciliation completes the remainder (`duplicate:false`) — safe either way (W-3 [2] + [3]); (d) LLM provider rate limit → retry with backoff, bounded (≤5 retries/session); (e) local conversation > local turn cap → fail-closed LOCAL error (the commit endpoint has no turns — the legacy turn cap is POST /v1/sessions behavior, not the commit endpoint's); (f) malformed derived payload (e.g., quote >200 chars, unknown kind — stale local Layer-1 mirror) → server 422 with field reasons → client retries ONCE with corrected shape → still failing → client surfaces the reasons; `code: calibration_mismatch` → client refreshes its value brief (commit_schema.py) and regenerates (W-3).
+**Edge cases:** (a) provider key missing → fail-closed local error, NO regex fallback — extraction is LLM-default only; the `TORTOISE_SESSION_EXTRACTION` mode knob and its `required`/`auto`/`regex` modes were REMOVED as product paths by #822 (server-side provider key, or the `TORTOISE_SESSION_LLM_MOCK=1` test seam — the same knob removal applies to the `TORTOISE_SESSION_EXTRACTION` references in W-1 failure modes and the DE2E negative cases below); (b) empty session (no value) → J-2; (c) network failure mid-commit → client retries with same `client_commit_id`: if the previous attempt FULLY wrote (:CommitRecord fully_written), L1 returns `duplicate:true` (zero writes, zero write-ops billed); otherwise L2 MERGE reconciliation completes the remainder (`duplicate:false`) — safe either way (W-3 [2] + [3]); (d) LLM provider rate limit → retry with backoff, bounded (≤5 retries/session); (e) local conversation > local turn cap → fail-closed LOCAL error (the commit endpoint has no turns — the legacy turn cap is POST /v1/sessions behavior, not the commit endpoint's); (f) malformed derived payload (e.g., quote >200 chars, unknown kind — stale local Layer-1 mirror) → server 422 with field reasons → client retries ONCE with corrected shape → still failing → client surfaces the reasons; `code: calibration_mismatch` → client refreshes its value brief (commit_schema.py) and regenerates (W-3).
 
 #### J-2 — Extract-nothing session (E2E-8) — P1
 
@@ -197,7 +197,7 @@ recorded here so implementation does not re-derive):**
 
 **Automation points:** all S0-S6 run automatically at session end; S1 and S2 retries run on the cheap model only (≤1 retry/item, ≤5/session). **Manual intervention:** only enforcement-alarm review (W-2 step 5) and calibration (W-5).
 
-**Failure modes:** (a) provider unavailable → mode-dependent per `TORTOISE_SESSION_EXTRACTION`: `required` → fail-closed local error, NO regex fallback; `auto`/`regex` → regex capture baseline (capture always works); (b) keep-ratio alarm → empty + alarm (never noise); (c) block-rate >15% → fail-closed to empty + alarm; (d) malformed stream (E9) → retry once → run fails with reason (the ONE run-level class — R8 Layer-1 contract).
+**Failure modes:** (a) provider unavailable → fail-closed local error, NO regex fallback (extraction is LLM-default only — `TORTOISE_SESSION_EXTRACTION` modes removed by #822); (b) keep-ratio alarm → empty + alarm (never noise); (c) block-rate >15% → fail-closed to empty + alarm; (d) malformed stream (E9) → retry once → run fails with reason (the ONE run-level class — R8 Layer-1 contract).
 
 **Handoffs:** S6 derived payload → W-3 (commit path); violation events → W-2 (ladder) → W-6 (metrics) and W-5 (pack calibration).
 
@@ -527,7 +527,7 @@ run-level: only E9 (malformed stream shape) fails the RUN — retry once → fai
 | **Event** | `:Event` | EXISTS; **NEW eventKind** | `eventId` (content-addressed — hash of session_id+captured_at, deterministic for MERGE), `eventKind: AgentSession` (**amendment §4.3** — exact code spelling, capital A; reconciles with core `sessionCaptured`), `capturedAt` (**amendment §4.3**), `startedAt/endedAt`, `is_episodic: true`, participants as Event PROPERTIES in v1 (no `participatesIn` producer — scope §1) | Produces the Document |
 | **Document** | `:Document` | EXISTS (ONTOLOGY §4.4) | `documentKind: transcript`, `title`, `summary`, **`story_arc` (NEW field — amendment §4.3)**, `topics`, `sessionId`, `eventId`, `sourcePath` (basename only — privacy), `doc_status` (captured/extracted/draft), `_searchText` — **NO `content` on the derived path** | Fields exist today; amendments = register capture usage (summary/story-arc/sessionId). Content only on the opt-in raw path (not v1) |
 | **Source** | `:Source` | EXISTS (ONTOLOGY §4.6) | `url` (identity — basename/contentHash-derived, never the full local path), `sourceKind: agentSession` (value registered — amendment §4.3; external kinds for referenced artifacts), `credibilityTier`, `contentHash`, `title`, `ingestedAt`, `updatedAt`, `externalId`, `sourceDate`, `provenance_spans` (NEW property — amendment §4.3; window spans from provenance_refs), `is_episodic: true` | **Bridge, NOT content holder** (four-node model). The session Source carries provenance only |
-| **Point** | `:Point` | EXISTS | `id` (`pt_<sha>` deterministic — content-addressed ids registered, amendment §4.3), `content` (≤1000), `pointKind` ∈ closed vocab (incl. `event` for event-class items — registered, amendment §4.3), `status` (draft→live), `confidence`, `c_cal` (NEW field — amendment §4.3), `quote` (≤200, secret-scanned — stored Point property, amendment §4.3), `source_ref` REQUIRED; `is_episodic: true` on episodic (regex-path) Points only — the quota discriminator | decision/claim kinds; event-class items → points with `pointKind: event` (R1 serialization rule) |
+| **Point** | `:Point` | EXISTS | `id` (`pt_<sha>` deterministic — content-addressed ids registered, amendment §4.3), `content` (≤1000), `pointKind` ∈ closed vocab (incl. `event` for event-class items — registered, amendment §4.3), `status` (draft→live), `confidence`, `c_cal` (NEW field — amendment §4.3), `quote` (≤200, secret-scanned — stored Point property, amendment §4.3), `source_ref` REQUIRED; `is_episodic: true` on episodic (capture material) Points only — the quota discriminator | decision/claim kinds; event-class items → points with `pointKind: event` (R1 serialization rule) |
 | **Entity (Object)** | `:Object` | EXISTS | `name`, `objectKind` (node property; payload calls it `kind` — mapped at write), `passes_frequency_gate` (NEW property — amendment §4.3; written WITH flag when false) | Entities MERGE by (name, objectKind) |
 | **Operator** | `:Point {is_operator:true}` | EXISTS (sdk.py:1503) | `op_type`, `inputs`, direction flag; node id = ULID (unchanged); **MERGE key = (src, dst, op_type) tuple** — no `op_<sha>` ids (create_operator hardcodes ULID; adding an explicit-id path is NOT needed — (PL1)) | IMPL / NAND (unidirectional flag per S3 policy) / CORRECTS (via supersede_point) / **mitigation Point** (pointKind statement, `mitigation_strength` 0-1 — the existing mitigate_operator mechanism; extractor bias 0.10-0.50 maps into strength) |
 
@@ -559,7 +559,7 @@ names at implementation against `sdk._link_source`/EventAPI (slice 5).
 
 ### 4.3 Ontology amendments (slice 3 — registration, not new design)
 
-1. `AgentSession` registered in ONTOLOGY §4.5 core eventKind vocabulary — EXACT code spelling (capital A; sdk.py:3963, session_indexer.py); `sessionCaptured` (the legacy core kind, still written by the regex path) declared an alias of the same concept — both remain valid kinds, no migration.
+1. `AgentSession` registered in ONTOLOGY §4.5 core eventKind vocabulary — EXACT code spelling (capital A; sdk.py:3963, session_indexer.py); `sessionCaptured` (the legacy core kind, still written by capture_session's LLM path) declared an alias of the same concept — both remain valid kinds, no migration.
 2. `capturedAt` documented in §4.5 (bi-temporal capture).
 3. Content-addressed Event ID documented in §4.5 (deterministic MERGE anchor for the agentSession Event).
 4. Document `summary`/`story-arc`/`sessionId` — §4.4 fields; `story_arc` registered as an explicit §4.4 field (capture usage note; summary = short, story_arc = arc continuation).
@@ -631,14 +631,14 @@ names at implementation against `sdk._link_source`/EventAPI (slice 5).
 
 - **Local:** pip SDK + CLI/extension on the user's machine; BYOK provider key from user env/config; extraction never leaves the machine; the derived commit is the only network egress (plus telemetry).
 - **Hosted:** FastAPI (existing hosted_api.py) behind existing auth (tt_ keys, `get_current_team`); graph = existing FalkorDB tenant namespace; no new services. The `:CommitRecord` label is the ONLY new graph artifact (replay/adjudication state, §4.1). Hold queue = response semantics + Session counters (client-side items, PL3).
-- **Consumers of the commit endpoint (enumerated):** SDK `commit_session` (dev machines, CI), capture extension cloud path; **self-hosted deployments** = run `hosted_api` locally (the endpoint is part of the existing selfhost surface) — there is NO local-graph-write fallback for derived commits in v1; `capture_session` (regex path) remains the local-only capture for self-hosts without the endpoint.
+- **Consumers of the commit endpoint (enumerated):** SDK `commit_session` (dev machines, CI), capture extension cloud path; **self-hosted deployments** = run `hosted_api` locally (the endpoint is part of the existing selfhost surface) — there is NO local-graph-write fallback for derived commits in v1; `capture_session` remains the local-only capture for self-hosts without the endpoint (extraction is LLM-default; the regex path was removed as a product path by #822).
 - **Eval:** standalone scripts + GitHub Actions CI (Layer-1 blockers + watch-gate reports + minimum-signal assertions); gold set lives in the repo. **Drift monitor:** a small scheduled job consumes commit-endpoint telemetry (the telemetry block lands in the existing telemetry/analytics store) and runs the rolling N=20 live-floor watch → alert on <90% (R8 build order item 5; slice 8).
 
 ### 5.4 Failure modes & mitigations
 
 | Failure | Detection | Mitigation |
 | --- | --- | --- |
-| LLM provider unavailable (local) | mode check | `required` → fail-closed; `auto`/`regex` → regex baseline |
+| LLM provider unavailable (local) | provider call error | fail-closed local error, NO regex fallback (LLM-default only, #822) |
 | keep-ratio >40% (S1 over-keeps) | telemetry alarm | fail-closed to empty + alarm; calibration (W-5) |
 | Block-rate >15% (vocab misconfigured) | violation-event stats | fail-closed to empty + alarm |
 | LLM nondeterminism | Layer-1 vs Layer-2 split | deterministic schema gates (CI blockers) + statistical watch-gates (eval) |
@@ -818,9 +818,10 @@ def commit_session(
 
 # UNCHANGED — existing (slice 7 note only)
 def capture_session(...) -> dict:        # KEEPS its current shape {session_id, turns,
-    ...                                 #   extracted, points} — regex/local-only capture
-                                        #   (the non-BYOK fallback + self-host path); the
-                                        #   cloud path rework routes BYOK captures through
+    ...                                 #   extracted, points} — LLM-default local capture (no
+                                        #   non-BYOK fallback — no provider key fails closed
+                                        #   per #822; self-host tests use TORTOISE_SESSION_LLM_MOCK=1);
+                                        #   the cloud path rework routes BYOK captures through
                                         #   commit_session, NOT through a changed return
 
 # NEW — value brief (slice 4/6)
@@ -903,8 +904,9 @@ kappa(a_labels: list[Label], b_labels: list[Label]) -> float
   telemetry + change detection. **L2 reconciliation triggers ONLY when the canonical
   hash changes (content change) — never on version alone** (a version-bump-only re-send
   is an L1 replay, DE2E-7).
-- The existing POST /v1/sessions (regex capture) stays unchanged for the non-BYOK
-  fallback path; the new endpoint is additive.
+- The existing POST /v1/sessions stays unchanged (LLM-default capture; the regex mode knob was
+  REMOVED as a product path by #822 — `TORTOISE_SESSION_LLM_MOCK=1` is the test seam); the new
+  endpoint is additive.
 
 ---
 
@@ -966,7 +968,7 @@ kappa(a_labels: list[Label], b_labels: list[Label]) -> float
 - Layer-1 (deterministic): all four chain nodes exist; `(Event)-[:produces]->(Document)`; `(Document)<-[:references]-(Source)`; every `(Point)-[:extractedFrom]->(Source)` resolves (R4/R7); **entities present as `:Object` nodes with `objectKind`; every `about_entities` entry resolves via `(Point)-[:aboutObject]->(Object)`; duplicate entity names MERGE by (name, objectKind); `passes_frequency_gate: false` → written WITH flag**; **operator edges exist with the (src,dst,op_type) MERGE key**; payload contains no raw turn text (byte-level check).
 - Layer-2 (watch): layer-correct ≥0.90 (N≥30 across the gold set — prerequisite: slice-8 gold set exists); per-class rates recorded.
 
-**Negative cases:** (a) provider key missing with `TORTOISE_SESSION_EXTRACTION=required` (pin the env in the test) → fail-closed local error, no commit; (b) raw conversation string in payload → 422 (schema has no such field) + Layer-1 privacy test; (c) secret-like quote (e.g., `sk-...` pattern) → dropped by secret-scan, quote omitted, violation logged.
+**Negative cases:** (a) provider key missing → fail-closed local error, no commit (extraction is LLM-default — the `TORTOISE_SESSION_EXTRACTION=required` mode was removed by #822; pin `TORTOISE_SESSION_LLM_MOCK` off + no provider key in the test); (b) raw conversation string in payload → 422 (schema has no such field) + Layer-1 privacy test; (c) secret-like quote (e.g., `sk-...` pattern) → dropped by secret-scan, quote omitted, violation logged.
 
 ### DE2E-3 — Layer-correct classification + R3 routing
 
@@ -1193,9 +1195,9 @@ MITIGATES edge-targeting).
 | R-8 | Privacy regression (content leaks into telemetry/provenance paths) | Low | Trust, legal | Byte-level tests (DE2E-10); telemetry schema test (no text fields); basename-only paths; secret-scan | 5, 7, 9 |
 | R-9 | Held items lost client-side (never re-submitted) | Med | Value loss | Never dropped by design; `held[]` in every response; SDK hold_queue helper; no server GC (documented) | 5, 7 |
 | R-10 | Enforcement ladder frustrates agents despite "soft" promise | Low-Med | DX | Item-level drops only (E9 the sole run-level class); WARN/retry dominant (7 of 10 classes); block-rate fail-closed = misconfiguration signal, not agent punishment | 6 |
-| R-11 | Self-host users have no derived-commit path | Med | Adoption | Documented: run hosted_api locally (endpoint is part of the selfhost surface); capture_session regex path unchanged as the fallback | 7 |
+| R-11 | Self-host users have no derived-commit path | Med | Adoption | Documented: run hosted_api locally (endpoint is part of the selfhost surface); capture_session local capture unchanged (LLM-default, no regex path — #822) | 7 |
 | R-12 | Pack v3 validation too strict/too loose (manifest authoring burden) | Med | Adoption | Backward compatible by construction (verified against the current registry); template gains commented sections; calibration loop improves descriptions | 4 |
-| R-13 | **Rate limits / provider unavailability** — BYOK LLM provider 429/timeout; endpoint 429 at 100 req/min/key (catch-up commits after offline capture + hold re-submissions can exceed it) | Med | DX, capture failure | Mode-dependent fail-closed vs regex baseline; bounded retries (≤5/session) on the cheap model; replay-safe retries via client_commit_id; **RESOLVED at plan: the commit endpoint gets a dedicated higher bucket (300 req/min/key, decided + tested in slice 5)** | 5, 6 |
+| R-13 | **Rate limits / provider unavailability** — BYOK LLM provider 429/timeout; endpoint 429 at 100 req/min/key (catch-up commits after offline capture + hold re-submissions can exceed it) | Med | DX, capture failure | Fail-closed on missing provider key, NO regex baseline (#822); bounded retries (≤5/session) on the cheap model; replay-safe retries via client_commit_id; **RESOLVED at plan: the commit endpoint gets a dedicated higher bucket (300 req/min/key, decided + tested in slice 5)** | 5, 6 |
 | R-14 | **L2 re-capture churn** — after an extractor/pack/calibration bump, re-extraction drifts LLM output → mass supersede + full delta counts as net-new → cumulative budget burns → legitimate re-captures hit the 50 ceiling (402) | Med-High (once the calibration loop is live) | Value loss via 402 | **Supersede-only deltas do NOT increment net-new** (a new point superseding an existing same-session point is exempt — authoritative budget block §6.1); documented generation-depth cap for supersession chains; DE2E-7 bump-then-re-capture fixture | 5, 6, 8 |
 | R-15 | **Extractor ships before any real-model quality measurement** — Layer-1 fixtures are MockModel-only; the first P/R measurement (slice-8 gold set) lands after slice 7 exposes real users to the pipeline | Med-High | Quality, broken Layer-1 contracts in production | **Slice-6 acceptance: run the 2-window rubric material through the NEW S0-S6 pipeline with a REAL model (extends the existing judge harness — zero new tooling); gate slice 7 on that smoke** | 6, 8 |
 | R-16 | **Cross-team pack content changes break the shared registry/brief** — dev/marketing manifest PRs (slice 4) resolve cross-pack post-load; strict load-time validation makes one team's manifest a single point of failure for the extractor/enforcer/endpoint vocab | Med | Brief availability, CI | **Per-pack load isolation (fail the pack, not the registry)** + a whole-registry compile CI job on every pack PR (extends existing registry tests) | 4 |
