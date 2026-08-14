@@ -468,7 +468,11 @@ def resolve_api_key(cp, token: str) -> dict | None:
     # api_keys read (step 1): "enabled" is an additive column
     # (20260813000005, #1148 — dashboard key-login toggle). A schema one
     # migration behind 400s on it; fail soft to the pre-#1148 default
-    # (enabled), never take down all auth (#1096). The base api_keys
+    # (enabled), never take down all auth (#1096). Accepted-by-scope: the
+    # error-blind seam swallows ANY combined-read failure (drift or a
+    # transient base-ok/additive-fail error) — a stored enabled=False key
+    # re-authenticates for the degrade duration (same fail-open class as
+    # the teams ladder; documented in the #1096 plan). The base api_keys
     # columns (0007) stay fail-closed: a failure of the base-only retry
     # propagates.
     _API_KEY_BASE_SELECT = ["id", "team_id", "key_prefix", "created_via",
