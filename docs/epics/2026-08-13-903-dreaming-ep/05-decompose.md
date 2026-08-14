@@ -43,7 +43,7 @@ created: 2026-08-13
 
 - C4 owns ep.py invalidation helper + generic call sites; C9 owns the three lifecycle call sites (supersede L1777, invalidate L1475, approve_merge L2616).
 - C11 owns MCP tool registration/params/error mapping wholesale; C7 owns SDK `dream_health_check()` + alarm logic.
-- C5 owns sdk.py L5383 non-convergence retention; C2 owns L5380 zero-affected-converged retention + promote→dirty (L1835).
+- C5 owns sdk.py L5388-5390 non-convergence retention (`_dirty_roots -= affected`); C2 owns L5386-5387 zero-affected-converged retention (`_dirty_roots.clear()`) + promote→dirty (L1835).
 - C7 owns the staleness-error-curve + region_attempts + warm_start_savings SURFACING; C10/C5/C4 produce the underlying data.
 - DB-down contract: C6 (embedded TortoiseError raise), C8 (hosted/selfhost 500/503 shape).
 - G7 isolation: C2 owns the write-back regression guard; C6 authors the DE2E-3 precedence/isolation test.
