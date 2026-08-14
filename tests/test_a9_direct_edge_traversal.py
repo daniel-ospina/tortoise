@@ -383,8 +383,10 @@ def test_e2e14_impl_3_cycle_honest_convergence():
         assert p1["id"] in affected and p2["id"] in affected \
             and p3["id"] in affected, affected
         # assertion 3: dirty roots cleared ONLY because factors ran — an
-        # immediate re-dream is a no-op
-        result2 = sdk.dream(dirty_only=True, max_hops=2)
+        # immediate re-dream is a no-op (epic 903-C6 #1244: explicit local
+        # mode pins the no-op contract; auto-select would route the now-clean
+        # small graph to full, which is idempotent but not a literal no-op)
+        result2 = sdk.dream(dirty_only=True, max_hops=2, mode="local")
         assert result2["iterations"] == 0 and result2["converged"] is True \
             and result2["affected_claims"] == [], result2
         # assertion 4: numeric confidence movement off baseline (every

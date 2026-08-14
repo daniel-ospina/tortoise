@@ -6320,16 +6320,39 @@ class TortoiseSDK:
         ).result_set
         self._dirty_roots.update(r[0] for r in rows)
 
+    #: Accepted explicit dream modes (epic 903-C6 #1244, I1 precedence table).
+    _DREAM_MODES = ("local", "stale-first", "full")
+    #: Auto-select heuristic (I1 rule 3 — mode=None, full=False): graphs
+    #: with fewer live operators than this are "small" → full mode (J3 — no
+    #: reason to window a graph this small; one pass drains it). Simple,
+    #: documented count-query heuristic: ``MATCH (n:Point
+    #: {is_operator:true}) RETURN count(n)`` — cheap and deterministic.
+    _AUTO_FULL_OPERATOR_THRESHOLD = 50
+
     def dream(self, dirty_only: bool = True, full: bool = False,
               max_hops: int = 2,
               require_calibration: bool | None = None,
-              stamp_dreamed_at: bool = True) -> dict:
-        """Run EP stabilization (#85).
+              stamp_dreamed_at: bool = True,
+              mode: str | None = None,
+              budget: int | None = None) -> dict:
+        """Run EP stabilization (#85) with strategy auto-selection (epic 903).
+
+        One call, three strategies (I1): ``local`` (write-triggered refresh
+        of the dirty roots), ``stale-first`` (scheduler: staleness-ranked
+        window ∪ dirty roots, bounded per-pass), ``full`` (whole-graph
+        stabilization). Users never pick — the router picks, unless an
+        explicit ``mode`` overrides.
 
         Args:
-            dirty_only: dream the accumulated dirty roots (default True).
-            full: whole-graph stabilization (dream_all). Mutually exclusive
-                  with dirty_only + anchors.
+            dirty_only: sugar (default True) — DEPRECATED (epic 903-C6,
+                  #1244): kept for backward compatibility, currently IGNORED
+                  by the mode router (auto-select and explicit mode govern).
+                  Historical semantics (dirty_only=False = suppress local
+                  dreaming) are NOT preserved — with no dirty roots the
+                  router may route small graphs to full. Callers wanting the
+                  old suppression should pass mode="local" explicitly.
+            full: sugar — whole-graph stabilization. Maps to
+                  mode="full" ONLY when ``mode`` is None (I1 rule 2).
             max_hops: EP subgraph expansion (keep ≥2 — contract with
                       _mark_dirty).
             require_calibration: gate the EP run on calibration state —
@@ -6346,9 +6369,44 @@ class TortoiseSDK:
                   moves the freshness signal that the 903-C4
                   stale-first scheduler ranks on. Default True for
                   write-triggered/operator-initiated dreams.
+            mode: explicit strategy override ∈ {"local", "stale-first",
+                  "full"} — WINS over the full/dirty_only sugar (I1 rule 1);
+                  unknown mode → ValueError. None → auto-select by context
+                  (I1 rule 3): write context (dirty roots) → local;
+                  small-graph/first-run → full; otherwise → local. The
+                  scheduled path calls with mode="stale-first" explicitly
+                  (903-C8 wiring) — auto never silently picks the window.
+            budget: per-pass operator cap. None → the existing 200-op
+                  selector cap (every pass bounded by construction); an
+                  explicit budget overrides it; budget=0 → no-op result
+                  (not an error — exact key-set, all zeros, no stamps).
+                  An explicit budget a full pass cannot satisfy raises
+                  BudgetExceededError (tortoise/exceptions.py) — full is
+                  complete-in-one-pass by contract; stale-first never
+                  raises (deferral is its design).
 
-        Returns {iterations, converged, affected_claims} or the dream_all
-        summary for full=True.
+        Returns (per-mode key-sets, pinned per I1 — exact):
+            local: {mode, iterations, converged, affected_claims,
+                    budget_used, coverage} — converged retained for the
+                    dirty-root logic (roots covered by the affected set are
+                    cleared; roots outside stay dirty for a later dream).
+            stale-first: {mode, batches, converged_all, converged,
+                    affected_claims, budget_used, coverage} — converged =
+                    this pass's window-level convergence (drives the
+                    dirty-root logic: a failed pass clears nothing, W4);
+                    budget_used = distinct operators processed after dedup.
+            full: {mode, batches, total_affected, converged_all,
+                    budget_used, coverage, scanned_count} — total_affected
+                    = reachable claims only; scanned_count = operator-less
+                    claims trivially stamped by the scan path (DE2E-1).
+
+        Coverage semantics per mode (I1): local → affected /
+        window-reachable (live non-operator claims in the anchors' BFS
+        closure); stale-first → affected / remaining-stale-before-pass (the
+        pre-pass window); full → total_affected / reachable non-operator
+        claims (claims with ≥1 IMPL|NAND edge; operator-less claims are
+        reported via scanned_count, not the denominator). Coverage is 0.0
+        when the denominator is empty (no-op / zero-operator graph).
         """
         # #1157: gate BEFORE any work — dream is an EP write surface
         # (persists n.confidence); same posture as compute_confidence.
@@ -6356,32 +6414,259 @@ class TortoiseSDK:
             require_calibration = _ep_require_calibration_default()
         if require_calibration:
             self._ensure_calibrated("dream")
+        resolved = self._resolve_dream_mode(mode, full)
+        if budget is not None and budget <= 0:
+            # I1: budget=0 → no-op result, not an error. No EP, no stamps.
+            return self._dream_noop(resolved)
         dreamer = self._get_dreamer()
+        if resolved == "local":
+            return self._dream_local(dreamer, max_hops, stamp_dreamed_at,
+                                     budget)
+        if resolved == "stale-first":
+            return self._dream_stale_first(dreamer, max_hops, budget)
+        return self._dream_full(dreamer, max_hops, stamp_dreamed_at, budget)
+
+    def _resolve_dream_mode(self, mode: str | None, full: bool) -> str:
+        """I1 precedence table (epic 903-C6 #1244).
+
+        1. Explicit ``mode`` (∈ {"local", "stale-first", "full"}) WINS over
+           the full/dirty_only sugar; unknown mode → ValueError.
+        2. ``full=True`` maps to mode="full" ONLY when ``mode`` is None.
+        3. mode=None + full=False → auto-select by context (write → local;
+           scheduled → stale-first — via the scheduler's explicit mode, not
+           here; small-graph/first-run → full; otherwise → local).
+        """
+        if mode is not None:
+            if mode not in self._DREAM_MODES:
+                raise ValueError(
+                    f"unknown dream mode {mode!r} — expected one of "
+                    + ", ".join(repr(m) for m in self._DREAM_MODES)
+                )
+            return mode
         if full:
-            return dreamer.dream_all(
-                max_hops=max_hops, stamp_dreamed_at=stamp_dreamed_at)
-        if not dirty_only and not self._dirty_roots:
-            return {"iterations": 0, "converged": True, "affected_claims": []}
+            return "full"
+        return self._auto_dream_mode()
+
+    def _auto_dream_mode(self) -> str:
+        """Auto-selection (I1 rule 3): write context → local; small-graph /
+        first-run → full; otherwise → local (the safe bounded default).
+
+        Context detection hooks: the scheduler path is called with
+        mode="stale-first" explicitly (903-C8 wiring), so the SDK only
+        needs the write-context rule (dirty roots present → the write path
+        ran _mark_dirty → local, W1) and the small-graph rule (total
+        operators below ``_AUTO_FULL_OPERATOR_THRESHOLD`` → full, J3).
+        """
+        if self._dirty_roots:
+            # Write context (W1): the dirty roots ARE the local window.
+            # D2-5 structural guarantee: the write path can never reach
+            # window/full modes from here.
+            return "local"
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (n:Point {is_operator:true}) RETURN count(n)"
+        ).result_set
+        n_operators = int(rows[0][0])
+        if n_operators < self._AUTO_FULL_OPERATOR_THRESHOLD:
+            # Small graph / first run (J3): nothing worth windowing — one
+            # full pass drains it.
+            return "full"
+        return "local"
+
+    def _dream_noop(self, mode: str) -> dict:
+        """budget ≤ 0 → no-op result with the mode's EXACT key-set (I1:
+        "budget=0 → no-op result (not an error)"). No EP, no stamps;
+        converged flags are vacuously True (matches dream_window's budget=0
+        contract)."""
+        if mode == "local":
+            return {"mode": "local", "iterations": 0, "converged": True,
+                    "affected_claims": [], "budget_used": 0, "coverage": 0.0}
+        if mode == "stale-first":
+            return {"mode": "stale-first", "batches": 0,
+                    "converged_all": True, "converged": True,
+                    "affected_claims": [], "budget_used": 0, "coverage": 0.0}
+        return {"mode": "full", "batches": 0, "total_affected": 0,
+                "converged_all": True, "budget_used": 0, "coverage": 0.0,
+                "scanned_count": 0}
+
+    def _dream_local(self, dreamer, max_hops: int, stamp_dreamed_at: bool,
+                     budget: int | None) -> dict:
+        """Local mode (W1): EP over the dirty roots. I1 local key-set.
+
+        Dirty-root clearing keeps the #395-era retention semantics (roots in
+        the affected set are cleared; roots OUTSIDE the dreamed subgraph
+        stay dirty for a later dream; an empty affected set subtracts
+        nothing) — the non-convergence divergence is owned by 903-C5.
+        """
         anchors = list(self._dirty_roots)
-        # Main (#395-era) already merged the retention change: roots in the
-        # affected set are cleared; roots OUTSIDE the dreamed subgraph stay
-        # dirty (vacuous-run = subtracts nothing). Epic 903-C2 (#1240) adds
-        # only the stamp_dreamed_at forwarding below — retention semantics
-        # owned by 903-C5 for the non-convergence divergence.
-        result = dreamer.dream(anchors, max_hops=max_hops,
-                                stamp_dreamed_at=stamp_dreamed_at)
-        # Clear dirty roots that the dream's affected subgraph actually
-        # covered: roots in the affected set converged and are cleared;
-        # roots OUTSIDE the dreamed subgraph stay dirty for a later dream
-        # (e.g. roots reachable only through legacy op_type-only operators,
-        # invisible to the {is_operator:true}-only dream selector in
-        # analyze._bfs_select_operators). An empty affected set (dream found
-        # no operators) subtracts nothing, keeping every dirty root for
-        # retry — the vacuous-run case handled naturally by the single
-        # unconditional subtraction.
+        if not anchors:
+            return {"mode": "local", "iterations": 0, "converged": True,
+                    "affected_claims": [], "budget_used": 0, "coverage": 0.0}
+        result = dreamer.dream(
+            anchors, max_hops=max_hops,
+            stamp_dreamed_at=stamp_dreamed_at,
+            op_cap=budget if budget is not None else 200,
+        )
         affected = set(result.get("affected_claims", []))
         self._dirty_roots -= affected
-        return result
+        reachable = self._window_closure(anchors, max_hops)
+        coverage = (len(affected) / len(reachable)) if reachable else 0.0
+        return {
+            "mode": "local",
+            "iterations": result["iterations"],
+            "converged": result["converged"],
+            "affected_claims": result["affected_claims"],
+            "budget_used": getattr(dreamer, "_last_operator_count", 0) or 0,
+            "coverage": coverage,
+        }
+
+    def _dream_stale_first(self, dreamer, max_hops: int,
+                           budget: int | None) -> dict:
+        """Stale-first mode (W2): staleness-ranked window ∪ dirty roots.
+
+        I1 key-set (I6→I1 mapping): ``operators_deduped`` is dropped
+        (``budget_used`` already = distinct operators after dedup) and
+        ``coverage`` is added = affected / remaining-stale-before-pass (the
+        claim-hop closure of the PRE-PASS window recorded by dream_window —
+        the pre-pass value because stamps written by the pass reorder the
+        ranking; the closure guarantees 0 ≤ coverage ≤ 1 and a converged
+        full-window pass reports 1.0). The dirty-root logic is driven from
+        the window-level ``converged`` flag: a converged pass clears the
+        affected roots; a failed pass clears nothing (W4 retention —
+        non-converged regions reselect via the window union).
+        """
+        result = dreamer.dream_window(budget=budget, max_hops=max_hops)
+        window = getattr(dreamer, "_last_window", []) or []
+        affected = set(result.get("affected_claims", []))
+        if result.get("converged"):
+            self._dirty_roots -= affected
+        reachable = self._window_closure(window, max_hops)
+        coverage = (len(affected) / len(reachable)) if reachable else 0.0
+        return {
+            "mode": "stale-first",
+            "batches": result["batches"],
+            "converged_all": result["converged_all"],
+            "converged": result["converged"],
+            "affected_claims": result["affected_claims"],
+            "budget_used": result["budget_used"],
+            "coverage": coverage,
+        }
+
+    def _dream_full(self, dreamer, max_hops: int, stamp_dreamed_at: bool,
+                    budget: int | None) -> dict:
+        """Full mode (J3): whole-graph stabilization. I1 full key-set.
+
+        An explicit budget the graph cannot satisfy raises
+        BudgetExceededError inside dream_all (full is complete-in-one-pass
+        by contract — never silently truncate an explicit budget).
+        """
+        result = dreamer.dream_all(
+            max_hops=max_hops, stamp_dreamed_at=stamp_dreamed_at,
+            budget=budget,
+        )
+        reachable = self._reachable_claim_count()
+        coverage = ((result["total_affected"] / reachable)
+                    if reachable else 0.0)
+        return {
+            "mode": "full",
+            "batches": result["batches"],
+            "total_affected": result["total_affected"],
+            "converged_all": result["converged_all"],
+            "budget_used": result["budget_used"],
+            "coverage": coverage,
+            "scanned_count": result["scanned_count"],
+        }
+
+    def _window_closure(self, window: list[str], max_hops: int) -> set[str]:
+        """Claim-hop closure of a dream window (I1 coverage denominator:
+        the claims a pass COULD reach from its window).
+
+        Mirrors ``TortoiseEP._affected_claims``'s batched per-hop expansion
+        exactly (operators are transparent bridges — one claim-hop per BFS
+        level; operator-less direct edges via #888 W5 semantics; #780 draft
+        exclusion) so the denominator matches the pass's universe:
+        affected ⊆ closure, and a converged pass over its whole window
+        reports coverage = 1.0. The window members themselves are reachable
+        at 0 claim-hops (an operator-less isolated claim is its own window).
+
+        Two batched queries per hop (operator-bridge + direct-edge), seeded
+        with the whole window — cheap for the scheduler's large windows
+        (2 × max_hops queries total), unlike a per-seed BFS.
+        """
+        proj = self._get_proj()
+        live = "(n.status IS NULL OR n.status <> 'draft')"
+        rows = proj.g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids "
+            "AND (n.is_operator IS NULL OR n.is_operator = false) "
+            f"AND {live} RETURN n.id",
+            params={"ids": list(window)},
+        ).result_set
+        closure: set[str] = {r[0] for r in rows}
+        frontier = list(closure)
+        hops = 0
+        while frontier and (max_hops is None or hops < max_hops):
+            hops += 1
+            new_frontier: list[str] = []
+            if frontier:
+                # Operator-mediated bridges (op_type OR is_operator — legacy
+                # operator detection parity, #943). Never hops through drafts.
+                nbr_rows = proj.g.query(
+                    "MATCH (n:Point)-[r]-(op:Point)-[r2]-(m:Point) "
+                    "WHERE n.id IN $ids AND m.id <> n.id "
+                    "AND (op.is_operator = true OR op.op_type IS NOT NULL) "
+                    "AND (op.status IS NULL OR op.status <> 'draft') "
+                    "AND (m.status IS NULL OR m.status <> 'draft') "
+                    "RETURN DISTINCT n.id, m.id",
+                    params={"ids": frontier},
+                ).result_set
+                for _nid, mid in nbr_rows:
+                    if mid not in closure:
+                        closure.add(mid)
+                        new_frontier.append(mid)
+                # Operator-less direct IMPL|NAND edges between plain Points
+                # (#888 W5). Draft endpoints never propagate (#780).
+                dir_rows = proj.g.query(
+                    "MATCH (a:Point)-[r:IMPL|NAND]-(b:Point) "
+                    "WHERE a.id IN $ids AND b.id <> a.id "
+                    "AND (a.status IS NULL OR a.status <> 'draft') "
+                    "AND (b.status IS NULL OR b.status <> 'draft') "
+                    "AND a.is_operator = false AND a.op_type IS NULL "
+                    "AND b.is_operator = false AND b.op_type IS NULL "
+                    "RETURN DISTINCT a.id, b.id",
+                    params={"ids": frontier},
+                ).result_set
+                for _aid, bid in dir_rows:
+                    if bid not in closure:
+                        closure.add(bid)
+                        new_frontier.append(bid)
+            frontier = new_frontier
+        return closure
+
+    def _reachable_claim_count(self) -> int:
+        """Live non-operator claims reachable from EP (full-mode coverage
+        denominator: total_affected / reachable non-operator claims).
+
+        Reachable = claims participating in ≥1 IMPL|NAND edge (operator-
+        mediated or direct) — the EP-run universe. Operator-less claims with
+        no edges are reported separately via ``scanned_count`` and are NOT
+        in the denominator (EP cannot reach them; DE2E-1 keeps
+        total_affected reachable-only).
+
+        P2-review (#1244): the FAR endpoint is draft-filtered too — a live
+        claim whose only IMPL edge connects to a draft cannot be affected by
+        EP (#780: an operator needs ≥2 live endpoints; a draft neighbor is
+        excluded), so it must not inflate the denominator (else a fully
+        converged pass reports coverage < 1.0 forever).
+        """
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (n:Point)-[r:IMPL|NAND]-(m:Point) "
+            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "AND (n.status IS NULL OR n.status <> 'draft') "
+            "AND (m.status IS NULL OR m.status <> 'draft') "
+            "RETURN count(DISTINCT n)"
+        ).result_set
+        return int(rows[0][0])
 
     def _select_subgraph(self, anchors: list[str], max_hops: int = 1,
                          rel_filter: str = "IMPL|NAND",

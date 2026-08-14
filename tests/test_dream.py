@@ -58,9 +58,15 @@ class TestDreamIncremental:
         assert sdk._dirty_roots == set(), "converged dream clears dirty roots"
 
     def test_dream_no_anchors_noop(self, sdk):
-        result = sdk.dream(dirty_only=True)
+        # Epic 903-C6 (#1244): explicit local mode pins the no-op contract.
+        # Auto-select would route a no-dirty-roots small graph to full
+        # (I1 rule 3) — the local key-set is the no-op contract surface.
+        result = sdk.dream(dirty_only=True, mode="local")
         assert result["converged"] is True
         assert result["iterations"] == 0
+        assert set(result.keys()) == {
+            "mode", "iterations", "converged", "affected_claims",
+            "budget_used", "coverage"}
 
     def test_dream_max_hops_respected(self, sdk):
         """A chain A←B←C: dreaming from C with max_hops=2 reaches A."""

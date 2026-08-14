@@ -544,7 +544,8 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
         # dream/anchors, both explicit-k by default). #1241: the scheduler
         # passes its per-pass operator budget as op_cap (explicit budget
         # overrides the 200 default; budget=None keeps the cap).
-        if max_hops is not None and len(collected) > op_cap:
+        if (max_hops is not None and op_cap is not None
+                and len(collected) > op_cap):
             _log.warning(
                 "BFS selector: collected %d operators, truncating to %d.",
                 len(collected), op_cap,
