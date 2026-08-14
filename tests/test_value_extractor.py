@@ -455,3 +455,54 @@ class TestR1R3Discriminator:
         assert "COMMISSIVE" in joined or "commissive" in joined
         assert "agentivity" in joined
         assert "epistemic weight" in joined
+
+
+class TestReviewFixes:
+    """P1/P2 review fixes (#1272, independent fresh-context review)."""
+
+    def test_warn_mode_forwarded_on_extraction_path(self):
+        """P1-1: extract_session(conversation=..., mode='warn') must not
+        fail-closed on non-vocab kinds — the warn mode reaches the
+        conversation/extraction path, not just the summary= branch."""
+        from tortoise.value_extractor import extract_session
+        class _M:
+            def __init__(self):
+                self._summary = {
+                    "session": {"summary": "S", "type": "design"},
+                    "state": [{"name": "artifact", "objectKind": "design-artifact"}],
+                    "decisions": [], "logic": [], "issues": [],
+                }
+            def complete(self, *, system, user):
+                import json as _j
+                return _j.dumps(self._summary)
+        out = extract_session(_M(), [
+            {"role": "user", "content": "x"},
+            {"role": "assistant", "content": "worked on artifact"}],
+            mode="warn")
+        assert not any("objectKind" in e for e in out["errors"]), out["errors"]
+
+    def test_unmapped_operator_dropped_not_commit_killer(self):
+        """P2-3: an operator referencing a fabricated id is dropped, and the
+        remaining stream still produces a valid payload."""
+        from tortoise.sdk import _stream_to_payload
+        from tortoise.ids import content_hash
+        pt = f"pt_{content_hash('real point')[:62]}"
+        ev = f"ev_{content_hash('real event')[:62]}"
+        stream = {
+            "entities": [{"name": "x", "kind": "core:goal"}],
+            "events": [{"id": "ev_fake_ev", "eventKind": "decision",
+                        "content": "real event", "about_entities": ["x"]}],
+            "points": [{"id": "pt_fake_pt", "content": "real point",
+                        "about_entities": ["x"]}],
+            "operators": [
+                {"src": "pt_fake_pt", "dst": "ev_fake_ev", "op_type": "IMPL"},
+                {"src": "pt_hallucinated", "dst": "ev_fake_ev", "op_type": "NAND",
+                 "direction": "unidirectional"},
+            ],
+        }
+        p = _stream_to_payload({}, "s1", stream)
+        # only the mapped operator survives
+        assert len(p["operators"]) == 1
+        assert p["operators"][0]["op_type"] == "IMPL"
+        assert p["operators"][0]["src"] == pt
+        assert p["operators"][0]["dst"] == ev

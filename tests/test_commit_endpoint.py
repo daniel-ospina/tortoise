@@ -1210,3 +1210,66 @@ class TestEventEndpointNoSpuriousEdges:
             "RETURN o.id, count(x)",
         ).result_set
         assert rows2 and rows2[0][1] == 1, f"event edge missing: {rows2}"
+
+
+# ── P1/P2 review fixes (#1272, independent fresh-context review) ───────────
+
+class TestReviewTelemetryAndEventEdges:
+    """P1-2: keep_ratio ≤ 1 (denominator = reconcilable set); new events are
+    not dedup hits. P2-4: event→aboutObject edge exists for a NEW entity."""
+
+    def test_keep_ratio_leq_1_and_events_not_dedup(self, client):
+        from tortoise.ids import content_hash
+        pt = f"pt_{content_hash('a point')[:62]}"
+        ev = f"ev_{content_hash('an event')[:62]}"
+        raw = _raw_payload(0, session_id="s-keepratio")
+        raw["entities"] = [{"name": "opt-a", "kind": "core:goal",
+                            "passes_frequency_gate": True}]
+        raw["points"] = [{"id": pt, "content": "a point",
+                          "pointKind": "statement", "reason": "NEW",
+                          "confidence": 0.5, "c_cal": 0.5,
+                          "about_entities": ["opt-a"], "source_ref": "session.md",
+                          "quote": "", "status": "draft"}]
+        raw["events"] = [{"id": ev, "eventKind": "decision",
+                          "content": "an event", "confidence": 0.5,
+                          "about_entities": ["opt-a"], "source_ref": "session.md"}]
+        raw["operators"] = [{"src": pt, "dst": ev, "op_type": "IMPL"}]
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        rec = _commit_record(r.json()["commit_id"])
+        assert rec is not None
+        import json as _json
+        telemetry = _json.loads(rec[2])
+        assert telemetry["keep_ratio"] is not None
+        assert 0.0 <= telemetry["keep_ratio"] <= 1.0, telemetry["keep_ratio"]
+        # dedup_hits = reconcilable_submitted - net_new; a fresh commit has
+        # low dedup (not the full event count).
+        assert telemetry["dedup_hits"] is not None
+
+    def test_event_about_object_edge_created_for_new_entity(self, client):
+        from tortoise.ids import content_hash
+        pt = f"pt_{content_hash('arg')[:62]}"
+        ev = f"ev_{content_hash('decided on new option')[:62]}"
+        raw = _raw_payload(0, session_id="s-newentity")
+        raw["entities"] = [{"name": "brand-new-option", "kind": "core:goal",
+                            "passes_frequency_gate": True}]
+        raw["points"] = [{"id": pt, "content": "arg",
+                          "pointKind": "statement", "reason": "NEW",
+                          "confidence": 0.5, "c_cal": 0.5,
+                          "about_entities": ["brand-new-option"],
+                          "source_ref": "session.md", "quote": "",
+                          "status": "draft"}]
+        raw["events"] = [{"id": ev, "eventKind": "decision",
+                          "content": "decided on new option", "confidence": 0.5,
+                          "about_entities": ["brand-new-option"],
+                          "source_ref": "session.md"}]
+        raw["operators"] = [{"src": pt, "dst": ev, "op_type": "IMPL"}]
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        g = _team_sdk()._get_proj().g
+        rows = g.query(
+            "MATCH (e:Event {eventId:$ev})-[:aboutObject]->(o:Object {name:'brand-new-option'}) "
+            "RETURN count(e)",
+            params={"ev": ev},
+        ).result_set
+        assert rows and rows[0][0] == 1, "event→Object edge missing for new entity"

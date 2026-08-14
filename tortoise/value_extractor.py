@@ -448,8 +448,8 @@ def extract_session(model, conversation: list[dict],
              "text": _mask_refs(str(t.get("content", "")))}
             for i, t in enumerate(conversation) if t.get("content")]
     summary = summarize(model, edus, chunk_size=chunk_size)
-    errors = validate_summary(summary)
-    if errors and mode == "fail-closed":
+    errors = validate_summary(summary, mode=mode)
+    if errors:
         # T10: one bounded repair attempt (the dev lineage's CORRECT_PASS).
         try:
             fixed = _parse_json(_complete(

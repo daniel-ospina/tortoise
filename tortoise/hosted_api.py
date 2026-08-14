@@ -3577,9 +3577,16 @@ def _store_commit_telemetry(proj, client_commit_id: str, payload: "CommitPayload
     """
     telemetry = payload.telemetry.model_dump()
     if plan is not None and plan.reconcile is not None:
-        submitted = max(len(payload.points) + len(payload.events), 1)
+        # P1-2 (#1272 review): the denominator must match what reconcile.net_new
+        # counts — new points + new entities + new operators. Events are
+        # episodic (is_episodic=true, zero budget) and never reconciled, so
+        # they are excluded from BOTH terms — a new event is never a "dedup
+        # hit". keep_ratio is therefore always in [0, 1].
+        submitted = max(
+            len(payload.points) + len(payload.entities) + len(payload.operators),
+            1)
         kept = max(plan.reconcile.net_new, 0)
-        telemetry["keep_ratio"] = round(kept / submitted, 4)
+        telemetry["keep_ratio"] = round(min(kept / submitted, 1.0), 4)
         telemetry["dedup_hits"] = max(submitted - kept, 0)
     proj.g.query(
         "MATCH (r:CommitRecord {client_commit_id:$cid}) "
@@ -3692,8 +3699,13 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: "CommitPayload", plan):
             params={"eid": ev.id, "did": doc_id},
         )
         for name in ev.about_entities:
+            # P2-4 (#1272 review): entity creation runs in step 6, AFTER this
+            # event wiring — a MATCH-only Object lookup silently dropped the
+            # edge for NEW entities. MERGE creates the :Object on demand
+            # (consistent with step 6's MERGE-by-name semantics).
             proj.g.query(
-                "MATCH (e:Event {eventId:$eid}), (o:Object {name:$name}) "
+                "MATCH (e:Event {eventId:$eid}) "
+                "MERGE (o:Object {name:$name}) "
                 "MERGE (e)-[:aboutObject]->(o)",
                 params={"eid": ev.id, "name": name},
             )
