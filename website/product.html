@@ -237,6 +237,21 @@
       background: radial-gradient(ellipse at center, transparent 55%, var(--bg) 85%);
     }
 
+    /* OAuth state-expiry banner (#1224) — fixed top, above the canvas */
+    .oauth-error-banner {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 10;
+      display: flex; align-items: center; justify-content: center;
+      gap: 12px; flex-wrap: wrap;
+      padding: 10px 16px;
+      background: #b45309; color: #fff;
+      font-size: 14px; line-height: 1.4;
+    }
+    .oauth-error-banner a {
+      color: #fff; font-weight: 700;
+      text-decoration: underline; text-underline-offset: 2px;
+    }
+    .oauth-error-banner[hidden] { display: none; }
+
     /* Legal footer */
     .legal-footer {
       position: relative; z-index: 2;   /* paint above the fixed graph canvas */
@@ -277,6 +292,13 @@
   </style>
 </head>
 <body>
+  <!-- OAuth error banner (#1224): Supabase redirects here with
+       ?error=...&error_code=bad_oauth_state when the OAuth state TTL
+       expired mid-login — surface it instead of failing silently. -->
+  <div id="oauth-error" class="oauth-error-banner" role="alert" hidden>
+    <span id="oauth-error-msg"></span>
+    <a id="oauth-error-retry" href="/signup">Sign up again →</a>
+  </div>
   <canvas id="graph-canvas"></canvas>
   <div id="vignette"></div>
 
@@ -341,6 +363,34 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/ScrollTrigger.min.js"></script>
   <script>
     gsap.registerPlugin(ScrollTrigger);
+
+    /* ── OAuth state-expiry banner (#1224) ─────────────────────────────
+       A slow/stale GitHub/Google login expires the Supabase OAuth state;
+       the provider callback redirects HERE with error params and no
+       message. Detect and surface it with a retry path. */
+    (function () {
+      try {
+        var params = new URLSearchParams(window.location.search);
+        var code = params.get('error_code') || '';
+        var desc = params.get('error_description') || '';
+        if (!params.get('error') && !code) return;
+        var msg = '';
+        if (code === 'bad_oauth_state' || /state/.test(desc)) {
+          msg = 'Your sign-in session expired while you were on the login page. ';
+        } else if (desc) {
+          msg = desc + ' ';
+        } else {
+          msg = 'Sign-in failed. ';
+        }
+        var el = document.getElementById('oauth-error');
+        var msgEl = document.getElementById('oauth-error-msg');
+        var retry = document.getElementById('oauth-error-retry');
+        if (!el || !msgEl) return;
+        msgEl.textContent = msg + 'Please try again — it takes under a minute.';
+        if (retry) retry.href = '/signup?' + window.location.search.slice(1);
+        el.hidden = false;
+      } catch (e) { /* banner is best-effort */ }
+    })();
 
     /* ── Canvas + graph ── */
     const canvas = document.getElementById('graph-canvas');
