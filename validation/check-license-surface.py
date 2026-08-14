@@ -41,6 +41,26 @@ SURFACES = {
     },
 }
 
+# #526 client/server split — the thin driver distribution (client/) is
+# Apache-2.0 by design (MongoDB/Redis driver precedent; see
+# docs/client-server-split.md §License). These surfaces must declare
+# Apache-2.0 so the boundary cannot silently regress (same backstop pattern
+# as the engine's four-surface check above).
+CLIENT_SURFACES = {
+    "client/LICENSE": {
+        "path": ROOT / "client" / "LICENSE",
+        "required": ["Apache License", "Version 2.0"],
+    },
+    "client/pyproject.toml": {
+        "path": ROOT / "client" / "pyproject.toml",
+        "required": ["Apache-2.0"],
+    },
+    "client/README.md": {
+        "path": ROOT / "client" / "README.md",
+        "required": ["Apache-2.0"],
+    },
+}
+
 
 def check() -> list[str]:
     errors: list[str] = []
@@ -53,6 +73,15 @@ def check() -> list[str]:
         for needle in spec["required"]:
             if needle not in text:
                 errors.append(f"{name}: missing '{needle}'")
+    for name, spec in CLIENT_SURFACES.items():
+        path = spec["path"]
+        if not path.exists():
+            errors.append(f"{name}: file missing ({path})")
+            continue
+        text = path.read_text()
+        for needle in spec["required"]:
+            if needle not in text:
+                errors.append(f"{name} (#526 client dist): missing '{needle}'")
     return errors
 
 
@@ -62,9 +91,10 @@ def main() -> int:
         print("❌ License surface inconsistent:")
         for e in errors:
             print(f"   - {e}")
-        print("   Fix all four surfaces to declare BSL 1.1 + $5M AUG + MPL 2.0 conversion.")
+        print("   Engine: all four surfaces must declare BSL 1.1 + $5M AUG + MPL 2.0 conversion.")
+        print("   Client (#526): client/LICENSE, client/pyproject.toml, client/README.md must declare Apache-2.0.")
         return 1
-    print("✅ License surface consistent: LICENSE / README.md / pyproject.toml / index.md all BSL 1.1.")
+    print("✅ License surfaces consistent: engine BSL 1.1 ($5M AUG + MPL 2.0); tortoise-client Apache-2.0.")
     return 0
 
 

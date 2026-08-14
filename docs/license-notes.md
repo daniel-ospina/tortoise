@@ -83,3 +83,34 @@ MariaDB steward text + adopter files (linked in §2), not GitHub.
 - Fork risk (Valkey/OpenTofu pattern) when value appears gated — mitigated by the $5M AUG granting real free production use and the 4-year MPL 2.0 conversion.
 - Threshold-crossing confusion ("when do I pay?") — addressed by the FAQ + clear revenue definition in the AUG.
 - Enforcement is manual (no technical license checks).
+
+## 6. Client/Server Split — thin client license boundary (#526, 2026-08-15)
+
+The #526 package split ships the engine as a server-only distribution
+(`tortoise-graph`, BSL-1.1 — unchanged) and a **thin driver** distribution
+(`tortoise-client`) under **Apache-2.0**. Full mechanics:
+[docs/client-server-split.md](docs/client-server-split.md).
+
+**Why Apache-2.0 for the client (vs MPL-2.0):**
+
+- **Driver-industry norm:** MongoDB ships every driver under Apache-2.0
+  explicitly so an application using the driver is *"a separate work"* that
+  never inherits server obligations; Redis keeps client libraries
+  open-source under its RSAL/SSPL server licenses. Apache-2.0 matches the
+  MongoDB-driver analogy exactly.
+- **Maximal permissiveness:** Apache-2.0 allows consumers to vendor, modify,
+  and relicense the driver with no file-level copyleft obligations — the
+  right shape for a thin network driver whose only job is to connect.
+  MPL-2.0 (HashiCorp's SDK precedent) would impose file-level copyleft on a
+  ~3-module package with no offsetting benefit for the consumer.
+- **Boundary is physical, not behavioral:** the client dist contains ONLY
+  the client modules (mcp_client, config, exceptions) re-licensed under
+  Apache-2.0; engine code (sdk, projection, EP) never ships in the client
+  wheel. A client-only install cannot contain BSL code.
+- **Backstop:** `validation/check-license-surface.py` now asserts the client
+  surfaces (client/LICENSE, client/pyproject.toml, client/README.md) declare
+  Apache-2.0, and `client/verify_client.sh` (CI) proves no engine module or
+  engine dependency is importable/installed from a clean client install.
+
+Pending legal sign-off on the Apache-2.0 choice (issue #526 Q1) — owner
+pick, documented here for review.

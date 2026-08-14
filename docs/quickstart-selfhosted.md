@@ -304,6 +304,23 @@ Or add to `.mcp.json`:
 }
 ```
 
+### Scripting / agent tooling — the thin Python driver (`tortoise-client`)
+
+For Python scripts and agent integrations, install the thin driver (#526) —
+it connects to the daemon over MCP and never embeds the engine:
+
+```bash
+pip install tortoise-client
+# TORTOISE_MCP_URL defaults to http://localhost:8000/mcp — set TORTOISE_API_KEY if the daemon requires auth
+tortoise-client status          # connectivity + tool-count probe
+```
+
+```python
+# client-first import surface (tortoise.mcp_client also works)
+from tortoise_client import status, call_tool
+print(status())
+```
+
 ### No-Docker path (single-agent eval) — stdio
 
 Add a `tortoise` server to your MCP client's config (`.mcp.json` for Claude Code / Cursor, or the equivalent for your client):

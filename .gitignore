@@ -26,3 +26,7 @@ website/apps/dashboard/node_modules/
 
 # Issue #316 benchmark outputs (regenerated per run)
 benchmarks/reports/
+
+# #526: tortoise-client build artifacts (client/build_client.sh output)
+dist-client/
+

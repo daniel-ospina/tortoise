@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — thin client package (#526)
+
+The physical client/server split: `pip install` no longer embeds the engine.
+
+- **`tortoise-client` (new distribution, Apache-2.0):** thin MCP network driver built from the same repo via the Prefect `prefect-client` pattern (`client/` build directory — `client/build_client.sh` stages the client subset of `tortoise/`; `client/verify_client.sh` runs the acceptance gate). Ships only `tortoise/mcp_client.py` (driver) + `tortoise/config.py` + `tortoise/exceptions.py` (shared config/types) + a `tortoise_client` re-export shim with a minimal `tortoise-client` CLI (`status` / `list-tools` / `call`).
+- **Dependency split:** client pulls only `fastmcp-slim[client]==3.4.6` + `httpx>=0.27` — no falkordb / falkordblite / numpy / scipy / fastapi (enforced by CI gate).
+- **No breakage:** `tortoise-graph` (BSL-1.1) is byte-identical in behavior — it still ships the full `tortoise.*` tree, daemon, and MCP server; `tortoise.mcp_client` remains importable from the server package.
+- **Version coupling:** both dists release in lockstep with the same version; a client of minor `X.Y` targets a server of minor `X.Y` (documented in docs/client-server-split.md).
+- **CI:** per-PR `client-build` job (build + acceptance gate) and tagged-release `build-client`/`publish-client` jobs in publish-pypi.yml (Trusted Publishing against a new `pypi-client` environment).
+
 ### Self-hosted trust (#942)
 
 The durable multi-writer path is now the documented default; embedded
