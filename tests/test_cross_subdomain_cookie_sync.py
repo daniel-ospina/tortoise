@@ -16,6 +16,7 @@ so regex anchoring to declaration patterns is reliable.
 from __future__ import annotations
 
 import re
+import pytest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -61,7 +62,12 @@ def test_both_adapters_write_and_remove_cookie_with_same_attributes() -> None:
     dash = _read(DASHBOARD)
     # write template: key=encoded value + domain + path + SameSite=Lax + Secure + Expires
     assert "SameSite=Lax" in shared and "SameSite=Lax" in dash
-    assert "Path=" in shared and "Path=" in dash
+    # Path VALUE must be '/' in both — a Path drift silently breaks the bridge
+    # (shared file builds 'Path=' + COOKIE_PATH; dashboard inlines Path=/)
+    path_pat = re.compile(r"(?:const|var)\s+COOKIE_PATH\s*=\s*['\"]([^'\"]+)['\"]")
+    pm = path_pat.search(shared)
+    assert pm and pm.group(1) == "/", f"shared COOKIE_PATH must be '/': {pm.group(1) if pm else None}"
+    assert "Path=/" in dash
     # Secure + Max-Age=0 removal (both always emit these; localhost omission is
     # a separate branch inside the shared file, not the template)
     assert "Secure" in shared and "Secure" in dash
@@ -71,6 +77,20 @@ def test_both_adapters_write_and_remove_cookie_with_same_attributes() -> None:
     assert "decodeURIComponent" in shared and "decodeURIComponent" in dash
     # 7-day expiry parity
     assert "7 * 24 * 3600 * 1000" in shared and "7 * 24 * 3600 * 1000" in dash
+    # storageKey parity — the cookie name written/read must be the same on both sides
+    assert "storageKey" in shared and "storageKey" in dash
+
+
+def test_shared_script_syntax() -> None:
+    """The wiring tests are string-presence based — a parse-error'd shared
+    script would pass them. Best-effort node --check (skips when node absent)."""
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not available")
+    subprocess.run([node, "--check", str(SHARED)], check=True)
 
 
 def test_shared_adapter_handles_localhost_and_size_guard() -> None:

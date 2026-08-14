@@ -36,7 +36,11 @@
 
   var isLocal = function () {
     var h = window.location.hostname;
-    return h === 'localhost' || h === '127.0.0.1';
+    // localhost + loopback IPs (v4/v6) + RFC1918 private ranges — no
+    // Domain/Secure attributes on non-public origins (review P3-5).
+    if (h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '[::1]') return true;
+    if (h.startsWith('10.') || h.startsWith('192.168.')) return true;
+    return /^172\.(1[6-9]|2\d|3[01])\./.test(h);
   };
 
   // Domain attribute only on premiselabs.co hosts — host-only cookie elsewhere
@@ -118,6 +122,17 @@
         // guard stripped provider tokens — in that case keep the legacy copy.
         supabaseStorage.setItem(COOKIE_NAME, legacy);
         if (readCookie(COOKIE_NAME) !== legacy) return;
+      } else {
+        // Both cookie and legacy exist (review P3-3): a stale cached tab may
+        // hold a NEWER legacy session than the cookie — compare expires_at and
+        // keep the newer one before clearing the legacy key.
+        try {
+          var legacyExp = JSON.parse(legacy).expires_at || 0;
+          var cookieExp = JSON.parse(alreadyShared).expires_at || 0;
+          if (legacyExp > cookieExp) {
+            supabaseStorage.setItem(COOKIE_NAME, legacy);
+          }
+        } catch (e) { /* malformed JSON — keep cookie, drop legacy below */ }
       }
       // Stale-secret hygiene: the new client never reads the legacy key; drop
       // it whether or not a cookie was already present.

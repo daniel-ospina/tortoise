@@ -457,7 +457,7 @@
           console.error("supabase client init failed:", err);
         }
       } else {
-        console.warn("supabase CDN script did not load — auth disabled");
+        console.warn("supabase-session.js shared script did not load — auth disabled");
       }
       if (!supabaseClient) {
         document.querySelectorAll("button").forEach(function(btn) { btn.disabled = true; });
