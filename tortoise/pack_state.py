@@ -48,6 +48,7 @@ import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from threading import Lock
 
 from tortoise.sdk import TortoiseSDK
 
@@ -147,6 +148,26 @@ def _target_graph(sdk: TortoiseSDK, graph_name: str | None):
     return proj.db.select_graph(graph_name)
 
 
+# #1307: the embedded FalkorDBLite engine does not guarantee server-side
+# atomicity of MERGE under thread contention (observed: 8-thread races
+# producing duplicate PackInstall nodes). Serialize activation per
+# (graph, namespace) in-process — embedded mode is single-writer, so the
+# lock is sufficient there; other DB paths keep their atomic MERGE. Keyed
+# per graph so distinct tenants never serialize against each other.
+_PACK_INSTALL_LOCKS: dict[str, Lock] = {}
+_PACK_INSTALL_LOCKS_GUARD = Lock()
+
+
+def _pack_install_lock(graph_name: str, ns: str) -> Lock:
+    key = f"{graph_name}\x1f{ns}"
+    with _PACK_INSTALL_LOCKS_GUARD:
+        lock = _PACK_INSTALL_LOCKS.get(key)
+        if lock is None:
+            lock = Lock()
+            _PACK_INSTALL_LOCKS[key] = lock
+        return lock
+
+
 def ensure_tenant_packs(sdk: TortoiseSDK, *, starter: list[str] | tuple[str, ...] | None = None,
                         graph_name: str | None = None) -> list[dict]:
     """Idempotent activation of the starter set into the tenant graph.
@@ -170,8 +191,9 @@ def ensure_tenant_packs(sdk: TortoiseSDK, *, starter: list[str] | tuple[str, ...
                 "(check TORTOISE_STARTER_PACKS)", ns)
             continue
         try:
-            g.query(
-                "MERGE (p:PackInstall {namespace: $ns}) "
+            with _pack_install_lock(graph_name or "default", ns):
+                g.query(
+                    "MERGE (p:PackInstall {namespace: $ns}) "
                 "SET p.version = $version, p.status = 'active', "
                 "    p.source = 'starter', "
                 "    p.installed_at = coalesce(p.installed_at, $now)",
