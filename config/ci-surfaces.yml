@@ -115,6 +115,7 @@ surfaces:
   - test_indexes.py
   - test_ingest.py
   - test_ingest_bundle.py
+  - test_ingest_conformance.py
   - test_ingest_mode.py
   - test_ingest_promotion.py
   - test_ingest_validation.py
