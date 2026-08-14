@@ -23,7 +23,8 @@ from tortoise.sdk import (TortoiseSDK, INGEST_GRANULARITIES,
 from tortoise import monitoring
 from tortoise.mcp_auth import (_current_team_id, _current_team_limits,
                                _transport_mode, _get_team_sdk,
-                               HTTP_ALLOWED, ERR_EXCLUDED, SELFHOST_TEAM_ID)
+                               HTTP_ALLOWED, ERR_UNAUTHORIZED, ERR_EXCLUDED,
+                               SELFHOST_TEAM_ID)
 
 _log = logging.getLogger(__name__)
 
@@ -818,6 +819,27 @@ def tortoise_list_batch(batch_id: str) -> dict:
 def tortoise_list_batches(limit: int = 20) -> list[dict]:
     """Batch discovery — recent distinct ingest batch_ids (epic #902 A13)."""
     return _safe(_get_team_sdk().list_batches, limit=limit)
+
+
+def tortoise_packs_list() -> list[dict]:
+    """List this team's ACTIVE packs (#318 — multi-tenant pack isolation).
+
+    Shared pack catalog + the tenant graph's PackInstall activation records
+    (ensure-then-read core shared with REST GET /v1/packs — no REST/MCP
+    divergence). Auth-only scoping via the _current_team_id contextvar seam:
+    cross-tenant access is structurally impossible. D6 masking: empty result
+    when nothing is installed (never an error); the only error surface is
+    auth/transport failure.
+    """
+    # Fail-closed (#318): in HTTP/tenant mode a missing team context must
+    # NEVER fall back to the base (default-namespace) SDK for pack
+    # introspection — pack state is per-tenant. (stdio/selfhost keeps the
+    # base SDK: single-tenant, the base graph IS the tenant.)
+    if _current_team_id.get() is None and _transport_mode.get() == "http":
+        return {"error": "Authentication required. No team context.",
+                "code": ERR_UNAUTHORIZED}
+    from tortoise.pack_state import get_tenant_packs
+    return _safe(lambda: get_tenant_packs(_get_team_sdk()))
 
 
 def tortoise_list_tags() -> list[dict]:

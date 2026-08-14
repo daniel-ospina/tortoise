@@ -824,6 +824,18 @@ async def provision_tenant(request: Request):
             api_key_created, created_by, team_id, team_id[:8], api_key_id, "provision"
         )
 
+        # #318 (multi-tenant pack isolation): activate the starter pack set
+        # in the new tenant graph — idempotent (MERGE per namespace) and
+        # best-effort (Backlex precedent: activation failure never blocks
+        # signup; the introspection surface self-heals on first read).
+        try:
+            from tortoise.pack_state import ensure_tenant_packs
+            ensure_tenant_packs(_make_sdk(namespace=team_id))
+        except Exception:
+            _logger.warning(
+                "pack activation failed for team %s — self-heals on first read",
+                team_id, exc_info=True)
+
         return {"status": "provisioned", "team_id": team_id, "graph_name": graph_name}
     except Exception:
         # Full rollback on any failure (registry graph)
@@ -2232,6 +2244,40 @@ async def team_info(team: dict = Depends(get_current_team)):
     )
 
 
+@app.get("/v1/packs")
+async def list_packs(team: dict = Depends(get_current_team)):
+    """#318: read-only pack introspection — the tenant's ACTIVE packs.
+
+    Shared pack catalog + per-tenant ``PackInstall`` activation records
+    (graph-native install-state in the tenant graph ``team_{team_id}``).
+    Auth-only scoping: team identity comes EXCLUSIVELY from the request auth
+    (no tenant selector parameter exists), so cross-tenant access is
+    structurally impossible — no request can name another tenant's graph.
+
+    Response matrix (pinned, scoping §4): no auth → 401 (get_current_team);
+    auth + graph unreachable → 503 (never empty-on-outage); auth + no
+    installs → empty list (D6 existence masking — same-tenant no-installs
+    and cross-tenant probes both read empty, never an error); auth +
+    installs → the tenant's pack list.
+    """
+    team_id = team.get("team_id")
+    if not team_id:
+        # Fail-closed (#318): no default-namespace fallback — pack state is
+        # per-tenant. Only SKIP_AUTH/background paths reach here (they are
+        # not in SKIP_AUTH, so a normal request 401s in get_current_team).
+        raise HTTPException(status_code=401, detail="Authentication required")
+    from tortoise.pack_state import get_tenant_packs
+    sdk = _make_sdk(namespace=team_id)
+    try:
+        # to_thread (contextvars-propagating, py3.9+) — never
+        # run_in_executor (does NOT propagate; cpython#78195).
+        packs = await asyncio.to_thread(get_tenant_packs, sdk)
+    except Exception:
+        _logger.exception("pack introspection failed for team %s", team_id)
+        raise HTTPException(status_code=503, detail="Pack catalog unavailable")
+    return {"packs": packs}
+
+
 def _team_is_anon(team_id: str) -> bool:
     """True when the team is an unclaimed anon team (Supabase mode only).
 
@@ -2430,6 +2476,18 @@ async def register_user(request: Request, response: Response):
                 "CREATE (:TeamMeta {name: $name, created: $now})",
                 params={"name": team_name, "now": now},
             )
+
+            # #318 (multi-tenant pack isolation): activate the starter pack
+            # set — registry-mode self-service path (the Supabase-mode path
+            # is covered by the provision_team RPC hook). Idempotent +
+            # best-effort: a pack failure never rolls back registration.
+            try:
+                from tortoise.pack_state import ensure_tenant_packs
+                ensure_tenant_packs(_make_sdk(namespace=team_id))
+            except Exception:
+                _logger.warning(
+                    "pack activation failed for team %s — self-heals on first read",
+                    team_id, exc_info=True)
 
             # Log audit event — INSIDE the try (main parity, re-review P2
             # PR #874): an audit failure rolls the whole registration back

@@ -918,6 +918,27 @@ class PackRegistry:
 
     # ── Query ──────────────────────────────────────────────────────────
 
+    def pack_summaries(self) -> dict[str, dict]:
+        """Stable shared-catalog read: namespace → {name, version, tier, description}.
+
+        #318 (multi-tenant pack isolation): per-tenant activation records
+        (pack_state.PackInstall) join against this catalog — the shared
+        catalog stays READ-ONLY for tenants; only install-state is
+        per-tenant. Keys are manifest namespaces (the catalog's canonical
+        id — note the project-management pack dir declares namespace `pm`).
+        Read-at-call-time contract: no caching here; callers resolve the
+        catalog when they need it.
+        """
+        return {
+            p.namespace: {
+                "name": p.name,
+                "version": p.version,
+                "tier": p.tier,
+                "description": p.description,
+            }
+            for p in self.packs.values()
+        }
+
     def list_packs(self) -> list[dict]:
         """Return all installed packs with metadata. No connector code executed."""
         return [

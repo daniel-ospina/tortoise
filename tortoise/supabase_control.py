@@ -1300,6 +1300,28 @@ def provision_team(cp, **params: object) -> None:
     """
     cp.rpc("provision_team", params)
 
+    # #318 (multi-tenant pack isolation): post-RPC starter-pack activation.
+    # The RPC transaction is Supabase-only; pack install-state lives in the
+    # tenant graph (a different store), so activation rides AFTER the RPC as
+    # an idempotent post-step (scoping: "idempotent post-step with retry-safe
+    # semantics"). One hook here covers EVERY provision_team caller (/v1/register,
+    # /v1/teams, agent signup, onboarding sub-team). Best-effort: failure never
+    # blocks provisioning — the introspection surface self-heals on first read.
+    # Embedded-aware _make_sdk (code-review conf 60, PR #1261): a bare
+    # TortoiseSDK(namespace=...) with no db_path/URI raises when
+    # TORTOISE_DB_URI is unset, and the exception is swallowed here →
+    # activation silently skipped. _make_sdk mirrors the hosted_api hooks.
+    team_id = params.get("p_team_id")
+    if team_id:
+        try:
+            from tortoise.pack_state import ensure_tenant_packs
+            from tortoise import hosted_api as _ha
+            ensure_tenant_packs(_ha._make_sdk(namespace=team_id))
+        except Exception:
+            _logger.warning(
+                "pack activation failed for team %s — self-heals on first read",
+                team_id, exc_info=True)
+
 
 # ── Claim path (#1082, PR1 — 20260813000004) ────────────────────────────────
 #
