@@ -163,6 +163,7 @@ surfaces:
   - test_pack_content_v3.py
   - test_pack_kinds.py
   - test_pack_registry_gaps.py
+  - test_pack_state.py
   - test_pipeline_cli.py
   - test_pre_migration_safety.py
   - test_projection.py
