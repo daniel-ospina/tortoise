@@ -323,9 +323,157 @@ class TestInviteAccept:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# E4 hardening — POST /v1/invites/accept rate limits (#1134)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestInviteAcceptRateLimit:
+    """OWASP per-token / per-IP / global caps on invites/accept (#1134).
+
+    The fixture sets RATE_LIMIT_DISABLED=1 (module level); these tests opt
+    back in per-test via monkeypatch.delenv and shrink the env-tunable
+    thresholds so a handful of requests exhaust each dimension. Tokens are
+    INVALID on purpose — the OWASP scenario is repeated FAILED binding
+    checks, and the limiter must trip without invalidating anything.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _limiter_on(self, monkeypatch):
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)  # limiter ON
+        import tortoise.hosted_api as ha_mod
+
+        # Fresh bucket stores per test — TestClient always reports the same
+        # host ("testclient"), so the per-IP bucket would bleed across tests.
+        ha_mod._INVITE_ACCEPT_TOKEN_BUCKETS.clear()
+        ha_mod._INVITE_ACCEPT_IP_BUCKETS.clear()
+        ha_mod._INVITE_ACCEPT_GLOBAL_BUCKETS.clear()
+        yield
+        ha_mod._INVITE_ACCEPT_TOKEN_BUCKETS.clear()
+        ha_mod._INVITE_ACCEPT_IP_BUCKETS.clear()
+        ha_mod._INVITE_ACCEPT_GLOBAL_BUCKETS.clear()
+
+    def _post(self, client, token="not-a-token"):
+        return client.post("/v1/invites/accept", json={"token": token})
+
+    def test_per_token_cap(self, client, monkeypatch):
+        """5 attempts / 15 min per token (env-shrunk to 2): the same token
+        exhausts its OWN bucket while the per-IP budget stays intact."""
+        monkeypatch.setenv("TORTOISE_INVITE_ACCEPT_TOKEN_LIMIT", "2")
+        monkeypatch.setenv("TORTOISE_INVITE_ACCEPT_TOKEN_WINDOW_S", "3600")
+        _as_user("user-bob", "bob@example.com")
+        for _ in range(2):
+            r = self._post(client, token="same-token")
+            assert r.status_code == 400, r.text  # failed binding, allowed
+        r3 = self._post(client, token="same-token")
+        assert r3.status_code == 429, r3.text
+        body = r3.json()["detail"]
+        assert body["error_code"] == "over_invite_accept_rate_limit"
+        assert r3.headers.get("retry-after")  # RFC 7231 contract
+
+    def test_per_ip_cap(self, client, monkeypatch):
+        """20 / hour per IP (env-shrunk to 2): DIFFERENT tokens share the
+        IP budget — a rotating-token farm cannot bypass the IP cap."""
+        monkeypatch.setenv("TORTOISE_INVITE_ACCEPT_IP_LIMIT", "2")
+        monkeypatch.setenv("TORTOISE_INVITE_ACCEPT_IP_WINDOW_S", "3600")
+        _as_user("user-bob", "bob@example.com")
+        for i in range(2):
+            assert self._post(client, token=f"ip-token-{i}").status_code == 400
+        r3 = self._post(client, token="ip-token-2")
+        assert r3.status_code == 429, r3.text
+        assert r3.json()["detail"]["error_code"] == \
+            "over_invite_accept_rate_limit"
+
+    def test_global_cap(self, client, monkeypatch):
+        """200 / hour global (env-shrunk to 2): distinct tokens AND the
+        per-token/IP budgets must NOT pre-empt the global dimension."""
+        monkeypatch.setenv("TORTOISE_INVITE_ACCEPT_GLOBAL_LIMIT", "2")
+        monkeypatch.setenv("TORTOISE_INVITE_ACCEPT_GLOBAL_WINDOW_S", "3600")
+        monkeypatch.setenv("TORTOISE_INVITE_ACCEPT_TOKEN_LIMIT", "100")
+        monkeypatch.setenv("TORTOISE_INVITE_ACCEPT_IP_LIMIT", "100")
+        _as_user("user-bob", "bob@example.com")
+        for i in range(2):
+            assert self._post(client, token=f"global-token-{i}").status_code == 400
+        r3 = self._post(client, token="global-token-2")
+        assert r3.status_code == 429, r3.text
+        assert r3.json()["detail"]["error_code"] == \
+            "over_invite_accept_rate_limit"
+
+    def test_dimensions_independent(self, client, monkeypatch):
+        """Per-token exhaustion must NOT trip the per-IP or global budget:
+        a token-typed 429 is dimension-specific (OWASP: throttle the
+        binding candidate, not the network)."""
+        monkeypatch.setenv("TORTOISE_INVITE_ACCEPT_TOKEN_LIMIT", "1")
+        monkeypatch.setenv("TORTOISE_INVITE_ACCEPT_TOKEN_WINDOW_S", "3600")
+        monkeypatch.setenv("TORTOISE_INVITE_ACCEPT_IP_LIMIT", "100")
+        monkeypatch.setenv("TORTOISE_INVITE_ACCEPT_GLOBAL_LIMIT", "100")
+        _as_user("user-bob", "bob@example.com")
+        assert self._post(client, token="token-a").status_code == 400
+        r = self._post(client, token="token-a")
+        assert r.status_code == 429, r.text
+        # a DIFFERENT token from the same client is still allowed
+        assert self._post(client, token="token-b").status_code == 400
+
+    def test_rate_limit_disabled_opt_out(self, client, monkeypatch):
+        """RATE_LIMIT_DISABLED=1 (test seam) bypasses every dimension even
+        with thresholds shrunk to 1."""
+        monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
+        monkeypatch.setenv("TORTOISE_INVITE_ACCEPT_TOKEN_LIMIT", "1")
+        monkeypatch.setenv("TORTOISE_INVITE_ACCEPT_IP_LIMIT", "1")
+        monkeypatch.setenv("TORTOISE_INVITE_ACCEPT_GLOBAL_LIMIT", "1")
+        _as_user("user-bob", "bob@example.com")
+        for _ in range(3):
+            assert self._post(client, token="same-token").status_code == 400
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # E8 — GET/DELETE/PATCH /v1/teams/{team_id}/members
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
+    def test_successful_accept_does_not_consume_budget(self, client, reg,
+                                                       monkeypatch):
+        """#1228-review: buckets bound FAILED binding checks — a successful
+        accept must NOT consume the per-token / per-IP / global budget.
+        With token=1/IP=1, two successful accepts on fresh tokens both pass;
+        a subsequent FAILED attempt trips the per-token cap."""
+        import tortoise.hosted_api as ha_mod
+        monkeypatch.setenv("TORTOISE_INVITE_ACCEPT_TOKEN_LIMIT", "1")
+        monkeypatch.setenv("TORTOISE_INVITE_ACCEPT_TOKEN_WINDOW_S", "3600")
+        monkeypatch.setenv("TORTOISE_INVITE_ACCEPT_IP_LIMIT", "1")
+        monkeypatch.setenv("TORTOISE_INVITE_ACCEPT_IP_WINDOW_S", "3600")
+        monkeypatch.setenv("TORTOISE_INVITE_ACCEPT_GLOBAL_LIMIT", "5")
+        monkeypatch.setenv("TORTOISE_INVITE_ACCEPT_GLOBAL_WINDOW_S", "3600")
+        # fresh stores so this test's successes don't share buckets
+        monkeypatch.setattr(ha_mod, "_INVITE_ACCEPT_TOKEN_BUCKETS",
+                            ha_mod.defaultdict(list))
+        monkeypatch.setattr(ha_mod, "_INVITE_ACCEPT_IP_BUCKETS",
+                            ha_mod.defaultdict(list))
+        monkeypatch.setattr(ha_mod, "_INVITE_ACCEPT_GLOBAL_BUCKETS",
+                            ha_mod.defaultdict(list))
+        _seed_team_with_owner(reg, "team-t")
+        _as_user("user-1", "owner@example.com")  # owner creates invites
+        r1 = client.post("/v1/invites",
+                         json={"team_id": "team-t", "email": "bob@example.com",
+                               "role": "member"})
+        assert r1.status_code == 200, r1.text
+        _as_user("user-bob", "bob@example.com")
+        assert client.post("/v1/invites/accept",
+                           json={"token": r1.json()["token"]}).status_code == 200
+        # token=1/IP=1: a SECOND successful accept on a fresh invite +
+        # different team still passes (successes didn't fill the buckets)
+        _seed_team_with_owner(reg, "team-u")
+        _as_user("user-1", "owner@example.com")
+        r2 = client.post("/v1/invites",
+                         json={"team_id": "team-u", "email": "bob@example.com",
+                               "role": "member"})
+        assert r2.status_code == 200, r2.text
+        _as_user("user-bob", "bob@example.com")
+        assert client.post("/v1/invites/accept",
+                           json={"token": r2.json()["token"]}).status_code == 200
+        # repeated FAILED attempts still trip the per-token cap
+        assert self._post(client, token="garbage-token").status_code == 400
+        r = self._post(client, token="garbage-token")
+        assert r.status_code == 429, r.text
 
 class TestMembersRbac:
     def test_list_members_requires_owner_admin_403(self, client, reg):
@@ -428,3 +576,4 @@ class TestMembersRbac:
         r = client.patch("/v1/teams/team-t/members/user-ghost",
                          json={"role": "member"})
         assert r.status_code == 404
+
