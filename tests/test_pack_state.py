@@ -142,7 +142,11 @@ class TestGetTenantPacks:
         ensure_tenant_packs(sdk)
         packs = get_tenant_packs(sdk)
         catalog = _catalog()
-        assert [p["namespace"] for p in packs] == sorted(catalog)
+        # Starter set ⊆ catalog — asserting the FULL catalog here (the pre-
+        # fix shape) fails the moment the catalog grows a non-starter pack
+        # (code-review conf 75, PR #1261). _expected_defaults() keeps this
+        # drift-proof.
+        assert [p["namespace"] for p in packs] == sorted(_expected_defaults())
         for p in packs:
             assert p["name"] == catalog[p["namespace"]]["name"]
             assert p["version"] == catalog[p["namespace"]]["version"]
@@ -536,6 +540,10 @@ class TestBackfillScript:
         monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
         monkeypatch.delenv("SUPABASE_URL", raising=False)
         monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+        # Hermetic selfhost shape: backfill's bare TortoiseSDK() resolves via
+        # TORTOISE_DB_PATH — a runner-set TORTOISE_DB_URI (unsupported
+        # embedded:// scheme) would route through from_uri and abort.
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "bf.db")
             monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
@@ -564,3 +572,64 @@ class TestBackfillScript:
             # dry-run must not add/duplicate anything: only the EAGER installs
             # from provisioning are present (a duplicate would inflate len)
             assert len(rows) == len(_expected_defaults())
+
+    def test_apply_writes_to_introspection_read_target(self, tmp_path,
+                                                      monkeypatch):
+        """conf 70 (PR #1261): --apply lands installs in the READ TARGET
+        (team_{team_id}) even for a legacy team whose recorded graph_name is
+        team_{name} — the read surface (get_tenant_packs) must see the
+        backfilled records, and the legacy graph must stay untouched."""
+        import importlib.machinery
+        import importlib.util
+        _script = os.path.join(REPO_ROOT, "graph-scripts",
+                               "backfill_pack_installs.py")
+        _loader = importlib.machinery.SourceFileLoader("bf_script", _script)
+        _spec = importlib.util.spec_from_loader("bf_script", _loader)
+        bf = importlib.util.module_from_spec(_spec)
+        _loader.exec_module(bf)
+
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
+        monkeypatch.delenv("SUPABASE_URL", raising=False)
+        monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+        # Embedded selfhost shape: TORTOISE_DB_PATH set, NO TORTOISE_DB_URI —
+        # the backfill's bare TortoiseSDK(namespace=...) calls resolve to the
+        # seeded DB via resolve_db_path() (the conf-70 scenario).
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "bf.db")
+            monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+            # Seed a LEGACY pre-#318 team via sdk.team_create: records
+            # graph_name team_{name} on the Team node and activates NO packs
+            # (no eager install-state — exactly a legacy tenant). Namespace=None
+            # SDK: registry graph is `control_plane`, matching the backfill's
+            # _iter_teams enumeration (TortoiseSDK() → control_plane) — a
+            # namespace="registry" SDK would write to registry_control_plane
+            # and the backfill would never see the team.
+            created = TortoiseSDK(db_path=db_path).team_create("LegacyCo")
+            team_id, legacy_graph = created["id"], created["graph_name"]
+            assert legacy_graph == "team_LegacyCo"
+            sdk_legacy = TortoiseSDK(db_path=db_path, namespace=team_id)
+            assert _read_installs(sdk_legacy) == []  # legacy: no installs
+
+            # --apply: backfill the legacy team's starter set
+            monkeypatch.setattr(sys, "argv",
+                                ["backfill_pack_installs.py", "--apply"])
+            assert bf.main() == 0
+
+            # Read surface sees the backfilled records WITHOUT self-heal (if
+            # --apply had landed them in team_LegacyCo, this read would return
+            # [] — the conf-70 bug; self-heal would mask it, so it's disabled).
+            monkeypatch.setenv("PACK_STATE_DISABLE_SELF_HEAL", "1")
+            packs = get_tenant_packs(TortoiseSDK(db_path=db_path,
+                                                 namespace=team_id))
+            assert sorted(p["namespace"] for p in packs) == \
+                sorted(_expected_defaults())
+            # installs landed in the READ TARGET team_{team_id} graph...
+            assert sorted(r[0] for r in _read_installs(sdk_legacy)) == \
+                sorted(_expected_defaults())
+            # ...and the legacy team_{name} graph stays untouched (no invisible
+            # duplicate set the self-heal would otherwise mint).
+            legacy_rows = sdk_legacy._get_proj().db.select_graph(
+                legacy_graph).query(
+                "MATCH (p:PackInstall) RETURN p.namespace").result_set
+            assert legacy_rows == []

@@ -6,10 +6,14 @@ tenants have no pack install-state). Safe to re-run: ``ensure_tenant_packs``
 is an additive MERGE per namespace — never duplicates, never uninstalls.
 
 D5 (plan docs/plans/2026-08-15-318-pack-isolation-plan.md): handles the
-legacy ``team_{name}`` vs ``team_{id}`` graph naming via the RECORDED
-graph_name — ``teams.graph_name`` in Supabase control-plane mode (the
-canonical team graph per the 0006 schema note), the Team node's
-``graph_name`` property or ``team_{id}`` derivation in registry mode.
+legacy ``team_{name}`` vs ``team_{id}`` graph naming. Install records ALWAYS
+land in the introspection READ TARGET (``team_{team_id}`` — the graph GET
+/v1/packs + packs_list read via ``namespace=team_id``). The RECORDED
+graph_name (``teams.graph_name`` in Supabase control-plane mode, the Team
+node's ``graph_name`` property in registry mode) is read only to DETECT and
+report legacy ``team_{name}`` tenants — writing into a legacy graph would
+leave backfilled records invisible to the read surface (code-review conf 70,
+PR #1261) and the self-heal would mint a duplicate set.
 
 Usage:
     python3 graph-scripts/backfill_pack_installs.py            # DRY-RUN (default)
@@ -90,7 +94,16 @@ def main() -> int:
     n_activated = 0
     for t in teams:
         team_id, recorded = t["team_id"], t["graph_name"]
-        graph_name = recorded or f"team_{team_id}"  # D5: recorded wins
+        # D5 (code-review conf 70, PR #1261): ALWAYS target the introspection
+        # read surface — team_{team_id}. GET /v1/packs and MCP packs_list read
+        # the SDK-derived team_{team_id} graph (namespace=team_id), never the
+        # legacy team_{name} graph recorded by sdk.team_create; landing
+        # installs there would make backfilled records invisible and the read
+        # surface's self-heal would mint a second set.
+        graph_name = f"team_{team_id}"
+        if recorded and recorded != graph_name:
+            print(f"· team {team_id}: recorded graph {recorded!r} is legacy "
+                  f"team_{{name}} — landing installs in read target {graph_name}")
         if args.apply:
             from tortoise.sdk import TortoiseSDK
             sdk = TortoiseSDK(namespace=team_id)
