@@ -7,6 +7,7 @@ subjects.team: epistemic-team
 aboutSubjects: tortoise-infra
 aboutObjects: fly-io, falkordb, cloudflare
 created: 2026-08-03
+updated: 2026-08-14
 ---
 
 # Tortoise Hosted Platform — Infrastructure Runbook
@@ -154,6 +155,104 @@ myhost.lan`) so the host guard accepts the hostnames clients use.
 
 Do **not** commit `.env` (gitignored) and do **not** put DB credentials in
 `.mcp.json`.
+
+## 4.6 Pre-Beta Graph Integrity Check (#1200)
+
+**When:** before each beta cohort starts. The gate proves the hosted prod
+graphs are structurally sound (chain integrity + EP-risk audit) before the
+first cohort touches the product. It is REPEATABLE — the same commands run
+against every team graph.
+
+**What the gate answers:**
+1. Chain integrity — `tortoise_check_structure` / `tortoise_summarize_structure`
+   (Gate 0→4 orphans, dangling refs, never-wired draft points).
+2. EP-risk surfaces — orphan NANDs, batch-connected mitigations, NAND edges to
+   dead points, unmitigated low-confidence operators.
+3. Evidence hygiene — missing `sourceKind` (#1158), superseded points without
+   `:SUPERSEDES` edges, keyword-suspicious IMPL edges.
+
+**Credentials needed (owner session):**
+- One **tenant `tt_` API key per hosted team graph** (dashboard welcome page or
+  `tortoise key create` against the hosted API). The hosted MCP endpoint
+  (`https://api.premiselabs.co/mcp/`) is **auth-gated** — `Authorization:
+  Bearer tt_<key>` per request, resolved server-side to that team's namespace
+  (`team_<id>`). Without a key the endpoint returns 401/empty (fail-closed).
+- Host-side fallback: `fly ssh console -a tortoise-api` — the app resolves
+  `FALKORDB_CLOUD_URI` → `TORTOISE_DB_URI` at runtime; run the SDK script from
+  inside the console to target the managed FalkorDB directly.
+- `FASTAPI_INTERNAL_KEY` only for `/internal/*` endpoints (not needed for the
+  integrity check — it is not exposed on the public REST surface).
+
+**Procedure A — hosted MCP (preferred, per team):**
+1. Point an MCP client at `https://api.premiselabs.co/mcp/` with
+   `Authorization: Bearer tt_<key>`.
+2. `tortoise_summarize_structure` → per-gate counts (gate0_jtbds … gate4_requirements).
+3. `tortoise_check_structure` → chain violations (orphan_use_case,
+   dangling_use_case_ref, dangling_jtbd_ref, dangling_workflow_ref,
+   orphaned_draft).
+4. `tortoise_list_pointkinds` → confirm the expected kinds exist in the team graph.
+
+**Procedure B — SDK script (repeatable, any target):**
+> **Prerequisite:** `graph-scripts/audit_beta_gate.py` imports the `tortoise` SDK
+> (`from tortoise.sdk import TortoiseSDK`). Install it once from the repo root
+> (`pip install -e .`) — or, without installing, point `PYTHONPATH` at the repo
+> root (the parent of `graph-scripts/`): `PYTHONPATH=/path/to/tortoise python3
+> graph-scripts/audit_beta_gate.py`. Run from the repo root either way.
+
+```bash
+# Hosted/selfhost FalkorDB (from fly ssh console, or with a keyless URI)
+TORTOISE_DB_URI='rediss://...' python3 graph-scripts/audit_beta_gate.py --namespace team_<id>
+
+# Local embedded snapshot (never touch a live single-writer DB, #942)
+cp ~/.tortoise/tortoise.db /tmp/gate-snapshot.db
+PYTHONPATH=/path/to/tortoise TORTOISE_DB_PATH=/tmp/gate-snapshot.db python3 graph-scripts/audit_beta_gate.py
+
+# Machine-readable (CI gate): exit 0 = PASS, 1 = P1 findings, 2 = error
+PYTHONPATH=/path/to/tortoise TORTOISE_DB_PATH=/tmp/gate-snapshot.db python3 graph-scripts/audit_beta_gate.py --json
+```
+`graph-scripts/audit_beta_gate.py` runs the full surface: baseline counts,
+`summarize_structure`, `check_structure`, `tortoise/audit.py` `audit_graph`,
+and the five beta-gate risk queries below.
+
+**What to look for (P1 = block the cohort, fix or file with owner):**
+1. **Orphan NANDs** — NAND operator points with ZERO edges (created, never
+   wired; EP can never apply them). Query: `MATCH (n:Point
+   {is_operator:true, op_type:'NAND'}) WHERE NOT (n)--() RETURN n.id`.
+2. **Batch-connected mitigations nuking EP weights** — ONE mitigation point
+   targeting >1 operator. Skill rule (how-to-use-tortoise): connect
+   mitigations ONE at a time, verify each — a batch mitigation cascade-nukes
+   downstream confidence. NOTE the edge shape: legacy writes used
+   `:mitigates` (m→op); the current SDK (`mitigate_operator`) writes
+   `(m)-[:IMPL]->(op), (op)-[:mitigated_by]->(m)` — the gate script matches
+   BOTH shapes; a raw-Cypher batch connect on either label fails the gate.
+3. **NAND edges to dead points** — targets whose `status` is retracted or
+   superseded (dangling contradiction; `deleted` is not a valid point
+   status — delete_point tombstones to `retracted`).
+4. **Chain violations** — orphaned drafts (draft points never wired,
+   `check_structure` `orphaned_draft`), useCase without JTBD parent,
+   dangling use_case/jtbd/workflow refs.
+5. **Caveat — `impl_instead_of_nand` is keyword-based** (content contains
+   "not"/"no "/"fail"…). Verify semantics before acting; ingested README/doc
+   text produces false positives.
+
+**P2 debt — file, don't block:**
+- **missing_sourceKind (#1158)** — evidence points without a source tier
+  (`audit_graph` reports as **medium**; tier the source, do not hand-set
+  point-level sourceKind — #398 source-level inheritance).
+- missing sourceDate on graded evidence; superseded points without a
+  `:SUPERSEDES` edge (audit `superseded_no_edge` is high — fix before
+  cohort if present; `superseded_active_edges` is medium).
+
+**Threshold:** zero unresolved P1 at cohort start (risk surfaces 1–3 must be
+empty; chain/audit P1s fixed or filed with owners). `impl_instead_of_nand` is
+keyword-based and excluded from the gate script's P1 hard-fail set — the script
+reports it as `audit_advisory` (debt, not a cohort blocker). P2s are debt — file,
+don't block. `audit_beta_gate.py` exits 0 = PASS, 1 = P1 findings, 2 =
+infrastructure error (DB unreachable, busy embedded store) — CI consumers
+should treat 1 and 2 distinctly.
+
+**Related:** #1149 tenant-provision incidents (multi-tenant hygiene), #1158
+`audit.py` sourceKind gap, #942 embedded single-writer rule.
 
 ## 5. Dashboard Deploy
 
