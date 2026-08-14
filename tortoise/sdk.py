@@ -2547,12 +2547,15 @@ class TortoiseSDK:
             raise ValueError(
                 f"op_type must be 'IMPL', 'NAND', or a part/whole type, got {op_type!r}"
             )
-        # Direction default: bidirectional for all op types (product owner,
-        # #753) — a NAND is logically "A and B can't both be true" (mutual).
-        # An agent may explicitly pass "unidirectional" to declare a DIRECTED
-        # attack (attacker's truth penalizes the target, no back-pressure).
+        # Direction default (CYCLE-25 per-op_type, ontology v3.6 #5):
+        # direction-absent canonicalizes per op_type — IMPL → "bidirectional"
+        # (unchanged), NAND → "unidirectional" (extraction default — ingest IS
+        # the extraction path: new-claim-attacks-existing is the common case;
+        # bidirectional NAND requires explicit mutual-restatement declaration).
+        # A caller may explicitly pass "unidirectional"/"bidirectional" to
+        # override.
         if direction is None:
-            direction = "bidirectional"  # backward compat: explicit None = default
+            direction = self._canonical_direction(op_type, None)
         if direction not in ("bidirectional", "unidirectional"):
             raise ValueError(
                 f"direction must be 'bidirectional' or 'unidirectional', got {direction!r}"
@@ -3960,6 +3963,11 @@ class TortoiseSDK:
         created = {"points": 0, "entities": 0, "sources": 0, "connections": 0}
         deduped = {"points": 0, "entities": 0, "sources": 0, "connections": 0}
         results = [] if granularity == "granular" else None
+        # A3 warnings contract (cycle-23): the ELEVEN-key enumeration lives in
+        # E2E-6.2; this accumulator carries the operator-absorb / residue /
+        # drift warnings appended during the connection loop.
+        warnings: list[str] = []
+        self._ingest_warnings = warnings
 
         def _register_ref(ref: str, cid: str, section: str) -> None:
             if ref in refs:
@@ -4152,12 +4160,103 @@ class TortoiseSDK:
                 op_type = conn["operator"]
                 label = conn.get("label")
                 direction = conn.get("direction")
+                # §8 connection-routing (A3, #1053): a PLAIN IMPL/NAND
+                # connection (route 'direct' — no reify/mitigation) is
+                # operator-less per §8 — route to create_direct_edge, carrying
+                # label/direction/batch_id on the EDGE (no operator node). The
+                # promotion SET fires only on created==True (the promotion-on-
+                # created-only pin, §5.3/CYCLE-24) — the bare-MERGE dedup hit
+                # applies NO promotion.
+                if self._connection_route(conn) == "direct":
+                    edge_res = self.create_direct_edge(
+                        op_type, src, dsts[0],
+                        label=label,
+                        direction=direction,
+                        batch_id=batch_id,
+                        promote_source=(promotion_policy == "auto"),
+                    )
+                    created_flag = bool(edge_res.get("created"))
+                    if created_flag:
+                        created["connections"] += 1
+                    else:
+                        deduped["connections"] += 1
+                    conn_result = {"direct_edge": op_type, "from": src,
+                                   "to": dsts[0], "deduped": not created_flag}
+                    # §6.1 descriptor: the ids["connections"] entry is the
+                    # STABLE shape (no deduped — aggregated in
+                    # deduped.connections) so identical-resubmission equality
+                    # holds; deduped lives only in the granular conn_result
+                    # (plan §5.5 route matrix, cycle-22).
+                    ids["connections"].append(
+                        {"direct_edge": op_type, "from": src, "to": dsts[0]})
+                    if results is not None:
+                        results.append({"section": "connections", "index": i,
+                                        "ref": conn.get("ref"), "item": conn,
+                                        "result": conn_result,
+                                        "deduped": bool(conn_result.get("deduped"))})
+                    continue
                 existing = self._find_operator(op_type, [src] + dsts,
                                                label=label, direction=direction)
-                if existing is not None:
-                    oid = existing
+                if existing is not None and existing.get("kind") == "exact":
+                    oid = existing["id"]
+                    # k=N boundary (cycle-15): re-apply promotion when the
+                    # exact-hit is NULL-status under auto (a crash after the
+                    # full input-edge loop, before the promotion SET).
+                    if (promotion_policy == "auto"
+                            and existing.get("status") is None):
+                        try:
+                            self._reapply_operator_promotion(oid)
+                        except Exception:  # noqa: BLE001 — best-effort
+                            pass
                     deduped["connections"] += 1
                     conn_result = {"operator_id": oid, "deduped": True}
+                elif existing is not None and existing.get("kind") == "partial":
+                    # partial-absorb (cycle-11): complete the written input
+                    # set to the full set via IDEMPOTENT bare-MERGE + SET per
+                    # input (never the raw-CREATE loop), then proceed to
+                    # promotion under auto.
+                    oid = existing["id"]
+                    written = set(existing.get("written") or [])
+                    for _i, _inp in enumerate([src] + dsts):
+                        if _inp in written:
+                            continue
+                        # IDEMPOTENT edge-completion (P0 fix, review gate): the
+                        # ONE-STEP property-filtered MERGE
+                        #   MERGE (o:Point {id:$oid})-[r:REL]->(t:Point {id:$inp})
+                        # CREATES DUPLICATE NODES when the edge is absent (the
+                        # FalkorDB quirk create_direct_edge's cycle-26 comment
+                        # documents) — the completion would land on a fresh
+                        # bare Point instead of the operator. Use the TWO-STEP
+                        # pattern: MATCH both endpoints, then edge-only MERGE
+                        # (with idx parity for create_operator's edge shape).
+                        proj.g.query(
+                            f"MATCH (o:Point {{id:$oid}}), (t:Point {{id:$inp}}) "
+                            f"MERGE (o)-[r:{op_type if op_type in ('IMPL','NAND') else 'hasPart'}]->(t) "
+                            f"SET r.idx = $idx",
+                            params={"oid": oid, "inp": _inp, "idx": _i},
+                        )
+                    completed = len([src] + dsts) - len(written)
+                    if promotion_policy == "auto" and existing.get("status") is None:
+                        try:
+                            self._reapply_operator_promotion(oid)
+                        except Exception:  # noqa: BLE001 — best-effort
+                            pass
+                    deduped["connections"] += 1
+                    conn_result = {"operator_id": oid, "deduped": True}
+                    self._append_warning(
+                        f"operator_absorb_completed:{oid}:{completed}")
+                elif existing is not None and existing.get("kind") == "decline":
+                    # TWO+ candidates → decline + partial_operator_residue
+                    # warning; the retry creates a fresh complete operator.
+                    self._append_warning(
+                        "partial_operator_residue:"
+                        + ",".join(existing.get("candidates") or []))
+                    op = self.create_operator(op_type, src, dsts,
+                                              label=label, direction=direction,
+                                              promote_source=(promotion_policy == "auto"))
+                    oid = op["id"]
+                    created["connections"] += 1
+                    conn_result = {"operator_id": oid, "deduped": False}
                 else:
                     op = self.create_operator(op_type, src, dsts,
                                               label=label, direction=direction,
@@ -4234,9 +4333,11 @@ class TortoiseSDK:
             "deduped": deduped,
             "ids": ids,
             "nudges": nudges,
+            "warnings": warnings,
         }
         if results is not None:
             out["results"] = results
+        self._ingest_warnings = None
         return out
 
     # ── batch_id stamping (epic #902 A4, §4.2) ────────────────────────
@@ -4505,33 +4606,118 @@ class TortoiseSDK:
 
     def _find_operator(self, op_type: str, inputs: list[str],
                        label: str | None = None,
-                       direction: str | None = None) -> str | None:
-        """Return the id of an existing operator Point with the same
-        (op_type, input set) — or None. Used by ingest to keep re-ingests
-        idempotent (operators are not content-hash dedupable).
+                       direction: str | None = None) -> dict | None:
+        """§5.5 OPERATOR-DEDUP (A3): richer return — exact-hit | partial-absorb
+        | miss.
+
+        Exact-hit: an operator with the SAME (op_type, input set) — returns
+        {"id", "status", "kind": "exact"}. Condition builders apply the
+        CYCLE-25 per-op_type absent↔default canonicalization (IMPL
+        direction-absent → stored "bidirectional"; NAND direction-absent →
+        stored "unidirectional" — the extraction default) so a
+        direction-omitting retry dedups its own run-1 operator (exactly-once);
+        label-absent appends `o.label IS NULL` (no-label requests match only
+        unlabeled operators).
+
+        Partial-absorb: on an exact miss, a NULL-status (unpromoted) operator
+        whose input set is a PROPER SUBSET of the requested set AND whose
+        label/direction STRICT-MATCH the declared values (a label-absent
+        request must NOT absorb a labeled operator — the cross-absorption
+        semantic-theft class) AND whose written input set is NON-EMPTY —
+        returns {"id", "status", "kind": "partial", "written": [...]}.
+        TWO+ qualifying candidates → {"kind": "decline",
+        "candidates": [...]} (never an arbitrary absorption).
+
+        Miss → None.
+
+        The SOLE caller (ingest operator path) unwraps the plain operator-id
+        str for the exact-hit branch and runs the EDGE-COMPLETION step
+        (bare-MERGE + SET per input — IDEMPOTENT) for a partial-absorb.
         """
         proj = self._get_proj()
         edge_rel = "hasPart" if op_type not in ("IMPL", "NAND") else op_type
+        canonical_dir = self._canonical_direction(op_type, direction)
+        params: dict = {"op": op_type, "inputs": list(inputs)}
         conds = [
             "size(targets) = size($inputs)",
             "all(x IN targets WHERE x IN $inputs)",
         ]
-        params = {"op": op_type, "inputs": list(inputs)}
         if label is not None:
             conds.append("o.label = $label")
             params["label"] = label
-        if direction is not None:
+        else:
+            # CYCLE-17 clause: label-absent → `o.label IS NULL` (no-label
+            # requests match only unlabeled operators — never a wildcard)
+            conds.append("o.label IS NULL")
+        if direction is not None or canonical_dir is not None:
+            # CYCLE-17/25: direction-absent canonicalizes per op_type (IMPL
+            # → bidirectional, NAND → unidirectional) — NEVER `o.direction IS
+            # NULL` (direction is always stored; a NULL clause matches
+            # NOTHING and recreates the exactly-once P1 on the default shape)
             conds.append("o.direction = $direction")
-            params["direction"] = direction
+            params["direction"] = canonical_dir
         rows = proj.g.query(
             f"MATCH (o:Point {{is_operator:true, op_type:$op}}) "
             f"OPTIONAL MATCH (o)-[r:{edge_rel}]->(t:Point) "
-            f"WITH o, collect(t.id) AS targets "
+            f"WITH o, collect(t.id) AS targets, collect(r) AS _ "
             f"WHERE {' AND '.join(conds)} "
-            f"RETURN o.id LIMIT 1",
+            f"RETURN o.id, o.status LIMIT 1",
             params=params,
         ).result_set
-        return rows[0][0] if rows else None
+        if rows:
+            return {"id": rows[0][0], "status": rows[0][1],
+                    "kind": "exact", "written": list(inputs)}
+        # ── partial-absorb (cycle-11/12/13): on an exact miss, look for a
+        # NULL-status partial whose written set is a PROPER SUBSET of the
+        # requested set with STRICT label/direction matching (the declared
+        # values — absent↔default canonicalized the same way).
+        pcond = [
+            "size(targets) < size($inputs)",
+            "all(x IN targets WHERE x IN $inputs)",
+            "size(targets) > 0",
+            "(o.status IS NULL OR o.status = 'draft')",
+        ]
+        if label is not None:
+            pcond.append("o.label = $label")
+        else:
+            pcond.append("o.label IS NULL")
+        if direction is not None or canonical_dir is not None:
+            pcond.append("o.direction = $direction")
+        prows = proj.g.query(
+            f"MATCH (o:Point {{is_operator:true, op_type:$op}}) "
+            f"OPTIONAL MATCH (o)-[r:{edge_rel}]->(t:Point) "
+            f"WITH o, collect(t.id) AS targets "
+            f"WHERE {' AND '.join(pcond)} "
+            f"RETURN o.id, o.status, targets",
+            params=params,
+        ).result_set
+        if len(prows) == 1:
+            return {"id": prows[0][0], "status": prows[0][1],
+                    "kind": "partial", "written": list(prows[0][2])}
+        if len(prows) > 1:
+            return {"kind": "decline",
+                    "candidates": [r[0] for r in prows]}
+        return None
+
+    def _append_warning(self, entry: str) -> None:
+        """Append to the current ingest's warnings accumulator (A3 cycle-23
+        contract). The accumulator is the module-level thread-local set by
+        ingest(); outside an ingest, the entry is a no-op."""
+        acc = getattr(self, "_ingest_warnings", None)
+        if acc is not None:
+            acc.append(entry)
+
+    def _reapply_operator_promotion(self, op_id: str) -> None:
+        """k=N boundary (cycle-15): re-apply promotion to a NULL-status
+        operator under auto (a crash after the full input-edge loop, before
+        the promotion SET). Mirrors create_operator's #131 guarded SET."""
+        proj = self._get_proj()
+        proj.g.query(
+            "MATCH (s:Point {id:$id}) "
+            "WHERE s.status IS NULL OR s.status = 'draft' "
+            "SET s.status = 'live', s.updatedAt = $now",
+            params={"id": op_id, "now": _now_iso()},
+        )
 
     def file_decision(self, options: list[str], evidence: list[str],
                       choice: int) -> dict:
