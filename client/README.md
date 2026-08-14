@@ -32,6 +32,13 @@ pip install tortoise-client
 > package — the engine dist is `tortoise-graph`, the client dist is
 > `tortoise-client`.
 
+> **⚠️ Do NOT install `tortoise-client` and `tortoise-graph` in the same
+> environment.** Both distributions install a top-level `tortoise` package;
+> co-installing overwrites files and breaks the engine. Install the client
+> where you **connect** from, and the engine (`tortoise-graph`) on the
+> machine that **serves** — they talk over MCP and never share an
+> interpreter.
+
 ## Connect
 
 Point the client at a running Tortoise server. Self-hosted: run the server

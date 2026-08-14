@@ -126,6 +126,12 @@ pattern).** Both dists carry the same version number at release
 - The client does NOT declare a pip dependency on `tortoise-graph` — the
   client is a separate install surface (client-only users never install the
   server); coupling is documented + enforced by CI drift checks.
+- **Co-installation hazard (PR #1313 conf 78):** both dists install a
+  top-level `tortoise` package. Installing `tortoise-client` AND
+  `tortoise-graph` in the SAME environment overwrites files and breaks the
+  engine — they are NOT co-installable. Client environments and server
+  environments must stay separate, which matches the architecture: the
+  client connects over MCP and never runs the engine.
 
 ## 6. License boundary
 

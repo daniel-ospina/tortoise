@@ -18,7 +18,8 @@
 # precedent — see docs/client-server-split.md §License). `client/LICENSE`
 # is the Apache-2.0 text governing this distribution.
 [build-system]
-requires = ["setuptools"]
+# setuptools>=77: PEP 639 SPDX license expression (license = "Apache-2.0" below)
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]

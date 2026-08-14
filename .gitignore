@@ -29,4 +29,5 @@ benchmarks/reports/
 
 # #526: tortoise-client build artifacts (client/build_client.sh output)
 dist-client/
+client/build/
 

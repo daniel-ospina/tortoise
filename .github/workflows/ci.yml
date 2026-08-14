@@ -158,13 +158,21 @@ jobs:
         run: pip install build
       - name: Build the client wheel + sdist (Prefect-pattern staging)
         run: bash client/build_client.sh
-      - name: Wheel content check — no engine modules
+      - name: Wheel content check — whitelist (thin driver only)
         run: |
-          unzip -l dist-client/*.whl | grep -E "tortoise/" | grep -vE "\.pyc"
-          if unzip -l dist-client/*.whl | grep -qE "tortoise/(sdk|projection|ep|mcp_server|selfhost|deployment|hosted_api|selfhost_api)\.py"; then
-            echo "::error::engine modules leaked into the tortoise-client wheel"
+          # Whitelist (PR #1313 conf 88): ANY tortoise/ entry outside the
+          # client module set is rejected — including package dirs (e.g.
+          # tortoise/projection/__init__.py) and new engine modules. Must
+          # stay in sync with verify_client.sh Gate 0.
+          BAD="$(unzip -Z1 dist-client/*.whl | grep -E '^(tortoise|tortoise_client)/' | \
+            grep -vE '^tortoise/(__init__|mcp_client|config|exceptions)\.py$' | \
+            grep -vE '^tortoise_client/(__init__|__main__|cli)\.py$' || true)"
+          if [ -n "$BAD" ]; then
+            echo "::error::non-client entries leaked into the tortoise-client wheel:"
+            echo "$BAD"
             exit 1
           fi
+          unzip -Z1 dist-client/*.whl | grep -E '^(tortoise|tortoise_client)/'
           echo "wheel content OK — thin driver only"
       - name: Acceptance gate (clean venv, client only)
         run: bash client/verify_client.sh
