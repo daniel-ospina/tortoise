@@ -51,7 +51,7 @@ System-level operational flows (handoffs + failure modes):
 
 **W7 — Budget enforcement.** Hosted: **only full-mode passes (including via override) count against the #329 hourly full-pass bucket** — window passes are bounded solely by their per-pass operator budget (I1) and do NOT consume the full bucket (explicit rule; the alternative — shared operator-hour accounting — is deferred as a future refinement). Explicit mode override to full is counted; budget rejection is explicit (reject/queue with 429-equivalent), never silent. Embedded: 500ms latency budget governs in-band local passes; window mode is scheduled-only (never in-band). Failure modes: budget bypass via override (counted), silent ignore of rejection (explicit error).
 
-**J↔W correspondence (actual):** J1→W1 · J2→W2 · J3→W2-degenerate (full sub-flow) · J4→W2-report (staleness_report generation is W2's reporting output; report semantics in I2) · J5→W6 · J6→W5 · J7→W4 · J8→diagnostics/eval (Substep 7 DE2E-9/10).
+**J↔W correspondence (actual):** J1→W1 · J2→W2 · J3→W2-degenerate (full sub-flow) · J4→W2-report (freshness signal on reads — the dedicated report endpoint was cut at human gate 2; the internal staleness-ranked query remains) · J5→W6 · J6→W5 · J7→W4 · J8→diagnostics/eval (Substep 7 DE2E-9/10).
 
 **Review gate (J/W/P):** CLEAN after batch A fixes (full sub-flow, W4 cap semantics, J↔W mapping, report flow).
 
@@ -153,12 +153,12 @@ States covered: idle (no backlog), queued (dirty set), running (locked), non-con
 
 | Component | File | Responsibility | Key changes |
 |---|---|---|---|
-| `SDK.dream()` (mode router + dirty-set owner) | `tortoise/sdk.py` | Auto-select strategy (write → local, scheduled → stale-first, small → full); explicit override wins (precedence table, I1); `staleness_report()`; dirty-root retention fix; promote→`_mark_dirty`; `dream_health_check()` | Mode plumbing; retention; promote hook; health check |
+| `SDK.dream()` (mode router + dirty-set owner) | `tortoise/sdk.py` | Auto-select strategy (write → local, scheduled → stale-first, small → full); explicit override wins (precedence table, I1); dirty-root retention fix; promote→`_mark_dirty`; `dream_health_check()` | Mode plumbing; retention; promote hook; health check |
 | `Dreamer` (scheduler) | `tortoise/dream.py` | `dream_window(budget)`: staleness-rank (null = stalest) ∪ retained-dirty → anchors; operator-set dedup; retention + attempt cap; health-metric emission; trivial-stamp scan | Window selection, dedup, retention, metrics, scan |
 | `TortoiseEP.run` (engine) | `tortoise/ep.py` | `run(warm_start=True)`: load graph messages → seed → fixed-γ skip → flush; `warm_start=False` default (fast path unchanged, no γ-skip, no lock dependency) | warm_start param + γ-skip; invalidation helper (called from write paths) |
 | Graph write-back | dream.py | **Single UNWIND batch** SET `confidence` + `lastDreamedAt` + `updatedAt` for all affected claims (mirrors `_flush_cache`'s shape — eliminates the current per-claim N+1 loop at dream.py L91-99, which also redundantly rewrites confidence the engine already flushed); `stamp_dreamed_at` flag (only dream paths stamp — fast path never does); trivial-stamp derived from already-fetched stale-first data, dedicated scan for full passes | UNWIND write-back; stamp flag |
 | Hosted worker | `tortoise/hosted_api.py` | `_dream_worker` mode wiring; #329 full-bucket accounting (full + override only); `/v1/dream/health` | Mode wiring; budget rule; health endpoint |
-| MCP tools | `tortoise/mcp_server.py` | `dream` (optional mode), `staleness_report`, `dream_health_check` tools | Additive to the #888-consolidated surface |
+| MCP tools | `tortoise/mcp_server.py` | `dream` (optional mode), `dream_health_check` tools (no staleness_report tool — cut at human gate 2) | Additive to the #888-consolidated surface |
 | Observability | dream.py + hosted + sdk | Metrics record + zero-output alarm (hosted endpoint; embedded call-triggered check) | Metrics + alarm |
 
 **Terminology note (scope↔plan):** the scope doc's "carry over the math" / "carried-over refresh" = the plan's **warm-start** (reuse the prior pass's graph-persisted message state, skip deltas ≤ fixed γ). Same mechanism; the plan standardizes on "warm-start" with this mapping note.
@@ -256,7 +256,7 @@ Each case is implementable as an automated test. **Harness (fixed per review):**
 - Act: write → `_mark_dirty` → `dream()` (default local).
 - Assert: affected claims refreshed; unrelated claims |Δconf| ≤ 0.01 (G7, re-locked at calibration); return shape pinned to I1 local key-set `{mode, iterations, converged, affected_claims, budget_used, coverage}` (concrete, typed — not "backward-compatible" vagueness).
 - **Precedence matrix sub-case** (I1 table, surface 1 guards): assert across mode×full×dirty_only combinations — explicit `mode` wins over sugar; `full=True` maps to full only when `mode is None`; `mode="stale-first"` + `dirty_only=True` → staleness window with dirty roots unioned; auto-selection: write-context → local.
-- **Operator-less write sub-case (D3-3b):** a freshly written isolated claim (no operators) → local pass trivially stamps it (`lastDreamedAt` set in the same write-back; the current `dream()` early-return at dream.py L82-84 would leave it null forever — this test pins the fix).
+- **Operator-less write sub-case (D3-3b):** a freshly written isolated claim (no operators) → local pass trivially stamps it (`lastDreamedAt` set in the same write-back; the current `dream()` early-return at dream.py ~L69-79 would leave it null forever — this test pins the fix).
 - **Write-path structural sub-case (D2-5):** the write context never invokes scheduled/window mode — write → local only; window mode unreachable from the write path.
 
 **DE2E-4 — Freshness signal on reads; draft→promote stays stale** (E2E-4 — report endpoint cut; freshness assertions re-scoped)
@@ -291,7 +291,7 @@ Each case is implementable as an automated test. **Harness (fixed per review):**
 
 **DE2E-8 — Dream health observable, silent death detectable** (E2E-8)
 - Setup: dreamer with stale backlog; in-process metrics/worker state reset per test (conftest `_reset_ip_rate_limits` pattern). Alarm trigger defined **counter-based** (not wall-clock): backlog > 0 ∧ output count == 0 since last pass.
-- Act: hosted — GET `/v1/dream/health`; embedded — `dream_health_check()`; MCP — `dream`/`staleness_report`/`dream_health_check` tools.
+- Act: hosted — GET `/v1/dream/health`; embedded — `dream_health_check()`; MCP — `dream`/`dream_health_check` tools (no staleness_report tool — cut at human gate 2).
 - Assert: last-pass ts, coverage %, failure rate, operator counts surfaced (both surfaces); **alarm fires** when backlog > 0 AND zero output (EP stubbed to no-op via monkeypatch — layer-scoped); **positive-control (fixed):** non-empty backlog + a real converging run that produces output → alarm MUST NOT fire (an implementation that fires on backlog alone fails this — catches the ignored-output-conjunct bug); **MCP error mapping:** `BudgetExceededError` → ERR_QUOTA, unknown mode → ERR_INVALID_ARG (mcp_server.py:497 codes); no false positive on healthy idle.
 
 **DE2E-9 — Freshness reduces staleness error (Indicator 3 acceptance)** (E2E-9)
