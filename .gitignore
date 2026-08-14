@@ -21,3 +21,4 @@ data/migrations/
 
 # #1148: dashboard build artifacts (node_modules is huge; dist/ IS committed)
 website/apps/dashboard/node_modules/
+.venv/
