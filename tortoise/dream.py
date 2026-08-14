@@ -79,7 +79,8 @@ class Dreamer:
     def dream(self, anchors: list[str], max_hops: int = DEFAULT_MAX_HOPS,
               direction: str = "both",
               stamp_dreamed_at: bool = True,
-              trivial_stamp: bool = True) -> dict:
+              trivial_stamp: bool = True,
+              op_cap: int = 200) -> dict:
         """Run EP over the subgraph reachable from ``anchors``.
 
         Reuses the fast-path selector (analyze._bfs_select_operators, capped
@@ -109,16 +110,25 @@ class Dreamer:
         n.confidence). Callers must gate on calibration state BEFORE calling
         (the SDK surface does via require_calibration → CalibrationError);
         do not invoke Dreamer directly with uncalibrated graphs.
+
+        ``op_cap`` (epic 903-C6, #1244): the BFS operator-selection cap for
+        this pass. ``budget=None`` on the SDK surface resolves to the
+        existing 200-op selector default (I1); an explicit budget overrides
+        it. ``_last_operator_count`` is set to the selected operator-set
+        size (after cap truncation) — the SDK adapter reads it to report
+        ``budget_used`` in the I1 local key-set.
         """
         if not anchors:
+            self._last_operator_count = 0
             return {"iterations": 0, "converged": True, "affected_claims": []}
         with self._lock:
             proj = self._sdk._get_proj()
             from .analyze import _bfs_select_operators
             operator_ids, factor_anchors = _bfs_select_operators(
                 proj, anchors, max_hops=max_hops, rel_filter="IMPL|NAND",
-                direction=direction,
+                direction=direction, op_cap=op_cap,
             )
+            self._last_operator_count = len(operator_ids)
             # A9 (epic #902 §5.6): the selection set ALSO carries direct-edge
             # factor anchors — a direct-edge-only subgraph yields ZERO
             # operator ids but a non-empty direct-factor selection. ep.run
@@ -266,10 +276,20 @@ class Dreamer:
         → ``budget_used`` and drives the dirty-root logic from ``converged``.
 
         Returns ``{mode: "stale-first", batches, converged, converged_all,
-        operators_deduped, budget_used, affected_claims}``.
+        operators_deduped, budget_used, affected_claims}`` (I6 — the SDK
+        adapter adds ``coverage`` for the I1 shape).
+
+        Side channel: ``self._last_window`` is set to the pre-pass window
+        (the staleness-ranked claims + retained-dirty union) on every return
+        path ([] for the no-op paths) — the SDK adapter (I6→I1 mapping)
+        reads it to compute stale-first coverage WITHOUT recomputing the
+        window post-pass (stamps written by the pass reorder the ranking,
+        so a post-pass recomputation would be wrong — the
+        all-null→whole-graph case would blow up entirely).
         """
         eff_budget = DEFAULT_WINDOW_BUDGET if budget is None else budget
         if eff_budget <= 0:
+            self._last_window = []
             return {"mode": "stale-first", "batches": 0, "converged": True,
                     "converged_all": True, "operators_deduped": 0,
                     "budget_used": 0, "affected_claims": []}
@@ -295,6 +315,12 @@ class Dreamer:
                 d for d in sorted(self._sdk._dirty_roots)
                 if d not in ranked_set
             ]
+            # Epic 903-C6 (#1244): record the pre-pass window for the SDK
+            # adapter (stale-first coverage = affected / window closure —
+            # I1 "remaining-stale-before-pass" = the stale claims this pass
+            # could reach; the closure is computed from THIS pre-pass list
+            # because stamps written by the pass reorder the ranking).
+            self._last_window = window
             if not window:
                 return {"mode": "stale-first", "batches": 0,
                         "converged": True, "converged_all": True,
@@ -397,7 +423,8 @@ class Dreamer:
     def dream_all(self, max_hops: int = 2,
                   batch_size: int = 2000,
                   max_total_operators: int = 200_000,
-                  stamp_dreamed_at: bool = True) -> dict:
+                  stamp_dreamed_at: bool = True,
+                  budget: int | None = None) -> dict:
         """Full-graph EP stabilization from all non-operator Points.
 
         Memory + DoS guard (#85, security P1): batches the anchor set so the
@@ -415,8 +442,22 @@ class Dreamer:
         to converge anywhere is a failed run and stamps nothing (W4
         retention: failed runs do not rank fresh).
 
-        Returns {batches, total_affected, converged_all, scanned_count}.
+        Returns {batches, total_affected, converged_all, scanned_count,
+        budget_used}.
+
+        ``budget`` (epic 903-C6, #1244): an explicit operator cap for the
+        pass. ``budget=None`` (default) keeps the existing ``
+        max_total_operators`` DoS guard (warn + truncate, never raise). An
+        explicit budget makes the pass fail loudly instead of truncating —
+        a full pass is contractually complete-in-one-pass (J3), so when the
+        graph requires more operators than the budget, ``
+        BudgetExceededError`` is raised at the first chunk that would
+        exceed it (earlier chunks' writes stay committed — the raise site
+        surfaces the budget exhaustion; hosted wiring in 903-C8 maps it to
+        the 429 quota response). ``budget_used`` = operators selected
+        across the pass's chunks (accumulated pre-truncation).
         """
+        from .exceptions import BudgetExceededError
         proj = self._sdk._get_proj()
         rows = proj.g.query(
             "MATCH (n:Point) WHERE n.is_operator = false "
@@ -425,22 +466,40 @@ class Dreamer:
         anchors = [r[0] for r in rows]
         if not anchors:
             return {"batches": 0, "total_affected": 0, "converged_all": True,
-                    "scanned_count": 0}
+                    "scanned_count": 0, "budget_used": 0}
 
         total_affected: set[str] = set()
         converged_all = True
         batches = 0
         total_operators = 0
+        cap = budget if budget is not None else max_total_operators
         for start in range(0, len(anchors), batch_size):
             chunk = anchors[start:start + batch_size]
             with self._lock:
                 from .analyze import _bfs_select_operators
+                # Epic 903-C6 (#1244): when an explicit budget is set, LIFT
+                # the selector's default 200-op cap (op_cap=None) so the
+                # true per-chunk need is collected and the budget check
+                # below can fire — the default cap would otherwise truncate
+                # each chunk at 200 before total_operators > budget ever
+                # triggers (silent partial full pass, P1 review #1244). The
+                # BFS is still bounded by max_hops=2. budget=None keeps the
+                # selector cap as the safety bound.
                 chunk_ops, _chunk_anchors = _bfs_select_operators(
                     proj, chunk, max_hops=max_hops, rel_filter="IMPL|NAND",
                     direction="both",
+                    op_cap=None if budget is not None else 200,
                 )
             total_operators += len(chunk_ops)
-            if total_operators > max_total_operators:
+            if total_operators > cap:
+                if budget is not None:
+                    raise BudgetExceededError(
+                        f"full-mode dream budget {budget} exceeded — "
+                        f"pass requires {total_operators} operators; "
+                        f"raise the budget or use mode=\"stale-first\" "
+                        f"for bounded windowed passes",
+                        budget=budget, required=total_operators,
+                    )
                 _log.warning(
                     "dream_all truncated at %d operators (cap %d) — "
                     "graph larger than budget",
@@ -469,4 +528,5 @@ class Dreamer:
             "total_affected": len(total_affected),
             "converged_all": converged_all,
             "scanned_count": scanned_count,
+            "budget_used": total_operators,
         }

@@ -65,6 +65,32 @@ class BundleValidationError(ValueError):
                 "violations": self.violations}
 
 
+class BudgetExceededError(RuntimeError):
+    """Raised when a dream pass exhausts its operator budget (epic 903-C6,
+    #1244).
+
+    The SDK-side raise site is the full-mode pass: a full pass is
+    contractually complete-in-one-pass (J3), so when an EXPLICIT ``budget``
+    is set and the graph requires more operators than the budget, the pass
+    fails loudly instead of silently truncating (truncation is only legal
+    for stale-first window passes, where deferral is the design — truncated
+    claims stay stale and re-enter the staleness ranking next pass).
+    ``budget=None`` keeps the existing 200_000-op DoS guard (warn +
+    truncate, never raise).
+
+    Carries the budget and the required operator count so hosted wiring
+    (epic 903-C8, ``/v1/dream`` 429 + Retry-After per I4) and the MCP layer
+    (903-C11, ``ERR_QUOTA``) can build their wire responses from one raise
+    site.
+    """
+
+    def __init__(self, message: str, budget: int | None = None,
+                 required: int | None = None):
+        self.budget = budget
+        self.required = required
+        super().__init__(message)
+
+
 class Phase2Error(ValueError):
     """Epic #902 A2 — Phase-2 write failure (post-validation, partial state
     may be committed). Carries the bundle's computed batch_id so the agent
