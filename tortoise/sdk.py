@@ -4371,11 +4371,14 @@ class TortoiseSDK:
 
         Completeness across ``rebuild_all``: batch_id on Points is restored
         from the pre-wipe live-graph snapshot (projection pass-1b tail) —
-        a rebuild of the SAME store keeps the audit intact; the JSONL
-        journal replay of ``BatchIdStamped`` / ``DirectEdgeCreated``
-        records (a fresh-store rebuild from the journal only) is A10
-        pass-2b (#1048, gated on A3) — NOT yet landed, so journal-only
-        rebuilds lose batch_id today (recorded deferral).
+        a rebuild of the SAME store keeps the POINT half of the audit
+        intact; DIRECT EDGES are lost even on same-store rebuilds today
+        (their ``DirectEdgeCreated`` descriptors are journaled but not
+        replayed). The JSONL journal replay of ``BatchIdStamped`` /
+        ``DirectEdgeCreated`` records (a fresh-store rebuild from the
+        journal only) is A10 pass-2b (#1048, gated on A3) — NOT yet
+        landed, so journal-only rebuilds lose batch_id today (recorded
+        deferral).
 
         Returns ``{"batch_id", "points": [{id, pointKind, status,
         is_operator, op_type, content}], "direct_edges": [{direct_edge,
