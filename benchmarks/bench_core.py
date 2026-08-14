@@ -56,6 +56,25 @@ CAP_MS: int = 500                     # degradation_chain collective cap (driver
 ELEVATED_TIMEOUT_MS: int = 5000       # elevated-cap column (#317 uncensored)
 E2E_TAIL_EPS_MS: float = 0.0          # band boundary is exactly > CAP_MS
 
+# Cap-boundary tolerance for sample classification. A sample whose measured
+# elapsed lands within ε of the cap is bucketed as cap-truncated
+# (capped/capped-tail): the degradation chain's as_completed deadline and the
+# driver-level timeout share a steady clock with the harness's perf_counter,
+# but scheduling skew can read cap−1..ε ms for work the cap actually cut off.
+# Without the tolerance that work would be bucketed "healthy" and sit in the
+# latency distribution, deflating p95. Arms that enforce NO timeout (tfidf
+# fallback) pass classify_eps_ms=0 so a genuine completion near the cap stays
+# healthy (measurement-validity: a 490ms tfidf run is real work, not a cap).
+CLASSIFY_CAP_EPS_MS: float = 25.0
+
+# E2E verdict validity gate: when more than this fraction of censored-column
+# samples did not complete healthy (capped + capped-tail + degraded +
+# breaker-open), the healthy-only p95 is computed over a non-representative
+# minority → the band verdict is meaningless ("inconclusive"). Scoping
+# reserves the 300/500 bands for p95 values, so a cap-dominated column must
+# never report "achieved" on a few fast survivors.
+E2E_CAP_DOMINANCE_FRACTION: float = 0.30
+
 DEFAULT_WARMUP_ITERS = 5
 DEFAULT_WARMUP_MAX_ITERS = 20
 WARMUP_CV_TARGET = 0.10               # warm-up steady-state CV < 10%
@@ -67,7 +86,7 @@ FailureClass = Literal[
     "healthy", "degraded", "capped", "capped-tail", "invalidating", "breaker-open",
 ]
 
-E2E_Verdict = Literal["achieved", "cap-dominated", "tail"]
+E2E_Verdict = Literal["achieved", "cap-dominated", "tail", "inconclusive"]
 
 
 # ── Stats ────────────────────────────────────────────────────────────────────
@@ -205,16 +224,23 @@ class ArmInvalidated(Exception):
 
 
 def classify_sample(
-    elapsed_ms: float, results_count: int, error: str | None, timeout_ms: float
+    elapsed_ms: float, results_count: int, error: str | None, timeout_ms: float,
+    cap_eps_ms: float = CLASSIFY_CAP_EPS_MS,
 ) -> str:
-    """Map one raw call outcome onto the failure taxonomy."""
+    """Map one raw call outcome onto the failure taxonomy.
+
+    cap_eps_ms: cap-boundary tolerance — elapsed within ε of the cap counts
+    as truncated (see CLASSIFY_CAP_EPS_MS). Pass 0.0 for arms that enforce no
+    timeout (a genuine completion near the cap is not a cap cut).
+    """
     if error is not None:
         lowered = error.lower()
         if "timeout" in lowered or "timed out" in lowered or "deadline" in lowered:
             return "capped"
         return "invalidating"
-    if elapsed_ms >= timeout_ms:
-        # Returned rows past the cap → the cap truncated the tail, not the work.
+    if elapsed_ms >= timeout_ms - cap_eps_ms:
+        # Returned rows past (or within ε of) the cap → the cap truncated the
+        # tail, not the work.
         return "capped-tail" if results_count > 0 else "capped"
     return "healthy" if results_count > 0 else "degraded"
 
@@ -259,6 +285,7 @@ def run_arm(
     reset_breakers: Callable[[], None] | None = None,
     breaker_is_open: Callable[[str], bool] | None = None,
     degraded_fast_threshold: float = 0.5,
+    classify_eps_ms: float = CLASSIFY_CAP_EPS_MS,
 ) -> ArmResult:
     """Run one measurement arm with warmup + breaker hygiene.
 
@@ -289,7 +316,9 @@ def run_arm(
     # Measured phase.
     for _ in range(samples):
         elapsed_ms, results_count, error = _time_fn(fn)
-        status = classify_sample(elapsed_ms, results_count, error, timeout_ms)
+        status = classify_sample(
+            elapsed_ms, results_count, error, timeout_ms, cap_eps_ms=classify_eps_ms
+        )
         samples_list.append({"elapsed_ms": elapsed_ms, "status": status, "results": results_count})
         if status == "invalidating":
             return ArmResult(
@@ -358,9 +387,28 @@ def strategy_verdict(p95_ms: float, target_ms: float) -> str:
     return "PASS" if p95_ms < target_ms else "FLAG"
 
 
-def e2e_verdict(mix_weighted_p95_ms: float) -> E2E_Verdict:
+def failure_fraction(stats: LatencyStats) -> float:
+    """Fraction of samples that did NOT complete as healthy (capped +
+    capped-tail + degraded + breaker-open). Invalidating aborts the arm and is
+    surfaced separately. > E2E_CAP_DOMINANCE_FRACTION ⇒ the healthy-only p95 is
+    computed over a non-representative minority."""
+    if stats.count <= 0:
+        return 0.0
+    return (
+        stats.capped + stats.capped_tail + stats.degraded + stats.breaker_open
+    ) / stats.count
+
+
+def e2e_verdict(
+    mix_weighted_p95_ms: float, failure_frac: float = 0.0
+) -> E2E_Verdict:
     """E2E-8 verdict bands (scoping: ≤300 achieved / 300-500 cap-dominated /
-    >500+ε tail)."""
+    >500+ε tail), gated on measurement validity: when failure_frac exceeds
+    E2E_CAP_DOMINANCE_FRACTION the censored column is cap-dominated and the
+    p95 over the few healthy survivors cannot support "achieved" — the
+    verdict is "inconclusive" (pre-registered bands unchanged)."""
+    if failure_frac > E2E_CAP_DOMINANCE_FRACTION:
+        return "inconclusive"
     if mix_weighted_p95_ms <= E2E_TARGET_MS:
         return "achieved"
     if mix_weighted_p95_ms <= CAP_MS + E2E_TAIL_EPS_MS:

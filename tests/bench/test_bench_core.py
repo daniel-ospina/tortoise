@@ -11,6 +11,8 @@ import pytest
 
 from benchmarks.bench_core import (
     CAP_MS,
+    CLASSIFY_CAP_EPS_MS,
+    E2E_CAP_DOMINANCE_FRACTION,
     E2E_TARGET_MS,
     ELEVATED_TIMEOUT_MS,
     PRE_REGISTERED_TARGETS_MS,
@@ -18,6 +20,7 @@ from benchmarks.bench_core import (
     WarmupProtocol,
     classify_sample,
     e2e_verdict,
+    failure_fraction,
     headroom_ms,
     percentile,
     run_arm,
@@ -79,6 +82,22 @@ def test_classify_sample_taxonomy():
     assert classify_sample(600.0, 3, None, 500) == "capped-tail"     # late rows
     assert classify_sample(50.0, 0, "timeout after 500ms", 500) == "capped"
     assert classify_sample(50.0, 0, "auth failed: 401", 500) == "invalidating"
+
+
+def test_classify_sample_cap_boundary_tolerance():
+    """Cap-boundary tolerance (issue #316 review): a sample whose elapsed
+    lands within ε of the cap is bucketed cap-truncated — the chain's
+    as_completed deadline and perf_counter share a clock, so a cap cut can
+    read cap−1..ε ms and must not pollute the healthy latency distribution."""
+    # Just under the cap but within ε → truncated, not healthy.
+    assert classify_sample(CAP_MS - 5.0, 3, None, CAP_MS) == "capped-tail"
+    assert classify_sample(CAP_MS - CLASSIFY_CAP_EPS_MS, 0, None, CAP_MS) == "capped"
+    # Outside ε → genuine completion.
+    assert classify_sample(CAP_MS - CLASSIFY_CAP_EPS_MS - 1.0, 3, None, CAP_MS) == "healthy"
+    # Arms with NO enforced timeout pass cap_eps_ms=0: a genuine completion
+    # near the cap (tfidf fallback) stays healthy.
+    assert classify_sample(CAP_MS - 5.0, 3, None, CAP_MS, cap_eps_ms=0.0) == "healthy"
+    assert classify_sample(CAP_MS + 1.0, 3, None, CAP_MS, cap_eps_ms=0.0) == "capped-tail"
 
 
 # ── Warmup protocol ─────────────────────────────────────────────────────────
@@ -229,6 +248,8 @@ def test_pre_registered_targets_match_scoping():
     assert E2E_TARGET_MS == 300.0
     assert CAP_MS == 500.0
     assert ELEVATED_TIMEOUT_MS == 5000.0
+    assert CLASSIFY_CAP_EPS_MS == 25.0
+    assert E2E_CAP_DOMINANCE_FRACTION == 0.30
 
 
 def test_e2e_verdict_bands():
@@ -238,6 +259,33 @@ def test_e2e_verdict_bands():
     assert e2e_verdict(499.9) == "cap-dominated"
     assert e2e_verdict(501.0) == "tail"              # >500+ε
     assert e2e_verdict(800.0) == "tail"
+
+
+def test_e2e_verdict_gated_on_failure_fraction():
+    """Cap-dominance gate (issue #316 review): when most censored samples are
+    capped/degraded, the healthy-only p95 comes from a non-representative
+    minority and cannot support "achieved" — the verdict is inconclusive even
+    if the few healthy survivors are fast."""
+    gate = E2E_CAP_DOMINANCE_FRACTION
+    assert e2e_verdict(250.0, failure_frac=gate + 0.01) == "inconclusive"
+    assert e2e_verdict(250.0, failure_frac=gate) == "achieved"          # <= gate: bands apply
+    assert e2e_verdict(250.0, failure_frac=0.2) == "achieved"
+    assert e2e_verdict(400.0, failure_frac=0.5) == "inconclusive"      # gate wins over band
+    assert e2e_verdict(800.0, failure_frac=0.9) == "inconclusive"
+    # Default (no gate data) keeps pre-registered band behavior.
+    assert e2e_verdict(250.0) == "achieved"
+
+
+def test_failure_fraction_counts_non_healthy():
+    stats = summarize([
+        {"elapsed_ms": 1, "status": "healthy", "results": 1},
+        {"elapsed_ms": 2, "status": "capped-tail", "results": 1},
+        {"elapsed_ms": 3, "status": "capped", "results": 0},
+        {"elapsed_ms": 4, "status": "degraded", "results": 0},
+    ])
+    assert failure_fraction(stats) == 0.75
+    assert failure_fraction(summarize([{"elapsed_ms": 1, "status": "healthy", "results": 1}])) == 0.0
+    assert failure_fraction(summarize([])) == 0.0
 
 
 def test_headroom_317():

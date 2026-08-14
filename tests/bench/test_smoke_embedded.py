@@ -59,10 +59,12 @@ def test_harness_runs_end_to_end_on_embedded(tmp_path):
         assert col["censored"]["invalidated"] is False
         assert col["elevated"]["invalidated"] is False
 
-    # E2E arm ran with a verdict (achieved/cap-dominated/tail are all valid
-    # smoke outcomes — embedded numbers are NOT prod-parity).
+    # E2E arm ran with a verdict (achieved/cap-dominated/tail/inconclusive are
+    # all valid smoke outcomes — embedded numbers are NOT prod-parity;
+    # inconclusive = cap-dominated column where the healthy minority cannot
+    # support a band verdict).
     e2e = report["arms"]["e2e"]
-    assert e2e["verdict"] in ("achieved", "cap-dominated", "tail")
+    assert e2e["verdict"] in ("achieved", "cap-dominated", "tail", "inconclusive")
     assert "headroom_ms_317" in e2e
     assert "cold_start_ms" in report and "e2e" in report["cold_start_ms"]
 

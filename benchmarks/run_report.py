@@ -4,7 +4,9 @@ Pre-registered numbers (issue #316 scoping v5.1 — fixed, do not edit here):
     per-strategy targets:  FTS < 50ms | vector < 100ms | hybrid < 200ms |
                            TF-IDF < 500ms  (isolation p95, censored column)
     E2E-8:                 mix-weighted p95 ≤ 300ms → "achieved";
-                           300–500ms → "cap-dominated"; >500ms+ε → "tail"
+                           300–500ms → "cap-dominated"; >500ms+ε → "tail";
+                           >30% of censored samples capped/degraded (healthy-only
+                           p95 over a minority) → "inconclusive"
     #317 headroom:         300 − full-E2E-uncensored-p95 (elevated column)
 
 Two-column protocol per arm: censored (default 500ms cap — pristine prod
@@ -43,12 +45,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))  # benchmarks pkg
 from benchmarks import bench_core  # noqa: E402
 from benchmarks.bench_core import (  # noqa: E402
     CAP_MS,
+    CLASSIFY_CAP_EPS_MS,
     E2E_TARGET_MS,
     ELEVATED_TIMEOUT_MS,
     PRE_REGISTERED_TARGETS_MS,
     ArmResult,
+    LatencyStats,
     WarmupProtocol,
     e2e_verdict,
+    failure_fraction,
     headroom_ms,
     run_arm,
     strategy_verdict,
@@ -134,7 +139,14 @@ def _query_vec_for(query: str, seed: int, use_model: bool) -> list[float] | None
 
     Real embedding when the model is available; otherwise a deterministic
     pseudo-random 384-dim vector (flagged `synthetic_vectors` in provenance —
-    latency shape only, NOT semantic quality)."""
+    latency shape only, NOT semantic quality).
+
+    Determinism: builtin hash() is salted per-process (PYTHONHASHSEED) so a
+    seeded run would produce different vectors per process → non-reproducible
+    reports. random.Random(str) seeds from SHA-512 of the string bytes
+    (Python 3 seed v2), which is stable across processes for the same
+    seed:query key (measurement-validity: a re-run must measure the same
+    workload)."""
     if use_model:
         try:
             from tortoise.embeddings import EmbeddingModel
@@ -143,15 +155,55 @@ def _query_vec_for(query: str, seed: int, use_model: bool) -> list[float] | None
                 return model.encode([query])[0].tolist()
         except Exception:
             pass
-    rng = random.Random(hash(query) & 0xFFFFFFFF)
+    rng = random.Random(f"{seed}:{query}")
     return [rng.gauss(0.0, 1.0) for _ in range(EMBEDDING_DIM)]
 
 
+def _is_special_query(q: dict) -> bool:
+    """Special queries that MUST be measured: no-match degrade triggers and
+    kind-bearing / kind-only structural queries (query_mix.json q049-q056).
+    They are the tail-of-mix cases the latency distribution must see."""
+    return (
+        q.get("expect") in ("no-match-degrade", "structural")
+        or q.get("kind") is not None
+    )
+
+
 def _roundrobin(items: list[dict], n: int) -> list[dict]:
-    """Cycle the query list to produce exactly n mix-weighted picks."""
+    """Cycle the query list to produce exactly n mix-weighted picks.
+
+    Measurement-validity contract: when n < len(items) the special queries
+    (no-match q055/q056, kind-bearing q049-q052, kind-only structural
+    q053/q054) are guaranteed inclusion and spread evenly across the picks —
+    otherwise default samples=50 < 56 queries would never measure the
+    degrade/structural tail and the mix-weighted p95 would be computed over
+    the first n queries only. Even spread also keeps the specials inside the
+    measured window after warmup consumes the front of the cycle."""
     if not items:
         return []
-    return [items[i % len(items)] for i in range(n)]
+    if len(items) <= n:
+        return [items[i % len(items)] for i in range(n)]
+    special = [q for q in items if _is_special_query(q)]
+    if not special:
+        return [items[i % len(items)] for i in range(n)]
+    if len(special) >= n:
+        # n too small to fit every special once — cycle specials so no single
+        # special type is systematically excluded.
+        return [special[i % len(special)] for i in range(n)]
+    regular = [q for q in items if not _is_special_query(q)]
+    # Evenly spread the specials across the n slots (integer positions are
+    # strictly increasing when n >= len(special), so every special is placed).
+    special_positions = {i * n // len(special) for i in range(len(special))}
+    picks: list[dict] = []
+    si = ri = 0
+    for i in range(n):
+        if i in special_positions:
+            picks.append(special[si])
+            si += 1
+        else:
+            picks.append(regular[ri % len(regular)])
+            ri += 1
+    return picks
 
 
 def _make_arm(arm_name: str, ctx: dict):
@@ -161,10 +213,10 @@ def _make_arm(arm_name: str, ctx: dict):
     tfidf_points = ctx["tfidf_points"]
     precomputed = ctx["precomputed"]
 
-    def _vec(q: str):
-        if q not in precomputed:
-            precomputed[q] = _query_vec_for(q, ctx["seed"], ctx["use_model"])
-        return precomputed[q]
+    def _vec(q: str) -> list[float] | None:
+        # Vectors are precomputed for the FULL mix before any arm runs
+        # (see _run_with_sdk) — never embed inside the measured window.
+        return precomputed.get(q)
 
     def fn(timeout_ms: float, qi: dict):
         q, kind = qi.get("query"), qi.get("kind")
@@ -237,8 +289,13 @@ def _breaker_is_open(name: str) -> bool:
 def _run_column(
     arm_name: str, fn, picks: list[dict], timeout_ms: float, args,
     breaker_names: list[str] | None,
+    classify_eps_ms: float = CLASSIFY_CAP_EPS_MS,
 ) -> ArmResult:
-    """One two-column leg: warmup + `samples` measured picks (round-robin)."""
+    """One two-column leg: warmup + `samples` measured picks (round-robin).
+
+    classify_eps_ms: cap-boundary tolerance for sample classification — 0.0
+    for arms with no enforced timeout (tfidf fallback) so a genuine completion
+    near the cap stays healthy."""
     from tortoise.search_engine import reset_circuit_breakers
 
     def reset():
@@ -261,6 +318,7 @@ def _run_column(
         breaker_names=breaker_names or [],
         reset_breakers=reset if breaker_names else None,
         breaker_is_open=_breaker_is_open if breaker_names else None,
+        classify_eps_ms=classify_eps_ms,
     )
 
 
@@ -280,12 +338,37 @@ def _arm_dict(arm: ArmResult, target_ms: float | None) -> dict:
     return d
 
 
+def _invalidated_arm(name: str, timeout_ms: float, samples: int, reason: str) -> ArmResult:
+    """Fabricate an INVALIDATED arm result (environmental failure — the run is
+    not comparable). Used when the DB pre-flight fails before any measurement."""
+    return ArmResult(
+        name=name, timeout_ms=timeout_ms, samples_requested=samples,
+        stats=LatencyStats(), warmup_iters=0,
+        invalidated=True, invalidated_reason=reason,
+    )
+
+
 def _e2e_report(censored: ArmResult, elevated: ArmResult) -> dict:
+    if censored.invalidated or elevated.invalidated:
+        reason = censored.invalidated_reason or elevated.invalidated_reason
+        return {
+            "target_ms": E2E_TARGET_MS,
+            "verdict": "INVALIDATED",
+            "invalidated_reason": reason,
+            "censored_p95_ms": round(censored.stats.p95_ms, 2),
+            "censored_failure_fraction": round(failure_fraction(censored.stats), 3),
+            "censored": censored.to_dict(),
+            "elevated_p95_ms": round(elevated.stats.p95_ms, 2),
+            "elevated": elevated.to_dict(),
+            "headroom_ms_317": round(headroom_ms(elevated.stats.p95_ms), 2),
+        }
     p95 = censored.stats.p95_ms
+    frac = failure_fraction(censored.stats)
     return {
         "target_ms": E2E_TARGET_MS,
-        "verdict": e2e_verdict(p95),
+        "verdict": e2e_verdict(p95, frac),
         "censored_p95_ms": round(p95, 2),
+        "censored_failure_fraction": round(frac, 3),
         "censored": censored.to_dict(),
         "elevated_p95_ms": round(elevated.stats.p95_ms, 2),
         "elevated": elevated.to_dict(),
@@ -323,6 +406,10 @@ def _markdown_table(report: dict) -> str:
 
 
 def _print_arm_row(arm_name: str, censored: ArmResult, elevated: ArmResult) -> None:
+    if censored.invalidated or elevated.invalidated:
+        reason = censored.invalidated_reason or elevated.invalidated_reason
+        print(f"[{arm_name:6s}] INVALIDATED — {reason}")
+        return
     target = PRE_REGISTERED_TARGETS_MS[arm_name]
     v = "INVALIDATED" if censored.invalidated else (
         "DEGRADED-FAST" if censored.degraded_fast
@@ -337,7 +424,11 @@ def _print_arm_row(arm_name: str, censored: ArmResult, elevated: ArmResult) -> N
 
 
 def _print_e2e_row(censored: ArmResult, elevated: ArmResult) -> None:
-    v = e2e_verdict(censored.stats.p95_ms)
+    if censored.invalidated or elevated.invalidated:
+        reason = censored.invalidated_reason or elevated.invalidated_reason
+        print(f"[e2e    ] INVALIDATED — {reason}")
+        return
+    v = e2e_verdict(censored.stats.p95_ms, failure_fraction(censored.stats))
     h = headroom_ms(elevated.stats.p95_ms)
     print(
         f"[e2e    ] censored p50={censored.stats.p50_ms:7.2f}ms "
@@ -439,14 +530,38 @@ def _run_with_sdk(args, sdk) -> dict:
         print(f"[tfidf] corpus snapshot {len(tfidf_points)} docs "
               f"(sklearn={'yes' if tfidf_available else 'NO'})")
 
-    # 5. Arms.
+    # 5. Precompute query vectors for the FULL mix, OUTSIDE the measured
+    # window: embedding a query lazily inside fn() would be measured latency
+    # (docstring contract in _query_vec_for) and would re-embed per column.
+    precomputed: dict[str, list[float] | None] = {}
+    for qi in all_queries:
+        q = qi.get("query")
+        if q:
+            precomputed[q] = _query_vec_for(q, args.seed, use_model)
+    if not args.quiet:
+        print(f"[vec] precomputed {len(precomputed)} query vectors (model={use_model})")
+
+    # Pre-flight the DB connection BEFORE any arm: the strategy runners
+    # swallow driver/connection exceptions internally and return [] (degraded),
+    # so a dead/unreachable store would masquerade as DEGRADED-FAST latency
+    # instead of an environmental failure. One trivial query proves reachability;
+    # on failure every arm is INVALIDATED (not comparable).
+    preflight_reason: str | None = None
+    try:
+        proj.g.query("RETURN 1").result_set
+    except Exception as e:  # noqa: BLE001
+        preflight_reason = f"DB connection pre-flight failed: {e}"
+        if not args.quiet:
+            print(f"[preflight] {preflight_reason} — invalidating all arms")
+
+    # 6. Arms.
     ctx = {
         "graph": proj.g,
         "is_embedded": is_embedded,
         "tfidf_points": tfidf_points,
         "seed": args.seed,
         "use_model": use_model,
-        "precomputed": {},
+        "precomputed": precomputed,
     }
     reports: dict[str, dict] = {}
     cold_start: dict[str, float] = {}
@@ -461,13 +576,28 @@ def _run_with_sdk(args, sdk) -> dict:
         picks = _roundrobin(arm_qs, args.samples)
         bnames = breaker_names.get(arm_name)
 
+        if preflight_reason is not None:
+            censored = _invalidated_arm(f"{arm_name}:censored", CAP_MS, args.samples, preflight_reason)
+            elevated = _invalidated_arm(f"{arm_name}:elevated", ELEVATED_TIMEOUT_MS, args.samples, preflight_reason)
+            reports[arm_name] = {
+                "target_ms": PRE_REGISTERED_TARGETS_MS[arm_name],
+                "censored": _arm_dict(censored, PRE_REGISTERED_TARGETS_MS[arm_name]),
+                "elevated": _arm_dict(elevated, None),
+            }
+            if not args.quiet:
+                _print_arm_row(arm_name, censored, elevated)
+            continue
+
         # Cold-start record: first pick pre-warmup (post-boot, post-seed).
         c0 = time.perf_counter()
         fn(CAP_MS, picks[0])
         cold_start[arm_name] = (time.perf_counter() - c0) * 1000
 
-        censored = _run_column(arm_name, fn, picks, CAP_MS, args, bnames)
-        elevated = _run_column(arm_name, fn, picks, ELEVATED_TIMEOUT_MS, args, bnames)
+        # tfidf enforces no timeout — a genuine completion near the cap is
+        # healthy, never cap-truncated (classify_eps_ms=0).
+        eps = 0.0 if arm_name == "tfidf" else CLASSIFY_CAP_EPS_MS
+        censored = _run_column(arm_name, fn, picks, CAP_MS, args, bnames, classify_eps_ms=eps)
+        elevated = _run_column(arm_name, fn, picks, ELEVATED_TIMEOUT_MS, args, bnames, classify_eps_ms=eps)
         reports[arm_name] = {
             "target_ms": PRE_REGISTERED_TARGETS_MS[arm_name],
             "censored": _arm_dict(censored, PRE_REGISTERED_TARGETS_MS[arm_name]),
@@ -485,19 +615,26 @@ def _run_with_sdk(args, sdk) -> dict:
         def e2e_fn(timeout_ms, qi):
             return _sdk_e2e(sdk, qi, timeout_ms if timeout_ms > CAP_MS else None)
 
-        c0 = time.perf_counter()
-        sdk.tortoise_fts_query(query=picks[0].get("query"), kind=picks[0].get("kind"), limit=10)
-        cold_start["e2e"] = (time.perf_counter() - c0) * 1000
+        if preflight_reason is not None:
+            censored = _invalidated_arm("e2e:censored", CAP_MS, args.samples, preflight_reason)
+            elevated = _invalidated_arm("e2e:elevated", ELEVATED_TIMEOUT_MS, args.samples, preflight_reason)
+            reports["e2e"] = _e2e_report(censored, elevated)
+            if not args.quiet:
+                _print_e2e_row(censored, elevated)
+        else:
+            c0 = time.perf_counter()
+            sdk.tortoise_fts_query(query=picks[0].get("query"), kind=picks[0].get("kind"), limit=10)
+            cold_start["e2e"] = (time.perf_counter() - c0) * 1000
 
-        censored = _run_column("e2e", e2e_fn, picks, CAP_MS, args,
-                               ["fts", "vector", "structural"])
-        elevated = _run_column("e2e", e2e_fn, picks, ELEVATED_TIMEOUT_MS, args,
-                               ["fts", "vector", "structural"])
-        reports["e2e"] = _e2e_report(censored, elevated)
-        if not args.quiet:
-            _print_e2e_row(censored, elevated)
+            censored = _run_column("e2e", e2e_fn, picks, CAP_MS, args,
+                                   ["fts", "vector", "structural"])
+            elevated = _run_column("e2e", e2e_fn, picks, ELEVATED_TIMEOUT_MS, args,
+                                   ["fts", "vector", "structural"])
+            reports["e2e"] = _e2e_report(censored, elevated)
+            if not args.quiet:
+                _print_e2e_row(censored, elevated)
 
-    # 6. Assemble.
+    # 7. Assemble.
     extras = {
         "embedding_model": "all-MiniLM-L6-v2" if use_model else "unavailable",
         "synthetic_vectors": not use_model,
@@ -523,7 +660,9 @@ def _run_with_sdk(args, sdk) -> dict:
             "hybrid p95 ≈ max(fts, vector, structural) — strategies run in "
             "PARALLEL under the 500ms collective cap.",
             "E2E verdict band: ≤300ms achieved / 300-500ms cap-dominated / "
-            ">500ms+ε tail (mix-weighted p95, censored column).",
+            ">500ms+ε tail (mix-weighted p95, censored column). When >30% of "
+            "censored samples are capped/degraded the p95 is computed over a "
+            "non-representative minority → inconclusive.",
             "#317 headroom = 300 − full-E2E-uncensored-p95 (elevated column).",
             "Embedded FalkorDBLite numbers are NOT prod-parity (no FTS/HNSW — "
             "numbers can reverse on Docker).",
