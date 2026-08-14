@@ -1584,8 +1584,9 @@ def tortoise_find_cross_lens_candidates(
     NEUTRAL — no op_type hint; the customer agent decides semantics and
     writes operators via the normal API (no in-repo verifier, #438 D7).
     Gated on registered sourceKind (any tier, D3); hard cap 200
-    candidates/cycle (D4). Empty results (not errors) when there is nothing
-    to see (D8). Never mutates the graph.
+    candidates/cycle (D4). top_k is hard-clamped to 100 so an agent cannot
+    inflate the per-cycle recall budget. Empty results (not errors) when
+    there is nothing to see (D8). Never mutates the graph.
     """
     return _safe(_get_team_sdk().get_cross_lens_candidates,
                  threshold=threshold, max_candidates=max_candidates,

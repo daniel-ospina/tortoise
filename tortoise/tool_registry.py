@@ -593,8 +593,9 @@ TOOL_REGISTRY: list[ToolDefinition] = [
                     "(truth|relevance) but stays NEUTRAL — no op_type hint; the "
                     "customer agent decides semantics and writes operators via the "
                     "normal API. Gated on registered sourceKind (any tier, D3); hard "
-                    "cap 200 candidates/cycle (D4). Empty results (not errors) when "
-                    "there is nothing to see (D8).",
+                    "cap 200 candidates/cycle (D4); top_k is hard-clamped to 100 so an "
+                    "agent cannot inflate the per-cycle recall budget. Empty results "
+                    "(not errors) when there is nothing to see (D8).",
         annotations=_ro(),
         http_policy=True,
         sdk_method="get_cross_lens_candidates",

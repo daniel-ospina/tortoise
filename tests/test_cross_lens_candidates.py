@@ -184,7 +184,7 @@ def test_cost_cap_truncated_flag(sdk):
     assert res_small["truncated"] is False
 
 
-def test_top_k_hard_clamp(sdk):
+def test_top_k_hard_clamp(sdk, monkeypatch):
     # conf 75: top_k is hard-clamped to CROSS_LENS_ANN_TOP_K_MAX (100) so an
     # agent cannot inflate the per-cycle recall budget — same D4 hard-cap
     # philosophy as max_candidates.
@@ -197,9 +197,27 @@ def test_top_k_hard_clamp(sdk):
     assert res["truncated"] is True
     res2 = sdk.get_cross_lens_candidates(max_candidates=10_000, top_k=100)
     assert res2["count"] == res["count"]
-    # values at/below the clamp edge are honored, not lowered
+    # values at/below the clamp edge are honored, not lowered: top_k=1 must
+    # shrink the result vs the top_k=100 run (low values flow through
+    # end-to-end — the clamp is a cap, not a floor).
     res3 = sdk.get_cross_lens_candidates(max_candidates=10_000, top_k=1)
-    assert res3["count"] <= 200
+    assert res3["count"] < res["count"]
+    # the limit actually handed to the vector index is the clamped top_k
+    # (+1 for self-exclusion), never the raw agent-supplied value.
+    from tortoise import search_engine
+    from tortoise.sdk import CROSS_LENS_ANN_TOP_K_MAX
+
+    limits: list[int] = []
+    real = search_engine.run_vector_query
+
+    def spy(g, query_vec, limit, is_embedded=True):
+        limits.append(limit)
+        return real(g, query_vec, limit=limit, is_embedded=is_embedded)
+
+    monkeypatch.setattr(search_engine, "run_vector_query", spy)
+    sdk.get_cross_lens_candidates(max_candidates=10_000, top_k=10_000)
+    assert limits, "run_vector_query was never called"
+    assert max(limits) <= CROSS_LENS_ANN_TOP_K_MAX + 1
     # lower bound still validated
     with pytest.raises(ValueError, match="top_k"):
         sdk.get_cross_lens_candidates(top_k=0)
