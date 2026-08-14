@@ -80,8 +80,13 @@ def _full_bundle():
              "sourceKind": "report", "tier": "T1"},
         ],
         "connections": [
-            # Operator edge (reification rule → operator Point)
-            {"ref": "c1", "from": "p1", "to": "p2", "operator": "IMPL"},
+            # Operator edge (reification rule → operator Point). §8 routing
+            # (A3): a PLAIN {operator: IMPL} is operator-LESS; the
+            # explicit-anchor reify:true path creates the operator — this
+            # shared fixture uses reify so the batch_id/operator tests keep
+            # exercising the operator stamping (their intent).
+            {"ref": "c1", "from": "p1", "to": "p2", "operator": "IMPL",
+             "reify": True},
             # Structural edge (stays plain)
             {"ref": "c2", "from": "s1", "to": "p1", "relation": "authoredBy"},
             # Point → Source provenance
@@ -194,7 +199,8 @@ class TestPromotionPolicy:
                 {"ref": "pA", "kind": "claim", "content": "A implies B"},
                 {"ref": "pB", "kind": "claim", "content": "B"},
             ],
-            "connections": [{"from": "pA", "to": "pB", "operator": "IMPL"}],
+            "connections": [{"from": "pA", "to": "pB", "operator": "IMPL",
+                              "reify": True}],
         }
         res = sdk.ingest(bundle)
         pA, pB = res["ids"]["points"]
@@ -210,7 +216,8 @@ class TestPromotionPolicy:
                 {"ref": "pA", "kind": "claim", "content": "A implies B"},
                 {"ref": "pB", "kind": "claim", "content": "B"},
             ],
-            "connections": [{"from": "pA", "to": "pB", "operator": "IMPL"}],
+            "connections": [{"from": "pA", "to": "pB", "operator": "IMPL",
+                              "reify": True}],
         }
         res = sdk.ingest(bundle, promotion_policy="gated")
         pA, pB = res["ids"]["points"]
@@ -245,7 +252,8 @@ class TestPromotionPolicy:
                 {"ref": "pA", "kind": "claim", "content": "A implies B"},
                 {"ref": "pB", "kind": "claim", "content": "B"},
             ],
-            "connections": [{"from": "pA", "to": "pB", "operator": "IMPL"}],
+            "connections": [{"from": "pA", "to": "pB", "operator": "IMPL",
+                              "reify": True}],
         }
         res = sdk.ingest(bundle, granularity="granular", promotion_policy="gated")
         pA, pB = res["ids"]["points"]
@@ -444,7 +452,8 @@ class TestPromotionPolicy:
                 {"ref": "pA", "kind": "claim", "content": "A implies B"},
                 {"ref": "pB", "kind": "claim", "content": "B"},
             ],
-            "connections": [{"from": "pA", "to": "pB", "operator": "IMPL"}],
+            "connections": [{"from": "pA", "to": "pB", "operator": "IMPL",
+                              "reify": True}],
         }
         first = sdk.ingest(bundle)  # gated default
         pA, _ = first["ids"]["points"]
@@ -577,7 +586,8 @@ class TestLocalRefs:
         bundle = {
             "points": [{"ref": "p1", "kind": "claim", "content": "new point"}],
             "connections": [
-                {"from": "p1", "to": existing["id"], "operator": "IMPL"},
+                {"from": "p1", "to": existing["id"], "operator": "IMPL",
+                 "reify": True},
             ],
         }
         res = sdk.ingest(bundle)
@@ -642,12 +652,42 @@ class TestLocalRefs:
 
 class TestReificationRule:
     def test_operator_connection_creates_operator(self, sdk):
+        """§8 routing (A3, plan §5.3 line 513): a PLAIN {operator: IMPL}
+        connection is OPERATOR-LESS — a direct edge, no operator node. The
+        reify:true variant is the explicit-anchor path that creates the
+        operator (asserted separately below)."""
         bundle = {
             "points": [
                 {"ref": "pA", "kind": "claim", "content": "supports"},
                 {"ref": "pB", "kind": "claim", "content": "supported"},
             ],
             "connections": [{"from": "pA", "to": "pB", "operator": "IMPL"}],
+        }
+        res = sdk.ingest(bundle, granularity="granular")
+        # direct edge exists; NO operator node (operator-less per §8)
+        assert _edge_count(sdk, "IMPL") == 1
+        assert _operator_count(sdk, "IMPL") == 0
+        assert _count(
+            sdk, "MATCH (o:Point {is_operator:true}) RETURN count(o)") == 0
+        # the direct-edge conn_result shape (plan §5.5 route matrix, cycle-22)
+        conn_entry = next(e for e in res["results"]
+                          if e["section"] == "connections")
+        result = conn_entry["result"]
+        assert set(result.keys()) == {"direct_edge", "from", "to", "deduped"}
+        assert result["direct_edge"] == "IMPL"
+        assert result["deduped"] is False
+        assert res["created"]["connections"] == 1
+
+    def test_reify_connection_creates_operator(self, sdk):
+        """§8 routing: {operator: IMPL, reify:true} is the EXPLICIT-ANCHOR
+        path — create_operator (the operator node exists)."""
+        bundle = {
+            "points": [
+                {"ref": "pA", "kind": "claim", "content": "supports"},
+                {"ref": "pB", "kind": "claim", "content": "supported"},
+            ],
+            "connections": [{"from": "pA", "to": "pB", "operator": "IMPL",
+                              "reify": True}],
         }
         res = sdk.ingest(bundle)
         assert _operator_count(sdk, "IMPL") == 1
@@ -672,6 +712,9 @@ class TestReificationRule:
         ) == 0
 
     def test_nand_operator_connection(self, sdk):
+        """§8 routing: a plain {operator: NAND} connection is OPERATOR-LESS
+        (direct edge with the CYCLE-25 extraction default — direction-absent
+        NAND = unidirectional on the edge)."""
         bundle = {
             "points": [
                 {"ref": "pA", "kind": "claim", "content": "A"},
@@ -680,9 +723,12 @@ class TestReificationRule:
             "connections": [{"from": "pA", "to": "pB", "operator": "NAND"}],
         }
         res = sdk.ingest(bundle)
-        assert _operator_count(sdk, "NAND") == 1
-        op = sdk.get_point(res["ids"]["connections"][0])
-        assert op["op_type"] == "NAND"
+        assert _edge_count(sdk, "NAND") == 1
+        assert _operator_count(sdk, "NAND") == 0
+        # direction-absent NAND = unidirectional on the edge (extraction default)
+        d = sdk._get_proj().g.query(
+            "MATCH ()-[r:NAND]->() RETURN r.direction").result_set
+        assert d and d[0][0] == "unidirectional"
 
     def test_connection_with_both_relation_and_operator_raises(self, sdk):
         bundle = {
@@ -1028,3 +1074,199 @@ class TestBatchId:
             assert sdk2.ingest(variant)["batch_id"] == bid
         finally:
             sdk2.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# A3 (§5.5, #1053): the operator-dedup richer return + §8 direct-edge routing
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestA3DirectEdgeRouting:
+    """§8 connection-routing (A3): a PLAIN {operator: IMPL|NAND} connection
+    is OPERATOR-LESS — a direct edge with label/direction/batch_id on the
+    edge, no operator node; the reify:true / mitigation paths still create
+    the operator."""
+
+    def test_plain_impl_is_operator_less_direct_edge(self, sdk):
+        bundle = {
+            "points": [
+                {"ref": "pA", "kind": "claim", "content": "A supports B"},
+                {"ref": "pB", "kind": "claim", "content": "B"},
+            ],
+            "connections": [{"from": "pA", "to": "pB", "operator": "IMPL",
+                              "label": "supports"}],
+        }
+        res = sdk.ingest(bundle, granularity="granular", promotion_policy="auto")
+        assert _edge_count(sdk, "IMPL") == 1
+        assert _operator_count(sdk, "IMPL") == 0
+        # label + batch_id on the EDGE (not a node)
+        row = sdk._get_proj().g.query(
+            "MATCH ()-[r:IMPL]->() RETURN r.label, r.batch_id").result_set
+        assert row[0][0] == "supports"
+        assert row[0][1] == res["batch_id"]
+        # direct-edge conn_result shape (plan §5.5 route matrix, cycle-22)
+        conn = next(e for e in res["results"] if e["section"] == "connections")
+        assert set(conn["result"].keys()) == {"direct_edge", "from", "to", "deduped"}
+        assert conn["result"]["deduped"] is False
+        # idempotent re-ingest → deduped, one edge
+        r2 = sdk.ingest(bundle, granularity="granular", promotion_policy="auto")
+        assert _edge_count(sdk, "IMPL") == 1
+        conn2 = next(e for e in r2["results"] if e["section"] == "connections")
+        assert conn2["result"]["deduped"] is True
+
+    def test_plain_nand_direction_default_unidirectional(self, sdk):
+        """CYCLE-25: a direction-absent plain NAND direct edge carries the
+        extraction default 'unidirectional' on the edge."""
+        bundle = {
+            "points": [
+                {"ref": "pA", "kind": "claim", "content": "A"},
+                {"ref": "pB", "kind": "claim", "content": "B"},
+            ],
+            "connections": [{"from": "pA", "to": "pB", "operator": "NAND"}],
+        }
+        sdk.ingest(bundle)
+        row = sdk._get_proj().g.query(
+            "MATCH ()-[r:NAND]->() RETURN r.direction").result_set
+        assert row[0][0] == "unidirectional"
+        assert _operator_count(sdk, "NAND") == 0
+
+
+class TestA3OperatorDedupRicherReturn:
+    """§5.5: _find_operator returns exact-hit | partial-absorb | decline | miss."""
+
+    def test_exact_hit_direction_absent_matches_default(self, sdk):
+        """CYCLE-17/25: a direction-ABSENT IMPL retry matches its own run-1
+        operator (stored 'bidirectional') — exactly-once on the default shape."""
+        bundle = {
+            "points": [
+                {"ref": "pA", "kind": "claim", "content": "A supports B"},
+                {"ref": "pB", "kind": "claim", "content": "B"},
+            ],
+            "connections": [{"from": "pA", "to": "pB", "operator": "IMPL",
+                              "reify": True}],
+        }
+        first = sdk.ingest(bundle)
+        second = sdk.ingest(bundle)
+        assert _operator_count(sdk, "IMPL") == 1
+        assert second["deduped"]["connections"] == 1
+        assert second["ids"]["connections"][0] == first["ids"]["connections"][0]
+
+    def test_direction_absent_nand_matches_stored_unidirectional(self, sdk):
+        """CYCLE-25: a direction-absent NAND retry matches its run-1
+        stored-'unidirectional' operator (exactly-once)."""
+        bundle = {
+            "points": [
+                {"ref": "pA", "kind": "claim", "content": "A"},
+                {"ref": "pB", "kind": "claim", "content": "B"},
+            ],
+            "connections": [{"from": "pA", "to": "pB", "operator": "NAND",
+                              "reify": True}],
+        }
+        first = sdk.ingest(bundle)
+        second = sdk.ingest(bundle)
+        assert _operator_count(sdk, "NAND") == 1
+        assert second["deduped"]["connections"] == 1
+
+    def test_partial_absorb_completes_input_set(self, sdk):
+        """§5.5 partial-absorb: a NULL-status partial operator on a PROPER
+        SUBSET absorbs the retry — completes the written set on the REAL
+        operator (is_operator:true, per-input multiplicity 1), one node per
+        id, operator_absorb_completed warning."""
+        pa = sdk.create_point("claim", "A")["id"]
+        pb = sdk.create_point("claim", "B")["id"]
+        pc = sdk.create_point("claim", "C")["id"]
+        partial = sdk.create_operator("IMPL", pa, [pc], promote_source=False)
+        bundle = {
+            "points": [], "entities": [], "sources": [],
+            "connections": [{"from": pa, "to": [pb, pc], "operator": "IMPL",
+                              "reify": True}],
+        }
+        res = sdk.ingest(bundle, promotion_policy="auto")
+        assert _operator_count(sdk, "IMPL") == 1
+        assert res["deduped"]["connections"] == 1
+        assert res["ids"]["connections"][0] == partial["id"]
+        # EXACTLY ONE node per id (no duplicate from the edge-completion MERGE)
+        for pid in (partial["id"], pa, pb, pc):
+            assert _count(sdk, "MATCH (n:Point {id:$p}) RETURN count(n)",
+                          {"p": pid}) == 1, f"duplicate node for {pid}"
+        # the REAL operator (is_operator:true) has the full set, multiplicity 1
+        n = _count(
+            sdk,
+            "MATCH (o:Point {is_operator:true, id:$p})-[:IMPL]->() "
+            "RETURN count(*)",
+            {"p": partial["id"]},
+        )
+        assert n == 3  # [A, B, C] completed
+        assert any("operator_absorb_completed" in w for w in res["warnings"])
+
+    def test_label_dropped_resubmit_does_not_absorb_labeled(self, sdk):
+        """CYCLE-14/15: a label-ABSENT retry must NOT absorb a LABELED
+        operator (the cross-absorption semantic-theft class) — strict miss →
+        a fresh operator + partial_operator_residue on the old one."""
+        pa = sdk.create_point("claim", "A")["id"]
+        pb = sdk.create_point("claim", "B")["id"]
+        sdk.create_operator("IMPL", pa, [pb], label="L", promote_source=False)
+        bundle = {
+            "points": [], "entities": [], "sources": [],
+            "connections": [{"from": pa, "to": pb, "operator": "IMPL",
+                              "reify": True}],
+        }
+        res = sdk.ingest(bundle)
+        assert _operator_count(sdk, "IMPL") == 2  # strict miss → new operator
+        # the labeled partial stays as residue (never absorbed by a no-label
+        # retry — the semantic-theft class stays closed)
+        labeled = sdk._get_proj().g.query(
+            "MATCH (o:Point {is_operator:true, label:'L'}) RETURN count(o)"
+        ).result_set[0][0]
+        assert labeled == 1
+
+    def test_decline_on_two_candidates(self, sdk):
+        """§5.5: TWO+ qualifying partials → decline + partial_operator_residue
+        warning; the retry creates a fresh complete operator."""
+        pa = sdk.create_point("claim", "A")["id"]
+        pb = sdk.create_point("claim", "B")["id"]
+        pc = sdk.create_point("claim", "C")["id"]
+        sdk.create_operator("IMPL", pa, [pc], promote_source=False)
+        sdk.create_operator("IMPL", pa, [pb], promote_source=False)
+        bundle = {
+            "points": [], "entities": [], "sources": [],
+            "connections": [{"from": pa, "to": [pb, pc], "operator": "IMPL",
+                              "reify": True}],
+        }
+        res = sdk.ingest(bundle)
+        assert _operator_count(sdk, "IMPL") == 3  # 2 residue + 1 fresh
+        assert res["created"]["connections"] == 1
+        assert any("partial_operator_residue" in w for w in res["warnings"])
+
+    def test_rebuild_survives_absorbed_operator(self, sdk, tmp_path):
+        """§5.5 cycle-13: the absorbed operator survives post-rebuild at the
+        FULL input set, per-input multiplicity 1 (the #548 graph-only-point
+        snapshot captures it from its edges), count()==1 per id."""
+        pa = sdk.create_point("claim", "A")["id"]
+        pb = sdk.create_point("claim", "B")["id"]
+        pc = sdk.create_point("claim", "C")["id"]
+        partial = sdk.create_operator("IMPL", pa, [pc], promote_source=False)
+        bundle = {
+            "points": [], "entities": [], "sources": [],
+            "connections": [{"from": pa, "to": [pb, pc], "operator": "IMPL",
+                              "reify": True}],
+        }
+        sdk.ingest(bundle)
+        # pre-rebuild: the real operator at the full set
+        n = _count(sdk,
+                   "MATCH (o:Point {is_operator:true, id:$p})-[:IMPL]->() "
+                   "RETURN count(*)", {"p": partial["id"]})
+        assert n == 3
+        # write a journal + rebuild (the #548 snapshot synthesizes OperatorAdded
+        # for graph-only operator points from their edges)
+        events_dir = tmp_path / "events"
+        events_dir.mkdir()
+        log_path = str(events_dir / "events.jsonl")
+        sdk._event_log_path = log_path
+        sdk._get_proj().rebuild_all(str(events_dir))
+        # post-rebuild: the operator survives at the full input set
+        assert _count(sdk, "MATCH (n:Point {id:$p}) RETURN count(n)",
+                      {"p": partial["id"]}) == 1
+        n2 = _count(sdk,
+                    "MATCH (o:Point {is_operator:true, id:$p})-[:IMPL]->() "
+                    "RETURN count(*)", {"p": partial["id"]})
+        assert n2 == 3
