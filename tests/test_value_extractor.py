@@ -433,3 +433,25 @@ class TestModelAdapterBounds:
         assert body["max_tokens"] == 4000
         assert body["temperature"] == 0.0
         assert body["model"] == "deepseek/deepseek-v4-flash"
+
+
+class TestR1R3Discriminator:
+    """T16 (#1272): the SUMMARY_SYSTEM prompt must carry the R1∧R3 decision
+    gate (commissive ∧ product-knowledge-bearing) with the "should" and
+    process-commitment exclusions — the discriminator was absent before."""
+
+    def test_summary_system_has_r1r3_gate(self):
+        from tortoise.value_extractor import SUMMARY_SYSTEM
+        assert "R1∧R3" in SUMMARY_SYSTEM or "DECISION GATE" in SUMMARY_SYSTEM
+        assert "product-knowledge-bearing" in SUMMARY_SYSTEM
+        assert "should" in SUMMARY_SYSTEM and "RECOMMENDATION" in SUMMARY_SYSTEM
+        assert "Process/work commitments" in SUMMARY_SYSTEM
+        assert "GitHub ingestion" in SUMMARY_SYSTEM
+
+    def test_r1r3_present_in_user_prompt_flow(self):
+        # The gate text is part of the system prompt used for every session.
+        from tortoise.value_extractor import SUMMARY_SYSTEM, _user_prompt
+        joined = SUMMARY_SYSTEM
+        assert "COMMISSIVE" in joined or "commissive" in joined
+        assert "agentivity" in joined
+        assert "epistemic weight" in joined

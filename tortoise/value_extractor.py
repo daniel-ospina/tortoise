@@ -113,6 +113,22 @@ dynamics, with the WHY + FOR/AGAINST + MITIGATIONS, in posterity wording.
 ISSUES = created/completed referenced (precise lifecycle syncs from GitHub).
 LOGIC = the durable beliefs/knowledge with their sources (edu_refs as
 supporting evidence). Empty sections are fine - extract-nothing is valid.
+
+DECISION GATE (R1∧R3 — the real discriminator): a DECISION is a COMMISSIVE
+(commits to a future action: decided / chose / agreed to / we're going with /
+the ruling is / default to / ship X first / reject Y) AND product-knowledge-
+bearing (asserts something durable about the domain: a choice of approach, a
+ruling, a commitment with epistemic weight). Exclusions:
+- "should" is a RECOMMENDATION, never a decision (measured 44× false positive).
+- "will" is ambiguous (prediction vs commitment) — discriminate on subject
+  agentivity + product-knowledge-bearing.
+- Process/work commitments ("I'll fix both now", "let me verify X", "I'll
+  commit after review") are NOT decisions — they are execution narration;
+  drop them (they are the S0 noise the value filter removes).
+- Commit/push/PR lifecycle events are NOT decisions — they are Events better
+  derived from GitHub ingestion; do not emit them as decisions.
+If a statement is durable domain knowledge ("X implies Y", "Z costs W", "the
+cause is Q"), put it in LOGIC, not DECISIONS.
 Output ONLY the JSON object."""
 
 
