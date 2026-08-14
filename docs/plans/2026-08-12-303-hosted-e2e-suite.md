@@ -152,7 +152,7 @@ Boot ~4-8s + JWKS mock <1s + ~40 tests x sub-second HTTP + E2E-12 second server 
 
 ### Task 6: Cases E2E-10-D..E2E-12-D (sessions, MCP, selfhost migration)
 
-**Intent:** agent session capture with regex extraction; MCP Streamable-HTTP handshake + tool call (SSE framing); selfhost→hosted migration parity with a second real server.
+**Intent:** agent session capture with LLM mock-mode extraction; MCP Streamable-HTTP handshake + tool call (SSE framing); selfhost→hosted migration parity with a second real server.
 **Acceptance:** `test_10_session_capture.py`, `test_11_mcp_connect.py`, `test_12_selfhost_migration.py` pass; MCP tools/call creates a Point readable via REST; selfhost daemon boots on its own DB path with static key auth; migration asserts query parity; cross-surface keys rejected.
 **Files:**
 - Create: `tests/e2e/hosted/test_10_session_capture.py`, `test_11_mcp_connect.py`, `test_12_selfhost_migration.py`

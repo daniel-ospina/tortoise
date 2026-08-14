@@ -631,14 +631,14 @@ names at implementation against `sdk._link_source`/EventAPI (slice 5).
 
 - **Local:** pip SDK + CLI/extension on the user's machine; BYOK provider key from user env/config; extraction never leaves the machine; the derived commit is the only network egress (plus telemetry).
 - **Hosted:** FastAPI (existing hosted_api.py) behind existing auth (tt_ keys, `get_current_team`); graph = existing FalkorDB tenant namespace; no new services. The `:CommitRecord` label is the ONLY new graph artifact (replay/adjudication state, §4.1). Hold queue = response semantics + Session counters (client-side items, PL3).
-- **Consumers of the commit endpoint (enumerated):** SDK `commit_session` (dev machines, CI), capture extension cloud path; **self-hosted deployments** = run `hosted_api` locally (the endpoint is part of the existing selfhost surface) — there is NO local-graph-write fallback for derived commits in v1; `capture_session` (regex path) remains the local-only capture for self-hosts without the endpoint.
+- **Consumers of the commit endpoint (enumerated):** SDK `commit_session` (dev machines, CI), capture extension cloud path; **self-hosted deployments** = run `hosted_api` locally (the endpoint is part of the existing selfhost surface) — there is NO local-graph-write fallback for derived commits in v1; `capture_session` remains the local-only capture for self-hosts without the endpoint (extraction is LLM-default; the regex path was removed as a product path by #822).
 - **Eval:** standalone scripts + GitHub Actions CI (Layer-1 blockers + watch-gate reports + minimum-signal assertions); gold set lives in the repo. **Drift monitor:** a small scheduled job consumes commit-endpoint telemetry (the telemetry block lands in the existing telemetry/analytics store) and runs the rolling N=20 live-floor watch → alert on <90% (R8 build order item 5; slice 8).
 
 ### 5.4 Failure modes & mitigations
 
 | Failure | Detection | Mitigation |
 | --- | --- | --- |
-| LLM provider unavailable (local) | mode check | `required` → fail-closed; `auto`/`regex` → regex baseline |
+| LLM provider unavailable (local) | provider call error | fail-closed local error, NO regex fallback (LLM-default only, #822) |
 | keep-ratio >40% (S1 over-keeps) | telemetry alarm | fail-closed to empty + alarm; calibration (W-5) |
 | Block-rate >15% (vocab misconfigured) | violation-event stats | fail-closed to empty + alarm |
 | LLM nondeterminism | Layer-1 vs Layer-2 split | deterministic schema gates (CI blockers) + statistical watch-gates (eval) |
@@ -903,8 +903,9 @@ kappa(a_labels: list[Label], b_labels: list[Label]) -> float
   telemetry + change detection. **L2 reconciliation triggers ONLY when the canonical
   hash changes (content change) — never on version alone** (a version-bump-only re-send
   is an L1 replay, DE2E-7).
-- The existing POST /v1/sessions (regex capture) stays unchanged for the non-BYOK
-  fallback path; the new endpoint is additive.
+- The existing POST /v1/sessions stays unchanged (LLM-default capture; the regex mode knob was
+  REMOVED as a product path by #822 — `TORTOISE_SESSION_LLM_MOCK=1` is the test seam); the new
+  endpoint is additive.
 
 ---
 
@@ -1193,9 +1194,9 @@ MITIGATES edge-targeting).
 | R-8 | Privacy regression (content leaks into telemetry/provenance paths) | Low | Trust, legal | Byte-level tests (DE2E-10); telemetry schema test (no text fields); basename-only paths; secret-scan | 5, 7, 9 |
 | R-9 | Held items lost client-side (never re-submitted) | Med | Value loss | Never dropped by design; `held[]` in every response; SDK hold_queue helper; no server GC (documented) | 5, 7 |
 | R-10 | Enforcement ladder frustrates agents despite "soft" promise | Low-Med | DX | Item-level drops only (E9 the sole run-level class); WARN/retry dominant (7 of 10 classes); block-rate fail-closed = misconfiguration signal, not agent punishment | 6 |
-| R-11 | Self-host users have no derived-commit path | Med | Adoption | Documented: run hosted_api locally (endpoint is part of the selfhost surface); capture_session regex path unchanged as the fallback | 7 |
+| R-11 | Self-host users have no derived-commit path | Med | Adoption | Documented: run hosted_api locally (endpoint is part of the selfhost surface); capture_session local capture unchanged (LLM-default, no regex path — #822) | 7 |
 | R-12 | Pack v3 validation too strict/too loose (manifest authoring burden) | Med | Adoption | Backward compatible by construction (verified against the current registry); template gains commented sections; calibration loop improves descriptions | 4 |
-| R-13 | **Rate limits / provider unavailability** — BYOK LLM provider 429/timeout; endpoint 429 at 100 req/min/key (catch-up commits after offline capture + hold re-submissions can exceed it) | Med | DX, capture failure | Mode-dependent fail-closed vs regex baseline; bounded retries (≤5/session) on the cheap model; replay-safe retries via client_commit_id; **RESOLVED at plan: the commit endpoint gets a dedicated higher bucket (300 req/min/key, decided + tested in slice 5)** | 5, 6 |
+| R-13 | **Rate limits / provider unavailability** — BYOK LLM provider 429/timeout; endpoint 429 at 100 req/min/key (catch-up commits after offline capture + hold re-submissions can exceed it) | Med | DX, capture failure | Fail-closed on missing provider key, NO regex baseline (#822); bounded retries (≤5/session) on the cheap model; replay-safe retries via client_commit_id; **RESOLVED at plan: the commit endpoint gets a dedicated higher bucket (300 req/min/key, decided + tested in slice 5)** | 5, 6 |
 | R-14 | **L2 re-capture churn** — after an extractor/pack/calibration bump, re-extraction drifts LLM output → mass supersede + full delta counts as net-new → cumulative budget burns → legitimate re-captures hit the 50 ceiling (402) | Med-High (once the calibration loop is live) | Value loss via 402 | **Supersede-only deltas do NOT increment net-new** (a new point superseding an existing same-session point is exempt — authoritative budget block §6.1); documented generation-depth cap for supersession chains; DE2E-7 bump-then-re-capture fixture | 5, 6, 8 |
 | R-15 | **Extractor ships before any real-model quality measurement** — Layer-1 fixtures are MockModel-only; the first P/R measurement (slice-8 gold set) lands after slice 7 exposes real users to the pipeline | Med-High | Quality, broken Layer-1 contracts in production | **Slice-6 acceptance: run the 2-window rubric material through the NEW S0-S6 pipeline with a REAL model (extends the existing judge harness — zero new tooling); gate slice 7 on that smoke** | 6, 8 |
 | R-16 | **Cross-team pack content changes break the shared registry/brief** — dev/marketing manifest PRs (slice 4) resolve cross-pack post-load; strict load-time validation makes one team's manifest a single point of failure for the extractor/enforcer/endpoint vocab | Med | Brief availability, CI | **Per-pack load isolation (fail the pack, not the registry)** + a whole-registry compile CI job on every pack PR (extends existing registry tests) | 4 |
