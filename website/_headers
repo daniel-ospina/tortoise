@@ -1,0 +1,5 @@
+# Security headers — premiselabs.co + tortoise.premiselabs.co (Cloudflare Pages, premise-labs project)
+# HSTS (#1003 §1): matches the API's value (tortoise/hosted_api.py) — max-age=31536000; includeSubDomains.
+# No `preload` yet — soak first, per #1003 §1.
+/*
+  Strict-Transport-Security: max-age=31536000; includeSubDomains
