@@ -20,7 +20,6 @@ the file/markers are absent so CI stays green until #1057 lands).
 """
 from __future__ import annotations
 
-import json
 import os
 import sys
 import tempfile
@@ -95,6 +94,12 @@ def test_sdk_success_response_key_set_equal(sdk):
         assert res["granularity"] == granularity
         assert len(res["batch_id"]) == 26
         assert isinstance(res["warnings"], list)
+        # E2E-6.2 closed-set enforcement: every emitted warning's key-prefix
+        # is in the ELEVEN-key enumeration (a key outside it is a divergence)
+        for w in res["warnings"]:
+            assert isinstance(w, str), f"warning entry must be a key-prefixed string: {w!r}"
+            assert w.split(":", 1)[0] in ELEVEN_WARNING_KEYS, \
+                f"warning key outside the closed enumeration: {w!r}"
 
 
 def test_mcp_success_response_key_set_equal(sdk, monkeypatch):
@@ -149,6 +154,7 @@ def test_failure_response_shape_no_results_key(sdk, monkeypatch):
     mcp_mod._get_team_sdk = lambda: sdk
     try:
         res = mcp_mod.tortoise_ingest(bundle=bad, granularity="granular")
+        assert "error" in res, "failure response must carry the error key"
         assert res["code"] == mcp_mod.ERR_BUNDLE_INVALID
         assert "violations" in res and res["violations"]
         assert "results" not in res, "failure shape must have no results key"
@@ -191,6 +197,11 @@ def test_doc_carries_canonical_enumeration_anchors():
     for key in sorted(ELEVEN_WARNING_KEYS):
         assert f"`{key}`" in doc or key in doc, \
             f"§3.2 warnings table missing key {key!r}"
+    # failure-half conformance: the doc carries the {error, code, violations}
+    # failure example (plan A12(a) requires success + failure examples)
+    assert "{error, code" in doc, "§5 failure example missing {error, code..."
+    assert "violations" in doc, "§5 failure example missing violations"
+    assert "ERR_BUNDLE_INVALID" in doc, "§5 failure example missing the code"
 
 
 # ── indicator 2: skill markers (J8 — skip until the section lands) ───
@@ -213,11 +224,14 @@ def test_skill_markers_contract():
     if text is None or "promotion_policy" not in text:
         pytest.skip("J8 skill section (#1057) not yet landed — markers "
                     "absent/untracked")
+    assert "bundle" in text, "bundle-shape marker"
     assert "granularity" in text
     assert "gated" in text
     assert "promotion_policy" in text
     assert "tortoise_update_point" in text, "interim promotion entry"
     assert "resubmit" in text.lower() or "idempotent" in text.lower()
     assert "retry" in text.lower()
+    assert "decision" in text.lower(), "decision-table marker"
+    assert "migration" in text.lower(), "§6.6 migration-line marker"
     for key in sorted(ELEVEN_WARNING_KEYS):
         assert key in text, f"skill warnings section missing {key!r}"

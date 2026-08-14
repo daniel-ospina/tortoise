@@ -560,12 +560,11 @@ class TestGranularResultsKeyForKey:
         assert res["created"]["connections"] == 2
 
     def test_direct_edge_route_shipped_shape(self):
-        # SHIPPED-SHAPE DELTA (plan-vs-code): the §5.5 route matrix pins the
-        # DIRECT-EDGE conn_result as {"direct_edge", "from", "to",
-        # "deduped"}, but (a) the ingest-level direct-edge routing is
-        # A3-owned (#1053 OPEN — shipped ingest routes plain IMPL/NAND
-        # operator-keyed connections through create_operator, the operator
-        # route), and (b) the SHIPPED create_direct_edge writer returns
+        # SHIPPED-SHAPE: the §5.5 route matrix pins the DIRECT-EDGE
+        # conn_result as {"direct_edge", "from", "to", "deduped"};
+        # post-A3 #1053 the ingest routing sends plain IMPL/NAND operator-
+        # keyed connections through create_direct_edge (the direct-edge
+        # route) — the SHIPPED create_direct_edge writer returns
         # {"direct_edge", "from", "to", "created", "deduped"} — the plan's
         # 4-key pin omits the shipped `created` key. Asserted here against
         # the SHIPPED writer shape; the ingest-level conn_result lands with

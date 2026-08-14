@@ -211,7 +211,7 @@ policy):
 | `deduped` | `{points, entities, sources, connections}` | Count of items that matched an existing node and were adopted instead. |
 | `ids` | `{points[], entities[], sources[], connections[], refs{}}` | The ids/urls the bundle produced or matched, plus the ref table. |
 | `nudges` | `[]` | Advisory only, never enforced. |
-| `warnings` | `[{key, ...}…]` | Divergences the engine noticed (never fatal). **planned** (this release; closed-set enumeration below). |
+| `warnings` | `["<key>:<ids>:<detail>", …]` | Divergences the engine noticed (never fatal). Each entry is a key-prefixed string — the key is the §3.2 closed-set token, then the affected ids, then any context (colon-delimited). A warning key outside the §3.2 table is a divergence. |
 | `results` | per-item array | Granular mode only. |
 
 `ids["connections"]` descriptor shapes:
