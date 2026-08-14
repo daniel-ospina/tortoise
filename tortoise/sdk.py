@@ -6485,7 +6485,14 @@ class TortoiseSDK:
         # stamp_dreamed_at=False — a READ never moves the freshness signal
         # that the 903-C4 stale-first scheduler ranks on.
         if factors is None and anchors is None and self._dirty_roots:
-            self.dream(dirty_only=True, stamp_dreamed_at=False)
+            # #1157/#1210: propagate the caller's calibration posture — an
+            # explicit require_calibration=False on this compute_confidence
+            # must NOT be silently re-gated by the internal lazy-consistency
+            # dream (same contract as get_confidence's auto-dream at line
+            # 6632; the outer surface already ran _ensure_calibrated when
+            # the posture is True).
+            self.dream(dirty_only=True, stamp_dreamed_at=False,
+                       require_calibration=require_calibration)
             # Re-extract factors after dreaming (graph may have changed).
             factors_data, _ = proj.extract_svbp_factors()
             operator_ids = [f[0] for f in factors_data]
@@ -6511,7 +6518,10 @@ class TortoiseSDK:
             # dirty roots reachable only through legacy op_type-only operators
             # (the dream selector is {is_operator:true}-only; _affected_claims
             # is op_type-aware).
-            self.dream(dirty_only=True)
+            # #1157/#1210: propagate the caller's calibration posture (same
+            # contract as the line-6488 auto-dream and get_confidence).
+            self.dream(dirty_only=True,
+                       require_calibration=require_calibration)
             iterations, converged = ep.run(roots, max_hops=None,
                                            evidence=run_evidence)
             if not ep._last_affected and not ep._last_truncated:
