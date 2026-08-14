@@ -242,7 +242,11 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_compute_confidence",
         description="Compute confidence via EP belief propagation. "
-                    "Returns {iterations, converged, confidences}.",
+                    "Returns {iterations, converged, confidences}. "
+                    "Calibration is required by default (#344): raises "
+                    "CalibrationError on uncalibrated graphs. Pass "
+                    "require_calibration=False to run on topology alone "
+                    "(explicit opt-out).",
         annotations=_ro(),
         http_policy=True,
         sdk_method="compute_confidence",

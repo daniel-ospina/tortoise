@@ -2,6 +2,7 @@
 Auto-capture findings during a session, auto-retrieve on next session start.
 Zero config. The agent IS the interface."""
 from tortoise.sdk import TortoiseSDK
+from tortoise.exceptions import CalibrationError
 from datetime import datetime
 
 class SessionContinuity:
@@ -53,7 +54,15 @@ class SessionContinuity:
             try:
                 result = self.sdk.compute_confidence()
                 print(f"Confidence updated: {result.get('iterations', '?')} iterations")
-            except:
+            except CalibrationError as e:
+                # #344: never swallow calibration failures — uncalibrated EP
+                # silently running on topology alone is the exact #7478
+                # degenerate case. Fail noisily with actionable guidance.
+                print(f"\n⚠ Calibration required — confidence NOT computed: {e}")
+                print("  Run calibrate_summary() to calibrate session findings "
+                      "(set_point_baseline() / credibility on recreate), or pass "
+                      "require_calibration=False to explicitly opt out.")
+            except Exception:
                 pass
         
         # Report what was captured
