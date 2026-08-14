@@ -482,10 +482,16 @@ def resolve_api_key(cp, token: str) -> dict | None:
         _logger.warning(
             "api_keys read failed — retrying without additive 'enabled'; is "
             "migration 20260813000005 applied? (%s)", e)
-        rows = cp.query(
-            "api_keys", select=_API_KEY_BASE_SELECT,
-            filters=[("lookup_hash", "eq", h)],
-        )
+        try:
+            rows = cp.query(
+                "api_keys", select=_API_KEY_BASE_SELECT,
+                filters=[("lookup_hash", "eq", h)],
+            )
+        except Exception as e2:
+            _logger.warning(
+                "api_keys base-only read failed — fail-closed (missing base "
+                "column or control-plane outage): %s", e2)
+            raise
     if rows:
         row = rows[0]
         if row.get("revoked_at") is not None:
