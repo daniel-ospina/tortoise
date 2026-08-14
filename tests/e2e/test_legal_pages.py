@@ -1188,7 +1188,7 @@ def test_security_soc2_roadmap_negation_safe(page: Page) -> None:
     assert "certified" not in remainder, \
         "SOC 2 overclaim: 'certified' appears outside the 'not soc 2 certified' negation"
     for phrase in ("we are soc 2 certified", "soc 2 type i", "soc 2 type ii",
-                   "attestation", "audited"):
+                   "attestation", "certification", "compliant"):
         assert phrase not in body, f"SOC 2 overclaim present on /security: {phrase!r}"
 
     # Roadmap milestones only — no target date, no auditor name (approved
