@@ -181,6 +181,7 @@ class LinearConnector:
 
         created = issue.get("createdAt", "")
         ended = issue.get("completedAt") or issue.get("canceledAt")
+        url = issue.get("url", "")
 
         participants = [assignee.get("email", "")] if assignee.get("email") else []
 
@@ -194,6 +195,7 @@ class LinearConnector:
             "startedAt": created,
             "endedAt": ended,
             "source": f"linear:{team_key}",
+            "sourceUrl": url,
             "sourceKind": "linear_card",
             "participants": participants,
         }
@@ -220,6 +222,12 @@ class LinearConnector:
             "startedAt": starts,
             "endedAt": completed or None,
             "source": f"linear:{team_key}",
-            "sourceKind": "linear_card",
+            # #388: cycles have no web URL — explicit container-level fallback
+            # keying (`linear:{team_key}` — a deliberate non-URL Source.url,
+            # ONTOLOGY §3.4 fallback rule) so the projection gate fires via the
+            # sourceUrl leg. sourceKind is linear_cycle, not linear_card
+            # (cycles are not cards).
+            "sourceUrl": f"linear:{team_key}",
+            "sourceKind": "linear_cycle",
             "participants": [],
         }

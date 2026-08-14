@@ -12,7 +12,9 @@ Four findings, all empirically verified:
 """
 import sys, os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+import pytest
 import numpy as np
+pytest.importorskip("sklearn")  # GMM tests need scikit-learn — skip module when absent
 from sklearn.mixture import GaussianMixture
 from tortoise.quadrature import tilted_moments, moments_to_beta, phi_nand
 

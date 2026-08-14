@@ -61,7 +61,12 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["tortoise*"]
+include = ["tortoise*", "benchmarks*"]
+
+[tool.pytest.ini_options]
+markers = [
+    "bench: issue #316 benchmark harness tests (benchmarks/ + tests/bench/)",
+]
 
 [build-system]
 requires = ["setuptools"]

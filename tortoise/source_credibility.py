@@ -14,8 +14,9 @@ docs/ep-source-credibility-experiment.md):
     k=1.0, clamped [0.1, 2.0]. Formula: 1 + k * sum_a (rep_a - 0.5) * (score_a - 0.5).
   - resolve_tier: precedence explicit credibilityTier > sourceKind tier-form > registry > None.
   - SOURCE_KIND_DEFAULTS: T0-T4 identity + explicit None for ALL legacy kinds —
-    legacy type strings (github_issue, slack_message, linear_card, document) stay
-    NEUTRAL until explicitly registered via register_source_kind_default().
+    legacy type strings (github_issue, github_pr, slack_message, linear_card,
+    linear_cycle, document) stay NEUTRAL until explicitly registered via
+    register_source_kind_default().
 
 Ontology alignment: reliability is DERIVED at query time (v3.1 §2/§11 — derived,
 not stored; evaluations are Points with EP confidence). Decay is the §10-compliant
@@ -65,8 +66,10 @@ SOURCE_KIND_DEFAULTS: dict[str, str | None] = {
     **{tier: tier for tier in _TIER_FORM},
     "document": None,
     "github_issue": None,
+    "github_pr": None,      # #388: PR events carry their own kind (was mislabeled github_issue)
     "slack_message": None,
     "linear_card": None,
+    "linear_cycle": None,   # #388: cycles are not cards — own kind, still neutral
 }
 
 # Assessment-factor constants (pinned in scoping resolution C / plan Task 5)
