@@ -194,6 +194,18 @@ class GitHubConnector:
 
         # Event — temporal occurrence (PM domain extension)
         event_kind = "pm:cardCompleted" if state == "closed" else "pm:cardCreated"
+        # #1155-P2: eventKind/subject intentionally DIVERGE from the poll-path
+        # producer (`_issue_to_event`: github.issue.{state} / subject
+        # issue:{repo}#{n}). Both producers write the SAME Event node (MERGE
+        # on the shared eventId); the projection's plain merge is
+        # LAST-WRITER-WINS (`e += $props` on MATCH) — whichever producer
+        # applies last defines the node's eventKind/subject. ingest()
+        # converges on THIS producer (covered poll events are deduped), but a
+        # standalone poll()/webhook apply AFTER the entity path flips the
+        # Event back to github.issue.* / issue:{repo}#{n}. Accepted risk —
+        # consumers rely on each producer's vocabulary; the divergence is
+        # pinned in test_producers_share_event_id so a future normalization
+        # is deliberate.
         event = {
             "type": "EventRecorded",
             # #1155: canonical issue-Event id — shared with the poll/webhook
@@ -438,6 +450,10 @@ class GitHubConnector:
             # dedup). The `-created` suffix keeps Event ids out of the Object
             # id space (the pm:issue Object id is `entity_id`) — previously
             # the poll-path eventId collided with the Object id string.
+            # #1155-P2: eventKind/subject diverge from the entity path by
+            # design (github.issue.* / issue:{repo}#{n} here vs pm:card* /
+            # github-user:{author}) — the shared Event node is last-writer-wins
+            # (see _issue_to_entities for the risk note).
             "eventId": f"github-issue-{self.repo}-{number}-created",
             "eventKind": f"github.issue.{state}",
             "subject": f"issue:{self.repo}#{number}",
