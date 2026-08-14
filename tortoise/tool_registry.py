@@ -615,7 +615,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
                     "graph, give each corpus a unique corpus_name (default = directory "
                     "basename) to avoid cross-corpus url collisions. "
                     "EXCLUDED from tenant HTTP — walks server filesystem with user-supplied path.",
-        annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True),
+        annotations=_rw(),
         http_policy=False,
         sdk_method="index_directory",
     ),

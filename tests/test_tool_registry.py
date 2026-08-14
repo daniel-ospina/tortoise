@@ -81,7 +81,7 @@ class TestRegistryEquivalence:
             assert excluded not in HTTP_ALLOWED, f"{excluded} must be HTTP-excluded"
 
     def test_registry_count(self):
-        """79 tools — 60 existing + 6 onboarding (#498/#499/#500) + 1
+        """85 tools — 60 existing + 6 onboarding (#498/#499/#500) + 1
         human-approval (#531) + 1 #540 + 2 #432 (events_poll, retract_point)
         + 1 #913 (review_connections) + 8 W1–W4 consolidations (#907/#918
         recall, #922 update/delete/operator_action/create_edge, #927
