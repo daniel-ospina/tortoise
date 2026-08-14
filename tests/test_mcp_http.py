@@ -915,13 +915,83 @@ class TestIntrospectiveQuotaCompleteness:
         assert matched >= 3, f"scan is vacuous: only {matched} tools matched"
 
     def test_bulk_writers_stay_http_excluded(self, mcp_client):
-        """ingest_corpus / index_sessions / backfill_v25 must remain excluded
-        from HTTP (or be quota-gated if ever added)."""
+        """ingest_corpus / index_sessions / index_files / backfill_v25 must
+        remain excluded from HTTP (or be quota-gated if ever added)."""
         tc, _ = mcp_client
         r, body = _mcp_post(tc, {
             "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {},
         })
         names = {t.get("name") for t in body.get("result", {}).get("tools", [])}
         for excluded in ("tortoise_ingest_corpus", "tortoise_index_sessions",
-                         "tortoise_backfill_v25", "tortoise_team_create"):
+                         "tortoise_index_files", "tortoise_backfill_v25",
+                         "tortoise_team_create"):
             assert excluded not in names, f"{excluded} must stay HTTP-excluded"
+
+
+class TestSC5IndexFilesSurface:
+    """Epic #900 T7 (#1043) — SC5 structural gate for the new tool surface.
+
+    Plan §8.4 S8 row + §6.3: tortoise_index_files joins _QUOTA_GATED
+    (mcp_server.py:329 convention — node/edge-creating tools are quota-gated),
+    http_policy=False enforced (#329 posture), DEPRECATED markers on the two
+    legacy tools (MCP tool-description surface), tool count net +1.
+    """
+
+    def test_index_files_registered_and_http_excluded(self):
+        """Registry entry exists, http_policy=False, absent from HTTP_ALLOWED."""
+        from tortoise.mcp_auth import HTTP_ALLOWED
+        from tortoise.tool_registry import TOOL_REGISTRY
+
+        entry = next((t for t in TOOL_REGISTRY
+                      if t.name == "tortoise_index_files"), None)
+        assert entry is not None, "tortoise_index_files missing from TOOL_REGISTRY"
+        assert entry.http_policy is False, "must be http_policy=False (#329 filesystem walk)"
+        assert entry.sdk_method == "index_directory"
+        assert entry.annotations.readOnlyHint is False
+        assert entry.annotations.destructiveHint is True
+        assert "tortoise_index_files" not in HTTP_ALLOWED
+        # description carries the corpus_name guidance line (cycle-21)
+        assert "corpus_name" in entry.description
+        assert "unique corpus_name" in entry.description
+        # wrong-tool guidance: points at the absorbed legacy tools
+        assert "tortoise_index_sessions" in entry.description
+        assert "tortoise_ingest_corpus" in entry.description
+
+    def test_index_files_quota_gated(self):
+        """tortoise_index_files MUST join _QUOTA_GATED (S8 pin, I25)."""
+        import tortoise.mcp_server as ms
+        assert "tortoise_index_files" in ms._QUOTA_GATED, (
+            "index_files creates nodes AND edges — must be quota-gated")
+
+    def test_legacy_tools_deprecation_markers(self):
+        """Both legacy tools carry the MCP tool-description DEPRECATED marker
+        naming the replacement (plan §6.3 — behavior unchanged, SC4)."""
+        from tortoise.tool_registry import TOOL_REGISTRY
+        by_name = {t.name: t for t in TOOL_REGISTRY}
+        for legacy in ("tortoise_index_sessions", "tortoise_ingest_corpus"):
+            d = by_name[legacy].description
+            assert d.startswith("DEPRECATED"), f"{legacy} missing DEPRECATED marker: {d}"
+            assert "tortoise_index_files" in d, f"{legacy} marker must name the replacement"
+            assert by_name[legacy].http_policy is False, f"{legacy} must stay http-excluded"
+
+    def test_index_files_absent_from_http_tools_list(self, mcp_client):
+        """E2E-17(e) structural half: the filesystem-walk tool is not
+        discoverable over tenant HTTP (http_policy=False, #329 posture)."""
+        tc, _ = mcp_client
+        r, body = _mcp_post(tc, {
+            "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {},
+        })
+        names = {t.get("name") for t in body.get("result", {}).get("tools", [])}
+        assert "tortoise_index_files" not in names
+
+    def test_index_files_http_call_refused(self, mcp_client):
+        """E2E-17(e): tools/call over HTTP → _http_excluded_error (-32004)."""
+        tc, _ = mcp_client
+        r, body = _mcp_post(tc, {
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "tortoise_index_files",
+                       "arguments": {"directory": "/tmp"}},
+        })
+        text = "".join(c.get("text", "") for c in body.get("result", {}).get("content", []))
+        assert "-32004" in text or "not available over HTTP" in text, \
+            f"expected excluded error, got: {body}"

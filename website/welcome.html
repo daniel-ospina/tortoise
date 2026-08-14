@@ -253,6 +253,191 @@
       background: var(--accent-hover);
     }
 
+    /* Two-path chooser (#welcome UX): one decision, then only the matching instructions */
+    .chooser {
+      margin-bottom: 1.5rem;
+    }
+    .chooser-q {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-dim);
+      margin-bottom: 0.75rem;
+      text-align: center;
+    }
+    .chooser-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.75rem;
+    }
+    .chooser-card {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 0.75rem;
+      padding: 1.25rem 1.25rem 1rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      color: var(--text);
+      font-family: var(--mono);
+      text-align: left;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s, transform 0.1s;
+    }
+    .chooser-card:hover {
+      border-color: var(--accent);
+      background: var(--surface-hover);
+    }
+    .chooser-card:active {
+      transform: translateY(1px);
+    }
+    .chooser-card:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+    .chooser-icon {
+      color: var(--accent);
+      display: flex;
+    }
+    .chooser-body {
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+    }
+    .chooser-title {
+      font-size: 1.02rem;
+      font-weight: 600;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .chooser-tag {
+      font-size: 0.62rem;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      padding: 2px 7px;
+      border-radius: 999px;
+      background: rgba(6, 182, 212, 0.15);
+      color: var(--accent);
+      border: 1px solid rgba(6, 182, 212, 0.35);
+    }
+    .chooser-sub {
+      font-size: 0.76rem;
+      line-height: 1.45;
+      color: var(--text-dim);
+    }
+    .chooser-cta {
+      margin-top: 0.25rem;
+      font-size: 0.78rem;
+      font-weight: 600;
+      color: var(--accent);
+    }
+
+    /* Path panels */
+    .panel-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 1rem;
+      margin-bottom: 1rem;
+    }
+    .panel-sub {
+      font-size: 0.78rem;
+      color: var(--text-dim);
+      line-height: 1.5;
+    }
+    .btn-ghost {
+      flex-shrink: 0;
+      padding: 0.4rem 0.75rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: transparent;
+      color: var(--text-dim);
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      cursor: pointer;
+      transition: color 0.2s, border-color 0.2s;
+    }
+    .btn {
+      display: inline-block;
+      margin-top: 0.75rem;
+      padding: 0.5rem 0.9rem;
+      border-radius: 6px;
+      background: var(--accent);
+      color: var(--bg);
+      font-family: var(--mono);
+      font-size: 0.8rem;
+      font-weight: 600;
+      text-decoration: none;
+    }
+    /* The claim CTA lives inside .error-state, whose `a` rule (0,1,1) would
+       otherwise beat .btn (0,1,0) and render cyan-on-cyan (invisible). */
+    .error-state a.btn {
+      color: var(--bg);
+    }
+    .btn-ghost:hover {
+      color: var(--accent);
+      border-color: var(--accent);
+    }
+    .btn-ghost:focus-visible, .btn-primary:focus-visible, .harness-tab:focus-visible, .btn-copy:focus-visible, .note a:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+    .btn-primary {
+      display: block;
+      width: 100%;
+      padding: 0.85rem 1rem;
+      border: none;
+      border-radius: 8px;
+      background: var(--accent);
+      color: var(--bg);
+      font-family: var(--mono);
+      font-size: 15px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .btn-primary:hover {
+      background: var(--accent-hover);
+    }
+    .btn-primary:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .steps {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin: 0.75rem 0 1rem;
+      font-size: 0.76rem;
+      color: var(--text-dim);
+      line-height: 1.4;
+    }
+    .steps strong {
+      color: var(--text);
+      font-weight: 600;
+    }
+    .steps-arrow {
+      color: var(--accent);
+    }
+    .note {
+      font-size: 0.74rem;
+      color: var(--text-dim);
+      line-height: 1.55;
+      margin-top: 0.75rem;
+    }
+    .note a {
+      color: var(--accent);
+    }
+    .toggle-row {
+      margin: 0 0 0.9rem;
+      text-align: center;
+    }
+
     .loading-state {
       text-align: center;
       padding: 3rem 1rem;
@@ -387,6 +572,10 @@
       .harness-tab { white-space: nowrap; }
       .snippet pre { font-size: 0.68rem; overflow-x: auto; }
       .btn-copy, .btn-dashboard { width: 100%; }
+      .chooser-grid { grid-template-columns: 1fr; }
+      .steps { flex-direction: column; gap: 0.15rem; }
+      .steps-arrow { display: none; }
+      .panel-head { flex-direction: column; }
     }
 
     /* Legal footer */
@@ -474,52 +663,120 @@
         </div>
       </div>
 
-      <div class="card hidden" id="returning-block">
+      <div class="card hidden" id="returning-block" role="status" aria-live="polite">
         <p style="font-size:0.85rem;color:var(--text-dim);line-height:1.5;">
           Taking you to your dashboard — manage keys, teams, and limits there.
         </p>
         <p style="margin-top:0.75rem;"><a href="https://app.premiselabs.co" style="color:var(--accent);">Open Dashboard →</a></p>
       </div>
 
-            <div class="card" id="mcp-card">
-        <div class="card-label">Connect our toolbox <span style="font-weight:400;font-size:0.72rem;color:var(--text-dim);">(MCP)</span></div>
-        <p style="font-size:0.82rem;color:var(--text-dim);margin:0 0 0.75rem;">
-          Pick your agent below — then copy the config and paste it into your agent. It connects
-          Tortoise to your agent; the onboarding prompt below runs your setup.
-        </p>
-        <div class="harness-tabs" id="harness-tabs" style="display:flex;gap:0.5rem;margin-bottom:0.75rem;flex-wrap:wrap;">
+      <!-- Path chooser: one decision, then only the matching instructions -->
+      <div class="chooser" id="chooser" role="group" aria-label="How do you want to use Tortoise?">
+        <p class="chooser-q">How do you want to use Tortoise?</p>
+        <div class="chooser-grid">
+          <button class="chooser-card" id="choose-mcp" onclick="choosePath('mcp')" aria-describedby="mcp-desc" type="button">
+            <span class="chooser-icon" aria-hidden="true">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+                <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+                <line x1="12" y1="22.08" x2="12" y2="12"/>
+              </svg>
+            </span>
+            <span class="chooser-body">
+              <span class="chooser-title">Use Tortoise <span class="chooser-tag">MCP</span></span>
+              <span class="chooser-sub" id="mcp-desc">Give your AI agent long-term memory. One prompt — your agent installs it.</span>
+              <span class="chooser-cta">Set up my agent →</span>
+            </span>
+          </button>
+          <button class="chooser-card" id="choose-sdk" onclick="choosePath('sdk')" aria-describedby="sdk-desc" type="button">
+            <span class="chooser-icon" aria-hidden="true">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="16 18 22 12 16 6"/>
+                <polyline points="8 6 2 12 8 18"/>
+              </svg>
+            </span>
+            <span class="chooser-body">
+              <span class="chooser-title">Build with Tortoise <span class="chooser-tag">SDK</span></span>
+              <span class="chooser-sub" id="sdk-desc">Add memory to your own product via the Python SDK / REST API.</span>
+              <span class="chooser-cta">Get the quickstart →</span>
+            </span>
+          </button>
+        </div>
+      </div>
+
+      <!-- MCP path -->
+      <div class="card hidden" id="mcp-card">
+        <div class="panel-head">
+          <div>
+            <div class="card-label" style="margin-bottom:0.25rem;">Use Tortoise — connect your agent</div>
+            <div class="panel-sub">One prompt. Your agent installs the MCP server and runs your setup.</div>
+          </div>
+          <button class="btn-ghost" onclick="choosePath(null)" type="button">← Back</button>
+        </div>
+        <div class="harness-tabs" id="harness-tabs" style="display:flex;gap:0.5rem;margin-bottom:1rem;flex-wrap:wrap;">
           <button class="harness-tab active" data-harness="claude" aria-pressed="true" onclick="switchHarness('claude')">Claude Code</button>
           <button class="harness-tab" data-harness="codex" aria-pressed="false" onclick="switchHarness('codex')">Codex</button>
           <button class="harness-tab" data-harness="cursor" aria-pressed="false" onclick="switchHarness('cursor')">Cursor</button>
           <button class="harness-tab" data-harness="pi" aria-pressed="false" onclick="switchHarness('pi')">Pi</button>
         </div>
-        <div class="snippet" id="mcp-snippet">
-          <pre><code id="mcp-config-text"></code></pre>
-        </div>
-        <button class="btn-copy" id="btn-copy-mcp" onclick="copyMcpConfig()" style="width:100%;margin-bottom:0.75rem;">
-          <span>Copy MCP config</span>
+        <div id="one-click-flow">
+        <button class="btn-primary" id="btn-copy-setup" onclick="copySetupPrompt()" type="button">
+          <span>Copy setup prompt</span>
         </button>
-        <div class="snippet" id="prompt-snippet" style="margin-bottom:0.75rem;">
-          <pre><code id="prompt-text"># Onboarding prompt — copied from a stable URL (see below)
+        <p class="steps">
+          <span>1&nbsp;Copy the prompt</span><span class="steps-arrow">→</span>
+          <span>2&nbsp;Paste it into <strong id="harness-name">Claude Code</strong></span><span class="steps-arrow">→</span>
+          <span>3&nbsp;Restart — your agent sets up memory</span>
+        </p>
+        <div class="snippet" id="setup-prompt-snippet">
+          <pre><code id="setup-prompt-text">(Loading…)</code></pre>
+        </div>
+        <p class="note">
+          The prompt adds the MCP server and saves the onboarding flow so your next session
+          runs setup automatically. Key embedded in the prompt — it will appear in your chat
+          history, your shell history, your shell profile (the prompt saves it there for
+          future sessions), and (for Claude Code) your local config.
+        </p>
+        </div>
+        <p class="note toggle-row" id="manual-toggle-row">
+          <a href="#" id="manual-toggle-link" onclick="toggleManual(event)" aria-expanded="false" aria-controls="manual-setup">Use manual setup (env-var form) →</a>
+        </p>
+        <div id="manual-setup" class="hidden">
+          <div class="card-label" style="margin:0.5rem 0 0.75rem;">Manual setup</div>
+          <p class="note" id="manual-placeholder-note" style="margin:0 0 0.75rem;">
+            Your key was shown once on your first visit — paste the key you saved in place of
+            <code>tt_YOUR_KEY</code> (or get it from the dashboard).
+          </p>
+          <div class="snippet" id="mcp-snippet">
+            <pre><code id="mcp-config-text"></code></pre>
+          </div>
+          <button class="btn-copy" id="btn-copy-mcp" onclick="copyMcpConfig()" style="width:100%;margin-bottom:0.75rem;">
+            <span>Copy MCP config</span>
+          </button>
+          <div class="snippet" id="prompt-snippet" style="margin-bottom:0.75rem;">
+            <pre><code id="prompt-text"># Onboarding prompt — copied from a stable URL (see below)
 
 Paste this into your agent to start the setup flow. The agent will ask
 you up to 6 yes/no questions and set up your Tortoise memory.
 
 (Loading prompt…)</code></pre>
+          </div>
+          <button class="btn-copy" id="btn-copy-prompt" onclick="copyPrompt()" style="width:100%;margin-bottom:0.75rem;">
+            <span>Copy onboarding prompt</span>
+          </button>
+          <p id="harness-delivery-steps" style="font-size:0.72rem;color:var(--text-dim);line-height:1.4;"></p>
         </div>
-        <button class="btn-copy" id="btn-copy-prompt" onclick="copyPrompt()" style="width:100%;margin-bottom:0.75rem;">
-          <span>Copy onboarding prompt</span>
-        </button>
-        <p id="harness-delivery-steps" style="font-size:0.72rem;color:var(--text-dim);line-height:1.4;"></p>
-        <p style="font-size:0.72rem;color:var(--text-dim);line-height:1.4;">
-          Block A = MCP config for your harness. Block B = that harness's
-          onboarding variant (the canonical question flow + how this harness
-          delivers it). Two actions total — see the steps above.
-        </p>
       </div>
 
-      <div class="card" id="build-card">
-        <div class="card-label">Build with Tortoise — call the API <span style="font-weight:400;font-size:0.72rem;color:var(--text-dim);">(CLI / REST)</span></div>
+      <!-- SDK path -->
+      <div class="card hidden" id="sdk-card">
+        <div class="panel-head">
+          <div>
+            <div class="card-label" style="margin-bottom:0.25rem;">Build with Tortoise — SDK &amp; API</div>
+            <div class="panel-sub">Install, connect with your API key, create your first Point.</div>
+          </div>
+          <button class="btn-ghost" onclick="choosePath(null)" type="button">← Back</button>
+        </div>
         <div class="snippet" id="snippet">
           <pre><span class="comment"># Install Tortoise</span>
 <span class="cmd">pip install tortoise-graph</span>
@@ -533,6 +790,10 @@ you up to 6 yes/no questions and set up your Tortoise memory.
         <button class="btn-copy" id="btn-copy-snippet" onclick="copySnippet()" style="width:100%;">
           <span>Copy quickstart</span>
         </button>
+        <p class="note" style="margin-top:0.9rem;">
+          <a href="/docs#quickstart" style="color:var(--accent);">Read the SDK docs →</a> — quickstart, REST reference,
+          session capture, and evidence propagation. Your agent can read it for you.
+        </p>
       </div>
 
       <a href="https://app.premiselabs.co" class="btn-dashboard hidden" id="btn-dashboard" target="_blank" rel="noopener">Open Dashboard →</a>
@@ -729,9 +990,9 @@ you up to 6 yes/no questions and set up your Tortoise memory.
       // #1082 (PR1 — P2-FIX-D): double-provision guard. RLS hides NULL-
       // user_id membership rows from authenticated, so a claimable anon
       // team is INVISIBLE to the query above — minting here would orphan it
-      // (the claim path needs exactly one NULL-user_id owner row). Before
-      // provisioning, ask the server (service-role, key-scoped) whether a
-      // claimable team exists for the presented key: if so, route to the
+      // (the claim path needs exactly one NULL-user_id owner row). The
+      // routing signal is the tt_claim_pending marker cookie (see
+      // claimStatusGuard — no server round-trip): if present, route to the
       // dashboard claim card instead of minting a stray team.
       if (await claimStatusGuard(session)) {
         return;
@@ -905,12 +1166,15 @@ you up to 6 yes/no questions and set up your Tortoise memory.
       // #745c hid the artifact cards entirely; epic #529 (J5/T7b) keeps the
       // MCP card visible with env-indirection Block A forms (no literal key —
       // HARNESS_CONFIGS detect the masked placeholder and never interpolate
-      // it). The build card still hides: its CLI snippet has no env form and
-      // would render a masked `--api-key ••••••`.
+      // it). #1147 redirects to the dashboard after a short hold; the manual
+      // env forms rendered here are the dashboard-unreachable fallback (the
+      // redirect is a best-effort setTimeout — if the dashboard never loads,
+      // the user still has the key-less path with their saved key).
+      choosePath("mcp");
       const mcpCard = document.getElementById("mcp-card");
-      if (mcpCard) { mcpCard.classList.remove("hidden"); renderMcpConfig(); renderDeliverySteps(); }
-      const buildCard = document.getElementById("build-card");
-      if (buildCard) buildCard.classList.add("hidden");
+      if (mcpCard) { mcpCard.classList.remove("hidden"); renderMcpConfig(); renderDeliverySteps(); renderSetupPrompt(); }
+      const sdkCard = document.getElementById("sdk-card");
+      if (sdkCard) sdkCard.classList.add("hidden");
     }
 
     function sleep(ms) {
@@ -929,6 +1193,7 @@ you up to 6 yes/no questions and set up your Tortoise memory.
       // MCP config must reflect the revealed key, not the masked placeholder
       // (#745a) — re-render now that #api-key holds the real key.
       renderMcpConfig();
+      renderSetupPrompt();
       // Reveal path: key shown; returning-visit block stays hidden; dashboard btn shown
       const revealEl = document.getElementById("reveal-block");
       if (revealEl) revealEl.classList.remove("hidden");
@@ -996,6 +1261,12 @@ you up to 6 yes/no questions and set up your Tortoise memory.
 
     async function copySnippet() {
       const key = document.getElementById("api-key").textContent;
+      // Never copy a masked key (#745c — the SDK snippet has no env form; a
+      // returning visitor's masked placeholder must not reach the clipboard).
+      if (!_usableKey(key)) {
+        flashCopyFailure("btn-copy-snippet", "no key on this visit — copy your key from the dashboard");
+        return;
+      }
       const snippet = `# Install Tortoise
 pip install tortoise-graph
 
@@ -1128,7 +1399,7 @@ tortoise create-point "Hello world" --kind statement`;
     const HARNESS_VARIANT_SLUG = { claude: "claude-code", codex: "codex", cursor: "cursor", pi: "pi" };
     // True only for a freshly revealed key; returning visits keep the masked
     // placeholder and get env-indirection forms only (#529 J5/T7b).
-    function _usableKey(key) { return typeof key === "string" && key.startsWith("tt_"); }
+    function _usableKey(key) { return typeof key === "string" && key.startsWith("tt_") && !key.includes("YOUR_KEY"); }
 
     // Canonical cursor/pi JSON blocks, wrapped in TORTOISE_CFG_BEGIN/END
     // markers so tests extract+parse exactly what the user copies (epic #529
@@ -1208,12 +1479,58 @@ ${JSON.stringify({ mcpServers: { tortoise: { url: MCP_URL, headers: { Authorizat
       pi: "Step 1: save Block A as .mcp.json (merge if one exists; export the key). Step 2: append Block B to AGENTS.md — it loads automatically in your next pi session, no paste into chat needed.",
     };
 
+    // Single-prompt onboarding: per-harness install line + auto-load surface.
+    // The prompt embeds the API key so the agent can wire it once; config
+    // FILE forms (cursor/pi/codex) reference the env var name — never a
+    // literal key on disk. The Claude CLI one-liner stores the header value
+    // in your local ~/.claude.json (pre-existing behavior, user-owned file;
+    // the manual-setup env form is the key-less alternative).
+    const HARNESS_NAMES = { claude: "Claude Code", codex: "Codex", cursor: "Cursor", pi: "Pi" };
+    const HARNESS_INSTALL = {
+      claude: (key) => `Run this command:\nclaude mcp add --transport http tortoise ${MCP_URL} --header "Authorization: Bearer ${key}"`,
+      codex: (key) => `Run these commands:\nexport TORTOISE_API_KEY=${key}\ncodex mcp add tortoise --url ${MCP_URL} --bearer-token-env-var TORTOISE_API_KEY`,
+      cursor: (key) => `Create .cursor/mcp.json in this project with:\n${JSON.stringify(CURSOR_MCP_CONFIG_ENV, null, 2)}\n(First: export TORTOISE_API_KEY=${key} — the config references the env var, not the key.)`,
+      pi: (key) => `Create or merge .mcp.json in this project with:\n${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}\n(First: export TORTOISE_API_KEY=${key} — the config references the env var, not the key.)`,
+    };
+    // Env vars die with the shell — the restart promise (step 3) only holds
+    // if the key survives: persist it to the user's shell profile.
+    const HARNESS_PERSIST = (key) => `Persist the key for future sessions — add this line to your shell profile\n(~/.zshrc, ~/.bashrc, or equivalent):\nexport TORTOISE_API_KEY=${key}`;
+    const HARNESS_AUTOLOAD = {
+      claude: "save it to CLAUDE.md in this project (Claude Code auto-loads CLAUDE.md every session)",
+      codex: "save it to AGENTS.md in this project (Codex auto-loads AGENTS.md)",
+      cursor: "save it to .cursor/rules/tortoise-onboarding.mdc (Cursor applies it to every chat)",
+      pi: "append it to AGENTS.md in this project (pi auto-loads AGENTS.md)",
+    };
+
+    // Manual-mode env-var forms: the key-less alternative for fresh users
+    // too (the toggle labels this "env-var form"). Normal mode (one-click)
+    // keeps the harness-optimal paste paths (literal key where the harness
+    // needs it, env-var where it doesn't). MUST be defined before the eval-
+    // time renderMcpConfig() call below (const TDZ).
+    const ENV_CONFIGS = {
+      claude: (key) => `# File alternative (.mcp.json) — env expansion, no literal key on disk:
+# {"mcpServers":{"tortoise":{"type":"http","url":"${MCP_URL}","headers":{"Authorization":"Bearer \${TORTOISE_API_KEY}"}}}}
+# Note: a url entry without "type" is skipped by Claude Code; project-scope
+# .mcp.json servers ask for a one-time approval on first use.
+export TORTOISE_API_KEY=${key}`,
+      codex: (key) => `export TORTOISE_API_KEY=${key}
+codex mcp add tortoise --url ${MCP_URL} --bearer-token-env-var TORTOISE_API_KEY`,
+      cursor: (key) => `# Save as .cursor/mcp.json (env form — no literal key on disk).
+# First: export TORTOISE_API_KEY=${key}
+${JSON.stringify(CURSOR_MCP_CONFIG_ENV, null, 2)}`,
+      pi: (key) => `# Save as .mcp.json (env form — no literal key on disk; merge if one exists).
+# First: export TORTOISE_API_KEY=${key}
+${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}`,
+    };
+    let manualMode = false;
+
     let currentHarness = "claude";
     // Render the default (Claude Code) MCP config on load so the box is never
     // empty (#745a) — switchHarness/copyMcpConfig re-render on interaction,
     // and showSuccess() re-renders once the real key is revealed.
     renderMcpConfig();
     renderDeliverySteps();
+    renderSetupPrompt();
     // Canonical onboarding prompt (#540): served by the premise-labs Pages
     // project from tortoise/onboarding/AGENT_ONBOARDING.md via deploy-pages.yml.
     // premiselabs.co is the project's active custom domain (tortoise.premiselabs.co
@@ -1234,12 +1551,15 @@ ${JSON.stringify({ mcpServers: { tortoise: { url: MCP_URL, headers: { Authorizat
       });
       renderMcpConfig();
       renderDeliverySteps();
+      renderSetupPrompt();
       loadVariantPrompt();
     }
 
     function renderMcpConfig() {
       const key = document.getElementById("api-key").textContent.trim();
-      const text = HARNESS_CONFIGS[currentHarness](key);
+      const text = manualMode
+        ? ENV_CONFIGS[currentHarness](key)
+        : HARNESS_CONFIGS[currentHarness](key);
       document.getElementById("mcp-config-text").textContent = text;
     }
 
@@ -1248,19 +1568,137 @@ ${JSON.stringify({ mcpServers: { tortoise: { url: MCP_URL, headers: { Authorizat
       if (el) el.textContent = HARNESS_DELIVERY_STEPS[currentHarness];
     }
 
+    // ── Path chooser: one decision, then only the matching instructions ──
+    function choosePath(path) {
+      const chooser = document.getElementById("chooser");
+      const mcpCard = document.getElementById("mcp-card");
+      const sdkCard = document.getElementById("sdk-card");
+      if (chooser) chooser.classList.toggle("hidden", path !== null);
+      if (mcpCard) mcpCard.classList.toggle("hidden", path !== "mcp");
+      if (sdkCard) sdkCard.classList.toggle("hidden", path !== "sdk");
+      // Leave the panel collapsed on re-entry (manual setup must not leak
+      // across path switches).
+      if (path !== "mcp") {
+        const manual = document.getElementById("manual-setup");
+        if (manual) manual.classList.add("hidden");
+        manualMode = false;
+      }
+      // Re-derive both flows from the key state on entry, so a previous
+      // manual-toggle can't leak an empty MCP card across Back → re-enter.
+      if (path === "mcp") {
+        renderSetupPrompt();
+        renderMcpConfig();
+      }
+      // Focus management: move focus into the shown surface so keyboard/SR
+      // users aren't dropped to <body> when the focused element is hidden.
+      if (path === "mcp") {
+        const tab = document.querySelector("#mcp-card .harness-tab");
+        if (tab) tab.focus();
+      } else if (path === "sdk") {
+        const back = document.querySelector("#sdk-card .btn-ghost");
+        if (back) back.focus();
+      } else if (chooser) {
+        const first = chooser.querySelector(".chooser-card");
+        if (first) first.focus();
+      }
+    }
+
+    // The single setup prompt: agent installs the MCP server now and persists
+    // the onboarding flow to the harness's auto-load surface, so the NEXT
+    // session runs setup automatically (MCP servers load at client startup —
+    // an in-session install never gives the current session the tools).
+    function setupPromptText(key) {
+      const harness = currentHarness;
+      const name = HARNESS_NAMES[harness];
+      return `Set up Tortoise memory for me. I use ${name}.\n\n1. Connect the Tortoise MCP server with this API key: ${key}\n${HARNESS_INSTALL[harness](key)}\n\n2. ${HARNESS_PERSIST(key)}\n\n3. Fetch the onboarding instructions from ${variantPromptUrl(harness)} and ${HARNESS_AUTOLOAD[harness]}.\n\n4. When both are done, tell me to restart you. On your next session,\nfollow the saved instructions and walk me through setup — ask the\nquestions one at a time.`;
+    }
+
+    function renderSetupPrompt() {
+      const nameEl = document.getElementById("harness-name");
+      if (nameEl) nameEl.textContent = HARNESS_NAMES[currentHarness];
+      const el = document.getElementById("setup-prompt-text");
+      const key = document.getElementById("api-key").textContent.trim();
+      const usable = _usableKey(key);
+      if (el) {
+        el.textContent = usable
+          ? setupPromptText(key)
+          : "(Your key isn't available on this visit — use Manual setup below with the key you saved.)";
+      }
+      // Returning visitor / masked key: the one-click prompt has no key to
+      // embed — disable the primary CTA, collapse the primary flow, and
+      // surface the key-less env-var manual forms (#529 J5/T7b contract).
+      const btn = document.getElementById("btn-copy-setup");
+      if (btn) btn.disabled = !usable;
+      const primaryFlow = document.getElementById("one-click-flow");
+      if (primaryFlow) primaryFlow.classList.toggle("hidden", !usable);
+      const manual = document.getElementById("manual-setup");
+      const manualShown = !usable;
+      if (manual) manual.classList.toggle("hidden", !manualShown);
+      // Toggle row + placeholder note follow the key state.
+      const toggleRow = document.getElementById("manual-toggle-row");
+      if (toggleRow) toggleRow.classList.toggle("hidden", !usable);
+      const placeholderNote = document.getElementById("manual-placeholder-note");
+      if (placeholderNote) placeholderNote.classList.toggle("hidden", usable);
+      syncManualAria(manualShown);
+    }
+
+    function syncManualAria(manualShown) {
+      const link = document.getElementById("manual-toggle-link");
+      if (!link) return;
+      link.setAttribute("aria-expanded", String(manualShown));
+      link.textContent = manualShown
+        ? "← Back to one-click setup"
+        : "Use manual setup (env-var form) →";
+    }
+
+    function toggleManual(e) {
+      if (e) e.preventDefault();
+      const manual = document.getElementById("manual-setup");
+      if (!manual) return;
+      const opening = manual.classList.contains("hidden");
+      manual.classList.toggle("hidden");
+      manualMode = opening;
+      // Primary flow vs manual flow: show one instruction set at a time.
+      const primaryFlow = document.getElementById("one-click-flow");
+      if (primaryFlow) primaryFlow.classList.toggle("hidden", opening);
+      syncManualAria(opening);
+      renderMcpConfig();
+      renderDeliverySteps();
+      // Fetch the variant prompt only when opening (and never twice per
+      // harness) — not on every toggle.
+      if (opening && promptLoadedFor !== currentHarness) loadVariantPrompt();
+    }
+
     // Block B: fetch the active harness's variant prompt; on ANY failure fall
     // back to the canonical prompt URL (unchanged UX — plan Substep 5).
+    // Negative-leg guard (#969 finding 3): the hosting layer returns 200 +
+    // landing HTML for missing variant paths (Cloudflare Pages masks 404s), so
+    // a status check alone is NOT enough — the fetched text must look like a
+    // prompt or we treat it as a failure and fall back to canonical.
+    const PROMPT_MARKER = "# Tortoise Onboarding";
+    function _looksLikePrompt(text) {
+      return typeof text === "string"
+        && text.includes(PROMPT_MARKER)
+        && text.trim().length > 100;
+    }
     let promptLoadedFor = null;
     function loadVariantPrompt() {
       const el = document.getElementById("prompt-text");
       const btn = document.getElementById("btn-copy-prompt");
       if (!el) return;
+      const harness = currentHarness;
+      // Already loaded for this harness — don't re-fetch (also skips the
+      // eval-time prefetch once the default harness's prompt is cached).
+      if (promptLoadedFor === harness) return;
       el.textContent = "(Loading prompt…)";
       if (btn) btn.disabled = true;
-      const harness = currentHarness;
-      fetch(variantPromptUrl(harness))
-        .then(r => { if (!r.ok) throw new Error("variant " + r.status); return r.text(); })
-        .catch(() => fetch(PROMPT_URL).then(r => { if (!r.ok) throw new Error("canonical " + r.status); return r.text(); }))
+      const fetchPrompt = (url) => fetch(url)
+        .then(r => r.ok ? r.text() : Promise.reject(new Error("http " + r.status)))
+        .then(text => _looksLikePrompt(text)
+          ? text
+          : Promise.reject(new Error("not-a-prompt (200+HTML masking?)")));
+      fetchPrompt(variantPromptUrl(harness))
+        .catch(() => fetchPrompt(PROMPT_URL))
         .then(text => { if (harness === currentHarness) { el.textContent = text; promptLoadedFor = harness; } })
         .catch(() => { if (harness === currentHarness) el.textContent = "(Prompt unavailable — copy from premiselabs.co/onboarding-prompt.md)"; })
         .finally(() => { if (harness === currentHarness && btn) btn.disabled = false; });
@@ -1316,11 +1754,33 @@ ${JSON.stringify({ mcpServers: { tortoise: { url: MCP_URL, headers: { Authorizat
       flashCopied("btn-copy-prompt");
     }
 
+    async function copySetupPrompt() {
+      renderSetupPrompt();
+      const el = document.getElementById("setup-prompt-text");
+      const text = el ? el.textContent : "";
+      const key = document.getElementById("api-key").textContent.trim();
+      if (!_usableKey(key)) {
+        flashCopyFailure("btn-copy-setup", "no key on this visit — use manual setup with your saved key");
+        return;
+      }
+      if (!(await copyWithFallback(text, "btn-copy-setup"))) return;
+      fireCopyBeacon("setup");
+      flashCopied("btn-copy-setup");
+    }
+
     function flashCopied(btnId) {
       const btn = document.getElementById(btnId);
-      const old = btn.textContent;
-      btn.textContent = "Copied!";
-      setTimeout(() => { btn.textContent = old; }, 1500);
+      if (!btn) return;
+      // Preserve the inner <span> (icon/label) — swap its text, not the whole
+      // button's DOM (copySnippet already used this pattern).
+      const textEl = btn.querySelector("span");
+      const origText = textEl ? textEl.textContent : btn.textContent;
+      if (textEl) textEl.textContent = "Copied!";
+      else btn.textContent = "Copied!";
+      setTimeout(() => {
+        if (textEl) textEl.textContent = origText;
+        else btn.textContent = origText;
+      }, 1500);
     }
 
     // Fetch the default harness's variant prompt on load (best-effort;

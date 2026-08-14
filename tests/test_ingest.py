@@ -851,3 +851,124 @@ def test_upgrade_all_unset_base_skips_everything(monkeypatch, tmp_path):
         assert rows[0][0] == "captured"
     finally:
         proj.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# SC4 hardening (epic #900 T9, issue #1045): frozen-legacy behavior asserted
+# during the W3 deprecation window — INSTANTIATES-edge preservation +
+# TORTOISE_INDEX_NO_NETWORK honored at the NEW-PATH boundary only.
+# ═══════════════════════════════════════════════════════════════════════
+
+def _legacy_ingest_session(tmp_path, monkeypatch, content: str,
+                           *, db_path: str | None = None,
+                           env: dict | None = None) -> tuple:
+    """Run the FROZEN legacy ingest_corpus AgentSession branch on one file
+    and return (sdk, report). Env mutations (TORTOISE_INDEX_NO_NETWORK etc.)
+    applied via monkeypatch.setenv — restored after the test."""
+    from tortoise.sdk import TortoiseSDK
+    corpus = tmp_path / "corpus"; corpus.mkdir()
+    (corpus / "s.md").write_text(content)
+    for k, v in (env or {}).items():
+        monkeypatch.setenv(k, v)
+    sdk = TortoiseSDK(db_path or os.path.join(str(tmp_path), "sc4.db"))
+    try:
+        report = sdk.ingest_corpus(str(corpus), eventKind="AgentSession",
+                                   extract_metadata=True)
+        return sdk, report
+    except Exception:
+        sdk.close()
+        raise
+
+
+SESSION_WITH_ISSUES = """\
+---
+sessionId: sc4-1
+title: "SC4 Session"
+issues: [repo#1]
+prs: [repo#2]
+---
+Body with issue references.
+"""
+
+
+def test_sc4_indexed_session_keeps_issue_object_edges(tmp_path, monkeypatch):
+    """SC4 (cycle-7 pin, T9): an ingested session Event keeps its issue/PR
+    Object edges via _connect_issue_objects on the FROZEN legacy path — the
+    INSTANTIATES-edge preservation term. The legacy ingest branch must not
+    regress during the W3 window."""
+    from tortoise.sdk import TortoiseSDK
+    corpus = tmp_path / "corpus"; corpus.mkdir()
+    (corpus / "s.md").write_text(SESSION_WITH_ISSUES)
+    sdk = TortoiseSDK(os.path.join(str(tmp_path), "sc4.db"))
+    try:
+        report = sdk.ingest_corpus(str(corpus), eventKind="AgentSession",
+                                   extract_metadata=False)
+        assert report.get("ingested", 0) >= 1, report
+        g = sdk._get_proj().g
+        # the session Event exists and carries aboutObject edges to the
+        # issue/PR Objects (the legacy _connect_issue_objects wiring)
+        n = g.query(
+            "MATCH (e:Event {eventId:'session_sc4-1'})-[:aboutObject]->(o:Object) "
+            "RETURN count(o)").result_set[0][0]
+        assert n >= 2, f"expected issue/PR Object edges, got {n}"
+    finally:
+        sdk.close()
+
+
+def test_sc4_no_network_legacy_branch_still_embeds(tmp_path, monkeypatch):
+    """SC4 no-network regression leg (cycle-11/12, T9): with
+    TORTOISE_INDEX_NO_NETWORK=1, the FROZEN legacy ingest_corpus AgentSession
+    branch STILL computes the embedding (the var is honored at the NEW-PATH
+    call boundary only — never inside the shared _session_embedding; an
+    implementation short-circuiting inside the shared function changes FROZEN
+    legacy behavior and fails this leg)."""
+    from tortoise.sdk import TortoiseSDK
+    import tortoise.session_indexer as si_mod
+    corpus = tmp_path / "corpus"; corpus.mkdir()
+    (corpus / "s.md").write_text("---\nsessionId: sc4-2\ntitle: N\n---\nBody")
+    monkeypatch.setenv("TORTOISE_INDEX_NO_NETWORK", "1")
+    calls = {"n": 0}
+    orig = si_mod.compute_session_embedding
+
+    def _spy(*a, **k):
+        # spy the INNER network-calling function (session_indexer.py:453):
+        # the real _session_embedding delegates into it, so a call-site gate
+        # OR a short-circuit inside the shared _session_embedding both yield
+        # calls == 0 → the leg fails on EITHER regression class (review-gate
+        # P2 — a spy on _session_embedding itself could not see a short-
+        # circuit INSIDE the shared function)
+        calls["n"] += 1
+        return [0.5] * 384
+
+    monkeypatch.setattr(si_mod, "compute_session_embedding", _spy)
+    sdk = TortoiseSDK(os.path.join(str(tmp_path), "sc4.db"))
+    try:
+        report = sdk.ingest_corpus(str(corpus), eventKind="AgentSession",
+                                   extract_metadata=True)
+        assert report.get("ingested", 0) >= 1, report
+        # the LEGACY branch embeds EVEN under the var (boundary-scoped honor)
+        assert calls["n"] >= 1, \
+            "legacy AgentSession branch must still embed under NO_NETWORK"
+        g = sdk._get_proj().g
+        emb = g.query(
+            "MATCH (e:Event {eventId:'session_sc4-2'}) RETURN e.embedding"
+        ).result_set[0][0]
+        assert emb is not None, "legacy Event embedding must be non-null"
+    finally:
+        sdk.close()
+
+
+def test_sc4_deprecation_markers_present():
+    """T9 indicator: SDK docstring deprecation markers on the two frozen
+    legacy surfaces record the W3 divergence."""
+    from tortoise.sdk import TortoiseSDK
+    import inspect
+    for method_name in ("ingest_corpus", "index_sessions"):
+        doc = inspect.getdoc(getattr(TortoiseSDK, method_name)) or ""
+        assert "DEPRECATED" in doc, f"{method_name} missing DEPRECATED marker"
+        assert "index_directory" in doc, \
+            f"{method_name} marker must name the replacement"
+    # the divergence is RECORDED (the flag semantics differ between paths)
+    doc = inspect.getdoc(TortoiseSDK.ingest_corpus) or ""
+    assert "extract_metadata" in doc and "divergence" in doc.lower(), \
+        "ingest_corpus must record the extract_metadata flag-semantics divergence"

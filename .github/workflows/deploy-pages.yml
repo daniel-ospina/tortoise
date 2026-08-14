@@ -206,8 +206,8 @@ jobs:
             echo "::warning::tortoise.premiselabs.co CNAME stale (got '${CNAME:-<none>}', expected premise-labs.pages.dev) — tortoise.* tests skipped"
           fi
 
-      # Step 3: pytest — mirroring welcome-e2e conventions from ci.yml
-      # (checkout → setup-python 3.12 → pip install -e '.[test]' →
+      # Step 3: pytest — mirroring the welcome-e2e-monitor workflow
+      # conventions (checkout → setup-python 3.12 → pip install -e '.[test]' →
       # playwright install --with-deps chromium → pytest).
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

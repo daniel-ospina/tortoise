@@ -11,6 +11,14 @@
 #            files (status A against the base) are allowed — the author can
 #            fix their own new migration before merge.
 #
+#            EXCEPTION (#1235, duplicate-prefix repair): a PURE PREFIX RENAME
+#            (content identical) of a base-tree migration is allowed when the
+#            old version is PROVABLY UNAPPLIED (not in the remote applied set,
+#            queried via the Supabase Management API) — the canonical fix for
+#            the 0012x2/0015x2 class. Fail-closed: without a token the remote
+#            set cannot be verified, so the strict block stands (fork PRs keep
+#            today's behavior). No-ops (A-only) and edits (M/D) are never exempt.
+#
 # The check logic lives in this SHARED script (not inline YAML) so the
 # hermetic pytest suite exercises the shipped logic, not a Python copy.
 #
@@ -19,8 +27,13 @@
 #   bash .github/scripts/check-migration-append-only diff   # needs DRIFT_BASE_SHA
 #
 # Env:
-#   DRIFT_REPO      (optional) — repo root (default: this script's repo)
-#   DRIFT_BASE_SHA  (diff mode, required) — base commit to diff against
+#   DRIFT_REPO            (optional) — repo root (default: this script's repo)
+#   DRIFT_BASE_SHA        (diff mode, required) — base commit to diff against
+#   SUPABASE_ACCESS_TOKEN (optional, diff mode) — enables the #1235 unapplied-
+#                         rename exception via the Management API. Absent →
+#                         fail-closed (strict block, fork-safe).
+#   DRIFT_TOKEN / DRIFT_CURL / DRIFT_API_URL / DRIFT_PROJECT_REF — test seams
+#                         (mirror check-migration-drift).
 #
 # Exit codes:
 #   0 — invariants hold
@@ -109,10 +122,75 @@ $STATUS_OUTPUT
 EOF
 
 if [ -n "$VIOLATIONS" ]; then
-  echo "::error::Migrations are append-only (#1095): a change to an already-merged migration must be a NEW timestamp file (do not edit/rename/delete an applied migration):"
-  printf '%s\n' "$VIOLATIONS" | sed '/^$/d' | sed 's/^/  /'
-  echo "::error::Historical violations of this rule caused the #1001 P0 (applied-migration edits diverged repo from prod). Use: supabase migration repair --linked --status applied <version> for repair."
-  exit 1
+  # ── #1235 exception: pure-prefix rename of a PROVABLY UNAPPLIED migration ──
+  # A rename (R*) whose content is byte-identical and whose old version is NOT
+  # in prod's applied set is the canonical duplicate-prefix repair — the old
+  # version was never applied, so renumbering it cannot diverge prod history.
+  # Fail-closed: the remote set is only reachable with a token; without one
+  # (fork PRs) the strict block below stands.
+  EXEMPT_RENAMES=""
+  if [ -n "${DRIFT_TOKEN:-}${SUPABASE_ACCESS_TOKEN:-}" ]; then
+    API_URL="${DRIFT_API_URL:-https://api.supabase.com}"
+    PROJECT_REF="${DRIFT_PROJECT_REF:-ybetwichurajbfswfeqa}"
+    CURL="${DRIFT_CURL:-curl}"
+    TOKEN="${DRIFT_TOKEN:-$SUPABASE_ACCESS_TOKEN}"
+    QUERY='{"query":"SELECT version FROM supabase_migrations.schema_migrations ORDER BY version"}'
+    API_RESPONSE="$("$CURL" -s -w '\n%{http_code}' -X POST \
+      "$API_URL/v1/projects/$PROJECT_REF/database/query" \
+      -H "Authorization: Bearer $TOKEN" \
+      -H "Content-Type: application/json" \
+      -d "$QUERY" 2>&1 || true)"
+    HTTP_CODE="$(printf '%s' "$API_RESPONSE" | tail -n1)"
+    API_BODY="$(printf '%s' "$API_RESPONSE" | sed '$d')"
+    if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
+      REMOTE_APPLIED="$(printf '%s' "$API_BODY" | jq -r '.[].version' 2>/dev/null | sort -u || true)"
+      # Evaluate each violation line: format "R<sim>\told\tnew" or "M\tpath" etc.
+      KEEP=""
+      while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        status="${line%%$'\t'*}"
+        rest="${line#*$'\t'}"
+        case "$status" in
+          R*)
+            old_path="${rest%%$'\t'*}"
+            new_path="${rest#*$'\t'}"
+            old_ver="$(basename "$old_path" | sed -nE 's#([0-9]+)_.*#\1#p')"
+            # Byte-identical content?
+            if git -C "$REPO" diff --quiet "$DRIFT_BASE_SHA:$old_path" "HEAD:$new_path" 2>/dev/null; then
+              # Old version NOT applied in prod?
+              if ! printf '%s\n' "$REMOTE_APPLIED" | grep -qxF "$old_ver"; then
+                EXEMPT_RENAMES="$EXEMPT_RENAMES
+$line"
+                continue
+              fi
+            fi
+            KEEP="$KEEP
+$line"
+            ;;
+          *)
+            KEEP="$KEEP
+$line"
+            ;;
+        esac
+      done <<EOF
+$VIOLATIONS
+EOF
+      VIOLATIONS="$KEEP"
+    else
+      echo "::warning::append-only: Management API returned HTTP $HTTP_CODE — cannot evaluate the #1235 unapplied-rename exception; enforcing the strict block." >&2
+    fi
+  fi
+
+  if [ -n "$VIOLATIONS" ]; then
+    echo "::error::Migrations are append-only (#1095): a change to an already-merged migration must be a NEW timestamp file (do not edit/rename/delete an applied migration):"
+    printf '%s\n' "$VIOLATIONS" | sed '/^$/d' | sed 's/^/  /'
+    echo "::error::Historical violations of this rule caused the #1001 P0 (applied-migration edits diverged repo from prod). Use: supabase migration repair --linked --status applied <version> for repair."
+    exit 1
+  fi
+  if [ -n "$EXEMPT_RENAMES" ]; then
+    echo "::notice::Append-only exception (#1235): pure-prefix rename of provably-unapplied migration(s) allowed:"
+    printf '%s\n' "$EXEMPT_RENAMES" | sed '/^$/d' | sed 's/^/  /'
+  fi
 fi
 
 echo "check-migration-append-only: append-only invariants OK"
