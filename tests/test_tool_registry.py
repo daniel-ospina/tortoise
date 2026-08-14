@@ -89,9 +89,13 @@ class TestRegistryEquivalence:
         + 2 epic #902 A13 (#1051, tortoise_list_batch + tortoise_list_batches)
         + 1 #405 (tortoise_validate_domain)."""
         from tortoise.tool_registry import TOOL_REGISTRY
+<<<<<<< HEAD
         assert len(TOOL_REGISTRY) == 88, f"Expected 88, got {len(TOOL_REGISTRY)}"
         names = {t.name for t in TOOL_REGISTRY}
         assert "tortoise_validate_domain" in names, "Missing #405 validate_domain tool"
+=======
+        assert len(TOOL_REGISTRY) == 86, f"Expected 86, got {len(TOOL_REGISTRY)}"
+>>>>>>> 43d05599 (feat(insights): add tortoise_issue_insight MCP tool — graph insight at issue creation (#1196))
         names = {t.name for t in TOOL_REGISTRY}
         onboarding = {"tortoise_onboarding_demo_create", "tortoise_onboarding_state",
                       "tortoise_onboarding_session_recording",

@@ -5952,6 +5952,21 @@ async def session_context(team: dict = Depends(get_current_team)):
         raise HTTPException(status_code=500, detail="Context unavailable")
 
 
+@app.get("/v1/issue-insight")
+async def issue_insight(title: str, body: str | None = None,
+                        repo: str | None = None, limit: int = 2,
+                        team: dict = Depends(get_current_team)):
+    """Graph insight for a would-be issue (#1196) — REST mirror of
+    TortoiseSDK.issue_insight() for hosted tenants.
+    """
+    sdk = _make_sdk(namespace=team["team_id"])
+    try:
+        return sdk.issue_insight(title=title, body=body, repo=repo, limit=limit)
+    except Exception:
+        logging.getLogger("tortoise.api").exception("issue_insight failed")
+        raise HTTPException(status_code=500, detail="Insight unavailable")
+
+
 
 # ── Onboarding endpoints (#498) ─────────────────────────────────
 

@@ -499,6 +499,18 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         sdk_method="session_context",
         rest_spec=RestSpec(method="GET", path="/v1/context"),
     ),
+    ToolDefinition(
+        name="tortoise_issue_insight",
+        description="Return a compact 'there's more in the graph' insight for a would-be "
+                    "issue — call BEFORE filing. Surfaces cross-session decisions / EP-tagged "
+                    "claims matching the title (semantic stage) plus prior indexed issues for "
+                    "the repo (repo= given). Fail-closed: empty graph -> no_prior_knowledge; "
+                    "populated graph + unindexed repo -> repo_not_indexed.",
+        annotations=_ro(),
+        http_policy=True,
+        sdk_method="issue_insight",
+        rest_spec=RestSpec(method="GET", path="/v1/issue-insight"),
+    ),
     # ── Excluded from HTTP ────────────────────────────────────────
     ToolDefinition(
         name="tortoise_ingest_corpus",
@@ -1010,6 +1022,7 @@ GROUP_BY_NAME: dict[str, str] = {
     "tortoise_list_tags": "memory",
     "tortoise_list_pointkinds": "memory", "tortoise_search": "memory",
     "tortoise_recall": "memory",
+    "tortoise_issue_insight": "memory",
     "tortoise_mine_conversations": "mining",
     "tortoise_list_dedup_candidates": "review",
     "tortoise_approve_merge": "review",

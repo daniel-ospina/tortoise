@@ -7276,6 +7276,104 @@ class TortoiseSDK:
             "confidence_changes": confidence_changes,
         }
 
+    # ── Issue Insight (#1196) ────────────────────────────────────
+
+    def issue_insight(self, title: str, body: str | None = None,
+                      repo: str | None = None, limit: int = 2) -> dict:
+        """Return a compact 'there's more in the graph' insight for a would-be issue.
+
+        Surface (b) of #1196: called by the creating agent at issue-creation time
+        BEFORE filing. Two stages:
+          * Semantic (always): hybrid search on title+body for cross-session
+            decisions / EP-tagged claims ('we already decided this').
+          * Repo (when repo= given): structural count of indexed GitHub
+            observation points for that repo (source='github').
+        Fail-closed: empty graph -> no_prior_knowledge; repo given + graph
+        non-empty + zero points for repo -> repo_not_indexed; never raises
+        (graph-service failure -> error dict via _safe at the handler).
+        """
+        proj = self._get_proj()
+        count_rows = proj.g.query(
+            "MATCH (n:Point) WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "RETURN count(n)"
+        ).result_set
+        total_points = int(count_rows[0][0]) if count_rows else 0
+
+        text = " ".join(p for p in (title or "", body or "") if p and p.strip()).strip()
+        semantic_hits = self.tortoise_fts_query(text, entity_type="point", limit=limit) if text else []
+
+        repo_points: list[dict] = []
+        if repo:
+            repo_points = self.query(
+                kind="observation", source="github", github_repo=repo
+            )
+
+        if total_points == 0:
+            return {
+                "has_prior": False,
+                "no_prior_knowledge": True,
+                "repo_not_indexed": False,
+                "data_points": [],
+                "insight": "The graph has no prior knowledge yet — nothing to pull. "
+                            "Run tortoise_onboarding_github_index to seed it.",
+                "more_in_graph": None,
+                "repo_stats": None,
+            }
+
+        data_points: list[dict] = []
+        for h in semantic_hits[:limit]:
+            dp = {"kind": h.get("point_kind"), "content": (h.get("content") or "")[:200]}
+            if h.get("ep") and h["ep"].get("confidence_mean") is not None:
+                dp["confidence_mean"] = round(h["ep"]["confidence_mean"], 3)
+            data_points.append(dp)
+
+        repo_stats = None
+        if repo:
+            repo_stats = {
+                "repo": repo,
+                "prior_issues": len(repo_points),
+                "open": sum(1 for p in repo_points if p.get("github_state") == "open"),
+            }
+            if repo_points and len(data_points) < limit:
+                data_points.append({
+                    "kind": "repo",
+                    "content": f"{repo}: {len(repo_points)} prior issue(s) in the graph",
+                })
+
+        if repo and not repo_points:
+            return {
+                "has_prior": True,
+                "no_prior_knowledge": False,
+                "repo_not_indexed": True,
+                "data_points": data_points,
+                "insight": f"Graph is populated but '{repo}' has no indexed issues yet — "
+                            "run tortoise_onboarding_github_index to index it.",
+                "more_in_graph": None,
+                "repo_stats": None,
+            }
+
+        if not data_points:
+            return {
+                "has_prior": False,
+                "no_prior_knowledge": False,
+                "repo_not_indexed": False,
+                "data_points": [],
+                "insight": "No graph matches for this issue title.",
+                "more_in_graph": None,
+                "repo_stats": None,
+            }
+
+        top = semantic_hits[0] if semantic_hits else (repo_points[0] if repo_points else None)
+        return {
+            "has_prior": True,
+            "no_prior_knowledge": False,
+            "repo_not_indexed": False,
+            "data_points": data_points,
+            "insight": f"{len(data_points)} graph hit(s) relate to this issue — check the graph before filing.",
+            "more_in_graph": ((top.get("content") or "")[:80] if top else None),
+            "repo_stats": repo_stats,
+        }
+
     # ── Hybrid Search (Phase 0, #7748) ───────────────────────────
 
     def tortoise_fts_query(
