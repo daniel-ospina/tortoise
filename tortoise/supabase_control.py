@@ -632,7 +632,9 @@ def membership_for_user_team(cp, user_id: str, team_id: str) -> dict | None:
 def team_by_id(cp, team_id: str) -> dict | None:
     """Team row (registry-properties-shaped dict) or None.
 
-    Suspension/staging columns (0015) read fail-soft (#1096): a schema
+    Additive columns fail soft (#1096): 0015 suspension/staging
+    (suspended_at/flagged_at) + 20260813000005 dashboard_key_login (no
+    team_by_id consumer reads it — included for seam uniformity). A schema
     missing them returns the row with safe None defaults, never raises.
     The #302 soft-delete columns (20260813000001 deleted_at/grace_hours)
     are NOT additive-fail-soft: the deletion kill-switch guard must fail
