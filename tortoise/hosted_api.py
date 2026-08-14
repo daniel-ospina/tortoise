@@ -5795,7 +5795,9 @@ _ALLOWED_STATE_KEYS = set(_ONBOARDING_DEFAULT_STATE.keys())
 # Not state keys — the PATCH handler pops harness/section and emits an
 # analytics event instead of persisting them.
 _HARNESS_ANALYTICS_VALUES = {"claude", "codex", "cursor", "pi"}
-_SECTION_ANALYTICS_VALUES = {"config", "prompt", "both"}
+# "setup" (welcome page one-click setup prompt) added alongside the #529
+# "config"/"prompt" copy-attribution sections — see welcome.html copySetupPrompt.
+_SECTION_ANALYTICS_VALUES = {"config", "prompt", "both", "setup"}
 
 
 def _get_onboarding_state(team_id: str) -> dict:
@@ -5888,7 +5890,7 @@ class OnboardingStatePatchRequest(BaseModel):
     # welcome.html fires this on copy with the displayed key. Enums match
     # #235's artifact_copied schema verbatim (align cycle-3 conformance).
     harness: str | None = None   # "claude"|"codex"|"cursor"|"pi"
-    section: str | None = None   # "config"|"prompt"|"both"
+    section: str | None = None   # "config"|"prompt"|"both"|"setup"
 
 
 @app.get("/v1/onboarding/state", response_model=OnboardingStateResponse)

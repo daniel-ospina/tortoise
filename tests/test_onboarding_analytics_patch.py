@@ -92,6 +92,16 @@ def test_patch_section_both_is_valid(client):
     assert events[0]["properties"] == {"harness": "cursor", "section": "both"}
 
 
+def test_patch_section_setup_is_valid(client):
+    """T5 (enum member): welcome page one-click setup prompt attribution."""
+    resp = client.patch("/v1/onboarding/state",
+                        json={"harness": "pi", "section": "setup"}, headers=AUTH)
+    assert resp.status_code == 200
+    events = _events(client)
+    assert len(events) == 1
+    assert events[0]["properties"] == {"harness": "pi", "section": "setup"}
+
+
 @pytest.mark.parametrize("payload", [
     {"harness": "vim", "section": "config"},      # invalid harness
     {"harness": "cursor", "section": "bogus"},    # invalid section
