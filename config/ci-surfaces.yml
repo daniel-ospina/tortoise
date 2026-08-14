@@ -20,6 +20,7 @@ surfaces:
   - test_client_ip_middleware.py
   - test_commit_endpoint.py
   - test_commit_schema.py
+  - test_cross_subdomain_cookie_sync.py
   - test_dashboard_login.py
   - test_direct_edge.py
   - test_dr_endpoints.py
