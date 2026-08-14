@@ -352,6 +352,9 @@
        dead form — the historical trigger for the credential-echo bug. -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"
           onerror="(function(){var e=document.getElementById('error');if(e){e.textContent='Sign in is temporarily unavailable (script blocked). Please try again later.';e.classList.add('visible');}})()"></script>
+  <!-- #1225: cross-subdomain session bridge — parent-domain cookie storage so the
+       session created here is visible on app.premiselabs.co (dashboard). -->
+  <script src="/assets/supabase-session.js"></script>
   <script>
     // ── Configuration ──────────────────────────────────────────────────────
     const SUPABASE_URL = "https://ybetwichurajbfswfeqa.supabase.co";
@@ -395,9 +398,12 @@
       // this entire script block at parse time (the historical 2026-08-08
       // bug that left the form as a static shell echoing credentials into
       // the URL). Guard so the form degrades to a clear error instead.
-      if (typeof window.supabase !== "undefined") {
+      // #1225: the shared factory (assets/supabase-session.js) is null-safe —
+      // it persists the session to the .premiselabs.co cookie the dashboard
+      // reads, and returns null (never throws) when the CDN is blocked.
+      if (typeof window.createTortoiseSupabaseClient === "function") {
         try {
-          supabaseClient = window.supabase.createClient(supabaseUrl, supabaseAnonKey);
+          supabaseClient = window.createTortoiseSupabaseClient(supabaseUrl, supabaseAnonKey);
         } catch (err) {
           console.error("supabase client init failed:", err);
         }

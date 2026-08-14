@@ -835,6 +835,9 @@ you up to 6 yes/no questions and set up your Tortoise memory.
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <!-- #1225: cross-subdomain session bridge — parent-domain cookie storage so the
+       session parsed here (OAuth/email callback) is visible on app.premiselabs.co. -->
+  <script src="/assets/supabase-session.js"></script>
   <script>
     // ── Configuration ──────────────────────────────────────────────────────
     const SUPABASE_URL = "https://ybetwichurajbfswfeqa.supabase.co";
@@ -882,7 +885,16 @@ you up to 6 yes/no questions and set up your Tortoise memory.
 
     let supabaseClient = null;
     if (isConfigured) {
-      supabaseClient = window.supabase.createClient(supabaseUrl, supabaseAnonKey);
+      // #1225: cross-subdomain session bridge. The shared factory
+      // (assets/supabase-session.js) persists the parsed session to the
+      // .premiselabs.co cookie the dashboard reads, and is null-safe — it
+      // returns null (never throws) when the CDN script is blocked or init
+      // fails, so the start block below can degrade to a clear message.
+      if (typeof window.createTortoiseSupabaseClient === "function") {
+        supabaseClient = window.createTortoiseSupabaseClient(supabaseUrl, supabaseAnonKey);
+      } else {
+        console.warn("supabase-session.js shared script did not load — auth disabled");
+      }
     } else {
       console.warn("SUPABASE_ANON_KEY not configured — page disabled");
     }
@@ -1378,10 +1390,17 @@ tortoise create-point "Hello world" --kind statement`;
       } else {
         waitForProvisioning();
       }
-    } else {
+    } else if (!isConfigured) {
       document.getElementById("loading").classList.add("hidden");
       document.getElementById("error-state").classList.remove("hidden");
       document.getElementById("error-message").textContent = "This page is not configured yet. Please contact support.";
+    } else {
+      // #1225 (review V2-P2-2): configured but no client — the supabase CDN
+      // (or the shared session bridge) was blocked. Distinct message from the
+      // unconfigured case, mirroring the #527 fail-closed pattern on signup/signin.
+      document.getElementById("loading").classList.add("hidden");
+      document.getElementById("error-state").classList.remove("hidden");
+      document.getElementById("error-message").textContent = "Welcome is temporarily unavailable (script blocked). Please try again later.";
     }
   
     // ── Harness-optimal configs + per-harness onboarding variants ────────
