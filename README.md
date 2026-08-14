@@ -109,6 +109,7 @@ Your agent now has Tortoise's tools — create points, query the graph, check be
 ```bash
 pip install tortoise-graph   # or: pip install 'tortoise-graph[embeddings]' for vector search
 # from source (clone): uv sync && uv run python -m tortoise.selfhost
+#   uv sync --extra embeddings  # or: uv sync for core only — extras mirror the PyPI package
 ```
 
 ## Self-host configuration
