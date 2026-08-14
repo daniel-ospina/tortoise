@@ -5381,32 +5381,16 @@ class TortoiseSDK:
             return {"iterations": 0, "converged": True, "affected_claims": []}
         anchors = list(self._dirty_roots)
         result = dreamer.dream(anchors, max_hops=max_hops)
-        # Clear dirty roots that CONVERGED — but ONLY the ones the dream's
-        # affected subgraph actually covered (PR #1273, code review). The
-        # previous code cleared ALL dirty roots whenever the dream ran
-        # anything (iterations > 0 or affected_claims non-empty), silently
-        # dropping roots OUTSIDE the dreamed subgraph — e.g. roots reachable
-        # only through legacy op_type-only operators, invisible to the
-        # {is_operator:true}-only dream selector (analyze._bfs_select_
-        # operators) — for every subsequent dream. An empty affected set
-        # (dream found no operators) subtracts nothing, keeping every dirty
-        # root for retry: the vacuous-run case the old iterations/affected-
-        # claims guard existed for is handled naturally. Roots that failed
-        # to converge stay dirty for a later dream (the else branch).
+        # Clear dirty roots that the dream's affected subgraph actually
+        # covered: roots in the affected set converged and are cleared;
+        # roots OUTSIDE the dreamed subgraph stay dirty for a later dream
+        # (e.g. roots reachable only through legacy op_type-only operators,
+        # invisible to the {is_operator:true}-only dream selector in
+        # analyze._bfs_select_operators). An empty affected set (dream found
+        # no operators) subtracts nothing, keeping every dirty root for
+        # retry — the vacuous-run case handled naturally by the single
+        # unconditional subtraction.
         affected = set(result.get("affected_claims", []))
-        # Clear dirty roots that CONVERGED — but ONLY the ones the dream's
-        # affected subgraph actually covered (PR #1273, code review). The
-        # previous code cleared ALL dirty roots whenever the dream ran
-        # anything (iterations > 0 or affected_claims non-empty), silently
-        # dropping roots OUTSIDE the dreamed subgraph — e.g. roots reachable
-        # only through legacy op_type-only operators, invisible to the
-        # {is_operator:true}-only dream selector (analyze._bfs_select_
-        # operators) — for every subsequent dream. An empty affected set
-        # (dream found no operators) subtracts nothing, keeping every dirty
-        # root for retry: the vacuous-run case the old iterations/affected-
-        # claims guard existed for is handled naturally. Roots that failed
-        # to converge stay dirty for a later dream (same subtraction — the
-        # converged/else split is kept only for the lifecycle comment).
         self._dirty_roots -= affected
         return result
 
