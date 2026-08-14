@@ -48,10 +48,14 @@ primary_region = "iad"
 [env]
   TORTOISE_DB_URI = ""  # Constructed at runtime by entrypoint.sh from FALKORDB_CLOUD_URI → FalkorDB Cloud
   FASTAPI_INTERNAL_KEY = ""  # Set via fly secrets
-  # #1081: only the Fly-proxied hosted deployment may trust Fly-Client-IP
-  # (the proxy overwrites it from the connection peer). Fail-closed
-  # elsewhere — a non-proxy ingress must never let a client set its own
-  # per-IP limiter key.
+  # #1081/#985: only the Fly-proxied hosted deployment may trust forwarded
+  # headers — Fly-Client-IP for per-IP limiters (#1081) and
+  # Fly-Forwarded-Proto for redirect Location schemes (#985; proxy-set,
+  # non-overridable, preferred over the client-overridable
+  # X-Forwarded-Proto). Self-hosters behind nginx/Caddy set
+  # TORTOISE_TRUST_X_FORWARDED_PROTO=1 instead. Fail-closed elsewhere —
+  # a non-proxy ingress must never let a client set its own limiter key
+  # or redirect scheme.
   TORTOISE_TRUST_FLY_CLIENT_IP = "1"
   # Hosted backups (#305) — set via fly secrets (deploy workflow syncs from GitHub)
   TORTOISE_BACKUP_KEY = ""

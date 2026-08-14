@@ -830,18 +830,24 @@ class TestIngestPromotionPolicy:
             assert res["code"] == mcp_mod.ERR_INVALID == -32003
             assert "not allowed under promotion_policy 'gated'" in res["error"]
 
-    def _sdk_backed_ingest(self, request, monkeypatch, tmp_path, **kw):
+    def _sdk_backed_ingest(self, request, monkeypatch, tmp_path, *, reify=False, **kw):
         import os
         from tortoise.sdk import TortoiseSDK
         sdk = TortoiseSDK(os.path.join(str(tmp_path), "ing.db"))
         request.addfinalizer(sdk.close)  # match repo teardown convention
         monkeypatch.setattr("tortoise.mcp_server._get_team_sdk", lambda: sdk)
+        conn = {"from": "pA", "to": "pB", "operator": "IMPL"}
+        if reify:
+            # §8 (INGEST_CONTRACT): reify:true anchors a REAL operator node
+            # (route 'operator') — a plain IMPL/NAND without it is
+            # operator-less (direct edge, no node to query).
+            conn["reify"] = True
         bundle = {
             "points": [
                 {"ref": "pA", "kind": "claim", "content": "A implies B"},
                 {"ref": "pB", "kind": "claim", "content": "B"},
             ],
-            "connections": [{"from": "pA", "to": "pB", "operator": "IMPL"}],
+            "connections": [conn],
         }
         res = mcp_mod.tortoise_ingest(bundle=bundle, **kw)
         return res
@@ -849,26 +855,28 @@ class TestIngestPromotionPolicy:
     def test_mcp_gated_default_keeps_source_draft(self, request, monkeypatch, tmp_path):
         # Agent journey: ingest via tortoise_ingest → read status back via
         # tortoise_get_point (the read surface the agent actually calls).
+        # §8 (INGEST_CONTRACT): a plain IMPL connection is an OPERATOR-LESS
+        # direct edge — under gated the sources stay draft, and no operator
+        # node exists to query (the connection entry is the descriptor).
         res = self._sdk_backed_ingest(request, monkeypatch, tmp_path)
         assert "error" not in res, res
-        pA, _ = res["ids"]["points"]
-        op_id = res["ids"]["connections"][0]
+        pA, pB = res["ids"]["points"]
         assert mcp_mod.tortoise_get_point(pA)["status"] == "draft"
-        assert mcp_mod.tortoise_get_point(op_id)["status"] == "draft"
+        assert mcp_mod.tortoise_get_point(pB)["status"] == "draft"
+        assert res["ids"]["connections"][0] == \
+            {"direct_edge": "IMPL", "from": pA, "to": pB}
 
     def test_mcp_auto_promotes_source_live(self, request, monkeypatch, tmp_path):
         res = self._sdk_backed_ingest(
             request, monkeypatch, tmp_path, promotion_policy="auto")
         assert "error" not in res, res
         pA, pB = res["ids"]["points"]
-        op_id = res["ids"]["connections"][0]
         assert mcp_mod.tortoise_get_point(pA)["status"] == "live"
         assert mcp_mod.tortoise_get_point(pB)["status"] == "draft"  # source-only
-        op = mcp_mod.tortoise_get_point(op_id)
-        assert "error" not in op, op
-        # #780 live-side: auto writes NO status on the operator (EP treats
-        # null-status as live) — assert key absence, not == "live".
-        assert "status" not in op
+        # §8 operator-less model: the plain IMPL connection is a direct edge
+        # (no operator node), so the entry is the descriptor, not an id.
+        assert res["ids"]["connections"][0] == \
+            {"direct_edge": "IMPL", "from": pA, "to": pB}
 
     def test_mcp_granular_auto_parity(self, request, monkeypatch, tmp_path):
         # E2E-5 at the MCP layer: granularity is forwarded verbatim and the
@@ -889,10 +897,33 @@ class TestIngestPromotionPolicy:
             request, monkeypatch, tmp_path, granularity="granular")
         assert "error" not in res, res
         assert res["granularity"] == "granular"
-        pA, _ = res["ids"]["points"]
-        op_id = res["ids"]["connections"][0]
+        pA, pB = res["ids"]["points"]
         assert mcp_mod.tortoise_get_point(pA)["status"] == "draft"
-        assert mcp_mod.tortoise_get_point(op_id)["status"] == "draft"
+        assert mcp_mod.tortoise_get_point(pB)["status"] == "draft"
+        assert res["ids"]["connections"][0] == \
+            {"direct_edge": "IMPL", "from": pA, "to": pB}
+
+    def test_mcp_gated_reify_operator_keeps_draft(self, request, monkeypatch, tmp_path):
+        # #780 semantics preserved for REAL operator nodes (route 'operator'
+        # via reify:true): under gated the operator is written status:'draft'.
+        res = self._sdk_backed_ingest(
+            request, monkeypatch, tmp_path, reify=True)
+        assert "error" not in res, res
+        op_id = res["ids"]["connections"][0]  # operator-route entry is the id
+        op = mcp_mod.tortoise_get_point(op_id)
+        assert "error" not in op, op
+        assert op["status"] == "draft"
+
+    def test_mcp_auto_reify_operator_no_status(self, request, monkeypatch, tmp_path):
+        # #780 live-side on a REAL operator node: auto writes NO status on the
+        # operator (EP treats null-status as live) — assert key absence.
+        res = self._sdk_backed_ingest(
+            request, monkeypatch, tmp_path, reify=True, promotion_policy="auto")
+        assert "error" not in res, res
+        op_id = res["ids"]["connections"][0]
+        op = mcp_mod.tortoise_get_point(op_id)
+        assert "error" not in op, op
+        assert "status" not in op
 
 
 class TestStdioEntrypointToolRegistration:
