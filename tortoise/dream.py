@@ -13,6 +13,11 @@ Design (Hybrid C, #85):
 - ``dream(anchors, hops)`` — incremental: BFS from anchor points, run EP on
   the affected subgraph, write back confidences.
 - ``dream_all()`` — full-graph stabilization from all non-operator points.
+- ``dream_window(budget)`` (epic 903-C3, #1241) — stale-first scheduler:
+  each pass refreshes the stalest window (staleness-ranked top-N ∪
+  retained-dirty-roots), per-pass operator budget bounded by the existing
+  200-op selector cap, operator-set dedup across windows (fixes the
+  dream_all double-BFS), atomic UNWIND freshness write-back (#1240).
 - Async decoupling: fast-path queries never block on dreaming (dreaming is
   triggered post-batch, lazy-on-read, or on-demand via SDK/MCP).
 
@@ -40,6 +45,18 @@ _log = logging.getLogger(__name__)
 # 1-hop; the dream expands to max_hops for full propagation. DO NOT reduce
 # below 2 without expanding _mark_dirty (contract, #85).
 DEFAULT_MAX_HOPS = 2
+
+# Default per-pass window budget for the stale-first scheduler (epic 903-C3,
+# #1241) — the existing _bfs_select_operators 200-operator selector cap.
+# budget=None resolves to this (every pass bounded by construction); an
+# explicit budget overrides it; budget=0 → no-op; budget >= graph → single
+# pass (window = whole graph, degenerates to full).
+DEFAULT_WINDOW_BUDGET = 200
+
+# Claim-anchor chunk size for windowed passes over large windows (mirrors
+# dream_all's batch_size default) — bounds EP cache memory when the window
+# degenerates to the whole graph (all-null / budget >= graph).
+WINDOW_CLAIM_BATCH = 2000
 
 # Embedded in-band latency budget (seconds). If a dream exceeds this, the
 # caller falls back to lazy-read + the scheduled dream_all (#85).
@@ -134,45 +151,9 @@ class Dreamer:
             # #330: dream must honour the SDK's persistent evidence (baselines)
             # — hydrate graph-persisted baselines and pass a copy to ep.run.
             # run() is call-scoped, so the copy cannot leak into later runs.
-            self._sdk._hydrate_evidence()
-            iterations, converged = ep.run(
-                seed_ids, max_hops=max_hops,
-                evidence=dict(self._sdk._evidence),
-            )
-            # Persist mean confidence to node property (mirrors compute_confidence).
-            # #395 (merged on main after this epic's branch): the write-back
-            # set == the run set by construction — consume ep._last_affected
-            # (stashed by run, assigned before its early returns) instead of
-            # re-running the BFS, fixing the documented dream.py:88 footgun.
-            # Epic 903-C2 (#1240): the batch UNWIND write-back SETs confidence
-            # + lastDreamedAt + updatedAt in ONE statement (both-or-neither,
-            # no N+1 writes). lastDreamedAt is written only when the run
-            # converged AND stamp_dreamed_at is set (failed runs keep old
-            # stamps — retention, W4).
-            affected = set(ep._last_affected)
-            from datetime import datetime, timezone
-            now = datetime.now(timezone.utc).isoformat()
+            iterations, converged, affected = self._ep_run_batch(
+                proj, seed_ids, max_hops, stamp_dreamed_at)
             stamp = stamp_dreamed_at and converged
-            params_list = [
-                {"id": cid, "c": ep.compute_confidence(cid)["mean"]}
-                for cid in affected
-            ]
-            if params_list:
-                if stamp:
-                    proj.g.query(
-                        "UNWIND $params AS p "
-                        "MATCH (n:Point {id: p.id}) "
-                        "SET n.confidence = p.c, n.lastDreamedAt = $now, "
-                        "    n.updatedAt = $now",
-                        params={"params": params_list, "now": now},
-                    )
-                else:
-                    proj.g.query(
-                        "UNWIND $params AS p "
-                        "MATCH (n:Point {id: p.id}) "
-                        "SET n.confidence = p.c, n.updatedAt = $now",
-                        params={"params": params_list, "now": now},
-                    )
             # Epic 903-C2 (#1240): operator-less anchors among the dirty roots
             # are trivially stamped in the same local pass (the EP write-back
             # above can never cover them — they have no factors). Gated on the
@@ -182,6 +163,198 @@ class Dreamer:
             return {
                 "iterations": iterations,
                 "converged": converged,
+                "affected_claims": sorted(affected),
+            }
+
+    def _ep_run_batch(self, proj, seed_ids: list[str], max_hops: int,
+                      stamp: bool) -> tuple[int, bool, set[str]]:
+        """Run EP over ``seed_ids`` + the atomic UNWIND write-back (#1240).
+
+        Shared by ``dream()`` and the stale-first scheduler
+        (``dream_window``) so window passes reuse the EXACT
+        confidence+lastDreamedAt+updatedAt single-UNWIND write-back
+        (both-or-neither, no N+1 writes). ``lastDreamedAt`` is written ONLY
+        when the run converged AND ``stamp`` is set — failed runs keep old
+        stamps and re-enter the staleness ranking (W4 retention). Returns
+        ``(iterations, converged, affected)``.
+        """
+        ep = self._sdk._get_ep()
+        # #330: dream must honour the SDK's persistent evidence (baselines)
+        # — hydrate graph-persisted baselines and pass a copy to ep.run.
+        # run() is call-scoped, so the copy cannot leak into later runs.
+        self._sdk._hydrate_evidence()
+        iterations, converged = ep.run(
+            seed_ids, max_hops=max_hops,
+            evidence=dict(self._sdk._evidence),
+        )
+        # #395: the write-back set == the run set by construction — consume
+        # ep._last_affected (stashed by run, assigned before its early
+        # returns) instead of re-running the BFS (the dream.py:88 footgun).
+        # Epic 903-C2 (#1240): the batch UNWIND write-back SETs confidence +
+        # lastDreamedAt + updatedAt in ONE statement (both-or-neither, no
+        # N+1 writes). lastDreamedAt is written only when the run converged
+        # AND stamp is set (failed runs keep old stamps — retention, W4).
+        affected = set(ep._last_affected)
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        stamp_now = stamp and converged
+        params_list = [
+            {"id": cid, "c": ep.compute_confidence(cid)["mean"]}
+            for cid in affected
+        ]
+        if params_list:
+            if stamp_now:
+                proj.g.query(
+                    "UNWIND $params AS p "
+                    "MATCH (n:Point {id: p.id}) "
+                    "SET n.confidence = p.c, n.lastDreamedAt = $now, "
+                    "    n.updatedAt = $now",
+                    params={"params": params_list, "now": now},
+                )
+            else:
+                proj.g.query(
+                    "UNWIND $params AS p "
+                    "MATCH (n:Point {id: p.id}) "
+                    "SET n.confidence = p.c, n.updatedAt = $now",
+                    params={"params": params_list, "now": now},
+                )
+        return iterations, converged, affected
+
+    # ── Stale-first window scheduler (epic 903-C3, #1241) ────────────
+
+    def dream_window(self, budget: int | None = None,
+                     max_hops: int = DEFAULT_MAX_HOPS) -> dict:
+        """Stale-first windowed pass (epic 903-C3, #1241).
+
+        Refreshes the stalest chunk of the graph each pass:
+
+            window = retained-dirty-roots ∪ staleness-ranked-top-N
+
+        where the staleness ranking (analyze._stale_first_claims) orders
+        live non-operator claims by ``lastDreamedAt ASC`` — NULL ranks
+        STALEST (never dreamed → first; legacy / first-deploy / crash-mid-
+        pass claims drain across passes), deterministic id tie-break — and
+        the dirty-roots union guarantees non-converged regions (W4, 903-C5
+        retention) reselect even when they rank outside the top-N.
+
+        Per-pass cost is bounded by ``budget`` — distinct operators
+        processed after operator-set dedup never exceeds it:
+        - ``budget=None`` → DEFAULT_WINDOW_BUDGET (the existing 200-op
+          ``_bfs_select_operators`` selector cap — every pass is bounded by
+          construction).
+        - ``budget=0`` → no-op result (no EP, no stamps).
+        - ``budget >= graph`` → single pass (window = whole graph,
+          degenerates to a full pass).
+        - All-null graph (nothing ever dreamed — first deploy / legacy /
+          crash recovery) → window = whole graph regardless of budget (W2).
+
+        Operator-set dedup (scope item 4 — fixes the ``dream_all``
+        double-BFS: the cap-check BFS and the inner ``dream()`` BFS
+        recomputed the same subgraph): each batch's operator set is selected
+        by exactly ONE ``_bfs_select_operators`` call (op_cap = budget) and
+        reused for the EP run — no second BFS; sets are unioned across the
+        pass's batches so overlapping windows never recompute the same
+        operators.
+
+        Write-back (#1240): every batch runs through the shared atomic
+        UNWIND confidence+lastDreamedAt+updatedAt write-back with stamping
+        on (scheduler passes are write-triggered); stamps land ONLY when the
+        batch converged (W4 — failed runs keep old stamps and re-enter the
+        ranking). Operator-less window claims are trivially stamped by a
+        window-scoped scan, gated on the pass converging. Dirty roots are
+        NOT cleared here — the SDK adapter (I6) maps ``operators_deduped``
+        → ``budget_used`` and drives the dirty-root logic from ``converged``.
+
+        Returns ``{mode: "stale-first", batches, converged, converged_all,
+        operators_deduped, budget_used, affected_claims}``.
+        """
+        eff_budget = DEFAULT_WINDOW_BUDGET if budget is None else budget
+        if eff_budget <= 0:
+            return {"mode": "stale-first", "batches": 0, "converged": True,
+                    "converged_all": True, "operators_deduped": 0,
+                    "budget_used": 0, "affected_claims": []}
+        with self._lock:
+            proj = self._sdk._get_proj()
+            from .analyze import (_bfs_select_operators,
+                                  _stale_first_claims,
+                                  _stale_first_count_stamped)
+            # All-null graph (nothing ever dreamed): window = whole graph —
+            # no point windowing a never-dreamed graph; one full pass drains
+            # it (W2 all-null degenerates to full).
+            if _stale_first_count_stamped(proj) == 0:
+                ranked = _stale_first_claims(proj, limit=None)
+            else:
+                ranked = _stale_first_claims(proj, limit=eff_budget)
+            # Window = staleness-ranked-top-N ∪ retained-dirty-roots (the
+            # union guarantees non-converged regions reselect even outside
+            # the top-N, W2/W4). Dirty roots sorted for deterministic
+            # chunking (BFS collection is order-independent — sets — but the
+            # window slice is not).
+            ranked_set = set(ranked)
+            window = list(ranked) + [
+                d for d in sorted(self._sdk._dirty_roots)
+                if d not in ranked_set
+            ]
+            if not window:
+                return {"mode": "stale-first", "batches": 0,
+                        "converged": True, "converged_all": True,
+                        "operators_deduped": 0, "budget_used": 0,
+                        "affected_claims": []}
+            seen_ops: set[str] = set()
+            affected: set[str] = set()
+            batches = 0
+            converged_all = True
+            for start in range(0, len(window), WINDOW_CLAIM_BATCH):
+                chunk = window[start:start + WINDOW_CLAIM_BATCH]
+                batches += 1
+                # ONE selection per batch — the cap-check and the run share
+                # it (dream_all double-BFS fix); op_cap = budget enforces the
+                # per-batch operator cap deterministically (sorted-by-id
+                # truncation).
+                ops, factor_anchors = _bfs_select_operators(
+                    proj, chunk, max_hops=max_hops, rel_filter="IMPL|NAND",
+                    direction="both", op_cap=eff_budget,
+                )
+                # Operator-set dedup: union across the pass's batches — an
+                # operator already selected by an earlier window is never
+                # re-run (overlapping windows share operator sets). The
+                # pass-level remaining guard keeps budget_used ≤ B even when
+                # the window spans multiple batches; truncated operators stay
+                # stale and re-enter the ranking next pass.
+                new_ops = ops - seen_ops
+                remaining = eff_budget - len(seen_ops)
+                if remaining <= 0:
+                    # Pass budget exhausted — defer the rest of the window to
+                    # the next pass (claims stay stale, re-enter ranking).
+                    break
+                if len(new_ops) > remaining:
+                    new_ops = set(sorted(new_ops)[:remaining])
+                seed_ids = list(new_ops)
+                for (src, tgt, _t) in factor_anchors:
+                    seed_ids.append(src)
+                    seed_ids.append(tgt)
+                seed_ids = list(dict.fromkeys(seed_ids))
+                if not seed_ids:
+                    # Chunk fully covered by an earlier window's operator set
+                    # (or draft-only): nothing new to run.
+                    continue
+                seen_ops |= new_ops
+                _iterations, converged, aff = self._ep_run_batch(
+                    proj, seed_ids, max_hops, stamp=True)
+                affected |= aff
+                converged_all = converged_all and converged
+            # Operator-less window claims: trivial-stamp (window-scoped scan,
+            # independent of the EP flush), gated on the pass converging — a
+            # failed pass stamps nothing (W4 retention).
+            if converged_all:
+                affected |= self._trivial_stamp(proj, window)
+            return {
+                "mode": "stale-first",
+                "batches": batches,
+                "converged": converged_all,
+                "converged_all": converged_all,
+                "operators_deduped": len(seen_ops),
+                "budget_used": len(seen_ops),
                 "affected_claims": sorted(affected),
             }
 
