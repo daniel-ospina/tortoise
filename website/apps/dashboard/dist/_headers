@@ -1,0 +1,6 @@
+# Security headers — app.premiselabs.co (Cloudflare Pages, tortoise-dashboard project)
+# HSTS (#1003 §1): matches the API's value (tortoise/hosted_api.py) — max-age=31536000; includeSubDomains.
+# No `preload` yet — soak first, per #1003 §1.
+# Vite copies this public/ dir into dist/ on build; the Pages deploy serves dist/.
+/*
+  Strict-Transport-Security: max-age=31536000; includeSubDomains
