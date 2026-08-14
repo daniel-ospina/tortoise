@@ -107,8 +107,15 @@ Output ONE JSON object:
   "logic": [{"point": str (posterity wording), "supports": str|null,
              "opposes": str|null, "sources": [int]}]
 }
-STATE = what IS after this session (objects per the ontology, incl. OPTIONS
-retained AND discarded). DECISIONS = commitments resolving the confidence
+STATE = what IS after this session (durable epistemic objects per the
+ontology, incl. OPTIONS retained AND discarded). STRICT EXCLUSION — do NOT
+emit as state: file paths, module names, branch names, worktrees, test
+suites/files, issue ids/labels, git operations, commands run, or any work
+artifact touched. State is what the session CHANGED ABOUT THE WORLD that
+remains true and durable (an option chosen, an approach adopted, a ruling, a
+feature decision) — NOT the mechanics of how the work was done. If it is a
+file/branch/test the agent worked on, it is execution narration, drop it.
+Aim for 2-8 state items, not one per artifact. DECISIONS = commitments resolving the confidence
 dynamics, with the WHY + FOR/AGAINST + MITIGATIONS, in posterity wording.
 ISSUES = created/completed referenced (precise lifecycle syncs from GitHub).
 LOGIC = the durable beliefs/knowledge with their sources (edu_refs as
