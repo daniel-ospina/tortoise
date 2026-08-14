@@ -371,6 +371,87 @@ def test_cli_human_mode_reports_issues(sdk, capsys, tmp_path):
     assert "HIGH" in out
 
 
+def _clear_db_env(monkeypatch):
+    """Reset every DB-target env source so env-based scenarios start clean.
+
+    Mirrors tests/test_cli_context.py's _delenv_falkordb + URI/PATH clears.
+    """
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+    for k in ("FALKORDB_HOST", "FALKORDB_PORT", "FALKORDB_PASSWORD"):
+        monkeypatch.delenv(k, raising=False)
+
+
+@pytest.mark.parametrize("case", [
+    "invalid_port",
+    "relative_path",
+    "unreachable_uri",
+    "embedded_busy",
+])
+def test_cli_error_paths_clean_one_line(case, capsys, monkeypatch, tmp_path):
+    """#1258 review-fix (9daec32e): every _cmd_audit failure path surfaces as
+    a SINGLE clean stderr line with exit 1 — never a raw traceback, and never
+    a credential leak from a URI-bearing target.
+
+    Covers the four paths the fix commit added error handling for:
+      (a) invalid FALKORDB_PORT       → ValueError in _resolve_db_target
+      (b) relative --db path          → ValueError in _resolve_db_target
+      (c) unreachable URI host        → RuntimeError/ConnectionError in the
+                                        SDK/audit branch (password must not
+                                        appear in output)
+      (d) embedded store held busy    → EmbeddedStoreBusyError from the SDK's
+                                        §5.3 pid-registry probe
+    """
+    from tortoise.__main__ import main
+
+    secret = None
+    if case == "invalid_port":
+        _clear_db_env(monkeypatch)
+        monkeypatch.setenv("FALKORDB_HOST", "localhost")
+        monkeypatch.setenv("FALKORDB_PORT", "not-an-int")
+        argv = ["audit"]
+        expect = "Invalid FALKORDB_PORT"
+    elif case == "relative_path":
+        _clear_db_env(monkeypatch)
+        argv = ["audit", "--db", "relative/path.db"]
+        expect = "Relative DB path"
+    elif case == "unreachable_uri":
+        _clear_db_env(monkeypatch)
+        # port 1 on loopback → instant ECONNREFUSED (no network RTT, no hang).
+        # The password-bearing userinfo must never reach stdout/stderr.
+        secret = "sup3rsekrit"
+        monkeypatch.setenv(
+            "TORTOISE_DB_URI",
+            f"docker://:{secret}@127.0.0.1:1/tortoise")
+        argv = ["audit"]
+        expect = "audit failed"
+    else:  # embedded_busy
+        _clear_db_env(monkeypatch)
+        db_path = str(tmp_path / "busy.db")
+        # Simulate a LIVE holder of the embedded store: write the redislite
+        # pid-registry (<path>.settings → pidfile) pointing at a live pid.
+        # Our own pid works — the probe only passes paths this process has
+        # ALREADY opened (_embedded_busy_known), and busy.db is fresh.
+        (tmp_path / "busy.db.settings").write_text(
+            json.dumps({"pidfile": str(tmp_path / "busy.pid")}),
+            encoding="utf-8")
+        (tmp_path / "busy.pid").write_text(str(os.getpid()), encoding="utf-8")
+        argv = ["audit", "--db", db_path]
+        expect = "Embedded store busy"
+
+    rc = main(argv)
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert expect in captured.err
+    assert len(captured.err.strip().splitlines()) == 1, \
+        f"expected a SINGLE stderr line, got:\n{captured.err!r}"
+    assert "Traceback" not in captured.out
+    assert "Traceback" not in captured.err
+    if secret is not None:
+        assert secret not in captured.out
+        assert secret not in captured.err
+
+
 # ── 7. MCP surface (registry + handler) ──────────────────────────
 
 def test_mcp_registry_entry_and_http_allowlist():
