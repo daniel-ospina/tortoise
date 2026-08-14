@@ -132,6 +132,41 @@ def _build_session_llm_extractor():
     )
 
 
+def _session_llm_effective_model(spec: str, provider: str | None) -> str:
+    """Effective model id that would be sent to the provider wire.
+
+    ``spec`` is the raw TORTOISE_SESSION_LLM_MODEL value (`<provider>:<model>`
+    or bare `<model>`); the provider prefix is stripped for the wire id, and an
+    unset spec resolves to the provider's default. The extractor build
+    validates provider matching separately (ValueError on mismatch); this
+    helper only resolves the model id for reporting/shape checks."""
+    if not spec:
+        return _SESSION_LLM_DEFAULT_MODELS.get(provider or "", "")
+    _p, _, m = spec.partition(":")
+    return m if (_p and m) else spec
+
+
+def _session_llm_model_shape_warning(spec: str, provider: str | None) -> str | None:
+    """OpenRouter route-shape warning — None when the model id is routable.
+
+    OpenRouter addresses models as `<family>/<model>` (e.g. deepseek/deepseek-chat);
+    a bare `<model>` spec (`openrouter:deepseek-chat`) builds an extractor fine
+    but the FIRST capture 404s at call time — the route id is not routable even
+    though the provider key is configured. Warn, never fail: only the route
+    shape is suspect, the configuration itself is valid."""
+    if provider != "openrouter":
+        return None
+    eff = _session_llm_effective_model(spec, provider)
+    if "/" in eff:
+        return None
+    return (
+        f"model {eff!r} lacks <family>/<model> shape — OpenRouter routes are "
+        f"family-prefixed (e.g. deepseek/deepseek-chat); the first capture "
+        f"would 404 at call time. Set "
+        f"TORTOISE_SESSION_LLM_MODEL=openrouter:<family>/<model>."
+    )
+
+
 class _InMemoryEventLog:
     """Duck-typed EventLog (append/read_all) backing the session-capture
     extraction readback. The graph (via the EventAPI projection) is the

@@ -2618,7 +2618,12 @@ def _cmd_doctor(args):
     hosted = bool(_os.environ.get("FLY_APP_NAME"))
     mock_seam = _os.environ.get("TORTOISE_SESSION_LLM_MOCK", "").strip().lower() == "1"
     try:
-        from tortoise.sdk import _SESSION_LLM_DEFAULT_MODELS, _session_llm_provider
+        from tortoise.sdk import (
+            _SESSION_LLM_DEFAULT_MODELS,
+            _build_session_llm_extractor,
+            _session_llm_model_shape_warning,
+            _session_llm_provider,
+        )
         from tortoise.hosted_api import _LLM_PROVIDER_KEYS, _llm_provider_available
 
         if _llm_provider_available():
@@ -2643,7 +2648,6 @@ def _cmd_doctor(args):
                 # doctor must not print ✅ for a config that crashes capture
                 # with a 500 (only a matching provider/model builds).
                 try:
-                    from tortoise.sdk import _build_session_llm_extractor
                     if _build_session_llm_extractor() is None:
                         raise RuntimeError("extractor is None despite provider available")
                 except Exception as e:
@@ -2658,6 +2662,15 @@ def _cmd_doctor(args):
                         "Session extraction", "✅",
                         f"LLM provider configured ({provider}, model {model or '?'})",
                     ))
+                    # OpenRouter route-shape warning (PR #1220 review P2 c65):
+                    # a bare <model> spec (openrouter:deepseek-chat) builds an
+                    # extractor fine but the FIRST capture 404s — OpenRouter
+                    # routes are family-prefixed (<family>/<model>). Warn, never
+                    # fail: the config is valid, only the route id shape is
+                    # suspect (and capture failure is a 404, not a 503).
+                    warning = _session_llm_model_shape_warning(spec, provider)
+                    if warning:
+                        results.append(("OpenRouter model", "⚠️", warning))
         else:
             detail = (
                 "no LLM provider key — POST /v1/sessions fails closed (503). "

@@ -133,6 +133,14 @@ jobs:
           if [ -z "${{ secrets.R2_ACCOUNT_ID }}" ] || [ -z "${{ secrets.R2_BUCKET }}" ]; then
             echo "::warning::R2_* secrets not fully set — backup storage disabled until configured"
           fi
+          # Session-capture LLM test seam (#1197): TORTOISE_SESSION_LLM_MOCK=1
+          # COUNTS as 'configured' for the 503 gate, but it lives on Fly's env
+          # (not GitHub secrets) so this gate CANNOT check it. A deploy with
+          # MOCK set passes every gate here while captures write offline
+          # MockModel points. Operator checklist: verify it is ABSENT on Fly
+          # before/after each deploy (docs/infra-runbook.md §4.6 —
+          # `fly secrets list -a tortoise-y4mjjq | grep TORTOISE_SESSION_LLM_MOCK`
+          # must be empty).
       # Migration drift gate (#1095): fail-closed check that repo migrations
       # are not ahead of prod before shipping app code. The #1001 P0 (code
       # reading teams.suspended_at/flagged_at whose migration never reached

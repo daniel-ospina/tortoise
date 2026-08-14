@@ -94,6 +94,25 @@ def test_provider_key_parity_all_keys(monkeypatch):
             monkeypatch.delenv(k)
 
 
+def test_openrouter_model_shape_warning_helper():
+    """PR #1220 review P2 c65: _session_llm_model_shape_warning flags ONLY
+    openrouter models lacking <family>/<model>; all other providers and
+    well-formed openrouter routes never warn (the 404-at-capture case)."""
+    from tortoise.sdk import _session_llm_model_shape_warning
+
+    # openrouter + bare model → warn (the 404-at-capture shape)
+    w = _session_llm_model_shape_warning("openrouter:deepseek-chat", "openrouter")
+    assert w and "<family>/<model>" in w and "404" in w
+    # openrouter + well-formed family/model → no warn
+    assert _session_llm_model_shape_warning("openrouter:deepseek/deepseek-chat", "openrouter") is None
+    # openrouter default (unset spec) → deepseek/deepseek-chat → no warn
+    assert _session_llm_model_shape_warning("", "openrouter") is None
+    # non-openrouter providers use bare model ids — never warn
+    assert _session_llm_model_shape_warning("deepseek:deepseek-chat", "deepseek") is None
+    assert _session_llm_model_shape_warning("openai:gpt-4o-mini", "openai") is None
+    assert _session_llm_model_shape_warning("gemini:gemini-2.0-flash", "gemini") is None
+
+
 def test_sdk_priority_covers_all_registry_providers():
     """#1197 drift guard: every provider registered in ingest._PROVIDERS must
     be (a) in sdk._SESSION_LLM_PROVIDER_PRIORITY and (b) carry a key in

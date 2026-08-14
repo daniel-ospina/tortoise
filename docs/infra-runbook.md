@@ -174,7 +174,7 @@ sure that never happens.
 | `OPENAI_API_KEY` | OpenAI | `gpt-4o-mini` | |
 | `GEMINI_API_KEY` | Google Gemini | `gemini-2.0-flash` | Also used by MCP tooling — its presence here does NOT alone prove session capture is enabled |
 | `TORTOISE_SESSION_LLM_MODEL` | — | per-provider default | Override, format `<provider>:<model>`; the provider must match the key that is set |
-| `TORTOISE_SESSION_LLM_MOCK` | — | unset | **TEST-ONLY** seam (`1` = offline MockModel). NEVER set on Fly — captures would write MockModel points |
+| `TORTOISE_SESSION_LLM_MOCK` | — | unset | **TEST-ONLY** seam (`1` = offline MockModel). **NEVER set on Fly** — it COUNTS as *configured* for the 503 gate, so a deploy with it set passes every gate while captures silently write offline MockModel points (see Verification procedure step 1) |
 
 Provider priority when MULTIPLE keys are set (first configured wins):
 `openrouter → deepseek → openai → gemini` (`sdk._SESSION_LLM_PROVIDER_PRIORITY`).
@@ -228,8 +228,15 @@ stop, not spend; monitor spend via the provider dashboard.
 ### Verification procedure
 
 ```bash
-# 1. Provider key present on the running app (needs Fly org access):
+# 1. Provider key present on the running app AND the MOCK test seam ABSENT.
+#    MOCK=1 counts as 'configured' for the 503 gate — a deploy with it set
+#    passes the gate but every capture writes offline MockModel points. The
+#    deploy workflow's verify-secrets step cannot check this (MOCK lives on
+#    Fly's env, not GitHub secrets) — it is an operator checklist item:
 fly secrets list -a tortoise-y4mjjq | grep -E "OPENROUTER|DEEPSEEK|OPENAI|GEMINI"
+if fly secrets list -a tortoise-y4mjjq | grep -q TORTOISE_SESSION_LLM_MOCK; then
+  echo "FAIL: TORTOISE_SESSION_LLM_MOCK is set on Fly — remove it (TEST-ONLY seam, never prod)"; exit 1
+fi
 
 # 2. Doctor reports the resolved provider/model (hosted mode FAILS on
 #    provider-missing — rc 1):
@@ -250,6 +257,11 @@ a Supabase team JWT for the authenticated capture call. As of 2026-08-14 the
 live `api.premiselabs.co` reports `{"status":"ok"}` on `/health` but
 `/health/ready` returned `Database unreachable` — verify FalkorDB connectivity
 before relying on a capture smoke (#1197).
+
+**Deploy checklist (operator, before/after each deploy-hosted run):**
+
+- [ ] ≥1 LLM provider key in GitHub secrets (deploy gate hard-fails otherwise)
+- [ ] `TORTOISE_SESSION_LLM_MOCK` is NOT set on Fly (`fly secrets list -a tortoise-y4mjjq | grep TORTOISE_SESSION_LLM_MOCK` → empty). MOCK=1 is a TEST-ONLY seam that *counts as configured* for the 503 gate — a deploy with it set passes every gate while captures write offline MockModel points. NEVER set it on Fly.
 
 ## 5. Dashboard Deploy
 

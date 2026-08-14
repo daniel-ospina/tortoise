@@ -448,6 +448,71 @@ class TestDoctorSessionExtraction:
         assert "misconfig" in line
         assert rc in (0, 1)
 
+    def test_openrouter_bare_model_shape_warns(self, clean_llm_env, capsys):
+        """PR #1220 review P2 c65: an openrouter spec WITHOUT <family>/<model>
+        (openrouter:deepseek-chat) builds an extractor fine (✅ Session
+        extraction) but the route 404s at capture time — the doctor must add
+        a ⚠️ shape warning, never fail the run (config itself is valid)."""
+        monkeypatch, db_path = clean_llm_env
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-1197")
+        monkeypatch.setenv("TORTOISE_SESSION_LLM_MODEL", "openrouter:deepseek-chat")
+        rc = _run_doctor(["--path", db_path])
+        out = capsys.readouterr().out
+
+        line = self._extraction_line(out)
+        assert "✅" in line  # config is valid — extractor builds
+        assert "deepseek-chat" in line
+        shape = next(l for l in out.splitlines() if "OpenRouter model" in l)
+        assert "⚠️" in shape
+        assert "<family>/<model>" in shape
+        assert "404" in shape  # actionable: the failure mode is a route 404
+        assert rc in (0, 1)
+
+    def test_openrouter_family_model_no_warning(self, clean_llm_env, capsys):
+        """A well-formed openrouter spec (openrouter:deepseek/deepseek-chat)
+        → no shape warning at all."""
+        monkeypatch, db_path = clean_llm_env
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-1197")
+        monkeypatch.setenv("TORTOISE_SESSION_LLM_MODEL", "openrouter:deepseek/deepseek-chat")
+        rc = _run_doctor(["--path", db_path])
+        out = capsys.readouterr().out
+
+        line = self._extraction_line(out)
+        assert "✅" in line
+        assert "deepseek/deepseek-chat" in line
+        assert not any("OpenRouter model" in l for l in out.splitlines())
+        assert rc in (0, 1)
+
+    def test_non_openrouter_provider_never_shape_warns(self, clean_llm_env, capsys):
+        """Shape warning is openrouter-ONLY — deepseek/openai/gemini models
+        are bare ids (deepseek-chat, gpt-4o-mini, gemini-2.0-flash) and must
+        never trip it."""
+        monkeypatch, db_path = clean_llm_env
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-1197")
+        monkeypatch.setenv("TORTOISE_SESSION_LLM_MODEL", "deepseek:deepseek-chat")
+        rc = _run_doctor(["--path", db_path])
+        out = capsys.readouterr().out
+
+        line = self._extraction_line(out)
+        assert "✅" in line
+        assert "deepseek-chat" in line
+        assert not any("OpenRouter model" in l for l in out.splitlines())
+        assert rc in (0, 1)
+
+    def test_openrouter_default_model_no_warning(self, clean_llm_env, capsys):
+        """Unset TORTOISE_SESSION_LLM_MODEL with openrouter key → default
+        deepseek/deepseek-chat (well-formed) → no shape warning."""
+        monkeypatch, db_path = clean_llm_env
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-1197")
+        rc = _run_doctor(["--path", db_path])
+        out = capsys.readouterr().out
+
+        line = self._extraction_line(out)
+        assert "✅" in line
+        assert "deepseek/deepseek-chat" in line
+        assert not any("OpenRouter model" in l for l in out.splitlines())
+        assert rc in (0, 1)
+
 
 class TestOnboardDoctorCall:
     def test_bare_namespace_no_attribute_error(self, monkeypatch, clear_db_env, tmp_path, capsys):
