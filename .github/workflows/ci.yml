@@ -157,6 +157,10 @@ jobs:
       - run: python -m playwright install --with-deps chromium
       - name: Run welcome page E2E (mocked; live smoke self-skips) (#373)
         run: python -m pytest tests/e2e/test_welcome_page.py -q -rs -p no:cacheprovider
+      - name: Run waitlist edge-function behavioral harness (#373)
+        run: node --experimental-strip-types tests/test_waitlist_subscribe.mjs
+      - name: Run tenant-provision CORS runtime harness (#1110)
+        run: node --experimental-strip-types tests/test_tenant_provision_cors.mjs
 
   legal-e2e:
     runs-on: ubuntu-latest
