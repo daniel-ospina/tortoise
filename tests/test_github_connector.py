@@ -2,8 +2,12 @@
 from __future__ import annotations
 
 import json
+import subprocess as sp
+
 import pytest
 from tortoise.connectors.github import GitHubConnector, _verify_sig
+
+from tests._embedded import wipe  # noqa: E402
 
 
 # ── Issue mapping ─────────────────────────────────────────────────
@@ -21,17 +25,15 @@ def test_issue_to_event_closed():
     ev = gh._issue_to_event(issue)
     assert ev is not None
     assert ev["type"] == "EventRecorded"
-    assert ev["eventId"] == "github-issue-test/repo-42"
+    # #1155: canonical issue-Event id — matches the entity-path producer so
+    # both converge on ONE Event node per issue (see test_producers_one_event).
+    assert ev["eventId"] == "github-issue-test/repo-42-created"
     assert ev["eventKind"] == "github.issue.closed"
     assert ev["subject"] == "issue:test/repo#42"
-    assert ev["object"] == "Fix login bug"
+    # #1155: object references the pm:issue Object by name (produces wiring).
+    assert ev["object"] == "test/repo#42"
     assert ev["startedAt"] == "2026-07-10T10:00:00Z"
     assert ev["endedAt"] == "2026-07-19T12:00:00Z"
-    # #388: source metadata — per-entity url + kind (projection materializes
-    # a Source node from these)
-    assert ev["source"] == "github:test/repo"
-    assert ev["sourceUrl"] == "https://github.com/test/repo/issues/42"
-    assert ev["sourceKind"] == "github_issue"
 
 
 def test_issue_to_event_open():
@@ -47,8 +49,6 @@ def test_issue_to_event_open():
     ev = gh._issue_to_event(issue)
     assert ev["eventKind"] == "github.issue.open"
     assert ev["endedAt"] is None
-    assert ev["sourceKind"] == "github_issue"
-    assert ev["sourceUrl"] == "..."
 
 
 def test_issue_to_event_skips_empty_title():
@@ -74,9 +74,6 @@ def test_pr_to_event_open():
     assert ev["eventId"] == "github-pr-test/repo-7"
     assert ev["eventKind"] == "github.pr.open"
     assert ev["endedAt"] is None
-    # #388: PR events carry their OWN kind (was mislabeled github_issue) + url
-    assert ev["sourceKind"] == "github_pr"
-    assert ev["sourceUrl"] == "..."
 
 
 def test_pr_to_event_merged():
@@ -93,7 +90,6 @@ def test_pr_to_event_merged():
     ev = gh._pr_to_event(pr)
     assert ev["eventKind"] == "github.pr.merged"
     assert ev["endedAt"] == "2026-07-16T10:00:00Z"
-    assert ev["sourceKind"] == "github_pr"
 
 
 def test_pr_to_event_closed_unmerged():
@@ -126,10 +122,7 @@ def test_webhook_issue_opened():
         },
     })
     assert ev["eventKind"] == "github.issue.open"
-    assert ev["eventId"] == "github-issue-org/r-5"
-    # #388: webhook html_url flows through to sourceUrl
-    assert ev["sourceUrl"] == "https://gh/org/r/issues/5"
-    assert ev["sourceKind"] == "github_issue"
+    assert ev["eventId"] == "github-issue-org/r-5-created"
 
 
 def test_webhook_issue_closed():
@@ -157,12 +150,10 @@ def test_webhook_pr_merged():
             "created_at": "2026-07-17T00:00:00Z",
             "closed_at": "2026-07-18T00:00:00Z",
             "merged_at": "2026-07-18T00:00:00Z",
-            "html_url": "https://gh/org/r/pull/10",
+            "html_url": "...",
         },
     })
     assert ev["eventKind"] == "github.pr.merged"
-    assert ev["sourceKind"] == "github_pr"
-    assert ev["sourceUrl"] == "https://gh/org/r/pull/10"
 
 
 def test_webhook_unknown_event_returns_none():
@@ -345,3 +336,131 @@ def test_webhook_processing_error_returns_500():
             assert False, "handler must respond with 500, not drop the connection"
     finally:
         gh.stop_webhook()
+
+
+# ── #1155: two-producer Event id collision (poll vs entity path) ─────
+
+def test_producers_share_event_id():
+    """#1155: the poll/webhook producer and the entity producer must mint the
+    SAME deterministic Event id for the same issue — one issue → one Event."""
+    gh = GitHubConnector(config={"repo": "test/repo"})
+    issue = {
+        "number": 42,
+        "title": "Fix login bug",
+        "state": "open",
+        "createdAt": "2026-07-10T10:00:00Z",
+        "closedAt": "",
+        "url": "https://github.com/test/repo/issues/42",
+        "labels": [{"name": "complexity:micro"}],
+        "assignees": [],
+        "author": {"login": "alice"},
+        "milestone": None,
+    }
+    poll_ev = gh._issue_to_event(issue)
+    entities = gh._issue_to_entities(issue)
+    assert poll_ev is not None and entities is not None
+    assert poll_ev["eventId"] == entities["event"]["eventId"]
+    assert poll_ev["eventId"] == "github-issue-test/repo-42-created"
+    # both producers point the produces edge at the SAME Object name — the
+    # pm:issue Object ({repo}#{number}) — never a stub.
+    assert poll_ev["object"] == entities["event"]["object"] == "test/repo#42"
+
+
+def test_ingest_one_event_per_issue(shared_proj, monkeypatch):
+    """#1155 regression: running the full ingest (poll path + entity path)
+    must yield exactly ONE Event node per issue — no colliding ids, no
+    double-counting — and the Event must produce the real pm:issue Object.
+
+    Pre-fix: 2 Event nodes (`github-issue-{repo}-{n}` from the poll path,
+    `github-issue-{repo}-{n}-created` from the entity path), the poll-path
+    Event id colliding with the pm:issue Object id string.
+    """
+    proj = shared_proj
+    if proj is None:
+        return
+    wipe(proj)
+
+    issues = [{
+        "number": 42, "title": "Fix login bug", "state": "open",
+        "createdAt": "2026-07-10T10:00:00Z", "closedAt": "",
+        "url": "https://github.com/test/repo/issues/42",
+        "labels": [{"name": "complexity:micro"}],
+        "assignees": [{"login": "bob"}],
+        "author": {"login": "alice"}, "milestone": None,
+    }]
+    prs = [{
+        "number": 7, "title": "Add auth module", "state": "open",
+        "createdAt": "2026-07-15T08:00:00Z", "closedAt": "", "mergedAt": "",
+        "url": "https://github.com/test/repo/pull/7",
+    }]
+
+    def fake_run(args, **kwargs):
+        argv = list(args)
+        if "pr" in argv:
+            payload = prs
+        elif "labels" in argv:  # poll_raw_issues (entity path)
+            payload = issues
+        else:  # poll issues (legacy poll path)
+            payload = issues
+        return sp.CompletedProcess(
+            args=args, returncode=0, stdout=json.dumps(payload))
+
+    monkeypatch.setattr(sp, "run", fake_run)
+
+    gh = GitHubConnector(config={"repo": "test/repo"})
+    gh.ingest(proj)
+
+    # Exactly ONE Event node for the issue, with the canonical id.
+    rows = proj.g.query(
+        "MATCH (e:Event) WHERE e.eventId STARTS WITH 'github-issue-test/repo-42' "
+        "RETURN e.eventId, e.eventKind"
+    ).result_set
+    assert sorted(tuple(r) for r in rows) == [
+        ("github-issue-test/repo-42-created", "pm:cardCreated"),
+    ]
+
+    # No Event carries the legacy poll-path id (which collided with the
+    # Object id string).
+    assert proj.g.query(
+        "MATCH (e:Event {eventId:'github-issue-test/repo-42'}) RETURN e"
+    ).result_set == []
+
+    # id-space is unambiguous: only the Object carries id
+    # `github-issue-test/repo-42` (pre-fix: Event + Object both matched).
+    rows = proj.g.query(
+        "MATCH (n {id:'github-issue-test/repo-42'}) RETURN labels(n)[0]"
+    ).result_set
+    assert [r[0] for r in rows] == ["Object"]
+
+    # produces edge lands on the REAL pm:issue Object (name {repo}#{number}),
+    # not a name-stub with a random id.
+    rows = proj.g.query(
+        "MATCH (e:Event {eventId:'github-issue-test/repo-42-created'})"
+        "-[:produces]->(o:Object) RETURN o.name, o.objectKind, o.id"
+    ).result_set
+    assert [tuple(r) for r in rows] == [
+        ("test/repo#42", "pm:issue", "github-issue-test/repo-42"),
+    ]
+
+    # aboutSubject wiring still resolves against the real Object.
+    rows = proj.g.query(
+        "MATCH (o:Object {id:'github-issue-test/repo-42'})"
+        "-[:aboutSubject]->(s:Subject) RETURN s.id ORDER BY s.id"
+    ).result_set
+    assert [r[0] for r in rows] == ["github-user:alice", "github-user:bob"]
+
+    # PR events (entity path does not cover PRs) still land.
+    rows = proj.g.query(
+        "MATCH (e:Event) WHERE e.eventId STARTS WITH 'github-pr-test/repo' "
+        "RETURN e.eventId"
+    ).result_set
+    assert [r[0] for r in rows] == ["github-pr-test/repo-7"]
+
+    # Idempotent: re-ingesting converges — still one Event + one Object.
+    gh.ingest(proj)
+    assert len(proj.g.query(
+        "MATCH (e:Event) WHERE e.eventId STARTS WITH 'github-issue-test/repo-42' "
+        "RETURN e").result_set) == 1
+    assert len(proj.g.query(
+        "MATCH (o:Object {id:'github-issue-test/repo-42'}) RETURN o"
+    ).result_set) == 1

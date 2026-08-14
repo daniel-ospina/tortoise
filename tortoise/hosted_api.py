@@ -1840,6 +1840,99 @@ async def _check_claim_rate_limit(request: Request) -> None:
                 del _CLAIM_BUCKETS[ip]
 
 
+# ── Invite-accept limiter (#1134, OWASP per-token/IP/global caps) ────────────
+# POST /v1/invites/accept is a token-binding endpoint: the invite token is a
+# bearer claim delivered via email (link possession). OWASP invitation
+# guidance (securepatterns.dev threat model) mandates throttling on repeated
+# failed binding checks per token / per IP / global — WITHOUT invalidating the
+# token on failed attempts (invalidation lets a leaked-link holder burn the
+# legitimate user's invitation). Three independent sliding-window buckets per
+# request, reusing the shared _check_ip_bucket_rate_limit helper (the #307
+# reusable-helper shape; the claim limiter's per-IP posture extended to a
+# token-hash and a global key). Env-tunable at call time (signup-limiter
+# pattern); RATE_LIMIT_DISABLED=1 opts out (test env). The token bucket is
+# keyed on sha256(token)[:16] — the raw bearer claim is NEVER held in memory.
+_INVITE_ACCEPT_TOKEN_BUCKETS: dict[tuple[str, str], list[float]] = defaultdict(list)
+_INVITE_ACCEPT_TOKEN_LOCK = asyncio.Lock()
+_INVITE_ACCEPT_IP_BUCKETS: dict[tuple[str, str], list[float]] = defaultdict(list)
+_INVITE_ACCEPT_IP_LOCK = asyncio.Lock()
+_INVITE_ACCEPT_GLOBAL_BUCKETS: dict[tuple[str, str], list[float]] = defaultdict(list)
+_INVITE_ACCEPT_GLOBAL_LOCK = asyncio.Lock()
+
+# Defaults: 5 attempts / 15 min per token (generous for human retries, tight
+# for a leaked-link brute-forcer), 20 / hour per IP, 200 / hour global
+# (a one-time human act per invite — legit fleets stay far below).
+_INVITE_ACCEPT_TOKEN_LIMIT = 5
+_INVITE_ACCEPT_TOKEN_WINDOW_S = 15 * 60
+_INVITE_ACCEPT_IP_LIMIT = 20
+_INVITE_ACCEPT_IP_WINDOW_S = 3600
+_INVITE_ACCEPT_GLOBAL_LIMIT = 200
+_INVITE_ACCEPT_GLOBAL_WINDOW_S = 3600
+
+
+async def _check_invite_accept_rate_limit(request: Request, token: str) -> None:
+    """Per-token / per-IP / global sliding-window caps on invites/accept.
+
+    Env knobs (read at call time so tests monkeypatch without reload):
+    TORTOISE_INVITE_ACCEPT_TOKEN_LIMIT / _WINDOW_S (default 5 / 900),
+    TORTOISE_INVITE_ACCEPT_IP_LIMIT / _WINDOW_S (default 20 / 3600),
+    TORTOISE_INVITE_ACCEPT_GLOBAL_LIMIT / _WINDOW_S (default 200 / 3600).
+    Raises HTTPException(429, error_code over_invite_accept_rate_limit) with
+    a computed Retry-After when any dimension is exhausted.
+    Failures never invalidate the token — the endpoint's own 400 path is
+    untouched (OWASP: a leaked link holder must not burn the invite).
+
+    #1228-review: the buckets record ATTEMPTS; accept_invite calls
+    ``_forget_invite_accept`` on success so SUCCESSFUL accepts (and 4xx
+    outcomes like email-mismatch/already-member that are not abuse) do not
+    consume budget — a 20-hire office onboarding from one NAT IP must not
+    trip the per-IP cap, and a garbage-token flood must not trip the global
+    cap with collateral on legit fleet traffic. OWASP semantics: caps bound
+    repeated FAILED binding checks.
+    """
+    if os.environ.get("RATE_LIMIT_DISABLED") == "1":
+        return
+    import hashlib as _hashlib
+    token_key = _hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+    ip = (getattr(request.state, "client_ip", None)
+          or (request.client.host if request.client else None))
+    ip = _normalize_mapped_ipv6(ip)
+    detail = {
+        "error_code": "over_invite_accept_rate_limit",
+        "message": ("Too many invite-accept attempts. Please try again "
+                    "later."),
+    }
+    # Per-token bucket (composite key bypasses the helper's IPv6 guard —
+    # _normalize_mapped_ipv6 handles non-str keys unchanged, #1081 P4).
+    await _check_ip_bucket_rate_limit(
+        request, buckets=_INVITE_ACCEPT_TOKEN_BUCKETS,
+        lock=_INVITE_ACCEPT_TOKEN_LOCK,
+        limit=_int_env("TORTOISE_INVITE_ACCEPT_TOKEN_LIMIT",
+                       _INVITE_ACCEPT_TOKEN_LIMIT),
+        window_s=_int_env("TORTOISE_INVITE_ACCEPT_TOKEN_WINDOW_S",
+                          _INVITE_ACCEPT_TOKEN_WINDOW_S),
+        key=("invite-accept", "token", token_key),
+        detail=detail, retry_after_s=None)
+    await _check_ip_bucket_rate_limit(
+        request, buckets=_INVITE_ACCEPT_IP_BUCKETS,
+        lock=_INVITE_ACCEPT_IP_LOCK,
+        limit=_int_env("TORTOISE_INVITE_ACCEPT_IP_LIMIT",
+                       _INVITE_ACCEPT_IP_LIMIT),
+        window_s=_int_env("TORTOISE_INVITE_ACCEPT_IP_WINDOW_S",
+                          _INVITE_ACCEPT_IP_WINDOW_S),
+        key=("invite-accept", "ip", ip),
+        detail=detail, retry_after_s=None)
+    await _check_ip_bucket_rate_limit(
+        request, buckets=_INVITE_ACCEPT_GLOBAL_BUCKETS,
+        lock=_INVITE_ACCEPT_GLOBAL_LOCK,
+        limit=_int_env("TORTOISE_INVITE_ACCEPT_GLOBAL_LIMIT",
+                       _INVITE_ACCEPT_GLOBAL_LIMIT),
+        window_s=_int_env("TORTOISE_INVITE_ACCEPT_GLOBAL_WINDOW_S",
+                          _INVITE_ACCEPT_GLOBAL_WINDOW_S),
+        key=("invite-accept", "global"),
+        detail=detail, retry_after_s=None)
+
+
 # ── Endpoints ─────────────────────────────────────────────────────
 
 @app.post("/v1/points", response_model=PointResponse)
@@ -3379,8 +3472,8 @@ def _load_commit_graph_state(sdk: TortoiseSDK, payload: "CommitPayload"):
     ).result_set
     state.entities = {(r[0], r[1] or "") for r in rows}
     rows = proj.g.query(
-        "MATCH (o:Point {is_operator:true})-[r]->(t:Point) "
-        "WHERE type(r) IN ['IMPL','NAND'] "
+        "MATCH (o:Point {is_operator:true})-[r]->(t) "
+        "WHERE type(r) IN ['IMPL','NAND'] AND (t:Point OR t:Event) "
         "RETURN o.id, o.op_type, r.idx, t.id ORDER BY o.id, r.idx",
     ).result_set
     ops: dict[str, dict] = {}
@@ -3399,8 +3492,8 @@ def _load_commit_graph_state(sdk: TortoiseSDK, payload: "CommitPayload"):
         t = op.target
         mit_rows = proj.g.query(
             "MATCH (o:Point {is_operator:true, op_type:'IMPL'}) "
-            "MATCH (o)-[:IMPL {idx:0}]->(s:Point {id:$src}) "
-            "MATCH (o)-[:IMPL {idx:1}]->(d:Point {id:$dst}) "
+            "MATCH (o)-[:IMPL {idx:0}]->(s) WHERE (s:Point OR s:Event) AND s.id = $src "
+            "MATCH (o)-[:IMPL {idx:1}]->(d) WHERE (d:Point OR d:Event) AND d.id = $dst "
             "MATCH (o)-[:mitigated_by]->(m) RETURN count(m)",
             params={"src": t.src, "dst": t.dst},
         ).result_set
@@ -3410,14 +3503,26 @@ def _load_commit_graph_state(sdk: TortoiseSDK, payload: "CommitPayload"):
 
 
 def _store_commit_telemetry(proj, client_commit_id: str, payload: "CommitPayload",
-                            *, warn: bool = False) -> None:
+                            *, warn: bool = False, plan=None) -> None:
     """Content-free telemetry store (W-7): the payload telemetry block is
     stored on the :CommitRecord — the schema has NO text-bearing fields (#963
     guards it) and NO graph-side counts (the server derives
     merge/supersede/held/draft/live from the Session counters — no second
     source of truth). judge_summary is DROPPED from v1. ``budget_warn`` is a
-    server-side annotation (soft-15 WARN), not part of the client schema."""
+    server-side annotation (soft-15 WARN), not part of the client schema.
+
+    T11 (#1272): the client's graph-truth telemetry fields (keep_ratio,
+    dedup_hits, confidence_histogram) are NOT trusted — when a ``plan``
+    (reconciled delta) is available the server derives keep_ratio from it
+    (net-new vs submitted), else they stay null (not measured). Client
+    process fields (extraction_ms, cost, retry_count) are kept as measured.
+    """
     telemetry = payload.telemetry.model_dump()
+    if plan is not None and plan.reconcile is not None:
+        submitted = max(len(payload.points) + len(payload.events), 1)
+        kept = max(plan.reconcile.net_new, 0)
+        telemetry["keep_ratio"] = round(kept / submitted, 4)
+        telemetry["dedup_hits"] = max(submitted - kept, 0)
     proj.g.query(
         "MATCH (r:CommitRecord {client_commit_id:$cid}) "
         "SET r.telemetry=$t, r.budget_warn=$warn",
@@ -3654,8 +3759,8 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: "CommitPayload", plan):
         if op_id is None:
             rows = proj.g.query(
                 "MATCH (o:Point {is_operator:true, op_type:'IMPL'}) "
-                "MATCH (o)-[:IMPL {idx:0}]->(s:Point {id:$src}) "
-                "MATCH (o)-[:IMPL {idx:1}]->(d:Point {id:$dst}) "
+                "MATCH (o)-[:IMPL {idx:0}]->(s) WHERE (s:Point OR s:Event) AND s.id = $src "
+                "MATCH (o)-[:IMPL {idx:1}]->(d) WHERE (d:Point OR d:Event) AND d.id = $dst "
                 "RETURN o.id LIMIT 1",
                 params={"src": t.src, "dst": t.dst},
             ).result_set
@@ -3786,7 +3891,7 @@ async def commit_session(request: Request, team: dict = Depends(get_current_team
         )
         store.update(payload.client_commit_id, status="held")
         _store_commit_telemetry(proj, payload.client_commit_id, payload,
-                                warn=plan.budget.warn)
+                                warn=plan.budget.warn, plan=plan)
         return _commit_response(
             payload, duplicate=False, held=list(plan.budget.held_point_ids),
             warn=plan.budget.warn, warnings=warnings)
@@ -3817,7 +3922,7 @@ async def commit_session(request: Request, team: dict = Depends(get_current_team
         params={"cid": payload.client_commit_id},
     )
     _store_commit_telemetry(proj, payload.client_commit_id, payload,
-                            warn=plan.budget.warn)
+                            warn=plan.budget.warn, plan=plan)
 
     # [6] Metering — write_ops +1 per NON-duplicate commit call; nodes_written
     # += net-new non-episodic (cost driver; supersede-only deltas exempt, R-14).
@@ -4502,11 +4607,23 @@ async def invite_info(token: str):
 
 
 @app.post("/v1/invites/accept")
-async def accept_invite(body: dict, user: dict = Depends(get_current_user)):
+async def accept_invite(body: dict, request: Request,
+                         user: dict = Depends(get_current_user)):
     """E4 — accept an invite by token (token-only in v1, decision 1e)."""
     token = (body or {}).get("token")
+    if not isinstance(token, str):
+        # #1228-review P3: a non-string token (int/bool/list) crashes
+        # sha256(token.encode()) with AttributeError → 500; reject cleanly.
+        raise HTTPException(status_code=422, detail="token must be a string")
     if not token:
         raise HTTPException(status_code=422, detail="token required")
+
+    # #1134: OWASP per-token/IP/global caps — throttles repeated failed
+    # binding checks WITHOUT invalidating the token (a leaked-link holder
+    # must not burn the legitimate user's invitation). RATE_LIMIT_DISABLED=1
+    # opts out (test env). Success path forgets the attempt so legit accepts
+    # never consume budget (see _check_invite_accept_rate_limit docstring).
+    await _check_invite_accept_rate_limit(request, token)
 
     # ── Supabase mode (plan Task 4): lookup_hash verify + role preserved ──
     from tortoise.supabase_control import (
@@ -4515,8 +4632,10 @@ async def accept_invite(body: dict, user: dict = Depends(get_current_user)):
     )
     if is_supabase_enabled():
         try:
-            return _sb_accept(get_control_plane(), token, user["user_id"],
-                              user_email=user.get("email"))
+            res = _sb_accept(get_control_plane(), token, user["user_id"],
+                             user_email=user.get("email"))
+            _forget_invite_accept(request, token)
+            return res
         except InvitationError as e:
             raise HTTPException(status_code=e.status, detail=str(e))
         except HTTPException:
@@ -4569,7 +4688,33 @@ async def accept_invite(body: dict, user: dict = Depends(get_current_user)):
         sdk.membership_create(invite["team_id"], user["user_id"], invite["role"])
     except Exception as e:
         raise HTTPException(status_code=402, detail=f"Could not join team: {e}")
+    _forget_invite_accept(request, token)
     return {"team_id": invite["team_id"], "role": invite["role"]}
+
+
+def _forget_invite_accept(request: Request, token: str) -> None:
+    """Roll back the attempt recorded by _check_invite_accept_rate_limit
+    after a SUCCESSFUL accept — attempts (not successes) are what the caps
+    bound (#1228-review). Removes the newest entry of each bucket; under
+    simultaneous accepts the most recent entry may belong to a concurrent
+    request (over-removal is bounded and conservative at invite volume).
+    """
+    import hashlib as _hashlib
+    token_key = _hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+    ip = (getattr(request.state, "client_ip", None)
+          or (request.client.host if request.client else None))
+    ip = _normalize_mapped_ipv6(ip)
+    for buckets, lock, key in (
+        (_INVITE_ACCEPT_TOKEN_BUCKETS, _INVITE_ACCEPT_TOKEN_LOCK,
+         ("invite-accept", "token", token_key)),
+        (_INVITE_ACCEPT_IP_BUCKETS, _INVITE_ACCEPT_IP_LOCK,
+         ("invite-accept", "ip", ip)),
+        (_INVITE_ACCEPT_GLOBAL_BUCKETS, _INVITE_ACCEPT_GLOBAL_LOCK,
+         ("invite-accept", "global")),
+    ):
+        bucket = buckets.get(key)
+        if bucket:
+            bucket.pop()
 
 
 @app.get("/v1/invites")
@@ -5950,6 +6095,25 @@ async def session_context(team: dict = Depends(get_current_team)):
         # #750.5: never leak internals to the client — log, return generic.
         logging.getLogger("tortoise.api").exception("session_context failed")
         raise HTTPException(status_code=500, detail="Context unavailable")
+
+
+@app.get("/v1/issue-insight")
+async def issue_insight(title: str, body: str | None = None,
+                        repo: str | None = None, limit: int = Query(2, ge=1, le=20),
+                        team: dict = Depends(get_current_team)):
+    """Graph insight for a would-be issue (#1196) — REST mirror of
+    TortoiseSDK.issue_insight() for hosted tenants.
+
+    limit mirrors the SDK default (2) but is bounded (1-20) like /v1/search:
+    an unbounded parameter let callers amplify semantic-stage cost (#1196
+    review c85) and out-of-range values 500'd instead of 422-ing.
+    """
+    sdk = _make_sdk(namespace=team["team_id"])
+    try:
+        return sdk.issue_insight(title=title, body=body, repo=repo, limit=limit)
+    except Exception:
+        logging.getLogger("tortoise.api").exception("issue_insight failed")
+        raise HTTPException(status_code=500, detail="Insight unavailable")
 
 
 

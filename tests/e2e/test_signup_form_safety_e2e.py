@@ -9,6 +9,16 @@ Covers the three production-failure contracts fixed in #527:
   3. A blocked Supabase CDN must surface a clear "temporarily unavailable"
      state instead of a dead form (the historical trigger for #1).
 
+#801 server-first contract (the deployed signup flow, #1190): the submit
+handler calls api.premiselabs.co/v1/signup/email — NOT the legacy
+client-side auth/v1/signup, which only runs on local/dev previews or when
+the server endpoint reports unavailable. The 429-mock tests therefore
+intercept the server endpoint, with the rate-limit mechanism carried in
+detail.error_code (email bucket vs per-IP) exactly as hosted_api.py sends
+it. The legacy client-side path remains covered through the
+503-degradation resend test (the only way the deployed page reaches the
+check-your-inbox state).
+
 Run:
   cd website && npx wrangler@4 pages dev . --port 8788 --ip 127.0.0.1
   RUN_LEGAL_E2E=1 BASE_URL=http://127.0.0.1:8788 \
@@ -37,6 +47,23 @@ if BASE_URL.startswith("https://") and os.environ.get("ALLOW_PROD") != "1":
 # Browser-level network log noise from deliberately-failed requests (429 /
 # blocked CDN) — not page JS errors; the zero-console-errors assertions filter it.
 _RESOURCE_LOG_RE = re.compile(r"Failed to load resource")
+
+# CORS preflight headers for the mocked cross-origin endpoints (the browser
+# preflights the api.premiselabs.co fetch and the supabase auth calls before
+# the real POST — the OPTIONS must be fulfilled locally or the request is
+# blocked before the mock can answer).
+_CORS_PREFLIGHT = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "POST,OPTIONS",
+    "Access-Control-Allow-Headers": "*",
+}
+
+# The deployed form is SERVER-FIRST on the hosted site (#801) but runs the
+# LEGACY client-side auth/signUp flow on local/dev previews (isLocal in
+# signup.html). Tests mock BOTH endpoints so both documented run modes work:
+#   prod (BASE_URL=https://...)        -> /v1/signup/email (server-first)
+#   local wrangler preview (127.0.0.1) -> auth/v1/signup (legacy fallback)
+IS_LOCAL = "127.0.0.1" in BASE_URL or "localhost" in BASE_URL
 
 
 def _page_js_errors(page: Page) -> list[str]:
@@ -67,23 +94,49 @@ def test_js_disabled_form_submission_does_not_echo_credentials(
 
 def test_429_signup_rate_limit_is_humanized(page: Page) -> None:
     """The production-verified failure (over_email_send_rate_limit 429) must
-    show friendly copy and keep the URL clean."""
+    show friendly copy and keep the URL clean.
+
+    #801 server-first: on the hosted site the submit calls
+    api.premiselabs.co/v1/signup/email (the API carries the mechanism in
+    detail.error_code); on local previews the legacy client-side
+    auth/v1/signup path runs instead. Both endpoints are mocked (the page
+    exercises exactly one of them per mode)."""
     console_errors = _page_js_errors(page)
     calls = {"n": 0}
 
     def handle(route):
         url = route.request.url
-        if "auth/v1/signup" in url and route.request.method == "POST":
-            calls["n"] += 1
-            route.fulfill(status=429, content_type="application/json",
-                          headers={"Access-Control-Allow-Origin": "*"},
-                          body=json.dumps({"code": 429,
-                                           "error_code": "over_email_send_rate_limit",
-                                           "msg": "email rate limit exceeded"}))
+        if "v1/signup/email" in url:
+            if route.request.method == "OPTIONS":  # CORS preflight (cross-origin fetch to api.premiselabs.co)
+                route.fulfill(status=204, headers=_CORS_PREFLIGHT)
+                return
+            if route.request.method == "POST":
+                calls["n"] += 1
+                # #801 server-first: the API carries the mechanism in
+                # detail.error_code (hosted_api.py /v1/signup/email).
+                route.fulfill(status=429, content_type="application/json",
+                              headers={"Access-Control-Allow-Origin": "*"},
+                              body=json.dumps({"detail": {
+                                  "error_code": "over_email_send_rate_limit",
+                                  "message": "email rate limit exceeded"}}))
+            return
+        if "auth/v1/signup" in url:
+            # local-preview (isLocal) legacy path — same email-bucket 429.
+            if route.request.method == "OPTIONS":  # CORS preflight
+                route.fulfill(status=204, headers=_CORS_PREFLIGHT)
+                return
+            if route.request.method == "POST":
+                calls["n"] += 1
+                route.fulfill(status=429, content_type="application/json",
+                              headers={"Access-Control-Allow-Origin": "*"},
+                              body=json.dumps({"code": 429,
+                                               "error_code": "over_email_send_rate_limit",
+                                               "msg": "email rate limit exceeded"}))
             return
         route.continue_()
 
-    page.route("**/*", handle)
+    page.route("**/v1/signup/email*", handle)
+    page.route("**/auth/v1/signup*", handle)
     page.goto(BASE_URL + "/signup", wait_until="domcontentloaded", timeout=30_000)
     page.locator("#email").fill("rate-527@premise-labs.dev")
     page.locator("#password").fill("RatePass-527!")
@@ -127,23 +180,40 @@ def test_429_signup_rate_limit_is_humanized(page: Page) -> None:
 
 
 def test_429_short_tier_lockout_60s_then_expiry(page: Page) -> None:
-    """#801 two-tier: a per-IP auth-attempt 429 (over_request_rate_limit) must
+    """#801 two-tier: a per-IP auth-attempt 429 (over_request_rate_limit_ip) must
     lock out for ~60s (NOT 1h), show the short-tier copy, and fully recover on
     expiry — submit re-enabled with the original label, no stale lockout."""
     console_errors = _page_js_errors(page)
 
     def handle(route):
         url = route.request.url
-        if "auth/v1/signup" in url and route.request.method == "POST":
-            route.fulfill(status=429, content_type="application/json",
-                          headers={"Access-Control-Allow-Origin": "*"},
-                          body=json.dumps({"code": 429,
-                                           "error_code": "over_request_rate_limit",
-                                           "msg": "request rate limit reached"}))
+        if "v1/signup/email" in url:
+            if route.request.method == "OPTIONS":  # CORS preflight
+                route.fulfill(status=204, headers=_CORS_PREFLIGHT)
+                return
+            if route.request.method == "POST":
+                route.fulfill(status=429, content_type="application/json",
+                              headers={"Access-Control-Allow-Origin": "*"},
+                              body=json.dumps({"detail": {
+                                  "error_code": "over_request_rate_limit_ip",
+                                  "message": "request rate limit reached"}}))
+            return
+        if "auth/v1/signup" in url:
+            # local-preview (isLocal) legacy path — same per-IP 429.
+            if route.request.method == "OPTIONS":  # CORS preflight
+                route.fulfill(status=204, headers=_CORS_PREFLIGHT)
+                return
+            if route.request.method == "POST":
+                route.fulfill(status=429, content_type="application/json",
+                              headers={"Access-Control-Allow-Origin": "*"},
+                              body=json.dumps({"code": 429,
+                                               "error_code": "over_request_rate_limit_ip",
+                                               "msg": "request rate limit reached"}))
             return
         route.continue_()
 
-    page.route("**/*", handle)
+    page.route("**/v1/signup/email*", handle)
+    page.route("**/auth/v1/signup*", handle)
     page.goto(BASE_URL + "/signup", wait_until="domcontentloaded", timeout=30_000)
     page.locator("#email").fill("rate-short@premise-labs.dev")
     page.locator("#password").fill("RatePass-Short!")
@@ -179,25 +249,45 @@ def test_429_short_tier_lockout_60s_then_expiry(page: Page) -> None:
 
 
 def test_non_rate_limit_error_does_not_lock_out(page: Page) -> None:
-    """#801: only rate-limit errors may trigger the lockout — a 400
-    (invalid credentials) must leave the form usable and write NO storage key."""
+    """#801: only rate-limit errors may trigger the lockout — a 422 from the
+    server-first endpoint (validation; 400 is Turnstile-only per hosted_api.py)
+    must leave the form usable and write NO storage key."""
     console_errors = _page_js_errors(page)
 
     def handle(route):
         url = route.request.url
-        if "auth/v1/signup" in url and route.request.method == "POST":
-            route.fulfill(status=400, content_type="application/json",
-                          headers={"Access-Control-Allow-Origin": "*"},
-                          body=json.dumps({"code": 400,
-                                           "error_code": "validation_failed",
-                                           "msg": "Password should be at least 6 characters"}))
+        if "v1/signup/email" in url:
+            if route.request.method == "OPTIONS":  # CORS preflight
+                route.fulfill(status=204, headers=_CORS_PREFLIGHT)
+                return
+            if route.request.method == "POST":
+                # Real endpoint contract (hosted_api.py /v1/signup/email):
+                # validation failures are 422 with a STRING detail (never
+                # str(ValidationError)); 400 is reserved for Turnstile. The
+                # string-vs-object detail handling is what this exercises.
+                route.fulfill(status=422, content_type="application/json",
+                              headers={"Access-Control-Allow-Origin": "*"},
+                              body=json.dumps({"detail": "Invalid email or password"}))
+            return
+        if "auth/v1/signup" in url:
+            # local-preview (isLocal) legacy path — same non-rate-limit 422.
+            if route.request.method == "OPTIONS":  # CORS preflight
+                route.fulfill(status=204, headers=_CORS_PREFLIGHT)
+                return
+            if route.request.method == "POST":
+                route.fulfill(status=422, content_type="application/json",
+                              headers={"Access-Control-Allow-Origin": "*"},
+                              body=json.dumps({"code": 422,
+                                               "error_code": "validation_failed",
+                                               "msg": "Invalid email or password"}))
             return
         route.continue_()
 
     # NB: password must satisfy the input's native minlength="6" (browser
     # validation would otherwise block the submit event entirely) — the
-    # mocked 400 exercises the server-error path.
-    page.route("**/*", handle)
+    # mocked 422 exercises the server-error path.
+    page.route("**/v1/signup/email*", handle)
+    page.route("**/auth/v1/signup*", handle)
     page.goto(BASE_URL + "/signup", wait_until="domcontentloaded", timeout=30_000)
     page.locator("#email").fill("nolate@premise-labs.dev")
     page.locator("#password").fill("ShortPass!")
@@ -214,30 +304,62 @@ def test_non_rate_limit_error_does_not_lock_out(page: Page) -> None:
 def test_resend_429_sets_lockout_and_disables_resend(page: Page) -> None:
     """#801: a 429 on auth.resend (returned, not thrown — supabase-js v2)
     must NOT show the false 'Resent' success; it must set the lockout and
-    show the rate-limit note. Resend burns the same project-wide bucket."""
+    show the rate-limit note. Resend burns the same project-wide bucket.
+
+    #801 server-first: the hosted page reaches the check-your-inbox state
+    (with the resend button) only through the LEGACY client-side fallback —
+    when the server endpoint reports unavailable (503) the form degrades to
+    supabaseClient.auth.signUp. This test drives BOTH deployed paths:
+    /v1/signup/email -> 503 (unavailable -> legacy fallback), then
+    auth/v1/signup -> session-less success (inbox state), then
+    auth/v1/resend -> 429 (lockout + note)."""
     console_errors = _page_js_errors(page)
     resend_calls = {"n": 0}
 
-    def handle(route):
+    def handle_server(route):
         url = route.request.url
-        if "auth/v1/signup" in url and route.request.method == "POST":
-            # session-less success → check-your-inbox state (confirmations ON)
-            route.fulfill(status=200, content_type="application/json",
-                          headers={"Access-Control-Allow-Origin": "*"},
-                          body=json.dumps({"user": {"id": "u-1", "email": "resend-429@premise-labs.dev",
-                                                     "identities": [{"id": "u-1"}]}}))
-            return
-        if "auth/v1/resend" in url and route.request.method == "POST":
-            resend_calls["n"] += 1
-            route.fulfill(status=429, content_type="application/json",
-                          headers={"Access-Control-Allow-Origin": "*"},
-                          body=json.dumps({"code": 429,
-                                           "error_code": "over_email_send_rate_limit",
-                                           "msg": "email rate limit exceeded"}))
+        if "v1/signup/email" in url:
+            if route.request.method == "OPTIONS":  # CORS preflight
+                route.fulfill(status=204, headers=_CORS_PREFLIGHT)
+                return
+            if route.request.method == "POST":
+                # server unavailable -> the page degrades to the legacy
+                # client-side auth.signUp flow (which shows the inbox state).
+                route.fulfill(status=503, content_type="application/json",
+                              headers={"Access-Control-Allow-Origin": "*"},
+                              body=json.dumps({"detail": "Email signup is not available on this deployment."}))
             return
         route.continue_()
 
-    page.route("**/*", handle)
+    def handle_legacy(route):
+        url = route.request.url
+        if "auth/v1/signup" in url:
+            if route.request.method == "OPTIONS":  # CORS preflight
+                route.fulfill(status=204, headers=_CORS_PREFLIGHT)
+                return
+            if route.request.method == "POST":
+                # session-less success -> check-your-inbox state (confirmations ON)
+                route.fulfill(status=200, content_type="application/json",
+                              headers={"Access-Control-Allow-Origin": "*"},
+                              body=json.dumps({"user": {"id": "u-1", "email": "resend-429@premise-labs.dev",
+                                                         "identities": [{"id": "u-1"}]}}))
+            return
+        if "auth/v1/resend" in url:
+            if route.request.method == "OPTIONS":  # CORS preflight
+                route.fulfill(status=204, headers=_CORS_PREFLIGHT)
+                return
+            if route.request.method == "POST":
+                resend_calls["n"] += 1
+                route.fulfill(status=429, content_type="application/json",
+                              headers={"Access-Control-Allow-Origin": "*"},
+                              body=json.dumps({"code": 429,
+                                               "error_code": "over_email_send_rate_limit",
+                                               "msg": "email rate limit exceeded"}))
+            return
+        route.continue_()
+
+    page.route("**/v1/signup/email*", handle_server)
+    page.route("**/auth/v1/**", handle_legacy)
     page.goto(BASE_URL + "/signup", wait_until="domcontentloaded", timeout=30_000)
     page.locator("#email").fill("resend-429@premise-labs.dev")
     page.locator("#password").fill("ResendPass-429!")
@@ -295,34 +417,96 @@ def test_healthy_load_does_not_show_watchdog_error(page: Page) -> None:
     assert page.evaluate("() => !!window.supabaseClient"), "supabaseClient not exposed on window"
 
 
-def test_mock_email_signup_inbox_state_url_clean(page: Page) -> None:
-    """Success path (email confirmation ON → check-your-inbox state) must
-    keep the URL clean and push the x_signup conversion event (#736)."""
+def test_mock_email_signup_created_signs_in_and_redirects_url_clean(page: Page) -> None:
+    """Success path — the #801 server-first contract (created server-side →
+    direct sign-in → /welcome redirect; the check-your-inbox state is NOT
+    part of the hosted happy path, email_confirm=true server-side). Must
+    keep the URL clean and push the x_signup conversion event (#736).
+
+    Local-preview mode (isLocal) runs the legacy client-side flow instead —
+    there the same mocks drive auth/v1/signup → session-less success → the
+    check-your-inbox state, and no redirect happens."""
     email = f"e2e-{uuid.uuid4().hex[:8]}@premise-labs.dev"
     console_errors = _page_js_errors(page)
+    captured = {"x_signup": None}
+    # Capture the x_signup push SYNCHRONOUSLY in the page (pushSignupEvents
+    # runs in the same task as the /welcome redirect — the JS context is
+    # destroyed on commit, so post-navigation reads always miss it).
+    page.expose_function("__e2eCaptureXSignup", lambda entry: captured.update(x_signup=entry))
+    page.add_init_script("""
+        (function () {
+          var origPush = Array.prototype.push;
+          var dl = (window.dataLayer = window.dataLayer || []);
+          dl.push = function () {
+            var entry = arguments[0];
+            var result = origPush.apply(this, arguments);
+            if (entry && entry.event === 'x_signup') window.__e2eCaptureXSignup(entry);
+            return result;
+          };
+        })();
+    """)
 
     def handle(route):
         url = route.request.url
-        if "auth/v1/signup" in url and route.request.method == "POST":
-            route.fulfill(status=200, content_type="application/json",
+        if "v1/signup/email" in url:
+            if route.request.method == "OPTIONS":  # CORS preflight
+                route.fulfill(status=204, headers=_CORS_PREFLIGHT)
+                return
+            if route.request.method == "POST":
+                route.fulfill(status=200, content_type="application/json",
+                              headers={"Access-Control-Allow-Origin": "*"},
+                              body=json.dumps({"user_id": "mock-user", "email": email,
+                                               "email_confirm": True, "message": "user_created"}))
+            return
+        if "auth/v1/signup" in url:
+            # local-preview (isLocal) legacy path — session-less success →
+            # the check-your-inbox state (no sign-in / redirect).
+            if route.request.method == "OPTIONS":  # CORS preflight
+                route.fulfill(status=204, headers=_CORS_PREFLIGHT)
+                return
+            if route.request.method == "POST":
+                route.fulfill(status=200, content_type="application/json",
+                              headers={"Access-Control-Allow-Origin": "*"},
+                              body=json.dumps({"user": {"id": "mock-user", "email": email,
+                                                         "identities": [{"id": "mock-id"}]}}))
+            return
+        if "auth/v1/token" in url:
+            if route.request.method == "OPTIONS":  # CORS preflight
+                route.fulfill(status=204, headers=_CORS_PREFLIGHT)
+                return
+            if route.request.method == "POST":
+                # signInAndGo — the created account signs in directly with the
+                # password; the session user carries identities.
+                route.fulfill(status=200, content_type="application/json",
                           headers={"Access-Control-Allow-Origin": "*"},
-                          body=json.dumps({"user": {"id": "mock-user",
-                                                    "email": email,
-                                                    "identities": [{"id": "mock-id"}]}}))
+                          body=json.dumps({
+                              "access_token": "mock-at", "token_type": "bearer",
+                              "expires_in": 3600, "refresh_token": "mock-rt",
+                              "user": {"id": "mock-user", "email": email,
+                                       "identities": [{"id": "mock-id"}]}}))
             return
         route.continue_()
 
-    page.route("**/*", handle)
+    page.route("**/v1/signup/email*", handle)
+    page.route("**/auth/v1/signup*", handle)
+    page.route("**/auth/v1/token*", handle)
     page.goto(BASE_URL + "/signup", wait_until="domcontentloaded", timeout=30_000)
     page.locator("#email").fill(email)
     page.locator("#password").fill("E2ePass-12345!")
     page.locator("#btn-submit").click()
 
-    expect(page.locator("#confirmation-required")).to_be_visible(timeout=10_000)
-    expect(page.locator("#confirm-email")).to_have_text(email)
+    if IS_LOCAL:
+        # local-preview (isLocal) legacy path: session-less success → the
+        # check-your-inbox state (no sign-in / redirect on the legacy flow).
+        expect(page.locator("#confirmation-required")).to_be_visible(timeout=10_000)
+        expect(page.locator("#confirm-email")).to_have_text(email)
+    else:
+        # Deployed happy path: server-side creation → direct sign-in →
+        # redirect to the welcome page (no check-your-inbox step, #801).
+        page.wait_for_url("**/welcome*", timeout=15_000)
     assert "email=" not in page.url and "password=" not in page.url
-    data_layer = page.evaluate("() => window.dataLayer || []")
-    assert any(e.get("event") == "x_signup" and e.get("conversion_id")
-               and e.get("email") == email for e in data_layer), \
-        "x_signup entry missing from dataLayer"
+    assert captured["x_signup"], "x_signup entry missing from dataLayer"
+    entry = captured["x_signup"]
+    assert entry.get("conversion_id") and entry.get("email") == email, \
+        f"x_signup entry malformed: {entry}"
     assert console_errors == [], f"page JS errors: {console_errors}"

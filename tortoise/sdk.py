@@ -14,6 +14,7 @@ import stat
 from typing import Any
 
 from .domain_loader import known_kinds, register_kind
+from .cross_lens import DEFAULT_THRESHOLD
 from .ids import ulid
 from . import monitoring
 from . import file_indexer  # noqa: F401 — import-time sourceKind registration (§4.4)
@@ -132,6 +133,41 @@ def _build_session_llm_extractor():
     )
 
 
+def _session_llm_effective_model(spec: str, provider: str | None) -> str:
+    """Effective model id that would be sent to the provider wire.
+
+    ``spec`` is the raw TORTOISE_SESSION_LLM_MODEL value (`<provider>:<model>`
+    or bare `<model>`); the provider prefix is stripped for the wire id, and an
+    unset spec resolves to the provider's default. The extractor build
+    validates provider matching separately (ValueError on mismatch); this
+    helper only resolves the model id for reporting/shape checks."""
+    if not spec:
+        return _SESSION_LLM_DEFAULT_MODELS.get(provider or "", "")
+    _p, _, m = spec.partition(":")
+    return m if (_p and m) else spec
+
+
+def _session_llm_model_shape_warning(spec: str, provider: str | None) -> str | None:
+    """OpenRouter route-shape warning — None when the model id is routable.
+
+    OpenRouter addresses models as `<family>/<model>` (e.g. deepseek/deepseek-chat);
+    a bare `<model>` spec (`openrouter:deepseek-chat`) builds an extractor fine
+    but the FIRST capture 404s at call time — the route id is not routable even
+    though the provider key is configured. Warn, never fail: only the route
+    shape is suspect, the configuration itself is valid."""
+    if provider != "openrouter":
+        return None
+    eff = _session_llm_effective_model(spec, provider)
+    if "/" in eff:
+        return None
+    return (
+        f"model {eff!r} lacks <family>/<model> shape — OpenRouter routes are "
+        f"family-prefixed (e.g. deepseek/deepseek-chat); the first capture "
+        f"would 404 at call time. Set "
+        f"TORTOISE_SESSION_LLM_MODEL=openrouter:<family>/<model>."
+    )
+
+
 class _InMemoryEventLog:
     """Duck-typed EventLog (append/read_all) backing the session-capture
     extraction readback. The graph (via the EventAPI projection) is the
@@ -239,6 +275,24 @@ def _first_non_draft_status(points: list) -> tuple[int, object] | None:
 # updatedAt desc, id tie-break); callers with larger graphs should pass a
 # scope (bounded at 200 by hybrid retrieval).
 REVIEW_ADD_POOL_CAP = 1000
+
+# ── Cross-lens candidate discovery (#438, BYOA) cost bounds ─────────────
+# D4: hard cap on candidates per discovery cycle (predictable per-cycle
+# cost; local-model pre-filter experiments live in epic #909, NOT here).
+CROSS_LENS_CANDIDATE_CAP = 200
+# Pool-scan bound: the per-cycle scan is capped at the most-recently-updated
+# eligible points so cost stays proportional to new data, not O(n²) over the
+# whole graph (indicator I3, #438).
+CROSS_LENS_POOL_CAP = 1000
+# Per-point ANN recall bound (neighbors pulled per pool point over the
+# vector index — HNSW on Docker, brute-force euclidean on embedded).
+CROSS_LENS_ANN_TOP_K = 20
+# D4-style hard cap on per-point ANN recall: an agent-passed top_k above
+# this is clamped, never honored, so the per-cycle recall budget stays
+# predictable (embedded brute-force recall is O(pool x total_points) —
+# see the _cross_lens_pairs docstring — so an unbounded top_k would
+# undermine the cost contract entirely).
+CROSS_LENS_ANN_TOP_K_MAX = 100
 
 # #432: declarative spec for the retract/supersede transition guards. NOT
 # consulted by update_point per-call (update_point only promotes draft→live);
@@ -366,6 +420,22 @@ def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _cosine(a: np.ndarray, b: np.ndarray) -> float:
+    """Cosine similarity between two embedding vectors (#438).
+
+    Stored embeddings round-trip as float32 lists — normalize defensively so
+    the #399-calibrated cosine threshold (0.40, all-MiniLM-L6-v2) applies to
+    the exact same metric cross_lens.py thresholds on.
+    """
+    import numpy as np
+
+    na = float(np.linalg.norm(a))
+    nb = float(np.linalg.norm(b))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return float(np.dot(a, b) / (na * nb))
+
+
 def _to_iso_utc(value) -> str:
     """Normalize a datetime or ISO-8601 string to UTC ISO-8601 (with +00:00).
 
@@ -449,6 +519,22 @@ _embedded_busy_known: set[str] = set()
 _embedded_busy_guard = threading.Lock()
 
 
+def _ep_require_calibration_default() -> bool:
+    """#1157: shared default calibration posture for EP surfaces.
+
+    Every EP surface (compute_confidence, dream, get_confidence) resolves
+    ``require_calibration=None`` to this value — one knob for the #7478
+    target ("0 silent uncalibrated EP runs"). Reads
+    ``TORTOISE_EP_REQUIRE_CALIBRATION`` (default "1" → True — fail-closed
+    since the #344 flip landed via PR #1212; set "0" to opt out). Draft
+    points are excluded from the gate (#780/#1212), so draft-heavy test
+    graphs stay passable under the fail-closed default.
+    """
+    import os
+    raw = os.environ.get("TORTOISE_EP_REQUIRE_CALIBRATION", "1").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
 # Per-corpus in-process run locks: the embedded FalkorDBLite's cross-connection
 # MERGE semantics are broken under concurrency (observed: the ON CREATE branch
 # re-fires against an existing key created by ANOTHER connection — the
@@ -478,7 +564,64 @@ def _mark_embedded_opened(db_path: str) -> None:
 
 
 def _stream_to_payload(summary: dict, session_id: str, stream: dict) -> dict:
-    """Payload from the constructed graph stream (the wired structure)."""
+    """Payload from the constructed graph stream (the wired structure).
+
+    T4 (#1272): stream ids from the LLM are NOT trustworthy (the prompt says
+    "the server re-derives them" but the code does not) — re-derive every
+    point/event id from content (pt_<sha>/ev_<sha>) and REMAP operator
+    src/dst + MITIGATES target triples to the re-derived ids, else Layer-1
+    referential integrity fails. Points are enriched with the required
+    fields (reason/confidence/c_cal) at the honest neutral prior 0.5/0.5
+    (T11 — never derived from LLM text in v1) and status draft (EP-inert
+    until #785)."""
+    from tortoise.ids import content_hash
+
+    id_map: dict[str, str] = {}
+    points = []
+    for p in stream.get("points", []):
+        if not p.get("id", "").startswith("pt_"):
+            continue
+        content = p.get("content", "")[:1000]
+        new_id = f"pt_{content_hash(content)[:62]}"
+        id_map[p["id"]] = new_id
+        points.append({
+            "id": new_id, "content": content,
+            "pointKind": "statement", "reason": "NEW",
+            "confidence": 0.5, "c_cal": 0.5,   # neutral prior (T11), never fabricated
+            "about_entities": p.get("about_entities", []) or [],
+            "source_ref": "session.md", "quote": "", "status": "draft",
+        })
+
+    events = []
+    for e in stream.get("events", []):
+        if not e.get("id", "").startswith("ev_"):
+            continue
+        content = e.get("content", "")[:1000]
+        new_id = f"ev_{content_hash(content)[:62]}"
+        id_map[e["id"]] = new_id
+        events.append({
+            "id": new_id, "eventKind": e.get("eventKind", "occurrence"),
+            "content": content, "confidence": 0.5,   # neutral prior (T11)
+            "about_entities": e.get("about_entities", []) or [],
+            "source_ref": "session.md",
+        })
+
+    def _remap(ref):
+        return id_map.get(ref, ref)
+
+    operators = []
+    for op in stream.get("operators", []) or []:
+        o = dict(op)
+        o["src"] = _remap(o.get("src", ""))
+        o["dst"] = _remap(o.get("dst", ""))
+        if o.get("target"):
+            t = dict(o["target"])
+            t["src"] = _remap(t.get("src", ""))
+            t["dst"] = _remap(t.get("dst", ""))
+            o["target"] = t
+        operators.append(o)
+
+    entities = [e for e in stream.get("entities", []) if e.get("name")]
     return {
         "schema_version": "1", "session_id": session_id,
         "client_commit_id": "", "captured_at": _now_iso(),
@@ -487,22 +630,16 @@ def _stream_to_payload(summary: dict, session_id: str, stream: dict) -> dict:
         "summary": (summary.get("session") or {}).get("summary", "")[:2000],
         "story_arc": "",
         "provenance_refs": [{"path": "session.md", "spans": []}],
-        "sources": [],
-        "entities": [e for e in stream.get("entities", [])
-                     if e.get("name")],
-        "points": [p for p in stream.get("points", [])
-                   if p.get("id", "").startswith("pt_")],
-        "events": [e for e in stream.get("events", [])
-                   if e.get("id", "").startswith("ev_")],
-        "operators": stream.get("operators", []) or [],
+        "sources": [], "entities": entities, "points": points,
+        "events": events, "operators": operators,
         "telemetry": {"extractor": {"version": "value@0.4.0+construct", "mode": "byok"},
                       "model": {"provider": "byok", "id": "user-model", "cfg_hash": ""},
-                      "counts": {"kept": len(stream.get("points", [])),
-                                 "candidate": len(stream.get("events", [])),
+                      "counts": {"kept": len(points),
+                                 "candidate": len(events),
                                  "segment": 1, "window": 1, "empty_windows": 0},
-                      "keep_ratio": 1.0, "dedup_hits": 0, "frontier_calls": 2,
+                      "keep_ratio": None, "dedup_hits": None, "frontier_calls": 2,
                       "llm_cost_usd": None, "extraction_ms": 0, "retry_count": 0,
-                      "last_error_code": None, "confidence_histogram": [0] * 10},
+                      "last_error_code": None, "confidence_histogram": None},
     }
 
 
@@ -1285,7 +1422,7 @@ class TortoiseSDK:
     def commit_session(self, conversation=None, session_id=None, *,
                        summary=None, existing_state=None,
                        extractor_model=None, chunk_size=6,
-                       base_url=None, api_key=None) -> dict:
+                       base_url=None, api_key=None, mode: str = "fail-closed") -> dict:
         """The production commit path (epic #909, two-process design).
 
         Process 1: the conversation -> summary (state/decisions/logic/issues)
@@ -1307,13 +1444,13 @@ class TortoiseSDK:
             model = extractor_model or _default_byok_model()
             extracted = extract_session(
                 model, conversation, existing_state=existing_state,
-                session_id=session_id, chunk_size=chunk_size)
+                session_id=session_id, chunk_size=chunk_size, mode=mode)
             summary = extracted["summary"]
             errors = extracted.get("errors", [])
             guards = extracted.get("guards", [])
             delta = extracted.get("delta")
         else:
-            errors = validate_summary(summary or {})
+            errors = validate_summary(summary or {}, mode=mode)
             guards = check_guards(summary or {})
             delta = None
 
@@ -1323,6 +1460,15 @@ class TortoiseSDK:
         except Exception:
             stream = None
         payload = _summary_to_payload(summary, session_id, stream=stream)
+        # T5 (#1272): compute the replay-safe client_commit_id in the mapper
+        # so the payload is complete on BOTH the POST and the error path
+        # (canonical excludes confidence/c_cal/status — enrichment is
+        # replay-safe; same content → same id).
+        from tortoise.commit_schema import compute_client_commit_id
+        payload["client_commit_id"] = compute_client_commit_id(
+            payload["session_id"], payload["points"], payload["entities"],
+            payload["operators"], payload["summary"], payload["story_arc"],
+            payload.get("events", []))
         if errors:
             return {"session_id": session_id, "ok": False, "errors": errors,
                     "payload": payload}
@@ -2217,6 +2363,14 @@ class TortoiseSDK:
                     "promoted": False, "blocked": True,
                     "reason": "not_draft"}
 
+        # Epic 903-C2 (#1240): a status→live transition invalidates the
+        # promoted claim's EP-derived confidence — mark it dirty (plus its
+        # operator neighborhood via the 1-hop reverse BFS) so the next dream
+        # re-derives it. Verified gap: promote_point did NOT call _mark_dirty
+        # (the W1 lifecycle contract says every status→live transition must),
+        # which left a promoted claim permanently excluded from dreaming.
+        self._mark_dirty([point_id])
+
         # Post-CAS race re-check (#990): the quarantine lock is a
         # read-then-CAS (two statements — FalkorDBLite has no EXISTS
         # subqueries), so a quarantine landing between the batch_status read
@@ -2862,7 +3016,7 @@ class TortoiseSDK:
         # before validation produced phantom OperatorAdded events on missing
         # inputs, visible to subscription poll consumers.
         existing = proj.g.query(
-            "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id",
+            "MATCH (n) WHERE (n:Point OR n:Event) AND n.id IN $ids RETURN n.id",
             params={"ids": inputs},
         ).result_set
         existing_ids = {row[0] for row in existing}
@@ -2887,11 +3041,13 @@ class TortoiseSDK:
             f"CREATE (o:Point {{id:$id, is_operator:true, op_type:$op, direction:$direction{props_clause}}})",
             params=params,
         )
-        # Ontology v2.1: map part/whole ops to hasPart, remove INPUT edges
+        # Ontology v2.1: map part/whole ops to hasPart, remove INPUT edges.
+        # A1b (#1272): operator endpoints may be Point OR Event nodes.
         edge_type = "hasPart" if op_type not in ("IMPL", "NAND") else op_type
         for i, inp_id in enumerate(inputs):
             proj.g.query(
-                f"MATCH (o:Point {{id:$oid}}), (s:Point {{id:$sid}}) "
+                f"MATCH (o:Point {{id:$oid}}), (s) WHERE (s:Point OR s:Event) "
+                f"AND s.id = $sid "
                 f"CREATE (o)-[:{edge_type} {{idx:$i}}]->(s)",
                 params={"oid": pid, "sid": inp_id, "i": i},
             )
@@ -3210,6 +3366,24 @@ class TortoiseSDK:
             "violations": violations,
             "drift": drift,
         }
+
+    def audit(self, point_kinds: list[str] | None = None) -> dict:
+        """Audit graph wiring quality — structured JSON report (epic #348).
+
+        Runs the audit checks (missing sourceKind point-level legacy + Source-
+        level canonical, missing sourceDate, superseded points without a
+        CORRECTS edge, live IMPL/NAND edges into superseded points, naive-IMPL
+        heuristic, low-confidence operators without mitigation, and legacy
+        ``mitigates`` edges). Returns per-check counts (uncapped) + capped
+        samples + summary + exit_code (0 clean, 1 issues found — the
+        check-consistency precedent).
+
+        point_kinds: Optional list of pointKind values to scope the audit
+                     (default: all Points).
+        """
+        from tortoise.audit import audit_graph
+        proj = self._get_proj()
+        return audit_graph(proj, point_kinds=point_kinds).to_dict()
 
     def summarize_structure(self) -> dict:
         """Count points per Gate (by pointKind). Returns {gate: count, ..., total}.
@@ -5530,6 +5704,233 @@ class TortoiseSDK:
                 scope, variance_threshold, prune_limit)
         return result
 
+    # ── Cross-lens candidate discovery (#438, BYOA) ───────────────────────
+
+    def get_cross_lens_candidates(
+        self,
+        *,
+        threshold: float = DEFAULT_THRESHOLD,
+        max_candidates: int = CROSS_LENS_CANDIDATE_CAP,
+        routing: str = "truth",
+        top_k: int = CROSS_LENS_ANN_TOP_K,
+    ) -> dict:
+        """Surface unverified cross-lens candidate pairs (#438, bring-your-own-agent).
+
+        READ-ONLY — never writes to the graph and never decides operator
+        semantics (the candidates-never-write/never-decide contract extends
+        from cross_lens.py to this surface). Returns candidate pairs between
+        Points from DIFFERENT sources (cross-stream discovery over the
+        existing HNSW vector index) with lens pair, cosine similarity, point
+        context, and dedup vs existing operators. The customer agent confirms
+        candidates and writes operators through the normal API (no in-repo
+        verifier — D7).
+
+        Contract (2026-08-15 scoping, docs/scoping/
+        2026-08-15-438-cross-domain-discovery-scoping.md):
+          - D2: the payload carries a single ``routing`` field ("truth" |
+            "relevance", #901 semantics). The surface stays NEUTRAL — no
+            op_type / suggested_relation hint; the caller's declared routing
+            context is echoed per candidate (deciding semantics is the
+            customer agent's job).
+          - D3: candidates are gated on a REGISTERED sourceKind (any tier) —
+            Points whose Source has an unregistered sourceKind (or no Source
+            at all) never appear, since unregistered kinds stay neutral
+            (#398 / source_credibility.SOURCE_KIND_DEFAULTS).
+          - D4: hard cap 200 candidates/cycle — ``max_candidates`` is clamped
+            to CROSS_LENS_CANDIDATE_CAP (predictable per-cycle cost; local
+            pre-filter tuning is #909's territory).
+          - D8: empty results (not errors) when there is nothing to see.
+
+        Discovery cost: bounded ANN pull over the existing Point.embedding
+        vector index (HNSW on Docker/server FalkorDB; brute-force euclidean
+        fallback on embedded — the documented degradation) with ``top_k``
+        neighbors per pool point, then exact cosine recompute from stored
+        embeddings (index scores are rank/euclidean, not the calibrated
+        cosine). The scanned pool is capped at CROSS_LENS_POOL_CAP
+        most-recently-updated eligible points — pair enumeration is
+        pool-bounded (each pool point contributes at most ``top_k``
+        neighbors, candidate space O(pool x top_k)), not O(n²) over the
+        whole graph (indicator I3). Cost caveat: on the embedded backend
+        run_vector_query is a brute-force scan over the ENTIRE Point index,
+        so embedded recall is O(pool x total_points) — the pool cap bounds
+        the pair space, not the per-query scan cost (the documented
+        degradation).
+
+        Recall caveat: the default top_k=20 favors dense recent clusters —
+        same-source near-duplicates (D5-excluded territory) can crowd the
+        top-k and crowd out genuine cross-lens pairs. Raise top_k (up to
+        the hard cap) or lower ``threshold`` when cross-lens recall looks
+        thin.
+
+        Args:
+            threshold: minimum cosine similarity (default 0.40 — the
+                #399-calibrated cross-vocabulary band for all-MiniLM-L6-v2;
+                near-duplicates are 0.75+).
+            max_candidates: requested result cap — HARD-clamped to 200 (D4).
+            routing: the #901 routing context the caller is mining under
+                ("truth" | "relevance") — echoed per candidate; the surface
+                itself stays neutral.
+            top_k: ANN neighbors pulled per pool point (recall bound) —
+                HARD-clamped to CROSS_LENS_ANN_TOP_K_MAX (100) so an agent
+                cannot inflate the per-cycle recall budget (D4 philosophy).
+
+        Returns:
+            {"candidates": [{src, dst, similarity, lenses, sourceKinds,
+              src_content, dst_content, src_source, dst_source, routing}],
+             "count": N, "cap": 200, "truncated": bool, "routing": str}.
+            Candidates sorted by similarity descending.
+
+        Raises ValueError on invalid routing/threshold/max_candidates/top_k.
+        """
+        if routing not in ("truth", "relevance"):
+            raise ValueError(
+                f"routing must be 'truth' or 'relevance' (#901), got {routing!r}"
+            )
+        if not (0.0 <= threshold <= 1.0):
+            raise ValueError(f"threshold must be 0.0-1.0, got {threshold!r}")
+        if max_candidates < 1:
+            raise ValueError(f"max_candidates must be >= 1, got {max_candidates!r}")
+        if top_k < 1:
+            raise ValueError(f"top_k must be >= 1, got {top_k!r}")
+        top_k = min(int(top_k), CROSS_LENS_ANN_TOP_K_MAX)  # hard cap (conf 75)
+
+        limit = min(int(max_candidates), CROSS_LENS_CANDIDATE_CAP)  # D4
+        pool = self._cross_lens_pool()
+        if len(pool) < 2:
+            return {"candidates": [], "count": 0,
+                    "cap": CROSS_LENS_CANDIDATE_CAP,
+                    "truncated": False, "routing": routing}
+
+        connected = self._connected_pairs(list(pool))
+        pairs = self._cross_lens_pairs(pool, threshold=threshold, top_k=top_k)
+
+        all_candidates: list[dict] = []
+        for (a, b), score in pairs:
+            if frozenset((a, b)) in connected:
+                continue  # dedup vs existing operators (Slice 1)
+            pa, pb = pool[a], pool[b]
+            all_candidates.append({
+                "src": a,
+                "dst": b,
+                "similarity": round(score, 6),
+                "lenses": [pa["source"], pb["source"]],
+                "sourceKinds": [pa["sourceKind"], pb["sourceKind"]],
+                "src_content": pa["content"],
+                "dst_content": pb["content"],
+                "src_source": pa["source_id"],
+                "dst_source": pb["source_id"],
+                "routing": routing,
+            })
+
+        truncated = len(all_candidates) > limit
+        candidates = all_candidates[:limit]
+        return {"candidates": candidates, "count": len(candidates),
+                "cap": CROSS_LENS_CANDIDATE_CAP,
+                "truncated": truncated, "routing": routing}
+
+    def _cross_lens_pool(self) -> dict[str, dict]:
+        """Eligible pool for cross-lens discovery (#438).
+
+        Non-operator, non-terminal Points with a stored embedding AND a Source
+        whose sourceKind is REGISTERED (D3 — any tier: T0-T4 identity kinds
+        and explicitly-registered kinds count; unregistered kinds stay
+        neutral). Bounded to the CROSS_LENS_POOL_CAP most-recently-updated
+        points so the per-cycle scan stays proportional to new data.
+        """
+        from tortoise.source_credibility import SOURCE_KIND_DEFAULTS
+
+        registered = [k for k in SOURCE_KIND_DEFAULTS]
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (p:Point)-[:extractedFrom]->(s:Source) "
+            "WHERE p.is_operator = false "
+            "  AND p.embedding IS NOT NULL "
+            "  AND (p.status IS NULL OR p.status IN ['draft', 'live']) "
+            "  AND (p.outdated IS NULL OR p.outdated = false) "
+            "  AND s.sourceKind IN $registered "
+            "RETURN p.id, p.content, p.status, s.id, s.url, s.sourceKind, "
+            "       p.updatedAt "
+            "ORDER BY p.updatedAt DESC "
+            "LIMIT $limit",
+            params={"registered": registered, "limit": CROSS_LENS_POOL_CAP},
+        ).result_set
+        pool: dict[str, dict] = {}
+        for pid, content, status, sid, url, skind, updated_at in rows:
+            content = content or ""
+            if content.startswith("[MITIGATION]"):
+                continue  # mitigation bookkeeping — not a standalone claim
+            pool[pid] = {
+                "id": pid,
+                "content": content,
+                "status": status or "draft",
+                "source_id": sid,
+                # lens identity: canonical Source url; fall back to node id.
+                "source": url or sid,
+                "sourceKind": skind,
+                "updated_at": updated_at or "",
+            }
+        return pool
+
+    def _cross_lens_pairs(self, pool: dict[str, dict], *,
+                          threshold: float, top_k: int) -> list[tuple[tuple[str, str], float]]:
+        """Similar cross-source point pairs via bounded ANN pull (#438).
+
+        For each pool point, pull its top-k neighbors over the vector index
+        (run_vector_query: HNSW on Docker/server, brute-force euclidean on
+        embedded), restrict to pool members from a DIFFERENT source, and
+        recompute the exact cosine similarity from stored embeddings (the
+        calibrated #399 metric). Returns [((a, b), score)] with a < b, sorted
+        by score descending. Never writes.
+
+        Cost is bounded on BOTH axes: pair enumeration is pool-bounded
+        (each pool point contributes at most top_k neighbors, so the
+        candidate space is O(pool x top_k)) and the pool itself is capped
+        at CROSS_LENS_POOL_CAP. Caveat: on the embedded backend the
+        run_vector_query recall is a brute-force scan over the ENTIRE Point
+        index, so embedded cost is O(pool x total_points) regardless of the
+        pool cap — the documented degradation. ``top_k`` is hard-clamped at
+        CROSS_LENS_ANN_TOP_K_MAX by the caller.
+        """
+        from .search_engine import run_vector_query
+        import numpy as np
+
+        proj = self._get_proj()
+        is_embedded = getattr(proj, "_is_embedded", True)
+        # Fetch stored embeddings in one query (round-trip as float32 lists).
+        rows = proj.g.query(
+            "MATCH (p:Point) WHERE p.id IN $ids AND p.embedding IS NOT NULL "
+            "RETURN p.id, p.embedding",
+            params={"ids": list(pool)},
+        ).result_set
+        embeddings: dict[str, np.ndarray] = {}
+        for pid, emb in rows:
+            if isinstance(emb, list) and emb:
+                embeddings[pid] = np.asarray(emb, dtype=np.float64)
+
+        best: dict[tuple[str, str], float] = {}
+        for pid, meta in pool.items():
+            vec = embeddings.get(pid)
+            if vec is None:
+                continue
+            hits = run_vector_query(proj.g, vec.tolist(), limit=top_k + 1,
+                                    is_embedded=is_embedded)
+            for nid, _score in hits:
+                if nid == pid or nid not in pool:
+                    continue
+                if pool[nid]["source"] == meta["source"]:
+                    continue  # same lens — cross-lens only
+                nvec = embeddings.get(nid)
+                if nvec is None:
+                    continue
+                sim = _cosine(vec, nvec)
+                if sim < threshold:
+                    continue
+                a, b = (pid, nid) if pid < nid else (nid, pid)
+                if best.get((a, b), 0.0) < sim:
+                    best[(a, b)] = sim
+        ordered = sorted(best.items(), key=lambda kv: kv[1], reverse=True)
+        return [((a, b), s) for (a, b), s in ordered]
+
     def _review_pool(self, scope: str | None) -> dict[str, dict]:
         """Candidate pool for a review: non-operator, non-terminal Points.
 
@@ -5909,7 +6310,9 @@ class TortoiseSDK:
         self._dirty_roots.update(r[0] for r in rows)
 
     def dream(self, dirty_only: bool = True, full: bool = False,
-              max_hops: int = 2) -> dict:
+              max_hops: int = 2,
+              require_calibration: bool | None = None,
+              stamp_dreamed_at: bool = True) -> dict:
         """Run EP stabilization (#85).
 
         Args:
@@ -5918,17 +6321,44 @@ class TortoiseSDK:
                   with dirty_only + anchors.
             max_hops: EP subgraph expansion (keep ≥2 — contract with
                       _mark_dirty).
+            require_calibration: gate the EP run on calibration state —
+                  raises CalibrationError when evidence-kind points are
+                  uncalibrated (#1157). None (default) resolves to the shared
+                  posture, TORTOISE_EP_REQUIRE_CALIBRATION (default True —
+                  fail-closed, post-#344; set it to "0" to opt out). Dream
+                  WRITES n.confidence,
+                  so it must never silently run uncalibrated EP (#7478).
+            stamp_dreamed_at: when False, the pass never writes
+                  lastDreamedAt (epic 903-C2) — the read-triggered
+                  lazy-consistency paths (get_confidence /
+                  compute_confidence) pass False so a READ never
+                  moves the freshness signal that the 903-C4
+                  stale-first scheduler ranks on. Default True for
+                  write-triggered/operator-initiated dreams.
 
         Returns {iterations, converged, affected_claims} or the dream_all
         summary for full=True.
         """
+        # #1157: gate BEFORE any work — dream is an EP write surface
+        # (persists n.confidence); same posture as compute_confidence.
+        if require_calibration is None:
+            require_calibration = _ep_require_calibration_default()
+        if require_calibration:
+            self._ensure_calibrated("dream")
         dreamer = self._get_dreamer()
         if full:
-            return dreamer.dream_all(max_hops=max_hops)
+            return dreamer.dream_all(
+                max_hops=max_hops, stamp_dreamed_at=stamp_dreamed_at)
         if not dirty_only and not self._dirty_roots:
             return {"iterations": 0, "converged": True, "affected_claims": []}
         anchors = list(self._dirty_roots)
-        result = dreamer.dream(anchors, max_hops=max_hops)
+        # Main (#395-era) already merged the retention change: roots in the
+        # affected set are cleared; roots OUTSIDE the dreamed subgraph stay
+        # dirty (vacuous-run = subtracts nothing). Epic 903-C2 (#1240) adds
+        # only the stamp_dreamed_at forwarding below — retention semantics
+        # owned by 903-C5 for the non-convergence divergence.
+        result = dreamer.dream(anchors, max_hops=max_hops,
+                                stamp_dreamed_at=stamp_dreamed_at)
         # Clear dirty roots that the dream's affected subgraph actually
         # covered: roots in the affected set converged and are cleared;
         # roots OUTSIDE the dreamed subgraph stay dirty for a later dream
@@ -5969,7 +6399,7 @@ class TortoiseSDK:
                            max_hops: int = 1,
                            rel_filter: str = "IMPL|NAND",
                            direction: str = "both",
-                           require_calibration: bool = True,
+                           require_calibration: bool | None = None,
                            recency_decay: float | None = None) -> dict:
         """Compute confidence via EP belief propagation. Returns {iterations, converged, confidences}.
 
@@ -5992,9 +6422,12 @@ class TortoiseSDK:
                 (max_hops=None) over the dirty roots.
             rel_filter: edge types for BFS — "IMPL", "NAND", or "IMPL|NAND" (default).
             direction: IMPL edge traversal direction — "incoming", "outgoing", or "both" (default).
-            require_calibration: fail-closed gate (default True) — raises CalibrationError
-                when evidence points are uncalibrated. Pass False explicitly to opt out and
-                run EP on topology alone (the #7478 degenerate case — do not do this silently).
+            require_calibration: fail-closed gate — raises CalibrationError
+                when evidence points are uncalibrated. None (default) resolves
+                to the shared TORTOISE_EP_REQUIRE_CALIBRATION posture
+                (default "1" → True fail-closed, post-#344). Pass False
+                explicitly to opt out and run EP on topology alone (the #7478
+                degenerate case — do not do this silently).
             recency_decay: optional recency decay factor (default 0.95 from TORTOISE_EP_RECENCY_DECAY).
                 T0 sources exempt; lower tiers get gentle decay. 1.0 = no decay.
 
@@ -6012,32 +6445,13 @@ class TortoiseSDK:
         run_evidence = dict(self._evidence)
         if evidence:
             run_evidence.update(evidence)
-        # Calibration gate
+        # Calibration gate (#1157: shared check — dream / get_confidence use
+        # the same _ensure_calibrated helper; fail-closed by default (#344),
+        # one knob TORTOISE_EP_REQUIRE_CALIBRATION).
+        if require_calibration is None:
+            require_calibration = _ep_require_calibration_default()
         if require_calibration:
-            from .exceptions import CalibrationError
-            summary = self.calibrate_summary()
-            evidence_kinds = {"statement", "observation", "hypothesis"}
-            uncalibrated = [
-                s for s in summary
-                if not s["calibrated"]
-                and s.get("pointKind") in evidence_kinds
-                # #780: draft points never feed EP (factor extraction and
-                # propagation exclude them by default) — demanding calibration
-                # of a draft is noise; the gate only guards live evidence
-                # (PR #1212). Status NULL = live, mirroring _live_only.
-                and s.get("status") != "draft"
-            ]
-            if uncalibrated:
-                ids = [s["id"] for s in uncalibrated[:10]]
-                msg = (
-                    f"{len(uncalibrated)} uncalibrated evidence points "
-                    f"(first 10: {ids}). EP is fail-closed until every evidence "
-                    f"point is calibrated (#344). Run calibrate_summary() for "
-                    f"per-point guidance — set_point_baseline(), recreate with a "
-                    f"credibility kwarg, or set_source_tier() for sourced points — "
-                    f"or pass require_calibration=False to explicitly opt out."
-                )
-                raise CalibrationError(msg)
+            self._ensure_calibrated("compute_confidence")
         if factors is not None:
             operator_ids = [f if isinstance(f, str) else f[0] for f in factors]
             if not operator_ids:
@@ -6059,6 +6473,22 @@ class TortoiseSDK:
                 operator_ids.append(src)
                 operator_ids.append(tgt)
             operator_ids = list(dict.fromkeys(operator_ids))
+        else:
+            factors_data, _ = proj.extract_svbp_factors()
+            operator_ids = [f[0] for f in factors_data]
+        if not operator_ids:
+            return {"iterations": 0, "converged": True, "confidences": {}, "diagnostic": "no_factors"}
+        # Lazy consistency (#85): if dirty roots exist and this is a
+        # whole-graph/auto-extract computation, dream the dirty subgraph
+        # first so the auto-extracted factors see stabilized values.
+        # Epic 903-C2 (#1240): read-triggered dreams pass
+        # stamp_dreamed_at=False — a READ never moves the freshness signal
+        # that the 903-C4 stale-first scheduler ranks on.
+        if factors is None and anchors is None and self._dirty_roots:
+            self.dream(dirty_only=True, stamp_dreamed_at=False)
+            # Re-extract factors after dreaming (graph may have changed).
+            factors_data, _ = proj.extract_svbp_factors()
+            operator_ids = [f[0] for f in factors_data]
             if not operator_ids:
                 return {"iterations": 0, "converged": True, "confidences": {}, "diagnostic": "no_factors"}
             iterations, converged = ep.run(
@@ -6179,14 +6609,29 @@ class TortoiseSDK:
         )
         self._mark_dirty(point_ids)
 
-    def get_confidence(self, claim_id: str) -> dict:
+    def get_confidence(self, claim_id: str,
+                       require_calibration: bool | None = None) -> dict:
         """Get EP confidence for a claim: {mean, variance, alpha, beta}.
 
         Lazy consistency (#85): if the claim is a dirty root (confidence
         diverged after writes), dream it first so reads return fresh values.
+
+        Calibration posture (#1157): the lazy dream path WRITES n.confidence
+        and the read returns belief numbers — both must be gated on
+        calibration like compute_confidence. require_calibration=True raises
+        CalibrationError when evidence-kind points are uncalibrated; None
+        (default) resolves to the shared TORTOISE_EP_REQUIRE_CALIBRATION
+        posture (default True — fail-closed, post-#344; set
+        TORTOISE_EP_REQUIRE_CALIBRATION to "0" to opt out).
         """
+        if require_calibration is None:
+            require_calibration = _ep_require_calibration_default()
+        if require_calibration:
+            self._ensure_calibrated("get_confidence")
         if claim_id in self._dirty_roots:
-            self.dream(dirty_only=True)
+            self.dream(dirty_only=True,
+                       require_calibration=require_calibration,
+                       stamp_dreamed_at=False)  # read path — never stamps (epic 903-C2)
         return self._get_ep().compute_confidence(claim_id)
 
     def _apply_source_inheritance(self, recency_decay: float | None = None,
@@ -6457,6 +6902,40 @@ class TortoiseSDK:
                         break
                 seen[pid] = item
         return deduped
+
+    def _ensure_calibrated(self, surface: str) -> None:
+        """#1157: shared calibration gate for EP surfaces.
+
+        Raises CalibrationError when evidence-kind Points (statement /
+        observation / hypothesis) are uncalibrated (no baseline). Extracted
+        from compute_confidence's require_calibration gate so dream and
+        get_confidence share the SAME check — the #7478 target is zero EP
+        surfaces running uncalibrated EP silently, not just the explicit
+        compute_confidence surface (#344 only covers the explicit surface).
+
+        Args:
+            surface: human-readable caller name for the error message
+                (e.g. "dream", "get_confidence").
+        """
+        from .exceptions import CalibrationError
+        summary = self.calibrate_summary()
+        evidence_kinds = {"statement", "observation", "hypothesis"}
+        uncalibrated = [
+            s for s in summary
+            if not s["calibrated"] and s.get("pointKind") in evidence_kinds
+            # #780/PR #1212: draft points never feed EP (factor extraction
+            # and propagation exclude them by default) — demanding
+            # calibration of a draft is noise; the gate only guards live
+            # evidence. Status NULL = live, mirroring _live_only.
+            and s.get("status") != "draft"
+        ]
+        if uncalibrated:
+            ids = [s["id"] for s in uncalibrated[:10]]
+            msg = (
+                f"{surface}: {len(uncalibrated)} uncalibrated evidence points. "
+                f"First 10: {ids}. Run calibrate_summary() for full guidance."
+            )
+            raise CalibrationError(msg)
 
 
     # ── P0 Group 3: Checkpoint, Diary, Status, Analyze, Ingest ────
@@ -7275,6 +7754,154 @@ class TortoiseSDK:
             "recent_events": recent_events,
             "confidence_changes": confidence_changes,
         }
+
+    # ── Issue Insight (#1196) ────────────────────────────────────
+    # Review c70: the semantic stage must not report unrelated hits as
+    # "relates to this issue". Gate: EP-confirmed claims (confidence_mean
+    # >= 0.5) count, and so do hits sharing >= 2 tokens with the query text
+    # (a single-token TF-IDF coincidence — e.g. one shared word like
+    # "unrelated" — is a false positive, not prior knowledge). Works across
+    # both retrieval modes: FTS/RRF (EP-annotated) and TF-IDF fallback
+    # (ep=None, zero-overlap matches are pure noise).
+    _ISSUE_INSIGHT_MIN_EP_CONFIDENCE = 0.5
+    _ISSUE_INSIGHT_MIN_SHARED_TOKENS = 2
+    _ISSUE_INSIGHT_TOKEN_RE = re.compile(r"[a-z0-9']+")
+
+    def issue_insight(self, title: str, body: str | None = None,
+                      repo: str | None = None, limit: int = 2) -> dict:
+        """Return a compact 'there's more in the graph' insight for a would-be issue.
+
+        Surface (b) of #1196: called by the creating agent at issue-creation time
+        BEFORE filing. Two stages:
+          * Semantic (always): hybrid search on title+body for cross-session
+            decisions / EP-tagged claims ('we already decided this'). Hits must
+            clear a relevance gate (EP confidence >= 0.5, or >= 2 shared tokens
+            with the query) — otherwise the stage reports no matches instead of
+            counting false positives.
+          * Repo (when repo= given): structural count of indexed GitHub
+            observation points for that repo (source='github').
+        Fail-closed: empty graph -> no_prior_knowledge; repo given + graph
+        non-empty + zero points for repo -> repo_not_indexed; never raises
+        (graph-service failure -> error dict via _safe at the handler).
+        data_points never exceeds `limit` rows (repo-stage append is capped).
+        """
+        proj = self._get_proj()
+        count_rows = proj.g.query(
+            "MATCH (n:Point) WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "RETURN count(n)"
+        ).result_set
+        total_points = int(count_rows[0][0]) if count_rows else 0
+
+        text = " ".join(p for p in (title or "", body or "") if p and p.strip()).strip()
+        semantic_hits: list[dict] = []
+        if text:
+            # Fetch a wider candidate pool than `limit` (review P3): the gate
+            # below filters post-retrieval, so a relevant hit ranked just past
+            # the limit would otherwise be invisible at small limits.
+            semantic_hits = self.tortoise_fts_query(
+                text, entity_type="point", limit=max(limit * 5, 20),
+            )
+            # c70: drop hits that clear neither the EP-confidence floor nor a
+            # shared-token floor (TF-IDF fallback hits carry no EP annotation;
+            # FTS-mode hits are EP-annotated but unmeasured points must still
+            # show real lexical overlap to count).
+            semantic_hits = [
+                h for h in semantic_hits
+                if self._issue_insight_relevant(h, text)
+            ][:limit]
+
+        repo_points: list[dict] = []
+        if repo:
+            repo_points = self.query(
+                kind="observation", source="github", github_repo=repo
+            )
+
+        if total_points == 0:
+            return {
+                "has_prior": False,
+                "no_prior_knowledge": True,
+                "repo_not_indexed": False,
+                "data_points": [],
+                "insight": "The graph has no prior knowledge yet — nothing to pull. "
+                            "Run tortoise_onboarding_github_index to seed it.",
+                "more_in_graph": None,
+                "repo_stats": None,
+            }
+
+        data_points: list[dict] = []
+        for h in semantic_hits:
+            dp = {"kind": h.get("point_kind"), "content": (h.get("content") or "")[:200]}
+            if h.get("ep") and h["ep"].get("confidence_mean") is not None:
+                dp["confidence_mean"] = round(h["ep"]["confidence_mean"], 3)
+            data_points.append(dp)
+
+        repo_stats = None
+        if repo:
+            repo_stats = {
+                "repo": repo,
+                "prior_issues": len(repo_points),
+                "open": sum(1 for p in repo_points if p.get("github_state") == "open"),
+            }
+            # Cap the repo-stage append so data_points never exceeds `limit`
+            # (semantic hits are already truncated to `limit` above).
+            if repo_points and len(data_points) < limit:
+                data_points.append({
+                    "kind": "repo",
+                    "content": f"{repo}: {len(repo_points)} prior issue(s) in the graph",
+                })
+
+        if repo and not repo_points:
+            return {
+                "has_prior": True,
+                "no_prior_knowledge": False,
+                "repo_not_indexed": True,
+                "data_points": data_points,
+                "insight": f"Graph is populated but '{repo}' has no indexed issues yet — "
+                            "run tortoise_onboarding_github_index to index it.",
+                "more_in_graph": None,
+                "repo_stats": None,
+            }
+
+        # c70: nothing cleared the semantic gate -> "no matches", even when the
+        # repo stage found points (repo context is still reported via repo_stats).
+        if not semantic_hits:
+            return {
+                "has_prior": False,
+                "no_prior_knowledge": False,
+                "repo_not_indexed": False,
+                "data_points": [],
+                "insight": "No graph matches for this issue title.",
+                "more_in_graph": None,
+                "repo_stats": repo_stats,
+            }
+
+        top = semantic_hits[0]
+        return {
+            "has_prior": True,
+            "no_prior_knowledge": False,
+            "repo_not_indexed": False,
+            "data_points": data_points,
+            "insight": f"{len(semantic_hits)} graph hit(s) relate to this issue — check the graph before filing.",
+            "more_in_graph": ((top.get("content") or "")[:80] if top else None),
+            "repo_stats": repo_stats,
+        }
+
+    def _issue_insight_relevant(self, hit: dict, query_text: str) -> bool:
+        """#1196 review c70 — semantic-stage relevance gate.
+
+        A hit counts as "relates to this issue" when it is EP-confirmed
+        (confidence_mean >= 0.5 — the 'we already decided this' signal) OR it
+        shares >= 2 tokens with the query text. The token floor protects the
+        TF-IDF fallback path (ep=None) from single-token coincidences and
+        keeps unmeasured FTS hits out unless they show real lexical overlap.
+        """
+        ep = hit.get("ep")
+        if ep is not None and ep.get("confidence_mean") is not None \
+                and ep["confidence_mean"] >= self._ISSUE_INSIGHT_MIN_EP_CONFIDENCE:
+            return True
+        q_tokens = set(self._ISSUE_INSIGHT_TOKEN_RE.findall(query_text.lower()))
+        c_tokens = set(self._ISSUE_INSIGHT_TOKEN_RE.findall((hit.get("content") or "").lower()))
+        return len(q_tokens & c_tokens) >= self._ISSUE_INSIGHT_MIN_SHARED_TOKENS
 
     # ── Hybrid Search (Phase 0, #7748) ───────────────────────────
 
@@ -12141,7 +12768,13 @@ def _default_byok_model():
     return _model_adapter(name)
 
 
-def _model_adapter(model_id: str):
+def _model_adapter(model_id: str, max_tokens: int = 4000, temperature: float = 0.0):
+    """BYOK model adapter with explicit bounds (T13 #1272).
+
+    The production summary/construct workload needs a real output budget —
+    the gate-judge default (500) truncates summaries and silently loses
+    chunks. 4000 is the summary/construct-sized default (temperature 0.0
+    for determinism); callers may override."""
     import os
     key = os.environ.get("OPENROUTER_API_KEY", "")
     url = os.environ.get("OPENROUTER_BASE_URL",
@@ -12155,7 +12788,9 @@ def _model_adapter(model_id: str):
                 "Content-Type": "application/json"},
                 json={"model": model_id,
                       "messages": [{"role": "system", "content": system},
-                                   {"role": "user", "content": user}]},
+                                   {"role": "user", "content": user}],
+                      "max_tokens": max_tokens,
+                      "temperature": temperature},
                 timeout=600)
             r.raise_for_status()
             return r.json()["choices"][0]["message"]["content"]
@@ -12183,7 +12818,7 @@ def _summary_to_payload(summary: dict, session_id: str,
             "id": f"ev_{content_hash(f'{session_id}:decision:{i}')[:62]}",
             "eventKind": "decision",
             "content": d.get("content", "")[:1000],
-            "confidence": 0.9,
+            "confidence": 0.5,   # T11 neutral prior (was fabricated 0.9)
             "about_entities": d.get("options") or [],
             "source_ref": "session.md",
         })
@@ -12192,7 +12827,7 @@ def _summary_to_payload(summary: dict, session_id: str,
             "id": f"ev_{content_hash(f'{session_id}:issue:{i}')[:62]}",
             "eventKind": "occurrence",
             "content": f"{iss.get('id', 'issue')} {iss.get('status', '')}: {iss.get('content', '')[:900]}",
-            "confidence": 0.9,
+            "confidence": 0.5,   # T11 neutral prior (was fabricated 0.9)
             "about_entities": [],
             "source_ref": "session.md",
         })
@@ -12204,9 +12839,9 @@ def _summary_to_payload(summary: dict, session_id: str,
         points.append({
             "id": pid, "content": l.get("point", "")[:1000],
             "pointKind": "statement", "reason": "NEW",
-            "confidence": 0.8, "c_cal": 0.7,
+            "confidence": 0.5, "c_cal": 0.5,   # T11 neutral prior (was 0.8/0.7)
             "about_entities": [], "source_ref": "session.md",
-            "quote": "", "status": "live",
+            "quote": "", "status": "draft",   # T11: draft (EP-inert until #785)
         })
 
     operators = []
@@ -12249,9 +12884,9 @@ def _summary_to_payload(summary: dict, session_id: str,
                       "model": {"provider": "byok", "id": "user-model", "cfg_hash": ""},
                       "counts": {"kept": len(points), "candidate": len(events),
                                  "segment": 1, "window": 1, "empty_windows": 0},
-                      "keep_ratio": 1.0, "dedup_hits": 0, "frontier_calls": 1,
+                      "keep_ratio": None, "dedup_hits": None, "frontier_calls": 1,
                       "llm_cost_usd": None, "extraction_ms": 0, "retry_count": 0,
-                      "last_error_code": None, "confidence_histogram": [0] * 10},
+                      "last_error_code": None, "confidence_histogram": None},
     }
 
 

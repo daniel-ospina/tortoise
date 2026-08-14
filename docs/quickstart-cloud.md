@@ -5,6 +5,7 @@ domain: platform
 doc_status: live
 subjects.team: epistemic-team
 created: 2026-08-08
+ownedBy: epistemic-team
 aboutSubjects: tortoise
 aboutObjects: tortoise-cloud, tortoise-mcp, tortoise-rest
 ---
@@ -89,6 +90,13 @@ tortoise session list                               # what's been captured
 tortoise context                                    # memory digest for session-start hooks
 ```
 
+**Meeting transcripts:** the manual mining flow (transcript → meeting/decision/
+friction events + draft Points) is a local CLI/SDK path — see the
+meeting-transcripts section of [quickstart-selfhosted.md](quickstart-selfhosted.md).
+Over hosted HTTP the `tortoise_mine_conversations` tool is stdio-only for
+security (#1090); run `tortoise serve` locally and connect your agent to it
+(stdio) to use it, or mine with the CLI against a local DB.
+
 ## 4. Use the REST API
 
 Base URL `https://api.premiselabs.co`, header `Authorization: Bearer tt_YOUR_KEY` on every request.
@@ -142,3 +150,12 @@ Running Tortoise yourself and moving to hosted? The supported path is a **replay
 
    For bulk, use the REST API (`POST /v1/points`) or the SDK — both accept the same content.
 5. **Verify parity** — `tortoise team info` and `tortoise context` confirm the team and its memory digest; the MCP tools `tortoise_check_structure` (chain integrity) and `tortoise_summarize_structure` (counts per gate) confirm the replayed graph. Compare counts against your selfhost graph; once hosted reaches parity, decommission the daemon at your leisure.
+
+## 7. Beta feedback & bug reports
+
+Part of the beta cohort? Bugs and feedback go through two channels (see [beta-feedback.md](beta-feedback.md) for the full guide and triage path):
+
+- **Bug / unexpected behavior** → [file a bug report](https://github.com/daniel-ospina/tortoise/issues/new?template=bug_report.yml) (structured form: surface, expected vs actual, graph JSON)
+- **Questions, ideas, general feedback** → [GitHub Discussions](https://github.com/daniel-ospina/tortoise/discussions)
+
+Reports are acknowledged within 2 business days.

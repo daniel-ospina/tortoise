@@ -117,7 +117,7 @@ Each layer answers a different question. All four are live mechanisms.
 | Layer | Question | Entity | How it works |
 |-------|----------|--------|--------------|
 | **Semantic** | Who/what exists? | Subject, Object (incl. Document), Source | Nouns. Standing structural relations (owns, memberOf, hasPart) via plain edges. |
-| **Epistemic** | What do we believe and why? | Point, Operator (IMPL/NAND + label + EP confidence) | Operators connect epistemic targets (Event→Point, Point→Point). Belief strength = EP confidence, computed by propagation. |
+| **Epistemic** | What do we believe and why? | Point, Operator (IMPL/NAND + label + EP confidence) | Operators connect epistemic targets (Event→Point, Point→Event, Point→Point). Belief strength = EP confidence, computed by propagation. **Point→Event operators are recorded argumentation annotations — write-only in v1, no EP propagation; decision semantics remain on the Event timeline; decisions stay non-first-class Points.** |
 | **Episodic** | What happened when? | Event | Verbs. Append-only, timestamped. Reified middle node: (Subject)-[performs]->(Event)-[produces]->(Object). |
 | **Procedural** | What is the current state of work? | Event + projected status on Object | **Status is derived, not stored.** An Object's status (in_progress, completed, failed) is projected at query time from its event stream — the events are the truth, the status is a read-only projection. |
 
@@ -145,9 +145,9 @@ Each layer answers a different question. All four are live mechanisms.
 | Edge | Type | Confidence | Example |
 |------|------|-----------|---------|
 | performs / produces / uses / owns / memberOf / authoredBy / ownedBy / managedBy | **Structural** (plain) | None (factual) | (User)-[performs]->(Event), (User)-[owns]->(Doc) |
-| Event→Point, Point→Point | **Epistemic** (operator) | EP confidence | (Event:deployFailed)-[NAND]->(Point:"deploy succeeded") |
+| Event→Point, Point→Event, Point→Point | **Epistemic** (operator) | EP confidence | (Event:deployFailed)-[NAND]->(Point:"deploy succeeded") · (Point:"argument for X")-[IMPL]->(Event:decision-on-X) — the latter write-only in v1 (argumentation annotation; no EP propagation; the decision stays an Event, never a first-class Point) |
 
-**Principle:** Operators connect only epistemic targets (Event→Point, Point→Point). Subjects connect via plain structural edges. Evaluations of subjects (expertise, reliability) are Statements (Points) with EP confidence — not edges. Reputation is derived at query time. Facts = confidence 1.0.
+**Principle:** Operators connect only epistemic targets (Event→Point, Point→Event, Point→Point). Subjects connect via plain structural edges. Evaluations of subjects (expertise, reliability) are Statements (Points) with EP confidence — not edges. Reputation is derived at query time. Facts = confidence 1.0.
 
 ---
 
@@ -165,6 +165,15 @@ Each layer answers a different question. All four are live mechanisms.
 > **Supersession semantics:** `CORRECTS` is the structural replacement edge. `supersede_point(old, new)` = mark old `outdated:true` + create `(new)-[:CORRECTS]->(old)` + transfer all old edges (IMPL/NAND/hasPart operators + structural edges) to new. `invalidate_point(id, corrected_by)` = mark outdated + CORRECTS only (no edge transfer). Old point retains only the CORRECTS edge as provenance.
 
 > **Direction flag (code note):** operator direction is an explicit flag on the operator Point. Creation default is **bidirectional** for all op types (#753 — NAND is logically mutual; `unidirectional` is the agent-declared directed attack). Pre-migration operators lacking the property are read as bidirectional (legacy semantics preserved).
+>
+> **Edge properties (IMPL/NAND — EP message state, epic 903):** these are **graph-persisted** belief-propagation messages written by `TortoiseEP._flush_cache` and read back by `_load_cache` (warm-start seed, 903-C4). They are load-bearing graph state — documented here so they are not treated as throwaway cache:
+>
+> | Property | Type | Written by | Meaning |
+> |----------|------|-----------|---------|
+> | `msg_alpha` / `msg_beta` | float | `TortoiseEP._flush_cache` (ep.py) | Forward EP message natural parameters, operator→claim slot `(op_id, claim_id, rel_type)` |
+> | `back_msg_alpha` / `back_msg_beta` | float | `TortoiseEP._flush_cache` (ep.py) | Backward EP message natural parameters — separate slot for bidirectional / operator-less edges (the `back_msg_*` pair on the same edge) |
+>
+> **Warm-start note (903-C4):** `run(warm_start=True)` loads these graph-persisted messages as seed and skips updates whose delta ≤ fixed threshold γ; the fast path (`compute_confidence`) runs `warm_start=False` and never touches γ-skip state.
 >
 > **Extraction NAND direction policy (epic #909 §4.3 #5 / research addendum §1 — pipeline spec):** the EXTRACTOR explicitly sets direction per this policy; the SDK creation default stays `bidirectional` (#807 — API-user path):
 > - **New-claim-attacks-existing-claim → `unidirectional`** (directed): "you now claim ¬D against D" is an attack on an existing belief — the new claim attacks the old. This is the common, measured-correct case (the one that makes contradiction surfacing work; `nand_precision` A11 measures it).
@@ -243,7 +252,7 @@ Connector entities (GitHub/Linear/Slack) get Source nodes at the projection chok
 | `produces` | Event → Object | unidirectional | 1→many | `schema:result` | Output artifact |
 | `uses` | Event → Object | unidirectional | N-ary | `prov:used` | Input consumed |
 | `nextEvent` | Event → Event | unidirectional | 1→1 | — | Sequencing (Graphiti NextEpisode equivalent) — planned |
-| `op: IMPL/NAND` | Event → Point | default bidirectional; optional unidirectional | N-ary | Epistemic | Outcome influence on belief (epistemic) |
+| `op: IMPL/NAND` | Event → Point, Point → Event | default bidirectional; optional unidirectional | N-ary | Epistemic | Outcome influence on belief (epistemic); Point→Event direction = argumentation annotation, write-only in v1 (no EP propagation) |
 
 > **#531 — canonical Event→Point pattern (`humanApproval`):** a human approval of a planning artifact is recorded as an Event (`eventKind: humanApproval`) + a decision Point (`pointKind: humanApproval`). The Event carries occurrence provenance (approver `performs`, artifact `uses`, claim `aboutPoint`, decision `produces`); the decision Point is a live epistemic claim that seeds the grounding a-vector and receives an EP evidence prior `Beta(10,1)` so dependent claims strengthen. Fan-out is `-[:IMPL {direction: "unidirectional", label: "approvedBy"}]->` per approved claim — deliberately unidirectional so claim weakness never back-propagates into the approval. No stored `approved` status on Objects — approval is derived from the event stream at query time. Worked example (`file_human_approval`, #531):
 >
@@ -303,6 +312,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `authoredBy` | SubjectID | — | `dc:creator` | ✅ | Who created the claim |
 | `validFrom` / `validTo` | ISO8601 | — | — | ✅ | Temporal validity window |
 | `createdAt` / `updatedAt` | ISO8601 | ✅ | `dc:created` / `dc:modified` | ✅ | Timestamps |
+| `lastDreamedAt` | ISO8601 UTC | — | — | ✅ | Freshness stamp — timestamp of the last EP write-back that **converged** on this claim (epic 903). NULL = never dreamed — **ranks STALEST** in the stale-first scheduler (first-deploy/legacy/crash-mid-pass graphs drain across passes). Non-operator claims only (operators excluded from ranking/stamping). Written **atomically with `confidence`** in the dream write-back (single UNWIND — the write-back's own fields lastDreamedAt+updatedAt are all-or-nothing; `confidence` is also flushed independently by `ep.run`'s `_flush_cache`, per the epic plan's redundancy note); failed/non-converged runs never update it; operator-less claims get a trivial stamp via the scan path. Composite index `:Point(is_operator, lastDreamedAt)` created idempotently at init on docker/server FalkorDB; embedded (redislite) gets plain `:Point(lastDreamedAt)` only — an `is_operator` composite is #522-unsafe on embedded (stale bool type table across reopen) |
 | `embedding` | vector | — | — | ✅ | Semantic embedding (FTS + vector search) |
 | `speaker` | string | — | — | ✅ | Role tag on episodic turn Points (user/assistant/…) — written by SDK `capture_session` (delta 5), not by hosted capture |
 | `is_episodic` | bool | — | — | ❌ | Quota exemption discriminator — true on episodic turn Points from the regex capture path (the `points` branch counts non-episodic only, #909 §4.3 #13/§4.4; legacy nodes lack the flag — one-query backfill migration ships with #947) |
@@ -561,8 +571,9 @@ A relationship operates on two layers — **semantic** (relation type) and **epi
 
 #### Reification rule — when an edge gets an operator
 
-**An edge carries an operator iff it needs mitigation, or is a Point↔Point
-support/contradict.** All other edges stay plain and carry confidence as an
+**An edge carries an operator iff it needs mitigation, or is an epistemic
+support/contradict between Points and/or Events (Point↔Point, Event→Point,
+Point→Event).** All other edges stay plain and carry confidence as an
 edge attribute.
 
 | Edge | Operator? | Confidence |

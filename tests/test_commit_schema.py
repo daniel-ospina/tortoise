@@ -912,3 +912,57 @@ class TestEventsPayload:
             "content": "x", "source_ref": "session.md"}]
         res, _ = _check(raw)
         assert not res.ok
+
+
+# ── A1b (#1272): events are valid operator endpoints ────────────────────────
+
+EV64 = "ev_" + "a" * 62
+PT0 = "pt_0000000000000000000000000000000000000000000000000000000000000000"
+PT1 = "pt_0000000000000000000000000000000000000000000000000000000000000001"
+
+
+class TestEventOperatorEndpoints:
+    """Owner ruling (2026-08-14): events MAY connect to points. Layer-1
+    accepts op.src/op.dst in emitted_point_ids ∪ emitted_event_ids."""
+
+    def _payload(self, operators, n_points=1):
+        raw = _raw_payload(n_points, operators=operators)
+        raw["events"] = [{
+            "id": EV64, "eventKind": "decision",
+            "content": "decided X", "about_entities": [],
+            "source_ref": "session.md"}]
+        return raw
+
+    def test_point_to_event_impl_ok(self):
+        # An argument point supporting a decision event (construct path).
+        res, _ = _check(self._payload([
+            {"src": PT0, "dst": EV64, "op_type": "IMPL"}]))
+        assert res.ok, res.errors
+
+    def test_event_to_point_nand_ok(self):
+        # An event opposing a claim (ontology canonical example).
+        res, _ = _check(self._payload([
+            {"src": EV64, "dst": PT0, "op_type": "NAND",
+             "direction": "unidirectional"}]))
+        assert res.ok, res.errors
+
+    def test_mitigates_targets_event_endpoint_edge(self):
+        # MITIGATES targets an IMPL edge whose dst is an event (T1+T3 shape).
+        raw = self._payload([
+            {"src": PT0, "dst": EV64, "op_type": "IMPL"},
+            {"src": PT1, "dst": EV64, "op_type": "IMPL",
+             "target": {"src": PT0, "dst": EV64, "op_type": "IMPL"},
+             "op_type": "MITIGATES", "strength": 0.3}],
+            n_points=2)
+        res, _ = _check(raw)
+        assert res.ok, res.errors
+
+    def test_dangling_event_endpoint_rejected(self):
+        # An operator referencing a non-emitted event id must fail.
+        raw = _raw_payload(1, operators=[
+            {"src": PT0, "dst": "ev_" + "f" * 62, "op_type": "IMPL"}])
+        raw["events"] = [{"id": EV64, "eventKind": "decision",
+                           "content": "x", "source_ref": "session.md"}]
+        res, _ = _check(raw)
+        assert not res.ok
+        assert "operators[0].dst" in res.errors

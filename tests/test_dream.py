@@ -41,7 +41,9 @@ class TestDreamIncremental:
         sdk.create_operator("IMPL", b["id"], [a["id"]])
         sdk.set_point_baseline(b["id"], 8.0, 2.0)
 
-        result = sdk.dream(dirty_only=True)
+        # #1157: live-uncalibrated claims trip the fail-closed gate; this unit
+        # test exercises the EP mechanics, not calibration — opt out explicitly.
+        result = sdk.dream(dirty_only=True, require_calibration=False)
         assert result["converged"] is True
         assert result["iterations"] >= 1
         assert a["id"] in result["affected_claims"]
@@ -52,7 +54,7 @@ class TestDreamIncremental:
         sdk.create_operator("IMPL", b["id"], [a["id"]])
         assert sdk._dirty_roots, "writes should mark dirty roots"
 
-        sdk.dream(dirty_only=True)
+        sdk.dream(dirty_only=True, require_calibration=False)
         assert sdk._dirty_roots == set(), "converged dream clears dirty roots"
 
     def test_dream_no_anchors_noop(self, sdk):
@@ -68,7 +70,8 @@ class TestDreamIncremental:
         sdk.create_operator("IMPL", c["id"], [b["id"]])
         sdk.create_operator("IMPL", b["id"], [a["id"]])
 
-        result = sdk.dream(dirty_only=True, max_hops=2)
+        result = sdk.dream(dirty_only=True, max_hops=2,
+                          require_calibration=False)
         assert result["converged"] is True
         affected = set(result["affected_claims"])
         # All three should be affected (dirty roots + 2-hop expansion)
@@ -82,7 +85,7 @@ class TestDreamAll:
             support = _make_claim(sdk, f"support {i}")
             sdk.create_operator("IMPL", support["id"], [claim["id"]])
 
-        result = sdk.dream(full=True)
+        result = sdk.dream(full=True, require_calibration=False)
         assert result["converged_all"] is True
         assert result["batches"] >= 1
         assert result["total_affected"] >= 5
@@ -100,8 +103,8 @@ class TestDreamAll:
         sdk.set_point_baseline(ev["id"], 9.0, 1.0)
 
         # No explicit compute_confidence — just dream.
-        sdk.dream(full=True)
-        conf = sdk.get_confidence(a["id"])
+        sdk.dream(full=True, require_calibration=False)
+        conf = sdk.get_confidence(a["id"], require_calibration=False)
         assert 0 <= conf["mean"] <= 1
         assert conf["effective_n"] >= 1
 
@@ -166,7 +169,7 @@ class TestLazyReadConsistency:
         sdk._dirty_roots.add(a["id"])
 
         # get_confidence should trigger a dream and return a fresh value.
-        conf = sdk.get_confidence(a["id"])
+        conf = sdk.get_confidence(a["id"], require_calibration=False)
         assert 0 <= conf["mean"] <= 1
         assert sdk._dirty_roots == set(), "lazy read consumed dirty roots"
 
@@ -196,12 +199,12 @@ class TestConvergenceAfterBatchWrites:
         assert len(sdk._dirty_roots) >= 10
 
         # Dream everything (no explicit compute_confidence).
-        sdk.dream(dirty_only=True)
+        sdk.dream(dirty_only=True, require_calibration=False)
         assert sdk._dirty_roots == set()
 
         # All claims now have stabilized confidence.
         for claim in claims:
-            conf = sdk.get_confidence(claim["id"])
+            conf = sdk.get_confidence(claim["id"], require_calibration=False)
             assert 0 <= conf["mean"] <= 1
             assert conf["effective_n"] >= 1
 
@@ -230,11 +233,11 @@ class TestDreamEvidence:
         sdk.set_point_baseline(b["id"], 10.0, 1.0)
         sdk._dirty_roots.clear()
 
-        sdk.dream([b["id"]], max_hops=2)
+        sdk.dream([b["id"]], max_hops=2, require_calibration=False)
 
         # b's posterior must be evidence-dominated (mean > 0.8), NOT clobbered
         # to the no-evidence value (~0.5-0.6) by a bare message-passing run.
-        conf = sdk.get_confidence(b["id"])
+        conf = sdk.get_confidence(b["id"], require_calibration=False)
         assert conf["mean"] > 0.8, (
             f"dream clobbered the baseline: b's posterior mean = {conf['mean']} "
             f"(expected evidence-dominated > 0.8)"

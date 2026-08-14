@@ -1,0 +1,118 @@
+name: Bug report (beta)
+description: File a bug or unexpected behavior you hit while beta testing Tortoise
+title: "[bug]: "
+labels: ["bug", "beta-feedback"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for beta testing Tortoise! A good bug report saves hours of back-and-forth.
+        Please fill in the fields below — especially **Expected vs Actual** and, where relevant, the **Graph JSON**.
+        See [docs/beta-feedback.md](https://github.com/daniel-ospina/tortoise/blob/main/docs/beta-feedback.md) for the full reporting guide.
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      description: Where did you hit the problem?
+      options:
+        - SDK (Python)
+        - MCP server (agent connection)
+        - CLI (tortoise ...)
+        - REST API (api.premiselabs.co)
+        - Hosted cloud
+        - Self-hosted / Docker
+        - Embedded (FalkorDBLite)
+        - Onboarding flow
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen?
+      placeholder: "I expected the point to be created with kind='decision' and returned in the search results."
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What actually happened instead?
+      placeholder: "The call failed with HTTP 422 / the point was created but with the wrong kind / the agent's memory returned stale results."
+    validations:
+      required: true
+
+  - type: textarea
+    id: graph-json
+    attributes:
+      label: Graph JSON (if relevant)
+      description: >-
+        Paste the graph payload — the point/operator JSON you sent, the response you got,
+        or the result of `tortoise_summarize_structure` (or a `tortoise backup --db <db-path>` export).
+        If it's long, attach it as a `.json` file instead (drag & drop below).
+      render: json
+      placeholder: '{"kind": "decision", "content": "...", "props": {...}}'
+    validations:
+      required: false
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Minimal numbered steps. Include the exact MCP tool call or CLI command if you have it.
+      placeholder: |
+        1. Start `tortoise serve --http --auth tenant`
+        2. Call `tortoise_create_point(kind="decision", content="...")`
+        3. Call `tortoise_search(query="...")`
+        4. Observe ...
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Tortoise version / commit
+      description: "`pip show tortoise` version or the git SHA you're running."
+      placeholder: "0.x.y / b535780f"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: transport
+    attributes:
+      label: Connection mode
+      description: How is your agent connected to Tortoise?
+      options:
+        - Hosted (streamable-http → api.premiselabs.co)
+        - Local MCP over HTTP (tortoise serve --http)
+        - Local MCP stdio
+        - Docker compose (local daemon)
+        - Embedded (FalkorDBLite, single-agent)
+        - N/A
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / error output (optional)
+      description: Paste the relevant stack trace or server log lines.
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Before submitting
+      description: A few quick checks that speed up triage.
+      options:
+        - label: I searched existing issues and Discussions for this problem first
+          required: false
+        - label: I've included graph JSON or a screenshot where the bug involves graph data
+          required: false

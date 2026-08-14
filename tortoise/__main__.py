@@ -98,7 +98,6 @@ def _cmd_mine_conversation(args):
     from tortoise.api import EventAPI
     from tortoise.log import EventLog
     from tortoise.mining import ConversationMiner
-    from tortoise.projection import FalkorProjection
 
     transcript_path = Path(args.transcript)
     if not transcript_path.exists():
@@ -113,7 +112,24 @@ def _cmd_mine_conversation(args):
     log_path = Path(f"mine-{source_id}.jsonl")
     if args.db:
         try:
-            proj = FalkorProjection.from_uri(args.db)
+            # #1198 P1: route --db through the canonical resolvers so embedded
+            # paths (e.g. ~/.tortoise/tortoise.db) work, not just docker:// URIs.
+            # #1215 P2 c80: reuse the repo's single routing choke-point
+            # _projection_for (URI → from_uri, path → embedded) instead of
+            # hand-rolling the routing here. Non-URI targets pre-resolve
+            # through resolve_db_path (expand ~, reject relative) first — the
+            # same resolved-target contract the other _projection_for callers
+            # get via _resolve_db_target; FalkorProjection never sees a raw
+            # tilde/relative path (#1215 review gate). Bare except is
+            # intentional: projection failure degrades to log-only mode
+            # (documented) rather than crashing the CLI.
+            from tortoise.config import is_db_uri, resolve_db_path
+            target = args.db if is_db_uri(args.db) else resolve_db_path(args.db)
+            proj = _projection_for(target)
+        except ValueError as e:
+            # Path-validation failure (e.g. RELATIVE_PATH_ERROR from
+            # resolve_db_path) — name the invalid --db value, not FalkorDB.
+            print(f"Warning: invalid --db path ({e}), using log-only mode")
         except Exception as e:
             print(f"Warning: FalkorDB unavailable ({e}), using log-only mode")
 
@@ -124,7 +140,7 @@ def _cmd_mine_conversation(args):
     api._ingest_cache = {}
 
     miner = ConversationMiner()
-    result = miner.mine(text, source_id, api)
+    miner.mine(text, source_id, api)
 
     if proj:
         proj.close()
@@ -146,6 +162,7 @@ def _cmd_mine_conversation(args):
     if len(event_entries) < 3:
         print(f"\u26a0\ufe0f  GATE FAILED: {len(event_entries)} events < 3 minimum")
         print(f"   Per plan WF4: <3 events/session → permanently descoped.")
+        return 1  # non-zero so scripts can detect a descoped session (#1198)
     else:
         print(f"\u2705  GATE PASSED: {len(event_entries)} events")
 
@@ -157,7 +174,7 @@ def _cmd_mine_conversation(args):
         print(f"  [{kind}] {obj}..." if len(e.get("object","")) > 80 else f"  [{kind}] {obj}")
     print()
 
-    return result
+    return 0
 
 
 def _cmd_reconcile(args):
@@ -1930,6 +1947,76 @@ def _cmd_validate(args) -> int:
     return 0
 
 
+def _cmd_audit(args) -> int:
+    """tortoise audit — graph wiring quality audit (exit 0 clean, 1 issues).
+
+    Wraps the shared SDK audit() method (same checks the MCP tortoise_audit
+    tool runs). Exit-code semantics follow check-consistency: any issue fails.
+
+    #1258 review-fix (conf 75): DB resolution + SDK construction + audit()
+    failures surface as CLEAN CLI errors (one line, exit 1), never raw
+    tracebacks — invalid FALKORDB_PORT (ValueError), relative --db path
+    (ValueError), EmbeddedStoreBusyError, and unreachable URI hosts all
+    print a single actionable line.
+    """
+    import json as _json
+    import os as _os
+
+    from tortoise.audit import AuditResult, print_audit
+    from tortoise.sdk import TortoiseSDK
+
+    # DB routing follows the canonical precedence (explicit --db > TORTOISE_DB_URI
+    # > FALKORDB_* legacy trio > TORTOISE_DB_PATH > embedded default, #715) —
+    # URI targets go through from_uri, everything else is an embedded path.
+    # Construct the SDK against the RESOLVED target so the busy-probe guards
+    # the store actually read (a no-arg TortoiseSDK() probes the DEFAULT
+    # store and would fail while the default path is held elsewhere).
+    from tortoise.config import is_db_uri as _is_uri
+    try:
+        target = _resolve_db_target(args.db)
+    except ValueError as e:
+        # conf 75: bad --db / env (relative path, invalid FALKORDB_PORT) is a
+        # clean CLI error, not a traceback. Mask URI userinfo (#720 conf 95).
+        print(f"  ❌ Invalid DB target: {_mask_uri_userinfo(str(e))}",
+              file=sys.stderr)
+        return 1
+    sdk: TortoiseSDK | None = None
+    try:
+        if _is_uri(target):
+            # conf 60: route the URI through the constructor's env resolution
+            # so the embedded busy-probe NEVER fires on the DEFAULT store for
+            # a URI target — a bare TortoiseSDK() with TORTOISE_DB_URI unset
+            # resolves to the canonical default embedded path and probes THAT
+            # (spurious EmbeddedStoreBusyError while the default store is held
+            # elsewhere). _projection_for(target) still pins the exact target.
+            _prev_uri = _os.environ.get("TORTOISE_DB_URI")
+            _os.environ["TORTOISE_DB_URI"] = target
+            try:
+                sdk = TortoiseSDK()
+            finally:
+                if _prev_uri is None:
+                    _os.environ.pop("TORTOISE_DB_URI", None)
+                else:
+                    _os.environ["TORTOISE_DB_URI"] = _prev_uri
+        else:
+            sdk = TortoiseSDK(db_path=target)
+        sdk._proj = _projection_for(target)
+        report = sdk.audit(point_kinds=args.kinds)
+    except Exception as e:
+        # conf 75: construction/audit failures (EmbeddedStoreBusyError,
+        # unreachable URI host, init errors) — one clean line, exit 1.
+        print(f"  ❌ audit failed: {e}", file=sys.stderr)
+        return 1
+    finally:
+        if sdk is not None:
+            sdk.close()
+    if args.json:
+        print(_json.dumps(report, indent=2, default=str))
+    else:
+        print_audit(AuditResult.from_dict(report))
+    return report["exit_code"]
+
+
 def _cmd_backfill(args):
     """Backfill missing properties on existing Points."""
     from .projection import FalkorProjection, _now_iso
@@ -2587,6 +2674,83 @@ def _cmd_doctor(args):
     else:
         results.append(("MCP server", "⚠️", "not running — tortoise serve"))
 
+    # 5.5 Session extraction — LLM provider (#1197)
+    # POST /v1/sessions (capture) fails closed with 503 when no LLM provider
+    # key is configured (#822 — regex extraction removed as a product path;
+    # this is the beta testers' most-critical feature). Doctor surfaces the
+    # configured provider/model BEFORE testers hit a silent 503. Hosted mode
+    # (FLY_APP_NAME — precedent: hosted_api.py, sdk.py) treats
+    # provider-missing as a HARD failure: the flagship feature cannot work at
+    # all. Local/selfhosted is a warning — capture still fails closed, but
+    # there is no hosted SLA at stake. Mirrors hosted_api._llm_provider_available
+    # + sdk._build_session_llm_extractor exactly (the seam they must agree on).
+    import os as _os
+    hosted = bool(_os.environ.get("FLY_APP_NAME"))
+    mock_seam = _os.environ.get("TORTOISE_SESSION_LLM_MOCK", "").strip().lower() == "1"
+    try:
+        from tortoise.sdk import (
+            _SESSION_LLM_DEFAULT_MODELS,
+            _build_session_llm_extractor,
+            _session_llm_model_shape_warning,
+            _session_llm_provider,
+        )
+        from tortoise.hosted_api import _LLM_PROVIDER_KEYS, _llm_provider_available
+
+        if _llm_provider_available():
+            provider = _session_llm_provider()
+            if mock_seam:
+                if hosted:
+                    results.append((
+                        "Session extraction", "❌",
+                        "TORTOISE_SESSION_LLM_MOCK=1 is SET in hosted mode — "
+                        "captures would write offline MockModel points; "
+                        "REMOVE the test seam and set a real provider key.",
+                    ))
+                else:
+                    results.append((
+                        "Session extraction", "⚠️",
+                        "LLM provider via TORTOISE_SESSION_LLM_MOCK=1 test "
+                        "seam (offline MockModel — NOT production-grade).",
+                    ))
+            else:
+                # Validate the REAL seam: sdk._build_session_llm_extractor
+                # raises ValueError on provider/model mismatch (sdk.py) — the
+                # doctor must not print ✅ for a config that crashes capture
+                # with a 500 (only a matching provider/model builds).
+                try:
+                    if _build_session_llm_extractor() is None:
+                        raise RuntimeError("extractor is None despite provider available")
+                except Exception as e:
+                    results.append((
+                        "Session extraction", "❌" if hosted else "⚠️",
+                        f"provider/model misconfig: {str(e)[:120]}",
+                    ))
+                else:
+                    spec = _os.environ.get("TORTOISE_SESSION_LLM_MODEL", "").strip()
+                    model = spec or _SESSION_LLM_DEFAULT_MODELS.get(provider or "", "")
+                    results.append((
+                        "Session extraction", "✅",
+                        f"LLM provider configured ({provider}, model {model or '?'})",
+                    ))
+                    # OpenRouter route-shape warning (PR #1220 review P2 c65):
+                    # a bare <model> spec (openrouter:deepseek-chat) builds an
+                    # extractor fine but the FIRST capture 404s — OpenRouter
+                    # routes are family-prefixed (<family>/<model>). Warn, never
+                    # fail: the config is valid, only the route id shape is
+                    # suspect (and capture failure is a 404, not a 503).
+                    warning = _session_llm_model_shape_warning(spec, provider)
+                    if warning:
+                        results.append(("OpenRouter model", "⚠️", warning))
+        else:
+            detail = (
+                "no LLM provider key — POST /v1/sessions fails closed (503). "
+                f"Set one of: {' / '.join(_LLM_PROVIDER_KEYS)} "
+                "(docs/infra-runbook.md §4.6)."
+            )
+            results.append(("Session extraction", "❌" if hosted else "⚠️", detail))
+    except Exception as e:
+        results.append(("Session extraction", "⚠️", f"check unavailable: {str(e)[:60]}"))
+
     # 6. Harness detection
     home = Path.home()
     detections: list[str] = []
@@ -2744,7 +2908,7 @@ def _cmd_index_sessions(args) -> int:
     if report.get("duplicates"):
         print(f"  duplicate sessionIds: {len(report['duplicates'])}")
         for d in report["duplicates"]:
-            print(f"    ! {d['session_id']}: {", ".join(d['files'])}")
+            print(f"    ! {d['session_id']}: {', '.join(d['files'])}")
     if report.get("reindex"):
         r = report["reindex"]
         print(f"Re-index: {r.get('ingested', 0)} ingested, "
@@ -3565,6 +3729,14 @@ def main(argv: list[str] | None = None) -> int:
     cc = sp.add_parser("check-consistency", help="Verify event log matches graph state")
     cc.add_argument("--db", required=True, help="Docker URI or file path")
     cc.add_argument("--log", required=True, help="Path to events.jsonl")
+    au = sp.add_parser("audit", help="Audit graph wiring quality (8 checks: source tiering, superseded gaps, mitigation coverage)")
+    au.add_argument("--db", default=None, help=(
+        f"DB target override — URI ({uri_schemes_hint}) or absolute path "
+        "(default: TORTOISE_DB_URI / FALKORDB_* / embedded path)"))
+    au.add_argument("--kind", action="append", dest="kinds", default=None,
+                    help="pointKind scope (repeatable; default: all Points)")
+    au.add_argument("--json", action="store_true",
+                    help="Machine-readable JSON output (exit 0 clean / 1 issues)")
     rc = sp.add_parser("reconcile", help="Replay unprojected EventRecorded entries from JSONL into FalkorDB")
     rc.add_argument("--db", required=True, help="FalkorDB docker:// URI")
     rc.add_argument("--log", required=True, help="Path to events.jsonl")
@@ -3578,10 +3750,18 @@ def main(argv: list[str] | None = None) -> int:
     rs.add_argument("backup_dir", help="Path to backup directory")
     rs.add_argument("--db", required=True, help="Target database path")
     rs.add_argument("--events", default="events.jsonl", help="Target event log path")
-    mc = sp.add_parser("mine-conversation", help="Mine conversation transcript → Events + Points (GAP-15)")
-    mc.add_argument("transcript", help="Path to transcript file (Speaker: text format)")
-    mc.add_argument("--source-id", default=None, help="Source identifier (default: basename of transcript)")
-    mc.add_argument("--db", default=None, help="FalkorDB docker:// URI for projection")
+    mc = sp.add_parser("mine-conversation",
+                        help="Mine meeting transcript → Events + draft Points (manual flow). "
+                             "Tutorial: docs/quickstart-selfhosted.md 'Meeting transcripts' "
+                             "(sample: tests/sample_transcript.txt)")
+    mc.add_argument("transcript",
+                    help="Path to transcript file (Speaker: text format, one line each)")
+    mc.add_argument("--source-id", default=None,
+                    help="Source identifier (default: transcript filename without extension)")
+    mc.add_argument("--db", default=None,
+                    help="Graph to project into: FalkorDB docker:// URI or embedded path "
+                         "(e.g. ~/.tortoise/tortoise.db). Omit for log-only mode "
+                         "(writes mine-<source-id>.jsonl, no W-3 gate)")
     sr = sp.add_parser("serve", help="Start Tortoise MCP server (stdio, default) or local HTTP (--http)")
     sr.add_argument("--http", action="store_true",
                     help="Serve MCP over HTTP (streamable) instead of stdio — self-hosted authenticated mode")
@@ -3758,6 +3938,8 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(f"\u2717 Inconsistent: {result['log_points']} in log, {result['db_points']} in graph (delta: {result['delta']})")
             return 1
+    elif args.cmd == "audit":
+        return _cmd_audit(args)
     elif args.cmd == "reconcile":
         return _cmd_reconcile(args)
     elif args.cmd == "backfill":

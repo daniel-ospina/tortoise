@@ -111,6 +111,20 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         sdk_method="summarize_structure",
     ),
     ToolDefinition(
+        name="tortoise_audit",
+        description="Audit graph wiring quality — 8 checks: missing sourceKind "
+                    "(point-level legacy + Source-level canonical), missing sourceDate, "
+                    "superseded points without a CORRECTS edge, live IMPL/NAND edges "
+                    "into superseded points, naive-IMPL contradiction heuristic, "
+                    "low-confidence operators without mitigation, and legacy 'mitigates' "
+                    "edges. Returns structured JSON: per-check counts (uncapped) + "
+                    "capped samples + summary + exit_code (0 clean, 1 issues). "
+                    "point_kinds: optional pointKind list to scope the audit.",
+        annotations=_ro(),
+        http_policy=True,
+        sdk_method="audit",
+    ),
+    ToolDefinition(
         name="tortoise_list_pointkinds",
         description="List all pointKinds present in the graph with counts. What EXISTS.",
         annotations=_ro(),
@@ -499,6 +513,18 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         sdk_method="session_context",
         rest_spec=RestSpec(method="GET", path="/v1/context"),
     ),
+    ToolDefinition(
+        name="tortoise_issue_insight",
+        description="Return a compact 'there's more in the graph' insight for a would-be "
+                    "issue — call BEFORE filing. Surfaces cross-session decisions / EP-tagged "
+                    "claims matching the title (semantic stage) plus prior indexed issues for "
+                    "the repo (repo= given). Fail-closed: empty graph -> no_prior_knowledge; "
+                    "populated graph + unindexed repo -> repo_not_indexed.",
+        annotations=_ro(),
+        http_policy=True,
+        sdk_method="issue_insight",
+        rest_spec=RestSpec(method="GET", path="/v1/issue-insight"),
+    ),
     # ── Excluded from HTTP ────────────────────────────────────────
     ToolDefinition(
         name="tortoise_ingest_corpus",
@@ -582,6 +608,23 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         annotations=_ro(),
         http_policy=True,
         sdk_method="review_connections",
+    ),
+    ToolDefinition(
+        name="tortoise_find_cross_lens_candidates",
+        description="Cross-lens candidate discovery (READ-ONLY, #438 bring-your-own-agent): "
+                    "surface unverified candidate pairs between Points from DIFFERENT "
+                    "sources (cross-stream discovery over the vector index) with lens "
+                    "pair, cosine similarity, point context, and dedup vs existing "
+                    "operators. Payload carries a single #901 routing field "
+                    "(truth|relevance) but stays NEUTRAL — no op_type hint; the "
+                    "customer agent decides semantics and writes operators via the "
+                    "normal API. Gated on registered sourceKind (any tier, D3); hard "
+                    "cap 200 candidates/cycle (D4); top_k is hard-clamped to 100 so an "
+                    "agent cannot inflate the per-cycle recall budget. Empty results "
+                    "(not errors) when there is nothing to see (D8).",
+        annotations=_ro(),
+        http_policy=True,
+        sdk_method="get_cross_lens_candidates",
     ),
     ToolDefinition(
         name="tortoise_provenance",
@@ -924,7 +967,7 @@ class FastMCPAdapter:
 
 
 # ── REST endpoint classification (Gate 3 pre-step, #454) ─────────
-# 8 REST tool-ops classified for the FastAPIRouterAdapter:
+# 9 REST tool-ops classified for the FastAPIRouterAdapter:
 #
 # | REST endpoint            | SDK-backed? | Registry entry      | RestSpec            |
 # |--------------------------|-------------|---------------------|---------------------|
@@ -936,6 +979,7 @@ class FastMCPAdapter:
 # | POST /v1/sessions        | RAW CYPHER  | (content_hash dedup bug — filed as tortoise#490) | — extract capture_session |
 # | GET  /v1/sessions        | RAW CYPHER  | (no SDK method)     | — extract list_sessions |
 # | GET  /v1/context         | YES         | tortoise_session_context | populated above |
+# | GET  /v1/issue-insight   | YES         | tortoise_issue_insight | populated above |
 #
 # Raw-Cypher ops are NOT added to the registry (no SDK method to register).
 # Gate 3 pre-step: extract SDK methods for list_points/get_point_by_id/
@@ -1010,6 +1054,7 @@ GROUP_BY_NAME: dict[str, str] = {
     "tortoise_list_tags": "memory",
     "tortoise_list_pointkinds": "memory", "tortoise_search": "memory",
     "tortoise_recall": "memory",
+    "tortoise_issue_insight": "memory",
     "tortoise_mine_conversations": "mining",
     "tortoise_list_dedup_candidates": "review",
     "tortoise_approve_merge": "review",
@@ -1027,6 +1072,7 @@ GROUP_BY_NAME: dict[str, str] = {
     "tortoise_list_topics": "reasoning", "tortoise_provenance": "reasoning",
     "tortoise_stale": "reasoning", "tortoise_dream": "reasoning",
     "tortoise_review_connections": "reasoning",
+    "tortoise_find_cross_lens_candidates": "reasoning",
     # graph
     "tortoise_create_operator": "graph", "tortoise_annotate_operator": "graph",
     "tortoise_get_operator": "graph", "tortoise_mitigate_operator": "graph",

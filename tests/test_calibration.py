@@ -279,3 +279,64 @@ def test_non_evidence_kinds_ignored_by_gate(sdk):
     # Gate should pass — diary is not an evidence kind
     result = sdk.compute_confidence(require_calibration=True)
     assert result["converged"] is True
+
+
+# ── #1157: un-gated EP surfaces (dream / get_confidence) ────────
+
+def test_dream_require_calibration_raises(sdk):
+    """dream(require_calibration=True) on uncalibrated graph raises
+    CalibrationError BEFORE any EP write (#1157)."""
+    # #943: default status is draft; the #1157 gate excludes drafts (#780),
+    # so the point must be live for the gate to see it.
+    sdk.create_point("statement", "Uncalibrated claim", status="live")
+
+    with pytest.raises(CalibrationError, match="dream.*uncalibrated"):
+        sdk.dream(require_calibration=True)
+
+
+def test_dream_gated_passes_when_calibrated(sdk):
+    """dream(require_calibration=True) runs on a calibrated graph."""
+    p = sdk.create_point("statement", "Calibrated", credibility="gold")
+    sdk.create_operator("IMPL", p["id"],
+                        [sdk.create_point("statement", "target",
+                                          credibility="gold")["id"]])
+
+    # Mark dirty so the dream path actually runs EP work
+    proj = sdk._get_proj()
+    proj.g.query(
+        "MATCH (n:Point) WHERE n.is_operator = false SET n.confidence = 0.4")
+    sdk._dirty_roots.update(
+        r[0] for r in proj.g.query(
+            "MATCH (n:Point) WHERE n.is_operator = false RETURN n.id").result_set)
+
+    result = sdk.dream(dirty_only=True, require_calibration=True)
+    assert result["converged"] is True
+
+
+def test_get_confidence_require_calibration_raises(sdk):
+    """get_confidence(require_calibration=True) on uncalibrated graph raises
+    CalibrationError (#1157) — the per-claim read is an EP surface."""
+    p = sdk.create_point("statement", "Uncalibrated claim", status="live")
+
+    with pytest.raises(CalibrationError, match="get_confidence.*uncalibrated"):
+        sdk.get_confidence(p["id"], require_calibration=True)
+
+
+def test_ep_require_calibration_env_default(sdk, monkeypatch):
+    """TORTOISE_EP_REQUIRE_CALIBRATION=1 flips the shared default for the
+    #1157 surfaces (dream, get_confidence) — the #344 flip semantics applied
+    to the once-un-gated surfaces, one knob for the #7478 target. The
+    explicit compute_confidence surface keeps its own (still-False) default;
+    #344 flips it separately."""
+    monkeypatch.setenv("TORTOISE_EP_REQUIRE_CALIBRATION", "1")
+    p = sdk.create_point("statement", "Uncalibrated claim", status="live")
+
+    # #1157 surfaces refuse by default (no explicit arg)
+    with pytest.raises(CalibrationError, match="dream"):
+        sdk.dream()
+    with pytest.raises(CalibrationError, match="get_confidence"):
+        sdk.get_confidence(p["id"])
+
+    # Explicit False is still the documented escape hatch on dream
+    result = sdk.dream(require_calibration=False)
+    assert result["converged"] is True

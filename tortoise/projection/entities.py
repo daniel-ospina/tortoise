@@ -315,11 +315,22 @@ class _EntityHandlers:
             embedding = compute_embedding(name)
         except Exception:
             pass
+        # #1155-P1: canonical id must win on MATCH too. The produces-edge
+        # wiring in _event_plain_merge can mint a name-stub Object (random
+        # ulid) when a poll/webhook event lands BEFORE this entity path's
+        # first ObjectRegistered. Without the ON MATCH id write, the MERGE
+        # below adopts the stub by NAME and the canonical id never lands on
+        # any node — aboutSubject wiring (MATCH by o.id) silently matches
+        # nothing. `coalesce($id, o.id)` is idempotent: $id is always the
+        # same deterministic id for a given name across producers (this
+        # function early-returns when the caller sends no id, so entities
+        # without ids never fire the clause).
         self.g.query(
             "MERGE (o:Object {name:$name}) "
             "ON CREATE SET o.id=$id, o.objectKind=coalesce($ok, 'other'), o.createdAt=coalesce($ca, $now), o.title=coalesce($title, ''), "
             "            o.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE o.embedding END "
-            "ON MATCH SET o.objectKind=coalesce($ok, o.objectKind), "
+            "ON MATCH SET o.id=coalesce($id, o.id), "
+            "            o.objectKind=coalesce($ok, o.objectKind), "
             "            o.title=coalesce($title, o.title), "
             "            o.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE o.embedding END",
             params={"id": oid, "name": name,
@@ -557,6 +568,13 @@ class _EntityHandlers:
             else:
                 from tortoise.ids import ulid
                 stub_id = ulid()
+                # #1155-P1: id is written ON CREATE ONLY — the stub id is a
+                # RANDOM ulid, and a poll/webhook event may arrive before the
+                # entity path's ObjectRegistered. If this MERGE also wrote id
+                # on MATCH, a late stub would CLOBBER the canonical id
+                # (github-issue-{repo}-{n}) that _upsert_object set. The
+                # canonical id wins via _upsert_object's ON MATCH
+                # `o.id=coalesce($id, o.id)` — do not add an id write here.
                 self.g.query(
                     "MERGE (o:Object {name:$name}) "
                     "ON CREATE SET o.id=$id, o.objectKind='other'",

@@ -776,6 +776,16 @@ def tortoise_validate_domain(domain: str) -> dict:
     return _safe(_get_team_sdk().validate_domain, domain)
 
 
+def tortoise_audit(point_kinds: list[str] | None = None) -> dict:
+    """Audit graph wiring quality — 8 checks (epic #348).
+
+    Returns structured JSON: per-check counts (uncapped) + capped samples +
+    summary + exit_code (0 clean, 1 issues). Same surface as the
+    `tortoise audit` CLI — both wrap the shared SDK audit() method.
+    """
+    return _safe(_get_team_sdk().audit, point_kinds=point_kinds)
+
+
 def tortoise_summarize_structure() -> dict:
     """Count points per Gate (by pointKind). Returns {gateN_*, total}.
     Alias → overview(section='structure') (epic #888 W3)."""
@@ -1077,9 +1087,18 @@ def tortoise_set_point_baseline(claim_id: str, alpha: float, beta: float) -> dic
     return _safe(_get_team_sdk().set_point_baseline, claim_id, alpha, beta)
 
 
-def tortoise_get_confidence(claim_id: str) -> dict:
-    """Get EP confidence for a claim: {mean, variance, alpha, beta}."""
-    return _safe(_get_team_sdk().get_confidence, claim_id)
+def tortoise_get_confidence(claim_id: str,
+                            require_calibration: bool | None = None) -> dict:
+    """Get EP confidence for a claim: {mean, variance, alpha, beta}.
+
+    #1157: the (possibly writing) lazy-dream read is gated on calibration
+    state like the other EP surfaces — CalibrationError when evidence points
+    are uncalibrated. None (default) resolves to the shared fail-closed
+    posture TORTOISE_EP_REQUIRE_CALIBRATION (default True, post-#344); pass
+    False explicitly to opt out.
+    """
+    return _safe(_get_team_sdk().get_confidence, claim_id,
+                 require_calibration=require_calibration)
 
 
 def tortoise_calibrate_summary() -> list[dict]:
@@ -1088,12 +1107,18 @@ def tortoise_calibrate_summary() -> list[dict]:
 
 
 def tortoise_dream(full: bool = False, dirty_only: bool = True,
-                   max_hops: int = 2) -> dict:
+                   max_hops: int = 2,
+                   require_calibration: bool | None = None) -> dict:
     """Run EP stabilization (dreaming, #85).
 
     Stabilizes confidence values after batch writes without an explicit
     compute_confidence call. Default: dreams the accumulated dirty subgraph
     (incremental). Set full=True for whole-graph stabilization.
+
+    #1157: the EP write is gated on calibration state — CalibrationError when
+    evidence points are uncalibrated. None (default) resolves to the shared
+    fail-closed posture TORTOISE_EP_REQUIRE_CALIBRATION (default True,
+    post-#344); pass False explicitly to opt out.
 
     #329: EXCLUDED from tenant HTTP — whole-graph EP is CPU-heavy
     (operator/stdio only; REST /v1/dream is separately budgeted).
@@ -1101,7 +1126,8 @@ def tortoise_dream(full: bool = False, dirty_only: bool = True,
     if _transport_mode.get() == "http":
         return _http_excluded_error()
     return _safe(_get_team_sdk().dream, dirty_only=dirty_only, full=full,
-                 max_hops=max_hops)
+                 max_hops=max_hops,
+                 require_calibration=require_calibration)
 
 
 def tortoise_update_point(id: str, props: Any) -> dict:
@@ -1426,6 +1452,19 @@ def tortoise_session_context() -> dict:
     return _safe(_get_team_sdk().session_context)
 
 
+def tortoise_issue_insight(title: str, body: str | None = None,
+                           repo: str | None = None, limit: int = 2) -> dict:
+    """Return a compact 'there's more in the graph' insight for a would-be issue.
+
+    Call BEFORE filing an issue: surfaces cross-session decisions / EP-tagged
+    claims matching the title (semantic stage) plus prior indexed issues for
+    the repo (repo stage, when repo= given). Fail-closed: empty graph ->
+    no_prior_knowledge; populated graph + repo with zero indexed points ->
+    repo_not_indexed. Returns {has_prior, data_points, insight, more_in_graph}.
+    """
+    return _safe(_get_team_sdk().issue_insight, title, body=body, repo=repo, limit=limit)
+
+
 def tortoise_ingest_corpus(directory: str) -> dict:
     """Batch document ingestion — walk directory, parse YAML frontmatter
     from .md files, create/update Document nodes.
@@ -1567,6 +1606,30 @@ def tortoise_review_connections(mode: str = "both", scope: str | None = None) ->
     Never mutates the graph.
     """
     return _safe(_get_team_sdk().review_connections, mode=mode, scope=scope)
+
+
+def tortoise_find_cross_lens_candidates(
+    threshold: float = 0.40,
+    max_candidates: int = 200,
+    routing: str = "truth",
+    top_k: int = 20,
+) -> dict:
+    """Cross-lens candidate discovery (READ-ONLY, #438 bring-your-own-agent).
+
+    Surface unverified candidate pairs between Points from DIFFERENT sources
+    (cross-stream discovery over the vector index) with lens pair, cosine
+    similarity, point context, and dedup vs existing operators. The payload
+    carries a single #901 routing field ("truth"|"relevance") but stays
+    NEUTRAL — no op_type hint; the customer agent decides semantics and
+    writes operators via the normal API (no in-repo verifier, #438 D7).
+    Gated on registered sourceKind (any tier, D3); hard cap 200
+    candidates/cycle (D4). top_k is hard-clamped to 100 so an agent cannot
+    inflate the per-cycle recall budget. Empty results (not errors) when
+    there is nothing to see (D8). Never mutates the graph.
+    """
+    return _safe(_get_team_sdk().get_cross_lens_candidates,
+                 threshold=threshold, max_candidates=max_candidates,
+                 routing=routing, top_k=top_k)
 
 
 def tortoise_provenance(point_id: str) -> dict:

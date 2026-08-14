@@ -20,6 +20,7 @@ surfaces:
   - test_client_ip_middleware.py
   - test_commit_endpoint.py
   - test_commit_schema.py
+  - test_cross_subdomain_cookie_sync.py
   - test_dashboard_login.py
   - test_direct_edge.py
   - test_dr_endpoints.py
@@ -82,6 +83,7 @@ surfaces:
   - test_control_plane.py
   - test_crash_recovery.py
   - test_crash_recovery_e2e.py
+  - test_cross_lens_candidates.py
   - test_de2e1_entity_extraction.py
   - test_de2e3_content_dedup.py
   - test_de2e5_instantiates_ranking.py
@@ -109,6 +111,7 @@ surfaces:
   - test_file_indexer.py
   - test_flip_gate.py
   - test_gate_b_tooling.py
+  - test_graph_diagnostics.py
   - test_guard.py
   - test_hard_reject.py
   - test_hnsw_vector_index.py
@@ -129,6 +132,7 @@ surfaces:
   - test_ingest_validation.py
   - test_joint_index_ingest.py
   - test_integration_search.py
+  - test_issue_insight.py
   - test_joint_index_ingest.py
   - test_judge_harness.py
   - test_linear_connector.py

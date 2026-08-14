@@ -70,7 +70,16 @@ def fresh_sdk(prefix: str = "tortoise_epic903_") -> tuple[TortoiseSDK, str]:
     Returns ``(sdk, db_path)``. Per-test fresh fixtures (uuid-namespace
     tempfile) → order-independent under pytest-randomly. Callers are
     responsible for ``sdk.close()``.
+
+    Post-#344/#1157, dream() is fail-closed on calibration
+    (TORTOISE_EP_REQUIRE_CALIBRATION defaults to "1") — synthetic fixtures
+    use statement/observation points as evidence, and calibration posture is
+    orthogonal to what the epic-903 tests verify (freshness stamping,
+    staleness ranking, warm-start equivalence). Disable it for the hermetic
+    harness so fixtures stay deterministic; production posture is untouched
+    (env is only defaulted, never forced).
     """
+    os.environ.setdefault("TORTOISE_EP_REQUIRE_CALIBRATION", "0")
     db_path = os.path.join(tempfile.mkdtemp(prefix=prefix), "test.db")
     sdk = TortoiseSDK(db_path)
     return sdk, db_path
