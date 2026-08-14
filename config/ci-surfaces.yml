@@ -83,6 +83,7 @@ surfaces:
   - test_control_plane.py
   - test_crash_recovery.py
   - test_crash_recovery_e2e.py
+  - test_cross_lens_candidates.py
   - test_de2e1_entity_extraction.py
   - test_de2e3_content_dedup.py
   - test_de2e5_instantiates_ranking.py
