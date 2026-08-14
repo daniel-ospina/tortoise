@@ -275,6 +275,7 @@ class TelemetryExtractor(BaseModel):
 
     version: str = Field(min_length=1)
     mode: str = Field(min_length=1)
+    calibration_version: str | None = None  # T11 (#1272): persist the calibration stamp
 
 
 class TelemetryModel(BaseModel):
@@ -304,18 +305,20 @@ class Telemetry(BaseModel):
     extractor: TelemetryExtractor
     model: TelemetryModel
     counts: TelemetryCounts = Field(default_factory=TelemetryCounts)
-    keep_ratio: float = 0.0
-    dedup_hits: int = 0
+    keep_ratio: float | None = None   # T11: None = not measured (server derives)
+    dedup_hits: int | None = None     # T11: None = not measured (server derives)
     frontier_calls: int = 0
     llm_cost_usd: float | None = None
     extraction_ms: int = 0
     retry_count: int = 0
     last_error_code: str | None = None
-    confidence_histogram: list[int] = Field(default_factory=lambda: [0] * 10)
+    confidence_histogram: list[int] | None = None  # T11: None = not measured
 
     @field_validator("confidence_histogram")
     @classmethod
-    def _ten_buckets(cls, v: list[int]) -> list[int]:
+    def _ten_buckets(cls, v: list[int] | None) -> list[int] | None:
+        if v is None:
+            return None
         if len(v) != 10:
             raise ValueError(
                 "confidence_histogram must have exactly 10 buckets (0.1 steps)"
@@ -465,8 +468,24 @@ def atomicity_violations(content: str, point_kind: str) -> list[str]:
     compound assertion; a decision-class point commits to at most ONE thing
     (≤1 commissive predicate — DECISION_POINT_KINDS per pack_registry).
     Heuristic by design — the deterministic mirror of the enforcer's E9.
+
+    T5 carve-out (#1272): ``pointKind == "statement"`` (the extraction-only
+    kind) skips the coordination-cue and comma checks — LLM-synthesized
+    argument sentences naturally carry commas/connectives and the R2
+    atomicity contract's purpose is decision-class atomicity (the commissive
+    check, which already never fires for statement). The statement carve-out
+    is documented, not silent: the construct path emits statement points
+    from the summary's argument wiring.
     """
     violations: list[str] = []
+    if point_kind == "statement":
+        # T5 carve-out (#1272): argument sentences are naturally
+        # compound-looking (commas/connectives) and R2's atomicity purpose
+        # is decision-class atomicity — the commissive check never fires for
+        # statement (∉ DECISION_POINT_KINDS). The carve-out is documented,
+        # not silent: construct-path statement points are LLM-synthesized
+        # argument wiring from the summary.
+        return violations
     if _COORDINATION_CUE.search(content):
         violations.append("coordination cue (and/but/or) — compound, "
                           "non-atomic assertion")
@@ -536,6 +555,7 @@ def validate_layer1(
             add(f"points[{i}].atomicity", violation)
 
     emitted_point_ids = {p.id for p in payload.points}
+    emitted_event_ids = {e.id for e in payload.events}  # A1b (#1272): events are valid operator endpoints
     entity_names = {e.name for e in payload.entities}
     # The session Source identity = provenance path basename (privacy: paths
     # are basename-only; the server derives the Session Source url from it).
@@ -587,12 +607,12 @@ def validate_layer1(
                 "session source or an emitted source[] entry")
 
     for i, op in enumerate(payload.operators):
-        if op.src not in emitted_point_ids:
+        if op.src not in emitted_point_ids and op.src not in emitted_event_ids:
             add(f"operators[{i}].src",
-                f"src {op.src!r} is not an emitted point id")
-        if op.dst not in emitted_point_ids:
+                f"src {op.src!r} is not an emitted point or event id")
+        if op.dst not in emitted_point_ids and op.dst not in emitted_event_ids:
             add(f"operators[{i}].dst",
-                f"dst {op.dst!r} is not an emitted point id")
+                f"dst {op.dst!r} is not an emitted point or event id")
         if op.op_type == "NAND" and not op.direction:
             add(f"operators[{i}].direction",
                 "direction is REQUIRED on NAND (extractor default "
