@@ -1115,7 +1115,9 @@ async def _get_current_team_supabase(request: Request, token: str) -> dict:
     team_memberships (long-lived keys); api_keys.revoked_at is authoritative
     (P1-2); tier/quota from teams. A registry-only key resolves to nothing →
     401 (E2E-7-negative). Fail-closed: a Supabase error raises 500 — never a
-    fallback to the registry, never 200.
+    fallback to the registry, never 200. EXCEPTION (#1096): an
+    additive-teams-read failure (0015 suspended_at/flagged_at) degrades to a
+    200 with safe defaults (un-suspended/un-flagged), logged at WARNING.
     """
     from tortoise.supabase_control import (
         get_control_plane, resolve_api_key, update_last_used,
@@ -1190,11 +1192,15 @@ async def _session_user_team(request: Request, user: dict) -> dict:
     # create_graph (_membership_team).
     if team_id not in {m["team_id"] for m in memberships}:
         raise HTTPException(status_code=403, detail="No membership in team")
-    from tortoise.supabase_control import _QUOTA_SELECT
-    rows = cp.query("teams", select=_QUOTA_SELECT, filters=[("id", "eq", team_id)])
-    if not rows:
+    from tortoise.supabase_control import (_TEAM_ADDITIVE_DKL_TIER,
+                                            _TEAM_ADDITIVE_0015_TIER,
+                                            _QUOTA_SELECT,
+                                            _teams_row_fail_soft)
+    row = _teams_row_fail_soft(
+        cp, team_id, select=_QUOTA_SELECT,
+        additive_tiers=[_TEAM_ADDITIVE_DKL_TIER, _TEAM_ADDITIVE_0015_TIER])
+    if row is None:
         raise HTTPException(status_code=403, detail="Team not found")
-    row = rows[0]
     from tortoise.pricing import tier_limits
     lim = tier_limits(row.get("tier") or "free")
     return {

@@ -405,6 +405,36 @@ class TestClaimEndpoint:
         assert r3.status_code == 429, r3.text
         assert r3.headers.get("retry-after") == "86400"
 
+    def test_claim_allowed_under_0015_drift_then_blocked_after_recovery(
+            self, client, fake, monkeypatch):
+        """#1096 accepted-risk pin: claim is suspension-gated via
+        _get_current_team_supabase — under 0015 drift a durably-suspended
+        anon team can execute the durable claim write (permanent identity
+        link + email overwrite); in healthy mode the 403 SUSPENDED gate
+        fires (the pin's premise)."""
+        _patch_verify(monkeypatch, _jwt("user-1", providers=["github"]))
+        # Drift phase: suspended anon team claims successfully (fail-open).
+        key, team_id = _provision_anon(client, fake)
+        fake.rpc("abuse_suspend", {"p_team_id": team_id})
+        fake.missing_columns = {"teams": {"suspended_at", "flagged_at"}}
+        r = client.post("/v1/claim", json={"api_key": key})
+        assert r.status_code == 200
+        # The DURABLE write actually landed (the accepted-risk property):
+        # owner membership linked + identity cleared + teams.email overwritten.
+        team_row = next(t for t in fake.tables["teams"] if t["id"] == team_id)
+        assert team_row["email"] == "claim@example.com"
+        mem = next(m for m in fake.tables["team_memberships"]
+                   if m["team_id"] == team_id)
+        assert mem["user_id"] == "user-1"
+        assert mem["identity"] is None
+        fake.missing_columns = None  # drift resolved — enforcement must resume
+        # Healthy phase: a FRESH suspended anon team is 403-blocked at the gate.
+        key2, team_id2 = _provision_anon(client, fake)
+        fake.rpc("abuse_suspend", {"p_team_id": team_id2})
+        r = client.post("/v1/claim", json={"api_key": key2})
+        assert r.status_code == 403
+        assert r.json()["detail"]["code"] == "SUSPENDED"
+
 
 class TestClaimStatusEndpoint:
     def test_requires_session_jwt(self, client, fake, monkeypatch):

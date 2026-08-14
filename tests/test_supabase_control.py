@@ -114,6 +114,18 @@ def fake() -> FakeControlPlane:
     })
 
 
+def test_fake_filter_column_drift_raises():
+    """Fake fidelity (#1096; out-of-slice scaffolding for the escalation
+    decomposition's sweep/health tests): PostgREST 400s on a FILTER of an
+    absent column just as on a select — the #302 sweeps filter deleted_at."""
+    fake = FakeControlPlane(
+        {"teams": [dict(FREE_TEAM)]},
+        missing_columns={"teams": {"deleted_at"}})
+    with pytest.raises(RuntimeError):
+        fake.query("teams", select=["id"],
+                   filters=[("deleted_at", "is", None)])
+
+
 # ── Resolve: api_keys path (E2E-2) ──────────────────────────────────────────
 
 class TestResolveApiKey:
@@ -215,6 +227,280 @@ class TestResolveApiKey:
         for key in ("team_id", "key_id", "tier", "max_users", "max_graphs",
                     "max_points", "max_api_keys", "max_sessions"):
             assert key in team, f"missing {key}"
+
+
+# ── #1096 fail-soft additive teams columns (post-#1001 auth resilience) ───
+
+class TestResolveApiKeyFailSoft:
+    def test_resolve_api_key_additive_columns_missing_fail_soft(self, fake,
+                                                               caplog):
+        """#1096: teams missing 0015 additive columns (the #1001 drift) →
+        resolve returns the team, NOT RuntimeError; additive fields default
+        to safe values (un-suspended/un-flagged; key login allowed); the
+        base read still carries real values (email, 0006) and the degrade
+        is logged (drift stays diagnosable)."""
+        fake.tables["teams"][0]["email"] = "owner@example.com"
+        fake.missing_columns = {"teams": {"suspended_at", "flagged_at"}}
+        fake.seed("api_keys", [_key_row()])
+        with caplog.at_level("WARNING", logger="tortoise.supabase_control"):
+            team = resolve_api_key(fake, TOKEN)
+        assert team is not None
+        assert team["team_id"] == "team-free-001"
+        assert team["tier"] == "free"
+        assert team["max_points"] == 10000
+        assert team["suspended_at"] is None
+        assert team["flagged_at"] is None
+        # 0006 base column — the base retry carries the REAL value (not a
+        # None pad): proves the base-vs-additive split is discriminating.
+        assert team["email"] == "owner@example.com"
+        # 20260813000005 additive — safe default is ALLOWED (matches the
+        # column's NOT NULL DEFAULT true; the #1148 gate must not 403
+        # key-auth management during drift).
+        assert team["dashboard_key_login"] is True
+        assert any("additive" in r.message for r in caplog.records)
+
+    def test_resolve_api_key_dashboard_key_login_only_drift(self, fake,
+                                                           caplog):
+        """#1096: the 20260813000005 additive class alone (dashboard_key_login
+        missing while 0015 present) fails soft the same way — key login
+        degrades to the safe default True."""
+        fake.missing_columns = {"teams": {"dashboard_key_login"}}
+        fake.seed("api_keys", [_key_row()])
+        with caplog.at_level("WARNING", logger="tortoise.supabase_control"):
+            team = resolve_api_key(fake, TOKEN)
+        assert team is not None
+        assert team["dashboard_key_login"] is True
+        assert any("additive" in r.message for r in caplog.records)
+
+    def test_resolve_api_key_dkl_only_drift_keeps_suspension(self, fake):
+        """#1096 (code-review fix): a 20260813000005-ONLY drift must NOT
+        discard real 0015 suspension state — the tiered retry reads
+        suspended_at/flagged_at on the second attempt (discarding it would
+        bypass enforcement with REAL data present)."""
+        fake.tables["teams"][0]["suspended_at"] = \
+            datetime.now(timezone.utc).isoformat()
+        fake.missing_columns = {"teams": {"dashboard_key_login"}}
+        fake.seed("api_keys", [_key_row()])
+        team = resolve_api_key(fake, TOKEN)
+        assert team is not None
+        assert team["suspended_at"] is not None  # real 0015 data kept
+        assert team["dashboard_key_login"] is True  # dkl tier padded to default
+
+    def test_resolve_api_key_api_keys_enabled_drift_fail_soft(self, fake,
+                                                             caplog):
+        """#1096 (code-review fix): api_keys.enabled is additive
+        (20260813000005) — a schema missing it fails soft to the pre-#1148
+        default True instead of taking down ALL key auth at step 1 (the
+        realistic drift fails the api_keys read first; the caplog WARNING
+        discriminates the degrade)."""
+        fake.missing_columns = {"api_keys": {"enabled"}}
+        fake.seed("api_keys", [_key_row()])
+        with caplog.at_level("WARNING", logger="tortoise.supabase_control"):
+            team = resolve_api_key(fake, TOKEN)
+        assert team is not None
+        assert team["enabled"] is True
+        assert any("enabled" in r.message for r in caplog.records)
+
+    def test_resolve_api_key_api_keys_base_column_drift_fails_closed(self,
+                                                                    fake,
+                                                                    caplog):
+        """#1096 (code-review fix): an api_keys BASE-column drift (0007) fails
+        the auth hot path CLOSED at step 1 — combined read raises → base
+        retry also raises (revoked_at stays in the base set) → RuntimeError
+        + the fatal-path tripwire (symmetric with the teams ladder)."""
+        fake.missing_columns = {"api_keys": {"revoked_at"}}
+        fake.seed("api_keys", [_key_row()])
+        with caplog.at_level("WARNING", logger="tortoise.supabase_control"):
+            with pytest.raises(RuntimeError):
+                resolve_api_key(fake, TOKEN)
+        assert any("api_keys base-only read failed" in r.message
+                   for r in caplog.records)
+
+    def test_resolve_api_key_api_keys_enabled_false_drift_fail_open(self,
+                                                                   fake):
+        """#1096 accepted-risk doc (code-review fix): a per-key DISABLED
+        key (enabled=False, #1148) re-authenticates under enabled-column
+        drift — the base retry cannot read the stored False, so the reject
+        never fires (the same fail-open class as the teams dashboard-key
+        gate). Pins the actual behavior so a future change cannot silently
+        flip it; healthy-mode reject unchanged."""
+        fake.seed("api_keys", [_key_row(enabled=False)])
+        fake.missing_columns = {"api_keys": {"enabled"}}
+        assert resolve_api_key(fake, TOKEN) is not None  # fail-open under drift
+        fake.missing_columns = None
+        assert resolve_api_key(fake, TOKEN) is None  # healthy reject unchanged
+
+    def test_resolve_api_key_stored_false_drift_fail_open(self, fake):
+        """#1096 accepted-risk doc: additive drift loses ALL additive state —
+        a stored dashboard_key_login=False is not readable through the base
+        retry, so the gate degrades to the pre-20260813000005 default True
+        (fail-open, same class as the suspension degrade). Pins the actual
+        behavior so a future change cannot silently flip it closed."""
+        fake.tables["teams"][0]["dashboard_key_login"] = False
+        fake.missing_columns = {"teams": {"suspended_at", "flagged_at"}}
+        fake.seed("api_keys", [_key_row()])
+        team = resolve_api_key(fake, TOKEN)
+        assert team is not None
+        assert team["dashboard_key_login"] is True  # drift lose-all-additive
+        # healthy-mode False is still carried (the gate stays closed)
+        fake.missing_columns = None
+        assert resolve_api_key(fake, TOKEN)["dashboard_key_login"] is False
+
+    def test_resolve_api_key_unaffected_by_deletion_columns_drift(self, fake,
+                                                                 caplog):
+        """#1096: the 20260813000001 class (deleted_at/grace_hours) is NOT in
+        _QUOTA_SELECT — resolve is unaffected (no degrade, no raise, no
+        WARNING, query count unchanged). The discriminating boundary of
+        suspension-fails-soft vs deletion-fails-closed."""
+        fake.missing_columns = {"teams": {"deleted_at", "grace_hours"}}
+        fake.seed("api_keys", [_key_row()])
+        with caplog.at_level("WARNING", logger="tortoise.supabase_control"):
+            team = resolve_api_key(fake, TOKEN)
+        assert team is not None
+        assert team["suspended_at"] is None
+        assert not any("additive" in r.message or "base-only read failed" in r.message
+                       for r in caplog.records)
+        assert fake.query_count == 2  # api_keys + teams (single round-trip)
+
+    def test_resolve_api_key_carries_suspension_state(self, fake):
+        """O/I/T target 2: with the columns PRESENT, suspension state still
+        resolves (enforcement is unchanged — REST 403 / MCP -32006 consume
+        this field)."""
+        fake.seed("api_keys", [_key_row()])
+        fake.tables["teams"][0]["suspended_at"] = \
+            datetime.now(timezone.utc).isoformat()
+        team = resolve_api_key(fake, TOKEN)
+        assert team is not None
+        assert team["suspended_at"] is not None
+
+    def test_resolve_api_key_degrade_then_recover(self, fake):
+        """#1096: degrade-then-recover — the helper is stateless; after the
+        additive columns become readable again, enforcement resumes (a
+        future latch/cache in the degrade path must not stick)."""
+        fake.seed("api_keys", [_key_row()])
+        fake.tables["teams"][0]["suspended_at"] = \
+            datetime.now(timezone.utc).isoformat()
+        fake.missing_columns = {"teams": {"suspended_at", "flagged_at"}}
+        assert resolve_api_key(fake, TOKEN)["suspended_at"] is None  # degraded
+        fake.missing_columns = None
+        assert resolve_api_key(fake, TOKEN)["suspended_at"] is not None  # recovered
+
+    def test_resolve_api_key_missing_team_under_drift_returns_none(self, fake):
+        """#1096: drift + absent team — the base retry returns [] → None
+        (401), never a raise (fail-closed on not-found, fail-soft on drift)."""
+        fake.missing_columns = {"teams": {"suspended_at", "flagged_at"}}
+        fake.seed("api_keys", [_key_row(team_id="team-gone")])
+        assert resolve_api_key(fake, TOKEN) is None
+
+    def test_long_lived_key_resolves_under_0015_drift(self, fake):
+        """#1096: the team_memberships (long-lived key) branch drifts the
+        same way — the shared _teams_row_fail_soft teams read degrades
+        identically; the membership query itself is drift-scoped."""
+        fake.missing_columns = {"teams": {"suspended_at", "flagged_at"}}
+        fake.seed("team_memberships", [_membership_row()])
+        team = resolve_api_key(fake, TOKEN)
+        assert team is not None
+        assert team["team_id"] == "team-free-001"
+        assert team["suspended_at"] is None
+        assert team["flagged_at"] is None
+
+    def test_resolve_api_key_base_column_drift_fails_closed(self, fake,
+                                                           caplog):
+        """#1096: a drifted BASE column (0006) fails the auth hot path
+        CLOSED — combined read raises → base retry also raises (ops_allowance
+        stays in the base set) → RuntimeError + the fatal-path WARNING."""
+        fake.missing_columns = {"teams": {"ops_allowance"}}
+        fake.seed("api_keys", [_key_row()])
+        with caplog.at_level("WARNING", logger="tortoise.supabase_control"):
+            with pytest.raises(RuntimeError):
+                resolve_api_key(fake, TOKEN)
+        assert any("base-only read failed" in r.message for r in caplog.records)
+
+
+class TestTeamByID:
+    def test_team_by_id_additive_columns_missing_fail_soft(self, fake,
+                                                           caplog):
+        """#1096: team_by_id survives 0015 + 20260813000005 drift
+        (suspension/staging + key-login columns) — returns the row with
+        safe None defaults, no raise; the caplog WARNING discriminates the
+        degrade actually firing (a None assert alone would pass without
+        drift, since FREE_TEAM lacks the columns)."""
+        fake.missing_columns = {"teams": {"suspended_at", "flagged_at",
+                                           "dashboard_key_login"}}
+        with caplog.at_level("WARNING", logger="tortoise.supabase_control"):
+            team = team_by_id(fake, "team-free-001")
+        assert team is not None
+        assert team["name"] == "Free Team"
+        assert team["suspended_at"] is None
+        assert team["flagged_at"] is None
+        assert team["dashboard_key_login"] is None  # raw seam value
+        assert team["deleted_at"] is None  # base column read via retry
+        assert any("additive" in r.message for r in caplog.records)
+
+    def test_team_by_id_missing_team_under_drift_returns_none(self, fake):
+        """#1096: team_by_id drift + absent team — the base retry returns
+        [] → None, never a raise (fail-closed on not-found)."""
+        fake.missing_columns = {"teams": {"suspended_at", "flagged_at"}}
+        assert team_by_id(fake, "missing") is None
+
+    def test_team_by_id_dkl_only_drift_keeps_suspension(self, fake):
+        """#1096 (code-review fix): team_by_id's tiered retry — a
+        20260813000005-ONLY drift keeps real 0015 suspension state."""
+        fake.tables["teams"][0]["suspended_at"] = \
+            datetime.now(timezone.utc).isoformat()
+        fake.missing_columns = {"teams": {"dashboard_key_login"}}
+        team = team_by_id(fake, "team-free-001")
+        assert team is not None
+        assert team["suspended_at"] is not None  # real 0015 data kept
+        assert team["dashboard_key_login"] is None  # dkl tier padded (raw seam)
+
+    def test_team_by_id_deleted_at_survives_0015_drift(self, fake, caplog):
+        """#1096: the deletion kill-switch must survive 0015 drift — a SET
+        deleted_at (soft-deleted team) is carried by the base retry, so
+        invitation_accept/export_team 410 guards keep firing. The caplog
+        WARNING proves the retry (not just the select) fired."""
+        fake.tables["teams"][0]["deleted_at"] = \
+            datetime.now(timezone.utc).isoformat()
+        fake.missing_columns = {"teams": {"suspended_at", "flagged_at"}}
+        with caplog.at_level("WARNING", logger="tortoise.supabase_control"):
+            team = team_by_id(fake, "team-free-001")
+        assert team is not None
+        assert team["deleted_at"] is not None
+        assert any("additive" in r.message for r in caplog.records)
+
+    def test_team_by_id_deletion_columns_drift_fails_closed(self, caplog):
+        """#1096: the #302 soft-delete columns are NOT fail-soft — a schema
+        missing deleted_at/grace_hours fails the deletion guard CLOSED
+        (RuntimeError propagates), never opening the 410 kill-switch; the
+        fatal-path WARNING (the drift-diagnosability tripwire) fires and
+        names the retry select."""
+        fake = FakeControlPlane(
+            {"api_keys": [], "team_memberships": [], "teams": [dict(FREE_TEAM)]},
+            missing_columns={"teams": {"deleted_at", "grace_hours"}})
+        with caplog.at_level("WARNING", logger="tortoise.supabase_control"):
+            with pytest.raises(RuntimeError):
+                team_by_id(fake, "team-free-001")
+        assert any("base-only read failed" in r.message for r in caplog.records)
+
+    def test_team_by_id_base_read_fails_closed(self):
+        """#1096: the base-only retry must NOT swallow a real outage — a
+        broken teams read still propagates RuntimeError (fail-closed)."""
+        with pytest.raises(RuntimeError):
+            team_by_id(ErrorControlPlane(), "team-free-001")
+
+    def test_invitation_accept_410_under_0015_drift(self, fake):
+        """#1096: the deletion kill-switch fires at the CONSUMER level under
+        0015 drift — a soft-deleted team still 410s invitation_accept (the
+        deleted_at-carried test proves the mechanism; this proves the
+        contract the Architecture section claims)."""
+        inv = invitation_mint(fake, "team-free-001", "bob@example.com",
+                              "member", "owner-1")
+        fake.tables["teams"][0]["deleted_at"] = \
+            datetime.now(timezone.utc).isoformat()
+        fake.missing_columns = {"teams": {"suspended_at", "flagged_at"}}
+        with pytest.raises(InvitationError) as ei:
+            invitation_accept(fake, inv["token"], "user-2")
+        assert ei.value.status == 410
 
 
 # ── update_last_used (#685 write-through) ───────────────────────────────────
