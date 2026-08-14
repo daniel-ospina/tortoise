@@ -1,16 +1,16 @@
 # Live signup-funnel monitor (#801) — moved OFF the per-PR path (queue-health,
-# #1008): the per-PR live runs competed with real traffic for shared prod
-# rate buckets and flaked CI on unrelated PRs. Now runs on a schedule + after
-# merges to main; failures auto-file an issue (the monitor's signal) instead
-# of blocking the merge queue. The static welcome/waitlist tests still run
-# per-PR in the python matrix (test (b)); this job's UNIQUE value is the
+# #1008): the per-PR live runs competed with real traffic for shared prod rate
+# buckets and flaked CI on unrelated PRs. Now runs on a schedule + after merges
+# to main; failures auto-file an issue (the monitor's signal) instead of
+# blocking the merge queue. The mocked welcome-page suite runs per-PR in
+# ci.yml's welcome-e2e job (secret-free); this job's UNIQUE value is the
 # live-prod browser run.
 #
 # The smoke targets the #801 server-first signup path: the form POSTs to
 # /v1/signup/email (hosted API → GoTrue Admin, email_confirm=true) — NO
 # confirmation email is sent, so the smoke does NOT consume the SMTP email
-# bucket (the pre-#801 "1 email-send per run" rationale is stale; the
-# no-429 signal is the signup endpoint's own rate buckets).
+# bucket (the pre-#801 "1 email-send per run" rationale is stale; the no-429
+# signal is the signup endpoint's own rate buckets).
 name: welcome-e2e-monitor
 
 on:

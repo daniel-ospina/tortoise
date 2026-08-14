@@ -283,3 +283,13 @@ def test_key_already_shown_env_indirection():
     # Fallback branches offer env indirection + the placeholder, never a secret.
     assert "tt_YOUR_KEY" in cfg_block
     assert "${env:TORTOISE_API_KEY}" in cfg_block or "CURSOR_MCP_CONFIG_ENV" in cfg_block
+    # Manual-mode ENV_CONFIGS (#1189): the masked-key branch must substitute
+    # the tt_YOUR_KEY placeholder for the raw bullets before interpolation.
+    assert "const effectiveKey = _usableKey(key) ? key : \"tt_YOUR_KEY\";" in html, (
+        "renderMcpConfig must substitute tt_YOUR_KEY for masked keys")
+    assert "ENV_CONFIGS[currentHarness](effectiveKey)" in html, (
+        "manual-mode ENV_CONFIGS must interpolate the effective key")
+    env_block = re.search(r"const ENV_CONFIGS = \{[\s\S]*?\n    \};", html)
+    assert env_block, "ENV_CONFIGS const missing"
+    assert "•" not in env_block.group(0), \
+        "ENV_CONFIGS blocks must not contain the masked bullet literal"
