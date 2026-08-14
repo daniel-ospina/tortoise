@@ -83,7 +83,7 @@ if [ -z "$TORTOISE_BIN" ]; then
   if [ ! -d "$TORTOISE_MODULE/tortoise" ]; then
     exit 0
   fi
-  PYTHON_BIN="$(command -v python3 || true)"
+  PYTHON_BIN="${PYTHON_BIN:-$(command -v python3 || true)}"
   [ -z "$PYTHON_BIN" ] && exit 0
   # #280 item 3: reconciliation sweep — periodically scan the local corpus
   # (~/.tortoise/docs/conversations/) for unindexed/stale session files and
@@ -92,11 +92,29 @@ if [ -z "$TORTOISE_BIN" ]; then
   # auto-reindexing — the sweep targets the local graph, independent of
   # capture. Backgrounded + ALWAYS exits 0 (never block session close);
   # the per-session flock serializes against capture and manual CLI runs.
+  #
+  # Epic #900 T8 migration (#1044): the sweep now converges onto the unified
+  # index path — `tortoise index directory <corpus> --metadata` — preserving
+  # the #280 reconciliation role (corpus-wide sweep at every session close)
+  # AND the legacy sweep's embedding behavior (--metadata). The corpus dir is
+  # passed POSITIONALLY, resolved via session_corpus_dir() (honors
+  # TORTOISE_SESSION_CORPUS else ~/.tortoise/docs/conversations).
+  # tortoise-hook-version: 2
+  SWEEP_CORPUS="$("$PYTHON_BIN" -c "
+import sys, os
+sys.path.insert(0, '$TORTOISE_MODULE')
+from tortoise.session_indexer import session_corpus_dir
+print(session_corpus_dir())" 2>/dev/null || true)"
+  [ -z "$SWEEP_CORPUS" ] && SWEEP_CORPUS="$HOME/.tortoise/docs/conversations"
   nohup "$PYTHON_BIN" -c "
-import sys
+import sys, os
 sys.path.insert(0, '$TORTOISE_MODULE')
 from tortoise.__main__ import main
-raise SystemExit(main(['index', 'sessions']))
+# TORTOISE_INDEX_CHILD_STDERR debug-redirect is OPT-IN: only when the
+# operator set it (never force-write a file at every session close —
+# review-gate P2). truncate-on-open + fail-safe inside the CLI.
+os.environ.setdefault('TORTOISE_INDEX_CHILD_STDERR', '')
+raise SystemExit(main(['index', 'directory', '$SWEEP_CORPUS', '--metadata']))
 " >/dev/null 2>&1 &
   "$PYTHON_BIN" -c "
 import sys
@@ -106,6 +124,24 @@ raise SystemExit(main(['session', 'capture', '--file', '$TMP']))
 " 2>/dev/null || exit 0
 else
   # Round-10 P3: sweep first (capture failure must not disable reindexing).
-  nohup "$TORTOISE_BIN" index sessions >/dev/null 2>&1 &
+  # The corpus dir is resolved via session_corpus_dir() (honors
+  # TORTOISE_SESSION_CORPUS else ~/.tortoise/docs/conversations) using the
+  # interpreter that owns the installed tortoise package — a missing
+  # resolution silently fell back to the default corpus and ignored a
+  # configured TORTOISE_SESSION_CORPUS — the corpus-dir divergence class
+  # the plan condemns, review-gate P1).
+  SWEEP_CORPUS="$(python3 -c "
+from tortoise.session_indexer import session_corpus_dir
+print(session_corpus_dir())" 2>/dev/null || true)"
+  [ -z "$SWEEP_CORPUS" ] && SWEEP_CORPUS="$HOME/.tortoise/docs/conversations"
+  # tortoise-hook-version: 2
+  # CHILD_STDERR debug-redirect is OPT-IN: only when the operator set it
+  # (never force-write a file at every session close)
+  if [ -z "${TORTOISE_INDEX_CHILD_STDERR:-}" ]; then
+    nohup "$TORTOISE_BIN" index directory "$SWEEP_CORPUS" --metadata >/dev/null 2>&1 &
+  else
+    TORTOISE_INDEX_CHILD_STDERR="$TORTOISE_INDEX_CHILD_STDERR" \
+      nohup "$TORTOISE_BIN" index directory "$SWEEP_CORPUS" --metadata >/dev/null 2>&1 &
+  fi
   tortoise session capture --file "$TMP" 2>/dev/null || exit 0
 fi
