@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Security — Tortoise Hosted Service</title>
+  <meta name="description" content="Security and compliance posture for the hosted Tortoise service operated by Premise Labs at tortoise.premiselabs.co — TLS in transit, encryption at rest, API key hashing, audit logging, and the SOC 2 roadmap.">
+  <meta name="theme-color" content="#060b14">
+  <link rel="canonical" href="https://tortoise.premiselabs.co/security">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #060b14;
+      --surface: #0d1a2d;
+      --text: #cbd5e1;
+      --text-dim: #94a3b8;
+      --accent: #06b6d4;
+      --accent-glow: rgba(6, 182, 212, 0.35);
+      --green: #4ade80;
+      --gold: #f59e0b;
+      --border: #1e293b;
+      --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
+      --serif: 'Georgia', 'Times New Roman', serif;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--serif);
+      font-size: 16px;
+      line-height: 1.75;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .wrap { max-width: 720px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+
+    .topbar { flex-wrap: wrap;
+      display: flex; justify-content: space-between; align-items: baseline; gap: 1rem;
+      margin-bottom: 2.5rem; font-family: var(--mono); font-size: 0.78rem;
+    }
+    .topbar a { color: var(--text-dim); text-decoration: none; }
+    .topbar a:hover { color: var(--accent); }
+    .topbar .host { color: var(--text-dim); }
+
+    .doc-type {
+      font-family: var(--mono); font-size: 0.72rem; text-transform: uppercase;
+      letter-spacing: 0.08em; color: var(--accent); margin-bottom: 0.6rem;
+    }
+
+    h1 {
+      font-family: var(--mono); font-size: 1.5rem; font-weight: 600;
+      color: var(--text); line-height: 1.35; letter-spacing: -0.01em;
+    }
+    .lede { color: var(--text-dim); font-size: 0.95rem; margin-top: 0.75rem; }
+
+    .meta {
+      margin: 1.5rem 0 2.75rem; background: var(--surface);
+      border: 1px solid var(--border); border-radius: 0.75rem;
+      padding: 1rem 1.25rem; display: flex; flex-wrap: wrap; gap: 0.9rem 2.25rem;
+    }
+    .meta .label {
+      display: block; font-family: var(--mono); font-size: 0.64rem;
+      text-transform: uppercase; letter-spacing: 0.08em;
+      color: var(--text-dim); margin-bottom: 0.2rem;
+    }
+    .meta .value { font-family: var(--mono); font-size: 0.82rem; color: var(--text); }
+
+    h2 {
+      font-family: var(--mono); font-size: 1.02rem; font-weight: 600; color: var(--text);
+      margin: 2.75rem 0 0.9rem; padding-top: 1.1rem;
+      border-top: 1px solid rgba(30, 41, 59, 0.6);
+    }
+    h2:first-of-type { border-top: none; margin-top: 0; padding-top: 0; }
+
+    p { margin: 0.85rem 0; }
+    strong { color: var(--text); font-weight: 600; }
+    a { color: var(--accent); text-decoration: none; border-bottom: 1px solid rgba(6, 182, 212, 0.25); }
+    a:hover { color: #22d3ee; border-bottom-color: var(--accent); }
+    code { font-family: var(--mono); font-size: 0.82em; color: #a5f3fc; }
+
+    ul, ol { margin: 0.85rem 0; padding-left: 1.35rem; }
+    li { margin: 0.4rem 0; }
+
+    .callout {
+      background: var(--surface); border: 1px solid var(--border);
+      border-left: 3px solid var(--accent); border-radius: 0.6rem;
+      padding: 1rem 1.25rem; margin: 1.25rem 0;
+    }
+    .callout p { margin: 0.25rem 0; }
+
+    table {
+      width: 100%; border-collapse: collapse; margin: 1rem 0;
+      font-family: var(--mono); font-size: 0.78rem;
+    }
+    th, td {
+      border: 1px solid var(--border); padding: 0.5rem 0.7rem;
+      text-align: left; vertical-align: top; word-break: break-word;
+    }
+    th { background: var(--surface); color: var(--accent); font-weight: 600; }
+    td { color: var(--text); }
+
+    footer {
+      margin-top: 3.5rem; padding-top: 1.25rem; border-top: 1px solid var(--border);
+      font-family: var(--mono); font-size: 0.76rem; color: var(--text-dim);
+    }
+    footer p { margin: 0.4rem 0; }
+    footer a { color: var(--text-dim); border-bottom: 1px solid rgba(100, 116, 139, 0.3); }
+    footer a:hover { color: var(--accent); border-bottom-color: var(--accent); }
+
+    @media (max-width: 480px) {
+      .wrap { padding: 1.5rem 1rem 3rem; }
+      h1 { font-size: 1.28rem; }
+      .meta { flex-direction: column; gap: 0.7rem; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <nav class="topbar" aria-label="Site navigation">
+      <a href="/">← Back to product</a>
+      <span class="host">tortoise.premiselabs.co</span>
+    </nav>
+
+    <header>
+      <p class="doc-type">Security</p>
+      <h1>Security — Tortoise Hosted Service</h1>
+      <p class="lede">How the hosted Tortoise service protects data in transit and at rest, stores API key credentials, logs control-plane activity, and approaches compliance — for enterprise buyers evaluating the service.</p>
+      <div class="meta">
+        <div>
+          <span class="label">Last updated</span>
+          <span class="value">2026-08-13</span>
+        </div>
+        <div>
+          <span class="label">Effective date:</span>
+          <span class="value">2026-08-13</span>
+        </div>
+        <div>
+          <span class="label">Version</span>
+          <span class="value">1.0</span>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <div class="callout">
+        <p><strong>Scope.</strong> This page describes the hosted Tortoise service (tortoise.premiselabs.co / api.premiselabs.co). Self-hosted deployments are not covered.</p>
+      </div>
+
+      <h2>1. TLS in transit</h2>
+      <p>Hosted API traffic (api.premiselabs.co) is served over HTTPS. TLS 1.2 and TLS 1.3 are the supported protocol versions, terminated at the Fly.io edge.</p>
+
+      <h2>2. Encryption at rest</h2>
+      <p>OAuth tokens (e.g., GitHub) are encrypted at rest with Fernet (AES-128-CBC + HMAC-SHA256). The key comes from the <code>TORTOISE_ENCRYPTION_KEY</code> environment variable, is never stored in the database, and the service fails closed if the key is missing. Encrypted token columns are revoked from anonymous and authenticated roles.</p>
+      <p>Encryption at rest applies to OAuth tokens specifically; it does not extend to all data stored by the service.</p>
+
+      <h2>3. API key hashing</h2>
+      <p>API keys are stored only as one-way hashes — PBKDF2-HMAC-SHA256 with a per-key 32-byte random salt and 100,000 iterations, plus a server-side pepper. A separate peppered SHA-256 digest enables constant-time lookup; the plaintext key exists only at creation time.</p>
+
+      <h2>4. Audit logging</h2>
+      <p>Control-plane operations — account registration, API key creation and issuance, deletion requests, and authentication failures — are logged with actor, operation, resource, IP, and timestamp. Events are written to Postgres first, with a local JSONL fallback and automatic replay on recovery.</p>
+      <p>Audit events cover control-plane operations — not every API request is logged.</p>
+
+      <h2>5. SOC 2 roadmap</h2>
+      <p>Tortoise is <strong>not SOC 2 certified</strong>. Compliance is a roadmap item: we are building toward a readiness posture across access control, change management, vendor management, training, and incident response — scoping → readiness → audit.</p>
+      <table>
+        <thead>
+          <tr>
+            <th scope="col">Control area</th>
+            <th scope="col">Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Access control</td>
+            <td>Roadmap</td>
+          </tr>
+          <tr>
+            <td>Change management</td>
+            <td>Roadmap</td>
+          </tr>
+          <tr>
+            <td>Vendor management</td>
+            <td>Roadmap</td>
+          </tr>
+          <tr>
+            <td>Training</td>
+            <td>Roadmap</td>
+          </tr>
+          <tr>
+            <td>Incident response</td>
+            <td>Roadmap</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>6. Credentials</h2>
+      <p><strong>Tortoise runtime (hosted API):</strong> the runtime stores API keys and OAuth tokens — it has no password system.</p>
+      <p><strong>Dashboard (app.premiselabs.co):</strong> account passwords for the dashboard are stored using salted hashing by Supabase Auth.</p>
+    </main>
+
+    <footer>
+      <h2 style="border-top: none; padding-top: 0; margin-top: 0;">Document history / revisions</h2>
+      <table>
+        <thead>
+          <tr>
+            <th scope="col">Version</th>
+            <th scope="col">Effective date</th>
+            <th scope="col">Summary</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>1.0</td>
+            <td>2026-08-13</td>
+            <td>Initial publication of the Security page.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p>Premise Labs · Tortoise · <a href="/">Back to product</a></p>
+    </footer>
+  </div>
+</body></html>
