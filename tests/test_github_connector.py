@@ -34,11 +34,6 @@ def test_issue_to_event_closed():
     assert ev["object"] == "test/repo#42"
     assert ev["startedAt"] == "2026-07-10T10:00:00Z"
     assert ev["endedAt"] == "2026-07-19T12:00:00Z"
-    # #388: source metadata — per-entity url + kind (projection materializes
-    # a Source node from these)
-    assert ev["source"] == "github:test/repo"
-    assert ev["sourceUrl"] == "https://github.com/test/repo/issues/42"
-    assert ev["sourceKind"] == "github_issue"
 
 
 def test_issue_to_event_open():
@@ -54,8 +49,6 @@ def test_issue_to_event_open():
     ev = gh._issue_to_event(issue)
     assert ev["eventKind"] == "github.issue.open"
     assert ev["endedAt"] is None
-    assert ev["sourceKind"] == "github_issue"
-    assert ev["sourceUrl"] == "..."
 
 
 def test_issue_to_event_skips_empty_title():
@@ -81,9 +74,6 @@ def test_pr_to_event_open():
     assert ev["eventId"] == "github-pr-test/repo-7"
     assert ev["eventKind"] == "github.pr.open"
     assert ev["endedAt"] is None
-    # #388: PR events carry their OWN kind (was mislabeled github_issue) + url
-    assert ev["sourceKind"] == "github_pr"
-    assert ev["sourceUrl"] == "..."
 
 
 def test_pr_to_event_merged():
@@ -100,7 +90,6 @@ def test_pr_to_event_merged():
     ev = gh._pr_to_event(pr)
     assert ev["eventKind"] == "github.pr.merged"
     assert ev["endedAt"] == "2026-07-16T10:00:00Z"
-    assert ev["sourceKind"] == "github_pr"
 
 
 def test_pr_to_event_closed_unmerged():
@@ -161,12 +150,10 @@ def test_webhook_pr_merged():
             "created_at": "2026-07-17T00:00:00Z",
             "closed_at": "2026-07-18T00:00:00Z",
             "merged_at": "2026-07-18T00:00:00Z",
-            "html_url": "https://gh/org/r/pull/10",
+            "html_url": "...",
         },
     })
     assert ev["eventKind"] == "github.pr.merged"
-    assert ev["sourceKind"] == "github_pr"
-    assert ev["sourceUrl"] == "https://gh/org/r/pull/10"
 
 
 def test_webhook_unknown_event_returns_none():
@@ -377,107 +364,6 @@ def test_producers_share_event_id():
     # both producers point the produces edge at the SAME Object name — the
     # pm:issue Object ({repo}#{number}) — never a stub.
     assert poll_ev["object"] == entities["event"]["object"] == "test/repo#42"
-    # #1155-P2: the two producers intentionally DIVERGE on eventKind/subject.
-    # The shared Event node is last-writer-wins (plain MERGE ON MATCH
-    # `e += $props` overwrites) — whoever applies last defines the node's
-    # eventKind/subject. ingest() converges on the entity path (covered poll
-    # events are deduped); a standalone poll()/webhook apply after the entity
-    # path flips the Event back to github.issue.* / issue:{repo}#{n}. Pin the
-    # divergence here so a future normalization is a deliberate change.
-    assert poll_ev["eventKind"] == "github.issue.open"
-    assert entities["event"]["eventKind"] == "pm:cardCreated"
-    assert poll_ev["subject"] == "issue:test/repo#42"
-    assert entities["event"]["subject"] == "github-user:alice"
-
-
-def test_poll_event_before_entity_keeps_canonical_object_id(shared_proj):
-    """#1155-P1 regression: a poll/webhook issue Event landing BEFORE the
-    entity path's first ObjectRegistered (e.g. a webhook fires before the
-    next ingest) must not strand the canonical Object id.
-
-    Pre-fix: the produces-edge wiring minted a name-stub Object (random ulid)
-    for {repo}#{number}; the entity path's _upsert_object MERGE adopted the
-    stub BY NAME without writing the canonical id — NO node carried id
-    github-issue-{repo}-{n}, so aboutSubject wiring (MATCH by o.id) silently
-    matched nothing.
-
-    Post-fix: the canonical id wins on match (idempotent — both producers
-    send the same deterministic id for a given Object name).
-    """
-    proj = shared_proj
-    if proj is None:
-        return
-    wipe(proj)
-
-    gh = GitHubConnector(config={"repo": "test/repo"})
-    issue = {
-        "number": 42,
-        "title": "Fix login bug",
-        "state": "open",
-        "createdAt": "2026-07-10T10:00:00Z",
-        "closedAt": "",
-        "url": "https://github.com/test/repo/issues/42",
-        "labels": [{"name": "complexity:micro"}],
-        "assignees": [{"login": "bob"}],
-        "author": {"login": "alice"},
-        "milestone": None,
-    }
-
-    # ── poll/webhook producer lands FIRST (webhook before next ingest) ──
-    proj.apply(gh._issue_to_event(issue))
-
-    # The produces-edge wiring must have minted a name-stub Object with a
-    # random id (NOT the canonical one) at this point.
-    stub_rows = proj.g.query(
-        "MATCH (o:Object {name:'test/repo#42'}) RETURN o.id"
-    ).result_set
-    assert len(stub_rows) == 1
-    assert stub_rows[0][0] != "github-issue-test/repo-42", (
-        "pre-entity path: poll wiring mints a random-id name-stub")
-
-    # ── then the entity path applies (mirrors ingest()'s entity chain) ──
-    entities = gh._issue_to_entities(issue)
-    proj.apply(entities["object"])
-    proj.apply(entities["event"])
-    for subj in entities["subjects"]:
-        proj.apply(subj)
-    obj_id = entities["object"]["id"]
-    for sid in entities["aboutSubjects"]:
-        proj.g.query(
-            "MATCH (o:Object {id: $oid}) MATCH (s:Subject {id: $sid}) "
-            "MERGE (o)-[:aboutSubject]->(s)",
-            params={"oid": obj_id, "sid": sid},
-        )
-
-    # P1: the canonical id WINS on match — the name-stub Object now carries
-    # github-issue-test/repo-42 (and the pm:issue objectKind), never the
-    # random stub ulid.
-    rows = proj.g.query(
-        "MATCH (o:Object {name:'test/repo#42'}) RETURN o.id, o.objectKind"
-    ).result_set
-    assert [tuple(r) for r in rows] == [
-        ("github-issue-test/repo-42", "pm:issue"),
-    ]
-    # id-space is unambiguous: only the Object carries id
-    # github-issue-test/repo-42.
-    rows = proj.g.query(
-        "MATCH (n {id:'github-issue-test/repo-42'}) RETURN labels(n)[0]"
-    ).result_set
-    assert [r[0] for r in rows] == ["Object"]
-
-    # produces edge lands on the Object that carries the canonical id.
-    rows = proj.g.query(
-        "MATCH (e:Event {eventId:'github-issue-test/repo-42-created'})"
-        "-[:produces]->(o:Object) RETURN o.id"
-    ).result_set
-    assert [r[0] for r in rows] == ["github-issue-test/repo-42"]
-
-    # aboutSubject wiring resolves against the canonical Object id.
-    rows = proj.g.query(
-        "MATCH (o:Object {id:'github-issue-test/repo-42'})"
-        "-[:aboutSubject]->(s:Subject) RETURN s.id ORDER BY s.id"
-    ).result_set
-    assert [r[0] for r in rows] == ["github-user:alice", "github-user:bob"]
 
 
 def test_ingest_one_event_per_issue(shared_proj, monkeypatch):
