@@ -283,6 +283,13 @@ _INDEX_DB_RETRY_BUDGET = 3
 _source_merge_lock_guard = threading.Lock()
 _source_merge_locks: dict[str, threading.Lock] = {}
 
+# T6 (issue #1042): eventKind → Source sourceKind mapping for the legacy
+# backfill reconciliation (CYCLE-25 v3.6 #6 spelling: agentSession).
+_BACKFILL_SOURCE_KIND: dict[str, str] = {
+    "AgentSession": "agentSession",
+    "DocumentCreated": "document",
+}
+
 # Embedded db paths this PROCESS has opened (the §5.3 busy probe passes
 # same-process daemon reuse — the registry records the DAEMON pid, which is
 # never our own python pid).
@@ -10037,6 +10044,473 @@ class TortoiseSDK:
                          or ev.get("eventId") == event_id)):
                 state = ev
         return state
+
+    def backfill_sources(self, directory: str | None = None,
+                         *, dry_run: bool = False,
+                         corpus_name: str | None = None,
+                         event_kinds: tuple[str, ...] = ("AgentSession", "DocumentCreated"),
+                         ) -> dict:
+        """Additive reconciliation for legacy Events of BOTH eventKinds (scope
+        item 6; E2E-8 parametrized). Path derivation: AgentSession → Event.source_file;
+        DocumentCreated → eventId IS the rel-path (verified sdk.py). Returns —
+        PINNED shape split (I27):
+          dry_run=True  → {"dry_run": true, "corpus_name": str,
+                           "would_create": int, "would_link": int,
+                           "degraded_no_file": int, "errors": [...]}
+          dry_run=False → {"dry_run": false, "corpus_name": str,
+                           "created": int, "linked": int, "skipped": int,
+                           "degraded_no_file": int, "errors": [...]}
+        `skipped` DEFINED (cycle-4): a legacy Event whose Source ALREADY exists AND
+        whose `references` edge ALREADY exists — `skipped` is exclusive per Event
+        per run (a FRESH Event counts in BOTH `created` and `linked`; `skipped`
+        counts only Events already fully linked — index_file enumerates skip
+        reasons; backfill's skipped bucket had no definition until this pin —
+        E2E-8's second run asserts it).
+        Counters are HONEST in the `db` failure class: a Source-write failure
+        NEVER increments `linked` (an edge that was not written is never counted),
+        and a re-run REPAIRS the missing edge (`linked`) instead of skipping.
+        errors[] entries cover: null-file_hash-with-missing-file (no Source created),
+        non-relativizable paths (counted identically in both modes),
+        hash-mismatch-since-capture notes, hardlink aliases with NO walk context
+        (`st_nlink > 1` → refuse the read, degrade to Event.file_hash when present —
+        cycle-5, W2 escape/inode rule), escape-rejected paths (derive_source_url's
+        §4.2 hard error caught PER FILE — errors[] entry, no Source, never an
+        aborting raise; E2E-8(e)), and mount-alias same-inode pairs (cycle-6
+        sibling-Event same-inode scan — alias Events converge onto one Source,
+        note names the pair; E2E-8(f)). Over-limit files (size guard, §6.4) are
+        NEVER read by backfill — they degrade to Event.file_hash (errors[] note +
+        degraded_no_file count, cycle-4), so backfill can never write a Source whose
+        hash the forward indexer would refuse (the OOM class stays closed at
+        4,190-file scale). Edge states: E2E-8 variants.
+        """
+        import os as _os
+        from pathlib import Path
+        from .file_indexer import compute_file_hash, derive_source_url, hash_text
+
+        if directory is None:
+            from .session_indexer import session_corpus_dir
+            directory = str(session_corpus_dir())
+        if not isinstance(directory, str) or not directory:
+            raise ValueError("backfill_sources: directory must be a non-empty string")
+        dir_path = Path(directory)
+        if not dir_path.is_dir():
+            raise ValueError(
+                f"backfill_sources: directory {directory!r} does not exist"
+            )
+        root_real = _os.path.realpath(str(dir_path))
+        name = corpus_name or Path(root_real).name
+        # Two-layer size-guard inheritance (§6.4/W2): backfill NEVER reads a file
+        # beyond the shared limit (an unguarded compute_file_hash would re-enter
+        # the OOM class at 4,190-file scale) — over-limit files degrade to
+        # Event.file_hash.
+        max_bytes = self._index_max_bytes()
+
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (e:Event) WHERE e.eventKind IN $kinds "
+            "RETURN e.eventId, e.eventKind, e.source_file, e.file_hash, e.title",
+            params={"kinds": list(event_kinds)},
+        ).result_set
+
+        report: dict = {"dry_run": bool(dry_run), "corpus_name": name}
+        if dry_run:
+            report.update(would_create=0, would_link=0,
+                          degraded_no_file=0, errors=[])
+        else:
+            report.update(created=0, linked=0, skipped=0,
+                          degraded_no_file=0, errors=[])
+        errors = report["errors"]
+
+        # ── per-Event analysis: path derivation (per eventKind) + url ──
+        units: list[dict] = []
+        for r in rows:
+            eid, ekind, source_file, file_hash, title = r
+            u = {"eid": eid, "kind": ekind, "title": title,
+                 "file_hash": file_hash, "url": None, "abs_path": None,
+                 "content_hash": None, "degrade": False,
+                 "inode": None, "error": None, "note": None}
+            if eid is None or str(eid) == "":
+                u["error"] = {"event": None, "eventKind": ekind,
+                              "error": "Event has no eventId — no path derivable",
+                              "cause": "structural"}
+                units.append(u)
+                continue
+            kind_name = _BACKFILL_SOURCE_KIND.get(ekind)
+            if kind_name is None:
+                # unmapped eventKind (custom event_kinds tuple) — NEVER a silent
+                # wrong-sourceKind write (§6.2 mapping-table pin): the unknown
+                # kind is reported and skipped, never fatal, never a Source.
+                u["error"] = {
+                    "event": eid, "eventKind": ekind,
+                    "error": f"eventKind {ekind!r} has no Source sourceKind "
+                             f"mapping — no Source created",
+                    "cause": "structural"}
+                units.append(u)
+                continue
+            u["source_kind"] = kind_name
+            if ekind == "AgentSession":
+                raw = source_file
+                if raw is None or str(raw) == "":
+                    # pre-#320 shape (cycle-21): no source_file → structural
+                    # error, NO Source, never an aborting raise
+                    u["error"] = {
+                        "event": eid, "eventKind": ekind,
+                        "error": "AgentSession Event has no source_file — "
+                                 "pre-#320 shape, no Source created",
+                        "cause": "structural"}
+                    units.append(u)
+                    continue
+            else:
+                raw = eid
+            try:
+                p = Path(str(raw))
+                candidate = p if p.is_absolute() else (dir_path / p)
+                u["url"] = derive_source_url(candidate, dir_path, corpus_name=name)
+                u["abs_path"] = str(candidate)
+            except UnicodeEncodeError:
+                # (x) undecodable source_file class (cycle-12) — errors[] entry,
+                # run continues, never an aborting raise (the shared per-file
+                # guard at the entry points)
+                u["error"] = {
+                    "event": eid, "eventKind": ekind,
+                    "error": f"source_file {str(raw)!r} is not decodable — "
+                             f"no Source created",
+                    "cause": "filename", "path": str(raw)}
+                units.append(u)
+                continue
+            except (ValueError, OSError) as exc:
+                # escape / non-relativizable path (E2E-8 variant (b)) — counted
+                # IDENTICALLY in dry-run and real run (would_create excludes it)
+                u["error"] = {
+                    "event": eid, "eventKind": ekind,
+                    "error": f"source_file {str(raw)!r} not relativizable under "
+                             f"corpus root {directory!r} — {exc}",
+                    "cause": "escape", "path": str(raw)}
+                units.append(u)
+                continue
+            units.append(u)
+
+        # ── file-state pass (reads allowed only past the fail-closed rules) ──
+        for u in units:
+            if u["url"] is None:
+                continue
+            eid, ekind = u["eid"], u["kind"]
+            fh = u["file_hash"]
+            hash_s = str(fh) if fh is not None and str(fh) != "" else None
+            try:
+                cand = Path(u["abs_path"])
+                if not cand.is_file():
+                    if hash_s is None:
+                        u["error"] = {
+                            "event": eid, "eventKind": ekind,
+                            "error": "source file missing and file_hash null — "
+                                     "no REQUIRED-compliant Source possible",
+                            "cause": "structural"}
+                    else:
+                        # MOVED-vs-DELETED distinction (W2 moved-file divergence
+                        # class, cycle-14/15): cross-check the stored file_hash
+                        # against every OTHER file in the corpus — a hash MATCH
+                        # at a different rel-path indicates a likely MOVE (the
+                        # file exists, just elsewhere); no match → genuine
+                        # deletion. Both degrade to the stored hash at the OLD
+                        # url (additive-only); the wording distinguishes the
+                        # classes so F-900-1's report can count the fork.
+                        moved_target = None
+                        if hash_s:
+                            # the file at this path is absent; cross-check the
+                            # stored hash against every OTHER file in the corpus.
+                            # A match at a DIFFERENT rel-path that is NOT claimed
+                            # by another legacy Event in this same run (cycle-8
+                            # scan-scope: hardlink siblings / mount-alias pairs
+                            # are covered by their own rows and must NOT be
+                            # misread as moves — the hardlink-pair mixed leg's
+                            # surviving sibling matches the deleted member's
+                            # hash, which is a sibling, not a move) indicates a
+                            # likely MOVE.
+                            claimed = {u2.get("abs_path") for u2 in units
+                                       if u2.get("abs_path") is not None}
+                            try:
+                                for other in dir_path.rglob("*"):
+                                    if not other.is_file() or str(other) == u["abs_path"]:
+                                        continue
+                                    if str(other) in claimed:
+                                        continue  # sibling/alias, not a move
+                                    try:
+                                        if other.stat().st_size > max_bytes:
+                                            continue
+                                    except OSError:
+                                        continue
+                                    try:
+                                        if compute_file_hash(str(other)) == hash_s:
+                                            moved_target = str(other)
+                                            break
+                                    except Exception:  # noqa: BLE001 — per-file
+                                        continue
+                            except OSError:
+                                pass
+                        u["degrade"] = True
+                        u["content_hash"] = hash_s
+                        if moved_target is not None:
+                            u["note"] = {
+                                "event": eid, "eventKind": ekind,
+                                "error": f"source file moved since capture — "
+                                         f"identical content found at "
+                                         f"{moved_target!r}; Source built from "
+                                         f"stored file_hash at the OLD url "
+                                         f"(degraded; accept-and-document "
+                                         f"divergence, W2 moved-file row)",
+                                "cause": "moved", "path": u["abs_path"]}
+                        else:
+                            u["note"] = {
+                                "event": eid, "eventKind": ekind,
+                                "error": "source file deleted since capture — "
+                                         "Source built from stored file_hash "
+                                         "(degraded)",
+                                "cause": "missing", "path": u["abs_path"]}
+                    continue
+                st = cand.stat()
+                if st.st_nlink > 1:
+                    # escape/inode fail-closed — NO walk context (cycle-5): a
+                    # hardlink entry whose aliases cannot be proven root-local is
+                    # NEVER read; degrade to the stored hash when present
+                    if hash_s is None:
+                        u["error"] = {
+                            "event": eid, "eventKind": ekind,
+                            "error": "source file hardlinked (st_nlink>1) and "
+                                     "file_hash null — no REQUIRED-compliant "
+                                     "Source possible",
+                            "cause": "inode", "path": u["abs_path"]}
+                    else:
+                        u["degrade"] = True
+                        u["content_hash"] = hash_s
+                        u["note"] = {
+                            "event": eid, "eventKind": ekind,
+                            "error": "source file hardlinked (st_nlink>1) — "
+                                     "never read without walk context; Source "
+                                     "built from stored file_hash (degraded)",
+                            "cause": "inode", "path": u["abs_path"]}
+                    continue
+                if st.st_size > max_bytes:
+                    # two-layer size-guard inheritance (§6.4/W2) — never read
+                    if hash_s is None:
+                        u["error"] = {
+                            "event": eid, "eventKind": ekind,
+                            "error": "source file over max_file_mb size guard and "
+                                     "file_hash null — no REQUIRED-compliant "
+                                     "Source possible",
+                            "cause": "size", "path": u["abs_path"]}
+                    else:
+                        u["degrade"] = True
+                        u["content_hash"] = hash_s
+                        u["note"] = {
+                            "event": eid, "eventKind": ekind,
+                            "error": "source file over max_file_mb size guard — "
+                                     "never read; Source built from stored "
+                                     "file_hash (degraded)",
+                            "cause": "size", "path": u["abs_path"]}
+                    continue
+                # layer-2 bounded read (T6 inherits the §6.4 two-layer guard: a
+                # file that GREW past max_bytes between the stat and the read is
+                # never read unbounded — it degrades to the stored hash, keeping
+                # the OOM class closed at 4,190-file scale; hash_text on the
+                # universal-newline-normalized buffer == compute_file_hash)
+                text, read_err = self._index_read_file(u["abs_path"], max_bytes)
+                if read_err == "size":
+                    if hash_s is None:
+                        u["error"] = {
+                            "event": eid, "eventKind": ekind,
+                            "error": "source file grew past max_file_mb between "
+                                     "stat and read (layer-2) and file_hash null "
+                                     "— no REQUIRED-compliant Source possible",
+                            "cause": "size", "path": u["abs_path"]}
+                    else:
+                        u["degrade"] = True
+                        u["content_hash"] = hash_s
+                        u["note"] = {
+                            "event": eid, "eventKind": ekind,
+                            "error": "source file grew past max_file_mb between "
+                                     "stat and read (layer-2) — Source built "
+                                     "from stored file_hash (degraded)",
+                            "cause": "size", "path": u["abs_path"]}
+                    continue
+                if read_err == "decode":
+                    if hash_s is None:
+                        u["error"] = {
+                            "event": eid, "eventKind": ekind,
+                            "error": "source file unreadable and file_hash null — "
+                                     "no REQUIRED-compliant Source possible",
+                            "cause": "decode", "path": u["abs_path"]}
+                    else:
+                        u["degrade"] = True
+                        u["content_hash"] = hash_s
+                        u["note"] = {
+                            "event": eid, "eventKind": ekind,
+                            "error": "source file unreadable — Source built from "
+                                     "stored file_hash (degraded)",
+                            "cause": "decode", "path": u["abs_path"]}
+                    continue
+                u["content_hash"] = hash_text(text)
+                u["inode"] = (st.st_dev, st.st_ino)
+                if hash_s is not None and u["content_hash"] != hash_s:
+                    # W2 "file edited since capture": Source gets the CURRENT
+                    # hash, the legacy Event KEEPS its stored file_hash
+                    # (additive-only, SC4) — the mismatch is a report artifact
+                    u["note"] = {
+                        "event": eid, "eventKind": ekind,
+                        "error": "file edited since capture — Source has CURRENT "
+                                 "file hash, Event keeps stored file_hash "
+                                 "(additive-only)",
+                        "cause": "hash-mismatch", "path": u["abs_path"]}
+            except OSError as exc:
+                u["error"] = {
+                    "event": eid, "eventKind": ekind,
+                    "error": f"cannot stat source file {u['abs_path']!r}: {exc}",
+                    "cause": "structural", "path": u["abs_path"]}
+
+        # ── sibling-Event same-inode convergence (cycle-6): the scan applies ONLY
+        # to nlink==1 aliases (the mount-alias class); nlink>1 hardlink pairs are
+        # EXCLUDED by the cycle-7 scan-scope pin (they degrade per Event) ──
+        groups: dict[tuple[int, int], list[int]] = {}
+        for i, u in enumerate(units):
+            if u["inode"] is not None:
+                groups.setdefault(u["inode"], []).append(i)
+        alias_of: dict[int, int] = {}
+        for members in groups.values():
+            if len(members) < 2:
+                continue
+            members_sorted = sorted(members, key=lambda i: units[i]["abs_path"])
+            winner = members_sorted[0]
+            for m in members_sorted[1:]:
+                alias_of[m] = winner
+            errors.append({
+                "event": units[winner]["eid"], "eventKind": units[winner]["kind"],
+                "error": "same-inode mount-alias pair — one physical file at "
+                         f"{units[winner]['abs_path']!r} and "
+                         f"{units[m]['abs_path']!r}; converging on ONE Source "
+                         "at the first sorted path",
+                "cause": "inode-alias",
+            })
+
+        # ── accounting (deterministic order: sorted rel path) ──
+        order = sorted(range(len(units)),
+                       key=lambda i: (units[i]["abs_path"] or "",
+                                      units[i]["eid"] or ""))
+        group_created: dict[int, bool] = {}
+        for i in order:
+            u = units[i]
+            if u["error"] is not None:
+                errors.append(u["error"])
+                continue
+            if u["note"] is not None:
+                errors.append(u["note"])
+            if u["degrade"]:
+                report["degraded_no_file"] += 1
+            if u["content_hash"] is None or u["url"] is None:
+                errors.append({"event": u["eid"], "eventKind": u["kind"],
+                               "error": "no content hash derivable — no Source",
+                               "cause": "structural"})
+                continue
+            winner_i = alias_of.get(i, i)
+            winner = units[winner_i]
+            url = winner["url"]
+            eid = u["eid"]
+            try:
+                source_exists, edge_exists = self._backfill_probe(url, eid)
+            except Exception as exc:  # noqa: BLE001 — per-Event isolation
+                errors.append({"event": eid, "eventKind": u["kind"],
+                               "error": f"probe failed: {exc}", "cause": "db",
+                               "path": u["abs_path"]})
+                continue
+            if source_exists and edge_exists:
+                if not dry_run:
+                    report["skipped"] += 1
+                continue
+            created_here = False
+            if not source_exists and not group_created.get(winner_i, False):
+                if dry_run:
+                    report["would_create"] += 1
+                    group_created[winner_i] = True
+                else:
+                    try:
+                        outcome = self._index_source_merge(
+                            url, u["source_kind"],
+                            None, winner["content_hash"],
+                            str(u["title"] or Path(winner["abs_path"] or eid).stem),
+                            winner["abs_path"], gate_v=None)
+                        if outcome == "indexed":
+                            report["created"] += 1
+                        group_created[winner_i] = True
+                        created_here = True
+                    except Exception as exc:  # noqa: BLE001 — per-Event isolation
+                        errors.append({"event": eid, "eventKind": u["kind"],
+                                       "error": f"Source write failed: {exc}",
+                                       "cause": "db", "path": u["abs_path"]})
+                        # outcome UNKNOWN (a journal-append failure can raise
+                        # AFTER the graph write committed): do NOT set
+                        # group_created — an alias member may retry the create;
+                        # the link below is gated on ACTUAL Source existence so
+                        # a failed create NEVER counts a phantom link (honest
+                        # counters in the db failure class).
+            if not edge_exists:
+                if dry_run:
+                    report["would_link"] += 1
+                else:
+                    try:
+                        # gate the link on ACTUAL Source existence: the normal
+                        # path knows it (source_exists or created_here); the
+                        # unknown-outcome path (a journal-append failure can
+                        # raise AFTER the graph write committed) re-probes
+                        # before linking; a create that left NO Source is
+                        # covered by the "Source write failed" error already —
+                        # never a phantom link count (honest counters).
+                        if (source_exists or created_here
+                                or self._backfill_probe(url, eid)[0]):
+                            self._backfill_link(url, eid)
+                            report["linked"] += 1
+                    except Exception as exc:  # noqa: BLE001 — crash-repair seam
+                        errors.append({"event": eid, "eventKind": u["kind"],
+                                       "error": f"references-link step failed: {exc}",
+                                       "cause": "db", "path": u["abs_path"]})
+        return report
+
+    def _backfill_probe(self, url: str, event_id: str) -> tuple[bool, bool]:
+        """Source + references-edge existence for backfill accounting.
+
+        Crash-repair semantics (W2 pin): Source existence alone NEVER satisfies
+        a legacy Event — a re-run must REPAIR a missing edge (linked), never
+        report the Event skipped.
+        """
+        proj = self._get_proj()
+        srows = proj.g.query(
+            "MATCH (s:Source {url:$url}) RETURN 1",
+            params={"url": url},
+        ).result_set
+        erows = proj.g.query(
+            "MATCH (s:Source {url:$url})-[:references]->(e:Event {eventId:$eid}) "
+            "RETURN 1",
+            params={"url": url, "eid": event_id},
+        ).result_set
+        return bool(srows), bool(erows)
+
+    def _backfill_link(self, url: str, event_id: str) -> None:
+        """Wire (Source)-[:references]->(Event) — the backfill link step.
+
+        Kept as a SEPARATE method so the kill-between crash-repair test can
+        monkeypatch it to raise AFTER the Source write (simulated crash): the
+        run catches per-Event into errors[] (per-file isolation, J1) and a
+        re-run repairs the missing edge (linked), never skipping the Event just
+        because the Source exists.
+
+        The edge MATCHES BY ``eventId`` (NOT ``id``): legacy raw-Cypher Events
+        carry no ``id`` property, so the projection's id-based auto-wire would
+        silently no-op on them — the edge must bind the legacy node directly.
+        """
+        proj = self._get_proj()
+        proj.g.query(
+            "MATCH (s:Source {url:$url}), (e:Event {eventId:$eid}) "
+            "MERGE (s)-[:references]->(e)",
+            params={"url": url, "eid": event_id},
+        )
 
     def index_sessions(self, directory: str, extract_metadata: bool = True,
                        llm_model: str | None = "gpt-5-mini",
