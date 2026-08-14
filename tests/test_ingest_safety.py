@@ -44,10 +44,13 @@ _INGEST_CAN_SUPPRESS_PROMOTION = (
     "promote_source" in inspect.signature(TortoiseSDK.create_operator).parameters)
 _CAN_PROMOTE_POINT = hasattr(TortoiseSDK, "promote_point")
 _TRACK_B_FULL = _INGEST_CAN_SUPPRESS_PROMOTION and _CAN_PROMOTE_POINT
+_SENTINEL_A9 = getattr(__import__("tortoise.analyze", fromlist=["x"]),
+                       "DIRECT_EDGE_TRAVERSAL", False)
 
 TRACK_B = pytest.mark.track_b
-TRACK_B_SKIP = pytest.mark.skipif(not _TRACK_B_FULL,
-                                  reason="Track B (#780) machinery not shipped")
+TRACK_B_SKIP = pytest.mark.skipif(
+    not (_TRACK_B_FULL and _SENTINEL_A9),
+    reason="Track B (#780) machinery + A9 traversal not shipped (§7 gates)")
 
 
 @pytest.fixture
@@ -82,8 +85,8 @@ def _two_point_bundle(operator: str | None = "IMPL",
             conn["mitigation"] = {"reason": "x", "strength": 0.6}
     return {
         "points": [
-            {"ref": "p1", "kind": "claim", "content": "A implies B."},
-            {"ref": "p2", "kind": "claim", "content": "B."},
+            {"ref": "p1", "kind": "statement", "content": "A implies B."},
+            {"ref": "p2", "kind": "statement", "content": "B."},
         ],
         "entities": [], "sources": [],
         "connections": [conn] if conn else [],
@@ -200,19 +203,34 @@ def test_e2e13_gated_operator_commits_and_is_inert(sdk):
 def test_e2e13_boundary_promote_second_endpoint_activates(sdk):
     """E2E-13 boundary (NEW — GATE-2 Q3): 1-live/1-draft endpoint →
     operator inert (no EP contribution) → promote the second endpoint →
-    the operator becomes EP-active (the derived-liveness predicate flips)."""
+    the operator becomes EP-active (the derived-liveness predicate flips).
+
+    The discriminating leg runs the selector with include_draft=True — the
+    draft-status #780 filter is bypassed, so the UNCONDITIONAL ≥2-live
+    predicate is the ONLY gate (a regression dropping derived-liveness
+    fails this leg)."""
     bundle = _two_point_bundle(operator="IMPL", mitigation=True)
     res = sdk.ingest(bundle, promotion_policy="gated")
     p1, p2 = res["ids"]["points"]
     op_id = res["ids"]["connections"][0]
-    # promote ONE endpoint → still 1 live / 1 draft → inert
+    # promote ONE endpoint → still 1 live / 1 draft → inert under
+    # include_draft=True (the ≥2-live rule is the only gate here)
     sdk.update_point(p1, status="live")
-    ops, _ = _bfs_select_operators(sdk._get_proj(), [p1, p2], max_hops=1)
-    assert op_id not in ops, "1-live/1-draft operator must stay inert"
-    # promote the SECOND endpoint → 2 live → active (default-mode selection
-    # still excludes the draft-status operator — the #780 live filter — so
-    # also promote the operator node itself for the EP-active assertion)
+    ops_d, _ = _bfs_select_operators(sdk._get_proj(), [p1, p2], max_hops=1,
+                                     include_draft=True)
+    assert op_id not in ops_d, \
+        "1-live/1-draft operator must be inert (derived-liveness, draft-inclusive)"
+    # promote the SECOND endpoint → 2 live → ACTIVE under include_draft
+    # (the draft-status filter is bypassed — the ≥2-live flip is the cause)
     sdk.update_point(p2, status="live")
+    ops_d2, _ = _bfs_select_operators(sdk._get_proj(), [p1, p2], max_hops=1,
+                                      include_draft=True)
+    assert op_id in ops_d2, \
+        "operator with 2 live endpoints must activate (derived-liveness)"
+    # default-mode leg (the #780 status filter also applies): the draft-
+    # status operator stays excluded until IT is promoted
+    ops, _ = _bfs_select_operators(sdk._get_proj(), [p1, p2], max_hops=1)
+    assert op_id not in ops, "draft-status operator excluded in default mode"
     sdk.update_point(op_id, status="live")
     ops2, _ = _bfs_select_operators(sdk._get_proj(), [p1, p2], max_hops=1)
     assert op_id in ops2, \
@@ -231,8 +249,8 @@ def test_e2e17_read_surfaces_reachable_after_ingest(sdk):
     hits = sdk.recall_subgraph("A implies B", max_nodes=10)
     ids = {n.get("id") for n in hits.get("nodes", [])} if isinstance(
         hits, dict) else set()
-    assert pid in ids or len(ids) >= 1, \
-        f"recall must reach ingested content: {str(hits)[:200]}"
+    assert pid in ids, \
+        f"recall must reach the specific ingested content: {str(hits)[:200]}"
     # list_batch (A13 surface): the stamped set is queryable
     audit = sdk.list_batch(res["batch_id"])
     assert audit["counts"]["points"] == 2, audit
@@ -259,6 +277,78 @@ def test_track_b_e2e3_zombie_operator_resolution(sdk):
     sdk.promote_point(p2)
     assert _status(sdk, op_id) == "live", \
         "zombie operator must resolve once ALL endpoints are live"
+
+
+@TRACK_B
+@TRACK_B_SKIP
+def test_track_b_e2e7_1_draft_invisible_to_ep(sdk):
+    """E2E-7.1 (incl. folded E2E-2b): drafts are INVISIBLE to EP factor
+    extraction — a draft point D with a direct NAND edge D→Y into a live Y
+    does NOT move conf(Y): dream(dirty_only=True) leaves conf(Y)
+    bit-identical. REQUIRES #780's _live_only covering Batch-3 direct-edge
+    factors AND A9's selector traversal (both shipped — this is the proof
+    obligation for both interface notes)."""
+    # live X, Y + live IMPL operator X→Y
+    x = sdk.create_point("statement", "X.", status="live")["id"]
+    y = sdk.create_point("statement", "Y.", status="live")["id"]
+    sdk.create_operator("IMPL", x, [y], promote_source=False)
+    sdk.set_point_baseline(x, 8.0, 2.0)
+    sdk.set_point_baseline(y, 2.0, 8.0)
+    sdk._mark_dirty([x, y])
+    sdk.dream(dirty_only=True, max_hops=2)
+    conf_before = _query(sdk, "MATCH (n:Point {id:$id}) RETURN n.confidence",
+                         {"id": y})[0][0]
+    # gated bulk bundle adds draft D with a plain NAND connection D→Y
+    # (→ operator-less direct NAND edge; D→Y is the ONLY dirty path to Y)
+    res = sdk.ingest({"points": [
+        {"ref": "p1", "kind": "statement", "content": "D."}],
+        "entities": [], "sources": [],
+        "connections": [{"ref": "c1", "from": "p1", "to": y,
+                          "operator": "NAND"}]})
+    d = res["ids"]["points"][0]
+    sdk._mark_dirty([d])
+    result = sdk.dream(dirty_only=True, max_hops=2)
+    assert result["converged"] is True, result
+    conf_after = _query(sdk, "MATCH (n:Point {id:$id}) RETURN n.confidence",
+                        {"id": y})[0][0]
+    assert conf_after == conf_before, \
+        f"draft D must be invisible to EP: conf(Y) {conf_before} -> {conf_after}"
+
+
+@TRACK_B
+@TRACK_B_SKIP
+def test_track_b_e2e7_2_direct_edge_subgraph_converges(sdk):
+    """E2E-7.2 control: promote_point(D) + dream → conf(Y) DOES change AND
+    the dream response shows the direct-edge-only subgraph was ACTUALLY
+    computed — iterations > 0, affected_claims non-empty incl. D (NOT the
+    vacuous {iterations:0, converged:True, affected_claims:[]}). Proves A9's
+    traversal + #780's Batch-3 filter — not dead wiring — explain 7.1."""
+    x = sdk.create_point("statement", "X.", status="live")["id"]
+    y = sdk.create_point("statement", "Y.", status="live")["id"]
+    sdk.create_operator("IMPL", x, [y], promote_source=False)
+    sdk.set_point_baseline(x, 8.0, 2.0)
+    sdk.set_point_baseline(y, 2.0, 8.0)
+    sdk._mark_dirty([x, y])
+    sdk.dream(dirty_only=True, max_hops=2)
+    conf_before = _query(sdk, "MATCH (n:Point {id:$id}) RETURN n.confidence",
+                         {"id": y})[0][0]
+    res = sdk.ingest({"points": [
+        {"ref": "p1", "kind": "statement", "content": "D."}],
+        "entities": [], "sources": [],
+        "connections": [{"ref": "c1", "from": "p1", "to": y,
+                          "operator": "NAND"}]})
+    d = res["ids"]["points"][0]
+    sdk.promote_point(d)   # #785: draft → live
+    sdk._mark_dirty([d])
+    result = sdk.dream(dirty_only=True, max_hops=2)
+    assert result["converged"] is True, result
+    assert result["iterations"] > 0, \
+        f"direct-edge-only subgraph must be computed: {result}"
+    assert d in result["affected_claims"], result
+    conf_after = _query(sdk, "MATCH (n:Point {id:$id}) RETURN n.confidence",
+                        {"id": y})[0][0]
+    assert conf_after != conf_before, \
+        "promoted D's NAND must move conf(Y) (the 7.1 control)"
 
 
 @TRACK_B
