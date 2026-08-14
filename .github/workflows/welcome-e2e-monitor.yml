@@ -1,15 +1,21 @@
 # Live signup-funnel monitor (#801) — moved OFF the per-PR path (queue-health,
-# #1008): every per-PR run consumed a send from the shared 30/hr prod email
-# bucket, competing with real signups and flaking CI when the bucket ran dry.
-# Now runs on a schedule + after merges to main; failures auto-file an issue
-# (the monitor's signal) instead of blocking the merge queue. The static
-# welcome/waitlist tests still run per-PR in the python matrix (test (b)):
-# this job's UNIQUE value is the live-prod browser run.
+# #1008): the per-PR live runs competed with real traffic for shared prod rate
+# buckets and flaked CI on unrelated PRs. Now runs on a schedule + after merges
+# to main; failures auto-file an issue (the monitor's signal) instead of
+# blocking the merge queue. The static welcome/waitlist tests still run per-PR
+# in the python matrix (test (b)); this job's UNIQUE value is the live-prod
+# browser run.
+#
+# The smoke targets the #801 server-first signup path: the form POSTs to
+# /v1/signup/email (hosted API → GoTrue Admin, email_confirm=true) — NO
+# confirmation email is sent, so the smoke does NOT consume the SMTP email
+# bucket (the pre-#801 "1 email-send per run" rationale is stale; the no-429
+# signal is the signup endpoint's own rate buckets).
 name: welcome-e2e-monitor
 
 on:
   schedule:
-    - cron: '0 */2 * * *'   # every 2 hours — bucket-friendly (30/hr shared)
+    - cron: '0 */2 * * *'   # every 2 hours — smoke is cheap (no email send)
   push:
     branches: [main]
 
@@ -46,6 +52,8 @@ jobs:
           fi
       - name: Run waitlist edge-function behavioral harness (#373)
         run: node --experimental-strip-types tests/test_waitlist_subscribe.mjs
+      - name: Run tenant-provision CORS runtime harness (#1110)
+        run: node --experimental-strip-types tests/test_tenant_provision_cors.mjs
       - name: Auto-file issue on failure (monitor signal — never blocks merges)
         if: failure()
         run: |
@@ -53,4 +61,4 @@ jobs:
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${{ github.repository }}/issues" \
-            -d '{"title":"live-signup-monitor: welcome-e2e failed (run ${{ github.run_id }})","body":"Monitor failure — run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}. This is the #801 live signup funnel monitor (schedule + on-merge). Most likely the shared 30/hr email bucket is exhausted, or a real funnel regression. Investigate or re-run; it is NOT a PR regression gate.","labels":["bug"]}'
+            -d '{"title":"live-signup-monitor: welcome-e2e failed (run ${{ github.run_id }})","body":"Monitor failure — run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}. This is the #801 live signup funnel monitor (schedule + on-merge). The smoke POSTs to /v1/signup/email (email_confirm=true — no email send); a failure signals the signup endpoint returning non-200 (rate buckets, CAPTCHA, or a real funnel regression). Investigate or re-run; it is NOT a PR regression gate.","labels":["bug"]}'
