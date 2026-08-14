@@ -2,8 +2,9 @@
 #
 # The #1110 incident (browser signups blocked by missing CORS headers) was
 # discovered by a USER, not by any signal. The function now logs its
-# incident-class failures server-side (rejected origin, FASTAPI_URL
-# misconfig, provision_team failure, uncaught handler errors) — this
+# incident-class failures server-side (FASTAPI_URL misconfig, provision_team
+# failure, uncaught handler errors) — "rejected origin" deny-branch lines are
+# intentional diagnosis logging and are NOT treated as incidents (#1149). This
 # workflow is the consume side: hourly, it queries the project's unified
 # logs stream for tenant-provision error markers and opens a DEDUPLICATED
 # GitHub issue (with log evidence) when any appear, then fails visibly.
@@ -58,9 +59,20 @@ jobs:
           # fires on every unauthenticated 401 by design (fail-closed Path 2,
           # hook inert since #832). It becomes meaningful only if the hook is
           # re-enabled (#1120); re-add it to the marker list then.
+          #
+          # "rejected origin not in allowlist" is ALSO deliberately EXCLUDED
+          # (#1149): it is the CORS deny branch of the function's origin
+          # allowlist, which logs rejected origins server-side FOR DIAGNOSIS by
+          # design (see index.ts comment on the deny branches). Any browser /
+          # security scanner probe from a non-allowlisted origin (e.g. the
+          # canonical CORS-misconfig probe Origin: https://evil.example.com)
+          # emits one line — a single probe opened #1149 as a false-positive
+          # incident. The deny behavior is the security control working, and a
+          # legit allowlisted origin can never hit this branch. Real incident
+          # coverage (FASTAPI_URL / pepper misconfig, provision_team failure,
+          # uncaught handler errors) is retained by the four markers below.
           hits="$(printf '%s' "$out" | jq -r '.result[]? | select(.event_message != null) | .event_message' \
             | grep -F \
-              -e "rejected origin not in allowlist" \
               -e "FASTAPI_URL is not set" \
               -e "Provisioning misconfigured" \
               -e "provision_team failed" \
