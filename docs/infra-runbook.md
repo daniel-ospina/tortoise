@@ -193,16 +193,22 @@ against every team graph.
 4. `tortoise_list_pointkinds` → confirm the expected kinds exist in the team graph.
 
 **Procedure B — SDK script (repeatable, any target):**
+> **Prerequisite:** `graph-scripts/audit_beta_gate.py` imports the `tortoise` SDK
+> (`from tortoise.sdk import TortoiseSDK`). Install it once from the repo root
+> (`pip install -e .`) — or, without installing, point `PYTHONPATH` at the repo
+> root (the parent of `graph-scripts/`): `PYTHONPATH=/path/to/tortoise python3
+> graph-scripts/audit_beta_gate.py`. Run from the repo root either way.
+
 ```bash
 # Hosted/selfhost FalkorDB (from fly ssh console, or with a keyless URI)
 TORTOISE_DB_URI='rediss://...' python3 graph-scripts/audit_beta_gate.py --namespace team_<id>
 
 # Local embedded snapshot (never touch a live single-writer DB, #942)
 cp ~/.tortoise/tortoise.db /tmp/gate-snapshot.db
-TORTOISE_DB_PATH=/tmp/gate-snapshot.db python3 graph-scripts/audit_beta_gate.py
+PYTHONPATH=/path/to/tortoise TORTOISE_DB_PATH=/tmp/gate-snapshot.db python3 graph-scripts/audit_beta_gate.py
 
 # Machine-readable (CI gate): exit 0 = PASS, 1 = P1 findings, 2 = error
-TORTOISE_DB_PATH=/tmp/gate-snapshot.db python3 graph-scripts/audit_beta_gate.py --json
+PYTHONPATH=/path/to/tortoise TORTOISE_DB_PATH=/tmp/gate-snapshot.db python3 graph-scripts/audit_beta_gate.py --json
 ```
 `graph-scripts/audit_beta_gate.py` runs the full surface: baseline counts,
 `summarize_structure`, `check_structure`, `tortoise/audit.py` `audit_graph`,
@@ -238,7 +244,9 @@ and the five beta-gate risk queries below.
   cohort if present; `superseded_active_edges` is medium).
 
 **Threshold:** zero unresolved P1 at cohort start (risk surfaces 1–3 must be
-empty; chain/audit P1s fixed or filed with owners). P2s are debt — file,
+empty; chain/audit P1s fixed or filed with owners). `impl_instead_of_nand` is
+keyword-based and excluded from the gate script's P1 hard-fail set — the script
+reports it as `audit_advisory` (debt, not a cohort blocker). P2s are debt — file,
 don't block. `audit_beta_gate.py` exits 0 = PASS, 1 = P1 findings, 2 =
 infrastructure error (DB unreachable, busy embedded store) — CI consumers
 should treat 1 and 2 distinctly.

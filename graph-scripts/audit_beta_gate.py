@@ -101,7 +101,10 @@ def run_check(sdk, proj) -> dict:
     #     operators. Skill (how-to-use-tortoise): "Batch-connecting
     #     mitigations → EP weights cascade-nuked." Connect one at a time.
     #     Matches BOTH edge shapes: legacy `:mitigates` (m→op) and the
-    #     current `:mitigated_by` (op→m, sdk.mitigate_operator).
+    #     current `:mitigated_by` (op→m, sdk.mitigate_operator). Targets are
+    #     deduped ACROSS shapes (UNWIND both lists → collect(DISTINCT)) so a
+    #     double-wired operator (both labels) counts once, not twice (#1200
+    #     review: false batch-mitigation P1).
     out["batch_mitigations"] = [
         {"id": r[0], "content": (r[1] or "")[:120], "targets": r[2]}
         for r in _q(
@@ -109,23 +112,27 @@ def run_check(sdk, proj) -> dict:
             "MATCH (m:Point) "
             "OPTIONAL MATCH (m)-[:mitigates]->(t1:Point) "
             "OPTIONAL MATCH (t2:Point)-[:mitigated_by]->(m) "
-            "WITH m, collect(DISTINCT t1) + collect(DISTINCT t2) AS tgts "
+            "WITH m, collect(DISTINCT t1) AS legacy_tgts, collect(DISTINCT t2) AS cur_tgts "
+            "UNWIND legacy_tgts + cur_tgts AS t "
+            "WITH m, collect(DISTINCT t) AS tgts "
             "WHERE size(tgts) > 1 "
             "RETURN m.id, m.content, size(tgts) ORDER BY size(tgts) DESC LIMIT 100",
         )
     ]
 
     # 5c. Unmitigated low-confidence operators — influence unchecked.
-    #     Matches both mitigation edge shapes (legacy :mitigates, current
-    #     :mitigated_by).
+    #     Mitigation attaches to the OPERATOR, not the edge target:
+    #     legacy (m)-[:mitigates]->(op) and current (op)-[:mitigated_by]->(m)
+    #     (sdk.mitigate_operator). Check op for both shapes (#1200 review:
+    #     previously checked tgt, so every mitigated operator looked bare).
     out["unmitigated_low_conf"] = [
         {"id": r[0], "confidence": r[1], "target": (r[2] or "")[:120]}
         for r in _q(
             proj,
             "MATCH (op:Point {is_operator:true})-[:IMPL|NAND]->(tgt:Point) "
             "WHERE op.confidence <= 0.35 "
-            "OPTIONAL MATCH (tgt)<-[mit_legacy:mitigates]-(:Point) "
-            "OPTIONAL MATCH (tgt)-[mit_cur:mitigated_by]->(:Point) "
+            "OPTIONAL MATCH (op)<-[mit_legacy:mitigates]-(:Point) "
+            "OPTIONAL MATCH (op)-[mit_cur:mitigated_by]->(:Point) "
             "WITH op, tgt, mit_legacy, mit_cur "
             "WHERE mit_legacy IS NULL AND mit_cur IS NULL "
             "RETURN DISTINCT op.id, op.confidence, tgt.content LIMIT 100",
@@ -159,12 +166,21 @@ def run_check(sdk, proj) -> dict:
 
     # ── gate verdict ──────────────────────────────────────────────────
     p1 = out["check_structure"]  # chain violations are P1-relevant
-    p1_audit = [i for i in result.issues if i.severity == "high"]
+    # impl_instead_of_nand is keyword-based (content "not"/"no "/"fail"…) and
+    # false-positives on ingested doc text — advisory, NOT a cohort-blocking
+    # P1 (#1200 review). Everything else at severity=high stays hard-FAIL.
+    ADVISORY_AUDIT_TYPES = {"impl_instead_of_nand"}
+    advisory_audit = [i for i in result.issues if i.issue_type in ADVISORY_AUDIT_TYPES]
+    p1_audit = [
+        i for i in result.issues
+        if i.severity == "high" and i.issue_type not in ADVISORY_AUDIT_TYPES
+    ]
     p1_risk = out["orphan_nands"] or out["batch_mitigations"] or out["nand_to_dead"]
     out["gate"] = {
         "PASS": not (p1 or p1_audit or p1_risk),
         "chain_violations": len(p1),
         "audit_high": len(p1_audit),
+        "audit_advisory": len(advisory_audit),
         "risk_surface_hits": {
             "orphan_nands": len(out["orphan_nands"]),
             "batch_mitigations": len(out["batch_mitigations"]),
@@ -220,7 +236,8 @@ def print_report(out: dict, db_target: str) -> None:
     verdict = "PASS" if g["PASS"] else "FAIL"
     print(
         f"\nGATE: {verdict} — chain={g['chain_violations']}, "
-        f"audit_high={g['audit_high']}, risk_surfaces={g['risk_surface_hits']}"
+        f"audit_high={g['audit_high']}, audit_advisory={g['audit_advisory']}, "
+        f"risk_surfaces={g['risk_surface_hits']}"
     )
 
 
