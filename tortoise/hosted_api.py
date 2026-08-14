@@ -3495,6 +3495,31 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: "CommitPayload", plan):
         params={"eid": event_id, "did": doc_id},
     )
 
+    # ── 3b. Extracted occurrences — Event NODES (issue #1013: never points
+    # with pointKind event). Content-addressed ev_<sha> ids; MERGE-safe. ──
+    for ev in (payload.events or []):
+        proj.g.query(
+            "MERGE (e:Event {eventId:$eid}) "
+            "SET e.id=$eid, e.eventKind=$ek, e.name=$name, e.content=$content, "
+            "    e.confidence=$conf, e.source_ref=$sref, e.is_episodic=true, "
+            "    e.capturedAt=coalesce(e.capturedAt, $cap), e.updatedAt=$now",
+            params={"eid": ev.id, "ek": ev.eventKind, "name": ev.content[:80],
+                    "content": ev.content, "conf": ev.confidence,
+                    "sref": ev.source_ref, "cap": ev.captured_at or now,
+                    "now": now},
+        )
+        proj.g.query(
+            "MATCH (e:Event {eventId:$eid}), (d:Document {id:$did}) "
+            "MERGE (e)-[:produces]->(d)",
+            params={"eid": ev.id, "did": doc_id},
+        )
+        for name in ev.about_entities:
+            proj.g.query(
+                "MATCH (e:Event {eventId:$eid}), (o:Object {name:$name}) "
+                "MERGE (e)-[:aboutObject]->(o)",
+                params={"eid": ev.id, "name": name},
+            )
+
     # ── 4. Source bridge: the session Source (basename url — privacy, W-7)
     # + external artifacts from sources[]; the session Source references the
     # Document AND the external artifacts (DE2E-5 chain). ──
