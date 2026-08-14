@@ -340,3 +340,37 @@ def test_ep_require_calibration_env_default(sdk, monkeypatch):
     # Explicit False is still the documented escape hatch on dream
     result = sdk.dream(require_calibration=False)
     assert result["converged"] is True
+
+
+def test_compute_confidence_explicit_optout_skips_inner_auto_dream(
+        sdk, monkeypatch):
+    """#1314: an explicit require_calibration=False must propagate to the
+    internal lazy-consistency auto-dreams (sdk.py:6494/6523).
+
+    Pre-fix regression: #1157/#1210 gated the auto-dreams with the
+    fail-closed default (env=1) but did NOT propagate the caller's explicit
+    False — so compute_confidence(require_calibration=False) with dirty
+    roots + uncalibrated live evidence raised CalibrationError("dream: ...")
+    from the inner dream despite the opt-out (test_ep_sources.py broke).
+
+    Post-fix: the explicit opt-out is honored end-to-end; the gate still
+    fires when the caller does NOT opt out (fail-closed preserved — covered
+    by test_require_calibration_raises / test_ep_require_calibration_env
+    _default).
+    """
+    monkeypatch.setenv("TORTOISE_EP_REQUIRE_CALIBRATION", "1")  # fail-closed
+    # Uncalibrated LIVE evidence (no baseline) + an operator → dirty roots.
+    p1 = sdk.create_point("statement", "Uncalibrated live claim",
+                          status="live")
+    p2 = sdk.create_point("statement", "Related live claim", status="live")
+    sdk.create_operator("IMPL", p1["id"], [p2["id"]])
+
+    # No-arg path (sdk.py:6494 auto-extract dream): explicit opt-out must
+    # not raise, and must return a converged result.
+    result = sdk.compute_confidence(require_calibration=False)
+    assert result["converged"] is True
+
+    # Anchors path (sdk.py:6523 bounded-pass dream with dirty roots): same.
+    result2 = sdk.compute_confidence(anchors=[p1["id"]],
+                                     require_calibration=False)
+    assert result2["converged"] is True
