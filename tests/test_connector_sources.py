@@ -293,6 +293,52 @@ class TestChokePointMaterialization:
             for u in (PERMALINK_A, PERMALINK_B):
                 assert _count(proj, "Source", url=u) == 1
 
+    def test_real_url_source_survives_late_fallback(self):
+        """conf-60 (reverse direction): a transient permalink failure —
+        chat_getPermalink returns None on ANY exception (rate limits,
+        outages) — must NOT displace an already-materialized real-URL Source.
+        Real URL first, fallback key arrives later → the real-URL Source, its
+        accumulated properties, and its references edge all SURVIVE (no
+        provenance churn / oscillation). And a subsequent successful poll
+        still converges on the single real URL."""
+        PERMALINK = "https://ws.slack.com/archives/C01/p1690000000.123456"
+        with fresh_sdk() as sdk:
+            proj = sdk._get_proj()
+            # First poll: permalink resolves → real-URL Source.
+            proj.apply(slack_event())
+            assert _count(proj, "Source") == 1
+            # Simulate accumulated Source properties (credibilityTier / tier).
+            proj.g.query(
+                "MATCH (s:Source {url: $u}) SET s.credibilityTier = 'T3'",
+                params={"u": PERMALINK},
+            )
+            # Later poll: rate-limited permalink → fallback key arrives late.
+            proj.apply(slack_event(sourceUrl=None))
+            assert _count(proj, "Source") == 1  # fallback NOT materialized
+            rows = proj.g.query("MATCH (s:Source) RETURN s.url").result_set
+            assert rows[0][0] == PERMALINK  # real URL Source survived
+            assert _edge_count(proj, "Source", "url", PERMALINK,
+                               "references", "Event", "eventId",
+                               "slack-msg-C01-1690000000-123456") == 1
+            # no fallback edge appeared (single provenance entry)
+            assert _edge_count(proj, "Source", "url", "slack:C01",
+                               "references", "Event", "eventId",
+                               "slack-msg-C01-1690000000-123456") == 0
+            # accumulated properties preserved on the surviving real Source
+            rows = proj.g.query(
+                "MATCH (s:Source {url: $u}) RETURN s.credibilityTier",
+                params={"u": PERMALINK},
+            ).result_set
+            assert rows[0][0] == "T3"
+            # Permalink recovers → still exactly one real-URL Source (no churn).
+            proj.apply(slack_event())
+            assert _count(proj, "Source") == 1
+            rows = proj.g.query("MATCH (s:Source) RETURN s.url").result_set
+            assert rows[0][0] == PERMALINK
+            assert _edge_count(proj, "Source", "url", "slack:C01",
+                               "references", "Event", "eventId",
+                               "slack-msg-C01-1690000000-123456") == 0
+
     def test_event_without_source_metadata_creates_no_source(self):
         with fresh_sdk() as sdk:
             proj = sdk._get_proj()

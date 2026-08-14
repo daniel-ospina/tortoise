@@ -23,6 +23,15 @@ _CONNECTOR_SOURCE_KINDS: frozenset = frozenset({
 })
 
 
+def _is_real_source_url(url: str) -> bool:
+    """#388 conf-60: a REAL web URL (http(s) permalink / resource) vs a
+    container-level fallback key (`slack:{channel}`, `linear:{team_key}`,
+    bare `source` string). The stale-sweep direction guard keys off this:
+    fallback keys are never authoritative over a real URL (see
+    ``_materialize_connector_source``)."""
+    return url.startswith(("http://", "https://"))
+
+
 def _build_search_text(title, summary=None, topics=None) -> str:
     """#125: compute the Document FTS search surface.
 
@@ -639,6 +648,25 @@ class _EntityHandlers:
         url = source_url or inner.get("source", "")
         if not url:
             return
+        # #388 conf-60 direction guard: NEVER let a fallback key displace a
+        # real URL. chat_getPermalink returns None on ANY exception (rate
+        # limits, transient outages), so a failed permalink poll emits the
+        # container-level fallback (`slack:{channel}`) for an event that
+        # already carries a real-permalink Source. Without this guard the
+        # sweep below would DELETE the real-URL Source (and its accumulated
+        # credibilityTier / sourcePath / title) + references edge — churning
+        # provenance, and the next successful poll re-creating it →
+        # oscillation. When the incoming url is a fallback key and the event
+        # already has a real-URL Source, skip materialization entirely (the
+        # fallback adds nothing; the real URL stays authoritative).
+        if not _is_real_source_url(url):
+            existing = self.g.query(
+                "MATCH (s:Source)-[:references]->(e:Event {eventId: $eid}) "
+                "RETURN s.url",
+                params={"eid": eid},
+            ).result_set
+            if any(_is_real_source_url(row[0]) for row in existing):
+                return
         self.g.query(
             "MERGE (s:Source {url: $url}) "
             "ON CREATE SET s.sourceKind = $sk, s.title = $url, "
@@ -652,7 +680,7 @@ class _EntityHandlers:
             "MERGE (s)-[:references]->(e)",
             params={"url": url, "eid": eid},
         )
-        # #388 conf-62: a fallback-key materialization (`slack:{channel}` /
+        # #388 conf-62/conf-60: a fallback-key materialization (`slack:{channel}` /
         # `linear:{team_key}` / bare `source`) can predate the real URL (a
         # permalink becomes available later, or a later poll resolves the
         # container key). The new materialization wires a SECOND Source to the
@@ -662,7 +690,10 @@ class _EntityHandlers:
         # edge was its ONLY relationship (deg=1 → orphaned). Shared Sources
         # (still referencing other events / extractedFrom by Points) keep the
         # node — only the superseded edge goes. EP-neutral: connector kinds
-        # are neutral on both sides of the swap.
+        # are neutral on both sides of the swap. Direction-guarded by conf-60
+        # above: this sweep runs only when the incoming url is a real URL (or
+        # no real-URL Source references the event), so a fallback key can
+        # never supersede a real permalink Source.
         self.g.query(
             "MATCH (old:Source)-[r:references]->(e:Event {eventId: $eid}) "
             "WHERE old.url <> $url "
