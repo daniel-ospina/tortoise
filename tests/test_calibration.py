@@ -60,18 +60,26 @@ def test_calibration_pipeline_e2e(sdk):
 # ── require_calibration gate ────────────────────────────────────
 
 def test_require_calibration_raises(sdk):
-    """require_calibration=True on uncalibrated graph raises CalibrationError."""
-    sdk.create_point("statement", "Uncalibrated claim")
-    sdk.create_point("statement", "Another uncalibrated")
+    """require_calibration=True on uncalibrated LIVE graph raises CalibrationError.
+
+    #780/PR #1212: draft points are excluded from EP (factor extraction +
+    propagation), so the gate only guards live evidence — drafts must be
+    promoted (create_operator / update_point draft→live) before the
+    fail-closed gate applies to them.
+    """
+    sdk.create_point("statement", "Uncalibrated claim", status="live")
+    sdk.create_point("statement", "Another uncalibrated", status="live")
     
     with pytest.raises(CalibrationError, match="uncalibrated"):
         sdk.compute_confidence(require_calibration=True)
 
 
 def test_require_calibration_partial(sdk):
-    """One calibrated, one not → still raises."""
+    """One calibrated, one live-uncalibrated → still raises."""
     p1 = sdk.create_point("statement", "Calibrated", credibility="gold")
-    sdk.create_point("statement", "Not calibrated")
+    # Live uncalibrated point — the draft default would be excluded from the
+    # gate (#780/PR #1212), so the fail-closed assertion needs explicit live.
+    sdk.create_point("statement", "Not calibrated", status="live")
     
     sdk.create_operator("IMPL", p1["id"], [sdk.create_point("statement", "target")["id"]])
     
@@ -86,8 +94,8 @@ def test_require_calibration_default(sdk):
     must raise CalibrationError under the default instead of silently
     running EP on topology alone; a calibrated graph succeeds.
     """
-    # Uncalibrated graph → fail-closed under the flipped default.
-    sdk.create_point("statement", "Uncalibrated claim")
+    # Uncalibrated LIVE graph → fail-closed under the flipped default.
+    sdk.create_point("statement", "Uncalibrated claim", status="live")
     with pytest.raises(CalibrationError, match="calibrate_summary"):
         sdk.compute_confidence()  # default True
 
@@ -102,6 +110,33 @@ def test_require_calibration_default(sdk):
         s2.create_operator("IMPL", p1["id"], [p2["id"]])
         result = s2.compute_confidence()  # default True, graph is calibrated
         assert result["converged"] is True
+    finally:
+        s2.close()
+
+
+def test_require_calibration_ignores_drafts(sdk):
+    """Draft evidence points do NOT trip the fail-closed gate (#780, PR #1212).
+
+    create_point defaults to status='draft', and drafts are excluded from
+    factor extraction + EP propagation (include_draft=False). A graph whose
+    only uncalibrated points are drafts must not demand calibration of
+    points EP will never use — the gate guards live evidence only.
+    """
+    sdk.create_point("statement", "Draft staging claim")  # defaults to draft
+    sdk.create_point("statement", "Another draft", status="draft")
+    # Draft-only graph → gate passes (nothing live to calibrate); EP finds
+    # no live factors and returns a no-op result instead of raising.
+    result = sdk.compute_confidence(require_calibration=True)
+    assert result.get("diagnostic") == "no_factors"
+
+    # Mixed: one live uncalibrated point still fails closed.
+    import tempfile
+    s2 = TortoiseSDK(os.path.join(tempfile.mkdtemp(prefix="tt_calib_"), "test.db"))
+    try:
+        s2.create_point("statement", "Draft staging claim")
+        s2.create_point("statement", "Live uncalibrated", status="live")
+        with pytest.raises(CalibrationError, match="uncalibrated"):
+            s2.compute_confidence(require_calibration=True)
     finally:
         s2.close()
 

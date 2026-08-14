@@ -2871,6 +2871,12 @@ def _cmd_decide(args) -> int:
                       "per-point guidance (set_point_baseline(), credibility on "
                       "recreate, or set_source_tier() for sourced points), or "
                       "pass require_calibration=False to explicitly opt out.")
+                # PR #1212: fail-closed — the calibration failure is NOT a
+                # successful run. Skip the "Done." summary and exit non-zero
+                # (main() returns this value → SystemExit(main())) so scripts
+                # and CI can detect the uncalibrated state instead of treating
+                # the empty comparison as success.
+                return 1
             else:
                 print(f"\n⚠ compute_confidence: {e}")
 

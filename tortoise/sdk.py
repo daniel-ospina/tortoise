@@ -4693,10 +4693,12 @@ class TortoiseSDK:
         for pid in point_ids:
             p = self.get_point(pid)
             before[pid] = p.get("confidence", 0.5) if p else 0.5
-        # #344: conscious opt-out from the fail-closed gate — this internal EP
-        # run is scoped to the approval subgraph whose calibration IS the
-        # Beta(10,1) evidence prior on the approval Point (never a silent
-        # swallow; the gate stays on for every explicit compute_confidence()).
+        # #344: conscious opt-out from the fail-closed gate — the gate is
+        # graph-wide (no anchors/factors are passed, so it would audit every
+        # evidence point); this run's epistemic content is fully carried by
+        # the Beta(10,1) evidence prior on the decision Point; the approval
+        # path deliberately opts out (never a silent swallow; the gate stays
+        # on for every explicit compute_confidence()).
         self.compute_confidence(evidence={decision_id: (10, 1)},
                                 require_calibration=False)
         deltas = {}
@@ -5442,7 +5444,13 @@ class TortoiseSDK:
             evidence_kinds = {"statement", "observation", "hypothesis"}
             uncalibrated = [
                 s for s in summary
-                if not s["calibrated"] and s.get("pointKind") in evidence_kinds
+                if not s["calibrated"]
+                and s.get("pointKind") in evidence_kinds
+                # #780: draft points never feed EP (factor extraction and
+                # propagation exclude them by default) — demanding calibration
+                # of a draft is noise; the gate only guards live evidence
+                # (PR #1212). Status NULL = live, mirroring _live_only.
+                and s.get("status") != "draft"
             ]
             if uncalibrated:
                 ids = [s["id"] for s in uncalibrated[:10]]
@@ -5775,14 +5783,16 @@ class TortoiseSDK:
             "OPTIONAL MATCH (n)-[:extractedFrom]->(s:Source) "
             "RETURN n.id, n.content, n.pointKind, "
             "coalesce(n.baseline_set, false) AS calibrated, "
+            "n.status, "
             "s.credibilityTier, s.sourceKind, s.url AS src_url",
             params=params,
         ).result_set
         
         results = []
         for row in rows:
-            pid, content, pk, calibrated, ctier, skind, src_url = row
-            item = {"id": pid, "content": content, "pointKind": pk, "calibrated": calibrated}
+            pid, content, pk, calibrated, status, ctier, skind, src_url = row
+            item = {"id": pid, "content": content, "pointKind": pk,
+                    "calibrated": calibrated, "status": status}
             # Effective tier: explicit credibilityTier > sourceKind tier-form >
             # registry default (issue #398 Task 6 — legacy-inherited advisory).
             eff_tier = resolve_tier(ctier, skind)
