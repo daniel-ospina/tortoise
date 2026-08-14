@@ -196,8 +196,10 @@ def test_cdn_failure_guards_present() -> None:
     createClient, (2) CDN <script> onerror belt, (3) watchdog block that
     surfaces "temporarily unavailable" if the client never arrives."""
     for name, html in (("signup", SIGNUP), ("signin", SIGNIN)):
-        assert 'typeof window.supabase !== "undefined"' in html, \
-            f"{name}.html missing the createClient typeof guard"
+        # #1225: the CDN guard moved to the null-safe shared factory
+        # (assets/supabase-session.js) — same fail-closed intent, new surface.
+        assert 'typeof window.createTortoiseSupabaseClient === "function"' in html, \
+            f"{name}.html missing the null-safe client factory guard"
         assert 'onerror="(function(){var e=document.getElementById(\'error\')' in html, \
             f"{name}.html missing the CDN script onerror belt"
         assert "temporarily unavailable" in html, \

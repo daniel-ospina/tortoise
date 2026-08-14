@@ -20,6 +20,7 @@ surfaces:
   - test_client_ip_middleware.py
   - test_commit_endpoint.py
   - test_commit_schema.py
+  - test_cross_subdomain_cookie_sync.py
   - test_dashboard_login.py
   - test_direct_edge.py
   - test_dr_endpoints.py
@@ -39,6 +40,7 @@ surfaces:
   - test_mcp_server_auth_modes.py
   - test_mcp_telemetry.py
   - test_metering.py
+  - test_oauth_mcp.py
   - test_pricing_tiers.py
   - test_provisioning_edge_function.py
   - test_quota.py
@@ -89,6 +91,7 @@ surfaces:
   - test_deployment.py
   - test_doctor.py
   - test_domain_loader_adapter.py
+  - test_domain_validators.py
   - test_e2e_journey.py
   - test_embedded_concurrency.py
   - test_embedded_lifecycle.py
@@ -107,6 +110,7 @@ surfaces:
   - test_file_indexer.py
   - test_flip_gate.py
   - test_gate_b_tooling.py
+  - test_graph_diagnostics.py
   - test_guard.py
   - test_hard_reject.py
   - test_hnsw_vector_index.py
@@ -127,6 +131,7 @@ surfaces:
   - test_ingest_validation.py
   - test_joint_index_ingest.py
   - test_integration_search.py
+  - test_issue_insight.py
   - test_joint_index_ingest.py
   - test_judge_harness.py
   - test_linear_connector.py
@@ -195,6 +200,7 @@ surfaces:
   - test_ep_directed_nand.py
   - test_ep_directional.py
   - test_ep_draft_filter.py
+  - test_ep_local_395.py
   - test_ep_nary_falsification.py
   - test_ep_operatorless.py
   - test_ep_projections.py
