@@ -259,15 +259,20 @@ class TestModeIsomorphism:
         for bid in (b1, b2):
             assert isinstance(bid, str) and len(bid) == 26
             assert _CROCKFORD_ULID_RE.match(bid), bid
-        # every bundle-created Point carries it — plain points + the
-        # operator Point (stamped POST-WRITE, §4.2)
+        # every bundle-created Point carries it — the 2 plain points (the
+        # bundle's plain IMPL routes to an OPERATOR-LESS DIRECT EDGE since
+        # A3 #1053 — the edge carries the batch_id on the EDGE, §5.3)
         for g, r in ((g1, r_bulk), (g2, r_gran)):
             stamped = _count(
                 g,
                 "MATCH (n:Point {batch_id:$b}) RETURN count(n)",
                 {"b": b1},
             )
-            assert stamped == 3, "2 plain points + 1 operator point stamped"
+            assert stamped == 2, "2 plain points stamped"
+            assert _count(
+                g, "MATCH ()-[r:IMPL|NAND {batch_id:$b}]->() RETURN count(r)",
+                {"b": b1},
+            ) == 1, "the plain IMPL direct edge carries the batch_id"
             assert _count(
                 g, "MATCH (n:Point) WHERE n.batch_id IS NULL RETURN count(n)"
             ) == 1, "only the pre-seeded live anchor L is unstamped"
@@ -471,7 +476,10 @@ class TestGranularResultsKeyForKey:
                 {"ref": "p2", "kind": "claim", "content": "B."},
             ],
             "connections": [
-                {"ref": "c1", "from": "p1", "to": "p2", "operator": "IMPL"},
+                # mitigation-bearing → the OPERATOR route (post-A3 #1053 a
+                # PLAIN IMPL would route to a direct edge)
+                {"ref": "c1", "from": "p1", "to": "p2", "operator": "IMPL",
+                 "mitigation": {"reason": "x", "strength": 0.6}},
             ],
         }
         res = self._mcp_ingest(bundle, granularity="granular",
@@ -498,7 +506,8 @@ class TestGranularResultsKeyForKey:
                 {"ref": "p2", "kind": "claim", "content": "B."},
             ],
             "connections": [
-                {"ref": "c1", "from": "p1", "to": "p2", "operator": "IMPL"},
+                {"ref": "c1", "from": "p1", "to": "p2", "operator": "IMPL",
+                 "mitigation": {"reason": "x", "strength": 0.6}},
             ],
         }
         # re-submission against the SAME graph → deduped hit
@@ -551,12 +560,11 @@ class TestGranularResultsKeyForKey:
         assert res["created"]["connections"] == 2
 
     def test_direct_edge_route_shipped_shape(self):
-        # SHIPPED-SHAPE DELTA (plan-vs-code): the §5.5 route matrix pins the
-        # DIRECT-EDGE conn_result as {"direct_edge", "from", "to",
-        # "deduped"}, but (a) the ingest-level direct-edge routing is
-        # A3-owned (#1053 OPEN — shipped ingest routes plain IMPL/NAND
-        # operator-keyed connections through create_operator, the operator
-        # route), and (b) the SHIPPED create_direct_edge writer returns
+        # SHIPPED-SHAPE: the §5.5 route matrix pins the DIRECT-EDGE
+        # conn_result as {"direct_edge", "from", "to", "deduped"};
+        # post-A3 #1053 the ingest routing sends plain IMPL/NAND operator-
+        # keyed connections through create_direct_edge (the direct-edge
+        # route) — the SHIPPED create_direct_edge writer returns
         # {"direct_edge", "from", "to", "created", "deduped"} — the plan's
         # 4-key pin omits the shipped `created` key. Asserted here against
         # the SHIPPED writer shape; the ingest-level conn_result lands with
@@ -737,11 +745,9 @@ class TestEmptyBundle:
                     "connections": [], "refs": {},
                 }
                 assert res["nudges"] == []
-                # SHIPPED-SHAPE delta (P2, review gate): plan assertion 7 pins
-                # empty `warnings`; the shipped ingest response carries NO
-                # `warnings` key at all (the warnings contract lands with A3 /
-                # E2E-6) — pin the shipped absence explicitly.
-                assert "warnings" not in res
+                # A3 #1053 shipped the warnings contract (E2E-6.2): the empty
+                # bundle carries an EMPTY warnings list
+                assert res["warnings"] == [], res["warnings"]
                 if granularity == "granular":
                     assert res["results"] == []
                 else:

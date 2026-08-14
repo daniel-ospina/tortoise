@@ -4168,9 +4168,11 @@ class TortoiseSDK:
           (live by projection — the #780 asymmetry: gated writes explicit
           draft on the operator, auto writes none).
 
-        Returns {granularity, created: {points, entities, sources, connections},
-        deduped: {...}, ids: {points, entities, sources, connections, refs},
-        nudges: [...]} (+ results for granularity='granular').
+        Returns {granularity, batch_id, created: {points, entities, sources,
+        connections}, deduped: {...}, ids: {points, entities, sources,
+        connections, refs}, nudges: [...], warnings: [...]} (+ results for
+        granularity='granular'). The key set is the canonical enumeration
+        (INGEST_CONTRACT §2.2 — a docs/behavior conformance test pins it).
         """
         if granularity not in INGEST_GRANULARITIES:
             raise ValueError(
