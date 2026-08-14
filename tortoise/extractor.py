@@ -972,10 +972,31 @@ class LLMExtractor:
             # #49 Phase 2: context is deprecated — use extractedFrom for provenance
             ids.append(api.add_point(content, prov, extractedFrom=source_id))
 
-        for r in self.relations.run(contents, f"conversation:{source_id}", multi_source=multi_source):
+        # #1194 flood bound: the relation model can emit up to O(n²) relations
+        # (the prompt says "only relations the speaker asserted", but nothing
+        # enforces it — MockModel's cue-word sparsity hides the flood in tests).
+        # Each relation writes an IMPL/NAND operator node counted by the points
+        # quota, so a permissive model could write more operator nodes than the
+        # session pre-write estimate (2 × sentences, #822) counted — bypassing
+        # the 402 flood gate the estimate feeds. Dedupe and clamp operators
+        # ≤ points (len(ids)) so the estimate's ×2 is a TRUE ceiling on node
+        # writes.
+        rels = self.relations.run(contents, f"conversation:{source_id}", multi_source=multi_source)
+        seen: set[tuple] = set()
+        bounded: list[dict] = []
+        for r in rels:
             s, d = r.get("src"), r.get("dst")
             if s is None or d is None or not (0 <= s < len(ids)) or not (0 <= d < len(ids)):
                 continue
+            key = (r.get("op_type"), s, d)
+            if key in seen:
+                continue
+            seen.add(key)
+            bounded.append(r)
+            if len(bounded) >= len(ids):
+                break
+        for r in bounded:
+            s, d = r.get("src"), r.get("dst")
             # ground the operator in the utterance that asserted the relation (dst)
             speaker, text, span = segs[d]
             prov = provenance(source_id, span, quote=text, speaker=speaker,

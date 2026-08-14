@@ -3106,7 +3106,8 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     #   est = 2 × Σ_turns min(sentences, MAX_EXTRACTIONS_PER_TURN)
     # (the ×2 covers the relations stage's operator nodes the old regex loop
     # never created; sentence count is the M2 point ceiling — one point per
-    # utterance).
+    # utterance; operators are clamped ≤ points in LLMExtractor.run, #1194,
+    # so the ×2 is a true ceiling).
     est = _session_llm_extraction_estimate(body.conversation)
     from tortoise.quota import count_team_usage
     sdk_team = _make_sdk(namespace=team["team_id"])

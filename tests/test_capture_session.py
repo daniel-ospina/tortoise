@@ -5,6 +5,7 @@ loop was removed as a product path and no-key fails closed. These tests run
 against the offline MockModel extractor (TORTOISE_SESSION_LLM_MOCK=1 seam) so
 no provider key or network is needed.
 """
+import json
 import logging
 import re
 
@@ -408,3 +409,74 @@ def test_create_event_wires_about_object_by_name(sdk):
         params={"eid": ev["eventId"]},
     ).result_set
     assert conn == [["license-research", "skill"]], f"name-resolved aboutObject miss: {conn}"
+
+
+# ── #1194: relation-stage flood cap — the pre-write estimate stays a true ceiling
+
+
+class _PermissiveRelationModel:
+    """Relation model returning EVERY ordered pair (i→j) — the O(n²) flood a
+    permissive real model can emit. MockModel's cue-word sparsity hides this in
+    the other tests; a real model has no prompt-enforced cap (extractor.py
+    _RelationStage.run returns the raw relations list)."""
+
+    id = "perm-relations"
+
+    def complete(self, *, system, user):
+        pts = json.loads(user)["points"]
+        n = len(pts)
+        return json.dumps({"relations": [
+            {"op_type": "IMPL", "src": i, "dst": j}
+            for i in range(n) for j in range(n) if i != j
+        ]})
+
+
+class _CountingAPI:
+    """Duck-typed EventAPI recording point/operator counts (extractor only
+    calls add_point/add_operator in transcript mode)."""
+
+    def __init__(self):
+        self.points = 0
+        self.operators = 0
+        self.ids = []
+
+    def add_point(self, content, provenance, **fields):
+        self.points += 1
+        self.ids.append(f"p{self.points}")
+        return self.ids[-1]
+
+    def add_operator(self, op_type, args, provenance):
+        self.operators += 1
+
+
+def test_session_relation_flood_capped_estimate_is_true_ceiling():
+    """#1194: a permissive relation model emitting O(n²) relations must not
+    write more operator nodes than the pre-write estimate counted. The
+    extractor dedupes + clamps operators ≤ points, so actual node writes
+    (points + operators) stay ≤ estimate (2 × sentences) — the 402 flood
+    gate the estimate feeds remains a true upper bound on node writes.
+
+    10 points → the permissive model emits 90 relations; without the cap that
+    is 90 IMPL operator nodes (non-episodic Points counted by the quota) vs
+    an estimate of 2 × 10 = 20 — a silent gate bypass. With the cap, operators
+    are held at ≤ points and the estimate holds."""
+    from tortoise.extractor import LLMExtractor, MockModel
+    from tortoise.sdk import _session_llm_transcript
+
+    conversation = [
+        {"role": "user", "content": f"sentence number {i} about the topic."}
+        for i in range(10)
+    ]
+    transcript, est = _session_llm_transcript(conversation)
+    assert est == 20, f"expected 2×10 sentences estimate, got {est}"
+
+    ex = LLMExtractor(MockModel("mock-point"), _PermissiveRelationModel())
+    api = _CountingAPI()
+    ex.run(transcript, "src-test", api)
+
+    assert api.points == 10, api.points
+    # the O(n²) flood (90 relations) is clamped to the estimate's ceiling
+    assert api.operators <= api.points, (
+        f"operator flood escaped the cap: {api.operators} > {api.points} points")
+    assert api.points + api.operators <= est, (
+        f"estimate {est} < actual nodes {api.points + api.operators}")

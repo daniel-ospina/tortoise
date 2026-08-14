@@ -108,15 +108,24 @@ def _build_session_llm_extractor():
     model_id = _SESSION_LLM_DEFAULT_MODELS[provider]
     spec = os.environ.get("TORTOISE_SESSION_LLM_MODEL", "").strip()
     if spec:
-        p, _, m = spec.partition(":")
-        if p and p != provider:
-            raise ValueError(
-                f"TORTOISE_SESSION_LLM_MODEL={spec!r} names provider {p!r} but "
-                f"{provider!r} is the configured session provider (its key is set)."
-            )
-        if not m:
-            raise ValueError(f"bad model spec {spec!r}; expected <model> or <provider>:<model>")
-        model_id = m
+        if ":" not in spec:
+            # Bare <model> — resolves against the configured provider key. The
+            # error message promises <model> or <provider>:<model>; before
+            # #1194 a bare name fell into the partition() branch where p=<model>
+            # and m="", so it could NEVER be accepted (misleading provider
+            # mismatch error, or "bad model spec" when it equaled the provider
+            # name) — surfaced as an uncaught 500 on every hosted capture.
+            model_id = spec
+        else:
+            p, _, m = spec.partition(":")
+            if p and p != provider:
+                raise ValueError(
+                    f"TORTOISE_SESSION_LLM_MODEL={spec!r} names provider {p!r} but "
+                    f"{provider!r} is the configured session provider (its key is set)."
+                )
+            if not m:
+                raise ValueError(f"bad model spec {spec!r}; expected <model> or <provider>:<model>")
+            model_id = m
     return LLMExtractor(
         OpenAICompatModel(id=model_id, base_url=base_url, api_key_env=key_env),
         OpenAICompatModel(id=model_id, base_url=base_url, api_key_env=key_env),
@@ -152,7 +161,10 @@ def _session_llm_transcript(conversation: list[dict]) -> tuple[str, int]:
     Returns ``(transcript, estimate)`` where ``estimate`` is the fail-closed
     upper bound on NEW non-episodic nodes: extracted Points (one per sentence)
     ×2 for the M2 relations stage's IMPL/NAND operator nodes (the regex loop
-    never created operators)."""
+    never created operators). The ×2 is a true ceiling only because the session
+    extractor clamps operators ≤ points (LLMExtractor.run dedupe+cap, #1194) —
+    a permissive relation model can no longer write more operator nodes than
+    points, which would have bypassed this estimate and the 402 gate it feeds."""
     from tortoise.extractor import _SENT
 
     lines: list[str] = []
