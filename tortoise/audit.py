@@ -25,7 +25,9 @@ Usage:
 
 Every check computes an UNCAPped count plus a capped sample list — counts are
 totals, samples are representative (#348: the previous LIMIT-capped issues
-were samples masquerading as totals).
+were samples masquerading as totals). EXCEPT check 5 (impl_instead_of_nand):
+its count is a fetch-capped UPPER BOUND, flagged "capped": true in the report
+so consumers never read it as an exact total (#1258 conf 58).
 """
 from __future__ import annotations
 
@@ -73,6 +75,9 @@ class AuditResult:
     check_counts: dict[str, int] = field(default_factory=dict)
     # check id → legacy marker (legacy checks are informational).
     check_legacy: dict[str, bool] = field(default_factory=dict)
+    # check id → count is UPPER-BOUNDED (fetch-capped), not a true total.
+    # Consumers must not treat it as an exact violation count (#1258 conf 58).
+    check_capped: dict[str, bool] = field(default_factory=dict)
 
     def high_count(self) -> int:
         return self._sev_total("high")
@@ -107,8 +112,9 @@ class AuditResult:
     def to_dict(self) -> dict:
         """Structured JSON report — the SDK audit() return value.
 
-        Per check: {id, severity, count (uncapped), legacy, samples (capped)}.
-        summary holds uncapped totals; exit_code = 0 clean / 1 issues.
+        Per check: {id, severity, count (true total unless "capped": true —
+        then an upper-bounded fetch sample), legacy, samples (capped)}.
+        summary holds totals; exit_code = 0 clean / 1 issues.
         """
         by_type: dict[str, list[AuditIssue]] = {}
         for iss in self.issues:
@@ -127,6 +133,9 @@ class AuditResult:
                 "severity": items[0].severity,
                 "count": self.check_counts.get(itype, len(items)),
                 "legacy": bool(self.check_legacy.get(itype, False)),
+                # conf 58: check-5's count is an upper-bounded fetch sample —
+                # flagged so consumers never read it as an exact total.
+                "capped": bool(self.check_capped.get(itype, False)),
                 "samples": [
                     {"node_id": i.node_id, "detail": i.detail, "fix": i.fix}
                     for i in items[:SAMPLE_LIMIT]
@@ -158,10 +167,12 @@ class AuditResult:
         issues: list[AuditIssue] = []
         check_counts: dict[str, int] = {}
         check_legacy: dict[str, bool] = {}
+        check_capped: dict[str, bool] = {}
         for ch in d.get("checks", []):
             cid = ch["id"]
             check_counts[cid] = ch.get("count", len(ch.get("samples", [])))
             check_legacy[cid] = bool(ch.get("legacy", False))
+            check_capped[cid] = bool(ch.get("capped", False))
             for s in ch.get("samples", []):
                 issues.append(AuditIssue(
                     issue_type=cid,
@@ -177,6 +188,7 @@ class AuditResult:
             edge_count=d.get("edge_count", 0),
             check_counts=check_counts,
             check_legacy=check_legacy,
+            check_capped=check_capped,
         )
 
 
@@ -224,12 +236,14 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
     issues: list[AuditIssue] = []
     check_counts: dict[str, int] = {}
     check_legacy: dict[str, bool] = {}
+    check_capped: dict[str, bool] = {}
 
     def _record(check_id: str, new_issues: list[AuditIssue], count: int,
-                legacy: bool = False) -> None:
+                legacy: bool = False, capped: bool = False) -> None:
         issues.extend(new_issues)
         check_counts[check_id] = count
         check_legacy[check_id] = legacy
+        check_capped[check_id] = capped
 
     # ── 0. Count nodes/edges in scope ──────────────────────────────
     node_count = _count(
@@ -422,7 +436,10 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                     f"confirmed: tortoise_create_operator('NAND', '{src_id}', "
                     f"['{tgt_id}'])",
             ))
-    _record("impl_instead_of_nand", issues5, count5)
+    # conf 58: count5 is an UPPER-BOUNDED fetch sample (LIMIT
+    # CHECK5_FETCH_LIMIT candidates, word-boundary filtered Python-side) — not
+    # a true total; flagged so summary/exit-code consumers read it as a bound.
+    _record("impl_instead_of_nand", issues5, count5, capped=True)
 
     # ── 6. mitigation_recommended (medium) ──────────────────────
     # Canonical predicate is (op)-[:mitigated_by]->(m) — OUTBOUND from the
@@ -537,6 +554,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         edge_count=edge_count,
         check_counts=check_counts,
         check_legacy=check_legacy,
+        check_capped=check_capped,
     )
 
 
@@ -566,7 +584,10 @@ def print_audit(result: AuditResult) -> None:
         for itype, items in sorted(by_type.items()):
             count = result.check_counts.get(itype, len(items))
             legacy = result.check_legacy.get(itype, False)
+            capped = result.check_capped.get(itype, False)
             tag = " [legacy]" if legacy else ""
+            if capped:
+                tag += " [count capped — upper bound]"
             print(f"\n  [{itype}]{tag} — {count} total")
             for iss in items[:5]:
                 print(f"    • {iss.detail[:120]}")
