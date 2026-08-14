@@ -12,7 +12,7 @@ created: 2026-08-03
 # Tortoise Hosted Platform — Infrastructure Runbook
 
 **Epic:** #7711
-**Last updated:** 2026-08-03
+**Last updated:** 2026-08-14
 
 ## 1. Initial Provisioning
 
@@ -155,6 +155,101 @@ myhost.lan`) so the host guard accepts the hostnames clients use.
 Do **not** commit `.env` (gitignored) and do **not** put DB credentials in
 `.mcp.json`.
 
+## 4.6 Session Capture — LLM Provider Configuration (#1197)
+
+`POST /v1/sessions` — the beta testers' most-critical feature — runs the M2
+LLM extractor over the conversation and **fails closed with 503 when no LLM
+provider key is configured**: the regex extraction loop was removed as a
+product path (#822) and there is no fallback. No key = capture disabled =
+silent 503s for every tester. This section is the ops contract for making
+sure that never happens.
+
+### Env keys (set on `tortoise-api`/Fly; GitHub Actions secrets are the source)
+
+| Key | Provider | Default model | Notes |
+|-----|----------|---------------|-------|
+| `OPENROUTER_API_KEY` | OpenRouter (aggregator) | `deepseek/deepseek-chat` | First in priority; one key → many model families |
+| `DEEPSEEK_API_KEY` | DeepSeek | `deepseek-chat` | Cheapest-tier default; matches the analyzer's historical default |
+| `OPENAI_API_KEY` | OpenAI | `gpt-4o-mini` | |
+| `GEMINI_API_KEY` | Google Gemini | `gemini-2.0-flash` | Also used by MCP tooling — its presence here does NOT alone prove session capture is enabled |
+| `TORTOISE_SESSION_LLM_MODEL` | — | per-provider default | Override, format `<provider>:<model>`; the provider must match the key that is set |
+| `TORTOISE_SESSION_LLM_MOCK` | — | unset | **TEST-ONLY** seam (`1` = offline MockModel). NEVER set on Fly — captures would write MockModel points |
+
+Provider priority when MULTIPLE keys are set (first configured wins):
+`openrouter → deepseek → openai → gemini` (`sdk._SESSION_LLM_PROVIDER_PRIORITY`).
+A key is only ever sent to the provider that issued it (#329).
+`ANTHROPIC_API_KEY` is deliberately NOT consumed (#722) — its presence must
+never be assumed to enable capture. `tortoise doctor` reports the resolved
+provider/model and fails in hosted mode when the key is missing.
+
+### Provider choice guidance
+
+- **Recommended default:** `DEEPSEEK_API_KEY` + default `deepseek-chat` —
+  cheapest viable tier, zero extra config.
+- **Aggregation / future model swaps:** `OPENROUTER_API_KEY` — one key covers
+  many model families (`openrouter:deepseek/deepseek-chat`, …) with per-route
+  cost control.
+- The key must exist on BOTH GitHub Actions secrets (deploy source —
+  `deploy-hosted.yml` sets Fly secrets from GH secrets) and the running app
+  (`fly secrets list -a tortoise-api`). A GH-secret miss silently ships a
+  503-on-every-capture deploy; the deploy workflow now fails the job when no
+  provider key is present.
+
+### Cost bounds per capture
+
+Bounds are enforced IN ORDER by `capture_session` (tortoise/hosted_api.py):
+
+1. **Provider gate** — no key → `503` (fail-closed).
+2. **Turn cap** — `MAX_SESSION_TURNS = 500` → `400` above it.
+3. **Points quota (pre-write estimate)** — `402` when the extraction-aware
+   estimate exceeds the team's points quota. Estimate:
+   `est = 2 × Σ_turns min(sentences, MAX_EXTRACTIONS_PER_TURN=200)`
+   (the ×2 covers the M2 relations stage's IMPL/NAND operator nodes; sentence
+   count is capped per turn — the #329 flood gate).
+4. **Sessions quota** — `DEFAULT_MAX_SESSIONS = 1000` (`_check_team_limit`).
+
+Free-tier interplay (product/pricing.json): `max_graph_nodes: 10000` is the
+points-quota numerator for NON-episodic Points only (turn Points / Session /
+Event are episodic and don't count), and `included_write_ops_per_month: 10000`
+is the write-ops budget. Worst-case node amplification per turn: 200
+sentences × 2 = 400 nodes, so a full 500-turn session is ~200K estimated
+nodes — always stopped by the 402 gate BEFORE any write. In practice the
+cheap-tier models extract far fewer points than the cap; the estimate is the
+fail-closed upper bound.
+
+**Dollar cost:** depends on the provider's then-current pricing and the
+transcript length (5,000-char truncation per turn in `_session_llm_transcript`).
+All four default models are cheap-tier (`deepseek-chat`, `deepseek/deepseek-chat`,
+`gpt-4o-mini`, `gemini-2.0-flash`). At free-tier volumes (10K write ops/month)
+per-capture cost is fractions of a cent — the quota gates above are the hard
+stop, not spend; monitor spend via the provider dashboard.
+
+### Verification procedure
+
+```bash
+# 1. Provider key present on the running app (needs Fly org access):
+fly secrets list -a tortoise-y4mjjq | grep -E "OPENROUTER|DEEPSEEK|OPENAI|GEMINI"
+
+# 2. Doctor reports the resolved provider/model (hosted mode FAILS on
+#    provider-missing — rc 1):
+fly ssh console -a tortoise-y4mjjq -C "python -m tortoise doctor"
+
+# 3. Live capture smoke (needs FalkorDB up + a real team JWT):
+curl -s https://api.premiselabs.co/health/ready    # {"status":"ok","db":"connected"}
+# POST /v1/sessions with a team token → expect 200 + "extraction_mode":"llm".
+# A 503 with detail containing "LLM provider key" = provider missing.
+
+# 4. Local hermetic E2E (offline — MockModel seam, exercises the full path):
+RUN_HOSTED_E2E=1 python -m pytest tests/e2e/hosted/ -q -rs
+```
+
+**Credentials needed for the LIVE smoke** (not available to repo automation):
+Fly org access (`flyctl auth`) for `fly secrets list` / `fly ssh console`, and
+a Supabase team JWT for the authenticated capture call. As of 2026-08-14 the
+live `api.premiselabs.co` reports `{"status":"ok"}` on `/health` but
+`/health/ready` returned `Database unreachable` — verify FalkorDB connectivity
+before relying on a capture smoke (#1197).
+
 ## 5. Dashboard Deploy
 
 ```bash
@@ -178,12 +273,14 @@ wrangler pages deploy dist --project-name=tortoise-dashboard
 | R2_ACCESS_KEY_ID | ✅ | — | ✅ |
 | R2_SECRET_ACCESS_KEY | ✅ | — | ✅ |
 | R2_BUCKET | ✅ (`tortoise-backups`) | — | ✅ |
+| LLM provider key — `OPENROUTER_API_KEY` / `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` (≥1 REQUIRED for `POST /v1/sessions`; #822/#1197) | ✅ | — | ✅ (deploy source; deploy workflow fails without ≥1) |
 
 ### Runtime Config (non-secret)
 
 | Var | Default | Effect |
 |-----|---------|--------|
-| `TORTOISE_SESSION_LLM_MODEL` | per-provider default | `/v1/sessions` extraction model (LLM-default, #822 — the `TORTOISE_SESSION_EXTRACTION` mode knob and regex path were removed). Format `provider:model` (e.g. `deepseek:deepseek-chat`, `openrouter:deepseek/deepseek-chat`, `openai:gpt-4o-mini`); the provider must match the key that is set. Defaults: `deepseek-chat`, `deepseek/deepseek-chat`, `gpt-4o-mini`, `gemini-2.0-flash`. Capture **fails closed (503)** when no provider key (`OPENROUTER/DEEPSEEK/OPENAI/GEMINI_API_KEY`) is set — deploy a provider key before enabling captures. `TORTOISE_SESSION_LLM_MOCK=1` is a test-only seam (offline MockModel). |
+| `TORTOISE_SESSION_LLM_MODEL` | per-provider default | `/v1/sessions` extraction model (LLM-default, #822 — the `TORTOISE_SESSION_EXTRACTION` mode knob and regex path were removed). Format `provider:model` (e.g. `deepseek:deepseek-chat`, `openrouter:deepseek/deepseek-chat`, `openai:gpt-4o-mini`); the provider must match the key that is set. Defaults: `deepseek-chat`, `deepseek/deepseek-chat`, `gpt-4o-mini`, `gemini-2.0-flash`. Capture **fails closed (503)** when no provider key (`OPENROUTER/DEEPSEEK/OPENAI/GEMINI_API_KEY`) is set — deploy a provider key before enabling captures. Provider priority when multiple are set: openrouter → deepseek → openai → gemini. See §4.6 for cost bounds + verification. |
+| `TORTOISE_SESSION_LLM_MOCK` | unset | TEST-ONLY seam: `1` swaps in the offline MockModel extractor (no network). NEVER set on Fly — hosted captures would write MockModel points. `tortoise doctor` fails in hosted mode when this is set. |
 
 ## Reproducibility Test
 Can a fresh Fly.io account + Cloudflare account follow §1 from zero and arrive at the same infra?
@@ -192,3 +289,5 @@ Can a fresh Fly.io account + Cloudflare account follow §1 from zero and arrive 
 - [ ] `api.premiselabs.co` → resolves, TLS valid, /health returns ok (db: connected)
 - [ ] `app.premiselabs.co` → resolves, serves dashboard placeholder
 - [ ] GitHub push to main → auto-deploys tortoise-api
+- [ ] ≥1 LLM provider key in GitHub secrets → deployed to Fly (`fly secrets list -a tortoise-y4mjjq`) → `tortoise doctor` reports `Session extraction ✅` on the app
+- [ ] Live `POST /v1/sessions` smoke returns 200 + `extraction_mode: "llm"` (not a 503)

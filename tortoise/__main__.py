@@ -2495,6 +2495,70 @@ def _cmd_doctor(args):
     else:
         results.append(("MCP server", "⚠️", "not running — tortoise serve"))
 
+    # 5.5 Session extraction — LLM provider (#1197)
+    # POST /v1/sessions (capture) fails closed with 503 when no LLM provider
+    # key is configured (#822 — regex extraction removed as a product path;
+    # this is the beta testers' most-critical feature). Doctor surfaces the
+    # configured provider/model BEFORE testers hit a silent 503. Hosted mode
+    # (FLY_APP_NAME — precedent: hosted_api.py, sdk.py) treats
+    # provider-missing as a HARD failure: the flagship feature cannot work at
+    # all. Local/selfhosted is a warning — capture still fails closed, but
+    # there is no hosted SLA at stake. Mirrors hosted_api._llm_provider_available
+    # + sdk._build_session_llm_extractor exactly (the seam they must agree on).
+    import os as _os
+    hosted = bool(_os.environ.get("FLY_APP_NAME"))
+    mock_seam = _os.environ.get("TORTOISE_SESSION_LLM_MOCK", "").strip().lower() == "1"
+    try:
+        from tortoise.sdk import _SESSION_LLM_DEFAULT_MODELS, _session_llm_provider
+        from tortoise.hosted_api import _LLM_PROVIDER_KEYS, _llm_provider_available
+
+        if _llm_provider_available():
+            provider = _session_llm_provider()
+            if mock_seam:
+                if hosted:
+                    results.append((
+                        "Session extraction", "❌",
+                        "TORTOISE_SESSION_LLM_MOCK=1 is SET in hosted mode — "
+                        "captures would write offline MockModel points; "
+                        "REMOVE the test seam and set a real provider key.",
+                    ))
+                else:
+                    results.append((
+                        "Session extraction", "⚠️",
+                        "LLM provider via TORTOISE_SESSION_LLM_MOCK=1 test "
+                        "seam (offline MockModel — NOT production-grade).",
+                    ))
+            else:
+                # Validate the REAL seam: sdk._build_session_llm_extractor
+                # raises ValueError on provider/model mismatch (sdk.py) — the
+                # doctor must not print ✅ for a config that crashes capture
+                # with a 500 (only a matching provider/model builds).
+                try:
+                    from tortoise.sdk import _build_session_llm_extractor
+                    if _build_session_llm_extractor() is None:
+                        raise RuntimeError("extractor is None despite provider available")
+                except Exception as e:
+                    results.append((
+                        "Session extraction", "❌" if hosted else "⚠️",
+                        f"provider/model misconfig: {str(e)[:120]}",
+                    ))
+                else:
+                    spec = _os.environ.get("TORTOISE_SESSION_LLM_MODEL", "").strip()
+                    model = spec or _SESSION_LLM_DEFAULT_MODELS.get(provider or "", "")
+                    results.append((
+                        "Session extraction", "✅",
+                        f"LLM provider configured ({provider}, model {model or '?'})",
+                    ))
+        else:
+            detail = (
+                "no LLM provider key — POST /v1/sessions fails closed (503). "
+                f"Set one of: {' / '.join(_LLM_PROVIDER_KEYS)} "
+                "(docs/infra-runbook.md §4.6)."
+            )
+            results.append(("Session extraction", "❌" if hosted else "⚠️", detail))
+    except Exception as e:
+        results.append(("Session extraction", "⚠️", f"check unavailable: {str(e)[:60]}"))
+
     # 6. Harness detection
     home = Path.home()
     detections: list[str] = []

@@ -69,6 +69,72 @@ def test_sdk_and_hosted_availability_agree(monkeypatch):
     assert _extractor_present() is True
 
 
+def test_provider_key_parity_all_keys(monkeypatch):
+    """#1197: EVERY key hosted_api._llm_provider_available() reports must
+    actually build an extractor in sdk — and every key that opens the gate
+    must be in the reported set. A drift fails the 503 gate open/closed
+    wrongly (hosted available=True but sdk extractor=None → partial-write
+    500 instead of a clean fail-closed 503)."""
+    from tortoise import hosted_api
+    from tortoise.sdk import _build_session_llm_extractor
+
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MODEL", raising=False)
+    for k in hosted_api._LLM_PROVIDER_KEYS:
+        monkeypatch.delenv(k, raising=False)
+    assert not hosted_api._llm_provider_available()
+    for k in hosted_api._LLM_PROVIDER_KEYS:
+        monkeypatch.setenv(k, "sk-test-1197")
+        try:
+            assert hosted_api._llm_provider_available(), \
+                f"{k} must open the hosted 503 gate"
+            assert _build_session_llm_extractor() is not None, \
+                f"{k} opens the hosted gate but sdk builds NO extractor"
+        finally:
+            monkeypatch.delenv(k)
+
+
+def test_sdk_priority_covers_all_registry_providers():
+    """#1197 drift guard: every provider registered in ingest._PROVIDERS must
+    be (a) in sdk._SESSION_LLM_PROVIDER_PRIORITY and (b) carry a key in
+    hosted_api._LLM_PROVIDER_KEYS. Adding a provider without updating both
+    fails the 503 gate OPEN (hosted says available, sdk builds None)."""
+    from tortoise import hosted_api
+    from tortoise.ingest import _PROVIDERS
+    from tortoise.sdk import _SESSION_LLM_PROVIDER_PRIORITY
+
+    for provider, (_url, key_env) in _PROVIDERS.items():
+        assert provider in _SESSION_LLM_PROVIDER_PRIORITY, (
+            f"provider {provider!r} registered in ingest._PROVIDERS but missing "
+            f"from sdk._SESSION_LLM_PROVIDER_PRIORITY — the 503 gate would fail "
+            f"open for {key_env}"
+        )
+        assert key_env in hosted_api._LLM_PROVIDER_KEYS, (
+            f"{key_env} (ingest provider {provider!r}) missing from "
+            f"hosted_api._LLM_PROVIDER_KEYS — the gate would not see it"
+        )
+
+
+def test_analyze_keys_subset_of_session_keys():
+    """#1197: every analyze._LLM_PROVIDERS key must be usable by the SESSION
+    extractor — an analyze-only key (in analyze but not in ingest._PROVIDERS)
+    would open the hosted 503 gate while sdk._build_session_llm_extractor
+    builds None → mid-capture failure. A naive subset-vs-union check is
+    tautological (_llm_provider_keys() unions analyze in by construction);
+    the real invariant is: every analyze key must be an INGEST provider key."""
+    from tortoise.ingest import _PROVIDERS
+    from tortoise.analyze import _LLM_PROVIDERS
+
+    ingest_keys = {key_env for _url, key_env in _PROVIDERS.values() if key_env}
+    extra = set(_LLM_PROVIDERS) - ingest_keys
+    assert not extra, (
+        f"analyze-only key(s) {sorted(extra)} are not ingest provider keys — "
+        f"they would open the hosted 503 gate while "
+        f"sdk._build_session_llm_extractor cannot consume them; add them to "
+        f"ingest._PROVIDERS or exclude them from the session key union"
+    )
+
+
 # ── capture_session honors the fail-closed / LLM-default contract ──────────
 
 
