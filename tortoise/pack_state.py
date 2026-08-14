@@ -27,9 +27,11 @@ Design decisions (locked 2026-08-15, issue #318 — decision comment
 Semantics:
 
 - **Idempotent additive MERGE** per namespace — re-running activation
-  (provision retry, self-heal, backfill) is a no-op and never duplicates
-  (MERGE on ``{namespace}`` is atomic per statement in Cypher/FalkorDB, so
-  concurrent ensures converge to exactly ONE ``PackInstall`` per namespace).
+  (provision retry, self-heal, backfill) is a no-op and never duplicates.
+  MERGE is atomic per statement on server-side engines; the embedded
+  FalkorDBLite engine serializes activation in-process per (graph,
+  namespace) instead (#1307) — concurrent ensures converge to exactly ONE
+  ``PackInstall`` per namespace either way.
 - **Additive-only removal** — removing a pack from ``TORTOISE_STARTER_PACKS``
   does NOT uninstall existing installs (non-destructive; Backlex/decree
   reseed-no-op precedent). Explicit uninstall/deactivation belongs to the
@@ -48,6 +50,7 @@ import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from threading import Lock
 
 from tortoise.sdk import TortoiseSDK
 
@@ -147,19 +150,74 @@ def _target_graph(sdk: TortoiseSDK, graph_name: str | None):
     return proj.db.select_graph(graph_name)
 
 
+def _resolved_graph_name(sdk: TortoiseSDK, graph_name: str | None) -> str:
+    """Resolve the PHYSICAL graph identity a call reads/writes.
+
+    ``graph_name=None`` → the SDK's namespace-scoped graph; the projection
+    exposes the LANDED name (``team_{team_id}`` for team SDKs — the #7886
+    isolation boundary). An explicit ``graph_name`` (D5 backfill read
+    target, ``team_{team_id}``) is already the physical name.
+
+    Locking keys on this RESOLVED name (conf 75, PR #1312): a hosted
+    provision (``graph_name=None``) and the backfill (explicit
+    ``team_{team_id}``) write the SAME physical graph, so they must
+    serialize on the SAME lock. Keying on the passed string instead would
+    split one graph across two locks (race survives in the mixed path) and
+    collapse every None caller onto one shared ``default`` lock
+    (over-serializing distinct tenants).
+    """
+    proj = sdk._get_proj()
+    if graph_name is None:
+        return proj.graph_name
+    return graph_name
+
+
+# #1307: the embedded FalkorDBLite engine does not guarantee server-side
+# atomicity of MERGE under thread contention (observed: 8-thread races
+# producing duplicate PackInstall nodes). Serialize activation per
+# (graph, namespace) in-process — embedded mode is single-writer, so the
+# lock is sufficient there; server-side (FalkorDB server/docker) engines
+# keep their atomic MERGE. The lock key is the RESOLVED graph name (conf
+# 75, PR #1312), so mixed paths (hosted provision ``graph_name=None`` vs
+# the backfill's explicit ``team_{team_id}``) hitting the same physical
+# graph share one lock, while distinct tenants never serialize against
+# each other.
+#
+# Bounded in practice: one entry per (graph, namespace) — a fixed starter
+# set (D1) × active tenants. # TODO (conf 60, PR #1312): evict idle
+# entries if tenant churn grows (e.g. drop locks for graphs with no recent
+# writers) — under sustained churn this dict would otherwise grow without
+# bound.
+_PACK_INSTALL_LOCKS: dict[str, Lock] = {}
+_PACK_INSTALL_LOCKS_GUARD = Lock()
+
+
+def _pack_install_lock(graph_name: str, ns: str) -> Lock:
+    key = f"{graph_name}\x1f{ns}"
+    with _PACK_INSTALL_LOCKS_GUARD:
+        lock = _PACK_INSTALL_LOCKS.get(key)
+        if lock is None:
+            lock = Lock()
+            _PACK_INSTALL_LOCKS[key] = lock
+        return lock
+
+
 def ensure_tenant_packs(sdk: TortoiseSDK, *, starter: list[str] | tuple[str, ...] | None = None,
                         graph_name: str | None = None) -> list[dict]:
     """Idempotent activation of the starter set into the tenant graph.
 
-    One ``MERGE (:PackInstall {namespace})`` per starter namespace — atomic
-    per statement, so concurrent ensures converge to exactly ONE node per
-    namespace regardless of interleaving. Best-effort: a namespace that
+    One ``MERGE (:PackInstall {namespace})`` per starter namespace —
+    atomic per statement on server-side engines; the embedded engine's
+    activation is serialized in-process per (graph, namespace) (#1307), so
+    concurrent ensures converge to exactly ONE node per namespace
+    regardless of interleaving. Best-effort: a namespace that
     fails (or is unknown in the catalog) is skipped with a logged warning
     and never raises into the provisioning path. Returns the activation
     records written (or already present) this call.
     """
     catalog = _resolve_catalog()
     g = _target_graph(sdk, graph_name)
+    lock_graph = _resolved_graph_name(sdk, graph_name)
     now = datetime.now(timezone.utc).isoformat()
     activated: list[dict] = []
     for ns in _starter_namespaces(starter):
@@ -170,8 +228,9 @@ def ensure_tenant_packs(sdk: TortoiseSDK, *, starter: list[str] | tuple[str, ...
                 "(check TORTOISE_STARTER_PACKS)", ns)
             continue
         try:
-            g.query(
-                "MERGE (p:PackInstall {namespace: $ns}) "
+            with _pack_install_lock(lock_graph, ns):
+                g.query(
+                    "MERGE (p:PackInstall {namespace: $ns}) "
                 "SET p.version = $version, p.status = 'active', "
                 "    p.source = 'starter', "
                 "    p.installed_at = coalesce(p.installed_at, $now)",

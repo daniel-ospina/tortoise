@@ -81,8 +81,10 @@ class TestEnsureTenantPacks:
         assert sorted(r[0] for r in first) == sorted(r[0] for r in second)
 
     def test_concurrent_ensures_converge_to_one_node_per_namespace(self, tmp_path):
-        """MERGE atomicity: N parallel ensures → exactly ONE PackInstall per
-        namespace regardless of interleaving (server-side atomicity)."""
+        """N parallel ensures → exactly ONE PackInstall per namespace
+        regardless of interleaving — server-side MERGE atomicity where the
+        engine provides it; in-process per-(graph, namespace) serialization
+        on the embedded engine (#1307)."""
         sdk = TortoiseSDK(db_path=str(tmp_path / "c.db"), namespace="team-c")
         sdk._get_proj()  # pre-initialize before threading
         n = 8
@@ -207,6 +209,149 @@ class TestGetTenantPacks:
             counts[r[0]] = counts.get(r[0], 0) + 1
         assert sorted(counts) == sorted(_expected_defaults())
         assert all(c == 1 for c in counts.values())
+
+
+# ── #1307 lock serialization regression guards ────────────────────────────
+
+
+class _RaceSeam:
+    """Replace the atomic MERGE with a deterministic read-then-create.
+
+    Two barriers park racing threads INSIDE the read (both observe
+    'absent') and between read and write (both hold their read result) —
+    forcing the exact #1307 interleaving (both CREATE) whenever activation
+    is NOT serialized. With the per-(graph, ns) lock in place the second
+    thread cannot reach the seam until the first finished, so its read
+    observes the first thread's write. A lone thread at a barrier (the
+    lock held the other back) times out and proceeds alone.
+    """
+
+    def __init__(self, g, enter, write_gate):
+        self._g = g
+        self._enter = enter
+        self._write_gate = write_gate
+
+    def query(self, cypher, params=None, timeout=None):
+        if "PackInstall" not in cypher or "MERGE" not in cypher:
+            return self._g.query(cypher, params=params, timeout=timeout)
+        try:
+            self._enter.wait(timeout=1)      # both threads park before the read
+        except threading.BrokenBarrierError:
+            pass
+        existing = self._g.query(
+            "MATCH (p:PackInstall {namespace: $ns}) RETURN p.namespace",
+            params={"ns": params["ns"]},
+        ).result_set
+        try:
+            self._write_gate.wait(timeout=1)  # both park before the write
+        except threading.BrokenBarrierError:
+            pass
+        if not existing:
+            self._g.query(
+                "CREATE (p:PackInstall {namespace: $ns, version: $version, "
+                "status: 'active', source: 'starter'})",
+                params={"ns": params["ns"], "version": params["version"]},
+            )
+        return []
+
+
+def _run_race_pair(sdk, join_timeout=60) -> list[Exception]:
+    """Two threads ensure the same SDK concurrently; returns collected errors."""
+    errors: list[Exception] = []
+
+    def _ensure():
+        try:
+            ensure_tenant_packs(sdk, starter=["dev"])
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    threads = [threading.Thread(target=_ensure) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=join_timeout)
+    return errors
+
+
+class TestPackInstallLockSerialization:
+    def test_same_graph_namespace_share_one_lock(self):
+        """conf 95 (PR #1312): lock-keying invariant — same (graph, ns) →
+        SAME lock; different namespace or different graph → DIFFERENT lock.
+        The serialization guard depends on this invariant; it fails on any
+        revert that drops or mis-keys the lock."""
+        from tortoise.pack_state import _pack_install_lock
+        assert _pack_install_lock("team_a", "dev") is _pack_install_lock("team_a", "dev")
+        assert _pack_install_lock("team_a", "dev") is not _pack_install_lock("team_a", "pm")
+        assert _pack_install_lock("team_a", "dev") is not _pack_install_lock("team_b", "dev")
+
+    def test_ensure_keys_lock_on_resolved_graph(self, tmp_path, monkeypatch):
+        """conf 75 (PR #1312): ensure_tenant_packs keys the lock on the
+        RESOLVED graph name, not the passed string. ``graph_name=None``
+        (hosted provision) and ``graph_name='team_team-k'`` (backfill read
+        target) hit the SAME physical graph and MUST use the same lock.
+        Pre-fix keying (``graph_name or 'default'``) produced 'default' vs
+        'team_team-k' — a split lock on one graph (and one shared 'default'
+        lock across all None callers)."""
+        import tortoise.pack_state as ps
+        sdk = TortoiseSDK(db_path=str(tmp_path / "k.db"), namespace="team-k")
+        seen: list[str] = []
+        real = ps._pack_install_lock
+
+        def _spy(graph, ns):
+            seen.append(graph)
+            return real(graph, ns)
+
+        monkeypatch.setattr(ps, "_pack_install_lock", _spy)
+        ensure_tenant_packs(sdk, graph_name=None, starter=["dev"])
+        ensure_tenant_packs(sdk, graph_name="team_team-k", starter=["dev"])
+        assert seen, "lock must be consulted for every activation"
+        assert seen == ["team_team-k", "team_team-k"], (
+            f"lock keyed on passed string, not resolved graph: {seen}")
+
+    def test_race_seam_reproduces_duplicates_without_serialization(
+            self, tmp_path, monkeypatch):
+        """Red demonstration (conf 95): with the lock neutralized (unfixed
+        behavior — no-op lock), the deterministic read-then-create seam
+        produces EXACTLY the #1307 duplicate. Proves the seam is a faithful
+        repro; without it, the green test below would pass vacuously even if
+        the seam forced no interleaving at all."""
+        from contextlib import nullcontext
+        import tortoise.pack_state as ps
+        if getattr(ps, "_pack_install_lock", None) is not None:
+            monkeypatch.setattr(ps, "_pack_install_lock",
+                                lambda graph, ns: nullcontext())
+        db = str(tmp_path / "red.db")
+        sdk = TortoiseSDK(db_path=db, namespace="team-red")
+        sdk._get_proj()  # pre-initialize before threading
+        g = sdk._get_proj().g
+        seam = _RaceSeam(g, threading.Barrier(2), threading.Barrier(2))
+        monkeypatch.setattr(ps, "_target_graph", lambda sdk_, gn: seam)
+        errors = _run_race_pair(sdk)
+        assert not errors, f"ensures raised: {errors}"
+        dev_count = sum(1 for r in _read_installs(sdk) if r[0] == "dev")
+        assert dev_count == 2, (
+            f"race seam did not reproduce the #1307 duplicate (got "
+            f"{dev_count}); the seam no longer forces the interleaving")
+
+    def test_concurrent_ensures_with_race_seam_converge(
+            self, tmp_path, monkeypatch):
+        """Green regression guard (conf 95, PR #1312): the per-(graph, ns)
+        lock serializes activation, so even under the race-forcing seam
+        exactly ONE node survives. Fails on unfixed code — the missing lock
+        lets both threads rendezvous in the seam's read and both CREATE
+        (duplicate, as #1307 observed). Deterministic: no timing luck."""
+        import tortoise.pack_state as ps
+        db = str(tmp_path / "green.db")
+        sdk = TortoiseSDK(db_path=db, namespace="team-green")
+        sdk._get_proj()  # pre-initialize before threading
+        g = sdk._get_proj().g
+        seam = _RaceSeam(g, threading.Barrier(2), threading.Barrier(2))
+        monkeypatch.setattr(ps, "_target_graph", lambda sdk_, gn: seam)
+        errors = _run_race_pair(sdk)
+        assert not errors, f"ensures raised: {errors}"
+        dev_count = sum(1 for r in _read_installs(sdk) if r[0] == "dev")
+        assert dev_count == 1, (
+            f"duplicate PackInstall after serialized activation: {dev_count}")
 
 
 # ── Provisioning hooks ─────────────────────────────────────────────────────
