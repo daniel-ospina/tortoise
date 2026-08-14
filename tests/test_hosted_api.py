@@ -1148,6 +1148,88 @@ class TestCrossTenantIsolation:
         assert "TEAM_B_SECRET" not in contents_a, "cross-tenant leak: team A sees team B data"
 
 
+class TestIssueInsightAPI:
+    """#1196 — GET /v1/issue-insight REST mirror (review c90: hosted coverage).
+
+    The SDK method is covered in tests/test_issue_insight.py; this leg covers
+    the hosted surface: fail-closed shape on an empty graph, cross-team
+    isolation of repo stats, bounded limit validation, and the generic 500
+    when the graph service raises.
+    """
+
+    def test_authed_call_returns_fail_closed_shape(self, client):
+        """Fresh (empty) graph -> no_prior_knowledge, never a crash."""
+        r = client.get("/v1/issue-insight", params={"title": "anything at all"})
+        assert r.status_code == 200
+        payload = r.json()
+        assert payload["no_prior_knowledge"] is True
+        assert payload["has_prior"] is False
+        assert payload["repo_not_indexed"] is False
+        assert payload["data_points"] == []
+        assert "no prior knowledge" in payload["insight"]
+
+    def test_cross_team_isolation(self, client):
+        """Team B cannot see Team A's repo stats via the REST mirror."""
+        from tortoise.hosted_api import _make_sdk
+
+        # Team A indexes repo acme/app in ITS namespace.
+        sdk_a = _make_sdk(namespace=TEST_TEAM_ID)
+        sdk_a.create_point(
+            kind="observation", content="acme/app #1: login bug on iOS",
+            source="github", github_repo="acme/app", github_number=1, github_state="open",
+        )
+
+        r_a = client.get("/v1/issue-insight",
+                         params={"title": "login bug", "repo": "acme/app"})
+        assert r_a.status_code == 200
+        assert r_a.json()["repo_stats"] == {
+            "repo": "acme/app", "prior_issues": 1, "open": 1,
+        }
+
+        # Team B: different team_id -> different namespace, same DB file.
+        app.dependency_overrides[get_current_team] = lambda: dict(
+            TEST_TEAM, team_id="test-team-002")
+        sdk_b = _make_sdk(namespace="test-team-002")
+        sdk_b.create_point(
+            kind="observation", content="b-corp/web #3: unrelated styling tweak",
+            source="github", github_repo="b-corp/web", github_number=3, github_state="closed",
+        )
+
+        r_b = client.get("/v1/issue-insight",
+                         params={"title": "login bug", "repo": "acme/app"})
+        assert r_b.status_code == 200
+        payload_b = r_b.json()
+        # acme/app is not indexed in Team B's namespace -> fail-closed, and
+        # Team A's stats never leak across the namespace boundary.
+        assert payload_b["repo_not_indexed"] is True
+        assert payload_b["repo_stats"] is None
+        assert all("acme/app" not in (dp.get("content") or "")
+                   for dp in payload_b["data_points"])
+
+    def test_limit_is_bounded(self, client):
+        """c85: limit outside [1,20] is rejected with 422, not 500."""
+        for bad in (0, -1, 21, 1000):
+            r = client.get("/v1/issue-insight",
+                           params={"title": "x", "limit": bad})
+            assert r.status_code == 422, f"limit={bad} should 422, got {r.status_code}"
+        r = client.get("/v1/issue-insight", params={"title": "x", "limit": 20})
+        assert r.status_code == 200
+        r = client.get("/v1/issue-insight", params={"title": "x"})  # default 2
+        assert r.status_code == 200
+
+    def test_graph_service_failure_returns_generic_500(self, client, monkeypatch):
+        """SDK exception -> HTTP 500 with a generic detail, never a traceback leak."""
+        import tortoise.hosted_api as ha_mod
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("graph down")
+
+        monkeypatch.setattr(ha_mod.TortoiseSDK, "issue_insight", _boom)
+        r = client.get("/v1/issue-insight", params={"title": "x", "repo": "owner/a"})
+        assert r.status_code == 500
+        assert r.json()["detail"] == "Insight unavailable"
+
+
 class TestKeysRevoke:
     """DELETE /v1/team/keys/{id} — revoke an API key (team-scoped)."""
 

@@ -7276,6 +7276,154 @@ class TortoiseSDK:
             "confidence_changes": confidence_changes,
         }
 
+    # ── Issue Insight (#1196) ────────────────────────────────────
+    # Review c70: the semantic stage must not report unrelated hits as
+    # "relates to this issue". Gate: EP-confirmed claims (confidence_mean
+    # >= 0.5) count, and so do hits sharing >= 2 tokens with the query text
+    # (a single-token TF-IDF coincidence — e.g. one shared word like
+    # "unrelated" — is a false positive, not prior knowledge). Works across
+    # both retrieval modes: FTS/RRF (EP-annotated) and TF-IDF fallback
+    # (ep=None, zero-overlap matches are pure noise).
+    _ISSUE_INSIGHT_MIN_EP_CONFIDENCE = 0.5
+    _ISSUE_INSIGHT_MIN_SHARED_TOKENS = 2
+    _ISSUE_INSIGHT_TOKEN_RE = re.compile(r"[a-z0-9']+")
+
+    def issue_insight(self, title: str, body: str | None = None,
+                      repo: str | None = None, limit: int = 2) -> dict:
+        """Return a compact 'there's more in the graph' insight for a would-be issue.
+
+        Surface (b) of #1196: called by the creating agent at issue-creation time
+        BEFORE filing. Two stages:
+          * Semantic (always): hybrid search on title+body for cross-session
+            decisions / EP-tagged claims ('we already decided this'). Hits must
+            clear a relevance gate (EP confidence >= 0.5, or >= 2 shared tokens
+            with the query) — otherwise the stage reports no matches instead of
+            counting false positives.
+          * Repo (when repo= given): structural count of indexed GitHub
+            observation points for that repo (source='github').
+        Fail-closed: empty graph -> no_prior_knowledge; repo given + graph
+        non-empty + zero points for repo -> repo_not_indexed; never raises
+        (graph-service failure -> error dict via _safe at the handler).
+        data_points never exceeds `limit` rows (repo-stage append is capped).
+        """
+        proj = self._get_proj()
+        count_rows = proj.g.query(
+            "MATCH (n:Point) WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "RETURN count(n)"
+        ).result_set
+        total_points = int(count_rows[0][0]) if count_rows else 0
+
+        text = " ".join(p for p in (title or "", body or "") if p and p.strip()).strip()
+        semantic_hits: list[dict] = []
+        if text:
+            # Fetch a wider candidate pool than `limit` (review P3): the gate
+            # below filters post-retrieval, so a relevant hit ranked just past
+            # the limit would otherwise be invisible at small limits.
+            semantic_hits = self.tortoise_fts_query(
+                text, entity_type="point", limit=max(limit * 5, 20),
+            )
+            # c70: drop hits that clear neither the EP-confidence floor nor a
+            # shared-token floor (TF-IDF fallback hits carry no EP annotation;
+            # FTS-mode hits are EP-annotated but unmeasured points must still
+            # show real lexical overlap to count).
+            semantic_hits = [
+                h for h in semantic_hits
+                if self._issue_insight_relevant(h, text)
+            ][:limit]
+
+        repo_points: list[dict] = []
+        if repo:
+            repo_points = self.query(
+                kind="observation", source="github", github_repo=repo
+            )
+
+        if total_points == 0:
+            return {
+                "has_prior": False,
+                "no_prior_knowledge": True,
+                "repo_not_indexed": False,
+                "data_points": [],
+                "insight": "The graph has no prior knowledge yet — nothing to pull. "
+                            "Run tortoise_onboarding_github_index to seed it.",
+                "more_in_graph": None,
+                "repo_stats": None,
+            }
+
+        data_points: list[dict] = []
+        for h in semantic_hits:
+            dp = {"kind": h.get("point_kind"), "content": (h.get("content") or "")[:200]}
+            if h.get("ep") and h["ep"].get("confidence_mean") is not None:
+                dp["confidence_mean"] = round(h["ep"]["confidence_mean"], 3)
+            data_points.append(dp)
+
+        repo_stats = None
+        if repo:
+            repo_stats = {
+                "repo": repo,
+                "prior_issues": len(repo_points),
+                "open": sum(1 for p in repo_points if p.get("github_state") == "open"),
+            }
+            # Cap the repo-stage append so data_points never exceeds `limit`
+            # (semantic hits are already truncated to `limit` above).
+            if repo_points and len(data_points) < limit:
+                data_points.append({
+                    "kind": "repo",
+                    "content": f"{repo}: {len(repo_points)} prior issue(s) in the graph",
+                })
+
+        if repo and not repo_points:
+            return {
+                "has_prior": True,
+                "no_prior_knowledge": False,
+                "repo_not_indexed": True,
+                "data_points": data_points,
+                "insight": f"Graph is populated but '{repo}' has no indexed issues yet — "
+                            "run tortoise_onboarding_github_index to index it.",
+                "more_in_graph": None,
+                "repo_stats": None,
+            }
+
+        # c70: nothing cleared the semantic gate -> "no matches", even when the
+        # repo stage found points (repo context is still reported via repo_stats).
+        if not semantic_hits:
+            return {
+                "has_prior": False,
+                "no_prior_knowledge": False,
+                "repo_not_indexed": False,
+                "data_points": [],
+                "insight": "No graph matches for this issue title.",
+                "more_in_graph": None,
+                "repo_stats": repo_stats,
+            }
+
+        top = semantic_hits[0]
+        return {
+            "has_prior": True,
+            "no_prior_knowledge": False,
+            "repo_not_indexed": False,
+            "data_points": data_points,
+            "insight": f"{len(semantic_hits)} graph hit(s) relate to this issue — check the graph before filing.",
+            "more_in_graph": ((top.get("content") or "")[:80] if top else None),
+            "repo_stats": repo_stats,
+        }
+
+    def _issue_insight_relevant(self, hit: dict, query_text: str) -> bool:
+        """#1196 review c70 — semantic-stage relevance gate.
+
+        A hit counts as "relates to this issue" when it is EP-confirmed
+        (confidence_mean >= 0.5 — the 'we already decided this' signal) OR it
+        shares >= 2 tokens with the query text. The token floor protects the
+        TF-IDF fallback path (ep=None) from single-token coincidences and
+        keeps unmeasured FTS hits out unless they show real lexical overlap.
+        """
+        ep = hit.get("ep")
+        if ep is not None and ep.get("confidence_mean") is not None \
+                and ep["confidence_mean"] >= self._ISSUE_INSIGHT_MIN_EP_CONFIDENCE:
+            return True
+        q_tokens = set(self._ISSUE_INSIGHT_TOKEN_RE.findall(query_text.lower()))
+        c_tokens = set(self._ISSUE_INSIGHT_TOKEN_RE.findall((hit.get("content") or "").lower()))
+        return len(q_tokens & c_tokens) >= self._ISSUE_INSIGHT_MIN_SHARED_TOKENS
+
     # ── Hybrid Search (Phase 0, #7748) ───────────────────────────
 
     def tortoise_fts_query(

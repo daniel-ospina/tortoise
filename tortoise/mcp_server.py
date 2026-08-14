@@ -1426,6 +1426,19 @@ def tortoise_session_context() -> dict:
     return _safe(_get_team_sdk().session_context)
 
 
+def tortoise_issue_insight(title: str, body: str | None = None,
+                           repo: str | None = None, limit: int = 2) -> dict:
+    """Return a compact 'there's more in the graph' insight for a would-be issue.
+
+    Call BEFORE filing an issue: surfaces cross-session decisions / EP-tagged
+    claims matching the title (semantic stage) plus prior indexed issues for
+    the repo (repo stage, when repo= given). Fail-closed: empty graph ->
+    no_prior_knowledge; populated graph + repo with zero indexed points ->
+    repo_not_indexed. Returns {has_prior, data_points, insight, more_in_graph}.
+    """
+    return _safe(_get_team_sdk().issue_insight, title, body=body, repo=repo, limit=limit)
+
+
 def tortoise_ingest_corpus(directory: str) -> dict:
     """Batch document ingestion — walk directory, parse YAML frontmatter
     from .md files, create/update Document nodes.

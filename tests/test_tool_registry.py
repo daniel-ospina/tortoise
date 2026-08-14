@@ -89,7 +89,7 @@ class TestRegistryEquivalence:
         + 2 epic #902 A13 (#1051, tortoise_list_batch + tortoise_list_batches)
         + 1 #405 (tortoise_validate_domain)."""
         from tortoise.tool_registry import TOOL_REGISTRY
-        assert len(TOOL_REGISTRY) == 88, f"Expected 88, got {len(TOOL_REGISTRY)}"
+        assert len(TOOL_REGISTRY) == 89, f"Expected 89, got {len(TOOL_REGISTRY)}"
         names = {t.name for t in TOOL_REGISTRY}
         assert "tortoise_validate_domain" in names, "Missing #405 validate_domain tool"
         names = {t.name for t in TOOL_REGISTRY}
