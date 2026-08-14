@@ -345,7 +345,7 @@
     <div class="footer">
       Already have an account? <a href="/signin.html">Sign in</a> ·
       <a href="/privacy">Privacy Policy</a> · <a href="/tos">Terms of Service</a> ·
-      <a href="/license">License</a> · <a href="/dpa">DPA</a> · <a href="/security">Security</a>
+      <a href="/license">License</a> · <a href="/dpa">DPA</a>
     </div>
   </div>
 
@@ -436,6 +436,27 @@
 
     // Guard: check if the anon key placeholder was replaced at deploy time
     const isConfigured = supabaseAnonKey && !supabaseAnonKey.includes("{{");
+
+    // ── OAuth state-expiry recovery (#1224) ───────────────────────────────
+    // A slow login can expire the Supabase OAuth state; the provider callback
+    // redirects with ?error=...&error_code=bad_oauth_state (to the landing or
+    // back here). Surface it on this retry surface with a clear message.
+    (function () {
+      try {
+        var p = new URLSearchParams(window.location.search);
+        if (!p.get("error") && !p.get("error_code")) return;
+        var code = p.get("error_code") || "";
+        var desc = p.get("error_description") || "";
+        var msg;
+        if (code === "bad_oauth_state" || /state/.test(desc)) {
+          msg = "Your sign-in session expired while you were on the login page. Please try again.";
+        } else {
+          msg = "Sign-in failed" + (desc ? ": " + desc : ". Please try again.");
+        }
+        var errorEl = document.getElementById("error");
+        if (errorEl) { errorEl.textContent = msg; errorEl.classList.add("visible"); }
+      } catch (e) { /* banner is best-effort */ }
+    })();
 
     let supabaseClient = null;
     if (isConfigured) {
