@@ -196,21 +196,22 @@ class GitHubConnector:
         event_kind = "pm:cardCompleted" if state == "closed" else "pm:cardCreated"
         event = {
             "type": "EventRecorded",
+            # #1155: canonical issue-Event id — shared with the poll/webhook
+            # producer (`_issue_to_event`). Both producers converge on ONE
+            # Event node per issue (MERGE dedup on eventId).
             "eventId": f"{entity_id}-created",
             "eventKind": event_kind,
             "subject": f"github-user:{author}" if author else f"repo:{self.repo}",
-            "object": entity_id,
+            # #1155: `object` references the pm:issue Object by NAME
+            # ({repo}#{number}) — the projection's produces-edge wiring
+            # matches Object.name, so the produces edge lands on the REAL
+            # Object (previously: a stub Object named after entity_id).
+            "object": f"{self.repo}#{number}",
             "startedAt": created_at,
             "endedAt": closed_at if state == "closed" else None,
-            # #388: connector source metadata — the projection's _upsert_event
-            # choke point materializes a Source node from this + wires
-            # references edges. sourceObjectId is the entity-path-specific
-            # explicit Object key (event.object must never be used as one — it
-            # is the entity TITLE on poll/webhook paths).
+            # provenance parity with the poll-path producer (#1155)
             "source": f"github:{self.repo}",
-            "sourceUrl": url,
             "sourceKind": "github_issue",
-            "sourceObjectId": entity_id,
         }
 
         # Subjects — people involved (ONTOLOGY_v2.5 §1.1 subjectKind)
@@ -240,23 +241,30 @@ class GitHubConnector:
         """Poll + apply to projection. Returns count of applied events.
         Issues get entity chain: Object (pm:issue) + Event + Subjects + aboutSubject edges.
         PRs get event-only (existing behavior).
-        """
-        events = self.poll()
-        count = 0
-        for ev in events:
-            proj.apply(ev)
-            count += 1
 
+        #1155: the entity path is the canonical producer for issue Events —
+        poll-path issue events are DEDUPED (skipped) when the entity chain
+        covered the same issue, so one issue yields exactly ONE Event node.
+        Both producers share the deterministic eventId
+        `github-issue-{repo}-{n}-created`; the poll path remains the
+        fallback producer (raw-issues fetch failure) and the PR producer.
+        Entity chains are applied BEFORE the poll path so the produces edge
+        always lands on the real pm:issue Object (id = entity_id) — never a
+        name-stub with a random id.
+        """
         # Entity extraction for issues (ONTOLOGY_v2.5 §1.1, PM domain extension)
         try:
             raw_issues = self.poll_raw_issues()
         except Exception:
             raw_issues = []  # ponytail: gh CLI may fail, skip entity extraction
 
+        count = 0
+        covered: set[int] = set()
         for issue in raw_issues:
             entities = self._issue_to_entities(issue)
             if not entities:
                 continue
+            covered.add(issue.get("number"))
 
             # Apply Object (ObjectRegistered → FalkorDB)
             if entities.get("object"):
@@ -307,6 +315,17 @@ class GitHubConnector:
                     entities.get("event", {}).get("sourceKind", "github_issue"),
                 )
 
+            count += 1
+
+        # Poll path — PRs always (entity path doesn't cover PRs); issue
+        # events only when the entity path did not cover them (#1155 dedup).
+        covered_event_ids = {
+            f"github-issue-{self.repo}-{n}-created" for n in covered if n
+        }
+        for ev in self.poll():
+            if ev.get("eventId") in covered_event_ids:
+                continue  # absorbed by the entity path (one Event per issue)
+            proj.apply(ev)
             count += 1
         return count
 
@@ -413,14 +432,24 @@ class GitHubConnector:
 
         return {
             "type": "EventRecorded",
-            "eventId": f"github-issue-{self.repo}-{number}",
+            # #1155: canonical issue-Event id — MUST match the entity-path
+            # producer (`_issue_to_entities`, eventId f"{entity_id}-created")
+            # so both producers converge on ONE Event node per issue (MERGE
+            # dedup). The `-created` suffix keeps Event ids out of the Object
+            # id space (the pm:issue Object id is `entity_id`) — previously
+            # the poll-path eventId collided with the Object id string.
+            "eventId": f"github-issue-{self.repo}-{number}-created",
             "eventKind": f"github.issue.{state}",
             "subject": f"issue:{self.repo}#{number}",
-            "object": title,
+            # #1155: `object` references the pm:issue Object by NAME
+            # ({repo}#{number}) — the projection's produces-edge wiring
+            # matches Object.name, so the produces edge lands on the REAL
+            # Object, identical to the entity-path producer (previously: a
+            # stub Object named after the issue title).
+            "object": f"{self.repo}#{number}",
             "startedAt": created_at,
             "endedAt": closed_at if state == "closed" else None,
             "source": f"github:{self.repo}",
-            "sourceUrl": url,
             "sourceKind": "github_issue",
             "participants": [],
         }
@@ -448,8 +477,7 @@ class GitHubConnector:
             "startedAt": created_at,
             "endedAt": merged_at or (closed_at if state == "closed" else None),
             "source": f"github:{self.repo}",
-            "sourceUrl": url,
-            "sourceKind": "github_pr",
+            "sourceKind": "github_issue",
             "participants": [],
         }
 
