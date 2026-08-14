@@ -301,6 +301,21 @@ class TestResolveApiKeyFailSoft:
         assert team["enabled"] is True
         assert any("enabled" in r.message for r in caplog.records)
 
+    def test_resolve_api_key_api_keys_base_column_drift_fails_closed(self,
+                                                                    fake,
+                                                                    caplog):
+        """#1096 (code-review fix): an api_keys BASE-column drift (0007) fails
+        the auth hot path CLOSED at step 1 — combined read raises → base
+        retry also raises (revoked_at stays in the base set) → RuntimeError
+        + the fatal-path tripwire (symmetric with the teams ladder)."""
+        fake.missing_columns = {"api_keys": {"revoked_at"}}
+        fake.seed("api_keys", [_key_row()])
+        with caplog.at_level("WARNING", logger="tortoise.supabase_control"):
+            with pytest.raises(RuntimeError):
+                resolve_api_key(fake, TOKEN)
+        assert any("api_keys base-only read failed" in r.message
+                   for r in caplog.records)
+
     def test_resolve_api_key_stored_false_drift_fail_open(self, fake):
         """#1096 accepted-risk doc: additive drift loses ALL additive state —
         a stored dashboard_key_login=False is not readable through the base
