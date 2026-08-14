@@ -6,6 +6,7 @@
   <title>Docs — Tortoise</title>
   <meta name="description" content="Tortoise documentation: what it is, quickstart, and API reference.">
   <meta name="theme-color" content="#060b14">
+  <link rel="icon" type="image/png" href="/logo.png">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -28,8 +29,8 @@
 
     /* Top bar */
     .topbar { display: flex; align-items: center; gap: 20px; padding: 14px 24px; border-bottom: 1px solid var(--border); background: rgba(6, 11, 20, 0.9); position: sticky; top: 0; z-index: 10; }
-    .topbar .logo { font-family: var(--serif); font-size: 1.2rem; color: var(--text); text-decoration: none; }
-    .topbar .logo span { color: var(--accent); }
+    .topbar .logo { display: flex; align-items: center; text-decoration: none; line-height: 1; }
+    .topbar .logo img { height: 40px; width: auto; display: block; }
     .topbar nav { flex: 1; display: flex; gap: 16px; }
     .topbar nav a { color: var(--text-dim); text-decoration: none; font-size: 14px; }
     .topbar nav a:hover, .topbar nav a.active { color: var(--accent); }
@@ -72,7 +73,7 @@
 </head>
 <body>
   <div class="topbar">
-    <a class="logo" href="/">Tortoise<span>.</span></a>
+    <a class="logo" href="/"><img src="/logo.png" alt="Premise Labs" onerror="this.style.display='none'"></a>
     <nav>
       <a href="https://tortoise.premiselabs.co/">Product</a>
       <a href="/docs" class="active">Docs</a>

@@ -6,6 +6,7 @@
   <title>Sign in — Tortoise</title>
   <meta name="description" content="Sign in to your Tortoise account and continue building your knowledge graph.">
   <meta name="theme-color" content="#060b14">
+  <link rel="icon" type="image/png" href="/logo.png">
   <style>
     .hidden {
       display: none;
@@ -35,8 +36,8 @@
       border-bottom: 1px solid var(--border, #1e293b);
       backdrop-filter: blur(8px);
     }
-    .topbar .logo { font-family: var(--serif, Georgia, serif); font-size: 1.15rem; color: var(--text, #cbd5e1); text-decoration: none; }
-    .topbar .logo span { color: var(--accent, #06b6d4); }
+    .topbar .logo { display: flex; align-items: center; text-decoration: none; line-height: 1; }
+    .topbar .logo img { height: 40px; width: auto; display: block; }
     .topbar nav { flex: 1; display: flex; gap: 16px; }
     .topbar nav a { color: var(--text-dim, #94a3b8); text-decoration: none; font-size: 14px; }
     .topbar nav a:hover, .topbar nav a.active { color: var(--accent, #06b6d4); }
@@ -267,7 +268,7 @@
 </head>
 <body>
   <div class="topbar">
-    <a class="logo" href="/">Tortoise<span>.</span></a>
+    <a class="logo" href="/"><img src="/logo.png" alt="Premise Labs" onerror="this.style.display='none'"></a>
     <nav>
       <a href="https://tortoise.premiselabs.co/">Product</a>
       <a href="/docs">Docs</a>
