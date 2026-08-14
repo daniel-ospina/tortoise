@@ -1,3 +1,12 @@
+---
+title: "Test Design Surface Map — Epic #903: Dreaming"
+type: engineering
+domain: platform
+doc_status: live
+subjects.team: epistemic-team
+created: 2026-08-13
+---
+
 # Test-Design — Epic #903 Integration Surface Map
 
 **Date:** 2026-08-13

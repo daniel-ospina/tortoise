@@ -1,3 +1,12 @@
+---
+title: "Epic Scope — #903: Dreaming (EP across the whole/expanding graph)"
+type: decisions
+domain: strategy
+doc_status: live
+subjects.team: epistemic-team
+created: 2026-08-13
+---
+
 # Epic Scope — Dreaming: EP across the whole/expanding graph (#903)
 
 **Date:** 2026-08-13

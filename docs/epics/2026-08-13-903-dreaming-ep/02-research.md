@@ -1,3 +1,12 @@
+---
+title: "Epic Research Brief — #903: Dreaming (EP across the whole/expanding graph)"
+type: synthesis
+domain: strategy
+doc_status: live
+subjects.team: epistemic-team
+created: 2026-08-13
+---
+
 # Epic Research Brief — Dreaming: EP across the whole/expanding graph (#903)
 
 **Date:** 2026-08-13
