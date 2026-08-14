@@ -13,9 +13,10 @@ REQUIRED sweep, not failed (option 2 — completed by a later sweep).
 The core convergence fix landed in projection/entities.py _upsert_source:
 an ingest source item carrying NO contentHash ($hash IS NULL) PRESERVES the
 stored hash/version/title on ON MATCH — the ingest never clobbers an
-index-created Source's contentHash to '' or bumps its version. CYCLE-25:
-both writers use the SAME sourceKind value ('agentSession' / 'document') —
-the joint convergence proof.
+index-created Source's contentHash to '' or bumps its version. The joint
+test asserts the STRONGER survivor property: an ingest item declaring a
+DIFFERENT sourceKind ('report') does NOT overwrite the index-created
+'agentSession' kind (the ON MATCH never SETs sourceKind).
 """
 from __future__ import annotations
 
@@ -83,10 +84,12 @@ def test_joint_one_graph_both_writers_share_source(tmp_path, sdk):
     assert r1["indexed"] == 2
     url = f"corpus://{c.name}/s1.md"
     before = _query(sdk, "MATCH (s:Source {url:$u}) RETURN s.contentHash, "
-                         "s.sourceKind, s.version, s.id",
+                         "s.sourceKind, s.version, s.id, s.title, "
+                         "s._searchText",
                     {"u": url})[0]
-    content_hash, kind, version, sid = before
+    content_hash, kind, version, sid, title, search_text = before
     assert content_hash and kind == "agentSession" and version == 1
+    assert title and search_text, "the index path sets title/_searchText"
     # the index path's references edge (Source → AgentSession Event)
     assert _count(sdk, "MATCH (s:Source {url:$u})-[:references]->() "
                        "RETURN count(*)",
@@ -107,12 +110,16 @@ def test_joint_one_graph_both_writers_share_source(tmp_path, sdk):
         "the reused url must MERGE, never create a second Source"
     assert _count(sdk, "MATCH (s:Source) RETURN count(s)") == 2  # s1 + s2
     after = _query(sdk, "MATCH (s:Source {url:$u}) RETURN s.contentHash, "
-                        "s.sourceKind, s.version",
+                        "s.sourceKind, s.version, s.title, s._searchText",
                    {"u": url})[0]
     assert after[0] == content_hash, \
         f"contentHash must survive the ingest merge: {after[0]} vs {content_hash}"
     assert after[1] == kind, f"sourceKind must survive: {after[1]}"
     assert after[2] == version, f"version must be UNCHANGED: {after[2]}"
+    assert after[3] == title, "title must survive the no-hash merge"
+    assert after[4] == search_text, "_searchText must survive the no-hash merge"
+    assert res["deduped"]["sources"] == 1, \
+        "the reused-url merge counts as a deduped source"
     # the index path's references edge survives (the merge never touches it)
     assert _count(sdk, "MATCH (s:Source {url:$u})-[:references]->() "
                        "RETURN count(*)",
@@ -181,9 +188,13 @@ def test_joint_stub_source_exception_class(tmp_path, sdk):
     stub = _query(sdk, "MATCH (s:Source {url:'https://example.com/only-bundle'}) "
                        "RETURN s.contentHash, s.ingestedAt")[0]
     assert stub[0] == "" and stub[1]
+    # NOTE (P2-4, plan option-2 scope): "completed by a later sweep" is only
+    # realizable for corpus:// urls — a non-corpus stub (this https url) is
+    # a PERMANENT exception-class member (no sweep ever re-passes the url);
+    # the REQUIRED sweep reports it indefinitely (counted, never failed).
     # the REQUIRED sweep counts EXACTLY the stub (the exception, not a
-    # false-green and not a hard failure): 2 indexed Sources are clean,
-    # the 1 bundle stub is the documented exception
+    # false-green and not a hard failure): no Sources indexed yet — the
+    # sweep returns exactly the 1 bundle stub (the named exception class)
     viol = g.query(
         "MATCH (s:Source) WHERE s.url IS NULL OR s.url='' OR s.sourceKind IS NULL "
         "OR s.contentHash IS NULL OR s.contentHash='' OR s.ingestedAt IS NULL "
