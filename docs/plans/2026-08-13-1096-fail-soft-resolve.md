@@ -189,7 +189,7 @@ def _teams_row_fail_soft(cp, team_id: str, *, select: list[str],
                     "the newest additive tier dropped (%s); a missing "
                     "additive column degrades, a missing base/deletion "
                     "column fails closed (%s)",
-                    team_id, select, additive, e)
+                    team_id, select, additive_tiers[0], e)
             elif set(additive) <= dropped:
                 _logger.warning(
                     "teams read failed for %s (select=%s) — base-only select "
@@ -198,8 +198,9 @@ def _teams_row_fail_soft(cp, team_id: str, *, select: list[str],
                     team_id, select, attempt_select, e)
             else:
                 _logger.warning(
-                    "teams read failed for %s (select=%s) — retrying select "
-                    "%s (%s)", team_id, select, attempt_select, e)
+                    "teams read failed for %s (select=%s) — retrying with "
+                    "the next additive tier dropped (%s): %s",
+                    team_id, select, additive_tiers[k], e)
     else:
         _logger.warning(
             "teams base-only read failed for %s (select=%s) — fail-closed "
