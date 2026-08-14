@@ -119,7 +119,7 @@ curl -s https://api.premiselabs.co/v1/team \
 - **List:** `GET /v1/team/keys` — see all keys for the team (plaintext is not returned again).
 - **Revoke:** `DELETE /v1/team/keys/{key_id}` — instantly invalidates that key. Losing a key? Revoke it and create a replacement.
 
-## 6. Beta feedback & bug reports
+## 7. Beta feedback & bug reports
 
 Part of the beta cohort? Bugs and feedback go through two channels (see [beta-feedback.md](beta-feedback.md) for the full guide and triage path):
 
