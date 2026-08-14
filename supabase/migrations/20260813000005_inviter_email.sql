@@ -14,6 +14,12 @@
 ALTER TABLE public.invitations
     ADD COLUMN IF NOT EXISTS inviter_email text;
 
+-- email_sent_at: provider-accept stamp for the invite email (#307) — the
+-- Supabase branch's on_sent callback PATCHes this; without the column the
+-- stamp is a silent no-op (PostgREST 400 caught + logged per send).
+ALTER TABLE public.invitations
+    ADD COLUMN IF NOT EXISTS email_sent_at timestamptz;
+
 GRANT SELECT (id, team_id, role, invited_by, inviter_email, email, status,
               accepted_at, expires_at, created_at)
     ON public.invitations TO authenticated;

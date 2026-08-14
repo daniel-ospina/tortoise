@@ -429,50 +429,24 @@ function App() {
   React.useEffect(() => {
     ;(async () => {
       try {
-        if (!supabaseClient) { setChecking(false); return }
-        const { data: { session }, error } = await supabaseClient.auth.getSession()
-        if (error || !session) {
-          // Round-24: no session → the card's only affordance is the key input;
-          // don't show the misleading 'Sign in with your Tortoise account.'
-          setAuthMode('apikey')
-          setChecking(false); return
-        }
-        sessionTokenRef.current = session.access_token
-        // Round-6 (P2): supabase-js auto-refreshes the access token (~1h) into
-        // the cookie — keep the ref in sync so JWT-scoped calls never die with
-        // a stale token while the dashboard still looks logged in.
-        const { data: authSub } = supabaseClient.auth.onAuthStateChange((_evt, s) => {
-          if (s?.access_token) sessionTokenRef.current = s.access_token
-          else if (_evt === 'SIGNED_OUT') { sessionTokenRef.current = null; setTeams([]) }
-        })
-        authSubRef.current = authSub?.subscription || null
-
-        // #1082 (PR1): ?claim=1 claim-intent routing — the OAuth redirect
-        // lands here with the pasted key in sessionStorage (same-tab PKCE).
-        // POST /v1/claim BEFORE any provisioning: the welcome page's
-        // Phase-2 mint is never reached (redirectTo targets the dashboard
-        // claim route, NOT welcome.html), so the claimable anon team is
-        // never orphaned by a stray mint.
-        // #1177: ?invite_token=... — the invite-accept page routes here with
-        // the token stashed in sessionStorage (same-tab, same-origin) after
-        // OAuth/email sign-in. POST /v1/invites/accept once a session exists;
-        // success is surfaced and the param is stripped (no resubmit on
-        // refresh — same precedent as ?claim=1).
+        // #1177: stash + strip ?invite_token= UNCONDITIONALLY (before the
+        // session guard) so signed-out invitees don't leave the token in the
+        // URL bar/history/server logs while they sign in. The accept fires
+        // when a session materializes (see acceptStashedInvite below).
         const inviteTokenParam = new URLSearchParams(window.location.search).get('invite_token')
         if (inviteTokenParam) {
-          try {
-            sessionStorage.setItem(INVITE_TOKEN_STORAGE, inviteTokenParam)
-          } catch { /* best-effort */ }
+          try { sessionStorage.setItem(INVITE_TOKEN_STORAGE, inviteTokenParam) } catch { /* best-effort */ }
           window.history.replaceState({}, '', window.location.pathname)
         }
         const stashedInvite = (() => {
           try { return sessionStorage.getItem(INVITE_TOKEN_STORAGE) || '' } catch { return '' }
         })()
-        if (stashedInvite && session.access_token) {
+        const acceptStashedInvite = async (accessToken) => {
+          if (!stashedInvite || !accessToken) return
           try {
             const inviteRes = await fetch(`${API_BASE}/v1/invites/accept`, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${accessToken}` },
               body: JSON.stringify({ token: stashedInvite }),
             })
             if (inviteRes.ok) {
@@ -492,6 +466,39 @@ function App() {
           } catch (e) {
             setBanner((e && e.message) || 'Could not accept invite — try again.')
           }
+        }
+
+        if (!supabaseClient) { setChecking(false); return }
+        const { data: { session }, error } = await supabaseClient.auth.getSession()
+        if (error || !session) {
+          // Round-24: no session → the card's only affordance is the key input;
+          // don't show the misleading 'Sign in with your Tortoise account.'
+          setAuthMode('apikey')
+          setChecking(false); return
+        }
+        sessionTokenRef.current = session.access_token
+        // Round-6 (P2): supabase-js auto-refreshes the access token (~1h) into
+        // the cookie — keep the ref in sync so JWT-scoped calls never die with
+        // a stale token while the dashboard still looks logged in.
+        const { data: authSub } = supabaseClient.auth.onAuthStateChange((_evt, s) => {
+          if (s?.access_token) {
+            sessionTokenRef.current = s.access_token
+            // #1177: signed-out invitee completed sign-in → accept the stashed invite.
+            if (_evt === 'SIGNED_IN') acceptStashedInvite(s.access_token)
+          } else if (_evt === 'SIGNED_OUT') { sessionTokenRef.current = null; setTeams([]) }
+        })
+        authSubRef.current = authSub?.subscription || null
+
+        // #1082 (PR1): ?claim=1 claim-intent routing — the OAuth redirect
+        // lands here with the pasted key in sessionStorage (same-tab PKCE).
+        // POST /v1/claim BEFORE any provisioning: the welcome page's
+        // Phase-2 mint is never reached (redirectTo targets the dashboard
+        // claim route, NOT welcome.html), so the claimable anon team is
+        // never orphaned by a stray mint.
+        // #1177: signed-in invitee at mount → accept now (signed-out path is
+        // handled by onAuthStateChange SIGNED_IN above).
+        if (stashedInvite && session.access_token) {
+          await acceptStashedInvite(session.access_token)
         }
 
         const claimParam = new URLSearchParams(window.location.search).get('claim')
