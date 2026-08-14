@@ -98,6 +98,14 @@ _CORS_PREFLIGHT = {
     "Access-Control-Allow-Headers": "*",
 }
 
+# Browser-level network log noise from deliberately-failed requests (real
+# 401s from the /welcome boot fetches after the mocked sign-in redirect in
+# prod mode — rest/v1/team_memberships, /v1/onboarding/state fire ~100-500ms
+# after commit; review P1 c60) — NOT page JS errors; the zero-console-errors
+# assertion in the mocked-signup test filters it (same filter the signup
+# safety suite uses).
+_RESOURCE_LOG_RE = re.compile(r"Failed to load resource")
+
 # ── Lazy playwright import — bare collection must never error. ─────────────
 from playwright.sync_api import Page, expect  # noqa: E402
 
@@ -746,7 +754,15 @@ def test_mock_email_signup_created_signs_in_and_redirects(page: Page) -> None:
     visible, the redirect happened, and zero console errors."""
     email = f"e2e-{uuid.uuid4().hex[:8]}@premise-labs.dev"
     console_errors: list[str] = []
-    page.on("console", lambda m: console_errors.append(m.text) if m.type == "error" else None)
+    # _RESOURCE_LOG_RE filter (review P1 c60): in prod mode the /welcome
+    # redirect loads the REAL welcome page, whose boot fetches
+    # (rest/v1/team_memberships, /v1/onboarding/state) fire real 401 network
+    # errors ~100-500ms after commit — the mock session has no live team row.
+    # Those are network noise, not page JS errors; the raw == [] assertion
+    # raced them. pageerror is still captured unfiltered.
+    page.on("console", lambda m: console_errors.append(m.text)
+            if m.type == "error" and not _RESOURCE_LOG_RE.search(m.text) else None)
+    page.on("pageerror", lambda e: console_errors.append(str(e)))
 
     fired: dict = {}
     captured: dict = {}
@@ -781,7 +797,7 @@ def test_mock_email_signup_created_signs_in_and_redirects(page: Page) -> None:
                     content_type="application/json",
                     headers={"Access-Control-Allow-Origin": "*"},
                     body=json.dumps({"user_id": "mock-user", "email": email,
-                                     "email_confirm": False, "message": "user_created"}),
+                                     "email_confirm": True, "message": "user_created"}),
                 )
             return
         if "auth/v1/signup" in url:

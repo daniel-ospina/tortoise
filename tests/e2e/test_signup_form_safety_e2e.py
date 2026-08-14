@@ -180,7 +180,7 @@ def test_429_signup_rate_limit_is_humanized(page: Page) -> None:
 
 
 def test_429_short_tier_lockout_60s_then_expiry(page: Page) -> None:
-    """#801 two-tier: a per-IP auth-attempt 429 (over_request_rate_limit) must
+    """#801 two-tier: a per-IP auth-attempt 429 (over_request_rate_limit_ip) must
     lock out for ~60s (NOT 1h), show the short-tier copy, and fully recover on
     expiry — submit re-enabled with the original label, no stale lockout."""
     console_errors = _page_js_errors(page)
@@ -195,7 +195,7 @@ def test_429_short_tier_lockout_60s_then_expiry(page: Page) -> None:
                 route.fulfill(status=429, content_type="application/json",
                               headers={"Access-Control-Allow-Origin": "*"},
                               body=json.dumps({"detail": {
-                                  "error_code": "over_request_rate_limit",
+                                  "error_code": "over_request_rate_limit_ip",
                                   "message": "request rate limit reached"}}))
             return
         if "auth/v1/signup" in url:
@@ -207,7 +207,7 @@ def test_429_short_tier_lockout_60s_then_expiry(page: Page) -> None:
                 route.fulfill(status=429, content_type="application/json",
                               headers={"Access-Control-Allow-Origin": "*"},
                               body=json.dumps({"code": 429,
-                                               "error_code": "over_request_rate_limit",
+                                               "error_code": "over_request_rate_limit_ip",
                                                "msg": "request rate limit reached"}))
             return
         route.continue_()
@@ -249,9 +249,9 @@ def test_429_short_tier_lockout_60s_then_expiry(page: Page) -> None:
 
 
 def test_non_rate_limit_error_does_not_lock_out(page: Page) -> None:
-    """#801: only rate-limit errors may trigger the lockout — a 400 from the
-    server-first endpoint (validation) must leave the form usable and write
-    NO storage key."""
+    """#801: only rate-limit errors may trigger the lockout — a 422 from the
+    server-first endpoint (validation; 400 is Turnstile-only per hosted_api.py)
+    must leave the form usable and write NO storage key."""
     console_errors = _page_js_errors(page)
 
     def handle(route):
@@ -261,27 +261,31 @@ def test_non_rate_limit_error_does_not_lock_out(page: Page) -> None:
                 route.fulfill(status=204, headers=_CORS_PREFLIGHT)
                 return
             if route.request.method == "POST":
-                route.fulfill(status=400, content_type="application/json",
+                # Real endpoint contract (hosted_api.py /v1/signup/email):
+                # validation failures are 422 with a STRING detail (never
+                # str(ValidationError)); 400 is reserved for Turnstile. The
+                # string-vs-object detail handling is what this exercises.
+                route.fulfill(status=422, content_type="application/json",
                               headers={"Access-Control-Allow-Origin": "*"},
-                              body=json.dumps({"detail": "Password should be at least 6 characters"}))
+                              body=json.dumps({"detail": "Invalid email or password"}))
             return
         if "auth/v1/signup" in url:
-            # local-preview (isLocal) legacy path — same non-rate-limit 400.
+            # local-preview (isLocal) legacy path — same non-rate-limit 422.
             if route.request.method == "OPTIONS":  # CORS preflight
                 route.fulfill(status=204, headers=_CORS_PREFLIGHT)
                 return
             if route.request.method == "POST":
-                route.fulfill(status=400, content_type="application/json",
+                route.fulfill(status=422, content_type="application/json",
                               headers={"Access-Control-Allow-Origin": "*"},
-                              body=json.dumps({"code": 400,
+                              body=json.dumps({"code": 422,
                                                "error_code": "validation_failed",
-                                               "msg": "Password should be at least 6 characters"}))
+                                               "msg": "Invalid email or password"}))
             return
         route.continue_()
 
     # NB: password must satisfy the input's native minlength="6" (browser
     # validation would otherwise block the submit event entirely) — the
-    # mocked 400 exercises the server-error path.
+    # mocked 422 exercises the server-error path.
     page.route("**/v1/signup/email*", handle)
     page.route("**/auth/v1/signup*", handle)
     page.goto(BASE_URL + "/signup", wait_until="domcontentloaded", timeout=30_000)
@@ -452,7 +456,7 @@ def test_mock_email_signup_created_signs_in_and_redirects_url_clean(page: Page) 
                 route.fulfill(status=200, content_type="application/json",
                               headers={"Access-Control-Allow-Origin": "*"},
                               body=json.dumps({"user_id": "mock-user", "email": email,
-                                               "email_confirm": False, "message": "user_created"}))
+                                               "email_confirm": True, "message": "user_created"}))
             return
         if "auth/v1/signup" in url:
             # local-preview (isLocal) legacy path — session-less success →
