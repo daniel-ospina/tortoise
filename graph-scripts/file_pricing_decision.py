@@ -125,7 +125,11 @@ for src, op_type, tgt in edges:
 
 # ── Compute confidence ──
 try:
-    sdk.compute_confidence()
+    # #395 (AC8): explicit max_hops=2 pin — no-arg compute_confidence is now
+    # LOCAL EP over the dirty roots (exact closure). Pinning keeps the
+    # decision artifact's persisted confidence values comparable across
+    # runs on this fully-connected decision graph.
+    sdk.compute_confidence(max_hops=2)
     print("\n✓ Confidence computed")
 except Exception as e:
     print(f"\n⚠ compute_confidence: {e}")

@@ -17,6 +17,20 @@ from .live import _live_only
 
 logger = logging.getLogger(__name__)
 
+# ── Degeneration-guard thresholds (#395, Phase-3 profiling pinned) ──
+# A max_hops=None closure must not expand unboundedly on the interactive
+# path. Two bounds, aligned with the 200-operator precedent (analyze.py):
+#   A. affected ≈ full graph: collected >= fraction of the graph's Points
+#      -> the "local" run is degenerate (whole-graph EP); stop expanding.
+#   B. per-hop frontier growth: one hop producing > cap new claims while
+#      the graph is already large -> explosive-blowup risk; stop expanding.
+# Guard B is gated on graph size (combined bound, P3 note): a legitimately
+# dense 10-50 claim zone through a hub operator in a small graph must stay
+# EXACT (a real closure is never truncated).
+_EP_GUARD_FULL_GRAPH_FRACTION = 0.5
+_EP_GUARD_FRONTIER_CAP = 200
+_EP_GUARD_MIN_GRAPH_CLAIMS = 500
+
 
 class TortoiseEP:
     """EP belief propagation on Tortoise factor graphs.
@@ -45,6 +59,14 @@ class TortoiseEP:
         self.tol = tol
         # Fixed evidence priors: {claim_id: (alpha, beta)}
         self._evidence = dict(evidence) if evidence else {}
+        # #395 (delta C): run-set diagnostics, stashed by run() for write-back
+        # consistency. _last_affected = the affected-claim set of the most
+        # recent run (== the set _load_cache/_flush_cache covered); reset at
+        # run entry, assigned BEFORE the early returns so a vacuous run never
+        # leaves stale state. _last_truncated = the degeneration guard fired
+        # (per-hop cap or affected≈full) during the most recent run.
+        self._last_affected: set[str] = set()
+        self._last_truncated: bool = False
 
     # ── Batch I/O cache (#6761) ──────────────────────────────────
 
@@ -562,7 +584,7 @@ class TortoiseEP:
     # ── Affected subgraph extraction ──────────────────────────────
 
     def _affected_claims(self, operator_ids: list[str],
-                         max_hops: int = 2,
+                         max_hops: int | None = 2,
                          include_draft: bool = False) -> set[str]:
         """Affected claims for a run, seeded from operator and/or point ids.
 
@@ -571,6 +593,14 @@ class TortoiseEP:
         directions (an operator-less edge is a factor shared by BOTH of its
         endpoints) AND its operator-mediated neighborhood, so seeding a claim
         runs every factor it participates in.
+
+        max_hops: expansion depth. int k = k BFS hops (current semantics);
+        None = unbounded — expand until the frontier is empty (the full
+        connected subgraph from the seeds, #395 delta A). The unbounded
+        regime carries a degeneration guard (per-hop frontier cap + affected
+        ≈ full-graph detection) so the interactive path never expands
+        unboundedly; when the guard fires, `self._last_truncated` is set and
+        the collected (truncated) set is returned.
 
         With include_draft=False (default, #780): draft target claims are
         excluded, draft operator nodes are skipped as sources, and the BFS
@@ -632,9 +662,34 @@ class TortoiseEP:
                         affected.add(nid)
             affected.update(r[0] for r in rows)
 
-        if max_hops > 0 and affected:
+        if affected and (max_hops is None or max_hops > 0):
             frontier = list(affected)
-            for _ in range(max_hops):
+            hops = 0
+            while frontier:
+                if max_hops is not None and hops >= max_hops:
+                    break
+                hops += 1
+                # Degeneration guard (#395): in the UNBOUNDED regime, stop
+                # expanding before the next hop when the closure is ≈ the
+                # whole graph (size bound) or a single hop would explode the
+                # frontier on an already-large graph (growth bound). The
+                # guard NEVER aborts the run — it proceeds with the collected
+                # (truncated) set; the diagnostic travels via _last_truncated.
+                # Both bounds are gated on graph SIZE (P3 note): a legitimately
+                # dense 10-50 claim zone in a small graph must stay EXACT — a
+                # real closure is never truncated.
+                if max_hops is None:
+                    total = self._graph_claim_count()
+                    if (total >= _EP_GUARD_MIN_GRAPH_CLAIMS
+                            and len(affected) >= _EP_GUARD_FULL_GRAPH_FRACTION * total):
+                        self._last_truncated = True
+                        logger.warning(
+                            "EP affected-subgraph BFS: %d claims ≈ %.0f%% of "
+                            "graph (%d Points) — degenerate full-graph closure, "
+                            "truncating expansion (max_hops=None guard, #395).",
+                            len(affected), 100.0 * len(affected) / total, total,
+                        )
+                        break
                 # Strip drafts from the frontier BEFORE expanding: a draft
                 # claim must never propagate to live claims (#780).
                 if not include_draft:
@@ -645,34 +700,77 @@ class TortoiseEP:
                         if not frontier:
                             break
                 new_frontier: list[str] = []
-                for claim_id in frontier:
-                    for nid in self._live_neighbors(claim_id, include_draft):
-                        if nid not in affected:
-                            affected.add(nid)
-                            new_frontier.append(nid)
+                if frontier:
+                    # Per-hop BATCH neighbor expansion (#395 delta A) — kills
+                    # the BFS-time N+1 (2 queries per claim) with 2 queries
+                    # per hop, preserving the per-claim semantics exactly:
+                    # (1) operator-mediated bridges — operator detection and
+                    # draft filters match _live_neighbors (#780: draft
+                    # operators never bridge, draft targets never admitted;
+                    # include_draft=True keeps proj._neighbors' legacy
+                    # {is_operator:true}-only bridge detection), and
+                    # (2) operator-less direct edges (#888 W5) with the same
+                    # live-endpoint filters.
+                    if include_draft:
+                        nbr_rows = self.g.query(
+                            "MATCH (n:Point)-[r]-(op:Point {is_operator:true})-[r2]-(m:Point) "
+                            "WHERE n.id IN $ids AND m.id <> n.id "
+                            "RETURN DISTINCT n.id, m.id",
+                            params={"ids": list(frontier)},
+                        ).result_set
+                    else:
+                        nbr_rows = self.g.query(
+                            "MATCH (n:Point)-[r]-(op:Point)-[r2]-(m:Point) "
+                            "WHERE n.id IN $ids AND m.id <> n.id "
+                            "AND (op.is_operator = true OR op.op_type IS NOT NULL) "
+                            "AND (op.status IS NULL OR op.status <> 'draft') "
+                            "AND (m.status IS NULL OR m.status <> 'draft') "
+                            "RETURN DISTINCT n.id, m.id",
+                            params={"ids": list(frontier)},
+                        ).result_set
+                    for _nid, mid in nbr_rows:
+                        if mid not in affected:
+                            affected.add(mid)
+                            new_frontier.append(mid)
                     # Operator-less hops (#888 W5): direct IMPL/NAND edges
                     # between plain Points (operator-mediated hops above).
                     # Draft endpoints never propagate (#780).
-                    conds = ["b.id <> $id"]
+                    conds = ["a.id IN $ids", "b.id <> a.id"]
                     if live_a:
                         conds.append(live_a)
                     if live_b:
                         conds.append(live_b)
-                    where = " WHERE " + " AND ".join(conds)
                     dir_rows = self.g.query(
-                        "MATCH (a:Point {id:$id})-[r:IMPL|NAND]-(b:Point) "
-                        f"{where} "
+                        "MATCH (a:Point)-[r:IMPL|NAND]-(b:Point) "
+                        "WHERE " + " AND ".join(conds) + " "
                         "AND a.is_operator = false "
                         "AND a.op_type IS NULL "
                         "AND b.is_operator = false "
                         "AND b.op_type IS NULL "
-                        "RETURN DISTINCT b.id",
-                        params={"id": claim_id},
+                        "RETURN DISTINCT a.id, b.id",
+                        params={"ids": list(frontier)},
                     ).result_set
-                    for (nid,) in dir_rows:
-                        if nid not in affected:
-                            affected.add(nid)
-                            new_frontier.append(nid)
+                    for _aid, bid in dir_rows:
+                        if bid not in affected:
+                            affected.add(bid)
+                            new_frontier.append(bid)
+                # Growth bound (max_hops=None only): a single hop producing
+                # more than the frontier cap while the graph is already large
+                # is explosive-blowup risk, not a legitimately dense zone
+                # (a real 10-50 claim hub zone never reaches the cap).
+                if (max_hops is None
+                        and len(new_frontier) > _EP_GUARD_FRONTIER_CAP):
+                    total_graph_claims = self._graph_claim_count()
+                    if total_graph_claims >= _EP_GUARD_MIN_GRAPH_CLAIMS:
+                        self._last_truncated = True
+                        logger.warning(
+                            "EP affected-subgraph BFS: frontier of %d new claims "
+                            "exceeds cap %d on a %d-Point graph — truncating "
+                            "expansion (max_hops=None guard, #395).",
+                            len(new_frontier), _EP_GUARD_FRONTIER_CAP,
+                            total_graph_claims,
+                        )
+                        break
                 frontier = new_frontier
                 if not frontier:
                     break
@@ -683,6 +781,16 @@ class TortoiseEP:
         if not include_draft and affected:
             affected -= self._filter_draft_ids(affected)
         return affected
+
+    def _graph_claim_count(self) -> int:
+        """Total Point count in the graph (degeneration-guard sizing, #395).
+
+        One cheap count query, called only in the max_hops=None regime.
+        """
+        rows = self.g.query(
+            "MATCH (n:Point) RETURN count(n)"
+        ).result_set
+        return int(rows[0][0]) if rows and rows[0][0] is not None else 0
 
     def _filter_draft_ids(self, ids: set[str]) -> set[str]:
         """Return the subset of ids whose nodes have status == 'draft' (#780)."""
@@ -962,7 +1070,7 @@ class TortoiseEP:
         return [{"id": r[0], "content": r[1], "alpha": r[2],
                  "beta": r[3], "variance": r[4]} for r in rows]
 
-    def run(self, operator_ids: list[str], max_hops: int = 2,
+    def run(self, operator_ids: list[str], max_hops: int | None = 2,
             evidence: dict[str, tuple[float, float]] | None = None,
             include_draft: bool = False) -> tuple[int, bool]:
         """Run EP to convergence. Batch I/O avoids SQLite crashes (#6761).
@@ -972,7 +1080,10 @@ class TortoiseEP:
                 also accepted as seeds: a plain seed runs the operator-less
                 direct edges it participates in plus its operator-mediated
                 neighborhood (#888 W5)
-            max_hops: how far to extend the affected subgraph
+            max_hops: how far to extend the affected subgraph. int k = k BFS
+                hops; None = the full connected subgraph from the seeds
+                (#395 delta A — the unbounded regime carries a degeneration
+                guard; when it fires, `_last_truncated` is set).
             evidence: optional {claim_id: (alpha, beta)} priors —
                 merged with any evidence set at construction time.
                 Evidence set at run() overrides per-claim.
@@ -980,7 +1091,18 @@ class TortoiseEP:
                 EP identically to live ones (#780 escape hatch — legacy
                 behavior). Default False: drafts are excluded at ALL four
                 factor-extraction call sites.
+
+        Returns the (iterations, converged) 2-tuple (unchanged contract —
+        four destructuring callers). The run's affected-claim set is stashed
+        on ``self._last_affected`` (assigned before the early returns so a
+        vacuous run never leaves stale write-back state, #395 delta C); the
+        degeneration guard's firing is stashed on ``self._last_truncated``.
         """
+        # #395 (delta C): run-set diagnostics reset at entry, alongside the
+        # cache lifecycle — a run that exits early must not report a previous
+        # run's affected set / guard state.
+        self._last_affected = set()
+        self._last_truncated = False
         # Run-level evidence is CALL-SCOPED (#330): merge into a local dict so
         # self._evidence is never mutated by run() — otherwise a later run()
         # without evidence would re-apply (and re-write to the graph) stale
@@ -1032,6 +1154,12 @@ class TortoiseEP:
 
         affected = self._affected_claims(operator_ids, max_hops,
                                          include_draft=include_draft)
+        # #395 (delta C): stash the run set BEFORE the early returns — the
+        # write-back callers (sdk.compute_confidence, dream.py) consume
+        # _last_affected so the write-back set == the run set by construction,
+        # and a vacuous run (empty affected / empty factors) never leaves a
+        # previous run's set behind for write-back.
+        self._last_affected = affected
         if not affected:
             if not include_draft and operator_ids:
                 logger.warning(

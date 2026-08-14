@@ -334,7 +334,7 @@ def _inject_subgraph_filter(cypher: str, vars: list[str],
 DIRECT_EDGE_TRAVERSAL = True
 
 
-def _bfs_select_operators(proj, anchors: list[str], max_hops: int = 1,
+def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
                           rel_filter: str = "IMPL|NAND",
                           direction: str = "both",
                           include_draft: bool = False) -> tuple[set[str], set[tuple[str, str, str]]]:
@@ -360,6 +360,13 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
     operators AND direct factors together; a direct-edge-only subgraph
     yields ZERO operator ids + non-empty factor anchors (the return
     contract).
+
+    max_hops (#395 delta A): int k = k BFS hops; None = unbounded — expand
+    until the frontier is empty (the full connected subgraph from the
+    anchors, direction/rel-filter constrained). For explicit k the 200-
+    operator cap stays a mid-BFS safety bound; for None the cap is lifted
+    (genuine full closure) — internal callers only (the user-facing
+    tortoise_analyze HTTP tool keeps an explicit k).
 
     DERIVED-LIVENESS (GATE-2 Q3, §5.6 item 5): an operator participates in
     EP IFF >=2 of its connected points are live (status='live') — the
@@ -429,7 +436,8 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
             frontier -= draft_anchors
             visited -= draft_anchors
 
-    for hop in range(max_hops):
+    hop = 0
+    while frontier and (max_hops is None or hop < max_hops):
         if not frontier:
             break
         new_ops: set[str] = set()
@@ -522,7 +530,12 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
 
         collected |= new_ops
 
-        if len(collected) > 200:
+        # #395 (delta A): the 200-op cap is a safety bound for EXPLICIT k
+        # only — max_hops=None means genuine full connected subgraph, so the
+        # cap is lifted in the unbounded regime (degeneration guarding for
+        # the interactive path lives in ep._affected_claims; this selector
+        # feeds dream/anchors, both explicit-k by default).
+        if max_hops is not None and len(collected) > 200:
             _log.warning(
                 "BFS selector: collected %d operators, truncating to 200.",
                 len(collected),
@@ -533,7 +546,7 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
             break
 
         # Expand to new frontier points from collected operators
-        if new_ops and hop < max_hops - 1:
+        if new_ops and (max_hops is None or hop < max_hops - 1):
             ops_list = list(new_ops)
             rows = proj.g.query(
                 "MATCH (op:Point {is_operator:true})-[r:IMPL|NAND]->(p:Point) "
@@ -547,6 +560,7 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
 
         frontier = new_points - visited
         visited |= new_points
+        hop += 1
 
     return collected, factor_anchors
 

@@ -297,6 +297,106 @@ class TestTeamIsolation:
         assert r.status_code == 200
 
 
+# ── #395: tortoise_compute_confidence HTTP contract ─────────────────────
+
+class TestComputeConfidenceHTTP:
+    """AC7 — the no-arg HTTP disable-contract (#395 delta C).
+
+    The request-scoped SDK (mcp_auth.py _get_team_sdk) has empty in-memory
+    dirty state over HTTP, so the SDK no-arg path would silently return {}
+    where today it runs whole-graph EP (the #7288 timeout surface). The
+    transport-aware branch lives in the handler: no-arg over HTTP →
+    diagnostic "no_dirty_state_http"; factors/anchors still work.
+    """
+
+    @staticmethod
+    def _unwrap(body: dict) -> dict:
+        """MCP tool results carry {content, structuredContent} — return the
+        structured payload."""
+        result = body.get("result", {})
+        sc = result.get("structuredContent")
+        if sc is not None:
+            return sc
+        # Fallback: parse the embedded JSON text.
+        for item in result.get("content", []):
+            text = item.get("text")
+            if text:
+                import json as _json
+                try:
+                    return _json.loads(text)
+                except Exception:
+                    continue
+        return result
+
+    def test_noarg_over_http_returns_no_dirty_state(self, mcp_client):
+        """No-arg (no factors/anchors) over HTTP → no_dirty_state_http."""
+        tc, _ = mcp_client
+        r = tc.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/call",
+                                  "id": 1,
+                                  "params": {"name": "tortoise_compute_confidence",
+                                              "arguments": {}}})
+        assert r.status_code == 200, r.text
+        body = _parse_sse_json(r)
+        assert body is not None
+        result = self._unwrap(body)
+        assert result.get("diagnostic") == "no_dirty_state_http", result
+        assert result.get("confidences") == {}
+        assert result.get("iterations") == 0
+        assert result.get("converged") is True
+
+    def test_factors_over_http_still_work(self, mcp_client, monkeypatch):
+        """Explicit factors over HTTP pass through to the real EP path (no
+        no_dirty_state_http) — the disable-contract is no-arg only."""
+        import tempfile as _tf
+        import tortoise.mcp_server as ms
+        tc, _ = mcp_client
+        # The fixture's request-scoped team SDK would open the same embedded
+        # store the registry SDK holds (single-writer #6761) — route the
+        # handler to a fresh-path SDK so the pass-through is testable.
+        def _fresh_sdk():
+            sdk = TortoiseSDK(os.path.join(
+                _tf.mkdtemp(prefix="tt_395_http_"), "http.db"))
+            return sdk
+        monkeypatch.setattr(ms, "_get_team_sdk", _fresh_sdk)
+        r = tc.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/call",
+                                  "id": 1,
+                                  "params": {"name": "tortoise_compute_confidence",
+                                              "arguments": {"factors": ["missing-op"]}}})
+        assert r.status_code == 200, r.text
+        body = _parse_sse_json(r)
+        assert body is not None
+        result = self._unwrap(body)
+        # Factors path runs (returns the vacuous-run shape on an empty graph),
+        # NOT the HTTP no-arg disable contract.
+        assert "no_dirty_state_http" not in str(result), result
+        assert "confidences" in result
+
+    def test_anchors_none_over_http_clamped(self, monkeypatch):
+        """anchors + max_hops=None over HTTP is clamped to a deterministic
+        bounded default (whole-component BFS is unbounded on a multi-tenant
+        surface). The JSON-RPC schema rejects null before the handler, so the
+        clamp is exercised at the handler level directly (defensive protection
+        for non-schema callers)."""
+        import tortoise.mcp_server as ms
+        from tortoise.mcp_auth import _transport_mode
+        seen: dict = {}
+
+        def _spy_sdk():
+            sdk = object.__new__(TortoiseSDK)  # stub — handler only forwards
+            orig_cc = lambda *a, **k: seen.update(max_hops=k.get("max_hops")) or {}
+            sdk.compute_confidence = orig_cc
+            return sdk
+        monkeypatch.setattr(ms, "_get_team_sdk", _spy_sdk)
+        monkeypatch.setattr(ms, "_parse", lambda x: x)
+        token = _transport_mode.set("http")
+        try:
+            result = ms.tortoise_compute_confidence(anchors=["a1"], max_hops=None)
+        finally:
+            _transport_mode.reset(token)
+        assert seen.get("max_hops") == 1, f"max_hops clamped, got {seen}"
+        assert result == {}  # stubbed SDK returns {} — clamp verified pre-delegation
+
+
 # ── Rate limit ──────────────────────────────────────────────────────────────
 
 class TestRateLimit:

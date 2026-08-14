@@ -243,6 +243,12 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         name="tortoise_compute_confidence",
         description="Compute confidence via EP belief propagation. "
                     "Returns {iterations, converged, confidences}. "
+                    "#395: no-arg (no factors/anchors) runs LOCAL EP over "
+                    "the dirty subgraph on stdio/embedded; over HTTP, "
+                    "factors or anchors are REQUIRED (no-arg returns "
+                    "diagnostic 'no_dirty_state_http' — the request-scoped "
+                    "SDK carries no dirty state). anchors+max_hops=None is "
+                    "clamped to a bounded default over HTTP. "
                     "Calibration is required by default (#344): raises "
                     "CalibrationError on uncalibrated graphs. Pass "
                     "require_calibration=False to run on topology alone "

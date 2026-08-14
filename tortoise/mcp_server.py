@@ -1020,7 +1020,27 @@ def tortoise_compute_confidence(factors: Any = None,
     max_hops: BFS depth from anchors (default 1).
     rel_filter: edge types — "IMPL", "NAND", or "IMPL|NAND" (default).
     direction: IMPL traversal — "incoming", "outgoing", or "both" (default).
+
+    #395 (delta C): no-arg (no factors/anchors) runs LOCAL EP over the dirty
+    subgraph on stdio/embedded. Over HTTP the request-scoped SDK has no dirty
+    state, so no-arg returns diagnostic "no_dirty_state_http" — factors or
+    anchors are REQUIRED over HTTP. anchors + max_hops=None over HTTP is
+    clamped to a deterministic bounded default (whole-component BFS is
+    unbounded on a multi-tenant surface).
     """
+    # #395 (delta C): HTTP no-arg is the disable-contract — a fresh
+    # request-scoped SDK (mcp_auth.py:69) always has empty _dirty_roots, so
+    # the no-arg path would silently return {} where today it runs whole-
+    # graph EP (the #7288 timeout surface). Transport-aware branch lives in
+    # the handler (precedent: _transport_mode checks at mcp_server.py:962).
+    if _transport_mode.get() == "http" and factors is None and anchors is None:
+        return {"iterations": 0, "converged": True, "confidences": {},
+                "diagnostic": "no_dirty_state_http"}
+    # anchors + max_hops=None over HTTP → clamp to a deterministic bounded
+    # default (max_hops=None now means full connected subgraph — unbounded
+    # BFS on a multi-tenant hosted surface is not acceptable).
+    if _transport_mode.get() == "http" and max_hops is None:
+        max_hops = 1
     factors = _parse(factors)
     evidence = _parse(evidence)
     anchors = _parse(anchors)
