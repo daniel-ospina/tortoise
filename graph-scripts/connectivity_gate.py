@@ -85,12 +85,46 @@ def classify_target(uri: str | None, path: str | None) -> dict:
     return classify_target(DEFAULT_URI, None)
 
 
+def redact_uri(uri: str) -> str:
+    """Return the URI with the password portion redacted (safe to print/store).
+
+    docker://:pw@host:6379/db  →  docker://:****@host:6379/db
+    redis://user:pw@host/db    →  redis://user:****@host/db
+    URIs without credentials are returned unchanged (conf-75: never leak the
+    DB password into stdout or sidecar files).
+    """
+    from urllib.parse import urlsplit, urlunsplit
+    parts = urlsplit(uri)
+    if not parts.username and not parts.password:
+        return uri
+    host = parts.hostname or ""
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    user = parts.username or ""
+    netloc = f"{user}:****@{host}" if user else f":****@{host}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query,
+                       parts.fragment))
+
+
 def connect_projection(cfg: dict):
-    """Build a FalkorProjection for the classified target (no writes)."""
+    """Build a FalkorProjection for the classified target (no writes).
+
+    Embedded paths must EXIST — a missing path silently spins up a fresh empty
+    FalkorDBLite database, and an all-zero "clean" scan/baseline would be
+    misleading (conf-65). Fail loudly instead.
+    """
     from tortoise.projection import FalkorProjection
     if cfg["mode"] == "uri":
         return FalkorProjection.from_uri(cfg["uri"])
-    return FalkorProjection(cfg["path"])
+    path = cfg["path"]
+    if path != ":memory:" and not os.path.isfile(path):
+        raise FileNotFoundError(
+            f"embedded graph path does not exist: {path!r} — refusing to "
+            "silently create a fresh empty FalkorDBLite database (an all-zero "
+            "'clean' scan/baseline would be misleading). Point at an existing "
+            "graph, or use a docker:// URI."
+        )
+    return FalkorProjection(path)
 
 
 # ── Graph stats (read-only) ──────────────────────────────────────────────
@@ -139,11 +173,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[connectivity-gate] ERROR: {exc}", file=sys.stderr)
         return 2
 
+    # Never echo the raw URI (it carries the DB password) — conf-75.
+    target = ({**cfg, "uri": redact_uri(cfg["uri"])}
+              if cfg.get("uri") else cfg)
+
     if args.json:
         out = {
             "tool": "334-connectivity-gate",
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "target": cfg,
+            "target": target,
             "ok": None,
             "stats": None,
         }
@@ -151,7 +189,7 @@ def main(argv: list[str] | None = None) -> int:
         print("=" * 60)
         print("#334 PHASE-0 CONNECTIVITY GATE (read-only)")
         print("=" * 60)
-        print(f"  Target: {cfg.get('uri') or cfg.get('path')}")
+        print(f"  Target: {target.get('uri') or target.get('path')}")
         print(f"  Mode:   {cfg['mode']}")
         print(f"  Restore path: {cfg['snapshot_path']}")
         print()
@@ -166,7 +204,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(out, indent=2, default=str))
         else:
             print("[connectivity-gate] FAIL: endpoint unreachable.", file=sys.stderr)
-            print(f"  Target: {cfg.get('uri') or cfg.get('path')}", file=sys.stderr)
+            print(f"  Target: {target.get('uri') or target.get('path')}", file=sys.stderr)
             print(f"  Reason: {exc}", file=sys.stderr)
             print("  Check the endpoint is up and TORTOISE_DB_URI is correct.", file=sys.stderr)
         return 1

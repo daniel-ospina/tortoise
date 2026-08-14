@@ -20,7 +20,9 @@ the legacy cross-file wiring scripts that created them (#329/#6713).
 """
 from __future__ import annotations
 
+import json
 import os
+import subprocess
 import sys
 import tempfile
 import uuid
@@ -194,6 +196,43 @@ class TestBaselineScan:
         assert ef["points_edge_backed"] == 0  # no extractedFrom edges seeded
         assert ef["evidence_without_source_backing"]["count"] >= 1
 
+    def test_scan_extracted_from_excludes_property_backed(self, sdk):
+        """Property-backed points (entities.py ~L171-174) are NOT 'without
+        backing' — the metrics must stay disjoint (conf-60 double-count)."""
+        a, b = _seed_clean_graph(sdk)
+        _seed_anomalies(sdk, a, b)
+        proj = _proj(sdk)
+        report1 = baseline_scan.scan_graph(proj)
+        base = report1["extracted_from"][
+            "evidence_without_source_backing"]["count"]
+
+        hex8 = uuid.uuid4().hex[:8]
+        pid = f"prop-{hex8}"
+        proj.g.query(
+            "CREATE (p:Point {id:$id, content:'property-backed evidence', "
+            "is_operator:false, extractedFrom:'https://example.com/src-prop'})",
+            params={"id": pid})
+
+        report2 = baseline_scan.scan_graph(proj)
+        ef = report2["extracted_from"]
+        assert ef["points_property_backed"] >= 1
+        # property-backed point must NOT be double-counted as without backing
+        assert ef["evidence_without_source_backing"]["count"] == base
+        assert pid not in {s["id"] for s in
+                           ef["evidence_without_source_backing"]["samples"]}
+
+    def test_connect_projection_missing_path_fails(self):
+        """Missing embedded path must fail loudly, not spin a fresh empty
+        FalkorDBLite DB (conf-65 — all-zero 'clean' scan would mislead)."""
+        with pytest.raises(FileNotFoundError):
+            baseline_scan.connect_projection(
+                {"mode": "embedded", "path": "/nonexistent/334-xyz.db"})
+
+    def test_connect_projection_memory_allowed(self):
+        proj = baseline_scan.connect_projection(
+            {"mode": "embedded", "path": ":memory:"})
+        assert proj is not None
+
     def test_scan_reports_subject_stubs(self, sdk):
         a, b = _seed_clean_graph(sdk)
         seeded = _seed_anomalies(sdk, a, b)
@@ -252,6 +291,26 @@ class TestConnectivityGate:
         assert stats["by_label"].get("Point", 0) >= 3
         assert stats["by_label"].get("Source", 0) == 1
 
+    def test_connect_projection_missing_path_fails(self):
+        """Missing embedded path must fail loudly (conf-65)."""
+        with pytest.raises(FileNotFoundError):
+            connectivity_gate.connect_projection(
+                {"mode": "embedded", "path": "/nonexistent/334-xyz.db"})
+
+    def test_redact_uri(self):
+        """URI password must never leak into meta.json/stdout (conf-75)."""
+        redacted = connectivity_gate.redact_uri(
+            "docker://:s3cr3t@localhost:6379/tortoise")
+        assert "s3cr3t" not in redacted
+        assert redacted == "docker://:****@localhost:6379/tortoise"
+        user_redacted = connectivity_gate.redact_uri(
+            "redis://user:s3cr3t@host:6380/db")
+        assert "s3cr3t" not in user_redacted
+        assert user_redacted == "redis://user:****@host:6380/db"
+        # no credentials → unchanged
+        assert connectivity_gate.redact_uri(
+            "redis://localhost:6379/tt") == "redis://localhost:6379/tt"
+
     def test_cli_unreachable_exit_nonzero(self):
         # Closed port on loopback → ConnectionRefusedError → gate exits 1
         rc = connectivity_gate.main(
@@ -287,3 +346,106 @@ class TestRdbSnapshotRestore:
         assert result["ok"] is True
         assert result["dry_run"] is True
         assert any("BGSAVE" in w for w in result["would"])
+        # stats sidecar is recorded BEFORE the BGSAVE (conf-70 ordering)
+        assert (result["would"].index(next(w for w in result["would"]
+                                             if "meta.json" in w))
+                < result["would"].index(next(w for w in result["would"]
+                                              if "redis-cli BGSAVE" in w)))
+
+    def test_snapshot_captures_stats_before_bgsave(self, monkeypatch, tmp_path):
+        """conf-70: the stats sidecar must be captured BEFORE BGSAVE so it
+        describes the exact data state the RDB persists (no TOCTOU), and the
+        stored uri must be password-redacted (conf-75)."""
+        calls: list[str] = []
+        monkeypatch.setattr(rdb_snapshot_restore, "resolve_container",
+                            lambda uri, c: (calls.append("resolve"),
+                                            "falkordb")[1])
+        monkeypatch.setattr(rdb_snapshot_restore, "_container_rdb_info",
+                            lambda c: (calls.append("rdb_info"),
+                                       {"dir": "/data",
+                                        "dbfilename": "dump.rdb"})[1])
+        monkeypatch.setattr(rdb_snapshot_restore, "graph_stats_for",
+                            lambda uri: (calls.append("stats"),
+                                         {"nodes": 3, "edges": 1,
+                                          "by_label": {"Point": 3}})[1])
+        monkeypatch.setattr(rdb_snapshot_restore, "_bgsave_and_wait",
+                            lambda c, start_ts, timeout_s=120:
+                            (calls.append("bgsave"),
+                             {"ok": True, "lastsave": 1})[1])
+
+        def fake_docker(args, timeout=30):
+            calls.append("docker:" + args[0])
+            if args[0] == "cp":  # emulate docker cp writing the RDB out
+                with open(args[-1], "w", encoding="utf-8") as fh:
+                    fh.write("REDIS0009-fake-rdb")
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(rdb_snapshot_restore, "_docker", fake_docker)
+
+        out_dir = str(tmp_path / "snap")
+        result = rdb_snapshot_restore.snapshot(
+            "docker://:s3cr3t@localhost:6379/tortoise", out_dir, None)
+        assert result["ok"] is True
+        assert calls.index("stats") < calls.index("bgsave")
+        # uri stored redacted — never the raw password (conf-75)
+        assert "s3cr3t" not in result["uri"]
+        assert "****" in result["uri"]
+        with open(result["meta"], encoding="utf-8") as fh:
+            meta = json.load(fh)
+        assert "s3cr3t" not in meta["uri"]
+        assert meta["uri"] == "docker://:****@localhost:6379/tortoise"
+
+    def test_restore_refuses_when_appendonly(self, monkeypatch, tmp_path):
+        """conf-60: appendonly=yes makes Redis load the AOF over the placed
+        RDB — restore must refuse instead of silently no-oping."""
+        rdb_file = str(tmp_path / "snap.rdb")
+        with open(rdb_file, "w", encoding="utf-8") as fh:
+            fh.write("REDIS0009-fake")
+        monkeypatch.setattr(rdb_snapshot_restore, "resolve_container",
+                            lambda uri, c: "falkordb")
+
+        def fake_docker(args, timeout=30):
+            if (args[:3] == ["exec", "falkordb", "redis-cli"] and
+                    args[3:5] == ["CONFIG", "GET"]):
+                return subprocess.CompletedProcess(
+                    args, 0, stdout="appendonly\nyes\n", stderr="")
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(rdb_snapshot_restore, "_docker", fake_docker)
+        result = rdb_snapshot_restore.restore(
+            "docker://:x@localhost:6379/tt", rdb_file, None, yes=True)
+        assert result["ok"] is False
+        assert "appendonly=yes" in result["error"]
+
+    def test_resolve_container_ambiguous_aborts(self, monkeypatch):
+        """conf-55: multiple containers publishing the port — refuse rather
+        than stop/restart the wrong one."""
+        ps_out = ("alpha\t0.0.0.0:6379->6379/tcp\n"
+                  "beta\t0.0.0.0:6379->6379/tcp\n")
+        monkeypatch.setattr(
+            rdb_snapshot_restore, "_docker",
+            lambda args, timeout=30: subprocess.CompletedProcess(
+                args, 0, stdout=ps_out, stderr=""))
+        with pytest.raises(RuntimeError, match="MULTIPLE"):
+            rdb_snapshot_restore.resolve_container(
+                "docker://:x@localhost:6379/tt", None)
+
+    def test_resolve_container_single_match(self, monkeypatch):
+        ps_out = "alpha\t0.0.0.0:6379->6379/tcp\n"
+        monkeypatch.setattr(
+            rdb_snapshot_restore, "_docker",
+            lambda args, timeout=30: subprocess.CompletedProcess(
+                args, 0, stdout=ps_out, stderr=""))
+        assert rdb_snapshot_restore.resolve_container(
+            "docker://:x@localhost:6379/tt", None) == "alpha"
+
+    def test_resolve_container_explicit_arg_wins(self, monkeypatch):
+        def boom(args, timeout=30):
+            raise AssertionError("docker must not be called")
+        monkeypatch.setattr(rdb_snapshot_restore, "_docker", boom)
+        assert rdb_snapshot_restore.resolve_container(
+            "docker://:x@localhost:6379/tt", "my-falkordb") == "my-falkordb"
+
+    def test_redact_uri_reexport(self):
+        assert "s3cr3t" not in rdb_snapshot_restore.redact_uri(
+            "docker://:s3cr3t@localhost:6379/tortoise")

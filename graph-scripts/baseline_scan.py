@@ -40,6 +40,12 @@ Report sections (counts + samples, all read-only):
     neither available → class UNVERIFIABLE (scoping exit criterion 2). Decision
     owner + default documented (event-log normalization decision, Phase 1).
 
+Bounded-materialization contract: large legacy populations (NULL-status
+points, sourceKind-less Points, evidence without Source backing, tier-neutral
+Sources, degenerate operators) are NEVER fully materialized into Python —
+every section reports an exact Cypher COUNT plus a bounded sample (LIMIT in
+the query, SAMPLE_LIMIT ids).
+
 Known-issue note (NOT fixed here): tortoise/ep.py:1060 `random.shuffle(factors)`
 is unseeded — Phase 5's EP determinism protocol must pin random.seed (+
 PYTHONHASHSEED if cross-process). Phase 0/1 is pre-migration read-only
@@ -64,6 +70,10 @@ from datetime import datetime, timezone
 
 # Allow running from any directory (repo-root import).
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Sibling graph-scripts/ module (script dir is sys.path[0] when run directly;
+# tests insert graph-scripts/ explicitly).
+from connectivity_gate import redact_uri
 
 DEFAULT_URI = "docker://:falkordb@localhost:6379/tortoise"
 SUPPORTED_URI_SCHEMES = ("docker", "redis", "rediss")
@@ -92,11 +102,24 @@ def classify_target(uri: str | None, path: str | None) -> dict:
 
 
 def connect_projection(cfg: dict):
-    """Build a FalkorProjection for the classified target (no writes)."""
+    """Build a FalkorProjection for the classified target (no writes).
+
+    Embedded paths must EXIST — a missing path silently spins up a fresh empty
+    FalkorDBLite database, and an all-zero "clean" scan would be misleading
+    (conf-65). Fail loudly instead.
+    """
     from tortoise.projection import FalkorProjection
     if cfg["mode"] == "uri":
         return FalkorProjection.from_uri(cfg["uri"])
-    return FalkorProjection(cfg["path"])
+    path = cfg["path"]
+    if path != ":memory:" and not os.path.isfile(path):
+        raise FileNotFoundError(
+            f"embedded graph path does not exist: {path!r} — refusing to "
+            "silently create a fresh empty FalkorDBLite database (an all-zero "
+            "'clean' scan would be misleading). Point at an existing graph, or "
+            "use a docker:// URI."
+        )
+    return FalkorProjection(path)
 
 
 # ── Query helpers ────────────────────────────────────────────────────────
@@ -118,10 +141,13 @@ def _count_and_samples(proj, count_cypher: str, sample_cypher: str,
 
     Large legacy populations (NULL-status points, sourceKind-less Points,
     evidence without Source backing) must never be fully materialized into
-    Python — the count query stays exact, samples stay bounded.
+    Python — the count query stays exact, samples stay bounded with the LIMIT
+    pushed INTO the query so the DB does the bounding (conf-75 contract).
     """
     crows = _q(proj, count_cypher)
     count = int(crows[0][0]) if crows else 0
+    sample_cypher = (sample_cypher if "LIMIT" in sample_cypher.upper()
+                     else f"{sample_cypher} LIMIT {limit}")
     return {"count": count, "samples": _samples(_q(proj, sample_cypher), keys, limit)}
 
 
@@ -209,18 +235,23 @@ def _stub_edges(proj) -> dict:
 
 
 def _degenerate_operators(proj) -> dict:
-    rows = _q(proj, "MATCH (o:Point {is_operator: true}) "
-                    "OPTIONAL MATCH (o)-[e:IMPL|NAND]->(:Point) "
-                    "WITH o, count(e) AS n_inputs WHERE n_inputs < 2 "
-                    "RETURN o.id, o.op_type, n_inputs ORDER BY n_inputs")
+    base = ("MATCH (o:Point {is_operator: true}) "
+            "OPTIONAL MATCH (o)-[e:IMPL|NAND]->(:Point) "
+            "WITH o, count(e) AS n_inputs WHERE n_inputs < 2 ")
+    crows = _q(proj, base + "RETURN count(o)")
+    count = int(crows[0][0]) if crows else 0
     return {
-        "count": len(rows),
+        "count": count,
         "threshold": "IMPL|NAND input count < 2 — the engine's own exclusion "
                      "threshold (projection/__init__.py extract_svbp_factors: "
                      "'Operators with <2 inputs are excluded').",
-        "samples": _samples(rows, ("id", "op_type", "n_inputs")),
+        "samples": _samples(_q(proj, base + "RETURN o.id, o.op_type, n_inputs "
+                                            "ORDER BY n_inputs "
+                                            f"LIMIT {SAMPLE_LIMIT}"),
+                            ("id", "op_type", "n_inputs")),
         "note": "Degenerate operators carry no usable factor; Phase 3 runs a "
-                "reviewable degenerate-operator pass (scoping exit criterion 2).",
+                "reviewable degenerate-operator pass (scoping exit criterion 2). "
+                "Count is exact (Cypher count); samples are bounded.",
     }
 
 
@@ -278,24 +309,43 @@ def _source_tier_neutral(proj) -> dict:
     credibilityTier > sourceKind tier-form > registry default > None.
     Registry state = the module's SOURCE_KIND_DEFAULTS (the loaded default —
     registry persistence is a Phase-4 prerequisite, not yet committed).
+
+    The tier vocabulary is computed in-process and pushed as query params so
+    the NEUTRAL population is an exact Cypher COUNT + bounded samples — the
+    Source population is never fully materialized into Python (conf-75).
     """
-    from tortoise.source_credibility import resolve_tier
-    rows = _q(proj, "MATCH (s:Source) RETURN s.url, s.sourceKind, "
-                    "s.credibilityTier ORDER BY s.url")
-    neutral: list[dict] = []
-    total = 0
-    for url, kind, tier in rows:
-        total += 1
-        if resolve_tier(tier, kind) is None:
-            neutral.append({"url": url, "sourceKind": kind, "credibilityTier": tier})
+    from tortoise.source_credibility import SOURCE_KIND_DEFAULTS, _TIER_FORM
+    # sourceKind values that resolve NON-neutral: the tier-form strings
+    # themselves (T0-T4, resolve_tier's first check) + registered kinds whose
+    # registry default is a tier. Everything else (unknown kinds, explicitly
+    # None-registered legacy kinds) resolves neutral.
+    tier_kinds = sorted(set(_TIER_FORM) | {
+        k for k, v in SOURCE_KIND_DEFAULTS.items() if v in _TIER_FORM})
+
+    crows = _q(proj, "MATCH (s:Source) RETURN count(s)")
+    total = int(crows[0][0]) if crows else 0
+
+    neutral_where = ("MATCH (s:Source) WHERE "
+                     "(s.credibilityTier IS NULL OR "
+                     "NOT s.credibilityTier IN $tv) "
+                     "AND (s.sourceKind IS NULL OR NOT s.sourceKind IN $tk) ")
+    params = {"tv": sorted(_TIER_FORM), "tk": tier_kinds}
+    nrows = _q(proj, neutral_where + "RETURN count(s)", params=params)
+    neutral_count = int(nrows[0][0]) if nrows else 0
+    samples = _samples(_q(proj, neutral_where +
+                          "RETURN s.url, s.sourceKind, s.credibilityTier "
+                          "ORDER BY s.url LIMIT " + str(SAMPLE_LIMIT),
+                          params=params),
+                       ("url", "sourceKind", "credibilityTier"))
     return {
-        "count": len(neutral),
+        "count": neutral_count,
         "total_sources": total,
-        "pct_neutral": round(len(neutral) / total, 4) if total else None,
-        "samples": neutral[:SAMPLE_LIMIT],
+        "pct_neutral": round(neutral_count / total, 4) if total else None,
+        "samples": samples,
         "note": "Sources resolving NEUTRAL (no explicit credibilityTier, no "
                 "tier-form sourceKind, no registry default). Exit criterion 3: "
-                ">=50% of evidence-backed Sources resolved non-neutral.",
+                ">=50% of evidence-backed Sources resolved non-neutral. Count "
+                "is exact (Cypher count); samples are bounded.",
     }
 
 
@@ -304,12 +354,19 @@ def _extracted_from(proj) -> dict:
                          "RETURN count(DISTINCT p)")
     prop_rows = _q(proj, "MATCH (p:Point) WHERE p.extractedFrom IS NOT NULL "
                          "RETURN count(p)")
+    # Backing = extractedFrom EDGE or legacy extractedFrom PROPERTY
+    # (entities.py ~L171-174) — a property-backed Point is NOT 'without
+    # backing'. Exclude it so the two metrics stay disjoint (conf-60: it was
+    # double-counted in both points_property_backed and
+    # evidence_without_source_backing).
     ev_no_src = _count_and_samples(
         proj,
         "MATCH (p:Point {is_operator: false}) "
-        "WHERE NOT (p)-[:extractedFrom]->(:Source) RETURN count(p)",
+        "WHERE NOT (p)-[:extractedFrom]->(:Source) "
+        "AND p.extractedFrom IS NULL RETURN count(p)",
         "MATCH (p:Point {is_operator: false}) "
         "WHERE NOT (p)-[:extractedFrom]->(:Source) "
+        "AND p.extractedFrom IS NULL "
         "RETURN p.id, p.content ORDER BY p.id",
         ("id", "content"),
     )
@@ -318,13 +375,17 @@ def _extracted_from(proj) -> dict:
         "points_property_backed": int(prop_rows[0][0]) if prop_rows else 0,
         "evidence_without_source_backing": {
             **ev_no_src,
-            "note": "Non-operator Points with no extractedFrom edge. The "
-                    "provenanceSource STRING class (entities.py ~L143-147) "
-                    "has no Source node — backfill must identity-validate "
-                    "before _link_source MERGE (scoping P1-7: no stub-Source "
-                    "manufacturing).",
+            "note": "Non-operator Points with NO Source backing — no "
+                    "extractedFrom edge AND no legacy extractedFrom property "
+                    "(entities.py ~L171-174). The provenanceSource STRING "
+                    "class (entities.py ~L143-147) has no Source node — "
+                    "backfill must identity-validate before _link_source "
+                    "MERGE (scoping P1-7: no stub-Source manufacturing).",
         },
-        "note": "extractedFrom backing % — exit criterion 4 baseline.",
+        "note": "extractedFrom backing % — exit criterion 4 baseline. Backing "
+                "= edge OR legacy property; points_edge_backed and "
+                "points_property_backed are disjoint from "
+                "evidence_without_source_backing by construction.",
     }
 
 
@@ -332,18 +393,23 @@ def _subject_stubs(proj) -> dict:
     # Stub signature from _create_about_edges: MERGE (s:Subject {name}) ON
     # CREATE SET s.id=$name, s.subjectKind='other' — id == name marks the
     # auto-created stub (deliberate create_subject uses a ULID id).
-    rows = _q(proj, "MATCH (s:Subject) WHERE s.id = s.name "
-                    "AND s.subjectKind = 'other' RETURN s.name ORDER BY s.name")
+    base = ("MATCH (s:Subject) WHERE s.id = s.name "
+            "AND s.subjectKind = 'other' ")
+    crows = _q(proj, base + "RETURN count(s)")
+    count = int(crows[0][0]) if crows else 0
     edge_rows = _q(proj, "MATCH (:Point)-[r:aboutSubject]->(s:Subject) "
                          "WHERE s.id = s.name AND s.subjectKind = 'other' "
                          "RETURN count(r)")
     return {
-        "count": len(rows),
+        "count": count,
         "about_subject_edges": int(edge_rows[0][0]) if edge_rows else 0,
-        "samples": _samples(rows, ("name",)),
+        "samples": _samples(_q(proj, base + "RETURN s.name ORDER BY s.name "
+                                            f"LIMIT {SAMPLE_LIMIT}"),
+                            ("name",)),
         "note": "Auto-created Subject stubs (id=name, subjectKind='other'). "
                 "Exit criterion 8: class decided in Phase 3 (0 aboutSubject-to-"
-                "stub edges or documented acceptance).",
+                "stub edges or documented acceptance). Count is exact (Cypher "
+                "count); samples are bounded.",
     }
 
 
@@ -353,15 +419,19 @@ def _cap_skip(proj) -> dict:
     # edges.py ~L60) or the operator is fully degenerate. The skipped edge
     # itself leaves no trace: source of truth = event log > content-string;
     # neither available here → class UNVERIFIABLE (exit criterion 2 floor).
-    rows = _q(proj, "MATCH (o:Point {is_operator: true}) "
-                    "WHERE o.op_type IS NOT NULL "
-                    "AND NOT (o)-[:IMPL|NAND]->(:Point) "
-                    "RETURN o.id, o.op_type ORDER BY o.id")
+    base = ("MATCH (o:Point {is_operator: true}) "
+            "WHERE o.op_type IS NOT NULL "
+            "AND NOT (o)-[:IMPL|NAND]->(:Point) ")
+    crows = _q(proj, base + "RETURN count(o)")
+    count = int(crows[0][0]) if crows else 0
     return {
         "status": "UNVERIFIABLE_FROM_GRAPH_STATE",
         "typed_edge_less_operators": {
-            "count": len(rows),
-            "samples": _samples(rows, ("id", "op_type")),
+            "count": count,
+            "samples": _samples(_q(proj, base + "RETURN o.id, o.op_type "
+                                                "ORDER BY o.id "
+                                                f"LIMIT {SAMPLE_LIMIT}"),
+                                ("id", "op_type")),
         },
         "decision": {
             "owner": "TBD (epistemic-team)",
@@ -438,7 +508,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     report = scan_graph(proj)
-    report["target"] = cfg
+    # Never echo the raw URI (it carries the DB password) — conf-75.
+    report["target"] = ({**cfg, "uri": redact_uri(cfg["uri"])}
+                         if cfg.get("uri") else cfg)
     text = json.dumps(report, indent=2, default=str)
 
     if args.output:

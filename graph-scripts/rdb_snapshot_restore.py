@@ -9,9 +9,11 @@ SDK-created points. Real restore = docker-aware RDB (copy the .rdb file back
 into the container and restart).
 
 This script implements both halves with a verification handshake:
-  - snapshot: BGSAVE → wait for LASTSAVE to advance → docker cp the RDB out →
-    record pre-snapshot graph stats (node counts by type) into a sidecar
-    .meta.json so restore can VERIFY it recovered the same state.
+  - snapshot: record pre-snapshot graph stats (node counts by type) → BGSAVE
+    → wait for LASTSAVE to advance → docker cp the RDB out → write the stats
+    sidecar .meta.json so restore can VERIFY it recovered the same state.
+    Stats are captured BEFORE BGSAVE so the sidecar describes exactly the
+    data the RDB persists (no TOCTOU between stats and RDB contents).
   - restore: refuses without --yes (destructive: container restart) → stop →
     place RDB → start → wait for connectivity → re-run the connectivity gate's
     graph stats and reconcile counts against the snapshot meta.
@@ -56,6 +58,10 @@ from datetime import datetime, timezone
 
 # Allow running from any directory (repo-root import).
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Sibling graph-scripts/ module (script dir is sys.path[0] when run directly;
+# tests insert graph-scripts/ explicitly).
+from connectivity_gate import graph_stats, redact_uri
 
 DEFAULT_URI = "docker://:falkordb@localhost:6379/tortoise"
 SUPPORTED_URI_SCHEMES = ("docker", "redis", "rediss")
@@ -103,7 +109,6 @@ def graph_stats_for(uri: str) -> dict:
     the caller treats that as restore-verification failure.
     """
     from tortoise.projection import FalkorProjection
-    from connectivity_gate import graph_stats  # repo graph-scripts/ module
     proj = FalkorProjection.from_uri(uri)
     return graph_stats(proj)
 
@@ -116,7 +121,13 @@ def _docker(args: list[str], timeout: int = 30) -> subprocess.CompletedProcess:
 
 def resolve_container(uri: str, container: str | None) -> str:
     """Resolve the container name: explicit arg > port-based docker ps probe
-    > default 'falkordb'. Raises RuntimeError when docker is unavailable."""
+    > default 'falkordb'.
+
+    Raises RuntimeError when docker is unavailable, or when the port probe
+    matches MULTIPLE containers — an ambiguous probe could stop/restart the
+    WRONG graph container (conf-55 data-safety), so it refuses and demands an
+    explicit --container instead of guessing.
+    """
     if container:
         return container
     port = parse_uri(uri)["port"]
@@ -128,10 +139,21 @@ def resolve_container(uri: str, container: str | None) -> str:
             "FalkorDB Cloud console snapshot, or backup.py JSONL (NOT a real "
             "restore — scoping P1-2)."
         )
+    matches = []
     for line in r.stdout.splitlines():
         name, ports = line.split("\t", 1)
         if f":{port}->" in ports or f":{port}/tcp" in ports:
-            return name
+            matches.append(name)
+    matches = sorted(set(matches))
+    if len(matches) > 1:
+        raise RuntimeError(
+            f"port {port} is published by MULTIPLE containers "
+            f"({', '.join(matches)}) — refusing to guess which one to stop/"
+            "restart (the wrong container would be a data-safety incident). "
+            "Pass --container <name> explicitly."
+        )
+    if matches:
+        return matches[0]
     return "falkordb"
 
 
@@ -143,6 +165,22 @@ def _container_rdb_info(container: str) -> dict:
         lines = [l.strip() for l in r.stdout.strip().splitlines() if l.strip()]
         return lines[-1] if lines else ""
     return {"dir": _cfg("dir"), "dbfilename": _cfg("dbfilename")}
+
+
+def _appendonly_state(container: str) -> dict:
+    """CONFIG GET appendonly — AOF preference check (restore no-op risk).
+
+    Redis/FalkorDB loads the AOF in preference to the RDB on cold start: a
+    stale AOF at the target makes a placed RDB silently ignored (restore
+    serves pre-restore data). Mirrors projection.remove_stale_aof semantics
+    (#915) — here we detect and refuse instead of deleting inside a stopped
+    container (conf-60).
+    """
+    r = _docker(["exec", container, "redis-cli", "CONFIG", "GET",
+                 "appendonly"], timeout=15)
+    lines = [l.strip() for l in r.stdout.strip().splitlines() if l.strip()]
+    val = lines[-1].lower() if lines else ""
+    return {"aof_enabled": val == "yes", "value": val or ""}
 
 
 def _bgsave_and_wait(container: str, start_ts: int, timeout_s: int = 120) -> dict:
@@ -177,9 +215,11 @@ def snapshot(uri: str, out_dir: str, container: str | None,
     if dry_run:
         return {"ok": True, "dry_run": True,
                 "would": [
+                    f"record graph stats sidecar (BEFORE BGSAVE) -> "
+                    f"{out_dir}/pre-migration-{ts}.meta.json",
                     f"docker exec <container> redis-cli BGSAVE",
-                    f"docker cp <container>:<rdb-dir>/<dbfilename> {out_dir}/pre-migration-{ts}.rdb",
-                    f"record graph stats sidecar -> {out_dir}/pre-migration-{ts}.meta.json",
+                    f"docker cp <container>:<rdb-dir>/<dbfilename> "
+                    f"{out_dir}/pre-migration-{ts}.rdb",
                 ]}
 
     cname = resolve_container(uri, container)
@@ -190,12 +230,18 @@ def snapshot(uri: str, out_dir: str, container: str | None,
                 "error": f"could not read RDB config from container {cname!r} — "
                          "is it a FalkorDB/Redis container?"}
 
-    # 1. BGSAVE + wait for LASTSAVE to advance
+    # 1. Capture pre-snapshot graph stats BEFORE BGSAVE — the sidecar must
+    #    describe the exact data state the RDB is about to persist. A stats
+    #    capture after docker cp would race with writes landing between the
+    #    BGSAVE point and the capture (conf-70 TOCTOU).
+    stats = graph_stats_for(uri)
+
+    # 2. BGSAVE + wait for LASTSAVE to advance
     lastsave = _bgsave_and_wait(cname, start_ts=int(time.time()) - 5)
     if not lastsave["ok"]:
         return lastsave
 
-    # 2. Copy RDB out
+    # 3. Copy RDB out
     rdb_path = os.path.join(out_dir, f"pre-migration-{ts}.rdb")
     src = f"{cname}:{info['dir']}/{info['dbfilename']}"
     r = _docker(["cp", src, rdb_path], timeout=60)
@@ -204,11 +250,13 @@ def snapshot(uri: str, out_dir: str, container: str | None,
     if not os.path.isfile(rdb_path) or os.path.getsize(rdb_path) == 0:
         return {"ok": False, "error": f"copied RDB missing/empty: {rdb_path}"}
 
-    # 3. Record pre-snapshot graph stats (verification baseline)
-    stats = graph_stats_for(uri)
+    # 4. Record the pre-snapshot graph stats sidecar (verification baseline).
+    #    The uri is stored REDACTED — the raw URI carries the DB password and
+    #    the sidecar is written with the default umask (conf-75); it is also
+    #    chmod 600 for defense-in-depth.
     meta = {
         "snapshot_at": ts,
-        "uri": uri,
+        "uri": redact_uri(uri),
         "container": cname,
         "rdb": rdb_path,
         "rdb_bytes": os.path.getsize(rdb_path),
@@ -218,6 +266,7 @@ def snapshot(uri: str, out_dir: str, container: str | None,
     meta_path = f"{rdb_path}.meta.json"
     with open(meta_path, "w", encoding="utf-8") as fh:
         json.dump(meta, fh, indent=2, default=str)
+    os.chmod(meta_path, 0o600)
 
     return {"ok": True, "rdb": rdb_path, "meta": meta_path, **meta}
 
@@ -250,12 +299,27 @@ def restore(uri: str, rdb_file: str, container: str | None,
 
     if dry_run:
         return {"ok": True, "dry_run": True, "would": [
+            f"verify appendonly is off (CONFIG GET appendonly) — refuse if "
+            f"yes (Redis loads the AOF over the placed RDB)",
             f"docker stop {cname}",
             f"docker cp {rdb_file} {cname}:<rdb-dir>/<dbfilename>",
             f"docker start {cname}",
             f"wait for connectivity (≤{_CONNECT_MAX_WAIT_S}s) + reconcile "
             f"graph stats vs {meta_path}",
         ]}
+
+    # AOF guard: with appendonly=yes the server loads the AOF in PREFERENCE
+    # to the placed RDB on start — this restore would silently no-op and
+    # serve pre-restore data (conf-60; projection.remove_stale_aof, #915).
+    aof = _appendonly_state(cname)
+    if aof["aof_enabled"]:
+        return {"ok": False,
+                "error": f"container {cname!r} has appendonly=yes — Redis loads "
+                         "the AOF in preference to the placed RDB on start, so "
+                         "this restore would silently no-op (serve pre-restore "
+                         "data). Refusing. Disable AOF first (CONFIG SET "
+                         "appendonly no + BGSAVE, or remove the stale appendonly "
+                         "dir inside the container), then retry."}
 
     # Pre-restore sanity: capture current state for the audit trail + read
     # the RDB location BEFORE the stop (docker exec fails on stopped containers).
