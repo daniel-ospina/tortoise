@@ -4183,6 +4183,24 @@ async def _require_owner(user_id: str, team_id: str, *,
     raise HTTPException(status_code=403, detail="Requires owner role in team")
 
 
+def _utc_now_iso() -> str:
+    from datetime import datetime, timezone as _tz
+    return datetime.now(_tz.utc).isoformat()
+
+
+def _set_invite_email_sent(cp, invitation_id: str) -> None:
+    """Stamp invitations.email_sent_at on provider-accept (best-effort)."""
+    try:
+        cp.query(
+            "invitations",
+            method="PATCH",
+            json_body={"email_sent_at": _utc_now_iso()},
+            filters=[("id", "eq", invitation_id)],
+        )
+    except Exception as _e:  # noqa: BLE001 — stamping must not raise into the email task
+        _logger.warning("invite: email_sent_at stamp failed for %s (%s)", invitation_id, _e)
+
+
 @app.post("/v1/invites")
 async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):
     """E3 — invite a user to the team (admin/member roles; Team tier)."""
@@ -4208,7 +4226,19 @@ async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):
             if (team.get("tier") or "free") != "team":
                 raise HTTPException(status_code=402, detail="Invites require the Team tier")
             inv = invitation_mint(get_control_plane(), team_id, email, role,
-                                  invited_by=user["user_id"])
+                                  invited_by=user["user_id"],
+                                  inviter_email=(user.get("email") or None))
+            # #307: best-effort invite email — never blocks the mint.
+            try:
+                from tortoise.email_notify import send_invite_email
+                send_invite_email(
+                    team.get("name") or "your team", email, role,
+                    inv["token"], inv["id"],
+                    on_sent=lambda mid: _set_invite_email_sent(
+                        get_control_plane(), inv["id"]),
+                )
+            except Exception as _e:  # noqa: BLE001
+                _logger.warning("invite: email schedule failed for %s (%s)", inv["id"], _e)
             return {"invite_id": inv["id"], "status": "invited",
                     "token": inv["token"], "expires_at": inv["expires_at"],
                     "role": role}
@@ -4261,10 +4291,11 @@ async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):
     expires_at = (datetime.now(_tz.utc) + timedelta(days=7)).isoformat()
     reg.query(
         "CREATE (i:Invitation {id:$id, team_id:$tid, email:$email, role:$role, "
-        "token_hash:$th, created_by:$cb, created_at:$now, expires_at:$exp, "
-        "accepted_at:null, status:'pending'})",
+        "token_hash:$th, created_by:$cb, inviter_email:$ie, created_at:$now, "
+        "expires_at:$exp, accepted_at:null, status:'pending'})",
         params={"id": iid, "tid": team_id, "email": email, "role": role,
-                "th": token_hash, "cb": user["user_id"], "now": now, "exp": expires_at},
+                "th": token_hash, "cb": user["user_id"], "ie": user.get("email"),
+                "now": now, "exp": expires_at},
     )
     # Also record the invitee row in team_memberships (status='invited') per plan §4.1
     reg.query(
@@ -4272,8 +4303,96 @@ async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):
         "ON CREATE SET m.role=$role, m.status='invited', m.invited_email=$email, m.created_at=$now",
         params={"tid": team_id, "fake": f"invite-{iid}", "role": role, "email": email, "now": now},
     )
+    # #307: best-effort invite email — never blocks the mint.
+    try:
+        from tortoise.email_notify import send_invite_email
+        send_invite_email(
+            team_node.get("name") or "your team", email, role,
+            token, iid,
+            on_sent=lambda mid: reg.query(
+                "MATCH (i:Invitation {id:$id}) SET i.email_sent_at = $now",
+                params={"id": iid, "now": now},
+            ),
+        )
+    except Exception as _e:  # noqa: BLE001 — email must never fail the mint
+        _logger.warning("invite: email schedule failed for %s (%s)", iid, _e)
     return {"invite_id": iid, "status": "invited", "token": token,
             "expires_at": expires_at, "role": role}
+
+
+@app.get("/v1/invites/info")
+async def invite_info(token: str):
+    """Public invite-info for the accept page (#1177).
+
+    Returns display fields only (team name, role, expiry, inviter identifier)
+    so the landing page can render the copy variables BEFORE the invitee
+    accepts. No auth: the token itself is the capability (hash-only at rest).
+    Unknown/consumed/expired tokens → 404 with identical copy (no oracle).
+    """
+    from datetime import datetime, timezone as _tz
+
+    if not token:
+        raise HTTPException(status_code=422, detail="token required")
+
+    def _registry_invite():
+        from tortoise.auth import verify_api_key as _verify
+        sdk = _make_sdk(namespace="registry")
+        reg = sdk._get_registry()
+        rows = reg.query(
+            "MATCH (i:Invitation) WHERE i.accepted_at IS NULL "
+            "AND (i.status IS NULL OR i.status <> 'revoked') "
+            "RETURN i.id, i.team_id, i.role, i.inviter_email, i.expires_at, i.token_hash",
+        ).result_set
+        for iid, tid, role, ie, exp, th in rows:
+            if _verify(token, th):
+                return {"team_id": tid, "role": role,
+                        "inviter_email": ie, "expires_at": exp}
+        return None
+
+    def _team_name(team_id: str) -> str | None:
+        from tortoise.supabase_control import (
+            get_control_plane, is_supabase_enabled, team_by_id,
+        )
+        if is_supabase_enabled():
+            t = team_by_id(get_control_plane(), team_id)
+            return (t or {}).get("name")
+        sdk = _make_sdk(namespace="registry")
+        reg = sdk._get_registry()
+        rows = reg.query(
+            "MATCH (t:Team {id:$id}) RETURN properties(t)",
+            params={"id": team_id},
+        ).result_set
+        return rows[0][0].get("name") if rows else None
+
+    try:
+        from tortoise.supabase_control import (
+            get_control_plane, invitation_info_by_token, is_supabase_enabled,
+        )
+        inv = (invitation_info_by_token(get_control_plane(), token)
+               if is_supabase_enabled() else _registry_invite())
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=500,
+                            detail="Invites unavailable (control plane error)")
+
+    if not inv:
+        raise HTTPException(status_code=404, detail="Invite not found or expired")
+
+    exp = inv.get("expires_at")
+    if exp and exp < datetime.now(_tz.utc).isoformat():
+        raise HTTPException(status_code=404, detail="Invite not found or expired")
+
+    team_name = _team_name(inv["team_id"])
+    if not team_name:
+        raise HTTPException(status_code=404, detail="Invite not found or expired")
+
+    return {
+        "team_name": team_name,
+        "role": inv.get("role", "member"),
+        "inviter_email": inv.get("inviter_email") or "a team member",
+        "expires_at": inv.get("expires_at"),
+    }
 
 
 @app.post("/v1/invites/accept")

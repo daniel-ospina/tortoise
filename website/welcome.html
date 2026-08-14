@@ -1671,6 +1671,16 @@ ${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}`,
 
     // Block B: fetch the active harness's variant prompt; on ANY failure fall
     // back to the canonical prompt URL (unchanged UX — plan Substep 5).
+    // Negative-leg guard (#969 finding 3): the hosting layer returns 200 +
+    // landing HTML for missing variant paths (Cloudflare Pages masks 404s), so
+    // a status check alone is NOT enough — the fetched text must look like a
+    // prompt or we treat it as a failure and fall back to canonical.
+    const PROMPT_MARKER = "# Tortoise Onboarding";
+    function _looksLikePrompt(text) {
+      return typeof text === "string"
+        && text.includes(PROMPT_MARKER)
+        && text.trim().length > 100;
+    }
     let promptLoadedFor = null;
     function loadVariantPrompt() {
       const el = document.getElementById("prompt-text");
@@ -1682,9 +1692,13 @@ ${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}`,
       if (promptLoadedFor === harness) return;
       el.textContent = "(Loading prompt…)";
       if (btn) btn.disabled = true;
-      fetch(variantPromptUrl(harness))
-        .then(r => { if (!r.ok) throw new Error("variant " + r.status); return r.text(); })
-        .catch(() => fetch(PROMPT_URL).then(r => { if (!r.ok) throw new Error("canonical " + r.status); return r.text(); }))
+      const fetchPrompt = (url) => fetch(url)
+        .then(r => r.ok ? r.text() : Promise.reject(new Error("http " + r.status)))
+        .then(text => _looksLikePrompt(text)
+          ? text
+          : Promise.reject(new Error("not-a-prompt (200+HTML masking?)")));
+      fetchPrompt(variantPromptUrl(harness))
+        .catch(() => fetchPrompt(PROMPT_URL))
         .then(text => { if (harness === currentHarness) { el.textContent = text; promptLoadedFor = harness; } })
         .catch(() => { if (harness === currentHarness) el.textContent = "(Prompt unavailable — copy from premiselabs.co/onboarding-prompt.md)"; })
         .finally(() => { if (harness === currentHarness && btn) btn.disabled = false; });

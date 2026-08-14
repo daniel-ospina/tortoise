@@ -1,8 +1,9 @@
 ---
 title: "Tortoise Self-Hosted Quickstart"
-type: guide
-domain: epistemic
+type: engineering
+domain: platform
 doc_status: live
+subjects.team: epistemic-team
 created: 2026-08-08
 aboutSubjects: tortoise
 aboutObjects: tortoise-cli, tortoise-mcp
@@ -107,7 +108,177 @@ tortoise index github https://github.com/your/repo --db <path-or-uri>
 
 `index github` clones the repo (or accepts a local path), extracts deterministically with offline mock models, and writes Points/Operators to the graph — idempotent across runs. For richer LLM-based extraction, use the standalone ingest CLI instead — `tortoise-ingest transcript.txt --db <path-or-uri>` (or `python -m tortoise.ingest`). It ingests a transcript file, requires `--db`, and defaults to offline mock models; pass `--point-model`/`--relation-model` (e.g. `ollama:llama3.2:3b`) to use a real LLM. `tortoise onboard` runs the full init → index → demo → doctor flow and passes the same resolved DB target to each step, so it works in embedded-only mode too (it used to crash; fixed in #705).
 
+For a LOCAL corpus of `.md` files (your own notes, docs, session exports), use the
+unified index path — [§4b Index a local corpus](#4b-index-a-local-corpus-of-markdown-files-the-unified-index-path) — which writes Sources + Events/Documents idempotently and is what the session-end hook's reconciliation sweep uses.
+
 > **Indexing cost (real-world):** indexing is CPU-bound extraction, not I/O — a few hundred markdown files takes **minutes** (measured: ~280s for a 261-md repo on embedded with offline mock models). It is not hung; `tortoise onboard` Step 3 and the Q5 ingestion step run in the background until done.
+
+## 4b. Index a local corpus of markdown files (the unified index path)
+
+`tortoise index directory <corpus-dir> [--db URI] [--corpus-name NAME] [--metadata]`
+walks a directory of `.md` files and writes **Sources + Events/Documents** (a
+Source per file, plus a session/meeting Event or a Document per file) —
+idempotent across runs (re-runs converge to `skipped`).
+
+```bash
+tortoise index directory ~/notes --db docker://:falkordb@localhost:6379/tortoise
+# stdout: ONE JSON line = the honest summary — the machine contract
+#   {"directory": ..., "corpus_name": ..., "file_count": 3, "indexed": 3,
+#    "updated": 0, "skipped": 0, "failed": 0, "aborted": 0, "ignored": 0,
+#    "errors": [], "by_kind": {"agentSession": 2, "document": 1}, ...}
+# stderr: the human-readable rendering
+```
+
+- **Exit code 0 = the run COMPLETED** (even with `failed > 0` — per-file
+  failures are *reported* in the summary, never encoded in the exit code).
+  Exit 1 = a pre-walk argument error or an unreachable graph.
+- **`--metadata`** (opt-in): run LLM metadata extraction + session embeddings.
+  Default is the no-network mode (`extract_metadata=False`).
+- **`--corpus-name`**: the corpus identity in the `corpus://<name>/…` urls.
+  Default = the directory basename. **On a shared graph, give each corpus a
+  unique `corpus_name`** — two corpora with the same basename collide on the
+  same urls.
+- **Env fallback**: with no positional dir, `TORTOISE_INGEST_BASE_DIR` is used;
+  with both absent, the CLI exits 1 naming both surfaces.
+
+### Env table (all seven indexing vars)
+
+| Var | Default | Precedence / notes |
+|-----|---------|--------------------|
+| `TORTOISE_DB_URI` | (unset → embedded) | Docker URI for the durable multi-writer graph; concurrent writers verified at 2 processes |
+| `TORTOISE_INGEST_BASE_DIR` | (unset → no sandbox) | SECURITY sandbox: corpus dirs + progress files + resolved symlink targets must stay under it. Not the corpus selector. A typo here = pre-walk error |
+| `TORTOISE_SESSION_CORPUS` | `~/.tortoise/docs/conversations` | The session-end hook's sweep-corpus selector (passed positionally). ⚠️ The base-dir-vs-corpus confusion: setting this to the real corpus while the DB points at a test graph sweeps the whole corpus into the wrong DB |
+| `TORTOISE_MAX_FILE_MB` | `50` | Two-layer size guard (float MB); at/over the limit → rejected before any read |
+| `TORTOISE_EMBEDDING_REPAIR_BACKOFF_HOURS` | `24` | Across-run bound on embedding-repair retries after an outage (float hours) |
+| `TORTOISE_INDEX_NO_NETWORK` | (unset) | TEST-ONLY: forces the no-network omission at the new-path boundary; never honored inside the shared embedding — the frozen legacy path still embeds |
+| `TORTOISE_INDEX_CHILD_STDERR` | (unset) | Debug-redirect for the backgrounded sweep: full child output (stdout+stderr), truncate-on-open, fail-safe on relative/missing-parent targets |
+
+### Corpus layout
+
+- **Only `*.md` is indexed — case-sensitively.** A corpus that is mostly PDFs
+  reports `{file_count: 0, ignored: N}` — a zero `file_count` on a non-empty
+  dir means the corpus is not markdown.
+- Default session corpus: `~/.tortoise/docs/conversations` (or
+  `TORTOISE_SESSION_CORPUS`).
+- Session files: frontmatter `sessionId` (or `file_<stem>` fallback). Meeting
+  files: `fileType: meeting` + title/date. Everything else = document.
+
+### Verify your index
+
+```bash
+tortoise list-sources          # flat rows: url + sourceKind + points
+tortoise doctor                # health check incl. the session-indexing surface
+```
+
+`session_index_health` is **session-family-only** — meeting/doc files always
+appear in `unindexed` by necessity (health buckets every sessionless file).
+For mixed corpora, verify with `list_sources` (count + `by_kind`) instead;
+use health for the session corpus.
+
+### Operational gotchas (each is accept-and-document — known, pinned behavior)
+
+1. **Embedded FTS returns `[]` silently.** The default embedded backend has no
+   fulltext index — `tortoise_fts_query` returns empty results deterministically.
+   Text search by title requires the server-mode (`bolt://`/docker) graph.
+2. **After any `rebuild_all`, session/meeting provenance edges are gone** until
+   you re-run `tortoise index directory` (the re-index is the repair oracle).
+   Document edges survive rebuild.
+3. **Renaming/moving a corpus forks Sources.** The `corpus://` url encodes the
+   basename — a rename changes every url and doubles the Sources. Use the
+   explicit `--corpus-name` to keep the identity.
+4. **Resume fast-skip keys use (size, mtime).** A same-size edit within the
+   same mtime second can be skipped as unchanged on a `progress_file` resume —
+   re-run without the progress file to force the full read.
+5. **`TORTOISE_INDEX_NO_NETWORK` is test-only.** An accidentally-set value
+   disables LLM/embeddings (warnings only in `errors[]`).
+6. **Deleting a corpus file leaves its Source/Event/edges live** (historical
+   records — accept-and-document). Health shows no false stale/unindexed for
+   it; `list_sources` still lists it.
+7. **A failed background sweep is invisible by default** — the hook always
+   exits 0. Set `TORTOISE_INDEX_CHILD_STDERR` proactively and check
+   `list_sources`/health periodically (see below).
+
+### Monitoring the background session-end hook
+
+The session-end hook runs a corpus-wide reconciliation sweep at every session
+close — backgrounded, always exits 0. A sweep failing every session end is
+invisible by default. To monitor:
+
+```bash
+export TORTOISE_INDEX_CHILD_STDERR=~/.tortoise-index-child.log   # capture the sweep output
+tortoise list-sources && tortoise doctor                         # periodic check
+```
+
+Run `tortoise doctor` after upgrades.
+
+### Upgrading an existing hook install
+
+Installed hooks are per-project copies (`.claude/hooks/session-end.sh`). If you
+installed before the index-path migration, re-copy the current script and
+verify:
+
+```bash
+cp tortoise/claude-hooks/session-end.sh .claude/hooks/session-end.sh
+grep 'index directory' .claude/hooks/session-end.sh   # must match
+```
+
+The migrated script carries `# tortoise-hook-version: 2`. An un-upgraded copy
+still invoking the legacy `index sessions` becomes `nohup command-not-found →
+/dev/null` after the legacy CLI is removed — a silent failure.
+
+### How to restore (backup → wipe → rebuild → re-index)
+
+1. Back up: (1) the corpus files (source of truth), (2) the FULL `events/`
+   JSONL directory (the sole replay source for Sources/Events/Documents),
+   (3) the db file.
+2. Restore onto a fresh graph — `rebuild_all` is line-tolerant (a torn
+   trailing line from a crash is skipped, never fatal):
+
+```bash
+python -c 'from tortoise.sdk import TortoiseSDK; TortoiseSDK().rebuild_all("<events-dir>")'
+```
+
+3. Re-index the corpus:
+
+```bash
+tortoise index directory <corpus-dir>
+```
+
+4. **Verify — including an EDGE check.** `session_index_health` is edge-blind;
+   declare success only after checking a recall/edge surface too:
+
+```bash
+tortoise list-sources                     # count == file_count
+tortoise doctor                           # health
+# edge check: a recall on an indexed url must return its neighbor
+```
+
+**Upgrading is forward-only** — there is no binary rollback: the old binary
+replaying a new journal silently drops the new record kinds (and reintroduces
+wipe-before-parse, turning one torn line into total loss). The restore path is
+a pre-release backup per the drill above.
+
+### Troubleshooting: why isn't my file indexed?
+
+1. Re-run `tortoise index directory <dir>` manually and read the `errors[]`
+   entries (each names the rel-path + a cause-class: `decode` / `size` /
+   `escape` / `structural` / `filename`).
+2. Check the file extension — only case-sensitive `*.md`.
+3. Check `TORTOISE_MAX_FILE_MB` — an over-limit file is rejected before read.
+4. Check symlinks — an out-of-base resolved target is rejected (`escape`).
+5. Check health / `list_sources` for the session corpus.
+
+### Supported topologies
+
+- **One machine + embedded default** (eval): single-writer; two processes on
+  one embedded file is the #6761 crash class.
+- **One graph + N corpora**: give each corpus a unique `corpus_name`
+  (same-basename corpora collide on the urls).
+- **Concurrent writers**: `bolt://` (docker) — design-supported via
+  MERGE-keyed writes; **integration-tested to 2 concurrent writers**. Two
+  embedded DBs never sync (no replication exists); NFS/shared-volume
+  multi-writer is untested.
+
 
 ## 5. Connect your agent (MCP)
 
@@ -179,6 +350,57 @@ Point your client at `http://127.0.0.1:8000/mcp` with header `Authorization: Bea
 tortoise doctor                                        # health check
 tortoise backup --db ~/.tortoise/tortoise.db           # snapshot → backups/<timestamp>/
 ```
+
+## 7. Migrating from self-hosted to cloud
+
+The supported migration path is a **replay path**: your self-hosted daemon keeps serving the graph while you set up a hosted account, and you replay your knowledge into the hosted team through the same ingest path you used originally. This is the documented fallback verified by the **E2E-12-D** suite: knowledge lives on the selfhost daemon → the customer registers a hosted team → the knowledge is replayed → the hosted surface answers with parity.
+
+> ⚠️ **No automated import today.** There is no graph-import endpoint and no bulk export→import tool — you replay knowledge manually (CLI/REST/SDK) rather than uploading a backup. An export→import tool is tracked as a follow-up epic.
+
+**What carries over:** everything you replay lands as first-class graph data — Points, edges (operators), and belief scores computed by the same EP propagation. Queries, `context` digests, and the MCP tools behave identically on hosted.
+
+**What does NOT carry over:** Point IDs, edge topology, and belief scores are not copied — replayed knowledge is recreated and EP recomputes over the new graph. API keys are **not portable across surfaces**: a selfhost static key is rejected by hosted and a hosted key is rejected by your daemon (both 401 — keys are scoped per team/surface).
+
+### Step-by-step
+
+1. **Keep your selfhost daemon running** — the graph stays live and queryable while you set up cloud:
+
+   ```bash
+   docker compose up -d        # or leave your embedded DB in place
+   tortoise doctor             # confirm the local graph is healthy
+   ```
+
+2. **Register a hosted account** — [tortoise.premiselabs.co/signup](https://tortoise.premiselabs.co/signup) (Supabase sign-up), or mint a free hosted team + key with no email:
+
+   ```bash
+   tortoise signup
+   # ✅ Free team created — API key printed once, saved to .tortoise
+   ```
+
+3. **Connect a working directory to cloud**:
+
+   ```bash
+   tortoise init --api-key tt_<your-key>   # saves .tortoise config in this directory
+   ```
+
+4. **Replay the knowledge** through the hosted ingest path (run from the connected directory):
+
+   ```bash
+   # Sessions/transcripts you captured while self-hosted
+   tortoise session capture --file transcript.txt
+
+   # Individual claims (or bulk via REST POST /v1/points or the SDK)
+   tortoise create-point "The decision was approved" --kind statement
+   ```
+
+5. **Verify parity** — run the same checks on both surfaces:
+
+   ```bash
+   tortoise doctor          # selfhost health
+   tortoise team info       # hosted team + usage
+   ```
+
+   Then call the structure tools over MCP on each surface — `tortoise_check_structure` (chain integrity) and `tortoise_summarize_structure` (counts per gate) — and compare the hosted counts to your selfhost graph. When hosted reaches parity and answers your queries, decommission the daemon at your leisure.
 
 ## Troubleshooting
 

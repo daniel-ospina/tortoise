@@ -6259,8 +6259,13 @@ class TortoiseSDK:
         """Batch ingestion — walk directory, parse YAML frontmatter,
         create/update Event nodes. Returns {ingested, updated, skipped, failed, errors}.
 
-        When eventKind='AgentSession' and extract_metadata=True, runs LLM/fallback
-        metadata extraction on session content before creating the Event.
+        DEPRECATED — use ``index_directory`` (epic #900). During the W3
+        deprecation window this FROZEN legacy branch keeps its behavior
+        byte-identical (SC4). FLAG-SEMANTICS DIVERGENCE (W3, §6.1):
+        ``extract_metadata=False`` STILL computes session embeddings on the
+        legacy path (``_session_embedding`` unconditional in both AgentSession
+        branches) while the new path short-circuits the embedding to None —
+        the SAME flag, different Event semantics on two live paths.
         """
         import os as _os
         import json as _json
@@ -10704,7 +10709,12 @@ class TortoiseSDK:
                        llm_model: str | None = "gpt-5-mini",
                        progress_file: str | None = None) -> dict:
         """Index session files as AgentSession Events.
-        Thin wrapper around ingest_corpus with AgentSession defaults."""
+
+        DEPRECATED — use ``index_directory`` (epic #900). Thin wrapper
+        around the frozen legacy ``ingest_corpus`` (SC4 — behavior
+        unchanged); see its docstring for the ``extract_metadata``
+        flag-semantics divergence (W3, §6.1).
+        """
         return self.ingest_corpus(directory, eventKind="AgentSession",
                                   extract_metadata=extract_metadata,
                                   llm_model=llm_model,

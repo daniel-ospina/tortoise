@@ -179,9 +179,34 @@ def _mock_supabase_success(page: Page, team_name: str = "Test Team",
     return user_id
 
 
+def _open_mcp_path(page: Page) -> None:
+    """Drive the two-path chooser (#1170): the MCP card (harness tabs, manual
+    setup) is hidden until the user picks "Use Tortoise (MCP)". Skips when the
+    deployed page predates the chooser (TORTISE_HOST_CHECK pattern)."""
+    chooser = page.locator("#choose-mcp")
+    if chooser.count() == 0:
+        pytest.skip(
+            "deployed welcome page predates the #1170 two-path chooser — runs post-deploy"
+        )
+    chooser.click()
+    expect(page.locator("#mcp-card")).not_to_be_hidden(timeout=15_000)
+
+
+def _open_manual_setup(page: Page) -> None:
+    """Expand the collapsed manual-setup section (#1170): the env-var config
+    and onboarding-prompt copy buttons live there behind the one-click flow."""
+    link = page.locator("#manual-toggle-link")
+    if link.count() == 0:
+        pytest.skip(
+            "deployed welcome page predates the #1170 manual-setup toggle — runs post-deploy"
+        )
+    link.click()
+    expect(page.locator("#manual-setup")).not_to_be_hidden(timeout=15_000)
+
+
 def test_welcome_success_shows_key_and_artifacts(page: Page) -> None:
     """With a mocked provisioned session the page shows the API key, harness
-    tabs, MCP config, and prompt block (welcome page v2 success state)."""
+    tabs, and the one-click setup prompt (welcome page v2 success state)."""
     _mock_supabase_success(page)
     page.goto(WELCOME_URL, wait_until="domcontentloaded", timeout=30_000)
     expect(page.locator("#success")).not_to_be_hidden(timeout=15_000)
@@ -190,53 +215,50 @@ def test_welcome_success_shows_key_and_artifacts(page: Page) -> None:
     # removed #mcp-snippet-key line) and reveal the dashboard CTA for
     # first-time users — previously the button never appeared.
     expect(page.locator("#btn-dashboard")).to_be_visible(timeout=15_000)
+    # Two-path UI (#1170): harness tabs + the setup flows live in the MCP
+    # panel, hidden until the user picks "Use Tortoise (MCP)".
+    _open_mcp_path(page)
     expect(page.locator("#harness-tabs")).to_be_visible()
     # Four harness tabs (Claude Code / Codex / Cursor / Pi)
     expect(page.locator(".harness-tab")).to_have_count(4)
-    # MCP config renders on first tab interaction (renderMcpConfig is called
-    # by switchHarness, not by showSuccess)
+    # The one-click setup prompt (the visible default, #1170) embeds the
+    # revealed key and the Claude Code CLI one-liner (#529).
     page.locator('.harness-tab[data-harness="claude"]').click()
+    setup = page.locator("#setup-prompt-text").inner_text()
+    assert "https://api.premiselabs.co/mcp" in setup
+    assert "Bearer tt_" in setup
+    assert "claude mcp add" in setup
+    # Manual env-var form (#1170): the key-less .mcp.json alternative sits in
+    # the collapsed manual-setup section — expand it and verify the config.
+    _open_manual_setup(page)
     config = page.locator("#mcp-config-text").inner_text()
-    # Epic #529 transition: Claude Block A is the CLI one-liner post-deploy;
-    # this suite runs against the LIVE page, so until deploy-pages publishes
-    # the new welcome.html the old JSON shape is also accepted. Capstone #969
-    # tightens to the CLI-only assertion post-deploy.
     assert "https://api.premiselabs.co/mcp" in config
-    assert "Bearer" in config
-    assert ("claude mcp add" in config) or ('"url": "https://api.premiselabs.co/mcp"' in config)
+    assert "TORTOISE_API_KEY" in config
 
 
 def test_harness_tabs_switch_config(page: Page) -> None:
-    """Switching harness tabs must swap the Streamable HTTP config variant
-    (each harness has its own mcpServers JSON)."""
+    """Switching harness tabs must swap the one-click setup prompt variant
+    (each harness has its own install line — epic #529)."""
     _mock_supabase_success(page)
     page.goto(WELCOME_URL, wait_until="domcontentloaded", timeout=30_000)
     expect(page.locator("#success")).not_to_be_hidden(timeout=15_000)
     expect(page.locator("#api-key")).to_contain_text("tt_", timeout=15_000)
 
-    # MCP config renders on first tab interaction (renderMcpConfig is called
-    # by switchHarness, not by showSuccess) — click Claude to seed it.
-    page.locator('.harness-tab[data-harness="claude"]').click()
-    default = page.locator("#mcp-config-text").inner_text()
-    assert 'https://api.premiselabs.co/mcp' in default
+    # Two-path UI (#1170): open the MCP path to reach the harness tabs.
+    _open_mcp_path(page)
 
-    # Each harness renders its own optimal variant (epic #529): claude =
-    # CLI one-liner, codex = export + codex mcp add, cursor/pi = env-form
-    # JSON — all four renderings are now distinct.
+    # Each harness renders its own one-click setup prompt (epic #529):
+    # claude = CLI one-liner, codex = export + codex mcp add, cursor/pi =
+    # config-file forms — all four renderings are distinct.
     seen: set[str] = set()
     for harness in ("claude", "codex", "cursor", "pi"):
         page.locator(f'.harness-tab[data-harness="{harness}"]').click()
-        text = page.locator("#mcp-config-text").inner_text()
-        assert 'https://api.premiselabs.co/mcp' in text, f"bad config for {harness}"
+        text = page.locator("#setup-prompt-text").inner_text()
+        assert 'https://api.premiselabs.co/mcp' in text, f"bad setup prompt for {harness}"
         seen.add(text)
-    # Epic #529 transition: post-deploy all four render distinct optimal
-    # variants (>=4); pre-deploy claude/pi shared one JSON shape (>=3) and
-    # codex used the old header. Capstone #969 tightens to >=4 + the new
-    # codex header post-deploy.
-    assert len(seen) >= 3, f"expected distinct configs, got {len(seen)}"
+    assert len(seen) >= 4, f"expected distinct setup prompts, got {len(seen)}"
     page.locator('.harness-tab[data-harness="codex"]').click()
-    codex_text = page.locator("#mcp-config-text").inner_text()
-    assert codex_text.startswith("# Step 1") or codex_text.startswith("# Set your API key")
+    codex_text = page.locator("#setup-prompt-text").inner_text()
     assert "codex mcp add" in codex_text
     assert "--bearer-token-env-var TORTOISE_API_KEY" in codex_text
 
@@ -250,18 +272,29 @@ def test_mcp_config_copy_puts_harness_config_on_clipboard(page: Page) -> None:
     expect(page.locator("#success")).not_to_be_hidden(timeout=15_000)
     page.context.grant_permissions(["clipboard-read", "clipboard-write"],
                                    origin=_clipboard_origin())
+    # Two-path UI (#1170): the copy buttons live in the collapsed manual-setup
+    # section behind the MCP chooser. Harness tab first, THEN manual setup —
+    # this order also works pre-deploy (the live page before #1189 collapses
+    # manual setup on a harness switch; post-deploy both orders work).
+    _open_mcp_path(page)
     page.locator(".harness-tab[data-harness=\"claude\"]").click()
+    _open_manual_setup(page)
     page.locator("#btn-copy-mcp").click()
     clip = page.evaluate("navigator.clipboard.readText()")
     assert "https://api.premiselabs.co/mcp" in clip
-    if "claude mcp add" in clip:  # post-deploy CLI one-liner
-        assert "--transport http" in clip
-        assert "Bearer tt_" in clip
-    else:  # pre-deploy JSON shape
-        parsed = json.loads(clip)
-        servers = parsed["mcpServers"]["tortoise"]
-        assert servers["url"] == "https://api.premiselabs.co/mcp"
-        assert "Bearer tt_" in servers["headers"]["Authorization"]
+    # The copy button lives in the MANUAL setup section (#1170 layout), which
+    # renders the key-less env-var form: .mcp.json with ${TORTOISE_API_KEY}
+    # indirection (never a literal key in the config block).
+    assert "TORTOISE_API_KEY" in clip, f"env-var form missing: {clip[:200]!r}"
+    assert "Bearer ${TORTOISE_API_KEY}" in clip or "Bearer $TORTOISE_API_KEY" in clip
+    config_block, sep, export_line = clip.partition("export TORTOISE_API_KEY=")
+    assert sep, f"env-var form missing the export line: {clip[:200]!r}"
+    # The config block must reference the key only via env-var indirection;
+    # the literal key belongs in the export line and nowhere else (order-robust
+    # partition, not a position-dependent slice).
+    assert "tt_e2e_mock_api_key" not in config_block, \
+        "config block must not embed the literal key"
+    assert "tt_e2e_mock_api_key" in export_line, "export line missing the key"
 
 
 def test_prompt_copy_uses_fetched_markdown(page: Page) -> None:
@@ -272,6 +305,10 @@ def test_prompt_copy_uses_fetched_markdown(page: Page) -> None:
     expect(page.locator("#success")).not_to_be_hidden(timeout=15_000)
     page.context.grant_permissions(["clipboard-read", "clipboard-write"],
                                    origin=_clipboard_origin())
+    # Two-path UI (#1170): the onboarding-prompt copy button lives in the
+    # collapsed manual-setup section behind the MCP chooser.
+    _open_mcp_path(page)
+    _open_manual_setup(page)
     page.locator("#btn-copy-prompt").click()
     clip = page.evaluate("navigator.clipboard.readText()")
     assert clip.startswith("# Tortoise Onboarding"), "prompt copy is not the markdown"
@@ -533,28 +570,38 @@ LIVE_SIGNUP = pytest.mark.skipif(
 
 @LIVE_SIGNUP
 def test_live_signup_no_429_confirmation_required(page: Page) -> None:
-    """#801 live no-429 monitor (per-push smoke).
+    """#801 live no-429 monitor (on-merge + scheduled smoke).
 
-    Real signup against PROD (confirmations ON since #832). The signup POST
-    must return 200 and the page must reach the check-your-inbox state —
-    NOT the 429 over_email_send_rate_limit error. If the project-wide email
-    bucket is exhausted (real traffic / parallel CI), this test FAILS with
-    the server body in the message: that is the monitored signal.
+    Real signup against PROD through the SERVER-SIDE path (#801): the form
+    posts to /v1/signup/email (hosted API → GoTrue Admin API with
+    email_confirm=true — NO confirmation email is sent). The POST must return
+    200 — NOT 429 (over_email_send_rate_limit / per-IP register buckets) —
+    then the page auto-signs-in (auth/v1/token?grant_type=password) and
+    redirects to /welcome.
 
-    No sign-in / provisioning / key reveal here — the mocked welcome suite
-    owns those (green in CI); a live key-reveal would mint an un-deletable
-    prod team + api_keys row + FalkorDB graph (no cleanup endpoint in-repo).
+    The /welcome navigation is route-blocked: a live key-reveal there would
+    mint an un-deletable prod team + api_keys row + FalkorDB graph (no
+    cleanup endpoint in-repo) — the monitor only needs the signup + auto
+    sign-in to succeed.
 
     Teardown deletes the created auth user via the Admin API (best-effort;
     the FK cascade removes the placeholder team_memberships row)."""
     signup = {"status": None, "body": ""}
+    token = {"status": None}
 
     def _on_response(resp):
-        if "auth/v1/signup" in resp.url and resp.request.method == "POST":
+        if "v1/signup/email" in resp.url and resp.request.method == "POST":
             signup["status"] = resp.status
             signup["body"] = resp.text()[:400]
+        elif "token?grant_type=password" in resp.url and resp.request.method == "POST":
+            token["status"] = resp.status
 
     page.on("response", _on_response)
+    # #801: the account is created pre-confirmed, so the page redirects to
+    # /welcome — block it so the welcome page's provisioning never runs.
+    page.route("**/welcome*", lambda route: route.fulfill(
+        status=200, content_type="text/html", body="<html><body>ok</body></html>"
+    ))
     email = f"e2e-live-{uuid.uuid4().hex[:8]}@premise-labs.dev"
     password = f"E2eLivePass-{uuid.uuid4().hex[:8]}!"
     try:
@@ -562,20 +609,24 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
         page.locator("#email").fill(email)
         page.locator("#password").fill(password)
         page.locator("#btn-submit").click()
-        # Direct no-429 proof: the server must accept the signup.
+        # Direct no-429 proof: the server-side signup endpoint must accept it.
         # expect.poll is NOT available in playwright-python (JS-only) — poll
         # the captured response manually (code-review P1).
         deadline = time.time() + 30
         while signup["status"] is None and time.time() < deadline:
             page.wait_for_timeout(250)
-        assert signup["status"] is not None, "no auth/v1/signup response observed"
+        assert signup["status"] is not None, "no /v1/signup/email response observed"
         assert signup["status"] == 200, (
             f"live signup returned {signup['status']} — rate-limited or error: {signup['body']!r}")
-        # User-visible truth: check-your-inbox with the typed email.
-        expect(page.locator("#confirmation-required")).to_be_visible(timeout=30_000)
-        expect(page.locator("#confirm-email")).to_have_text(email)
-        # No 429 copy / no other error surfaced.
-        expect(page.locator("#error")).to_be_hidden(timeout=5_000)
+        # #801: created pre-confirmed → the page auto-signs-in.
+        deadline = time.time() + 30
+        while token["status"] is None and time.time() < deadline:
+            page.wait_for_timeout(250)
+        assert token["status"] is not None, "no auto sign-in (auth/v1/token) response observed"
+        assert token["status"] == 200, f"auto sign-in returned {token['status']}"
+        # The flow redirects to /welcome (route-blocked stub above) — the
+        # redirect itself is the user-visible success state of #801.
+        page.wait_for_url("**/welcome*", timeout=15_000)
         assert "email=" not in page.url and "password=" not in page.url, \
             f"credentials echoed into URL: {page.url}"
     finally:

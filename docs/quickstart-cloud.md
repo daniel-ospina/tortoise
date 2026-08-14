@@ -1,8 +1,9 @@
 ---
 title: "Tortoise Hosted Quickstart"
-type: guide
-domain: epistemic
+type: engineering
+domain: platform
 doc_status: live
+subjects.team: epistemic-team
 created: 2026-08-08
 aboutSubjects: tortoise
 aboutObjects: tortoise-cloud, tortoise-mcp, tortoise-rest
@@ -116,3 +117,28 @@ curl -s https://api.premiselabs.co/v1/team \
 - **Create:** `POST /v1/team/keys` — the plaintext key is shown **once** in the response; store it immediately.
 - **List:** `GET /v1/team/keys` — see all keys for the team (plaintext is not returned again).
 - **Revoke:** `DELETE /v1/team/keys/{key_id}` — instantly invalidates that key. Losing a key? Revoke it and create a replacement.
+
+## 6. Migrating from self-hosted to cloud
+
+Running Tortoise yourself and moving to hosted? The supported path is a **replay**: your self-hosted daemon keeps serving the graph while you set up this account, then you replay your knowledge into the hosted team through the same ingest path you used originally. This is the documented fallback verified by the **E2E-12-D** suite — knowledge lives on the selfhost daemon → the customer registers a hosted team → the knowledge is replayed → the hosted surface answers with parity. See [quickstart-selfhosted.md](quickstart-selfhosted.md) for the daemon side.
+
+> ⚠️ **No automated import today.** There is no graph-import endpoint and no bulk export→import tool — you replay knowledge manually (CLI/REST/SDK) rather than uploading a backup. An export→import tool is tracked as a follow-up epic.
+
+**What carries over:** everything you replay lands as first-class graph data — Points, edges (operators), and belief scores computed by the same EP propagation. Queries, `context` digests, and the MCP tools behave identically here.
+
+**What does NOT carry over:** Point IDs, edge topology, and belief scores are not copied — replayed knowledge is recreated and EP recomputes over the new graph. API keys are **not portable across surfaces**: a selfhost static key is rejected by the hosted API and a hosted key is rejected by your daemon (both 401 — keys are scoped per team/surface), so register a fresh hosted team + key below.
+
+### Step-by-step
+
+1. **Keep your selfhost daemon running** while you set up cloud — your graph stays live and queryable.
+2. **Register a hosted account** — [tortoise.premiselabs.co/signup](https://tortoise.premiselabs.co/signup), or from the CLI: `tortoise signup` (mints a free hosted team + key, no email).
+3. **Connect a working directory**: run `tortoise init --api-key tt_<your-key>` from the directory you'll replay into.
+4. **Replay the knowledge** through the hosted ingest path:
+
+   ```bash
+   tortoise session capture --file transcript.txt    # sessions captured while self-hosted
+   tortoise create-point "The decision was approved" --kind statement   # individual claims
+   ```
+
+   For bulk, use the REST API (`POST /v1/points`) or the SDK — both accept the same content.
+5. **Verify parity** — `tortoise team info` and `tortoise context` confirm the team and its memory digest; the MCP tools `tortoise_check_structure` (chain integrity) and `tortoise_summarize_structure` (counts per gate) confirm the replayed graph. Compare counts against your selfhost graph; once hosted reaches parity, decommission the daemon at your leisure.

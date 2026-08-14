@@ -1,3 +1,13 @@
+---
+title: "Ops: Fly Token Hardening + Main Branch Protection (#660)"
+type: engineering
+domain: platform
+doc_status: live
+subjects.team: epistemic-team
+created: 2026-08-09
+aboutSubjects: tortoise
+---
+
 # Fly Token Hardening + Main Branch Protection (#660)
 
 Follow-up to #596 (registry backup DR). Closes the largest residual under the
@@ -78,7 +88,6 @@ gh api repos/daniel-ospina/tortoise/branches/main/protection -X PUT \
       "docs",
       "test-isolation",
       "license-surface",
-      "welcome-e2e",
       "legal-e2e"
     ]
   },
@@ -99,7 +108,8 @@ Settings applied:
 - **Require PR reviews:** min 1 approval, dismiss stale reviews on new commits
 - **Prevent force pushes:** yes
 - **Prevent branch deletion:** yes
-- **Require status checks (strict):** all 6 CI jobs must pass before merge
+- **Require status checks (strict):** all 5 CI jobs must pass before merge
   (`pricing-artifact`, `docs`, `test-isolation`, `license-surface`,
-  `welcome-e2e`, `legal-e2e`)
+  `legal-e2e`; `welcome-e2e` moved off the required list in #1008 — the
+  live signup smoke runs in the welcome-e2e-monitor workflow instead)
 - **Enforce admins:** no (owner can still bypass in emergencies)
