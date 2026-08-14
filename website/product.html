@@ -237,6 +237,23 @@
       background: radial-gradient(ellipse at center, transparent 55%, var(--bg) 85%);
     }
 
+    /* Floating top menu (#1288) — transparent, only a cyan Login button top-right */
+    .floating-topmenu {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 12;
+      display: flex; justify-content: flex-end;
+      padding: 18px 24px;
+      pointer-events: none;  /* container never blocks the page */
+    }
+    .floating-topmenu .login-btn {
+      pointer-events: auto;
+      background: var(--accent, #06b6d4); color: #04121a;
+      padding: 7px 22px; border-radius: 8px;
+      text-decoration: none; font-weight: 600; font-size: 14px;
+      font-family: var(--mono, 'SF Mono', monospace);
+      transition: background 0.2s;
+    }
+    .floating-topmenu .login-btn:hover { background: var(--accent-hover, #0891b2); }
+
     /* OAuth state-expiry banner (#1224) — fixed top, above the canvas */
     .oauth-error-banner {
       position: fixed; top: 0; left: 0; right: 0; z-index: 10;
@@ -292,6 +309,10 @@
   </style>
 </head>
 <body>
+  <!-- Floating top menu (#1288): transparent, cyan Login top-right → /signup -->
+  <div class="floating-topmenu">
+    <a class="login-btn" href="/signup">Login</a>
+  </div>
   <!-- OAuth error banner (#1224): Supabase redirects here with
        ?error=...&error_code=bad_oauth_state when the OAuth state TTL
        expired mid-login — surface it instead of failing silently. -->
