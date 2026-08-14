@@ -2303,6 +2303,14 @@ class TortoiseSDK:
                     "promoted": False, "blocked": True,
                     "reason": "not_draft"}
 
+        # Epic 903-C2 (#1240): a status→live transition invalidates the
+        # promoted claim's EP-derived confidence — mark it dirty (plus its
+        # operator neighborhood via the 1-hop reverse BFS) so the next dream
+        # re-derives it. Verified gap: promote_point did NOT call _mark_dirty
+        # (the W1 lifecycle contract says every status→live transition must),
+        # which left a promoted claim permanently excluded from dreaming.
+        self._mark_dirty([point_id])
+
         # Post-CAS race re-check (#990): the quarantine lock is a
         # read-then-CAS (two statements — FalkorDBLite has no EXISTS
         # subqueries), so a quarantine landing between the batch_status read
@@ -6241,7 +6249,8 @@ class TortoiseSDK:
 
     def dream(self, dirty_only: bool = True, full: bool = False,
               max_hops: int = 2,
-              require_calibration: bool | None = None) -> dict:
+              require_calibration: bool | None = None,
+              stamp_dreamed_at: bool = True) -> dict:
         """Run EP stabilization (#85).
 
         Args:
@@ -6257,6 +6266,13 @@ class TortoiseSDK:
                   fail-closed, post-#344; set it to "0" to opt out). Dream
                   WRITES n.confidence,
                   so it must never silently run uncalibrated EP (#7478).
+            stamp_dreamed_at: when False, the pass never writes
+                  lastDreamedAt (epic 903-C2) — the read-triggered
+                  lazy-consistency paths (get_confidence /
+                  compute_confidence) pass False so a READ never
+                  moves the freshness signal that the 903-C4
+                  stale-first scheduler ranks on. Default True for
+                  write-triggered/operator-initiated dreams.
 
         Returns {iterations, converged, affected_claims} or the dream_all
         summary for full=True.
@@ -6269,11 +6285,18 @@ class TortoiseSDK:
             self._ensure_calibrated("dream")
         dreamer = self._get_dreamer()
         if full:
-            return dreamer.dream_all(max_hops=max_hops)
+            return dreamer.dream_all(
+                max_hops=max_hops, stamp_dreamed_at=stamp_dreamed_at)
         if not dirty_only and not self._dirty_roots:
             return {"iterations": 0, "converged": True, "affected_claims": []}
         anchors = list(self._dirty_roots)
-        result = dreamer.dream(anchors, max_hops=max_hops)
+        # Main (#395-era) already merged the retention change: roots in the
+        # affected set are cleared; roots OUTSIDE the dreamed subgraph stay
+        # dirty (vacuous-run = subtracts nothing). Epic 903-C2 (#1240) adds
+        # only the stamp_dreamed_at forwarding below — retention semantics
+        # owned by 903-C5 for the non-convergence divergence.
+        result = dreamer.dream(anchors, max_hops=max_hops,
+                                stamp_dreamed_at=stamp_dreamed_at)
         # Clear dirty roots that the dream's affected subgraph actually
         # covered: roots in the affected set converged and are cleared;
         # roots OUTSIDE the dreamed subgraph stay dirty for a later dream
@@ -6388,6 +6411,22 @@ class TortoiseSDK:
                 operator_ids.append(src)
                 operator_ids.append(tgt)
             operator_ids = list(dict.fromkeys(operator_ids))
+        else:
+            factors_data, _ = proj.extract_svbp_factors()
+            operator_ids = [f[0] for f in factors_data]
+        if not operator_ids:
+            return {"iterations": 0, "converged": True, "confidences": {}, "diagnostic": "no_factors"}
+        # Lazy consistency (#85): if dirty roots exist and this is a
+        # whole-graph/auto-extract computation, dream the dirty subgraph
+        # first so the auto-extracted factors see stabilized values.
+        # Epic 903-C2 (#1240): read-triggered dreams pass
+        # stamp_dreamed_at=False — a READ never moves the freshness signal
+        # that the 903-C4 stale-first scheduler ranks on.
+        if factors is None and anchors is None and self._dirty_roots:
+            self.dream(dirty_only=True, stamp_dreamed_at=False)
+            # Re-extract factors after dreaming (graph may have changed).
+            factors_data, _ = proj.extract_svbp_factors()
+            operator_ids = [f[0] for f in factors_data]
             if not operator_ids:
                 return {"iterations": 0, "converged": True, "confidences": {}, "diagnostic": "no_factors"}
             iterations, converged = ep.run(
@@ -6529,7 +6568,8 @@ class TortoiseSDK:
             self._ensure_calibrated("get_confidence")
         if claim_id in self._dirty_roots:
             self.dream(dirty_only=True,
-                       require_calibration=require_calibration)
+                       require_calibration=require_calibration,
+                       stamp_dreamed_at=False)  # read path — never stamps (epic 903-C2)
         return self._get_ep().compute_confidence(claim_id)
 
     def _apply_source_inheritance(self, recency_decay: float | None = None,

@@ -1089,6 +1089,35 @@ class FalkorProjection(
                     logging.getLogger(__name__).error(
                         "Failed to create index on n.%s: %s", prop, e)
 
+        # ── lastDreamedAt freshness index (epic 903-C2, #1240) ──
+        # Powers the stale-first scheduler's staleness ranking
+        # (ORDER BY lastDreamedAt ASC, null = stalest). Composite
+        # (is_operator, lastDreamedAt) on docker/server FalkorDB; embedded
+        # (redislite) gets the plain lastDreamedAt index only — a composite
+        # containing is_operator is #522-unsafe on embedded (stale bool type
+        # table across reopen silently zeroes `= false` lookups; the repair
+        # sweep below drops such composites on open). Idempotent +
+        # AOF-replay-safe (CREATE INDEX survives AOF replay —
+        # tests/test_embedded_concurrency.py:532).
+        if getattr(self, "_is_embedded", False):
+            dreamed_props = ("lastDreamedAt",)
+        else:
+            dreamed_props = ("is_operator", "lastDreamedAt")
+        try:
+            self.g.query(
+                "CREATE INDEX FOR (n:Point) ON ("
+                + ", ".join(f"n.{p}" for p in dreamed_props) + ")"
+            )
+        except Exception as e:
+            msg = str(e).lower()
+            if "already indexed" in msg or "already exists" in msg:
+                pass  # expected — index exists from prior startup
+            else:
+                import logging
+                logging.getLogger(__name__).error(
+                    "Failed to create index on :Point(%s): %s",
+                    ", ".join(dreamed_props), e)
+
         # ── Embedded repair: drop stale composite Point indexes (#522) ──
         # A composite index containing is_operator (created by an older
         # _ensure_indexes or the pre-#522 build) has entries typed by the

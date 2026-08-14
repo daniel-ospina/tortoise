@@ -166,6 +166,15 @@ Each layer answers a different question. All four are live mechanisms.
 
 > **Direction flag (code note):** operator direction is an explicit flag on the operator Point. Creation default is **bidirectional** for all op types (#753 — NAND is logically mutual; `unidirectional` is the agent-declared directed attack). Pre-migration operators lacking the property are read as bidirectional (legacy semantics preserved).
 >
+> **Edge properties (IMPL/NAND — EP message state, epic 903):** these are **graph-persisted** belief-propagation messages written by `TortoiseEP._flush_cache` and read back by `_load_cache` (warm-start seed, 903-C4). They are load-bearing graph state — documented here so they are not treated as throwaway cache:
+>
+> | Property | Type | Written by | Meaning |
+> |----------|------|-----------|---------|
+> | `msg_alpha` / `msg_beta` | float | `TortoiseEP._flush_cache` (ep.py) | Forward EP message natural parameters, operator→claim slot `(op_id, claim_id, rel_type)` |
+> | `back_msg_alpha` / `back_msg_beta` | float | `TortoiseEP._flush_cache` (ep.py) | Backward EP message natural parameters — separate slot for bidirectional / operator-less edges (the `back_msg_*` pair on the same edge) |
+>
+> **Warm-start note (903-C4):** `run(warm_start=True)` loads these graph-persisted messages as seed and skips updates whose delta ≤ fixed threshold γ; the fast path (`compute_confidence`) runs `warm_start=False` and never touches γ-skip state.
+>
 > **Extraction NAND direction policy (epic #909 §4.3 #5 / research addendum §1 — pipeline spec):** the EXTRACTOR explicitly sets direction per this policy; the SDK creation default stays `bidirectional` (#807 — API-user path):
 > - **New-claim-attacks-existing-claim → `unidirectional`** (directed): "you now claim ¬D against D" is an attack on an existing belief — the new claim attacks the old. This is the common, measured-correct case (the one that makes contradiction surfacing work; `nand_precision` A11 measures it).
 > - **Mutual restatement → `bidirectional`**: when both claims are asserted together as mutually exclusive (e.g., the conversation itself declares "A and B can't both be true").
@@ -303,6 +312,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `authoredBy` | SubjectID | — | `dc:creator` | ✅ | Who created the claim |
 | `validFrom` / `validTo` | ISO8601 | — | — | ✅ | Temporal validity window |
 | `createdAt` / `updatedAt` | ISO8601 | ✅ | `dc:created` / `dc:modified` | ✅ | Timestamps |
+| `lastDreamedAt` | ISO8601 UTC | — | — | ✅ | Freshness stamp — timestamp of the last EP write-back that **converged** on this claim (epic 903). NULL = never dreamed — **ranks STALEST** in the stale-first scheduler (first-deploy/legacy/crash-mid-pass graphs drain across passes). Non-operator claims only (operators excluded from ranking/stamping). Written **atomically with `confidence`** in the dream write-back (single UNWIND — the write-back's own fields lastDreamedAt+updatedAt are all-or-nothing; `confidence` is also flushed independently by `ep.run`'s `_flush_cache`, per the epic plan's redundancy note); failed/non-converged runs never update it; operator-less claims get a trivial stamp via the scan path. Composite index `:Point(is_operator, lastDreamedAt)` created idempotently at init on docker/server FalkorDB; embedded (redislite) gets plain `:Point(lastDreamedAt)` only — an `is_operator` composite is #522-unsafe on embedded (stale bool type table across reopen) |
 | `embedding` | vector | — | — | ✅ | Semantic embedding (FTS + vector search) |
 | `speaker` | string | — | — | ✅ | Role tag on episodic turn Points (user/assistant/…) — written by SDK `capture_session` (delta 5), not by hosted capture |
 | `is_episodic` | bool | — | — | ❌ | Quota exemption discriminator — true on episodic turn Points from the regex capture path (the `points` branch counts non-episodic only, #909 §4.3 #13/§4.4; legacy nodes lack the flag — one-query backfill migration ships with #947) |
