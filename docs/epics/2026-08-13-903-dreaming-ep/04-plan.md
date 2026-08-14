@@ -9,7 +9,7 @@ created: 2026-08-13
 
 # Epic Plan — Dreaming: EP across the whole/expanding graph (#903)
 
-**Date:** 2026-08-13 (rev 2 — consolidated review fixes from substep gates A+B)
+**Date:** 2026-08-13 (final — substep gates A/B/C/D CLEAN, 59 issues fixed; human gate 2 approved)
 **Pipeline:** epic-workflow Stage 4 (Plan) — `epic-plan` (8 substeps)
 **Inputs:** `01-align.md` (PROCEED) · `02-research.md` (CLEAN) · `03-scope.md` (human APPROVED, review CLEAN) · `test-design-surface-map.md` (filed as issue #1232)
 **Test-Design Gate:** issue **#1232** — integration-surface map (10 surfaces). Child issues derive verification checklists from it.
@@ -140,7 +140,7 @@ States covered: idle (no backlog), queued (dirty set), running (locked), non-con
 | Message state | graph-persisted (above) | **No new store.** Warm-start = `run(warm_start=True)`: load graph messages (existing), skip updates with Δ ≤ γ, flush back (existing). No in-memory mirror → no two-sources-of-truth. Cache-key discipline: `(op_id, claim_id, rel_type)` + separate forward/back slots. |
 
 **Integrity constraints (engine level):**
-- `confidence` + `lastDreamedAt` written in the SAME Cypher query (dream.py L98 pattern extended) — never two interleavable writes (surface 5 atomicity).
+- `confidence` + `lastDreamedAt` written in the SAME Cypher query (dream.py L112 atomic-SET pattern extended — the per-claim loop is L109-117) — never two interleavable writes (surface 5 atomicity).
 - `lastDreamedAt` updated ONLY when the run converges for that region; non-converged affected claims keep their old stamp (so they re-enter the staleness ranking — retention and freshness don't undermine each other).
 - **Status→live transitions (`promote_point` and any equivalent) call `_mark_dirty`** (verified gap: sdk.py L1835 does not today); `dream()` does NOT clear dirty roots on converged runs that produced zero affected claims (draft-excluded runs — #780).
 - Operator-less/isolated claims: **explicit trivial-stamp path** in full/scan passes — a dedicated query stamps `lastDreamedAt` for non-operator claims not covered by the EP flush (`run()` early-returns before flush when no factors; the scan path is separate and independent).
@@ -165,7 +165,7 @@ States covered: idle (no backlog), queued (dirty set), running (locked), non-con
 | `SDK.dream()` (mode router + dirty-set owner) | `tortoise/sdk.py` | Auto-select strategy (write → local, scheduled → stale-first, small → full); explicit override wins (precedence table, I1); dirty-root retention fix; promote→`_mark_dirty`; `dream_health_check()` | Mode plumbing; retention; promote hook; health check |
 | `Dreamer` (scheduler) | `tortoise/dream.py` | `dream_window(budget)`: staleness-rank (null = stalest) ∪ retained-dirty → anchors; operator-set dedup; retention + attempt cap; health-metric emission; trivial-stamp scan | Window selection, dedup, retention, metrics, scan |
 | `TortoiseEP.run` (engine) | `tortoise/ep.py` | `run(warm_start=True)`: load graph messages → seed → fixed-γ skip → flush; `warm_start=False` default (fast path unchanged, no γ-skip, no lock dependency) | warm_start param + γ-skip; invalidation helper (called from write paths) |
-| Graph write-back | dream.py | **Single UNWIND batch** SET `confidence` + `lastDreamedAt` + `updatedAt` for all affected claims (mirrors `_flush_cache`'s shape — eliminates the current per-claim N+1 loop at dream.py L91-99, which also redundantly rewrites confidence the engine already flushed); `stamp_dreamed_at` flag (only dream paths stamp — fast path never does); trivial-stamp derived from already-fetched stale-first data, dedicated scan for full passes | UNWIND write-back; stamp flag |
+| Graph write-back | dream.py | **Single UNWIND batch** SET `confidence` + `lastDreamedAt` + `updatedAt` for all affected claims (mirrors `_flush_cache`'s shape — eliminates the current per-claim N+1 loop at dream.py L109-117, which also redundantly rewrites confidence the engine already flushed); `stamp_dreamed_at` flag (only dream paths stamp — fast path never does); trivial-stamp derived from already-fetched stale-first data, dedicated scan for full passes | UNWIND write-back; stamp flag |
 | Hosted worker | `tortoise/hosted_api.py` | `_dream_worker` mode wiring; #329 full-bucket accounting (full + override only); `/v1/dream/health` | Mode wiring; budget rule; health endpoint |
 | MCP tools | `tortoise/mcp_server.py` | `dream` (optional mode), `dream_health_check` tools (no staleness_report tool — cut at human gate 2) | Additive to the #888-consolidated surface |
 | Observability | dream.py + hosted + sdk | Metrics record + zero-output alarm (hosted endpoint; embedded call-triggered check) | Metrics + alarm |
@@ -265,7 +265,7 @@ Each case is implementable as an automated test. **Harness (fixed per review):**
 - Act: write → `_mark_dirty` → `dream()` (default local).
 - Assert: affected claims refreshed; unrelated claims |Δconf| ≤ 0.01 (G7, re-locked at calibration); return shape pinned to I1 local key-set `{mode, iterations, converged, affected_claims, budget_used, coverage}` (concrete, typed — not "backward-compatible" vagueness).
 - **Precedence matrix sub-case** (I1 table, surface 1 guards): assert across mode×full×dirty_only combinations — explicit `mode` wins over sugar; `full=True` maps to full only when `mode is None`; `mode="stale-first"` + `dirty_only=True` → staleness window with dirty roots unioned; auto-selection: write-context → local.
-- **Operator-less write sub-case (D3-3b):** a freshly written isolated claim (no operators) → local pass trivially stamps it (`lastDreamedAt` set in the same write-back; the current `dream()` early-return at dream.py ~L69-79 would leave it null forever — this test pins the fix).
+- **Operator-less write sub-case (D3-3b):** a freshly written isolated claim (no operators) → local pass trivially stamps it (`lastDreamedAt` set in the same write-back; the current `dream()` seed-empty early-return at dream.py L92-93 would leave it null forever — this test pins the fix).
 - **Write-path structural sub-case (D2-5):** the write context never invokes scheduled/window mode — write → local only; window mode unreachable from the write path.
 
 **DE2E-4 — Freshness signal on reads; draft→promote stays stale** (E2E-4 — report endpoint cut; freshness assertions re-scoped)
