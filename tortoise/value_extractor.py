@@ -40,16 +40,51 @@ def compile_value_brief(packs_dir: Path | str | None = None) -> dict:
                 "description": spec.get("description", ""),
                 "nearMisses": spec.get("nearMisses", []),
             }
+    # T12 (#1272): the core objectKind set is aligned to ONTOLOGY §5 Object
+    # Kind Vocabulary (16 kinds incl. the commitment-state family) — the
+    # prior brief (concept/standard/document/tool/workflow/WorkItem/other)
+    # missed project/tag/user/skill/agent/agreement + strategy/plan/goal/
+    # target and added concept (not in §5). `concept` is mapped to core:other.
     core = {
-        "core:concept": "An abstract idea or model (incl. the system's own concepts)",
-        "core:standard": "A standard, spec, or canonical reference",
-        "core:document": "A document artifact",
-        "core:tool": "A tool, CLI, or utility",
-        "core:workflow": "A reusable procedural sequence",
+        "core:Project": "A project",
         "core:WorkItem": "A unit of work",
+        "core:document": "A document artifact",
+        "core:tag": "A tag",
+        "core:user": "A user",
+        "core:skill": "A skill",
+        "core:tool": "A tool, CLI, or utility",
+        "core:agent": "An agent",
+        "core:workflow": "A reusable procedural sequence",
+        "core:agreement": "An agreement",
+        "core:standard": "A standard, spec, or canonical reference",
         "core:other": "No fitting kind - the explicit uncertain bucket",
+        "core:strategy": "A strategy state (commitment-state family)",
+        "core:plan": "A plan state (commitment-state family)",
+        "core:goal": "A goal state (commitment-state family)",
+        "core:target": "A target state (commitment-state family)",
     }
     return {**core, **kinds}
+
+
+_VOCAB_CACHE: dict | None = None
+
+
+def _object_kind_vocab() -> set[str]:
+    """The closed objectKind set (core §5 + pack kinds), cached (T12 —
+    compile_value_brief does PackRegistry.load_all() per call). Bare forms
+    are normalized to their namespaced key; case is folded."""
+    global _VOCAB_CACHE
+    if _VOCAB_CACHE is None:
+        brief = compile_value_brief()
+        vocab = set()
+        for key in brief:
+            ns, _, kind = key.rpartition(":")
+            vocab.add(key)
+            vocab.add(kind)                       # bare form
+            vocab.add(kind.lower())              # case-folded
+            vocab.add(f"{ns}:{kind.lower()}")   # namespaced + folded
+        _VOCAB_CACHE = vocab
+    return _VOCAB_CACHE
 
 
 # ── Process 1: the summary pass ─────────────────────────────────────────────
@@ -111,8 +146,16 @@ EVENT_KINDS = {"decision", "occurrence", "deployment", "review", "extraction",
                "humanApproval"}
 
 
-def validate_summary(summary: dict, vocab: dict | None = None) -> list[str]:
-    """Deterministic validation of the summary stream (the enforcer)."""
+def validate_summary(summary: dict, vocab: dict | None = None,
+                    mode: str = "fail-closed") -> list[str]:
+    """Deterministic validation of the summary stream (the enforcer).
+
+    T12 (#1272): ``mode`` selects fail-closed (default — non-vocab
+    objectKinds reject) vs warn (Phase B calibration — non-vocab kinds
+    become proposal notes, not errors, so the calibration windows are
+    reachable; criteria v1 §2.2.6 proposal semantics). The kind check is
+    ALWAYS active against the aligned §5+pack vocab (never gated on vocab
+    being passed — the vocab is loaded internally when None)."""
     errors = []
     for d in summary.get("decisions", []) or []:
         if not d.get("content"):
@@ -124,6 +167,19 @@ def validate_summary(summary: dict, vocab: dict | None = None) -> list[str]:
     for s in summary.get("state", []) or []:
         if not s.get("name"):
             errors.append("state: missing name")
+        kind = s.get("objectKind")
+        if not kind:
+            errors.append(f"state {s.get('name','')[:30]}: missing objectKind "
+                          "(fail-closed — the mapper default core:other is a "
+                          "payload fallback, not a validation pass)")
+        elif kind not in _object_kind_vocab():
+            if mode == "fail-closed":
+                errors.append(f"state {s.get('name','')[:30]}: objectKind "
+                              f"{kind!r} not in the closed vocabulary "
+                              "(minted kind — T12)")
+            else:
+                # warn mode: proposal note, not an error (Phase B).
+                pass
     for l in summary.get("logic", []) or []:
         if not l.get("point"):
             errors.append("logic: missing point")
@@ -168,8 +224,9 @@ Output (ONE JSON object — the derived-commit stream):
   "operators": [
     {"src": "pt-id", "dst": "ev-id", "op_type": "IMPL", "direction": "unidirectional"},   # an argument FOR a decision
     {"src": "pt-id", "dst": "ev-id", "op_type": "NAND", "direction": "unidirectional"},   # an argument AGAINST
-    {"src": "pt-id", "target_edge": {"src": "pt-id", "dst": "ev-id", "op_type": "IMPL"},   # a mitigation tempers a support edge
-     "op_type": "MITIGATES", "strength": 0.1-0.5}
+    {"src": "pt-id", "dst": "ev-id", "op_type": "MITIGATES",
+     "target": {"src": "pt-id", "dst": "ev-id", "op_type": "IMPL"},
+     "strength": 0.3}   # a mitigation tempers a support edge (target = the edge-identity triple)
   ]
 }
 RULES:
@@ -242,8 +299,25 @@ def _user_prompt(edus: list[dict]) -> str:
         f"{e['index']}: {e['role']}: {e['text']}" for e in edus)
 
 
+CORRECT_PASS = """You are the CORRECTION pass. The session summary below failed
+validation with these errors:
+{errors}
+
+The items' names/ids are FIXED. Produce the FULL corrected summary (same keys:
+session/state/decisions/logic/issues) fixing ONLY the listed errors (add the
+missing sources/why, trim over-long content). Do not invent new items. One
+JSON object."""
+
+
 def summarize(model, edus: list[dict], chunk_size: int = 6) -> dict:
-    """Process 1, chunked for long sessions (per-chunk retry/skip)."""
+    """Process 1, chunked for long sessions (per-chunk retry/skip).
+
+    T7/T8/T9 (#1272): the merge aggregates per-chunk ``session`` blocks
+    (summary concatenated, capped at 2000; type preserved), drops the
+    ``ch{n}-`` name prefix (it poisoned the (name, kind) MERGE key),
+    de-duplicates state items by (name, kind) across chunks, and counts
+    failed chunks so partial extraction is never silent.
+    """
     def _one(part, system):
         for _ in range(3):
             try:
@@ -255,19 +329,38 @@ def summarize(model, edus: list[dict], chunk_size: int = 6) -> dict:
     if len(edus) <= chunk_size:
         out = _one(edus, SUMMARY_SYSTEM)
         return out or {"session": {"summary": ""}, "state": [], "decisions": [],
-                       "logic": [], "issues": []}
+                       "logic": [], "issues": [], "failed_chunks": 0}
     merged = {"session": {"summary": ""}, "state": [], "decisions": [],
-              "logic": [], "issues": []}
+              "logic": [], "issues": [], "failed_chunks": 0}
+    summaries: list[str] = []
+    session_type: str | None = None
     for start in range(0, len(edus), chunk_size):
         chunk = edus[start:start + chunk_size]
-        prefix = f"ch{start // chunk_size}"
-        system = SUMMARY_SYSTEM + (f"\nCHUNK ID PREFIX: prefix item names with "
-                                   f"'{prefix}-' where they would collide.")
-        part = _one(chunk, system)
+        part = _one(chunk, SUMMARY_SYSTEM)  # T8: no ch{n}- prefix instruction
         if not part:
+            merged["failed_chunks"] += 1
             continue
+        sess = part.get("session") or {}
+        if sess.get("summary"):
+            summaries.append(str(sess["summary"]))
+        if sess.get("type") and session_type is None:
+            session_type = str(sess["type"])
         for k in ("state", "decisions", "logic", "issues"):
             merged[k].extend(part.get(k, []) or [])
+    # T8: cross-chunk (name, kind) dedup — run ONCE on the accumulated list.
+    seen: set[tuple[str, str]] = set()
+    deduped: list[dict] = []
+    for st in merged["state"]:
+        key = (st.get("name", ""), st.get("objectKind", ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(st)
+    merged["state"] = deduped
+    merged["session"] = {
+        "summary": " ".join(summaries)[:2000],   # T7: concatenate, cap at 2000
+        "type": session_type or "",
+    }
     return merged
 
 
@@ -318,14 +411,34 @@ def _compact(summary: dict) -> dict:
 def extract_session(model, conversation: list[dict],
                     existing_state: dict | None = None,
                     session_id: str = "session",
-                    chunk_size: int = 6) -> dict:
+                    chunk_size: int = 6,
+                    mode: str = "fail-closed") -> dict:
     """The production entry: conversation -> summary (+ delta when existing
-    state is provided). Returns the commit-ready stream."""
+    state is provided). Returns the commit-ready stream.
+
+    T10 (#1272): a bounded R4 repair loop — if validate_summary flags errors,
+    the model is re-prompted ONCE with the errors (CORRECT_PASS) to fix them
+    (≤1 retry; the harness's proven run_iterative pattern, production-schema
+    adapted). The mode param (T12) selects fail-closed (default) vs warn.
+    """
     edus = [{"index": i, "role": t.get("role", "unknown"),
              "text": _mask_refs(str(t.get("content", "")))}
             for i, t in enumerate(conversation) if t.get("content")]
     summary = summarize(model, edus, chunk_size=chunk_size)
     errors = validate_summary(summary)
+    if errors and mode == "fail-closed":
+        # T10: one bounded repair attempt (the dev lineage's CORRECT_PASS).
+        try:
+            fixed = _parse_json(_complete(
+                model, CORRECT_PASS.format(errors="\n".join(errors[:8])),
+                json.dumps(summary, indent=1)))
+            if isinstance(fixed, dict):
+                fixed_errors = validate_summary(fixed)
+                if len(fixed_errors) < len(errors):
+                    summary = fixed
+                    errors = fixed_errors
+        except Exception:
+            pass  # repair is best-effort; original errors stand
     warns = check_guards(summary)
     result = {"session_id": session_id, "summary": summary,
               "errors": errors, "guards": warns}

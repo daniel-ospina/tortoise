@@ -564,7 +564,64 @@ def _mark_embedded_opened(db_path: str) -> None:
 
 
 def _stream_to_payload(summary: dict, session_id: str, stream: dict) -> dict:
-    """Payload from the constructed graph stream (the wired structure)."""
+    """Payload from the constructed graph stream (the wired structure).
+
+    T4 (#1272): stream ids from the LLM are NOT trustworthy (the prompt says
+    "the server re-derives them" but the code does not) — re-derive every
+    point/event id from content (pt_<sha>/ev_<sha>) and REMAP operator
+    src/dst + MITIGATES target triples to the re-derived ids, else Layer-1
+    referential integrity fails. Points are enriched with the required
+    fields (reason/confidence/c_cal) at the honest neutral prior 0.5/0.5
+    (T11 — never derived from LLM text in v1) and status draft (EP-inert
+    until #785)."""
+    from tortoise.ids import content_hash
+
+    id_map: dict[str, str] = {}
+    points = []
+    for p in stream.get("points", []):
+        if not p.get("id", "").startswith("pt_"):
+            continue
+        content = p.get("content", "")[:1000]
+        new_id = f"pt_{content_hash(content)[:62]}"
+        id_map[p["id"]] = new_id
+        points.append({
+            "id": new_id, "content": content,
+            "pointKind": "statement", "reason": "NEW",
+            "confidence": 0.5, "c_cal": 0.5,   # neutral prior (T11), never fabricated
+            "about_entities": p.get("about_entities", []) or [],
+            "source_ref": "session.md", "quote": "", "status": "draft",
+        })
+
+    events = []
+    for e in stream.get("events", []):
+        if not e.get("id", "").startswith("ev_"):
+            continue
+        content = e.get("content", "")[:1000]
+        new_id = f"ev_{content_hash(content)[:62]}"
+        id_map[e["id"]] = new_id
+        events.append({
+            "id": new_id, "eventKind": e.get("eventKind", "occurrence"),
+            "content": content, "confidence": 0.5,   # neutral prior (T11)
+            "about_entities": e.get("about_entities", []) or [],
+            "source_ref": "session.md",
+        })
+
+    def _remap(ref):
+        return id_map.get(ref, ref)
+
+    operators = []
+    for op in stream.get("operators", []) or []:
+        o = dict(op)
+        o["src"] = _remap(o.get("src", ""))
+        o["dst"] = _remap(o.get("dst", ""))
+        if o.get("target"):
+            t = dict(o["target"])
+            t["src"] = _remap(t.get("src", ""))
+            t["dst"] = _remap(t.get("dst", ""))
+            o["target"] = t
+        operators.append(o)
+
+    entities = [e for e in stream.get("entities", []) if e.get("name")]
     return {
         "schema_version": "1", "session_id": session_id,
         "client_commit_id": "", "captured_at": _now_iso(),
@@ -573,22 +630,16 @@ def _stream_to_payload(summary: dict, session_id: str, stream: dict) -> dict:
         "summary": (summary.get("session") or {}).get("summary", "")[:2000],
         "story_arc": "",
         "provenance_refs": [{"path": "session.md", "spans": []}],
-        "sources": [],
-        "entities": [e for e in stream.get("entities", [])
-                     if e.get("name")],
-        "points": [p for p in stream.get("points", [])
-                   if p.get("id", "").startswith("pt_")],
-        "events": [e for e in stream.get("events", [])
-                   if e.get("id", "").startswith("ev_")],
-        "operators": stream.get("operators", []) or [],
+        "sources": [], "entities": entities, "points": points,
+        "events": events, "operators": operators,
         "telemetry": {"extractor": {"version": "value@0.4.0+construct", "mode": "byok"},
                       "model": {"provider": "byok", "id": "user-model", "cfg_hash": ""},
-                      "counts": {"kept": len(stream.get("points", [])),
-                                 "candidate": len(stream.get("events", [])),
+                      "counts": {"kept": len(points),
+                                 "candidate": len(events),
                                  "segment": 1, "window": 1, "empty_windows": 0},
-                      "keep_ratio": 1.0, "dedup_hits": 0, "frontier_calls": 2,
+                      "keep_ratio": None, "dedup_hits": None, "frontier_calls": 2,
                       "llm_cost_usd": None, "extraction_ms": 0, "retry_count": 0,
-                      "last_error_code": None, "confidence_histogram": [0] * 10},
+                      "last_error_code": None, "confidence_histogram": None},
     }
 
 
@@ -1371,7 +1422,7 @@ class TortoiseSDK:
     def commit_session(self, conversation=None, session_id=None, *,
                        summary=None, existing_state=None,
                        extractor_model=None, chunk_size=6,
-                       base_url=None, api_key=None) -> dict:
+                       base_url=None, api_key=None, mode: str = "fail-closed") -> dict:
         """The production commit path (epic #909, two-process design).
 
         Process 1: the conversation -> summary (state/decisions/logic/issues)
@@ -1393,13 +1444,13 @@ class TortoiseSDK:
             model = extractor_model or _default_byok_model()
             extracted = extract_session(
                 model, conversation, existing_state=existing_state,
-                session_id=session_id, chunk_size=chunk_size)
+                session_id=session_id, chunk_size=chunk_size, mode=mode)
             summary = extracted["summary"]
             errors = extracted.get("errors", [])
             guards = extracted.get("guards", [])
             delta = extracted.get("delta")
         else:
-            errors = validate_summary(summary or {})
+            errors = validate_summary(summary or {}, mode=mode)
             guards = check_guards(summary or {})
             delta = None
 
@@ -1409,6 +1460,15 @@ class TortoiseSDK:
         except Exception:
             stream = None
         payload = _summary_to_payload(summary, session_id, stream=stream)
+        # T5 (#1272): compute the replay-safe client_commit_id in the mapper
+        # so the payload is complete on BOTH the POST and the error path
+        # (canonical excludes confidence/c_cal/status — enrichment is
+        # replay-safe; same content → same id).
+        from tortoise.commit_schema import compute_client_commit_id
+        payload["client_commit_id"] = compute_client_commit_id(
+            payload["session_id"], payload["points"], payload["entities"],
+            payload["operators"], payload["summary"], payload["story_arc"],
+            payload.get("events", []))
         if errors:
             return {"session_id": session_id, "ok": False, "errors": errors,
                     "payload": payload}
@@ -2956,7 +3016,7 @@ class TortoiseSDK:
         # before validation produced phantom OperatorAdded events on missing
         # inputs, visible to subscription poll consumers.
         existing = proj.g.query(
-            "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id",
+            "MATCH (n) WHERE (n:Point OR n:Event) AND n.id IN $ids RETURN n.id",
             params={"ids": inputs},
         ).result_set
         existing_ids = {row[0] for row in existing}
@@ -2981,11 +3041,13 @@ class TortoiseSDK:
             f"CREATE (o:Point {{id:$id, is_operator:true, op_type:$op, direction:$direction{props_clause}}})",
             params=params,
         )
-        # Ontology v2.1: map part/whole ops to hasPart, remove INPUT edges
+        # Ontology v2.1: map part/whole ops to hasPart, remove INPUT edges.
+        # A1b (#1272): operator endpoints may be Point OR Event nodes.
         edge_type = "hasPart" if op_type not in ("IMPL", "NAND") else op_type
         for i, inp_id in enumerate(inputs):
             proj.g.query(
-                f"MATCH (o:Point {{id:$oid}}), (s:Point {{id:$sid}}) "
+                f"MATCH (o:Point {{id:$oid}}), (s) WHERE (s:Point OR s:Event) "
+                f"AND s.id = $sid "
                 f"CREATE (o)-[:{edge_type} {{idx:$i}}]->(s)",
                 params={"oid": pid, "sid": inp_id, "i": i},
             )
@@ -12706,7 +12768,13 @@ def _default_byok_model():
     return _model_adapter(name)
 
 
-def _model_adapter(model_id: str):
+def _model_adapter(model_id: str, max_tokens: int = 4000, temperature: float = 0.0):
+    """BYOK model adapter with explicit bounds (T13 #1272).
+
+    The production summary/construct workload needs a real output budget —
+    the gate-judge default (500) truncates summaries and silently loses
+    chunks. 4000 is the summary/construct-sized default (temperature 0.0
+    for determinism); callers may override."""
     import os
     key = os.environ.get("OPENROUTER_API_KEY", "")
     url = os.environ.get("OPENROUTER_BASE_URL",
@@ -12720,7 +12788,9 @@ def _model_adapter(model_id: str):
                 "Content-Type": "application/json"},
                 json={"model": model_id,
                       "messages": [{"role": "system", "content": system},
-                                   {"role": "user", "content": user}]},
+                                   {"role": "user", "content": user}],
+                      "max_tokens": max_tokens,
+                      "temperature": temperature},
                 timeout=600)
             r.raise_for_status()
             return r.json()["choices"][0]["message"]["content"]
@@ -12748,7 +12818,7 @@ def _summary_to_payload(summary: dict, session_id: str,
             "id": f"ev_{content_hash(f'{session_id}:decision:{i}')[:62]}",
             "eventKind": "decision",
             "content": d.get("content", "")[:1000],
-            "confidence": 0.9,
+            "confidence": 0.5,   # T11 neutral prior (was fabricated 0.9)
             "about_entities": d.get("options") or [],
             "source_ref": "session.md",
         })
@@ -12757,7 +12827,7 @@ def _summary_to_payload(summary: dict, session_id: str,
             "id": f"ev_{content_hash(f'{session_id}:issue:{i}')[:62]}",
             "eventKind": "occurrence",
             "content": f"{iss.get('id', 'issue')} {iss.get('status', '')}: {iss.get('content', '')[:900]}",
-            "confidence": 0.9,
+            "confidence": 0.5,   # T11 neutral prior (was fabricated 0.9)
             "about_entities": [],
             "source_ref": "session.md",
         })
@@ -12769,9 +12839,9 @@ def _summary_to_payload(summary: dict, session_id: str,
         points.append({
             "id": pid, "content": l.get("point", "")[:1000],
             "pointKind": "statement", "reason": "NEW",
-            "confidence": 0.8, "c_cal": 0.7,
+            "confidence": 0.5, "c_cal": 0.5,   # T11 neutral prior (was 0.8/0.7)
             "about_entities": [], "source_ref": "session.md",
-            "quote": "", "status": "live",
+            "quote": "", "status": "draft",   # T11: draft (EP-inert until #785)
         })
 
     operators = []
@@ -12814,9 +12884,9 @@ def _summary_to_payload(summary: dict, session_id: str,
                       "model": {"provider": "byok", "id": "user-model", "cfg_hash": ""},
                       "counts": {"kept": len(points), "candidate": len(events),
                                  "segment": 1, "window": 1, "empty_windows": 0},
-                      "keep_ratio": 1.0, "dedup_hits": 0, "frontier_calls": 1,
+                      "keep_ratio": None, "dedup_hits": None, "frontier_calls": 1,
                       "llm_cost_usd": None, "extraction_ms": 0, "retry_count": 0,
-                      "last_error_code": None, "confidence_histogram": [0] * 10},
+                      "last_error_code": None, "confidence_histogram": None},
     }
 
 

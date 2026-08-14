@@ -3472,8 +3472,8 @@ def _load_commit_graph_state(sdk: TortoiseSDK, payload: "CommitPayload"):
     ).result_set
     state.entities = {(r[0], r[1] or "") for r in rows}
     rows = proj.g.query(
-        "MATCH (o:Point {is_operator:true})-[r]->(t:Point) "
-        "WHERE type(r) IN ['IMPL','NAND'] "
+        "MATCH (o:Point {is_operator:true})-[r]->(t) "
+        "WHERE type(r) IN ['IMPL','NAND'] AND (t:Point OR t:Event) "
         "RETURN o.id, o.op_type, r.idx, t.id ORDER BY o.id, r.idx",
     ).result_set
     ops: dict[str, dict] = {}
@@ -3492,8 +3492,8 @@ def _load_commit_graph_state(sdk: TortoiseSDK, payload: "CommitPayload"):
         t = op.target
         mit_rows = proj.g.query(
             "MATCH (o:Point {is_operator:true, op_type:'IMPL'}) "
-            "MATCH (o)-[:IMPL {idx:0}]->(s:Point {id:$src}) "
-            "MATCH (o)-[:IMPL {idx:1}]->(d:Point {id:$dst}) "
+            "MATCH (o)-[:IMPL {idx:0}]->(s) WHERE (s:Point OR s:Event) AND s.id = $src "
+            "MATCH (o)-[:IMPL {idx:1}]->(d) WHERE (d:Point OR d:Event) AND d.id = $dst "
             "MATCH (o)-[:mitigated_by]->(m) RETURN count(m)",
             params={"src": t.src, "dst": t.dst},
         ).result_set
@@ -3503,14 +3503,26 @@ def _load_commit_graph_state(sdk: TortoiseSDK, payload: "CommitPayload"):
 
 
 def _store_commit_telemetry(proj, client_commit_id: str, payload: "CommitPayload",
-                            *, warn: bool = False) -> None:
+                            *, warn: bool = False, plan=None) -> None:
     """Content-free telemetry store (W-7): the payload telemetry block is
     stored on the :CommitRecord — the schema has NO text-bearing fields (#963
     guards it) and NO graph-side counts (the server derives
     merge/supersede/held/draft/live from the Session counters — no second
     source of truth). judge_summary is DROPPED from v1. ``budget_warn`` is a
-    server-side annotation (soft-15 WARN), not part of the client schema."""
+    server-side annotation (soft-15 WARN), not part of the client schema.
+
+    T11 (#1272): the client's graph-truth telemetry fields (keep_ratio,
+    dedup_hits, confidence_histogram) are NOT trusted — when a ``plan``
+    (reconciled delta) is available the server derives keep_ratio from it
+    (net-new vs submitted), else they stay null (not measured). Client
+    process fields (extraction_ms, cost, retry_count) are kept as measured.
+    """
     telemetry = payload.telemetry.model_dump()
+    if plan is not None and plan.reconcile is not None:
+        submitted = max(len(payload.points) + len(payload.events), 1)
+        kept = max(plan.reconcile.net_new, 0)
+        telemetry["keep_ratio"] = round(kept / submitted, 4)
+        telemetry["dedup_hits"] = max(submitted - kept, 0)
     proj.g.query(
         "MATCH (r:CommitRecord {client_commit_id:$cid}) "
         "SET r.telemetry=$t, r.budget_warn=$warn",
@@ -3747,8 +3759,8 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: "CommitPayload", plan):
         if op_id is None:
             rows = proj.g.query(
                 "MATCH (o:Point {is_operator:true, op_type:'IMPL'}) "
-                "MATCH (o)-[:IMPL {idx:0}]->(s:Point {id:$src}) "
-                "MATCH (o)-[:IMPL {idx:1}]->(d:Point {id:$dst}) "
+                "MATCH (o)-[:IMPL {idx:0}]->(s) WHERE (s:Point OR s:Event) AND s.id = $src "
+                "MATCH (o)-[:IMPL {idx:1}]->(d) WHERE (d:Point OR d:Event) AND d.id = $dst "
                 "RETURN o.id LIMIT 1",
                 params={"src": t.src, "dst": t.dst},
             ).result_set
@@ -3879,7 +3891,7 @@ async def commit_session(request: Request, team: dict = Depends(get_current_team
         )
         store.update(payload.client_commit_id, status="held")
         _store_commit_telemetry(proj, payload.client_commit_id, payload,
-                                warn=plan.budget.warn)
+                                warn=plan.budget.warn, plan=plan)
         return _commit_response(
             payload, duplicate=False, held=list(plan.budget.held_point_ids),
             warn=plan.budget.warn, warnings=warnings)
@@ -3910,7 +3922,7 @@ async def commit_session(request: Request, team: dict = Depends(get_current_team
         params={"cid": payload.client_commit_id},
     )
     _store_commit_telemetry(proj, payload.client_commit_id, payload,
-                            warn=plan.budget.warn)
+                            warn=plan.budget.warn, plan=plan)
 
     # [6] Metering — write_ops +1 per NON-duplicate commit call; nodes_written
     # += net-new non-episodic (cost driver; supersede-only deltas exempt, R-14).

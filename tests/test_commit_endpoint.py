@@ -241,7 +241,7 @@ def _finalize(raw: dict) -> dict:
     if "session_id" in raw:
         raw["client_commit_id"] = compute_client_commit_id(
             raw["session_id"], raw["points"], raw["entities"], raw["operators"],
-            raw["summary"], raw["story_arc"])
+            raw["summary"], raw["story_arc"], raw.get("events", []))
     return raw
 
 
@@ -420,6 +420,77 @@ class TestFourNodeChain:
         assert r2.status_code == 200
         assert r2.json()["duplicate"] is True
         assert _session_counter("s1", "value_nodes_created") == before
+
+
+# ── A1b (#1272): event-endpoint operators — write + replay ─────────────────
+
+EV64 = "ev_" + "a" * 62
+PT0 = "pt_0000000000000000000000000000000000000000000000000000000000000000"
+PT1 = "pt_0000000000000000000000000000000000000000000000000000000000000001"
+
+
+class TestEventEndpointOperators:
+    """Owner ruling (2026-08-14): events MAY connect to points. The write path
+    resolves :Event endpoints; the replay path reconciles them idempotently."""
+
+    def _raw(self, operators, n_points=2):
+        raw = _raw_payload(n_points, operators=operators)
+        raw["events"] = [{
+            "id": EV64, "eventKind": "decision",
+            "content": "decided X", "about_entities": [],
+            "source_ref": "session.md"}]
+        return raw
+
+    def test_event_target_operator_written(self, client):
+        """Point→Event IMPL: argument point supports the decision event."""
+        raw = self._raw([{"src": PT0, "dst": EV64, "op_type": "IMPL"}])
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        g = _team_sdk()._get_proj().g
+        rows = g.query(
+            "MATCH (o:Point {is_operator:true, op_type:'IMPL'}) "
+            "MATCH (o)-[:IMPL {idx:1}]->(ev:Event {id:$ev}) "
+            "RETURN count(o)",
+            params={"ev": EV64},
+        ).result_set
+        assert rows and rows[0][0] == 1
+
+    def test_event_src_operator_written(self, client):
+        """Event→Point NAND: the ontology canonical example direction."""
+        raw = self._raw([{"src": EV64, "dst": PT0, "op_type": "NAND",
+                          "direction": "unidirectional"}])
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        g = _team_sdk()._get_proj().g
+        rows = g.query(
+            "MATCH (o:Point {is_operator:true, op_type:'NAND'}) "
+            "MATCH (o)-[:NAND {idx:0}]->(ev:Event {id:$ev}) "
+            "RETURN count(o)",
+            params={"ev": EV64},
+        ).result_set
+        assert rows and rows[0][0] == 1
+
+    def test_event_endpoint_replay_no_duplicate(self, client):
+        """Replay path: an event-endpoint operator reconciles as MERGE, not
+        NEW — no duplicate node, no budget re-count (sites 5/6 fix)."""
+        raw = self._raw([{"src": PT0, "dst": EV64, "op_type": "IMPL"}])
+        r1 = _commit(client, raw)
+        assert r1.status_code == 200, r1.text
+        before = _session_counter("s1", "value_nodes_created")
+        # Re-commit the same payload (same client_commit_id) — the partial-
+        # retry contract: the record may be partial, so L2 reconciliation runs.
+        r2 = _commit(client, dict(raw))
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["duplicate"] is True
+        assert _session_counter("s1", "value_nodes_created") == before
+        g = _team_sdk()._get_proj().g
+        rows = g.query(
+            "MATCH (o:Point {is_operator:true, op_type:'IMPL'}) "
+            "MATCH (o)-[:IMPL {idx:1}]->(ev:Event {id:$ev}) "
+            "RETURN count(o)",
+            params={"ev": EV64},
+        ).result_set
+        assert rows and rows[0][0] == 1  # one operator, not two
 
 
 # ── DE2E-5 — external sources + references chain ───────────────────────────
@@ -927,7 +998,8 @@ class TestPrivacy:
             "extractor", "model", "counts", "keep_ratio", "dedup_hits",
             "frontier_calls", "llm_cost_usd", "extraction_ms", "retry_count",
             "last_error_code", "confidence_histogram"}
-        assert set(telemetry["extractor"].keys()) == {"version", "mode"}
+        assert set(telemetry["extractor"].keys()) == {"version", "mode",
+                                                      "calibration_version"}
         assert set(telemetry["counts"].keys()) <= {
             "kept", "candidate", "segment", "window", "empty_windows"}
 
@@ -1038,3 +1110,103 @@ class TestRateBucket:
             assert "Retry-After" in r.headers
             # the general 100/min bucket is untouched by commit requests
             assert tc.get("/v1/points", headers=h).status_code == 200
+
+
+# ── T14 (#1272): Phase A exit smoke — construct-shaped payload commits ─────
+
+class TestConstructPathSmoke:
+    """The Phase A exit gate: a construct-shaped payload (event-endpoint
+    operators, enriched points at the neutral prior) must commit end-to-end
+    through the real endpoint — system-green, not just suite-green."""
+
+    def test_construct_payload_commits_end_to_end(self, client):
+        # Shape mirrors what _stream_to_payload now emits (T4): point ids
+        # content-derived, event-endpoint IMPL, neutral prior, draft status.
+        from tortoise.ids import content_hash
+        pt_id = f"pt_{content_hash('the graph is the memory')[:62]}"
+        ev_id = f"ev_{content_hash('Adopt the state-centric model')[:62]}"
+        raw = _raw_payload(0, session_id="s-construct")
+        raw["entities"] = [{"name": "state-model", "kind": "core:goal",
+                            "passes_frequency_gate": True}]
+        raw["points"] = [{
+            "id": pt_id, "content": "the graph is the memory",
+            "pointKind": "statement", "reason": "NEW",
+            "confidence": 0.5, "c_cal": 0.5,
+            "about_entities": ["state-model"], "source_ref": "session.md",
+            "quote": "", "status": "draft",
+        }]
+        raw["events"] = [{
+            "id": ev_id, "eventKind": "decision",
+            "content": "Adopt the state-centric model",
+            "confidence": 0.5, "about_entities": ["state-model"],
+            "source_ref": "session.md",
+        }]
+        raw["operators"] = [
+            {"src": pt_id, "dst": ev_id, "op_type": "IMPL"},
+            {"src": pt_id, "dst": ev_id, "op_type": "MITIGATES",
+             "target": {"src": pt_id, "dst": ev_id, "op_type": "IMPL"},
+             "strength": 0.3},
+        ]
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body.get("commit_id")
+        assert body.get("duplicate") is False
+        # the event-endpoint operator edge exists in the graph
+        g = _team_sdk()._get_proj().g
+        rows = g.query(
+            "MATCH (o:Point {is_operator:true, op_type:'IMPL'}) "
+            "MATCH (o)-[:IMPL {idx:1}]->(ev:Event {id:$ev}) "
+            "RETURN count(o)",
+            params={"ev": ev_id},
+        ).result_set
+        assert rows and rows[0][0] == 1
+
+
+class TestEventEndpointNoSpuriousEdges:
+    """VGATE follow-up (#1272): the event-endpoint write must NOT create
+    spurious operator edges to unrelated :Point nodes (a Cypher precedence
+    bug — `s:Point OR s:Event AND ...` — previously matched ALL Points)."""
+
+    def test_no_spurious_edges_to_unrelated_points(self, client):
+        from tortoise.ids import content_hash
+        pt_a = f"pt_{content_hash('argument a')[:62]}"
+        pt_b = f"pt_{content_hash('unrelated point b')[:62]}"
+        ev_id = f"ev_{content_hash('decided the approach')[:62]}"
+        raw = _raw_payload(0, session_id="s-no-spurious")
+        raw["entities"] = [{"name": "e", "kind": "core:goal",
+                            "passes_frequency_gate": True}]
+        raw["points"] = [
+            {"id": pt_a, "content": "argument a", "pointKind": "statement",
+             "reason": "NEW", "confidence": 0.5, "c_cal": 0.5,
+             "about_entities": ["e"], "source_ref": "session.md",
+             "quote": "", "status": "draft"},
+            {"id": pt_b, "content": "unrelated point b", "pointKind": "statement",
+             "reason": "NEW", "confidence": 0.5, "c_cal": 0.5,
+             "about_entities": ["e"], "source_ref": "session.md",
+             "quote": "", "status": "draft"},
+        ]
+        raw["events"] = [{"id": ev_id, "eventKind": "decision",
+                          "content": "decided the approach", "confidence": 0.5,
+                          "about_entities": ["e"], "source_ref": "session.md"}]
+        raw["operators"] = [{"src": pt_a, "dst": ev_id, "op_type": "IMPL"}]
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        g = _team_sdk()._get_proj().g
+        # The operator node wires src→dst (2 input edges: idx 0 + idx 1).
+        # The corruption being guarded: spurious edges to UNRELATED Points.
+        # So: edges to Points must be exactly 1 (the src argument point),
+        # never more (the bug matched every Point in the graph).
+        rows = g.query(
+            "MATCH (o:Point {is_operator:true, op_type:'IMPL'}) "
+            "MATCH (o)-[:IMPL]->(x:Point) "
+            "RETURN o.id, count(x)",
+        ).result_set
+        assert rows and rows[0][1] == 1, f"spurious Point edges: {rows}"
+        # And the event target is the only non-Point edge.
+        rows2 = g.query(
+            "MATCH (o:Point {is_operator:true, op_type:'IMPL'}) "
+            "MATCH (o)-[:IMPL]->(x:Event) "
+            "RETURN o.id, count(x)",
+        ).result_set
+        assert rows2 and rows2[0][1] == 1, f"event edge missing: {rows2}"
