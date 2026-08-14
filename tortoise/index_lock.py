@@ -251,16 +251,35 @@ class SessionIndexLock:
             return self._status
 
     def release(self) -> None:
-        """Release the lock (idempotent)."""
+        """Release the lock (idempotent) and remove the pid file (#1231).
+
+        Graceful shutdown unlinks the lock file WHILE still holding the
+        flock (TOCTOU-safe — a contender cannot acquire the inode we
+        hold). The inode guard ensures we never unlink a swapped-in
+        replacement path. The file now only survives a crash, where the
+        reaper's stale-pid sweep (embedded_reaper.sweep_stale_index_pid_files)
+        removes it — no unbounded ~/.tortoise/index-*.pid accumulation.
+        """
         import fcntl
 
         if self._fh:
             try:
-                fcntl.flock(self._fh, fcntl.LOCK_UN)
-            except OSError:
-                pass
-            self._fh.close()
-            self._fh = None
+                # Unlink while holding the flock: no contender can be
+                # mid-acquire on this inode, and the inode guard refuses a
+                # swapped/symlinked path. Best-effort — if removal fails the
+                # file is a stale record the reaper sweep collects later.
+                if self._fh_matches_path():
+                    try:
+                        self.path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                try:
+                    fcntl.flock(self._fh, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+                self._fh.close()
+            finally:
+                self._fh = None
 
     @property
     def status(self) -> str | None:

@@ -1061,8 +1061,78 @@ def _parse_timeout(cli_value: str | None) -> int:
     return TIMEOUT_DEFAULT
 
 
+# #1231: stale per-session index-lock pid files. SessionIndexLock.release()
+# now removes its pid file on graceful shutdown (index_lock.py); files that
+# survive are crash leftovers (flock is kernel-released on death) and are
+# swept here. Age-guarded like the socket walk's boot cooldown: files
+# younger than this are never touched (a just-created lock whose holder is
+# mid-acquire must not be deleted).
+INDEX_PID_MIN_AGE_DEFAULT = 30
+
+
+def _index_lock_dir() -> str:
+    """Resolve the per-session index-lock dir (mirrors index_lock.lock_path_for)."""
+    return os.environ.get("TORTOISE_INDEX_LOCK_DIR", "") or os.path.join(
+        os.path.expanduser("~"), ".tortoise")
+
+
+def sweep_stale_index_pid_files(lock_dir: str | None = None,
+                                dry_run: bool = False,
+                                min_age: int = INDEX_PID_MIN_AGE_DEFAULT) -> list[str]:
+    """Remove stale ``index-*.pid`` lock files (#1231 T3).
+
+    A pid file is stale when its recorded holder is dead: the kernel
+    releases the flock on holder death, so a lock whose flock can be taken
+    AND whose recorded pid is gone is a crash leftover. Removal goes
+    through ``SessionIndexLock.force_release()`` — the TOCTOU-hardened
+    unlink (takes the flock first, so a live holder or mid-acquire
+    contender is never evicted; refuses symlinks; verifies the locked
+    inode is the path; unlinks while holding). Age-guarded like the socket
+    walk: files younger than ``min_age`` are never touched.
+
+    Returns the list of removed (or would-remove in dry-run) file paths.
+    """
+    from .index_lock import SessionIndexLock
+
+    if lock_dir is None:
+        lock_dir = _index_lock_dir()
+    removed: list[str] = []
+    try:
+        entries = sorted(os.scandir(lock_dir), key=lambda e: e.name)
+    except OSError:
+        return removed
+    now = time.time()
+    for entry in entries:
+        if not entry.is_file():
+            continue
+        if not (entry.name.startswith("index-") and entry.name.endswith(".pid")):
+            continue
+        try:
+            age = now - entry.stat().st_mtime
+        except OSError:
+            continue
+        if age < min_age:
+            continue  # boot-cooldown guard, mirrors the socket walk
+        session_id = entry.name[len("index-"):-len(".pid")]
+        lock = SessionIndexLock(session_id, lock_dir)
+        if dry_run:
+            # Non-authoritative would-remove: staleness by attribution only
+            # (no flock probe) — never mutates in dry-run mode.
+            if lock.held_by().get("stale"):
+                removed.append(entry.path)
+            continue
+        try:
+            if lock.force_release():
+                removed.append(entry.path)
+                logger.warning("removed stale index lock file %s", entry.path)
+        except Exception as exc:  # per-file isolation
+            logger.warning("pid-file sweep failed for %s: %s", entry.path, exc)
+    return removed
+
+
 def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
-               jobs: int = 8, kill_pacing: float = KILL_PACING_DEFAULT) -> list[dict]:
+               jobs: int = 8, kill_pacing: float = KILL_PACING_DEFAULT,
+               sweep_pid_files: bool = True) -> list[dict]:
     """Discover + classify + reap; return acted-upon records.
 
     jobs>1 parallelizes the per-candidate CLIENT LIST probes (the dominant
@@ -1073,8 +1143,20 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
     candidates = [r for r in records if r["classification"] == "candidate"]
     # Phase 1: resolve stale-PID records via probe before any kill
     resolved = [phase1_probe(r) for r in candidates]
-    return reap(resolved, dry_run=dry_run, batch_size=batch_size,
-                kill_pacing=kill_pacing, only_safe=only_safe)
+    acted = reap(resolved, dry_run=dry_run, batch_size=batch_size,
+                 kill_pacing=kill_pacing, only_safe=only_safe)
+    # #1231 T3: stale per-session index-lock pid files (crash leftovers).
+    # Runs after the socket sweep under the same singleton lock; age-guarded
+    # and TOCTOU-hardened via SessionIndexLock.force_release().
+    if sweep_pid_files:
+        try:
+            removed = sweep_stale_index_pid_files(dry_run=dry_run)
+            for path in removed:
+                acted.append({"pid": None, "pid_file": path,
+                              "classification": "stale_pid_file"})
+        except Exception as exc:  # never fail the sweep over pid hygiene
+            logger.warning("index-pid sweep failed: %s", exc)
+    return acted
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1134,6 +1216,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         print(_json.dumps([
             {"pid": r.get("pid"), "socket_path": r.get("socket_path"),
+             "pid_file": r.get("pid_file"),
              "classification": r.get("classification")}
             for r in acted
         ]))
