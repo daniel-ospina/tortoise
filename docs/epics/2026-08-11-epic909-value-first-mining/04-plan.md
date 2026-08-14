@@ -527,7 +527,7 @@ run-level: only E9 (malformed stream shape) fails the RUN — retry once → fai
 | **Event** | `:Event` | EXISTS; **NEW eventKind** | `eventId` (content-addressed — hash of session_id+captured_at, deterministic for MERGE), `eventKind: AgentSession` (**amendment §4.3** — exact code spelling, capital A; reconciles with core `sessionCaptured`), `capturedAt` (**amendment §4.3**), `startedAt/endedAt`, `is_episodic: true`, participants as Event PROPERTIES in v1 (no `participatesIn` producer — scope §1) | Produces the Document |
 | **Document** | `:Document` | EXISTS (ONTOLOGY §4.4) | `documentKind: transcript`, `title`, `summary`, **`story_arc` (NEW field — amendment §4.3)**, `topics`, `sessionId`, `eventId`, `sourcePath` (basename only — privacy), `doc_status` (captured/extracted/draft), `_searchText` — **NO `content` on the derived path** | Fields exist today; amendments = register capture usage (summary/story-arc/sessionId). Content only on the opt-in raw path (not v1) |
 | **Source** | `:Source` | EXISTS (ONTOLOGY §4.6) | `url` (identity — basename/contentHash-derived, never the full local path), `sourceKind: agentSession` (value registered — amendment §4.3; external kinds for referenced artifacts), `credibilityTier`, `contentHash`, `title`, `ingestedAt`, `updatedAt`, `externalId`, `sourceDate`, `provenance_spans` (NEW property — amendment §4.3; window spans from provenance_refs), `is_episodic: true` | **Bridge, NOT content holder** (four-node model). The session Source carries provenance only |
-| **Point** | `:Point` | EXISTS | `id` (`pt_<sha>` deterministic — content-addressed ids registered, amendment §4.3), `content` (≤1000), `pointKind` ∈ closed vocab (incl. `event` for event-class items — registered, amendment §4.3), `status` (draft→live), `confidence`, `c_cal` (NEW field — amendment §4.3), `quote` (≤200, secret-scanned — stored Point property, amendment §4.3), `source_ref` REQUIRED; `is_episodic: true` on episodic (regex-path) Points only — the quota discriminator | decision/claim kinds; event-class items → points with `pointKind: event` (R1 serialization rule) |
+| **Point** | `:Point` | EXISTS | `id` (`pt_<sha>` deterministic — content-addressed ids registered, amendment §4.3), `content` (≤1000), `pointKind` ∈ closed vocab (incl. `event` for event-class items — registered, amendment §4.3), `status` (draft→live), `confidence`, `c_cal` (NEW field — amendment §4.3), `quote` (≤200, secret-scanned — stored Point property, amendment §4.3), `source_ref` REQUIRED; `is_episodic: true` on episodic (capture material) Points only — the quota discriminator | decision/claim kinds; event-class items → points with `pointKind: event` (R1 serialization rule) |
 | **Entity (Object)** | `:Object` | EXISTS | `name`, `objectKind` (node property; payload calls it `kind` — mapped at write), `passes_frequency_gate` (NEW property — amendment §4.3; written WITH flag when false) | Entities MERGE by (name, objectKind) |
 | **Operator** | `:Point {is_operator:true}` | EXISTS (sdk.py:1503) | `op_type`, `inputs`, direction flag; node id = ULID (unchanged); **MERGE key = (src, dst, op_type) tuple** — no `op_<sha>` ids (create_operator hardcodes ULID; adding an explicit-id path is NOT needed — (PL1)) | IMPL / NAND (unidirectional flag per S3 policy) / CORRECTS (via supersede_point) / **mitigation Point** (pointKind statement, `mitigation_strength` 0-1 — the existing mitigate_operator mechanism; extractor bias 0.10-0.50 maps into strength) |
 
@@ -559,7 +559,7 @@ names at implementation against `sdk._link_source`/EventAPI (slice 5).
 
 ### 4.3 Ontology amendments (slice 3 — registration, not new design)
 
-1. `AgentSession` registered in ONTOLOGY §4.5 core eventKind vocabulary — EXACT code spelling (capital A; sdk.py:3963, session_indexer.py); `sessionCaptured` (the legacy core kind, still written by the regex path) declared an alias of the same concept — both remain valid kinds, no migration.
+1. `AgentSession` registered in ONTOLOGY §4.5 core eventKind vocabulary — EXACT code spelling (capital A; sdk.py:3963, session_indexer.py); `sessionCaptured` (the legacy core kind, still written by capture_session's LLM path) declared an alias of the same concept — both remain valid kinds, no migration.
 2. `capturedAt` documented in §4.5 (bi-temporal capture).
 3. Content-addressed Event ID documented in §4.5 (deterministic MERGE anchor for the agentSession Event).
 4. Document `summary`/`story-arc`/`sessionId` — §4.4 fields; `story_arc` registered as an explicit §4.4 field (capture usage note; summary = short, story_arc = arc continuation).
@@ -818,9 +818,10 @@ def commit_session(
 
 # UNCHANGED — existing (slice 7 note only)
 def capture_session(...) -> dict:        # KEEPS its current shape {session_id, turns,
-    ...                                 #   extracted, points} — regex/local-only capture
-                                        #   (the non-BYOK fallback + self-host path); the
-                                        #   cloud path rework routes BYOK captures through
+    ...                                 #   extracted, points} — LLM-default local capture (no
+                                        #   non-BYOK fallback — no provider key fails closed
+                                        #   per #822; self-host tests use TORTOISE_SESSION_LLM_MOCK=1);
+                                        #   the cloud path rework routes BYOK captures through
                                         #   commit_session, NOT through a changed return
 
 # NEW — value brief (slice 4/6)
