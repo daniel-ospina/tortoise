@@ -60,17 +60,19 @@ jobs:
           # hook inert since #832). It becomes meaningful only if the hook is
           # re-enabled (#1120); re-add it to the marker list then.
           #
-          # "rejected origin not in allowlist" is ALSO deliberately EXCLUDED
-          # (#1149): it is the CORS deny branch of the function's origin
-          # allowlist, which logs rejected origins server-side FOR DIAGNOSIS by
-          # design (see index.ts comment on the deny branches). Any browser /
-          # security scanner probe from a non-allowlisted origin (e.g. the
-          # canonical CORS-misconfig probe Origin: https://evil.example.com)
-          # emits one line — a single probe opened #1149 as a false-positive
-          # incident. The deny behavior is the security control working, and a
-          # legit allowlisted origin can never hit this branch. Real incident
-          # coverage (FASTAPI_URL / pepper misconfig, provision_team failure,
-          # uncaught handler errors) is retained by the four markers below.
+          # "rejected origin not in allowlist" — COUNT-THRESHOLD, not excluded
+          # (#1149, review #1234): the CORS deny branch logs rejected origins
+          # server-side FOR DIAGNOSIS by design (see index.ts comment on the
+          # deny branches). Security-scanner probes (e.g. the canonical
+          # CORS-misconfig probe Origin: https://evil.example.com) emit 1-2
+          # lines per 3h window — a single probe opened #1149 as a
+          # false-positive incident. BUT the #1110 recurrence class this
+          # monitor exists for IS an allowlist misconfig rejecting LEGIT
+          # origins (dozens+ lines per window) — full removal would blind the
+          # monitor to it. So: count deny lines; only >=5 per window (a
+          # scanner burst or a real outage) opens an incident.
+          deny_count="$(printf '%s' "$out" | jq -r '.result[]? | select(.event_message != null) | .event_message' \
+            | grep -Fc "rejected origin not in allowlist" || true)"
           hits="$(printf '%s' "$out" | jq -r '.result[]? | select(.event_message != null) | .event_message' \
             | grep -F \
               -e "FASTAPI_URL is not set" \
@@ -78,7 +80,7 @@ jobs:
               -e "provision_team failed" \
               -e "tenant-provision error" \
             | sort -u | head -20 || true)"
-          if [ -n "$hits" ]; then
+          if [ -n "$hits" ] || [ "$deny_count" -ge 5 ]; then
             title="[monitor] incident-class errors in tenant-provision logs ($SUPABASE_PROJECT_REF)"
             # Dedup: search must go in the URL path (-f q= 404s on this
             # endpoint); coerce the count to a number so a failed call can
