@@ -99,7 +99,10 @@ ontology:
     - id: productDelivery
       name: "Product Delivery Chain"
       description: "How product strategy flows into shipped architecture"
-      steps: [useCase, feature, userJourney, workflow, requirement, architecture]
+      # JTBD is step-0 (issue #405 decision 2026-08-15): the canonical chain
+      # matches check_structure/skill — jobToBeDone → useCase → feature →
+      # userJourney → workflow → requirement → architecture.
+      steps: [jobToBeDone, useCase, feature, userJourney, workflow, requirement, architecture]
       enforcement: warn       # bypass → warn (block is opt-in per pack)
 
   # ── relations: existing 4 + 2 new chain edges (extractable) ─────────────

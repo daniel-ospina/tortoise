@@ -317,3 +317,163 @@ def resolve_domain_from_path(file_path: str, manifest_path: str | Path | None = 
             return domain
 
     return "capability"
+
+
+# ── Domain integrity validator registry (#405) ────────────────────────────
+# Constraint-registration API (issue #405, scoping bullet 1): domains register
+# validation functions per surface, discovered by the CLI, MCP tool and the
+# commit-path hook. Definitions (registered fns) are separated from
+# enforcement strategy (warn-first at write time; advisory on-demand runs) —
+# SHACL-style, per the research brief.
+#
+# Surfaces:
+#   "graph"          — graph-global rules (orphan useCase, dangling refs, …),
+#                      run on-demand via `tortoise validate --domain` / MCP.
+#                      Signature: fn(graph) -> list[dict]. Never run at commit
+#                      (the commit path has no graph state by construction).
+#   "payload_local"  — intra-payload rules (leapfrog, …), run from the commit
+#                      path via validate_domain_rules(). Signature:
+#                      fn(payload) -> list[dict]. MUST NOT touch the graph.
+#
+# Production validators register at IMPORT TIME in tortoise/domain_validators.py
+# (imported by the CLI, MCP server and SDK paths) so every process sees the
+# same registry — a missing import would make `validate` report a false-clean.
+# The registry is append-only after import; tests may register under synthetic
+# domains (no production path looks those up).
+
+SURFACE_GRAPH = "graph"
+SURFACE_PAYLOAD_LOCAL = "payload_local"
+_VALID_SURFACES: frozenset[str] = frozenset({SURFACE_GRAPH, SURFACE_PAYLOAD_LOCAL})
+
+# (domain, surface) -> [registered spec dicts]. Ordered: earlier registrations
+# run first. Spec: {domain, surface, chain_id, fn}.
+_DOMAIN_VALIDATORS: dict[tuple[str, str], list[dict]] = {}
+_VALIDATORS_LOCK = Lock()
+
+
+def _check_surface(surface: str) -> None:
+    if surface not in _VALID_SURFACES:
+        raise ValueError(
+            f"unknown validator surface {surface!r} "
+            f"(expected one of {sorted(_VALID_SURFACES)})"
+        )
+
+
+def register_domain_validator(
+    domain: str,
+    *,
+    chain_id: str | None = None,
+    surface: str = SURFACE_GRAPH,
+    fn: Callable[[Any], list[dict]] | None = None,
+) -> Callable[[Any], list[dict]] | None:
+    """Register a per-domain validation function (issue #405).
+
+    ``surface`` selects when the function runs (graph-global on-demand vs
+    payload-local at commit). ``chain_id`` ties the rule to a manifest chain
+    (used for enforcement resolution + drift detection). Returns ``fn`` when
+    given (decorator-compatible); callers may also use ``@domain_validator``.
+    Duplicate (domain, surface, chain_id, fn) registrations are ignored;
+    re-registering the same fn under a fresh chain_id appends a second entry.
+    """
+    _check_surface(surface)
+    if fn is None:
+        raise ValueError("register_domain_validator requires fn (or use @domain_validator)")
+    key = (domain, surface)
+    spec = {"domain": domain, "surface": surface, "chain_id": chain_id, "fn": fn}
+    with _VALIDATORS_LOCK:
+        entries = _DOMAIN_VALIDATORS.setdefault(key, [])
+        for existing in entries:
+            if existing["chain_id"] == chain_id and existing["fn"] == fn:
+                return fn  # idempotent re-registration (imports may run twice)
+        entries.append(spec)
+    return fn
+
+
+def domain_validator(
+    domain: str,
+    *,
+    chain_id: str | None = None,
+    surface: str = SURFACE_GRAPH,
+) -> Callable:
+    """Decorator form of register_domain_validator.
+
+    Usage:
+        @domain_validator("product-strategy", chain_id="productDelivery",
+                          surface=SURFACE_GRAPH)
+        def validate_chain_integrity(graph) -> list[dict]: ...
+    """
+
+    def deco(fn: Callable[[Any], list[dict]]) -> Callable[[Any], list[dict]]:
+        register_domain_validator(domain, chain_id=chain_id, surface=surface, fn=fn)
+        return fn
+
+    return deco
+
+
+def domain_validators(
+    domain: str, surface: str | None = None
+) -> list[dict]:
+    """Discover registered validators for a domain.
+
+    Returns a COPY of the registered specs ({domain, surface, chain_id, fn})
+    so callers can never mutate the live registry. ``surface=None`` returns
+    validators for every surface. Unknown domains → empty list.
+    """
+    if surface is not None:
+        _check_surface(surface)
+        with _VALIDATORS_LOCK:
+            return list(_DOMAIN_VALIDATORS.get((domain, surface), []))
+    out: list[dict] = []
+    with _VALIDATORS_LOCK:
+        for s in sorted(_VALID_SURFACES):  # deterministic cross-surface order
+            out.extend(list(_DOMAIN_VALIDATORS.get((domain, s), [])))
+    return out
+
+
+def domain_chain_spec(domain: str) -> dict[str, dict]:
+    """Manifest chain declaration for a domain (issue #405, the *declaration*
+    reference): {chain_id: {id, name, steps, enforcement}} from the pack
+    manifest v3 ``chains[]``. Empty dict when no pack matches the domain.
+    """
+    reg = _get_registry()
+    pack = reg.get_pack(domain) if reg is not None else None
+    if pack is None:
+        return {}
+    spec: dict[str, dict] = {}
+    for chain in getattr(pack, "chains", []) or []:
+        chain_id = chain.get("id")
+        if not chain_id:
+            continue
+        spec[chain_id] = {
+            "id": chain_id,
+            "name": chain.get("name", chain_id),
+            "steps": list(chain.get("steps", [])),
+            "enforcement": chain.get("enforcement", "warn"),
+        }
+    return spec
+
+
+def known_domains() -> list[str]:
+    """Sorted namespaces of every loaded pack (the queryable domain set).
+    Empty when packs are unavailable."""
+    reg = _get_registry()
+    if reg is None:
+        return []
+    return sorted(reg.packs.keys())
+
+
+def pack_kind_overlap(domain: str, bucket: str, kinds: list[str]) -> int:
+    """Count of the given kind names (bare, namespace stripped) present in a
+    pack's OWN kind list for ``bucket``. Only the pack's declared kinds are
+    counted (canonical core kinds are not pre-added to the score, so the
+    score measures pack attribution, not shared vocabulary). Used by the
+    commit path's fail-safe domain inference (#405)."""
+    _check_bucket(bucket)
+    reg = _get_registry()
+    pack = reg.get_pack(domain) if reg is not None else None
+    if pack is None:
+        return 0
+    attr = _BUCKET_ATTRS[bucket]
+    own = getattr(pack, attr) if attr is not None else []
+    bare = {k.split(":", 1)[-1] for k in kinds}
+    return sum(1 for k in own if k in bare)

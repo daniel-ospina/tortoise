@@ -35,6 +35,7 @@ payload caps (MAX_PAYLOAD_POINTS / MAX_ENTITIES / MAX_OPERATORS) are Layer-1
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 from dataclasses import dataclass, field
@@ -59,6 +60,8 @@ from .quota import (
 )
 from .source_credibility import SOURCE_KIND_DEFAULTS
 
+_logger = logging.getLogger(__name__)
+
 __all__ = [
     # constants
     "BUDGET_SOFT", "BUDGET_HARD", "BUDGET_CEILING",
@@ -73,6 +76,8 @@ __all__ = [
     # Layer-1
     "Layer1Result", "Layer1Error", "missing_required_fields", "shape_errors",
     "validate_layer1", "validate_payload_dict", "atomicity_violations",
+    # domain integrity rules (#405)
+    "validate_domain_rules", "domain_block_warnings", "_infer_payload_domain",
     # canonicalization
     "canonical_payload", "compute_client_commit_id", "point_content_id",
     # reconciliation
@@ -392,11 +397,19 @@ class Layer1Result:
     errors maps field paths → human-readable reasons (the 422
     ``{detail: {field: [reasons], code?}}`` shape); code is
     ``commit_id_mismatch`` / ``calibration_mismatch`` / None.
+
+    warnings (#405) — additive domain-rule violations (intra-payload,
+    warn-first): the commit STILL WRITES; warnings ride the 200 response
+    (``warnings[]``). Each warning: {rule, kind, ref, message, fix, severity}
+    where severity is the resolved chain enforcement (warn/retry/block).
+    Block-severity warnings (Phase B, wired-but-inactive in prod — no
+    production chain is 'block') reject the commit in the endpoint.
     """
 
     ok: bool
     errors: dict[str, list[str]] = field(default_factory=dict)
     code: str | None = None
+    warnings: list[dict] = field(default_factory=list)
 
 
 class Layer1Error(ValueError):
@@ -627,13 +640,17 @@ def validate_layer1(
 
 
 def validate_payload_dict(
-    raw: dict, vocab: Vocab | None = None
+    raw: dict, vocab: Vocab | None = None, *, domain: str | None = None
 ) -> tuple[Layer1Result, CommitPayload | None]:
     """Full Layer-1 gate over a raw JSON body.
 
     400 class → code ``missing_required_fields`` (endpoint maps to 400 —
     reserved for missing required payload fields). Every other violation is
     422 class with field reasons (the endpoint maps to 422).
+
+    ``domain`` (optional, #405): the orchestrator-known domain for the
+    payload-local integrity rules; when None the fail-safe kind inference
+    runs (no-match/multi-match → rules skipped).
     """
     if not isinstance(raw, dict):
         return Layer1Result(
@@ -653,7 +670,86 @@ def validate_payload_dict(
         payload = CommitPayload.model_validate(raw)
     except ValidationError as exc:
         return Layer1Result(ok=False, errors=shape_errors(exc)), None
-    return validate_layer1(payload, vocab=vocab), payload
+    result = validate_layer1(payload, vocab=vocab)
+    if result.ok:
+        # #405: additive, warn-first domain rules (intra-payload only — no
+        # graph I/O in the commit path by construction). A valid payload
+        # carries warnings[] on the 200; violations never fail the write.
+        result.warnings = validate_domain_rules(payload, domain=domain)
+    return result, payload
+
+
+def validate_domain_rules(
+    payload: CommitPayload, domain: str | None = None
+) -> list[dict]:
+    """Run the domain's ``payload_local`` validators (issue #405, Phase A).
+
+    Additive + warn-first: the commit STILL WRITES; results ride the 200
+    response as ``warnings[]``. A validator exception is logged and skipped —
+    a broken rule must never fail a write (guardrails).
+
+    ``domain`` is passed by the orchestration layer when known; the
+    fail-safe fallback infers it from the payload's pointKinds (pack overlap)
+    and SKIPS (with a log) when no-match or multi-match — never a wrong
+    attribution. Each warning is stamped with ``severity`` — the resolved
+    chain enforcement for the rule's chain (warn/retry/block; ``block`` is
+    Phase B, wired-but-inactive in prod).
+    """
+    if domain is None:
+        domain = _infer_payload_domain(payload)
+    if domain is None:
+        return []
+    from .domain_loader import SURFACE_PAYLOAD_LOCAL, domain_validators
+    from .domain_validators import resolve_rule_severity
+
+    warnings: list[dict] = []
+    for spec in domain_validators(domain, surface=SURFACE_PAYLOAD_LOCAL):
+        try:
+            found = spec["fn"](payload)
+        except Exception:
+            _logger.exception(
+                "payload-local domain validator failed (domain=%s chain=%s) "
+                "— skipped", domain, spec.get("chain_id"))
+            continue
+        for w in found:
+            w = dict(w)
+            w["severity"] = resolve_rule_severity(
+                domain, spec.get("chain_id"), w.get("rule"))
+            warnings.append(w)
+    return warnings
+
+
+def domain_block_warnings(warnings: list[dict]) -> list[dict]:
+    """Phase B selector — warnings whose resolved severity is 'block' reject
+    the commit (4xx). Wired-but-inactive in production: no production chain
+    is 'block' today; only synthetic/test rules exercise this path."""
+    return [w for w in warnings if w.get("severity") == "block"]
+
+
+def _infer_payload_domain(payload: CommitPayload) -> str | None:
+    """Fail-safe kind-based domain inference for the commit path (#405).
+
+    Scores each loaded pack by how many of the payload's pointKinds (bare
+    names) appear in the pack's OWN point kinds. Exactly one unique top
+    scorer with score ≥ 1 → that domain. No-match or multi-match (tie) →
+    None (skip + log) — never a wrong attribution.
+    """
+    from .domain_loader import known_domains, pack_kind_overlap
+
+    kinds = [p.pointKind for p in payload.points]
+    if not kinds:
+        return None
+    scored = [(d, pack_kind_overlap(d, "pointKind", kinds))
+              for d in known_domains()]
+    scored.sort(key=lambda kv: -kv[1])
+    if not scored or scored[0][1] == 0:
+        return None
+    if len(scored) > 1 and scored[1][1] == scored[0][1]:
+        _logger.warning(
+            "commit domain inference multi-match (kinds=%s) — skipping "
+            "payload-local domain rules (#405)", kinds)
+        return None
+    return scored[0][0]
 
 
 # ── Canonicalization (deterministic across clients) ───────────────────────

@@ -3315,11 +3315,15 @@ def _commit_response(
     nodes_merged: int = 0,
     held: list[str] | None = None,
     warn: bool = False,
+    warnings: list[dict] | None = None,
 ) -> dict:
     """§6.1 200 response body — commit_id = client_commit_id (stable per
     logical commit); duplicate:true ⇒ zero writes, zero write-ops billed
     (PL4); held non-empty ⇒ overflow (PL3), client-side, re-commit checks
-    the 50-ceiling only."""
+    the 50-ceiling only. warnings[] (#405): additive, warn-first domain
+    integrity violations — the commit WRITES anyway; present (possibly
+    empty) on every 200, deterministic per payload (idempotent re-commits
+    return the same warnings)."""
     return {
         "session_id": payload.session_id,
         "commit_id": payload.client_commit_id,
@@ -3328,6 +3332,7 @@ def _commit_response(
         "held": held or [],
         "duplicate": duplicate,
         "warn": warn,
+        "warnings": warnings or [],
     }
 
 
@@ -3706,6 +3711,18 @@ async def commit_session(request: Request, team: dict = Depends(get_current_team
             detail["code"] = result.code
         raise HTTPException(status_code=422, detail=detail)
 
+    # #405 Phase A/B: additive warnings[] ride the 200 (warn-first — the
+    # write proceeds). Phase B (wired-but-inactive in prod — no production
+    # chain is 'block'): a block-severity warning rejects the commit.
+    from tortoise.commit_schema import domain_block_warnings
+    warnings = result.warnings or []
+    blocking = domain_block_warnings(warnings)
+    if blocking:
+        raise HTTPException(
+            status_code=422,
+            detail={"warnings": blocking, "code": "domain_rule_block"},
+        )
+
     sdk = _make_sdk(namespace=team["team_id"])
     proj = sdk._get_proj()
     store = CommitRecordStore(sdk)
@@ -3715,7 +3732,7 @@ async def commit_session(request: Request, team: dict = Depends(get_current_team
     # record with status held|partial is NOT fully written (PL3).
     record = store.get(payload.client_commit_id)
     if record is not None and record.status == "fully_written":
-        return _commit_response(payload, duplicate=True)
+        return _commit_response(payload, duplicate=True, warnings=warnings)
 
     # [3] L2 reconciliation IN MEMORY (W-3 [3]) + budget adjudication on the
     # reconciled net-new delta — computed BEFORE any write (the ceiling check
@@ -3732,10 +3749,10 @@ async def commit_session(request: Request, team: dict = Depends(get_current_team
     if not created:
         rec = store.get(payload.client_commit_id) or rec
         if rec.status == "fully_written":
-            return _commit_response(payload, duplicate=True)
+            return _commit_response(payload, duplicate=True, warnings=warnings)
         plan = plan_commit(payload, state, rec)  # PL3: ceiling-only
     if plan.duplicate:
-        return _commit_response(payload, duplicate=True)
+        return _commit_response(payload, duplicate=True, warnings=warnings)
 
     # [4a] Sessions quota (post-fix count — 402). Replays already returned
     # above: quota never gates a duplicate (zero writes).
@@ -3766,7 +3783,7 @@ async def commit_session(request: Request, team: dict = Depends(get_current_team
                                 warn=plan.budget.warn)
         return _commit_response(
             payload, duplicate=False, held=list(plan.budget.held_point_ids),
-            warn=plan.budget.warn)
+            warn=plan.budget.warn, warnings=warnings)
 
     # [5] Graph writes — fail-closed: any write error → redacted 500 (the
     # client retries with the same client_commit_id — safe by L1; the record
@@ -3810,6 +3827,7 @@ async def commit_session(request: Request, team: dict = Depends(get_current_team
         nodes_created=plan.reconcile.net_new,
         nodes_merged=merged,
         warn=plan.budget.warn,
+        warnings=warnings,
     )
 
 
