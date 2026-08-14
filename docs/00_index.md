@@ -18,4 +18,5 @@ ownedBy: epistemic-team
 | Ingest contract (`tortoise_ingest` / `sdk.ingest` bundle API) | `docs/INGEST_CONTRACT.md` |
 | Data safety — encryption in transit + at rest | `docs/data-safety.md` |
 | Quickstart — hosted | `docs/quickstart-cloud.md` |
+| OAuth 2.1 for remote MCP auth (#524) | `docs/oauth-mcp.md` |
 | Quickstart — self-hosted | `docs/quickstart-selfhosted.md` — incl. §4b (the `tortoise index directory` local-corpus surface: env table, gotchas, hook monitoring, restore drill, topologies) |
