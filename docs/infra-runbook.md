@@ -286,14 +286,17 @@ wrangler pages deploy dist --project-name=tortoise-dashboard
 | R2_ACCESS_KEY_ID | ✅ | — | ✅ |
 | R2_SECRET_ACCESS_KEY | ✅ | — | ✅ |
 | R2_BUCKET | ✅ (`tortoise-backups`) | — | ✅ |
-| LLM provider key — `OPENROUTER_API_KEY` / `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` (≥1 REQUIRED for `POST /v1/sessions`; #822/#1197) | ✅ | — | ✅ (deploy source; deploy workflow fails without ≥1) |
+| RESEND_API_KEY | ✅ (billing + transactional email, #310/#307) | — | ✅ |
+| RESEND_FROM_EMAIL | ✅ (single managed sender identity — #1136; default `noreply@premiselabs.co`) | — | ✅ |
+| BILLING_FROM_EMAIL | optional (distinct billing sender override — #1136) | — | — |
+| BILLING_NOTIFY_TO | ✅ (ops inbox for billing/abuse emails) | — | ✅ |
 
 ### Runtime Config (non-secret)
 
 | Var | Default | Effect |
 |-----|---------|--------|
 | `TORTOISE_SESSION_EXTRACTION` | `auto` | `/v1/sessions` extraction mode (`auto\|required\|regex`). `required` fails closed: **all** session captures return 503 when no LLM provider key (`OPENROUTER/DEEPSEEK/OPENAI/GEMINI_API_KEY`) is set — do not enable it until a provider key is deployed. Unknown values fall back to `auto`. |
-| `RESEND_SEND_BUDGET_DAILY` | `100` | In-process hard cap on sends per UTC day (#1138 — Resend free tier 100/day). A slot is reserved when a send is scheduled and refunded on provider failure (burst-safe). When the cap is reached, further invite sends are skipped with a loud warning instead of silently 429ing. Scope: invite path only — billing/abuse notifications share the Resend account but are NOT counted; per-process — N replicas × cap (2 replicas × 100/day = up to 200/day toward the free tier). Estimate only — resets on process restart. |
+| `RESEND_SEND_BUDGET_DAILY` | `100` | In-process hard cap on provider-accepted sends per UTC day (#1138 — Resend free tier 100/day). When reached, further invite sends are skipped with a loud warning instead of silently 429ing. Estimate only — resets on process restart. |
 | `RESEND_SEND_BUDGET_MONTHLY` | `3000` | Same as above for the UTC month (free tier 3,000/month). |
 
 ## Reproducibility Test

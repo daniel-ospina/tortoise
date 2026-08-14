@@ -5,6 +5,7 @@ No real network: httpx.AsyncClient.post is monkeypatched. Env-gated skip
 """
 import asyncio
 import logging
+from datetime import datetime, timezone
 
 import pytest
 
@@ -16,6 +17,13 @@ def _env(monkeypatch):
     monkeypatch.setenv("RESEND_API_KEY", "re_test_secret_key_123")
     monkeypatch.setenv("RESEND_FROM_EMAIL", "noreply@premiselabs.co")
     monkeypatch.setenv("EMAIL_LINK_BASE_URL", "https://tortoise.premiselabs.co")
+    # #1138: budget envs unset (free-tier defaults) + counters reset per test.
+    monkeypatch.delenv("RESEND_SEND_BUDGET_DAILY", raising=False)
+    monkeypatch.delenv("RESEND_SEND_BUDGET_MONTHLY", raising=False)
+    email_notify._send_counts_day = 0
+    email_notify._send_counts_month = 0
+    email_notify._send_counts_day_period = ""
+    email_notify._send_counts_month_period = ""
     email_notify._skip_logged.clear()
     yield
 
