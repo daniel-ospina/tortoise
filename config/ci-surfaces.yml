@@ -5,6 +5,7 @@ surfaces:
   - test_abuse_integration.py
   - test_agent_signup.py
   - test_api.py
+  - test_audit.py
   - test_audit_events.py
   - test_auth.py
   - test_auth_flip.py
@@ -89,6 +90,7 @@ surfaces:
   - test_de2e5_instantiates_ranking.py
   - test_de2e6_temporal.py
   - test_de2e7_gates_mcp.py
+  - test_deploy_workflow.py
   - test_deployment.py
   - test_doctor.py
   - test_domain_loader_adapter.py
@@ -99,8 +101,9 @@ surfaces:
   - test_embeddings.py
   - test_embeddings_filters.py
   - test_entity_stage.py
-  - test_epic903_fixtures.py
   - test_enumeration_surfaces.py
+  - test_epic903_fixtures.py
+  - test_epic903_freshness.py
   - test_eval_metrics.py
   - test_event_log.py
   - test_event_provenance.py
@@ -130,7 +133,6 @@ surfaces:
   - test_ingest_rebuild_durability.py
   - test_ingest_safety.py
   - test_ingest_validation.py
-  - test_joint_index_ingest.py
   - test_integration_search.py
   - test_issue_insight.py
   - test_joint_index_ingest.py
