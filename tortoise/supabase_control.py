@@ -408,15 +408,16 @@ def _teams_row_fail_soft(cp, team_id: str, *, select: list[str],
             last_exc = e
             if not dropped:
                 _logger.warning(
-                    "teams read failed for %s (select=%s) — retrying without "
-                    "additive %s; a missing additive column degrades, a "
-                    "missing base/deletion column fails closed (%s)",
+                    "teams read failed for %s (select=%s) — retrying with "
+                    "the newest additive tier dropped (%s); a missing "
+                    "additive column degrades, a missing base/deletion "
+                    "column fails closed (%s)",
                     team_id, select, additive, e)
             elif set(additive) <= dropped:
                 _logger.warning(
-                    "teams read failed for %s (select=%s) — retrying "
-                    "base-only select %s; a missing additive column (0015) "
-                    "degrades, a missing base/deletion column fails closed (%s)",
+                    "teams read failed for %s (select=%s) — base-only select "
+                    "%s failed, fail-closed (missing base/deletion column "
+                    "or control-plane outage): %s",
                     team_id, select, attempt_select, e)
             else:
                 _logger.warning(

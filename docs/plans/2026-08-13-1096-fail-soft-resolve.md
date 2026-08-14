@@ -46,7 +46,7 @@ Likewise `claim_status` (~5210, claimability probe) restores from fail-closed `{
 |---|---|---|
 | `resolve_api_key` step 3 → teams combined select | unit (FakeControlPlane) | Healthy path ONE round-trip (2 queries/auth total). Failure → base-only retry → fail-soft. Base-only retry failure → RuntimeError propagates (fail-closed, correct). Direct consumers: `_get_current_team_supabase` (~1049, resolve at ~1062 — indexes `team_id`/`tier` directly, reads `suspended_at` via `.get()` for the 403 gate) feeding REST `get_current_team` dispatcher (~910); `_session_user_team` (~1110, session-auth management branch — teams read routed through the fail-soft seam post-test-review, degrades never-500) + `team_info` (GET /v1/team, ~1921 — reads `flagged_at` via `.get()` for the status chip, display-only), `claim_team` (POST /v1/claim, ~5128/5177 — **suspension-gated WRITE** via the same auth dependency; under 0015 drift the gate opens and a durably-suspended anon team can claim (permanent identity link + `teams.email` overwrite, survives drift recovery) — pinned, see Accepted risk), MCP `TeamResolutionMiddleware` (mcp_auth ~166 — reads via `.get()`), `claim_status` (~5210 — indexes `team_id` directly; read-only probe; under 0015 drift it restores from fail-closed `{"claimable": False}` to a real determination, policy-unchanged). The always-present contract keys (`team_id`/`tier`/`key_id`) are never affected by the fail-soft — only the additive fields pad to `None`. |
 | `resolve_api_key` degrade path | unit (FakeControlPlane drift mode) | New `_teams_row_fail_soft` helper; degraded ⇒ `suspended_at`/`flagged_at`/`email` keys present with `None` + WARNING log. |
-| `team_by_id` → teams select | unit | Same combined-with-fallback; **fail-soft additive set = 0015 `suspended_at`/`flagged_at` only** — the #302 `deleted_at`/`grace_hours` stay in the base select so the drift-safe retry fails CLOSED on 20260813000001 drift (deletion kill-switch never opens). |
+| `team_by_id` → teams select | unit | Same combined-with-fallback (TIERED); fail-soft additive set = 0015 `suspended_at`/`flagged_at` + 20260813000005 `dashboard_key_login` (included for seam uniformity — no `team_by_id` consumer reads it); the #302 `deleted_at`/`grace_hours` stay in the base select so the drift-safe retry fails CLOSED on 20260813000001 drift (deletion kill-switch never opens). |
 | REST enforcement (hosted_api 403 SUSPENDED) | integration (existing `test_abuse_integration.py`) | Reads `suspended_at` from resolved dict via `.get()` — unchanged; no edits needed. |
 | MCP enforcement (`mcp_auth.py` -32006) | integration (existing) | Reads `suspended_at` from resolved dict via `.get()` — unchanged; no edits needed. |
 | FakeControlPlane | test infra | New `missing_columns` drift mode mirrors the real seam (raises RuntimeError on select of a drifted column, body discarded — same as production). |
@@ -183,10 +183,23 @@ def _teams_row_fail_soft(cp, team_id: str, *, select: list[str],
             break
         except Exception as e:
             last_exc = e
-            _logger.warning(
-                "teams read failed for %s (select=%s) — retrying select %s; "
-                "a missing additive column degrades, a missing base/deletion "
-                "column fails closed (%s)", team_id, select, attempt_select, e)
+            if not dropped:
+                _logger.warning(
+                    "teams read failed for %s (select=%s) — retrying with "
+                    "the newest additive tier dropped (%s); a missing "
+                    "additive column degrades, a missing base/deletion "
+                    "column fails closed (%s)",
+                    team_id, select, additive, e)
+            elif set(additive) <= dropped:
+                _logger.warning(
+                    "teams read failed for %s (select=%s) — base-only select "
+                    "%s failed, fail-closed (missing base/deletion column "
+                    "or control-plane outage): %s",
+                    team_id, select, attempt_select, e)
+            else:
+                _logger.warning(
+                    "teams read failed for %s (select=%s) — retrying select "
+                    "%s (%s)", team_id, select, attempt_select, e)
     else:
         _logger.warning(
             "teams base-only read failed for %s (select=%s) — fail-closed "
@@ -234,7 +247,7 @@ All are docstring-only edits. **Code changes in this task (from the code-review 
 
 **Step 4:** Run `./.venv/bin/python -m pytest tests/test_supabase_control.py -q` → green (no existing test changes).
 
-## Task 3: team_by_id fail-soft (suspension columns only)
+## Task 3: team_by_id fail-soft (additive columns)
 
 **Intent:** `team_by_id` fails soft on the additive columns (0015 `suspended_at`/`flagged_at` + 20260813000005 `dashboard_key_login` — the latter included for seam uniformity; no `team_by_id` consumer reads it) while keeping the #302 deletion kill-switch fail-closed: `deleted_at`/`grace_hours` stay in the critical path so a drifted 20260813000001 schema fails the delete-sensitive paths CLOSED (500), never opening the guard. The `deleted_at` consumers: `invitation_accept` (410) and `export_team` (410 via `_team_node` → `team_by_id` in Supabase mode) are pinned — `invitation_accept` at the consumer level, `export_team`'s shared seam at the `team_by_id` level; `delete_team` reads `deleted_at` but replays idempotently (200), and `list_my_teams` never reads it — both 500 under 20260813000001 drift via the shared seam.
 
@@ -249,7 +262,9 @@ All are docstring-only edits. **Code changes in this task (from the code-review 
 def team_by_id(cp, team_id: str) -> dict | None:
     """Team row (registry-properties-shaped dict) or None.
 
-    Suspension/staging columns (0015) read fail-soft (#1096): a schema
+    Additive columns fail soft (#1096): 0015 suspension/staging
+    (suspended_at/flagged_at) + 20260813000005 dashboard_key_login (no
+    team_by_id consumer reads it — included for seam uniformity). A schema
     missing them returns the row with safe None defaults, never raises.
     The #302 soft-delete columns (20260813000001 deleted_at/grace_hours)
     are NOT additive-fail-soft: the deletion kill-switch guard must fail
@@ -501,7 +516,7 @@ Run: `./.venv/bin/python -m pytest tests/test_supabase_control.py tests/test_abu
 
 Run: `./.venv/bin/python -m pytest tests/test_supabase_control.py tests/test_abuse_integration.py tests/test_claim_endpoints.py -q` → all green.
 
-**MCP +60s cache-hold claim — explicitly documented, not consumer-asserted:** the `TeamResolutionMiddleware` 60s TTL arithmetic is **pre-existing and unchanged** — this slice adds no drift-specific branch to the middleware. The drift-affected inputs to the cache (`resolve_api_key`'s returned dict + the suspension signal set) are pinned at seam/REST level (`test_resolve_api_key_additive_columns_missing_fail_soft`, `degrade_then_recover`, `test_drift_resolution_clears_suspension_signal`); the cache faithfully caches whatever resolve returns, so the MCP +60s hold is a documented consequence of pinned behaviors, not new untested code — an MCP-transport drift test would re-verify unchanged cache arithmetic for marginal value against the plan's 26-test suite (13 resolve + 7 team_by_id + mint + signal-teardown + claim-write + session-seam + fake-filter-drift pins).
+**MCP +60s cache-hold claim — explicitly documented, not consumer-asserted:** the `TeamResolutionMiddleware` 60s TTL arithmetic is **pre-existing and unchanged** — this slice adds no drift-specific branch to the middleware. The drift-affected inputs to the cache (`resolve_api_key`'s returned dict + the suspension signal set) are pinned at seam/REST level (`test_resolve_api_key_additive_columns_missing_fail_soft`, `degrade_then_recover`, `test_drift_resolution_clears_suspension_signal`); the cache faithfully caches whatever resolve returns, so the MCP +60s hold is a documented consequence of pinned behaviors, not new untested code — an MCP-transport drift test would re-verify unchanged cache arithmetic for marginal value against the plan's 25-test suite (13 resolve + 7 team_by_id + mint + signal-teardown + claim-write + session-seam + fake-filter-drift pins).
 
 ## Task 5: full suite + commit handoff
 
