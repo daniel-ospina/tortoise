@@ -150,6 +150,41 @@ def test_a9_direction_respect_unidirectional_impl_no_back_traversal():
         sdk.close()
 
 
+def test_a9_direction_param_gates_direct_edge_traversal():
+    """Review-gate P2-1 pin: the `direction` PARAMETER gates the direct-edge
+    traversal too — "outgoing" from a direct-edge TARGET must NOT
+    back-traverse; "incoming" from a direct-edge SOURCE must NOT
+    forward-traverse; a NAND direct edge is still found under a single-
+    direction param (NAND is ALWAYS both)."""
+    sdk = _fresh_sdk()
+    try:
+        src = _live(sdk, "Source")
+        tgt = _live(sdk, "Target")
+        sdk.create_direct_edge("IMPL", src["id"], tgt["id"],
+                               direction="bidirectional")
+        # outgoing from the TARGET: no back-traversal (the edge influences
+        # the target, not the source)
+        _, anchors_out = _select(sdk._get_proj(), [tgt["id"]], max_hops=1,
+                                 direction="outgoing")
+        assert anchors_out == set(), anchors_out
+        # incoming from the SOURCE: no forward-traversal
+        _, anchors_in = _select(sdk._get_proj(), [src["id"]], max_hops=1,
+                                direction="incoming")
+        assert anchors_in == set(), anchors_in
+        # both from either endpoint: found
+        _, anchors_both = _select(sdk._get_proj(), [tgt["id"]], max_hops=1,
+                                  direction="both")
+        assert anchors_both == {(src["id"], tgt["id"], "IMPL")}, anchors_both
+        # NAND direct edge: found under a single-direction param (always both)
+        sdk.create_direct_edge("NAND", src["id"], tgt["id"],
+                               direction="unidirectional")
+        _, anchors_nand = _select(sdk._get_proj(), [tgt["id"]], max_hops=1,
+                                  direction="outgoing")
+        assert (src["id"], tgt["id"], "NAND") in anchors_nand, anchors_nand
+    finally:
+        sdk.close()
+
+
 def test_a9_nand_always_bidirectional():
     """NAND edges are traversed both directions ALWAYS — seeding from the
     target of a unidirectional NAND still discovers the edge."""
