@@ -1377,6 +1377,19 @@ class FalkorProjection(
 
         return factors, {}
 
+    # NOTE (#395 code review, PR #1273): the scoped-by-operator-ids extractor
+    # `extract_factors_for_operators` shipped in this PR was REMOVED — it had
+    # no production call path (the no-arg local EP runs ep.run, whose factor
+    # extraction is ep._affected_factors), and its parity tests pinned it
+    # against extract_svbp_factors, which is NOT the local path's reference.
+    # The op_type-aware operator predicate it implemented lives on in
+    # _affected_factors Batch-1 / _affected_claims (ep.py) and is covered by
+    # test_vector_g_legacy_op_type_only_operator. Deleting beat wiring it
+    # into production: consuming its (op_id, op_type, [inputs], weight)
+    # 4-tuples with hardcoded 3.0/1.0 weights would have changed the shipping
+    # local path's factor semantics (compute_operator_weight, direction,
+    # label) for no consumer.
+
     def get_svbp(self, **svbp_kwargs):
         """Create and run TortoiseSVBP on the current graph.
 

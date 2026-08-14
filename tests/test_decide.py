@@ -418,13 +418,18 @@ class TestIssue400EPFixes:
         with pytest.raises(ValueError, match="do not exist"):
             sdk.create_operator("IMPL", fake_id, [ev["id"]])
 
-    def test_compute_confidence_empty_signals_no_factors(self, sdk):
-        """compute_confidence on empty graph returns diagnostic='no_factors'."""
+    def test_compute_confidence_empty_signals_no_dirty_roots(self, sdk):
+        """compute_confidence on empty graph returns diagnostic='no_dirty_roots' (#395).
+
+        Pre-#395 the empty/clean no-arg returned 'no_factors' (global extract
+        found no operators); the new no-arg contract short-circuits on the
+        dirty-roots check first — 'no_factors' now means "dirty roots but no
+        live closure" (breaking-change record, AC8)."""
         result = sdk.compute_confidence()
         assert result["iterations"] == 0
         assert result["converged"] is True
-        assert result.get("diagnostic") == "no_factors", (
-            f"Expected diagnostic='no_factors' on empty graph, got {result}"
+        assert result.get("diagnostic") == "no_dirty_roots", (
+            f"Expected diagnostic='no_dirty_roots' on empty graph, got {result}"
         )
         assert result["confidences"] == {}
 

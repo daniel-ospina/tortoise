@@ -5929,13 +5929,17 @@ class TortoiseSDK:
             return {"iterations": 0, "converged": True, "affected_claims": []}
         anchors = list(self._dirty_roots)
         result = dreamer.dream(anchors, max_hops=max_hops)
-        # Clear dirty roots that converged (keep any that failed to converge
-        # so a later dream retries them).
-        if result.get("converged", False):
-            self._dirty_roots.clear()
-        else:
-            affected = set(result.get("affected_claims", []))
-            self._dirty_roots -= affected
+        # Clear dirty roots that the dream's affected subgraph actually
+        # covered: roots in the affected set converged and are cleared;
+        # roots OUTSIDE the dreamed subgraph stay dirty for a later dream
+        # (e.g. roots reachable only through legacy op_type-only operators,
+        # invisible to the {is_operator:true}-only dream selector in
+        # analyze._bfs_select_operators). An empty affected set (dream found
+        # no operators) subtracts nothing, keeping every dirty root for
+        # retry — the vacuous-run case handled naturally by the single
+        # unconditional subtraction.
+        affected = set(result.get("affected_claims", []))
+        self._dirty_roots -= affected
         return result
 
     def _select_subgraph(self, anchors: list[str], max_hops: int = 1,
@@ -5975,10 +5979,17 @@ class TortoiseSDK:
         legacy behavior.
 
         Args:
-            factors: operator IDs (list[str]) or factor tuples. If None, auto-extracts.
-            evidence: optional {claim_id: (alpha, beta)} priors.
+            factors: operator IDs (list[str]) or factor tuples. If None, BFS-
+                selects from anchors or runs LOCAL EP over the dirty roots
+                (#395 delta C — no-arg no longer scans the whole graph).
+            evidence: optional {claim_id: (alpha, beta)} priors — merged into
+                a CALL-SCOPED copy for the run (never mutated into the SDK's
+                persistent evidence, #395).
             anchors: list of Point IDs for BFS subgraph selection.
-            max_hops: BFS expansion depth when using anchors (default 1).
+            max_hops: BFS expansion depth when using anchors (default 1),
+                threaded to the run so selection depth == run depth (#395
+                AC8). The no-arg path always uses the exact affected closure
+                (max_hops=None) over the dirty roots.
             rel_filter: edge types for BFS — "IMPL", "NAND", or "IMPL|NAND" (default).
             direction: IMPL edge traversal direction — "incoming", "outgoing", or "both" (default).
             require_calibration: fail-closed gate (default True) — raises CalibrationError
@@ -5987,7 +5998,7 @@ class TortoiseSDK:
             recency_decay: optional recency decay factor (default 0.95 from TORTOISE_EP_RECENCY_DECAY).
                 T0 sources exempt; lower tiers get gentle decay. 1.0 = no decay.
 
-        Precedence: factors > anchors > auto-extract-all.
+        Precedence: factors > anchors > no-arg local EP over the dirty roots.
         """
         proj = self._get_proj()
         ep = self._get_ep()
@@ -5995,8 +6006,12 @@ class TortoiseSDK:
         self._hydrate_evidence()
         # Apply source-based credibility inheritance (with recency modulation #122)
         self._apply_source_inheritance(recency_decay=recency_decay)
+        # #395: evidence is CALL-SCOPED — merge into a local copy so the SDK's
+        # persistent _evidence is never mutated by a run (same pattern as
+        # TortoiseEP.run's run_evidence).
+        run_evidence = dict(self._evidence)
         if evidence:
-            self._evidence.update(evidence)
+            run_evidence.update(evidence)
         # Calibration gate
         if require_calibration:
             from .exceptions import CalibrationError
@@ -6025,12 +6040,18 @@ class TortoiseSDK:
                 raise CalibrationError(msg)
         if factors is not None:
             operator_ids = [f if isinstance(f, str) else f[0] for f in factors]
+            if not operator_ids:
+                return {"iterations": 0, "converged": True, "confidences": {}, "diagnostic": "no_factors"}
+            iterations, converged = ep.run(
+                operator_ids, max_hops=max_hops, evidence=run_evidence)
         elif anchors is not None:
             # BFS subgraph selection from anchor points (A9, epic #902): the
             # selection carries the direct-edge factor anchors too — a
             # direct-edge-only subgraph yields ZERO operators but a non-empty
             # direct-factor selection; ep.run accepts plain-point seeds, so
             # the run seeds = operators + the anchor endpoints (§5.6).
+            # #395 (AC8): selection depth == run depth — max_hops threads
+            # through BOTH the selector and ep.run.
             operator_ids, _factor_anchors = self._select_subgraph(
                 anchors, max_hops=max_hops, rel_filter=rel_filter,
                 direction=direction)
@@ -6038,35 +6059,63 @@ class TortoiseSDK:
                 operator_ids.append(src)
                 operator_ids.append(tgt)
             operator_ids = list(dict.fromkeys(operator_ids))
-        else:
-            factors_data, _ = proj.extract_svbp_factors()
-            operator_ids = [f[0] for f in factors_data]
-        if not operator_ids:
-            return {"iterations": 0, "converged": True, "confidences": {}, "diagnostic": "no_factors"}
-        # Lazy consistency (#85): if dirty roots exist and this is a
-        # whole-graph/auto-extract computation, dream the dirty subgraph
-        # first so the auto-extracted factors see stabilized values.
-        if factors is None and anchors is None and self._dirty_roots:
-            self.dream(dirty_only=True)
-            # Re-extract factors after dreaming (graph may have changed).
-            factors_data, _ = proj.extract_svbp_factors()
-            operator_ids = [f[0] for f in factors_data]
             if not operator_ids:
                 return {"iterations": 0, "converged": True, "confidences": {}, "diagnostic": "no_factors"}
-        iterations, converged = ep.run(operator_ids, evidence=self._evidence)
+            iterations, converged = ep.run(
+                operator_ids, max_hops=max_hops, evidence=run_evidence)
+        else:
+            # ── No-arg: LOCAL EP over the affected subgraph (#395, delta C) ──
+            # The interactive default no longer scans the whole graph with
+            # extract_svbp_factors(). Dirty roots seed a max_hops=None local
+            # run over the exact affected closure.
+            roots = list(self._dirty_roots)
+            if not roots:
+                return {"iterations": 0, "converged": True, "confidences": {},
+                        "diagnostic": "no_dirty_roots"}
+            # Bounded fail-safe pass (dream, max_hops=2) FIRST — preserves the
+            # dirty-clear/retry lifecycle (#85); then the exact local pass
+            # (max_hops=None). Roots are captured BEFORE the dream so the
+            # exact pass seeds the ORIGINAL dirty set (the dream clears
+            # converged roots). Double-pass rationale (scoping P2): bounded-
+            # then-exact is a fail-safe against dream-alone silently dropping
+            # dirty roots reachable only through legacy op_type-only operators
+            # (the dream selector is {is_operator:true}-only; _affected_claims
+            # is op_type-aware).
+            self.dream(dirty_only=True)
+            iterations, converged = ep.run(roots, max_hops=None,
+                                           evidence=run_evidence)
+            if not ep._last_affected and not ep._last_truncated:
+                return {"iterations": iterations, "converged": converged,
+                        "confidences": {}, "diagnostic": "no_factors"}
         confidences = {}
         proj = self._get_proj()
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).isoformat()
-        for claim_id in ep._affected_claims(operator_ids):
+        # #395 (delta C): the write-back set == the run set — consume
+        # ep._last_affected (stashed by run, assigned before its early
+        # returns) instead of re-running the BFS with a default depth.
+        for claim_id in (ep._last_affected or set()):
             conf = ep.compute_confidence(claim_id)
             confidences[claim_id] = conf
-            # Write back mean confidence to node property
+        # Batch write-back via UNWIND (drops the per-claim SET loop; only the
+        # updatedAt stamp + full-precision mean are unique to the loop —
+        # n.confidence itself is already batch-written by _flush_cache).
+        if confidences:
             proj.g.query(
-                "MATCH (n:Point {id:$id}) SET n.confidence = $c, n.updatedAt = $now",
-                params={"id": claim_id, "c": conf["mean"], "now": now},
+                "UNWIND $params AS p "
+                "MATCH (n:Point {id: p.id}) SET n.confidence = p.c, "
+                "n.updatedAt = $now",
+                params={"params": [{"id": cid, "c": conf["mean"]}
+                                    for cid, conf in confidences.items()],
+                        "now": now},
             )
-        return {"iterations": iterations, "converged": converged, "confidences": confidences}
+        result = {"iterations": iterations, "converged": converged,
+                  "confidences": confidences}
+        # #395: the degeneration guard never aborts the interactive path — it
+        # proceeds with the capped set and reports the diagnostic.
+        if ep._last_truncated:
+            result["diagnostic"] = "truncated"
+        return result
 
     def _hydrate_evidence(self) -> None:
         """Load graph-persisted baselines (baseline_set=true) into _evidence.

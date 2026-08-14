@@ -101,16 +101,27 @@ class Dreamer:
                 evidence=dict(self._sdk._evidence),
             )
             # Persist mean confidence to node property (mirrors compute_confidence).
-            # P2 (#85): use the SAME max_hops as the run so the affected set
-            # matches what _load_cache/_flush_cache covered.
-            affected = ep._affected_claims(seed_ids, max_hops=max_hops)
+            # #395: the write-back set == the run set by construction — consume
+            # ep._last_affected (stashed by run, assigned before its early
+            # returns) instead of re-running the BFS, fixing the documented
+            # dream.py:88 footgun (a second _affected_claims call with a
+            # divergent default depth). Batch UNWIND write-back (confidence +
+            # updatedAt stamp) mirrors compute_confidence.
+            affected = set(ep._last_affected)
             from datetime import datetime, timezone
             now = datetime.now(timezone.utc).isoformat()
+            confidences = {}
             for claim_id in affected:
                 conf = ep.compute_confidence(claim_id)
+                confidences[claim_id] = conf
+            if confidences:
                 proj.g.query(
-                    "MATCH (n:Point {id:$id}) SET n.confidence = $c, n.updatedAt = $now",
-                    params={"id": claim_id, "c": conf["mean"], "now": now},
+                    "UNWIND $params AS p "
+                    "MATCH (n:Point {id: p.id}) SET n.confidence = p.c, "
+                    "n.updatedAt = $now",
+                    params={"params": [{"id": cid, "c": conf["mean"]}
+                                        for cid, conf in confidences.items()],
+                            "now": now},
                 )
             return {
                 "iterations": iterations,
