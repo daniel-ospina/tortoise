@@ -95,6 +95,7 @@ surfaces:
   - test_embeddings.py
   - test_embeddings_filters.py
   - test_entity_stage.py
+  - test_epic903_fixtures.py
   - test_enumeration_surfaces.py
   - test_eval_metrics.py
   - test_event_log.py
