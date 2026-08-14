@@ -31,7 +31,10 @@ the read-side seam the hosted auth paths use AFTER the flip:
 Fail-closed contract (backup-seam P1-3 pattern): every query error raises
 ``RuntimeError`` — auth never falls back to the registry and never
 authenticates on error. ``update_last_used`` is the one best-effort exception
-(#685 telemetry write-through must never gate auth).
+(#685 telemetry write-through must never gate auth). #1096 adds a second
+exception at the resolve caller: a failure of the additive teams read (0015
+``suspended_at``/``flagged_at``) degrades to safe defaults
+(un-suspended/un-flagged) at WARNING; base/deletion reads still raise.
 
 Env gating (plan Task 8 names the variable): ``TORTOISE_CONTROL_PLANE``
 accepts ``supabase|registry``. When unset, Supabase resolution is the default
@@ -65,16 +68,26 @@ _logger = logging.getLogger(__name__)
 # analytics write path uses — accept either so the flip works with both.
 _SERVICE_KEY_ENV = ("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SERVICE_KEY")
 
-_QUOTA_SELECT = [
+# Base teams columns (migration 0006 — the core teams table; drift-safe).
+# email is 0006, NOT 0015 — it rides the base read.
+_TEAM_BASE_SELECT = [
     "id", "name", "tier", "max_users", "max_graphs", "graph_size_cap",
-    "ops_allowance",
-    # #308: suspension/staging state + owner email ride the same resolution
-    # round-trip (additive keys — consumers read known keys only).
-    "suspended_at", "flagged_at", "email",
+    "ops_allowance", "email",
+]
+# Additive teams columns, separately migrated after 0006 (0015 abuse state;
+# 20260813000005 dashboard_key_login). A schema one migration behind raises
+# PostgREST HTTP 400 on these; the auth seam must degrade to safe defaults
+# (un-suspended/un-flagged; key login allowed), never take down all auth
+# (#1096, defense-in-depth behind the #1095 deploy gate).
+_TEAM_ADDITIVE_SELECT = [
+    "suspended_at", "flagged_at",
     # #1148: whether API-key login is accepted for the dashboard (management
     # surface). Default true; claimed owners toggle it (session-authed).
     "dashboard_key_login",
 ]
+
+# Combined quota read (primary query) — the healthy path stays ONE round-trip.
+_QUOTA_SELECT = _TEAM_BASE_SELECT + _TEAM_ADDITIVE_SELECT
 
 
 def _service_key() -> str:
@@ -113,7 +126,9 @@ class SupabaseControlPlane:
 
     Fail-closed: non-2xx responses and transport errors raise RuntimeError,
     so callers can never mistake an outage for "key not found" (a 401) or
-    silently degrade to the registry.
+    silently degrade to the registry. (Seam-level contract — the resolve
+    caller may intentionally swallow an additive-read failure per #1096;
+    base/deletion reads still raise.)
     """
 
     def __init__(self, url: str | None = None, service_key: str | None = None,
@@ -348,6 +363,49 @@ def _parse_ts(value) -> datetime | None:
     return parsed
 
 
+def _teams_row_fail_soft(cp, team_id: str, *, select: list[str],
+                         additive: list[str]) -> dict | None:
+    """Teams row with fail-soft additive columns (#1096).
+
+    Primary query selects base+additive (one round-trip). When it raises —
+    a missing additive column → PostgREST HTTP 400 (PGRST204 per the
+    error reference; the error-blind seam discards the body) — retry with
+    the drift-safe base set and pad the additive fields to None
+    (un-suspended/un-flagged, pre-0015 behavior).
+    A failure of the base-only retry PROPAGATES (fail-closed: a broken
+    teams table, or a missing non-additive column — e.g. team_by_id's
+    #302 deleted_at/grace_hours stay in THAT call site's base set — must
+    never authenticate or open a kill-switch guard). Logged at WARNING so
+    drift stays diagnosable (#1001 post-mortem). Accepted-by-scope: a
+    non-drift failure of the combined read degrades suspension enforcement
+    for the degrade duration (one auth; up to +60s on MCP) — the closure
+    (error discrimination + revoked_at stamping) is deferred to the #1096
+    escalation decomposition.
+    """
+    additive_defaults = {f: None for f in additive}
+    try:
+        rows = cp.query("teams", select=select, filters=[("id", "eq", team_id)])
+    except Exception as e:
+        base = [c for c in select if c not in additive_defaults]
+        _logger.warning(
+            "teams read failed for %s (select=%s) — retrying base-only "
+            "select %s; a missing additive column (0015) degrades, a "
+            "missing base/deletion column fails closed (%s)",
+            team_id, select, base, e)
+        try:
+            rows = cp.query("teams", select=base, filters=[("id", "eq", team_id)])
+        except Exception as e2:
+            _logger.warning(
+                "teams base-only read failed for %s (select=%s) — "
+                "fail-closed (missing base column or control-plane "
+                "outage): %s",
+                team_id, base, e2)
+            raise
+    if not rows:
+        return None
+    return {**additive_defaults, **rows[0]}
+
+
 def resolve_api_key(cp, token: str) -> dict | None:
     """Resolve a ``tt_`` token against Supabase. None = not found/rejected.
 
@@ -361,7 +419,12 @@ def resolve_api_key(cp, token: str) -> dict | None:
     3. tier/quota from the ``teams`` row.
 
     Fail-closed: a control-plane error raises (RuntimeError) — it never
-    returns None (401) and never falls back to the registry.
+    returns None (401) and never falls back to the registry. EXCEPTION
+    (#1096): a failure of the additive teams read (0015 suspended_at/
+    flagged_at — separately-migrated columns) degrades to safe defaults
+    (un-suspended/un-flagged) and is logged at WARNING; the drift-safe
+    base read still raises on failure (a broken teams table never
+    authenticates).
 
     Returns the same dict shape as the registry get_current_team path
     (team_id, key_id, tier, max_users, max_graphs, max_points, max_api_keys,
@@ -409,13 +472,11 @@ def resolve_api_key(cp, token: str) -> dict | None:
             return None  # registry-only key → nothing resolves (E2E-7-negative)
         team_id = memberships[0]["team_id"]
 
-    team_rows = cp.query(
-        "teams", select=_QUOTA_SELECT, filters=[("id", "eq", team_id)]
-    )
-    if not team_rows:
+    team_row = _teams_row_fail_soft(
+        cp, team_id, select=_QUOTA_SELECT, additive=_TEAM_ADDITIVE_SELECT)
+    if team_row is None:
         # Key's team vanished — fail closed (401), never authenticate.
         return None
-    team_row = team_rows[0]
 
     # #1082 PR2: anon-ceiling derivation at the auth boundary — an
     # unclaimed zero-email team resolves to the reduced ``anon`` tier until
@@ -431,6 +492,12 @@ def resolve_api_key(cp, token: str) -> dict | None:
     max_users = team_row.get("max_users")
     max_graphs = team_row.get("max_graphs")
     graph_size_cap = team_row.get("graph_size_cap")
+    # #1148: dashboard key-login acceptance — normalized BEFORE the dict so
+    # a None (additive-read degrade, #1096) becomes the safe default True
+    # (the column is NOT NULL DEFAULT true; a drifted schema must not 403
+    # key-auth management for teams that never disabled it). A stored False
+    # is carried as-is (the gate stays closed).
+    _dkl = team_row.get("dashboard_key_login")
     return {
         "team_id": team_id,
         "key_id": key_id,
@@ -453,8 +520,7 @@ def resolve_api_key(cp, token: str) -> dict | None:
         "key_prefix": key_prefix,
         "created_via": created_via,
         "created_by": created_by,
-        # #1148: dashboard key-login acceptance (rides the team row)
-        "dashboard_key_login": team_row.get("dashboard_key_login", True),
+        "dashboard_key_login": True if _dkl is None else _dkl,
         # #1148: per-key enabled state (dashboard toggle)
         "enabled": row.get("enabled", True) if rows else True,
         # #308: enforcement (403 SUSPENDED) + owner notification
@@ -510,17 +576,23 @@ def membership_for_user_team(cp, user_id: str, team_id: str) -> dict | None:
 
 
 def team_by_id(cp, team_id: str) -> dict | None:
-    """Team row (registry-properties-shaped dict) or None."""
-    rows = cp.query(
-        "teams",
+    """Team row (registry-properties-shaped dict) or None.
+
+    Suspension/staging columns (0015) read fail-soft (#1096): a schema
+    missing them returns the row with safe None defaults, never raises.
+    The #302 soft-delete columns (20260813000001 deleted_at/grace_hours)
+    are NOT additive-fail-soft: the deletion kill-switch guard must fail
+    closed, never open (a schema missing them cannot have soft-deleted
+    rows — the write path is equally drifted — so fail-closed is safe).
+    """
+    return _teams_row_fail_soft(
+        cp, team_id,
         select=["id", "name", "tier", "email", "graph_name", "max_users",
                 "max_teams", "max_graphs", "ops_allowance", "graph_size_cap",
                 "backup_enabled", "backup_latest_at", "backup_restored_at",
-                "created_at", "deleted_at", "grace_hours",
-                "suspended_at", "flagged_at"],
-        filters=[("id", "eq", team_id)],
-    )
-    return rows[0] if rows else None
+                "created_at", "deleted_at", "grace_hours"]
+            + _TEAM_ADDITIVE_SELECT,
+        additive=_TEAM_ADDITIVE_SELECT)
 
 
 # ── Session-key mint writes (E2E-2 round-trip: mint → api_keys → resolve) ──

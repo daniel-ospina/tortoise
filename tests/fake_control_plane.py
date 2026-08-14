@@ -23,11 +23,16 @@ from typing import Any
 
 
 class FakeControlPlane:
-    def __init__(self, tables: dict[str, list[dict]] | None = None):
+    def __init__(self, tables: dict[str, list[dict]] | None = None,
+                 *, missing_columns: dict[str, set[str]] | None = None):
         # rows are stored as dicts keyed by column name
         self.tables: dict[str, list[dict]] = tables or {}
         self.query_count = 0
         self.rpc_calls: list[tuple[str, dict]] = []
+        # #1096 drift mode: columns that are absent from the "schema" of a
+        # table (mirrors PostgREST 400 PGRST204 on select/filter of an
+        # absent column). Default None → behavior identical to before.
+        self.missing_columns: dict[str, set[str]] | None = missing_columns
 
     def seed(self, table: str, rows: list[dict]) -> "FakeControlPlane":
         self.tables.setdefault(table, []).extend(rows)
@@ -337,6 +342,21 @@ class FakeControlPlane:
             else:
                 raise ValueError(f"unsupported filter op {op!r}")
         if method == "GET":
+            if (self.missing_columns and table in self.missing_columns
+                    and select and self.missing_columns[table] & set(select)):
+                # Mirrors the #1001 failure: PostgREST HTTP 400 for an
+                # absent column (PGRST204 per the error reference); the real
+                # seam discards the body, so only HTTP 400 surfaces.
+                raise RuntimeError(
+                    f"Supabase control-plane query failed ({table}): HTTP 400")
+            if (self.missing_columns and table in self.missing_columns
+                    and filters
+                    and self.missing_columns[table] & {c for c, _, _ in filters}):
+                # Filter-column drift mirrors the same seam (the #302 sweeps
+                # filter deleted_at). Out-of-slice scaffolding for the
+                # escalation decomposition's sweep/health tests.
+                raise RuntimeError(
+                    f"Supabase control-plane query failed ({table}): HTTP 400")
             if select:
                 rows = [{k: r.get(k) for k in select} for r in rows]
             if order:

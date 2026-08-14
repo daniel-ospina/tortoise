@@ -143,6 +143,22 @@ class TestRestSuspension:
         assert detail["code"] == "SUSPENDED"
         assert detail["appeal_url"].startswith("http")
 
+    def test_drift_resolution_clears_suspension_signal(self, env):
+        """#1096 accepted-risk pin: under 0015 drift a fresh resolution reads
+        suspended_at=None and the self-heal clears the in-process signal —
+        the only local enforcement cell is torn down while the durable
+        suspended_at stays stamped (the worst-case window mechanism)."""
+        fake = env["fake"]
+        fake.rpc("abuse_suspend", {"p_team_id": TEAM})
+        abuse.mark_suspended(TEAM)
+        assert abuse.is_suspended_signal(TEAM)
+        fake.missing_columns = {"teams": {"suspended_at", "flagged_at"}}
+        with TestClient(env["app"]) as tc:
+            r = tc.get("/v1/team", headers=_auth())
+        assert r.status_code == 200  # degraded (accepted-by-scope)
+        assert not abuse.is_suspended_signal(TEAM)  # self-heal tore it down
+        assert fake.tables["teams"][0]["suspended_at"] is not None  # durable stays
+
     def test_unsuspend_restores_next_request(self, env):
         fake = env["fake"]
         fake.rpc("abuse_suspend", {"p_team_id": TEAM})
@@ -452,6 +468,42 @@ class TestMintGateAndAlerts:
                 r = tc.post("/v1/session/key",
                             json={"purpose": "recovery", "team_id": TEAM})
             assert r.status_code == 403
+            assert r.json()["detail"]["code"] == "SUSPENDED"
+        finally:
+            env["app"].dependency_overrides.clear()
+
+    def test_mint_allowed_under_0015_drift_then_blocked_after_recovery(self, env):
+        """#1096 accepted-risk pin: under 0015 drift the mint gate's
+        suspended_at reads None → a durably-suspended team CAN mint; after
+        recovery the 403 returns (the fail-open window closes)."""
+        from tortoise.hosted_api import get_current_user
+        fake = env["fake"]
+        fake.seed("team_memberships", [{
+            "user_id": "user-1", "team_id": TEAM, "role": "owner",
+            "status": "active", "team_name": "abuse-team"}])
+        # env fixture pre-seeds 2 provisioned keys at the free-tier cap
+        # (max_api_keys=2). The DRIFT-phase mint has the suspension gate
+        # bypassed (degrade) and would 402 at the cap before creating a
+        # key — clear them so the 200 assertion holds. The recovery phase
+        # 403s at the suspension gate before any cap check.
+        # (precedent: test_auth_flip test_mint_resolves_then_revoked_rejected).
+        fake.tables["api_keys"] = []
+        fake.rpc("abuse_suspend", {"p_team_id": TEAM})
+        fake.missing_columns = {"teams": {"suspended_at", "flagged_at"}}
+        env["app"].dependency_overrides[get_current_user] = \
+            lambda: {"user_id": "user-1"}
+        try:
+            with TestClient(env["app"]) as tc:
+                r = tc.post("/v1/session/key",
+                            json={"purpose": "recovery", "team_id": TEAM})
+                assert r.status_code == 200  # fail-open during drift (accepted)
+                assert "key" in r.json()  # the grant actually minted
+            fake.missing_columns = None  # drift resolved
+            with TestClient(env["app"]) as tc:
+                r = tc.post("/v1/session/key",
+                            json={"purpose": "recovery", "team_id": TEAM})
+            assert r.status_code == 403
+            # Gate identity: the SUSPENDED gate specifically (not another 403).
             assert r.json()["detail"]["code"] == "SUSPENDED"
         finally:
             env["app"].dependency_overrides.clear()
