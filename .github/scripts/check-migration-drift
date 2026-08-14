@@ -53,11 +53,20 @@ fi
 # Matches the Supabase CLI's migrateFilePattern ^([0-9]+)_(.*)\.sql$.
 # -n + p drops non-conforming files (the CLI skips them too); they are
 # reported separately below since they'd be applied by NOBODY.
-LOCAL_VERSIONS="$(
+# Duplicate detection BEFORE dedup: two files sharing a version prefix are the
+# 0012x2/0015x2 class that ABORTS `supabase db push` entirely (#1001 root cause).
+# sort -u would collapse them here, masking the pending state (the
+# 20260813000005 incident, #1235) — so detect and report them explicitly.
+LOCAL_ALL_VERSIONS="$(
   ls "$MIGRATIONS_DIR"/*.sql 2>/dev/null \
-    | sed -nE 's#.*/([0-9]+)_.*#\1#p' \
-    | sort -u
+    | sed -nE 's#.*/([0-9]+)_.*#\1#p'
 )"
+DUP_LOCAL_VERSIONS="$(
+  printf '%s\n' "$LOCAL_ALL_VERSIONS" \
+    | sort \
+    | uniq -d
+)"
+LOCAL_VERSIONS="$(printf '%s\n' "$LOCAL_ALL_VERSIONS" | sort -u)"
 NON_CONFORMING="$(
   ls "$MIGRATIONS_DIR"/*.sql 2>/dev/null \
     | sed -nE 's#.*/([^0-9][^/]*\.sql|[0-9]+[^_/]*\.sql)$#\1#p' \
@@ -134,6 +143,16 @@ if [ -n "$NON_CONFORMING" ]; then
   echo "  non-conforming migration filenames (applied by NOBODY — rename to ^[0-9]+_ pattern): $NON_CONFORMING" >&2
 fi
 
+if [ -n "$DUP_LOCAL_VERSIONS" ]; then
+  echo "  BLOCKING duplicate migration version prefixes (abort \`supabase db push\` AND mask drift state — see #1235):"
+  for v in $DUP_LOCAL_VERSIONS; do
+    files="$(ls "$MIGRATIONS_DIR"/${v}_*.sql 2>/dev/null | xargs -n1 basename | tr '\n' ' ')"
+    echo "    - $v  [$files]"
+  done
+  echo "  Remediation: pure-prefix rename ONE file to the next free prefix (content unchanged) —"
+  echo "    e.g. git mv ${v}_a.sql ${v}_b.sql → <next-free>_a.sql, then apply via supabase-deploy dispatch."
+  exit 1
+fi
 if [ -n "$BLOCKING" ]; then
   echo "  BLOCKING repo-ahead migrations (pending in repo, NOT applied to prod):"
   for v in $BLOCKING; do echo "    - $v"; done

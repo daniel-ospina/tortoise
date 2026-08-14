@@ -14,7 +14,11 @@ jobs:
   #                              `db push` entirely, #1001 root cause)
   #   migration-append-only    — edits/renames/deletions of already-merged
   #                              migrations are rejected (a change to an applied
-  #                              migration must be a NEW timestamp file)
+  #                              migration must be a NEW timestamp file).
+  #                              #1235: when SUPABASE_ACCESS_TOKEN is available
+  #                              (same-repo PRs), a PURE PREFIX RENAME of a
+  #                              provably-unapplied migration is exempt; fork
+  #                              PRs (no token) keep the strict block (fail-closed).
   # Both drive the shared .github/scripts/check-migration-append-only script so
   # tests exercise the shipped logic. fetch-depth: 0 is required for the base
   # SHA to be available to `git diff` (default checkout is depth 1).
@@ -34,6 +38,9 @@ jobs:
         run: bash .github/scripts/check-migration-append-only diff
         env:
           DRIFT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          # #1235: enables the unapplied-rename exception (same-repo PRs);
+          # forks don't get secrets → strict block preserved (fail-closed).
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
   pricing-artifact:
     # #682: canonical pricing must exist on main and stay in sync with the
     # tier_limits() table — a missing/renamed product/pricing.json fails CI.

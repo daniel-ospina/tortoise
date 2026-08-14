@@ -199,3 +199,44 @@ def test_unparseable_migration_blocks():
     r = subprocess.run(["bash", str(SCRIPT)], capture_output=True, text=True, env=env, cwd=REPO_ROOT)
     assert r.returncode == 1, r.stderr
     assert "20260813000007" in r.stdout
+
+
+# ── #1235: duplicate version prefixes are detected + BLOCK (not masked) ──
+# Before this fix, LOCAL_VERSIONS used `sort -u` — a duplicate prefix (the
+# 0012x2/0015x2 class) was collapsed, so the drift check reported "OK" while
+# prod lacked the migration entirely (the 20260813000005 incident).
+
+
+def test_duplicate_prefix_blocks():
+    # Two files share prefix 20260813000005 (dashboard_login + inviter_email
+    # collision, #1235) — prod has only the applied one.
+    r = _run({}, ["20260813000005_dashboard_login.sql", "20260813000005_inviter_email.sql"],
+             ["20260813000005"])
+    assert r.returncode == 1, r.stderr
+    assert "duplicate" in r.stdout.lower(), r.stdout
+    assert "20260813000005" in r.stdout
+    # Both file names surfaced so the operator knows which pair collided.
+    assert "dashboard_login" in r.stdout and "inviter_email" in r.stdout
+
+
+def test_duplicate_prefix_blocks_even_when_remote_missing_both():
+    # Neither applied in prod — duplicate still blocks (db push would abort).
+    r = _run({}, ["20260813000005_a.sql", "20260813000005_b.sql"], ["0001"])
+    assert r.returncode == 1, r.stderr
+    assert "duplicate" in r.stdout.lower()
+
+
+def test_duplicate_free_set_still_clean():
+    # No duplicates → unchanged behavior: remote has both, so nothing pending.
+    r = _run({}, ["20260813000005_dashboard_login.sql", "20260813000006_inviter_email.sql"],
+             ["20260813000005", "20260813000006"])
+    assert r.returncode == 0, r.stderr
+
+
+def test_duplicate_free_but_pending_blocks_normally():
+    # No duplicates, but one migration pending → normal repo-ahead BLOCK (the
+    # duplicate-detection must not suppress the existing drift gate).
+    r = _run({}, ["20260813000005_dashboard_login.sql", "20260813000006_inviter_email.sql"],
+             ["20260813000005"])
+    assert r.returncode == 1, r.stderr
+    assert "20260813000006" in r.stdout  # pending migration surfaced
