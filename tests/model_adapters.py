@@ -6,12 +6,13 @@ class OpenRouterModel:
     """Adapter for OpenRouter API — supports any model on the platform."""
     
     def __init__(self, model_id: str, max_tokens: int = 500, temperature: float = 0.0,
-                 thinking_budget: int = 0):
+                 thinking_budget: int = 0, disable_reasoning: bool = False):
         self.id = model_id
         self.api_key = os.environ.get('OPENROUTER_API_KEY', '')
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.thinking_budget = thinking_budget  # for reasoning models
+        self.disable_reasoning = disable_reasoning  # send reasoning.effort=none
         
     def complete(self, *, system: str, user: str) -> str:
         headers = {
@@ -30,6 +31,8 @@ class OpenRouterModel:
         # Enable thinking for reasoning models
         if self.thinking_budget > 0:
             body["reasoning"] = {"max_tokens": self.thinking_budget}
+        elif self.disable_reasoning:
+            body["reasoning"] = {"effort": "none"}
         
         r = requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
@@ -53,6 +56,13 @@ MODELS = {
     'deepseek-v4-pro': lambda: OpenRouterModel('deepseek/deepseek-v4-pro', max_tokens=500),
     'deepseek-r1-xhigh': lambda: OpenRouterModel('deepseek/deepseek-r1-0528', max_tokens=500, thinking_budget=2000),
     'deepseek-v4-pro-xhigh': lambda: OpenRouterModel('deepseek/deepseek-v4-pro', max_tokens=500, temperature=0.0),
+    # OpenRouter-side only (epic #909 gate judges) — independent of Pi's qwen-tp provider config.
+    # Reasoning models consume the shared max_tokens budget on internal reasoning; bound it
+    # (thinking_budget) or disable it (disable_reasoning) so the label JSON actually gets emitted
+    # (#946 gate runs observed all-reasoning/zero-content collapses at default settings).
+    'qwen3.8-max': lambda: OpenRouterModel('qwen/qwen3.8-max', max_tokens=8000, temperature=0.0, thinking_budget=2000),
+    'deepseek-v4-pro-noreason': lambda: OpenRouterModel('deepseek/deepseek-v4-pro', max_tokens=8000, temperature=0.0, disable_reasoning=True),
+    'claude-opus-5': lambda: OpenRouterModel('anthropic/claude-opus-5', max_tokens=12000, temperature=0.0),
 }
 
 import requests, json
