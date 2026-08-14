@@ -135,6 +135,29 @@ jobs:
           fi
           echo "service-first gate OK"
 
+  welcome-e2e:
+    runs-on: ubuntu-latest
+    # Mocked welcome-page suite (#541) — secret-free per-PR coverage against
+    # the LIVE page (Supabase calls mocked via Playwright routes). The #801
+    # live signup smoke self-skips without SUPABASE secrets and runs in
+    # welcome-e2e-monitor.yml (scheduled + on-merge). Restored per-PR after
+    # #1189: the botched #1181 merge wrapped this job in conflict markers
+    # (empty HEAD side); #1181's monitor move had dropped per-PR coverage of
+    # the mocked welcome flows (the python matrix excludes tests/e2e/).
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'   # --experimental-strip-types needs >= 22.6 (#373 harness)
+      - run: pip install -e '.[test]'
+      - run: python -m playwright install --with-deps chromium
+      - name: Run welcome page E2E (mocked; live smoke self-skips) (#373)
+        run: python -m pytest tests/e2e/test_welcome_page.py -q -rs -p no:cacheprovider
+
   legal-e2e:
     runs-on: ubuntu-latest
     # Full legal-page suite (#657) — ~1000 assertions across 10 plan checks

@@ -2,9 +2,9 @@
 # #1008): the per-PR live runs competed with real traffic for shared prod rate
 # buckets and flaked CI on unrelated PRs. Now runs on a schedule + after merges
 # to main; failures auto-file an issue (the monitor's signal) instead of
-# blocking the merge queue. The static welcome/waitlist tests still run per-PR
-# in the python matrix (test (b)); this job's UNIQUE value is the live-prod
-# browser run.
+# blocking the merge queue. The mocked welcome-page suite runs per-PR in
+# ci.yml's welcome-e2e job (secret-free); this job's UNIQUE value is the
+# live-prod browser run.
 #
 # The smoke targets the #801 server-first signup path: the form POSTs to
 # /v1/signup/email (hosted API → GoTrue Admin, email_confirm=true) — NO
@@ -44,6 +44,12 @@ jobs:
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
       - name: Warn if live signup smoke is skipping (no-429 monitor off)
         if: always()
+        # The secrets must be passed to THIS step too — without an env block the
+        # vars are always empty and the warning fires even when the live smoke
+        # ran with creds (#1067; verified in run logs 2026-08-13).
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
         run: |
           if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_SERVICE_KEY" ]; then
             echo "::warning::live signup smoke is SKIPPED — SUPABASE_URL/SUPABASE_SERVICE_KEY secrets missing; the #801 no-429 monitor is OFF"

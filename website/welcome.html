@@ -1559,8 +1559,13 @@ ${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}`,
 
     function renderMcpConfig() {
       const key = document.getElementById("api-key").textContent.trim();
+      // Masked key (returning visitor): never interpolate the raw bullets —
+      // substitute the tt_YOUR_KEY placeholder the manual note references
+      // (matches HARNESS_CONFIGS' masked branch; ENV_CONFIGS otherwise
+      // renders the literal key).
+      const effectiveKey = _usableKey(key) ? key : "tt_YOUR_KEY";
       const text = manualMode
-        ? ENV_CONFIGS[currentHarness](key)
+        ? ENV_CONFIGS[currentHarness](effectiveKey)
         : HARNESS_CONFIGS[currentHarness](key);
       document.getElementById("mcp-config-text").textContent = text;
     }
