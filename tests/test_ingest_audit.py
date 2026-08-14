@@ -113,11 +113,15 @@ def test_audit_ingest_exact_stamped_set(sdk):
 
 
 def test_audit_entities_sources_out_of_stamp_scope(sdk):
-    """A13 scope line: bundle entities and sources are NEVER stamped — the
-    audit surface cannot return them (documented out-of-scope)."""
+    """A13 scope line: bundle entities and sources are NEVER stamped on the
+    INGEST path — the audit surface cannot return them (documented
+    out-of-scope). The raw-SDK props-passthrough hole (create_subject with
+    batch_id) is a DOCUMENTED interim gap (the global _sanitize_props
+    batch_id rejection is the A4-gated final sub-step after #785 adopts the
+    shared helper) — pinned here so the contract wording matches reality."""
     res = sdk.ingest(_full_bundle())
     bid = res["batch_id"]
-    # the source and subject nodes exist but carry no batch_id
+    # the source and subject nodes exist but carry no batch_id (ingest path)
     assert _count(sdk, "MATCH (s:Source) RETURN count(s)") == 1
     assert _count(sdk, "MATCH (n:Subject) RETURN count(n)") == 1
     assert _count(sdk, "MATCH (s:Source {batch_id:$bid}) RETURN count(s)",
@@ -126,7 +130,16 @@ def test_audit_entities_sources_out_of_stamp_scope(sdk):
                   {"bid": bid}) == 0
     audit = sdk.list_batch(bid)
     assert all("url" not in p for p in audit["points"])
-
+    # DOCUMENTED interim gap (A4-gated sub-step): the raw-SDK surface can
+    # still stamp an entity via props passthrough — the audit does NOT
+    # return it (out of Point scope); pinned so a future _sanitize_props
+    # rejection (post-#785) flips this assertion intentionally
+    subj = sdk.create_subject("Doc-stamped entity", batch_id=bid)
+    rows = _query(sdk, "MATCH (n:Subject {id:$id}) RETURN n.batch_id",
+                  {"id": subj["id"]})
+    assert rows and rows[0][0] == bid
+    assert all(p["id"] != subj["id"] for p in sdk.list_batch(bid)["points"]), \
+        "entities are outside the Point-scoped audit"
 
 def test_audit_crash_retry_shares_one_batch_id(sdk):
     """A13 indicator 1 crash-retry: re-submitting the IDENTICAL bundle yields
@@ -162,23 +175,41 @@ def test_audit_direct_edge_batch_stamp(sdk):
     assert edge["direct_edge"] == "IMPL"
     assert edge["from"] == p1["id"] and edge["to"] == p2["id"]
     assert edge["direction"] == "bidirectional"  # IMPL default
+    # P2-2: an EDGE-ONLY batch (no stamped points) is discoverable — the
+    # transport-death recovery path must not lose it
+    batches = sdk.list_batches()
+    found = [b for b in batches if b["batch_id"] == bid]
+    assert found and found[0]["points"] == 0 and found[0]["direct_edges"] == 1, \
+        f"edge-only batch must be discoverable: {batches}"
 
 
 def test_audit_post_supersede_boundary(sdk):
     """A13 indicator 3: the EDITORIAL supersede artifact is OUTSIDE audit —
     superseding a bundle point with a user-created point: the superseding
     (editorial) point is NOT in the batch audit; the superseded original
-    keeps its batch_id; no stamp leaks onto the editorial point."""
+    keeps its batch_id; no stamp leaks onto the editorial point. A direct
+    edge incident to the superseded point KEEPS its originating batch_id
+    (E2E-11.6 — the 2a-DIRECT edge transfer preserves edge attributes; the
+    post-rebuild half is A10 pass-2b #1048, gated on A3)."""
     res = sdk.ingest(_full_bundle())
     bid = res["batch_id"]
     original = res["ids"]["points"][0]
+    other = res["ids"]["points"][1]
     editorial = sdk.create_point("claim", "Editorial replacement.")["id"]
+    # a direct edge incident to the superseded point, stamped with the batch
+    sdk.create_direct_edge("IMPL", original, other, batch_id=bid)
     sdk.supersede_point(original, editorial)
     audit = sdk.list_batch(bid)
     audit_ids = {p["id"] for p in audit["points"]}
     assert original in audit_ids, "the superseded original keeps its batch"
     assert editorial not in audit_ids, \
         "the editorial supersede artifact is outside audit (not stamped)"
+    # the repointed direct edge REMAINS in the originating batch (the
+    # 2a-DIRECT transfer preserves edge attributes incl. batch_id)
+    assert audit["counts"]["direct_edges"] == 1, audit
+    edge = audit["direct_edges"][0]
+    assert edge["from"] == editorial or edge["to"] == editorial, \
+        f"the edge must have been repointed onto the editorial point: {edge}"
     # the editorial point carries NO batch_id anywhere
     rows = _query(sdk, "MATCH (n:Point {id:$id}) RETURN n.batch_id",
                   {"id": editorial})

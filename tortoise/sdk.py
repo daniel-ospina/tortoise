@@ -4358,14 +4358,24 @@ class TortoiseSDK:
         batch-less pre-existing point acquires the bundle's batch_id on its
         first dedup hit) and every operator-less direct edge carrying it.
         Operator/mitigation Points are ordinary Points (stamped the same
-        way, §4.2). Entities and sources are OUT of stamp scope (bundle
-        entities/sources are never stamped — documented, INGEST_CONTRACT
-        §audit). Editorial supersede artifacts are outside audit: the
-        superseding (editorial) point is not stamped with the originating
-        bundle's batch_id, and repointed edges KEEP their originating
-        batch_id (E2E-11.6). Completeness holds across ``rebuild_all`` (the
-        pre-wipe snapshot's batch_id enforcement links are restored —
-        projection pass-1b tail, A10).
+        way, §4.2). Entities and sources are OUT of stamp scope on the
+        INGEST path (bundle entities/sources are never stamped — a bundle
+        item carrying ``batch_id`` is rejected at Phase-1; the raw-SDK
+        props-passthrough surface can still stamp an entity via
+        ``create_subject(batch_id=...)`` — a DOCUMENTED interim gap until
+        #785 adopts the shared ``_sanitize_props`` batch_id rejection, the
+        A4-gated final sub-step). Editorial supersede artifacts are outside
+        audit: the superseding (editorial) point is not stamped with the
+        originating bundle's batch_id, and repointed edges KEEP their
+        originating batch_id (E2E-11.6).
+
+        Completeness across ``rebuild_all``: batch_id on Points is restored
+        from the pre-wipe live-graph snapshot (projection pass-1b tail) —
+        a rebuild of the SAME store keeps the audit intact; the JSONL
+        journal replay of ``BatchIdStamped`` / ``DirectEdgeCreated``
+        records (a fresh-store rebuild from the journal only) is A10
+        pass-2b (#1048, gated on A3) — NOT yet landed, so journal-only
+        rebuilds lose batch_id today (recorded deferral).
 
         Returns ``{"batch_id", "points": [{id, pointKind, status,
         is_operator, op_type, content}], "direct_edges": [{direct_edge,
@@ -4385,8 +4395,10 @@ class TortoiseSDK:
         edge_rows = proj.g.query(
             "MATCH (a:Point)-[r:IMPL|NAND]->(b:Point) "
             "WHERE r.batch_id = $bid "
-            "AND a.is_operator = false AND a.op_type IS NULL "
-            "AND b.is_operator = false AND b.op_type IS NULL "
+            "AND coalesce(a.is_operator, false) = false "
+            "AND a.op_type IS NULL "
+            "AND coalesce(b.is_operator, false) = false "
+            "AND b.op_type IS NULL "
             "RETURN type(r), a.id, b.id, "
             "       coalesce(r.direction, 'bidirectional'), "
             "       r.confidence, r.weight, r.label "
@@ -4408,35 +4420,52 @@ class TortoiseSDK:
         """Batch discovery — the most recent distinct batch_ids (A13).
 
         Returns ``[{batch_id, points, direct_edges}]`` ordered by the newest
-        stamped point's ``createdAt`` descending, capped at ``limit``
-        (default 20). Entities/sources are out of stamp scope (never
-        counted). The ``points``/``direct_edges`` counts are the aggregate
-        counts per batch (not the full rows — use ``list_batch`` for the
-        audit detail).
+        stamped point's ``createdAt`` descending (a batch whose ONLY stamped
+        artifacts are direct edges sorts by the edge's newest timestamp),
+        capped at ``limit`` (default 20). Entities/sources are out of stamp
+        scope (never counted). The ``points``/``direct_edges`` counts are the
+        aggregate counts per batch (not the full rows — use ``list_batch``
+        for the audit detail). Edge-only batches ARE discoverable (the
+        transport-death recovery path must not lose them).
         """
         if not isinstance(limit, int) or limit < 1:
             raise ValueError("list_batches: limit must be a positive int")
         proj = self._get_proj()
+        # point-stamped batches: (bid, newest point createdAt, point count)
         rows = proj.g.query(
             "MATCH (n:Point) WHERE n.batch_id IS NOT NULL "
             "WITH n.batch_id AS bid, max(n.createdAt) AS newest, count(n) AS c "
-            "ORDER BY newest DESC LIMIT $limit RETURN bid, c",
-            params={"limit": limit},
+            "RETURN bid, newest, c",
         ).result_set
-        out: list[dict] = []
-        for (bid, c) in rows:
-            out.append({"batch_id": bid, "points": c,
-                        "direct_edges": 0})  # edges counted per-batch below
-        # per-batch direct-edge counts (one query, grouped)
+        # edge-stamped batches: edge-only batches (endpoints carry no
+        # batch_id) must ALSO be discoverable — the transport-death recovery
+        # path must not lose them
         edge_rows = proj.g.query(
             "MATCH ()-[r:IMPL|NAND]->() "
             "WHERE r.batch_id IS NOT NULL "
-            "WITH r.batch_id AS bid, count(r) AS c RETURN bid, c",
+            "WITH r.batch_id AS bid, max(r.createdAt) AS newest, count(r) AS c "
+            "RETURN bid, newest, c",
         ).result_set
-        edge_counts = {bid: c for (bid, c) in edge_rows}
-        for item in out:
-            item["direct_edges"] = edge_counts.get(item["batch_id"], 0)
-        return out
+        newest_by_bid: dict[str, str] = {}
+        by_bid: dict[str, dict] = {}
+        for (bid, newest, c) in rows:
+            by_bid[bid] = {"batch_id": bid, "points": c, "direct_edges": 0}
+            if newest is not None and (bid not in newest_by_bid
+                                       or newest > newest_by_bid[bid]):
+                newest_by_bid[bid] = newest
+        for (bid, newest, c) in edge_rows:
+            if bid in by_bid:
+                by_bid[bid]["direct_edges"] = c
+            else:
+                by_bid[bid] = {"batch_id": bid, "points": 0,
+                               "direct_edges": c}
+            if newest is not None and (bid not in newest_by_bid
+                                       or newest > newest_by_bid[bid]):
+                newest_by_bid[bid] = newest
+        items = list(by_bid.values())
+        items.sort(key=lambda b: newest_by_bid.get(b["batch_id"], ""),
+                   reverse=True)
+        return items[:limit]
 
     def create_direct_edge(self, op_type: str, source_id: str, target_id: str, *,
                            direction: str | None = None,
