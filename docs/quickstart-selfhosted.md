@@ -1,8 +1,9 @@
 ---
 title: "Tortoise Self-Hosted Quickstart"
-type: guide
-domain: epistemic
+type: engineering
+domain: platform
 doc_status: live
+subjects.team: epistemic-team
 created: 2026-08-08
 aboutSubjects: tortoise
 aboutObjects: tortoise-cli, tortoise-mcp
@@ -179,6 +180,57 @@ Point your client at `http://127.0.0.1:8000/mcp` with header `Authorization: Bea
 tortoise doctor                                        # health check
 tortoise backup --db ~/.tortoise/tortoise.db           # snapshot → backups/<timestamp>/
 ```
+
+## 7. Migrating from self-hosted to cloud
+
+The supported migration path is a **replay path**: your self-hosted daemon keeps serving the graph while you set up a hosted account, and you replay your knowledge into the hosted team through the same ingest path you used originally. This is the documented fallback verified by the **E2E-12-D** suite: knowledge lives on the selfhost daemon → the customer registers a hosted team → the knowledge is replayed → the hosted surface answers with parity.
+
+> ⚠️ **No automated import today.** There is no graph-import endpoint and no bulk export→import tool — you replay knowledge manually (CLI/REST/SDK) rather than uploading a backup. An export→import tool is tracked as a follow-up epic.
+
+**What carries over:** everything you replay lands as first-class graph data — Points, edges (operators), and belief scores computed by the same EP propagation. Queries, `context` digests, and the MCP tools behave identically on hosted.
+
+**What does NOT carry over:** Point IDs, edge topology, and belief scores are not copied — replayed knowledge is recreated and EP recomputes over the new graph. API keys are **not portable across surfaces**: a selfhost static key is rejected by hosted and a hosted key is rejected by your daemon (both 401 — keys are scoped per team/surface).
+
+### Step-by-step
+
+1. **Keep your selfhost daemon running** — the graph stays live and queryable while you set up cloud:
+
+   ```bash
+   docker compose up -d        # or leave your embedded DB in place
+   tortoise doctor             # confirm the local graph is healthy
+   ```
+
+2. **Register a hosted account** — [tortoise.premiselabs.co/signup](https://tortoise.premiselabs.co/signup) (Supabase sign-up), or mint a free hosted team + key with no email:
+
+   ```bash
+   tortoise signup
+   # ✅ Free team created — API key printed once, saved to .tortoise
+   ```
+
+3. **Connect a working directory to cloud**:
+
+   ```bash
+   tortoise init --api-key tt_<your-key>   # saves .tortoise config in this directory
+   ```
+
+4. **Replay the knowledge** through the hosted ingest path (run from the connected directory):
+
+   ```bash
+   # Sessions/transcripts you captured while self-hosted
+   tortoise session capture --file transcript.txt
+
+   # Individual claims (or bulk via REST POST /v1/points or the SDK)
+   tortoise create-point "The decision was approved" --kind statement
+   ```
+
+5. **Verify parity** — run the same checks on both surfaces:
+
+   ```bash
+   tortoise doctor          # selfhost health
+   tortoise team info       # hosted team + usage
+   ```
+
+   Then call the structure tools over MCP on each surface — `tortoise_check_structure` (chain integrity) and `tortoise_summarize_structure` (counts per gate) — and compare the hosted counts to your selfhost graph. When hosted reaches parity and answers your queries, decommission the daemon at your leisure.
 
 ## Troubleshooting
 

@@ -46,7 +46,8 @@ jobs:
         if: always()
         # The secrets must be passed to THIS step too — without an env block the
         # vars are always empty and the warning fires even when the live smoke
-        # ran with creds (#1067; verified in run logs 2026-08-13).
+        # ran with creds (#1067; the monitor copy of the job lost this env block
+        # when #1181 extracted it — restored 2026-08-14, #1189).
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
@@ -59,6 +60,8 @@ jobs:
       - name: Run waitlist edge-function behavioral harness (#373)
         run: node --experimental-strip-types tests/test_waitlist_subscribe.mjs
       - name: Run tenant-provision CORS runtime harness (#1110)
+        # Preserved from the old ci.yml welcome-e2e job when it moved here
+        # (#1181/#1189) — this is its only runner.
         run: node --experimental-strip-types tests/test_tenant_provision_cors.mjs
       - name: Auto-file issue on failure (monitor signal — never blocks merges)
         if: failure()
@@ -67,4 +70,4 @@ jobs:
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${{ github.repository }}/issues" \
-            -d '{"title":"live-signup-monitor: welcome-e2e failed (run ${{ github.run_id }})","body":"Monitor failure — run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}. This is the #801 live signup funnel monitor (schedule + on-merge). The smoke POSTs to /v1/signup/email (email_confirm=true — no email send); a failure signals the signup endpoint returning non-200 (rate buckets, CAPTCHA, or a real funnel regression). Investigate or re-run; it is NOT a PR regression gate.","labels":["bug"]}'
+            -d '{"title":"live-signup-monitor: welcome-e2e failed (run ${{ github.run_id }})","body":"Monitor failure — run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}. This is the #801 live signup funnel monitor (schedule + on-merge). The smoke asserts POST /v1/signup/email → 200 and the auto sign-in (auth/v1/token?grant_type=password) → 200; failures are typically a real signup-funnel regression, an API 429 (over_email_send_rate_limit / over_request_rate_limit / over_request_rate_limit_ip), or a stale test vs the deployed page. Investigate or re-run; it is NOT a PR regression gate.","labels":["bug"]}'

@@ -1,0 +1,210 @@
+{
+  "window_id": "w2-op",
+  "window_type": "operational",
+  "judge": "frontier",
+  "n_edus": 25,
+  "labels": [
+    {
+      "edu_index": 0,
+      "class": "none",
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": []
+    },
+    {
+      "edu_index": 1,
+      "class": "process",
+      "kind": null,
+      "atomicity": true,
+      "source_ref": null,
+      "relations": []
+    },
+    {
+      "edu_index": 2,
+      "class": "process",
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": []
+    },
+    {
+      "edu_index": 3,
+      "class": "process",
+      "kind": null,
+      "atomicity": true,
+      "source_ref": null,
+      "relations": []
+    },
+    {
+      "edu_index": 4,
+      "class": "process",
+      "kind": null,
+      "atomicity": true,
+      "source_ref": null,
+      "relations": []
+    },
+    {
+      "edu_index": 5,
+      "class": "process",
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": []
+    },
+    {
+      "edu_index": 6,
+      "class": "process",
+      "kind": null,
+      "atomicity": true,
+      "source_ref": null,
+      "relations": []
+    },
+    {
+      "edu_index": 7,
+      "class": "process",
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": []
+    },
+    {
+      "edu_index": 8,
+      "class": "process",
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": []
+    },
+    {
+      "edu_index": 9,
+      "class": "process",
+      "kind": null,
+      "atomicity": true,
+      "source_ref": null,
+      "relations": []
+    },
+    {
+      "edu_index": 10,
+      "class": "process",
+      "kind": null,
+      "atomicity": true,
+      "source_ref": null,
+      "relations": []
+    },
+    {
+      "edu_index": 11,
+      "class": "process",
+      "kind": null,
+      "atomicity": true,
+      "source_ref": null,
+      "relations": []
+    },
+    {
+      "edu_index": 12,
+      "class": "process",
+      "kind": null,
+      "atomicity": true,
+      "source_ref": null,
+      "relations": []
+    },
+    {
+      "edu_index": 13,
+      "class": "process",
+      "kind": null,
+      "atomicity": true,
+      "source_ref": null,
+      "relations": []
+    },
+    {
+      "edu_index": 14,
+      "class": "process",
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": []
+    },
+    {
+      "edu_index": 15,
+      "class": "process",
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": []
+    },
+    {
+      "edu_index": 16,
+      "class": "process",
+      "kind": null,
+      "atomicity": true,
+      "source_ref": null,
+      "relations": []
+    },
+    {
+      "edu_index": 17,
+      "class": "process",
+      "kind": null,
+      "atomicity": true,
+      "source_ref": null,
+      "relations": []
+    },
+    {
+      "edu_index": 18,
+      "class": "process",
+      "kind": null,
+      "atomicity": true,
+      "source_ref": null,
+      "relations": []
+    },
+    {
+      "edu_index": 19,
+      "class": "process",
+      "kind": null,
+      "atomicity": true,
+      "source_ref": null,
+      "relations": []
+    },
+    {
+      "edu_index": 20,
+      "class": "process",
+      "kind": null,
+      "atomicity": true,
+      "source_ref": null,
+      "relations": []
+    },
+    {
+      "edu_index": 21,
+      "class": "process",
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": []
+    },
+    {
+      "edu_index": 22,
+      "class": "process",
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": []
+    },
+    {
+      "edu_index": 23,
+      "class": "process",
+      "kind": null,
+      "atomicity": true,
+      "source_ref": null,
+      "relations": []
+    },
+    {
+      "edu_index": 24,
+      "class": "process",
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": []
+    }
+  ],
+  "degenerate": false,
+  "incomplete": false
+}

@@ -287,8 +287,14 @@ def test_mcp_config_copy_puts_harness_config_on_clipboard(page: Page) -> None:
     # indirection (never a literal key in the config block).
     assert "TORTOISE_API_KEY" in clip, f"env-var form missing: {clip[:200]!r}"
     assert "Bearer ${TORTOISE_API_KEY}" in clip or "Bearer $TORTOISE_API_KEY" in clip
-    assert "tt_e2e_mock_api_key" not in clip.split("export TORTOISE_API_KEY=")[0], \
+    config_block, sep, export_line = clip.partition("export TORTOISE_API_KEY=")
+    assert sep, f"env-var form missing the export line: {clip[:200]!r}"
+    # The config block must reference the key only via env-var indirection;
+    # the literal key belongs in the export line and nowhere else (order-robust
+    # partition, not a position-dependent slice).
+    assert "tt_e2e_mock_api_key" not in config_block, \
         "config block must not embed the literal key"
+    assert "tt_e2e_mock_api_key" in export_line, "export line missing the key"
 
 
 def test_prompt_copy_uses_fetched_markdown(page: Page) -> None:

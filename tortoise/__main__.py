@@ -2675,6 +2675,198 @@ def _cmd_index_sessions(args) -> int:
     return 1 if (report.get("reindex") or {}).get("failed") else 0
 
 
+def _cmd_index_directory(args) -> int:
+    """The unified index path CLI (epic #900 T8, §6.5 canonical).
+
+    tortoise index directory <corpus-dir> [--db URI] [--corpus-name NAME]
+                                 [--metadata]
+
+    Stdout contract (cycle-21/23 pin): the §3.1 report dict as ONE JSON line
+    (deterministic key order: directory, corpus_name, file_count, indexed,
+    updated, skipped, failed, aborted, ignored, errors, by_kind,
+    aborted_reason) + a human-readable multi-line rendering to stderr.
+    Exit codes: 0 = completed run (with or without failed>0); 1 = pre-walk
+    argument error OR graph unreachable. A completed run with failed>0 still
+    exits 0 — per-file failures are REPORTED in the summary, never encoded
+    in the exit code (the backgrounded hook path must never see exit-1
+    ambiguity between argument errors and data failures).
+
+    Corpus-dir resolution: POSITIONAL argument → TORTOISE_INGEST_BASE_DIR
+    fallback → explicit pre-walk error when both absent (exit 1, naming
+    BOTH corpus_root and TORTOISE_INGEST_BASE_DIR — the actionability
+    assertion, E2E-16(iv)). The migrated hook passes the corpus dir
+    POSITIONALLY (resolved from session_corpus_dir()/TORTOISE_SESSION_CORPUS).
+
+    Env: TORTOISE_DB_URI, TORTOISE_INGEST_BASE_DIR,
+    TORTOISE_EMBEDDING_REPAIR_BACKOFF_HOURS, TORTOISE_MAX_FILE_MB,
+    TORTOISE_INDEX_NO_NETWORK (forces extract_metadata=False regardless of
+    --metadata — cycle-12 precedence pin), TORTOISE_INDEX_CHILD_STDERR
+    (debug-redirect: captures the child's FULL output — stdout+stderr — to
+    the target file, TRUNCATE-ON-OPEN; fail-safe rejects relative targets
+    and targets whose PARENT dir is missing/unwritable; a NONEXISTENT
+    TARGET FILE is valid — the nohup'd child creates it).
+    """
+    import os as _os
+    import sys as _sys
+    import json as _json
+    from pathlib import Path as _Path
+    from tortoise.sdk import TortoiseSDK
+
+    # ── TORTOISE_INDEX_CHILD_STDERR debug-redirect (cycle-15/16 pins) ──
+    # Captures the backgrounded child's FULL output (stdout+stderr → file,
+    # the semantics extend beyond the name's literal reading). TRUNCATE-ON-
+    # OPEN (a `>`-style, never append — the hook fires at every session
+    # close; unbounded growth is disk exhaustion). Fail-safe: reject ONLY
+    # relative targets and targets whose PARENT directory is missing or
+    # unwritable — a NONEXISTENT TARGET FILE is VALID (the nohup'd child
+    # creates it); existing-DIRECTORY and non-regular-file (FIFO/device)
+    # targets are also rejected before the redirect open (an operator
+    # setting the var to a directory would raise EISDIR inside the child
+    # with fd 1/2 still /dev/null — an invisible crash killing the #280
+    # sweep).
+    _redirect = _os.environ.get("TORTOISE_INDEX_CHILD_STDERR", "").strip()
+    _stdout = _sys.stdout
+    _stderr = _sys.stderr
+    if _redirect:
+        _rt = _Path(_redirect)
+        if not _rt.is_absolute():
+            print(f"TORTOISE_INDEX_CHILD_STDERR target must be absolute: "
+                  f"{_redirect!r} (fail-safe)", file=_sys.stderr)
+            return 1
+        _parent = _rt.parent
+        if not _parent.is_dir() or not _os.access(str(_parent), _os.W_OK):
+            print(f"TORTOISE_INDEX_CHILD_STDERR parent dir missing/unwritable: "
+                  f"{_parent} (fail-safe)", file=_sys.stderr)
+            return 1
+        if _rt.exists() and _rt.is_dir():
+            print(f"TORTOISE_INDEX_CHILD_STDERR target is a directory: "
+                  f"{_redirect!r} (fail-safe)", file=_sys.stderr)
+            return 1
+        if _rt.exists() and not _rt.is_file():
+            print(f"TORTOISE_INDEX_CHILD_STDERR target is not a regular file: "
+                  f"{_redirect!r} (fail-safe)", file=_sys.stderr)
+            return 1
+        try:
+            _f = open(_redirect, "w", encoding="utf-8")  # TRUNCATE-ON-OPEN
+        except OSError as _e:
+            print(f"TORTOISE_INDEX_CHILD_STDERR cannot open target "
+                  f"{_redirect!r}: {_e} (fail-safe)", file=_sys.stderr)
+            return 1
+        _stdout = _f
+        _stderr = _f
+
+    # ── corpus-dir resolution (positional → env fallback → error) ──
+    # E2E-15(g)/§8.6 cycle-13 pin: a NONEXISTENT env-resolved fallback dir
+    # (manual TORTOISE_INGEST_BASE_DIR typo) = PRE-WALK ERROR (exit 1, clear
+    # message) — the zero-count no-op applies ONLY to an explicitly
+    # POSITIONALLY-passed nonexistent dir (the hook passes positionally).
+    positional = args.corpus_dir
+    corpus_dir = positional
+    env_resolved = False
+    if corpus_dir is None or not str(corpus_dir).strip():
+        corpus_dir = _os.environ.get("TORTOISE_INGEST_BASE_DIR", "").strip()
+        env_resolved = bool(corpus_dir)
+    if not corpus_dir:
+        _msg = ("tortoise index directory: no corpus directory given — pass "
+                "<corpus-dir> positionally or set TORTOISE_INGEST_BASE_DIR.")
+        print(_msg, file=_sys.stderr)
+        if _redirect:
+            _stdout.close()
+        return 1
+    if not _os.path.isabs(corpus_dir):
+        print(f"tortoise index directory: corpus directory must be absolute: "
+              f"{corpus_dir!r}", file=_sys.stderr)
+        if _redirect:
+            _stdout.close()
+        return 1
+    if env_resolved and not _os.path.isdir(corpus_dir):
+        print(f"tortoise index directory: TORTOISE_INGEST_BASE_DIR points at a "
+              f"nonexistent directory: {corpus_dir!r} (pre-walk error — pass "
+              f"the corpus dir positionally for a zero-count no-op)",
+              file=_sys.stderr)
+        if _redirect:
+            _stdout.close()
+        return 1
+
+    # ── graph target + run ──
+    try:
+        target = _resolve_db_target(args.db)
+    except ValueError as e:
+        print(f"  ❌ Invalid DB target: {e}", file=_stderr)
+        if _redirect:
+            _stdout.close()
+        return 1
+    sdk: TortoiseSDK | None = None
+    try:
+        # REVIEW-FIX (re-review gate P1): construct the SDK against the
+        # RESOLVED target so the §5.3 busy-probe guards the store actually
+        # written — a no-arg TortoiseSDK() probes the DEFAULT store (the
+        # `--db` contract would silently bypass the guard on the real
+        # target; E2E-16 legs fail deterministically while the default
+        # store is held). URI targets route through from_uri (no embedded
+        # probe); embedded paths are probed at the resolved path.
+        from tortoise.config import is_db_uri as _is_uri
+        if _is_uri(target):
+            sdk = TortoiseSDK()
+        else:
+            sdk = TortoiseSDK(db_path=target)
+        sdk._proj = _projection_for(target)
+        report = sdk.index_directory(
+            corpus_dir,
+            extract_metadata=bool(args.metadata),
+            corpus_name=args.corpus_name,
+        )
+    except ValueError as _e:
+        # §6.5/T8 pin (E2E-15(d2) contract): the RESOLUTION ValueError
+        # (unsafe directory, corpus-root symlink resolving outside
+        # TORTOISE_INGEST_BASE_DIR, progress_file bounds) must surface its
+        # TRACEBACK — the capture file (TORTOISE_INDEX_CHILD_STDERR) must
+        # contain the traceback naming the ValueError class + the symlink
+        # path, so a backgrounded sweep failure is INSPECTABLE. A
+        # clean-error implementation FAILS (d2) on purpose. The child's
+        # real stderr is /dev/null under the hook's nohup discipline, so
+        # the CLI writes the traceback to the redirect target itself
+        # (falling back to the real stderr for direct operators); exit 1 =
+        # pre-walk error.
+        import traceback as _tb
+        print(f"tortoise index directory: pre-walk error ({type(_e).__name__}):"
+              f" {_e}", file=_stderr)
+        print(_tb.format_exc(), file=_stderr)
+        if _redirect:
+            _stdout.close()
+        return 1
+    except Exception as e:
+        print(f"  ❌ graph unreachable: {e}", file=_stderr)
+        if _redirect:
+            _stdout.close()
+        return 1
+    finally:
+        if sdk is not None and sdk._proj:
+            sdk._proj.close()
+
+    # ── stdout contract: ONE JSON line (deterministic key order) ──
+    _order = ("directory", "corpus_name", "file_count", "indexed", "updated",
+              "skipped", "failed", "aborted", "ignored", "errors",
+              "by_kind", "aborted_reason")
+    _line = {k: report.get(k) for k in _order}
+    print(_json.dumps(_line), file=_stdout)
+    # human-readable rendering to stderr
+    print(f"Indexed corpus: {report.get('directory')}", file=_stderr)
+    print(f"  file_count: {report.get('file_count')}  indexed: "
+          f"{report.get('indexed')}  updated: {report.get('updated')}  "
+          f"skipped: {report.get('skipped')}  failed: {report.get('failed')}  "
+          f"aborted: {report.get('aborted')}  ignored: {report.get('ignored')}",
+          file=_stderr)
+    if report.get("aborted_reason"):
+        print(f"  aborted_reason: {report['aborted_reason']}", file=_stderr)
+    for e in (report.get("errors") or [])[:5]:
+        print(f"    ! {e.get('file', e.get('dir'))}: {e.get('error')}",
+              file=_stderr)
+    if _redirect:
+        _stdout.close()
+    return 0
+
+
 def _cmd_decide(args) -> int:
     """Compare options via EP belief propagation.
 
@@ -3378,6 +3570,18 @@ def main(argv: list[str] | None = None) -> int:
                        help="DB target override (default: TORTOISE_DB_URI / FALKORDB_* / embedded path)")
     isess.add_argument("--metadata", action="store_true",
                        help="Run LLM metadata extraction (default: keyword-only — sweep never burns LLM tokens)")
+    # tortoise index directory — the unified index path (epic #900 T8, §6.5)
+    idir = idx_sp.add_parser("directory",
+                             help="Index a corpus directory of .md files as Sources + Events/Documents (unified index path)")
+    idir.add_argument("corpus_dir", nargs="?", default=None,
+                      help="Corpus directory (default: TORTOISE_INGEST_BASE_DIR — the hook passes positionally)")
+    idir.add_argument("--db", default=None,
+                      help="DB target override (default: TORTOISE_DB_URI / FALKORDB_* / embedded path)")
+    idir.add_argument("--metadata", action="store_true",
+                      help="Run metadata extraction + embeddings (default: extract_metadata=False — the NO-NETWORK mode)")
+    idir.add_argument("--corpus-name", default=None,
+                      help="Explicit corpus_name override (default: basename of the resolved corpus root; "
+                           "give same-basename corpora distinct names on a shared graph — §8.2)")
     # tortoise create-point <content> --kind <kind>
     cp = sp.add_parser("create-point", help="Create a Point via Tortoise Cloud API")
     cp.add_argument("content", help="Point content (text)")
@@ -3517,6 +3721,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_index_github(args)
         elif args.index_cmd == "sessions":
             return _cmd_index_sessions(args)
+        elif args.index_cmd == "directory":
+            return _cmd_index_directory(args)
         idx.print_help()
         return 1
     elif args.cmd == "list-kinds":
