@@ -6649,6 +6649,7 @@ class TortoiseSDK:
         relationship_filter: str | None = None,
         traversal_path: str | None = None,
         exclude_status: list[str] | None = None,
+        _elevated_timeout_ms: int | None = None,
     ) -> list[dict]:
         """Hybrid search with RRF fusion + EP annotation.
 
@@ -6669,6 +6670,10 @@ class TortoiseSDK:
             silently shrink the result count — epic #898 recall_state). Default None =
             no filtering (existing behavior unchanged; retracted is already excluded at
             the retrieval layer, #689). Points with no status property are kept.
+        _elevated_timeout_ms: PRIVATE — benchmark-only (#316). Threads an elevated
+            collective-cap override into degradation_chain to measure uncensored
+            true-completion latency. Default None = production 500ms cap. Never
+            passed by production callers.
         """
         from .search_engine import (
             classify_query, degradation_chain, rrf_fusion,
@@ -6721,6 +6726,7 @@ class TortoiseSDK:
             graph, query, kind, query_vec, strategies,
             entity_type=entity_type, limit=str_limit,
             is_embedded=is_embedded,
+            elevated_timeout_ms=_elevated_timeout_ms,
         )
 
         if not raw_results:

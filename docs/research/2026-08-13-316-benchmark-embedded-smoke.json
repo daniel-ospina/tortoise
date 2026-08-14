@@ -1,0 +1,374 @@
+{
+  "schema_version": 1,
+  "issue": "316",
+  "seed": 42,
+  "corpus_target": 1000,
+  "seeded_points": 1000,
+  "cold_start_ms": {
+    "fts": 4.2990000220015645,
+    "vector": 3.82404203992337,
+    "hybrid": 4.598499974235892,
+    "tfidf": 20.610416948329657,
+    "e2e": 508.6462909821421
+  },
+  "arms": {
+    "fts": {
+      "target_ms": 50.0,
+      "censored": {
+        "name": "fts:censored",
+        "timeout_ms": 500,
+        "samples_requested": 30,
+        "stats": {
+          "count": 30,
+          "mean_ms": 0.5229272355791181,
+          "min_ms": 0.40737498784437776,
+          "max_ms": 0.7710829959250987,
+          "p50_ms": 0.434333982411772,
+          "p95_ms": 0.7710829959250987,
+          "p99_ms": 0.7710829959250987,
+          "healthy": 4,
+          "degraded": 26,
+          "capped": 0,
+          "capped_tail": 0,
+          "invalidating": 0,
+          "breaker_open": 0,
+          "percentile_basis": "healthy-samples-only (capped/degraded right-censored, excluded)"
+        },
+        "warmup_iters": 20,
+        "breaker_tripped": false,
+        "invalidated": false,
+        "invalidated_reason": null,
+        "degraded_fast": true,
+        "verdict": "DEGRADED-FAST"
+      },
+      "elevated": {
+        "name": "fts:elevated",
+        "timeout_ms": 5000,
+        "samples_requested": 30,
+        "stats": {
+          "count": 30,
+          "mean_ms": 0.6506150093628094,
+          "min_ms": 0.46920799650251865,
+          "max_ms": 0.777459004893899,
+          "p50_ms": 0.6490839878097177,
+          "p95_ms": 0.777459004893899,
+          "p99_ms": 0.777459004893899,
+          "healthy": 4,
+          "degraded": 26,
+          "capped": 0,
+          "capped_tail": 0,
+          "invalidating": 0,
+          "breaker_open": 0,
+          "percentile_basis": "healthy-samples-only (capped/degraded right-censored, excluded)"
+        },
+        "warmup_iters": 20,
+        "breaker_tripped": false,
+        "invalidated": false,
+        "invalidated_reason": null,
+        "degraded_fast": true,
+        "verdict": "DEGRADED-FAST"
+      }
+    },
+    "vector": {
+      "target_ms": 100.0,
+      "censored": {
+        "name": "vector:censored",
+        "timeout_ms": 500,
+        "samples_requested": 30,
+        "stats": {
+          "count": 30,
+          "mean_ms": 3.280958329560235,
+          "min_ms": 2.24041601177305,
+          "max_ms": 10.848584002815187,
+          "p50_ms": 2.9256660491228104,
+          "p95_ms": 4.3134589795954525,
+          "p99_ms": 10.848584002815187,
+          "healthy": 30,
+          "degraded": 0,
+          "capped": 0,
+          "capped_tail": 0,
+          "invalidating": 0,
+          "breaker_open": 0,
+          "percentile_basis": "healthy-samples-only (capped/degraded right-censored, excluded)"
+        },
+        "warmup_iters": 5,
+        "breaker_tripped": false,
+        "invalidated": false,
+        "invalidated_reason": null,
+        "degraded_fast": false,
+        "verdict": "PASS",
+        "target_ms": 100.0
+      },
+      "elevated": {
+        "name": "vector:elevated",
+        "timeout_ms": 5000,
+        "samples_requested": 30,
+        "stats": {
+          "count": 30,
+          "mean_ms": 2.511933296530818,
+          "min_ms": 2.258624997921288,
+          "max_ms": 3.0823330162093043,
+          "p50_ms": 2.4821250117383897,
+          "p95_ms": 2.8867499786429107,
+          "p99_ms": 3.0823330162093043,
+          "healthy": 30,
+          "degraded": 0,
+          "capped": 0,
+          "capped_tail": 0,
+          "invalidating": 0,
+          "breaker_open": 0,
+          "percentile_basis": "healthy-samples-only (capped/degraded right-censored, excluded)"
+        },
+        "warmup_iters": 11,
+        "breaker_tripped": false,
+        "invalidated": false,
+        "invalidated_reason": null,
+        "degraded_fast": false
+      }
+    },
+    "hybrid": {
+      "target_ms": 200.0,
+      "censored": {
+        "name": "hybrid:censored",
+        "timeout_ms": 500,
+        "samples_requested": 30,
+        "stats": {
+          "count": 30,
+          "mean_ms": 5.011279199970886,
+          "min_ms": 2.568708034232259,
+          "max_ms": 12.756209005601704,
+          "p50_ms": 3.515208954922855,
+          "p95_ms": 11.862709012348205,
+          "p99_ms": 12.756209005601704,
+          "healthy": 30,
+          "degraded": 0,
+          "capped": 0,
+          "capped_tail": 0,
+          "invalidating": 0,
+          "breaker_open": 0,
+          "percentile_basis": "healthy-samples-only (capped/degraded right-censored, excluded)"
+        },
+        "warmup_iters": 5,
+        "breaker_tripped": false,
+        "invalidated": false,
+        "invalidated_reason": null,
+        "degraded_fast": false,
+        "verdict": "PASS",
+        "target_ms": 200.0
+      },
+      "elevated": {
+        "name": "hybrid:elevated",
+        "timeout_ms": 5000,
+        "samples_requested": 30,
+        "stats": {
+          "count": 30,
+          "mean_ms": 3.4606805614506206,
+          "min_ms": 2.785207994747907,
+          "max_ms": 5.535500007681549,
+          "p50_ms": 3.390583035070449,
+          "p95_ms": 4.091624985449016,
+          "p99_ms": 5.535500007681549,
+          "healthy": 30,
+          "degraded": 0,
+          "capped": 0,
+          "capped_tail": 0,
+          "invalidating": 0,
+          "breaker_open": 0,
+          "percentile_basis": "healthy-samples-only (capped/degraded right-censored, excluded)"
+        },
+        "warmup_iters": 20,
+        "breaker_tripped": false,
+        "invalidated": false,
+        "invalidated_reason": null,
+        "degraded_fast": false
+      }
+    },
+    "tfidf": {
+      "target_ms": 500.0,
+      "censored": {
+        "name": "tfidf:censored",
+        "timeout_ms": 500,
+        "samples_requested": 30,
+        "stats": {
+          "count": 30,
+          "mean_ms": 17.03147626443145,
+          "min_ms": 10.181833989918232,
+          "max_ms": 40.98729201359674,
+          "p50_ms": 12.9820829606615,
+          "p95_ms": 40.86154099786654,
+          "p99_ms": 40.98729201359674,
+          "healthy": 30,
+          "degraded": 0,
+          "capped": 0,
+          "capped_tail": 0,
+          "invalidating": 0,
+          "breaker_open": 0,
+          "percentile_basis": "healthy-samples-only (capped/degraded right-censored, excluded)"
+        },
+        "warmup_iters": 5,
+        "breaker_tripped": false,
+        "invalidated": false,
+        "invalidated_reason": null,
+        "degraded_fast": false,
+        "verdict": "PASS",
+        "target_ms": 500.0
+      },
+      "elevated": {
+        "name": "tfidf:elevated",
+        "timeout_ms": 5000,
+        "samples_requested": 30,
+        "stats": {
+          "count": 30,
+          "mean_ms": 20.435348502360284,
+          "min_ms": 11.404666991438717,
+          "max_ms": 51.65145802311599,
+          "p50_ms": 14.361040957737714,
+          "p95_ms": 45.16887501813471,
+          "p99_ms": 51.65145802311599,
+          "healthy": 30,
+          "degraded": 0,
+          "capped": 0,
+          "capped_tail": 0,
+          "invalidating": 0,
+          "breaker_open": 0,
+          "percentile_basis": "healthy-samples-only (capped/degraded right-censored, excluded)"
+        },
+        "warmup_iters": 11,
+        "breaker_tripped": false,
+        "invalidated": false,
+        "invalidated_reason": null,
+        "degraded_fast": false
+      }
+    },
+    "e2e": {
+      "target_ms": 300.0,
+      "verdict": "cap-dominated",
+      "censored_p95_ms": 313.57,
+      "censored": {
+        "name": "e2e:censored",
+        "timeout_ms": 500,
+        "samples_requested": 30,
+        "stats": {
+          "count": 30,
+          "mean_ms": 127.83563550328836,
+          "min_ms": 38.808833982329816,
+          "max_ms": 313.5652080527507,
+          "p50_ms": 75.90275001712143,
+          "p95_ms": 313.5652080527507,
+          "p99_ms": 313.5652080527507,
+          "healthy": 4,
+          "degraded": 0,
+          "capped": 0,
+          "capped_tail": 26,
+          "invalidating": 0,
+          "breaker_open": 0,
+          "percentile_basis": "healthy-samples-only (capped/degraded right-censored, excluded)"
+        },
+        "warmup_iters": 20,
+        "breaker_tripped": false,
+        "invalidated": false,
+        "invalidated_reason": null,
+        "degraded_fast": true
+      },
+      "elevated_p95_ms": 1262.35,
+      "elevated": {
+        "name": "e2e:elevated",
+        "timeout_ms": 5000,
+        "samples_requested": 30,
+        "stats": {
+          "count": 30,
+          "mean_ms": 860.1324123970699,
+          "min_ms": 18.057750014122576,
+          "max_ms": 1373.5213330364786,
+          "p50_ms": 879.7550830058753,
+          "p95_ms": 1262.3486670199782,
+          "p99_ms": 1373.5213330364786,
+          "healthy": 30,
+          "degraded": 0,
+          "capped": 0,
+          "capped_tail": 0,
+          "invalidating": 0,
+          "breaker_open": 0,
+          "percentile_basis": "healthy-samples-only (capped/degraded right-censored, excluded)"
+        },
+        "warmup_iters": 6,
+        "breaker_tripped": false,
+        "invalidated": false,
+        "invalidated_reason": null,
+        "degraded_fast": false
+      },
+      "headroom_ms_317": -962.35
+    }
+  },
+  "provenance": {
+    "timestamp_utc": "2026-08-13T23:52:44.188552+00:00",
+    "git_sha": "004e2452ea0f72bb435fa2a54ec5e2665f8a78c4",
+    "host": {
+      "platform": "macOS-26.5.1-arm64-arm-64bit",
+      "python": "3.12.13",
+      "cpu_count": 10,
+      "machine": "arm64"
+    },
+    "db_mode": "embedded-falkordblite",
+    "tor_toise_db_uri_set": false,
+    "embedding_model": "unavailable",
+    "synthetic_vectors": true,
+    "tfidf_available": true,
+    "indexes": {
+      "fts": true,
+      "vector": false
+    },
+    "corpus": {
+      "n_points": 1000,
+      "kinds": {
+        "claim": 346,
+        "term": 154,
+        "decision": 178,
+        "event": 42,
+        "operator": 20,
+        "question": 113,
+        "source": 42,
+        "plan": 105
+      },
+      "n_operators": 20,
+      "n_retracted": 13,
+      "n_with_posterior": 506,
+      "n_operator_edges": 4000
+    },
+    "query_mix": {
+      "issue": "316",
+      "source": "scoping v5.1 \u2014 task 1",
+      "distinct_queries": 56,
+      "grounding": "per-label indexable fields (point content tokens + pointKind)",
+      "requirements": [
+        ">= 50 distinct queries",
+        ">= 1 no-match degrade trigger per text arm",
+        ">= 1 kind-bearing query per arm",
+        "structural = explicit strategy-class (kind-only, no text)"
+      ]
+    },
+    "warmup": {
+      "iters": 5,
+      "max_iters": 20
+    },
+    "samples_per_arm": 30,
+    "elevated_timeout_ms": 5000,
+    "cap_ms": 500,
+    "e2e_target_ms": 300.0,
+    "pre_registered_targets_ms": {
+      "fts": 50.0,
+      "vector": 100.0,
+      "hybrid": 200.0,
+      "tfidf": 500.0
+    },
+    "falkordb_version": "unknown",
+    "embedded_engine": "redislite (no FTS/HNSW \u2014 numbers NOT prod-parity; can reverse on Docker)"
+  },
+  "notes": [
+    "Per-strategy p95s are isolation measurements (single strategy, censored column = pristine prod path).",
+    "hybrid p95 \u2248 max(fts, vector, structural) \u2014 strategies run in PARALLEL under the 500ms collective cap.",
+    "E2E verdict band: \u2264300ms achieved / 300-500ms cap-dominated / >500ms+\u03b5 tail (mix-weighted p95, censored column).",
+    "#317 headroom = 300 \u2212 full-E2E-uncensored-p95 (elevated column).",
+    "Embedded FalkorDBLite numbers are NOT prod-parity (no FTS/HNSW \u2014 numbers can reverse on Docker)."
+  ]
+}
