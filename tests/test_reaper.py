@@ -1002,3 +1002,104 @@ def test_active_suite_tokens_lists_markers(monkeypatch, tmp_path):
                         str(marker_dir))
     # malformed/empty/stale markers are skipped; only the live one counts
     assert active_suite_tokens() == ["1234-abc"]
+
+
+# ── #1231: stale index-lock pid-file sweep ──────────────────────────
+
+def test_sweep_stale_index_pid_files_removes_dead_holder(tmp_path):
+    """A crash-left index-*.pid lock (dead recorded pid, flock free) is
+    removed; the file no longer exists after the sweep (#1231 T3)."""
+    from tortoise.embedded_reaper import sweep_stale_index_pid_files
+    lock_dir = tmp_path / "locks"
+    lock_dir.mkdir()
+    stale = lock_dir / "index-crashed.pid"
+    stale.write_text("999999999 0\n")  # pid 999999999 is dead everywhere
+    old = time.time() - 120
+    os.utime(stale, (old, old))  # older than the 30s min-age guard
+
+    removed = sweep_stale_index_pid_files(str(lock_dir), dry_run=False)
+    assert removed == [str(stale)]
+    assert not stale.exists()
+
+
+def test_sweep_stale_index_pid_files_skips_live_holder(tmp_path):
+    """A lock held by a live process (flock taken) is NEVER removed — the
+    force_release TOCTOU guard refuses while the flock is contended."""
+    from tortoise.index_lock import SessionIndexLock
+    from tortoise.embedded_reaper import sweep_stale_index_pid_files
+    lock_dir = tmp_path / "locks"
+    lock_dir.mkdir()
+    lock = SessionIndexLock("sess-live", str(lock_dir))
+    assert lock.acquire() == "acquired"
+    old = time.time() - 120
+    os.utime(lock.path, (old, old))  # old file, but flock is HELD
+
+    removed = sweep_stale_index_pid_files(str(lock_dir), dry_run=False)
+    assert removed == []
+    assert lock.path.exists()
+    lock.release()
+
+
+def test_sweep_stale_index_pid_files_age_guard(tmp_path):
+    """A fresh lock file (younger than the min-age guard) is never touched,
+    mirroring the socket walk's boot cooldown."""
+    from tortoise.embedded_reaper import sweep_stale_index_pid_files
+    lock_dir = tmp_path / "locks"
+    lock_dir.mkdir()
+    fresh = lock_dir / "index-fresh.pid"
+    fresh.write_text("999999999 0\n")  # dead pid, but file is brand-new
+
+    removed = sweep_stale_index_pid_files(str(lock_dir), dry_run=False)
+    assert removed == []
+    assert fresh.exists()
+
+
+def test_sweep_stale_index_pid_files_skips_non_lock_files(tmp_path):
+    """Non index-*.pid files in the lock dir are ignored."""
+    from tortoise.embedded_reaper import sweep_stale_index_pid_files
+    lock_dir = tmp_path / "locks"
+    lock_dir.mkdir()
+    other = lock_dir / "capture-abc.pid"  # different prefix (extension's)
+    other.write_text("999999999\n")
+    old = time.time() - 120
+    os.utime(other, (old, old))
+
+    removed = sweep_stale_index_pid_files(str(lock_dir), dry_run=False)
+    assert removed == []
+    assert other.exists()
+
+
+def test_sweep_stale_index_pid_files_dry_run_does_not_remove(tmp_path):
+    """dry_run=True reports the would-remove candidate without touching it."""
+    from tortoise.embedded_reaper import sweep_stale_index_pid_files
+    lock_dir = tmp_path / "locks"
+    lock_dir.mkdir()
+    stale = lock_dir / "index-crashed.pid"
+    stale.write_text("999999999 0\n")
+    old = time.time() - 120
+    os.utime(stale, (old, old))
+
+    removed = sweep_stale_index_pid_files(str(lock_dir), dry_run=True)
+    assert removed == [str(stale)]
+    assert stale.exists()  # dry-run never mutates
+
+
+def test_run_sweep_includes_stale_pid_files(tmp_path, monkeypatch):
+    """_run_sweep appends stale index-pid removals to its acted list."""
+    from tortoise.embedded_reaper import _run_sweep
+    lock_dir = tmp_path / "locks"
+    lock_dir.mkdir()
+    stale = lock_dir / "index-crashed.pid"
+    stale.write_text("999999999 0\n")
+    old = time.time() - 120
+    os.utime(stale, (old, old))
+    monkeypatch.setenv("TORTOISE_INDEX_LOCK_DIR", str(lock_dir))
+    # No redis servers involved — discover() finds nothing; the pid sweep is
+    # the only actor. _run_sweep takes the reaper lock; it must be free.
+    monkeypatch.setattr("tortoise.embedded_reaper.discover",
+                        lambda jobs=1: [])
+    acted = _run_sweep(dry_run=False, batch_size=None, only_safe=True)
+    pid_actions = [a for a in acted if a.get("classification") == "stale_pid_file"]
+    assert len(pid_actions) == 1
+    assert pid_actions[0]["pid_file"] == str(stale)
+    assert not stale.exists()

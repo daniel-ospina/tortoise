@@ -136,7 +136,7 @@ def shared_embedded_db():
 
 @pytest.fixture(scope="session", autouse=True)
 def _redislite_hygiene():
-    """Bound redislite orphan accumulation (#1005).
+    """Bound redislite orphan accumulation (#1005) + index-pid files (#1231).
 
     Session start: register this suite in the active-suite registry and run
     a CONCURRENCY-SAFE sweep (dir-gone/stale records only — never a live
@@ -144,9 +144,11 @@ def _redislite_hygiene():
     between tests). Session end: run a full sweep, but only when no other
     suite is still active — otherwise defer to the last suite standing.
 
-    Sweeps acquire the reaper singleton lock and are batch-capped so a
-    dirty machine cannot stall suite startup.
+    #1231: an atexit fallback runs the stale index-pid sweep (and removes
+    this suite's marker) when the process exits abnormally (pytest killed,
+    watchdog SIGINT) so test-spawned lock files never accumulate.
     """
+    import atexit
     import uuid
 
     from tortoise.embedded_reaper import (
@@ -154,6 +156,7 @@ def _redislite_hygiene():
         _ReaperLock,
         _run_sweep,
         active_suite_tokens,
+        sweep_stale_index_pid_files,
     )
 
     marker_dir = ACTIVE_SUITES_DIR
@@ -208,6 +211,30 @@ def _redislite_hygiene():
     # may be mid-run (their per-test servers are 0-client between tests).
     start_result = _sweep(only_safe=True)
     print(f"[redislite-hygiene] start sweep: {start_result}")
+
+    # #1231: atexit fallback — when this process exits abnormally (pytest
+    # killed, watchdog SIGINT) the normal teardown below never runs; clean
+    # the stale index-pid files and our own active-suite marker anyway so
+    # test-spawned lock files don't accumulate on shared dev boxes.
+    _teardown_ran = [False]
+
+    def _atexit_cleanup() -> None:
+        if _teardown_ran[0]:
+            return
+        if marker_path:
+            try:
+                os.remove(marker_path)
+            except OSError:
+                pass
+        try:
+            removed = sweep_stale_index_pid_files(dry_run=False)
+            if removed:
+                print(f"[redislite-hygiene] atexit stale index-pid cleanup: "
+                      f"{len(removed)} removed")
+        except Exception:
+            pass
+
+    atexit.register(_atexit_cleanup)
 
     yield
 
@@ -305,6 +332,8 @@ def _redislite_hygiene():
     end_result = _sweep(only_safe=bool(others) or foreign)
     print(f"[redislite-hygiene] end sweep (other-suites={len(others)}, "
           f"foreign-pytest={foreign}): {end_result}")
+    # #1231: normal teardown completed — the atexit fallback must not re-run.
+    _teardown_ran[0] = True
     # Issue #1103: pytest capture swallows the print above, so the sweep
     # decision is invisible in CI logs. Mirror it to a file the CI orphan
     # check can dump. Best-effort — never fail the suite over hygiene logging.

@@ -291,3 +291,28 @@ def test_lock_file_created_private(lock_dir):
         assert (os.stat(lock.path).st_mode & 0o777) == 0o600
     finally:
         lock.release()
+
+
+def test_release_removes_pid_file(lock_dir):
+    """#1231 T2: graceful release unlinks the lock file — no unbounded
+    ~/.tortoise/index-*.pid accumulation on the dev box."""
+    lock = SessionIndexLock("sess-release-unlink", lock_dir)
+    assert lock.acquire() == "acquired"
+    assert lock.path.exists()
+    lock.release()
+    assert not lock.path.exists()
+    # Release remains idempotent after the file is gone
+    lock.release()
+
+
+def test_release_removes_file_only_when_held(lock_dir):
+    """release() after a contended acquire (never held) does NOT delete the
+    live holder's file."""
+    a = SessionIndexLock("sess-release-contended", lock_dir)
+    b = SessionIndexLock("sess-release-contended", lock_dir)
+    assert a.acquire() == "acquired"
+    assert b.acquire() == "held"      # b never owns the flock
+    b.release()                        # b's release must not unlink a's file
+    assert a.path.exists()
+    a.release()
+    assert not a.path.exists()
