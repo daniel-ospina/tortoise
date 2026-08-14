@@ -29,6 +29,7 @@ regression dropping the traversal cannot produce vacuous greens.
 """
 from __future__ import annotations
 
+import inspect
 import os
 import sys
 import tempfile
@@ -333,8 +334,10 @@ def test_e2e14_impl_3_cycle_honest_convergence():
         pre = pre_conf[0][0] if pre_conf and pre_conf[0][0] is not None else 0.8
 
         result = sdk.dream(dirty_only=True, max_hops=2)
-        ep = TortoiseEP  # class reference — the cap constant
-        max_iter = 50  # ep.py:39 default (the plan's EP_MAX_ITERATIONS)
+        # EP_MAX_ITERATIONS = the live __init__ max_iter default (ep.py:39
+        # pins the cap at 50 — read the signature default so drift is caught)
+        max_iter = inspect.signature(TortoiseEP.__init__).parameters[
+            "max_iter"].default
         # assertion 1: NUMERIC termination under the cap
         assert result["iterations"] < max_iter, result
         assert result["converged"] is True, result
@@ -378,8 +381,10 @@ def test_e2e14_nand_inclusive_cycle_terminates_bounded():
         sdk.create_direct_edge("IMPL", p1["id"], p2["id"])
         sdk.create_direct_edge("IMPL", p2["id"], p3["id"])
         sdk.create_direct_edge("NAND", p3["id"], p1["id"])  # cycle + NAND
+        from tortoise.ep import TortoiseEP as _EP
         result = sdk.dream(dirty_only=True, max_hops=2)
-        max_iter = 50  # ep.py:39 default (EP_MAX_ITERATIONS)
+        # EP_MAX_ITERATIONS (ep.py:39 __init__ default = 50)
+        max_iter = inspect.signature(_EP.__init__).parameters["max_iter"].default
         assert result["iterations"] < max_iter, result
         assert result["converged"] is True, result
         assert result["iterations"] > 0, \

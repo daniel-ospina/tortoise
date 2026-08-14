@@ -85,7 +85,10 @@ class Dreamer:
             for (src, tgt, _t) in factor_anchors:
                 seed_ids.append(src)
                 seed_ids.append(tgt)
-            seed_ids = list(dict.fromkeys(seed_ids))  # dedup, order-stable
+            seed_ids = list(dict.fromkeys(seed_ids))  # dedup (order is not
+            # deterministic — operator_ids is a set, hash-randomized across
+            # processes; harmless: EP factors are order-independent and
+            # affected_claims is a set)
             if not seed_ids:
                 return {"iterations": 0, "converged": True, "affected_claims": []}
             ep = self._sdk._get_ep()

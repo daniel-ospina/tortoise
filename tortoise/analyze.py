@@ -410,6 +410,7 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
         rows = proj.g.query(
             "MATCH (op:Point {is_operator:true})-[:IMPL|NAND]-(t:Point) "
             "WHERE op.id IN $ids "
+            "AND (t.is_operator = false AND t.op_type IS NULL) "
             "AND (t.status IS NULL OR t.status <> 'draft') "
             "WITH op, count(DISTINCT t) AS live_conn "
             "WHERE live_conn >= 2 "
@@ -477,40 +478,47 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
                             new_points.add(target_id)
 
             # ── operator-LESS direct edges (A9, §5.6) — DIRECTION-RESPECTING ──
+            # The `direction` parameter governs the direct-edge traversal too:
+            # forward (frontier → neighbor) only for "outgoing"/"both";
+            # backward (neighbor → frontier) only for "incoming"/"both" —
+            # mirroring the operator-mediated dirs. NAND is ALWAYS both
+            # (matching the operator BFS's NAND bidirectionality).
             # forward: (frontier) -[rel]-> (plain neighbor); every rel type
             # traverses forward from the frontier point.
-            rows = proj.g.query(
-                f"MATCH (a:Point)-[r:{rel}]->(b:Point) "
-                f"WHERE a.id IN $frontier {live_a} {live_b} "
-                "AND a.is_operator = false AND a.op_type IS NULL "
-                "AND b.is_operator = false AND b.op_type IS NULL "
-                "RETURN DISTINCT b.id, a.id, type(r)",
-                params={"frontier": frontier_list},
-            ).result_set
-            for (bid, aid, rtype) in rows:
-                if bid not in visited:
-                    new_points.add(bid)
-                factor_anchors.add((aid, bid, rtype))
+            if rel == "NAND" or direction in ("outgoing", "both"):
+                rows = proj.g.query(
+                    f"MATCH (a:Point)-[r:{rel}]->(b:Point) "
+                    f"WHERE a.id IN $frontier {live_a} {live_b} "
+                    "AND a.is_operator = false AND a.op_type IS NULL "
+                    "AND b.is_operator = false AND b.op_type IS NULL "
+                    "RETURN DISTINCT b.id, a.id, type(r)",
+                    params={"frontier": frontier_list},
+                ).result_set
+                for (bid, aid, rtype) in rows:
+                    if bid not in visited:
+                        new_points.add(bid)
+                    factor_anchors.add((aid, bid, rtype))
             # backward: (plain neighbor) -[rel]-> (frontier); NAND always;
             # IMPL only when the edge is NOT unidirectional (never
             # back-propagate into a unidirectional edge's source).
-            rows = proj.g.query(
-                f"MATCH (a:Point)-[r:{rel}]->(b:Point) "
-                f"WHERE b.id IN $frontier {live_a} {live_b} "
-                "AND a.is_operator = false AND a.op_type IS NULL "
-                "AND b.is_operator = false AND b.op_type IS NULL "
-                "AND (type(r) = 'NAND' "
-                "     OR coalesce(r.direction, 'bidirectional') <> 'unidirectional') "
-                "RETURN DISTINCT a.id, b.id, type(r)",
-                params={"frontier": frontier_list},
-            ).result_set
-            for (aid, bid, rtype) in rows:
-                if aid not in visited:
-                    new_points.add(aid)
-                # the anchor is the edge's CANONICAL (src, tgt) — the same
-                # (a.id, b.id, type) tuple the forward query records, so a
-                # bidirectional walk dedups to ONE anchor per edge (§5.6)
-                factor_anchors.add((aid, bid, rtype))
+            if rel == "NAND" or direction in ("incoming", "both"):
+                rows = proj.g.query(
+                    f"MATCH (a:Point)-[r:{rel}]->(b:Point) "
+                    f"WHERE b.id IN $frontier {live_a} {live_b} "
+                    "AND a.is_operator = false AND a.op_type IS NULL "
+                    "AND b.is_operator = false AND b.op_type IS NULL "
+                    "AND (type(r) = 'NAND' "
+                    "     OR coalesce(r.direction, 'bidirectional') <> 'unidirectional') "
+                    "RETURN DISTINCT a.id, b.id, type(r)",
+                    params={"frontier": frontier_list},
+                ).result_set
+                for (aid, bid, rtype) in rows:
+                    if aid not in visited:
+                        new_points.add(aid)
+                    # the anchor is the edge's CANONICAL (src, tgt) — the same
+                    # (a.id, b.id, type) tuple the forward query records, so a
+                    # bidirectional walk dedups to ONE anchor per edge (§5.6)
+                    factor_anchors.add((aid, bid, rtype))
 
         collected |= new_ops
 
