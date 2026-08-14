@@ -366,11 +366,24 @@ def test_compute_confidence_explicit_optout_skips_inner_auto_dream(
     sdk.create_operator("IMPL", p1["id"], [p2["id"]])
 
     # No-arg path (sdk.py:6494 auto-extract dream): explicit opt-out must
-    # not raise, and must return a converged result.
+    # not raise, and must return a converged result. Assert the run actually
+    # executed EP (not the vacuous no_factors/no_dirty_roots short-circuit).
     result = sdk.compute_confidence(require_calibration=False)
     assert result["converged"] is True
+    assert result.get("diagnostic") is None, (
+        f"expected a real EP run, got {result.get('diagnostic')}")
+
+    # Re-establish dirt for the anchors path — the no-arg run above converged
+    # and cleared all dirty roots, so a second call would otherwise
+    # short-circuit at no_dirty_roots without touching the 6523 dream.
+    p3 = sdk.create_point("statement", "Another uncalibrated live claim",
+                          status="live")
+    p4 = sdk.create_point("statement", "Its related claim", status="live")
+    sdk.create_operator("IMPL", p3["id"], [p4["id"]])
 
     # Anchors path (sdk.py:6523 bounded-pass dream with dirty roots): same.
-    result2 = sdk.compute_confidence(anchors=[p1["id"]],
+    result2 = sdk.compute_confidence(anchors=[p3["id"]],
                                      require_calibration=False)
     assert result2["converged"] is True
+    assert result2.get("diagnostic") is None, (
+        f"expected a real EP run, got {result2.get('diagnostic')}")
