@@ -111,6 +111,20 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         sdk_method="summarize_structure",
     ),
     ToolDefinition(
+        name="tortoise_audit",
+        description="Audit graph wiring quality — 8 checks: missing sourceKind "
+                    "(point-level legacy + Source-level canonical), missing sourceDate, "
+                    "superseded points without a CORRECTS edge, live IMPL/NAND edges "
+                    "into superseded points, naive-IMPL contradiction heuristic, "
+                    "low-confidence operators without mitigation, and legacy 'mitigates' "
+                    "edges. Returns structured JSON: per-check counts (uncapped) + "
+                    "capped samples + summary + exit_code (0 clean, 1 issues). "
+                    "point_kinds: optional pointKind list to scope the audit.",
+        annotations=_ro(),
+        http_policy=True,
+        sdk_method="audit",
+    ),
+    ToolDefinition(
         name="tortoise_list_pointkinds",
         description="List all pointKinds present in the graph with counts. What EXISTS.",
         annotations=_ro(),

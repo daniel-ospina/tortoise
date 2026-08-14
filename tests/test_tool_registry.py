@@ -87,9 +87,10 @@ class TestRegistryEquivalence:
         recall, #922 update/delete/operator_action/create_edge, #927
         overview/get, #932 ingest) + 1 epic #900 T7 (#1043, tortoise_index_files)
         + 2 epic #902 A13 (#1051, tortoise_list_batch + tortoise_list_batches)
-        + 1 #405 (tortoise_validate_domain) + 1 #438 (find_cross_lens_candidates)."""
+        + 1 #405 (tortoise_validate_domain) + 1 #438 (find_cross_lens_candidates)
+        + 1 #348 (tortoise_audit)."""
         from tortoise.tool_registry import TOOL_REGISTRY
-        assert len(TOOL_REGISTRY) == 89, f"Expected 89, got {len(TOOL_REGISTRY)}"
+        assert len(TOOL_REGISTRY) == 91, f"Expected 91, got {len(TOOL_REGISTRY)}"
         names = {t.name for t in TOOL_REGISTRY}
         assert "tortoise_validate_domain" in names, "Missing #405 validate_domain tool"
         onboarding = {"tortoise_onboarding_demo_create", "tortoise_onboarding_state",
@@ -103,6 +104,7 @@ class TestRegistryEquivalence:
         assert "tortoise_events_poll" in names, "Missing #432 events_poll tool"
         assert "tortoise_retract_point" in names, "Missing #432 retract_point tool"
         assert "tortoise_find_cross_lens_candidates" in names, "Missing #438 cross-lens tool"
+        assert "tortoise_audit" in names, "Missing #348 tortoise_audit tool"
         # W1–W4 consolidated tools (#888): recall (W1), update/delete/
         # operator_action/create_edge (W2), overview/get (W3), ingest (W4)
         w_consolidations = {"tortoise_recall", "tortoise_update", "tortoise_delete",

@@ -776,6 +776,16 @@ def tortoise_validate_domain(domain: str) -> dict:
     return _safe(_get_team_sdk().validate_domain, domain)
 
 
+def tortoise_audit(point_kinds: list[str] | None = None) -> dict:
+    """Audit graph wiring quality — 8 checks (epic #348).
+
+    Returns structured JSON: per-check counts (uncapped) + capped samples +
+    summary + exit_code (0 clean, 1 issues). Same surface as the
+    `tortoise audit` CLI — both wrap the shared SDK audit() method.
+    """
+    return _safe(_get_team_sdk().audit, point_kinds=point_kinds)
+
+
 def tortoise_summarize_structure() -> dict:
     """Count points per Gate (by pointKind). Returns {gateN_*, total}.
     Alias → overview(section='structure') (epic #888 W3)."""
