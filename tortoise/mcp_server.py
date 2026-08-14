@@ -1569,6 +1569,29 @@ def tortoise_review_connections(mode: str = "both", scope: str | None = None) ->
     return _safe(_get_team_sdk().review_connections, mode=mode, scope=scope)
 
 
+def tortoise_find_cross_lens_candidates(
+    threshold: float = 0.40,
+    max_candidates: int = 200,
+    routing: str = "truth",
+    top_k: int = 20,
+) -> dict:
+    """Cross-lens candidate discovery (READ-ONLY, #438 bring-your-own-agent).
+
+    Surface unverified candidate pairs between Points from DIFFERENT sources
+    (cross-stream discovery over the vector index) with lens pair, cosine
+    similarity, point context, and dedup vs existing operators. The payload
+    carries a single #901 routing field ("truth"|"relevance") but stays
+    NEUTRAL — no op_type hint; the customer agent decides semantics and
+    writes operators via the normal API (no in-repo verifier, #438 D7).
+    Gated on registered sourceKind (any tier, D3); hard cap 200
+    candidates/cycle (D4). Empty results (not errors) when there is nothing
+    to see (D8). Never mutates the graph.
+    """
+    return _safe(_get_team_sdk().get_cross_lens_candidates,
+                 threshold=threshold, max_candidates=max_candidates,
+                 routing=routing, top_k=top_k)
+
+
 def tortoise_provenance(point_id: str) -> dict:
     """Provenance chain — "Who decided this?" Follows authoredBy → Subject → delegation."""
     return _safe(_get_team_sdk().provenance, point_id)
