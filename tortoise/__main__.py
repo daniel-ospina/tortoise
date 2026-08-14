@@ -1838,6 +1838,92 @@ def _cmd_verify(args):
     return 0
 
 
+def _cmd_validate(args) -> int:
+    """tortoise validate --domain <slug> — advisory, read-only domain
+    integrity validation (issue #405). Runs the domain's graph-surface
+    validators (orphan useCase, dangling refs, draft hygiene) against the
+    live graph; drift warnings flag manifest chains with no registered rule.
+
+    Exit codes (documented contract — CI-actionable): 0 clean · 1 violations
+    found · 2 usage error (missing/unknown domain) · 3 runtime/DB failure.
+    ``--warn-only`` reports violations but exits 0 (pure advisory escape).
+    """
+    import sys as _sys
+    domain = getattr(args, "domain", None)
+    if not domain:
+        print("tortoise validate: --domain is required "
+              "(e.g. 'tortoise validate --domain product-strategy')",
+              file=_sys.stderr)
+        return 2
+    from tortoise.domain_loader import (
+        SURFACE_GRAPH, domain_chain_spec, domain_validators, known_domains,
+    )
+    # Unknown domain = no registered validators AND no loaded pack (the
+    # registry is the source of truth — validators register at import time,
+    # so a pip-installed wheel without packs/ still validates).
+    if not domain_validators(domain) and domain not in known_domains():
+        known = ", ".join(sorted(known_domains())) or "none"
+        print(f"tortoise validate: unknown domain {domain!r} "
+              f"(known packs: {known})", file=_sys.stderr)
+        return 2
+    proj = None
+    try:
+        target = _resolve_db_target(getattr(args, "db", None))
+        proj = _projection_for(target)
+    except Exception as e:
+        # Exit 3 = runtime/DB failure (connection refused, embedded probe
+        # failure, invalid target) — advisory validate must never crash.
+        print(f"tortoise validate: DB target failure: "
+              f"{_mask_uri_userinfo(str(e))}", file=_sys.stderr)
+        return 3
+    try:
+        from tortoise.domain_validators import run_domain_graph_validators
+        violations, drift = run_domain_graph_validators(domain, proj)
+    except Exception as e:
+        print(f"tortoise validate: failed to run (domain={domain}): "
+              f"{_mask_uri_userinfo(str(e))}", file=_sys.stderr)
+        return 3
+    finally:
+        if proj is not None:
+            try:
+                proj.close()
+            except Exception:
+                pass
+
+    chains = domain_chain_spec(domain)
+    if getattr(args, "json", False):
+        import json as _json
+        print(_json.dumps({
+            "domain": domain,
+            "ok": not violations,
+            "violations": violations,
+            "drift": drift,
+            "chains": chains,
+        }, indent=2))
+    else:
+        print(f"tortoise validate: domain={domain}")
+        for cid, cspec in chains.items():
+            print(f"  chain {cid}: {', '.join(cspec['steps'])}"
+                  f" (enforcement: {cspec['enforcement']})")
+        for i, v in enumerate(violations, 1):
+            print(f"  ✗ [{v['rule']}] ({v.get('kind', '?')}) "
+                  f"ref={v.get('ref', '?')}: {v['message']}")
+            fix = v.get("fix")
+            if fix:
+                print(f"      fix: {fix}")
+        for d in drift:
+            print(f"  ⚠ [{d['rule']}] ref={d['ref']}: {d['message']}")
+        if violations:
+            print(f"\n{len(violations)} violation(s) · "
+                  f"{len(drift)} drift warning(s)")
+        else:
+            print(f"\n✓ Clean — no violations "
+                  f"({len(drift)} drift warning(s))")
+    if violations and not getattr(args, "warn_only", False):
+        return 1
+    return 0
+
+
 def _cmd_backfill(args):
     """Backfill missing properties on existing Points."""
     from .projection import FalkorProjection, _now_iso
@@ -3464,6 +3550,12 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_parser("backfill", help="Backfill missing Point properties (status, createdAt)").add_argument("--db", required=True, help="Docker URI or file path")
     vf = sp.add_parser("verify", help="Write/read/delete test Point — health check")
     vf.add_argument("--db", required=True, help="FalkorDB docker:// URI")
+    # tortoise validate --domain <slug> (#405) — advisory domain integrity
+    vld = sp.add_parser("validate", help="Advisory domain integrity validation (graph-global rules, read-only)")
+    vld.add_argument("--domain", required=True, help="Domain namespace (pack) to validate, e.g. product-strategy")
+    vld.add_argument("--db", default=None, help="Docker URI or file path (default: TORTOISE_DB_URI / FALKORDB_* / embedded path)")
+    vld.add_argument("--json", action="store_true", help="Machine-readable JSON output")
+    vld.add_argument("--warn-only", action="store_true", help="Report violations but exit 0 (pure advisory — never gates)")
     cc = sp.add_parser("check-consistency", help="Verify event log matches graph state")
     cc.add_argument("--db", required=True, help="Docker URI or file path")
     cc.add_argument("--log", required=True, help="Path to events.jsonl")
@@ -3667,6 +3759,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     elif args.cmd == "verify":
         return _cmd_verify(args)
+    elif args.cmd == "validate":
+        return _cmd_validate(args)
     elif args.cmd == "migrate-db":
         from tortoise.migrate_db import main as _migrate_main
         return _migrate_main(["--force"] if args.force else [])

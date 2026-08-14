@@ -93,6 +93,17 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         sdk_method="check_structure",
     ),
     ToolDefinition(
+        name="tortoise_validate_domain",
+        description="Validate a domain's ontology integrity (issue #405) — advisory, read-only. "
+                    "Runs the domain's graph-surface rules (orphan useCase, dangling refs, "
+                    "draft hygiene) and returns enriched, actionable violations "
+                    "({rule, kind, ref, message, fix}) + drift warnings. Never modifies "
+                    "the graph; violations are warnings, not blocks.",
+        annotations=_ro(),
+        http_policy=True,
+        sdk_method="validate_domain",
+    ),
+    ToolDefinition(
         name="tortoise_summarize_structure",
         description="Count points per Gate (by pointKind). Returns {gateN_*, total}.",
         annotations=_ro(),
@@ -1002,7 +1013,8 @@ GROUP_BY_NAME: dict[str, str] = {
     "tortoise_set_point_baseline": "memory", "tortoise_calibrate_summary": "memory",
     "tortoise_suggest_entry_points": "memory",
     # reasoning
-    "tortoise_check_structure": "reasoning", "tortoise_summarize_structure": "reasoning",
+    "tortoise_check_structure": "reasoning", "tortoise_validate_domain": "reasoning",
+    "tortoise_summarize_structure": "reasoning",
     "tortoise_overview": "reasoning",
     "tortoise_traverse": "reasoning", "tortoise_entity_profile": "reasoning",
     "tortoise_analyze": "reasoning", "tortoise_taxonomy": "reasoning",

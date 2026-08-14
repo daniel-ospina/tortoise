@@ -52,15 +52,19 @@ class TestWholeRegistryCompile:
 
 
 class TestProductDeliveryChain:
-    """product-strategy: the owner's chain (research-r6 §4, worked example)."""
+    """product-strategy: the owner's chain (research-r6 §4, worked example).
 
-    def test_chain_parsed_with_all_six_steps(self, registry):
+    Issue #405 decision (2026-08-15): jobToBeDone is step-0 — the canonical
+    chain matches check_structure/skill (JTBD → useCase → feature →
+    userJourney → workflow → requirement → architecture)."""
+
+    def test_chain_parsed_with_all_seven_steps(self, registry):
         ps = registry.get_pack("product-strategy")
         assert [c["id"] for c in ps.chains] == ["productDelivery"]
         chain = ps.chains[0]
         assert chain["steps"] == [
-            "useCase", "feature", "userJourney", "workflow",
-            "requirement", "architecture",
+            "jobToBeDone", "useCase", "feature", "userJourney",
+            "workflow", "requirement", "architecture",
         ]
         # Chain resolves post-load (zero errors == every step resolved,
         # incl. bare `workflow` → core kind and the new kinds).

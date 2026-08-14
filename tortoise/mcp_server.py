@@ -765,6 +765,17 @@ def tortoise_check_structure() -> list[dict]:
     return _safe(_get_team_sdk().check_structure)
 
 
+def tortoise_validate_domain(domain: str) -> dict:
+    """Validate a domain's ontology integrity — advisory, read-only (#405).
+
+    Runs the domain's graph-surface validators (orphan useCase, dangling
+    refs, draft hygiene) against the live graph and returns enriched,
+    actionable violations ({rule, kind, ref, message, fix}) plus drift
+    warnings for manifest chains with no registered validator. Never
+    modifies the graph; violations are warnings, not blocks."""
+    return _safe(_get_team_sdk().validate_domain, domain)
+
+
 def tortoise_summarize_structure() -> dict:
     """Count points per Gate (by pointKind). Returns {gateN_*, total}.
     Alias → overview(section='structure') (epic #888 W3)."""

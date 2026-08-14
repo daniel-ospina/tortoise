@@ -86,9 +86,12 @@ class TestRegistryEquivalence:
         + 1 #913 (review_connections) + 8 W1–W4 consolidations (#907/#918
         recall, #922 update/delete/operator_action/create_edge, #927
         overview/get, #932 ingest) + 1 epic #900 T7 (#1043, tortoise_index_files)
-        + 2 epic #902 A13 (#1051, tortoise_list_batch + tortoise_list_batches)."""
+        + 2 epic #902 A13 (#1051, tortoise_list_batch + tortoise_list_batches)
+        + 1 #405 (tortoise_validate_domain)."""
         from tortoise.tool_registry import TOOL_REGISTRY
-        assert len(TOOL_REGISTRY) == 87, f"Expected 87, got {len(TOOL_REGISTRY)}"
+        assert len(TOOL_REGISTRY) == 88, f"Expected 88, got {len(TOOL_REGISTRY)}"
+        names = {t.name for t in TOOL_REGISTRY}
+        assert "tortoise_validate_domain" in names, "Missing #405 validate_domain tool"
         names = {t.name for t in TOOL_REGISTRY}
         onboarding = {"tortoise_onboarding_demo_create", "tortoise_onboarding_state",
                       "tortoise_onboarding_session_recording",

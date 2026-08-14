@@ -3143,111 +3143,38 @@ class TortoiseSDK:
     # ── Chain Integrity ───────────────────────────────────────────
 
     def check_structure(self) -> list[dict]:
-        """Check Gate 0→4 chain integrity. Uses pack-aware kind expansion."""
+        """Check Gate 0→4 chain integrity. Thin delegation wrapper over the
+        domain-validator registry (issue #405): runs the product-strategy
+        graph-surface validator and maps its enriched output back to the
+        legacy {type, id, message} contract (preserved for the mcp_server,
+        tool_registry, test_sdk and test_integration_search consumers).
+
+        Behavior note (#405): chain rules now run on LIVE points only (draft
+        points are the orphaned_draft rule's job) — a draft with a dangling
+        ref or no JTBD parent is no longer double-flagged."""
         proj = self._get_proj()
-        violations: list[dict] = []
+        from .domain_validators import (
+            run_domain_graph_validators, to_legacy_shape,
+        )
+        violations, _drift = run_domain_graph_validators(
+            "product-strategy", proj)
+        return to_legacy_shape(violations)
 
-        # Resolve kinds via pack registry (handles namespace prefixes)
-        uc_kind = self._expand_kind("useCase")
-        jtbd_kind = self._expand_kind("jobToBeDone")
-        uj_kind = self._expand_kind("userJourney")
-        wf_kind = self._expand_kind("workflow")
-        req_kind = self._expand_kind("requirement")
-
-        # Build IN clauses
-        def kind_in(kinds):
-            return ", ".join(f"'{k}'" for k in kinds)
-
-        # useCase without parent JTBD
-        ucs = proj.g.query(
-            f"MATCH (uc:Point) WHERE uc.pointKind IN [{kind_in(uc_kind)}] RETURN uc.id, uc.uc_id"
-        ).result_set
-        for uc_id, uc_ref in ucs:
-            parents = proj.g.query(
-                f"MATCH (op:Point {{is_operator:true, op_type:'composedOf'}})"
-                f"-[:hasPart]->(uc:Point {{id:$id}}), "
-                f"(op)-[:hasPart]->(jtbd:Point) WHERE jtbd.pointKind IN [{kind_in(jtbd_kind)}] "
-                f"RETURN jtbd.id",
-                params={"id": uc_id},
-            ).result_set
-            if not parents:
-                violations.append({
-                    "type": "orphan_use_case",
-                    "id": uc_id,
-                    "message": f"useCase {uc_ref or uc_id} has no parent JTBD",
-                })
-
-        # userJourney dangling UC refs
-        for uj_id, covered in proj.g.query(
-            f"MATCH (uj:Point) WHERE uj.pointKind IN [{kind_in(uj_kind)}] RETURN uj.id, uj.covered_use_cases"
-        ).result_set:
-            if not covered:
-                continue
-            for uc_ref in covered.split(","):
-                uc_ref = uc_ref.strip()
-                if not proj.g.query(
-                    f"MATCH (uc:Point) WHERE uc.pointKind IN [{kind_in(uc_kind)}] AND uc.uc_id=$ref RETURN count(uc) > 0",
-                    params={"ref": uc_ref},
-                ).result_set[0][0]:
-                    violations.append({
-                        "type": "dangling_use_case_ref",
-                        "id": uj_id,
-                        "message": f"userJourney {uj_id} refs non-existent useCase {uc_ref}",
-                    })
-
-        # Workflow dangling JTBD refs
-        for wf_id, enables in proj.g.query(
-            f"MATCH (wf:Point) WHERE wf.pointKind IN [{kind_in(wf_kind)}] RETURN wf.id, wf.enables_jtbd"
-        ).result_set:
-            if not enables:
-                continue
-            for jtbd_ref in enables.split(","):
-                jtbd_ref = jtbd_ref.strip()
-                if not proj.g.query(
-                    f"MATCH (j:Point) WHERE j.pointKind IN [{kind_in(jtbd_kind)}] AND j.jtbd_id=$ref RETURN count(j) > 0",
-                    params={"ref": jtbd_ref},
-                ).result_set[0][0]:
-                    violations.append({
-                        "type": "dangling_jtbd_ref",
-                        "id": wf_id,
-                        "message": f"workflow {wf_id} refs non-existent JTBD {jtbd_ref}",
-                    })
-
-        # Requirement dangling Workflow refs
-        for req_id, wf_ref in proj.g.query(
-            f"MATCH (req:Point) WHERE req.pointKind IN [{kind_in(req_kind)}] RETURN req.id, req.enabled_workflow"
-        ).result_set:
-            if not wf_ref or wf_ref == "ALL":
-                continue
-            if not proj.g.query(
-                f"MATCH (w:Point) WHERE w.pointKind IN [{kind_in(wf_kind)}] AND w.wf_id=$ref RETURN count(w) > 0",
-                params={"ref": wf_ref},
-            ).result_set[0][0]:
-                violations.append({
-                    "type": "dangling_workflow_ref",
-                    "id": req_id,
-                    "message": f"requirement {req_id} refs non-existent workflow {wf_ref}",
-                })
-
-        # Orphaned draft points — created but never wired (#131)
-        for row in proj.g.query(
-            "MATCH (n:Point {status:'draft'}) "
-            "WHERE n.is_operator = false "
-            "AND NOT (n)--() "
-            "RETURN n.id, n.content, n.pointKind, n.createdAt "
-            "ORDER BY n.createdAt"
-        ).result_set:
-            violations.append({
-                "type": "orphaned_draft",
-                "id": row[0],
-                "message": (
-                    f"Draft point '{row[1][:80] if row[1] else ''}' "
-                    f"of kind '{row[2] or 'unknown'}' has no edges "
-                    f"(created {row[3] or 'unknown'})"
-                ),
-            })
-
-        return violations
+    def validate_domain(self, domain: str) -> dict:
+        """Run a domain's graph-surface validators (issue #405) — advisory,
+        read-only, on-demand. Returns
+        ``{domain, ok, violations, drift}`` where violations are enriched,
+        actionable dicts ({rule, kind, ref, message, fix}). Raises ValueError
+        for an unknown domain (no loaded pack AND no registered validators)."""
+        proj = self._get_proj()
+        from .domain_validators import run_domain_graph_validators
+        violations, drift = run_domain_graph_validators(domain, proj)
+        return {
+            "domain": domain,
+            "ok": not violations,
+            "violations": violations,
+            "drift": drift,
+        }
 
     def summarize_structure(self) -> dict:
         """Count points per Gate (by pointKind). Returns {gate: count, ..., total}.
