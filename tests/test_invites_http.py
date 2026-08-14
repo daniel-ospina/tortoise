@@ -430,6 +430,51 @@ class TestInviteAcceptRateLimit:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+    def test_successful_accept_does_not_consume_budget(self, client, reg,
+                                                       monkeypatch):
+        """#1228-review: buckets bound FAILED binding checks — a successful
+        accept must NOT consume the per-token / per-IP / global budget.
+        With token=1/IP=1, two successful accepts on fresh tokens both pass;
+        a subsequent FAILED attempt trips the per-token cap."""
+        import tortoise.hosted_api as ha_mod
+        monkeypatch.setenv("TORTOISE_INVITE_ACCEPT_TOKEN_LIMIT", "1")
+        monkeypatch.setenv("TORTOISE_INVITE_ACCEPT_TOKEN_WINDOW_S", "3600")
+        monkeypatch.setenv("TORTOISE_INVITE_ACCEPT_IP_LIMIT", "1")
+        monkeypatch.setenv("TORTOISE_INVITE_ACCEPT_IP_WINDOW_S", "3600")
+        monkeypatch.setenv("TORTOISE_INVITE_ACCEPT_GLOBAL_LIMIT", "5")
+        monkeypatch.setenv("TORTOISE_INVITE_ACCEPT_GLOBAL_WINDOW_S", "3600")
+        # fresh stores so this test's successes don't share buckets
+        monkeypatch.setattr(ha_mod, "_INVITE_ACCEPT_TOKEN_BUCKETS",
+                            ha_mod.defaultdict(list))
+        monkeypatch.setattr(ha_mod, "_INVITE_ACCEPT_IP_BUCKETS",
+                            ha_mod.defaultdict(list))
+        monkeypatch.setattr(ha_mod, "_INVITE_ACCEPT_GLOBAL_BUCKETS",
+                            ha_mod.defaultdict(list))
+        _seed_team_with_owner(reg, "team-t")
+        _as_user("user-1", "owner@example.com")  # owner creates invites
+        r1 = client.post("/v1/invites",
+                         json={"team_id": "team-t", "email": "bob@example.com",
+                               "role": "member"})
+        assert r1.status_code == 200, r1.text
+        _as_user("user-bob", "bob@example.com")
+        assert client.post("/v1/invites/accept",
+                           json={"token": r1.json()["token"]}).status_code == 200
+        # token=1/IP=1: a SECOND successful accept on a fresh invite +
+        # different team still passes (successes didn't fill the buckets)
+        _seed_team_with_owner(reg, "team-u")
+        _as_user("user-1", "owner@example.com")
+        r2 = client.post("/v1/invites",
+                         json={"team_id": "team-u", "email": "bob@example.com",
+                               "role": "member"})
+        assert r2.status_code == 200, r2.text
+        _as_user("user-bob", "bob@example.com")
+        assert client.post("/v1/invites/accept",
+                           json={"token": r2.json()["token"]}).status_code == 200
+        # repeated FAILED attempts still trip the per-token cap
+        assert self._post(client, token="garbage-token").status_code == 400
+        r = self._post(client, token="garbage-token")
+        assert r.status_code == 429, r.text
+
 class TestMembersRbac:
     def test_list_members_requires_owner_admin_403(self, client, reg):
         _seed_team_with_owner(reg, "team-t")
@@ -531,3 +576,4 @@ class TestMembersRbac:
         r = client.patch("/v1/teams/team-t/members/user-ghost",
                          json={"role": "member"})
         assert r.status_code == 404
+

@@ -1815,9 +1815,17 @@ async def _check_invite_accept_rate_limit(request: Request, token: str) -> None:
     TORTOISE_INVITE_ACCEPT_IP_LIMIT / _WINDOW_S (default 20 / 3600),
     TORTOISE_INVITE_ACCEPT_GLOBAL_LIMIT / _WINDOW_S (default 200 / 3600).
     Raises HTTPException(429, error_code over_invite_accept_rate_limit) with
-    a computed Retry-After (P2-FIX-5) when any dimension is exhausted.
+    a computed Retry-After when any dimension is exhausted.
     Failures never invalidate the token — the endpoint's own 400 path is
     untouched (OWASP: a leaked link holder must not burn the invite).
+
+    #1228-review: the buckets record ATTEMPTS; accept_invite calls
+    ``_forget_invite_accept`` on success so SUCCESSFUL accepts (and 4xx
+    outcomes like email-mismatch/already-member that are not abuse) do not
+    consume budget — a 20-hire office onboarding from one NAT IP must not
+    trip the per-IP cap, and a garbage-token flood must not trip the global
+    cap with collateral on legit fleet traffic. OWASP semantics: caps bound
+    repeated FAILED binding checks.
     """
     if os.environ.get("RATE_LIMIT_DISABLED") == "1":
         return
@@ -4534,13 +4542,18 @@ async def accept_invite(body: dict, request: Request,
                          user: dict = Depends(get_current_user)):
     """E4 — accept an invite by token (token-only in v1, decision 1e)."""
     token = (body or {}).get("token")
+    if not isinstance(token, str):
+        # #1228-review P3: a non-string token (int/bool/list) crashes
+        # sha256(token.encode()) with AttributeError → 500; reject cleanly.
+        raise HTTPException(status_code=422, detail="token must be a string")
     if not token:
         raise HTTPException(status_code=422, detail="token required")
 
     # #1134: OWASP per-token/IP/global caps — throttles repeated failed
     # binding checks WITHOUT invalidating the token (a leaked-link holder
     # must not burn the legitimate user's invitation). RATE_LIMIT_DISABLED=1
-    # opts out (test env).
+    # opts out (test env). Success path forgets the attempt so legit accepts
+    # never consume budget (see _check_invite_accept_rate_limit docstring).
     await _check_invite_accept_rate_limit(request, token)
 
     # ── Supabase mode (plan Task 4): lookup_hash verify + role preserved ──
@@ -4550,8 +4563,10 @@ async def accept_invite(body: dict, request: Request,
     )
     if is_supabase_enabled():
         try:
-            return _sb_accept(get_control_plane(), token, user["user_id"],
-                              user_email=user.get("email"))
+            res = _sb_accept(get_control_plane(), token, user["user_id"],
+                             user_email=user.get("email"))
+            _forget_invite_accept(request, token)
+            return res
         except InvitationError as e:
             raise HTTPException(status_code=e.status, detail=str(e))
         except HTTPException:
@@ -4604,7 +4619,33 @@ async def accept_invite(body: dict, request: Request,
         sdk.membership_create(invite["team_id"], user["user_id"], invite["role"])
     except Exception as e:
         raise HTTPException(status_code=402, detail=f"Could not join team: {e}")
+    _forget_invite_accept(request, token)
     return {"team_id": invite["team_id"], "role": invite["role"]}
+
+
+def _forget_invite_accept(request: Request, token: str) -> None:
+    """Roll back the attempt recorded by _check_invite_accept_rate_limit
+    after a SUCCESSFUL accept — attempts (not successes) are what the caps
+    bound (#1228-review). Removes the newest entry of each bucket; under
+    simultaneous accepts the most recent entry may belong to a concurrent
+    request (over-removal is bounded and conservative at invite volume).
+    """
+    import hashlib as _hashlib
+    token_key = _hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+    ip = (getattr(request.state, "client_ip", None)
+          or (request.client.host if request.client else None))
+    ip = _normalize_mapped_ipv6(ip)
+    for buckets, lock, key in (
+        (_INVITE_ACCEPT_TOKEN_BUCKETS, _INVITE_ACCEPT_TOKEN_LOCK,
+         ("invite-accept", "token", token_key)),
+        (_INVITE_ACCEPT_IP_BUCKETS, _INVITE_ACCEPT_IP_LOCK,
+         ("invite-accept", "ip", ip)),
+        (_INVITE_ACCEPT_GLOBAL_BUCKETS, _INVITE_ACCEPT_GLOBAL_LOCK,
+         ("invite-accept", "global")),
+    ):
+        bucket = buckets.get(key)
+        if bucket:
+            bucket.pop()
 
 
 @app.get("/v1/invites")
