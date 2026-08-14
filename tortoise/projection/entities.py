@@ -858,28 +858,42 @@ class _EntityHandlers:
             "MERGE (s:Source {url: $url}) "
             "ON CREATE SET s.id = coalesce($id, $url), "
             "              s.sourceKind = $sk, "
-            "              s.contentHash = $hash, "
+            "              s.contentHash = coalesce($hash, ''), "
             "              s.title = $title, "
             "              s.ingestedAt = $now, "
             "              s.version = 1, "
             "              s.externalId = $ext, "
             "              s.sourcePath = coalesce($sp, s.sourcePath), "
             "              s._searchText = $st" + run_clause + " "
-            "ON MATCH SET s.contentHash = CASE WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
+            # JOINT-E2E (epic #900 #1032): when the caller carries NO
+            # contentHash ($hash IS NULL — the bundle ingest source-item
+            # path; the INDEX path owns contentHash), the ON MATCH preserves
+            # the stored hash/version/title — the ingest must never clobber
+            # an index-created Source's contentHash to '' or bump its version
+            # (the joint convergence contract: ONE Source, original
+            # contentHash/references survive, version unchanged). Stubs
+            # (NULL stored hash) are still COMPLETED by a real $hash, and the
+            # hash-diff bump is unchanged for callers that DO carry a hash.
+            "ON MATCH SET s.contentHash = CASE WHEN $hash IS NULL THEN s.contentHash "
+            "                          WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
             "                          THEN $hash ELSE s.contentHash END, "
-            "           s.title = CASE WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
+            "           s.title = CASE WHEN $hash IS NULL THEN s.title "
+            "                   WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
             "                   THEN coalesce($title, s.title) ELSE s.title END, "
-            "           s.version = CASE WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
+            "           s.version = CASE WHEN $hash IS NULL THEN s.version "
+            "                    WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
             "                    THEN s.version + 1 ELSE s.version END, "
-            "           s.updatedAt = CASE WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
+            "           s.updatedAt = CASE WHEN $hash IS NULL THEN s.updatedAt "
+            "                     WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
             "                     THEN $now ELSE s.updatedAt END, "
             "           s.sourcePath = coalesce($sp, s.sourcePath), "
-            "           s._searchText = CASE WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
+            "           s._searchText = CASE WHEN $hash IS NULL THEN s._searchText "
+            "                        WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
             "                        THEN $st ELSE s._searchText END",
             params={
                 "url": key, "id": sid or key,
                 "sk": ev.get("sourceKind", "document"),
-                "hash": ev.get("contentHash", ""),
+                "hash": ev.get("contentHash"),
                 "title": ev.get("title", key),
                 "now": _now_iso(),
                 "ext": ev.get("externalId", ""),
