@@ -21,7 +21,7 @@
 | J1 — Write-then-fresh | P1, P2 | Agent writes points/operators | 1. Agent creates/updates claims → 2. system marks area dirty → 3. background refresh (local mode) updates confidence + freshness timestamps → 4. agent's next read sees fresh confidence | Next read returns current beliefs; no action needed | 1, 2 (auto: local) |
 | J2 — Scheduled whole-graph freshness | P1, P3 | Operator enables scheduled dreaming | 1. Operator configures dream schedule → 2. system refreshes the stalest chunk each pass (null-stamp claims rank STALEST — first deploy refreshes) → 3. coverage grows across passes → 4. operator sees graph-wide freshness report | Whole graph fresh within the expected number of passes; per-pass cost bounded | 3, 1, 4, 7 |
 | J3 — Full refresh on demand | P1, P2 | Small graph / migration / first run | 1. Operator calls `dream(full=True)` (or mode="full") → 2. all reachable claims recomputed + freshness stamped (operator-less claims trivially stamped by the scan path) → 3. summary returned (converged_all, total_affected) | Full coverage in one pass (hosted: counts against the #329 hourly full-pass budget) | 1, 2 (explicit override), 5 |
-| J4 — Freshness inspection | P1, P2, P3 | User distrusts a confidence value | 1. User reads a belief / calls `staleness_report()` → 2. sees `lastDreamedAt` (+ staleness annotation) → 3. sees which regions were recomputed when | User can judge trustworthiness of any belief | 1 |
+| J4 — Freshness inspection (internal) | P1, P3 | User distrusts a confidence value | 1. User reads a belief → 2. `lastDreamedAt` is available on the read (comes free with the existing `get_point` properties) → 3. trust decision based on the freshness signal (no dedicated report surface — the report endpoint is DEFERRED per human gate 2) | Freshness signal available on reads without a new surface | 1 |
 | J5 — Lifecycle event propagates | P1, P2 | Agent supersedes/invalidates/merges | 1. Agent performs lifecycle write → 2. affected area marked dirty AND warm-start cache invalidated → 3. next refresh re-derives the surviving belief → 4. graph consistent with the event | Surviving node's confidence reflects the post-event graph | 8 |
 | J6 — Dream health check | P3 | Ops suspects dreaming is not running | 1. Ops calls health endpoint / `dream_health_check()` → 2. sees last-pass ts, coverage %, failure rate → 3. alarm verdict (zero output while backlog exists) surfaced | Silent death detectable (hosted: endpoint; embedded: call-triggered check) | 7 |
 | J7 — Failed area retries | P3 | A region won't converge | 1. Refresh hits a region that fails to converge → 2. region stays queued (retention) AND is NOT stamped fresh → 3. retried on later passes (attempt-capped, exponential backoff) → 4. converges after evidence resolves, or is surfaced as `stale_unresolved` | No stale areas beyond the attempt cap; capped regions surfaced in health | 6 |
@@ -136,7 +136,7 @@ States covered: idle (no backlog), queued (dirty set), running (locked), non-con
 - **Status→live transitions (`promote_point` and any equivalent) call `_mark_dirty`** (verified gap: sdk.py L1835 does not today); `dream()` does NOT clear dirty roots on converged runs that produced zero affected claims (draft-excluded runs — #780).
 - Operator-less/isolated claims: **explicit trivial-stamp path** in full/scan passes — a dedicated query stamps `lastDreamedAt` for non-operator claims not covered by the EP flush (`run()` early-returns before flush when no factors; the scan path is separate and independent).
 - Legacy null: no mass backfill on deploy (avoids stampede); scheduler's null-as-stalest drains them across passes naturally. Optional backfill policy documented (use `createdAt` as sentinel if a hard migration is ever wanted).
-- **`staleAfter` (scope E2E-4, display-only):** read surfaces may derive `staleAfter = lastDreamedAt + configured staleness threshold` as an annotation on returned beliefs. NOT stored, NOT used by the scheduler (the scheduler uses raw `lastDreamedAt` ranking); defined here so the scope contract has a home.
+- ~~`staleAfter` annotation~~ — **cut at human gate 2 (deferred).** The raw `lastDreamedAt` property stays (scheduler fuel + available on reads); the derived display annotation is not built.
 - FalkorDB index: `:Point(lastDreamedAt)` (verify composite `:Point(is_operator, lastDreamedAt)` support in implementation); must include/exclude null-property nodes per the chosen semantics (null must be rankable as stalest — if the index excludes them, ranking query must union a null scan); creation must be **idempotent + AOF-replay-safe** (existing `_ensure_registry_indexes` try/except pattern; `tests/test_embedded_concurrency.py:532` shows CREATE INDEX must survive replay) — created at init, not via migration, for new DBs.
 
 **Ontology note (vocabulary):** ONTOLOGY.md Point-properties table gains `lastDreamedAt` (definition above, scoped to non-operator claims); edge-properties table gains `msg_alpha`/`msg_beta`/`back_msg_alpha`/`back_msg_beta` (documenting existing graph state this epic's warm-start operates on). No entity/edge-kind changes.
@@ -206,16 +206,9 @@ dream(dirty_only: bool = True, full: bool = False, mode: str | None = None,
 - `coverage` semantics per mode: local → affected / window-reachable; stale-first → affected / remaining-stale-before-pass; full → affected / reachable non-operator claims.
 - Errors: unknown mode → `ValueError`; `budget=0` → no-op result (not an error); **budget exceeded** → `BudgetExceededError` (new, `tortoise/exceptions.py`).
 
-**I2 — SDK `staleness_report()`:** (regions = the scheduler's own primitive: staleness-ranked top-N anchors grouped by their `_bfs_select_operators` neighborhoods via ONE shared helper — the report is a pure function of the same ranked query the scheduler uses; no separate region machinery)
-```
-staleness_report(budget: int = 100) -> dict
-# budget = max regions returned (unit pinned)
-# {"regions": [{"region_id", "stale_count", "oldest_lastDreamedAt", "coverage"}],
-#  "generated_at"}  — ranked stalest-first; null lastDreamedAt sorts STALEST
-# (region with only-null claims reports oldest_lastDreamedAt: null)
-```
+**I2 — (DEFERRED — cut at human gate 2):** `staleness_report()` endpoint. `lastDreamedAt` remains exposed on reads via the existing `get_point` properties (free — `properties(n)` returns it wholesale, verified by the improvement reviewer); the scheduler's staleness-ranked query (shared helper, null-as-stalest) remains internal. If a report is ever wanted, it is a pure function of that same ranked query — no new region machinery.
 
-**I3 — MCP tools** (additive to #888 surface): `dream` (params: dirty_only, full, mode, budget), `staleness_report` (budget), `dream_health_check` (no params — returns alarm verdict + metrics; embedded alarm evaluator). Error mapping: `BudgetExceededError` → existing MCP `ERR_QUOTA` code (mcp_server.py:497); `ValueError` → `ERR_INVALID_ARG`.
+**I3 — MCP tools** (additive to #888 surface): `dream` (params: dirty_only, full, mode, budget), `dream_health_check` (no params — returns alarm verdict + metrics; embedded alarm evaluator). No staleness_report tool (deferred with I2). Error mapping: `BudgetExceededError` → existing MCP `ERR_QUOTA` code (mcp_server.py:497); `ValueError` → `ERR_INVALID_ARG`.
 
 **I4 — Hosted `/v1/dream`:** existing endpoint + `mode` field; **only full-mode passes (incl. via override) count against the #329 hourly bucket**; window passes bounded by per-pass operator budget (do not consume #329); response adds `mode` + `budget_used`; on budget exhaustion: **429 with `Retry-After` header** (seconds until hourly-window reset — consistent with the existing §6.1 429 contract hosted_api.py:493; **the existing full-mode 429 gains the header** in this epic).
 
@@ -266,10 +259,10 @@ Each case is implementable as an automated test. **Harness (fixed per review):**
 - **Operator-less write sub-case (D3-3b):** a freshly written isolated claim (no operators) → local pass trivially stamps it (`lastDreamedAt` set in the same write-back; the current `dream()` early-return at dream.py L82-84 would leave it null forever — this test pins the fix).
 - **Write-path structural sub-case (D2-5):** the write context never invokes scheduled/window mode — write → local only; window mode unreachable from the write path.
 
-**DE2E-4 — Freshness tracking is queryable; draft→promote stays stale** (E2E-4)
+**DE2E-4 — Freshness signal on reads; draft→promote stays stale** (E2E-4 — report endpoint cut; freshness assertions re-scoped)
 - Setup: F2 staleness fixture (3 stamped regions + null region) + a live claim that is then demoted to draft and promoted back.
-- Act: `staleness_report()`; then a dream pass.
-- Assert: each claim reports `lastDreamedAt`; report lists regions stalest-first matching pass order; null-stamp region reports `oldest_lastDreamedAt: null` and ranks first (stale); **draft→promote negative (fixed):** after demote+promote the claim re-enters `_dirty_roots` (promote→_mark_dirty fix) and the next pass re-stamps/re-derives it — asserted on the dirty-set/next-pass effect, NOT the report (a never-dreamed claim ranks stale regardless; dirty ≠ stale).
+- Act: read a claim via `get_point` (assert `lastDreamedAt` present on the read — free via properties); then a dream pass.
+- Assert: each claim's `lastDreamedAt` is present and matches the last pass that touched it (null-stamp claim has null until a pass touches it); **draft→promote negative (fixed):** after demote+promote the claim re-enters `_dirty_roots` (promote→_mark_dirty fix) and the next pass re-stamps/re-derives it — asserted on the dirty-set/next-pass effect (dirty ≠ stale; the scheduler behavior is DE2E-2's null-ranks-stalest, not a report assertion).
 - **Zero-affected retention sub-case:** draft-only dirty roots + converged run with zero affected claims (#780 draft-excluded) → roots REMAIN dirty and are re-dreamed after promote.
 
 **DE2E-5 — Lifecycle events absorb into dreaming + invalidation on transfer** (E2E-5)
@@ -328,7 +321,7 @@ Each case is implementable as an automated test. **Harness (fixed per review):**
 
 ## Substep 8 — Coherence Review + Risk Analysis
 
-**Cross-substep drift checkpoints (actual mapping):** journeys J1–J8 ↔ workflows W1–W7 (+report flow, +full sub-flow) · scope items 1–10 ↔ surfaces 1–10 ↔ DE2E-1..11 (surface numbers are the test-design map's; DE2E numbering is 1:1 with scope E2Es plus DE2E-11/12 additions — the two numberings are intentionally separate) · interfaces I1–I7 ↔ architecture components · data model ↔ interfaces (lastDreamedAt in I1/I2 return shapes + staleness query; msg_* properties recognized in I7).
+**Cross-substep drift checkpoints (actual mapping):** journeys J1–J8 ↔ workflows W1–W7 (+report flow, +full sub-flow) · scope items 1–10 ↔ surfaces 1–10 ↔ DE2E-1..11 (surface numbers are the test-design map's; DE2E numbering is 1:1 with scope E2Es plus DE2E-11/12 additions — the two numberings are intentionally separate) · interfaces I1–I7 ↔ architecture components · data model ↔ interfaces (lastDreamedAt in I1 return shape + read properties; staleness query internal; msg_* properties recognized in I7; I2 report endpoint DEFERRED).
 
 **Risks + mitigations:**
 
@@ -351,6 +344,8 @@ Each case is implementable as an automated test. **Harness (fixed per review):**
 | Invalidation (supersede/baseline) racing an in-flight warm-start pass → stale reuse mid-run | low | high | Lock- or topology-version-check discipline on invalidation (I7); DE2E-12 write-during-dream case |
 | Hosted-worker/selfhost mode wiring drifts from the I1 precedence table | medium | medium | DE2E-11 hosted-mode-selection sub-assertion: hosted scheduled pass → stale-first (NOT full), write burst → local; selfhost forwards mode/budget transparently |
 | Warm-start is a no-op in hosted (SDK rebuilt per drain) | low (eliminated by design: warm-start state is graph-persisted, not process-scoped) | high (silent) | Design decision — no process-scoped cache exists; DE2E-6a no-interleaved-flush setup indirectly verifies cross-run graph persistence |
+
+**Recorded scope changes (human gate 2):** (1) `staleness_report()` endpoint + `staleAfter` annotation + MCP staleness_report tool — **CUT/deferred**; the `lastDreamedAt` property stays (scheduler fuel, free on reads). (2) `Retry-After` on the existing full-mode 429 — conscious addition (see DE2E-11 note).
 
 **Improvement opportunities:** (1) RBP-style within-run scheduling could be layered later without rework (out of scope now); (2) `recency_decay` on reads is a complementary freshness signal (deferred); (3) shared operator-hour budget accounting across modes (deferred refinement of W7 — full-bucket-only rule is the v1); (4) `dream_all`'s operator cap becomes mostly vestigial after dedup — keep as safety net.
 
