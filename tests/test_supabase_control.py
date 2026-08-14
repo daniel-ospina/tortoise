@@ -316,6 +316,20 @@ class TestResolveApiKeyFailSoft:
         assert any("api_keys base-only read failed" in r.message
                    for r in caplog.records)
 
+    def test_resolve_api_key_api_keys_enabled_false_drift_fail_open(self,
+                                                                   fake):
+        """#1096 accepted-risk doc (code-review fix): a per-key DISABLED
+        key (enabled=False, #1148) re-authenticates under enabled-column
+        drift — the base retry cannot read the stored False, so the reject
+        never fires (the same fail-open class as the teams dashboard-key
+        gate). Pins the actual behavior so a future change cannot silently
+        flip it; healthy-mode reject unchanged."""
+        fake.seed("api_keys", [_key_row(enabled=False)])
+        fake.missing_columns = {"api_keys": {"enabled"}}
+        assert resolve_api_key(fake, TOKEN) is not None  # fail-open under drift
+        fake.missing_columns = None
+        assert resolve_api_key(fake, TOKEN) is None  # healthy reject unchanged
+
     def test_resolve_api_key_stored_false_drift_fail_open(self, fake):
         """#1096 accepted-risk doc: additive drift loses ALL additive state —
         a stored dashboard_key_login=False is not readable through the base
