@@ -5,6 +5,7 @@ surfaces:
   - test_abuse_integration.py
   - test_agent_signup.py
   - test_api.py
+  - test_audit.py
   - test_audit_events.py
   - test_auth.py
   - test_auth_flip.py
@@ -89,6 +90,7 @@ surfaces:
   - test_de2e5_instantiates_ranking.py
   - test_de2e6_temporal.py
   - test_de2e7_gates_mcp.py
+  - test_deploy_workflow.py
   - test_deployment.py
   - test_doctor.py
   - test_domain_loader_adapter.py
@@ -197,6 +199,7 @@ surfaces:
   - test_directional_impl.py
   - test_directional_impl_fix.py
   - test_dream.py
+  - test_epic903_freshness.py
   - test_ep_calibration.py
   - test_ep_directed_nand.py
   - test_ep_directional.py
