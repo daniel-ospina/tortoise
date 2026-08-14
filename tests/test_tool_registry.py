@@ -81,18 +81,19 @@ class TestRegistryEquivalence:
             assert excluded not in HTTP_ALLOWED, f"{excluded} must be HTTP-excluded"
 
     def test_registry_count(self):
-        """89 tools — 60 existing + 6 onboarding (#498/#499/#500) + 1
+        """91 tools — 60 existing + 6 onboarding (#498/#499/#500) + 1
         human-approval (#531) + 1 #540 + 2 #432 (events_poll, retract_point)
         + 1 #913 (review_connections) + 8 W1–W4 consolidations (#907/#918
         recall, #922 update/delete/operator_action/create_edge, #927
         overview/get, #932 ingest) + 1 epic #900 T7 (#1043, tortoise_index_files)
         + 2 epic #902 A13 (#1051, tortoise_list_batch + tortoise_list_batches)
         + 1 #405 (tortoise_validate_domain) + 1 #438 (find_cross_lens_candidates)
-        + 1 #348 (tortoise_audit)."""
+        + 1 #348 (tortoise_audit) + 1 #318 (tortoise_packs_list)."""
         from tortoise.tool_registry import TOOL_REGISTRY
-        assert len(TOOL_REGISTRY) == 91, f"Expected 91, got {len(TOOL_REGISTRY)}"
+        assert len(TOOL_REGISTRY) == 92, f"Expected 92, got {len(TOOL_REGISTRY)}"
         names = {t.name for t in TOOL_REGISTRY}
         assert "tortoise_validate_domain" in names, "Missing #405 validate_domain tool"
+        assert "tortoise_packs_list" in names, "Missing #318 packs_list tool"
         onboarding = {"tortoise_onboarding_demo_create", "tortoise_onboarding_state",
                       "tortoise_onboarding_session_recording",
                       "tortoise_onboarding_github_connect",

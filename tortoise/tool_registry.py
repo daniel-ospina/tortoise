@@ -166,6 +166,16 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         http_policy=True,
         sdk_method="list_batches",
     ),
+    ToolDefinition(
+        name="tortoise_packs_list",
+        description="List this team's active packs (#318): the shared pack catalog "
+                    "joined with the tenant graph's PackInstall activation records. "
+                    "Read-only; empty result when nothing is installed (existence "
+                    "masking — another tenant's packs are never observable).",
+        annotations=_ro(),
+        http_policy=True,
+        sdk_method="get_tenant_packs",  # pack_state helper, not an SDK method
+    ),
     # ── Tags (#215) ───────────────────────────────────────────────
     ToolDefinition(
         name="tortoise_list_tags",
@@ -1090,6 +1100,7 @@ GROUP_BY_NAME: dict[str, str] = {
     "tortoise_session_context": "sessions", "tortoise_get_session": "sessions",
     "tortoise_index_sessions": "sessions", "tortoise_search_sessions": "sessions",
     "tortoise_list_graphs": "sessions", "tortoise_list_namespaces": "sessions",
+    "tortoise_packs_list": "admin",
     "tortoise_events_poll": "sessions",  # #432 CDC/subscription — not a memory tool
     # journal
     "tortoise_checkpoint": "journal", "tortoise_diary_write": "journal",
