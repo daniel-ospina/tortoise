@@ -162,6 +162,17 @@ _(Always runs — regardless of answers to Q1–Q5)_
 
 ---
 
+## Beta feedback & bug reports
+
+Beta tester? If something breaks or feels off, file it — feedback drives the beta.
+Two channels (full guide + triage path: [docs/beta-feedback.md](../../docs/beta-feedback.md)):
+
+- **Bug / unexpected behavior:** open [a bug report](https://github.com/daniel-ospina/tortoise/issues/new?template=bug_report.yml) —
+  include the surface, expected vs actual, and the graph JSON/payload where relevant.
+- **Questions, ideas, general feedback:** [GitHub Discussions](https://github.com/daniel-ospina/tortoise/discussions).
+
+Reports are acknowledged within 2 business days.
+
 ## Error recovery
 
 If a tool fails at runtime:
