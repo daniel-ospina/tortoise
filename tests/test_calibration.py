@@ -286,7 +286,9 @@ def test_non_evidence_kinds_ignored_by_gate(sdk):
 def test_dream_require_calibration_raises(sdk):
     """dream(require_calibration=True) on uncalibrated graph raises
     CalibrationError BEFORE any EP write (#1157)."""
-    sdk.create_point("statement", "Uncalibrated claim")
+    # #943: default status is draft; the #1157 gate excludes drafts (#780),
+    # so the point must be live for the gate to see it.
+    sdk.create_point("statement", "Uncalibrated claim", status="live")
 
     with pytest.raises(CalibrationError, match="dream.*uncalibrated"):
         sdk.dream(require_calibration=True)
@@ -314,7 +316,7 @@ def test_dream_gated_passes_when_calibrated(sdk):
 def test_get_confidence_require_calibration_raises(sdk):
     """get_confidence(require_calibration=True) on uncalibrated graph raises
     CalibrationError (#1157) — the per-claim read is an EP surface."""
-    p = sdk.create_point("statement", "Uncalibrated claim")
+    p = sdk.create_point("statement", "Uncalibrated claim", status="live")
 
     with pytest.raises(CalibrationError, match="get_confidence.*uncalibrated"):
         sdk.get_confidence(p["id"], require_calibration=True)
@@ -327,7 +329,7 @@ def test_ep_require_calibration_env_default(sdk, monkeypatch):
     explicit compute_confidence surface keeps its own (still-False) default;
     #344 flips it separately."""
     monkeypatch.setenv("TORTOISE_EP_REQUIRE_CALIBRATION", "1")
-    p = sdk.create_point("statement", "Uncalibrated claim")
+    p = sdk.create_point("statement", "Uncalibrated claim", status="live")
 
     # #1157 surfaces refuse by default (no explicit arg)
     with pytest.raises(CalibrationError, match="dream"):

@@ -39,7 +39,9 @@ class TestEvidence:
 
     def test_get_confidence_default(self, sdk):
         p = _make_claim(sdk, "some claim")
-        c = sdk.get_confidence(p["id"])
+        # #1157: live-uncalibrated claim trips the fail-closed gate; this
+        # asserts the read surface's return contract, not the gate — opt out.
+        c = sdk.get_confidence(p["id"], require_calibration=False)
         assert "mean" in c
         assert "variance" in c
         assert c["alpha"] == 1.0 and c["beta"] == 1.0  # default uniform

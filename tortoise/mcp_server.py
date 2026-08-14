@@ -1078,12 +1078,14 @@ def tortoise_set_point_baseline(claim_id: str, alpha: float, beta: float) -> dic
 
 
 def tortoise_get_confidence(claim_id: str,
-                            require_calibration: bool = False) -> dict:
+                            require_calibration: bool | None = None) -> dict:
     """Get EP confidence for a claim: {mean, variance, alpha, beta}.
 
-    #1157: pass require_calibration=True to gate the (possibly writing)
-    lazy-dream read on calibration state — CalibrationError when evidence
-    points are uncalibrated.
+    #1157: the (possibly writing) lazy-dream read is gated on calibration
+    state like the other EP surfaces — CalibrationError when evidence points
+    are uncalibrated. None (default) resolves to the shared fail-closed
+    posture TORTOISE_EP_REQUIRE_CALIBRATION (default True, post-#344); pass
+    False explicitly to opt out.
     """
     return _safe(_get_team_sdk().get_confidence, claim_id,
                  require_calibration=require_calibration)
@@ -1096,15 +1098,17 @@ def tortoise_calibrate_summary() -> list[dict]:
 
 def tortoise_dream(full: bool = False, dirty_only: bool = True,
                    max_hops: int = 2,
-                   require_calibration: bool = False) -> dict:
+                   require_calibration: bool | None = None) -> dict:
     """Run EP stabilization (dreaming, #85).
 
     Stabilizes confidence values after batch writes without an explicit
     compute_confidence call. Default: dreams the accumulated dirty subgraph
     (incremental). Set full=True for whole-graph stabilization.
 
-    #1157: pass require_calibration=True to gate the EP write on calibration
-    state — CalibrationError when evidence points are uncalibrated.
+    #1157: the EP write is gated on calibration state — CalibrationError when
+    evidence points are uncalibrated. None (default) resolves to the shared
+    fail-closed posture TORTOISE_EP_REQUIRE_CALIBRATION (default True,
+    post-#344); pass False explicitly to opt out.
 
     #329: EXCLUDED from tenant HTTP — whole-graph EP is CPU-heavy
     (operator/stdio only; REST /v1/dream is separately budgeted).

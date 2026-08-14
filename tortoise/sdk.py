@@ -5938,8 +5938,9 @@ class TortoiseSDK:
             require_calibration: gate the EP run on calibration state —
                   raises CalibrationError when evidence-kind points are
                   uncalibrated (#1157). None (default) resolves to the shared
-                  posture, TORTOISE_EP_REQUIRE_CALIBRATION (default False
-                  today; issue #344 flips it True). Dream WRITES n.confidence,
+                  posture, TORTOISE_EP_REQUIRE_CALIBRATION (default True —
+                  fail-closed, post-#344; set it to "0" to opt out). Dream
+                  WRITES n.confidence,
                   so it must never silently run uncalibrated EP (#7478).
 
         Returns {iterations, converged, affected_claims} or the dream_all
@@ -6204,7 +6205,8 @@ class TortoiseSDK:
         calibration like compute_confidence. require_calibration=True raises
         CalibrationError when evidence-kind points are uncalibrated; None
         (default) resolves to the shared TORTOISE_EP_REQUIRE_CALIBRATION
-        posture (False today, flipped by #344).
+        posture (default True — fail-closed, post-#344; set
+        TORTOISE_EP_REQUIRE_CALIBRATION to "0" to opt out).
         """
         if require_calibration is None:
             require_calibration = _ep_require_calibration_default()
