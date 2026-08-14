@@ -102,15 +102,32 @@ Or add to `.mcp.json`:
 
 Your agent now has Tortoise's tools — create points, query the graph, check belief structure, run evidence propagation. See the [MCP tool surface](tortoise/tool_registry.py) for the full registry (58 tools) and the [REST reference](tortoise/tool_registry.py) (as it lands).
 
-## SDK for local dev / scripting
+## Client & server packages (#526)
 
-`pip install tortoise-graph` gives you the **SDK** — a driver for local development, scripting, and power-user access against a running daemon (or embedded mode for experiments). Tortoise is a service: the SDK connects, it doesn't replace the server. (The package is published as `tortoise-graph` on PyPI — the bare `tortoise` name is squatted by an unrelated library, #258.)
+Tortoise ships as **two distributions** — the MongoDB-driver model: the engine runs on the server, and you connect to it with a thin driver.
+
+| Distribution | What it is | License | Install where |
+|---|---|---|---|
+| `tortoise-graph` | The **server**: engine (SDK, projection, EP), daemon, MCP server, CLIs (`tortoise`, `tortoise-serve`, `tortoise-ingest`) | BSL-1.1 | Docker image / server host |
+| `tortoise-client` | The **thin driver**: MCP client + config + types + a `tortoise-client` CLI — connects, never embeds the engine | Apache-2.0 | anywhere you script / integrate |
+
+**Scripting / integration / agent tooling — install the client:**
 
 ```bash
-pip install tortoise-graph   # or: pip install 'tortoise-graph[embeddings]' for vector search
+pip install tortoise-client
+```
+
+Point it at a running server (`TORTOISE_MCP_URL`, default `http://localhost:8000/mcp`; `TORTOISE_API_KEY` when auth is on) and run `tortoise-client status`. A clean client install contains no engine code and pulls no engine dependencies (no FalkorDB / numpy / scipy / fastapi).
+
+**Running the server** (self-hosted): Docker compose (`docker compose up -d`) or `pip install tortoise-graph` + `tortoise-serve` — see [docs/quickstart-selfhosted.md](docs/quickstart-selfhosted.md). The `tortoise-graph` package still ships the full SDK surface for server-side power use and local eval. (The bare `tortoise` PyPI name is squatted by an unrelated library — engine = `tortoise-graph`, client = `tortoise-client`, #258/#526.)
+
+```bash
+pip install tortoise-graph   # server package: engine + daemon + MCP server
 # from source (clone): uv sync && uv run python -m tortoise.selfhost
 #   uv sync --extra embeddings  # or: uv sync (core + dev group) — extras mirror the PyPI package
 ```
+
+Full split mechanics (build, version coupling, license boundary): [docs/client-server-split.md](docs/client-server-split.md).
 
 ## Self-host configuration
 
@@ -135,10 +152,12 @@ Tortoise is **Business Source License 1.1** — see [LICENSE](LICENSE) and the [
 - **MIT products are never blocked:** connect over MCP/REST and you never import Tortoise — the license boundary sits at the network, so your distribution stays clean.
 - **MPL 2.0 conversion:** every version converts to Mozilla Public License 2.0 (file-level copyleft — enterprise-safe) four years after publication.
 - **Can't offer Tortoise as a service:** the grant never permits reselling Tortoise (or a substantially similar product) to third parties as a hosted/managed service.
+- **Thin client is Apache-2.0 (#526):** the `tortoise-client` driver distribution is permissively licensed (MongoDB/Redis driver precedent) — a client-only install never ships BSL code, so the license boundary sits at the network. The engine stays BSL-1.1. Rationale + boundary mechanics: [docs/client-server-split.md](docs/client-server-split.md).
 
 ## What's here
 
 - `tortoise/` — the SDK, MCP server, projection, search engine, backup/restore, and the self-host daemon (`tortoise/selfhost.py`)
+- `client/` — the thin `tortoise-client` driver distribution (staging build + acceptance-gate scripts, client shim package, #526)
 - `integrations/` — thin connectors that talk to Tortoise over MCP (not SDK imports)
 - `website/` — the hosted product's landing pages + dashboard (deploys to Cloudflare Pages)
 - `docs/ONTOLOGY.md` — **canonical ontology v3.4** (co-located with the code it governs)

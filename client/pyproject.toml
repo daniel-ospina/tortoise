@@ -1,0 +1,55 @@
+# tortoise-client — thin network driver for the Tortoise graph server (#526)
+#
+# Part of the additive client/server split: `tortoise-graph` (this repo root,
+# BUSL-1.1) ships the ENGINE (sdk, projection, EP, daemon, MCP server);
+# `tortoise-client` (this directory) ships ONLY the thin driver that connects
+# to a running server over MCP — the MongoDB-driver model. A client-only
+# install never contains engine code and never pulls engine dependencies
+# (falkordb / falkordblite / numpy / scipy / fastapi).
+#
+# Build mechanics follow the Prefect `prefect-client` pattern: a separate
+# dist built from the same monorepo via a staging script that selects the
+# client subset of the `tortoise` package (client/build_client.sh). Shared
+# modules (mcp_client, config, exceptions) are COPIED from the canonical repo
+# tree at build time — single source of truth, zero drift.
+#
+# License boundary (#526): the engine stays BSL-1.1; this dist re-licenses
+# ONLY the shipped client modules under Apache-2.0 (MongoDB/Redis driver
+# precedent — see docs/client-server-split.md §License). `client/LICENSE`
+# is the Apache-2.0 text governing this distribution.
+[build-system]
+# setuptools>=77: PEP 639 SPDX license expression (license = "Apache-2.0" below)
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tortoise-client"
+version = "0.2.0"  # lockstep with tortoise-graph (same minor; see docs/client-server-split.md §Version coupling)
+requires-python = ">=3.12"
+license = "Apache-2.0"
+readme = {file = "README.md", content-type = "text/markdown"}
+description = "Tortoise thin client — connect to a Tortoise graph server over MCP (engine stays server-side)"
+authors = [{ name = "Premise Labs" }]
+keywords = ["tortoise", "mcp", "graph", "agent-memory", "client"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.12",
+]
+# Dependency split (#526): CLIENT-ONLY deps. fastmcp-slim[client] provides
+# the `fastmcp.client` surface mcp_client.py imports (StreamableHttpTransport
+# + BearerAuth) WITHOUT the server extra (uvicorn/websockets/cyclopts) and
+# WITHOUT fastapi/numpy/scipy/falkordb. The pin matches tortoise-graph's
+# fastmcp==3.4.6 — protocol/API lockstep between client and server. httpx is
+# declared directly (transport floor, mirroring the server's own httpx>=0.27
+# floor — #310/#494).
+dependencies = [
+    "fastmcp-slim[client]==3.4.6",
+    "httpx>=0.27",
+]
+
+[project.scripts]
+tortoise-client = "tortoise_client.cli:main"
+
+[tool.setuptools]
+packages = ["tortoise", "tortoise_client"]

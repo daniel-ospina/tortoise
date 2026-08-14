@@ -20,4 +20,5 @@ ownedBy: epistemic-team
 | Data safety — encryption in transit + at rest | `docs/data-safety.md` |
 | Quickstart — hosted | `docs/quickstart-cloud.md` |
 | Quickstart — self-hosted | `docs/quickstart-selfhosted.md` |
+| Client/server package split (`tortoise-client` thin driver, #526) | `docs/client-server-split.md` |
 | Beta feedback & bug reporting (#1199) | `docs/beta-feedback.md` |

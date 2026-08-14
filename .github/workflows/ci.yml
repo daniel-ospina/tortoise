@@ -142,6 +142,41 @@ jobs:
           fi
           echo "service-first gate OK"
 
+  client-build:
+    # #526: the thin-client boundary must hold on EVERY PR — build the
+    # tortoise-client wheel, run the acceptance gate in a clean venv (driver
+    # imports, engine modules raise ImportError, no engine deps installed),
+    # and prove the wheel contains no engine modules. A future engine change
+    # leaking into the client dist fails here, not at release.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build tooling
+        run: pip install build
+      - name: Build the client wheel + sdist (Prefect-pattern staging)
+        run: bash client/build_client.sh
+      - name: Wheel content check — whitelist (thin driver only)
+        run: |
+          # Whitelist (PR #1313 conf 88): ANY tortoise/ entry outside the
+          # client module set is rejected — including package dirs (e.g.
+          # tortoise/projection/__init__.py) and new engine modules. Must
+          # stay in sync with verify_client.sh Gate 0.
+          BAD="$(unzip -Z1 dist-client/*.whl | grep -E '^(tortoise|tortoise_client)/' | \
+            grep -vE '^tortoise/(__init__|mcp_client|config|exceptions)\.py$' | \
+            grep -vE '^tortoise_client/(__init__|__main__|cli)\.py$' || true)"
+          if [ -n "$BAD" ]; then
+            echo "::error::non-client entries leaked into the tortoise-client wheel:"
+            echo "$BAD"
+            exit 1
+          fi
+          unzip -Z1 dist-client/*.whl | grep -E '^(tortoise|tortoise_client)/'
+          echo "wheel content OK — thin driver only"
+      - name: Acceptance gate (clean venv, client only)
+        run: bash client/verify_client.sh
+
   welcome-e2e:
     runs-on: ubuntu-latest
     # Mocked welcome-page suite (#541) — secret-free per-PR coverage against
