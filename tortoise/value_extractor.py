@@ -145,6 +145,57 @@ def check_guards(summary: dict) -> list[str]:
     return warns
 
 
+# ── Step 2: graph construction (the structure pass) ─────────────────────────
+# The owner's refinement (2026-08-13): first derive the LOGIC (the summary,
+# semantics), then CONSTRUCT the graph structure — arguments become statement
+# Points wired to the options they argue about (aboutObject) and the decisions
+# they support/oppose (IMPL/NAND); mitigations target the support edges. The
+# state objects' confidence is derived from these attached points.
+
+CONSTRUCT_SYSTEM = """You are the GRAPH CONSTRUCTOR. Turn a session summary into
+the epistemic graph structure. The arguments are the confidence engine: every
+for/against/mitigation must become a Point wired to its targets.
+
+Input: the session summary (state/decisions/logic/issues).
+Output (ONE JSON object — the derived-commit stream):
+{
+  "entities": [{"name", "kind", "passes_frequency_gate": true}],   # state objects AND their options
+  "events": [{"id": "ev_<sha>", "eventKind": "decision|occurrence", "content",
+              "about_entities": [chosen-option], "source_ref": "session.md"}],
+  "points": [{"id": "pt_<sha>", "content", "pointKind": "statement",
+              "about_entities": [the option this argument argues about],
+              "source_ref": "session.md", "quote": ""}],
+  "operators": [
+    {"src": "pt-id", "dst": "ev-id", "op_type": "IMPL", "direction": "unidirectional"},   # an argument FOR a decision
+    {"src": "pt-id", "dst": "ev-id", "op_type": "NAND", "direction": "unidirectional"},   # an argument AGAINST
+    {"src": "pt-id", "target_edge": {"src": "pt-id", "dst": "ev-id", "op_type": "IMPL"},   # a mitigation tempers a support edge
+     "op_type": "MITIGATES", "strength": 0.1-0.5}
+  ]
+}
+RULES:
+- Every decision's "for" becomes a statement Point with IMPL -> the decision event.
+- Every "against" becomes a statement Point with NAND -> the decision event.
+- Every mitigation becomes a statement Point with MITIGATES -> the support edge it tempers.
+- Points argue about their option: about_entities = the option name from the decision's options/chosen or the state item it concerns.
+- The logic[] items are points too (they are the durable knowledge; IMPL between them when supports/opposes references exist).
+- Keep ids deterministic-looking (pt_<sha>/ev_<sha> — the server re-derives them from content).
+- Value filter stays: no filler points."""
+
+
+def construct_graph(summary: dict, model) -> dict:
+    """Step 2: summary -> the epistemic graph structure (the derived stream)."""
+    for _ in range(3):
+        try:
+            resp = _complete(model, CONSTRUCT_SYSTEM,
+                             json.dumps(summary, indent=1))
+            d = _parse_json(resp)
+            if d.get("points") or d.get("events"):
+                return d
+        except Exception:
+            continue
+    return {"entities": [], "events": [], "points": [], "operators": []}
+
+
 # ── The chunked runner + deadline (scale + robustness) ──────────────────────
 
 def _complete(model, system: str, user: str, deadline_s: int = 600) -> str:
