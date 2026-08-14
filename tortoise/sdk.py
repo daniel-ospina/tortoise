@@ -6196,11 +6196,8 @@ class TortoiseSDK:
 
     def dream(self, dirty_only: bool = True, full: bool = False,
               max_hops: int = 2,
-<<<<<<< HEAD
-              require_calibration: bool | None = None) -> dict:
-=======
+              require_calibration: bool | None = None,
               stamp_dreamed_at: bool = True) -> dict:
->>>>>>> 75b1b7b7 (feat(epic903): lastDreamedAt freshness property + atomic write-back + promote/zero-affected fixes)
         """Run EP stabilization (#85).
 
         Args:
@@ -6209,7 +6206,6 @@ class TortoiseSDK:
                   with dirty_only + anchors.
             max_hops: EP subgraph expansion (keep ≥2 — contract with
                       _mark_dirty).
-<<<<<<< HEAD
             require_calibration: gate the EP run on calibration state —
                   raises CalibrationError when evidence-kind points are
                   uncalibrated (#1157). None (default) resolves to the shared
@@ -6217,15 +6213,13 @@ class TortoiseSDK:
                   fail-closed, post-#344; set it to "0" to opt out). Dream
                   WRITES n.confidence,
                   so it must never silently run uncalibrated EP (#7478).
-=======
             stamp_dreamed_at: when False, the pass never writes
-                              lastDreamedAt (epic 903-C2) — the read-triggered
-                              lazy-consistency paths (get_confidence /
-                              compute_confidence) pass False so a READ never
-                              moves the freshness signal that the 903-C4
-                              stale-first scheduler ranks on. Default True for
-                              write-triggered/operator-initiated dreams.
->>>>>>> 75b1b7b7 (feat(epic903): lastDreamedAt freshness property + atomic write-back + promote/zero-affected fixes)
+                  lastDreamedAt (epic 903-C2) — the read-triggered
+                  lazy-consistency paths (get_confidence /
+                  compute_confidence) pass False so a READ never
+                  moves the freshness signal that the 903-C4
+                  stale-first scheduler ranks on. Default True for
+                  write-triggered/operator-initiated dreams.
 
         Returns {iterations, converged, affected_claims} or the dream_all
         summary for full=True.
@@ -6520,12 +6514,9 @@ class TortoiseSDK:
         if require_calibration:
             self._ensure_calibrated("get_confidence")
         if claim_id in self._dirty_roots:
-<<<<<<< HEAD
             self.dream(dirty_only=True,
-                       require_calibration=require_calibration)
-=======
-            self.dream(dirty_only=True, stamp_dreamed_at=False)  # read path — never stamps (epic 903-C2)
->>>>>>> 75b1b7b7 (feat(epic903): lastDreamedAt freshness property + atomic write-back + promote/zero-affected fixes)
+                       require_calibration=require_calibration,
+                       stamp_dreamed_at=False)  # read path — never stamps (epic 903-C2)
         return self._get_ep().compute_confidence(claim_id)
 
     def _apply_source_inheritance(self, recency_decay: float | None = None,
