@@ -476,6 +476,15 @@ the MCP tool is tracked as a follow-up so the system-wide default matches the in
   only via promotion — today via `tortoise_update_point(status="live")`
   (the interim route; guarded draft→live), and via the dedicated promote
   tools when they ship.
+  **Interim-route caveat (Track A — no zombie-operator resolution):** the
+  interim route promotes a single point; it does NOT resolve draft operator
+  nodes whose endpoints are now all live (the "zombie operator" — a draft
+  operator left inert by derived liveness). Zombie-operator resolution
+  ("promotes incident draft operators once all their endpoints are live")
+  ships with the dedicated promote tools (#785 Track B, `SENTINEL_785`);
+  until then an operator-requiring gated bundle's draft operator stays
+  inert until either its endpoints are live AND it is explicitly promoted,
+  or a promote_batch-style tool lands.
 - **Promotion authority setting (per-team, alongside quota limits):**
   default `agent` — agents can promote. The alternate value is `reviewer`
   mode (the reviewer-gated flow). Not asked at onboarding; discoverable in
