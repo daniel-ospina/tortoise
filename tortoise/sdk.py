@@ -4167,10 +4167,13 @@ class TortoiseSDK:
         - Connections resolve from/to by local ref first, then pass through as
           raw ids/urls to the underlying primitive (create_operator /
           create_edge / _link_source).
-        - Reification rule (ontology v3.5 §8): a connection carrying
-          ``operator`` (IMPL/NAND, ...) creates an operator Point (Point↔Point
-          support/contradict reify); a connection carrying ``relation`` stays
-          a PLAIN structural edge (structural edges never reify).
+        - Reification rule (ontology v3.5 §8, updated for A3 §8 routing #1256):
+          a connection carrying ``operator`` reifies to an operator Point ONLY
+          when it carries a reification anchor (``reify: true`` or
+          ``mitigation``); a PLAIN IMPL/NAND ``operator`` connection is
+          operator-less — routed to a DIRECT edge (no operator node, see
+          INGEST_CONTRACT.md §8). A connection carrying ``relation`` stays a
+          PLAIN structural edge (structural edges never reify).
         - granularity='bulk' (default): whole bundle in one coherent pass,
           returns aggregated {created, ids, nudges}. granularity='granular':
           additionally returns per-item ``results`` for agent step-by-step
