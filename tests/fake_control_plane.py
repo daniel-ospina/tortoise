@@ -292,11 +292,17 @@ class FakeControlPlane:
               order: str | None = None, limit: int | None = None) -> list[dict]:
         self.query_count += 1
         if method == "PATCH":
-            # mutate the STORED rows (mirrors PostgREST update semantics)
+            # mutate the STORED rows (mirrors PostgREST update semantics);
+            # return=representation when a select is given → the UPDATED
+            # rows ([] when nothing matched), the atomic-claim path used by
+            # OAuth single-use codes / rotation (PR #1264 review P2).
+            updated: list[dict] = []
             for r in self.tables.get(table, []):
                 if _matches(r, filters or []):
                     r.update(json_body or {})
-            return []
+                    if select is not None:
+                        updated.append({k: r.get(k) for k in select})
+            return updated if select is not None else []
         if method == "POST":
             row = dict(json_body or {})
             if table == "abuse_events" and row.get("created_at") is None:

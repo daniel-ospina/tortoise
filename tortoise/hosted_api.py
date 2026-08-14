@@ -7655,14 +7655,32 @@ async def oauth_authorize(request: Request):
                 params["redirect_uri"] + sep + urlencode(
                     {"error": exc.error, "state": params["state"]}))
         return _oauth_error_response(exc)
-    html = consent_page_html(
+    html, nonce = consent_page_html(
         client_name=client.get("client_name") or client["id"],
         scope=params["scope"] or client.get("scope") or "mcp",
         params=params,
         supabase_url=os.environ.get("SUPABASE_URL", ""),
         supabase_anon_key=os.environ.get("SUPABASE_ANON_KEY", ""),
     )
-    return Response(html, media_type="text/html")
+    # CSP (PR #1264 review P1): script-src is nonce-gated so the inline
+    # consent logic runs while a payload that somehow escapes the JSON
+    # embedding still cannot execute; connect-src allows the supabase-js
+    # REST calls; frame-ancestors blocks clickjacking.
+    from urllib.parse import urlparse
+    supabase_origin = ""
+    _u = urlparse(os.environ.get("SUPABASE_URL", ""))
+    if _u.scheme and _u.netloc:
+        supabase_origin = f"{_u.scheme}://{_u.netloc}"
+    csp = (
+        "default-src 'none'; "
+        f"script-src 'nonce-{nonce}' https://cdn.jsdelivr.net; "
+        "style-src 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        f"connect-src 'self' {supabase_origin}; "
+        "base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+    )
+    return Response(html, media_type="text/html",
+                    headers={"Content-Security-Policy": csp})
 
 
 @app.get("/oauth/consent/preview")

@@ -83,6 +83,10 @@ CREATE INDEX IF NOT EXISTS idx_oauth_codes_client
     ON public.oauth_codes (client_id);
 CREATE INDEX IF NOT EXISTS idx_oauth_access_tokens_team
     ON public.oauth_access_tokens (team_id, revoked_at);
+-- D5 rotation lookup: refresh_token_id equality at each refresh (PR #1264
+-- review P3 — the refresh path selects the access bound to a refresh row).
+CREATE INDEX IF NOT EXISTS idx_oauth_access_tokens_refresh
+    ON public.oauth_access_tokens (refresh_token_id);
 CREATE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_user_team
     ON public.oauth_refresh_tokens (user_id, team_id, revoked_at);
 CREATE INDEX IF NOT EXISTS idx_oauth_refresh_tokens_rotated_from

@@ -236,7 +236,12 @@ class SupabaseControlPlane:
                 resp = self._http.get(url, params=params, headers=headers)
             elif method == "PATCH":
                 headers["Content-Type"] = "application/json"
-                headers["Prefer"] = "return=minimal"
+                # return=representation when a select is given → the caller
+                # sees the UPDATED rows ([] when the WHERE matched nothing),
+                # enabling atomic conditional claims (single UPDATE ... WHERE
+                # + rowcount via body, PR #1264 review P2).
+                headers["Prefer"] = ("return=representation" if select
+                                      else "return=minimal")
                 resp = self._http.patch(url, params=params, headers=headers,
                                         json=json_body or {})
             elif method == "POST":
@@ -262,7 +267,7 @@ class SupabaseControlPlane:
                 f"Supabase control-plane query failed ({table}): "
                 f"HTTP {resp.status_code}"
             )
-        if method == "PATCH" or not resp.content:
+        if not resp.content:
             return []
         try:
             data = resp.json()

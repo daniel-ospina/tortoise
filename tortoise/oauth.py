@@ -433,23 +433,27 @@ def issue_auth_code(cp, *, client_id: str, user_id: str, base: str,
 
 
 def _consume_code(cp, code: str) -> dict:
-    """Single-use auth-code redemption (RFC 6749 §4.1.2)."""
+    """Single-use auth-code redemption (RFC 6749 §4.1.2).
+
+    Atomic claim: one conditional UPDATE (``WHERE used_at IS NULL``) with
+    return=representation — a concurrent worker reusing the same code sees
+    zero affected rows and fails invalid_grant (no SELECT-then-PATCH race,
+    PR #1264 review P2).
+    """
     rows = cp.query("oauth_codes", select=[
         "code_hash", "client_id", "user_id", "team_id", "redirect_uri",
         "code_challenge", "code_challenge_method", "scope", "resource",
         "expires_at", "used_at",
-    ], filters=[("code_hash", "eq", _sha256(code))])
+    ], method="PATCH",
+        filters=[("code_hash", "eq", _sha256(code)), ("used_at", "is", None)],
+        json_body={"used_at": _now_iso()})
     if not rows:
+        # Unknown code, or already claimed (single-use) — the token endpoint
+        # must never distinguish, and must never double-issue.
         raise OAuthError(400, "invalid_grant", "Invalid authorization code.")
     row = rows[0]
-    if row.get("used_at") is not None:
-        raise OAuthError(400, "invalid_grant",
-                         "Authorization code already used.")
     if _parse_ts(row.get("expires_at")) is None or _parse_ts(row["expires_at"]) < _now():
         raise OAuthError(400, "invalid_grant", "Authorization code expired.")
-    cp.query("oauth_codes", method="PATCH",
-             filters=[("code_hash", "eq", _sha256(code))],
-             json_body={"used_at": _now_iso()})
     return row
 
 
@@ -510,15 +514,15 @@ def _issue_tokens(cp, *, client_id: str, user_id: str, team_id: str,
                   prev_refresh: dict | None = None,
                   prev_access_id: str | None = None) -> dict:
     """Mint an access+refresh pair; rotate (revoke) the previous pair when
-    called from the refresh path (D5 rotation)."""
-    if prev_refresh is not None:
-        cp.query("oauth_refresh_tokens", method="PATCH",
-                 filters=[("id", "eq", prev_refresh["id"])],
-                 json_body={"revoked_at": _now_iso()})
-    if prev_access_id:
-        cp.query("oauth_access_tokens", method="PATCH",
-                 filters=[("id", "eq", prev_access_id)],
-                 json_body={"revoked_at": _now_iso()})
+    called from the refresh path (D5 rotation).
+
+    Mint FIRST, revoke after (PR #1264 review P3): a DB failure mid-rotation
+    leaves the new pair live instead of a dead token. The old refresh token
+    is revoked with an atomic conditional UPDATE (``WHERE revoked_at IS
+    NULL``); if a concurrent worker already claimed it, the freshly minted
+    orphan pair is rolled back so exactly one rotation wins (PR #1264 review
+    P2 — no double rotation under concurrent workers).
+    """
     access = _new_token(ACCESS_TOKEN_PREFIX)
     refresh = _new_token(REFRESH_TOKEN_PREFIX)
     refresh_id = secrets.token_urlsafe(16)
@@ -548,6 +552,27 @@ def _issue_tokens(cp, *, client_id: str, user_id: str, team_id: str,
         "refresh_token_id": refresh_id,
         "created_at": now,
     })
+    if prev_refresh is not None:
+        claimed = cp.query("oauth_refresh_tokens", method="PATCH",
+                           select=["id"],
+                           filters=[("id", "eq", prev_refresh["id"]),
+                                    ("revoked_at", "is", None)],
+                           json_body={"revoked_at": _now_iso()})
+        if not claimed:
+            # A concurrent worker already rotated this grant — roll back the
+            # orphan pair so only the winner's tokens survive.
+            cp.query("oauth_refresh_tokens", method="PATCH",
+                     filters=[("id", "eq", refresh_id)],
+                     json_body={"revoked_at": now})
+            cp.query("oauth_access_tokens", method="PATCH",
+                     filters=[("id", "eq", access_id)],
+                     json_body={"revoked_at": now})
+            raise OAuthError(400, "invalid_grant",
+                             "Refresh token already revoked (rotated or invalidated).")
+    if prev_access_id:
+        cp.query("oauth_access_tokens", method="PATCH",
+                 filters=[("id", "eq", prev_access_id)],
+                 json_body={"revoked_at": now})
     return {
         "access_token": access,
         "token_type": "Bearer",
@@ -819,8 +844,9 @@ _CONSENT_HTML = """<!DOCTYPE html>
   <div class="spinner" id="spinner" style="display:none">Verifying session…</div>
 </div>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"
+        nonce="__NONCE__"
         onerror="showError('Auth script blocked — please retry.')"></script>
-<script>
+<script nonce="__NONCE__">
   // ── authorize request params (JSON-embedded by the server; origin-safe) ──
   const PARAMS = __PARAMS__;
   const SUPABASE_URL = __SUPABASE_URL__;
@@ -939,17 +965,43 @@ _CONSENT_HTML = """<!DOCTYPE html>
 """
 
 
+def _json_for_script(obj) -> str:
+    """JSON-encode a value for embedding inside an HTML <script> block.
+
+    json.dumps does NOT escape ``<``, ``>``, ``&`` or the U+2028/U+2029 line
+    separators — an attacker-controlled string containing ``</script>`` would
+    close the script element and inject markup/script. Escaping those
+    characters as \\u sequences (OWASP XSS cheat sheet) keeps the JSON
+    valid while making script-element breakout impossible.
+    """
+    return (json.dumps(obj)
+            .replace("&", "\\u0026")
+            .replace("<", "\\u003c")
+            .replace(">", "\\u003e")
+            .replace("\u2028", "\\u2028")
+            .replace("\u2029", "\\u2029"))
+
+
 def consent_page_html(*, client_name: str, scope: str | None,
                       params: dict, supabase_url: str,
-                      supabase_anon_key: str) -> str:
+                      supabase_anon_key: str) -> tuple[str, str]:
     """Render the branded consent page (D2). ``params`` are the raw authorize
-    query params — JSON-encoded into the page so the JS echoes them back."""
+    query params — JSON-encoded into the page so the JS echoes them back.
+
+    Returns ``(html, csp_nonce)``. The nonce is embedded in both <script>
+    tags so the caller can serve a script-src CSP that still permits the
+    inline consent logic. Attacker-controlled values (state / scope /
+    resource / client_name) are JSON-escaped for the <script> context, so a
+    ``</script>`` payload cannot break out of the block (PR #1264 review P1).
+    """
     safe_params = {
         k: (v if isinstance(v, str) else "")
         for k, v in params.items()
     }
     safe_params["client_name"] = client_name
-    return _CONSENT_HTML.replace("__PARAMS__", json.dumps(safe_params)) \
-        .replace("__SUPABASE_URL__", json.dumps(supabase_url.rstrip("/"))) \
-        .replace("__SUPABASE_ANON_KEY__", json.dumps(supabase_anon_key)) \
-        .replace("__CLIENT_NAME__", client_name)
+    nonce = secrets.token_urlsafe(16)
+    html = _CONSENT_HTML.replace("__PARAMS__", _json_for_script(safe_params)) \
+        .replace("__SUPABASE_URL__", _json_for_script(supabase_url.rstrip("/"))) \
+        .replace("__SUPABASE_ANON_KEY__", _json_for_script(supabase_anon_key)) \
+        .replace("__NONCE__", nonce)
+    return html, nonce

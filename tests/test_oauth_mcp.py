@@ -359,6 +359,39 @@ class TestAuthorizePage:
         assert "test-connector" in r.text  # client name embedded
         assert '"/oauth/consent"' in r.text
 
+    def test_consent_page_escapes_script_breakout(self, api_client):
+        """P1 (PR #1264 review): a malicious state / client_name containing
+        ``</script><script>`` cannot break out of the JSON-embedded PARAMS
+        block, and the page is served with a nonce-gated CSP."""
+        tc, _ = api_client
+        reg = _register_client(
+            tc, client_name='</script><script>window.pwned=1</script>')
+        verifier, challenge = _pkce()
+        evil_state = '</script><script>window.pwned=1</script>'
+        r = tc.get("/oauth/authorize", params={
+            "client_id": reg["client_id"], "redirect_uri": REDIRECT,
+            "response_type": "code", "code_challenge": challenge,
+            "code_challenge_method": "S256", "state": evil_state,
+            "scope": "mcp", "resource": ""})
+        assert r.status_code == 200
+        # the raw breakout payload must never appear verbatim in the page
+        assert "</script><script>window.pwned=1</script>" not in r.text
+        assert "<script>window.pwned=1" not in r.text
+        # the JSON is embedded with < > & escaped as \u sequences
+        assert "\\u003c/script\\u003e" in r.text
+        assert "const PARAMS = {" in r.text
+        # the embedded JSON still parses as a JS object literal
+        import json as _json
+        payload = r.text.split("const PARAMS = ", 1)[1].split(";", 1)[0]
+        parsed = _json.loads(payload.encode().decode("unicode_escape"))
+        assert parsed["state"] == evil_state
+        assert parsed["client_name"] == reg["client_name"]
+        # CSP is served with the nonce used on both script tags
+        csp = r.headers.get("content-security-policy", "")
+        assert "script-src" in csp and "nonce-" in csp
+        assert "frame-ancestors 'none'" in csp
+        assert r.text.count('nonce="') == 2  # CDN + inline script tags
+
     def test_authorize_invalid_request_redirects_error(self, api_client):
         """A REGISTERED redirect_uri receives the error redirect (RFC 6749
         §4.1.2.1) when the request is invalid (here: missing PKCE)."""
@@ -481,6 +514,47 @@ class TestCodeExchange:
                        verifier=flow["verifier"])
         assert r2.status_code == 400
         assert r2.json()["error"] == "invalid_grant"
+
+    def test_code_claim_is_atomic(self, api_client, session_user):
+        """P2 (PR #1264 review): the single-use claim is one conditional
+        UPDATE — a second (concurrent) exchange sees no claimable row and
+        must never double-issue a token pair."""
+        tc, cp = api_client
+        session_user("user-1")
+        flow = _auth_code_flow(tc, cp)
+        r1 = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
+                       verifier=flow["verifier"])
+        assert r1.status_code == 200
+        # second exchange (simulating a racing worker) fails
+        r2 = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
+                       verifier=flow["verifier"])
+        assert r2.status_code == 400
+        assert r2.json()["error"] == "invalid_grant"
+        # exactly ONE token pair was ever minted — no double issue
+        live_access = [t for t in cp.tables["oauth_access_tokens"]
+                       if t["revoked_at"] is None]
+        live_refresh = [t for t in cp.tables["oauth_refresh_tokens"]
+                        if t["revoked_at"] is None]
+        assert len(live_access) == 1
+        assert len(live_refresh) == 1
+
+    def test_consume_code_claim_via_fake(self, api_client, session_user):
+        """The atomic claim updates in place: after a successful consume the
+        row carries used_at, and a second consume raises invalid_grant even
+        when called directly (no HTTP layer involved)."""
+        from tortoise.oauth import OAuthError, _consume_code
+        tc, cp = api_client
+        session_user("user-1")
+        flow = _auth_code_flow(tc, cp)
+        row = _consume_code(cp, flow["code"])
+        assert row["code_hash"] == hashlib.sha256(
+            flow["code"].encode()).hexdigest()
+        stored = cp.tables["oauth_codes"][0]
+        assert stored["used_at"] is not None  # claimed in place
+        with pytest.raises(OAuthError) as exc:
+            _consume_code(cp, flow["code"])
+        assert exc.value.status == 400
+        assert exc.value.error == "invalid_grant"
 
     def test_redirect_uri_mismatch_rejected(self, api_client, session_user):
         tc, cp = api_client
@@ -701,6 +775,49 @@ class TestRefreshRotation:
             "client_id": flow["client_id"],
         })
         assert r4.status_code == 200, r4.text
+
+    def test_rotation_race_single_winner(self, api_client, session_user):
+        """P2 + P3 (PR #1264 review): two workers that both pass the initial
+        revoked_at check race the rotation claim — the winner's pair
+        survives, the loser's orphan pair is rolled back, and the old token
+        is revoked exactly once."""
+        from tortoise.oauth import OAuthError, _issue_tokens
+        tc, cp = api_client
+        session_user("user-1")
+        flow = _auth_code_flow(tc, cp)
+        r = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
+                      verifier=flow["verifier"])
+        assert r.status_code == 200, r.text
+        prev = [t for t in cp.tables["oauth_refresh_tokens"]
+                if t["revoked_at"] is None][0]
+        prev_access = [t for t in cp.tables["oauth_access_tokens"]
+                       if t["revoked_at"] is None][0]
+        args = dict(client_id=flow["client_id"], user_id="user-1",
+                    team_id="team-free-001", scope="mcp", resource=None)
+        # worker A wins the atomic claim
+        out_a = _issue_tokens(cp, prev_refresh=prev,
+                              prev_access_id=prev_access["id"], **args)
+        # worker B races with the SAME presented token: claim fails and the
+        # orphan pair is rolled back (no second live grant)
+        with pytest.raises(OAuthError) as exc:
+            _issue_tokens(cp, prev_refresh=prev,
+                          prev_access_id=prev_access["id"], **args)
+        assert exc.value.status == 400
+        assert exc.value.error == "invalid_grant"
+        live = [t for t in cp.tables["oauth_refresh_tokens"]
+                if t["revoked_at"] is None]
+        assert len(live) == 1
+        assert live[0]["id"] == out_a["_refresh_id"]
+        assert live[0]["rotated_from"] == prev["id"]
+        # B's orphan pair was rolled back (revoked), not left live
+        orphans = [t for t in cp.tables["oauth_refresh_tokens"]
+                   if t["rotated_from"] == prev["id"]
+                   and t["id"] != out_a["_refresh_id"]]
+        assert len(orphans) == 1
+        assert orphans[0]["revoked_at"] is not None
+        live_access = [t for t in cp.tables["oauth_access_tokens"]
+                       if t["revoked_at"] is None]
+        assert [t["id"] for t in live_access] == [out_a["_access_id"]]
 
     def test_refresh_rejects_wrong_client(self, api_client, session_user):
         tc, cp = api_client
