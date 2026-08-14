@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json as _json
 import logging
+import os
 import re
 import stat
 from typing import Any
@@ -45,6 +46,145 @@ STALE_TERMINAL_STATUSES = frozenset(
 # drift; INGEST_CONTRACT.md §2/§5 pins the exact values + error shapes).
 INGEST_GRANULARITIES = ("bulk", "granular")
 INGEST_PROMOTION_POLICIES = ("gated", "auto")
+
+
+# ── Session LLM extraction (epic #909 M2 — issue #822) ─────────────────────
+# The deterministic regex extraction loop is REMOVED as a product path: LLM
+# extraction is the DEFAULT (and only) capture extraction. These helpers build
+# the M2 two-stage LLMExtractor (tortoise/extractor.py) from the configured
+# provider and run it over a conversation; both hosted_api.capture_session and
+# TortoiseSDK.capture_session consume them so the two copies stay in sync.
+
+# Provider priority when MULTIPLE keys are set (first configured wins — the
+# deploy-time decision is which key is present; a key is only ever sent to the
+# provider that issued it, #329). Order mirrors tortoise.ingest._PROVIDERS.
+_SESSION_LLM_PROVIDER_PRIORITY = ("openrouter", "deepseek", "openai", "gemini")
+
+# Default model per provider when TORTOISE_SESSION_LLM_MODEL is unset. The
+# provider/model choice is a product decision (deploy-time) — these are
+# cheap-tier defaults matching the analyzer's model choices (analyze.py
+# _LLM_PROVIDERS) and session_indexer's whitelist family.
+_SESSION_LLM_DEFAULT_MODELS = {
+    "openrouter": "deepseek/deepseek-chat",
+    "deepseek": "deepseek-chat",
+    "openai": "gpt-4o-mini",
+    "gemini": "gemini-2.0-flash",
+}
+
+
+def _session_llm_provider() -> str | None:
+    """First configured session-extraction provider, or None when no provider
+    key is set (fail-closed). Mirrors ingest._PROVIDERS exactly — the same key
+    set hosted_api._llm_provider_available() reports (#722 parity)."""
+    from tortoise.ingest import _PROVIDERS
+
+    for provider in _SESSION_LLM_PROVIDER_PRIORITY:
+        if provider in _PROVIDERS:
+            _base_url, key_env = _PROVIDERS[provider]
+            if os.environ.get(key_env):
+                return provider
+    return None
+
+
+def _build_session_llm_extractor():
+    """Build the M2 LLMExtractor for session capture from the configured
+    provider (or None when no provider key is set — the no-key case fails
+    closed). TORTOISE_SESSION_LLM_MOCK=1 is a test seam (precedent:
+    TORTOISE_BACKUP_STORAGE=memory / RATE_LIMIT_DISABLED) that swaps in the
+    deterministic MockModel so the E2E/unit suites exercise the real LLM
+    pipeline shape with zero network."""
+    if os.environ.get("TORTOISE_SESSION_LLM_MOCK", "").strip().lower() == "1":
+        from tortoise.extractor import LLMExtractor, MockModel
+
+        return LLMExtractor(MockModel("mock-point"), MockModel("mock-relation"))
+    provider = _session_llm_provider()
+    if provider is None:
+        return None
+    from tortoise.ingest import _PROVIDERS
+    from tortoise.extractor import LLMExtractor
+    from tortoise.models import OpenAICompatModel
+
+    base_url, key_env = _PROVIDERS[provider]
+    model_id = _SESSION_LLM_DEFAULT_MODELS[provider]
+    spec = os.environ.get("TORTOISE_SESSION_LLM_MODEL", "").strip()
+    if spec:
+        p, _, m = spec.partition(":")
+        if p and p != provider:
+            raise ValueError(
+                f"TORTOISE_SESSION_LLM_MODEL={spec!r} names provider {p!r} but "
+                f"{provider!r} is the configured session provider (its key is set)."
+            )
+        if not m:
+            raise ValueError(f"bad model spec {spec!r}; expected <model> or <provider>:<model>")
+        model_id = m
+    return LLMExtractor(
+        OpenAICompatModel(id=model_id, base_url=base_url, api_key_env=key_env),
+        OpenAICompatModel(id=model_id, base_url=base_url, api_key_env=key_env),
+    )
+
+
+class _InMemoryEventLog:
+    """Duck-typed EventLog (append/read_all) backing the session-capture
+    extraction readback. The graph (via the EventAPI projection) is the
+    durable store; this log only carries the events of the current capture so
+    the caller can read the extracted Points back. No file I/O, no temp files."""
+
+    def __init__(self):
+        self._events: list[dict] = []
+
+    def append(self, event: dict) -> None:
+        self._events.append(event)
+
+    def read_all(self) -> list[dict]:
+        return list(self._events)
+
+
+def _session_llm_transcript(conversation: list[dict]) -> tuple[str, int]:
+    """Build the LLM-extraction transcript + pre-write estimate for a
+    conversation (#822). One ``Speaker: text`` line per turn (the
+    extractor._utterances segmenter format; non-name roles fall back to
+    ``Speaker``), content from the SAME 5000-char window the turn Points store
+    (#721 parity — a phrase past the cut has no home in any stored turn),
+    newlines flattened so multi-line turns are still extracted, sentences
+    capped per turn at MAX_EXTRACTIONS_PER_TURN (the #329 flood gate — the
+    removed regex loop capped extracted Points per turn the same way).
+
+    Returns ``(transcript, estimate)`` where ``estimate`` is the fail-closed
+    upper bound on NEW non-episodic nodes: extracted Points (one per sentence)
+    ×2 for the M2 relations stage's IMPL/NAND operator nodes (the regex loop
+    never created operators)."""
+    from tortoise.extractor import _SENT
+
+    lines: list[str] = []
+    n_sentences = 0
+    for turn in conversation:
+        raw_role = turn.get("role")
+        role = raw_role if isinstance(raw_role, str) else (
+            "unknown" if raw_role is None else str(raw_role))
+        speaker = role.title()
+        if not re.match(r"^[A-Z][\w .'-]{0,40}$", speaker):
+            # non-word roles (123, dict str, weird casing) still extract under
+            # a generic speaker label — never drop the turn's content.
+            speaker = "Speaker"
+        raw = turn.get("content")
+        content = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
+        body = " ".join(content[:5000].split())
+        sents = [s.group(0).strip() for s in _SENT.finditer(body)]
+        sents = [s for s in sents if len(s) >= 3]
+        capped = sents[:MAX_EXTRACTIONS_PER_TURN]
+        n_sentences += len(capped)
+        if capped:
+            lines.append(f"{speaker}: {' '.join(capped)}")
+    return "\n".join(lines), n_sentences * 2
+
+
+def _session_llm_extraction_estimate(conversation: list[dict]) -> int:
+    """Pre-write fail-closed estimate of new non-episodic nodes a capture will
+    produce (points + operators). Hosted 402 gate input — mirrors the removed
+    regex estimate (#947: the points quota counts non-episodic Points only,
+    and turn Points/Session/Event are episodic)."""
+    _transcript, est = _session_llm_transcript(conversation)
+    return est
 
 
 def _first_non_draft_status(points: list) -> tuple[int, object] | None:
@@ -1084,19 +1224,36 @@ class TortoiseSDK:
         *,
         max_turns: int = MAX_SESSION_TURNS,
     ) -> dict:
-        """Capture an agent session into the graph (#312 delta 4).
+        """Capture an agent session into the graph (#312 delta 4, #822).
 
         Mirrors the hosted POST /v1/sessions logic minus quota/auth:
         turns become episodic Points keyed {session_id}_t{i} (deterministic +
-        idempotent), decisions/claims become epistemic Points (content-hash
-        dedup), plus a :Session node and an ontology-compliant
-        :Event {eventKind:'sessionCaptured'} with aboutEvent edges.
+        idempotent), the M2 LLM extractor (epic #909) turns the conversation
+        into epistemic Points (+ IMPL/NAND operators — provenance-grounded,
+        extracted via the EventAPI projection), plus a :Session node and an
+        ontology-compliant :Event {eventKind:'sessionCaptured'} with
+        aboutEvent edges. The deterministic regex loop is removed as a product
+        path — LLM extraction is the default and no-key fails closed.
 
         ``conversation`` is a list of {"role", "content"} dicts. Returns
-        {"session_id", "turns", "extracted", "points": [...]}.
+        {"session_id", "turns", "extracted", "points": [...],
+        "extraction_mode"}.
+
+        Requires an LLM provider key (OPENROUTER/DEEPSEEK/OPENAI/GEMINI_API_KEY)
+        or the TORTOISE_SESSION_LLM_MOCK=1 test seam — raises ValueError
+        otherwise (fail-closed, mirroring the hosted 503).
         """
         import uuid
         from datetime import datetime, timezone
+
+        if _build_session_llm_extractor() is None:
+            raise ValueError(
+                "capture_session requires an LLM provider key (set e.g. "
+                "OPENROUTER_API_KEY or DEEPSEEK_API_KEY) — the regex "
+                "extraction loop was removed as a product path (#822). "
+                "Set TORTOISE_SESSION_LLM_MOCK=1 in tests for the offline "
+                "MockModel extractor."
+            )
 
         proj = self._get_proj()
         now = datetime.now(timezone.utc).isoformat()
@@ -1112,27 +1269,18 @@ class TortoiseSDK:
             params={"sid": session_id, "now": now, "tc": len(conversation)},
         )
 
-        decisions = [
-            r"(?i)(?:let'?s|we will|we should|I will|I'm going to|decided|decision)\s+[^.!?]+[.!?]",
-            r"(?i)(?:plan is|next steps?:|action item:)\s+[^.!?]+[.!?]",
-        ]
-        claims = [
-            r"(?i)(?:I think|I believe|my understanding is|the problem is|the key insight)\s+[^.!?]+[.!?]",
-            r"(?i)(?:evidence suggests|data shows|we found that|this means)\s+[^.!?]+[.!?]",
-        ]
-
-        # NOTE: this extraction loop (regexes + per-turn caps) is duplicated
-        # from tortoise/hosted_api.py POST /v1/sessions. Divergences: the SDK
+        # NOTE: this per-turn loop (episodic turn Points) is duplicated from
+        # tortoise/hosted_api.py POST /v1/sessions. Divergences: the SDK
         # variant writes a `speaker` property on turn Points (delta 5) while
         # hosted adds quota/auth bounds; hosted has no speaker tag. SDK
-        # TRUNCATES turn content > 5000 chars silently AND extracts from the
-        # truncated text (stored-source parity — a phrase past the cut has no
-        # home in any stored turn), hosted rejects > 5000 with 422 (Pydantic
-        # field_validator failure) so its loop always sees <= 5000 chars:
-        # extraction inputs align. role=None normalizes to "unknown" in the
-        # SDK, hosted stores None as-is. Keep the two in sync when touching
-        # either.
-        extracted = []
+        # TRUNCATES turn content > 5000 chars silently AND the extraction
+        # transcript is built from the truncated text (stored-source parity —
+        # a phrase past the cut has no home in any stored turn), hosted
+        # rejects > 5000 with 422 (Pydantic field_validator failure) so its
+        # loop always sees <= 5000 chars: extraction inputs align. role=None
+        # normalizes to "unknown" in the SDK, hosted stores None as-is. Keep
+        # the two in sync when touching either. The LLM extraction that
+        # follows the loop is shared via _extract_session_llm (#822).
         for i, turn in enumerate(conversation):
             # #721: same isinstance-first pattern as content below — an `or
             # "unknown"` fallback only fixes falsy roles, but TRUTHY non-string
@@ -1175,46 +1323,10 @@ class TortoiseSDK:
                 params={"sid": session_id, "tid": turn_id},
             )
 
-            # Epistemic extraction (regex, same bounds as hosted). #721:
-            # scan the STORED (truncated) turn text — the turn Point above
-            # stores content[:5000], so the regexes must run on that same
-            # slice. Scanning the full content would extract phrases past the
-            # cut into session-wired Points whose source text exists in no
-            # stored turn (broken provenance). Hosted can't hit this (422 on
-            # content > 5000 before the loop); this keeps extraction input
-            # aligned with what is actually stored.
-            scan = content[:5000]
-            n_dec = 0
-            for pat in decisions:
-                for match in re.finditer(pat, scan):
-                    if n_dec >= MAX_EXTRACTIONS_PER_TURN:
-                        break
-                    n_dec += 1
-                    text = match.group().strip()
-                    p = self.create_point("decision", text[:5000], dedup=True)
-                    pid = p["id"]
-                    proj.g.query(
-                        "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
-                        "MERGE (s)-[:CONTAINS]->(p)",
-                        params={"sid": session_id, "pid": pid},
-                    )
-                    extracted.append({"id": pid, "kind": "decision", "text": text[:200]})
-
-            n_clm = 0
-            for pat in claims:
-                for match in re.finditer(pat, scan):
-                    if n_clm >= MAX_EXTRACTIONS_PER_TURN:
-                        break
-                    n_clm += 1
-                    text = match.group().strip()
-                    p = self.create_point("statement", text[:5000], dedup=True)
-                    pid = p["id"]
-                    proj.g.query(
-                        "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
-                        "MERGE (s)-[:CONTAINS]->(p)",
-                        params={"sid": session_id, "pid": pid},
-                    )
-                    extracted.append({"id": pid, "kind": "statement", "text": text[:200]})
+        # M2 LLM extraction over the whole conversation (#822) — replaces the
+        # regex decision/claim loop (removed as a product path). Shared with
+        # the hosted copy so the two stay in sync.
+        extracted = self._extract_session_llm(conversation, session_id, now)
 
         # Ontology episodic model (v3.1 §4.5/§3.2): Event + aboutEvent edges.
         try:
@@ -1240,7 +1352,71 @@ class TortoiseSDK:
             "turns": len(conversation),
             "extracted": len(extracted),
             "points": extracted,
+            "extraction_mode": "llm",
         }
+
+    def _extract_session_llm(
+        self,
+        conversation: list[dict[str, str]],
+        session_id: str,
+        now: str,
+    ) -> list[dict]:
+        """M2 LLM extraction (epic #909) over a conversation (#822).
+
+        Runs the two-stage LLMExtractor on the conversation transcript
+        through an EventAPI bound to THIS SDK's projection — the same write
+        path mining uses (points + IMPL/NAND operators land via the shared
+        event projection with provenance spans + extractor-version stamping).
+        Every extracted Point is then wired to the session (:CONTAINS edge,
+        same as the removed regex loop).
+
+        Returns the ``[{id, kind, text}]`` list the capture contract reports;
+        ``kind`` reflects the stored pointKind (the M2 conversation stage
+        writes untyped Points, reported as ``statement``).
+
+        Shared by the hosted copy so the two capture_session loops stay in
+        sync — the regex decision/claim loop is removed as a product path and
+        no-key fails closed (the caller gates on _build_session_llm_extractor).
+        """
+        extractor = _build_session_llm_extractor()
+        if extractor is None:
+            raise ValueError(
+                "_extract_session_llm requires an LLM provider key or "
+                "TORTOISE_SESSION_LLM_MOCK=1 — no extractor available (#822)")
+        transcript, _est = _session_llm_transcript(conversation)
+        if not transcript.strip():
+            return []
+
+        from tortoise.api import EventAPI
+        from tortoise.projection import fold, split
+
+        log = _InMemoryEventLog()
+        api = EventAPI(log, initiated_by="extractor", agent_id=extractor.version,
+                       projection=self._get_proj())
+        source_id = f"session:{session_id}"
+        try:
+            extractor.run(transcript, source_id, api)
+        except Exception as e:
+            raise RuntimeError(
+                f"LLM session extraction failed for session {session_id}: {e}"
+            ) from e
+
+        statements, _operators = split(fold(log.read_all()))
+        extracted: list[dict] = []
+        proj = self._get_proj()
+        for p in statements:
+            pid = p["id"]
+            proj.g.query(
+                "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
+                "MERGE (s)-[:CONTAINS]->(p)",
+                params={"sid": session_id, "pid": pid},
+            )
+            extracted.append({
+                "id": pid,
+                "kind": p.get("pointKind") or "statement",
+                "text": p.get("content", "")[:200],
+            })
+        return extracted
 
     # ── Update / Delete consolidation (epic #888 W2, PR #912) ─────────
     # One update()/delete() for Points AND entities. The legacy methods

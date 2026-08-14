@@ -183,7 +183,7 @@ wrangler pages deploy dist --project-name=tortoise-dashboard
 
 | Var | Default | Effect |
 |-----|---------|--------|
-| `TORTOISE_SESSION_EXTRACTION` | `auto` | `/v1/sessions` extraction mode (`auto\|required\|regex`). `required` fails closed: **all** session captures return 503 when no LLM provider key (`OPENROUTER/DEEPSEEK/OPENAI/GEMINI_API_KEY`) is set — do not enable it until a provider key is deployed. Unknown values fall back to `auto`. |
+| `TORTOISE_SESSION_LLM_MODEL` | per-provider default | `/v1/sessions` extraction model (LLM-default, #822 — the `TORTOISE_SESSION_EXTRACTION` mode knob and regex path were removed). Format `provider:model` (e.g. `deepseek:deepseek-chat`, `openrouter:deepseek/deepseek-chat`, `openai:gpt-4o-mini`); the provider must match the key that is set. Defaults: `deepseek-chat`, `deepseek/deepseek-chat`, `gpt-4o-mini`, `gemini-2.0-flash`. Capture **fails closed (503)** when no provider key (`OPENROUTER/DEEPSEEK/OPENAI/GEMINI_API_KEY`) is set — deploy a provider key before enabling captures. `TORTOISE_SESSION_LLM_MOCK=1` is a test-only seam (offline MockModel). |
 
 ## Reproducibility Test
 Can a fresh Fly.io account + Cloudflare account follow §1 from zero and arrive at the same infra?

@@ -1,8 +1,9 @@
-"""E2E-10-D — agent session capture (regex extraction, no LLM).
+"""E2E-10-D — agent session capture (LLM-default extraction).
 
 Reconstructed case (#303). POST /v1/sessions with a dense conversation →
-session stored and retrievable; the regex extractor (TORTOISE_SESSION_
-EXTRACTION=regex on the E2E server) turns decision/claim turns into Points.
+session stored and retrievable; the M2 LLM extractor (#822 — the regex mode
+knob is removed; TORTOISE_SESSION_LLM_MOCK=1 installs the offline MockModel
+on the E2E server) turns conversation sentences into Points.
 
 Negatives: turn cap (MAX_SESSION_TURNS=500) → 400; oversized turn content
 (>5000 chars) → 422; unauthenticated → 401.
@@ -51,7 +52,7 @@ def test_session_capture_and_extraction(api, tenant_factory):
 
     after = api.get("/v1/points", headers=h).json()["points"]
     assert len(after) > len(before), \
-        "regex extraction must turn dense conversation into Points"
+        "LLM extraction must turn dense conversation into Points"
 
 
 def test_session_turn_cap_400(api, tenant_factory):
