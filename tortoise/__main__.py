@@ -2816,8 +2816,27 @@ def _cmd_index_directory(args) -> int:
             extract_metadata=bool(args.metadata),
             corpus_name=args.corpus_name,
         )
+    except ValueError as _e:
+        # §6.5/T8 pin (E2E-15(d2) contract): the RESOLUTION ValueError
+        # (unsafe directory, corpus-root symlink resolving outside
+        # TORTOISE_INGEST_BASE_DIR, progress_file bounds) must surface its
+        # TRACEBACK — the capture file (TORTOISE_INDEX_CHILD_STDERR) must
+        # contain the traceback naming the ValueError class + the symlink
+        # path, so a backgrounded sweep failure is INSPECTABLE. A
+        # clean-error implementation FAILS (d2) on purpose. The child's
+        # real stderr is /dev/null under the hook's nohup discipline, so
+        # the CLI writes the traceback to the redirect target itself
+        # (falling back to the real stderr for direct operators); exit 1 =
+        # pre-walk error.
+        import traceback as _tb
+        print(f"tortoise index directory: pre-walk error ({type(_e).__name__}):"
+              f" {_e}", file=_stderr)
+        print(_tb.format_exc(), file=_stderr)
+        if _redirect:
+            _stdout.close()
+        return 1
     except Exception as e:
-        print(f"  ❌ graph unreachable or pre-walk error: {e}", file=_stderr)
+        print(f"  ❌ graph unreachable: {e}", file=_stderr)
         if _redirect:
             _stdout.close()
         return 1

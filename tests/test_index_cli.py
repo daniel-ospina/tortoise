@@ -534,6 +534,204 @@ def test_e2e15_g_nonexistent_corpus_zero_count(tmp_path):
     assert '"file_count": 0' in content or "file_count: 0" in content, content
 
 
+@pytest.mark.skipif(not Path(HOOK).exists(),
+                    reason="hook script not present in the worktree")
+def test_e2e15_b_d2_symlink_root_escape(tmp_path):
+    """E2E-15(b)/(d2) shared fixture (cycle-12 RE-ADMITTED induction — the
+    corpus root is an in-base symlink resolving OUTSIDE TORTOISE_INGEST_
+    BASE_DIR → the resolution ValueError class).
+
+    (b) = default config (TORTOISE_INDEX_CHILD_STDERR ABSENT): hook exits 0
+    (the sweep is nohup-backgrounded with output to /dev/null — the raise
+    NEVER surfaces synchronously), the fixture unit is ABSENT from the
+    graph; the ValueError class is verified at S14/d2 level.
+
+    (d2) = WITH TORTOISE_INDEX_CHILD_STDERR: the capture file EXISTS and
+    contains the PINNED SUBSTRING — the traceback naming the ValueError
+    class + the symlink path (the pre-walk error exits 1 in the child, hook
+    still exits 0; a clean-error implementation fails on purpose).
+    """
+    import time as _time
+    base = tmp_path / "base"; base.mkdir()
+    outside = tmp_path / "outside"; outside.mkdir()
+    (outside / "s.md").write_text(
+        "---\nsessionId: esc1\ntitle: Esc\n---\nBody")
+    corpus_link = base / "corpus-link"
+    corpus_link.symlink_to(outside, target_is_directory=True)
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(json.dumps({
+        "type": "user", "message": {"role": "user", "content": "hi"},
+    }) + "\n")
+    db = os.path.join(str(tmp_path), "hook.db")
+
+    def _fire(cap: str | None):
+        env = {
+            "TORTOISE_SESSION_CORPUS": str(corpus_link),
+            "TORTOISE_INGEST_BASE_DIR": str(base),
+            "TORTOISE_DB_PATH": db,
+            "TORTOISE_INDEX_NO_NETWORK": "1",
+            "TORTOISE_INDEX_LOCK_DIR": str(tmp_path / "locks"),
+        }
+        if cap:
+            env["TORTOISE_INDEX_CHILD_STDERR"] = cap
+        os.makedirs(env["TORTOISE_INDEX_LOCK_DIR"], exist_ok=True)
+        return _run_hook(env=env, transcript_path=transcript)
+
+    def _drain_settled():
+        """Poll for the child's daemon release (redislite .settings registry
+        disappears when the child's daemon closes on exit)."""
+        _time.sleep(1)
+        for _ in range(60):
+            if not Path(db + ".settings").exists():
+                return True
+            _time.sleep(1)
+        return False
+
+    # ── (b) default config: no CHILD_STDERR ──
+    r = _fire(cap=None)
+    assert r.returncode == 0, r.stderr
+    assert _drain_settled()
+    sdk = TortoiseSDK(db)
+    try:
+        n = sdk._get_proj().g.query(
+            "MATCH (s:Source) RETURN count(s)").result_set[0][0]
+        assert n == 0, f"fixture unit must be ABSENT (refs={n})"
+    finally:
+        sdk.close()
+
+    # ── (d2) WITH CHILD_STDERR: capture contains the ValueError traceback ──
+    cap = str(tmp_path / "child-d2.log")
+    r2 = _fire(cap=cap)
+    assert r2.returncode == 0, r2.stderr
+    _time.sleep(1)
+    for _ in range(60):
+        if Path(cap).exists() and "ValueError" in Path(cap).read_text():
+            break
+        _time.sleep(1)
+    assert Path(cap).exists(), "capture file never written"
+    content = Path(cap).read_text()
+    assert "ValueError" in content, content          # the traceback class
+    assert "corpus-link" in content, content         # the symlink path named
+    assert "outside TORTOISE_INGEST_BASE_DIR" in content, content
+
+
+@pytest.mark.skipif(not Path(HOOK).exists(),
+                    reason="hook script not present in the worktree")
+def test_e2e15_c_lock_contention(tmp_path):
+    """E2E-15(c): hold the SessionIndexLock for the fixture's sessionId
+    during the sweep → the locked file's unit is ABSENT from the graph (the
+    lock-skip is pre-write), while a SECOND unlocked session fixture file IS
+    present (Source + Event + edge) — the positive control proving the sweep
+    ran, processed the corpus, and honored the lock for the held sessionId
+    only; hook exits 0."""
+    import time as _time
+    from tortoise.index_lock import SessionIndexLock
+    corpus = tmp_path / "corpus"; corpus.mkdir()
+    (corpus / "s1.md").write_text(
+        "---\nsessionId: lock1\ntitle: Lock1\n---\nBody1")
+    (corpus / "s2.md").write_text(
+        "---\nsessionId: lock2\ntitle: Lock2\n---\nBody2")
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(json.dumps({
+        "type": "user", "message": {"role": "user", "content": "hi"},
+    }) + "\n")
+    db = os.path.join(str(tmp_path), "hook.db")
+    cap = str(tmp_path / "child.log")
+    lock_dir = str(tmp_path / "locks")
+    os.makedirs(lock_dir, exist_ok=True)
+    # the parent holds lock1 (the sweep's child is a separate process — the
+    # flock is cross-process; the child's acquire → "held" → pre-write skip)
+    held = SessionIndexLock("lock1", lock_dir=lock_dir)
+    assert held.acquire() in ("acquired", "stale-recovered")
+    try:
+        env = {
+            "TORTOISE_SESSION_CORPUS": str(corpus),
+            "TORTOISE_INGEST_BASE_DIR": str(tmp_path),
+            "TORTOISE_DB_PATH": db,
+            "TORTOISE_INDEX_NO_NETWORK": "1",
+            "TORTOISE_INDEX_CHILD_STDERR": cap,
+            "TORTOISE_INDEX_LOCK_DIR": lock_dir,
+        }
+        r = _run_hook(env=env, transcript_path=transcript)
+        assert r.returncode == 0, r.stderr
+        _time.sleep(1)
+        for _ in range(60):
+            if Path(cap).exists() and "file_count" in Path(cap).read_text():
+                break
+            _time.sleep(1)
+    finally:
+        held.release()
+    assert Path(cap).exists() and "file_count" in Path(cap).read_text(), \
+        f"sweep never reported: {Path(cap).read_text() if Path(cap).exists() else 'no capture'}"
+    # drain: the child's daemon closes on exit → open FRESH and read
+    _time.sleep(1)
+    for _ in range(60):
+        if not Path(db + ".settings").exists():
+            break
+        _time.sleep(1)
+    sdk = TortoiseSDK(db)
+    try:
+        g = sdk._get_proj().g
+        rows = g.query(
+            "MATCH (s:Source)-[:references]->(e:Event) RETURN s.url"
+        ).result_set
+        urls = {r[0] for r in rows}
+        # the UNLOCKED session is indexed (positive control)
+        assert f"corpus://{corpus.name}/s2.md" in urls, urls
+        # the LOCKED session's unit is ABSENT (lock-skip is pre-write)
+        assert f"corpus://{corpus.name}/s1.md" not in urls, urls
+        # exactly ONE Source + ONE edge (no partial writes from the skip)
+        assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 1
+    finally:
+        sdk.close()
+
+
+@pytest.mark.skipif(not Path(HOOK).exists(),
+                    reason="hook script not present in the worktree")
+def test_e2e15_e2_graph_unreachable_dead_uri(tmp_path):
+    """E2E-15(e2): TORTOISE_DB_URI in the hook env points at a dead server
+    → the CLI child exits 1 (graph-unreachable per §6.5), the hook STILL
+    exits 0, capture still fires. NO graph poll against the dead URI (every
+    poll query would raise) — absence is asserted via the capture file
+    ("graph unreachable") + a live control DB (TORTOISE_DB_PATH) remaining
+    EMPTY (a silent fallback to an embedded DB would index the fixture into
+    a LIVE graph)."""
+    import time as _time
+    corpus = tmp_path / "corpus"; corpus.mkdir()
+    (corpus / "s.md").write_text(
+        "---\nsessionId: dead1\ntitle: Dead\n---\nBody")
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(json.dumps({
+        "type": "user", "message": {"role": "user", "content": "hi"},
+    }) + "\n")
+    cap = str(tmp_path / "child.log")
+    control = os.path.join(str(tmp_path), "control.db")
+    env = {
+        "TORTOISE_SESSION_CORPUS": str(corpus),
+        "TORTOISE_INGEST_BASE_DIR": str(tmp_path),
+        # docker://127.0.0.1:1 — a VALID URI whose server is dead: the
+        # resolve precedence picks TORTOISE_DB_URI over TORTOISE_DB_PATH
+        "TORTOISE_DB_URI": "docker://127.0.0.1:1",
+        "TORTOISE_DB_PATH": control,
+        "TORTOISE_INDEX_NO_NETWORK": "1",
+        "TORTOISE_INDEX_CHILD_STDERR": cap,
+        "TORTOISE_INDEX_LOCK_DIR": str(tmp_path / "locks"),
+    }
+    os.makedirs(env["TORTOISE_INDEX_LOCK_DIR"], exist_ok=True)
+    r = _run_hook(env=env, transcript_path=transcript)
+    assert r.returncode == 0, r.stderr
+    _time.sleep(1)
+    for _ in range(60):
+        if Path(cap).exists() and "graph unreachable" in Path(cap).read_text():
+            break
+        _time.sleep(1)
+    assert Path(cap).exists(), "capture file never written"
+    content = Path(cap).read_text()
+    assert "graph unreachable" in content, content
+    # the control DB was NOT used (no silent fallback to embedded)
+    assert not Path(control).exists() or os.path.getsize(control) == 0
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # T8 cycle-13/14 pins: --metadata production-parity assertion mechanisms
 # ═══════════════════════════════════════════════════════════════════════
