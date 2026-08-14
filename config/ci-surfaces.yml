@@ -71,11 +71,13 @@ surfaces:
   - test_backup_sweep.py
   - test_backup_watcher.py
   - test_bfs_audit.py
+  - test_build_window_transcript.py
   - test_canonical.py
   - test_capture_session.py
   - test_ci_selection.py
   - test_connector_loader.py
   - test_connector_secrets.py
+  - test_connector_sources.py
   - test_control_plane.py
   - test_crash_recovery.py
   - test_crash_recovery_e2e.py
@@ -93,6 +95,7 @@ surfaces:
   - test_embeddings.py
   - test_embeddings_filters.py
   - test_entity_stage.py
+  - test_epic903_fixtures.py
   - test_enumeration_surfaces.py
   - test_eval_metrics.py
   - test_event_log.py
@@ -114,13 +117,17 @@ surfaces:
   - test_index_surfacing.py
   - test_indexes.py
   - test_ingest.py
+  - test_ingest_audit.py
   - test_ingest_bundle.py
   - test_ingest_conformance.py
   - test_ingest_mode.py
   - test_ingest_promotion.py
+  - test_ingest_rebuild_durability.py
+  - test_ingest_safety.py
   - test_ingest_validation.py
   - test_joint_index_ingest.py
   - test_integration_search.py
+  - test_joint_index_ingest.py
   - test_judge_harness.py
   - test_linear_connector.py
   - test_list_contexts.py
@@ -172,6 +179,7 @@ surfaces:
   - test_tool_registry.py
   - test_topic_summarization.py
   - test_tortoise_search.py
+  - test_value_extractor.py
   - test_wiring_phase01.py
   - test_write_consolidation.py
   - test_writer_inventory.py

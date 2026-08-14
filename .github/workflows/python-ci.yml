@@ -182,6 +182,13 @@ jobs:
           echo "full=$(echo "$SEL" | python3 -c 'import json,sys; print(str(json.load(sys.stdin)["full"]).lower())')" >> "$GITHUB_OUTPUT"
           echo "surfaces=$(echo "$SEL" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["surfaces"]))')" >> "$GITHUB_OUTPUT"
           echo "test_files=$(echo "$SEL" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["test_files"]))')" >> "$GITHUB_OUTPUT"
+      - name: Manifest integrity (drift gate, #1262)
+        # Unconditional: every event runs the integrity check so new test
+        # files can never silently drift out of selection again (the #1260
+        # 12-file + #1270 6-file drift class — test_ci_selection.py only ran
+        # on selected surfaces, not push/main). <1s, fail-closed.
+        run: |
+          python3 tools/ci_selection.py --integrity
 
   test:
     # #880: split into two parallel halves (matrix). The fast suite's pytest
