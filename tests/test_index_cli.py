@@ -1201,6 +1201,15 @@ def test_e2e15_i_hook_vs_sweep_overlap(tmp_path):
                        ).result_set[0][0] == 400
     finally:
         sdk.close()
+    # drain the PARENT's own daemon release before the follow-up subprocess
+    # (review-gate P2-NEW-1: r2's fresh daemon must not load the RDB while
+    # the parent's close-SAVE is in flight — an undrained window made the
+    # follow-up report `updated` instead of `skipped` ~1-in-15 runs)
+    _time.sleep(1)
+    for _ in range(60):
+        if not Path(db + ".settings").exists():
+            break
+        _time.sleep(1)
     # follow-up sequential run converges (the plan's (i) end state)
     r2 = subprocess.run(
         [sys.executable, "-m", "tortoise", "index", "directory",

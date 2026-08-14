@@ -122,12 +122,12 @@ from tortoise.__main__ import main
 os.environ.setdefault('TORTOISE_INDEX_CHILD_STDERR', '')
 raise SystemExit(main(['index', 'directory', sys.argv[1], '--metadata']))
 " "$SWEEP_CORPUS" >/dev/null 2>&1 &
-  "$PYTHON_BIN" -c "
-import sys
-sys.path.insert(0, '$TORTOISE_MODULE')
+  TORTOISE_MODULE="$TORTOISE_MODULE" "$PYTHON_BIN" -c "
+import os, sys
+sys.path.insert(0, os.environ['TORTOISE_MODULE'])
 from tortoise.__main__ import main
-raise SystemExit(main(['session', 'capture', '--file', '$TMP']))
-" 2>/dev/null || exit 0
+raise SystemExit(main(['session', 'capture', '--file', sys.argv[1]]))
+" "$TMP" 2>/dev/null || exit 0
 else
   # Round-10 P3: sweep first (capture failure must not disable reindexing).
   # The corpus dir is resolved via session_corpus_dir() (honors
