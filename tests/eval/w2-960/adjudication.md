@@ -44,7 +44,7 @@
 ## Verdict composition (pre-registered rule)
 
 - Tool verdict (κ = 0.4997 → REVISE) is PRIMARY.
-- Owner acceptance 81.8% < 85% is a NECESSARY condition NOT MET → second REVISE signal (NOT_GREEN at minimum).
+- Owner acceptance 81.8% < 85% is a NECESSARY condition NOT MET → **supporting** REVISE signal (NOT_GREEN at minimum). The pre-registered statistic was the combined-denominator acceptance; the sample step was skipped, so 81.8% is the disagreement-set-only subset (supporting, non-pre-registered).
 - Acceptance cannot upgrade a REVISE → **final verdict: REVISE** (rubric revision; workflow stops).
 
 > **Protocol deviation (disclosed):** the pre-registered agreed-EDU sample step (≥10% stratified, combined-denominator acceptance) was skipped — acceptance was computed on the disagreement set only (22 EDUs). See gate record. The 81.8% figure is the disagreement-set acceptance, not the pre-registered combined statistic.

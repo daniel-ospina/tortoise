@@ -102,11 +102,17 @@ def main(argv: list[str] | None = None) -> int:
 
 
 # Secret patterns — transcripts derive from the full agent perceptual stream and may be
-# committed to a public repo; redact or hard-fail rather than ship a credential (SEC review,
-# PR #1259). Ordered (regex, replacement-or-None): None means hard-fail with a line reference.
+# committed to a public repo; this is a BEST-EFFORT guard, not a guarantee — redaction is
+# the operator's responsibility (SEC review, PR #1259). Ordered (regex, replacement-or-None):
+# None means hard-fail with a line reference. Coverage: OpenAI/Anthropic/Stripe/GitHub
+# (classic + fine-grained)/AWS/bearer/private-key; JWT, Google, Slack shapes are out of scope.
 _SECRET_PATTERNS = [
-    (re.compile(r"sk-[A-Za-z0-9_-]{16,}"), None),          # OpenAI/Anthropic-style keys
-    (re.compile(r"ghp_[A-Za-z0-9]{20,}"), None),            # GitHub PAT
+    (re.compile(r"sk-[A-Za-z0-9_-]{32,}"), None),           # OpenAI/Anthropic-style keys (>=32 tail; >=16 would FP on skill ids like sk-workflow-standard)
+    (re.compile(r"sk_live_[A-Za-z0-9]{16,}"), None),        # Stripe secret key
+    (re.compile(r"rk_live_[A-Za-z0-9]{16,}"), None),        # Stripe restricted key
+    (re.compile(r"ghp_[A-Za-z0-9]{20,}"), None),            # GitHub classic PAT
+    (re.compile(r"github_pat_[A-Za-z0-9_]{30,}"), None),    # GitHub fine-grained PAT
+    (re.compile(r"gh[osu]_[A-Za-z0-9]{20,}"), None),        # GitHub org/user/SSH tokens
     (re.compile(r"AKIA[0-9A-Z]{16}"), None),                # AWS access key id
     (re.compile(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]{20,}"), None),  # bearer tokens
     (re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"), None),
