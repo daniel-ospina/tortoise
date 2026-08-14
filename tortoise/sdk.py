@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import stat
+from time import monotonic as _monotonic
 from typing import Any
 
 from .domain_loader import known_kinds, register_kind
@@ -803,6 +804,18 @@ class TortoiseSDK:
         # paths mark affected claims dirty; dream()/lazy-read consume them.
         self._dirty_roots: set[str] = set()
         self._dreamer = None  # lazy-init Dreamer
+        # Epic 903-C5 (#1243): non-convergence retention state. A failed
+        # pass KEEPS the affected claim-roots dirty (W4 — retry, never
+        # silently drop); attempts are counted per root and capped; capped
+        # roots are dropped from the dirty set and surfaced as
+        # ``stale_unresolved`` (region_attempts record — consumed by the
+        # 903-C7 health surface). Backoff state is recorded, not slept —
+        # enforcement uses the injectable clock (tests pass a fake).
+        self._retry_attempts: dict[str, int] = {}
+        self._retry_backoff_until: dict[str, float] = {}
+        self._stale_unresolved: dict[str, dict] = {}
+        self.retry_attempt_cap: int = 3
+        self._retry_clock = _monotonic  # injectable for deterministic tests
 
     def _probe_embedded_busy(self, db_path: str) -> None:
         """Epic #900 §5.3: fail-fast on cross-process embedded overlap.
@@ -6289,6 +6302,98 @@ class TortoiseSDK:
             self._dreamer = Dreamer(self)
         return self._dreamer
 
+    # ── Epic 903-C5 (#1243): non-convergence retention ──────────────
+
+    def _register_failed_attempt(self, roots: set[str]) -> None:
+        """Record a failed (non-converged) attempt for the given dirty roots.
+
+        W4 retention: the roots STAY dirty (retry) until the attempt cap;
+        a capped root is dropped from the dirty set and surfaced as
+        ``stale_unresolved`` with its attempt count + backoff state. Backoff
+        is exponential in attempts (2**n seconds, capped) — recorded as
+        state, never slept (tests inject a fake clock).
+        """
+        now = self._retry_clock()
+        for root in roots:
+            if root not in self._dirty_roots:
+                continue  # already resolved/dropped by another path
+            attempts = self._retry_attempts.get(root, 0) + 1
+            if attempts > self.retry_attempt_cap:
+                self._dirty_roots.discard(root)
+                self._retry_attempts.pop(root, None)
+                self._retry_backoff_until.pop(root, None)
+                self._stale_unresolved[root] = {
+                    "attempts": attempts,
+                    "last_attempt_at": now,
+                    "backoff_state": "capped",
+                    "reason": "non_converged",
+                }
+            else:
+                self._retry_attempts[root] = attempts
+                self._retry_backoff_until[root] = now + min(
+                    2 ** attempts, 3600)
+                # P2-review (#1243): a re-dirtied root re-entering the retry
+                # cycle must drop its OLD capped record — C7 aggregation must
+                # never see a root in both retry_attempts and
+                # stale_unresolved at once.
+                self._stale_unresolved.pop(root, None)
+
+    def _reset_retry_state(self, roots: set[str]) -> None:
+        """Clear attempt/backoff state for roots that CONVERGED."""
+        for root in roots:
+            self._retry_attempts.pop(root, None)
+            self._retry_backoff_until.pop(root, None)
+            self._stale_unresolved.pop(root, None)
+
+    def _is_backed_off(self, root: str) -> bool:
+        """True when the root is inside its backoff window (retry later).
+
+        P2-review (#1243): this is a CONSUMER helper for the 903-C8 hosted
+        wiring (backoff enforcement point — a backed-off root is skipped,
+        not attempt-penalized). The embedded dream paths do NOT enforce it
+        today: backoff is recorded-not-slept by contract; attempts are
+        counted per actual run. Do not wire it into _dream_local without
+        deciding the skip-vs-penalize semantics with C8.
+        """
+        until = self._retry_backoff_until.get(root)
+        if until is None:
+            return False
+        return self._retry_clock() < until
+
+    def _prune_nonexistent_dirty_roots(self) -> None:
+        """Drop dirty roots whose Point no longer exists (deleted-point
+        zombies — P2-review #1243). Query once, bounded by the dirty set."""
+        if not self._dirty_roots:
+            return
+        proj = self._get_proj()
+        ids = list(self._dirty_roots)
+        rows = proj.g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id",
+            params={"ids": ids},
+        ).result_set
+        existing = {r[0] for r in rows}
+        gone = self._dirty_roots - existing
+        if gone:
+            self._dirty_roots -= gone
+            for g in gone:
+                self._retry_attempts.pop(g, None)
+                self._retry_backoff_until.pop(g, None)
+                self._stale_unresolved.pop(g, None)
+
+    def dream_health_state(self) -> dict:
+        """C5-emitted region_attempts record (consumed by 903-C7's health
+        surface): per-root attempt count + backoff state + stale_unresolved.
+        """
+        # P2-review (#1243): timestamp fields are _monotonic() BASE
+        # (process-local seconds, meaningless across restart/process) —
+        # C7's hosted health surface must not present them as wall-clock.
+        return {
+            "clock": "monotonic",
+            "retry_attempts": dict(self._retry_attempts),
+            "retry_backoff_until": dict(self._retry_backoff_until),
+            "stale_unresolved": dict(self._stale_unresolved),
+        }
+
     def _mark_dirty(self, point_ids: list[str]) -> None:
         """Mark claims whose confidence is now stale after a write.
 
@@ -6508,7 +6613,22 @@ class TortoiseSDK:
             op_cap=budget if budget is not None else 200,
         )
         affected = set(result.get("affected_claims", []))
-        self._dirty_roots -= affected
+        # Epic 903-C5 (#1243) — W4 retention (the A2-bug fix): affected
+        # claim-roots are cleared ONLY when the run CONVERGED. A failed run
+        # keeps them dirty (retry) and registers the attempt — the old
+        # unconditional ``-= affected`` dropped non-converged roots, leaving
+        # regions permanently stale. Capped roots are surfaced as
+        # ``stale_unresolved`` (region_attempts record, consumed by 903-C7).
+        if result.get("converged", False):
+            self._dirty_roots -= affected
+            self._reset_retry_state(affected)
+            # P2-review (#1243): prune deleted-point zombies — delete_point
+            # marks the deleted id dirty (reverse-BFS finds no edges), so a
+            # nonexistent Point can sit in _dirty_roots forever, pinning
+            # auto-select to local and inflating the W5 backlog alarm.
+            self._prune_nonexistent_dirty_roots()
+        else:
+            self._register_failed_attempt(affected)
         reachable = self._window_closure(anchors, max_hops)
         coverage = (len(affected) / len(reachable)) if reachable else 0.0
         return {
@@ -6540,6 +6660,13 @@ class TortoiseSDK:
         affected = set(result.get("affected_claims", []))
         if result.get("converged"):
             self._dirty_roots -= affected
+            self._reset_retry_state(affected)
+        else:
+            # Epic 903-C5 (#1243): a failed window pass registers attempts on
+            # the retained dirty roots (retention already keeps them via the
+            # W2 union — the attempt cap bounds the retry loop).
+            self._register_failed_attempt(
+                set(self._dirty_roots) & affected)
         reachable = self._window_closure(window, max_hops)
         coverage = (len(affected) / len(reachable)) if reachable else 0.0
         return {
@@ -6564,6 +6691,15 @@ class TortoiseSDK:
             max_hops=max_hops, stamp_dreamed_at=stamp_dreamed_at,
             budget=budget,
         )
+        # P2-review (#1243): a CONVERGED full pass resolves every reachable
+        # region — clear the affected roots' retry state so a later failed
+        # window pass cannot surface an already-converged region as
+        # stale_unresolved, and prune deleted-point zombies.
+        if result.get("converged_all", False):
+            affected = set(result.get("affected_claims", []))
+            self._dirty_roots -= affected
+            self._reset_retry_state(affected)
+            self._prune_nonexistent_dirty_roots()
         reachable = self._reachable_claim_count()
         coverage = ((result["total_affected"] / reachable)
                     if reachable else 0.0)
