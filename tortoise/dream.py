@@ -60,12 +60,28 @@ class Dreamer:
     # ── Incremental ────────────────────────────────────────────────
 
     def dream(self, anchors: list[str], max_hops: int = DEFAULT_MAX_HOPS,
-              direction: str = "both") -> dict:
+              direction: str = "both",
+              stamp_dreamed_at: bool = True,
+              trivial_stamp: bool = True) -> dict:
         """Run EP over the subgraph reachable from ``anchors``.
 
         Reuses the fast-path selector (analyze._bfs_select_operators, capped
         at 200 operators) and TortoiseEP.run with batch I/O. Returns
         {iterations, converged, affected_claims}.
+
+        Epic 903-C2 (#1240) — freshness write-back:
+        - The per-claim confidence write-back loop is replaced by a SINGLE
+          UNWIND batch that SETs confidence + lastDreamedAt + updatedAt for
+          all affected claims together (mirrors ``_flush_cache``'s shape) —
+          atomic: both-or-neither, no N+1 writes, no partial writes (confidence reads are still per-claim — unchanged from pre-fix).
+        - ``lastDreamedAt`` is stamped ONLY when the run converged (a failed
+          run keeps old stamps — retention semantics, W4) AND
+          ``stamp_dreamed_at`` is set. The fast path (compute_confidence)
+          never passes this flag and never stamps.
+        - Operator-less anchors (live claims with no IMPL/NAND edges — EP can
+          never cover them) get a trivial stamp in the local pass when
+          ``trivial_stamp=True`` (dream_all disables it and runs its own
+          graph-wide scan instead, reporting ``scanned_count``).
 
         #780: draft Points/operators are EXCLUDED by default (EP only runs
         over live claims); there is no include_draft escape hatch on this
@@ -101,6 +117,18 @@ class Dreamer:
             # processes; harmless: EP factors are order-independent and
             # affected_claims is a set)
             if not seed_ids:
+                # Epic 903-C2 (#1240): operator-less anchors (isolated claims
+                # with no operators AND no direct edges). There is no EP to
+                # run — but the local pass still trivially stamps them so a
+                # freshly written isolated claim gets lastDreamedAt instead of
+                # staying null forever (the pre-fix seed-empty early return
+                # never stamped). Draft anchors are excluded by the scan's
+                # liveness filter, so draft-only dirty roots stay unstamped
+                # (the zero-affected retention path, #780).
+                if stamp_dreamed_at and trivial_stamp:
+                    stamped = self._trivial_stamp(proj, anchors)
+                    return {"iterations": 0, "converged": True,
+                            "affected_claims": sorted(stamped)}
                 return {"iterations": 0, "converged": True, "affected_claims": []}
             ep = self._sdk._get_ep()
             # #330: dream must honour the SDK's persistent evidence (baselines)
@@ -112,39 +140,91 @@ class Dreamer:
                 evidence=dict(self._sdk._evidence),
             )
             # Persist mean confidence to node property (mirrors compute_confidence).
-            # #395: the write-back set == the run set by construction — consume
-            # ep._last_affected (stashed by run, assigned before its early
-            # returns) instead of re-running the BFS, fixing the documented
-            # dream.py:88 footgun (a second _affected_claims call with a
-            # divergent default depth). Batch UNWIND write-back (confidence +
-            # updatedAt stamp) mirrors compute_confidence.
+            # #395 (merged on main after this epic's branch): the write-back
+            # set == the run set by construction — consume ep._last_affected
+            # (stashed by run, assigned before its early returns) instead of
+            # re-running the BFS, fixing the documented dream.py:88 footgun.
+            # Epic 903-C2 (#1240): the batch UNWIND write-back SETs confidence
+            # + lastDreamedAt + updatedAt in ONE statement (both-or-neither,
+            # no N+1 writes). lastDreamedAt is written only when the run
+            # converged AND stamp_dreamed_at is set (failed runs keep old
+            # stamps — retention, W4).
             affected = set(ep._last_affected)
             from datetime import datetime, timezone
             now = datetime.now(timezone.utc).isoformat()
-            confidences = {}
-            for claim_id in affected:
-                conf = ep.compute_confidence(claim_id)
-                confidences[claim_id] = conf
-            if confidences:
-                proj.g.query(
-                    "UNWIND $params AS p "
-                    "MATCH (n:Point {id: p.id}) SET n.confidence = p.c, "
-                    "n.updatedAt = $now",
-                    params={"params": [{"id": cid, "c": conf["mean"]}
-                                        for cid, conf in confidences.items()],
-                            "now": now},
-                )
+            stamp = stamp_dreamed_at and converged
+            params_list = [
+                {"id": cid, "c": ep.compute_confidence(cid)["mean"]}
+                for cid in affected
+            ]
+            if params_list:
+                if stamp:
+                    proj.g.query(
+                        "UNWIND $params AS p "
+                        "MATCH (n:Point {id: p.id}) "
+                        "SET n.confidence = p.c, n.lastDreamedAt = $now, "
+                        "    n.updatedAt = $now",
+                        params={"params": params_list, "now": now},
+                    )
+                else:
+                    proj.g.query(
+                        "UNWIND $params AS p "
+                        "MATCH (n:Point {id: p.id}) "
+                        "SET n.confidence = p.c, n.updatedAt = $now",
+                        params={"params": params_list, "now": now},
+                    )
+            # Epic 903-C2 (#1240): operator-less anchors among the dirty roots
+            # are trivially stamped in the same local pass (the EP write-back
+            # above can never cover them — they have no factors). Gated on the
+            # same convergence rule: a failed run stamps nothing.
+            if stamp and trivial_stamp:
+                affected |= self._trivial_stamp(proj, anchors)
             return {
                 "iterations": iterations,
                 "converged": converged,
                 "affected_claims": sorted(affected),
             }
 
+    def _trivial_stamp(self, proj, claim_ids: list[str] | None = None) -> set[str]:
+        """Trivial-stamp ``lastDreamedAt`` for operator-less claims (epic 903-C2).
+
+        Operator-less = live non-operator Points with NO IMPL|NAND edges — EP
+        can never cover them (``run()`` early-returns when it has no factors),
+        so this dedicated scan stamps them directly, independent of the EP
+        flush. ``claim_ids=None`` scans the whole graph (full passes); a list
+        restricts the scan to the given anchors (local passes). Returns the
+        stamped claim ids.
+        """
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        if claim_ids is None:
+            rows = proj.g.query(
+                "MATCH (n:Point) "
+                "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+                "AND (n.status IS NULL OR n.status <> 'draft') "
+                "AND NOT (n)-[:IMPL|NAND]-() "
+                "SET n.lastDreamedAt = $now, n.updatedAt = $now "
+                "RETURN n.id",
+                params={"now": now},
+            ).result_set
+        else:
+            rows = proj.g.query(
+                "MATCH (n:Point) WHERE n.id IN $ids "
+                "AND (n.is_operator IS NULL OR n.is_operator = false) "
+                "AND (n.status IS NULL OR n.status <> 'draft') "
+                "AND NOT (n)-[:IMPL|NAND]-() "
+                "SET n.lastDreamedAt = $now, n.updatedAt = $now "
+                "RETURN n.id",
+                params={"ids": list(claim_ids), "now": now},
+            ).result_set
+        return {r[0] for r in rows}
+
     # ── Whole-graph ────────────────────────────────────────────────
 
     def dream_all(self, max_hops: int = 2,
                   batch_size: int = 2000,
-                  max_total_operators: int = 200_000) -> dict:
+                  max_total_operators: int = 200_000,
+                  stamp_dreamed_at: bool = True) -> dict:
         """Full-graph EP stabilization from all non-operator Points.
 
         Memory + DoS guard (#85, security P1): batches the anchor set so the
@@ -152,7 +232,17 @@ class Dreamer:
         operators processed across batches so a single request cannot trigger
         an unbounded whole-graph EP on the hosted deployment.
 
-        Returns {batches, total_affected, converged_all}.
+        Epic 903-C2 (#1240): the full pass stamps every reachable claim via
+        the atomic UNWIND write-back AND trivially stamps operator-less
+        claims via a dedicated graph-wide scan (the per-chunk dream() calls
+        disable their own trivial-stamp so operator-less claims are reported
+        separately, per DE2E-1: ``total_affected`` = reachable only;
+        ``scanned_count`` = operator-less stamped). The scan is gated on
+        ``stamp_dreamed_at`` AND ``converged_all`` — a full pass that failed
+        to converge anywhere is a failed run and stamps nothing (W4
+        retention: failed runs do not rank fresh).
+
+        Returns {batches, total_affected, converged_all, scanned_count}.
         """
         proj = self._sdk._get_proj()
         rows = proj.g.query(
@@ -161,7 +251,8 @@ class Dreamer:
         ).result_set
         anchors = [r[0] for r in rows]
         if not anchors:
-            return {"batches": 0, "total_affected": 0, "converged_all": True}
+            return {"batches": 0, "total_affected": 0, "converged_all": True,
+                    "scanned_count": 0}
 
         total_affected: set[str] = set()
         converged_all = True
@@ -183,12 +274,26 @@ class Dreamer:
                     total_operators, max_total_operators,
                 )
                 break
-            result = self.dream(chunk, max_hops=max_hops)
+            result = self.dream(chunk, max_hops=max_hops,
+                                stamp_dreamed_at=stamp_dreamed_at,
+                                trivial_stamp=False)  # dedicated scan below
             batches += 1
             total_affected.update(result.get("affected_claims", []))
             converged_all = converged_all and result.get("converged", False)
+        # Epic 903-C2 (#1240): dedicated graph-wide trivial-scan for
+        # operator-less claims (independent of the EP flush; kept out of
+        # total_affected per DE2E-1). Gated on BOTH stamp_dreamed_at AND
+        # converged_all — a full pass where any chunk failed to converge is a
+        # failed run and must not rank anything fresh (W4/DE2E-7 retention
+        # semantics). The scan runs under the Dreamer lock like every other
+        # dream-cycle write.
+        scanned_count = 0
+        if stamp_dreamed_at and converged_all:
+            with self._lock:
+                scanned_count = len(self._trivial_stamp(proj))
         return {
             "batches": batches,
             "total_affected": len(total_affected),
             "converged_all": converged_all,
+            "scanned_count": scanned_count,
         }
