@@ -337,7 +337,8 @@ DIRECT_EDGE_TRAVERSAL = True
 def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
                           rel_filter: str = "IMPL|NAND",
                           direction: str = "both",
-                          include_draft: bool = False) -> tuple[set[str], set[tuple[str, str, str]]]:
+                          include_draft: bool = False,
+                          op_cap: int = 200) -> tuple[set[str], set[tuple[str, str, str]]]:
     """BFS subgraph selection from anchor Points — A9 return contract.
 
     Returns ``(operator_ids, factor_anchors)``:
@@ -363,10 +364,16 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
 
     max_hops (#395 delta A): int k = k BFS hops; None = unbounded — expand
     until the frontier is empty (the full connected subgraph from the
-    anchors, direction/rel-filter constrained). For explicit k the 200-
-    operator cap stays a mid-BFS safety bound; for None the cap is lifted
-    (genuine full closure) — internal callers only (the user-facing
-    tortoise_analyze HTTP tool keeps an explicit k).
+    anchors, direction/rel-filter constrained). For explicit k the operator
+    cap (op_cap, default 200) stays a mid-BFS safety bound; for None the cap
+    is lifted (genuine full closure) — internal callers only (the
+    user-facing tortoise_analyze HTTP tool keeps an explicit k).
+
+    op_cap (#1241, epic 903-C3): truncation bound for explicit-k runs. The
+    stale-first scheduler passes its per-pass operator budget through so an
+    explicit budget OVERRIDES the default 200-op cap (budget > 200 lifts it;
+    budget=None keeps the existing cap). Deterministic truncation — sorted
+    by id — in all cases.
 
     DERIVED-LIVENESS (GATE-2 Q3, §5.6 item 5): an operator participates in
     EP IFF >=2 of its connected points are live (status='live') — the
@@ -530,19 +537,21 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
 
         collected |= new_ops
 
-        # #395 (delta A): the 200-op cap is a safety bound for EXPLICIT k
-        # only — max_hops=None means genuine full connected subgraph, so the
-        # cap is lifted in the unbounded regime (degeneration guarding for
-        # the interactive path lives in ep._affected_claims; this selector
-        # feeds dream/anchors, both explicit-k by default).
-        if max_hops is not None and len(collected) > 200:
+        # #395 (delta A): the op_cap is a safety bound for EXPLICIT k only —
+        # max_hops=None means genuine full connected subgraph, so the cap is
+        # lifted in the unbounded regime (degeneration guarding for the
+        # interactive path lives in ep._affected_claims; this selector feeds
+        # dream/anchors, both explicit-k by default). #1241: the scheduler
+        # passes its per-pass operator budget as op_cap (explicit budget
+        # overrides the 200 default; budget=None keeps the cap).
+        if max_hops is not None and len(collected) > op_cap:
             _log.warning(
-                "BFS selector: collected %d operators, truncating to 200.",
-                len(collected),
+                "BFS selector: collected %d operators, truncating to %d.",
+                len(collected), op_cap,
             )
             # Deterministic truncation — set iteration order is non-deterministic
             # (hash randomization); sort by ID for reproducible selection.
-            collected = set(sorted(collected)[:200])
+            collected = set(sorted(collected)[:op_cap])
             break
 
         # Expand to new frontier points from collected operators
@@ -563,6 +572,64 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
         hop += 1
 
     return collected, factor_anchors
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Epic 903 (dreaming): staleness-ranked claim selection (shared helper)
+# ═══════════════════════════════════════════════════════════════════
+
+
+def _stale_first_claims(proj, limit: int | None = None) -> list[str]:
+    """Staleness-ranked live non-operator claim ids (epic 903-C3, #1241).
+
+    Ranks non-operator, non-draft Points by ``lastDreamedAt ASC`` with
+    NULL = STALEST (FIRST) — legacy / first-deploy / crash-mid-pass claims
+    (never dreamed) drain across scheduler passes. Deterministic tie-break
+    by id. The scheduler's window = top-N of this ranking ∪ retained dirty
+    roots; a future staleness report (I2, deferred at human gate 2) is a
+    pure function of this same ranked list.
+
+    Null semantics (D2-3): the ORDER BY keys on ``coalesce(n.lastDreamedAt,
+    '')`` so nulls rank first REGARDLESS of the backend's native null
+    ordering (FalkorDB sorts NULL last in ASC — a raw ``ORDER BY
+    n.lastDreamedAt`` would rank never-dreamed claims FRESHEST, the
+    opposite of the contract). This is the plan's explicit-null-scan-union
+    alternative: one deterministic query instead of a union scan, at the
+    cost of not sorting on the raw indexed property (the :Point(
+    lastDreamedAt) / :Point(is_operator, lastDreamedAt) indexes still
+    accelerate the property access and the is_operator filter on
+    docker/server).
+    """
+    base = (
+        "MATCH (n:Point) "
+        "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+        "AND (n.status IS NULL OR n.status <> 'draft') "
+        "WITH n, coalesce(n.lastDreamedAt, '') AS _freshness "
+        "ORDER BY _freshness ASC, n.id ASC "
+        "RETURN n.id"
+    )
+    rows = proj.g.query(
+        base if limit is None else base + " LIMIT $limit",
+        params={} if limit is None else {"limit": limit},
+    ).result_set
+    return [r[0] for r in rows]
+
+
+def _stale_first_count_stamped(proj) -> int:
+    """Count live non-operator claims that HAVE a ``lastDreamedAt`` stamp.
+
+    The scheduler's all-null decision (plan W2): a graph where NOTHING has
+    ever been dreamed (first deploy / legacy / crash mid-pass) degenerates
+    to a single full pass — window = whole graph — regardless of budget.
+    """
+    rows = proj.g.query(
+        "MATCH (n:Point) "
+        "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+        "AND (n.status IS NULL OR n.status <> 'draft') "
+        "AND n.lastDreamedAt IS NOT NULL "
+        "RETURN count(n)"
+    ).result_set
+    return int(rows[0][0])
 
 
 def analyze(question: str, proj=None, *,
