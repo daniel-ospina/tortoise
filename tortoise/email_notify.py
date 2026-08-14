@@ -13,7 +13,6 @@ Design (from docs/scoping/2026-08-13-307-email-notifications-scope.md, Approach 
   key → channel skipped with a once-per-process log.
 - Send budget (#1138): Resend free tier is 100 emails/day / 3,000/month — a
   bulk invite blast must never silently exhaust it (budget/rate 429s). We
-<<<<<<< HEAD
   track an in-process estimate of sends per UTC day + month and hard-stop
   (skip + loud warning) when the env-tunable cap is reached. A slot is
   RESERVED at schedule time — closing the burst TOCTOU where N>cap concurrent
@@ -21,10 +20,6 @@ Design (from docs/scoping/2026-08-13-307-email-notifications-scope.md, Approach 
   refunded when the provider rejects/fails the POST. The guard covers the
   INVITE path only (billing/abuse notifications share the Resend account but
   are not counted) and is per-process (N replicas × cap).
-=======
-  track an in-process estimate of provider-accepted sends per UTC day + month
-  and hard-stop (skip + loud warning) when the env-tunable cap is reached.
->>>>>>> 9feedb14 (fix(email): Resend send-budget guard for bulk invite blasts (#1138))
 - Secrets never logged: ``redact_safe`` on exception paths.
 """
 from __future__ import annotations
@@ -79,7 +74,6 @@ def _skip_channel(channel: str, secret: str | None) -> bool:
 # Resend free tier: 100 emails/day, 3,000/month (budget/rate 429s beyond).
 # A bulk invite blast (Team-tier bulk invite endpoint, burst of signups) must
 # never silently exhaust the shared budget mid-blast. Guard = in-process
-<<<<<<< HEAD
 # estimate of sends per UTC day + month; when either env-tunable cap is
 # reached, further sends are SKIPPED with a loud warning.
 # Reservation semantics (P1 review-fix): a slot is RESERVED when the send is
@@ -90,13 +84,6 @@ def _skip_channel(channel: str, secret: str | None) -> bool:
 # absolute usage meter (upgrade/usage-API monitoring is a separate concern).
 # Scope: INVITE path only — billing/abuse notifications share the Resend
 # account but are not counted; per-process (N replicas × cap).
-=======
-# estimate of provider-accepted sends per UTC day + month; when either
-# env-tunable cap is reached, further sends are SKIPPED with a loud warning.
-# Estimate semantics: counters reset on process restart, so they bound a
-# single process's burst — NOT an absolute usage meter (upgrade/usage-API
-# monitoring is a separate concern).
->>>>>>> 9feedb14 (fix(email): Resend send-budget guard for bulk invite blasts (#1138))
 _send_counts_day: int = 0
 _send_counts_month: int = 0
 _send_counts_day_period: str = ""   # "YYYY-MM-DD" UTC — day counter resets on day change
@@ -108,7 +95,6 @@ def _budget_limit(env_name: str, default: int) -> int:
     if raw is None:
         return default
     try:
-<<<<<<< HEAD
         value = int(raw)
     except ValueError:
         logger.warning("email notify: invalid %s=%r — using default %s", env_name, raw, default)
@@ -118,12 +104,6 @@ def _budget_limit(env_name: str, default: int) -> int:
         logger.warning("email notify: negative %s=%r — using default %s", env_name, raw, default)
         return default
     return value
-=======
-        return max(0, int(raw))
-    except ValueError:
-        logger.warning("email notify: invalid %s=%r — using default %s", env_name, raw, default)
-        return default
->>>>>>> 9feedb14 (fix(email): Resend send-budget guard for bulk invite blasts (#1138))
 
 
 def _reset_budget_if_new_period() -> None:
@@ -156,7 +136,6 @@ def _budget_exceeded() -> tuple[bool, str | None]:
     return False, None
 
 
-<<<<<<< HEAD
 def _reserve_send() -> None:
     """Reserve one budget slot at schedule time (#1138 P1 review-fix).
 
@@ -165,17 +144,12 @@ def _reserve_send() -> None:
     the check before any POST finishes (TOCTOU) and every one goes out. The
     reservation is rolled back by :func:`_refund_send` on provider failure.
     """
-=======
-def _count_send() -> None:
-    """Count one provider-accepted send (in-process estimate, #1138)."""
->>>>>>> 9feedb14 (fix(email): Resend send-budget guard for bulk invite blasts (#1138))
     _reset_budget_if_new_period()
     global _send_counts_day, _send_counts_month
     _send_counts_day += 1
     _send_counts_month += 1
 
 
-<<<<<<< HEAD
 def _refund_send() -> None:
     """Roll back a reserved slot after the provider rejected/failed the POST.
 
@@ -187,8 +161,6 @@ def _refund_send() -> None:
     _send_counts_month = max(0, _send_counts_month - 1)
 
 
-=======
->>>>>>> 9feedb14 (fix(email): Resend send-budget guard for bulk invite blasts (#1138))
 # ── Templates ────────────────────────────────────────────────────────────────
 
 
@@ -255,12 +227,8 @@ async def _send_resend(to: str, subject: str, html_body: str, text_body: str,
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(RESEND_URL, headers=headers, json=payload)
             resp.raise_for_status()
-<<<<<<< HEAD
             # #1138: budget slot was already RESERVED at schedule time in
             # send_invite_email (P1 TOCTOU fix); on failure the caller refunds.
-=======
-            _count_send()  # #1138: provider-accepted send consumes budget
->>>>>>> 9feedb14 (fix(email): Resend send-budget guard for bulk invite blasts (#1138))
             return resp.json()
 
 
@@ -315,12 +283,9 @@ def send_invite_email(team_name: str, invitee_email: str, role: str,
 
     # #1138: hard-stop before scheduling when the send budget is exhausted — a
     # bulk blast must never silently 429 past the free-tier cap. Skip loud.
-<<<<<<< HEAD
     # A slot is RESERVED here (synchronously, before create_task) — closing the
     # TOCTOU where N>cap concurrent schedules all passed the check before any
     # provider POST completed; _refund_send() gives it back on failure.
-=======
->>>>>>> 9feedb14 (fix(email): Resend send-budget guard for bulk invite blasts (#1138))
     exceeded, reason = _budget_exceeded()
     if exceeded:
         logger.warning(
@@ -328,10 +293,7 @@ def send_invite_email(team_name: str, invitee_email: str, role: str,
             invitation_id, invitee_email, reason,
         )
         return
-<<<<<<< HEAD
     _reserve_send()
-=======
->>>>>>> 9feedb14 (fix(email): Resend send-budget guard for bulk invite blasts (#1138))
 
     task = asyncio.create_task(
         _send_invite_attempt(invitee_email, team_name, role, token, invitation_id, on_sent)
