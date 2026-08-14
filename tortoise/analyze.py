@@ -329,16 +329,44 @@ def _inject_subgraph_filter(cypher: str, vars: list[str],
 # Main API
 # ═══════════════════════════════════════════════════════════════════
 
+# A9 (epic #902, issue #1059): the selector traverses operator-less direct
+# edges — probed by SENTINEL_A9 (plan §5.6/§7 capability-probe sentinels).
+DIRECT_EDGE_TRAVERSAL = True
+
+
 def _bfs_select_operators(proj, anchors: list[str], max_hops: int = 1,
                           rel_filter: str = "IMPL|NAND",
                           direction: str = "both",
-                          include_draft: bool = False) -> set[str]:
-    """BFS subgraph selection from anchor Points — returns set of operator Point IDs.
+                          include_draft: bool = False) -> tuple[set[str], set[tuple[str, str, str]]]:
+    """BFS subgraph selection from anchor Points — A9 return contract.
 
-    Shared helper for both compute_confidence and tortoise_analyze.
-    Expands from anchor Points along operator edges (IMPL|NAND) for max_hops hops.
-    IMPL edges respect direction; NAND always traversed bidirectionally.
-    Capped at 200 operator IDs.
+    Returns ``(operator_ids, factor_anchors)``:
+      operator_ids  — operator Point IDs for the operator-mediated factors
+      factor_anchors — DIRECT-EDGE factor anchors ``(src, tgt, type)`` — one
+        per operator-less IMPL/NAND edge discovered in the traversal,
+        DEDUPED by (src, tgt, type) regardless of BFS discovery direction
+        (a bidirectional walk can discover the same edge from both
+        endpoints; a double anchor would run the factor twice → wrong
+        posteriors with green tests, §5.6 cycle-3).
+
+    A9 traversal (epic #902 §5.6): the selector ALSO walks operator-less
+    direct edges — DIRECTION-RESPECTING: NAND edges traversed both
+directions ALWAYS; IMPL edges traversed both directions ONLY when the
+    edge's stored ``direction`` ≠ ``"unidirectional"`` (a unidirectional
+    direct IMPL edge must NOT back-propagate into its source — mirrors
+    §4.3's EP read coalesce(r.direction,'bidirectional') and the operator-
+    path selector's direction handling). The direct-edge traversal expands
+    the frontier like the operator BFS does, so mixed subgraphs select
+    operators AND direct factors together; a direct-edge-only subgraph
+    yields ZERO operator ids + non-empty factor anchors (the return
+    contract).
+
+    DERIVED-LIVENESS (GATE-2 Q3, §5.6 item 5): an operator participates in
+    EP IFF >=2 of its connected points are live (status='live') — the
+    fail-closed gated-rejection (old check-5) is RETIRED; gated+
+    operator-requiring bundles are ACCEPTED and the operator is EP-INERT
+    until its endpoints are live. The predicate counts the operator's
+    IMPL|NAND-connected points (source AND targets, undirected).
 
     With include_draft=False (default, #780): draft anchors, draft operators
     and draft frontier points are excluded — the shared live-only filter at
@@ -347,6 +375,7 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int = 1,
     import logging
     _log = logging.getLogger(__name__)
     collected: set[str] = set()
+    factor_anchors: set[tuple[str, str, str]] = set()
     frontier: set[str] = set(anchors)
     visited: set[str] = set(anchors)
     rel_types = set(rel_filter.split("|"))
@@ -354,6 +383,40 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int = 1,
     live_op = f"AND {_live_only('op.status', include_draft)}" if not include_draft else ""
     live_t = f"AND {_live_only('target.status', include_draft)}" if not include_draft else ""
     live_p = f"AND {_live_only('p.status', include_draft)}" if not include_draft else ""
+    live_b = f"AND {_live_only('b.status', include_draft)}" if not include_draft else ""
+    live_a = f"AND {_live_only('a.status', include_draft)}" if not include_draft else ""
+
+    # derived-liveness (GATE-2 Q3): operator participates IFF >=2 of its
+    # connected points (IMPL|NAND neighbors, both directions) are live.
+    # Unconditional — "live" is an absolute status (the escape hatch
+    # include_draft=True widens the operator's own status filter, not the
+    # endpoint-liveness rule).
+
+    def _derived_live_operators(ids: list[str]) -> set[str]:
+        """Subset of ``ids`` whose operators have >=2 live connected points.
+
+        GATE-2 Q3 derived-liveness: an operator participates in EP iff >=2 of
+        its connected points (IMPL|NAND neighbors, both directions) are live.
+        "Live" matches the shared #780 ``_live_only`` semantics (live.py):
+        ``status IS NULL OR status <> 'draft'`` — legacy pre-#780 nodes
+        without a stored status are LIVE (the entity write path defaults
+        ``coalesce($st, n.status, 'live')``). The predicate is UNCONDITIONAL
+        (draft endpoints never count toward the >=2, even under the
+        include_draft escape hatch — the E2E-13.1 1-live/1-draft boundary
+        pins the operator INERT).
+        """
+        if not ids:
+            return set()
+        rows = proj.g.query(
+            "MATCH (op:Point {is_operator:true})-[:IMPL|NAND]-(t:Point) "
+            "WHERE op.id IN $ids "
+            "AND (t.status IS NULL OR t.status <> 'draft') "
+            "WITH op, count(DISTINCT t) AS live_conn "
+            "WHERE live_conn >= 2 "
+            "RETURN op.id",
+            params={"ids": ids},
+        ).result_set
+        return {r[0] for r in rows}
 
     if not include_draft and frontier:
         rows = proj.g.query(
@@ -384,26 +447,70 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int = 1,
             else:
                 dirs = (direction,)
 
+            # ── operator-mediated edges (existing BFS + derived-liveness) ──
             for d in dirs:
                 if d == "incoming":
+                    # frontier POINTS → operators pointing AT them; only
+                    # operators with >=2 live connected points participate
                     rows = proj.g.query(
                         f"MATCH (op:Point {{is_operator:true}})-[:{rel}]->(p:Point) "
                         f"WHERE p.id IN $frontier {live_op} "
                         "RETURN DISTINCT op.id",
                         params={"frontier": frontier_list},
                     ).result_set
-                    for (op_id,) in rows:
+                    for op_id in _derived_live_operators([r[0] for r in rows]):
                         new_ops.add(op_id)
                         new_points.add(op_id)
                 else:  # outgoing
-                    rows = proj.g.query(
-                        f"MATCH (op:Point {{is_operator:true}})-[:{rel}]->(target:Point) "
-                        f"WHERE op.id IN $frontier {live_op} {live_t} "
-                        "RETURN DISTINCT target.id",
-                        params={"frontier": frontier_list},
-                    ).result_set
-                    for (target_id,) in rows:
-                        new_points.add(target_id)
+                    # frontier OPERATORS → their target points (expansion);
+                    # only derived-live operators expand (an inert operator
+                    # must not reach its targets)
+                    alive = _derived_live_operators(frontier_list)
+                    if alive:
+                        rows = proj.g.query(
+                            f"MATCH (op:Point {{is_operator:true}})-[:{rel}]->(target:Point) "
+                            f"WHERE op.id IN $ops {live_op} {live_t} "
+                            "RETURN DISTINCT target.id",
+                            params={"ops": list(alive)},
+                        ).result_set
+                        for (target_id,) in rows:
+                            new_points.add(target_id)
+
+            # ── operator-LESS direct edges (A9, §5.6) — DIRECTION-RESPECTING ──
+            # forward: (frontier) -[rel]-> (plain neighbor); every rel type
+            # traverses forward from the frontier point.
+            rows = proj.g.query(
+                f"MATCH (a:Point)-[r:{rel}]->(b:Point) "
+                f"WHERE a.id IN $frontier {live_a} {live_b} "
+                "AND a.is_operator = false AND a.op_type IS NULL "
+                "AND b.is_operator = false AND b.op_type IS NULL "
+                "RETURN DISTINCT b.id, a.id, type(r)",
+                params={"frontier": frontier_list},
+            ).result_set
+            for (bid, aid, rtype) in rows:
+                if bid not in visited:
+                    new_points.add(bid)
+                factor_anchors.add((aid, bid, rtype))
+            # backward: (plain neighbor) -[rel]-> (frontier); NAND always;
+            # IMPL only when the edge is NOT unidirectional (never
+            # back-propagate into a unidirectional edge's source).
+            rows = proj.g.query(
+                f"MATCH (a:Point)-[r:{rel}]->(b:Point) "
+                f"WHERE b.id IN $frontier {live_a} {live_b} "
+                "AND a.is_operator = false AND a.op_type IS NULL "
+                "AND b.is_operator = false AND b.op_type IS NULL "
+                "AND (type(r) = 'NAND' "
+                "     OR coalesce(r.direction, 'bidirectional') <> 'unidirectional') "
+                "RETURN DISTINCT a.id, b.id, type(r)",
+                params={"frontier": frontier_list},
+            ).result_set
+            for (aid, bid, rtype) in rows:
+                if aid not in visited:
+                    new_points.add(aid)
+                # the anchor is the edge's CANONICAL (src, tgt) — the same
+                # (a.id, b.id, type) tuple the forward query records, so a
+                # bidirectional walk dedups to ONE anchor per edge (§5.6)
+                factor_anchors.add((aid, bid, rtype))
 
         collected |= new_ops
 
@@ -433,7 +540,7 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int = 1,
         frontier = new_points - visited
         visited |= new_points
 
-    return collected
+    return collected, factor_anchors
 
 
 def analyze(question: str, proj=None, *,
@@ -461,10 +568,14 @@ def analyze(question: str, proj=None, *,
     """
     # BFS subgraph selection from anchor IDs
     if anchor_ids is not None and proj is not None and entity_subgraph_ids is None:
-        entity_subgraph_ids = _bfs_select_operators(
+        _ops, _anchors = _bfs_select_operators(
             proj, anchor_ids, max_hops=max_hops,
             rel_filter=rel_filter, direction=direction,
         )
+        # A9 (epic #902): the subgraph carries the direct-edge factor-anchor
+        # endpoints too (a direct-edge-only subgraph yields zero operators
+        # but a non-empty direct-factor selection, §5.6 return contract).
+        entity_subgraph_ids = _ops | {p for (s, t, _t) in _anchors for p in (s, t)}
     # 1. Classify intent
     result = classify(question)
     if result is None and use_llm:

@@ -224,8 +224,9 @@ def test_parity_anchors_equals_context():
         # found when context was persisted — see #49 Phase 1 stop-writes, which
         # makes the context query non-functional as a baseline).
         from tortoise.analyze import _bfs_select_operators
-        new_ops = set(_bfs_select_operators(proj, graph["all_point_ids"],
-                                            max_hops=1, direction="both"))
+        _bfs_ops, _bfs_anchors = _bfs_select_operators(
+        proj, graph["all_point_ids"], max_hops=1, direction="both")
+        new_ops = set(_bfs_ops)
         gt_rows = proj.g.query(
             "MATCH (op:Point {is_operator:true})-[r:IMPL|NAND]->(c:Point) "
             "WHERE c.id IN $ids RETURN DISTINCT op.id",
@@ -291,7 +292,7 @@ def test_bfs_direction_incoming():
         proj = sdk._get_proj()
 
         # direction="incoming" from opt: should find op (op targets opt)
-        ops_in = _bfs_select_operators(proj, [opt["id"]], max_hops=1,
+        ops_in, _ = _bfs_select_operators(proj, [opt["id"]], max_hops=1,
                                         direction="incoming")
         assert op_id in ops_in, (
             f"incoming should find op {op_id} targeting anchor {opt['id']}, "
@@ -323,7 +324,7 @@ def test_bfs_direction_outgoing_from_operator():
         # operators targeting them.
         # For a simpler test: run with max_hops=1 + direction="both"
         # and verify direction="outgoing" contributes points.
-        ops_outgoing = _bfs_select_operators(proj, [op_id], max_hops=2,
+        ops_outgoing, _ = _bfs_select_operators(proj, [op_id], max_hops=2,
                                               direction="outgoing")
         # At hop 1: outgoing from op → opt enters frontier
         # At hop 2: incoming from opt → op is found as targeting opt
@@ -335,7 +336,7 @@ def test_bfs_direction_outgoing_from_operator():
 
         # The real test: at max_hops=1 with direction="outgoing" from operator,
         # we get 0 operators collected (outgoing only finds TARGETS, not operators).
-        ops_out1 = _bfs_select_operators(proj, [op_id], max_hops=1,
+        ops_out1, _ = _bfs_select_operators(proj, [op_id], max_hops=1,
                                           direction="outgoing")
         assert len(ops_out1) == 0, (
             f"outgoing at max_hops=1 from operator should find 0 operators "
@@ -345,7 +346,7 @@ def test_bfs_direction_outgoing_from_operator():
         # direction="both" at max_hops=1 from op: incoming finds nothing
         # (nothing targets the operator), outgoing finds the target point.
         # Combined, still 0 operators at hop 1.
-        ops_both1 = _bfs_select_operators(proj, [op_id], max_hops=1,
+        ops_both1, _ = _bfs_select_operators(proj, [op_id], max_hops=1,
                                            direction="both")
         assert len(ops_both1) == 0, (
             f"both at max_hops=1 from operator should find 0 operators, got {ops_both1}"
@@ -380,7 +381,7 @@ def test_bfs_nand_bidirectional():
 
         # direction="incoming" from opt_b: should find op (operator targets opt_b)
         # This is the standard "incoming" case.
-        ops_from_b = _bfs_select_operators(proj, [opt_b["id"]], max_hops=1,
+        ops_from_b, _ = _bfs_select_operators(proj, [opt_b["id"]], max_hops=1,
                                             direction="incoming")
         assert op_id in ops_from_b, (
             f"incoming from target should find NAND operator {op_id}, got {ops_from_b}"
@@ -407,7 +408,7 @@ def test_bfs_nand_bidirectional():
         # NAND bidirectional means we do BOTH incoming and outgoing from op.
         # Incoming: no operators targeting op. Outgoing: op targets opt_b.
         # So we collect 0 operators at hop 1 (only points, no new operators).
-        ops_from_op = _bfs_select_operators(proj, [op_id], max_hops=1,
+        ops_from_op, _ = _bfs_select_operators(proj, [op_id], max_hops=1,
                                              direction="incoming")
         # With NAND bidirectional + direction="incoming" from operator,
         # we traverse outgoing too, finding opt_b. But opt_b is a point,
@@ -419,7 +420,7 @@ def test_bfs_nand_bidirectional():
         # NAND edges outgoing. We verify by checking max_hops=2:
         # hop 1: outgoing from op → opt_b enters frontier
         # hop 2: incoming from opt_b → op is found
-        ops_op_h2 = _bfs_select_operators(proj, [op_id], max_hops=2,
+        ops_op_h2, _ = _bfs_select_operators(proj, [op_id], max_hops=2,
                                            direction="incoming")
         assert op_id in ops_op_h2, (
             f"incoming from operator at max_hops=2 should traverse NAND bidirectionally "
@@ -431,13 +432,13 @@ def test_bfs_nand_bidirectional():
         # Source side = the operator. From the operator with direction="incoming",
         # NAND bidirectional ensures the outgoing edge is still traversed.
         # We verify this by checking: at max_hops=1, outgoing from op finds opt_b.
-        ops_op_h1_outgoing = _bfs_select_operators(proj, [op_id], max_hops=1,
+        ops_op_h1_outgoing, _ = _bfs_select_operators(proj, [op_id], max_hops=1,
                                                     direction="outgoing")
         assert len(ops_op_h1_outgoing) == 0
         # At max_hops=1 from op: outgoing finds opt_b (point). We don't collect it
         # as an operator. But the traversal happened.
         # We verify opt_b is reachable at max_hops=2 by running both directions.
-        all_ops = _bfs_select_operators(proj, [op_id], max_hops=2,
+        all_ops, _ = _bfs_select_operators(proj, [op_id], max_hops=2,
                                          direction="both")
         assert op_id in all_ops
 
@@ -467,7 +468,7 @@ def test_rel_filter_excludes_nand():
         proj = sdk._get_proj()
 
         # rel_filter="IMPL": should include impl_op, exclude nand_op
-        ops_impl = _bfs_select_operators(proj, [opt["id"]], max_hops=1,
+        ops_impl, _ = _bfs_select_operators(proj, [opt["id"]], max_hops=1,
                                           rel_filter="IMPL", direction="both")
         assert impl_op["id"] in ops_impl, f"IMPL filter should include {impl_op['id']}"
         assert nand_op["id"] not in ops_impl, (
@@ -475,7 +476,7 @@ def test_rel_filter_excludes_nand():
         )
 
         # rel_filter="NAND": should include nand_op, exclude impl_op
-        ops_nand = _bfs_select_operators(proj, [opt["id"]], max_hops=1,
+        ops_nand, _ = _bfs_select_operators(proj, [opt["id"]], max_hops=1,
                                           rel_filter="NAND", direction="both")
         assert nand_op["id"] in ops_nand, f"NAND filter should include {nand_op['id']}"
         assert impl_op["id"] not in ops_nand, (
@@ -483,7 +484,7 @@ def test_rel_filter_excludes_nand():
         )
 
         # rel_filter="IMPL|NAND": should include both
-        ops_both = _bfs_select_operators(proj, [opt["id"]], max_hops=1,
+        ops_both, _ = _bfs_select_operators(proj, [opt["id"]], max_hops=1,
                                           rel_filter="IMPL|NAND", direction="both")
         assert impl_op["id"] in ops_both
         assert nand_op["id"] in ops_both
@@ -514,7 +515,7 @@ def test_max_nodes_cap_warns_and_truncates(caplog):
         proj = sdk._get_proj()
 
         with caplog.at_level(logging.WARNING):
-            result = _bfs_select_operators(proj, [opt["id"]], max_hops=1,
+            result, _ = _bfs_select_operators(proj, [opt["id"]], max_hops=1,
                                             direction="both")
 
         # Should be capped at 200
