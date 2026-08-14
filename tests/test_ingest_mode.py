@@ -73,10 +73,12 @@ _CROCKFORD_ULID_RE = re.compile(r"^[0-7][0-9A-HJKMNP-TV-Z]{25}$", re.IGNORECASE)
 # Per-run volatile props excluded from the isomorphism comparison (the
 # plan's "modulo batch_id" — extended to the other per-run-derived props:
 # ids (per-call ULIDs), timestamps (assigned at write, sdk.py:744), and
-# source defaults).
+# source defaults). Deliberately NARROW: semantic payload props (title /
+# contentHash / externalId / version on Source nodes, content on Points)
+# stay in the signature — a future regression deriving them differently
+# per mode must not be invisible (review-gate P2-1).
 _VOLATILE_PROPS = frozenset({
     "id", "batch_id", "createdAt", "updatedAt", "ingestedAt",
-    "externalId", "version", "title", "contentHash",
 })
 
 
@@ -127,7 +129,12 @@ def _graph_signature(sdk):
         clean = tuple(sorted(
             (k, str(v)) for k, v in props.items() if k != "batch_id"))
         edge_set.add((typ, node_keys.get(fa), node_keys.get(tb), clean))
-    return frozenset(node_keys.values()), frozenset(edge_set)
+    # multiset comparison (review-gate P2-2): a mode that double-writes a
+    # node/edge with IDENTICAL props must be caught — frozenset dedupe
+    # would collapse it; Counter preserves multiplicity.
+    import collections
+    return (collections.Counter(node_keys.values()),
+            collections.Counter(edge_set))
 
 
 def _fresh_sdk(tmp_path=None):
