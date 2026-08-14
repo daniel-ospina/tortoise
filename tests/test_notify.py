@@ -19,6 +19,9 @@ def _env(monkeypatch):
     monkeypatch.setenv("BILLING_NOTIFY_TO", "ops@premiselabs.co")
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:ABCsecret")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "551595722")
+    # #1136: sender identity is env-driven — unset both so tests exercise the default.
+    monkeypatch.delenv("RESEND_FROM_EMAIL", raising=False)
+    monkeypatch.delenv("BILLING_FROM_EMAIL", raising=False)
     notify._skip_logged.clear()
     yield
 
@@ -40,9 +43,46 @@ def test_resend_called_with_email_payload(monkeypatch):
     assert url == notify.RESEND_URL
     body = kwargs["json"]
     assert body["to"] == ["ops@premiselabs.co"]  # BILLING_NOTIFY_TO, not hardcoded
-    assert body["from"] == notify.FROM_ADDRESS
+    assert body["from"] == notify.DEFAULT_FROM_ADDRESS  # #1136: default managed sender identity
     assert "billing_upgrade" in body["subject"]
     assert "pro" in body["html"]
+
+
+def test_resend_from_email_env_used(monkeypatch):
+    """#1136: notify.py sends from RESEND_FROM_EMAIL — the single managed identity."""
+    monkeypatch.setenv("RESEND_FROM_EMAIL", "noreply@premiselabs.co")
+    calls = []
+
+    def fake_post(url, **kwargs):
+        calls.append(kwargs)
+        class _R:
+            def raise_for_status(self):
+                pass
+        return _R()
+
+    monkeypatch.setattr(notify.httpx, "post", fake_post)
+    notify.notify_billing_event("billing_upgrade", TEAM, {"tier": "pro"})
+    assert calls
+    assert calls[0]["json"]["from"] == "noreply@premiselabs.co"
+
+
+def test_billing_from_email_override(monkeypatch):
+    """#1136: BILLING_FROM_EMAIL keeps the distinct billing sender when desired."""
+    monkeypatch.setenv("RESEND_FROM_EMAIL", "noreply@premiselabs.co")
+    monkeypatch.setenv("BILLING_FROM_EMAIL", "billing@premiselabs.co")
+    calls = []
+
+    def fake_post(url, **kwargs):
+        calls.append(kwargs)
+        class _R:
+            def raise_for_status(self):
+                pass
+        return _R()
+
+    monkeypatch.setattr(notify.httpx, "post", fake_post)
+    notify.notify_billing_event("billing_upgrade", TEAM, {"tier": "pro"})
+    assert calls
+    assert calls[0]["json"]["from"] == "billing@premiselabs.co"
 
 
 def test_telegram_called_with_message(monkeypatch):

@@ -124,6 +124,9 @@ jobs:
           if [ -z "${{ secrets.RESEND_API_KEY }}" ] || [ -z "${{ secrets.BILLING_NOTIFY_TO }}" ]; then
             echo "::warning::RESEND_API_KEY/BILLING_NOTIFY_TO not set — billing email notifications disabled until configured"
           fi
+          if [ -z "${{ secrets.RESEND_FROM_EMAIL }}" ]; then
+            echo "::warning::RESEND_FROM_EMAIL not set — transactional/billing sender falls back to noreply@premiselabs.co (#1136)"
+          fi
           # Backup (TORTOISE_BACKUP_KEY + R2_*) is env-gated at runtime and
           # Pro-tier-only — missing secrets degrade gracefully (backup
           # endpoints 402/503), so warn instead of blocking the deploy (#545).
@@ -158,12 +161,10 @@ jobs:
           [ -n "${{ secrets.STRIPE_PRICE_IDS }}" ] && ARGS="$ARGS STRIPE_PRICE_IDS=${{ secrets.STRIPE_PRICE_IDS }}"
           [ -n "${{ secrets.RESEND_API_KEY }}" ] && ARGS="$ARGS RESEND_API_KEY=${{ secrets.RESEND_API_KEY }}"
           [ -n "${{ secrets.BILLING_NOTIFY_TO }}" ] && ARGS="$ARGS BILLING_NOTIFY_TO=${{ secrets.BILLING_NOTIFY_TO }}"
-          # Transactional email (#307, #1221): explicit from-address + link base.
-          # Defaults exist in email_notify.py (noreply@premiselabs.co /
-          # https://tortoise.premiselabs.co) — pass-through only when set so
-          # unconfigured deploys keep working on the defaults.
+          # #1136: single managed sender identity — RESEND_FROM_EMAIL (billing
+          # override optional when a distinct billing sender is desired).
           [ -n "${{ secrets.RESEND_FROM_EMAIL }}" ] && ARGS="$ARGS RESEND_FROM_EMAIL=${{ secrets.RESEND_FROM_EMAIL }}"
-          [ -n "${{ secrets.EMAIL_LINK_BASE_URL }}" ] && ARGS="$ARGS EMAIL_LINK_BASE_URL=${{ secrets.EMAIL_LINK_BASE_URL }}"
+          [ -n "${{ secrets.BILLING_FROM_EMAIL }}" ] && ARGS="$ARGS BILLING_FROM_EMAIL=${{ secrets.BILLING_FROM_EMAIL }}"
           [ -n "${{ secrets.BILLING_SUCCESS_URL }}" ] && ARGS="$ARGS BILLING_SUCCESS_URL=${{ secrets.BILLING_SUCCESS_URL }}"
           [ -n "${{ secrets.BILLING_CANCEL_URL }}" ] && ARGS="$ARGS BILLING_CANCEL_URL=${{ secrets.BILLING_CANCEL_URL }}"
           # Session-capture LLM provider (#1197): propagate the four provider
