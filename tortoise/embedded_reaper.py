@@ -1216,6 +1216,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         print(_json.dumps([
             {"pid": r.get("pid"), "socket_path": r.get("socket_path"),
+             "pid_file": r.get("pid_file"),
              "classification": r.get("classification")}
             for r in acted
         ]))
