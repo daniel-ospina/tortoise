@@ -6485,7 +6485,8 @@ class TortoiseSDK:
         # stamp_dreamed_at=False — a READ never moves the freshness signal
         # that the 903-C4 stale-first scheduler ranks on.
         if factors is None and anchors is None and self._dirty_roots:
-            self.dream(dirty_only=True, stamp_dreamed_at=False)
+            self.dream(dirty_only=True, stamp_dreamed_at=False,
+                       require_calibration=require_calibration)
             # Re-extract factors after dreaming (graph may have changed).
             factors_data, _ = proj.extract_svbp_factors()
             operator_ids = [f[0] for f in factors_data]
