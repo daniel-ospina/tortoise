@@ -99,11 +99,51 @@ class SlackConnector:
     def ingest(self, proj) -> int:
         """Poll + apply to projection. Returns count of applied events."""
         events = self.poll()
+        # #388: ingestion-scoped per-message permalink enrichment (see
+        # _enrich_source_urls) — poll() stays API-call-free for standalone
+        # JSONL/preview use; the pure mapper never makes network calls.
+        self._enrich_source_urls(events)
         count = 0
         for ev in events:
             proj.apply(ev)
             count += 1
         return count
+
+    def _permalink(self, client, channel: str, ts: str) -> str | None:
+        """Best-effort chat.getPermalink — None on any failure (graceful
+        fallback to the container-level `slack:{channel}` Source key in the
+        projection, ONTOLOGY §3.4 fallback rule)."""
+        if not ts:
+            return None
+        try:
+            result = client.chat_getPermalink(channel=channel, message_ts=ts)
+            return result.get("permalink") if result else None
+        except Exception:
+            return None
+
+    def _enrich_source_urls(self, events: list[dict]) -> None:
+        """#388: attach per-message permalink ``sourceUrl`` to slack events.
+
+        Ingestion-scoped: called from ingest() where a projection is attached.
+        On permalink failure/absence the event keeps no sourceUrl and the
+        projection falls back to the container-level ``slack:{channel}`` Source
+        key (per-entity permalink is an enhancement, not a hard dependency).
+        """
+        if not events or not self.token or not self.channel_id:
+            return
+        client = self._client()
+        prefix = f"slack-msg-{self.channel_id}-"
+        for ev in events:
+            if ev.get("sourceKind") != "slack_message" or ev.get("sourceUrl"):
+                continue
+            eid = ev.get("eventId", "")
+            if not eid.startswith(prefix):
+                continue
+            # eventId = slack-msg-{channel}-{ts-with-dots-replaced-by-dashes}
+            ts = eid[len(prefix):].replace("-", ".")
+            permalink = self._permalink(client, self.channel_id, ts)
+            if permalink:
+                ev["sourceUrl"] = permalink
 
     # ── Webhook (Events API) ───────────────────────────────────────
 

@@ -8,6 +8,16 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# #388: connector sourceKinds eligible for choke-point Source materialization in
+# _upsert_event. Pinned explicitly (NOT SOURCE_KIND_DEFAULTS registry membership,
+# which also contains 'document' + T0-T4 tier forms) so the mining.py exclusion is
+# precise: mining events carry bare `source` without sourceKind/sourceUrl and must
+# never materialize a Source node.
+_CONNECTOR_SOURCE_KINDS: frozenset = frozenset({
+    "github_issue", "github_pr", "linear_card", "slack_message",
+})
+
+
 def _build_search_text(title, summary=None, topics=None) -> str:
     """#125: compute the Document FTS search surface.
 
@@ -459,6 +469,12 @@ class _EntityHandlers:
         if not guard:
             # ── PLAIN path — legacy/replay calls, byte-identical (SC4) ──
             self._event_plain_merge(eid, props, embedding, inner)
+            # #388: connector Source materialization at the choke point (all
+            # connector events flow here via proj.apply; the guarded meeting
+            # path never carries connector metadata, so the gate is plain-path
+            # scoped). Fire only on a registered connector sourceKind or an
+            # explicit sourceUrl — never on bare `source`.
+            self._materialize_connector_source(inner, eid)
             return None
         # ── MEETING GUARD path (cycle-12/13/17/18; the ONLY guard consumer) ──
         return self._event_guarded_merge(inner, eid, props, guard_source_file)
@@ -578,6 +594,69 @@ class _EntityHandlers:
             "MATCH (n:Event {eventId: $eid})", {"eid": eid},
             inner, self._EVENT_HANDLED,
         )
+
+    def _materialize_connector_source(self, inner: dict, eid: str) -> None:
+        """#388: materialize a Source node from connector event metadata.
+
+        The single choke point through which 100% of connector events flow
+        (github/linear/slack poll + webhook + entity paths all converge on
+        ``proj.apply`` → ``_upsert_event``). Connectors already emit
+        ``source``/``sourceKind`` (and now ``sourceUrl``) on every EventRecorded;
+        this materializes ``(Source)-[:references]->(Event)`` so the
+        ``(Point)-[:extractedFrom]->(Source)-[:references]->(Entity)``
+        provenance chain (ONTOLOGY §3.4) resolves for connector entities.
+
+        Gate: fires ONLY on a registered connector ``sourceKind`` or an
+        explicit ``sourceUrl`` field — never on bare ``source``. The second
+        choke-point producer ``mining.py`` emits EventRecorded with ``source``
+        but NO sourceKind/sourceUrl (mining.py:417-440) and must stay excluded
+        (spurious non-URL Source nodes otherwise).
+
+        Merge semantics (idempotent, no churn on re-poll):
+          - ``sourceKind`` is set ONLY on CREATE — a pre-existing Source's kind
+            is authoritative (#398 never-overwrite contract; ON MATCH uses
+            coalesce so an existing kind is never re-stamped, and a stub
+            without kind still gets one);
+          - no version bump on re-materialization (unlike ``_upsert_source``,
+            which bumps on hash-diff — TypeGraph churn pitfall).
+
+        ``(Source)-[:references]->(Object {id})`` is wired ONLY when the event
+        carries an explicit ``sourceObjectId`` (set exclusively by the github
+        entity path). ``event.object`` is NEVER used as an Object key — on
+        poll/webhook paths it is the entity TITLE string and
+        ``_event_plain_merge`` already stubs ``Object {name: title}`` with a
+        random ulid; using it would wire references to the wrong stub.
+        """
+        sk = inner.get("sourceKind")
+        source_url = inner.get("sourceUrl")
+        if sk not in _CONNECTOR_SOURCE_KINDS and not source_url:
+            return
+        url = source_url or inner.get("source", "")
+        if not url:
+            return
+        self.g.query(
+            "MERGE (s:Source {url: $url}) "
+            "ON CREATE SET s.sourceKind = $sk, s.title = $url, "
+            "    s.contentHash = '', s.ingestedAt = $now "
+            "ON MATCH SET s.sourceKind = coalesce(s.sourceKind, $sk)",
+            params={"url": url, "sk": sk or "document", "now": _now_iso()},
+        )
+        # (Source)-[:references]->(Event) — always, when the event exists.
+        self.g.query(
+            "MATCH (s:Source {url: $url}), (e:Event {eventId: $eid}) "
+            "MERGE (s)-[:references]->(e)",
+            params={"url": url, "eid": eid},
+        )
+        # (Source)-[:references]->(Object {id}) — only on explicit
+        # sourceObjectId (github entity path; event.object is never an Object
+        # key — see docstring).
+        obj_id = inner.get("sourceObjectId")
+        if obj_id:
+            self.g.query(
+                "MATCH (s:Source {url: $url}), (o:Object {id: $oid}) "
+                "MERGE (s)-[:references]->(o)",
+                params={"url": url, "oid": obj_id},
+            )
 
     def _event_guarded_merge(self, inner: dict, candidate: str, props: dict,
                              sf: str | None) -> "tuple[str, bool]":
