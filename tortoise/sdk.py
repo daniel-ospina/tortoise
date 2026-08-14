@@ -609,13 +609,24 @@ def _stream_to_payload(summary: dict, session_id: str, stream: dict) -> dict:
     def _remap(ref):
         return id_map.get(ref, ref)
 
+    def _mapped(ref):
+        """True iff the ref is in the re-derived id map. An operator whose
+        src/dst/target references an LLM-fabricated id NOT emitted by this
+        stream is unknowable — drop it rather than 422 the whole commit
+        (P2-3 #1272 review)."""
+        return ref in id_map
+
     operators = []
     for op in stream.get("operators", []) or []:
         o = dict(op)
+        if not (_mapped(o.get("src", "")) and _mapped(o.get("dst", ""))):
+            continue
         o["src"] = _remap(o.get("src", ""))
         o["dst"] = _remap(o.get("dst", ""))
         if o.get("target"):
             t = dict(o["target"])
+            if not (_mapped(t.get("src", "")) and _mapped(t.get("dst", ""))):
+                continue
             t["src"] = _remap(t.get("src", ""))
             t["dst"] = _remap(t.get("dst", ""))
             o["target"] = t
