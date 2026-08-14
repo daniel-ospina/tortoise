@@ -1,0 +1,56 @@
+# Live signup-funnel monitor (#801) — moved OFF the per-PR path (queue-health,
+# #1008): every per-PR run consumed a send from the shared 30/hr prod email
+# bucket, competing with real signups and flaking CI when the bucket ran dry.
+# Now runs on a schedule + after merges to main; failures auto-file an issue
+# (the monitor's signal) instead of blocking the merge queue. The static
+# welcome/waitlist tests still run per-PR in the python matrix (test (b)):
+# this job's UNIQUE value is the live-prod browser run.
+name: welcome-e2e-monitor
+
+on:
+  schedule:
+    - cron: '0 */2 * * *'   # every 2 hours — bucket-friendly (30/hr shared)
+  push:
+    branches: [main]
+
+concurrency:
+  group: welcome-e2e
+  cancel-in-progress: true
+
+jobs:
+  welcome-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'   # --experimental-strip-types needs >= 22.6 (#373 harness)
+      - run: pip install -e '.[test]'
+      - run: python -m playwright install --with-deps chromium
+      - name: Run welcome page E2E + waitlist static tests (#373)
+        run: python -m pytest tests/e2e/test_welcome_page.py tests/test_waitlist_form.py -q -rs -p no:cacheprovider
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      - name: Warn if live signup smoke is skipping (no-429 monitor off)
+        if: always()
+        run: |
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_SERVICE_KEY" ]; then
+            echo "::warning::live signup smoke is SKIPPED — SUPABASE_URL/SUPABASE_SERVICE_KEY secrets missing; the #801 no-429 monitor is OFF"
+          else
+            echo "secrets present — live signup smoke will run"
+          fi
+      - name: Run waitlist edge-function behavioral harness (#373)
+        run: node --experimental-strip-types tests/test_waitlist_subscribe.mjs
+      - name: Auto-file issue on failure (monitor signal — never blocks merges)
+        if: failure()
+        run: |
+          curl -s -X POST \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/issues" \
+            -d '{"title":"live-signup-monitor: welcome-e2e failed (run ${{ github.run_id }})","body":"Monitor failure — run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}. This is the #801 live signup funnel monitor (schedule + on-merge). Most likely the shared 30/hr email bucket is exhausted, or a real funnel regression. Investigate or re-run; it is NOT a PR regression gate.","labels":["bug"]}'

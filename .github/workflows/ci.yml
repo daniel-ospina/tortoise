@@ -135,6 +135,8 @@ jobs:
           fi
           echo "service-first gate OK"
 
+<<<<<<< HEAD
+=======
   welcome-e2e:
     runs-on: ubuntu-latest
     # Serialize live smoke runs: each run consumes 1 email-send from the
@@ -196,6 +198,7 @@ jobs:
       - name: Run tenant-provision CORS runtime harness (#1110)
         run: node --experimental-strip-types tests/test_tenant_provision_cors.mjs
 
+>>>>>>> origin/main
   legal-e2e:
     runs-on: ubuntu-latest
     # Full legal-page suite (#657) — ~1000 assertions across 10 plan checks
