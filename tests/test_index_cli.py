@@ -39,6 +39,13 @@ def _run_cli(args: list[str], *, env: dict | None = None,
     e = dict(os.environ)
     e.pop("TORTOISE_DB_URI", None)
     e.pop("TORTOISE_DB_PATH", None)
+    # legacy trio scrub (review-gate P2-5): _resolve_db_target prefers
+    # FALKORDB_HOST/PORT/PASSWORD over TORTOISE_DB_PATH — a host with the
+    # trio set would silently target a live docker graph from every
+    # embedded-DB leg
+    e.pop("FALKORDB_HOST", None)
+    e.pop("FALKORDB_PORT", None)
+    e.pop("FALKORDB_PASSWORD", None)
     if env:
         e.update(env)
     # PATH-scrub: drop any dir containing a tortoise binary from the PATH so
@@ -311,6 +318,50 @@ def test_s14_child_stderr_fail_safe(tmp_path):
     assert Path(cap).exists()
 
 
+def test_s14_child_stderr_fail_safe_extended(tmp_path):
+    """S14 unit (review-gate P2-4 — the cycle-16 pin's full enumeration):
+    the fail-safe ALSO rejects an existing-DIRECTORY target and a
+    non-regular-file (FIFO) target BEFORE the redirect open (an operator
+    setting the var to a directory/FIFO would raise EISDIR / block inside
+    the child with fd 1/2 still /dev/null — an invisible crash killing the
+    #280 sweep); an unwritable-parent target is rejected too."""
+    import stat as _stat
+    corpus = _make_corpus(tmp_path)
+    # existing-directory target → exit 1, fail-safe
+    rdir = _run_cli([str(corpus), "--db", _db_path(tmp_path)],
+                    env={"TORTOISE_INDEX_CHILD_STDERR": str(tmp_path)})
+    assert rdir.returncode == 1
+    assert "is a directory" in rdir.stderr
+    # non-regular (FIFO) target → exit 1, fail-safe
+    fifo = tmp_path / "child.fifo"
+    os.mkfifo(str(fifo))
+    try:
+        rfifo = _run_cli([str(corpus), "--db", _db_path(tmp_path)],
+                         env={"TORTOISE_INDEX_CHILD_STDERR": str(fifo)},
+                         timeout=30)
+        assert rfifo.returncode == 1
+        assert "not a regular file" in rfifo.stderr
+    finally:
+        try:
+            os.unlink(str(fifo))
+        except FileNotFoundError:
+            pass
+    # unwritable parent → exit 1, fail-safe (root bypasses permissions —
+    # skip the leg when euid==0)
+    if os.geteuid() != 0:
+        rodir = tmp_path / "ro"; rodir.mkdir()
+        rodir.chmod(_stat.S_IRUSR | _stat.S_IXUSR)  # r-x, no write
+        try:
+            rro = _run_cli(
+                [str(corpus), "--db", _db_path(tmp_path)],
+                env={"TORTOISE_INDEX_CHILD_STDERR":
+                     str(rodir / "child.log")})
+            assert rro.returncode == 1
+            assert "unwritable" in rro.stderr
+        finally:
+            rodir.chmod(0o755)
+
+
 # ── S14 unit: arg resolution precedence (NO_NETWORK vs --metadata) ────
 
 def test_s14_no_network_overrides_metadata_flag(tmp_path):
@@ -335,13 +386,21 @@ HOOK = REPO_ROOT / "tortoise" / "claude-hooks" / "session-end.sh"
 
 
 def _run_hook(*, env: dict, transcript_path: Path | None = None,
-              timeout: int = 60) -> subprocess.CompletedProcess:
+              timeout: int = 60, cwd: str | None = None) -> subprocess.CompletedProcess:
     """Invoke the REAL hook script with the stdin JSON contract + a scrubbed
     PATH (the repo-checkout fallback must resolve against the worktree, never
-    a pip-installed tortoise — E2E-15(d2) harness hygiene)."""
+    a pip-installed tortoise — E2E-15(d2) harness hygiene).
+
+    ``cwd`` defaults to REPO_ROOT; legs that stub the hosted capture pass a
+    dir holding a ``.tortoise`` config (the session-capture CLI reads
+    api_key/api_url from Path.cwd()/.tortoise — no env fallback)."""
     e = dict(os.environ)
     e.pop("TORTOISE_DB_URI", None)
     e.pop("TORTOISE_DB_PATH", None)
+    # legacy trio scrub (review-gate P2-5)
+    e.pop("FALKORDB_HOST", None)
+    e.pop("FALKORDB_PORT", None)
+    e.pop("FALKORDB_PASSWORD", None)
     scrubbed = [p for p in e.get("PATH", "").split(os.pathsep)
                 if not Path(p).joinpath("tortoise").exists()]
     e["PATH"] = os.pathsep.join(scrubbed) if scrubbed else e.get("PATH", "")
@@ -357,7 +416,7 @@ def _run_hook(*, env: dict, transcript_path: Path | None = None,
     })
     return subprocess.run(
         ["bash", str(HOOK)], input=stdin, capture_output=True, text=True,
-        env=e, cwd=str(REPO_ROOT), timeout=timeout,
+        env=e, cwd=cwd or str(REPO_ROOT), timeout=timeout,
     )
 
 
@@ -383,7 +442,10 @@ def _wait_for_graph(sdk, corpus: Path, deadline_s: float = 60.0) -> dict | None:
 def test_e2e15_a_happy_path_reaches_new_primitive(tmp_path, monkeypatch):
     """E2E-15(a): fire the hook → exit 0; the fixture session file IS indexed
     via the NEW primitive (Source + AgentSession Event + references edge —
-    proves the sweep reached index_directory).
+    proves the sweep reached index_directory). The capture spy (a stub HTTP
+    /v1/sessions endpoint) asserts the hosted capture step FIRED with the
+    converted transcript. Post-drain: session_index_health asserts the
+    fixture session lands in `matched` (the cycle-20 POST-DRAIN HEALTH pin).
 
     Backend choreography (cycle-9 pin, #6761): the nohup'd sweep is a
     SEPARATE process — two processes on one embedded file is the #6761 crash
@@ -392,8 +454,12 @@ def test_e2e15_a_happy_path_reaches_new_primitive(tmp_path, monkeypatch):
     does NOT hold the daemon; the child indexes, its daemon auto-closes on
     child exit (redislite SAVE on last-connection close), and the parent
     opens FRESH after the child completes (RDB persisted) and reads the
-    indexed state. Deterministic drain: poll for child completion, then open."""
+    indexed state. Deterministic drain: poll for child completion + the
+    daemon's .settings release (review-gate P2-1 — the report lands ~100ms
+    BEFORE the daemon closes; a fresh open inside that window races the
+    busy-probe), then open."""
     import time as _time
+    import threading as _threading
     corpus = tmp_path / "corpus"; corpus.mkdir()
     sess = corpus / "s.md"
     sess.write_text("---\nsessionId: hk1\ntitle: Hook\n---\nBody")
@@ -403,6 +469,37 @@ def test_e2e15_a_happy_path_reaches_new_primitive(tmp_path, monkeypatch):
     }) + "\n")
     db = os.path.join(str(tmp_path), "hook.db")
     cap = str(tmp_path / "child.log")
+    # capture spy: a stub /v1/sessions endpoint recording the POST (leg (a)
+    # must prove the hosted capture step FIRED — a deleted capture step
+    # would fail here; review-gate P2-3)
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    spy: dict = {"requests": []}
+
+    class _H(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            body = self.rfile.read(length).decode("utf-8", "replace")
+            spy["requests"].append({"path": self.path, "body": body})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"session_id": "e2e15-spy"}')
+
+        def log_message(self, *a):  # noqa: ANN002
+            pass
+
+    stub = HTTPServer(("127.0.0.1", 0), _H)
+    stub_port = stub.server_address[1]
+    stub_thread = _threading.Thread(target=stub.serve_forever, daemon=True)
+    stub_thread.start()
+    # the session-capture CLI reads api_key/api_url from Path.cwd()/.tortoise
+    # (NO env fallback — __main__.py:1295-1310) — write the config into a
+    # leg-local cwd so the capture step targets the spy
+    hook_cwd = tmp_path / "hook-cwd"; hook_cwd.mkdir()
+    (hook_cwd / ".tortoise").write_text(json.dumps({
+        "api_key": "e2e15-spy-key",
+        "api_url": f"http://127.0.0.1:{stub_port}",
+    }))
     env = {
         "TORTOISE_SESSION_CORPUS": str(corpus),
         "TORTOISE_INGEST_BASE_DIR": str(tmp_path),
@@ -412,26 +509,50 @@ def test_e2e15_a_happy_path_reaches_new_primitive(tmp_path, monkeypatch):
         "TORTOISE_INDEX_LOCK_DIR": str(tmp_path / "locks"),
     }
     os.makedirs(env["TORTOISE_INDEX_LOCK_DIR"], exist_ok=True)
-    r = _run_hook(env=env, transcript_path=transcript)
-    assert r.returncode == 0, r.stderr
-    # deterministic drain: poll for the child's report in the capture file
-    start = _time.time()
-    while _time.time() - start < 60:
-        if Path(cap).exists() and "file_count" in Path(cap).read_text():
-            break
-        _time.sleep(1)
-    assert Path(cap).exists() and "file_count" in Path(cap).read_text(), \
-        f"sweep child never reported: {Path(cap).read_text() if Path(cap).exists() else 'no capture'}"
-    # the child's daemon has closed on exit → open FRESH and read the graph
-    sdk = TortoiseSDK(db)
     try:
-        g = sdk._get_proj().g
-        n = g.query(
-            "MATCH (s:Source)-[:references]->(e:Event) "
-            "RETURN count(*)").result_set[0][0]
-        assert n == 1, f"fixture not indexed by the hook sweep (refs={n})"
+        r = _run_hook(env=env, transcript_path=transcript, cwd=str(hook_cwd))
+        assert r.returncode == 0, r.stderr
+        # deterministic drain: poll for the child's report in the capture
+        # file + the daemon's .settings release (P2-1 fresh-open race)
+        start = _time.time()
+        while _time.time() - start < 60:
+            cap_ready = (Path(cap).exists()
+                         and "file_count" in Path(cap).read_text())
+            settled = not Path(db + ".settings").exists()
+            if cap_ready and settled:
+                break
+            _time.sleep(1)
+        assert Path(cap).exists() and "file_count" in Path(cap).read_text(), \
+            f"sweep child never reported: {Path(cap).read_text() if Path(cap).exists() else 'no capture'}"
+        # the capture spy FIRED with the converted transcript (the payload
+        # carries the parsed turns: role/content per _parse_transcript)
+        assert len(spy["requests"]) >= 1, "capture spy never POSTed"
+        assert any("/v1/sessions" in rq["path"] for rq in spy["requests"])
+        assert any('"content": "hello"' in rq["body"] for rq in spy["requests"]), \
+            "capture POST must carry the converted transcript turns"
+        assert any('"role": "user"' in rq["body"] for rq in spy["requests"]), \
+            "capture POST must carry the parsed User turn"
+        # the child's daemon has closed on exit → open FRESH and read the graph
+        sdk = TortoiseSDK(db)
+        try:
+            g = sdk._get_proj().g
+            n = g.query(
+                "MATCH (s:Source)-[:references]->(e:Event) "
+                "RETURN count(*)").result_set[0][0]
+            assert n == 1, f"fixture not indexed by the hook sweep (refs={n})"
+        finally:
+            sdk.close()
+        # cycle-20 POST-DRAIN HEALTH pin: the fixture session lands in
+        # `matched` (the operator's diagnose loop proven end-to-end)
+        sdk2 = TortoiseSDK(db)
+        try:
+            health = sdk2.session_index_health(str(corpus))
+            assert health["matched"] == 1, health
+        finally:
+            sdk2.close()
     finally:
-        sdk.close()
+        stub.shutdown()
+        stub.server_close()
 
 
 @pytest.mark.skipif(not Path(HOOK).exists(),
@@ -484,12 +605,19 @@ def test_e2e15_h_two_consecutive_fire_truncate(tmp_path):
         if done and settled:
             break
         _time.sleep(1)
-    # truncate-on-open: the file holds at most ONE run's output — the bound
-    # is the FULL report size (the JSON line + human rendering), never TWO
-    # runs' worth (the append-vs-truncate discriminator)
+    # truncate-on-open (review-gate P2-2 tightened bound): the file holds
+    # ONLY the second run's output — the append-vs-truncate discriminator.
+    # The report is ~800B; under append semantics the file would hold TWO
+    # runs' worth (~1600B) — the bound (< size1 + 256) fails append. The
+    # one-JSON-line assertion is the structural discriminator (append would
+    # concatenate two JSON lines).
     size2 = Path(cap).stat().st_size if Path(cap).exists() else 0
-    assert 0 < size2 < size1 + 2000, \
+    assert 0 < size2 <= size1 + 256, \
         f"capture grew beyond one run's output: {size1} → {size2}"
+    content2 = Path(cap).read_text()
+    json_lines = [l for l in content2.splitlines()
+                  if l.strip().startswith("{")]
+    assert len(json_lines) == 1, f"capture must hold ONE report: {content2}"
 
 
 @pytest.mark.skipif(not Path(HOOK).exists(),
@@ -613,6 +741,11 @@ def test_e2e15_b_d2_symlink_root_escape(tmp_path):
     assert "ValueError" in content, content          # the traceback class
     assert "corpus-link" in content, content         # the symlink path named
     assert "outside TORTOISE_INGEST_BASE_DIR" in content, content
+    # the TRACEBACK marker (review-gate P1-3): the clean-error message ALSO
+    # contains all three substrings — only the traceback names the class in
+    # a way a clean-error implementation cannot fake
+    assert "Traceback (most recent call last):" in content, content
+    assert "_cmd_index_directory" in content, content
 
 
 @pytest.mark.skipif(not Path(HOOK).exists(),
@@ -793,9 +926,16 @@ def test_t8_metadata_parity_in_process(tmp_path, monkeypatch):
     assert calls["n"] == 0, "NO_NETWORK must short-circuit the embedding"
     sdk2 = TortoiseSDK(db2)
     try:
-        emb2 = sdk2._get_proj().g.query(
-            "MATCH (e:Event) RETURN e.embedding").result_set[0][0]
+        rows = sdk2._get_proj().g.query(
+            "MATCH (e:Event) RETURN e.embedding, "
+            "e.embeddingRepairFailedAt").result_set
+        emb2, repair_marker = rows[0]
         assert emb2 is None, "e.embedding must be None under NO_NETWORK"
+        # E2E-15(d) omission-semantics pin (review-gate P2-3): NO repair
+        # attempt and NO marker are EVER written (embedding is EXCLUDED
+        # from completeness — a repair attempt would mark the unit)
+        assert repair_marker is None, \
+            f"NO_NETWORK must never write embeddingRepairFailedAt: {repair_marker}"
     finally:
         sdk2.close()
 
@@ -825,12 +965,20 @@ def test_s14_env_nonexistent_base_dir_prewalk_error(tmp_path):
 @pytest.mark.skipif(not Path(HOOK).exists(),
                     reason="hook script not present in the worktree")
 def test_e2e15_h2_crash_mid_write_recovery(tmp_path):
-    """E2E-15(h) crash-mid-write recovery sub-leg (cycle-16 pin): fire with
-    the sweep child KILLED mid-report (partial capture file) → fire again →
-    assert the capture file contains only the SECOND fire's COMPLETE report
-    (the truncate cleared the partial — the recovery guarantee, asserted
-    end-to-end)."""
-    import signal as _sig
+    """E2E-15(h) crash-mid-write recovery sub-leg (cycle-16 pin): the
+    capture target holds a PARTIAL report (the crash-mid-write state) → fire
+    again → assert the capture file contains ONLY the SECOND fire's
+    COMPLETE report (the truncate cleared the partial — the recovery
+    guarantee, asserted end-to-end).
+
+    REVIEW-GATE P2-2 DEVIATION (deterministic, documented): the plan's
+    "kill the child mid-report" induction is racy by construction (the
+    report is written in a few ms — a timed kill lands before/after the
+    write nondeterministically). The recovery guarantee the plan pins is
+    "the truncate cleared the partial" — exercised here DETERMINISTICALLY
+    by truncating the capture to a partial report before fire 2 (a
+    truncate-on-open implementation clears it; an append implementation
+    leaves the partial residue and the assertions fail)."""
     import time as _time
     corpus = tmp_path / "corpus"; corpus.mkdir()
     (corpus / "s.md").write_text("---\nsessionId: hk3\ntitle: Hook\n---\nBody")
@@ -849,24 +997,25 @@ def test_e2e15_h2_crash_mid_write_recovery(tmp_path):
         "TORTOISE_INDEX_LOCK_DIR": str(tmp_path / "locks"),
     }
     os.makedirs(env["TORTOISE_INDEX_LOCK_DIR"], exist_ok=True)
-    # fire 1: kill the sweep child mid-report (partial capture)
+    # fire 1: a COMPLETE first report (the baseline)
     r1 = _run_hook(env=env, transcript_path=transcript)
     assert r1.returncode == 0
     _time.sleep(1)
-    for _ in range(30):
-        if Path(cap).exists() and Path(cap).stat().st_size > 0:
+    for _ in range(60):
+        if Path(cap).exists() and "file_count" in Path(cap).read_text():
             break
-        _time.sleep(0.5)
-    # kill any leftover sweep child + daemon to force a partial capture
-    for proc in _iter_child_pythons(env["TORTOISE_DB_PATH"]):
-        try:
-            os.kill(proc, _sig.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
-    _time.sleep(1)
-    partial = Path(cap).read_text() if Path(cap).exists() else ""
-    # fire 2: the truncate clears the partial → the file holds the COMPLETE
-    # second report (JSON line parseable, no partial residue)
+        _time.sleep(1)
+    assert Path(cap).exists() and "file_count" in Path(cap).read_text(), \
+        f"first fire never reported: {Path(cap).read_text() if Path(cap).exists() else 'no capture'}"
+    # simulate the crash-mid-write state: truncate the capture to a PARTIAL
+    # report (a short fixed prefix of the JSON line — exactly the state a
+    # killed child leaves; half-the-line could still contain "file_count")
+    full = Path(cap).read_text()
+    Path(cap).write_text(full[:12])
+    partial = Path(cap).read_text()
+    assert "file_count" not in partial, "partial must not be complete"
+    # fire 2: the truncate clears the partial → the file holds ONLY the
+    # COMPLETE second report (JSON line parseable, no partial residue)
     r2 = _run_hook(env=env, transcript_path=transcript)
     assert r2.returncode == 0
     _time.sleep(1)
@@ -876,11 +1025,12 @@ def test_e2e15_h2_crash_mid_write_recovery(tmp_path):
         _time.sleep(1)
     content = Path(cap).read_text() if Path(cap).exists() else ""
     assert "file_count" in content
-    # the second report parses as ONE JSON line (no partial-then-complete
-    # concatenation residue); the unit was already indexed by fire 1, so
-    # fire 2 legitimately reports skipped — the guarantee is the COMPLETE
-    # report, not the index delta
-    first_line = content.strip().splitlines()[0]
+    # the partial residue is GONE: ONE parseable JSON line, nothing before
+    # it (an append implementation would prepend the half-line garbage)
+    lines = content.splitlines()
+    assert lines and lines[0].strip().startswith("{"), \
+        f"partial residue not cleared: {content[:200]!r}"
+    first_line = lines[0]
     import json as _json
     d = _json.loads(first_line)
     assert d["file_count"] == 1, d
@@ -889,7 +1039,11 @@ def test_e2e15_h2_crash_mid_write_recovery(tmp_path):
 
 def _iter_child_pythons(db_path: str):
     """Best-effort: find sweep-child python processes holding the given db
-    (via the db .settings registry's pidfile when present)."""
+    (via the db .settings registry's pidfile when present).
+
+    Retained for the (h2) crash-mid-write induction on hosts where a timed
+    kill is desired; the default (h2) leg uses the deterministic partial-
+    capture rewrite (review-gate P2-2)."""
     import subprocess as _sp
     pidfile = db_path + ".settings"
     if not Path(pidfile).exists():
@@ -903,3 +1057,156 @@ def _iter_child_pythons(db_path: str):
     except Exception:
         pass
     return []
+
+
+def _daemon_holding(db_path: str) -> int | None:
+    """Return the live pid holding the embedded daemon for db_path (via the
+    redislite .settings registry's pidfile), or None. Used by the leg-(i)
+    barrier: the hook child's busy-probe only fires when the registry is
+    COMPLETE (pidfile present + pid alive) — a bare db.settings existence is
+    NOT enough (redislite writes the file before the pidfile key; a probe
+    racing that window silently JOINS the manual daemon → the #6761
+    concurrent-writer class)."""
+    import json as _json
+    settings = Path(db_path).with_name(Path(db_path).name + ".settings")
+    if not settings.is_file():
+        return None
+    try:
+        s = _json.loads(settings.read_text(encoding="utf-8"))
+        pf = s.get("pidfile")
+        if pf and Path(pf).is_file():
+            pid = int(Path(pf).read_text().strip())
+            try:
+                os.kill(pid, 0)
+                return pid
+            except ProcessLookupError:
+                return None
+            except PermissionError:
+                return pid  # alive, not ours to signal
+    except Exception:  # noqa: BLE001 — registry unreadable ⇒ no probe
+        pass
+    return None
+
+
+@pytest.mark.skipif(not Path(HOOK).exists(),
+                    reason="hook script not present in the worktree")
+def test_e2e15_i_hook_vs_sweep_overlap(tmp_path):
+    """E2E-15(i) — the §5.3 production pin's hook-path test surface (cycle-24
+    physical landing; review-gate P1-2): fire the hook while a MANUAL
+    `tortoise index directory` sweep is MID-FLIGHT on the same corpus +
+    embedded DB (barrier via a slow-fixture corpus + the daemon-up poll) →
+    the second opener's §5.3 busy-probe detects the live holder →
+    EmbeddedStoreBusyError INSPECTABLE in the CHILD_STDERR capture (hook
+    still exits 0 — the hook NEVER blocks) AND the first sweep completes +
+    the fixture is indexed EXACTLY ONCE (zero duplicate urls); the follow-up
+    sequential run converges (skipped)."""
+    import time as _time
+    corpus = tmp_path / "corpus"; corpus.mkdir()
+    # slow-fixture: enough session files that the manual sweep holds the
+    # daemon across the hook fire (walk + hash + MERGE per file; ~25ms/file
+    # warm — 400 files ≈ 10s, far wider than the child's ~2s probe window)
+    for i in range(400):
+        (corpus / f"s{i:03d}.md").write_text(
+            f"---\nsessionId: ov{i:03d}\ntitle: Ov{i:03d}\n---\nBody {i}")
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(json.dumps({
+        "type": "user", "message": {"role": "user", "content": "hi"},
+    }) + "\n")
+    db = os.path.join(str(tmp_path), "hook.db")
+    cap = str(tmp_path / "child.log")
+    lock_dir = str(tmp_path / "locks")
+    os.makedirs(lock_dir, exist_ok=True)
+
+    e = dict(os.environ)
+    for k in ("TORTOISE_DB_URI", "TORTOISE_DB_PATH", "FALKORDB_HOST",
+              "FALKORDB_PORT", "FALKORDB_PASSWORD"):
+        e.pop(k, None)
+    e.update({
+        "TORTOISE_DB_PATH": db,
+        "TORTOISE_INDEX_NO_NETWORK": "1",
+        "TORTOISE_INGEST_BASE_DIR": str(tmp_path),
+        "TORTOISE_INDEX_LOCK_DIR": lock_dir,
+    })
+    # ── the MANUAL sweep starts FIRST (the live holder) ──
+    manual = subprocess.Popen(
+        [sys.executable, "-m", "tortoise", "index", "directory",
+         str(corpus)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        env=e, cwd=str(REPO_ROOT),
+    )
+    manual_out = manual_err = ""
+    try:
+        # barrier: the manual sweep's daemon must be UP with a LIVE pidfile
+        # before the hook fires — the hook child must probe a LIVE holder
+        # (never a cold-start race and never a bare-settings race where the
+        # child silently JOINS the daemon — the #6761 crash class)
+        _time.sleep(1)
+        holder = None
+        for _ in range(60):
+            holder = _daemon_holding(db)
+            if holder is not None:
+                break
+            if manual.poll() is not None:
+                manual_out, manual_err = manual.communicate(timeout=30)
+                raise AssertionError(
+                    f"manual sweep exited early rc={manual.returncode}: "
+                    f"{manual_err[-500:]!r}")
+            _time.sleep(0.5)
+        assert holder is not None, "manual daemon (live pidfile) never came up"
+        # double-check the holder is still alive + the sweep still mid-flight
+        assert _daemon_holding(db) is not None, "holder died before the hook fire"
+        assert manual.poll() is None, "manual sweep already exited"
+        # ── fire the hook mid-flight ──
+        env = {
+            "TORTOISE_SESSION_CORPUS": str(corpus),
+            "TORTOISE_INGEST_BASE_DIR": str(tmp_path),
+            "TORTOISE_DB_PATH": db,
+            "TORTOISE_INDEX_NO_NETWORK": "1",
+            "TORTOISE_INDEX_CHILD_STDERR": cap,
+            "TORTOISE_INDEX_LOCK_DIR": lock_dir,
+        }
+        r = _run_hook(env=env, transcript_path=transcript)
+        assert r.returncode == 0, r.stderr   # the hook NEVER blocks
+        _time.sleep(1)
+        for _ in range(60):
+            if (Path(cap).exists()
+                    and "EmbeddedStoreBusyError" in Path(cap).read_text()):
+                break
+            _time.sleep(1)
+        assert Path(cap).exists(), "capture never written"
+        content = Path(cap).read_text()
+        assert "EmbeddedStoreBusyError" in content, content
+    finally:
+        manual_out, manual_err = manual.communicate(timeout=180)
+    assert manual.returncode == 0, \
+        f"manual sweep failed rc={manual.returncode}: {manual_err[-2000:]}"
+    d = json.loads(manual_out.splitlines()[0])
+    assert d["file_count"] == 400 and d["indexed"] == 400 \
+        and d["failed"] == 0, d
+    # the fixture is indexed EXACTLY ONCE (zero duplicate urls)
+    _time.sleep(1)
+    for _ in range(60):
+        if not Path(db + ".settings").exists():
+            break
+        _time.sleep(1)
+    sdk = TortoiseSDK(db)
+    try:
+        g = sdk._get_proj().g
+        dups = g.query(
+            "MATCH (s:Source) WITH s.url AS u, count(*) AS c "
+            "WHERE c > 1 RETURN u"
+        ).result_set
+        assert dups == [], f"duplicate urls: {dups}"
+        assert g.query("MATCH (s:Source) RETURN count(s)"
+                       ).result_set[0][0] == 400
+    finally:
+        sdk.close()
+    # follow-up sequential run converges (the plan's (i) end state)
+    r2 = subprocess.run(
+        [sys.executable, "-m", "tortoise", "index", "directory",
+         str(corpus)],
+        capture_output=True, text=True, env=e, cwd=str(REPO_ROOT), timeout=120,
+    )
+    assert r2.returncode == 0, r2.stderr
+    d2 = json.loads(r2.stdout.splitlines()[0])
+    assert d2["skipped"] == 400 and d2["indexed"] == 0, d2

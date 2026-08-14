@@ -100,22 +100,28 @@ if [ -z "$TORTOISE_BIN" ]; then
   # passed POSITIONALLY, resolved via session_corpus_dir() (honors
   # TORTOISE_SESSION_CORPUS else ~/.tortoise/docs/conversations).
   # tortoise-hook-version: 2
-  SWEEP_CORPUS="$("$PYTHON_BIN" -c "
-import sys, os
-sys.path.insert(0, '$TORTOISE_MODULE')
+  #
+  # Path-hygiene (review-gate P1): NEVER string-interpolate an operator-
+  # controlled path into the python -c source (a quote in
+  # TORTOISE_SESSION_CORPUS/$HOME would SyntaxError the snippet → an
+  # invisible child crash silently killing the #280 sweep). The corpus dir
+  # travels as argv[1]; the module root travels via TORTOISE_MODULE env.
+  SWEEP_CORPUS="$(TORTOISE_MODULE="$TORTOISE_MODULE" "$PYTHON_BIN" -c "
+import os, sys
+sys.path.insert(0, os.environ['TORTOISE_MODULE'])
 from tortoise.session_indexer import session_corpus_dir
 print(session_corpus_dir())" 2>/dev/null || true)"
   [ -z "$SWEEP_CORPUS" ] && SWEEP_CORPUS="$HOME/.tortoise/docs/conversations"
-  nohup "$PYTHON_BIN" -c "
-import sys, os
-sys.path.insert(0, '$TORTOISE_MODULE')
+  TORTOISE_MODULE="$TORTOISE_MODULE" nohup "$PYTHON_BIN" -c "
+import os, sys
+sys.path.insert(0, os.environ['TORTOISE_MODULE'])
 from tortoise.__main__ import main
 # TORTOISE_INDEX_CHILD_STDERR debug-redirect is OPT-IN: only when the
 # operator set it (never force-write a file at every session close —
 # review-gate P2). truncate-on-open + fail-safe inside the CLI.
 os.environ.setdefault('TORTOISE_INDEX_CHILD_STDERR', '')
-raise SystemExit(main(['index', 'directory', '$SWEEP_CORPUS', '--metadata']))
-" >/dev/null 2>&1 &
+raise SystemExit(main(['index', 'directory', sys.argv[1], '--metadata']))
+" "$SWEEP_CORPUS" >/dev/null 2>&1 &
   "$PYTHON_BIN" -c "
 import sys
 sys.path.insert(0, '$TORTOISE_MODULE')

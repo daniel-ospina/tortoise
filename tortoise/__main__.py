@@ -2836,7 +2836,11 @@ def _cmd_index_directory(args) -> int:
             _stdout.close()
         return 1
     except Exception as e:
-        print(f"  ❌ graph unreachable: {e}", file=_stderr)
+        # name the exception CLASS — the §5.3 busy-probe failure class
+        # (EmbeddedStoreBusyError) must be INSPECTABLE in the CHILD_STDERR
+        # capture (E2E-15(i) hook-vs-sweep overlap pin: "capture contains
+        # the named error class").
+        print(f"  ❌ graph unreachable ({type(e).__name__}): {e}", file=_stderr)
         if _redirect:
             _stdout.close()
         return 1
