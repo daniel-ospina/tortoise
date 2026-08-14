@@ -11,6 +11,13 @@ Channels are gated on their secrets being set in env:
 - Resend:   RESEND_API_KEY (Bearer), BILLING_NOTIFY_TO (recipient inbox)
 - Telegram: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 Absent secret → channel skipped (logged once per process).
+
+Sender identity (#1136): the Resend sender comes from RESEND_FROM_EMAIL — the
+single managed sender identity shared with the transactional invite sender
+(email_notify.py) — so one domain/identity is managed in env
+(deploy-hosted.yml + .env.example). BILLING_FROM_EMAIL overrides it when a
+distinct billing sender is desired (the pre-#1136 hardcoded
+billing@premiselabs.co).
 """
 from __future__ import annotations
 
@@ -23,7 +30,7 @@ from tortoise.telegram_push import send_message as telegram_send  # noqa: E402 �
 logger = logging.getLogger(__name__)
 
 RESEND_URL = "https://api.resend.com/emails"
-FROM_ADDRESS = "billing@premiselabs.co"
+DEFAULT_FROM_ADDRESS = "noreply@premiselabs.co"  # single managed sender identity (#1136)
 
 # Kinds mirror the audit/analytics event names (billing_upgrade, billing_downgrade,
 # billing_payment_failed, billing_cancel).
@@ -39,6 +46,16 @@ _skip_logged: set[str] = set()
 def _env(name: str) -> str | None:
     v = os.environ.get(name)
     return v.strip() if v and v.strip() else None
+
+
+def _from_address() -> str:
+    """Resend sender for billing notifications (#1136).
+
+    RESEND_FROM_EMAIL is the single managed sender identity (same env as the
+    transactional invite sender). BILLING_FROM_EMAIL overrides it when a
+    distinct billing sender is desired. Falls back to the default identity.
+    """
+    return _env("BILLING_FROM_EMAIL") or _env("RESEND_FROM_EMAIL") or DEFAULT_FROM_ADDRESS
 
 
 def _skip_channel(channel: str, secret: str) -> bool:
@@ -82,7 +99,7 @@ def _send_resend(api_key: str, to: str, subject: str, html: str) -> None:
     resp = httpx.post(
         RESEND_URL,
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json={"from": FROM_ADDRESS, "to": [to], "subject": subject, "html": html},
+        json={"from": _from_address(), "to": [to], "subject": subject, "html": html},
         timeout=15.0,
     )
     resp.raise_for_status()
