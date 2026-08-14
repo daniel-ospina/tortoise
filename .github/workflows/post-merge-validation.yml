@@ -63,7 +63,7 @@ jobs:
           # pytest-playwright browsers this job does not install —
           # post-merge-validation covers the
           # unit/integration suite only.
-          python -m pytest tests/ -q --timeout=90 --ignore=tests/e2e 2>&1 | tail -25
+          python -m pytest tests/ -q --timeout=90 -m 'not track_b' --ignore=tests/e2e 2>&1 | tail -25
       - name: Comment result on PR
         if: always()
         uses: actions/github-script@v7

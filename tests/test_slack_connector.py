@@ -25,6 +25,10 @@ def test_message_to_event_basic():
     assert ev["source"] == "slack:C01"
     assert ev["participants"] == ["U01"]
     assert ev["parentEvent"] is None
+    assert ev["sourceKind"] == "slack_message"
+    # #388: permalink enrichment is ingest-scoped — the pure mapper carries no
+    # sourceUrl (projection falls back to the container-level slack:C01 key)
+    assert "sourceUrl" not in ev
 
 
 def test_message_to_event_thread_reply():
@@ -73,6 +77,50 @@ def test_message_to_event_unknown_user():
     ev = sc._message_to_event({"text": "hi", "ts": "1.2"})
     assert ev is not None
     assert ev["subject"] == "slack:C:unknown"
+
+
+# ── #388: permalink-with-fallback enrichment (ingest-scoped) ───────────
+
+def test_enrich_source_urls_attaches_permalink():
+    """#388: ingest() enriches slack events with per-message permalinks via
+    chat.getPermalink; poll() alone stays API-call-free."""
+    sc = SlackConnector(config={"token": "xoxb-test", "channel_id": "C01"})
+    events = [sc._message_to_event({
+        "text": "hello", "ts": "1690000000.123456", "user": "U01"
+    })]
+
+    class _FakeClient:
+        def chat_getPermalink(self, channel=None, message_ts=None):
+            return {"permalink": f"https://ws.slack.com/archives/{channel}/p{message_ts}"}
+
+    sc._client = lambda: _FakeClient()
+    sc._enrich_source_urls(events)
+    assert events[0]["sourceUrl"] == (
+        "https://ws.slack.com/archives/C01/p1690000000.123456")
+
+
+def test_enrich_source_urls_falls_back_when_permalink_fails():
+    """#388: permalink failure/absence leaves sourceUrl unset — the projection
+    falls back to the container-level `slack:{channel}` Source key."""
+    sc = SlackConnector(config={"token": "xoxb-test", "channel_id": "C01"})
+    events = [sc._message_to_event({
+        "text": "hello", "ts": "1690000000.123456", "user": "U01"
+    })]
+
+    class _BoomClient:
+        def chat_getPermalink(self, channel=None, message_ts=None):
+            raise RuntimeError("api down")
+
+    sc._client = lambda: _BoomClient()
+    sc._enrich_source_urls(events)
+    assert "sourceUrl" not in events[0]
+
+
+def test_enrich_source_urls_noop_without_config():
+    """#388: no token/channel → enrichment is a no-op (no client, no calls)."""
+    sc = SlackConnector(config={"token": "", "channel_id": ""})
+    sc._client = lambda: (_ for _ in ()).throw(AssertionError("must not init"))
+    sc._enrich_source_urls([{"sourceKind": "slack_message"}])  # no crash
 
 
 # ── Timestamp conversion ─────────────────────────────────────────

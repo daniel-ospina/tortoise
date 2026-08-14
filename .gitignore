@@ -3,6 +3,7 @@ __pycache__/
 .worktrees/
 __pycache__/
 *.egg-info/
+.venv/
 .wrangler/
 premise-labs/.wrangler/
 :memory:
@@ -22,3 +23,6 @@ data/migrations/
 # #1148: dashboard build artifacts (node_modules is huge; dist/ IS committed)
 website/apps/dashboard/node_modules/
 .venv/
+
+# Issue #316 benchmark outputs (regenerated per run)
+benchmarks/reports/

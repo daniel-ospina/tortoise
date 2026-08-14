@@ -14,6 +14,24 @@ doc_status: live
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
 >
+> **Changelog v3.8 (2026-08-13, issue #388 — connector Source nodes):**
+> - §3.4: connector events (GitHub/Linear/Slack poll + webhook + entity paths)
+>   now materialize Source nodes at the projection choke point (`_upsert_event`,
+>   projection/entities.py) — `(Source {url})-[:references]->(Event {eventId})`
+>   (+ `(Source)-[:references]->(Object {id})` on the GitHub entity path via an
+>   explicit `sourceObjectId` field). Gate fires only on a registered connector
+>   `sourceKind` or an explicit `sourceUrl` — never on bare `source` (mining
+>   events stay excluded). `sourceKind` is set on CREATE only (#398 never-
+>   overwrite contract: an existing Source's kind is authoritative on re-MERGE);
+>   re-materialization does not bump `version` (idempotent re-poll).
+> - §3.4/§5: `sourceKind` vocabulary gains `github_pr` (PR events — previously
+>   mislabeled `github_issue`) and `linear_cycle` (cycles — previously mislabeled
+>   `linear_card`); both register neutral in SOURCE_KIND_DEFAULTS (no EP
+>   inheritance change).
+> - §3.4: `Source.url` may be a container-scope string when no per-entity URL
+>   exists (`slack:{channel}` on permalink failure, `linear:{team_key}` for
+>   cycles) — deliberate non-URL fallback keying.
+>
 > **Changelog v3.6 (2026-08-11, epic #909 slice 3 — 13 ontology amendments, issue #948):**
 > Registration only — no new design (plan §4.3, numbered exactly 13):
 > 1. §4.5/§5: eventKind `AgentSession` (EXACT code spelling — capital A, sdk.py/session_indexer.py) + `sessionCaptured` declared an alias of the same concept — both remain valid kinds, no migration.
@@ -182,7 +200,9 @@ Per-type edges (chosen over single polymorphic edge — FalkorDB matrix-per-type
 |-----------|-----------|-----------|-------------|--------------------|---------|
 | `references` | Source → Document/Event/Object/Source | unidirectional | 1→many | — | The source links to / references this entity — target may be a Document, Event, Object, **or another Source** (producer extension in `link_source_to_entity`, #909 §4.3 #8 — previously validated only Document/Event/Object). Wired in the ingest path — `_upsert_document` links `(Source {url:doc_id})-[:references]->(Document {id:doc_id})` (#205); external artifacts referenced in a captured conversation become external Source nodes that the session Source `references` (referential chain, #909). |
 
-`(Point)-[:extractedFrom]->(Source)-[:references]->(Entity)` — layered provenance. Source carries `sourceKind` (extensible source TYPE vocabulary, e.g. `github_issue`, `slack_message`, `document`) and `credibilityTier` (T0-T4 credibility tier — see §4.6, #398).
+`(Point)-[:extractedFrom]->(Source)-[:references]->(Entity)` — layered provenance. Source carries `sourceKind` (extensible source TYPE vocabulary, e.g. `github_issue`, `github_pr`, `linear_card`, `linear_cycle`, `slack_message`, `document`) and `credibilityTier` (T0-T4 credibility tier — see §4.6, #398).
+
+Connector entities (GitHub/Linear/Slack) get Source nodes at the projection choke point: `_upsert_event` (projection/entities.py) materializes `(Source {url})-[:references]->(Event {eventId})` from connector event metadata (`sourceKind` + per-entity `sourceUrl`) — #388. The gate fires only on a registered connector `sourceKind` or an explicit `sourceUrl` (never on bare `source` — mining events stay excluded); `sourceKind` is set on CREATE only — a pre-existing Source's kind is authoritative (#398 never-overwrite contract) — and re-materialization does not bump `version` (no churn on re-poll). When no per-entity URL exists, `Source.url` falls back to a container-scope string (`slack:{channel}`, `linear:{team_key}`) — the reference still resolves; the key is just coarser than a permalink. The GitHub entity path additionally wires `(Source)-[:references]->(Object {id})` via an explicit `sourceObjectId` event field (`event.object` is never used as an Object key — it is the entity title on poll/webhook paths).
 
 ### §3.5 Subject → Event → Object (Procedural)
 
@@ -195,7 +215,7 @@ Per-type edges (chosen over single polymorphic edge — FalkorDB matrix-per-type
 
 > **One edge, two names:** `uses` (graph predicate) = `prov:used` (PROV property). Same thing — present tense in our vocabulary, past tense in PROV's. `produces` = `schema:result` (Activity→Entity, matching direction); `prov:wasGeneratedBy` names the reverse (Entity→Activity).
 >
-> **Mechanism provenance ("how was it produced"):** the producing mechanism is a first-class Object linked via `uses` — `(Event)-[:uses]->(Object {objectKind: skill|tool|agent|workflow})`. The mechanism is therefore searchable and shared (finite skill set, not per-event). Mechanism *specifics* (version, model, config, pipeline hash) live in the immutable event-log record, reachable via the Event's `eventId` — they are NOT materialized as per-event graph nodes (avoids O(events) node growth at scale). Full lineage: `(Point)-[:extractedFrom]->(Source)-[:references]->(Object:document)<-[:produces]-(Event {eventId})` → log record. (The `references` hop is wired in the ingest path for Documents — see §3.4; entity-reference detection in connectors remains a follow-up.)
+> **Mechanism provenance ("how was it produced"):** the producing mechanism is a first-class Object linked via `uses` — `(Event)-[:uses]->(Object {objectKind: skill|tool|agent|workflow})`. The mechanism is therefore searchable and shared (finite skill set, not per-event). Mechanism *specifics* (version, model, config, pipeline hash) live in the immutable event-log record, reachable via the Event's `eventId` — they are NOT materialized as per-event graph nodes (avoids O(events) node growth at scale). Full lineage: `(Point)-[:extractedFrom]->(Source)-[:references]->(Object:document)<-[:produces]-(Event {eventId})` → log record. (The `references` hop is wired in the ingest path for Documents and — since #388 — for connector entities at the `_upsert_event` choke point — see §3.4.)
 
 ### §3.6 Subject ↔ Subject (Organisational)
 
@@ -459,12 +479,14 @@ T0 (meta-analysis), T1 (peer-reviewed), T2 (expert), T3 (anecdotal), T4 (unverif
 ```
 
 > **v3.2 (#398):** `sourceKind` is the extensible source TYPE vocabulary — pack-declared
-> kinds (github_issue, slack_message, linear_card, document...) resolve to a tier ONLY
-> via explicit registration (`register_source_kind_default`) or an explicit
-> `credibilityTier` assignment; unknown kinds stay neutral (no inheritance). The
-> T0–T4 tier semantics above live on `credibilityTier`. The Beta-prior mapping
-> (T0=(10,1), T1=(5,1), T2=(3,1), T3=(2,1), T4=(1.1,1)) is the validated model
-> (docs/ep-source-credibility-experiment.md §1.1).
+> kinds (github_issue, github_pr, linear_card, linear_cycle, slack_message, document...)
+> resolve to a tier ONLY via explicit registration (`register_source_kind_default`) or
+> an explicit `credibilityTier` assignment; unknown kinds stay neutral (no inheritance).
+> Connector kinds register explicitly neutral in SOURCE_KIND_DEFAULTS
+> (source_credibility.py) — connector Source materialization (#388) therefore never
+> alters EP inheritance. The T0–T4 tier semantics above live on `credibilityTier`. The
+> Beta-prior mapping (T0=(10,1), T1=(5,1), T2=(3,1), T3=(2,1), T4=(1.1,1)) is the
+> validated model (docs/ep-source-credibility-experiment.md §1.1).
 
 > **Expansion-pack kinds live in the packs, not here.** Pack-declared kinds (dev:epic, product-strategy:product, etc.) are defined in their pack manifests (§9) and registered at load time via the pack registry. This file documents only the core vocabulary; it is not the home for pack kinds.
 
