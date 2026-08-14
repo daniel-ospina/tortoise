@@ -73,7 +73,9 @@ def test_interim_route_promotes_gated_draft(sdk):
 
 def test_interim_route_guarded_terminal_statuses(sdk):
     """The interim route is GUARDED draft→live: terminal statuses are
-    rejected (update_point validates against POINT_STATUS_VALUES)."""
+    rejected by the draft→live-only promote guard (the status is in
+    POINT_STATUS_VALUES, but update_point only promotes draft/NULL nodes
+    to live — no other status change)."""
     p = sdk.create_point("claim", "X.", status="draft")["id"]
     with pytest.raises(ValueError):
         sdk.update_point(p, status="superseded")
@@ -102,6 +104,10 @@ def test_no_zombie_operator_resolution_caveat(sdk):
     # promote BOTH endpoints via the interim route
     sdk.update_point(p1, status="live")
     sdk.update_point(p2, status="live")
+    assert _status(sdk, p1) == "live" and _status(sdk, p2) == "live"
+    # endpoint promotion does NOT touch the operator node
+    assert _status(sdk, op_id) == "draft", \
+        "endpoint promotion must not promote the operator (no zombie auto-resolution)"
     # the draft operator is STILL inert in default-mode EP selection
     # (draft status → #780 live filter), even though derived liveness
     # (>=2 live endpoints) now passes — the no-zombie-resolution caveat
