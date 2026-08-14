@@ -449,6 +449,22 @@ _embedded_busy_known: set[str] = set()
 _embedded_busy_guard = threading.Lock()
 
 
+def _ep_require_calibration_default() -> bool:
+    """#1157: shared default calibration posture for EP surfaces.
+
+    Every EP surface (compute_confidence, dream, get_confidence) resolves
+    ``require_calibration=None`` to this value — one knob for the #7478
+    target ("0 silent uncalibrated EP runs"). Reads
+    ``TORTOISE_EP_REQUIRE_CALIBRATION`` (default "1" → True — fail-closed
+    since the #344 flip landed via PR #1212; set "0" to opt out). Draft
+    points are excluded from the gate (#780/#1212), so draft-heavy test
+    graphs stay passable under the fail-closed default.
+    """
+    import os
+    raw = os.environ.get("TORTOISE_EP_REQUIRE_CALIBRATION", "1").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
 # Per-corpus in-process run locks: the embedded FalkorDBLite's cross-connection
 # MERGE semantics are broken under concurrency (observed: the ON CREATE branch
 # re-fires against an existing key created by ANOTHER connection — the
@@ -5909,7 +5925,8 @@ class TortoiseSDK:
         self._dirty_roots.update(r[0] for r in rows)
 
     def dream(self, dirty_only: bool = True, full: bool = False,
-              max_hops: int = 2) -> dict:
+              max_hops: int = 2,
+              require_calibration: bool | None = None) -> dict:
         """Run EP stabilization (#85).
 
         Args:
@@ -5918,10 +5935,23 @@ class TortoiseSDK:
                   with dirty_only + anchors.
             max_hops: EP subgraph expansion (keep ≥2 — contract with
                       _mark_dirty).
+            require_calibration: gate the EP run on calibration state —
+                  raises CalibrationError when evidence-kind points are
+                  uncalibrated (#1157). None (default) resolves to the shared
+                  posture, TORTOISE_EP_REQUIRE_CALIBRATION (default True —
+                  fail-closed, post-#344; set it to "0" to opt out). Dream
+                  WRITES n.confidence,
+                  so it must never silently run uncalibrated EP (#7478).
 
         Returns {iterations, converged, affected_claims} or the dream_all
         summary for full=True.
         """
+        # #1157: gate BEFORE any work — dream is an EP write surface
+        # (persists n.confidence); same posture as compute_confidence.
+        if require_calibration is None:
+            require_calibration = _ep_require_calibration_default()
+        if require_calibration:
+            self._ensure_calibrated("dream")
         dreamer = self._get_dreamer()
         if full:
             return dreamer.dream_all(max_hops=max_hops)
@@ -5969,7 +5999,7 @@ class TortoiseSDK:
                            max_hops: int = 1,
                            rel_filter: str = "IMPL|NAND",
                            direction: str = "both",
-                           require_calibration: bool = True,
+                           require_calibration: bool | None = None,
                            recency_decay: float | None = None) -> dict:
         """Compute confidence via EP belief propagation. Returns {iterations, converged, confidences}.
 
@@ -5992,9 +6022,12 @@ class TortoiseSDK:
                 (max_hops=None) over the dirty roots.
             rel_filter: edge types for BFS — "IMPL", "NAND", or "IMPL|NAND" (default).
             direction: IMPL edge traversal direction — "incoming", "outgoing", or "both" (default).
-            require_calibration: fail-closed gate (default True) — raises CalibrationError
-                when evidence points are uncalibrated. Pass False explicitly to opt out and
-                run EP on topology alone (the #7478 degenerate case — do not do this silently).
+            require_calibration: fail-closed gate — raises CalibrationError
+                when evidence points are uncalibrated. None (default) resolves
+                to the shared TORTOISE_EP_REQUIRE_CALIBRATION posture
+                (default "1" → True fail-closed, post-#344). Pass False
+                explicitly to opt out and run EP on topology alone (the #7478
+                degenerate case — do not do this silently).
             recency_decay: optional recency decay factor (default 0.95 from TORTOISE_EP_RECENCY_DECAY).
                 T0 sources exempt; lower tiers get gentle decay. 1.0 = no decay.
 
@@ -6012,32 +6045,13 @@ class TortoiseSDK:
         run_evidence = dict(self._evidence)
         if evidence:
             run_evidence.update(evidence)
-        # Calibration gate
+        # Calibration gate (#1157: shared check — dream / get_confidence use
+        # the same _ensure_calibrated helper; fail-closed by default (#344),
+        # one knob TORTOISE_EP_REQUIRE_CALIBRATION).
+        if require_calibration is None:
+            require_calibration = _ep_require_calibration_default()
         if require_calibration:
-            from .exceptions import CalibrationError
-            summary = self.calibrate_summary()
-            evidence_kinds = {"statement", "observation", "hypothesis"}
-            uncalibrated = [
-                s for s in summary
-                if not s["calibrated"]
-                and s.get("pointKind") in evidence_kinds
-                # #780: draft points never feed EP (factor extraction and
-                # propagation exclude them by default) — demanding calibration
-                # of a draft is noise; the gate only guards live evidence
-                # (PR #1212). Status NULL = live, mirroring _live_only.
-                and s.get("status") != "draft"
-            ]
-            if uncalibrated:
-                ids = [s["id"] for s in uncalibrated[:10]]
-                msg = (
-                    f"{len(uncalibrated)} uncalibrated evidence points "
-                    f"(first 10: {ids}). EP is fail-closed until every evidence "
-                    f"point is calibrated (#344). Run calibrate_summary() for "
-                    f"per-point guidance — set_point_baseline(), recreate with a "
-                    f"credibility kwarg, or set_source_tier() for sourced points — "
-                    f"or pass require_calibration=False to explicitly opt out."
-                )
-                raise CalibrationError(msg)
+            self._ensure_calibrated("compute_confidence")
         if factors is not None:
             operator_ids = [f if isinstance(f, str) else f[0] for f in factors]
             if not operator_ids:
@@ -6179,14 +6193,28 @@ class TortoiseSDK:
         )
         self._mark_dirty(point_ids)
 
-    def get_confidence(self, claim_id: str) -> dict:
+    def get_confidence(self, claim_id: str,
+                       require_calibration: bool | None = None) -> dict:
         """Get EP confidence for a claim: {mean, variance, alpha, beta}.
 
         Lazy consistency (#85): if the claim is a dirty root (confidence
         diverged after writes), dream it first so reads return fresh values.
+
+        Calibration posture (#1157): the lazy dream path WRITES n.confidence
+        and the read returns belief numbers — both must be gated on
+        calibration like compute_confidence. require_calibration=True raises
+        CalibrationError when evidence-kind points are uncalibrated; None
+        (default) resolves to the shared TORTOISE_EP_REQUIRE_CALIBRATION
+        posture (default True — fail-closed, post-#344; set
+        TORTOISE_EP_REQUIRE_CALIBRATION to "0" to opt out).
         """
+        if require_calibration is None:
+            require_calibration = _ep_require_calibration_default()
+        if require_calibration:
+            self._ensure_calibrated("get_confidence")
         if claim_id in self._dirty_roots:
-            self.dream(dirty_only=True)
+            self.dream(dirty_only=True,
+                       require_calibration=require_calibration)
         return self._get_ep().compute_confidence(claim_id)
 
     def _apply_source_inheritance(self, recency_decay: float | None = None,
@@ -6457,6 +6485,40 @@ class TortoiseSDK:
                         break
                 seen[pid] = item
         return deduped
+
+    def _ensure_calibrated(self, surface: str) -> None:
+        """#1157: shared calibration gate for EP surfaces.
+
+        Raises CalibrationError when evidence-kind Points (statement /
+        observation / hypothesis) are uncalibrated (no baseline). Extracted
+        from compute_confidence's require_calibration gate so dream and
+        get_confidence share the SAME check — the #7478 target is zero EP
+        surfaces running uncalibrated EP silently, not just the explicit
+        compute_confidence surface (#344 only covers the explicit surface).
+
+        Args:
+            surface: human-readable caller name for the error message
+                (e.g. "dream", "get_confidence").
+        """
+        from .exceptions import CalibrationError
+        summary = self.calibrate_summary()
+        evidence_kinds = {"statement", "observation", "hypothesis"}
+        uncalibrated = [
+            s for s in summary
+            if not s["calibrated"] and s.get("pointKind") in evidence_kinds
+            # #780/PR #1212: draft points never feed EP (factor extraction
+            # and propagation exclude them by default) — demanding
+            # calibration of a draft is noise; the gate only guards live
+            # evidence. Status NULL = live, mirroring _live_only.
+            and s.get("status") != "draft"
+        ]
+        if uncalibrated:
+            ids = [s["id"] for s in uncalibrated[:10]]
+            msg = (
+                f"{surface}: {len(uncalibrated)} uncalibrated evidence points. "
+                f"First 10: {ids}. Run calibrate_summary() for full guidance."
+            )
+            raise CalibrationError(msg)
 
 
     # ── P0 Group 3: Checkpoint, Diary, Status, Analyze, Ingest ────

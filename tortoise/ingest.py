@@ -80,12 +80,22 @@ def _infer_format(filepath: Path) -> str:
 
 # ── #133 upgrade helpers ────────────────────────────────────────────
 
-def _run_ep_propagation(proj):
-    """#133: Run EP confidence propagation after upgrade.
+def _run_ep_propagation(proj, *, label: str = "EP"):
+    """#133: Run EP confidence propagation after ingest/upgrade.
 
-    Lazy (on-demand) — called only after an upgrade, not on every ingest.
-    Note: EP requires the full factor graph for correct belief propagation,
-    so this iterates all operators (the graph is small at this scale).
+    Lazy (on-demand) — called only after an upgrade/ingest, not on every
+    ingest. Note: EP requires the full factor graph for correct belief
+    propagation, so this iterates all operators (the graph is small at this
+    scale).
+
+    #1157 calibration posture: evidence priors are synthesized ONLY from
+    claims with a STORED confidence (extractor confidence or a prior EP
+    posterior) — never the silent ``coalesce(n.confidence, 0.5)`` default.
+    Beta(1,1) uniform priors on uncalibrated claims are the exact silent
+    uncalibrated-EP pattern #7478 targets. Claims without stored confidence
+    are excluded and counted in the output line. When NO claim has stored
+    confidence the run is refused (skipped with a loud flag) — no EP on a
+    fully uncalibrated graph.
     """
     try:
         op_ids = [r[0] for r in proj.g.query(
@@ -97,23 +107,37 @@ def _run_ep_propagation(proj):
         claim_rows = proj.g.query(
             "MATCH (n:Point) "
             "WHERE n.is_operator = false "
-            "RETURN n.id, coalesce(n.confidence, 0.5)"
+            "RETURN n.id, n.confidence"
         ).result_set
         evidence = {}
+        uncalibrated = 0
         for cid, conf_raw in claim_rows:
-            conf = float(conf_raw)
+            if conf_raw is None:
+                uncalibrated += 1
+                continue
+            try:
+                conf = float(conf_raw)
+            except (TypeError, ValueError):
+                uncalibrated += 1
+                continue
             evidence[cid] = TortoiseEP.confidence_to_prior(conf)
+        if not evidence:
+            print(f"  {label}: skipped — no stored confidence on any claim "
+                  f"(graph uncalibrated); set credibility / baselines first")
+            return
         ep = proj.get_ep() if hasattr(proj, 'get_ep') else TortoiseEP(proj)
         n_iter, converged = ep.run(op_ids, max_hops=3, evidence=evidence)
-        print(f"  EP: {'converged' if converged else 'max iter'} in {n_iter} iterations"
-              f" ({len(evidence)} priors)")
+        suffix = (f" ({uncalibrated} uncalibrated claims excluded)"
+                  if uncalibrated else "")
+        print(f"  {label}: {'converged' if converged else 'max iter'} in "
+              f"{n_iter} iterations ({len(evidence)} priors){suffix}")
     except Exception as e:
         msg = str(e).lower()
         if any(kw in msg for kw in ("connection refused", "connection reset",
               "errno 61", "errno 111", "cannot connect", "no route to host")):
-            print(f"  EP propagation skipped (DB unavailable: {e})")
+            print(f"  {label}: propagation skipped (DB unavailable: {e})")
         else:
-            print(f"  EP propagation failed: {e}")
+            print(f"  {label}: propagation failed: {e}")
             raise
 
 def _do_upgrade(transcript, text, source_id, proj, api, args):
@@ -549,36 +573,10 @@ def main(argv=None):
                 if stats.get("failed_sections"):
                     print(f"warning: {len(stats['failed_sections'])} sections failed extraction")
                 # Post-extraction: propagate confidence using factor-graph EP
-                # (replaces BFS propagate_shock — bidirectional, quadrature-based)
-                try:
-                    op_ids = [r[0] for r in proj.g.query(
-                        "MATCH (o:Point) WHERE o.is_operator = true RETURN o.id"
-                    ).result_set]
-                    if op_ids:
-                        from tortoise.ep import TortoiseEP
-                        # Build evidence priors from extractor confidence values
-                        claim_rows = proj.g.query(
-                            "MATCH (n:Point) "
-                            "WHERE n.is_operator = false "
-                            "RETURN n.id, coalesce(n.confidence, 0.5)"
-                        ).result_set
-                        evidence = {}
-                        for cid, conf_raw in claim_rows:
-                            conf = float(conf_raw)
-                            evidence[cid] = TortoiseEP.confidence_to_prior(conf)
-                        ep = proj.get_ep() if hasattr(proj, 'get_ep') else TortoiseEP(proj)
-                        n_iter, converged = ep.run(op_ids, max_hops=3, evidence=evidence)
-                        print(f"EP: {'converged' if converged else 'max iter'} in {n_iter} iterations"
-                              f" ({len(evidence)} priors from extractor confidence)")
-                except Exception as e:
-                    # Only suppress DB-availability errors; let logic errors propagate.
-                    msg = str(e).lower()
-                    if any(kw in msg for kw in ("connection refused", "connection reset",
-                          "errno 61", "errno 111", "cannot connect", "no route to host")):
-                        print(f"tortoise.ingest: EP propagation skipped (DB unavailable: {e})")
-                    else:
-                        print(f"tortoise.ingest: EP propagation failed: {e}")
-                        raise
+                # (replaces BFS propagate_shock — bidirectional, quadrature-based).
+                # #1157: shared helper — priors from stored confidence only;
+                # refuses (loud flag) when the graph has none.
+                _run_ep_propagation(proj, label="EP")
 
                 # S7: Semantic extraction (Subjects + Objects + aboutEntities)
                 if args.semantic_extract and is_doc:

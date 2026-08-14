@@ -22,6 +22,12 @@ Concurrency contract (#85):
   and the #176 process leak). Latency budget: ≤500ms on the dirty subgraph.
 - Hosted mode: per-tenant async queue in hosted_api.py; cooperative asyncio
   tasks (server-mode FalkorDB handles concurrency natively).
+
+Calibration posture (#1157): dreaming WRITES n.confidence, so it is an EP
+write surface — the SDK-level ``dream()`` gate (require_calibration) refuses
+uncalibrated runs before any EP work (CalibrationError), same posture as
+compute_confidence. This class is internal; the gate lives on the public
+``TortoiseSDK.dream`` surface so dream_all → dream chunks inherit it.
 """
 from __future__ import annotations
 
@@ -65,6 +71,11 @@ class Dreamer:
         over live claims); there is no include_draft escape hatch on this
         surface — call TortoiseEP.run(include_draft=True) directly for
         legacy behavior.
+
+        #1157 calibration: this is an EP WRITE surface (persists
+        n.confidence). Callers must gate on calibration state BEFORE calling
+        (the SDK surface does via require_calibration → CalibrationError);
+        do not invoke Dreamer directly with uncalibrated graphs.
         """
         if not anchors:
             return {"iterations": 0, "converged": True, "affected_claims": []}

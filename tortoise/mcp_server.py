@@ -1077,9 +1077,18 @@ def tortoise_set_point_baseline(claim_id: str, alpha: float, beta: float) -> dic
     return _safe(_get_team_sdk().set_point_baseline, claim_id, alpha, beta)
 
 
-def tortoise_get_confidence(claim_id: str) -> dict:
-    """Get EP confidence for a claim: {mean, variance, alpha, beta}."""
-    return _safe(_get_team_sdk().get_confidence, claim_id)
+def tortoise_get_confidence(claim_id: str,
+                            require_calibration: bool | None = None) -> dict:
+    """Get EP confidence for a claim: {mean, variance, alpha, beta}.
+
+    #1157: the (possibly writing) lazy-dream read is gated on calibration
+    state like the other EP surfaces — CalibrationError when evidence points
+    are uncalibrated. None (default) resolves to the shared fail-closed
+    posture TORTOISE_EP_REQUIRE_CALIBRATION (default True, post-#344); pass
+    False explicitly to opt out.
+    """
+    return _safe(_get_team_sdk().get_confidence, claim_id,
+                 require_calibration=require_calibration)
 
 
 def tortoise_calibrate_summary() -> list[dict]:
@@ -1088,12 +1097,18 @@ def tortoise_calibrate_summary() -> list[dict]:
 
 
 def tortoise_dream(full: bool = False, dirty_only: bool = True,
-                   max_hops: int = 2) -> dict:
+                   max_hops: int = 2,
+                   require_calibration: bool | None = None) -> dict:
     """Run EP stabilization (dreaming, #85).
 
     Stabilizes confidence values after batch writes without an explicit
     compute_confidence call. Default: dreams the accumulated dirty subgraph
     (incremental). Set full=True for whole-graph stabilization.
+
+    #1157: the EP write is gated on calibration state — CalibrationError when
+    evidence points are uncalibrated. None (default) resolves to the shared
+    fail-closed posture TORTOISE_EP_REQUIRE_CALIBRATION (default True,
+    post-#344); pass False explicitly to opt out.
 
     #329: EXCLUDED from tenant HTTP — whole-graph EP is CPU-heavy
     (operator/stdio only; REST /v1/dream is separately budgeted).
@@ -1101,7 +1116,8 @@ def tortoise_dream(full: bool = False, dirty_only: bool = True,
     if _transport_mode.get() == "http":
         return _http_excluded_error()
     return _safe(_get_team_sdk().dream, dirty_only=dirty_only, full=full,
-                 max_hops=max_hops)
+                 max_hops=max_hops,
+                 require_calibration=require_calibration)
 
 
 def tortoise_update_point(id: str, props: Any) -> dict:
