@@ -360,5 +360,5 @@ Each case is implementable as an automated test. **Harness (fixed per review):**
 
 ## Plan status markers
 
-<!-- substep-gates: A CLEAN (6 fixed) · B CLEAN (17 fixed across DM/Arch/IF) · C CLEAN (16 fixed across coverage/repro/test-quality) · D pending -->
+<!-- substep-gates: A CLEAN (6 fixed) · B CLEAN (17 fixed) · C CLEAN (16 fixed) · D CLEAN (20 fixed across drift/risk/improvement) -->
 <!-- human-gate-2: pending -->
