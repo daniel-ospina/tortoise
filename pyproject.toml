@@ -61,8 +61,18 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["tortoise*"]
+include = ["tortoise*", "benchmarks*"]
+
+[tool.pytest.ini_options]
+markers = [
+    "bench: issue #316 benchmark harness tests (benchmarks/ + tests/bench/)",
+]
 
 [build-system]
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+markers = [
+    "track_b: epic #902 Track B (post-#780) tests — inert under '-m not track_b' (A8 #1058)",
+]
