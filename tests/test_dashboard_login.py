@@ -202,6 +202,27 @@ class TestDashboardLoginGate:
         assert r.status_code == 200, r.text
         assert "dashboard_login_disabled" not in str(r.json())
 
+    def test_session_mgmt_degrades_under_0015_drift(self, client, fake,
+                                                    monkeypatch, caplog):
+        """#1096: the session branch (_session_user_team) routes through the
+        fail-soft seam — under 0015 drift session-authed management degrades
+        (200, never 500) and logs the WARNING tripwire. Pins the contract the
+        plan's surface map states (a revert to the raw combined query would
+        500 here with no other test catching it)."""
+        key, team_id = _provision_anon(client, fake)
+        user_id = f"user-{uuid.uuid4().hex[:8]}"
+        _patch_session_user(monkeypatch, user_id)
+        from tortoise.auth import lookup_hash
+        sc.claim_membership(fake, lookup_hash=lookup_hash(key),
+                            user_id=user_id, email="owner@example.com")
+        fake.missing_columns = {"teams": {"suspended_at", "flagged_at"}}
+        with caplog.at_level("WARNING", logger="tortoise.supabase_control"):
+            r = client.post("/v1/team/keys",
+                            headers={"Authorization": "Bearer eyJ.sess"},
+                            json={})
+        assert r.status_code == 200, r.text  # degrade, never 500
+        assert any("additive" in rec.message for rec in caplog.records)
+
 
 class TestClaimEmail:
     def test_claim_email_creates_user_and_claims(self, client, fake, monkeypatch):
