@@ -90,6 +90,13 @@ tortoise session list                               # what's been captured
 tortoise context                                    # memory digest for session-start hooks
 ```
 
+**Meeting transcripts:** the manual mining flow (transcript → meeting/decision/
+friction events + draft Points) is a local CLI/SDK path — see the
+meeting-transcripts section of [quickstart-selfhosted.md](quickstart-selfhosted.md).
+Over hosted HTTP the `tortoise_mine_conversations` tool is stdio-only for
+security (#1090); run `tortoise serve` locally and connect your agent to it
+(stdio) to use it, or mine with the CLI against a local DB.
+
 ## 4. Use the REST API
 
 Base URL `https://api.premiselabs.co`, header `Authorization: Bearer tt_YOUR_KEY` on every request.

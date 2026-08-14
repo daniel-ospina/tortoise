@@ -8,7 +8,7 @@
 > **Design doc:** `docs/epics/2026-08-07-hosted-onboarding-235/artifacts/02-question-set.md`
 >
 > **How to use:** Paste this entire block into your agent after adding Tortoise
-> to your MCP config. The agent will guide you through 5 yes/no questions and
+> to your MCP config. The agent will guide you through 6 yes/no questions and
 > set up your memory in under 5 minutes.
 
 ---
@@ -131,6 +131,41 @@ directory of markdown files, I can index them into your memory."
 
 **If no:** "Skipping document ingestion. You can ingest docs later."
 
+### Q5b — Ingest meeting transcripts?
+
+_(Independent of Q5 — both can be "yes". This is the manual transcript path
+for beta testers, #1198: a meeting transcript → meeting/decision/friction
+Events + draft Points with Source provenance.)_
+
+**Ask:** "Would you like to ingest a meeting transcript? I can turn a
+conversation transcript into structured memory — a meeting event, decisions,
+and friction points, each tagged with its source. This is a manual flow: you
+paste a transcript (or give me a file path / directory) and I mine it into
+draft Points you can review before promoting."
+
+**If yes:**
+
+1. Get the transcript: ask the user to paste the text, provide a file path,
+   or use the bundled sample at `tests/sample_transcript.txt` (repo checkout)
+   to try the flow.
+2. Set expectations BEFORE calling: "Mining is deterministic and offline — no
+   LLM call. You'll get draft Points (reviewable, not live) with source
+   provenance; promote them when you're ready."
+3. Call `tortoise_mine_conversations(transcript=<text>, source_id=<meeting-name>)`
+   — or `corpus_dir=<directory>` to batch-mine a folder of transcripts.
+4. Show: "✅ Mined [N] events and [M] draft Points from <source_id> —
+   meeting, decisions, and friction. Drafts are reviewable; promote them when
+   ready."
+5. If the tool errors (HTTP transport — see error recovery): "Transcript
+   mining isn't available over hosted HTTP. Run `tortoise serve` locally and
+   connect your agent to it (stdio) to use `tortoise_mine_conversations`, or
+   use the CLI: `tortoise mine-conversation transcript.txt --source-id
+   <meeting>` (a sample ships at `tests/sample_transcript.txt`). I'll skip
+   ahead."
+
+**If no:** "Skipping transcript mining. You can file meeting notes anytime via
+`tortoise mine-conversation` (CLI) or by asking me to mine a transcript."
+
 ### Q6 — Show me!
 
 _(Always runs — regardless of answers to Q1–Q5)_
@@ -190,6 +225,13 @@ If a tool fails at runtime:
   directory isn't available in hosted mode. Run `tortoise serve` locally and
   connect your agent to it (stdio) to use `tortoise_ingest_corpus`, or run
   `tortoise onboard` for the self-hosted setup. I'll skip ahead."
+- **Q5b (Transcript mining):** If HTTP transport: "Transcript mining isn't
+  available over hosted HTTP. Run `tortoise serve` locally and connect your
+  agent to it (stdio) to use `tortoise_mine_conversations`, or use the CLI:
+  `tortoise mine-conversation transcript.txt --source-id <meeting>` — a
+  sample transcript ships at `tests/sample_transcript.txt` (see the
+  meeting-transcripts section of docs/quickstart-selfhosted.md). I'll skip
+  ahead."
 
 If `tortoise_health` fails at any point: "Lost connection to Tortoise. Check
 your network and try again."
@@ -216,6 +258,7 @@ specification with execution paths, state tracking, and error handling.
 | Q3 (Session recording) | `tortoise_onboarding_session_recording` | ✅ Live (HTTP) | `tortoise_diary_write` |
 | Q4 (Demo graph) | `tortoise_onboarding_demo_create` | ✅ Live (HTTP) | `tortoise_create_point` ×5 |
 | Q5 (Docs ingestion) | `tortoise_ingest_corpus` | ⚠️ Stdio-only | `tortoise serve` locally |
+| Q5b (Transcript mining) | `tortoise_mine_conversations` | ⚠️ Stdio-only (#1090 fs-walk) | `tortoise mine-conversation` CLI + `tests/sample_transcript.txt` |
 | Q6 (Verification) | `tortoise_health`, `tortoise_session_context`, `tortoise_summarize_structure` | ✅ Live | same |
 
 **Fallback behavior:** If a tool fails, the agent follows the error recovery
