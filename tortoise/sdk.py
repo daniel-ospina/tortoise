@@ -1080,6 +1080,30 @@ class TortoiseSDK:
                 "RETURN n.id",
                 params={"ch": ch, "kind": kind},
             ).result_set
+            # A10 CONTENT+KIND FALLBACK SCAN (cycle-17/18): a mid-function
+            # crash inside create_point (between the node CREATE and the
+            # content_hash/props SET loop) leaves a live Point WITHOUT
+            # content_hash — the content-hash MATCH misses, and a second
+            # point would be a permanent duplicate no later submission can
+            # dedup (exactly-once violated, E2E-6.4). On the shared miss, the
+            # fallback matches stored content against the item's content,
+            # constrained to hash-less points of the same kind. Order pin:
+            # fallback runs FIRST on the miss; a fallback HIT is a dedup (no
+            # straddle warning); a fallback MISS runs the raw MATCH below for
+            # the pre-change straddle. Rebuild-durable: content+kind survive
+            # the #548 snapshot (the hash-less point's content is intact).
+            if not existing:
+                fallback = proj.g.query(
+                    "MATCH (n:Point) "
+                    "WHERE n.is_operator = false "
+                    "AND n.pointKind = $kind "
+                    "AND n.content_hash IS NULL "
+                    "AND n.content = $content "
+                    "RETURN n.id",
+                    params={"kind": kind, "content": content},
+                ).result_set
+                if fallback:
+                    existing = fallback
             if existing:
                 pid = existing[0][0]
                 # Existing point already stores content_hash — don't re-write it
@@ -4294,6 +4318,21 @@ class TortoiseSDK:
                 "AND n.pointKind = $kind RETURN n.id",
                 params={"ch": _content_hash(content), "kind": kind},
             ).result_set
+            # A10 CONTENT+KIND fallback (cycle-17/18): mirror create_point's
+            # hash-less sibling detection so the counter is honest (a
+            # fallback hit counts as deduped, never created).
+            if not existed:
+                fallback = proj.g.query(
+                    "MATCH (n:Point) "
+                    "WHERE n.is_operator = false "
+                    "AND n.pointKind = $kind "
+                    "AND n.content_hash IS NULL "
+                    "AND n.content = $content "
+                    "RETURN n.id",
+                    params={"kind": kind, "content": content},
+                ).result_set
+                if fallback:
+                    existed = fallback
             point = self.create_point(kind, content, dedup=True, **item)
             pid = point["id"]
             if ref:

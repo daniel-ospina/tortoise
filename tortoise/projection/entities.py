@@ -163,6 +163,22 @@ class _EntityHandlers:
             "vf": p.get("validFrom"), "vt": p.get("validTo"),
             "now": _now_iso(),
         }
+        # A10 operator-scoped replay extension (cycle-22/23): the OperatorAdded
+        # point snapshot carries `direction` (stored ALWAYS) + `label` (stored
+        # when truthy) on the node — the fixed SET list above drops them,
+        # which post-rebuild (a) leaves direction=NULL (a direction-omitting
+        # bundle's resubmission MISSES its run-1 operator → duplicate +
+        # exactly-once violated), (b) re-opens the label cross-absorption
+        # class (a label-absent retry matches rebuilt label-NULL operators),
+        # and (c) flips every unidirectional operator to bidirectional in EP
+        # (ep.py coalesce default). Write them from the payload (ZERO new
+        # record fields — the carrier already exists).
+        if op:
+            set_clauses.append("n.direction=$dir")
+            params["dir"] = p.get("direction")
+            if p.get("label") is not None:
+                set_clauses.append("n.label=$label")
+                params["label"] = p["label"]
         # Phase 2 #49: context removed — never written
         self.g.query(
             "MERGE (n:Point {id:$id}) SET " + ", ".join(set_clauses),
