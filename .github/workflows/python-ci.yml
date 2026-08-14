@@ -46,8 +46,9 @@ name: Python CI
 #   0. ENV-BROKEN FILES are excluded from the fast job (they cannot pass
 #      in THIS job and would pollute every summary with noise; both are
 #      tracked in #647):
-#      - tests/e2e/           — browser tests; covered by ci.yml's
-#                               welcome-e2e / legal-e2e jobs, which run
+#      - tests/e2e/           — browser tests; covered by the
+#                               welcome-e2e-monitor workflow + ci.yml's
+#                               legal-e2e job, which run
 #                               `playwright install --with-deps chromium`.
 #                               Without browsers they only ever ERROR here.
 #      - tests/test_agent_signup.py — control-plane suite requiring a live
