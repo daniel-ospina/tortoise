@@ -7606,6 +7606,278 @@ async def webhooks_stripe(request: Request):
         return JSONResponse(status_code=500, content={"detail": "processing failed"})
 
 
+# ── OAuth 2.1 for remote MCP (#524) ─────────────────────────────────────
+# Authorization-code + PKCE server with DCR + RFC 8707 resource indicators,
+# Supabase-auth-backed (D2). Locked decisions in
+# docs/scoping/2026-08-15-524-oauth-mcp-scoping.md; protocol logic lives in
+# tortoise/oauth.py (control-plane seam, OAuthError → RFC 6749 error JSON).
+# D3: MCP-only — REST /v1/* keeps tt_ + session-JWT; tt_ stays the permanent
+# documented fallback. Selfhost/registry mode: functional endpoints fail
+# closed 503 (OAuth is hosted-only); the well-known metadata endpoints still
+# serve (they describe the hosted AS; harmless static JSON).
+
+# DCR per-IP limiter (RFC 7591 registration is an unauthenticated write
+# surface — reuses the shared per-IP bucket primitive, 20/hr default).
+_OAUTH_DCR_BUCKETS: dict[str, list[float]] = defaultdict(list)
+_OAUTH_DCR_LOCK = asyncio.Lock()
+_OAUTH_DCR_MAX_PER_HOUR = int(os.environ.get("TORTOISE_OAUTH_DCR_PER_HOUR", "20"))
+
+
+def _oauth_control_plane() -> tuple:
+    """(cp, is_enabled) — fail-closed: OAuth functions 503 in registry mode."""
+    from tortoise.supabase_control import get_control_plane, is_supabase_enabled
+    enabled = is_supabase_enabled()
+    cp = get_control_plane() if enabled else None
+    return cp, enabled
+
+
+def _oauth_base(request: Request) -> str:
+    """Origin for RFC 8707 resource URIs (request.base_url in tests resolves
+    to http://testserver — production is https://api.premiselabs.co)."""
+    return str(request.base_url).rstrip("/")
+
+
+def _oauth_error_response(exc: "OAuthError") -> JSONResponse:
+    return JSONResponse(status_code=exc.status, content=exc.body())
+
+
+@app.get("/.well-known/oauth-protected-resource")
+@app.get("/.well-known/oauth-protected-resource/mcp")
+async def oauth_protected_resource(request: Request):
+    """RFC 9728 Protected Resource Metadata (P1).
+
+    Served at both the root and path-based well-known URI (the MCP SDK tries
+    ``/.well-known/oauth-protected-resource/mcp`` first, then the root form).
+    """
+    from tortoise.oauth import protected_resource_metadata
+    return protected_resource_metadata(_oauth_base(request))
+
+
+@app.get("/.well-known/oauth-authorization-server")
+@app.get("/.well-known/oauth-authorization-server/mcp")
+async def oauth_authorization_server_metadata(request: Request):
+    """RFC 8414 Authorization Server Metadata (P1)."""
+    from tortoise.oauth import authorization_server_metadata
+    return authorization_server_metadata(_oauth_base(request))
+
+
+@app.get("/oauth/authorize")
+async def oauth_authorize(request: Request):
+    """Authorization endpoint (P2) — validates the request and renders the
+    branded consent page (D2; the single custom HTML page reusing the
+    signup/signin pattern). The browser signs in via supabase-js, then posts
+    the session JWT to /oauth/consent which mints the auth code.
+    """
+    from tortoise.oauth import (
+        OAuthError, consent_page_html, validate_authorize_params,
+    )
+    cp, enabled = _oauth_control_plane()
+    if not enabled or cp is None:
+        raise HTTPException(status_code=503, detail="OAuth not configured")
+    params = {
+        "client_id": request.query_params.get("client_id", ""),
+        "redirect_uri": request.query_params.get("redirect_uri", ""),
+        "response_type": request.query_params.get("response_type", ""),
+        "code_challenge": request.query_params.get("code_challenge", ""),
+        "code_challenge_method": request.query_params.get("code_challenge_method", "S256"),
+        "state": request.query_params.get("state", ""),
+        "scope": request.query_params.get("scope", ""),
+        "resource": request.query_params.get("resource", ""),
+    }
+    try:
+        client = validate_authorize_params(
+            cp, client_id=params["client_id"],
+            redirect_uri=params["redirect_uri"] or None,
+            response_type=params["response_type"] or None,
+            code_challenge=params["code_challenge"] or None,
+            code_challenge_method=params["code_challenge_method"] or None,
+        )
+    except OAuthError as exc:
+        # Invalid authorize params → RFC 6749 §4.1.2.1 error to the browser.
+        # Open-redirect guard: only redirect when the redirect_uri is
+        # REGISTERED for the client — never echo an unvalidated param.
+        from tortoise.oauth import get_client
+        client = get_client(cp, params["client_id"]) if params["client_id"] else None
+        if (params["redirect_uri"] and client is not None
+                and params["redirect_uri"] in (client.get("redirect_uris") or [])):
+            from urllib.parse import urlencode
+            sep = "&" if "?" in params["redirect_uri"] else "?"
+            return RedirectResponse(
+                params["redirect_uri"] + sep + urlencode(
+                    {"error": exc.error, "state": params["state"]}))
+        return _oauth_error_response(exc)
+    html, nonce = consent_page_html(
+        client_name=client.get("client_name") or client["id"],
+        scope=params["scope"] or client.get("scope") or "mcp",
+        params=params,
+        supabase_url=os.environ.get("SUPABASE_URL", ""),
+        supabase_anon_key=os.environ.get("SUPABASE_ANON_KEY", ""),
+    )
+    # CSP (PR #1264 review P1): script-src is nonce-gated so the inline
+    # consent logic runs while a payload that somehow escapes the JSON
+    # embedding still cannot execute; connect-src allows the supabase-js
+    # REST calls; frame-ancestors blocks clickjacking.
+    from urllib.parse import urlparse
+    supabase_origin = ""
+    _u = urlparse(os.environ.get("SUPABASE_URL", ""))
+    if _u.scheme and _u.netloc:
+        supabase_origin = f"{_u.scheme}://{_u.netloc}"
+    csp = (
+        "default-src 'none'; "
+        f"script-src 'nonce-{nonce}' https://cdn.jsdelivr.net; "
+        "style-src 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        f"connect-src 'self' {supabase_origin}; "
+        "base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+    )
+    return Response(html, media_type="text/html",
+                    headers={"Content-Security-Policy": csp})
+
+
+@app.get("/oauth/consent/preview")
+async def oauth_consent_preview(request: Request):
+    """Consent-page team preview (D4): which team a grant would bind, given
+    the session JWT + client-declared resource indicator. No state change.
+    """
+    from tortoise.oauth import OAuthError, consent_preview
+    cp, enabled = _oauth_control_plane()
+    if not enabled or cp is None:
+        raise HTTPException(status_code=503, detail="OAuth not configured")
+    user = await verify_session_jwt(request)
+    try:
+        return consent_preview(cp, user["user_id"], _oauth_base(request),
+                               request.query_params.get("resource") or None)
+    except OAuthError as exc:
+        return _oauth_error_response(exc)
+
+
+@app.post("/oauth/consent")
+async def oauth_consent(request: Request):
+    """Consent confirmation (P2): verifies the browser session JWT via the
+    shared JWKS path, resolves the team (RFC 8707, D4), mints a single-use
+    PKCE-bound authorization code, returns {code, state} for the redirect.
+    """
+    from tortoise.oauth import (
+        OAuthError, issue_auth_code, validate_authorize_params,
+    )
+    cp, enabled = _oauth_control_plane()
+    if not enabled or cp is None:
+        raise HTTPException(status_code=503, detail="OAuth not configured")
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    try:
+        client = validate_authorize_params(
+            cp, client_id=body.get("client_id", ""),
+            redirect_uri=body.get("redirect_uri") or None,
+            response_type=body.get("response_type") or None,
+            code_challenge=body.get("code_challenge") or None,
+            code_challenge_method=body.get("code_challenge_method") or "S256",
+        )
+    except OAuthError as exc:
+        return _oauth_error_response(exc)
+    # The browser session JWT — same JWKS/RS256 verification the session
+    # endpoints use (D2: reuse session_auth verify; no new auth stack).
+    user = await verify_session_jwt(request)
+    try:
+        code, _team_id = issue_auth_code(
+            cp, client_id=client["id"], user_id=user["user_id"],
+            base=_oauth_base(request),
+            redirect_uri=body["redirect_uri"],
+            code_challenge=body["code_challenge"],
+            state=body.get("state"),
+            scope=body.get("scope") or client.get("scope") or "mcp",
+            resource=body.get("resource") or None,
+        )
+    except OAuthError as exc:
+        return _oauth_error_response(exc)
+    return {"code": code, "state": body.get("state"),
+            "redirect_uri": body["redirect_uri"]}
+
+
+@app.post("/oauth/token")
+async def oauth_token(request: Request):
+    """Token endpoint (P2 + P4 + D5): authorization_code exchange and
+    refresh_token rotation (RFC 6749 §4.1.3 / §6, RFC 7009 semantics).
+    Form-encoded body per OAuth; errors are RFC 6749 §5.2 JSON.
+    """
+    from tortoise.oauth import (
+        OAuthError, exchange_auth_code, refresh_grant,
+    )
+    cp, enabled = _oauth_control_plane()
+    if not enabled or cp is None:
+        raise HTTPException(status_code=503, detail="OAuth not configured")
+    from urllib.parse import parse_qs
+    try:
+        raw = await request.body()
+        body = {k: v[0] for k, v in parse_qs(raw.decode()).items()}
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid form body")
+    grant = body.get("grant_type")
+    try:
+        if grant == "authorization_code":
+            out = exchange_auth_code(cp, body, _oauth_base(request))
+        elif grant == "refresh_token":
+            out = refresh_grant(cp, body, _oauth_base(request))
+        else:
+            raise OAuthError(400, "unsupported_grant_type",
+                             "grant_type must be authorization_code or refresh_token")
+    except OAuthError as exc:
+        return _oauth_error_response(exc)
+    return out
+
+
+@app.post("/oauth/revoke")
+async def oauth_revoke(request: Request):
+    """RFC 7009 token revocation (D5 — explicit client-initiated revocation)."""
+    from tortoise.oauth import OAuthError, revoke_token
+    cp, enabled = _oauth_control_plane()
+    if not enabled or cp is None:
+        raise HTTPException(status_code=503, detail="OAuth not configured")
+    from urllib.parse import parse_qs
+    try:
+        raw = await request.body()
+        body = {k: v[0] for k, v in parse_qs(raw.decode()).items()}
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid form body")
+    try:
+        revoke_token(cp, body)
+    except OAuthError as exc:
+        return _oauth_error_response(exc)
+    return Response(status_code=200, content="")
+
+
+@app.post("/register")
+async def oauth_dcr_register(request: Request):
+    """Dynamic Client Registration (P3, RFC 7591, D1) — enables the
+    'connectors discover and register' UX (Claude.ai/ChatGPT custom
+    connectors) without operator-issued client_ids.
+    """
+    from tortoise.oauth import OAuthError, register_client
+    cp, enabled = _oauth_control_plane()
+    if not enabled or cp is None:
+        raise HTTPException(status_code=503, detail="OAuth not configured")
+    await _check_ip_bucket_rate_limit(
+        request, buckets=_OAUTH_DCR_BUCKETS, lock=_OAUTH_DCR_LOCK,
+        limit=_OAUTH_DCR_MAX_PER_HOUR, window_s=3600,
+        key=(getattr(request.state, "client_ip", None)
+             or (request.client.host if request.client else None)),
+        detail="Too many client registrations from this IP. Please try again later.",
+        retry_after_s=3600)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    try:
+        reg = register_client(cp, body)
+    except OAuthError as exc:
+        return _oauth_error_response(exc)
+    return JSONResponse(status_code=201, content=reg)
+
+
 # ── MCP mount (#236) ─────────────────────────────────────────────
 # Mount AFTER all route definitions. DO NOT add /mcp to the parent
 # RateLimitMiddleware.SKIP — Starlette's mount already routes /mcp.

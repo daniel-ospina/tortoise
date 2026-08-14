@@ -99,13 +99,20 @@ def _jsonrpc_error(code: int, message: str, data: dict | None = None,
 
 
 class TeamResolutionMiddleware(BaseHTTPMiddleware):
-    """Bearer tt_ token → team_id ContextVar. 401 pre-tool-leak (D3, D17).
+    """Bearer token → team_id ContextVar. 401 pre-tool-leak (D3, D17).
 
-    Supabase-backed (#767): resolves via tortoise.supabase_control.resolve_api_key
-    (lookup_hash exact-match; api_keys.revoked_at authoritative; tier/quota from
-    teams) — the SAME shared function REST get_current_team uses. Registry
-    apikey_verify (O(keys) salted-hash scan) stays for selfhost. Bounded 60s
-    true-LRU cache protects against MCP init bursts.
+    Accepts TWO credential families (#524, D3 — additive, never breaking):
+      * ``tt_<key>`` — tenant API keys (pre-existing path). Supabase-backed
+        (#767): resolves via tortoise.supabase_control.resolve_api_key
+        (lookup_hash exact-match; api_keys.revoked_at authoritative;
+        tier/quota from teams) — the SAME shared function REST
+        get_current_team uses. Registry apikey_verify (O(keys) salted-hash
+        scan) stays for selfhost.
+      * ``oat_<token>`` — OAuth 2.1 access tokens (hosted-only, D3):
+        introspected via tortoise.oauth.resolve_oauth_access_token (D6 —
+        self-sufficient at the MCP boundary, no tt_ key minting). Registry
+        mode has no OAuth tables → oat_ always 401s there.
+    Bounded 60s true-LRU cache protects against MCP init bursts.
     """
 
     def __init__(self, app, *, max_cache: int = 10000,
@@ -132,14 +139,31 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
         if request.method != "POST":
             return await call_next(request)
         auth = request.headers.get("Authorization", "")
-        if not auth.startswith("Bearer ") or not auth[7:].startswith("tt_"):
+        if not auth.startswith("Bearer "):
             return _jsonrpc_error(
                 ERR_UNAUTHORIZED,
                 "Unauthorized: invalid or missing Bearer token. "
-                "Expected format: Authorization: Bearer tt_<key>",
+                "Expected format: Authorization: Bearer tt_<key> "
+                "(or an OAuth access token for #524 OAuth clients)",
                 status=401,
             )
         token = auth[7:]
+        if not (token.startswith("tt_") or token.startswith("oat_")):
+            if not token:
+                return _jsonrpc_error(
+                    ERR_UNAUTHORIZED,
+                    "Unauthorized: invalid or missing Bearer token. "
+                    "Expected format: Authorization: Bearer tt_<key> "
+                    "(or an OAuth access token for #524 OAuth clients)",
+                    status=401,
+                )
+            return _jsonrpc_error(
+                ERR_UNAUTHORIZED,
+                "Unauthorized: invalid Bearer token format. "
+                "Expected tt_<tenant key> or an OAuth access token.",
+                status=401,
+            )
+        is_oauth = token.startswith("oat_")
         now = time.time()
         cached = self._cache.get(token)
         if cached and now - cached[0] < 60:
@@ -158,15 +182,25 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
                 # when the control plane is Supabase-backed — the SAME shared
                 # function REST get_current_team uses (single source of truth,
                 # REST + MCP cannot drift). Registry apikey_verify stays for
-                # selfhost.
+                # selfhost. #524: OAuth access tokens (oat_) introspect via
+                # tortoise.oauth — hosted-only (registry mode has no OAuth
+                # tables → None → 401).
                 from tortoise.supabase_control import (
                     get_control_plane, is_supabase_enabled, resolve_api_key,
                 )
                 if is_supabase_enabled():
-                    team = resolve_api_key(get_control_plane(), token)
+                    if is_oauth:
+                        from tortoise.oauth import resolve_oauth_access_token
+                        team = resolve_oauth_access_token(
+                            get_control_plane(), token)
+                    else:
+                        team = resolve_api_key(get_control_plane(), token)
                 else:
-                    sdk = await self._get_registry_sdk()
-                    team = sdk.apikey_verify(token)
+                    if is_oauth:
+                        team = None
+                    else:
+                        sdk = await self._get_registry_sdk()
+                        team = sdk.apikey_verify(token)
             except Exception:
                 # Registry down → 503, never 500/stack-trace
                 return _jsonrpc_error(
