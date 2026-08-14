@@ -252,6 +252,12 @@ CROSS_LENS_POOL_CAP = 1000
 # Per-point ANN recall bound (neighbors pulled per pool point over the
 # vector index — HNSW on Docker, brute-force euclidean on embedded).
 CROSS_LENS_ANN_TOP_K = 20
+# D4-style hard cap on per-point ANN recall: an agent-passed top_k above
+# this is clamped, never honored, so the per-cycle recall budget stays
+# predictable (embedded brute-force recall is O(pool x total_points) —
+# see the _cross_lens_pairs docstring — so an unbounded top_k would
+# undermine the cost contract entirely).
+CROSS_LENS_ANN_TOP_K_MAX = 100
 
 # #432: declarative spec for the retract/supersede transition guards. NOT
 # consulted by update_point per-call (update_point only promotes draft→live);
@@ -5602,8 +5608,20 @@ class TortoiseSDK:
         neighbors per pool point, then exact cosine recompute from stored
         embeddings (index scores are rank/euclidean, not the calibrated
         cosine). The scanned pool is capped at CROSS_LENS_POOL_CAP
-        most-recently-updated eligible points — cost is proportional to the
-        pool, not O(n²) over the whole graph (indicator I3).
+        most-recently-updated eligible points — pair enumeration is
+        pool-bounded (each pool point contributes at most ``top_k``
+        neighbors, candidate space O(pool x top_k)), not O(n²) over the
+        whole graph (indicator I3). Cost caveat: on the embedded backend
+        run_vector_query is a brute-force scan over the ENTIRE Point index,
+        so embedded recall is O(pool x total_points) — the pool cap bounds
+        the pair space, not the per-query scan cost (the documented
+        degradation).
+
+        Recall caveat: the default top_k=20 favors dense recent clusters —
+        same-source near-duplicates (D5-excluded territory) can crowd the
+        top-k and crowd out genuine cross-lens pairs. Raise top_k (up to
+        the hard cap) or lower ``threshold`` when cross-lens recall looks
+        thin.
 
         Args:
             threshold: minimum cosine similarity (default 0.40 — the
@@ -5613,7 +5631,9 @@ class TortoiseSDK:
             routing: the #901 routing context the caller is mining under
                 ("truth" | "relevance") — echoed per candidate; the surface
                 itself stays neutral.
-            top_k: ANN neighbors pulled per pool point (recall bound).
+            top_k: ANN neighbors pulled per pool point (recall bound) —
+                HARD-clamped to CROSS_LENS_ANN_TOP_K_MAX (100) so an agent
+                cannot inflate the per-cycle recall budget (D4 philosophy).
 
         Returns:
             {"candidates": [{src, dst, similarity, lenses, sourceKinds,
@@ -5633,6 +5653,7 @@ class TortoiseSDK:
             raise ValueError(f"max_candidates must be >= 1, got {max_candidates!r}")
         if top_k < 1:
             raise ValueError(f"top_k must be >= 1, got {top_k!r}")
+        top_k = min(int(top_k), CROSS_LENS_ANN_TOP_K_MAX)  # hard cap (conf 75)
 
         limit = min(int(max_candidates), CROSS_LENS_CANDIDATE_CAP)  # D4
         pool = self._cross_lens_pool()
@@ -5721,6 +5742,15 @@ class TortoiseSDK:
         recompute the exact cosine similarity from stored embeddings (the
         calibrated #399 metric). Returns [((a, b), score)] with a < b, sorted
         by score descending. Never writes.
+
+        Cost is bounded on BOTH axes: pair enumeration is pool-bounded
+        (each pool point contributes at most top_k neighbors, so the
+        candidate space is O(pool x top_k)) and the pool itself is capped
+        at CROSS_LENS_POOL_CAP. Caveat: on the embedded backend the
+        run_vector_query recall is a brute-force scan over the ENTIRE Point
+        index, so embedded cost is O(pool x total_points) regardless of the
+        pool cap — the documented degradation. ``top_k`` is hard-clamped at
+        CROSS_LENS_ANN_TOP_K_MAX by the caller.
         """
         from .search_engine import run_vector_query
         import numpy as np

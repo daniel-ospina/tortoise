@@ -184,6 +184,27 @@ def test_cost_cap_truncated_flag(sdk):
     assert res_small["truncated"] is False
 
 
+def test_top_k_hard_clamp(sdk):
+    # conf 75: top_k is hard-clamped to CROSS_LENS_ANN_TOP_K_MAX (100) so an
+    # agent cannot inflate the per-cycle recall budget — same D4 hard-cap
+    # philosophy as max_candidates.
+    _seed_two_streams(sdk, n=30)
+    # 10_000 would (unclamped) pull the whole index per point; clamped to
+    # 100 it still makes the full 60-point pool reachable — same result as
+    # top_k=100, proving the clamp is applied and silent (no error).
+    res = sdk.get_cross_lens_candidates(max_candidates=10_000, top_k=10_000)
+    assert res["count"] == 200
+    assert res["truncated"] is True
+    res2 = sdk.get_cross_lens_candidates(max_candidates=10_000, top_k=100)
+    assert res2["count"] == res["count"]
+    # values at/below the clamp edge are honored, not lowered
+    res3 = sdk.get_cross_lens_candidates(max_candidates=10_000, top_k=1)
+    assert res3["count"] <= 200
+    # lower bound still validated
+    with pytest.raises(ValueError, match="top_k"):
+        sdk.get_cross_lens_candidates(top_k=0)
+
+
 # ── 5. tier gate (D3: registered sourceKind, any tier) ─────────────────
 
 def test_registered_sourcekind_gate(sdk):
