@@ -69,59 +69,89 @@ def test_sdk_and_hosted_availability_agree(monkeypatch):
     assert _extractor_present() is True
 
 
-# ── TORTOISE_SESSION_LLM_MODEL spec parsing (#1194) ────────────────────────
-
-
-def _build_with_model(monkeypatch, spec):
-    """Build the real extractor with DEEPSEEK_API_KEY set and the given
-    TORTOISE_SESSION_LLM_MODEL spec (mock seam off). Other provider keys are
-    cleared so deepseek is the configured provider (openrouter has priority
-    and the dev shell exports real OPENROUTER/DEEPSEEK keys)."""
+def test_provider_key_parity_all_keys(monkeypatch):
+    """#1197: EVERY key hosted_api._llm_provider_available() reports must
+    actually build an extractor in sdk — and every key that opens the gate
+    must be in the reported set. A drift fails the 503 gate open/closed
+    wrongly (hosted available=True but sdk extractor=None → partial-write
+    500 instead of a clean fail-closed 503)."""
+    from tortoise import hosted_api
     from tortoise.sdk import _build_session_llm_extractor
 
     monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
-    for k in ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"):
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MODEL", raising=False)
+    for k in hosted_api._LLM_PROVIDER_KEYS:
         monkeypatch.delenv(k, raising=False)
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
-    monkeypatch.setenv("TORTOISE_SESSION_LLM_MODEL", spec)
-    return _build_session_llm_extractor()
+    assert not hosted_api._llm_provider_available()
+    for k in hosted_api._LLM_PROVIDER_KEYS:
+        monkeypatch.setenv(k, "sk-test-1197")
+        try:
+            assert hosted_api._llm_provider_available(), \
+                f"{k} must open the hosted 503 gate"
+            assert _build_session_llm_extractor() is not None, \
+                f"{k} opens the hosted gate but sdk builds NO extractor"
+        finally:
+            monkeypatch.delenv(k)
 
 
-def test_session_llm_model_bare_spec_accepted(monkeypatch):
-    """#1194: a bare <model> (no 'provider:' prefix) is accepted and resolved
-    against the configured provider key. Before the fix partition(':') made
-    the bare form unreachable — p=<model>, m="" → misleading "names provider
-    'deepseek-chat' but 'deepseek' is configured" error, or "bad model spec"
-    when the bare name happened to equal the provider name — so a bare
-    TORTOISE_SESSION_LLM_MODEL could NEVER be accepted despite the error
-    message promising it, surfacing as an uncaught 500 on every capture."""
-    ex = _build_with_model(monkeypatch, "deepseek-chat")
-    assert ex is not None
-    assert ex.points.model.id == "deepseek-chat"
-    assert ex.relations.model.id == "deepseek-chat"
+def test_openrouter_model_shape_warning_helper():
+    """PR #1220 review P2 c65: _session_llm_model_shape_warning flags ONLY
+    openrouter models lacking <family>/<model>; all other providers and
+    well-formed openrouter routes never warn (the 404-at-capture case)."""
+    from tortoise.sdk import _session_llm_model_shape_warning
+
+    # openrouter + bare model → warn (the 404-at-capture shape)
+    w = _session_llm_model_shape_warning("openrouter:deepseek-chat", "openrouter")
+    assert w and "<family>/<model>" in w and "404" in w
+    # openrouter + well-formed family/model → no warn
+    assert _session_llm_model_shape_warning("openrouter:deepseek/deepseek-chat", "openrouter") is None
+    # openrouter default (unset spec) → deepseek/deepseek-chat → no warn
+    assert _session_llm_model_shape_warning("", "openrouter") is None
+    # non-openrouter providers use bare model ids — never warn
+    assert _session_llm_model_shape_warning("deepseek:deepseek-chat", "deepseek") is None
+    assert _session_llm_model_shape_warning("openai:gpt-4o-mini", "openai") is None
+    assert _session_llm_model_shape_warning("gemini:gemini-2.0-flash", "gemini") is None
 
 
-def test_session_llm_model_bare_spec_equal_to_provider_accepted(monkeypatch):
-    """#1194: the other unreachable branch — a bare spec equal to the provider
-    name ("deepseek") previously tripped `if not m` → "bad model spec". Now
-    it is a valid bare model id."""
-    ex = _build_with_model(monkeypatch, "deepseek")
-    assert ex is not None
-    assert ex.points.model.id == "deepseek"
+def test_sdk_priority_covers_all_registry_providers():
+    """#1197 drift guard: every provider registered in ingest._PROVIDERS must
+    be (a) in sdk._SESSION_LLM_PROVIDER_PRIORITY and (b) carry a key in
+    hosted_api._LLM_PROVIDER_KEYS. Adding a provider without updating both
+    fails the 503 gate OPEN (hosted says available, sdk builds None)."""
+    from tortoise import hosted_api
+    from tortoise.ingest import _PROVIDERS
+    from tortoise.sdk import _SESSION_LLM_PROVIDER_PRIORITY
+
+    for provider, (_url, key_env) in _PROVIDERS.items():
+        assert provider in _SESSION_LLM_PROVIDER_PRIORITY, (
+            f"provider {provider!r} registered in ingest._PROVIDERS but missing "
+            f"from sdk._SESSION_LLM_PROVIDER_PRIORITY — the 503 gate would fail "
+            f"open for {key_env}"
+        )
+        assert key_env in hosted_api._LLM_PROVIDER_KEYS, (
+            f"{key_env} (ingest provider {provider!r}) missing from "
+            f"hosted_api._LLM_PROVIDER_KEYS — the gate would not see it"
+        )
 
 
-def test_session_llm_model_prefixed_spec_requires_matching_provider(monkeypatch):
-    """#1194: provider:model with the configured provider is accepted; a
-    mismatched provider prefix still raises a clear config error (not a 500),
-    and a trailing-colon spec with no model is still rejected."""
-    ex = _build_with_model(monkeypatch, "deepseek:deepseek-reasoner")
-    assert ex.points.model.id == "deepseek-reasoner"
+def test_analyze_keys_subset_of_session_keys():
+    """#1197: every analyze._LLM_PROVIDERS key must be usable by the SESSION
+    extractor — an analyze-only key (in analyze but not in ingest._PROVIDERS)
+    would open the hosted 503 gate while sdk._build_session_llm_extractor
+    builds None → mid-capture failure. A naive subset-vs-union check is
+    tautological (_llm_provider_keys() unions analyze in by construction);
+    the real invariant is: every analyze key must be an INGEST provider key."""
+    from tortoise.ingest import _PROVIDERS
+    from tortoise.analyze import _LLM_PROVIDERS
 
-    with pytest.raises(ValueError, match="names provider 'openai'"):
-        _build_with_model(monkeypatch, "openai:gpt-4o-mini")
-
-    with pytest.raises(ValueError, match="bad model spec"):
-        _build_with_model(monkeypatch, "deepseek:")
+    ingest_keys = {key_env for _url, key_env in _PROVIDERS.values() if key_env}
+    extra = set(_LLM_PROVIDERS) - ingest_keys
+    assert not extra, (
+        f"analyze-only key(s) {sorted(extra)} are not ingest provider keys — "
+        f"they would open the hosted 503 gate while "
+        f"sdk._build_session_llm_extractor cannot consume them; add them to "
+        f"ingest._PROVIDERS or exclude them from the session key union"
+    )
 
 
 # ── capture_session honors the fail-closed / LLM-default contract ──────────

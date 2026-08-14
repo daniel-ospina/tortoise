@@ -341,6 +341,179 @@ class TestDoctorDefaultResolution:
         assert "0 Points" in line
 
 
+class TestDoctorSessionExtraction:
+    """#1197: doctor surfaces the /v1/sessions LLM-provider gate (#822).
+
+    Capture fails closed (503) when no provider key is configured — the beta
+    testers' most-critical feature. Doctor must report the provider/model
+    when configured, and FAIL in hosted mode (FLY_APP_NAME) when the key is
+    missing or the test seam is left on, so ops catch it before testers do.
+    """
+
+    _LLM_ENV = (
+        "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
+        "GEMINI_API_KEY", "TORTOISE_SESSION_LLM_MOCK",
+        "TORTOISE_SESSION_LLM_MODEL", "FLY_APP_NAME",
+    )
+
+    @pytest.fixture
+    def clean_llm_env(self, monkeypatch, clear_db_env, tmp_path):
+        for k in self._LLM_ENV:
+            monkeypatch.delenv(k, raising=False)
+        db_path = os.path.join(str(tmp_path), "doctor_llm.db")
+        return monkeypatch, db_path
+
+    def _extraction_line(self, out: str) -> str:
+        return next(line for line in out.splitlines() if "Session extraction" in line)
+
+    def test_no_provider_local_warns(self, clean_llm_env, capsys):
+        """No key + not hosted → ⚠️ warning (capture fails closed; rc not
+        driven by this check). Embedded DB so the only possible ❌ is mine."""
+        monkeypatch, db_path = clean_llm_env
+        rc = _run_doctor(["--path", db_path])
+        out = capsys.readouterr().out
+
+        line = self._extraction_line(out)
+        assert "⚠️" in line
+        assert "503" in line and "no LLM provider key" in line
+        assert rc in (0, 1)
+
+    def test_provider_key_reports_provider(self, clean_llm_env, capsys):
+        """A configured provider key → ✅ with the resolved provider + model."""
+        monkeypatch, db_path = clean_llm_env
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-1197")
+        monkeypatch.setenv("TORTOISE_SESSION_LLM_MODEL", "openrouter:deepseek/deepseek-chat")
+        rc = _run_doctor(["--path", db_path])
+        out = capsys.readouterr().out
+
+        line = self._extraction_line(out)
+        assert "✅" in line
+        assert "openrouter" in line
+        assert "deepseek/deepseek-chat" in line
+        assert rc in (0, 1)
+
+    def test_mock_seam_local_reports_test_mode(self, clean_llm_env, capsys):
+        """TORTOISE_SESSION_LLM_MOCK=1 locally → ⚠️ test seam (offline)."""
+        monkeypatch, db_path = clean_llm_env
+        monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+        rc = _run_doctor(["--path", db_path])
+        out = capsys.readouterr().out
+
+        line = self._extraction_line(out)
+        assert "⚠️" in line
+        assert "test" in line.lower()
+        assert rc in (0, 1)
+
+    def test_hosted_no_provider_fails(self, clean_llm_env, capsys):
+        """Hosted mode (FLY_APP_NAME) + no provider key → ❌ + rc 1 — the
+        flagship beta feature cannot work; ops must not ship this."""
+        monkeypatch, db_path = clean_llm_env
+        monkeypatch.setenv("FLY_APP_NAME", "tortoise-api")
+        rc = _run_doctor(["--path", db_path])
+        out = capsys.readouterr().out
+
+        line = self._extraction_line(out)
+        assert "❌" in line
+        assert "503" in line
+        assert rc == 1
+
+    def test_hosted_mock_seam_fails(self, clean_llm_env, capsys):
+        """Hosted + TORTOISE_SESSION_LLM_MOCK=1 → ❌ (captures would write
+        offline MockModel points; the seam must never ship to prod)."""
+        monkeypatch, db_path = clean_llm_env
+        monkeypatch.setenv("FLY_APP_NAME", "tortoise-api")
+        monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+        rc = _run_doctor(["--path", db_path])
+        out = capsys.readouterr().out
+
+        line = self._extraction_line(out)
+        assert "❌" in line
+        assert "REMOVE" in line
+        assert rc == 1
+
+
+    def test_provider_model_mismatch_not_ok(self, clean_llm_env, capsys):
+        """Key set + TORTOISE_SESSION_LLM_MODEL naming a DIFFERENT provider
+        → never ✅: sdk._build_session_llm_extractor raises ValueError
+        (capture would 500) — the doctor must surface the misconfig
+        (❌ hosted / ⚠️ local) instead of reporting healthy."""
+        monkeypatch, db_path = clean_llm_env
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-1197")
+        monkeypatch.setenv("TORTOISE_SESSION_LLM_MODEL", "deepseek:deepseek-chat")
+        rc = _run_doctor(["--path", db_path])
+        out = capsys.readouterr().out
+
+        line = self._extraction_line(out)
+        assert "✅" not in line
+        assert "misconfig" in line
+        assert rc in (0, 1)
+
+    def test_openrouter_bare_model_shape_warns(self, clean_llm_env, capsys):
+        """PR #1220 review P2 c65: an openrouter spec WITHOUT <family>/<model>
+        (openrouter:deepseek-chat) builds an extractor fine (✅ Session
+        extraction) but the route 404s at capture time — the doctor must add
+        a ⚠️ shape warning, never fail the run (config itself is valid)."""
+        monkeypatch, db_path = clean_llm_env
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-1197")
+        monkeypatch.setenv("TORTOISE_SESSION_LLM_MODEL", "openrouter:deepseek-chat")
+        rc = _run_doctor(["--path", db_path])
+        out = capsys.readouterr().out
+
+        line = self._extraction_line(out)
+        assert "✅" in line  # config is valid — extractor builds
+        assert "deepseek-chat" in line
+        shape = next(l for l in out.splitlines() if "OpenRouter model" in l)
+        assert "⚠️" in shape
+        assert "<family>/<model>" in shape
+        assert "404" in shape  # actionable: the failure mode is a route 404
+        assert rc in (0, 1)
+
+    def test_openrouter_family_model_no_warning(self, clean_llm_env, capsys):
+        """A well-formed openrouter spec (openrouter:deepseek/deepseek-chat)
+        → no shape warning at all."""
+        monkeypatch, db_path = clean_llm_env
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-1197")
+        monkeypatch.setenv("TORTOISE_SESSION_LLM_MODEL", "openrouter:deepseek/deepseek-chat")
+        rc = _run_doctor(["--path", db_path])
+        out = capsys.readouterr().out
+
+        line = self._extraction_line(out)
+        assert "✅" in line
+        assert "deepseek/deepseek-chat" in line
+        assert not any("OpenRouter model" in l for l in out.splitlines())
+        assert rc in (0, 1)
+
+    def test_non_openrouter_provider_never_shape_warns(self, clean_llm_env, capsys):
+        """Shape warning is openrouter-ONLY — deepseek/openai/gemini models
+        are bare ids (deepseek-chat, gpt-4o-mini, gemini-2.0-flash) and must
+        never trip it."""
+        monkeypatch, db_path = clean_llm_env
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-1197")
+        monkeypatch.setenv("TORTOISE_SESSION_LLM_MODEL", "deepseek:deepseek-chat")
+        rc = _run_doctor(["--path", db_path])
+        out = capsys.readouterr().out
+
+        line = self._extraction_line(out)
+        assert "✅" in line
+        assert "deepseek-chat" in line
+        assert not any("OpenRouter model" in l for l in out.splitlines())
+        assert rc in (0, 1)
+
+    def test_openrouter_default_model_no_warning(self, clean_llm_env, capsys):
+        """Unset TORTOISE_SESSION_LLM_MODEL with openrouter key → default
+        deepseek/deepseek-chat (well-formed) → no shape warning."""
+        monkeypatch, db_path = clean_llm_env
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-1197")
+        rc = _run_doctor(["--path", db_path])
+        out = capsys.readouterr().out
+
+        line = self._extraction_line(out)
+        assert "✅" in line
+        assert "deepseek/deepseek-chat" in line
+        assert not any("OpenRouter model" in l for l in out.splitlines())
+        assert rc in (0, 1)
+
+
 class TestOnboardDoctorCall:
     def test_bare_namespace_no_attribute_error(self, monkeypatch, clear_db_env, tmp_path, capsys):
         """#703 follow-up: _cmd_onboard calls _cmd_doctor(Namespace(cmd='doctor'))
