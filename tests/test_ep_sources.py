@@ -108,6 +108,16 @@ def make_operator(sdk: TortoiseSDK, source_id: str, target_id: str,
     return sdk.create_operator(op_type, source_id, [target_id], direction=direction)
 
 
+def calibrate_neutral(sdk: TortoiseSDK, pid: str) -> None:
+    """#344: mark a point calibrated with the neutral Beta(1,1) prior it
+    carried while uncalibrated — keeps the fail-closed EP gate ACTIVE while
+    preserving the prior math exactly. Only for points that never carry a
+    source (sourced points self-calibrate via _apply_source_inheritance
+    before the gate; backfilling them 'explicit' would freeze inheritance,
+    and 'inherited' gets reverted when no source edge exists)."""
+    sdk.set_point_baseline(pid, 1, 1)
+
+
 def build_scenario_a(sdk) -> tuple[str, str]:
     """Linear chain: Point_A ->[IMPL]-> Claim_B."""
     a = make_point(sdk, "Point A: evidence aggregation point")
@@ -127,7 +137,8 @@ def build_scenario_b(sdk) -> tuple[str, str, str]:
     return a["id"], b["id"], c["id"]
 
 
-def run_ep(sdk: TortoiseSDK, seed: int = 42, anchors: list[str] | None = None) -> dict:
+def run_ep(sdk: TortoiseSDK, seed: int = 42, anchors: list[str] | None = None,
+           require_calibration: bool | None = None) -> dict:
     """Deterministic EP run.
 
     - recency_decay=1.0 passed EXPLICITLY through the whole chain — otherwise
@@ -136,12 +147,17 @@ def run_ep(sdk: TortoiseSDK, seed: int = 42, anchors: list[str] | None = None) -
     - anchors=[...] skips the uncontrolled self.dream(dirty_only=True) branch
       (compute_confidence with no factors/anchors dreams first) and scopes the
       BFS subgraph — deterministic and side-effect-free.
+    - require_calibration=False is the #344 sanctioned explicit opt-out for
+      baseline runs where the anchor is DELIBERATELY pre-source (the test
+      measures the source delta); every other run stays gate-active.
     """
     random.seed(seed)
     kwargs = {"recency_decay": 1.0}
     if anchors is not None:
         kwargs["anchors"] = anchors
         kwargs["max_hops"] = 2
+    if require_calibration is not None:
+        kwargs["require_calibration"] = require_calibration
     return sdk.compute_confidence(**kwargs)
 
 
@@ -426,6 +442,7 @@ class TestSituation7_AddRemoveIdempotent:
         the deleted prior."""
         with fresh_sdk() as sdk:
             a_id, b_id = build_scenario_a(sdk)
+            calibrate_neutral(sdk, b_id)  # b never carries a source
             link_tiered_source(sdk, a_id, "https://s0.example", "T4")
             sdk._apply_source_inheritance(recency_decay=1.0)
             assert inherited_alpha(sdk, a_id) == pytest.approx(1.1, rel=1e-9)
@@ -435,6 +452,7 @@ class TestSituation7_AddRemoveIdempotent:
             )
             sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
             assert inherited_alpha(sdk, a_id) is None  # graph read is clean
+            calibrate_neutral(sdk, a_id)  # revert cleared the baseline — re-neutral
             # EP path must also see the revert — no stale prior:
             res = sdk.compute_confidence(recency_decay=1.0, anchors=[a_id], max_hops=2)
             conf = get_conf(res, a_id)
@@ -458,10 +476,12 @@ class TestScenarioA_LinearChain:
     def test_b_rises_through_impl(self):
         with fresh_sdk() as sdk:
             a_id, b_id = build_scenario_a(sdk)
+            calibrate_neutral(sdk, b_id)  # b never carries a source
             # no sources: baseline ~0.633, NOT 0.5 — the bidirectional IMPL
             # proportional boost (1+2/max(alpha+beta-1,1)) raises unevidenced
-            # targets off neutral
-            res0 = run_ep(sdk, anchors=[a_id])
+            # targets off neutral. res0 runs with a DELIBERATELY pre-source —
+            # #344 sanctioned explicit opt-out (the source delta is the test).
+            res0 = run_ep(sdk, anchors=[a_id], require_calibration=False)
             b0 = get_conf(res0, b_id)
             # attach T0 source DIRECTLY to A (extractedFrom on A — required for
             # EP: only operator factors are auto-extracted, orphan points inert)
@@ -476,9 +496,12 @@ class TestScenarioA_LinearChain:
         comfortably above noise — measured margin ~0.088 (0.633 -> 0.721)."""
         with fresh_sdk() as sdk:
             a_id, b_id = build_scenario_a(sdk)
+            calibrate_neutral(sdk, a_id)  # 0-source branch — neutral prior
+            calibrate_neutral(sdk, b_id)
             b0 = get_conf(run_ep(sdk, anchors=[a_id]), b_id)
         with fresh_sdk() as sdk:
             a_id, b_id = build_scenario_a(sdk)
+            calibrate_neutral(sdk, b_id)
             for i in range(3):
                 link_tiered_source(sdk, a_id, f"https://s{i}.example", "T0")
             sdk._apply_source_inheritance(recency_decay=1.0)
@@ -490,12 +513,18 @@ class TestScenarioB_LoopySingleEntry:
     def test_cluster_rises_from_single_entry(self):
         with fresh_sdk() as sdk:
             a_id, b_id, c_id = build_scenario_b(sdk)
-            res0 = run_ep(sdk, anchors=[a_id])
+            calibrate_neutral(sdk, b_id)
+            calibrate_neutral(sdk, c_id)
+            # a is DELIBERATELY pre-source on this run (source delta is the
+            # test) — #344 sanctioned explicit opt-out; run 2 stays gate-active.
+            res0 = run_ep(sdk, anchors=[a_id], require_calibration=False)
             assert res0["converged"] is True  # precondition: loopy BP converged
             base = {"a": get_conf(res0, a_id), "b": get_conf(res0, b_id),
                     "c": get_conf(res0, c_id)}
         with fresh_sdk() as sdk:
             a_id, b_id, c_id = build_scenario_b(sdk)
+            calibrate_neutral(sdk, b_id)
+            calibrate_neutral(sdk, c_id)
             link_tiered_source(sdk, a_id, "https://s0.example", "T0")
             sdk._apply_source_inheritance(recency_decay=1.0)
             res1 = run_ep(sdk, anchors=[a_id])
@@ -512,6 +541,9 @@ class TestScenarioC_LoopyMultiEntry:
     def test_multi_entry_rises_more_than_single(self):
         with fresh_sdk() as sdk:
             a_id, b_id, c_id = build_scenario_b(sdk)
+            # b never gets a source here — calibrate it (and c); a inherits T0.
+            calibrate_neutral(sdk, b_id)
+            calibrate_neutral(sdk, c_id)
             link_tiered_source(sdk, a_id, "https://s0.example", "T0")
             sdk._apply_source_inheritance(recency_decay=1.0)
             res_s = run_ep(sdk, anchors=[a_id])
@@ -520,6 +552,8 @@ class TestScenarioC_LoopyMultiEntry:
                       "c": get_conf(res_s, c_id)}
         with fresh_sdk() as sdk:
             a_id, b_id, c_id = build_scenario_b(sdk)
+            # b DOES get a source here — leave it inheritance-eligible; c doesn't.
+            calibrate_neutral(sdk, c_id)
             link_tiered_source(sdk, a_id, "https://s0.example", "T0")
             link_tiered_source(sdk, b_id, "https://s1.example", "T0")
             sdk._apply_source_inheritance(recency_decay=1.0)
@@ -537,6 +571,7 @@ class TestSituation10_ChainResponse:
     def test_source_on_a_moves_b(self):
         with fresh_sdk() as sdk:
             a_id, b_id = build_scenario_a(sdk)
+            calibrate_neutral(sdk, b_id)  # #344: b never carries a source
             # T2 source (mean 0.75) — robust margin for B's response; T4 would
             # be marginal at w=1.0 (prior mean 0.5238)
             link_tiered_source(sdk, a_id, "https://s0.example", "T2")
@@ -556,6 +591,7 @@ class TestEdgeCaseInvariants:
         for cfg in self.CONFIGS:
             with fresh_sdk() as sdk:
                 a_id, b_id = build_scenario_a(sdk)
+                calibrate_neutral(sdk, b_id)  # b never carries a source
                 for i, (tier, n) in enumerate(cfg.items()):
                     for j in range(n):
                         link_tiered_source(sdk, a_id, f"https://cfg{i}-{j}.example", tier)
@@ -571,6 +607,7 @@ class TestEdgeCaseInvariants:
         for cfg in self.CONFIGS:
             with fresh_sdk() as sdk:
                 a_id, b_id = build_scenario_a(sdk)
+                calibrate_neutral(sdk, b_id)  # b never carries a source
                 for i, (tier, n) in enumerate(cfg.items()):
                     for j in range(n):
                         link_tiered_source(sdk, a_id, f"https://cfg{i}-{j}.example", tier)
@@ -587,6 +624,8 @@ class TestEdgeCaseInvariants:
         for _ in range(2):
             with fresh_sdk() as sdk:
                 a_id, b_id, c_id = build_scenario_b(sdk)  # 3 factors — real shuffle
+                calibrate_neutral(sdk, b_id)
+                calibrate_neutral(sdk, c_id)
                 link_tiered_source(sdk, a_id, "https://s0.example", "T0")
                 sdk._apply_source_inheritance(recency_decay=1.0)
                 res = run_ep(sdk, anchors=[a_id], seed=42)
@@ -603,6 +642,7 @@ class TestSituation8_GoldPlusNand_Audit:
         """Gold source alone anchors the claim high (the part that IS asserted)."""
         with fresh_sdk() as sdk:
             a_id, b_id = build_scenario_a(sdk)
+            calibrate_neutral(sdk, b_id)  # b never carries a source
             link_tiered_source(sdk, a_id, "https://g0.example", "T0")
             sdk._apply_source_inheritance(recency_decay=1.0)
             conf = get_conf(run_ep(sdk, anchors=[a_id]), a_id)

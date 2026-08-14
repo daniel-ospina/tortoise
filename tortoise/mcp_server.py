@@ -1007,11 +1007,13 @@ def tortoise_compute_confidence(factors: Any = None,
                     max_hops: int = 1,
                     rel_filter: str = "IMPL|NAND",
                     direction: str = "both",
-                    require_calibration: bool = False) -> dict:
+                    require_calibration: bool = True) -> dict:
     """Compute confidence via EP belief propagation. Returns {iterations, converged, confidences}.
 
     Pass anchors=[point_ids] for BFS subgraph selection.
-    Pass require_calibration=True to gate on calibration state.
+    Calibration is required by default (#344): raises CalibrationError on
+    uncalibrated graphs. Pass require_calibration=False to run on topology
+    alone (explicit opt-out only).
     max_hops: BFS depth from anchors (default 1).
     rel_filter: edge types — "IMPL", "NAND", or "IMPL|NAND" (default).
     direction: IMPL traversal — "incoming", "outgoing", or "both" (default).

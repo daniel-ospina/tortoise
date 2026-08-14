@@ -1,39 +1,14 @@
-"""Integration tests for EP calibration pipeline — Issue #7478.
+"""Tests for EP calibration pipeline — Issue #7478.
 
-Requires live FalkorDB (Docker); skips gracefully when unavailable so the
-no-Docker embedded suite stays green (AGENTS.md). Mirrors the probe pattern
-in tests/test_integration_search.py.
+Runs on the embedded falkordblite fixture (no Docker needed, AGENTS.md) —
+migrated in #398; the stale live-FalkorDB skip probe was removed as part of
+#344 so the fail-closed default-flip tests actually execute.
 """
 import os
 
 import pytest
 from tortoise.sdk import TortoiseSDK
 from tortoise.exceptions import CalibrationError
-
-_CAL_URI = "docker://:falkordb@localhost:6379/tortoise_test_calibration"
-FALKORDB_AVAILABLE = False
-_OLD_URI = os.environ.get("TORTOISE_DB_URI")
-try:
-    os.environ["TORTOISE_DB_URI"] = _CAL_URI
-    _probe_sdk = TortoiseSDK()
-    _probe_sdk._get_proj().g.query("RETURN 1")
-    _probe_sdk.close()
-    FALKORDB_AVAILABLE = True
-except Exception:
-    pass
-finally:
-    # ALWAYS restore the original env (success or failure) — an import-time
-    # setdefault without restore leaks the docker URI into every later test
-    # file (#176 contamination: test_m1/test_pre_migration_safety/... hit
-    # Error 61 on localhost:6379).
-    if _OLD_URI is not None:
-        os.environ["TORTOISE_DB_URI"] = _OLD_URI
-    else:
-        os.environ.pop("TORTOISE_DB_URI", None)
-
-pytestmark = pytest.mark.skipif(
-    not FALKORDB_AVAILABLE, reason="Live FalkorDB (Docker) not available")
-
 
 
 @pytest.fixture
@@ -105,11 +80,30 @@ def test_require_calibration_partial(sdk):
 
 
 def test_require_calibration_default(sdk):
-    """require_calibration=False runs normally on uncalibrated graph."""
-    sdk.create_point("statement", "Uncalibrated", credibility="medium")
-    
-    result = sdk.compute_confidence()  # default False
-    assert result["converged"] is True
+    """Default require_calibration=True is fail-closed (#344).
+
+    A genuinely uncalibrated graph (no credibility → baseline_set=false)
+    must raise CalibrationError under the default instead of silently
+    running EP on topology alone; a calibrated graph succeeds.
+    """
+    # Uncalibrated graph → fail-closed under the flipped default.
+    sdk.create_point("statement", "Uncalibrated claim")
+    with pytest.raises(CalibrationError, match="calibrate_summary"):
+        sdk.compute_confidence()  # default True
+
+    # Companion: a calibrated graph succeeds under the default. The gate is
+    # graph-wide, so this needs a fresh graph (the uncalibrated point above
+    # would still trip it).
+    import tempfile
+    s2 = TortoiseSDK(os.path.join(tempfile.mkdtemp(prefix="tt_calib_"), "test.db"))
+    try:
+        p1 = s2.create_point("statement", "Calibrated claim", credibility="gold")
+        p2 = s2.create_point("statement", "Related claim", credibility="gold")
+        s2.create_operator("IMPL", p1["id"], [p2["id"]])
+        result = s2.compute_confidence()  # default True, graph is calibrated
+        assert result["converged"] is True
+    finally:
+        s2.close()
 
 
 # ── calibrate_summary ───────────────────────────────────────────

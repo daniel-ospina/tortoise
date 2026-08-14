@@ -304,6 +304,7 @@ class TestRecencyModulation:
         """compute_confidence accepts recency_decay parameter."""
         # Create a simple claim + operator
         p = sdk.create_point("statement", "test claim")
+        sdk.set_point_baseline(p["id"], 1, 1)  # #344: neutral baseline (gate active)
         op = sdk.create_operator("IMPL", p["id"], [p["id"]])
         # Should not raise — recency_decay is accepted
         result = sdk.compute_confidence(recency_decay=0.95)

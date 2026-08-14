@@ -2863,7 +2863,16 @@ def _cmd_decide(args) -> int:
                     bar = "█" * int(c * 20) + "░" * (20 - int(c * 20))
                     print(f"  {pid:<{name_width}}  {c:.4f}  {bar}")
         except Exception as e:
-            print(f"\n⚠ compute_confidence: {e}")
+            from tortoise.exceptions import CalibrationError
+            if isinstance(e, CalibrationError):
+                # #344: fail-closed — never let uncalibrated EP run silently.
+                print(f"\n⚠ Calibration required — EP not run: {e}")
+                print("  Calibrate the graph first: run calibrate_summary() for "
+                      "per-point guidance (set_point_baseline(), credibility on "
+                      "recreate, or set_source_tier() for sourced points), or "
+                      "pass require_calibration=False to explicitly opt out.")
+            else:
+                print(f"\n⚠ compute_confidence: {e}")
 
     finally:
         if sdk._proj:
