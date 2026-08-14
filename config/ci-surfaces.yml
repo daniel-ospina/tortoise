@@ -20,14 +20,18 @@ surfaces:
   - test_client_ip_middleware.py
   - test_commit_endpoint.py
   - test_commit_schema.py
+  - test_dashboard_login.py
   - test_direct_edge.py
   - test_dr_endpoints.py
+  - test_email_integration_resend.py
+  - test_email_notify.py
   - test_email_signup.py
   - test_export_delete.py
   - test_failure_contract.py
   - test_hosted_api.py
   - test_hosted_auth.py
   - test_hosted_backup.py
+  - test_index_mcp.py
   - test_init_apikey_validation.py
   - test_mcp_client.py
   - test_mcp_http.py
@@ -60,6 +64,7 @@ surfaces:
   - test_analytics.py
   - test_analyze.py
   - test_analyze_scoped.py
+  - test_backfill_sources.py
   - test_backup.py
   - test_backup_config.py
   - test_backup_e2e.py
@@ -103,11 +108,14 @@ surfaces:
   - test_hard_reject.py
   - test_hnsw_vector_index.py
   - test_idempotency.py
+  - test_index_cli.py
   - test_index_directory.py
+  - test_index_restore.py
   - test_index_surfacing.py
   - test_indexes.py
   - test_ingest.py
   - test_ingest_bundle.py
+  - test_ingest_mode.py
   - test_ingest_validation.py
   - test_integration_search.py
   - test_judge_harness.py
@@ -161,10 +169,13 @@ surfaces:
   - test_tool_registry.py
   - test_topic_summarization.py
   - test_tortoise_search.py
+  - test_wiring_phase01.py
   - test_write_consolidation.py
   - test_writer_inventory.py
   ep:
+  - test_a9_direct_edge_traversal.py
   - test_calibration.py
+  - test_calibration_tools.py
   - test_decide.py
   - test_directional_impl.py
   - test_directional_impl_fix.py
@@ -199,6 +210,7 @@ surfaces:
   - test_harness_mcp_config.py
   - test_index_github_cli.py
   - test_invites.py
+  - test_invites_email_http.py
   - test_invites_http.py
   - test_onboard_prompt_ref.py
   - test_onboarding_analytics_patch.py
