@@ -66,6 +66,7 @@ surfaces:
   - test_analytics.py
   - test_analyze.py
   - test_analyze_scoped.py
+  - test_audit.py
   - test_backfill_sources.py
   - test_backup.py
   - test_backup_config.py
@@ -89,6 +90,7 @@ surfaces:
   - test_de2e5_instantiates_ranking.py
   - test_de2e6_temporal.py
   - test_de2e7_gates_mcp.py
+  - test_deploy_workflow.py
   - test_deployment.py
   - test_doctor.py
   - test_domain_loader_adapter.py
@@ -100,6 +102,7 @@ surfaces:
   - test_embeddings_filters.py
   - test_entity_stage.py
   - test_epic903_fixtures.py
+  - test_epic903_freshness.py
   - test_enumeration_surfaces.py
   - test_eval_metrics.py
   - test_event_log.py
