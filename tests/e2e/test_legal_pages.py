@@ -12,8 +12,12 @@ Covers plan checks #1-#10 (T7 of docs/plans/2026-08-08-657-legal-pages-plan.md):
   #6  middleware root rewrites — tortoise.* → product marker,
       premiselabs.co → index marker (gated)
   #7  same-viewport acceptance (.legal-accept vs .providers + #btn-submit at
-      1280x720 AND 375x667) + DOM parentage + mocked email signup with
-      mandatory inbox-state + mocked GitHub OAuth click
+      1280x720 AND 375x667) + DOM parentage + mocked email signup + mocked
+      GitHub OAuth click (mocked email signup asserts the #801 server-first
+      deployed contract: /v1/signup/email 200 → direct sign-in → /welcome
+      redirect; the check-your-inbox state is not part of the hosted happy
+      path — the legacy fallback that reaches it is covered in
+      test_signup_form_safety_e2e via the 503-degradation resend test)
   #8  link crawl — enumerated page set final-200 + tortoise root (gated) +
       third-party external links
   #9  mobile render @375px — no horizontal scroll + minimum content + headings
@@ -77,6 +81,30 @@ if (BASE_URL.startswith("https://") or TORTISE_HOST.startswith("https://")) and 
         "no production assertions pre-merge — set ALLOW_PROD=1 to test production",
         allow_module_level=True,
     )
+
+# ── Signup-flow mode discrimination (#1190) ────────────────────────────────
+# The deployed form is SERVER-FIRST on the hosted site (#801) but runs the
+# LEGACY client-side auth/signUp flow on local/dev previews (isLocal in
+# signup.html). The mocked email-signup test drives BOTH: the server
+# endpoint on prod, the legacy endpoint on local preview.
+IS_LOCAL = "127.0.0.1" in BASE_URL or "localhost" in BASE_URL
+# CORS preflight headers for the mocked cross-origin endpoints (the browser
+# preflights the api.premiselabs.co fetch and the supabase auth calls before
+# the real POST — the OPTIONS must be fulfilled locally or the request is
+# blocked before the mock can answer).
+_CORS_PREFLIGHT = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "POST,OPTIONS",
+    "Access-Control-Allow-Headers": "*",
+}
+
+# Browser-level network log noise from deliberately-failed requests (real
+# 401s from the /welcome boot fetches after the mocked sign-in redirect in
+# prod mode — rest/v1/team_memberships, /v1/onboarding/state fire ~100-500ms
+# after commit; review P1 c60) — NOT page JS errors; the zero-console-errors
+# assertion in the mocked-signup test filters it (same filter the signup
+# safety suite uses).
+_RESOURCE_LOG_RE = re.compile(r"Failed to load resource")
 
 # ── Lazy playwright import — bare collection must never error. ─────────────
 from playwright.sync_api import Page, expect  # noqa: E402
@@ -713,41 +741,105 @@ def test_signup_acceptance_dom_structure(page: Page) -> None:
     assert "/tos" in hrefs and "/privacy" in hrefs, f"legal-accept links wrong: {hrefs}"
 
 
-def test_mock_email_signup_shows_confirmation(page: Page) -> None:
-    """Mocked email-path signup (the ONLY un-mocked modified surface): the
-    auth/v1/signup request fires with the typed email, the acceptance block
-    stays visible, zero console errors, and the MANDATORY inbox-state
-    (#confirmation-required visible + #confirm-email == typed email) renders
-    (cycle-4 P2-7b — not optional)."""
+def test_mock_email_signup_created_signs_in_and_redirects(page: Page) -> None:
+    """Mocked email-path signup — the DEPLOYED #801 server-first contract
+    (stale client-side auth/v1/signup assertions fixed in #1190): the submit
+    calls api.premiselabs.co/v1/signup/email, a 200 "created" signs the user
+    in directly (auth/v1/token) and redirects to /welcome.html — the
+    check-your-inbox state is NOT part of the hosted happy path
+    (email_confirm=true server-side, #801; that legacy UI is only reached
+    via the server-unavailable fallback, covered in the safety suite's
+    resend test). Asserts the signup request fired with the typed payload,
+    the x_signup conversion event (#736), the acceptance block stayed
+    visible, the redirect happened, and zero console errors."""
     email = f"e2e-{uuid.uuid4().hex[:8]}@premise-labs.dev"
     console_errors: list[str] = []
-    page.on("console", lambda m: console_errors.append(m.text) if m.type == "error" else None)
+    # _RESOURCE_LOG_RE filter (review P1 c60): in prod mode the /welcome
+    # redirect loads the REAL welcome page, whose boot fetches
+    # (rest/v1/team_memberships, /v1/onboarding/state) fire real 401 network
+    # errors ~100-500ms after commit — the mock session has no live team row.
+    # Those are network noise, not page JS errors; the raw == [] assertion
+    # raced them. pageerror is still captured unfiltered.
+    page.on("console", lambda m: console_errors.append(m.text)
+            if m.type == "error" and not _RESOURCE_LOG_RE.search(m.text) else None)
+    page.on("pageerror", lambda e: console_errors.append(str(e)))
 
     fired: dict = {}
+    captured: dict = {}
+    # Capture the x_signup push SYNCHRONOUSLY in the page (pushSignupEvents
+    # runs in the same task as the /welcome redirect — the JS context is
+    # destroyed on commit, so post-navigation reads always miss it).
+    page.expose_function("__e2eCaptureXSignup", lambda entry: captured.update(x_signup=entry))
+    page.add_init_script("""
+        (function () {
+          var origPush = Array.prototype.push;
+          var dl = (window.dataLayer = window.dataLayer || []);
+          dl.push = function () {
+            var entry = arguments[0];
+            var result = origPush.apply(this, arguments);
+            if (entry && entry.event === 'x_signup') window.__e2eCaptureXSignup(entry);
+            return result;
+          };
+        })();
+    """)
 
     def handle(route):
         url = route.request.url
-        if "auth/v1/signup" in url:
+        if "v1/signup/email" in url:
             if route.request.method == "OPTIONS":  # CORS preflight
-                route.fulfill(status=204, headers={
-                    "Access-Control-Allow-Origin": "*",
-                    "Access-Control-Allow-Methods": "POST,OPTIONS",
-                    "Access-Control-Allow-Headers": "*",
-                })
+                route.fulfill(status=204, headers=_CORS_PREFLIGHT)
                 return
-            fired["signup"] = route.request
-            # session-less response → the page shows the check-your-inbox state.
-            # email mirrors real Supabase signUp responses (user.email present).
-            route.fulfill(
-                status=200,
-                content_type="application/json",
-                headers={"Access-Control-Allow-Origin": "*"},
-                body=json.dumps({"user": {"id": "mock-user", "email": email, "identities": [{"id": "mock-id"}]}}),
-            )
+            if route.request.method == "POST":
+                fired["signup"] = route.request
+                # #801 server-first: account created confirmed server-side.
+                route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    headers={"Access-Control-Allow-Origin": "*"},
+                    body=json.dumps({"user_id": "mock-user", "email": email,
+                                     "email_confirm": True, "message": "user_created"}),
+                )
+            return
+        if "auth/v1/signup" in url:
+            # local-preview (isLocal) legacy path — session-less success →
+            # the check-your-inbox state (no sign-in / redirect).
+            if route.request.method == "OPTIONS":  # CORS preflight
+                route.fulfill(status=204, headers=_CORS_PREFLIGHT)
+                return
+            if route.request.method == "POST":
+                fired["signup"] = route.request
+                route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    headers={"Access-Control-Allow-Origin": "*"},
+                    body=json.dumps({"user": {"id": "mock-user", "email": email,
+                                               "identities": [{"id": "mock-id"}]}}),
+                )
+            return
+        if "auth/v1/token" in url:
+            if route.request.method == "OPTIONS":  # CORS preflight
+                route.fulfill(status=204, headers=_CORS_PREFLIGHT)
+                return
+            if route.request.method == "POST":
+                # signInAndGo: the created account signs in directly (session
+                # response — user carries identities).
+                route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    headers={"Access-Control-Allow-Origin": "*"},
+                    body=json.dumps({
+                        "access_token": "mock-at", "token_type": "bearer",
+                        "expires_in": 3600, "refresh_token": "mock-rt",
+                        "user": {"id": "mock-user", "email": email,
+                                  "identities": [{"id": "mock-id"}]},
+                    }),
+                )
             return
         route.continue_()
 
+    page.route("**/v1/signup/email*", handle)
     page.route("**/auth/v1/signup*", handle)
+    page.route("**/auth/v1/token*", handle)
     _goto(page, BASE_URL + "/signup")
     expect(page.locator(".legal-accept")).to_be_visible()
 
@@ -755,27 +847,31 @@ def test_mock_email_signup_shows_confirmation(page: Page) -> None:
     page.locator("#password").fill("E2ePass-12345!")
     page.locator("#btn-submit").click()
 
-    # MANDATORY inbox-state assertion (cycle-4 P2-7b).
-    expect(page.locator("#confirmation-required")).to_be_visible(timeout=15_000)
-    expect(page.locator("#confirm-email")).to_have_text(email)
+    if IS_LOCAL:
+        # local-preview (isLocal) legacy path: session-less success → the
+        # check-your-inbox state (no sign-in / redirect on the legacy flow).
+        expect(page.locator("#confirmation-required")).to_be_visible(timeout=15_000)
+        expect(page.locator("#confirm-email")).to_have_text(email)
+    else:
+        # #801 deployed happy path: created server-side → direct sign-in →
+        # redirect to the welcome page (NO check-your-inbox step).
+        page.wait_for_url("**/welcome*", timeout=15_000)
 
     # X conversion event (#736 Path A): the dataLayer push fired on success
     # with event=x_signup, the typed email, and a non-empty conversion_id
     # (Supabase user id — the dedup key for the X Lead event).
-    data_layer = page.evaluate("() => window.dataLayer || []")
-    assert any(
-        entry.get("event") == "x_signup" and entry.get("conversion_id") and entry.get("email") == email
-        for entry in data_layer
-    ), f"x_signup entry missing from dataLayer: {data_layer}"
+    assert captured.get("x_signup"), "x_signup entry missing from dataLayer"
+    entry = captured["x_signup"]
+    assert entry.get("conversion_id") and entry.get("email") == email, \
+        f"x_signup entry malformed: {entry}"
 
     # The signup request fired with the typed payload.
-    assert "signup" in fired, "auth/v1/signup request never fired"
+    assert "signup" in fired, "v1/signup/email request never fired"
     payload = json.loads(fired["signup"].post_data or "{}")
     assert payload.get("email") == email, f"signup payload email mismatch: {payload.get('email')!r}"
     assert payload.get("password") == "E2ePass-12345!"
 
-    # Acceptance block still present + zero console errors.
-    expect(page.locator(".legal-accept")).to_be_visible()
+    # Acceptance block was visible pre-submit + zero console errors.
     assert console_errors == [], f"console errors during email signup: {console_errors}"
 
 
