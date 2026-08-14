@@ -420,6 +420,19 @@ def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _entity_name_id(label: str, name: str) -> str:
+    """Deterministic entity id from name — mirrors create_point's content-hash
+    dedup so the projection's MERGE-by-name is IDEMPOTENT: the same name
+    always yields the same id, so a second create_object/create_subject
+    returns the canonical node id (#452) and the #1155-P1
+    ``coalesce($id, o.id)`` ON-MATCH write is a no-op (same id), while a
+    name-stub Object minted with a random ulid by the event path still gets
+    replaced by the canonical id on the first ObjectRegistered write.
+    """
+    digest = hashlib.sha256(f"{label}:{name}".encode("utf-8")).hexdigest()[:26]
+    return f"{label[:3].lower()}-{digest}"
+
+
 def _cosine(a: np.ndarray, b: np.ndarray) -> float:
     """Cosine similarity between two embedding vectors (#438).
 
@@ -9669,11 +9682,11 @@ class TortoiseSDK:
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         t = (type or "").strip().lower()
         if t == "subject":
-            node = self._create_entity("Subject", self.ulid(), {
+            node = self._create_entity("Subject", _entity_name_id("Subject", name), {
                 "name": name, "subjectKind": props.pop("subjectKind", "other"),
                 "status": "live", **props}, "SubjectAdded")
         elif t == "object":
-            node = self._create_entity("Object", self.ulid(), {
+            node = self._create_entity("Object", _entity_name_id("Object", name), {
                 "name": name, "objectKind": props.pop("objectKind", "other"),
                 "status": "live", **props}, "ObjectRegistered")
         elif t == "event":
