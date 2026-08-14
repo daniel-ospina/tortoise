@@ -105,6 +105,19 @@ jobs:
             echo "::error::STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET must be set in GitHub secrets"
             exit 1
           fi
+          # Session capture LLM provider (#1197): POST /v1/sessions fails
+          # closed (503) with no provider key — the regex extraction loop was
+          # removed (#822). At least ONE provider key must be present so a
+          # deploy never silently ships a 503-on-every-capture API (beta
+          # testers' most-critical feature). Hard-error, matching the core
+          # secrets above — a provider key is deploy-source-of-truth.
+          if [ -z "${{ secrets.OPENROUTER_API_KEY }}" ] && \
+             [ -z "${{ secrets.DEEPSEEK_API_KEY }}" ] && \
+             [ -z "${{ secrets.OPENAI_API_KEY }}" ] && \
+             [ -z "${{ secrets.GEMINI_API_KEY }}" ]; then
+            echo "::error::No LLM provider key set — POST /v1/sessions fails closed (503). Set at least one of OPENROUTER_API_KEY / DEEPSEEK_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY (docs/infra-runbook.md §4.6)"
+            exit 1
+          fi
           if [ -z "${{ secrets.STRIPE_PRICE_IDS }}" ]; then
             echo "::warning::STRIPE_PRICE_IDS not set — checkout/webhook tier resolution disabled until configured"
           fi
@@ -145,6 +158,14 @@ jobs:
           [ -n "${{ secrets.EMAIL_LINK_BASE_URL }}" ] && ARGS="$ARGS EMAIL_LINK_BASE_URL=${{ secrets.EMAIL_LINK_BASE_URL }}"
           [ -n "${{ secrets.BILLING_SUCCESS_URL }}" ] && ARGS="$ARGS BILLING_SUCCESS_URL=${{ secrets.BILLING_SUCCESS_URL }}"
           [ -n "${{ secrets.BILLING_CANCEL_URL }}" ] && ARGS="$ARGS BILLING_CANCEL_URL=${{ secrets.BILLING_CANCEL_URL }}"
+          # Session-capture LLM provider (#1197): propagate the four provider
+          # keys so the verify-secrets gate above and the shipped app AGREE —
+          # a key present in GH secrets never reaches Fly otherwise (and the
+          # app would 503 every capture even though the gate passed).
+          [ -n "${{ secrets.OPENROUTER_API_KEY }}" ] && ARGS="$ARGS OPENROUTER_API_KEY=${{ secrets.OPENROUTER_API_KEY }}"
+          [ -n "${{ secrets.DEEPSEEK_API_KEY }}" ] && ARGS="$ARGS DEEPSEEK_API_KEY=${{ secrets.DEEPSEEK_API_KEY }}"
+          [ -n "${{ secrets.OPENAI_API_KEY }}" ] && ARGS="$ARGS OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}"
+          [ -n "${{ secrets.GEMINI_API_KEY }}" ] && ARGS="$ARGS GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}"
           # Optional (env-gated at runtime): only pass when set, so unconfigured
           # backups / GitHub OAuth never fail the deploy.
           [ -n "${{ secrets.TORTOISE_BACKUP_KEY }}" ] && ARGS="$ARGS TORTOISE_BACKUP_KEY=${{ secrets.TORTOISE_BACKUP_KEY }}"
