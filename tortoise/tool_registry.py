@@ -596,6 +596,23 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         sdk_method="review_connections",
     ),
     ToolDefinition(
+        name="tortoise_find_cross_lens_candidates",
+        description="Cross-lens candidate discovery (READ-ONLY, #438 bring-your-own-agent): "
+                    "surface unverified candidate pairs between Points from DIFFERENT "
+                    "sources (cross-stream discovery over the vector index) with lens "
+                    "pair, cosine similarity, point context, and dedup vs existing "
+                    "operators. Payload carries a single #901 routing field "
+                    "(truth|relevance) but stays NEUTRAL — no op_type hint; the "
+                    "customer agent decides semantics and writes operators via the "
+                    "normal API. Gated on registered sourceKind (any tier, D3); hard "
+                    "cap 200 candidates/cycle (D4); top_k is hard-clamped to 100 so an "
+                    "agent cannot inflate the per-cycle recall budget. Empty results "
+                    "(not errors) when there is nothing to see (D8).",
+        annotations=_ro(),
+        http_policy=True,
+        sdk_method="get_cross_lens_candidates",
+    ),
+    ToolDefinition(
         name="tortoise_provenance",
         description="Provenance chain — 'Who decided this?' "
                     "Follows authoredBy → Subject → delegation.",
@@ -1041,6 +1058,7 @@ GROUP_BY_NAME: dict[str, str] = {
     "tortoise_list_topics": "reasoning", "tortoise_provenance": "reasoning",
     "tortoise_stale": "reasoning", "tortoise_dream": "reasoning",
     "tortoise_review_connections": "reasoning",
+    "tortoise_find_cross_lens_candidates": "reasoning",
     # graph
     "tortoise_create_operator": "graph", "tortoise_annotate_operator": "graph",
     "tortoise_get_operator": "graph", "tortoise_mitigate_operator": "graph",

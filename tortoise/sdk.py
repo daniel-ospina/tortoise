@@ -14,6 +14,7 @@ import stat
 from typing import Any
 
 from .domain_loader import known_kinds, register_kind
+from .cross_lens import DEFAULT_THRESHOLD
 from .ids import ulid
 from . import monitoring
 from . import file_indexer  # noqa: F401 — import-time sourceKind registration (§4.4)
@@ -240,6 +241,24 @@ def _first_non_draft_status(points: list) -> tuple[int, object] | None:
 # scope (bounded at 200 by hybrid retrieval).
 REVIEW_ADD_POOL_CAP = 1000
 
+# ── Cross-lens candidate discovery (#438, BYOA) cost bounds ─────────────
+# D4: hard cap on candidates per discovery cycle (predictable per-cycle
+# cost; local-model pre-filter experiments live in epic #909, NOT here).
+CROSS_LENS_CANDIDATE_CAP = 200
+# Pool-scan bound: the per-cycle scan is capped at the most-recently-updated
+# eligible points so cost stays proportional to new data, not O(n²) over the
+# whole graph (indicator I3, #438).
+CROSS_LENS_POOL_CAP = 1000
+# Per-point ANN recall bound (neighbors pulled per pool point over the
+# vector index — HNSW on Docker, brute-force euclidean on embedded).
+CROSS_LENS_ANN_TOP_K = 20
+# D4-style hard cap on per-point ANN recall: an agent-passed top_k above
+# this is clamped, never honored, so the per-cycle recall budget stays
+# predictable (embedded brute-force recall is O(pool x total_points) —
+# see the _cross_lens_pairs docstring — so an unbounded top_k would
+# undermine the cost contract entirely).
+CROSS_LENS_ANN_TOP_K_MAX = 100
+
 # #432: declarative spec for the retract/supersede transition guards. NOT
 # consulted by update_point per-call (update_point only promotes draft→live);
 # every claim transition is observable via a Task 3 emit hook, and no
@@ -364,6 +383,22 @@ def _is_ulid(s: str) -> bool:
 
 def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _cosine(a: np.ndarray, b: np.ndarray) -> float:
+    """Cosine similarity between two embedding vectors (#438).
+
+    Stored embeddings round-trip as float32 lists — normalize defensively so
+    the #399-calibrated cosine threshold (0.40, all-MiniLM-L6-v2) applies to
+    the exact same metric cross_lens.py thresholds on.
+    """
+    import numpy as np
+
+    na = float(np.linalg.norm(a))
+    nb = float(np.linalg.norm(b))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return float(np.dot(a, b) / (na * nb))
 
 
 def _to_iso_utc(value) -> str:
@@ -5545,6 +5580,233 @@ class TortoiseSDK:
             result["prune"] = self._review_prune(
                 scope, variance_threshold, prune_limit)
         return result
+
+    # ── Cross-lens candidate discovery (#438, BYOA) ───────────────────────
+
+    def get_cross_lens_candidates(
+        self,
+        *,
+        threshold: float = DEFAULT_THRESHOLD,
+        max_candidates: int = CROSS_LENS_CANDIDATE_CAP,
+        routing: str = "truth",
+        top_k: int = CROSS_LENS_ANN_TOP_K,
+    ) -> dict:
+        """Surface unverified cross-lens candidate pairs (#438, bring-your-own-agent).
+
+        READ-ONLY — never writes to the graph and never decides operator
+        semantics (the candidates-never-write/never-decide contract extends
+        from cross_lens.py to this surface). Returns candidate pairs between
+        Points from DIFFERENT sources (cross-stream discovery over the
+        existing HNSW vector index) with lens pair, cosine similarity, point
+        context, and dedup vs existing operators. The customer agent confirms
+        candidates and writes operators through the normal API (no in-repo
+        verifier — D7).
+
+        Contract (2026-08-15 scoping, docs/scoping/
+        2026-08-15-438-cross-domain-discovery-scoping.md):
+          - D2: the payload carries a single ``routing`` field ("truth" |
+            "relevance", #901 semantics). The surface stays NEUTRAL — no
+            op_type / suggested_relation hint; the caller's declared routing
+            context is echoed per candidate (deciding semantics is the
+            customer agent's job).
+          - D3: candidates are gated on a REGISTERED sourceKind (any tier) —
+            Points whose Source has an unregistered sourceKind (or no Source
+            at all) never appear, since unregistered kinds stay neutral
+            (#398 / source_credibility.SOURCE_KIND_DEFAULTS).
+          - D4: hard cap 200 candidates/cycle — ``max_candidates`` is clamped
+            to CROSS_LENS_CANDIDATE_CAP (predictable per-cycle cost; local
+            pre-filter tuning is #909's territory).
+          - D8: empty results (not errors) when there is nothing to see.
+
+        Discovery cost: bounded ANN pull over the existing Point.embedding
+        vector index (HNSW on Docker/server FalkorDB; brute-force euclidean
+        fallback on embedded — the documented degradation) with ``top_k``
+        neighbors per pool point, then exact cosine recompute from stored
+        embeddings (index scores are rank/euclidean, not the calibrated
+        cosine). The scanned pool is capped at CROSS_LENS_POOL_CAP
+        most-recently-updated eligible points — pair enumeration is
+        pool-bounded (each pool point contributes at most ``top_k``
+        neighbors, candidate space O(pool x top_k)), not O(n²) over the
+        whole graph (indicator I3). Cost caveat: on the embedded backend
+        run_vector_query is a brute-force scan over the ENTIRE Point index,
+        so embedded recall is O(pool x total_points) — the pool cap bounds
+        the pair space, not the per-query scan cost (the documented
+        degradation).
+
+        Recall caveat: the default top_k=20 favors dense recent clusters —
+        same-source near-duplicates (D5-excluded territory) can crowd the
+        top-k and crowd out genuine cross-lens pairs. Raise top_k (up to
+        the hard cap) or lower ``threshold`` when cross-lens recall looks
+        thin.
+
+        Args:
+            threshold: minimum cosine similarity (default 0.40 — the
+                #399-calibrated cross-vocabulary band for all-MiniLM-L6-v2;
+                near-duplicates are 0.75+).
+            max_candidates: requested result cap — HARD-clamped to 200 (D4).
+            routing: the #901 routing context the caller is mining under
+                ("truth" | "relevance") — echoed per candidate; the surface
+                itself stays neutral.
+            top_k: ANN neighbors pulled per pool point (recall bound) —
+                HARD-clamped to CROSS_LENS_ANN_TOP_K_MAX (100) so an agent
+                cannot inflate the per-cycle recall budget (D4 philosophy).
+
+        Returns:
+            {"candidates": [{src, dst, similarity, lenses, sourceKinds,
+              src_content, dst_content, src_source, dst_source, routing}],
+             "count": N, "cap": 200, "truncated": bool, "routing": str}.
+            Candidates sorted by similarity descending.
+
+        Raises ValueError on invalid routing/threshold/max_candidates/top_k.
+        """
+        if routing not in ("truth", "relevance"):
+            raise ValueError(
+                f"routing must be 'truth' or 'relevance' (#901), got {routing!r}"
+            )
+        if not (0.0 <= threshold <= 1.0):
+            raise ValueError(f"threshold must be 0.0-1.0, got {threshold!r}")
+        if max_candidates < 1:
+            raise ValueError(f"max_candidates must be >= 1, got {max_candidates!r}")
+        if top_k < 1:
+            raise ValueError(f"top_k must be >= 1, got {top_k!r}")
+        top_k = min(int(top_k), CROSS_LENS_ANN_TOP_K_MAX)  # hard cap (conf 75)
+
+        limit = min(int(max_candidates), CROSS_LENS_CANDIDATE_CAP)  # D4
+        pool = self._cross_lens_pool()
+        if len(pool) < 2:
+            return {"candidates": [], "count": 0,
+                    "cap": CROSS_LENS_CANDIDATE_CAP,
+                    "truncated": False, "routing": routing}
+
+        connected = self._connected_pairs(list(pool))
+        pairs = self._cross_lens_pairs(pool, threshold=threshold, top_k=top_k)
+
+        all_candidates: list[dict] = []
+        for (a, b), score in pairs:
+            if frozenset((a, b)) in connected:
+                continue  # dedup vs existing operators (Slice 1)
+            pa, pb = pool[a], pool[b]
+            all_candidates.append({
+                "src": a,
+                "dst": b,
+                "similarity": round(score, 6),
+                "lenses": [pa["source"], pb["source"]],
+                "sourceKinds": [pa["sourceKind"], pb["sourceKind"]],
+                "src_content": pa["content"],
+                "dst_content": pb["content"],
+                "src_source": pa["source_id"],
+                "dst_source": pb["source_id"],
+                "routing": routing,
+            })
+
+        truncated = len(all_candidates) > limit
+        candidates = all_candidates[:limit]
+        return {"candidates": candidates, "count": len(candidates),
+                "cap": CROSS_LENS_CANDIDATE_CAP,
+                "truncated": truncated, "routing": routing}
+
+    def _cross_lens_pool(self) -> dict[str, dict]:
+        """Eligible pool for cross-lens discovery (#438).
+
+        Non-operator, non-terminal Points with a stored embedding AND a Source
+        whose sourceKind is REGISTERED (D3 — any tier: T0-T4 identity kinds
+        and explicitly-registered kinds count; unregistered kinds stay
+        neutral). Bounded to the CROSS_LENS_POOL_CAP most-recently-updated
+        points so the per-cycle scan stays proportional to new data.
+        """
+        from tortoise.source_credibility import SOURCE_KIND_DEFAULTS
+
+        registered = [k for k in SOURCE_KIND_DEFAULTS]
+        proj = self._get_proj()
+        rows = proj.g.query(
+            "MATCH (p:Point)-[:extractedFrom]->(s:Source) "
+            "WHERE p.is_operator = false "
+            "  AND p.embedding IS NOT NULL "
+            "  AND (p.status IS NULL OR p.status IN ['draft', 'live']) "
+            "  AND (p.outdated IS NULL OR p.outdated = false) "
+            "  AND s.sourceKind IN $registered "
+            "RETURN p.id, p.content, p.status, s.id, s.url, s.sourceKind, "
+            "       p.updatedAt "
+            "ORDER BY p.updatedAt DESC "
+            "LIMIT $limit",
+            params={"registered": registered, "limit": CROSS_LENS_POOL_CAP},
+        ).result_set
+        pool: dict[str, dict] = {}
+        for pid, content, status, sid, url, skind, updated_at in rows:
+            content = content or ""
+            if content.startswith("[MITIGATION]"):
+                continue  # mitigation bookkeeping — not a standalone claim
+            pool[pid] = {
+                "id": pid,
+                "content": content,
+                "status": status or "draft",
+                "source_id": sid,
+                # lens identity: canonical Source url; fall back to node id.
+                "source": url or sid,
+                "sourceKind": skind,
+                "updated_at": updated_at or "",
+            }
+        return pool
+
+    def _cross_lens_pairs(self, pool: dict[str, dict], *,
+                          threshold: float, top_k: int) -> list[tuple[tuple[str, str], float]]:
+        """Similar cross-source point pairs via bounded ANN pull (#438).
+
+        For each pool point, pull its top-k neighbors over the vector index
+        (run_vector_query: HNSW on Docker/server, brute-force euclidean on
+        embedded), restrict to pool members from a DIFFERENT source, and
+        recompute the exact cosine similarity from stored embeddings (the
+        calibrated #399 metric). Returns [((a, b), score)] with a < b, sorted
+        by score descending. Never writes.
+
+        Cost is bounded on BOTH axes: pair enumeration is pool-bounded
+        (each pool point contributes at most top_k neighbors, so the
+        candidate space is O(pool x top_k)) and the pool itself is capped
+        at CROSS_LENS_POOL_CAP. Caveat: on the embedded backend the
+        run_vector_query recall is a brute-force scan over the ENTIRE Point
+        index, so embedded cost is O(pool x total_points) regardless of the
+        pool cap — the documented degradation. ``top_k`` is hard-clamped at
+        CROSS_LENS_ANN_TOP_K_MAX by the caller.
+        """
+        from .search_engine import run_vector_query
+        import numpy as np
+
+        proj = self._get_proj()
+        is_embedded = getattr(proj, "_is_embedded", True)
+        # Fetch stored embeddings in one query (round-trip as float32 lists).
+        rows = proj.g.query(
+            "MATCH (p:Point) WHERE p.id IN $ids AND p.embedding IS NOT NULL "
+            "RETURN p.id, p.embedding",
+            params={"ids": list(pool)},
+        ).result_set
+        embeddings: dict[str, np.ndarray] = {}
+        for pid, emb in rows:
+            if isinstance(emb, list) and emb:
+                embeddings[pid] = np.asarray(emb, dtype=np.float64)
+
+        best: dict[tuple[str, str], float] = {}
+        for pid, meta in pool.items():
+            vec = embeddings.get(pid)
+            if vec is None:
+                continue
+            hits = run_vector_query(proj.g, vec.tolist(), limit=top_k + 1,
+                                    is_embedded=is_embedded)
+            for nid, _score in hits:
+                if nid == pid or nid not in pool:
+                    continue
+                if pool[nid]["source"] == meta["source"]:
+                    continue  # same lens — cross-lens only
+                nvec = embeddings.get(nid)
+                if nvec is None:
+                    continue
+                sim = _cosine(vec, nvec)
+                if sim < threshold:
+                    continue
+                a, b = (pid, nid) if pid < nid else (nid, pid)
+                if best.get((a, b), 0.0) < sim:
+                    best[(a, b)] = sim
+        ordered = sorted(best.items(), key=lambda kv: kv[1], reverse=True)
+        return [((a, b), s) for (a, b), s in ordered]
 
     def _review_pool(self, scope: str | None) -> dict[str, dict]:
         """Candidate pool for a review: non-operator, non-terminal Points.
