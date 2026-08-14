@@ -168,12 +168,17 @@ def main() -> int:
     print(f"[extract] local _affected_factors: {t_local_factors:.1f} ms "
           f"({len(factors_local)} factors)")
 
-    # 2d. Delta-B scoped extraction
-    zone_ops = [f"op-{i:05d}" for i in range(21)]  # one zone's operators
+    # 2d. Scoped extraction (delta B — the landed local path is
+    # ep._affected_factors; the scoped-by-operator-ids extractor
+    # extract_factors_for_operators was removed as dead code, PR #1273).
+    # Measure a SECOND zone's closure so the per-zone extraction cost is
+    # shown independently of the 2b/2c zone.
+    zone2_roots = ["claim-00020", "claim-00021", "claim-00022"]
+    zone2_affected = ep._affected_claims(zone2_roots, max_hops=None)
     t0 = time.perf_counter()
-    factors_scoped, _ = proj.extract_factors_for_operators(zone_ops)
+    factors_scoped = ep._affected_factors(zone2_affected)
     t_scoped = (time.perf_counter() - t0) * 1000
-    print(f"[extract] extract_factors_for_operators(zone): {t_scoped:.1f} ms "
+    print(f"[extract] _affected_factors(zone2): {t_scoped:.1f} ms "
           f"({len(factors_scoped)} factors)")
 
     # 2e. EP loop — full vs local (bounded iterations; per-iteration cost)

@@ -1377,82 +1377,18 @@ class FalkorProjection(
 
         return factors, {}
 
-    def extract_factors_for_operators(self, operator_ids: list[str],
-                                      include_draft: bool = False):
-        """Extract EP factors for a SPECIFIED operator set (#395, delta B).
-
-        Same contract as ``extract_svbp_factors`` but scoped to the given
-        operator IDs — 2 batch queries restricted to the set, no global scan.
-        Returns ``(factors, evidence)`` with the same tuple shape
-        ``(op_id, op_type, [input_ids], weight)`` and the same degenerate-
-        operator (<2 live inputs) silent-drop + warning convention.
-
-        Operator predicate is the EP engine's canonical one —
-        ``is_operator = true OR op_type IS NOT NULL`` (matches
-        ``_affected_factors`` Batch-1, ep.py) — NOT ``extract_svbp_factors``'
-        ``{is_operator:true}``-only predicate, so legacy ``op_type``-only
-        operators are not silently dropped for explicit-factors consumers.
-
-        With include_draft=False (default, #780): draft operators and draft
-        claim inputs are excluded; #689 retracted Points never feed factors.
-        """
-        ids = [i for i in operator_ids if i]
-        if not ids:
-            return [], {}
-        # Operator predicate: is_operator = true OR op_type IS NOT NULL — the
-        # EP engine's canonical contract (ep.py _affected_factors Batch-1).
-        # #689: retracted operators never feed EP factors.
-        # #780: draft operators never feed EP factors (unless opted in).
-        draft_o = f"AND {_live_only('o.status', include_draft)}" if not include_draft else ""
-        draft_c = f"AND {_live_only('c.status', include_draft)}" if not include_draft else ""
-        op_rows = self.g.query(
-            "MATCH (o:Point) "
-            "WHERE (o.is_operator = true OR o.op_type IS NOT NULL) "
-            "AND o.id IN $ids "
-            "AND (o.status IS NULL OR o.status <> 'retracted') "
-            f"{draft_o} "
-            "RETURN o.id, o.op_type",
-            params={"ids": ids},
-        ).result_set
-
-        input_rows = self.g.query(
-            "MATCH (o:Point)-[r:IMPL|NAND]->(c:Point) "
-            "WHERE (o.is_operator = true OR o.op_type IS NOT NULL) "
-            "AND o.id IN $ids "
-            "AND (c.status IS NULL OR c.status <> 'retracted') "
-            f"{draft_c} {draft_o} "
-            "RETURN o.id, c.id "
-            "ORDER BY o.id, c.id",
-            params={"ids": ids},
-        ).result_set
-
-        op_types: dict[str, str] = {}
-        for op_id, op_type in op_rows:
-            op_types[op_id] = op_type
-        op_inputs: dict[str, list[str]] = defaultdict(list)
-        for op_id, claim_id in input_rows:
-            op_inputs[op_id].append(claim_id)
-
-        factors = []
-        degenerate_count = 0
-        for op_id, op_type in op_types.items():
-            input_ids = op_inputs.get(op_id, [])
-            if len(input_ids) >= 2:
-                weight = 3.0 if op_type == "NAND" else 1.0
-                factors.append((op_id, op_type, input_ids, weight))
-            else:
-                degenerate_count += 1
-
-        if degenerate_count > 0:
-            logger.warning(
-                "extract_factors_for_operators: %d operators with <2 inputs "
-                "excluded from EP (possible silent edge drop). Operator ids: %s",
-                degenerate_count,
-                [op_id for op_id, n in op_inputs.items()
-                 if len(n) < 2],
-            )
-
-        return factors, {}
+    # NOTE (#395 code review, PR #1273): the scoped-by-operator-ids extractor
+    # `extract_factors_for_operators` shipped in this PR was REMOVED — it had
+    # no production call path (the no-arg local EP runs ep.run, whose factor
+    # extraction is ep._affected_factors), and its parity tests pinned it
+    # against extract_svbp_factors, which is NOT the local path's reference.
+    # The op_type-aware operator predicate it implemented lives on in
+    # _affected_factors Batch-1 / _affected_claims (ep.py) and is covered by
+    # test_vector_g_legacy_op_type_only_operator. Deleting beat wiring it
+    # into production: consuming its (op_id, op_type, [inputs], weight)
+    # 4-tuples with hardcoded 3.0/1.0 weights would have changed the shipping
+    # local path's factor semantics (compute_operator_weight, direction,
+    # label) for no consumer.
 
     def get_svbp(self, **svbp_kwargs):
         """Create and run TortoiseSVBP on the current graph.

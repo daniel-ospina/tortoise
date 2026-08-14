@@ -2,7 +2,9 @@
 
 Covers the ten acceptance criteria of docs/plans/2026-08-13-395-local-ep-plan.md:
 
-  AC1  Delta A — extract_factors_for_operators parity vs extract_svbp_factors
+  AC1  Delta A — no-arg compute_confidence runs LOCAL EP via ep.run →
+       _affected_factors (op_type-aware; the scoped-by-operator-ids
+       extractor shipped in the PR was removed as dead code, PR #1273)
   AC2  Delta B — no-arg compute_confidence runs LOCAL EP (no global extract),
        full {iterations, converged, confidences} contract, no_dirty_roots on
        clean graphs
@@ -516,68 +518,6 @@ def test_canonical_bfs_consistency():
         assert op1["id"] in selected and op2["id"] in selected
 
 
-# ── AC1: extract_factors_for_operators parity ───────────────────────────
-
-
-def test_ac1_extract_factors_for_operators_parity():
-    """AC1 — extract_factors_for_operators(ids) == extract_svbp_factors
-    filtered to ids (degenerate + draft cases)."""
-    with _fresh_sdk() as sdk:
-        a = _make_claim(sdk, "p1")
-        b = _make_claim(sdk, "p2")
-        c = _make_claim(sdk, "p3")
-        d = _make_claim(sdk, "p4")
-        sdk.set_point_baseline(a["id"], 1, 1)
-        sdk.set_point_baseline(b["id"], 1, 1)
-        sdk.set_point_baseline(c["id"], 1, 1)
-        sdk.set_point_baseline(d["id"], 1, 1)
-        op1 = sdk.create_operator("IMPL", a["id"], [b["id"]])
-        op2 = sdk.create_operator("NAND", c["id"], [d["id"]])
-        # degenerate operator: only ONE live input (other target is draft)
-        sdk.create_point("statement", "draft-target", status="draft")
-        draft_op = sdk.create_operator("IMPL", a["id"], [d["id"]],
-                                       promote_source=False)
-        proj = sdk._get_proj()
-        # Parity on is_operator=true operators (extract_svbp_factors scope).
-        all_factors, _ = proj.extract_svbp_factors()
-        svbp_filtered = [f for f in all_factors if f[0] in (op1["id"], op2["id"])]
-        scoped, _ = proj.extract_factors_for_operators([op1["id"], op2["id"]])
-        assert len(scoped) == 2
-        assert {f[0] for f in scoped} == {f[0] for f in svbp_filtered}
-        for f in scoped:
-            assert f in svbp_filtered, f"scoped factor {f[0]} not in svbp set"
-        # Draft operator excluded by default (#780), included with opt-in.
-        live_scoped, _ = proj.extract_factors_for_operators([draft_op["id"]])
-        assert live_scoped == []
-        draft_scoped, _ = proj.extract_factors_for_operators(
-            [draft_op["id"]], include_draft=True)
-        # Draft op has 2 inputs (a, d) but both... a is live, d is live here —
-        # include_draft widens the OPERATOR filter only; inputs still >= 2.
-        assert len(draft_scoped) == 1
-
-
-def test_ac1_op_type_only_consistency():
-    """AC1 — extract_factors_for_operators uses the EP-engine canonical
-    predicate (is_operator OR op_type), so legacy op_type-only operators are
-    NOT silently dropped (unlike extract_svbp_factors)."""
-    with _fresh_sdk() as sdk:
-        a = _make_claim(sdk, "ot-a")
-        b = _make_claim(sdk, "ot-b")
-        proj = sdk._get_proj()
-        proj.g.query(
-            "CREATE (o:Point {id:'ot-op', op_type:'IMPL', status:'live'}) "
-            "WITH o "
-            "MATCH (a:Point {id:$a}), (b:Point {id:$b}) "
-            "CREATE (o)-[:IMPL {idx:0}]->(a), (o)-[:IMPL {idx:1}]->(b)",
-            params={"a": a["id"], "b": b["id"]},
-        )
-        scoped, _ = proj.extract_factors_for_operators(["ot-op"])
-        assert len(scoped) == 1, "op_type-only operator must be extracted"
-        all_svbp, _ = proj.extract_svbp_factors()
-        assert all(f[0] != "ot-op" for f in all_svbp), \
-            "extract_svbp_factors ({is_operator:true}-only) misses op_type-only"
-
-
 # ── AC2/AC3: no-arg local contract + max_hops=None semantics ────────────
 
 
@@ -717,7 +657,12 @@ def test_ac5_interactive_latency_zone():
         # O/IT indicator 1: interactive local EP ≤ 1s for 10-50 claim zones.
         # Profiling (graph-scripts/profile_395_local_ep.py) measured the 20-
         # claim local run at ~270ms; the 40-claim zone converges in ~10 iters.
-        assert elapsed < 5.0, f"local EP took {elapsed:.2f}s — interactive budget"
+        # PR #1273 (code review, conf 65): the old <5.0s bound did not enforce
+        # the acceptance criterion — tighten to the ≤1s budget with a small CI
+        # flake margin (1.2s); 5.0s stays only as a runaway hard cap.
+        assert elapsed < 1.2, (
+            f"local EP took {elapsed:.2f}s — interactive budget is ≤1s")
+        assert elapsed < 5.0, f"local EP took {elapsed:.2f}s — hard cap"
 
 
 # ── AC8: run-depth semantic ─────────────────────────────────────────────

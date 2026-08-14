@@ -20,7 +20,10 @@ logger = logging.getLogger(__name__)
 # ── Degeneration-guard thresholds (#395, Phase-3 profiling pinned) ──
 # A max_hops=None closure must not expand unboundedly on the interactive
 # path. Two bounds, aligned with the 200-operator precedent (analyze.py):
-#   A. affected ≈ full graph: collected >= fraction of the graph's Points
+#   A. affected ≈ full graph: collected >= fraction of the graph's CLAIMS
+#      (claims-only count — `affected` holds claim ids; comparing against
+#      all Points would fire on operator-sparse graphs while the component
+#      is still far from fully collected, PR #1273)
 #      -> the "local" run is degenerate (whole-graph EP); stop expanding.
 #   B. per-hop frontier growth: one hop producing > cap new claims while
 #      the graph is already large -> explosive-blowup risk; stop expanding.
@@ -685,7 +688,7 @@ class TortoiseEP:
                         self._last_truncated = True
                         logger.warning(
                             "EP affected-subgraph BFS: %d claims ≈ %.0f%% of "
-                            "graph (%d Points) — degenerate full-graph closure, "
+                            "graph (%d claims) — degenerate full-graph closure, "
                             "truncating expansion (max_hops=None guard, #395).",
                             len(affected), 100.0 * len(affected) / total, total,
                         )
@@ -765,7 +768,7 @@ class TortoiseEP:
                         self._last_truncated = True
                         logger.warning(
                             "EP affected-subgraph BFS: frontier of %d new claims "
-                            "exceeds cap %d on a %d-Point graph — truncating "
+                            "exceeds cap %d on a %d-claim graph — truncating "
                             "expansion (max_hops=None guard, #395).",
                             len(new_frontier), _EP_GUARD_FRONTIER_CAP,
                             total_graph_claims,
@@ -783,12 +786,28 @@ class TortoiseEP:
         return affected
 
     def _graph_claim_count(self) -> int:
-        """Total Point count in the graph (degeneration-guard sizing, #395).
+        """Claim count in the graph (degeneration-guard sizing, #395).
 
-        One cheap count query, called only in the max_hops=None regime.
+        Counts CLAIMS only — Points with is_operator != true AND op_type IS
+        NULL (the projection layer's canonical operator test is
+        bool(is_operator or op_type), projection/__init__.py). The guards
+        compare this against ``len(affected)``, which holds CLAIM ids, so
+        counting all Points (claims + operators) made guard A fire at 50% of
+        Points on operator-sparse graphs while the component was far from
+        fully collected, truncating a genuine closure mid-BFS (#395 code
+        review, PR #1273).
+
+        The bound is graph-size-relative: it only gates once the graph has
+        enough claims to make a whole-graph closure a cost problem
+        (>= _EP_GUARD_MIN_GRAPH_CLAIMS), and a legitimately dense 10-50
+        claim zone in a small graph always stays exact. One cheap count
+        query, called only in the max_hops=None regime.
         """
         rows = self.g.query(
-            "MATCH (n:Point) RETURN count(n)"
+            "MATCH (n:Point) "
+            "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+            "AND n.op_type IS NULL "
+            "RETURN count(n)"
         ).result_set
         return int(rows[0][0]) if rows and rows[0][0] is not None else 0
 
