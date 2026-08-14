@@ -61,8 +61,8 @@ New to Tortoise? Choose a path:
 
   ```bash
   git clone https://github.com/daniel-ospina/tortoise.git && cd tortoise
-  pip install -e .                         # or: pip install -e '.[embeddings]' for vector search
-  python -m tortoise.selfhost              # embedded FalkorDBLite — SINGLE-WRITER, eval only
+  uv sync                             # creates .venv from committed uv.lock (Python 3.12)
+  uv run python -m tortoise.selfhost  # embedded FalkorDBLite — SINGLE-WRITER, eval only
   # or straight from GitHub (no clone):
   pip install git+https://github.com/daniel-ospina/tortoise.git
   ```
@@ -108,8 +108,8 @@ Your agent now has Tortoise's tools — create points, query the graph, check be
 
 ```bash
 pip install tortoise-graph   # or: pip install 'tortoise-graph[embeddings]' for vector search
-# from source: pip install -e .
-python -m tortoise.selfhost # run the daemon locally (see env table below)
+# from source (clone): uv sync && uv run python -m tortoise.selfhost
+#   uv sync --extra embeddings  # or: uv sync (core + dev group) — extras mirror the PyPI package
 ```
 
 ## Self-host configuration
