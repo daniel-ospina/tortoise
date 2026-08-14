@@ -84,3 +84,26 @@ Every case carries ≥2 negative tests.
 
 Remote mode skips the cases whose seams are local-only (E2E-5-D, E2E-12-D,
 bare-server legs) and shares ≤3 tenants (server-side register limit 3/hr/IP).
+
+## Embedded daemon hygiene (shared dev machines)
+
+Hermetic runs boot embedded FalkorDBLite/redislite daemons under `~/.tortoise`.
+On shared dev boxes these can accumulate between sessions — the #176/#1003§4
+leak class (hundreds of orphaned `redis-server` daemons pinning temp sockets,
+~10 GB RSS, plus stale `~/.tortoise/index-*.pid` files).
+
+- **Boot-timeout flakes are environmental.** The 60s boot budget (30s request
+timeouts mid-suite) fails under CPU contention from orphaned daemons. Before
+blaming the suite, check `pgrep -fc 'redislite/bin/redis-server'` — a clean
+machine should show 0–2 daemons, not dozens.
+- **Ops sweep** (after confirming no live sessions are running):
+
+  ```bash
+  pkill -f 'redislite/bin/redis-server'   # orphaned embedded daemons
+  rm -f ~/.tortoise/index-*.pid           # stale pid files (reaper clears
+                                          # sockets, not pid files)
+  ```
+
+- **Fixture-scoping/teardown:** session-shared embedded DB audit is #1012
+(closed via PR #1108, orphans ~46 → 1); the per-session atexit/lifecycle bound
+for test-spawned daemons is tracked as a follow-up (see #1003 status).
