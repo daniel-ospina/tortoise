@@ -120,6 +120,27 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         http_policy=True,
         sdk_method="list_namespaces",
     ),
+    # epic #902 A13 (#1051) — batch audit surface
+    ToolDefinition(
+        name="tortoise_list_batch",
+        description="Audit one ingest bundle: the stamped artifacts (Points "
+                    "created or adopted via dedup + direct edges) carrying the "
+                    "given batch_id. Entities/sources are out of stamp scope; "
+                    "editorial supersede artifacts are outside audit. "
+                    "Completeness holds across rebuild_all.",
+        annotations=_ro(),
+        http_policy=True,
+        sdk_method="list_batch",
+    ),
+    ToolDefinition(
+        name="tortoise_list_batches",
+        description="Batch discovery — the most recent distinct ingest batch_ids "
+                    "with their point/direct-edge counts (ordered by newest "
+                    "stamp, capped at limit, default 20).",
+        annotations=_ro(),
+        http_policy=True,
+        sdk_method="list_batches",
+    ),
     # ── Tags (#215) ───────────────────────────────────────────────
     ToolDefinition(
         name="tortoise_list_tags",

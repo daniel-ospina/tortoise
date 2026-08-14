@@ -789,6 +789,16 @@ def tortoise_list_namespaces() -> list[dict]:
     return _safe(_get_team_sdk().list_namespaces)
 
 
+def tortoise_list_batch(batch_id: str) -> dict:
+    """Audit one ingest bundle's stamped artifacts (epic #902 A13)."""
+    return _safe(_get_team_sdk().list_batch, batch_id)
+
+
+def tortoise_list_batches(limit: int = 20) -> list[dict]:
+    """Batch discovery — recent distinct ingest batch_ids (epic #902 A13)."""
+    return _safe(_get_team_sdk().list_batches, limit=limit)
+
+
 def tortoise_list_tags() -> list[dict]:
     """List all Tag names with count of tagged Points. Where tags are USED.
     Alias → overview(section='tags') (epic #888 W3)."""
