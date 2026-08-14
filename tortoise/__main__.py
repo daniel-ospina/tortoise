@@ -1858,6 +1858,11 @@ def _cmd_validate(args) -> int:
     from tortoise.domain_loader import (
         SURFACE_GRAPH, domain_chain_spec, domain_validators, known_domains,
     )
+    # Import the production validators module BEFORE the guard: its import-time
+    # registrations populate the registry the guard reads. Without this, a
+    # packs-less environment (pip wheel without packs/) sees an empty registry
+    # and a VALID domain exits 2 (review P1, PR #1271).
+    import tortoise.domain_validators  # noqa: F401  (side-effect registration)
     # Unknown domain = no registered validators AND no loaded pack (the
     # registry is the source of truth — validators register at import time,
     # so a pip-installed wheel without packs/ still validates).
@@ -1906,13 +1911,14 @@ def _cmd_validate(args) -> int:
             print(f"  chain {cid}: {', '.join(cspec['steps'])}"
                   f" (enforcement: {cspec['enforcement']})")
         for i, v in enumerate(violations, 1):
-            print(f"  ✗ [{v['rule']}] ({v.get('kind', '?')}) "
-                  f"ref={v.get('ref', '?')}: {v['message']}")
+            print(f"  ✗ [{v.get('rule', '?')}] ({v.get('kind', '?')}) "
+                  f"ref={v.get('ref', '?')}: {v.get('message', '?')}")
             fix = v.get("fix")
             if fix:
                 print(f"      fix: {fix}")
         for d in drift:
-            print(f"  ⚠ [{d['rule']}] ref={d['ref']}: {d['message']}")
+            print(f"  ⚠ [{d.get('rule', '?')}] ref={d.get('ref', '?')}: "
+                  f"{d.get('message', '?')}")
         if violations:
             print(f"\n{len(violations)} violation(s) · "
                   f"{len(drift)} drift warning(s)")

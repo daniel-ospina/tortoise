@@ -578,6 +578,46 @@ class TestValidateCLI:
         from tortoise.__main__ import _cmd_validate
         assert _cmd_validate(_cli_args("", graph_sdk._db_path)) == 2
 
+    def test_no_packs_env_valid_domain_exit_zero(self, graph_sdk,
+                                                 monkeypatch, tmp_path):
+        """Packs-less environment (pip wheel without packs/): a valid domain
+        must STILL exit 0 — the CLI imports tortoise.domain_validators BEFORE
+        the unknown-domain guard, so the registry is populated even when
+        known_domains() is empty (review P1, PR #1271 regression).
+
+        Simulates a fresh process: empty packs dir + empty validator registry
+        + the validators module evicted from sys.modules so the import inside
+        _cmd_validate re-executes and re-registers."""
+        import sys
+        import tortoise.domain_loader as dl
+        empty_packs = tmp_path / "empty-packs"
+        empty_packs.mkdir()
+        monkeypatch.setattr(dl, "_PACKS_DIR", empty_packs)
+        monkeypatch.setattr(dl, "_registry", None)
+        monkeypatch.setattr(dl, "_DOMAIN_VALIDATORS", {})
+        monkeypatch.delitem(sys.modules, "tortoise.domain_validators",
+                            raising=False)
+        assert dl.known_domains() == []  # simulation is real
+        assert dl.domain_validators("product-strategy") == []
+        from tortoise.__main__ import _cmd_validate
+        assert _cmd_validate(_cli_args("product-strategy",
+                                       graph_sdk._db_path)) == 0
+
+    def test_non_contract_validator_dict_renders(self, graph_sdk, capsys):
+        """Third-party validator dicts missing {rule, kind, ref, message, fix}
+        must not raise KeyError in the human render path — .get() with '?'
+        defaults (review P2, PR #1271)."""
+        from tortoise.__main__ import _cmd_validate
+
+        def _fn(graph):
+            return [{"foo": "bar"}]
+
+        register_domain_validator("render-405", chain_id="c",
+                                  surface=SURFACE_GRAPH, fn=_fn)
+        assert _cmd_validate(_cli_args("render-405",
+                                       graph_sdk._db_path)) == 1
+        assert "[?]" in capsys.readouterr().out
+
     def test_runtime_failure_exit_three(self, graph_sdk, monkeypatch):
         from tortoise import __main__ as m
         from tortoise.__main__ import _cmd_validate
