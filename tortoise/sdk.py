@@ -1077,6 +1077,52 @@ class TortoiseSDK:
 
         return None
 
+    def commit_session(self, conversation=None, session_id=None, *,
+                       summary=None, existing_state=None,
+                       extractor_model=None, chunk_size=6,
+                       base_url=None, api_key=None) -> dict:
+        """The production commit path (epic #909, two-process design).
+
+        Process 1: the conversation -> summary (state/decisions/logic/issues)
+        via the value extractor (BYOK model). Process 2: the summary -> graph
+        delta against existing_state (when provided). The summary stream is
+        mapped to the derived-commit payload and POSTed to
+        /v1/sessions/commit (no raw conversation ever leaves the machine).
+
+        ``summary`` may be passed directly (already extracted) to skip
+        Process 1. Returns the endpoint response, or the local extraction
+        result with the payload when the endpoint is unreachable."""
+        import uuid
+        from tortoise.value_extractor import (extract_session,
+                                              validate_summary, check_guards)
+
+        session_id = session_id or f"session_{uuid.uuid4().hex[:12]}"
+        if summary is None and conversation is not None:
+            model = extractor_model or _default_byok_model()
+            extracted = extract_session(
+                model, conversation, existing_state=existing_state,
+                session_id=session_id, chunk_size=chunk_size)
+            summary = extracted["summary"]
+            errors = extracted.get("errors", [])
+            guards = extracted.get("guards", [])
+            delta = extracted.get("delta")
+        else:
+            errors = validate_summary(summary or {})
+            guards = check_guards(summary or {})
+            delta = None
+
+        payload = _summary_to_payload(summary, session_id)
+        if errors:
+            return {"session_id": session_id, "ok": False, "errors": errors,
+                    "payload": payload}
+        try:
+            r = _post_commit(payload, base_url=base_url, api_key=api_key)
+            return {**r, "session_id": session_id, "ok": True,
+                    "guards": guards, "delta": delta}
+        except Exception as e:
+            return {"session_id": session_id, "ok": False, "error": str(e),
+                    "payload": payload, "guards": guards, "delta": delta}
+
     def capture_session(
         self,
         conversation: list[dict[str, str]],
@@ -11529,3 +11575,140 @@ class TortoiseSDK:
             params={"key": self._CALIBRATION_MARKER_KEY},
         ).result_set
         return bool(rows)
+
+
+def _default_byok_model():
+    """Default BYOK model adapter (env-configured; tests inject mocks)."""
+    import os
+    name = os.environ.get("TORTOISE_EXTRACT_MODEL", "deepseek/deepseek-v4-flash")
+    return _model_adapter(name)
+
+
+def _model_adapter(model_id: str):
+    import os
+    key = os.environ.get("OPENROUTER_API_KEY", "")
+    url = os.environ.get("OPENROUTER_BASE_URL",
+                         "https://openrouter.ai/api/v1/chat/completions")
+
+    class _Compat:
+        def complete(self, *, system, user):
+            import requests
+            r = requests.post(url, headers={
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json"},
+                json={"model": model_id,
+                      "messages": [{"role": "system", "content": system},
+                                   {"role": "user", "content": user}]},
+                timeout=600)
+            r.raise_for_status()
+            return r.json()["choices"][0]["message"]["content"]
+
+    return _Compat()
+
+
+def _summary_to_payload(summary: dict, session_id: str) -> dict:
+    """Map the summary stream to the derived-commit payload (#1013 shape):
+    decisions -> events[] (eventKind decision, about_entities = options);
+    logic -> points[] (pointKind statement) + IMPL/NAND between logic points;
+    state -> entities[]; issues -> events[] (occurrence)."""
+    from tortoise.ids import content_hash
+
+    events = []
+    for i, d in enumerate((summary.get("decisions") or [])):
+        events.append({
+            "id": f"ev_{content_hash(f'{session_id}:decision:{i}')[:62]}",
+            "eventKind": "decision",
+            "content": d.get("content", "")[:1000],
+            "confidence": 0.9,
+            "about_entities": d.get("options") or [],
+            "source_ref": "session.md",
+        })
+    for i, iss in enumerate((summary.get("issues") or [])):
+        events.append({
+            "id": f"ev_{content_hash(f'{session_id}:issue:{i}')[:62]}",
+            "eventKind": "occurrence",
+            "content": f"{iss.get('id', 'issue')} {iss.get('status', '')}: {iss.get('content', '')[:900]}",
+            "confidence": 0.9,
+            "about_entities": [],
+            "source_ref": "session.md",
+        })
+
+    points, logic_ids = [], {}
+    for i, l in enumerate((summary.get("logic") or [])):
+        pid = f"pt_{content_hash(l.get('point', ''))[:62]}"
+        logic_ids[l.get("point", "")[:40]] = pid
+        points.append({
+            "id": pid, "content": l.get("point", "")[:1000],
+            "pointKind": "statement", "reason": "NEW",
+            "confidence": 0.8, "c_cal": 0.7,
+            "about_entities": [], "source_ref": "session.md",
+            "quote": "", "status": "live",
+        })
+
+    operators = []
+    for l in (summary.get("logic") or []):
+        src = logic_ids.get(l.get("point", "")[:40])
+        if not src:
+            continue
+        if l.get("supports"):
+            tgt = logic_ids.get(str(l["supports"])[:40])
+            if tgt and tgt != src:
+                operators.append({"src": src, "dst": tgt, "op_type": "IMPL",
+                                  "direction": "unidirectional"})
+        if l.get("opposes"):
+            tgt = logic_ids.get(str(l["opposes"])[:40])
+            if tgt and tgt != src:
+                operators.append({"src": src, "dst": tgt, "op_type": "NAND",
+                                  "direction": "unidirectional"})
+
+    entities, seen = [], set()
+    for st in (summary.get("state") or []):
+        name = st.get("name", "")
+        key = (name, st.get("objectKind", "core:concept"))
+        if not name or key in seen:
+            continue
+        seen.add(key)
+        entities.append({"name": name, "kind": st.get("objectKind", "core:concept"),
+                         "passes_frequency_gate": True})
+
+    return {
+        "schema_version": "1", "session_id": session_id,
+        "client_commit_id": "", "captured_at": _now_iso(),
+        "extractor": {"version": "value@0.3.0+summary", "mode": "byok",
+                      "calibration_version": "v1"},
+        "summary": (summary.get("session") or {}).get("summary", "")[:2000],
+        "story_arc": "",
+        "provenance_refs": [{"path": "session.md", "spans": []}],
+        "sources": [], "entities": entities, "points": points,
+        "events": events, "operators": operators,
+        "telemetry": {"extractor": {"version": "value@0.3.0+summary", "mode": "byok"},
+                      "model": {"provider": "byok", "id": "user-model", "cfg_hash": ""},
+                      "counts": {"kept": len(points), "candidate": len(events),
+                                 "segment": 1, "window": 1, "empty_windows": 0},
+                      "keep_ratio": 1.0, "dedup_hits": 0, "frontier_calls": 1,
+                      "llm_cost_usd": None, "extraction_ms": 0, "retry_count": 0,
+                      "last_error_code": None, "confidence_histogram": [0] * 10},
+    }
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _post_commit(payload: dict, *, base_url=None, api_key=None) -> dict:
+    """POST the derived payload to /v1/sessions/commit (replay-safe)."""
+    import os
+    from tortoise.commit_schema import compute_client_commit_id
+    payload["client_commit_id"] = compute_client_commit_id(
+        payload["session_id"], payload["points"], payload["entities"],
+        payload["operators"], payload["summary"], payload["story_arc"],
+        payload.get("events", []))
+    base = base_url or os.environ.get("TORTOISE_API_URL", "http://localhost:8000")
+    key = api_key or os.environ.get("TORTOISE_API_KEY", "")
+    import requests
+    r = requests.post(f"{base.rstrip('/')}/v1/sessions/commit",
+                      headers={"Authorization": f"Bearer {key}"},
+                      json=payload, timeout=120)
+    r.raise_for_status()
+    return r.json()

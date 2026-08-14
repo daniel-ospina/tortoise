@@ -92,7 +92,7 @@ def _finalize(raw: dict) -> dict:
     payload — mirrors the client's serializer (W-3)."""
     raw["client_commit_id"] = compute_client_commit_id(
         raw["session_id"], raw["points"], raw["entities"], raw["operators"],
-        raw["summary"], raw["story_arc"])
+        raw["summary"], raw["story_arc"], raw.get("events", []))
     return raw
 
 
@@ -862,3 +862,53 @@ class TestConcurrency:
             assert store.get(cid).status == "fully_written"
         finally:
             sdk.close()
+
+
+# ── #1013: events[] — episodic records as Event nodes ──────────────────────
+
+class TestEventsPayload:
+    def test_events_accepted_with_valid_kind(self):
+        raw = _raw_payload(0)
+        raw["events"] = [{
+            "id": "ev_" + "a" * 62, "eventKind": "occurrence",
+            "content": "the run hung", "confidence": 0.9,
+            "about_entities": [], "source_ref": "session.md",
+        }]
+        res, payload = _check(raw)
+        assert res.ok, res.errors
+
+    def test_events_bad_kind_rejected(self):
+        raw = _raw_payload(0)
+        raw["events"] = [{
+            "id": "ev_" + "b" * 62, "eventKind": "banana",
+            "content": "x", "source_ref": "session.md"}]
+        res, _ = _check(raw)
+        assert not res.ok
+        assert any("events[0].eventKind" in k for k in res.errors)
+
+    def test_events_dangling_entity_rejected(self):
+        raw = _raw_payload(0)
+        raw["events"] = [{
+            "id": "ev_" + "c" * 62, "eventKind": "decision",
+            "content": "decided X", "about_entities": ["Ghost"],
+            "source_ref": "session.md"}]
+        res, _ = _check(raw)
+        assert not res.ok
+        assert any("events[0].about_entities" in k for k in res.errors)
+
+    def test_events_missing_source_ref_rejected(self):
+        raw = _raw_payload(0)
+        raw["events"] = [{
+            "id": "ev_" + "d" * 62, "eventKind": "occurrence",
+            "content": "x"}]
+        res, _ = _check(raw)
+        assert not res.ok
+        assert any("events[0].source_ref" in k for k in res.errors)
+
+    def test_events_need_ev_prefix_id(self):
+        raw = _raw_payload(0)
+        raw["events"] = [{
+            "id": "pt_" + "e" * 62, "eventKind": "occurrence",
+            "content": "x", "source_ref": "session.md"}]
+        res, _ = _check(raw)
+        assert not res.ok
