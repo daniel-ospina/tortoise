@@ -15,6 +15,11 @@ def _now_iso() -> str:
 # never materialize a Source node.
 _CONNECTOR_SOURCE_KINDS: frozenset = frozenset({
     "github_issue", "github_pr", "linear_card", "slack_message",
+    # #388: linear_cycle rides BOTH legs — the explicit container-level
+    # fallback sourceUrl (linear.py) and the kind leg (belt-and-suspenders,
+    # mirroring the github.py wiring comment): a cycle event missing
+    # sourceUrl must still materialize via its registered kind.
+    "linear_cycle",
 })
 
 
@@ -645,6 +650,27 @@ class _EntityHandlers:
         self.g.query(
             "MATCH (s:Source {url: $url}), (e:Event {eventId: $eid}) "
             "MERGE (s)-[:references]->(e)",
+            params={"url": url, "eid": eid},
+        )
+        # #388 conf-62: a fallback-key materialization (`slack:{channel}` /
+        # `linear:{team_key}` / bare `source`) can predate the real URL (a
+        # permalink becomes available later, or a later poll resolves the
+        # container key). The new materialization wires a SECOND Source to the
+        # same event → duplicated provenance entries. Clean up: drop every
+        # `(Source)-[:references]->(Event)` edge whose url differs from the
+        # now-authoritative url, and delete the Source node outright if that
+        # edge was its ONLY relationship (deg=1 → orphaned). Shared Sources
+        # (still referencing other events / extractedFrom by Points) keep the
+        # node — only the superseded edge goes. EP-neutral: connector kinds
+        # are neutral on both sides of the swap.
+        self.g.query(
+            "MATCH (old:Source)-[r:references]->(e:Event {eventId: $eid}) "
+            "WHERE old.url <> $url "
+            "WITH old, r, size([(old)-[x]-(y) | x]) AS deg "
+            "DELETE r "
+            "WITH old, deg "
+            "WHERE deg = 1 "
+            "DELETE old",
             params={"url": url, "eid": eid},
         )
         # (Source)-[:references]->(Object {id}) — only on explicit

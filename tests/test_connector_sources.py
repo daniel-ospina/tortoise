@@ -191,6 +191,20 @@ class TestChokePointMaterialization:
             assert rows[0][0] == "linear:ENG"
             assert rows[0][1] == "linear_cycle"
 
+    def test_linear_cycle_event_without_source_url_materializes_via_kind_leg(self):
+        """conf-55 regression: linear_cycle is in _CONNECTOR_SOURCE_KINDS, so a
+        cycle event MISSING sourceUrl still materializes a Source through the
+        kind leg alone (belt-and-suspenders next to the URL leg)."""
+        with fresh_sdk() as sdk:
+            proj = sdk._get_proj()
+            proj.apply(linear_cycle_event(sourceUrl=None))  # kind leg only
+            assert _count(proj, "Source") == 1
+            rows = proj.g.query(
+                "MATCH (s:Source) RETURN s.url, s.sourceKind"
+            ).result_set
+            assert rows[0][0] == "linear:ENG"
+            assert rows[0][1] == "linear_cycle"
+
     def test_slack_event_with_permalink_materializes(self):
         with fresh_sdk() as sdk:
             proj = sdk._get_proj()
@@ -219,6 +233,65 @@ class TestChokePointMaterialization:
             assert _count(proj, "Source") == 1
             rows = proj.g.query("MATCH (s:Source) RETURN s.sourceKind").result_set
             assert rows[0][0] == "mystery_kind"
+
+    def test_fallback_source_superseded_when_real_url_appears(self):
+        """conf-62: a fallback-key materialization (`slack:C01`) predates the
+        real permalink; re-materializing the SAME event at the real URL must
+        remove the superseded references edge and delete the now-orphaned
+        fallback Source (duplicated provenance entries otherwise)."""
+        PERMALINK = "https://ws.slack.com/archives/C01/p1690000000.123456"
+        with fresh_sdk() as sdk:
+            proj = sdk._get_proj()
+            # First poll: no permalink → fallback key on the channel container.
+            proj.apply(slack_event(sourceUrl=None))
+            assert _count(proj, "Source") == 1
+            assert _edge_count(proj, "Source", "url", "slack:C01",
+                               "references", "Event", "eventId",
+                               "slack-msg-C01-1690000000-123456") == 1
+            # Later poll resolves the real permalink for the SAME event.
+            proj.apply(slack_event())
+            assert _count(proj, "Source") == 1  # orphaned fallback node deleted
+            rows = proj.g.query("MATCH (s:Source) RETURN s.url").result_set
+            assert rows[0][0] == PERMALINK
+            assert _edge_count(proj, "Source", "url", PERMALINK,
+                               "references", "Event", "eventId",
+                               "slack-msg-C01-1690000000-123456") == 1
+            # the superseded edge is gone (single provenance entry)
+            assert _edge_count(proj, "Source", "url", "slack:C01",
+                               "references", "Event", "eventId",
+                               "slack-msg-C01-1690000000-123456") == 0
+
+    def test_shared_fallback_source_survives_supersession(self):
+        """conf-62 guard: a fallback Source shared by OTHER events (or
+        extractedFrom by Points) keeps its node — only the superseded edge to
+        the re-materialized event is removed; once the LAST reference is
+        superseded the orphan is deleted."""
+        PERMALINK_A = "https://ws.slack.com/archives/C01/p1690000000.111111"
+        PERMALINK_B = "https://ws.slack.com/archives/C01/p1690000000.222222"
+        with fresh_sdk() as sdk:
+            proj = sdk._get_proj()
+            # Two events share the channel fallback key (both no permalink).
+            proj.apply(slack_event(
+                eventId="slack-msg-C01-1690000000-111111", sourceUrl=None))
+            proj.apply(slack_event(
+                eventId="slack-msg-C01-1690000000-222222", sourceUrl=None))
+            assert _count(proj, "Source") == 1  # single slack:C01
+            # Event A gets a permalink → edge A superseded, node survives (B).
+            proj.apply(slack_event(
+                eventId="slack-msg-C01-1690000000-111111", sourceUrl=PERMALINK_A))
+            assert _count(proj, "Source") == 2  # slack:C01 + permalink A
+            assert _edge_count(proj, "Source", "url", "slack:C01",
+                               "references", "Event", "eventId",
+                               "slack-msg-C01-1690000000-111111") == 0
+            assert _edge_count(proj, "Source", "url", "slack:C01",
+                               "references", "Event", "eventId",
+                               "slack-msg-C01-1690000000-222222") == 1
+            # Event B too → slack:C01 now orphaned → fully deleted.
+            proj.apply(slack_event(
+                eventId="slack-msg-C01-1690000000-222222", sourceUrl=PERMALINK_B))
+            assert _count(proj, "Source") == 2  # both permalinks, fallback gone
+            for u in (PERMALINK_A, PERMALINK_B):
+                assert _count(proj, "Source", url=u) == 1
 
     def test_event_without_source_metadata_creates_no_source(self):
         with fresh_sdk() as sdk:
