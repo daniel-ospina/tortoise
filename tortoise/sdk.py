@@ -477,6 +477,35 @@ def _mark_embedded_opened(db_path: str) -> None:
         _embedded_busy_known.add(str(db_path))
 
 
+def _stream_to_payload(summary: dict, session_id: str, stream: dict) -> dict:
+    """Payload from the constructed graph stream (the wired structure)."""
+    return {
+        "schema_version": "1", "session_id": session_id,
+        "client_commit_id": "", "captured_at": _now_iso(),
+        "extractor": {"version": "value@0.4.0+construct", "mode": "byok",
+                      "calibration_version": "v1"},
+        "summary": (summary.get("session") or {}).get("summary", "")[:2000],
+        "story_arc": "",
+        "provenance_refs": [{"path": "session.md", "spans": []}],
+        "sources": [],
+        "entities": [e for e in stream.get("entities", [])
+                     if e.get("name")],
+        "points": [p for p in stream.get("points", [])
+                   if p.get("id", "").startswith("pt_")],
+        "events": [e for e in stream.get("events", [])
+                   if e.get("id", "").startswith("ev_")],
+        "operators": stream.get("operators", []) or [],
+        "telemetry": {"extractor": {"version": "value@0.4.0+construct", "mode": "byok"},
+                      "model": {"provider": "byok", "id": "user-model", "cfg_hash": ""},
+                      "counts": {"kept": len(stream.get("points", [])),
+                                 "candidate": len(stream.get("events", [])),
+                                 "segment": 1, "window": 1, "empty_windows": 0},
+                      "keep_ratio": 1.0, "dedup_hits": 0, "frontier_calls": 2,
+                      "llm_cost_usd": None, "extraction_ms": 0, "retry_count": 0,
+                      "last_error_code": None, "confidence_histogram": [0] * 10},
+    }
+
+
 def _now_iso() -> str:
     """UTC now in ISO format (module-level — shared by write paths)."""
     from datetime import datetime, timezone
@@ -1272,6 +1301,7 @@ class TortoiseSDK:
         from tortoise.value_extractor import (extract_session,
                                               validate_summary, check_guards)
 
+        from tortoise.value_extractor import construct_graph
         session_id = session_id or f"session_{uuid.uuid4().hex[:12]}"
         if summary is None and conversation is not None:
             model = extractor_model or _default_byok_model()
@@ -1287,7 +1317,12 @@ class TortoiseSDK:
             guards = check_guards(summary or {})
             delta = None
 
-        payload = _summary_to_payload(summary, session_id)
+        # Step 2: construct the graph structure (arguments as wired points).
+        try:
+            stream = construct_graph(summary, extractor_model or _default_byok_model())
+        except Exception:
+            stream = None
+        payload = _summary_to_payload(summary, session_id, stream=stream)
         if errors:
             return {"session_id": session_id, "ok": False, "errors": errors,
                     "payload": payload}
@@ -12149,7 +12184,14 @@ def _model_adapter(model_id: str):
     return _Compat()
 
 
-def _summary_to_payload(summary: dict, session_id: str) -> dict:
+def _summary_to_payload(summary: dict, session_id: str,
+                       stream: dict | None = None) -> dict:
+    """Map the summary to the derived-commit payload. When a constructed
+    stream (Step 2 output) is provided, its wired structure (argument points
+    with about_entities + IMPL/NAND/MITIGATES operators + decision events) is
+    used directly; otherwise the loose mapping is applied."""
+    if stream and (stream.get("points") or stream.get("events")):
+        return _stream_to_payload(summary, session_id, stream)
     """Map the summary stream to the derived-commit payload (#1013 shape):
     decisions -> events[] (eventKind decision, about_entities = options);
     logic -> points[] (pointKind statement) + IMPL/NAND between logic points;
