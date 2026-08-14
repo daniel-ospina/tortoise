@@ -119,6 +119,7 @@ surfaces:
   - test_ingest_mode.py
   - test_ingest_promotion.py
   - test_ingest_validation.py
+  - test_joint_index_ingest.py
   - test_integration_search.py
   - test_judge_harness.py
   - test_linear_connector.py
