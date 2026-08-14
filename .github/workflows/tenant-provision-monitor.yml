@@ -3,8 +3,9 @@
 # The #1110 incident (browser signups blocked by missing CORS headers) was
 # discovered by a USER, not by any signal. The function now logs its
 # incident-class failures server-side (FASTAPI_URL misconfig, provision_team
-# failure, uncaught handler errors) — "rejected origin" deny-branch lines are
-# intentional diagnosis logging and are NOT treated as incidents (#1149). This
+# failure, uncaught handler errors). "rejected origin" deny-branch lines are
+# intentional diagnosis logging; only a >=5-per-window burst opens an
+# incident (#1149 count-threshold — see marker comment below). This
 # workflow is the consume side: hourly, it queries the project's unified
 # logs stream for tenant-provision error markers and opens a DEDUPLICATED
 # GitHub issue (with log evidence) when any appear, then fails visibly.
