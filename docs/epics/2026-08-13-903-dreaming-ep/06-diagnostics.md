@@ -21,7 +21,7 @@ decision itself is recorded here by the epistemic team.
 
 ---
 
-## Metrics (emitted by `scripts/graph-diagnostics.py`)
+## Metrics (emitted by `graph-scripts/graph-diagnostics.py`)
 
 | Metric | What it tells the decision |
 |---|---|
@@ -67,7 +67,7 @@ machinery at our scale.
 
 ### F5 fixture run — 2026-08-14 (deterministic, representative synthetic)
 
-Run: `.venv/bin/python scripts/graph-diagnostics.py --fixture` — source =
+Run: `.venv/bin/python graph-scripts/graph-diagnostics.py --fixture` — source =
 F5 representative synthetic fixture (the F5 builder pins the shape; real
 production-snapshot runs are optional/TO-DO below).
 
@@ -110,7 +110,7 @@ FalkorDB with a production graph). When one is available:
 
 ```bash
 # against the configured TORTOISE_DB_URI / docker://... instance:
-.venv/bin/python graph-scripts/graph-diagnostics.py
+.venv/bin/python graph-graph-scripts/graph-diagnostics.py
 ```
 
 **Observed data point (2026-08-14, local dev embedded graph — NOT the
@@ -130,7 +130,7 @@ then decide between rule 2 and rule 3).
 
 ## Status
 
-- [x] Diagnostics script (`scripts/graph-diagnostics.py`) — emits all metrics + invariants
+- [x] Diagnostics script (`graph-scripts/graph-diagnostics.py`) — emits all metrics + invariants
 - [x] Automated invariants tested on the F5 fixture (`tests/test_graph_diagnostics.py`)
 - [x] Decision recorded for the representative (F5) scale: **FULL**
 - [ ] Production-snapshot run (optional, TO-DO) — re-evaluation trigger

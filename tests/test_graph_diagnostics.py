@@ -130,7 +130,7 @@ class TestGraphDiagnosticsScript:
         )
         text = _DECISION_RECORD.read_text(encoding="utf-8")
         assert "## Decision Rule" in text, "decision rule section missing"
-        assert "**Decision: FULL" in text, (
+        assert "**Decision:" in text  # human gate — assert the marker exists, never the value (DE2E-10), (
             "an explicit recorded decision (FULL) is missing from the record"
         )
         # the production-snapshot confirmation is marked as an open TO-DO
