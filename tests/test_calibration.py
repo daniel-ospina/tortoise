@@ -1,39 +1,14 @@
-"""Integration tests for EP calibration pipeline — Issue #7478.
+"""Tests for EP calibration pipeline — Issue #7478.
 
-Requires live FalkorDB (Docker); skips gracefully when unavailable so the
-no-Docker embedded suite stays green (AGENTS.md). Mirrors the probe pattern
-in tests/test_integration_search.py.
+Runs on the embedded falkordblite fixture (no Docker needed, AGENTS.md) —
+migrated in #398; the stale live-FalkorDB skip probe was removed as part of
+#344 so the fail-closed default-flip tests actually execute.
 """
 import os
 
 import pytest
 from tortoise.sdk import TortoiseSDK
 from tortoise.exceptions import CalibrationError
-
-_CAL_URI = "docker://:falkordb@localhost:6379/tortoise_test_calibration"
-FALKORDB_AVAILABLE = False
-_OLD_URI = os.environ.get("TORTOISE_DB_URI")
-try:
-    os.environ["TORTOISE_DB_URI"] = _CAL_URI
-    _probe_sdk = TortoiseSDK()
-    _probe_sdk._get_proj().g.query("RETURN 1")
-    _probe_sdk.close()
-    FALKORDB_AVAILABLE = True
-except Exception:
-    pass
-finally:
-    # ALWAYS restore the original env (success or failure) — an import-time
-    # setdefault without restore leaks the docker URI into every later test
-    # file (#176 contamination: test_m1/test_pre_migration_safety/... hit
-    # Error 61 on localhost:6379).
-    if _OLD_URI is not None:
-        os.environ["TORTOISE_DB_URI"] = _OLD_URI
-    else:
-        os.environ.pop("TORTOISE_DB_URI", None)
-
-pytestmark = pytest.mark.skipif(
-    not FALKORDB_AVAILABLE, reason="Live FalkorDB (Docker) not available")
-
 
 
 @pytest.fixture
@@ -85,18 +60,26 @@ def test_calibration_pipeline_e2e(sdk):
 # ── require_calibration gate ────────────────────────────────────
 
 def test_require_calibration_raises(sdk):
-    """require_calibration=True on uncalibrated graph raises CalibrationError."""
-    sdk.create_point("statement", "Uncalibrated claim")
-    sdk.create_point("statement", "Another uncalibrated")
+    """require_calibration=True on uncalibrated LIVE graph raises CalibrationError.
+
+    #780/PR #1212: draft points are excluded from EP (factor extraction +
+    propagation), so the gate only guards live evidence — drafts must be
+    promoted (create_operator / update_point draft→live) before the
+    fail-closed gate applies to them.
+    """
+    sdk.create_point("statement", "Uncalibrated claim", status="live")
+    sdk.create_point("statement", "Another uncalibrated", status="live")
     
     with pytest.raises(CalibrationError, match="uncalibrated"):
         sdk.compute_confidence(require_calibration=True)
 
 
 def test_require_calibration_partial(sdk):
-    """One calibrated, one not → still raises."""
+    """One calibrated, one live-uncalibrated → still raises."""
     p1 = sdk.create_point("statement", "Calibrated", credibility="gold")
-    sdk.create_point("statement", "Not calibrated")
+    # Live uncalibrated point — the draft default would be excluded from the
+    # gate (#780/PR #1212), so the fail-closed assertion needs explicit live.
+    sdk.create_point("statement", "Not calibrated", status="live")
     
     sdk.create_operator("IMPL", p1["id"], [sdk.create_point("statement", "target")["id"]])
     
@@ -105,11 +88,57 @@ def test_require_calibration_partial(sdk):
 
 
 def test_require_calibration_default(sdk):
-    """require_calibration=False runs normally on uncalibrated graph."""
-    sdk.create_point("statement", "Uncalibrated", credibility="medium")
-    
-    result = sdk.compute_confidence()  # default False
-    assert result["converged"] is True
+    """Default require_calibration=True is fail-closed (#344).
+
+    A genuinely uncalibrated graph (no credibility → baseline_set=false)
+    must raise CalibrationError under the default instead of silently
+    running EP on topology alone; a calibrated graph succeeds.
+    """
+    # Uncalibrated LIVE graph → fail-closed under the flipped default.
+    sdk.create_point("statement", "Uncalibrated claim", status="live")
+    with pytest.raises(CalibrationError, match="calibrate_summary"):
+        sdk.compute_confidence()  # default True
+
+    # Companion: a calibrated graph succeeds under the default. The gate is
+    # graph-wide, so this needs a fresh graph (the uncalibrated point above
+    # would still trip it).
+    import tempfile
+    s2 = TortoiseSDK(os.path.join(tempfile.mkdtemp(prefix="tt_calib_"), "test.db"))
+    try:
+        p1 = s2.create_point("statement", "Calibrated claim", credibility="gold")
+        p2 = s2.create_point("statement", "Related claim", credibility="gold")
+        s2.create_operator("IMPL", p1["id"], [p2["id"]])
+        result = s2.compute_confidence()  # default True, graph is calibrated
+        assert result["converged"] is True
+    finally:
+        s2.close()
+
+
+def test_require_calibration_ignores_drafts(sdk):
+    """Draft evidence points do NOT trip the fail-closed gate (#780, PR #1212).
+
+    create_point defaults to status='draft', and drafts are excluded from
+    factor extraction + EP propagation (include_draft=False). A graph whose
+    only uncalibrated points are drafts must not demand calibration of
+    points EP will never use — the gate guards live evidence only.
+    """
+    sdk.create_point("statement", "Draft staging claim")  # defaults to draft
+    sdk.create_point("statement", "Another draft", status="draft")
+    # Draft-only graph → gate passes (nothing live to calibrate); EP finds
+    # no live factors and returns a no-op result instead of raising.
+    result = sdk.compute_confidence(require_calibration=True)
+    assert result.get("diagnostic") == "no_factors"
+
+    # Mixed: one live uncalibrated point still fails closed.
+    import tempfile
+    s2 = TortoiseSDK(os.path.join(tempfile.mkdtemp(prefix="tt_calib_"), "test.db"))
+    try:
+        s2.create_point("statement", "Draft staging claim")
+        s2.create_point("statement", "Live uncalibrated", status="live")
+        with pytest.raises(CalibrationError, match="uncalibrated"):
+            s2.compute_confidence(require_calibration=True)
+    finally:
+        s2.close()
 
 
 # ── calibrate_summary ───────────────────────────────────────────

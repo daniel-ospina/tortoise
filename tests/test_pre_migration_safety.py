@@ -48,9 +48,10 @@ def _get_context_anchors(proj, context: str) -> list[str]:
 def _get_new_operator_set(proj, anchors: list[str]) -> set[str]:
     if not anchors:
         return set()
-    return _bfs_select_operators(
+    ops, _anchors = _bfs_select_operators(
         proj, anchors, max_hops=1, rel_filter="IMPL|NAND", direction="both"
     )
+    return ops
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────

@@ -789,6 +789,16 @@ def tortoise_list_namespaces() -> list[dict]:
     return _safe(_get_team_sdk().list_namespaces)
 
 
+def tortoise_list_batch(batch_id: str) -> dict:
+    """Audit one ingest bundle's stamped artifacts (epic #902 A13)."""
+    return _safe(_get_team_sdk().list_batch, batch_id)
+
+
+def tortoise_list_batches(limit: int = 20) -> list[dict]:
+    """Batch discovery — recent distinct ingest batch_ids (epic #902 A13)."""
+    return _safe(_get_team_sdk().list_batches, limit=limit)
+
+
 def tortoise_list_tags() -> list[dict]:
     """List all Tag names with count of tagged Points. Where tags are USED.
     Alias → overview(section='tags') (epic #888 W3)."""
@@ -1010,11 +1020,13 @@ def tortoise_compute_confidence(factors: Any = None,
                     max_hops: int = 1,
                     rel_filter: str = "IMPL|NAND",
                     direction: str = "both",
-                    require_calibration: bool = False) -> dict:
+                    require_calibration: bool = True) -> dict:
     """Compute confidence via EP belief propagation. Returns {iterations, converged, confidences}.
 
     Pass anchors=[point_ids] for BFS subgraph selection.
-    Pass require_calibration=True to gate on calibration state.
+    Calibration is required by default (#344): raises CalibrationError on
+    uncalibrated graphs. Pass require_calibration=False to run on topology
+    alone (explicit opt-out only).
     max_hops: BFS depth from anchors (default 1).
     rel_filter: edge types — "IMPL", "NAND", or "IMPL|NAND" (default).
     direction: IMPL traversal — "incoming", "outgoing", or "both" (default).

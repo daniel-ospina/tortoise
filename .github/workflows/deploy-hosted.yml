@@ -137,6 +137,12 @@ jobs:
           [ -n "${{ secrets.STRIPE_PRICE_IDS }}" ] && ARGS="$ARGS STRIPE_PRICE_IDS=${{ secrets.STRIPE_PRICE_IDS }}"
           [ -n "${{ secrets.RESEND_API_KEY }}" ] && ARGS="$ARGS RESEND_API_KEY=${{ secrets.RESEND_API_KEY }}"
           [ -n "${{ secrets.BILLING_NOTIFY_TO }}" ] && ARGS="$ARGS BILLING_NOTIFY_TO=${{ secrets.BILLING_NOTIFY_TO }}"
+          # Transactional email (#307, #1221): explicit from-address + link base.
+          # Defaults exist in email_notify.py (noreply@premiselabs.co /
+          # https://tortoise.premiselabs.co) — pass-through only when set so
+          # unconfigured deploys keep working on the defaults.
+          [ -n "${{ secrets.RESEND_FROM_EMAIL }}" ] && ARGS="$ARGS RESEND_FROM_EMAIL=${{ secrets.RESEND_FROM_EMAIL }}"
+          [ -n "${{ secrets.EMAIL_LINK_BASE_URL }}" ] && ARGS="$ARGS EMAIL_LINK_BASE_URL=${{ secrets.EMAIL_LINK_BASE_URL }}"
           [ -n "${{ secrets.BILLING_SUCCESS_URL }}" ] && ARGS="$ARGS BILLING_SUCCESS_URL=${{ secrets.BILLING_SUCCESS_URL }}"
           [ -n "${{ secrets.BILLING_CANCEL_URL }}" ] && ARGS="$ARGS BILLING_CANCEL_URL=${{ secrets.BILLING_CANCEL_URL }}"
           # Optional (env-gated at runtime): only pass when set, so unconfigured

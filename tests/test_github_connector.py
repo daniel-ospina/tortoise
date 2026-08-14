@@ -27,6 +27,11 @@ def test_issue_to_event_closed():
     assert ev["object"] == "Fix login bug"
     assert ev["startedAt"] == "2026-07-10T10:00:00Z"
     assert ev["endedAt"] == "2026-07-19T12:00:00Z"
+    # #388: source metadata — per-entity url + kind (projection materializes
+    # a Source node from these)
+    assert ev["source"] == "github:test/repo"
+    assert ev["sourceUrl"] == "https://github.com/test/repo/issues/42"
+    assert ev["sourceKind"] == "github_issue"
 
 
 def test_issue_to_event_open():
@@ -42,6 +47,8 @@ def test_issue_to_event_open():
     ev = gh._issue_to_event(issue)
     assert ev["eventKind"] == "github.issue.open"
     assert ev["endedAt"] is None
+    assert ev["sourceKind"] == "github_issue"
+    assert ev["sourceUrl"] == "..."
 
 
 def test_issue_to_event_skips_empty_title():
@@ -67,6 +74,9 @@ def test_pr_to_event_open():
     assert ev["eventId"] == "github-pr-test/repo-7"
     assert ev["eventKind"] == "github.pr.open"
     assert ev["endedAt"] is None
+    # #388: PR events carry their OWN kind (was mislabeled github_issue) + url
+    assert ev["sourceKind"] == "github_pr"
+    assert ev["sourceUrl"] == "..."
 
 
 def test_pr_to_event_merged():
@@ -83,6 +93,7 @@ def test_pr_to_event_merged():
     ev = gh._pr_to_event(pr)
     assert ev["eventKind"] == "github.pr.merged"
     assert ev["endedAt"] == "2026-07-16T10:00:00Z"
+    assert ev["sourceKind"] == "github_pr"
 
 
 def test_pr_to_event_closed_unmerged():
@@ -116,6 +127,9 @@ def test_webhook_issue_opened():
     })
     assert ev["eventKind"] == "github.issue.open"
     assert ev["eventId"] == "github-issue-org/r-5"
+    # #388: webhook html_url flows through to sourceUrl
+    assert ev["sourceUrl"] == "https://gh/org/r/issues/5"
+    assert ev["sourceKind"] == "github_issue"
 
 
 def test_webhook_issue_closed():
@@ -143,10 +157,12 @@ def test_webhook_pr_merged():
             "created_at": "2026-07-17T00:00:00Z",
             "closed_at": "2026-07-18T00:00:00Z",
             "merged_at": "2026-07-18T00:00:00Z",
-            "html_url": "...",
+            "html_url": "https://gh/org/r/pull/10",
         },
     })
     assert ev["eventKind"] == "github.pr.merged"
+    assert ev["sourceKind"] == "github_pr"
+    assert ev["sourceUrl"] == "https://gh/org/r/pull/10"
 
 
 def test_webhook_unknown_event_returns_none():

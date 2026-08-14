@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json as _json
 import logging
+import os
 import re
 import stat
 from typing import Any
@@ -45,6 +46,157 @@ STALE_TERMINAL_STATUSES = frozenset(
 # drift; INGEST_CONTRACT.md §2/§5 pins the exact values + error shapes).
 INGEST_GRANULARITIES = ("bulk", "granular")
 INGEST_PROMOTION_POLICIES = ("gated", "auto")
+
+
+# ── Session LLM extraction (epic #909 M2 — issue #822) ─────────────────────
+# The deterministic regex extraction loop is REMOVED as a product path: LLM
+# extraction is the DEFAULT (and only) capture extraction. These helpers build
+# the M2 two-stage LLMExtractor (tortoise/extractor.py) from the configured
+# provider and run it over a conversation; both hosted_api.capture_session and
+# TortoiseSDK.capture_session consume them so the two copies stay in sync.
+
+# Provider priority when MULTIPLE keys are set (first configured wins — the
+# deploy-time decision is which key is present; a key is only ever sent to the
+# provider that issued it, #329). Order mirrors tortoise.ingest._PROVIDERS.
+_SESSION_LLM_PROVIDER_PRIORITY = ("openrouter", "deepseek", "openai", "gemini")
+
+# Default model per provider when TORTOISE_SESSION_LLM_MODEL is unset. The
+# provider/model choice is a product decision (deploy-time) — these are
+# cheap-tier defaults matching the analyzer's model choices (analyze.py
+# _LLM_PROVIDERS) and session_indexer's whitelist family.
+_SESSION_LLM_DEFAULT_MODELS = {
+    "openrouter": "deepseek/deepseek-chat",
+    "deepseek": "deepseek-chat",
+    "openai": "gpt-4o-mini",
+    "gemini": "gemini-2.0-flash",
+}
+
+
+def _session_llm_provider() -> str | None:
+    """First configured session-extraction provider, or None when no provider
+    key is set (fail-closed). Mirrors ingest._PROVIDERS exactly — the same key
+    set hosted_api._llm_provider_available() reports (#722 parity)."""
+    from tortoise.ingest import _PROVIDERS
+
+    for provider in _SESSION_LLM_PROVIDER_PRIORITY:
+        if provider in _PROVIDERS:
+            _base_url, key_env = _PROVIDERS[provider]
+            if os.environ.get(key_env):
+                return provider
+    return None
+
+
+def _build_session_llm_extractor():
+    """Build the M2 LLMExtractor for session capture from the configured
+    provider (or None when no provider key is set — the no-key case fails
+    closed). TORTOISE_SESSION_LLM_MOCK=1 is a test seam (precedent:
+    TORTOISE_BACKUP_STORAGE=memory / RATE_LIMIT_DISABLED) that swaps in the
+    deterministic MockModel so the E2E/unit suites exercise the real LLM
+    pipeline shape with zero network."""
+    if os.environ.get("TORTOISE_SESSION_LLM_MOCK", "").strip().lower() == "1":
+        from tortoise.extractor import LLMExtractor, MockModel
+
+        return LLMExtractor(MockModel("mock-point"), MockModel("mock-relation"))
+    provider = _session_llm_provider()
+    if provider is None:
+        return None
+    from tortoise.ingest import _PROVIDERS
+    from tortoise.extractor import LLMExtractor
+    from tortoise.models import OpenAICompatModel
+
+    base_url, key_env = _PROVIDERS[provider]
+    model_id = _SESSION_LLM_DEFAULT_MODELS[provider]
+    spec = os.environ.get("TORTOISE_SESSION_LLM_MODEL", "").strip()
+    if spec:
+        if ":" not in spec:
+            # Bare <model> — resolves against the configured provider key. The
+            # error message promises <model> or <provider>:<model>; before
+            # #1194 a bare name fell into the partition() branch where p=<model>
+            # and m="", so it could NEVER be accepted (misleading provider
+            # mismatch error, or "bad model spec" when it equaled the provider
+            # name) — surfaced as an uncaught 500 on every hosted capture.
+            model_id = spec
+        else:
+            p, _, m = spec.partition(":")
+            if p and p != provider:
+                raise ValueError(
+                    f"TORTOISE_SESSION_LLM_MODEL={spec!r} names provider {p!r} but "
+                    f"{provider!r} is the configured session provider (its key is set)."
+                )
+            if not m:
+                raise ValueError(f"bad model spec {spec!r}; expected <model> or <provider>:<model>")
+            model_id = m
+    return LLMExtractor(
+        OpenAICompatModel(id=model_id, base_url=base_url, api_key_env=key_env),
+        OpenAICompatModel(id=model_id, base_url=base_url, api_key_env=key_env),
+    )
+
+
+class _InMemoryEventLog:
+    """Duck-typed EventLog (append/read_all) backing the session-capture
+    extraction readback. The graph (via the EventAPI projection) is the
+    durable store; this log only carries the events of the current capture so
+    the caller can read the extracted Points back. No file I/O, no temp files."""
+
+    def __init__(self):
+        self._events: list[dict] = []
+
+    def append(self, event: dict) -> None:
+        self._events.append(event)
+
+    def read_all(self) -> list[dict]:
+        return list(self._events)
+
+
+def _session_llm_transcript(conversation: list[dict]) -> tuple[str, int]:
+    """Build the LLM-extraction transcript + pre-write estimate for a
+    conversation (#822). One ``Speaker: text`` line per turn (the
+    extractor._utterances segmenter format; non-name roles fall back to
+    ``Speaker``), content from the SAME 5000-char window the turn Points store
+    (#721 parity — a phrase past the cut has no home in any stored turn),
+    newlines flattened so multi-line turns are still extracted, sentences
+    capped per turn at MAX_EXTRACTIONS_PER_TURN (the #329 flood gate — the
+    removed regex loop capped extracted Points per turn the same way).
+
+    Returns ``(transcript, estimate)`` where ``estimate`` is the fail-closed
+    upper bound on NEW non-episodic nodes: extracted Points (one per sentence)
+    ×2 for the M2 relations stage's IMPL/NAND operator nodes (the regex loop
+    never created operators). The ×2 is a true ceiling only because the session
+    extractor clamps operators ≤ points (LLMExtractor.run dedupe+cap, #1194) —
+    a permissive relation model can no longer write more operator nodes than
+    points, which would have bypassed this estimate and the 402 gate it feeds."""
+    from tortoise.extractor import _SENT
+
+    lines: list[str] = []
+    n_sentences = 0
+    for turn in conversation:
+        raw_role = turn.get("role")
+        role = raw_role if isinstance(raw_role, str) else (
+            "unknown" if raw_role is None else str(raw_role))
+        speaker = role.title()
+        if not re.match(r"^[A-Z][\w .'-]{0,40}$", speaker):
+            # non-word roles (123, dict str, weird casing) still extract under
+            # a generic speaker label — never drop the turn's content.
+            speaker = "Speaker"
+        raw = turn.get("content")
+        content = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
+        body = " ".join(content[:5000].split())
+        sents = [s.group(0).strip() for s in _SENT.finditer(body)]
+        sents = [s for s in sents if len(s) >= 3]
+        capped = sents[:MAX_EXTRACTIONS_PER_TURN]
+        n_sentences += len(capped)
+        if capped:
+            lines.append(f"{speaker}: {' '.join(capped)}")
+    return "\n".join(lines), n_sentences * 2
+
+
+def _session_llm_extraction_estimate(conversation: list[dict]) -> int:
+    """Pre-write fail-closed estimate of new non-episodic nodes a capture will
+    produce (points + operators). Hosted 402 gate input — mirrors the removed
+    regex estimate (#947: the points quota counts non-episodic Points only,
+    and turn Points/Session/Event are episodic)."""
+    _transcript, est = _session_llm_transcript(conversation)
+    return est
 
 
 def _first_non_draft_status(points: list) -> tuple[int, object] | None:
@@ -928,6 +1080,30 @@ class TortoiseSDK:
                 "RETURN n.id",
                 params={"ch": ch, "kind": kind},
             ).result_set
+            # A10 CONTENT+KIND FALLBACK SCAN (cycle-17/18): a mid-function
+            # crash inside create_point (between the node CREATE and the
+            # content_hash/props SET loop) leaves a live Point WITHOUT
+            # content_hash — the content-hash MATCH misses, and a second
+            # point would be a permanent duplicate no later submission can
+            # dedup (exactly-once violated, E2E-6.4). On the shared miss, the
+            # fallback matches stored content against the item's content,
+            # constrained to hash-less points of the same kind. Order pin:
+            # fallback runs FIRST on the miss; a fallback HIT is a dedup (no
+            # straddle warning); a fallback MISS runs the raw MATCH below for
+            # the pre-change straddle. Rebuild-durable: content+kind survive
+            # the #548 snapshot (the hash-less point's content is intact).
+            if not existing:
+                fallback = proj.g.query(
+                    "MATCH (n:Point) "
+                    "WHERE n.is_operator = false "
+                    "AND n.pointKind = $kind "
+                    "AND n.content_hash IS NULL "
+                    "AND n.content = $content "
+                    "RETURN n.id",
+                    params={"kind": kind, "content": content},
+                ).result_set
+                if fallback:
+                    existing = fallback
             if existing:
                 pid = existing[0][0]
                 # Existing point already stores content_hash — don't re-write it
@@ -1077,6 +1253,52 @@ class TortoiseSDK:
 
         return None
 
+    def commit_session(self, conversation=None, session_id=None, *,
+                       summary=None, existing_state=None,
+                       extractor_model=None, chunk_size=6,
+                       base_url=None, api_key=None) -> dict:
+        """The production commit path (epic #909, two-process design).
+
+        Process 1: the conversation -> summary (state/decisions/logic/issues)
+        via the value extractor (BYOK model). Process 2: the summary -> graph
+        delta against existing_state (when provided). The summary stream is
+        mapped to the derived-commit payload and POSTed to
+        /v1/sessions/commit (no raw conversation ever leaves the machine).
+
+        ``summary`` may be passed directly (already extracted) to skip
+        Process 1. Returns the endpoint response, or the local extraction
+        result with the payload when the endpoint is unreachable."""
+        import uuid
+        from tortoise.value_extractor import (extract_session,
+                                              validate_summary, check_guards)
+
+        session_id = session_id or f"session_{uuid.uuid4().hex[:12]}"
+        if summary is None and conversation is not None:
+            model = extractor_model or _default_byok_model()
+            extracted = extract_session(
+                model, conversation, existing_state=existing_state,
+                session_id=session_id, chunk_size=chunk_size)
+            summary = extracted["summary"]
+            errors = extracted.get("errors", [])
+            guards = extracted.get("guards", [])
+            delta = extracted.get("delta")
+        else:
+            errors = validate_summary(summary or {})
+            guards = check_guards(summary or {})
+            delta = None
+
+        payload = _summary_to_payload(summary, session_id)
+        if errors:
+            return {"session_id": session_id, "ok": False, "errors": errors,
+                    "payload": payload}
+        try:
+            r = _post_commit(payload, base_url=base_url, api_key=api_key)
+            return {**r, "session_id": session_id, "ok": True,
+                    "guards": guards, "delta": delta}
+        except Exception as e:
+            return {"session_id": session_id, "ok": False, "error": str(e),
+                    "payload": payload, "guards": guards, "delta": delta}
+
     def capture_session(
         self,
         conversation: list[dict[str, str]],
@@ -1084,19 +1306,36 @@ class TortoiseSDK:
         *,
         max_turns: int = MAX_SESSION_TURNS,
     ) -> dict:
-        """Capture an agent session into the graph (#312 delta 4).
+        """Capture an agent session into the graph (#312 delta 4, #822).
 
         Mirrors the hosted POST /v1/sessions logic minus quota/auth:
         turns become episodic Points keyed {session_id}_t{i} (deterministic +
-        idempotent), decisions/claims become epistemic Points (content-hash
-        dedup), plus a :Session node and an ontology-compliant
-        :Event {eventKind:'sessionCaptured'} with aboutEvent edges.
+        idempotent), the M2 LLM extractor (epic #909) turns the conversation
+        into epistemic Points (+ IMPL/NAND operators — provenance-grounded,
+        extracted via the EventAPI projection), plus a :Session node and an
+        ontology-compliant :Event {eventKind:'sessionCaptured'} with
+        aboutEvent edges. The deterministic regex loop is removed as a product
+        path — LLM extraction is the default and no-key fails closed.
 
         ``conversation`` is a list of {"role", "content"} dicts. Returns
-        {"session_id", "turns", "extracted", "points": [...]}.
+        {"session_id", "turns", "extracted", "points": [...],
+        "extraction_mode"}.
+
+        Requires an LLM provider key (OPENROUTER/DEEPSEEK/OPENAI/GEMINI_API_KEY)
+        or the TORTOISE_SESSION_LLM_MOCK=1 test seam — raises ValueError
+        otherwise (fail-closed, mirroring the hosted 503).
         """
         import uuid
         from datetime import datetime, timezone
+
+        if _build_session_llm_extractor() is None:
+            raise ValueError(
+                "capture_session requires an LLM provider key (set e.g. "
+                "OPENROUTER_API_KEY or DEEPSEEK_API_KEY) — the regex "
+                "extraction loop was removed as a product path (#822). "
+                "Set TORTOISE_SESSION_LLM_MOCK=1 in tests for the offline "
+                "MockModel extractor."
+            )
 
         proj = self._get_proj()
         now = datetime.now(timezone.utc).isoformat()
@@ -1112,27 +1351,18 @@ class TortoiseSDK:
             params={"sid": session_id, "now": now, "tc": len(conversation)},
         )
 
-        decisions = [
-            r"(?i)(?:let'?s|we will|we should|I will|I'm going to|decided|decision)\s+[^.!?]+[.!?]",
-            r"(?i)(?:plan is|next steps?:|action item:)\s+[^.!?]+[.!?]",
-        ]
-        claims = [
-            r"(?i)(?:I think|I believe|my understanding is|the problem is|the key insight)\s+[^.!?]+[.!?]",
-            r"(?i)(?:evidence suggests|data shows|we found that|this means)\s+[^.!?]+[.!?]",
-        ]
-
-        # NOTE: this extraction loop (regexes + per-turn caps) is duplicated
-        # from tortoise/hosted_api.py POST /v1/sessions. Divergences: the SDK
+        # NOTE: this per-turn loop (episodic turn Points) is duplicated from
+        # tortoise/hosted_api.py POST /v1/sessions. Divergences: the SDK
         # variant writes a `speaker` property on turn Points (delta 5) while
         # hosted adds quota/auth bounds; hosted has no speaker tag. SDK
-        # TRUNCATES turn content > 5000 chars silently AND extracts from the
-        # truncated text (stored-source parity — a phrase past the cut has no
-        # home in any stored turn), hosted rejects > 5000 with 422 (Pydantic
-        # field_validator failure) so its loop always sees <= 5000 chars:
-        # extraction inputs align. role=None normalizes to "unknown" in the
-        # SDK, hosted stores None as-is. Keep the two in sync when touching
-        # either.
-        extracted = []
+        # TRUNCATES turn content > 5000 chars silently AND the extraction
+        # transcript is built from the truncated text (stored-source parity —
+        # a phrase past the cut has no home in any stored turn), hosted
+        # rejects > 5000 with 422 (Pydantic field_validator failure) so its
+        # loop always sees <= 5000 chars: extraction inputs align. role=None
+        # normalizes to "unknown" in the SDK, hosted stores None as-is. Keep
+        # the two in sync when touching either. The LLM extraction that
+        # follows the loop is shared via _extract_session_llm (#822).
         for i, turn in enumerate(conversation):
             # #721: same isinstance-first pattern as content below — an `or
             # "unknown"` fallback only fixes falsy roles, but TRUTHY non-string
@@ -1175,46 +1405,10 @@ class TortoiseSDK:
                 params={"sid": session_id, "tid": turn_id},
             )
 
-            # Epistemic extraction (regex, same bounds as hosted). #721:
-            # scan the STORED (truncated) turn text — the turn Point above
-            # stores content[:5000], so the regexes must run on that same
-            # slice. Scanning the full content would extract phrases past the
-            # cut into session-wired Points whose source text exists in no
-            # stored turn (broken provenance). Hosted can't hit this (422 on
-            # content > 5000 before the loop); this keeps extraction input
-            # aligned with what is actually stored.
-            scan = content[:5000]
-            n_dec = 0
-            for pat in decisions:
-                for match in re.finditer(pat, scan):
-                    if n_dec >= MAX_EXTRACTIONS_PER_TURN:
-                        break
-                    n_dec += 1
-                    text = match.group().strip()
-                    p = self.create_point("decision", text[:5000], dedup=True)
-                    pid = p["id"]
-                    proj.g.query(
-                        "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
-                        "MERGE (s)-[:CONTAINS]->(p)",
-                        params={"sid": session_id, "pid": pid},
-                    )
-                    extracted.append({"id": pid, "kind": "decision", "text": text[:200]})
-
-            n_clm = 0
-            for pat in claims:
-                for match in re.finditer(pat, scan):
-                    if n_clm >= MAX_EXTRACTIONS_PER_TURN:
-                        break
-                    n_clm += 1
-                    text = match.group().strip()
-                    p = self.create_point("statement", text[:5000], dedup=True)
-                    pid = p["id"]
-                    proj.g.query(
-                        "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
-                        "MERGE (s)-[:CONTAINS]->(p)",
-                        params={"sid": session_id, "pid": pid},
-                    )
-                    extracted.append({"id": pid, "kind": "statement", "text": text[:200]})
+        # M2 LLM extraction over the whole conversation (#822) — replaces the
+        # regex decision/claim loop (removed as a product path). Shared with
+        # the hosted copy so the two stay in sync.
+        extracted = self._extract_session_llm(conversation, session_id, now)
 
         # Ontology episodic model (v3.1 §4.5/§3.2): Event + aboutEvent edges.
         try:
@@ -1240,7 +1434,71 @@ class TortoiseSDK:
             "turns": len(conversation),
             "extracted": len(extracted),
             "points": extracted,
+            "extraction_mode": "llm",
         }
+
+    def _extract_session_llm(
+        self,
+        conversation: list[dict[str, str]],
+        session_id: str,
+        now: str,
+    ) -> list[dict]:
+        """M2 LLM extraction (epic #909) over a conversation (#822).
+
+        Runs the two-stage LLMExtractor on the conversation transcript
+        through an EventAPI bound to THIS SDK's projection — the same write
+        path mining uses (points + IMPL/NAND operators land via the shared
+        event projection with provenance spans + extractor-version stamping).
+        Every extracted Point is then wired to the session (:CONTAINS edge,
+        same as the removed regex loop).
+
+        Returns the ``[{id, kind, text}]`` list the capture contract reports;
+        ``kind`` reflects the stored pointKind (the M2 conversation stage
+        writes untyped Points, reported as ``statement``).
+
+        Shared by the hosted copy so the two capture_session loops stay in
+        sync — the regex decision/claim loop is removed as a product path and
+        no-key fails closed (the caller gates on _build_session_llm_extractor).
+        """
+        extractor = _build_session_llm_extractor()
+        if extractor is None:
+            raise ValueError(
+                "_extract_session_llm requires an LLM provider key or "
+                "TORTOISE_SESSION_LLM_MOCK=1 — no extractor available (#822)")
+        transcript, _est = _session_llm_transcript(conversation)
+        if not transcript.strip():
+            return []
+
+        from tortoise.api import EventAPI
+        from tortoise.projection import fold, split
+
+        log = _InMemoryEventLog()
+        api = EventAPI(log, initiated_by="extractor", agent_id=extractor.version,
+                       projection=self._get_proj())
+        source_id = f"session:{session_id}"
+        try:
+            extractor.run(transcript, source_id, api)
+        except Exception as e:
+            raise RuntimeError(
+                f"LLM session extraction failed for session {session_id}: {e}"
+            ) from e
+
+        statements, _operators = split(fold(log.read_all()))
+        extracted: list[dict] = []
+        proj = self._get_proj()
+        for p in statements:
+            pid = p["id"]
+            proj.g.query(
+                "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
+                "MERGE (s)-[:CONTAINS]->(p)",
+                params={"sid": session_id, "pid": pid},
+            )
+            extracted.append({
+                "id": pid,
+                "kind": p.get("pointKind") or "statement",
+                "text": p.get("content", "")[:200],
+            })
+        return extracted
 
     # ── Update / Delete consolidation (epic #888 W2, PR #912) ─────────
     # One update()/delete() for Points AND entities. The legacy methods
@@ -2547,12 +2805,15 @@ class TortoiseSDK:
             raise ValueError(
                 f"op_type must be 'IMPL', 'NAND', or a part/whole type, got {op_type!r}"
             )
-        # Direction default: bidirectional for all op types (product owner,
-        # #753) — a NAND is logically "A and B can't both be true" (mutual).
-        # An agent may explicitly pass "unidirectional" to declare a DIRECTED
-        # attack (attacker's truth penalizes the target, no back-pressure).
+        # Direction default (CYCLE-25 per-op_type, ontology v3.6 #5):
+        # direction-absent canonicalizes per op_type — IMPL → "bidirectional"
+        # (unchanged), NAND → "unidirectional" (extraction default — ingest IS
+        # the extraction path: new-claim-attacks-existing is the common case;
+        # bidirectional NAND requires explicit mutual-restatement declaration).
+        # A caller may explicitly pass "unidirectional"/"bidirectional" to
+        # override.
         if direction is None:
-            direction = "bidirectional"  # backward compat: explicit None = default
+            direction = self._canonical_direction(op_type, None)
         if direction not in ("bidirectional", "unidirectional"):
             raise ValueError(
                 f"direction must be 'bidirectional' or 'unidirectional', got {direction!r}"
@@ -3907,9 +4168,11 @@ class TortoiseSDK:
           (live by projection — the #780 asymmetry: gated writes explicit
           draft on the operator, auto writes none).
 
-        Returns {granularity, created: {points, entities, sources, connections},
-        deduped: {...}, ids: {points, entities, sources, connections, refs},
-        nudges: [...]} (+ results for granularity='granular').
+        Returns {granularity, batch_id, created: {points, entities, sources,
+        connections}, deduped: {...}, ids: {points, entities, sources,
+        connections, refs}, nudges: [...], warnings: [...]} (+ results for
+        granularity='granular'). The key set is the canonical enumeration
+        (INGEST_CONTRACT §2.2 — a docs/behavior conformance test pins it).
         """
         if granularity not in INGEST_GRANULARITIES:
             raise ValueError(
@@ -3960,6 +4223,11 @@ class TortoiseSDK:
         created = {"points": 0, "entities": 0, "sources": 0, "connections": 0}
         deduped = {"points": 0, "entities": 0, "sources": 0, "connections": 0}
         results = [] if granularity == "granular" else None
+        # A3 warnings contract (cycle-23): the ELEVEN-key enumeration lives in
+        # E2E-6.2; this accumulator carries the operator-absorb / residue /
+        # drift warnings appended during the connection loop.
+        warnings: list[str] = []
+        self._ingest_warnings = warnings
 
         def _register_ref(ref: str, cid: str, section: str) -> None:
             if ref in refs:
@@ -4052,6 +4320,21 @@ class TortoiseSDK:
                 "AND n.pointKind = $kind RETURN n.id",
                 params={"ch": _content_hash(content), "kind": kind},
             ).result_set
+            # A10 CONTENT+KIND fallback (cycle-17/18): mirror create_point's
+            # hash-less sibling detection so the counter is honest (a
+            # fallback hit counts as deduped, never created).
+            if not existed:
+                fallback = proj.g.query(
+                    "MATCH (n:Point) "
+                    "WHERE n.is_operator = false "
+                    "AND n.pointKind = $kind "
+                    "AND n.content_hash IS NULL "
+                    "AND n.content = $content "
+                    "RETURN n.id",
+                    params={"kind": kind, "content": content},
+                ).result_set
+                if fallback:
+                    existed = fallback
             point = self.create_point(kind, content, dedup=True, **item)
             pid = point["id"]
             if ref:
@@ -4152,12 +4435,103 @@ class TortoiseSDK:
                 op_type = conn["operator"]
                 label = conn.get("label")
                 direction = conn.get("direction")
+                # §8 connection-routing (A3, #1053): a PLAIN IMPL/NAND
+                # connection (route 'direct' — no reify/mitigation) is
+                # operator-less per §8 — route to create_direct_edge, carrying
+                # label/direction/batch_id on the EDGE (no operator node). The
+                # promotion SET fires only on created==True (the promotion-on-
+                # created-only pin, §5.3/CYCLE-24) — the bare-MERGE dedup hit
+                # applies NO promotion.
+                if self._connection_route(conn) == "direct":
+                    edge_res = self.create_direct_edge(
+                        op_type, src, dsts[0],
+                        label=label,
+                        direction=direction,
+                        batch_id=batch_id,
+                        promote_source=(promotion_policy == "auto"),
+                    )
+                    created_flag = bool(edge_res.get("created"))
+                    if created_flag:
+                        created["connections"] += 1
+                    else:
+                        deduped["connections"] += 1
+                    conn_result = {"direct_edge": op_type, "from": src,
+                                   "to": dsts[0], "deduped": not created_flag}
+                    # §6.1 descriptor: the ids["connections"] entry is the
+                    # STABLE shape (no deduped — aggregated in
+                    # deduped.connections) so identical-resubmission equality
+                    # holds; deduped lives only in the granular conn_result
+                    # (plan §5.5 route matrix, cycle-22).
+                    ids["connections"].append(
+                        {"direct_edge": op_type, "from": src, "to": dsts[0]})
+                    if results is not None:
+                        results.append({"section": "connections", "index": i,
+                                        "ref": conn.get("ref"), "item": conn,
+                                        "result": conn_result,
+                                        "deduped": bool(conn_result.get("deduped"))})
+                    continue
                 existing = self._find_operator(op_type, [src] + dsts,
                                                label=label, direction=direction)
-                if existing is not None:
-                    oid = existing
+                if existing is not None and existing.get("kind") == "exact":
+                    oid = existing["id"]
+                    # k=N boundary (cycle-15): re-apply promotion when the
+                    # exact-hit is NULL-status under auto (a crash after the
+                    # full input-edge loop, before the promotion SET).
+                    if (promotion_policy == "auto"
+                            and existing.get("status") is None):
+                        try:
+                            self._reapply_operator_promotion(oid)
+                        except Exception:  # noqa: BLE001 — best-effort
+                            pass
                     deduped["connections"] += 1
                     conn_result = {"operator_id": oid, "deduped": True}
+                elif existing is not None and existing.get("kind") == "partial":
+                    # partial-absorb (cycle-11): complete the written input
+                    # set to the full set via IDEMPOTENT bare-MERGE + SET per
+                    # input (never the raw-CREATE loop), then proceed to
+                    # promotion under auto.
+                    oid = existing["id"]
+                    written = set(existing.get("written") or [])
+                    for _i, _inp in enumerate([src] + dsts):
+                        if _inp in written:
+                            continue
+                        # IDEMPOTENT edge-completion (P0 fix, review gate): the
+                        # ONE-STEP property-filtered MERGE
+                        #   MERGE (o:Point {id:$oid})-[r:REL]->(t:Point {id:$inp})
+                        # CREATES DUPLICATE NODES when the edge is absent (the
+                        # FalkorDB quirk create_direct_edge's cycle-26 comment
+                        # documents) — the completion would land on a fresh
+                        # bare Point instead of the operator. Use the TWO-STEP
+                        # pattern: MATCH both endpoints, then edge-only MERGE
+                        # (with idx parity for create_operator's edge shape).
+                        proj.g.query(
+                            f"MATCH (o:Point {{id:$oid}}), (t:Point {{id:$inp}}) "
+                            f"MERGE (o)-[r:{op_type if op_type in ('IMPL','NAND') else 'hasPart'}]->(t) "
+                            f"SET r.idx = $idx",
+                            params={"oid": oid, "inp": _inp, "idx": _i},
+                        )
+                    completed = len([src] + dsts) - len(written)
+                    if promotion_policy == "auto" and existing.get("status") is None:
+                        try:
+                            self._reapply_operator_promotion(oid)
+                        except Exception:  # noqa: BLE001 — best-effort
+                            pass
+                    deduped["connections"] += 1
+                    conn_result = {"operator_id": oid, "deduped": True}
+                    self._append_warning(
+                        f"operator_absorb_completed:{oid}:{completed}")
+                elif existing is not None and existing.get("kind") == "decline":
+                    # TWO+ candidates → decline + partial_operator_residue
+                    # warning; the retry creates a fresh complete operator.
+                    self._append_warning(
+                        "partial_operator_residue:"
+                        + ",".join(existing.get("candidates") or []))
+                    op = self.create_operator(op_type, src, dsts,
+                                              label=label, direction=direction,
+                                              promote_source=(promotion_policy == "auto"))
+                    oid = op["id"]
+                    created["connections"] += 1
+                    conn_result = {"operator_id": oid, "deduped": False}
                 else:
                     op = self.create_operator(op_type, src, dsts,
                                               label=label, direction=direction,
@@ -4234,9 +4608,11 @@ class TortoiseSDK:
             "deduped": deduped,
             "ids": ids,
             "nudges": nudges,
+            "warnings": warnings,
         }
         if results is not None:
             out["results"] = results
+        self._ingest_warnings = None
         return out
 
     # ── batch_id stamping (epic #902 A4, §4.2) ────────────────────────
@@ -4347,6 +4723,128 @@ class TortoiseSDK:
             )
             return False
         return True
+
+    # ── batch audit surface (epic #902 A13, §4.2 audit row) ──────────
+
+    def list_batch(self, batch_id: str) -> dict:
+        """Audit the stamped artifacts of ONE bundle (epic #902 A13).
+
+        Returns the bundle's STAMPED set — every Point carrying this
+        ``batch_id`` (created OR ADOPTED via dedup — E2E-10 row 14: a
+        batch-less pre-existing point acquires the bundle's batch_id on its
+        first dedup hit) and every operator-less direct edge carrying it.
+        Operator/mitigation Points are ordinary Points (stamped the same
+        way, §4.2). Entities and sources are OUT of stamp scope on the
+        INGEST path (bundle entities/sources are never stamped — a bundle
+        item carrying ``batch_id`` is rejected at Phase-1; the raw-SDK
+        props-passthrough surface can still stamp an entity via
+        ``create_subject(batch_id=...)`` — a DOCUMENTED interim gap until
+        #785 adopts the shared ``_sanitize_props`` batch_id rejection, the
+        A4-gated final sub-step). Editorial supersede artifacts are outside
+        audit: the superseding (editorial) point is not stamped with the
+        originating bundle's batch_id, and repointed edges KEEP their
+        originating batch_id (E2E-11.6).
+
+        Completeness across ``rebuild_all``: batch_id on Points is restored
+        from the pre-wipe live-graph snapshot (projection pass-1b tail) —
+        a rebuild of the SAME store keeps the POINT half of the audit
+        intact; DIRECT EDGES are lost even on same-store rebuilds today
+        (their ``DirectEdgeCreated`` descriptors are journaled but not
+        replayed). The JSONL journal replay of ``BatchIdStamped`` /
+        ``DirectEdgeCreated`` records (a fresh-store rebuild from the
+        journal only) is A10 pass-2b (#1048, gated on A3) — NOT yet
+        landed, so journal-only rebuilds lose batch_id today (recorded
+        deferral).
+
+        Returns ``{"batch_id", "points": [{id, pointKind, status,
+        is_operator, op_type, content}], "direct_edges": [{direct_edge,
+        from, to, direction, confidence, weight, label}], "counts":
+        {"points": n, "direct_edges": m}}``.
+        """
+        if not isinstance(batch_id, str) or not batch_id:
+            raise ValueError("list_batch: batch_id must be a non-empty string")
+        proj = self._get_proj()
+        point_rows = proj.g.query(
+            "MATCH (n:Point {batch_id:$bid}) "
+            "RETURN n.id, n.pointKind, n.status, "
+            "       (n.is_operator = true), n.op_type, n.content "
+            "ORDER BY n.id",
+            params={"bid": batch_id},
+        ).result_set
+        edge_rows = proj.g.query(
+            "MATCH (a:Point)-[r:IMPL|NAND]->(b:Point) "
+            "WHERE r.batch_id = $bid "
+            "AND coalesce(a.is_operator, false) = false "
+            "AND a.op_type IS NULL "
+            "AND coalesce(b.is_operator, false) = false "
+            "AND b.op_type IS NULL "
+            "RETURN type(r), a.id, b.id, "
+            "       coalesce(r.direction, 'bidirectional'), "
+            "       r.confidence, r.weight, r.label "
+            "ORDER BY a.id",
+            params={"bid": batch_id},
+        ).result_set
+        points = [{"id": r[0], "pointKind": r[1], "status": r[2],
+                   "is_operator": bool(r[3]), "op_type": r[4],
+                   "content": r[5]} for r in point_rows]
+        edges = [{"direct_edge": r[0], "from": r[1], "to": r[2],
+                  "direction": r[3], "confidence": r[4], "weight": r[5],
+                  "label": r[6]} for r in edge_rows]
+        return {"batch_id": batch_id, "points": points,
+                "direct_edges": edges,
+                "counts": {"points": len(points),
+                            "direct_edges": len(edges)}}
+
+    def list_batches(self, limit: int = 20) -> list[dict]:
+        """Batch discovery — the most recent distinct batch_ids (A13).
+
+        Returns ``[{batch_id, points, direct_edges}]`` ordered by the newest
+        stamped point's ``createdAt`` descending (a batch whose ONLY stamped
+        artifacts are direct edges sorts by the edge's newest timestamp),
+        capped at ``limit`` (default 20). Entities/sources are out of stamp
+        scope (never counted). The ``points``/``direct_edges`` counts are the
+        aggregate counts per batch (not the full rows — use ``list_batch``
+        for the audit detail). Edge-only batches ARE discoverable (the
+        transport-death recovery path must not lose them).
+        """
+        if not isinstance(limit, int) or limit < 1:
+            raise ValueError("list_batches: limit must be a positive int")
+        proj = self._get_proj()
+        # point-stamped batches: (bid, newest point createdAt, point count)
+        rows = proj.g.query(
+            "MATCH (n:Point) WHERE n.batch_id IS NOT NULL "
+            "WITH n.batch_id AS bid, max(n.createdAt) AS newest, count(n) AS c "
+            "RETURN bid, newest, c",
+        ).result_set
+        # edge-stamped batches: edge-only batches (endpoints carry no
+        # batch_id) must ALSO be discoverable — the transport-death recovery
+        # path must not lose them
+        edge_rows = proj.g.query(
+            "MATCH ()-[r:IMPL|NAND]->() "
+            "WHERE r.batch_id IS NOT NULL "
+            "WITH r.batch_id AS bid, max(r.createdAt) AS newest, count(r) AS c "
+            "RETURN bid, newest, c",
+        ).result_set
+        newest_by_bid: dict[str, str] = {}
+        by_bid: dict[str, dict] = {}
+        for (bid, newest, c) in rows:
+            by_bid[bid] = {"batch_id": bid, "points": c, "direct_edges": 0}
+            if newest is not None and (bid not in newest_by_bid
+                                       or newest > newest_by_bid[bid]):
+                newest_by_bid[bid] = newest
+        for (bid, newest, c) in edge_rows:
+            if bid in by_bid:
+                by_bid[bid]["direct_edges"] = c
+            else:
+                by_bid[bid] = {"batch_id": bid, "points": 0,
+                               "direct_edges": c}
+            if newest is not None and (bid not in newest_by_bid
+                                       or newest > newest_by_bid[bid]):
+                newest_by_bid[bid] = newest
+        items = list(by_bid.values())
+        items.sort(key=lambda b: newest_by_bid.get(b["batch_id"], ""),
+                   reverse=True)
+        return items[:limit]
 
     def create_direct_edge(self, op_type: str, source_id: str, target_id: str, *,
                            direction: str | None = None,
@@ -4505,33 +5003,118 @@ class TortoiseSDK:
 
     def _find_operator(self, op_type: str, inputs: list[str],
                        label: str | None = None,
-                       direction: str | None = None) -> str | None:
-        """Return the id of an existing operator Point with the same
-        (op_type, input set) — or None. Used by ingest to keep re-ingests
-        idempotent (operators are not content-hash dedupable).
+                       direction: str | None = None) -> dict | None:
+        """§5.5 OPERATOR-DEDUP (A3): richer return — exact-hit | partial-absorb
+        | miss.
+
+        Exact-hit: an operator with the SAME (op_type, input set) — returns
+        {"id", "status", "kind": "exact"}. Condition builders apply the
+        CYCLE-25 per-op_type absent↔default canonicalization (IMPL
+        direction-absent → stored "bidirectional"; NAND direction-absent →
+        stored "unidirectional" — the extraction default) so a
+        direction-omitting retry dedups its own run-1 operator (exactly-once);
+        label-absent appends `o.label IS NULL` (no-label requests match only
+        unlabeled operators).
+
+        Partial-absorb: on an exact miss, a NULL-status (unpromoted) operator
+        whose input set is a PROPER SUBSET of the requested set AND whose
+        label/direction STRICT-MATCH the declared values (a label-absent
+        request must NOT absorb a labeled operator — the cross-absorption
+        semantic-theft class) AND whose written input set is NON-EMPTY —
+        returns {"id", "status", "kind": "partial", "written": [...]}.
+        TWO+ qualifying candidates → {"kind": "decline",
+        "candidates": [...]} (never an arbitrary absorption).
+
+        Miss → None.
+
+        The SOLE caller (ingest operator path) unwraps the plain operator-id
+        str for the exact-hit branch and runs the EDGE-COMPLETION step
+        (bare-MERGE + SET per input — IDEMPOTENT) for a partial-absorb.
         """
         proj = self._get_proj()
         edge_rel = "hasPart" if op_type not in ("IMPL", "NAND") else op_type
+        canonical_dir = self._canonical_direction(op_type, direction)
+        params: dict = {"op": op_type, "inputs": list(inputs)}
         conds = [
             "size(targets) = size($inputs)",
             "all(x IN targets WHERE x IN $inputs)",
         ]
-        params = {"op": op_type, "inputs": list(inputs)}
         if label is not None:
             conds.append("o.label = $label")
             params["label"] = label
-        if direction is not None:
+        else:
+            # CYCLE-17 clause: label-absent → `o.label IS NULL` (no-label
+            # requests match only unlabeled operators — never a wildcard)
+            conds.append("o.label IS NULL")
+        if direction is not None or canonical_dir is not None:
+            # CYCLE-17/25: direction-absent canonicalizes per op_type (IMPL
+            # → bidirectional, NAND → unidirectional) — NEVER `o.direction IS
+            # NULL` (direction is always stored; a NULL clause matches
+            # NOTHING and recreates the exactly-once P1 on the default shape)
             conds.append("o.direction = $direction")
-            params["direction"] = direction
+            params["direction"] = canonical_dir
         rows = proj.g.query(
             f"MATCH (o:Point {{is_operator:true, op_type:$op}}) "
             f"OPTIONAL MATCH (o)-[r:{edge_rel}]->(t:Point) "
-            f"WITH o, collect(t.id) AS targets "
+            f"WITH o, collect(t.id) AS targets, collect(r) AS _ "
             f"WHERE {' AND '.join(conds)} "
-            f"RETURN o.id LIMIT 1",
+            f"RETURN o.id, o.status LIMIT 1",
             params=params,
         ).result_set
-        return rows[0][0] if rows else None
+        if rows:
+            return {"id": rows[0][0], "status": rows[0][1],
+                    "kind": "exact", "written": list(inputs)}
+        # ── partial-absorb (cycle-11/12/13): on an exact miss, look for a
+        # NULL-status partial whose written set is a PROPER SUBSET of the
+        # requested set with STRICT label/direction matching (the declared
+        # values — absent↔default canonicalized the same way).
+        pcond = [
+            "size(targets) < size($inputs)",
+            "all(x IN targets WHERE x IN $inputs)",
+            "size(targets) > 0",
+            "(o.status IS NULL OR o.status = 'draft')",
+        ]
+        if label is not None:
+            pcond.append("o.label = $label")
+        else:
+            pcond.append("o.label IS NULL")
+        if direction is not None or canonical_dir is not None:
+            pcond.append("o.direction = $direction")
+        prows = proj.g.query(
+            f"MATCH (o:Point {{is_operator:true, op_type:$op}}) "
+            f"OPTIONAL MATCH (o)-[r:{edge_rel}]->(t:Point) "
+            f"WITH o, collect(t.id) AS targets "
+            f"WHERE {' AND '.join(pcond)} "
+            f"RETURN o.id, o.status, targets",
+            params=params,
+        ).result_set
+        if len(prows) == 1:
+            return {"id": prows[0][0], "status": prows[0][1],
+                    "kind": "partial", "written": list(prows[0][2])}
+        if len(prows) > 1:
+            return {"kind": "decline",
+                    "candidates": [r[0] for r in prows]}
+        return None
+
+    def _append_warning(self, entry: str) -> None:
+        """Append to the current ingest's warnings accumulator (A3 cycle-23
+        contract). The accumulator is the module-level thread-local set by
+        ingest(); outside an ingest, the entry is a no-op."""
+        acc = getattr(self, "_ingest_warnings", None)
+        if acc is not None:
+            acc.append(entry)
+
+    def _reapply_operator_promotion(self, op_id: str) -> None:
+        """k=N boundary (cycle-15): re-apply promotion to a NULL-status
+        operator under auto (a crash after the full input-edge loop, before
+        the promotion SET). Mirrors create_operator's #131 guarded SET."""
+        proj = self._get_proj()
+        proj.g.query(
+            "MATCH (s:Point {id:$id}) "
+            "WHERE s.status IS NULL OR s.status = 'draft' "
+            "SET s.status = 'live', s.updatedAt = $now",
+            params={"id": op_id, "now": _now_iso()},
+        )
 
     def file_decision(self, options: list[str], evidence: list[str],
                       choice: int) -> dict:
@@ -4700,7 +5283,14 @@ class TortoiseSDK:
         for pid in point_ids:
             p = self.get_point(pid)
             before[pid] = p.get("confidence", 0.5) if p else 0.5
-        self.compute_confidence(evidence={decision_id: (10, 1)})
+        # #344: conscious opt-out from the fail-closed gate — the gate is
+        # graph-wide (no anchors/factors are passed, so it would audit every
+        # evidence point); this run's epistemic content is fully carried by
+        # the Beta(10,1) evidence prior on the decision Point; the approval
+        # path deliberately opts out (never a silent swallow; the gate stays
+        # on for every explicit compute_confidence()).
+        self.compute_confidence(evidence={decision_id: (10, 1)},
+                                require_calibration=False)
         deltas = {}
         for pid in point_ids:
             p = self.get_point(pid)
@@ -5386,26 +5976,31 @@ class TortoiseSDK:
     def _select_subgraph(self, anchors: list[str], max_hops: int = 1,
                          rel_filter: str = "IMPL|NAND",
                          direction: str = "both",
-                         include_draft: bool = False) -> list[str]:
-        """BFS subgraph selection from anchor Points to collect operator IDs.
+                         include_draft: bool = False) -> tuple[list[str], set[tuple[str, str, str]]]:
+        """BFS subgraph selection from anchor Points — A9 return contract.
 
         Delegates to the shared _bfs_select_operators in tortoise.analyze.
-        With include_draft=False (default, #780) draft anchors, operators and
-        frontier points are excluded.
+        Returns ``(operator_ids, factor_anchors)`` — the operator Point IDs
+        AND the direct-edge factor anchors ((src, tgt, type) descriptors)
+        discovered in the traversal (epic #902 §5.6: a direct-edge-only
+        subgraph yields ZERO operators but a non-empty direct-factor
+        selection; the ≥2-live-endpoints derived-liveness predicate applies
+        to operator nodes, GATE-2 Q3). With include_draft=False (default,
+        #780) draft anchors, operators and frontier points are excluded.
         """
         from .analyze import _bfs_select_operators
         proj = self._get_proj()
-        result = _bfs_select_operators(proj, anchors, max_hops=max_hops,
-                                        rel_filter=rel_filter, direction=direction,
-                                        include_draft=include_draft)
-        return list(result)
+        ops, anchors_out = _bfs_select_operators(proj, anchors, max_hops=max_hops,
+                                                 rel_filter=rel_filter, direction=direction,
+                                                 include_draft=include_draft)
+        return list(ops), anchors_out
 
     def compute_confidence(self, factors=None, evidence=None,
                            anchors: list[str] | None = None,
                            max_hops: int = 1,
                            rel_filter: str = "IMPL|NAND",
                            direction: str = "both",
-                           require_calibration: bool = False,
+                           require_calibration: bool = True,
                            recency_decay: float | None = None) -> dict:
         """Compute confidence via EP belief propagation. Returns {iterations, converged, confidences}.
 
@@ -5421,7 +6016,9 @@ class TortoiseSDK:
             max_hops: BFS expansion depth when using anchors (default 1).
             rel_filter: edge types for BFS — "IMPL", "NAND", or "IMPL|NAND" (default).
             direction: IMPL edge traversal direction — "incoming", "outgoing", or "both" (default).
-            require_calibration: if True, raises CalibrationError when evidence points are uncalibrated.
+            require_calibration: fail-closed gate (default True) — raises CalibrationError
+                when evidence points are uncalibrated. Pass False explicitly to opt out and
+                run EP on topology alone (the #7478 degenerate case — do not do this silently).
             recency_decay: optional recency decay factor (default 0.95 from TORTOISE_EP_RECENCY_DECAY).
                 T0 sources exempt; lower tiers get gentle decay. 1.0 = no decay.
 
@@ -5442,22 +6039,40 @@ class TortoiseSDK:
             evidence_kinds = {"statement", "observation", "hypothesis"}
             uncalibrated = [
                 s for s in summary
-                if not s["calibrated"] and s.get("pointKind") in evidence_kinds
+                if not s["calibrated"]
+                and s.get("pointKind") in evidence_kinds
+                # #780: draft points never feed EP (factor extraction and
+                # propagation exclude them by default) — demanding calibration
+                # of a draft is noise; the gate only guards live evidence
+                # (PR #1212). Status NULL = live, mirroring _live_only.
+                and s.get("status") != "draft"
             ]
             if uncalibrated:
                 ids = [s["id"] for s in uncalibrated[:10]]
                 msg = (
-                    f"{len(uncalibrated)} uncalibrated evidence points. "
-                    f"First 10: {ids}. Run calibrate_summary() for full guidance."
+                    f"{len(uncalibrated)} uncalibrated evidence points "
+                    f"(first 10: {ids}). EP is fail-closed until every evidence "
+                    f"point is calibrated (#344). Run calibrate_summary() for "
+                    f"per-point guidance — set_point_baseline(), recreate with a "
+                    f"credibility kwarg, or set_source_tier() for sourced points — "
+                    f"or pass require_calibration=False to explicitly opt out."
                 )
                 raise CalibrationError(msg)
         if factors is not None:
             operator_ids = [f if isinstance(f, str) else f[0] for f in factors]
         elif anchors is not None:
-            # BFS subgraph selection from anchor points
-            operator_ids = self._select_subgraph(anchors, max_hops=max_hops,
-                                                  rel_filter=rel_filter,
-                                                  direction=direction)
+            # BFS subgraph selection from anchor points (A9, epic #902): the
+            # selection carries the direct-edge factor anchors too — a
+            # direct-edge-only subgraph yields ZERO operators but a non-empty
+            # direct-factor selection; ep.run accepts plain-point seeds, so
+            # the run seeds = operators + the anchor endpoints (§5.6).
+            operator_ids, _factor_anchors = self._select_subgraph(
+                anchors, max_hops=max_hops, rel_filter=rel_filter,
+                direction=direction)
+            for (src, tgt, _t) in _factor_anchors:
+                operator_ids.append(src)
+                operator_ids.append(tgt)
+            operator_ids = list(dict.fromkeys(operator_ids))
         else:
             factors_data, _ = proj.extract_svbp_factors()
             operator_ids = [f[0] for f in factors_data]
@@ -5771,14 +6386,16 @@ class TortoiseSDK:
             "OPTIONAL MATCH (n)-[:extractedFrom]->(s:Source) "
             "RETURN n.id, n.content, n.pointKind, "
             "coalesce(n.baseline_set, false) AS calibrated, "
+            "n.status, "
             "s.credibilityTier, s.sourceKind, s.url AS src_url",
             params=params,
         ).result_set
         
         results = []
         for row in rows:
-            pid, content, pk, calibrated, ctier, skind, src_url = row
-            item = {"id": pid, "content": content, "pointKind": pk, "calibrated": calibrated}
+            pid, content, pk, calibrated, status, ctier, skind, src_url = row
+            item = {"id": pid, "content": content, "pointKind": pk,
+                    "calibrated": calibrated, "status": status}
             # Effective tier: explicit credibilityTier > sourceKind tier-form >
             # registry default (issue #398 Task 6 — legacy-inherited advisory).
             eff_tier = resolve_tier(ctier, skind)
@@ -6661,6 +7278,7 @@ class TortoiseSDK:
         relationship_filter: str | None = None,
         traversal_path: str | None = None,
         exclude_status: list[str] | None = None,
+        _elevated_timeout_ms: int | None = None,
     ) -> list[dict]:
         """Hybrid search with RRF fusion + EP annotation.
 
@@ -6681,6 +7299,10 @@ class TortoiseSDK:
             silently shrink the result count — epic #898 recall_state). Default None =
             no filtering (existing behavior unchanged; retracted is already excluded at
             the retrieval layer, #689). Points with no status property are kept.
+        _elevated_timeout_ms: PRIVATE — benchmark-only (#316). Threads an elevated
+            collective-cap override into degradation_chain to measure uncensored
+            true-completion latency. Default None = production 500ms cap. Never
+            passed by production callers.
         """
         from .search_engine import (
             classify_query, degradation_chain, rrf_fusion,
@@ -6733,6 +7355,7 @@ class TortoiseSDK:
             graph, query, kind, query_vec, strategies,
             entity_type=entity_type, limit=str_limit,
             is_embedded=is_embedded,
+            elevated_timeout_ms=_elevated_timeout_ms,
         )
 
         if not raw_results:
@@ -11495,3 +12118,140 @@ class TortoiseSDK:
             params={"key": self._CALIBRATION_MARKER_KEY},
         ).result_set
         return bool(rows)
+
+
+def _default_byok_model():
+    """Default BYOK model adapter (env-configured; tests inject mocks)."""
+    import os
+    name = os.environ.get("TORTOISE_EXTRACT_MODEL", "deepseek/deepseek-v4-flash")
+    return _model_adapter(name)
+
+
+def _model_adapter(model_id: str):
+    import os
+    key = os.environ.get("OPENROUTER_API_KEY", "")
+    url = os.environ.get("OPENROUTER_BASE_URL",
+                         "https://openrouter.ai/api/v1/chat/completions")
+
+    class _Compat:
+        def complete(self, *, system, user):
+            import requests
+            r = requests.post(url, headers={
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json"},
+                json={"model": model_id,
+                      "messages": [{"role": "system", "content": system},
+                                   {"role": "user", "content": user}]},
+                timeout=600)
+            r.raise_for_status()
+            return r.json()["choices"][0]["message"]["content"]
+
+    return _Compat()
+
+
+def _summary_to_payload(summary: dict, session_id: str) -> dict:
+    """Map the summary stream to the derived-commit payload (#1013 shape):
+    decisions -> events[] (eventKind decision, about_entities = options);
+    logic -> points[] (pointKind statement) + IMPL/NAND between logic points;
+    state -> entities[]; issues -> events[] (occurrence)."""
+    from tortoise.ids import content_hash
+
+    events = []
+    for i, d in enumerate((summary.get("decisions") or [])):
+        events.append({
+            "id": f"ev_{content_hash(f'{session_id}:decision:{i}')[:62]}",
+            "eventKind": "decision",
+            "content": d.get("content", "")[:1000],
+            "confidence": 0.9,
+            "about_entities": d.get("options") or [],
+            "source_ref": "session.md",
+        })
+    for i, iss in enumerate((summary.get("issues") or [])):
+        events.append({
+            "id": f"ev_{content_hash(f'{session_id}:issue:{i}')[:62]}",
+            "eventKind": "occurrence",
+            "content": f"{iss.get('id', 'issue')} {iss.get('status', '')}: {iss.get('content', '')[:900]}",
+            "confidence": 0.9,
+            "about_entities": [],
+            "source_ref": "session.md",
+        })
+
+    points, logic_ids = [], {}
+    for i, l in enumerate((summary.get("logic") or [])):
+        pid = f"pt_{content_hash(l.get('point', ''))[:62]}"
+        logic_ids[l.get("point", "")[:40]] = pid
+        points.append({
+            "id": pid, "content": l.get("point", "")[:1000],
+            "pointKind": "statement", "reason": "NEW",
+            "confidence": 0.8, "c_cal": 0.7,
+            "about_entities": [], "source_ref": "session.md",
+            "quote": "", "status": "live",
+        })
+
+    operators = []
+    for l in (summary.get("logic") or []):
+        src = logic_ids.get(l.get("point", "")[:40])
+        if not src:
+            continue
+        if l.get("supports"):
+            tgt = logic_ids.get(str(l["supports"])[:40])
+            if tgt and tgt != src:
+                operators.append({"src": src, "dst": tgt, "op_type": "IMPL",
+                                  "direction": "unidirectional"})
+        if l.get("opposes"):
+            tgt = logic_ids.get(str(l["opposes"])[:40])
+            if tgt and tgt != src:
+                operators.append({"src": src, "dst": tgt, "op_type": "NAND",
+                                  "direction": "unidirectional"})
+
+    entities, seen = [], set()
+    for st in (summary.get("state") or []):
+        name = st.get("name", "")
+        key = (name, st.get("objectKind", "core:concept"))
+        if not name or key in seen:
+            continue
+        seen.add(key)
+        entities.append({"name": name, "kind": st.get("objectKind", "core:concept"),
+                         "passes_frequency_gate": True})
+
+    return {
+        "schema_version": "1", "session_id": session_id,
+        "client_commit_id": "", "captured_at": _now_iso(),
+        "extractor": {"version": "value@0.3.0+summary", "mode": "byok",
+                      "calibration_version": "v1"},
+        "summary": (summary.get("session") or {}).get("summary", "")[:2000],
+        "story_arc": "",
+        "provenance_refs": [{"path": "session.md", "spans": []}],
+        "sources": [], "entities": entities, "points": points,
+        "events": events, "operators": operators,
+        "telemetry": {"extractor": {"version": "value@0.3.0+summary", "mode": "byok"},
+                      "model": {"provider": "byok", "id": "user-model", "cfg_hash": ""},
+                      "counts": {"kept": len(points), "candidate": len(events),
+                                 "segment": 1, "window": 1, "empty_windows": 0},
+                      "keep_ratio": 1.0, "dedup_hits": 0, "frontier_calls": 1,
+                      "llm_cost_usd": None, "extraction_ms": 0, "retry_count": 0,
+                      "last_error_code": None, "confidence_histogram": [0] * 10},
+    }
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _post_commit(payload: dict, *, base_url=None, api_key=None) -> dict:
+    """POST the derived payload to /v1/sessions/commit (replay-safe)."""
+    import os
+    from tortoise.commit_schema import compute_client_commit_id
+    payload["client_commit_id"] = compute_client_commit_id(
+        payload["session_id"], payload["points"], payload["entities"],
+        payload["operators"], payload["summary"], payload["story_arc"],
+        payload.get("events", []))
+    base = base_url or os.environ.get("TORTOISE_API_URL", "http://localhost:8000")
+    key = api_key or os.environ.get("TORTOISE_API_KEY", "")
+    import requests
+    r = requests.post(f"{base.rstrip('/')}/v1/sessions/commit",
+                      headers={"Authorization": f"Bearer {key}"},
+                      json=payload, timeout=120)
+    r.raise_for_status()
+    return r.json()

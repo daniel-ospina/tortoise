@@ -33,6 +33,9 @@ def test_issue_to_event_basic():
     assert ev["source"] == "linear:TEAM"
     assert ev["participants"] == ["alice@example.com"]
     assert ev["endedAt"] is None
+    # #388: per-entity url flows through from the GraphQL `url` field
+    assert ev["sourceUrl"] == "https://linear.app/test/issue/TEAM-42"
+    assert ev["sourceKind"] == "linear_card"
 
 
 def test_issue_to_event_completed():
@@ -51,6 +54,8 @@ def test_issue_to_event_completed():
     assert ev["eventKind"] == "linear.issue.completed"
     assert ev["endedAt"] == "2026-07-15T00:00:00Z"
     assert ev["participants"] == []
+    # no url in fixture → empty sourceUrl (projection falls back to `source`)
+    assert ev["sourceUrl"] == ""
 
 
 def test_issue_to_event_canceled():
@@ -125,6 +130,9 @@ def test_cycle_to_event_active():
     assert ev["subject"] == "cycle:linear:ENG#5"
     assert ev["object"] == "Sprint 5"
     assert ev["endedAt"] is None  # active cycles have no endedAt
+    # #388: cycles are not cards — own sourceKind + container-level fallback url
+    assert ev["sourceKind"] == "linear_cycle"
+    assert ev["sourceUrl"] == "linear:ENG"
 
 
 def test_cycle_to_event_completed():
@@ -140,6 +148,8 @@ def test_cycle_to_event_completed():
     ev = lc._cycle_to_event(cycle)
     assert ev["eventKind"] == "linear.cycle.completed"
     assert ev["endedAt"] == "2026-06-14T00:00:00Z"
+    assert ev["sourceKind"] == "linear_cycle"
+    assert ev["sourceUrl"] == "linear:DEV"
 
 
 def test_cycle_to_event_skips_missing():

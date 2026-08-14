@@ -586,6 +586,7 @@ def degradation_chain(
     limit: int = 20,
     is_embedded: bool = True,
     expanded_kinds=None,  # accepted for SDK compat; kind expansion is post-retrieval (sdk.py)
+    elevated_timeout_ms: int | None = None,
 ) -> dict[str, list[tuple[str, float]]]:
     """Run retrieval strategies in parallel with per-strategy degradation.
 
@@ -599,6 +600,14 @@ def degradation_chain(
                  'source', or 'operator' — forwarded to each retrieval
                  strategy to query the correct entity label/id field. (#172)
 
+    elevated_timeout_ms: benchmark override (issue #316). Default None = the
+        pre-registered 500ms collective cap (as_completed(timeout=0.5)). When
+        set (e.g. 5000ms), it is threaded into all THREE spots — the per-runner
+        driver timeout, the structural runner timeout, and the as_completed
+        deadline — so a benchmark can measure true completion without the cap
+        truncating the tail. Default-off: production callers never pass it and
+        behavior is byte-identical.
+
     Returns:
         {strategy_name: [(id, score), ...]} — only strategies that succeeded
     """
@@ -609,27 +618,33 @@ def degradation_chain(
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
         # Submit all enabled strategies in parallel
+        runner_timeout = int(elevated_timeout_ms or 500)
         if strategies.get("fts") and query:
             futures[executor.submit(
-                run_fts_query, graph, query, entity_type=entity_type, limit=limit
+                run_fts_query, graph, query, entity_type=entity_type, limit=limit,
+                timeout_ms=runner_timeout,
             )] = "fts"
 
         if strategies.get("vector") and query_vec:
             futures[executor.submit(
                 run_vector_query, graph, query_vec, limit=limit, is_embedded=is_embedded,
-                entity_type=entity_type,
+                entity_type=entity_type, timeout_ms=runner_timeout,
             )] = "vector"
 
         if strategies.get("structural"):
             futures[executor.submit(
-                run_structural_query, graph, kind, entity_type=entity_type, limit=limit
+                run_structural_query, graph, kind, entity_type=entity_type, limit=limit,
+                timeout_ms=runner_timeout,
             )] = "structural"
 
         # Collect results with 500ms total timeout across all strategies.
         # as_completed(timeout=0.5) raises TimeoutError if any future
         # hasn't completed within 500ms from the start of iteration.
+        # #316: elevated_timeout_ms threads the benchmark cap into the
+        # deadline too (default-off — production callers keep 0.5s).
+        deadline = (elevated_timeout_ms or 500) / 1000.0
         try:
-            for future in concurrent.futures.as_completed(futures, timeout=0.5):
+            for future in concurrent.futures.as_completed(futures, timeout=deadline):
                 strategy_name = futures[future]
                 strategy_results = future.result()  # already done — no timeout needed
                 if strategy_results:

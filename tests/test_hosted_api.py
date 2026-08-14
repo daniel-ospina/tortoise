@@ -111,10 +111,22 @@ def unauth_client():
             app.dependency_overrides.clear()
 
 
+@pytest.fixture(autouse=True)
+def llm_extraction_provider(monkeypatch):
+    """Install the offline MockModel session extractor (#822).
+
+    LLM extraction is the default (and only) capture extraction — the regex
+    loop was removed as a product path. Every session-capture test runs the
+    real M2 pipeline (LLMExtractor via the EventAPI projection) with zero
+    network via the TORTOISE_SESSION_LLM_MOCK=1 test seam (precedent:
+    TORTOISE_BACKUP_STORAGE=memory / RATE_LIMIT_DISABLED).
+    """
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Health Endpoints
 # ═══════════════════════════════════════════════════════════════════════════════
-
 
 class TestHealthEndpoints:
     """GET /health and GET /health/security."""
@@ -574,6 +586,9 @@ class TestSessionCapture:
         assert body["turns"] == 2
         assert "extracted" in body
         assert "points" in body
+        # #822: extraction_mode reflects what actually ran — the M2 LLM
+        # extractor (no more hardcoded "regex" stopgap).
+        assert body["extraction_mode"] == "llm"
 
     def test_capture_session_with_explicit_id(self, client):
         r = client.post(
@@ -586,7 +601,9 @@ class TestSessionCapture:
         assert r.status_code == 200, r.text
         assert r.json()["session_id"] == "my-custom-session"
 
-    def test_capture_session_extracts_decisions(self, client):
+    def test_capture_session_extracts_points(self, client):
+        """LLM-default extraction: every sentence of a dense conversation
+        becomes a Point (the decision/claim regexes are gone, #822)."""
         conv = [
             {"role": "user", "content": "Let's use PostgreSQL for the backend."},
             {"role": "assistant", "content": "I think that's a good choice."},
@@ -594,10 +611,8 @@ class TestSessionCapture:
         r = client.post("/v1/sessions", json={"conversation": conv})
         assert r.status_code == 200, r.text
         body = r.json()
-        # Should have extracted at least the "Let's" decision
-        assert body["extracted"] >= 1
-        kinds = [p["kind"] for p in body["points"]]
-        assert "decision" in kinds
+        assert body["extracted"] >= 1, body
+        assert body["extraction_mode"] == "llm"
 
     def test_capture_session_handles_empty_conversation(self, client):
         r = client.post(
@@ -613,12 +628,13 @@ class TestSessionCapture:
         r = client.post("/v1/sessions", json={})
         assert r.status_code == 422, r.text
 
-    # ── #490: content-hash dedup on the REST path ────────────────────
+    # ── #490/#822: turn Points MERGE, M2 LLM Points are fresh per capture ──
 
-    def test_capture_session_dedups_identical_content(self, client):
-        """#490: re-capturing the SAME session must NOT create duplicate
-        Points — turn Points MERGE on {session_id}_t{i} and extracted
-        claims dedup by content hash."""
+    def test_capture_session_no_content_dedup_across_captures(self, client):
+        """#490/#822: re-capturing the SAME session MERGEs turn Points but the
+        M2 LLM extraction writes fresh Points per capture — content-hash
+        dedup is a later pipeline stage (epic #909 W-2 #784), not part of
+        capture."""
         conv = [
             {"role": "user", "content": "Let's use PostgreSQL for the backend."},
         ]
@@ -628,20 +644,20 @@ class TestSessionCapture:
         r2 = client.post("/v1/sessions", json=payload)
         assert r2.status_code == 200, r2.text
 
-        # Count Points mentioning PostgreSQL in the graph.
-        # Expected: 2 total (1 turn Point + 1 extracted decision Point) —
-        # each deduped across the two captures. Without dedup this would be 4.
+        # Turn Point MERGEs across captures (idempotent): 1 turn point
+        # containing PostgreSQL + 2 LLM points (one per capture, no dedup).
         import tortoise.hosted_api as ha_mod
         sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
         proj = sdk._get_proj()
         r = proj.g.query(
             "MATCH (p:Point) WHERE p.content CONTAINS 'PostgreSQL' RETURN count(p)"
         ).result_set
-        assert r[0][0] == 2, f"expected 2 deduped Points, got {r[0][0]}"
+        assert r[0][0] == 3, f"expected 3 (1 turn + 2 LLM points), got {r[0][0]}"
 
-    def test_capture_session_dedup_returns_same_point_ids(self, client):
-        """#490: second capture returns the same canonical Point ids
-        (no deterministic-id duplicate hazard)."""
+    def test_capture_session_llm_points_are_fresh_ulids(self, client):
+        """#822: M2 extraction mints a fresh ULID per LLM Point per capture —
+        no deterministic-id hazard, no content-hash dedup (deferred to the
+        value-first pipeline, epic #909)."""
         conv = [
             {"role": "assistant", "content": "I think Postgres is the right choice."},
         ]
@@ -650,12 +666,11 @@ class TestSessionCapture:
         assert r1.status_code == 200 and r2.status_code == 200
         p1 = {p["id"] for p in r1.json()["points"]}
         p2 = {p["id"] for p in r2.json()["points"]}
-        # All extracted point ids must be identical across captures
-        assert p1 == p2, f"dedup failed: {p1} vs {p2}"
-        # And they must be ULIDs (no deterministic session-derived ids)
+        # Both captures produced ULID ids, distinct across captures.
         import re as _re
-        for pid in p1:
+        for pid in p1 | p2:
             assert _re.match(r"^[0-9a-f]+-[0-9a-f]{12}$", pid), f"non-ULID id: {pid}"
+        assert p1.isdisjoint(p2), f"fresh-ULID contract violated: {p1} vs {p2}"
 
     def test_capture_session_turn_points_are_session_scoped(self, client):
         """#490 P2-2: turn Points are the episodic stream OF THIS SESSION —
@@ -680,8 +695,9 @@ class TestSessionCapture:
         assert r[0][0] == 2, f"expected 2 session-scoped turn Points, got {r[0][0]}"
 
     def test_capture_session_re_capture_is_idempotent_for_turns(self, client):
-        """#490: re-capturing the SAME session_id must not duplicate turn
-        Points or CONTAINS edges (MERGE on {session_id}_t{i})."""
+        """#490/#822: re-capturing the SAME session_id must not duplicate
+        turn Points (MERGE on {session_id}_t{i}) — LLM-extracted Points are
+        fresh per capture, but the episodic turn stream stays idempotent."""
         conv = [{"role": "user", "content": "Hello"}]
         for _ in range(2):
             r = client.post(
@@ -694,7 +710,8 @@ class TestSessionCapture:
         sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
         proj = sdk._get_proj()
         r = proj.g.query(
-            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) RETURN count(t)",
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
+            "RETURN count(t)",
             params={"sid": "same-session-490"},
         ).result_set
         assert r[0][0] == 1, f"expected 1 turn Point, got {r[0][0]}"
@@ -1461,13 +1478,13 @@ class TestSessionFloodGate:
         assert "cap" in r.text.lower()
 
     def test_extraction_amplifier_402_zero_growth(self, client):
-        """Dense decision content → extraction-aware estimate exceeds the
+        """Dense sentence content → extraction-aware estimate exceeds the
         points quota → 402 BEFORE any write (zero node growth)."""
         # Review P2, PR #976: the estimate counts the EXTRACTED set only
-        # (turn Points/Session/Event are episodic) — est = Σ_turns
-        # (min(decisions, cap) + min(claims, cap)). 50 dense turns × 200 cap
-        # = exactly 10000 = max_points → NOT > → no 402 (boundary). 51 turns
-        # = 10200 > 10000 → 402 (Free max_points per #662 pricing).
+        # (turn Points/Session/Event are episodic). #822: est = 2 × Σ_turns
+        # min(sentences, cap) — points + operator allowance. "we should go."
+        # repeated 300× in one turn = 300 sentences capped at 200 → 400/turn;
+        # 51 turns = 20400 > 10000 (Free max_points) → 402.
         dense = ("we should go. " * 300)  # 4500 chars < 5000 turn limit
         conversation = [{"role": "user", "content": dense}] * 51
         r = client.post("/v1/sessions", json={
@@ -1493,13 +1510,11 @@ class TestSessionFloodGate:
         assert r.status_code == 200, r.text[:200]
 
     def test_extraction_cap_bounds_node_growth(self, client):
-        """#329: a single dense turn's extraction is capped at
-        MAX_EXTRACTIONS_PER_TURN per class — the loop-level cap (not just the
+        """#329/#822: a single dense turn's extraction is capped at
+        MAX_EXTRACTIONS_PER_TURN — the transcript-level cap (not just the
         estimate) must execute, so a turn can never write unbounded Points."""
         from tortoise.quota import MAX_EXTRACTIONS_PER_TURN
-        # ~900 distinct short sentences (fits the 5000-char turn cap; each
-        # "we should goN." is ~16 chars → ~14.4k matches would fit 5k chars
-        # with ~330 distinct sentences; use max within the limit)
+        # ~300 distinct short sentences (fits the 5000-char turn cap)
         dense = " ".join(f"we should go{i}." for i in range(300))
         assert len(dense) <= 5000, len(dense)
         r = client.post("/v1/sessions", json={
@@ -1510,9 +1525,11 @@ class TestSessionFloodGate:
         from tortoise.hosted_api import TortoiseSDK as _HASDK
         proj = _HASDK(namespace=TEST_TEAM_ID)._get_proj()
         rows = proj.g.query(
-            "MATCH (p:Point) WHERE p.pointKind='decision' RETURN count(p)",
+            "MATCH (p:Point) WHERE (p.is_episodic IS NULL OR p.is_episodic = false) "
+            "AND p.pointKind <> 'event' RETURN count(p)",
         ).result_set
-        assert rows[0][0] <= MAX_EXTRACTIONS_PER_TURN,             f"extraction cap breached: {rows[0][0]} decision points"
+        assert rows[0][0] <= MAX_EXTRACTIONS_PER_TURN, \
+            f"extraction cap breached: {rows[0][0]} extracted points"
 
 
 class TestDreamBudget:

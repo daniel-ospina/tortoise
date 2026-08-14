@@ -234,16 +234,16 @@ def test_bfs_select_operators_excludes_drafts(sdk):
     draft_op = sdk.create_operator("IMPL", s["id"], [d["id"], b["id"]],
                                    promote_source=False)
 
-    ops = _bfs_select_operators(proj, [s["id"]], include_draft=False)
+    ops, _ = _bfs_select_operators(proj, [s["id"]], include_draft=False)
     assert live_op["id"] in ops
     assert draft_op["id"] not in ops, "draft operator must be excluded"
 
     # Draft anchor: excluded entirely (no expansion from a draft).
-    ops2 = _bfs_select_operators(proj, [d["id"]], include_draft=False)
+    ops2, _ = _bfs_select_operators(proj, [d["id"]], include_draft=False)
     assert draft_op["id"] not in ops2
 
     # Escape hatch.
-    ops3 = _bfs_select_operators(proj, [s["id"]], include_draft=True)
+    ops3, _ = _bfs_select_operators(proj, [s["id"]], include_draft=True)
     assert draft_op["id"] in ops3
 
 
@@ -254,11 +254,17 @@ def test_select_subgraph_excludes_drafts(sdk):
     live_op = sdk.create_operator("IMPL", s["id"], [a["id"]])
     draft_op = sdk.create_operator("IMPL", s["id"], [d["id"]], promote_source=False)
 
-    ops = sdk._select_subgraph([s["id"]], include_draft=False)
+    ops, _ = sdk._select_subgraph([s["id"]], include_draft=False)
     assert live_op["id"] in ops
     assert draft_op["id"] not in ops
-    ops2 = sdk._select_subgraph([s["id"]], include_draft=True)
-    assert draft_op["id"] in ops2
+    ops2, _ = sdk._select_subgraph([s["id"]], include_draft=True)
+    # A9 derived-liveness (GATE-2 Q3): draft_op has only ONE live connected
+    # point (s) — it is EP-INERT BY CONSTRUCTION even under the draft-
+    # inclusive escape hatch (an operator activates only when >=2 of its
+    # connected points are live; the E2E-13.1 1-live/1-draft boundary). The
+    # live operator (2 live endpoints) is included in both modes.
+    assert live_op["id"] in ops2
+    assert draft_op["id"] not in ops2
 
 
 # ── create_operator(promote_source=False) — draft operator nodes ──

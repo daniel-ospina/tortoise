@@ -420,6 +420,9 @@ class TestCycle25Vocabulary:
 
 class TestDuplicateConnections:
     def test_identical_duplicates_clean_dedup(self, sdk):
+        """§8 routing (A3): two IDENTICAL plain IMPL connections dedup at
+        the direct-edge level — one edge, second reported deduped, no
+        operator node (operator-less per §8)."""
         bundle = _points_pair() | {"connections": [
             {"from": "pA", "to": "pB", "operator": "IMPL"},
             {"from": "pA", "to": "pB", "operator": "IMPL"},
@@ -428,7 +431,8 @@ class TestDuplicateConnections:
         res = sdk.ingest(bundle)
         assert res["created"]["connections"] == 1
         assert res["deduped"]["connections"] == 1
-        assert _operator_count(sdk, "IMPL") == 1
+        assert _edge_count(sdk, "IMPL") == 1
+        assert _operator_count(sdk, "IMPL") == 0
 
     def test_iml_absent_equals_bidirectional(self, sdk):
         # CYCLE-25 per-op_type canonicalization: IMPL absent ≡ bidirectional

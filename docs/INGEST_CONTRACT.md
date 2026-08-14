@@ -211,7 +211,7 @@ policy):
 | `deduped` | `{points, entities, sources, connections}` | Count of items that matched an existing node and were adopted instead. |
 | `ids` | `{points[], entities[], sources[], connections[], refs{}}` | The ids/urls the bundle produced or matched, plus the ref table. |
 | `nudges` | `[]` | Advisory only, never enforced. |
-| `warnings` | `[{key, ...}…]` | Divergences the engine noticed (never fatal). **planned** (this release; closed-set enumeration below). |
+| `warnings` | `["<key>:<ids>:<detail>", …]` | Divergences the engine noticed (never fatal). Each entry is a key-prefixed string — the key is the §3.2 closed-set token, then the affected ids, then any context (colon-delimited). A warning key outside the §3.2 table is a divergence. |
 | `results` | per-item array | Granular mode only. |
 
 `ids["connections"]` descriptor shapes:
@@ -476,6 +476,15 @@ the MCP tool is tracked as a follow-up so the system-wide default matches the in
   only via promotion — today via `tortoise_update_point(status="live")`
   (the interim route; guarded draft→live), and via the dedicated promote
   tools when they ship.
+  **Interim-route caveat (Track A — no zombie-operator resolution):** the
+  interim route promotes a single point; it does NOT resolve draft operator
+  nodes whose endpoints are now all live (the "zombie operator" — a draft
+  operator left inert by derived liveness). Zombie-operator resolution
+  ("promotes incident draft operators once all their endpoints are live")
+  ships with the dedicated promote tools (#785 Track B, `SENTINEL_785`);
+  until then an operator-requiring gated bundle's draft operator stays
+  inert until either its endpoints are live AND it is explicitly promoted,
+  or a promote_batch-style tool lands.
 - **Promotion authority setting (per-team, alongside quota limits):**
   default `agent` — agents can promote. The alternate value is `reviewer`
   mode (the reviewer-gated flow). Not asked at onboarding; discoverable in
@@ -490,7 +499,12 @@ Under `promotion_policy="gated"`, operator-requiring connections (mitigation /
 `reify:true`) are accepted — there is no fail-closed rejection. The operator
 is created with `status:"draft"` (`promote_source=False`) and is **EP-inert by
 construction**: it participates in EP **iff ≥2 of its connected points are
-live**. Promote a second endpoint and the operator activates; until then it
+live AND the operator itself has been promoted out of draft** — endpoint
+promotion alone does NOT activate a draft operator (see the §11 interim-
+route caveat; zombie-operator auto-resolution ships with the #785 promote
+tools). "Promote a second endpoint and the operator activates" is the
+#785-era post-resolution statement; pre-#785 the operator's OWN promotion
+is the second required conjunct. Promote a second endpoint and the operator activates; until then it
 cannot propagate belief. This is the derived-liveness rule (A9's selector
 predicate for operator nodes).
 

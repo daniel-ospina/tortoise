@@ -1,4 +1,4 @@
--- Migration 20260813000005: invitations.inviter_email — display identity for the
+-- Migration 20260813000006: invitations.inviter_email — display identity for the
 -- invite-accept page (#307/#1177).
 --
 -- The accept page shows the inviter's identifier in the email copy slot
@@ -23,3 +23,9 @@ ALTER TABLE public.invitations
 GRANT SELECT (id, team_id, role, invited_by, inviter_email, email, status,
               accepted_at, expires_at, created_at)
     ON public.invitations TO authenticated;
+
+-- NOTE: renamed from 20260813000005_inviter_email.sql (2026-08-14) — the
+-- prefix 20260813000005 was already taken by 20260813000005_dashboard_login.sql
+-- (#1148, applied in prod). Duplicate prefixes abort `supabase db push`
+-- (check-migration-append-only: "0012x2/0015x2 bug") AND mask pending state in
+-- check-migration-drift (sort -u dedup). Rename restores both invariants.

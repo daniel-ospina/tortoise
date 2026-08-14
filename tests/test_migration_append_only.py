@@ -150,3 +150,86 @@ def _git_sha(repo: Path) -> str:
     return subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
     ).stdout.strip()
+
+
+# ── #1235: pure-prefix rename of a PROVABLY UNAPPLIED migration is allowed ──
+# (token present → Management API stub says old version NOT applied)
+
+
+def _stub_curl(versions: list[str], http_code: int = 201) -> Path:
+    """Write a stub curl returning the fixture remote version list."""
+    stub = FIXTURES / "stub-curl-append.sh"
+    rows = "".join(f'{{"version":"{v}"}},' for v in versions).rstrip(",")
+    body = f"[{rows}]"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        f'printf \'%s\\n{http_code}\\n\' \'{body}\'\n'
+    )
+    stub.chmod(0o755)
+    return stub
+
+
+def _run_script_with_token(mode: str, repo: Path, base_sha: str,
+                           versions: list[str]) -> subprocess.CompletedProcess:
+    stub = _stub_curl(versions)
+    env = dict(os.environ)
+    env["DRIFT_REPO"] = str(repo)
+    env["DRIFT_BASE_SHA"] = base_sha
+    env["DRIFT_CURL"] = str(stub)
+    env["DRIFT_API_URL"] = "https://api.supabase.invalid"
+    env["DRIFT_TOKEN"] = "test-token"
+    return subprocess.run(
+        ["bash", str(SCRIPT), mode],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=REPO_ROOT,
+    )
+
+
+def test_diff_unapplied_rename_allowed_with_token():
+    # Old version 20260813000099 is NOT in the remote applied set → the pure
+    # prefix rename is the #1235 exception and must be ALLOWED.
+    d = _make_repo(["20260813000099_a.sql"])
+    base = _git_sha(d)
+    (d / MIG / "20260813000099_a.sql").rename(d / MIG / "20260813100100_a.sql")
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "rename unapplied")
+    r = _run_script_with_token("diff", d, base, versions=["0001"])
+    assert r.returncode == 0, r.stdout
+    assert "exception" in r.stdout.lower(), r.stdout
+
+
+def test_diff_applied_rename_still_blocked_with_token():
+    # Old version IS applied in prod (stub lists it) → rename must stay blocked.
+    d = _make_repo(["20260813000099_a.sql"])
+    base = _git_sha(d)
+    (d / MIG / "20260813000099_a.sql").rename(d / MIG / "20260813100100_a.sql")
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "rename applied")
+    r = _run_script_with_token("diff", d, base, versions=["20260813000099"])
+    assert r.returncode == 1, r.stdout
+    assert "20260813000099_a.sql" in r.stdout or "20260813100100_a.sql" in r.stdout
+
+
+def test_diff_unapplied_rename_blocked_without_token():
+    # No token → cannot verify remote → fail-closed strict block (fork-safe).
+    d = _make_repo(["20260813000099_a.sql"])
+    base = _git_sha(d)
+    (d / MIG / "20260813000099_a.sql").rename(d / MIG / "20260813100100_a.sql")
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "rename unapplied, no token")
+    r = _run_script("diff", d, base)
+    assert r.returncode == 1, r.stdout
+    assert "append-only" in r.stdout.lower(), r.stdout
+
+
+def test_diff_content_edit_never_exempt_with_token():
+    # M (edit) — not a pure rename — must stay blocked even with a token.
+    d = _make_repo(["20260813000099_a.sql"])
+    base = _git_sha(d)
+    (d / MIG / "20260813000099_a.sql").write_text("-- changed content\n")
+    _git(d, "add", "-A")
+    _git(d, "commit", "-q", "-m", "edit")
+    r = _run_script_with_token("diff", d, base, versions=["0001"])
+    assert r.returncode == 1, r.stdout

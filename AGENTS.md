@@ -15,11 +15,12 @@ Premise Labs is the internal R&D and strategy hub. It houses:
 
 ### Python (Tortoise SDK)
 
-- Python 3.11+. No build step — interpreted.
-- Install: `pip install -e .`
+- Python 3.12+ (see `.python-version`). No build step — interpreted.
+- Install: `uv sync` (min uv 0.6.0). The committed `uv.lock` is the dev-environment source of truth; `uv lock --check` gates lockfile drift in CI.
+- Run commands/tests: `uv run <cmd>` — e.g. `uv run pytest tests/ -v`
+- `pip install -e .` remains the legacy/CI install path (python-ci.yml); uv is canonical for local dev.
 - Imports: prefer `from pathlib import Path` for path resolution — never hardcode absolute paths
 - Type hints: `from __future__ import annotations` at top of all modules
-- Run tests: `python -m pytest tests/ -v`
 
 ### TypeScript / Node.js (CI, Scripts, Tooling)
 
@@ -87,14 +88,14 @@ Premise Labs is the internal R&D and strategy hub. It houses:
 
 ```bash
 # Run all tests with FalkorDBLite (embedded, no Docker needed)
-python -m pytest tests/ -v
+uv run pytest tests/ -v
 
 # Run specific test file
-python -m pytest tests/test_directional_impl_fix.py -v
+uv run pytest tests/test_directional_impl_fix.py -v
 
 # Run with live FalkorDB (Docker required)
 docker compose -f ../eldato/operations/memory/docker-compose.yml up -d
-python -m pytest tests/ -v -m "not slow"
+uv run pytest tests/ -v -m "not slow"
 ```
 
 ## Documentation Filing

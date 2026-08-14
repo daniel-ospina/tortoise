@@ -58,6 +58,10 @@ class TestRunEP:
     def test_converges_on_simple_chain(self, sdk):
         a = _make_claim(sdk, "A")
         b = _make_claim(sdk, "B")
+        # #344: neutral Beta(1,1) baselines keep the fail-closed EP gate active
+        # (uncalibrated points previously carried the same prior silently).
+        sdk.set_point_baseline(a["id"], 1, 1)
+        sdk.set_point_baseline(b["id"], 1, 1)
         sdk.create_operator("IMPL", a["id"], [b["id"]])
 
         result = sdk.compute_confidence()
@@ -70,6 +74,8 @@ class TestRunEP:
         a = _make_claim(sdk, "A")
         b = _make_claim(sdk, "B")
         c = _make_claim(sdk, "C")
+        for cid in (a["id"], b["id"], c["id"]):
+            sdk.set_point_baseline(cid, 1, 1)  # #344: neutral calibrated baselines
         sdk.create_operator("IMPL", a["id"], [b["id"]])
         sdk.create_operator("NAND", b["id"], [c["id"]])
 
@@ -84,12 +90,15 @@ class TestRunEP:
 
         # Strong evidence on A → B should inherit higher confidence
         sdk.set_point_baseline(a["id"], 10.0, 1.0)
+        sdk.set_point_baseline(b["id"], 1, 1)  # #344: neutral baseline (gate active)
         result = sdk.compute_confidence()
         assert result["confidences"][a["id"]]["mean"] > 0.8
 
     def test_with_explicit_factors(self, sdk):
         a = _make_claim(sdk, "A")
         b = _make_claim(sdk, "B")
+        sdk.set_point_baseline(a["id"], 1, 1)  # #344: neutral calibrated baselines
+        sdk.set_point_baseline(b["id"], 1, 1)
         op = sdk.create_operator("IMPL", a["id"], [b["id"]])
 
         # Pass factors with the real operator ID
@@ -273,6 +282,9 @@ class TestZeroTotalGuard:
         sdk.create_operator("IMPL", a["id"], [b["id"]])
         proj = sdk._get_proj()
         for cid in (a["id"], b["id"]):
+            # #344: baseline first (keeps the gate active), then the (0,0)
+            # params the test exercises below.
+            sdk.set_point_baseline(cid, 1, 1)
             proj.g.query(
                 "MATCH (n:Point {id:$id}) SET n.ep_alpha=0.0, n.ep_beta=0.0",
                 params={"id": cid},
