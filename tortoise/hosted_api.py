@@ -543,7 +543,7 @@ app.add_middleware(ClientIPMiddleware)
 
 
 class ForwardedProtoMiddleware(BaseHTTPMiddleware):
-    """Honor X-Forwarded-Proto when building redirect Locations (#985).
+    """Honor forwarded-proto headers when building redirect Locations (#985).
 
     Starlette builds redirect URLs (e.g. the trailing-slash 307 for
     ``POST /mcp`` → ``/mcp/``) from ``scope["scheme"]``, which is the
@@ -554,23 +554,45 @@ class ForwardedProtoMiddleware(BaseHTTPMiddleware):
     convert the method to GET per RFC 9110 → ``GET /mcp/`` 405.
 
     This middleware rewrites ``scope["scheme"]`` from the FIRST value of
-    ``X-Forwarded-Proto`` so redirect Locations carry the client-visible
-    scheme (https). Trusted ONLY when ``TORTOISE_TRUST_FLY_CLIENT_IP=1``
-    — the same known-proxy gate as ClientIPMiddleware (#1081), set in
-    fly.toml [env] for the hosted Fly image. Fail-closed otherwise:
-    self-hosted / LAN / direct-port ingress never lets a client forge the
-    scheme of its own redirects.
+    the forwarded-proto header so redirect Locations carry the
+    client-visible scheme (https). Two trust domains, each gated by its
+    own flag (fail-closed — no flag = no trust, so a non-proxy ingress
+    can never forge the scheme of its own redirects):
+
+    * ``TORTOISE_TRUST_FLY_CLIENT_IP=1`` (hosted Fly image, fly.toml
+      [env]) — the known-proxy gate shared with ClientIPMiddleware
+      (#1081). Prefers ``Fly-Forwarded-Proto`` FIRST: Fly Proxy sets it
+      from the TLS connection and overwrites any client-supplied value
+      (non-spoofable — unlike ``X-Forwarded-Proto``, which Fly passes
+      through unchanged, so a client can set it to anything). Falls back
+      to ``X-Forwarded-Proto`` when ``Fly-Forwarded-Proto`` is absent.
+    * ``TORTOISE_TRUST_X_FORWARDED_PROTO=1`` — for self-hosters behind
+      nginx/Caddy (no Fly edge). Trusts ``X-Forwarded-Proto`` exactly as
+      those proxies set it.
     """
 
     async def dispatch(self, request: Request, call_next):
-        if os.environ.get("TORTOISE_TRUST_FLY_CLIENT_IP") == "1":
+        trust_fly = os.environ.get("TORTOISE_TRUST_FLY_CLIENT_IP") == "1"
+        trust_xfp = os.environ.get("TORTOISE_TRUST_X_FORWARDED_PROTO") == "1"
+
+        proto = None
+        if trust_fly:
+            # Fly-Forwarded-Proto is proxy-set and non-overridable — a
+            # client-supplied X-Forwarded-Proto can never win over it
+            # (review P2: X-Forwarded-Proto is client-overridable behind
+            # Fly, which passes it through unchanged).
+            proto = request.headers.get("Fly-Forwarded-Proto")
+        if proto is None and (trust_fly or trust_xfp):
+            # Fallback for the Fly path (no Fly-Forwarded-Proto header,
+            # e.g. health checks from inside the Fly network) and the
+            # nginx/Caddy self-host path.
             proto = request.headers.get("X-Forwarded-Proto")
-            if proto:
-                # Proxy chains append (e.g. "https,http") — the first value
-                # is the client-facing scheme (RFC 7239 ordering).
-                first = proto.split(",")[0].strip().lower()
-                if first in ("http", "https"):
-                    request.scope["scheme"] = first
+        if proto:
+            # Proxy chains append (e.g. "https,http") — the first value
+            # is the client-facing scheme (RFC 7239 ordering).
+            first = proto.split(",")[0].strip().lower()
+            if first in ("http", "https"):
+                request.scope["scheme"] = first
         return await call_next(request)
 
 

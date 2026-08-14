@@ -157,10 +157,11 @@ async def test_xfp_first_value_wins(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_xfp_ignored_without_trust_flag(monkeypatch):
-    """Fail-closed: without the trust flag, a client-forged X-Forwarded-Proto
+    """Fail-closed: without ANY trust flag, a client-forged X-Forwarded-Proto
     must NOT change the scheme — self-host / LAN / direct-port ingress could
     otherwise spoof https in its own redirects (review P2-2 pattern, #1081)."""
     monkeypatch.delenv("TORTOISE_TRUST_FLY_CLIENT_IP", raising=False)
+    monkeypatch.delenv("TORTOISE_TRUST_X_FORWARDED_PROTO", raising=False)
     req = await _dispatch_proto(
         _proto_middleware(),
         _FakeRequest(headers={"X-Forwarded-Proto": "https"}, scheme="http"),
@@ -184,6 +185,78 @@ async def test_xfp_invalid_value_ignored(monkeypatch):
 async def test_xfp_absent_is_noop(monkeypatch):
     """No header → scheme untouched (direct http ingress keeps http)."""
     monkeypatch.setenv("TORTOISE_TRUST_FLY_CLIENT_IP", "1")
+    req = await _dispatch_proto(
+        _proto_middleware(),
+        _FakeRequest(headers={}, scheme="http"),
+    )
+    assert req.scope["scheme"] == "http"
+
+
+@pytest.mark.asyncio
+async def test_fly_forwarded_proto_rewrites_scope_scheme(monkeypatch):
+    """Behind the trusted Fly proxy (flag=1), the proxy-set
+    Fly-Forwarded-Proto must rewrite scope["scheme"] (#985)."""
+    monkeypatch.setenv("TORTOISE_TRUST_FLY_CLIENT_IP", "1")
+    req = await _dispatch_proto(
+        _proto_middleware(),
+        _FakeRequest(headers={"Fly-Forwarded-Proto": "https"}),
+    )
+    assert req.scope["scheme"] == "https"
+
+
+@pytest.mark.asyncio
+async def test_fly_forwarded_proto_beats_client_xfp(monkeypatch):
+    """Review P2: X-Forwarded-Proto is client-overridable behind Fly (the
+    proxy passes it through unchanged), while Fly-Forwarded-Proto is proxy-
+    set and non-spoofable. In the trusted path, a client-supplied
+    X-Forwarded-Proto (here attempting a downgrade to http) must NEVER win
+    over Fly-Forwarded-Proto — the redirect stays https."""
+    monkeypatch.setenv("TORTOISE_TRUST_FLY_CLIENT_IP", "1")
+    req = await _dispatch_proto(
+        _proto_middleware(),
+        _FakeRequest(headers={
+            "Fly-Forwarded-Proto": "https",
+            "X-Forwarded-Proto": "http",
+        }),
+    )
+    assert req.scope["scheme"] == "https"  # Fly-Forwarded-Proto wins
+
+
+@pytest.mark.asyncio
+async def test_xfp_fallback_when_fly_forwarded_proto_absent(monkeypatch):
+    """Trusted Fly path without a Fly-Forwarded-Proto header (e.g. health
+    checks from inside the Fly network) falls back to X-Forwarded-Proto
+    exactly as before #985's P2 split."""
+    monkeypatch.setenv("TORTOISE_TRUST_FLY_CLIENT_IP", "1")
+    req = await _dispatch_proto(
+        _proto_middleware(),
+        _FakeRequest(headers={"X-Forwarded-Proto": "https"}),
+    )
+    assert req.scope["scheme"] == "https"
+
+
+@pytest.mark.asyncio
+async def test_xfp_trusted_with_selfhost_flag(monkeypatch):
+    """Review P2: TORTOISE_TRUST_X_FORWARDED_PROTO=1 alone (self-hoster
+    behind nginx/Caddy — no Fly edge) trusts X-Forwarded-Proto exactly as
+    that proxy set it, without enabling any Fly-Client-IP trust."""
+    monkeypatch.delenv("TORTOISE_TRUST_FLY_CLIENT_IP", raising=False)
+    monkeypatch.setenv("TORTOISE_TRUST_X_FORWARDED_PROTO", "1")
+    req = await _dispatch_proto(
+        _proto_middleware(),
+        _FakeRequest(headers={"X-Forwarded-Proto": "https"}),
+    )
+    assert req.scope["scheme"] == "https"
+
+
+@pytest.mark.asyncio
+async def test_fly_flag_alone_does_not_trust_fly_forwarded_proto_absent_xfp(
+    monkeypatch,
+):
+    """With only the Fly flag, no forwarded-proto header at all → scheme
+    unchanged (fail-closed default holds for the fly domain too)."""
+    monkeypatch.setenv("TORTOISE_TRUST_FLY_CLIENT_IP", "1")
+    monkeypatch.delenv("TORTOISE_TRUST_X_FORWARDED_PROTO", raising=False)
     req = await _dispatch_proto(
         _proto_middleware(),
         _FakeRequest(headers={}, scheme="http"),

@@ -2070,8 +2070,10 @@ class TestBackupStorageSeam:
 # Behind the Fly proxy the app sees plain http → Location downgrades to
 # http://... → the follow-up Fly http→https 301 converts POST→GET (RFC 9110)
 # → GET /mcp/ 405 (breaks POST-following stacks like the MCP TS SDK).
-# ForwardedProtoMiddleware fixes scope["scheme"] from X-Forwarded-Proto,
-# gated on the same known-proxy flag as ClientIPMiddleware.
+# ForwardedProtoMiddleware fixes scope["scheme"] from the forwarded-proto
+# header: Fly-Forwarded-Proto preferred (non-overridable) then
+# X-Forwarded-Proto, gated on TORTOISE_TRUST_FLY_CLIENT_IP (#1081) for the
+# Fly path and TORTOISE_TRUST_X_FORWARDED_PROTO for nginx/Caddy self-hosters.
 #
 # These tests exercise the REAL middleware through real Starlette routing
 # (a minimal /mcp mount reproducing the prod surface) because the hosted
@@ -2102,14 +2104,44 @@ class TestProxyProtoRedirect:
         assert r.headers["location"].startswith("https://"), r.headers["location"]
 
     def test_post_mcp_redirect_fail_closed_without_trust_flag(self, monkeypatch):
-        """Without the trust flag (self-host / LAN / direct ingress), a
+        """Without ANY trust flag (self-host / LAN / direct ingress), a
         client-forged X-Forwarded-Proto must NOT flip the scheme — the
         redirect stays http (unchanged scope), exactly as before #985."""
         monkeypatch.delenv("TORTOISE_TRUST_FLY_CLIENT_IP", raising=False)
+        monkeypatch.delenv("TORTOISE_TRUST_X_FORWARDED_PROTO", raising=False)
         with TestClient(self._mini_mcp_app(), follow_redirects=False) as tc:
             r = tc.post("/mcp", headers={"X-Forwarded-Proto": "https"})
         assert r.status_code == 307
         assert r.headers["location"].startswith("http://"), r.headers["location"]
+
+    def test_post_mcp_redirect_prefers_fly_forwarded_proto_over_client_xfp(
+        self, monkeypatch
+    ):
+        """Review P2: X-Forwarded-Proto is client-overridable behind Fly; a
+        client-supplied downgrade attempt (http) must NEVER beat the proxy-
+        set, non-overridable Fly-Forwarded-Proto (https) — the Location
+        stays https."""
+        monkeypatch.setenv("TORTOISE_TRUST_FLY_CLIENT_IP", "1")
+        with TestClient(self._mini_mcp_app(), follow_redirects=False) as tc:
+            r = tc.post(
+                "/mcp",
+                headers={
+                    "Fly-Forwarded-Proto": "https",
+                    "X-Forwarded-Proto": "http",
+                },
+            )
+        assert r.status_code == 307
+        assert r.headers["location"].startswith("https://"), r.headers["location"]
+
+    def test_post_mcp_redirect_trusts_xfp_with_selfhost_flag(self, monkeypatch):
+        """Self-hoster behind nginx/Caddy: TORTOISE_TRUST_X_FORWARDED_PROTO=1
+        alone (no Fly flag) must honor X-Forwarded-Proto: https."""
+        monkeypatch.delenv("TORTOISE_TRUST_FLY_CLIENT_IP", raising=False)
+        monkeypatch.setenv("TORTOISE_TRUST_X_FORWARDED_PROTO", "1")
+        with TestClient(self._mini_mcp_app(), follow_redirects=False) as tc:
+            r = tc.post("/mcp", headers={"X-Forwarded-Proto": "https"})
+        assert r.status_code == 307
+        assert r.headers["location"].startswith("https://"), r.headers["location"]
 
     def test_post_mcp_redirect_http_stays_http(self, monkeypatch):
         """X-Forwarded-Proto: http behind the proxy → Location stays http."""
