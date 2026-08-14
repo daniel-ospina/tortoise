@@ -136,6 +136,12 @@ def test_mine_derives_milestone():
     print(f"PASS test_mine_derives_milestone ({result['events']} events, kinds: {kinds})")
 
 
+# #1215 P2 c70: the CLI tests below depend on extractor determinism —
+# `mine-conversation` never passes --model, so ConversationMiner.
+# _make_extractor() returns the heuristic offline MockExtractor
+# (extractor.py, no LLM/network). Event counts/kinds are therefore
+# reproducible; wiring a model here would make the ≥3-event gate and the
+# kind assertions non-deterministic (and the tests would need API keys).
 def test_cli_mine_conversation_flow(sample_transcript_path, tmp_path,
                                     monkeypatch, capsys):
     """#1198: the `tortoise mine-conversation` CLI end-to-end on the sample.

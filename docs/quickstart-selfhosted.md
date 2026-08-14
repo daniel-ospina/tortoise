@@ -272,8 +272,9 @@ demonstrates the full mix (meeting + decision + friction).
 - SDK: `TortoiseSDK(db_path).mine_corpus(directory)` — batch-mine a folder of
   transcripts (ingest + mine per file, resume + dedup built in).
 - MCP (stdio): `tortoise_mine_conversations(transcript=..., source_id=...)` or
-  `corpus_dir=...` for a batch. Hosted HTTP excludes the fs-walk forms
-  (security, #1090) — run `tortoise serve` locally for those.
+  `corpus_dir=...` for a batch. Hosted HTTP excludes
+  `tortoise_mine_conversations` entirely (both forms, security #1090) — run
+  `tortoise serve` locally (stdio) for either.
 
 Mining details and the W-3 batch gate: `tortoise/mining.py`
 (`ConversationMiner`, `mine_conversation`, `mine_corpus`); the onboarding

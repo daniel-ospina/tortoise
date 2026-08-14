@@ -98,7 +98,6 @@ def _cmd_mine_conversation(args):
     from tortoise.api import EventAPI
     from tortoise.log import EventLog
     from tortoise.mining import ConversationMiner
-    from tortoise.projection import FalkorProjection
 
     transcript_path = Path(args.transcript)
     if not transcript_path.exists():
@@ -115,13 +114,22 @@ def _cmd_mine_conversation(args):
         try:
             # #1198 P1: route --db through the canonical resolvers so embedded
             # paths (e.g. ~/.tortoise/tortoise.db) work, not just docker:// URIs.
-            # Bare except is intentional: projection failure degrades to
-            # log-only mode (documented) rather than crashing the CLI.
+            # #1215 P2 c80: reuse the repo's single routing choke-point
+            # _projection_for (URI → from_uri, path → embedded) instead of
+            # hand-rolling the routing here. Non-URI targets pre-resolve
+            # through resolve_db_path (expand ~, reject relative) first — the
+            # same resolved-target contract the other _projection_for callers
+            # get via _resolve_db_target; FalkorProjection never sees a raw
+            # tilde/relative path (#1215 review gate). Bare except is
+            # intentional: projection failure degrades to log-only mode
+            # (documented) rather than crashing the CLI.
             from tortoise.config import is_db_uri, resolve_db_path
-            if is_db_uri(args.db):
-                proj = FalkorProjection.from_uri(args.db)
-            else:
-                proj = FalkorProjection(path=resolve_db_path(args.db))
+            target = args.db if is_db_uri(args.db) else resolve_db_path(args.db)
+            proj = _projection_for(target)
+        except ValueError as e:
+            # Path-validation failure (e.g. RELATIVE_PATH_ERROR from
+            # resolve_db_path) — name the invalid --db value, not FalkorDB.
+            print(f"Warning: invalid --db path ({e}), using log-only mode")
         except Exception as e:
             print(f"Warning: FalkorDB unavailable ({e}), using log-only mode")
 
