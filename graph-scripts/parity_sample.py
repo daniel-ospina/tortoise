@@ -101,9 +101,13 @@ def get_new_operator_set(proj: _LightProj, anchors: list[str]) -> set[str]:
     """
     if not anchors:
         return set()
-    return _bfs_select_operators(
+    # A9 (epic #902 §5.6): the selector returns (operator_ids, factor_anchors)
+    # — this tool consumes the OPERATOR ids (the direct-edge anchors are a
+    # new surface this parity tool predates).
+    ops, _anchors = _bfs_select_operators(
         proj, anchors, max_hops=1, rel_filter="IMPL|NAND", direction="both"
     )
+    return ops
 
 
 def classify_delta(

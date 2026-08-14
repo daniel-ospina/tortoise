@@ -71,11 +71,25 @@ class Dreamer:
         with self._lock:
             proj = self._sdk._get_proj()
             from .analyze import _bfs_select_operators
-            operator_ids = list(_bfs_select_operators(
+            operator_ids, factor_anchors = _bfs_select_operators(
                 proj, anchors, max_hops=max_hops, rel_filter="IMPL|NAND",
                 direction=direction,
-            ))
-            if not operator_ids:
+            )
+            # A9 (epic #902 §5.6): the selection set ALSO carries direct-edge
+            # factor anchors — a direct-edge-only subgraph yields ZERO
+            # operator ids but a non-empty direct-factor selection. ep.run
+            # accepts plain-point seeds (Batch 3 runs the operator-less
+            # direct edges they participate in), so the run seeds = operators
+            # + the anchor endpoints; both-empty is the ONLY vacuous case.
+            seed_ids = list(operator_ids)
+            for (src, tgt, _t) in factor_anchors:
+                seed_ids.append(src)
+                seed_ids.append(tgt)
+            seed_ids = list(dict.fromkeys(seed_ids))  # dedup (order is not
+            # deterministic — operator_ids is a set, hash-randomized across
+            # processes; harmless: EP factors are order-independent and
+            # affected_claims is a set)
+            if not seed_ids:
                 return {"iterations": 0, "converged": True, "affected_claims": []}
             ep = self._sdk._get_ep()
             # #330: dream must honour the SDK's persistent evidence (baselines)
@@ -83,13 +97,13 @@ class Dreamer:
             # run() is call-scoped, so the copy cannot leak into later runs.
             self._sdk._hydrate_evidence()
             iterations, converged = ep.run(
-                operator_ids, max_hops=max_hops,
+                seed_ids, max_hops=max_hops,
                 evidence=dict(self._sdk._evidence),
             )
             # Persist mean confidence to node property (mirrors compute_confidence).
             # P2 (#85): use the SAME max_hops as the run so the affected set
             # matches what _load_cache/_flush_cache covered.
-            affected = ep._affected_claims(operator_ids, max_hops=max_hops)
+            affected = ep._affected_claims(seed_ids, max_hops=max_hops)
             from datetime import datetime, timezone
             now = datetime.now(timezone.utc).isoformat()
             for claim_id in affected:
@@ -135,10 +149,10 @@ class Dreamer:
             chunk = anchors[start:start + batch_size]
             with self._lock:
                 from .analyze import _bfs_select_operators
-                chunk_ops = list(_bfs_select_operators(
+                chunk_ops, _chunk_anchors = _bfs_select_operators(
                     proj, chunk, max_hops=max_hops, rel_filter="IMPL|NAND",
                     direction="both",
-                ))
+                )
             total_operators += len(chunk_ops)
             if total_operators > max_total_operators:
                 _log.warning(

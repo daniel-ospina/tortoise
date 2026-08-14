@@ -5386,19 +5386,24 @@ class TortoiseSDK:
     def _select_subgraph(self, anchors: list[str], max_hops: int = 1,
                          rel_filter: str = "IMPL|NAND",
                          direction: str = "both",
-                         include_draft: bool = False) -> list[str]:
-        """BFS subgraph selection from anchor Points to collect operator IDs.
+                         include_draft: bool = False) -> tuple[list[str], set[tuple[str, str, str]]]:
+        """BFS subgraph selection from anchor Points — A9 return contract.
 
         Delegates to the shared _bfs_select_operators in tortoise.analyze.
-        With include_draft=False (default, #780) draft anchors, operators and
-        frontier points are excluded.
+        Returns ``(operator_ids, factor_anchors)`` — the operator Point IDs
+        AND the direct-edge factor anchors ((src, tgt, type) descriptors)
+        discovered in the traversal (epic #902 §5.6: a direct-edge-only
+        subgraph yields ZERO operators but a non-empty direct-factor
+        selection; the ≥2-live-endpoints derived-liveness predicate applies
+        to operator nodes, GATE-2 Q3). With include_draft=False (default,
+        #780) draft anchors, operators and frontier points are excluded.
         """
         from .analyze import _bfs_select_operators
         proj = self._get_proj()
-        result = _bfs_select_operators(proj, anchors, max_hops=max_hops,
-                                        rel_filter=rel_filter, direction=direction,
-                                        include_draft=include_draft)
-        return list(result)
+        ops, anchors_out = _bfs_select_operators(proj, anchors, max_hops=max_hops,
+                                                 rel_filter=rel_filter, direction=direction,
+                                                 include_draft=include_draft)
+        return list(ops), anchors_out
 
     def compute_confidence(self, factors=None, evidence=None,
                            anchors: list[str] | None = None,
@@ -5454,10 +5459,18 @@ class TortoiseSDK:
         if factors is not None:
             operator_ids = [f if isinstance(f, str) else f[0] for f in factors]
         elif anchors is not None:
-            # BFS subgraph selection from anchor points
-            operator_ids = self._select_subgraph(anchors, max_hops=max_hops,
-                                                  rel_filter=rel_filter,
-                                                  direction=direction)
+            # BFS subgraph selection from anchor points (A9, epic #902): the
+            # selection carries the direct-edge factor anchors too — a
+            # direct-edge-only subgraph yields ZERO operators but a non-empty
+            # direct-factor selection; ep.run accepts plain-point seeds, so
+            # the run seeds = operators + the anchor endpoints (§5.6).
+            operator_ids, _factor_anchors = self._select_subgraph(
+                anchors, max_hops=max_hops, rel_filter=rel_filter,
+                direction=direction)
+            for (src, tgt, _t) in _factor_anchors:
+                operator_ids.append(src)
+                operator_ids.append(tgt)
+            operator_ids = list(dict.fromkeys(operator_ids))
         else:
             factors_data, _ = proj.extract_svbp_factors()
             operator_ids = [f[0] for f in factors_data]
