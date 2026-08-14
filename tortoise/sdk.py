@@ -10418,7 +10418,8 @@ class TortoiseSDK:
                 source_exists, edge_exists = self._backfill_probe(url, eid)
             except Exception as exc:  # noqa: BLE001 — per-Event isolation
                 errors.append({"event": eid, "eventKind": u["kind"],
-                               "error": f"probe failed: {exc}", "cause": "db"})
+                               "error": f"probe failed: {exc}", "cause": "db",
+                               "path": u["abs_path"]})
                 continue
             if source_exists and edge_exists:
                 if not dry_run:
@@ -10443,7 +10444,7 @@ class TortoiseSDK:
                     except Exception as exc:  # noqa: BLE001 — per-Event isolation
                         errors.append({"event": eid, "eventKind": u["kind"],
                                        "error": f"Source write failed: {exc}",
-                                       "cause": "db"})
+                                       "cause": "db", "path": u["abs_path"]})
                         # outcome UNKNOWN (a journal-append failure can raise
                         # AFTER the graph write committed): do NOT set
                         # group_created — an alias member may retry the create;
@@ -10469,7 +10470,7 @@ class TortoiseSDK:
                     except Exception as exc:  # noqa: BLE001 — crash-repair seam
                         errors.append({"event": eid, "eventKind": u["kind"],
                                        "error": f"references-link step failed: {exc}",
-                                       "cause": "db"})
+                                       "cause": "db", "path": u["abs_path"]})
         return report
 
     def _backfill_probe(self, url: str, event_id: str) -> tuple[bool, bool]:
