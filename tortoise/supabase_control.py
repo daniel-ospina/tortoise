@@ -85,6 +85,13 @@ _TEAM_ADDITIVE_SELECT = [
     # surface). Default true; claimed owners toggle it (session-authed).
     "dashboard_key_login",
 ]
+# Retry tiers for the fail-soft ladder (#1096): the NEWEST migration is
+# dropped FIRST, so a schema missing only the newest additive (e.g.
+# 20260813000005) still reads the older additive state (0015 carries REAL
+# suspension data — discarding it would bypass enforcement with real data
+# present).
+_TEAM_ADDITIVE_DKL_TIER = ["dashboard_key_login"]      # 20260813000005
+_TEAM_ADDITIVE_0015_TIER = ["suspended_at", "flagged_at"]  # 0015
 
 # Combined quota read (primary query) — the healthy path stays ONE round-trip.
 _QUOTA_SELECT = _TEAM_BASE_SELECT + _TEAM_ADDITIVE_SELECT
@@ -364,43 +371,64 @@ def _parse_ts(value) -> datetime | None:
 
 
 def _teams_row_fail_soft(cp, team_id: str, *, select: list[str],
-                         additive: list[str]) -> dict | None:
+                         additive_tiers: list[list[str]]) -> dict | None:
     """Teams row with fail-soft additive columns (#1096).
 
     Primary query selects base+additive (one round-trip). When it raises —
     a missing additive column → PostgREST HTTP 400 (PGRST204 per the
-    error reference; the error-blind seam discards the body) — retry with
-    the drift-safe base set and pad the additive fields to None
-    (un-suspended/un-flagged, pre-0015 behavior).
-    A failure of the base-only retry PROPAGATES (fail-closed: a broken
-    teams table, or a missing non-additive column — e.g. team_by_id's
-    #302 deleted_at/grace_hours stay in THAT call site's base set — must
-    never authenticate or open a kill-switch guard). Logged at WARNING so
-    drift stays diagnosable (#1001 post-mortem). Accepted-by-scope: a
-    non-drift failure of the combined read degrades suspension enforcement
-    for the degrade duration (one auth; up to +60s on MCP) — the closure
-    (error discrimination + revoked_at stamping) is deferred to the #1096
-    escalation decomposition.
+    error reference; the error-blind seam discards the body) — retry
+    progressively dropping the additive TIERS (newest migration first:
+    tier[0] dropped first), padding the dropped tier's fields to safe
+    defaults. Tiered so a schema missing only the NEWEST additive
+    (e.g. 20260813000005 dashboard_key_login) still reads the OLDER
+    additive state (0015 suspended_at/flagged_at carry REAL suspension
+    data — discarding it would bypass enforcement with real data present).
+    If even the base-only select fails, the error PROPAGATES (fail-closed:
+    a broken teams table, or a missing base/deletion column — e.g.
+    team_by_id's #302 deleted_at/grace_hours stay in THAT call site's base
+    set — must never authenticate or open a kill-switch guard). Logged at
+    WARNING per failed attempt so drift stays diagnosable (#1001
+    post-mortem). Accepted-by-scope: a non-drift failure of the combined
+    read degrades enforcement for the degrade duration (one auth; up to
+    +60s on MCP) — the closure (error discrimination + revoked_at
+    stamping) is deferred to the #1096 escalation decomposition.
     """
-    additive_defaults = {f: None for f in additive}
-    try:
-        rows = cp.query("teams", select=select, filters=[("id", "eq", team_id)])
-    except Exception as e:
-        base = [c for c in select if c not in additive_defaults]
-        _logger.warning(
-            "teams read failed for %s (select=%s) — retrying base-only "
-            "select %s; a missing additive column (0015) degrades, a "
-            "missing base/deletion column fails closed (%s)",
-            team_id, select, base, e)
+    additive = [c for tier in additive_tiers for c in tier]
+    additive_defaults = {c: None for c in additive}
+    # Retry ladder: full select → drop tier[0] → drop tier[0..1] → … → base.
+    last_exc: Exception | None = None
+    for k in range(len(additive_tiers) + 1):
+        dropped = {c for tier in additive_tiers[:k] for c in tier}
+        attempt_select = [c for c in select if c not in dropped]
         try:
-            rows = cp.query("teams", select=base, filters=[("id", "eq", team_id)])
-        except Exception as e2:
-            _logger.warning(
-                "teams base-only read failed for %s (select=%s) — "
-                "fail-closed (missing base column or control-plane "
-                "outage): %s",
-                team_id, base, e2)
-            raise
+            rows = cp.query("teams", select=attempt_select,
+                            filters=[("id", "eq", team_id)])
+            break
+        except Exception as e:
+            last_exc = e
+            if not dropped:
+                _logger.warning(
+                    "teams read failed for %s (select=%s) — retrying without "
+                    "additive %s; a missing additive column degrades, a "
+                    "missing base/deletion column fails closed (%s)",
+                    team_id, select, additive, e)
+            elif set(additive) <= dropped:
+                _logger.warning(
+                    "teams read failed for %s (select=%s) — retrying "
+                    "base-only select %s; a missing additive column (0015) "
+                    "degrades, a missing base/deletion column fails closed (%s)",
+                    team_id, select, attempt_select, e)
+            else:
+                _logger.warning(
+                    "teams read failed for %s (select=%s) — retrying select "
+                    "%s (%s)", team_id, select, attempt_select, e)
+    else:
+        assert last_exc is not None
+        _logger.warning(
+            "teams base-only read failed for %s (select=%s) — "
+            "fail-closed (missing base column or control-plane outage): %s",
+            team_id, [c for c in select if c not in additive], last_exc)
+        raise last_exc
     if not rows:
         return None
     return {**additive_defaults, **rows[0]}
@@ -437,12 +465,27 @@ def resolve_api_key(cp, token: str) -> dict | None:
     h = lookup_hash(token)
     team_id = key_id = created_via = created_by = key_prefix = None
 
-    rows = cp.query(
-        "api_keys",
-        select=["id", "team_id", "key_prefix", "created_via", "created_by",
-                "expires_at", "revoked_at", "enabled"],
-        filters=[("lookup_hash", "eq", h)],
-    )
+    # api_keys read (step 1): "enabled" is an additive column
+    # (20260813000005, #1148 — dashboard key-login toggle). A schema one
+    # migration behind 400s on it; fail soft to the pre-#1148 default
+    # (enabled), never take down all auth (#1096). The base api_keys
+    # columns (0007) stay fail-closed: a failure of the base-only retry
+    # propagates.
+    _API_KEY_BASE_SELECT = ["id", "team_id", "key_prefix", "created_via",
+                            "created_by", "expires_at", "revoked_at"]
+    try:
+        rows = cp.query(
+            "api_keys", select=_API_KEY_BASE_SELECT + ["enabled"],
+            filters=[("lookup_hash", "eq", h)],
+        )
+    except Exception as e:
+        _logger.warning(
+            "api_keys read failed — retrying without additive 'enabled'; is "
+            "migration 20260813000005 applied? (%s)", e)
+        rows = cp.query(
+            "api_keys", select=_API_KEY_BASE_SELECT,
+            filters=[("lookup_hash", "eq", h)],
+        )
     if rows:
         row = rows[0]
         if row.get("revoked_at") is not None:
@@ -473,7 +516,8 @@ def resolve_api_key(cp, token: str) -> dict | None:
         team_id = memberships[0]["team_id"]
 
     team_row = _teams_row_fail_soft(
-        cp, team_id, select=_QUOTA_SELECT, additive=_TEAM_ADDITIVE_SELECT)
+        cp, team_id, select=_QUOTA_SELECT,
+        additive_tiers=[_TEAM_ADDITIVE_DKL_TIER, _TEAM_ADDITIVE_0015_TIER])
     if team_row is None:
         # Key's team vanished — fail closed (401), never authenticate.
         return None
@@ -592,7 +636,7 @@ def team_by_id(cp, team_id: str) -> dict | None:
                 "backup_enabled", "backup_latest_at", "backup_restored_at",
                 "created_at", "deleted_at", "grace_hours"]
             + _TEAM_ADDITIVE_SELECT,
-        additive=_TEAM_ADDITIVE_SELECT)
+        additive_tiers=[_TEAM_ADDITIVE_DKL_TIER, _TEAM_ADDITIVE_0015_TIER])
 
 
 # ── Session-key mint writes (E2E-2 round-trip: mint → api_keys → resolve) ──

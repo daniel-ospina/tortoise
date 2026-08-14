@@ -20,9 +20,9 @@ created: 2026-08-13
 **Team:** epistemic-team
 **Role:** (session)
 
-**Architecture:** The teams read keeps its SINGLE round-trip in the healthy path (combined select = base + additive) and degrades only on failure: when the query raises (a missing additive column → PostgREST 400, body discarded by the error-blind seam), retry once with the drift-safe base set (migration 0006 columns only for `resolve_api_key`; `team_by_id`'s retry intentionally retains the #302 `deleted_at`/`grace_hours` columns so a deletion-drifted schema fails closed) and pad the additive fields to `None` (un-suspended / un-flagged safe defaults, pre-0015 behavior). **Only suspension/staging state (0015 `suspended_at`/`flagged_at`) fails soft.** The #302 soft-delete columns (`deleted_at`/`grace_hours`, 20260813000001) stay fail-closed in `team_by_id`: a deletion kill-switch must fail the guard closed, never open it (a schema missing them cannot have soft-deleted rows, and the write path is equally drifted — so fail-closed is both safe and correct there). The base-only retry remains fail-closed (its failure propagates — a broken teams table must never authenticate). The degrade is logged at WARNING so drift stays diagnosable (#1001 post-mortem: "schema drift is undiagnosable"). Enforcement semantics are untouched whenever the additive columns ARE readable (REST 403 / MCP -32006 still fire via `suspended_at` in the returned dict). This is defense-in-depth: the deploy gate (#1095) is the primary fix; this keeps auth resilient if drift still ships.
+**Architecture:** The teams read keeps its SINGLE round-trip in the healthy path (combined select = base + additive) and degrades only on failure: when the query raises (a missing additive column → PostgREST 400, body discarded by the error-blind seam), retry dropping additive tiers progressively (newest migration first — a schema missing only 20260813000005 still reads real 0015 suspension state; the final attempt uses migration 0006 columns only for `resolve_api_key`; `team_by_id`'s base retains the #302 `deleted_at`/`grace_hours` so a deletion-drifted schema fails closed) and pad the additive fields to `None` (un-suspended / un-flagged safe defaults, pre-0015 behavior). **Only suspension/staging state (0015 `suspended_at`/`flagged_at`) fails soft.** The #302 soft-delete columns (`deleted_at`/`grace_hours`, 20260813000001) stay fail-closed in `team_by_id`: a deletion kill-switch must fail the guard closed, never open it (a schema missing them cannot have soft-deleted rows, and the write path is equally drifted — so fail-closed is both safe and correct there). The base-only retry remains fail-closed (its failure propagates — a broken teams table must never authenticate). The degrade is logged at WARNING so drift stays diagnosable (#1001 post-mortem: "schema drift is undiagnosable"). Enforcement semantics are untouched whenever the additive columns ARE readable (REST 403 / MCP -32006 still fire via `suspended_at` in the returned dict). This is defense-in-depth: the deploy gate (#1095) is the primary fix; this keeps auth resilient if drift still ships.
 
-**Accepted risk (explicit):** when the 0015 additive columns are unreadable for any reason — drift, or a transient base-ok/additive-fail error — a durably-suspended team degrades to un-suspended for the **entire degradation duration**, and on MCP up to **+60s after recovery** (TeamResolutionMiddleware's resolution TTL — REST resolves fresh per request and 403s immediately; the drift-degrade sets no suspension signal, so the MCP cache holds the un-suspended entry until TTL). Worse, the degrade **actively clears the in-process suspension signal**: both enforcement seams self-heal a fresh un-suspended resolution (`if is_suspended_signal(team_id): clear_suspended(team_id)`), so the first drifted request tears down the one local enforcement cell that still works, for the whole degradation duration (the scoping verifier's multi-replica cell concern — its closure is the deferred `revoked_at` stamping, item ④). During the window, session-key mint (hosted_api ~5425, `suspended_at` 403 gate) is **newly permitted** for a durably-suspended team (a capability grant, not just continued auth); the invite flows (mint + accept) restore from fail-closed 500 to **working** — policy-unchanged (invites were never suspension-gated in any mode; only the drift 500 blocked them) and consistent with this slice's fail-soft intent, so not pinned separately; and the #1148 key-login gate (`_check_dashboard_key_login`, management endpoints create_api_key/revoke_api_key/backups_restore/billing via `get_current_team_session`) degrades to the safe default ALLOWED under drift — `resolve_api_key` normalizes the additive `dashboard_key_login` None-pad to True (the column is NOT NULL DEFAULT true; a schema missing 20260813000005 behaves as pre-#1148, where key-login was always allowed). Note: under additive drift the STORED False is NOT readable (the additive set is excluded from the base retry — the degrade loses all additive state), so a team that disabled key-login has the gate re-opened for the degradation duration — the same fail-open class as the suspension degrade, accepted-by-scope. Pinned at the seam level by `test_resolve_api_key_additive_columns_missing_fail_soft` (True assertion), `test_resolve_api_key_dashboard_key_login_only_drift`, and `test_resolve_api_key_stored_false_drift_fail_open` (False→True documented). The SESSION branch (`_session_user_team`) routes through the same fail-soft seam (degrade, never 500). (Merge note: `dashboard_key_login` was added to `_TEAM_ADDITIVE_SELECT` during the post-plan rebase with main, which shipped #1148; this decision extends the plan's fail-soft principle to the new additive class.)
+**Accepted risk (explicit):** when the 0015 additive columns are unreadable for any reason — drift, or a transient base-ok/additive-fail error — a durably-suspended team degrades to un-suspended for the **entire degradation duration**, and on MCP up to **+60s after recovery** (TeamResolutionMiddleware's resolution TTL — REST resolves fresh per request and 403s immediately; the drift-degrade sets no suspension signal, so the MCP cache holds the un-suspended entry until TTL). Worse, the degrade **actively clears the in-process suspension signal**: both enforcement seams self-heal a fresh un-suspended resolution (`if is_suspended_signal(team_id): clear_suspended(team_id)`), so the first drifted request tears down the one local enforcement cell that still works, for the whole degradation duration (the scoping verifier's multi-replica cell concern — its closure is the deferred `revoked_at` stamping, item ④). During the window, session-key mint (hosted_api ~5425, `suspended_at` 403 gate) is **newly permitted** for a durably-suspended team (a capability grant, not just continued auth); the invite flows (mint + accept) restore from fail-closed 500 to **working** — policy-unchanged (invites were never suspension-gated in any mode; only the drift 500 blocked them) and consistent with this slice's fail-soft intent, so not pinned separately; and the #1148 key-login gate (`_check_dashboard_key_login`, management endpoints create_api_key/revoke_api_key/backups_restore/billing via `get_current_team_session`) degrades to the safe default ALLOWED under drift — `resolve_api_key` normalizes the additive `dashboard_key_login` None-pad to True (the column is NOT NULL DEFAULT true; a schema missing 20260813000005 behaves as pre-#1148, where key-login was always allowed). Note: under a 0015-absent drift the STORED False is NOT readable (the 0015 tier is dropped) so a team that disabled key-login has the gate re-opened for the degradation duration — the same fail-open class as the suspension degrade, accepted-by-scope. Under a 20260813000005-ONLY drift the tiered ladder preserves real 0015 suspension state (pinned by `test_resolve_api_key_dkl_only_drift_keeps_suspension`). Pinned at the seam level by `test_resolve_api_key_additive_columns_missing_fail_soft` (True assertion), `test_resolve_api_key_dashboard_key_login_only_drift`, and `test_resolve_api_key_stored_false_drift_fail_open` (False→True documented). The SESSION branch (`_session_user_team`) routes through the same fail-soft seam (degrade, never 500). `api_keys.enabled` (same 20260813000005 migration, read in resolve step 1) also fails soft to the pre-#1148 default True — a schema missing the newest migration must not take down all key auth at step 1 (code-review fix; pinned by `test_resolve_api_key_api_keys_enabled_drift_fail_soft`). (Merge note: `dashboard_key_login` was added to `_TEAM_ADDITIVE_SELECT` during the post-plan rebase with main, which shipped #1148; this decision extends the plan's fail-soft principle to the new additive class.)
 
 Likewise `claim_status` (~5210, claimability probe) restores from fail-closed `{"claimable": False}` to a real determination under drift — policy-unchanged (no suspension gate; the claim RPC is drift-independent) and read-only, so not pinned; and `team_info`'s status chip (GET /v1/team, ~1945) silently flips `"flagged"`→`"active"` for the degradation window — display-only, the same fail-soft direction as the un-suspended default, so not pinned. **`claim_team` (POST /v1/claim) is the one durable-write opening: it is suspension-gated via the same `_get_current_team_supabase` auth dependency, so under 0015 drift a durably-suspended ANON team can execute the claim (`claim_membership` RPC — permanent owner-identity link + `teams.email` overwrite, NOT undone by drift recovery) — pinned by `test_claim_allowed_under_0015_drift_then_blocked_after_recovery` (Task 4 Step 5).** This fail-open window is accepted-by-scope; see the `Deferred:` block below for the closure that would eliminate it and why it is not in this slice. The #302 deletion kill-switch is NOT part of this window: the 410 fires in healthy and 0015-drift modes; under 20260813000001 drift `team_by_id` raises and the consumer returns 500 (fail-closed — the guard never opens, never 2xx).
 
@@ -55,7 +55,7 @@ Likewise `claim_status` (~5210, claimability probe) restores from fail-closed `{
 ### Failure Modes
 
 - Drifted schema (missing 0015 columns — the #1001 case) → **Expected:** combined teams read raises → base-only retry succeeds → team resolves un-suspended/un-flagged (`suspended_at`/`flagged_at` = `None`); auth keeps working; WARNING logged per degrade → **Test:** `test_resolve_api_key_additive_columns_missing_fail_soft` (incl. caplog warning assertion)
-- Drifted schema (missing 20260813000005 `dashboard_key_login` — the #1148 additive class) → **Expected:** key-login gate degrades to safe default ALLOWED (`resolve_api_key` normalizes None→True; a team that set False keeps it False); pinned by `test_resolve_api_key_dashboard_key_login_only_drift` → **Test:** `test_resolve_api_key_dashboard_key_login_only_drift` + `test_resolve_api_key_additive_columns_missing_fail_soft` (True assertion)
+- Drifted schema (missing 20260813000005 `dashboard_key_login` — the #1148 additive class) → **Expected:** key-login gate degrades to safe default ALLOWED (`resolve_api_key` normalizes None→True — the pre-#1148 behavior; a stored False is NOT readable under 0015-absent drift); real 0015 suspension state PRESERVED by the tiered ladder → **Test:** `test_resolve_api_key_dashboard_key_login_only_drift` + `test_resolve_api_key_dkl_only_drift_keeps_suspension` + `test_resolve_api_key_additive_columns_missing_fail_soft` (True assertion)
 - Drifted schema (missing 20260813000001 columns — the #302 soft-delete columns) → **Expected:** `team_by_id` FAILS CLOSED (RuntimeError propagates from the base retry — the deletion kill-switch guard must never open; `invitation_accept`/`export_team` 410 semantics preserved) → **Test:** `test_team_by_id_deletion_columns_drift_fails_closed`
 - Columns present, team suspended → **Expected:** `suspended_at` carried in resolved dict; REST 403 / MCP -32006 unchanged → **Test:** `test_resolve_api_key_carries_suspension_state` + existing `test_abuse_integration.py` 403/MCP tests
 - Base columns missing (table broken / corrupt, distinct from a full outage) → **Expected:** base-only retry also raises → RuntimeError propagates (fail-closed, outcome unchanged), but the failure path now costs a second teams query + a second WARNING per request for the entire degradation (acknowledged trade-off for the single-round-trip healthy path; bounded only by the deferred seam error-discrimination closure, item ①) → **Test:** `test_team_by_id_base_read_fails_closed` + existing resolve fail-closed tests
@@ -132,7 +132,13 @@ _TEAM_BASE_SELECT = [
 # A schema one migration behind raises PostgREST 400 on these; the auth
 # seam must degrade to safe defaults (un-suspended/un-flagged), never
 # take down all auth (#1096, defense-in-depth behind the #1095 deploy gate).
-_TEAM_ADDITIVE_SELECT = ["suspended_at", "flagged_at"]
+# Additive retry TIERS (code-review fix): the NEWEST migration is dropped
+# FIRST, so a schema missing only the newest additive still reads the older
+# additive state (0015 carries REAL suspension data — discarding it would
+# bypass enforcement with real data present).
+_TEAM_ADDITIVE_DKL_TIER = ["dashboard_key_login"]      # 20260813000005
+_TEAM_ADDITIVE_0015_TIER = ["suspended_at", "flagged_at"]  # 0015
+_TEAM_ADDITIVE_SELECT = _TEAM_ADDITIVE_DKL_TIER + _TEAM_ADDITIVE_0015_TIER
 
 # Combined quota read (primary query) — the healthy path stays ONE round-trip.
 _QUOTA_SELECT = _TEAM_BASE_SELECT + _TEAM_ADDITIVE_SELECT
@@ -142,13 +148,17 @@ _QUOTA_SELECT = _TEAM_BASE_SELECT + _TEAM_ADDITIVE_SELECT
 
 ```python
 def _teams_row_fail_soft(cp, team_id: str, *, select: list[str],
-                         additive: list[str]) -> dict | None:
+                         additive_tiers: list[list[str]]) -> dict | None:
     """Teams row with fail-soft additive columns (#1096).
 
     Primary query selects base+additive (one round-trip). When it raises —
     a missing additive column → PostgREST HTTP 400 (PGRST204 per the
-    error reference; the error-blind seam discards the body) — retry with the drift-safe base set and pad the
-    additive fields to None (un-suspended/un-flagged, pre-0015 behavior).
+    error reference; the error-blind seam discards the body) — retry
+    dropping additive TIERS progressively (newest migration first),
+    padding the dropped tiers' fields to safe defaults
+    (un-suspended/un-flagged; key-login allowed). A schema missing only
+    the newest additive still reads the older additive state — real 0015
+    suspension data is never discarded (code-review fix).
     A failure of the base-only retry PROPAGATES (fail-closed: a broken
     teams table, or a missing non-additive column — e.g. team_by_id's
     #302 deleted_at/grace_hours stay in THAT call site's base set — must
@@ -159,25 +169,29 @@ def _teams_row_fail_soft(cp, team_id: str, *, select: list[str],
     (error discrimination + revoked_at stamping) is deferred to the #1096
     escalation decomposition.
     """
-    additive_defaults = {f: None for f in additive}
-    try:
-        rows = cp.query("teams", select=select, filters=[("id", "eq", team_id)])
-    except Exception as e:
-        base = [c for c in select if c not in additive_defaults]
-        _logger.warning(
-            "teams read failed for %s (select=%s) — retrying base-only "
-            "select %s; a missing additive column (0015) degrades, a "
-            "missing base/deletion column fails closed (%s)",
-            team_id, select, base, e)
+    additive = [c for tier in additive_tiers for c in tier]
+    additive_defaults = {c: None for c in additive}
+    # Retry ladder: full select → drop tier[0] → drop tier[0..1] → … → base.
+    last_exc = None
+    for k in range(len(additive_tiers) + 1):
+        dropped = {c for tier in additive_tiers[:k] for c in tier}
+        attempt_select = [c for c in select if c not in dropped]
         try:
-            rows = cp.query("teams", select=base, filters=[("id", "eq", team_id)])
-        except Exception as e2:
+            rows = cp.query("teams", select=attempt_select,
+                            filters=[("id", "eq", team_id)])
+            break
+        except Exception as e:
+            last_exc = e
             _logger.warning(
-                "teams base-only read failed for %s (select=%s) — "
-                "fail-closed (missing base column or control-plane "
-                "outage): %s",
-                team_id, base, e2)
-            raise
+                "teams read failed for %s (select=%s) — retrying select %s; "
+                "a missing additive column degrades, a missing base/deletion "
+                "column fails closed (%s)", team_id, select, attempt_select, e)
+    else:
+        _logger.warning(
+            "teams base-only read failed for %s (select=%s) — fail-closed "
+            "(missing base column or control-plane outage): %s",
+            team_id, [c for c in select if c not in additive], last_exc)
+        raise last_exc
     if not rows:
         return None
     return {**additive_defaults, **rows[0]}
@@ -189,7 +203,8 @@ def _teams_row_fail_soft(cp, team_id: str, *, select: list[str],
 
 ```python
     team_row = _teams_row_fail_soft(
-        cp, team_id, select=_QUOTA_SELECT, additive=_TEAM_ADDITIVE_SELECT)
+        cp, team_id, select=_QUOTA_SELECT,
+        additive_tiers=[_TEAM_ADDITIVE_DKL_TIER, _TEAM_ADDITIVE_0015_TIER])
     if team_row is None:
         # Key's team vanished — fail closed (401), never authenticate.
         return None
@@ -212,7 +227,7 @@ Also qualify the seam-level fail-closed docstrings that the new behavior contrad
 - `_get_current_team_supabase` (hosted_api.py ~1056): "never 200" claim → append "EXCEPTION (#1096): an additive-teams-read failure (0015) degrades to a 200 with safe defaults (un-suspended/un-flagged), logged at WARNING".
 - `SupabaseControlPlane` class docstring: qualify the fail-closed sentence as **seam-level** behavior (the resolve caller may intentionally swallow an additive-read failure per #1096).
 
-All are docstring-only edits.
+All are docstring-only edits. **Code changes in this task (from the code-review fixes, beyond the plan's original docstring-only scope):** (a) `_session_user_team` (hosted_api.py) routes its teams read through `_teams_row_fail_soft` so session-authed management degrades consistently (never 500); (b) `resolve_api_key` step 1 reads `api_keys.enabled` (20260813000005, additive) with a fail-soft retry to the pre-#1148 default True — a schema missing the newest migration must not take down all key auth at step 1.
 
 (The dict contract is unchanged: `suspended_at`/`flagged_at`/`email` keys are always present — `None` when degraded. Healthy-path query count stays 2/auth — `test_session_key_resolves_via_api_keys`'s `query_count == 2` assertion at line 132 does NOT change.)
 
@@ -247,7 +262,7 @@ def team_by_id(cp, team_id: str) -> dict | None:
                 "backup_enabled", "backup_latest_at", "backup_restored_at",
                 "created_at", "deleted_at", "grace_hours"]
             + _TEAM_ADDITIVE_SELECT,
-        additive=_TEAM_ADDITIVE_SELECT)
+        additive_tiers=[_TEAM_ADDITIVE_DKL_TIER, _TEAM_ADDITIVE_0015_TIER])
 ```
 
 **Step 2:** Run `./.venv/bin/python -m pytest tests/test_supabase_control.py -q` → green.
@@ -483,7 +498,7 @@ Run: `./.venv/bin/python -m pytest tests/test_supabase_control.py tests/test_abu
 
 Run: `./.venv/bin/python -m pytest tests/test_supabase_control.py tests/test_abuse_integration.py tests/test_claim_endpoints.py -q` → all green.
 
-**MCP +60s cache-hold claim — explicitly documented, not consumer-asserted:** the `TeamResolutionMiddleware` 60s TTL arithmetic is **pre-existing and unchanged** — this slice adds no drift-specific branch to the middleware. The drift-affected inputs to the cache (`resolve_api_key`'s returned dict + the suspension signal set) are pinned at seam/REST level (`test_resolve_api_key_additive_columns_missing_fail_soft`, `degrade_then_recover`, `test_drift_resolution_clears_suspension_signal`); the cache faithfully caches whatever resolve returns, so the MCP +60s hold is a documented consequence of pinned behaviors, not new untested code — an MCP-transport drift test would re-verify unchanged cache arithmetic for marginal value against the plan's 15-test suite (6 resolve + 5 team_by_id + mint + signal-teardown + claim-write + fake-filter-drift pins).
+**MCP +60s cache-hold claim — explicitly documented, not consumer-asserted:** the `TeamResolutionMiddleware` 60s TTL arithmetic is **pre-existing and unchanged** — this slice adds no drift-specific branch to the middleware. The drift-affected inputs to the cache (`resolve_api_key`'s returned dict + the suspension signal set) are pinned at seam/REST level (`test_resolve_api_key_additive_columns_missing_fail_soft`, `degrade_then_recover`, `test_drift_resolution_clears_suspension_signal`); the cache faithfully caches whatever resolve returns, so the MCP +60s hold is a documented consequence of pinned behaviors, not new untested code — an MCP-transport drift test would re-verify unchanged cache arithmetic for marginal value against the plan's 21-test suite (9 resolve + 7 team_by_id + mint + signal-teardown + claim-write + session-seam + fake-filter-drift pins).
 
 ## Task 5: full suite + commit handoff
 
@@ -496,7 +511,7 @@ Run: `./.venv/bin/python -m pytest tests/test_supabase_control.py tests/test_abu
 
 **Step 1:** `./.venv/bin/python -m pytest tests/ -q` → green (hermetic suite, FalkorDBLite).
 
-**Step 2:** Confirm `git status` shows only the planned files (`tortoise/supabase_control.py`, `tortoise/hosted_api.py` — docstring-only edits per Task 2 Step 3b, `tests/fake_control_plane.py`, `tests/test_supabase_control.py`, `tests/test_abuse_integration.py` — mint-under-drift (Step 3) + signal-teardown (Step 4) tests, `tests/test_claim_endpoints.py` — claim-write pin (Step 5), this plan doc).
+**Step 2:** Confirm `git status` shows only the planned files (`tortoise/supabase_control.py`, `tortoise/hosted_api.py` — docstring edits + `_session_user_team` seam routing (Task 2 Step 3b), `tests/fake_control_plane.py`, `tests/test_supabase_control.py`, `tests/test_abuse_integration.py` — mint-under-drift (Step 3) + signal-teardown (Step 4) tests, `tests/test_claim_endpoints.py` — claim-write pin (Step 5), this plan doc).
 
 **Step 3:** Invoke `commit-workflow` (mandatory gate before any commit; creates PR, code-review gate).
 

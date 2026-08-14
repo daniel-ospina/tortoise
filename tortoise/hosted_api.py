@@ -1135,10 +1135,13 @@ async def _session_user_team(request: Request, user: dict) -> dict:
     # create_graph (_membership_team).
     if team_id not in {m["team_id"] for m in memberships}:
         raise HTTPException(status_code=403, detail="No membership in team")
-    from tortoise.supabase_control import (_TEAM_ADDITIVE_SELECT, _QUOTA_SELECT,
+    from tortoise.supabase_control import (_TEAM_ADDITIVE_DKL_TIER,
+                                            _TEAM_ADDITIVE_0015_TIER,
+                                            _QUOTA_SELECT,
                                             _teams_row_fail_soft)
     row = _teams_row_fail_soft(
-        cp, team_id, select=_QUOTA_SELECT, additive=_TEAM_ADDITIVE_SELECT)
+        cp, team_id, select=_QUOTA_SELECT,
+        additive_tiers=[_TEAM_ADDITIVE_DKL_TIER, _TEAM_ADDITIVE_0015_TIER])
     if row is None:
         raise HTTPException(status_code=403, detail="Team not found")
     from tortoise.pricing import tier_limits

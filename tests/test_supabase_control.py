@@ -272,6 +272,35 @@ class TestResolveApiKeyFailSoft:
         assert team["dashboard_key_login"] is True
         assert any("additive" in r.message for r in caplog.records)
 
+    def test_resolve_api_key_dkl_only_drift_keeps_suspension(self, fake):
+        """#1096 (code-review fix): a 20260813000005-ONLY drift must NOT
+        discard real 0015 suspension state — the tiered retry reads
+        suspended_at/flagged_at on the second attempt (discarding it would
+        bypass enforcement with REAL data present)."""
+        fake.tables["teams"][0]["suspended_at"] = \
+            datetime.now(timezone.utc).isoformat()
+        fake.missing_columns = {"teams": {"dashboard_key_login"}}
+        fake.seed("api_keys", [_key_row()])
+        team = resolve_api_key(fake, TOKEN)
+        assert team is not None
+        assert team["suspended_at"] is not None  # real 0015 data kept
+        assert team["dashboard_key_login"] is True  # dkl tier padded to default
+
+    def test_resolve_api_key_api_keys_enabled_drift_fail_soft(self, fake,
+                                                             caplog):
+        """#1096 (code-review fix): api_keys.enabled is additive
+        (20260813000005) — a schema missing it fails soft to the pre-#1148
+        default True instead of taking down ALL key auth at step 1 (the
+        realistic drift fails the api_keys read first; the caplog WARNING
+        discriminates the degrade)."""
+        fake.missing_columns = {"api_keys": {"enabled"}}
+        fake.seed("api_keys", [_key_row()])
+        with caplog.at_level("WARNING", logger="tortoise.supabase_control"):
+            team = resolve_api_key(fake, TOKEN)
+        assert team is not None
+        assert team["enabled"] is True
+        assert any("enabled" in r.message for r in caplog.records)
+
     def test_resolve_api_key_stored_false_drift_fail_open(self, fake):
         """#1096 accepted-risk doc: additive drift loses ALL additive state —
         a stored dashboard_key_login=False is not readable through the base
@@ -384,6 +413,17 @@ class TestTeamByID:
         [] → None, never a raise (fail-closed on not-found)."""
         fake.missing_columns = {"teams": {"suspended_at", "flagged_at"}}
         assert team_by_id(fake, "missing") is None
+
+    def test_team_by_id_dkl_only_drift_keeps_suspension(self, fake):
+        """#1096 (code-review fix): team_by_id's tiered retry — a
+        20260813000005-ONLY drift keeps real 0015 suspension state."""
+        fake.tables["teams"][0]["suspended_at"] = \
+            datetime.now(timezone.utc).isoformat()
+        fake.missing_columns = {"teams": {"dashboard_key_login"}}
+        team = team_by_id(fake, "team-free-001")
+        assert team is not None
+        assert team["suspended_at"] is not None  # real 0015 data kept
+        assert team["dashboard_key_login"] is None  # dkl tier padded (raw seam)
 
     def test_team_by_id_deleted_at_survives_0015_drift(self, fake, caplog):
         """#1096: the deletion kill-switch must survive 0015 drift — a SET
