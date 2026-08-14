@@ -1170,7 +1170,10 @@ you up to 6 yes/no questions and set up your Tortoise memory.
       const returningEl = document.getElementById("returning-block");
       if (returningEl) returningEl.classList.remove("hidden");
       setTimeout(() => {
-        window.location.href = "https://app.premiselabs.co";
+        // #1287: first-time users land on the dashboard's /welcome subpage
+        // (key + chooser); returning users get dashboard home (the subpage
+        // clears itself on "Open dashboard").
+        window.location.href = "https://app.premiselabs.co/welcome";
       }, 1200);
       const dashBtn = document.getElementById("btn-dashboard");
       if (dashBtn) dashBtn.classList.remove("hidden");
