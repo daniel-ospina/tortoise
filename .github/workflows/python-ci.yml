@@ -623,10 +623,10 @@ jobs:
   # must never pass silently). Job id is load-bearing: branch protection
   # requires the exact check name `python-ci-gate` — do NOT rename or add a
   # `name:` field.
-  # Track B reporting job (epic #902 A8, #1058): runs ONLY the @track_b
-  # tests explicitly. NON-BLOCKING (excluded from python-ci-gate's needs)
-  # until the Track B sentinels flip; the suite itself is inert in default
-  # CI via -m "not track_b" + its skipifs.
+  # Track B job (epic #902 A8, #1058): runs ONLY the @track_b tests
+  # explicitly. MUST-PASS — both Track B sentinels (_TRACK_B_FULL,
+  # SENTINEL_A9) have shipped; wired into python-ci-gate's needs. The suite
+  # itself is inert in default CI via -m "not track_b" + its skipifs.
   test-track-b:
     needs: changes
     if: needs.changes.outputs.python == 'true'
@@ -649,11 +649,11 @@ jobs:
             -p no:cacheprovider --maxfail=20 -rfE > /tmp/trackb.log 2>&1
           rc=$?
           tail -25 /tmp/trackb.log
-          echo "track-b rc=$rc (non-blocking — reporting only)"
+          echo "track-b rc=$rc (must-pass — gate member)"
 
   python-ci-gate:
     if: always()
-    needs: [changes, test, test-slow, test-concurrency-falkor, packs-compile]
+    needs: [changes, test, test-slow, test-concurrency-falkor, packs-compile, test-track-b]
     runs-on: ubuntu-latest
     steps:
       - name: Aggregate matrix result

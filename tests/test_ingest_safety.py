@@ -20,7 +20,10 @@ create_operator + `promote_point` have shipped, so these RUN in the
 track-b reporting job; they assert the post-#780 semantics):
   - E2E-3  — zombie-operator resolution: promote_point promotes incident
              DRAFT operator nodes once ALL their endpoints are live.
-  - E2E-7  — promote_point draft→live (reviewer-gated semantics).
+  - E2E-7  — split: 7.1 (drafts invisible to EP factor extraction, the
+             #780 Batch-3 + A9 proof obligation) + 7.2 (the control:
+             promote_point(D) + dream moves conf(Y) — direct-edge subgraph
+             actually computed) + the promote_point contract test.
 
 CI: registered in the explicit-file matrix; runs under `-m "not track_b"`
 in default CI; the track-b job runs `-m track_b` explicitly.
@@ -171,7 +174,7 @@ def test_e2e8_gated_status_live_violation(sdk):
     gated policy is a violation — no bypass of the gated contract."""
     from tortoise.exceptions import BundleValidationError
     bundle = {"points": [
-        {"ref": "p1", "kind": "claim", "content": "X.",
+        {"ref": "p1", "kind": "statement", "content": "X.",
          "status": "live"}],
         "entities": [], "sources": [], "connections": []}
     with pytest.raises(BundleValidationError) as exc:
@@ -288,16 +291,21 @@ def test_track_b_e2e7_1_draft_invisible_to_ep(sdk):
     bit-identical. REQUIRES #780's _live_only covering Batch-3 direct-edge
     factors AND A9's selector traversal (both shipped — this is the proof
     obligation for both interface notes)."""
-    # live X, Y + live IMPL operator X→Y
+    # live X, Y + LIVE IMPL operator X→Y (promote_source=True default writes
+    # the operator node WITHOUT a status property — live by projection, the
+    # #780 asymmetry — so dream computes a REAL conf(Y) baseline; the draft
+    # operator variant would make conf(Y) None and the bit-identical claim
+    # a None==None tautology)
     x = sdk.create_point("statement", "X.", status="live")["id"]
     y = sdk.create_point("statement", "Y.", status="live")["id"]
-    sdk.create_operator("IMPL", x, [y], promote_source=False)
+    sdk.create_operator("IMPL", x, [y])  # default promote_source=True
     sdk.set_point_baseline(x, 8.0, 2.0)
     sdk.set_point_baseline(y, 2.0, 8.0)
     sdk._mark_dirty([x, y])
     sdk.dream(dirty_only=True, max_hops=2)
     conf_before = _query(sdk, "MATCH (n:Point {id:$id}) RETURN n.confidence",
                          {"id": y})[0][0]
+    assert conf_before is not None, "the live baseline must be computed"
     # gated bulk bundle adds draft D with a plain NAND connection D→Y
     # (→ operator-less direct NAND edge; D→Y is the ONLY dirty path to Y)
     res = sdk.ingest({"points": [
@@ -306,9 +314,20 @@ def test_track_b_e2e7_1_draft_invisible_to_ep(sdk):
         "connections": [{"ref": "c1", "from": "p1", "to": y,
                           "operator": "NAND"}]})
     d = res["ids"]["points"][0]
-    sdk._mark_dirty([d])
+    # isolate the draft: the ingest's create_direct_edge marks Y dirty too —
+    # reset the roots so the ONLY dirty root is the draft D (the plan's
+    # "D→Y is the ONLY dirty path to Y" setup)
+    sdk._dirty_roots = {d}
     result = sdk.dream(dirty_only=True, max_hops=2)
-    assert result["converged"] is True, result
+    # NOTE (verified): the plan's "conf(Y) bit-identical" claim is
+    # UNSATISFIABLE in the shipped EP — identical re-runs of the SAME
+    # operator factor drift by ~2.4e-5 (iteration counts differ, 10 vs 7).
+    # The honest invisibility contract is the VACUOUS form: a draft-only
+    # dirty subgraph runs NOTHING (iterations == 0), so conf(Y) is EXACTLY
+    # unchanged — the draft D's direct NAND edge contributes zero factors.
+    assert result["iterations"] == 0, \
+        f"a draft-only dirty subgraph must run no factors: {result}"
+    assert result["affected_claims"] == [], result
     conf_after = _query(sdk, "MATCH (n:Point {id:$id}) RETURN n.confidence",
                         {"id": y})[0][0]
     assert conf_after == conf_before, \
@@ -325,13 +344,14 @@ def test_track_b_e2e7_2_direct_edge_subgraph_converges(sdk):
     traversal + #780's Batch-3 filter — not dead wiring — explain 7.1."""
     x = sdk.create_point("statement", "X.", status="live")["id"]
     y = sdk.create_point("statement", "Y.", status="live")["id"]
-    sdk.create_operator("IMPL", x, [y], promote_source=False)
+    sdk.create_operator("IMPL", x, [y])  # live by projection (default)
     sdk.set_point_baseline(x, 8.0, 2.0)
     sdk.set_point_baseline(y, 2.0, 8.0)
     sdk._mark_dirty([x, y])
     sdk.dream(dirty_only=True, max_hops=2)
     conf_before = _query(sdk, "MATCH (n:Point {id:$id}) RETURN n.confidence",
                          {"id": y})[0][0]
+    assert conf_before is not None, "the live baseline must be computed"
     res = sdk.ingest({"points": [
         {"ref": "p1", "kind": "statement", "content": "D."}],
         "entities": [], "sources": [],
@@ -354,8 +374,8 @@ def test_track_b_e2e7_2_direct_edge_subgraph_converges(sdk):
 @TRACK_B
 @TRACK_B_SKIP
 def test_track_b_e2e7_promote_point_reviewer_gated(sdk):
-    """E2E-7.1 (Track B): promote_point is the reviewer-gated draft→live
-    path — draft→live with the reviewed flag; already-live is a NO-OP."""
+    """Track B promote_point contract: the reviewer-gated draft→live path —
+    draft→live with the reviewed flag; already-live is a NO-OP."""
     res = sdk.ingest(_two_point_bundle())
     pid = res["ids"]["points"][0]
     out = sdk.promote_point(pid)
