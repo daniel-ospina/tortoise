@@ -1,0 +1,16 @@
+# Issue template chooser config
+#
+# Structured bug reports use .github/ISSUE_TEMPLATE/bug_report.yml.
+# Everything else (questions, ideas, general beta feedback) belongs in
+# GitHub Discussions — see the contact links below.
+# See docs/beta-feedback.md for the full channel + triage guide (#1199).
+
+blank_issues_enabled: true
+
+contact_links:
+  - name: Beta feedback & questions (GitHub Discussions)
+    url: https://github.com/daniel-ospina/tortoise/discussions
+    about: Questions, ideas, and general beta feedback — the fastest way to reach the maintainer.
+  - name: Beta feedback guide & triage path
+    url: https://github.com/daniel-ospina/tortoise/blob/main/docs/beta-feedback.md
+    about: How to report, what to include, and who watches the channel.

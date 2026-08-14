@@ -5,6 +5,7 @@ domain: platform
 doc_status: live
 subjects.team: epistemic-team
 created: 2026-08-08
+ownedBy: epistemic-team
 aboutSubjects: tortoise
 aboutObjects: tortoise-cli, tortoise-mcp
 ---
@@ -410,3 +411,12 @@ The supported migration path is a **replay path**: your self-hosted daemon keeps
 - **Port 6379 already in use** — another container/process (local redis, another compose stack) is on it. Remap the sidecar: `-p 127.0.0.1:16380:6379` (Option B) or edit the compose `ports:` entry, then use `docker://:falkordb@localhost:16380/tortoise`.
 - **Upgrading** — clone: `git pull && pip install -e .`; direct install: `pip install -U git+https://github.com/daniel-ospina/tortoise.git`.
 - **`tortoise doctor` shows a Docker ❌** — expected in embedded-only mode (no container running). The graph-health check runs against the resolved DB target; `doctor --db <uri|path>` and `doctor --path` explicitly target a specific DB, and the bare `doctor` invocation works without extra flags.
+
+## 8. Beta feedback & bug reports
+
+Part of the beta cohort? Bugs and feedback go through two channels (see [beta-feedback.md](beta-feedback.md) for the full guide and triage path):
+
+- **Bug / unexpected behavior** → [file a bug report](https://github.com/daniel-ospina/tortoise/issues/new?template=bug_report.yml) (structured form: surface, expected vs actual, graph JSON)
+- **Questions, ideas, general feedback** → [GitHub Discussions](https://github.com/daniel-ospina/tortoise/discussions)
+
+Reports are acknowledged within 2 business days.
