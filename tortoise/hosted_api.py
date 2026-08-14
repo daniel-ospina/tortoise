@@ -1777,6 +1777,91 @@ async def _check_claim_rate_limit(request: Request) -> None:
                 del _CLAIM_BUCKETS[ip]
 
 
+# ── Invite-accept limiter (#1134, OWASP per-token/IP/global caps) ────────────
+# POST /v1/invites/accept is a token-binding endpoint: the invite token is a
+# bearer claim delivered via email (link possession). OWASP invitation
+# guidance (securepatterns.dev threat model) mandates throttling on repeated
+# failed binding checks per token / per IP / global — WITHOUT invalidating the
+# token on failed attempts (invalidation lets a leaked-link holder burn the
+# legitimate user's invitation). Three independent sliding-window buckets per
+# request, reusing the shared _check_ip_bucket_rate_limit helper (the #307
+# reusable-helper shape; the claim limiter's per-IP posture extended to a
+# token-hash and a global key). Env-tunable at call time (signup-limiter
+# pattern); RATE_LIMIT_DISABLED=1 opts out (test env). The token bucket is
+# keyed on sha256(token)[:16] — the raw bearer claim is NEVER held in memory.
+_INVITE_ACCEPT_TOKEN_BUCKETS: dict[tuple[str, str], list[float]] = defaultdict(list)
+_INVITE_ACCEPT_TOKEN_LOCK = asyncio.Lock()
+_INVITE_ACCEPT_IP_BUCKETS: dict[tuple[str, str], list[float]] = defaultdict(list)
+_INVITE_ACCEPT_IP_LOCK = asyncio.Lock()
+_INVITE_ACCEPT_GLOBAL_BUCKETS: dict[tuple[str, str], list[float]] = defaultdict(list)
+_INVITE_ACCEPT_GLOBAL_LOCK = asyncio.Lock()
+
+# Defaults: 5 attempts / 15 min per token (generous for human retries, tight
+# for a leaked-link brute-forcer), 20 / hour per IP, 200 / hour global
+# (a one-time human act per invite — legit fleets stay far below).
+_INVITE_ACCEPT_TOKEN_LIMIT = 5
+_INVITE_ACCEPT_TOKEN_WINDOW_S = 15 * 60
+_INVITE_ACCEPT_IP_LIMIT = 20
+_INVITE_ACCEPT_IP_WINDOW_S = 3600
+_INVITE_ACCEPT_GLOBAL_LIMIT = 200
+_INVITE_ACCEPT_GLOBAL_WINDOW_S = 3600
+
+
+async def _check_invite_accept_rate_limit(request: Request, token: str) -> None:
+    """Per-token / per-IP / global sliding-window caps on invites/accept.
+
+    Env knobs (read at call time so tests monkeypatch without reload):
+    TORTOISE_INVITE_ACCEPT_TOKEN_LIMIT / _WINDOW_S (default 5 / 900),
+    TORTOISE_INVITE_ACCEPT_IP_LIMIT / _WINDOW_S (default 20 / 3600),
+    TORTOISE_INVITE_ACCEPT_GLOBAL_LIMIT / _WINDOW_S (default 200 / 3600).
+    Raises HTTPException(429, error_code over_invite_accept_rate_limit) with
+    a computed Retry-After (P2-FIX-5) when any dimension is exhausted.
+    Failures never invalidate the token — the endpoint's own 400 path is
+    untouched (OWASP: a leaked link holder must not burn the invite).
+    """
+    if os.environ.get("RATE_LIMIT_DISABLED") == "1":
+        return
+    import hashlib as _hashlib
+    token_key = _hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+    ip = (getattr(request.state, "client_ip", None)
+          or (request.client.host if request.client else None))
+    ip = _normalize_mapped_ipv6(ip)
+    detail = {
+        "error_code": "over_invite_accept_rate_limit",
+        "message": ("Too many invite-accept attempts. Please try again "
+                    "later."),
+    }
+    # Per-token bucket (composite key bypasses the helper's IPv6 guard —
+    # _normalize_mapped_ipv6 handles non-str keys unchanged, #1081 P4).
+    await _check_ip_bucket_rate_limit(
+        request, buckets=_INVITE_ACCEPT_TOKEN_BUCKETS,
+        lock=_INVITE_ACCEPT_TOKEN_LOCK,
+        limit=_int_env("TORTOISE_INVITE_ACCEPT_TOKEN_LIMIT",
+                       _INVITE_ACCEPT_TOKEN_LIMIT),
+        window_s=_int_env("TORTOISE_INVITE_ACCEPT_TOKEN_WINDOW_S",
+                          _INVITE_ACCEPT_TOKEN_WINDOW_S),
+        key=("invite-accept", "token", token_key),
+        detail=detail, retry_after_s=None)
+    await _check_ip_bucket_rate_limit(
+        request, buckets=_INVITE_ACCEPT_IP_BUCKETS,
+        lock=_INVITE_ACCEPT_IP_LOCK,
+        limit=_int_env("TORTOISE_INVITE_ACCEPT_IP_LIMIT",
+                       _INVITE_ACCEPT_IP_LIMIT),
+        window_s=_int_env("TORTOISE_INVITE_ACCEPT_IP_WINDOW_S",
+                          _INVITE_ACCEPT_IP_WINDOW_S),
+        key=("invite-accept", "ip", ip),
+        detail=detail, retry_after_s=None)
+    await _check_ip_bucket_rate_limit(
+        request, buckets=_INVITE_ACCEPT_GLOBAL_BUCKETS,
+        lock=_INVITE_ACCEPT_GLOBAL_LOCK,
+        limit=_int_env("TORTOISE_INVITE_ACCEPT_GLOBAL_LIMIT",
+                       _INVITE_ACCEPT_GLOBAL_LIMIT),
+        window_s=_int_env("TORTOISE_INVITE_ACCEPT_GLOBAL_WINDOW_S",
+                          _INVITE_ACCEPT_GLOBAL_WINDOW_S),
+        key=("invite-accept", "global"),
+        detail=detail, retry_after_s=None)
+
+
 # ── Endpoints ─────────────────────────────────────────────────────
 
 @app.post("/v1/points", response_model=PointResponse)
@@ -4445,11 +4530,18 @@ async def invite_info(token: str):
 
 
 @app.post("/v1/invites/accept")
-async def accept_invite(body: dict, user: dict = Depends(get_current_user)):
+async def accept_invite(body: dict, request: Request,
+                         user: dict = Depends(get_current_user)):
     """E4 — accept an invite by token (token-only in v1, decision 1e)."""
     token = (body or {}).get("token")
     if not token:
         raise HTTPException(status_code=422, detail="token required")
+
+    # #1134: OWASP per-token/IP/global caps — throttles repeated failed
+    # binding checks WITHOUT invalidating the token (a leaked-link holder
+    # must not burn the legitimate user's invitation). RATE_LIMIT_DISABLED=1
+    # opts out (test env).
+    await _check_invite_accept_rate_limit(request, token)
 
     # ── Supabase mode (plan Task 4): lookup_hash verify + role preserved ──
     from tortoise.supabase_control import (
