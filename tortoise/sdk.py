@@ -3262,6 +3262,24 @@ class TortoiseSDK:
             "drift": drift,
         }
 
+    def audit(self, point_kinds: list[str] | None = None) -> dict:
+        """Audit graph wiring quality — structured JSON report (epic #348).
+
+        Runs the audit checks (missing sourceKind point-level legacy + Source-
+        level canonical, missing sourceDate, superseded points without a
+        CORRECTS edge, live IMPL/NAND edges into superseded points, naive-IMPL
+        heuristic, low-confidence operators without mitigation, and legacy
+        ``mitigates`` edges). Returns per-check counts (uncapped) + capped
+        samples + summary + exit_code (0 clean, 1 issues found — the
+        check-consistency precedent).
+
+        point_kinds: Optional list of pointKind values to scope the audit
+                     (default: all Points).
+        """
+        from tortoise.audit import audit_graph
+        proj = self._get_proj()
+        return audit_graph(proj, point_kinds=point_kinds).to_dict()
+
     def summarize_structure(self) -> dict:
         """Count points per Gate (by pointKind). Returns {gate: count, ..., total}.
 

@@ -1947,6 +1947,76 @@ def _cmd_validate(args) -> int:
     return 0
 
 
+def _cmd_audit(args) -> int:
+    """tortoise audit — graph wiring quality audit (exit 0 clean, 1 issues).
+
+    Wraps the shared SDK audit() method (same checks the MCP tortoise_audit
+    tool runs). Exit-code semantics follow check-consistency: any issue fails.
+
+    #1258 review-fix (conf 75): DB resolution + SDK construction + audit()
+    failures surface as CLEAN CLI errors (one line, exit 1), never raw
+    tracebacks — invalid FALKORDB_PORT (ValueError), relative --db path
+    (ValueError), EmbeddedStoreBusyError, and unreachable URI hosts all
+    print a single actionable line.
+    """
+    import json as _json
+    import os as _os
+
+    from tortoise.audit import AuditResult, print_audit
+    from tortoise.sdk import TortoiseSDK
+
+    # DB routing follows the canonical precedence (explicit --db > TORTOISE_DB_URI
+    # > FALKORDB_* legacy trio > TORTOISE_DB_PATH > embedded default, #715) —
+    # URI targets go through from_uri, everything else is an embedded path.
+    # Construct the SDK against the RESOLVED target so the busy-probe guards
+    # the store actually read (a no-arg TortoiseSDK() probes the DEFAULT
+    # store and would fail while the default path is held elsewhere).
+    from tortoise.config import is_db_uri as _is_uri
+    try:
+        target = _resolve_db_target(args.db)
+    except ValueError as e:
+        # conf 75: bad --db / env (relative path, invalid FALKORDB_PORT) is a
+        # clean CLI error, not a traceback. Mask URI userinfo (#720 conf 95).
+        print(f"  ❌ Invalid DB target: {_mask_uri_userinfo(str(e))}",
+              file=sys.stderr)
+        return 1
+    sdk: TortoiseSDK | None = None
+    try:
+        if _is_uri(target):
+            # conf 60: route the URI through the constructor's env resolution
+            # so the embedded busy-probe NEVER fires on the DEFAULT store for
+            # a URI target — a bare TortoiseSDK() with TORTOISE_DB_URI unset
+            # resolves to the canonical default embedded path and probes THAT
+            # (spurious EmbeddedStoreBusyError while the default store is held
+            # elsewhere). _projection_for(target) still pins the exact target.
+            _prev_uri = _os.environ.get("TORTOISE_DB_URI")
+            _os.environ["TORTOISE_DB_URI"] = target
+            try:
+                sdk = TortoiseSDK()
+            finally:
+                if _prev_uri is None:
+                    _os.environ.pop("TORTOISE_DB_URI", None)
+                else:
+                    _os.environ["TORTOISE_DB_URI"] = _prev_uri
+        else:
+            sdk = TortoiseSDK(db_path=target)
+        sdk._proj = _projection_for(target)
+        report = sdk.audit(point_kinds=args.kinds)
+    except Exception as e:
+        # conf 75: construction/audit failures (EmbeddedStoreBusyError,
+        # unreachable URI host, init errors) — one clean line, exit 1.
+        print(f"  ❌ audit failed: {e}", file=sys.stderr)
+        return 1
+    finally:
+        if sdk is not None:
+            sdk.close()
+    if args.json:
+        print(_json.dumps(report, indent=2, default=str))
+    else:
+        print_audit(AuditResult.from_dict(report))
+    return report["exit_code"]
+
+
 def _cmd_backfill(args):
     """Backfill missing properties on existing Points."""
     from .projection import FalkorProjection, _now_iso
@@ -3582,6 +3652,14 @@ def main(argv: list[str] | None = None) -> int:
     cc = sp.add_parser("check-consistency", help="Verify event log matches graph state")
     cc.add_argument("--db", required=True, help="Docker URI or file path")
     cc.add_argument("--log", required=True, help="Path to events.jsonl")
+    au = sp.add_parser("audit", help="Audit graph wiring quality (8 checks: source tiering, superseded gaps, mitigation coverage)")
+    au.add_argument("--db", default=None, help=(
+        f"DB target override — URI ({uri_schemes_hint}) or absolute path "
+        "(default: TORTOISE_DB_URI / FALKORDB_* / embedded path)"))
+    au.add_argument("--kind", action="append", dest="kinds", default=None,
+                    help="pointKind scope (repeatable; default: all Points)")
+    au.add_argument("--json", action="store_true",
+                    help="Machine-readable JSON output (exit 0 clean / 1 issues)")
     rc = sp.add_parser("reconcile", help="Replay unprojected EventRecorded entries from JSONL into FalkorDB")
     rc.add_argument("--db", required=True, help="FalkorDB docker:// URI")
     rc.add_argument("--log", required=True, help="Path to events.jsonl")
@@ -3783,6 +3861,8 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(f"\u2717 Inconsistent: {result['log_points']} in log, {result['db_points']} in graph (delta: {result['delta']})")
             return 1
+    elif args.cmd == "audit":
+        return _cmd_audit(args)
     elif args.cmd == "reconcile":
         return _cmd_reconcile(args)
     elif args.cmd == "backfill":
