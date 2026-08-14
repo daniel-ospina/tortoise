@@ -16,7 +16,6 @@ const LAST_AUTH_METHOD = 'tortoise_last_auth_method'
 // carries no credential, only a routing signal.
 const CLAIM_KEY_STORAGE = 'tt_claim_key'
 const INVITE_TOKEN_STORAGE = 'tortoise.inviteToken'
-const [banner, setBanner] = React.useState('')
 const CLAIM_PENDING_COOKIE = 'tt_claim_pending'
 
 
@@ -82,6 +81,9 @@ try {
 }
 
 function App() {
+  // #1280 (P0, mirrored from fix/1280): banner state MUST live inside the
+  // component — a module-top-level useState crashes the whole bundle.
+  const [banner, setBanner] = React.useState('')
   // #1148-ux: last auth method (login card "Last used" pills)
   const [lastAuthMethod, setLastAuthMethod] = React.useState(() => {
     try { return localStorage.getItem(LAST_AUTH_METHOD) || '' } catch { return '' }
@@ -471,6 +473,16 @@ function App() {
         if (!supabaseClient) { setChecking(false); return }
         const { data: { session }, error } = await supabaseClient.auth.getSession()
         if (error || !session) {
+          // #1287: dashboard guard — no OAuth session → route to the signup
+          // page (the combined Log in/Sign up card, incl. API-key login).
+          // API-key-only users (agents) keep the inline key path: a stored
+          // key resolves the team without OAuth. Otherwise redirect.
+          const storedKey = (() => { try { return localStorage.getItem(KEY_STORAGE) || '' } catch { return '' } })()
+          const claimKey = (() => { try { return sessionStorage.getItem(CLAIM_KEY_STORAGE) || '' } catch { return '' } })()
+          if (!storedKey && !claimKey) {
+            window.location.href = 'https://tortoise.premiselabs.co/signup'
+            return
+          }
           // Round-24: no session → the card's only affordance is the key input;
           // don't show the misleading 'Sign in with your Tortoise account.'
           setAuthMode('apikey')
