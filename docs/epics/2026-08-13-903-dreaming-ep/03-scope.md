@@ -62,7 +62,6 @@ The cut is anchored to the epic's four O/I/T indicators: each In-Scope item maps
 | No double work (4) | Refresh cost scales with actual change, not with graph size × wasteful overlap |
 | Carry over the math (5) | Each refresh redoes only the parts that changed — verified to match from-scratch results |
 | Retry failed areas (6) | A refresh that can't finish on an area gets retried later instead of silently abandoned — no unrecoverable stale areas |
-| Convergence-retention fix (6) | Failed dream regions get retried instead of silently abandoned — no unrecoverable stale regions |
 | Dream observability (7) | Ops can tell a healthy dreamer from a silently-dead one, and see graph coverage at a glance |
 | Consolidation interplay (8) | Supersedes/merges/invalidations immediately propagate through the graph — memory stays consistent with lifecycle events |
 | Staleness-error eval (9) | Measurable proof that freshness improves retrieval correctness (the epic's Indicator 3 acceptance) |
@@ -83,11 +82,12 @@ The cut is anchored to the epic's four O/I/T indicators: each In-Scope item maps
 
 ## High-Level E2E Test Cases
 
-### E2E-1: Full-graph mode refreshes every claim
-**Given:** a graph with live Points across multiple disconnected regions, some never dreamed
-**When:** `dream(mode=full)` completes
-**Then:** every non-operator Point has a fresh `lastDreamedAt` set to this pass
-**And:** the returned summary reports `converged_all=True` and `total_affected = #non-operator Points`
+### E2E-1: Full-graph mode refreshes every reachable claim
+**Given:** a graph with live Points across multiple disconnected regions, some never dreamed (fixture regions each contain ≥1 operator, so every claim is EP-reachable)
+**When:** `dream(full)` completes
+**Then:** every non-operator Point reachable via operators has a fresh `lastDreamedAt` set to this pass
+**And:** the returned summary reports `converged_all=True` and `total_affected = #reachable non-operator Points`
+**And (semantics decision):** operator-less/isolated claims are marked trivially fresh on the scan (nothing can change their confidence — no message path exists), so full mode still reports full coverage
 
 ### E2E-2: Stale-first refresh covers the graph across passes at a bounded cost
 **Given:** a large graph with areas of varying staleness
@@ -115,11 +115,16 @@ The cut is anchored to the epic's four O/I/T indicators: each In-Scope item maps
 **Then:** the surviving node's confidence is re-derived from the post-event graph (its region was scheduled)
 **And:** lifecycle-write → dirty-set → dream chain is observable in the dream log
 
-### E2E-6: Carry-over correctness check (the gate)
+### E2E-6a: Carry-over correctness (hard gate)
 **Given:** the standard test corpus with known ground truth
 **When:** a carried-over refresh is compared to a from-scratch refresh on identical input
 **Then:** the two produce the same beliefs within tolerance (the theory's bounded-error guarantee, verified empirically)
-**And:** the carried-over run is measurably cheaper (fewer updates / less wall time) OR the check fails and we ship the simpler version (documented fallback — the epic's targets are still met)
+**And:** this equivalence MUST hold — if it fails, the carry-over work is not shipped (documented fallback: ship the simpler version; the epic's targets are still met without carry-over)
+
+### E2E-6b: Carry-over cost (measured, not asserted)
+**Given:** the same corpus
+**When:** the carried-over refresh runs
+**Then:** the run records cost deltas (fewer updates / lower wall time vs from-scratch) as a measurement in the dream health metrics — recorded, not gated; if the savings are nil, that is data for the graph-scale diagnostics decision, not a test failure
 
 ### E2E-7: Non-converged regions are retained and retried
 **Given:** a region whose EP run does not converge within max_iter (oscillating subgraph)
@@ -133,17 +138,29 @@ The cut is anchored to the epic's four O/I/T indicators: each In-Scope item maps
 **Then:** last-pass timestamp, per-region coverage, failure rate, and operator counts are surfaced
 **And:** the zero-output-when-backlog-exists alarm condition triggers when dreaming produces no output for a stale region (silent-death, A8)
 
+### E2E-9: Freshness reduces staleness error (Indicator 3 acceptance)
+**Given:** a graph whose "true" belief state is known (ground truth frozen)
+**When:** some evidence changes (so some beliefs become wrong) and a stale-belief error is measured: mean |Δ| of confidence vs ground truth
+**Then:** after successive stale-first refresh passes, the measured error shrinks (monotonically or below a threshold) as refresh coverage grows
+**And:** the error-reduction curve is recorded in the dream health metrics — this is the epic's Indicator 3 acceptance, and the basis for the staleness-error eval added to the eval spec
+
+### E2E-10: Graph-scale diagnostics gate
+**Given:** a production-scale graph snapshot (or representative fixture)
+**When:** the diagnostics task runs
+**Then:** it reports graph size, connectivity (how many areas, how big a typical neighborhood is), and a recorded decision: stale-first refresh vs full refresh at this scale
+**And:** the decision is written to the epic docs — if full refresh is cheaper at our scale, items 3–5 are simplified accordingly before implementation
+
 ---
 
 ## Epic Scope Ready for Review
 
 **Scope:** 10 capabilities in (freshness metadata, one dream call with sane defaults, stale-first refresh, no double work, gated carry-over, retry failed areas, observability, lifecycle events feed dreaming, freshness measured, graph-scale diagnostics) — 6 mechanisms explicitly out (graph clustering, UI, deeper per-query refresh, streaming updates, fancier in-pass ordering, read-time decay).
 **Customer value map:** 10 capabilities mapped to user-visible value.
-**E2E test cases:** 8 drafted, each mapped to ≥1 O/I/T indicator.
+**E2E test cases:** 10 drafted (8 + staleness-error acceptance E2E-9 + diagnostics gate E2E-10), each mapped to ≥1 O/I/T indicator.
 **Complexity:** UX low · Architecture high · Ontology low · Accessibility low.
 
 Review the scope boundaries, customer value map, and E2E test cases.
 Reply **"proceed"** to continue to detailed planning, or give feedback.
 
-<!-- human-gate-1: pending -->
-<!-- review-gate-status: pending -->
+<!-- human-gate-1: APPROVED 2026-08-13 -->
+<!-- review-gate-status: CLEAN (5 issues fixed: E2E-9/10 added, dup row removed, E2E-6 split, E2E-1 semantics) -->
