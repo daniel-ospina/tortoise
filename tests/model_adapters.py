@@ -1,4 +1,5 @@
 """Model adapters for Tortoise LLMExtractor — wraps different backends into the complete(system, user) interface."""
+from __future__ import annotations
 
 import os, json, requests
 
@@ -60,6 +61,9 @@ MODELS = {
     # Reasoning models consume the shared max_tokens budget on internal reasoning; bound it
     # (thinking_budget) or disable it (disable_reasoning) so the label JSON actually gets emitted
     # (#946 gate runs observed all-reasoning/zero-content collapses at default settings).
+    # ⚠️ judge_harness._apply_tuning OVERWRITES max_tokens with its CLI default (2000) — these
+    # registry tunings are inert unless the CLI passes an explicit --max-tokens >= the value here
+    # (the gate run used --max-tokens 12000 / 8000; a bare `--model qwen3.8-max` would starve).
     'qwen3.8-max': lambda: OpenRouterModel('qwen/qwen3.8-max', max_tokens=8000, temperature=0.0, thinking_budget=2000),
     'deepseek-v4-pro-noreason': lambda: OpenRouterModel('deepseek/deepseek-v4-pro', max_tokens=8000, temperature=0.0, disable_reasoning=True),
     'claude-opus-5': lambda: OpenRouterModel('anthropic/claude-opus-5', max_tokens=12000, temperature=0.0),

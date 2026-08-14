@@ -47,6 +47,8 @@
 - Owner acceptance 81.8% < 85% is a NECESSARY condition NOT MET → second REVISE signal (NOT_GREEN at minimum).
 - Acceptance cannot upgrade a REVISE → **final verdict: REVISE** (rubric revision; workflow stops).
 
+> **Protocol deviation (disclosed):** the pre-registered agreed-EDU sample step (≥10% stratified, combined-denominator acceptance) was skipped — acceptance was computed on the disagreement set only (22 EDUs). See gate record. The 81.8% figure is the disagreement-set acceptance, not the pre-registered combined statistic.
+
 ## Adjudicated labels status
 
 **anchored, judge-derived, calibration-only — NOT gold.** Excluded from #961 gold-set seeding (per criteria v1 §4 anchoring guard: the owner saw judge labels before ruling).

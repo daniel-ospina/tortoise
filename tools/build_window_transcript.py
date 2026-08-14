@@ -29,16 +29,29 @@ _WS = re.compile(r"\s+")
 
 
 def load_session(path: Path, session_id: str) -> dict:
-    """Return the session record matching session_id (one record per session)."""
+    """Return the session record matching session_id (one record per session).
+
+    Hard-fails on duplicate session_ids so a re-captured/resumed session can never
+    silently produce a transcript from the wrong conversation (review P2, PR #1259).
+    """
+    matches = []
     with path.open() as fh:
-        for line in fh:
+        for lineno, line in enumerate(fh, start=1):
             line = line.strip()
             if not line:
                 continue
             record = json.loads(line)
             if record.get("session_id") == session_id:
-                return record
-    raise SystemExit(f"session {session_id} not found in {path}")
+                matches.append((lineno, record))
+    if not matches:
+        raise SystemExit(f"session {session_id} not found in {path}")
+    if len(matches) > 1:
+        lines = ", ".join(str(ln) for ln, _ in matches)
+        raise SystemExit(
+            f"session {session_id} found {len(matches)} times in {path} "
+            f"(lines {lines}) — ambiguous; refusing to pick the first"
+        )
+    return matches[0][1]
 
 
 def sanitize(text: str) -> str:
@@ -62,6 +75,7 @@ def build(record: dict) -> list[str]:
         text = sanitize(content)
         if not text:
             raise SystemExit(f"turn {i}: empty content after sanitization")
+        _check_secrets(text, i)
         lines.append(f"{i}: {role}: {text}")
     return lines
 
@@ -85,6 +99,29 @@ def main(argv: list[str] | None = None) -> int:
     out.write_text("\n".join(lines) + "\n")
     print(f"wrote {len(lines)} EDUs -> {out}")
     return 0
+
+
+# Secret patterns — transcripts derive from the full agent perceptual stream and may be
+# committed to a public repo; redact or hard-fail rather than ship a credential (SEC review,
+# PR #1259). Ordered (regex, replacement-or-None): None means hard-fail with a line reference.
+_SECRET_PATTERNS = [
+    (re.compile(r"sk-[A-Za-z0-9_-]{16,}"), None),          # OpenAI/Anthropic-style keys
+    (re.compile(r"ghp_[A-Za-z0-9]{20,}"), None),            # GitHub PAT
+    (re.compile(r"AKIA[0-9A-Z]{16}"), None),                # AWS access key id
+    (re.compile(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]{20,}"), None),  # bearer tokens
+    (re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"), None),
+]
+
+
+def _check_secrets(text: str, edu_index: int) -> None:
+    """Hard-fail on secret patterns so a credential never lands in a committed transcript."""
+    for pat, _replacement in _SECRET_PATTERNS:
+        m = pat.search(text)
+        if m:
+            raise SystemExit(
+                f"turn {edu_index}: possible secret pattern {m.group(0)[:16]!r}... "
+                f"({pat.pattern}) — redact before building the transcript"
+            )
 
 
 if __name__ == "__main__":
