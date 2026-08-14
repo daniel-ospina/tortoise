@@ -202,6 +202,15 @@ class GitHubConnector:
             "object": entity_id,
             "startedAt": created_at,
             "endedAt": closed_at if state == "closed" else None,
+            # #388: connector source metadata — the projection's _upsert_event
+            # choke point materializes a Source node from this + wires
+            # references edges. sourceObjectId is the entity-path-specific
+            # explicit Object key (event.object must never be used as one — it
+            # is the entity TITLE on poll/webhook paths).
+            "source": f"github:{self.repo}",
+            "sourceUrl": url,
+            "sourceKind": "github_issue",
+            "sourceObjectId": entity_id,
         }
 
         # Subjects — people involved (ONTOLOGY_v2.5 §1.1 subjectKind)
@@ -286,6 +295,17 @@ class GitHubConnector:
                         "MERGE (o)-[:aboutSubject]->(s)",
                         params={"oid": obj_id, "sid": sid},
                     )
+
+            # #388: explicit Source → Object references wiring (belt-and-
+            # suspenders next to the event-level sourceObjectId materialization
+            # in _upsert_event — idempotent MERGE, no-op when the event already
+            # wired it).
+            source_url = entities.get("event", {}).get("sourceUrl")
+            if obj_id and source_url:
+                proj.link_source_to_entity(
+                    source_url, obj_id, "Object",
+                    entities.get("event", {}).get("sourceKind", "github_issue"),
+                )
 
             count += 1
         return count
@@ -389,6 +409,7 @@ class GitHubConnector:
         state = issue.get("state", "")
         created_at = issue.get("createdAt", "")
         closed_at = issue.get("closedAt", "")
+        url = issue.get("url", "")
 
         return {
             "type": "EventRecorded",
@@ -399,7 +420,8 @@ class GitHubConnector:
             "startedAt": created_at,
             "endedAt": closed_at if state == "closed" else None,
             "source": f"github:{self.repo}",
-            "sourceKind": "github_issue", "sourceKind": "github_issue",
+            "sourceUrl": url,
+            "sourceKind": "github_issue",
             "participants": [],
         }
 
@@ -415,6 +437,7 @@ class GitHubConnector:
         closed_at = pr.get("closedAt", "")
 
         kind = "github.pr.merged" if merged_at else f"github.pr.{state}"
+        url = pr.get("url", "")
 
         return {
             "type": "EventRecorded",
@@ -425,7 +448,8 @@ class GitHubConnector:
             "startedAt": created_at,
             "endedAt": merged_at or (closed_at if state == "closed" else None),
             "source": f"github:{self.repo}",
-            "sourceKind": "github_issue", "sourceKind": "github_issue",
+            "sourceUrl": url,
+            "sourceKind": "github_pr",
             "participants": [],
         }
 
