@@ -5954,10 +5954,14 @@ async def session_context(team: dict = Depends(get_current_team)):
 
 @app.get("/v1/issue-insight")
 async def issue_insight(title: str, body: str | None = None,
-                        repo: str | None = None, limit: int = 2,
+                        repo: str | None = None, limit: int = Query(2, ge=1, le=20),
                         team: dict = Depends(get_current_team)):
     """Graph insight for a would-be issue (#1196) — REST mirror of
     TortoiseSDK.issue_insight() for hosted tenants.
+
+    limit mirrors the SDK default (2) but is bounded (1-20) like /v1/search:
+    an unbounded parameter let callers amplify semantic-stage cost (#1196
+    review c85) and out-of-range values 500'd instead of 422-ing.
     """
     sdk = _make_sdk(namespace=team["team_id"])
     try:

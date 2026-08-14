@@ -54,8 +54,9 @@ def _dispatch_sdk(monkeypatch, sdk):
 
 def _seed_graph(sdk: TortoiseSDK, *, include_repo_a: bool = True) -> None:
     """Seed prior knowledge the github indexer would have written."""
+    obs_101 = None
     if include_repo_a:
-        sdk.create_point(
+        obs_101 = sdk.create_point(
             kind="observation",
             content="owner/a #101: auth refresh token rotation failed in prod",
             source="github", github_repo="owner/a", github_number=101, github_state="closed",
@@ -72,10 +73,20 @@ def _seed_graph(sdk: TortoiseSDK, *, include_repo_a: bool = True) -> None:
         source="github", github_repo="owner/b", github_number=7, github_state="open",
     )
     # cross-session decision (the semantic "aha" — non-GitHub-covered space)
-    sdk.create_point(
+    decision = sdk.create_point(
         kind="decision",
         content=GRAPH_TOPIC,
     )
+    if obs_101 is not None:
+        # EP-back the decision (review c70: the semantic stage counts only
+        # EP-confirmed claims — confidence_mean >= 0.5). The #101 prod failure
+        # supports keeping rotation -> IMPL edge -> confidence_mean = 1/1 = 1.0.
+        # Keeps the seeded E2E green in both FTS and TF-IDF fallback modes.
+        sdk._get_proj().g.query(
+            "MATCH (a:Point), (b:Point) WHERE a.id = $a AND b.id = $b "
+            "CREATE (a)-[:IMPL]->(b)",
+            params={"a": obs_101["id"], "b": decision["id"]},
+        )
 
 
 # ── E2E: issue-created → insight with ≥1 graph-derived data point ─────
