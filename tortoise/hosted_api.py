@@ -38,7 +38,7 @@ from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op with
 import hmac
 from collections.abc import Hashable
 
-from tortoise.sdk import TortoiseSDK, _content_hash
+from tortoise.sdk import TortoiseSDK, _content_hash, _session_llm_extraction_estimate
 from tortoise.abuse import _int_env  # #1081 signup limiter env knobs (abuse.py:57)
 from tortoise.mcp_server import create_http_app
 from tortoise.hosted_backup import (
@@ -3021,9 +3021,7 @@ class SessionRequest(BaseModel):
     metadata: dict | None = None
 
 
-# ── Session extraction mode (#312 delta 1) ─────────────────────────────────
-
-_SESSION_EXTRACTION_MODES = ("auto", "required", "regex")
+# ── Session extraction (LLM-default — issue #822) ──────────────────────────
 
 def _llm_provider_keys() -> tuple[str, ...]:
     """Env keys for LLM providers the hosted extraction path ACTUALLY consumes.
@@ -3044,29 +3042,21 @@ def _llm_provider_keys() -> tuple[str, ...]:
 
 # Provider env keys the hosted deployment can use for LLM-grade extraction.
 # The provider/model choice is a product decision (deploy-time) — this module
-# only reports availability so `auto`/`required` modes behave correctly.
+# only reports availability so capture fails closed when no key is configured.
+# The regex extraction loop was REMOVED as a product path (#822): LLM
+# extraction is the default (and only) capture extraction, and the no-key
+# case fails closed with 503.
 _LLM_PROVIDER_KEYS: tuple[str, ...] = _llm_provider_keys()
 
 
-def _session_extraction_mode() -> str:
-    """Resolve TORTOISE_SESSION_EXTRACTION (auto|required|regex).
-
-    auto (default): LLM extraction when a provider key is configured, else
-        the deterministic regex path (capture always works).
-    required: fail-closed — capture errors when no LLM provider is configured.
-    regex: always the deterministic regex path (never calls an LLM).
-    Unknown values fall back to ``auto`` with a warning (never break capture).
-    """
-    import logging
-    raw = os.environ.get("TORTOISE_SESSION_EXTRACTION", "auto").strip().lower()
-    if raw in _SESSION_EXTRACTION_MODES:
-        return raw
-    logging.getLogger("tortoise.api").warning(
-        "unknown TORTOISE_SESSION_EXTRACTION=%r — falling back to 'auto'", raw)
-    return "auto"
-
-
 def _llm_provider_available() -> bool:
+    """True when an LLM provider key is configured (or the TORTOISE_SESSION_
+    LLM_MOCK=1 test seam is on — precedent: TORTOISE_BACKUP_STORAGE=memory /
+    RATE_LIMIT_DISABLED). Must agree with tortoise.sdk._build_session_llm_extractor
+    (which consumes the same key set); a mismatch would fail the 503 gate open
+    or closed wrongly."""
+    if os.environ.get("TORTOISE_SESSION_LLM_MOCK", "").strip().lower() == "1":
+        return True
     return any(os.environ.get(k) for k in _LLM_PROVIDER_KEYS)
 
 
@@ -3074,30 +3064,33 @@ def _llm_provider_available() -> bool:
 async def capture_session(body: SessionRequest, request: Request, team: dict = Depends(get_current_team)):
     """Capture an agent session and extract turns as episodic Points.
 
-    #329 flood gate: the extraction amplifier creates ~160 nodes/turn via the
-    decision/claim regexes (empirically 30 dense turns → 4,832 nodes) and the
-    ``sessions`` quota counts TOTAL nodes (MATCH (n), matching REST's
-    historical semantics) — Points were unbounded. Bounds (checked in order):
-    per-request turn cap → 400; extraction-aware pre-write estimate vs the
-    points quota → 402; per-turn extraction cap (in the loop).
+    #822: extraction is LLM-default — the M2 two-stage LLMExtractor (epic
+    #909) runs over the conversation when a provider key is configured; the
+    regex loop was removed as a product path and the no-key case fails
+    closed (503). #329 flood gate (historical): the regex amplifier created
+    ~160 nodes/turn and Points were unbounded. Bounds (checked in order):
+    provider gate → 503; per-request turn cap → 400; extraction-aware
+    pre-write estimate (M2 points + operators) vs the points quota → 402;
+    per-turn sentence cap in the transcript builder (the M2 point ceiling).
     """
-    import uuid, re
+    import uuid
     from datetime import datetime, timedelta, timezone
     from tortoise.quota import (
-        MAX_EXTRACTIONS_PER_TURN, MAX_SESSION_TURNS,
+        MAX_SESSION_TURNS,
         QuotaCheckError, QuotaExceededError, enforce_team_limit,
     )
 
-    # #312 delta 1: extraction mode semantics. `required` fails closed when
-    # no LLM provider is configured; `auto`/`regex` keep the deterministic
-    # regex path as the always-works baseline (LLM upgrade lands with the
-    # provider decision — deploy-time).
-    mode = _session_extraction_mode()
-    if mode == "required" and not _llm_provider_available():
+    # #822: LLM extraction is the default (and only) capture extraction —
+    # the regex loop was removed as a product path. No provider key →
+    # fail-closed 503 (matching today's `required` semantics; the
+    # TORTOISE_SESSION_LLM_MOCK=1 test seam counts as configured).
+    if not _llm_provider_available():
         raise HTTPException(
             status_code=503,
-            detail="Session extraction mode 'required' but no LLM provider key is "
-                   f"configured (set {' / '.join(_LLM_PROVIDER_KEYS)}).",
+            detail="Session extraction requires an LLM provider key (set "
+                   f"{' / '.join(_LLM_PROVIDER_KEYS)}). The regex extraction "
+                   "loop was removed as a product path (#822) — capture is "
+                   "disabled until a provider is configured.",
         )
 
     if len(body.conversation) > MAX_SESSION_TURNS:
@@ -3108,29 +3101,14 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
 
     # Extraction-aware estimate (pre-write, fail-closed count) — review P2,
     # PR #976: the points quota counts NON-episodic Points only, and turn
-    # Points/Session/Event are episodic — the estimate is the EXTRACTED set:
-    #   est = Σ_turns (min(decisions, cap) + min(claims, cap))
-    decisions = [
-        r"(?i)(?:let'?s|we will|we should|I will|I'm going to|decided|decision)\s+[^.!?]+[.!?]",
-        r"(?i)(?:plan is|next steps?:|action item:)\s+[^.!?]+[.!?]",
-    ]
-    claims = [
-        r"(?i)(?:I think|I believe|my understanding is|the problem is|the key insight)\s+[^.!?]+[.!?]",
-        r"(?i)(?:evidence suggests|data shows|we found that|this means)\s+[^.!?]+[.!?]",
-    ]
-    est = 0
-    for turn in body.conversation:
-        # #329/#947 (review P2, PR #976): the points quota counts NON-episodic
-        # Points only, and turn Points are written with is_episodic=true — the
-        # estimate must count the EXTRACTED (non-episodic) points only. The
-        # Session/Event base and the per-turn +1 are episodic; including them
-        # caused false pre-write 402s for teams near the limit. Still an upper
-        # bound for the extracted set (same full content the loop scans — a
-        # truncation mismatch would under-count).
-        content = turn.get("content", "")
-        n_dec = sum(len(re.findall(p, content)) for p in decisions)
-        n_clm = sum(len(re.findall(p, content)) for p in claims)
-        est += min(n_dec, MAX_EXTRACTIONS_PER_TURN) + min(n_clm, MAX_EXTRACTIONS_PER_TURN)
+    # Points/Session/Event are episodic — the estimate is the EXTRACTED set
+    # (M2 LLM points + IMPL/NAND operator nodes, #822):
+    #   est = 2 × Σ_turns min(sentences, MAX_EXTRACTIONS_PER_TURN)
+    # (the ×2 covers the relations stage's operator nodes the old regex loop
+    # never created; sentence count is the M2 point ceiling — one point per
+    # utterance; operators are clamped ≤ points in LLMExtractor.run, #1194,
+    # so the ×2 is a true ceiling).
+    est = _session_llm_extraction_estimate(body.conversation)
     from tortoise.quota import count_team_usage
     sdk_team = _make_sdk(namespace=team["team_id"])
     try:
@@ -3159,14 +3137,16 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
 
     extracted = []
 
-    # NOTE: this extraction loop is duplicated from tortoise/sdk.py
-    # capture_session. Divergences: hosted adds quota/auth bounds + a
-    # pre-write estimate; the SDK variant adds a `speaker` property on turn
-    # Points (delta 5) that hosted does not write. Hosted rejects turn content
-    # > 5000 chars with 422 (Pydantic field_validator failure), the SDK
-    # truncates to 5000 and extracts from the truncated text — extraction
-    # inputs align (both loops see <= 5000 chars); role=None stays None in
-    # hosted, the SDK normalizes it to "unknown". Keep the two in sync.
+    # NOTE: this per-turn loop (episodic turn Points) is duplicated from
+    # tortoise/sdk.py capture_session. Divergences: hosted adds quota/auth
+    # bounds + a pre-write estimate; the SDK variant adds a `speaker` property
+    # on turn Points (delta 5) that hosted does not write. Hosted rejects turn
+    # content > 5000 chars with 422 (Pydantic field_validator failure), the
+    # SDK truncates to 5000 and the extraction transcript is built from the
+    # truncated text — extraction inputs align (both see <= 5000 chars);
+    # role=None stays None in hosted, the SDK normalizes it to "unknown".
+    # Keep the two in sync. The LLM extraction that follows the loop is
+    # shared via sdk._extract_session_llm (#822).
     for i, turn in enumerate(body.conversation):
         role = turn.get("role", "unknown")
         content = turn.get("content", "")
@@ -3197,42 +3177,12 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
             params={"sid": session_id, "tid": turn_id},
         )
 
-        # #329: per-turn extraction cap (matches the estimate's min() bound —
-        # without it a single dense turn writes thousands of Points).
-        n_dec_extracted = 0
-        for pat in decisions:
-            for match in re.finditer(pat, content):
-                if n_dec_extracted >= MAX_EXTRACTIONS_PER_TURN:
-                    break
-                n_dec_extracted += 1
-                text = match.group().strip()
-                # Extracted decisions/claims ARE cross-session knowledge —
-                # keep content-hash dedup (identical claim in two sessions is
-                # one Point). Dedup by content_hash + pointKind via SDK.
-                p = sdk.create_point("decision", text[:5000], dedup=True)
-                pid = p["id"]
-                proj.g.query(
-                    "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
-                    "MERGE (s)-[:CONTAINS]->(p)",
-                    params={"sid": session_id, "pid": pid},
-                )
-                extracted.append({"id": pid, "kind": "decision", "text": text[:200]})
-
-        n_clm_extracted = 0
-        for pat in claims:
-            for match in re.finditer(pat, content):
-                if n_clm_extracted >= MAX_EXTRACTIONS_PER_TURN:
-                    break
-                n_clm_extracted += 1
-                text = match.group().strip()
-                p = sdk.create_point("statement", text[:5000], dedup=True)
-                pid = p["id"]
-                proj.g.query(
-                    "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
-                    "MERGE (s)-[:CONTAINS]->(p)",
-                    params={"sid": session_id, "pid": pid},
-                )
-                extracted.append({"id": pid, "kind": "statement", "text": text[:200]})
+    # M2 LLM extraction over the whole conversation (#822) — replaces the
+    # regex decision/claim loop (removed as a product path). Shared with the
+    # SDK copy via TortoiseSDK._extract_session_llm; extracted Points get
+    # session CONTAINS edges inside that helper (same wiring the regex loop
+    # did), then aboutEvent edges below.
+    extracted = sdk._extract_session_llm(body.conversation, session_id, now)
 
     # Ontology v3.1 §4.5/§3.2 (#7882): also create an episodic :Event node
     # (eventKind: sessionCaptured) and link extracted Points to it via
@@ -3268,12 +3218,9 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     # runs inside the SDK write; recounting here would cost a second query).
     await _abuse_record_points(request, team, len(body.conversation) + len(extracted))
 
-    # #722: report the EFFECTIVE method actually used, not the configured
-    # policy. The extraction loop above is the deterministic regex path — the
-    # loop never branches on mode today, so `auto`/`required` with a key would
-    # otherwise report LLM-intent while regex ran. Mode branching (LLM-grade
-    # extraction) is pending (#312 delta 2); until it lands, reflect what ran.
-    effective_mode = "regex"
+    # #822: extraction_mode reflects what ACTUALLY ran — the M2 LLM extractor
+    # (the regex stopgap #722 reported is gone with the regex loop).
+    effective_mode = "llm"
     return {"session_id": session_id, "turns": len(body.conversation),
             "extracted": len(extracted), "points": extracted,
             "extraction_mode": effective_mode}
@@ -3847,10 +3794,13 @@ async def get_session_detail(session_id: str, team: dict = Depends(get_current_t
     if not sess_rows:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Extracted point count (decisions + claims)
+    # Extracted point count (#822: LLM-extracted Points are untyped —
+    # pointKind is NULL for M2 conversation extraction — so the legacy
+    # decision/statement filter would report 0; count every non-turn Point
+    # wired to the session instead).
     ext_rows = proj.g.query(
         "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
-        "WHERE p.pointKind IN ['decision', 'statement'] "
+        "WHERE (p.pointKind IS NULL OR p.pointKind <> 'event') "
         "RETURN count(p)",
         params={"sid": session_id},
     ).result_set
@@ -3878,10 +3828,11 @@ async def get_session_detail(session_id: str, team: dict = Depends(get_current_t
             "created_at": created_at,
         })
 
-    # Extracted points (decisions + claims)
+    # Extracted points (#822: same non-turn filter as the count — M2 LLM
+    # Points are untyped, reported as "statement" like the capture response).
     ext_points_rows = proj.g.query(
         "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
-        "WHERE p.pointKind IN ['decision', 'statement'] "
+        "WHERE (p.pointKind IS NULL OR p.pointKind <> 'event') "
         "RETURN p.id, p.content, p.pointKind, p.createdAt "
         "ORDER BY p.createdAt",
         params={"sid": session_id},
@@ -3891,7 +3842,7 @@ async def get_session_detail(session_id: str, team: dict = Depends(get_current_t
         extracted.append({
             "id": er[0],
             "content": er[1] or "",
-            "kind": er[2],
+            "kind": er[2] or "statement",
             "created_at": er[3],
         })
 

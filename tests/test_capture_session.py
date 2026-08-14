@@ -1,4 +1,11 @@
-"""SDK capture_session tests (#312 delta 4 + delta 5 speaker tagging)."""
+"""SDK capture_session tests (#312 delta 4 + delta 5 speaker tagging, #822).
+
+#822: LLM extraction is the default (and only) capture extraction — the regex
+loop was removed as a product path and no-key fails closed. These tests run
+against the offline MockModel extractor (TORTOISE_SESSION_LLM_MOCK=1 seam) so
+no provider key or network is needed.
+"""
+import json
 import logging
 import re
 
@@ -10,6 +17,15 @@ from tortoise.sdk import TortoiseSDK
 # constant so no edge-syntax literal appears in source (Task 5 sweep requires
 # zero hits) — same pattern as tests/test_ranking.py.
 _LEGACY_INSTANTIATES = "INSTANTIATES"
+
+
+@pytest.fixture(autouse=True)
+def llm_extraction_provider(monkeypatch):
+    """Install the offline MockModel session extractor (#822) — the M2 LLM
+    pipeline runs with zero network regardless of ambient provider keys
+    (the dev shell has real OPENROUTER/DEEPSEEK keys). Any test that needs
+    the no-key fail-closed path clears the seam itself."""
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
 
 
 @pytest.fixture()
@@ -32,6 +48,8 @@ def test_capture_session_shape(sdk):
     assert res["turns"] == 3
     assert res["extracted"] >= 2
     assert all(p["kind"] in ("decision", "statement") for p in res["points"])
+    # #822: extraction_mode reports what actually ran — the M2 LLM extractor.
+    assert res["extraction_mode"] == "llm"
 
 
 def test_capture_session_turns_are_speaker_tagged(sdk):
@@ -52,14 +70,28 @@ def test_capture_session_idempotent(sdk):
     assert turns[0][0] == 3, "re-capture must not duplicate turn points"
 
 
-def test_capture_session_dedup_across_sessions(sdk):
-    # Same claim in two sessions → ONE statement point (content-hash dedup)
+def test_capture_session_no_provider_fails_closed(sdk, monkeypatch):
+    """#822: no provider key (and no mock seam) → ValueError — the regex
+    fallback is gone, capture requires an LLM provider."""
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
+              "GEMINI_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    with pytest.raises(ValueError, match="LLM provider key"):
+        sdk.capture_session(CONV)
+
+
+def test_capture_session_llm_points_fresh_per_capture(sdk):
+    """#822: M2 extraction mints a fresh ULID per Point per capture —
+    content-hash dedup is a later pipeline stage (epic #909 W-2 #784)."""
     sdk.capture_session(CONV)
     sdk.capture_session(CONV)
     stmt = sdk._get_proj().g.query(
-        "MATCH (p:Point {pointKind:'statement'}) RETURN count(p)"
+        "MATCH (p:Point) WHERE p.pointKind IS NULL RETURN count(p)"
     ).result_set
-    assert stmt[0][0] == 2, "identical claims across sessions dedup to one point each"
+    # 4 LLM points per capture (one per sentence; "ok" is below the 3-char
+    # utterance floor) × 2 captures — no dedup.
+    assert stmt[0][0] == 8, f"expected 8 fresh LLM points, got {stmt[0][0]}"
 
 
 def test_capture_session_turn_cap(sdk):
@@ -114,25 +146,33 @@ def test_capture_session_event_write_failure_logs_warning(sdk, caplog, monkeypat
 
 
 def test_capture_session_zero_extraction(sdk):
-    """Conversations with no decision/claim patterns → 0 extractions, turns still land."""
+    """M2 LLM extraction emits one Point per utterance — the deterministic
+    regex silence case is gone (#822). An empty conversation still yields 0;
+    short/empty turns yield 0 (utterance floor is 3 chars)."""
     plain = [
         {"role": "user", "content": "the weather today is fine"},
         {"role": "assistant", "content": "yes it is"},
     ]
     res = sdk.capture_session(plain)
+    # 2 utterances → 2 LLM points (the value gate is epic #909's future
+    # value_extractor; M2 is utterance→point).
+    assert res["extracted"] == 2, res
+    # Empty conversation → 0 extractions, turns still land.
+    res = sdk.capture_session([])
     assert res["extracted"] == 0
+    sid = res["session_id"]
     proj = sdk._get_proj()
-    sid = proj.g.query("MATCH (s:Session) RETURN s.id").result_set[0][0]
     turns = proj.g.query(
         "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
         "RETURN count(t)", params={"sid": sid}
     ).result_set
-    assert turns[0][0] == 2
-    # No epistemic points created
+    assert turns[0][0] == 0
+    # Only the two utterance Points from the first capture exist (no epistemic
+    # points from the empty capture).
     stmt = proj.g.query(
-        "MATCH (p:Point) WHERE p.pointKind IN ['decision','statement'] RETURN count(p)"
+        "MATCH (p:Point) WHERE p.pointKind IS NULL RETURN count(p)"
     ).result_set
-    assert stmt[0][0] == 0
+    assert stmt[0][0] == 2, "the two utterance Points from the first capture only"
 
 
 def test_capture_session_contains_edges_when_speaker_repeats(sdk):
@@ -150,25 +190,22 @@ def test_capture_session_contains_edges_when_speaker_repeats(sdk):
 
 
 def test_capture_session_contains_edges_to_extractions(sdk):
-    """Extraction-side CONTAINS edges: decision/statement points must be wired
-    to the session, and extraction actually creates decision/statement nodes."""
+    """Extraction-side CONTAINS edges: M2 LLM Points must be wired to the
+    session, and extraction actually creates the epistemic Points (#822)."""
     res = sdk.capture_session(CONV)
-    assert res["extracted"] >= 2, "CONV must trigger at least one extraction each"
+    assert res["extracted"] >= 2, "CONV must produce at least one point each"
     sid = res["session_id"]
     proj = sdk._get_proj()
-    # At least one extraction created a decision/statement node
+    # At least one extraction created an untyped (M2) epistemic Point
     kinds = proj.g.query(
-        "MATCH (p:Point) WHERE p.pointKind IN ['decision','statement'] "
-        "RETURN p.pointKind, count(p)"
+        "MATCH (p:Point) WHERE p.pointKind IS NULL RETURN count(p)"
     ).result_set
-    total = sum(r[1] for r in kinds)
-    assert total >= 2, "extraction loop must create decision/statement nodes"
-    assert set(r[0] for r in kinds) == {"decision", "statement"}, \
-        f"CONV should extract both kinds, got {[r[0] for r in kinds]}"
+    total = kinds[0][0]
+    assert total >= 2, "extraction loop must create epistemic Points"
     # Every extracted point is CONTAINS-connected to this session
     connected = proj.g.query(
         "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
-        "WHERE p.pointKind IN ['decision','statement'] RETURN collect(p.id)",
+        "WHERE p.pointKind IS NULL RETURN collect(p.id)",
         params={"sid": sid},
     ).result_set[0][0]
     assert len(connected) == res["extracted"], \
@@ -372,3 +409,74 @@ def test_create_event_wires_about_object_by_name(sdk):
         params={"eid": ev["eventId"]},
     ).result_set
     assert conn == [["license-research", "skill"]], f"name-resolved aboutObject miss: {conn}"
+
+
+# ── #1194: relation-stage flood cap — the pre-write estimate stays a true ceiling
+
+
+class _PermissiveRelationModel:
+    """Relation model returning EVERY ordered pair (i→j) — the O(n²) flood a
+    permissive real model can emit. MockModel's cue-word sparsity hides this in
+    the other tests; a real model has no prompt-enforced cap (extractor.py
+    _RelationStage.run returns the raw relations list)."""
+
+    id = "perm-relations"
+
+    def complete(self, *, system, user):
+        pts = json.loads(user)["points"]
+        n = len(pts)
+        return json.dumps({"relations": [
+            {"op_type": "IMPL", "src": i, "dst": j}
+            for i in range(n) for j in range(n) if i != j
+        ]})
+
+
+class _CountingAPI:
+    """Duck-typed EventAPI recording point/operator counts (extractor only
+    calls add_point/add_operator in transcript mode)."""
+
+    def __init__(self):
+        self.points = 0
+        self.operators = 0
+        self.ids = []
+
+    def add_point(self, content, provenance, **fields):
+        self.points += 1
+        self.ids.append(f"p{self.points}")
+        return self.ids[-1]
+
+    def add_operator(self, op_type, args, provenance):
+        self.operators += 1
+
+
+def test_session_relation_flood_capped_estimate_is_true_ceiling():
+    """#1194: a permissive relation model emitting O(n²) relations must not
+    write more operator nodes than the pre-write estimate counted. The
+    extractor dedupes + clamps operators ≤ points, so actual node writes
+    (points + operators) stay ≤ estimate (2 × sentences) — the 402 flood
+    gate the estimate feeds remains a true upper bound on node writes.
+
+    10 points → the permissive model emits 90 relations; without the cap that
+    is 90 IMPL operator nodes (non-episodic Points counted by the quota) vs
+    an estimate of 2 × 10 = 20 — a silent gate bypass. With the cap, operators
+    are held at ≤ points and the estimate holds."""
+    from tortoise.extractor import LLMExtractor, MockModel
+    from tortoise.sdk import _session_llm_transcript
+
+    conversation = [
+        {"role": "user", "content": f"sentence number {i} about the topic."}
+        for i in range(10)
+    ]
+    transcript, est = _session_llm_transcript(conversation)
+    assert est == 20, f"expected 2×10 sentences estimate, got {est}"
+
+    ex = LLMExtractor(MockModel("mock-point"), _PermissiveRelationModel())
+    api = _CountingAPI()
+    ex.run(transcript, "src-test", api)
+
+    assert api.points == 10, api.points
+    # the O(n²) flood (90 relations) is clamped to the estimate's ceiling
+    assert api.operators <= api.points, (
+        f"operator flood escaped the cap: {api.operators} > {api.points} points")
+    assert api.points + api.operators <= est, (
+        f"estimate {est} < actual nodes {api.points + api.operators}")

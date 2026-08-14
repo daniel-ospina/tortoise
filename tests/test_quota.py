@@ -26,6 +26,9 @@ def _embedded_env(monkeypatch, tmp_path):
     """Route quota SDKs to an embedded temp DB (no Docker in CI)."""
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "quota.db"))
+    # #822: capture_session is LLM-default (regex loop removed) — quota tests
+    # exercise the capture path offline via the MockModel test seam.
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
 
 
 @pytest.fixture

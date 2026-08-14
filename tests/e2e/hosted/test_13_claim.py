@@ -215,7 +215,7 @@ def claim_server(tmp_path_factory):
         "TORTOISE_SECRET_PEPPER": SECRET_PEPPER,
         "FASTAPI_INTERNAL_KEY": INTERNAL_KEY,
         "RATE_LIMIT_DISABLED": "1",
-        "TORTOISE_SESSION_EXTRACTION": "regex",
+        "TORTOISE_SESSION_LLM_MOCK": "1",
         "TORTOISE_BACKUP_KEY": base64.b64encode(os.urandom(32)).decode(),
         "TORTOISE_BACKUP_STORAGE": "memory",
         "BACKUP_WATCHER_DISABLED": "1",
