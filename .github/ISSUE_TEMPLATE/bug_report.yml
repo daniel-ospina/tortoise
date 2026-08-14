@@ -53,7 +53,7 @@ body:
       label: Graph JSON (if relevant)
       description: >-
         Paste the graph payload — the point/operator JSON you sent, the response you got,
-        or the result of `tortoise_summarize_structure` (or a `tortoise backup` export).
+        or the result of `tortoise_summarize_structure` (or a `tortoise backup --db <db-path>` export).
         If it's long, attach it as a `.json` file instead (drag & drop below).
       render: json
       placeholder: '{"kind": "decision", "content": "...", "props": {...}}'

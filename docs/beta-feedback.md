@@ -64,7 +64,7 @@ instead, use the same skeleton:
 **Expected:** what you expected to happen
 **Actual:** what happened instead
 **Graph JSON:** the point/operator payload you sent and the response you got
-  (or `tortoise_summarize_structure` output / a `tortoise backup` export).
+  (or `tortoise_summarize_structure` output / a `tortoise backup --db <db-path>` export).
   Attach long JSON as a .json file rather than pasting.
 **Steps:** minimal numbered repro, including the exact MCP tool call / CLI command
 **Version:** `pip show tortoise` version or the git SHA
@@ -82,7 +82,7 @@ surfaces, JSON is what makes a graph-engine bug fixable in one pass.
    (Discussions + issues labeled `beta-feedback`).
 2. **Bug reports** land as issues auto-labeled `bug` + `beta-feedback`. The
    `beta-feedback` label is the tracker's beta filter — triage
-   = reviewing `github.com/daniel-ospina/tortoise/labels/beta-feedback`.
+   = reviewing the [beta-feedback label](https://github.com/daniel-ospina/tortoise/labels/beta-feedback).
 3. **Triage cadence:** reports are acknowledged within **2 business days**.
    Each report is either (a) fixed directly, (b) converted into a scoped
    tracker issue (with `complexity:` + `team:` labels per repo convention),
@@ -104,8 +104,9 @@ surfaces, JSON is what makes a graph-engine bug fixable in one pass.
   Discussions from the "New issue" page.
 - ✅ `beta-feedback` label created — the tracker's triage filter.
 
-**Optional owner step (UI, cannot be automated — GitHub removed the
-`enableDiscussions` mutation):** to add a dedicated "Beta feedback" discussion
-category, open **Discussions → Categories (bottom of the page) → Add category**,
-name it `Beta feedback`, and set it as the default for new threads. Not
+**Optional owner step (UI-only, cannot be automated):** enabling Discussions itself was done
+programmatically (`updateRepository(hasDiscussionsEnabled: true)` / REST `has_discussions=true`),
+but GitHub's API has **no mutation for creating discussion categories** — to add a dedicated
+"Beta feedback" discussion category, open **Discussions → Categories (bottom of the page) →
+Add category**, name it `Beta feedback`, and set it as the default for new threads. Not
 required — General/Q&A already cover the cohort.
