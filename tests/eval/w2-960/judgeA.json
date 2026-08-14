@@ -1,0 +1,530 @@
+{
+  "window_id": "w2-960",
+  "window_type": "operational",
+  "judge": "claude-opus-5",
+  "n_edus": 65,
+  "labels": [
+    {
+      "edu_index": 0,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "none"
+    },
+    {
+      "edu_index": 1,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "none"
+    },
+    {
+      "edu_index": 2,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "none"
+    },
+    {
+      "edu_index": 3,
+      "kind": null,
+      "atomicity": true,
+      "source_ref": null,
+      "relations": [],
+      "class": "none"
+    },
+    {
+      "edu_index": 4,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "none"
+    },
+    {
+      "edu_index": 5,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "claim"
+    },
+    {
+      "edu_index": 6,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "claim"
+    },
+    {
+      "edu_index": 7,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "decision"
+    },
+    {
+      "edu_index": 8,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "none"
+    },
+    {
+      "edu_index": 9,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "none"
+    },
+    {
+      "edu_index": 10,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "claim"
+    },
+    {
+      "edu_index": 11,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "claim"
+    },
+    {
+      "edu_index": 12,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "none"
+    },
+    {
+      "edu_index": 13,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "none"
+    },
+    {
+      "edu_index": 14,
+      "kind": null,
+      "atomicity": true,
+      "source_ref": null,
+      "relations": [],
+      "class": "none"
+    },
+    {
+      "edu_index": 15,
+      "kind": null,
+      "atomicity": true,
+      "source_ref": null,
+      "relations": [],
+      "class": "none"
+    },
+    {
+      "edu_index": 16,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "none"
+    },
+    {
+      "edu_index": 17,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "decision"
+    },
+    {
+      "edu_index": 18,
+      "kind": null,
+      "atomicity": true,
+      "source_ref": null,
+      "relations": [],
+      "class": "none"
+    },
+    {
+      "edu_index": 19,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "none"
+    },
+    {
+      "edu_index": 20,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "claim"
+    },
+    {
+      "edu_index": 21,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "event"
+    },
+    {
+      "edu_index": 22,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "event"
+    },
+    {
+      "edu_index": 23,
+      "kind": null,
+      "atomicity": true,
+      "source_ref": null,
+      "relations": [],
+      "class": "process"
+    },
+    {
+      "edu_index": 24,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "claim"
+    },
+    {
+      "edu_index": 25,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "none"
+    },
+    {
+      "edu_index": 26,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "claim"
+    },
+    {
+      "edu_index": 27,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "none"
+    },
+    {
+      "edu_index": 28,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "process"
+    },
+    {
+      "edu_index": 29,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "process"
+    },
+    {
+      "edu_index": 30,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "process"
+    },
+    {
+      "edu_index": 31,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "claim"
+    },
+    {
+      "edu_index": 32,
+      "kind": null,
+      "atomicity": true,
+      "source_ref": null,
+      "relations": [],
+      "class": "none"
+    },
+    {
+      "edu_index": 33,
+      "kind": null,
+      "atomicity": true,
+      "source_ref": null,
+      "relations": [],
+      "class": "decision"
+    },
+    {
+      "edu_index": 34,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "claim"
+    },
+    {
+      "edu_index": 35,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "event"
+    },
+    {
+      "edu_index": 36,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "process"
+    },
+    {
+      "edu_index": 37,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "claim"
+    },
+    {
+      "edu_index": 38,
+      "kind": null,
+      "atomicity": true,
+      "source_ref": null,
+      "relations": [],
+      "class": "none"
+    },
+    {
+      "edu_index": 39,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "decision"
+    },
+    {
+      "edu_index": 40,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "none"
+    },
+    {
+      "edu_index": 41,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "none"
+    },
+    {
+      "edu_index": 42,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "event"
+    },
+    {
+      "edu_index": 43,
+      "kind": null,
+      "atomicity": true,
+      "source_ref": null,
+      "relations": [],
+      "class": "none"
+    },
+    {
+      "edu_index": 44,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "claim"
+    },
+    {
+      "edu_index": 45,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "claim"
+    },
+    {
+      "edu_index": 46,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "event"
+    },
+    {
+      "edu_index": 47,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "process"
+    },
+    {
+      "edu_index": 48,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "process"
+    },
+    {
+      "edu_index": 49,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "event"
+    },
+    {
+      "edu_index": 50,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "event"
+    },
+    {
+      "edu_index": 51,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "event"
+    },
+    {
+      "edu_index": 52,
+      "kind": null,
+      "atomicity": true,
+      "source_ref": null,
+      "relations": [],
+      "class": "process"
+    },
+    {
+      "edu_index": 53,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "claim"
+    },
+    {
+      "edu_index": 54,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "none"
+    },
+    {
+      "edu_index": 55,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "claim"
+    },
+    {
+      "edu_index": 56,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "none"
+    },
+    {
+      "edu_index": 57,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "none"
+    },
+    {
+      "edu_index": 58,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "none"
+    },
+    {
+      "edu_index": 59,
+      "kind": null,
+      "atomicity": true,
+      "source_ref": null,
+      "relations": [],
+      "class": "claim"
+    },
+    {
+      "edu_index": 60,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "claim"
+    },
+    {
+      "edu_index": 61,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "event"
+    },
+    {
+      "edu_index": 62,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "process"
+    },
+    {
+      "edu_index": 63,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "event"
+    },
+    {
+      "edu_index": 64,
+      "kind": null,
+      "atomicity": false,
+      "source_ref": null,
+      "relations": [],
+      "class": "event"
+    }
+  ],
+  "degenerate": false,
+  "incomplete": false
+}
