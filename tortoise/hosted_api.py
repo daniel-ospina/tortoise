@@ -542,6 +542,41 @@ class ClientIPMiddleware(BaseHTTPMiddleware):
 app.add_middleware(ClientIPMiddleware)
 
 
+class ForwardedProtoMiddleware(BaseHTTPMiddleware):
+    """Honor X-Forwarded-Proto when building redirect Locations (#985).
+
+    Starlette builds redirect URLs (e.g. the trailing-slash 307 for
+    ``POST /mcp`` → ``/mcp/``) from ``scope["scheme"]``, which is the
+    scheme the proxy used to reach the app — plain http behind the Fly
+    proxy (TLS terminates at the edge). The result is a downgraded
+    ``Location: http://api.premiselabs.co/mcp/``; the client follows it,
+    Fly 301s http→https, and POST-following HTTP stacks (MCP TS SDK)
+    convert the method to GET per RFC 9110 → ``GET /mcp/`` 405.
+
+    This middleware rewrites ``scope["scheme"]`` from the FIRST value of
+    ``X-Forwarded-Proto`` so redirect Locations carry the client-visible
+    scheme (https). Trusted ONLY when ``TORTOISE_TRUST_FLY_CLIENT_IP=1``
+    — the same known-proxy gate as ClientIPMiddleware (#1081), set in
+    fly.toml [env] for the hosted Fly image. Fail-closed otherwise:
+    self-hosted / LAN / direct-port ingress never lets a client forge the
+    scheme of its own redirects.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        if os.environ.get("TORTOISE_TRUST_FLY_CLIENT_IP") == "1":
+            proto = request.headers.get("X-Forwarded-Proto")
+            if proto:
+                # Proxy chains append (e.g. "https,http") — the first value
+                # is the client-facing scheme (RFC 7239 ordering).
+                first = proto.split(",")[0].strip().lower()
+                if first in ("http", "https"):
+                    request.scope["scheme"] = first
+        return await call_next(request)
+
+
+app.add_middleware(ForwardedProtoMiddleware)
+
+
 class HSTSMiddleware(BaseHTTPMiddleware):
     """Add Strict-Transport-Security header to every response."""
 

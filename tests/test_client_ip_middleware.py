@@ -11,7 +11,7 @@ limiters read it with a ``request.client.host`` fallback.
 import pytest
 from starlette.datastructures import State
 
-from tortoise.hosted_api import ClientIPMiddleware
+from tortoise.hosted_api import ClientIPMiddleware, ForwardedProtoMiddleware
 
 
 class _FakeRequest:
@@ -19,14 +19,15 @@ class _FakeRequest:
 
     Mirrors starlette's Request.state (a State over the shared
     ``scope["state"]`` dict) — the surface ClientIPMiddleware.dispatch
-    touches.
+    touches. ``scope["scheme"]`` carries the redirect-Location scheme
+    that ForwardedProtoMiddleware rewrites (#985).
     """
 
-    def __init__(self, headers=None, client_host="203.0.113.5"):
+    def __init__(self, headers=None, client_host="203.0.113.5", scheme="http"):
         self.headers = headers or {}
         self.client = (type("Client", (), {"host": client_host})()
                        if client_host is not None else None)
-        self.scope = {"state": {}}
+        self.scope = {"state": {}, "scheme": scheme}
         self.state = State(self.scope["state"])
 
 
@@ -111,3 +112,80 @@ async def test_no_client_no_header_resolves_none():
 
     await _middleware().dispatch(req, call_next)
     assert req.state.client_ip is None
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# ForwardedProtoMiddleware (#985)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _proto_middleware():
+    return ForwardedProtoMiddleware(lambda scope, receive, send: None)
+
+
+async def _dispatch_proto(mw, req):
+    async def call_next(request):
+        return request
+
+    await mw.dispatch(req, call_next)
+    return req
+
+
+@pytest.mark.asyncio
+async def test_xfp_https_rewrites_scope_scheme(monkeypatch):
+    """Behind the trusted Fly proxy (flag=1), X-Forwarded-Proto: https must
+    rewrite scope["scheme"] so redirect Locations stay https (#985)."""
+    monkeypatch.setenv("TORTOISE_TRUST_FLY_CLIENT_IP", "1")
+    req = await _dispatch_proto(
+        _proto_middleware(),
+        _FakeRequest(headers={"X-Forwarded-Proto": "https"}),
+    )
+    assert req.scope["scheme"] == "https"
+
+
+@pytest.mark.asyncio
+async def test_xfp_first_value_wins(monkeypatch):
+    """Proxy chains append values ("https,http") — the first is the
+    client-facing scheme (RFC 7239 ordering)."""
+    monkeypatch.setenv("TORTOISE_TRUST_FLY_CLIENT_IP", "1")
+    req = await _dispatch_proto(
+        _proto_middleware(),
+        _FakeRequest(headers={"X-Forwarded-Proto": "https, http"}),
+    )
+    assert req.scope["scheme"] == "https"
+
+
+@pytest.mark.asyncio
+async def test_xfp_ignored_without_trust_flag(monkeypatch):
+    """Fail-closed: without the trust flag, a client-forged X-Forwarded-Proto
+    must NOT change the scheme — self-host / LAN / direct-port ingress could
+    otherwise spoof https in its own redirects (review P2-2 pattern, #1081)."""
+    monkeypatch.delenv("TORTOISE_TRUST_FLY_CLIENT_IP", raising=False)
+    req = await _dispatch_proto(
+        _proto_middleware(),
+        _FakeRequest(headers={"X-Forwarded-Proto": "https"}, scheme="http"),
+    )
+    assert req.scope["scheme"] == "http"  # unchanged
+
+
+@pytest.mark.asyncio
+async def test_xfp_invalid_value_ignored(monkeypatch):
+    """Non-http(s) values (e.g. "ftp") are rejected — never write garbage
+    into scope."""
+    monkeypatch.setenv("TORTOISE_TRUST_FLY_CLIENT_IP", "1")
+    req = await _dispatch_proto(
+        _proto_middleware(),
+        _FakeRequest(headers={"X-Forwarded-Proto": "ftp"}, scheme="http"),
+    )
+    assert req.scope["scheme"] == "http"
+
+
+@pytest.mark.asyncio
+async def test_xfp_absent_is_noop(monkeypatch):
+    """No header → scheme untouched (direct http ingress keeps http)."""
+    monkeypatch.setenv("TORTOISE_TRUST_FLY_CLIENT_IP", "1")
+    req = await _dispatch_proto(
+        _proto_middleware(),
+        _FakeRequest(headers={}, scheme="http"),
+    )
+    assert req.scope["scheme"] == "http"

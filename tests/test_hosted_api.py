@@ -23,7 +23,12 @@ os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 # Tests opt out; production keeps the limit (RATE_LIMIT_DISABLED=1).
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
-from tortoise.hosted_api import app, get_current_team, get_current_user
+from tortoise.hosted_api import (
+    app,
+    get_current_team,
+    get_current_user,
+    ForwardedProtoMiddleware,
+)
 from tortoise.sdk import TortoiseSDK
 
 
@@ -2056,3 +2061,60 @@ class TestBackupStorageSeam:
         monkeypatch.setenv("TORTOISE_BACKUP_STORAGE", "s3-ish")
         with pytest.raises(RuntimeError, match="unknown"):
             _ha._backup_storage()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #985 — Redirect Location scheme behind the Fly proxy
+# ═══════════════════════════════════════════════════════════════════════════
+# POST /mcp → trailing-slash 307 built by Starlette from scope["scheme"].
+# Behind the Fly proxy the app sees plain http → Location downgrades to
+# http://... → the follow-up Fly http→https 301 converts POST→GET (RFC 9110)
+# → GET /mcp/ 405 (breaks POST-following stacks like the MCP TS SDK).
+# ForwardedProtoMiddleware fixes scope["scheme"] from X-Forwarded-Proto,
+# gated on the same known-proxy flag as ClientIPMiddleware.
+#
+# These tests exercise the REAL middleware through real Starlette routing
+# (a minimal /mcp mount reproducing the prod surface) because the hosted
+# app's own mounted MCP sub-app short-circuits unauthenticated requests
+# with 401 before its router can emit the 307.
+
+
+class TestProxyProtoRedirect:
+    @staticmethod
+    def _mini_mcp_app():
+        from starlette.applications import Starlette
+        from starlette.responses import PlainTextResponse
+        from starlette.routing import Mount, Route
+
+        sub = Starlette(routes=[Route("/", lambda _r: PlainTextResponse("root ok"))])
+        app = Starlette(routes=[Mount("/mcp", app=sub)])
+        app.add_middleware(ForwardedProtoMiddleware)
+        return app
+
+    def test_post_mcp_redirect_location_keeps_https_when_trusted(self, monkeypatch):
+        """Regression for #985: with the Fly-proxy trust flag set,
+        X-Forwarded-Proto: https must survive into the 307 Location — the
+        client never sees an http downgrade, so POST is preserved end to end."""
+        monkeypatch.setenv("TORTOISE_TRUST_FLY_CLIENT_IP", "1")
+        with TestClient(self._mini_mcp_app(), follow_redirects=False) as tc:
+            r = tc.post("/mcp", headers={"X-Forwarded-Proto": "https"})
+        assert r.status_code == 307
+        assert r.headers["location"].startswith("https://"), r.headers["location"]
+
+    def test_post_mcp_redirect_fail_closed_without_trust_flag(self, monkeypatch):
+        """Without the trust flag (self-host / LAN / direct ingress), a
+        client-forged X-Forwarded-Proto must NOT flip the scheme — the
+        redirect stays http (unchanged scope), exactly as before #985."""
+        monkeypatch.delenv("TORTOISE_TRUST_FLY_CLIENT_IP", raising=False)
+        with TestClient(self._mini_mcp_app(), follow_redirects=False) as tc:
+            r = tc.post("/mcp", headers={"X-Forwarded-Proto": "https"})
+        assert r.status_code == 307
+        assert r.headers["location"].startswith("http://"), r.headers["location"]
+
+    def test_post_mcp_redirect_http_stays_http(self, monkeypatch):
+        """X-Forwarded-Proto: http behind the proxy → Location stays http."""
+        monkeypatch.setenv("TORTOISE_TRUST_FLY_CLIENT_IP", "1")
+        with TestClient(self._mini_mcp_app(), follow_redirects=False) as tc:
+            r = tc.post("/mcp", headers={"X-Forwarded-Proto": "http"})
+        assert r.status_code == 307
+        assert r.headers["location"].startswith("http://"), r.headers["location"]
