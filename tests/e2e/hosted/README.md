@@ -96,14 +96,25 @@ leak class (hundreds of orphaned `redis-server` daemons pinning temp sockets,
 timeouts mid-suite) fails under CPU contention from orphaned daemons. Before
 blaming the suite, check `pgrep -fc 'redislite/bin/redis-server'` — a clean
 machine should show 0–2 daemons, not dozens.
-- **Ops sweep** (after confirming no live sessions are running):
+- **Ops sweep** (prefer the reaper, not pkill). The reaper classifies orphans
+  (liveness, ppid/detach, socket ownership) before killing — `pkill -f` also
+  matches LIVE same-user suites mid-run, so only use it when no suite can be
+  running (shared dev box: check other terminals/CI agents first):
 
   ```bash
-  pkill -f 'redislite/bin/redis-server'   # orphaned embedded daemons
-  rm -f ~/.tortoise/index-*.pid           # stale pid files (reaper clears
-                                          # sockets, not pid files)
+  python -m tortoise.embedded_reaper --no-dry-run   # classified orphan sweep (default dry-run)
+  # Last resort only (kills live same-user suites too):
+  pkill -f 'redislite/bin/redis-server'
   ```
+
+  Do NOT `rm -f ~/.tortoise/index-*.pid` — those are SessionIndexLock files
+  (flock+PID, `tortoise/index_lock.py`), not daemon pidfiles, and a bare rm
+  unlinks a live holder's lock inode (double-writer hazard the lock's
+  `force_release()` guards against). Stale locks self-heal on acquire
+  (kill-0 probe + 10-min age fallback); the reaper removes whole stale
+  redislite dirs (sockets AND pidfiles).
 
 - **Fixture-scoping/teardown:** session-shared embedded DB audit is #1012
 (closed via PR #1108, orphans ~46 → 1); the per-session atexit/lifecycle bound
-for test-spawned daemons is tracked as a follow-up (see #1003 status).
+for test-spawned daemons remains open (beyond #1003 §4's ops-doc scope) —
+tracked as #1231.
