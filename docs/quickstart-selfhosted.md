@@ -232,6 +232,54 @@ The supported migration path is a **replay path**: your self-hosted daemon keeps
 
    Then call the structure tools over MCP on each surface — `tortoise_check_structure` (chain integrity) and `tortoise_summarize_structure` (counts per gate) — and compare the hosted counts to your selfhost graph. When hosted reaches parity and answers your queries, decommission the daemon at your leisure.
 
+## Meeting transcripts — manual ingestion
+
+Beta flow (R4c): turn a meeting transcript into **Events + draft Points** with
+source provenance. Mining is **manual by design** — you run it; sessions
+capture is the automatic path. The extractor is deterministic and offline
+(no LLM call): every `Speaker: text` line becomes a draft Point, and the
+session produces ≥3 events: a **meeting** event, **decision** events (decision
+language), and **friction**/**milestone** events (contradictions).
+
+**Try it with the bundled sample** (repo checkout — `tests/sample_transcript.txt`):
+
+```bash
+tortoise mine-conversation tests/sample_transcript.txt \
+  --source-id 2026-08-14-sync
+```
+
+Output:
+
+- `mine-<source-id>.jsonl` — the mining event log in the current directory
+- A printed summary: events (gate: ≥3), draft points, operators, and the
+  per-event kind list
+
+**Mine into your graph** — add `--db` to project Points into FalkorDB
+(embedded path: `--db ~/.tortoise/tortoise.db`; Docker URI: `--db
+docker://:falkordb@localhost:6379/tortoise`). Points land as **draft** in a
+W-3-gated batch — the SDK/MCP path returns `batch_status` in its result; the
+CLI prints event/point/operator counts (watch for `FalkorDB unavailable`
+warnings, which mean projection failed and you're in log-only mode). Review
+and promote drafts when you're ready (`tortoise_promote_point` MCP tool /
+`TortoiseSDK.promote_point`).
+
+**Your own transcript:** any plain-text file with `Name: statement` lines.
+The sample transcript is an 8-line sync between `Connor` and `Spencer` that
+demonstrates the full mix (meeting + decision + friction).
+
+**Batch / SDK / MCP:**
+
+- SDK: `TortoiseSDK(db_path).mine_corpus(directory)` — batch-mine a folder of
+  transcripts (ingest + mine per file, resume + dedup built in).
+- MCP (stdio): `tortoise_mine_conversations(transcript=..., source_id=...)` or
+  `corpus_dir=...` for a batch. Hosted HTTP excludes the fs-walk forms
+  (security, #1090) — run `tortoise serve` locally for those.
+
+Mining details and the W-3 batch gate: `tortoise/mining.py`
+(`ConversationMiner`, `mine_conversation`, `mine_corpus`); the onboarding
+prompt teaches the same flow at `tortoise/onboarding/AGENT_ONBOARDING.md`
+(Q5b).
+
 ## Troubleshooting
 
 - **`pip` refuses to install ("externally-managed-environment")** — you're on Homebrew/Ubuntu system Python. Create and activate a venv first (step 1).

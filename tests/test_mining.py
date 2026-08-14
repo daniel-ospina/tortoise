@@ -4,7 +4,9 @@ ConversationMiner → extractor → ≥3 EventRecorded events per session.
 """
 from __future__ import annotations
 
+import json
 import os
+import re
 import sys
 import tempfile
 
@@ -38,42 +40,179 @@ def _api():
 
 # ── Gate: ≥3 events per session ──────────────────────────────────
 
-def test_mine_sample_transcript():
-    """Mining sample_transcript.txt produces ≥3 EventRecorded events."""
+# #1198: committed sample-transcript fixture — the file beta testers run
+# `tortoise mine-conversation` against. Module-level so pytest, the fixture
+# and the `__main__` block share ONE resolution (no drift if it moves).
+SAMPLE_TRANSCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "sample_transcript.txt")
+
+
+@pytest.fixture
+def sample_transcript_path():
+    """Path to the committed sample transcript fixture (#1198)."""
+    return SAMPLE_TRANSCRIPT
+
+
+def _read_sample_transcript(path):
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+def test_mine_sample_transcript(sample_transcript_path):
+    """#1198 smoke gate: mining the committed sample transcript produces
+    ≥3 EventRecorded events (meeting + decision + friction) and draft Points
+    carrying Source provenance (provenance.source_id).
+
+    The transcript is the fixture beta testers run `tortoise mine-conversation`
+    against — the test pins the behavior the docs promise. The event kinds are
+    asserted UNCONDITIONALLY (no "or milestone" escape hatch): the fixture
+    must demonstrate the full mix or the docs overpromise.
+    """
+    source_id = "sample-meeting"
     miner = ConversationMiner()
     api, log = _api()
 
-    transcript = (
-        "Connor: We should raise the burn rate slowly.\n"
-        "Connor: Because if we jump it too fast, early buyers get wrecked and they leave.\n"
-        "Spencer: But a slow raise lets a manipulator accumulate a cheap position before anyone notices.\n"
-        "Spencer: So the schedule has to be unpredictable, not just slow.\n"
-        "Connor: That's not relevant if the position is washable anyway.\n"
-        "Connor: A washable position means the ledger can be reset, therefore accumulation gives no lasting edge.\n"
-        "Spencer: However, washing has a detectable cost, since every reset shows up in settlement flow.\n"
-        "Connor: Given that settlement flow is public, honest actors can price the wash in.\n"
-    )
+    transcript = _read_sample_transcript(sample_transcript_path)
+    result = miner.mine(transcript, source_id, api)
 
-    result = miner.mine(transcript, "test_session", api)
-
+    # Gate: ≥3 events per session (WF4) — the fixture must demonstrate the
+    # full mix the docs advertise: meeting + decision + friction.
     assert result["events"] >= 3, (
         f"Gate failed: {result['events']} events < 3 minimum"
     )
     assert result["points"] > 0, "Expected at least 1 Point"
-    assert result["operators"] > 0, "Expected at least 1 Operator"
 
     # Verify EventRecorded events in log
     events = log.read_all()
     recorded = [e for e in events if e["type"] == "EventRecorded"]
     assert len(recorded) >= 3, f"Expected ≥3 EventRecorded in log, got {len(recorded)}"
 
-    # Verify at least one meeting event
+    # Meeting + decision + friction mix (indicator I2 of #1198). Friction is
+    # required, not optional — milestone is a fallback for sparse sessions.
     kinds = [e["event"]["eventKind"] for e in recorded]
     assert "meeting" in kinds, f"Expected 'meeting' in event kinds: {kinds}"
+    assert "decision" in kinds, f"Expected 'decision' in event kinds: {kinds}"
+    assert "friction" in kinds, f"Expected 'friction' in event kinds: {kinds}"
+
+    # Draft Points with Source provenance (indicator I3): every extraction
+    # Point enters the log as status=draft and carries provenance.source_id
+    # = the meeting's source_id, plus extractedFrom for the Source link.
+    points = [e for e in events if e["type"] == "PointAdded"]
+    assert len(points) >= 1, "Expected at least 1 PointAdded"
+    for ev in points:
+        pt = ev["point"]
+        assert pt.get("status") == "draft", (
+            f"Extraction Point must be draft, got {pt.get('status')}: {pt['content'][:60]}"
+        )
+        prov = pt.get("provenance") or {}
+        assert prov.get("source_id") == source_id, (
+            f"Point provenance.source_id must be {source_id!r}, got {prov.get('source_id')}"
+        )
+        assert pt.get("extractedFrom") == source_id, (
+            f"Point extractedFrom must be {source_id!r}, got {pt.get('extractedFrom')}"
+        )
 
     print(f"PASS test_mine_sample_transcript "
-          f"({result['events']} events, {result['points']} points, "
-          f"{result['operators']} operators)")
+          f"({result['events']} events {kinds}, {result['points']} draft points)")
+
+
+def test_mine_derives_milestone():
+    """Milestone fallback (#1198 / ConversationMiner._derive_events): a
+    sparse session with a >60-char significant-finding point and no
+    decision/friction cues emits a 'milestone' event."""
+    miner = ConversationMiner()
+    api, log = _api()
+    transcript = (
+        "Alice: This is a significant discovery for the memory backend, and we "
+        "should investigate it thoroughly before the next review cycle.\n"
+        "Bob: The investigation will require careful coordination across the "
+        "whole team.\n"
+    )
+    result = miner.mine(transcript, "test_milestone", api)
+    recorded = [e for e in log.read_all() if e["type"] == "EventRecorded"]
+    kinds = [e["event"]["eventKind"] for e in recorded]
+    assert "milestone" in kinds, f"Expected 'milestone' event, got: {kinds}"
+    assert result["events"] >= 2, "meeting + milestone expected"
+    print(f"PASS test_mine_derives_milestone ({result['events']} events, kinds: {kinds})")
+
+
+def test_cli_mine_conversation_flow(sample_transcript_path, tmp_path,
+                                    monkeypatch, capsys):
+    """#1198: the `tortoise mine-conversation` CLI end-to-end on the sample.
+
+    Pins what the quickstart docs promise testers: rc=0 + 'GATE PASSED' on a
+    mined transcript, rc=1 on a descoped (<3 events) transcript, rc=1 on a
+    missing file. The success path must exit 0 so scripts can chain it.
+    """
+    from tortoise.__main__ import main
+
+    monkeypatch.chdir(tmp_path)
+
+    # Success: sample transcript mines ≥3 events → rc 0
+    rc = main(["mine-conversation", sample_transcript_path,
+               "--source-id", "cli-smoke"])
+    assert rc == 0, f"mine-conversation must exit 0 on success, got {rc}"
+    out = capsys.readouterr().out
+    assert "GATE PASSED" in out
+    # Parse the emitted [kind] event lines rather than substring-scanning
+    # free-form output (a hint line mentioning 'decision' must not pass).
+    kinds = re.findall(r"^  \[(\w+)\]", out, re.M)
+    assert "meeting" in kinds and "decision" in kinds and "friction" in kinds, (
+        f"CLI event lines must include meeting+decision+friction, got {kinds}"
+    )
+    log_path = tmp_path / "mine-cli-smoke.jsonl"
+    assert log_path.exists(), "mining log must be written to cwd"
+    # The log the tester gets must actually hold draft Points with Source
+    # provenance — not just a passing printout.
+    entries = [json.loads(line) for line in log_path.read_text().splitlines()]
+    points = [e["point"] for e in entries if e["type"] == "PointAdded"]
+    assert points, "mined log must contain PointAdded entries"
+    for pt in points:
+        assert pt["status"] == "draft"
+        assert pt["provenance"]["source_id"] == "cli-smoke"
+        assert pt["extractedFrom"] == "cli-smoke"
+
+    # Descoped: a one-liner yields <3 events → rc 1 (WF4 permanently-descoped)
+    sparse = tmp_path / "sparse.txt"
+    sparse.write_text("Alice: Hi.\n", encoding="utf-8")
+    rc = main(["mine-conversation", str(sparse), "--source-id", "sparse"])
+    assert rc == 1, f"descoped session must exit 1, got {rc}"
+    assert "GATE FAILED" in capsys.readouterr().out
+
+    # Missing file → rc 1 with the documented stderr note (no crash)
+    rc = main(["mine-conversation", "no-such-transcript.txt"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "Transcript not found" in err, f"stderr must name the missing file, got: {err!r}"
+
+
+def test_cli_mine_conversation_gate_boundary(tmp_path, monkeypatch, capsys):
+    """#1198: the ≥3-event gate boundary is a fencepost the CLI must honor.
+
+    Exactly 3 events (meeting + 2 decisions, no friction) → rc 0 / GATE
+    PASSED; exactly 2 events (meeting + 1 decision) → rc 1 / GATE FAILED.
+    """
+    from tortoise.__main__ import main
+
+    monkeypatch.chdir(tmp_path)
+    three = tmp_path / "three.txt"
+    three.write_text(
+        "Alice: We decided to use FalkorDB for the memory backend.\n"
+        "Bob: We agreed to commit to the Q3 timeline.\n",
+        encoding="utf-8",
+    )
+    rc = main(["mine-conversation", str(three), "--source-id", "three"])
+    assert rc == 0, f"exactly 3 events must pass the gate, got rc {rc}"
+    assert "GATE PASSED" in capsys.readouterr().out
+
+    two = tmp_path / "two.txt"
+    two.write_text(
+        "Alice: We decided to use FalkorDB for the memory backend.\n",
+        encoding="utf-8",
+    )
+    rc = main(["mine-conversation", str(two), "--source-id", "two"])
+    assert rc == 1, f"2 events must fail the gate, got rc {rc}"
+    assert "GATE FAILED" in capsys.readouterr().out
 
 
 def test_mine_events_have_required_fields():
@@ -423,12 +562,13 @@ class TestEpSafeCommit:
 
 
 if __name__ == "__main__":
-    test_mine_sample_transcript()
+    test_mine_sample_transcript(SAMPLE_TRANSCRIPT)
     test_mine_events_have_required_fields()
     test_mine_derives_decisions()
     test_mine_derives_friction()
     test_mine_sparse_transcript()
     test_mine_preserves_point_content()
+    test_mine_derives_milestone()
 
 
 class TestEpSafeCommitReviewFixes:

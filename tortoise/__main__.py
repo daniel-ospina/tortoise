@@ -113,7 +113,15 @@ def _cmd_mine_conversation(args):
     log_path = Path(f"mine-{source_id}.jsonl")
     if args.db:
         try:
-            proj = FalkorProjection.from_uri(args.db)
+            # #1198 P1: route --db through the canonical resolvers so embedded
+            # paths (e.g. ~/.tortoise/tortoise.db) work, not just docker:// URIs.
+            # Bare except is intentional: projection failure degrades to
+            # log-only mode (documented) rather than crashing the CLI.
+            from tortoise.config import is_db_uri, resolve_db_path
+            if is_db_uri(args.db):
+                proj = FalkorProjection.from_uri(args.db)
+            else:
+                proj = FalkorProjection(path=resolve_db_path(args.db))
         except Exception as e:
             print(f"Warning: FalkorDB unavailable ({e}), using log-only mode")
 
@@ -124,7 +132,7 @@ def _cmd_mine_conversation(args):
     api._ingest_cache = {}
 
     miner = ConversationMiner()
-    result = miner.mine(text, source_id, api)
+    miner.mine(text, source_id, api)
 
     if proj:
         proj.close()
@@ -146,6 +154,7 @@ def _cmd_mine_conversation(args):
     if len(event_entries) < 3:
         print(f"\u26a0\ufe0f  GATE FAILED: {len(event_entries)} events < 3 minimum")
         print(f"   Per plan WF4: <3 events/session → permanently descoped.")
+        return 1  # non-zero so scripts can detect a descoped session (#1198)
     else:
         print(f"\u2705  GATE PASSED: {len(event_entries)} events")
 
@@ -157,7 +166,7 @@ def _cmd_mine_conversation(args):
         print(f"  [{kind}] {obj}..." if len(e.get("object","")) > 80 else f"  [{kind}] {obj}")
     print()
 
-    return result
+    return 0
 
 
 def _cmd_reconcile(args):
@@ -3465,10 +3474,18 @@ def main(argv: list[str] | None = None) -> int:
     rs.add_argument("backup_dir", help="Path to backup directory")
     rs.add_argument("--db", required=True, help="Target database path")
     rs.add_argument("--events", default="events.jsonl", help="Target event log path")
-    mc = sp.add_parser("mine-conversation", help="Mine conversation transcript → Events + Points (GAP-15)")
-    mc.add_argument("transcript", help="Path to transcript file (Speaker: text format)")
-    mc.add_argument("--source-id", default=None, help="Source identifier (default: basename of transcript)")
-    mc.add_argument("--db", default=None, help="FalkorDB docker:// URI for projection")
+    mc = sp.add_parser("mine-conversation",
+                        help="Mine meeting transcript → Events + draft Points (manual flow). "
+                             "Tutorial: docs/quickstart-selfhosted.md 'Meeting transcripts' "
+                             "(sample: tests/sample_transcript.txt)")
+    mc.add_argument("transcript",
+                    help="Path to transcript file (Speaker: text format, one line each)")
+    mc.add_argument("--source-id", default=None,
+                    help="Source identifier (default: transcript filename without extension)")
+    mc.add_argument("--db", default=None,
+                    help="Graph to project into: FalkorDB docker:// URI or embedded path "
+                         "(e.g. ~/.tortoise/tortoise.db). Omit for log-only mode "
+                         "(writes mine-<source-id>.jsonl, no W-3 gate)")
     sr = sp.add_parser("serve", help="Start Tortoise MCP server (stdio, default) or local HTTP (--http)")
     sr.add_argument("--http", action="store_true",
                     help="Serve MCP over HTTP (streamable) instead of stdio — self-hosted authenticated mode")

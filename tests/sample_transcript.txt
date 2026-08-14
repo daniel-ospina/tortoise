@@ -1,8 +1,8 @@
 Connor: We should raise the burn rate slowly.
 Connor: Because if we jump it too fast, early buyers get wrecked and they leave.
 Spencer: But a slow raise lets a manipulator accumulate a cheap position before anyone notices.
-Spencer: So the schedule has to be unpredictable, not just slow.
+Spencer: We decided the schedule has to be unpredictable, not just slow.
 Connor: That's not relevant if the position is washable anyway.
 Connor: A washable position means the ledger can be reset, therefore accumulation gives no lasting edge.
-Spencer: However, washing has a detectable cost, since every reset shows up in settlement flow.
-Connor: Given that settlement flow is public, honest actors can price the wash in.
+Spencer: However, washing has a detectable cost, since every reset shows up in the public ledger.
+Connor: Given that the ledger is public, honest actors can price the wash in.
