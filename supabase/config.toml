@@ -221,9 +221,16 @@ web3 = 30
 # Scope: this block governs LOCAL (supabase start) + SELFHOST only. The hosted
 # project (ybetwichurajbfswfeqa) is dashboard-managed — the human step is
 # Dashboard → Auth → Security → CAPTCHA with the same TURNSTILE_SECRET_KEY.
-# Local dev: set TURNSTILE_SECRET_KEY in .env (a Turnstile TEST secret works
-# for localhost) or flip enabled = false for local-only work. The PUBLIC site
-# key is client-side (widget) only — GoTrue never reads it.
+# Local dev: TURNSTILE_SECRET_KEY in .env (a Turnstile TEST secret) is
+# sufficient ONLY to boot the stack (supabase/tests/run_schema_tests.sh) —
+# GoTrue fails closed at boot without it. It does NOT exempt requests from
+# captcha: local password sign-in (POST /token grant_type=password) and
+# recovery (/recover) from website/signin.html carry no Turnstile token (0
+# widget refs in signin.html; site key empty), so those flows 400
+# captcha_failed even with a TEST secret set. For local form testing flip
+# [auth.captcha] enabled = false until #1003 ships the widget + captchaToken
+# pass-through. The PUBLIC site key is client-side (widget) only — GoTrue
+# never reads it.
 [auth.captcha]
 enabled = true
 provider = "turnstile"

@@ -78,6 +78,12 @@ created: 2026-08-13
 - Email-change (`PUT /auth/v1/user`) has no captcha hook — authenticated route;
   `double_confirm_changes` caps at 2 emails/change; no client guard in repo
   (#863 plan acceptance (a)).
-- Local dev: `supabase start` now requires `TURNSTILE_SECRET_KEY` set in `.env`
-  (a Turnstile TEST secret works for localhost) or `[auth.captcha]
-  enabled = false` temporarily — GoTrue fails closed.
+- Local dev: `supabase start` requires `TURNSTILE_SECRET_KEY` in `.env`
+  (a Turnstile TEST secret is sufficient ONLY to boot the stack —
+  `supabase/tests/run_schema_tests.sh`) or `[auth.captcha]
+  enabled = false` — GoTrue fails closed at boot. The TEST secret does NOT
+  exempt requests from captcha: `website/signin.html` (local mode) performs
+  password sign-in + recovery with no Turnstile widget (site key empty, #1003),
+  so those flows 400 `captcha_failed` regardless of the secret. Use
+  `enabled = false` for local form testing until #1003 ships the widget +
+  captchaToken pass-through.
