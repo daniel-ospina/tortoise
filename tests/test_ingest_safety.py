@@ -58,6 +58,12 @@ TRACK_B_SKIP = pytest.mark.skipif(
 
 @pytest.fixture
 def sdk():
+    # #1302: dream() is fail-closed on calibration by default
+    # (TORTOISE_EP_REQUIRE_CALIBRATION=1). This suite's Track B tests use
+    # synthetic baselines as evidence — calibration posture is orthogonal
+    # to what they verify (promote_point, direct-edge traversal). Disable it
+    # so the tests stay deterministic (same convention as epic903_fixtures).
+    os.environ.setdefault("TORTOISE_EP_REQUIRE_CALIBRATION", "0")
     db_path = os.path.join(tempfile.mkdtemp(prefix="tortoise_safety_"), "test.db")
     sdk = TortoiseSDK(db_path)
     yield sdk
