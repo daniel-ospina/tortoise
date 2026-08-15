@@ -220,14 +220,24 @@ async def topic_summary(
 
 
 @router.post("/dream", dependencies=[Depends(_require_key)])
-async def dream(full: bool = False):
+async def dream(full: bool = False, mode: str | None = None,
+                budget: int | None = None):
     """Trigger EP stabilization (registry: POST /v1/dream).
+
+    Epic 903-C8 (#1246): forwards mode/budget transparently (selfhost has
+    no #329 bucket — the per-pass operator budget bounds stale-first
+    passes).
 
     Incremental (default) or full=True whole-graph. Mirrors hosted_api.
     """
     sdk = _sdk()
     try:
-        result = sdk.dream(full=full) if full else sdk.dream(dirty_only=True)
+        if mode is not None:
+            result = sdk.dream(mode=mode, budget=budget)
+        elif full:
+            result = sdk.dream(full=True)
+        else:
+            result = sdk.dream(dirty_only=True)
         return {"status": "ok", "result": result}
     except Exception as e:  # noqa: BLE001
         _logger.exception("selfhost dream failed")

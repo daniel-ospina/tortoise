@@ -554,6 +554,11 @@ def _safe(fn, *args, **kwargs):
                     "violations": scrubbed}
         if isinstance(e, QuotaExceededError):
             return {"error": str(e), "code": ERR_QUOTA}
+        # Epic 903-C11 (#1249): BudgetExceededError (full-mode dream budget
+        # unsatisfiable — C6) is quota-class → ERR_QUOTA.
+        from tortoise.exceptions import BudgetExceededError
+        if isinstance(e, BudgetExceededError):
+            return {"error": str(e), "code": ERR_QUOTA}
         if isinstance(e, QuotaCheckError):
             return {"error": str(e), "code": ERR_QUOTA_SERVER}
         from tortoise.exceptions import Phase2Error
@@ -1130,12 +1135,19 @@ def tortoise_calibrate_summary() -> list[dict]:
 
 def tortoise_dream(full: bool = False, dirty_only: bool = True,
                    max_hops: int = 2,
-                   require_calibration: bool | None = None) -> dict:
+                   require_calibration: bool | None = None,
+                   mode: str | None = None,
+                   budget: int | None = None) -> dict:
     """Run EP stabilization (dreaming, #85).
 
     Stabilizes confidence values after batch writes without an explicit
     compute_confidence call. Default: dreams the accumulated dirty subgraph
     (incremental). Set full=True for whole-graph stabilization.
+
+    mode (epic 903-C6, #1244): explicit strategy override ∈ {"local",
+    "stale-first", "full"} — wins over full/dirty_only (I1 precedence);
+    None → auto-select. budget: per-pass operator cap; an explicit budget a
+    full pass cannot satisfy raises BudgetExceededError (→ ERR_QUOTA).
 
     #1157: the EP write is gated on calibration state — CalibrationError when
     evidence points are uncalibrated. None (default) resolves to the shared
@@ -1147,9 +1159,27 @@ def tortoise_dream(full: bool = False, dirty_only: bool = True,
     """
     if _transport_mode.get() == "http":
         return _http_excluded_error()
+    # Epic 903-C11 (#1249): validate mode BEFORE _safe (the wrapper swallows
+    # exceptions into plain error dicts) — unknown mode → ERR_INVALID
+    # (E2E-8.3 convention — named valid values in the message).
+    if mode is not None and mode not in ("local", "stale-first", "full"):
+        return {"error": (
+            f"unknown dream mode {mode!r} — expected one of "
+            "'local', 'stale-first', 'full'"), "code": ERR_INVALID}
     return _safe(_get_team_sdk().dream, dirty_only=dirty_only, full=full,
                  max_hops=max_hops,
-                 require_calibration=require_calibration)
+                 require_calibration=require_calibration,
+                 mode=mode, budget=budget)
+
+
+def tortoise_dream_health() -> dict:
+    """Dream observability (epic 903-C7, #1245): the zero-output silent-death
+    alarm verdict + health record (last pass, coverage, failure rate,
+    region_attempts, warm-start savings). Embedded call-triggered evaluator
+    (no daemon per #176)."""
+    if _transport_mode.get() == "http":
+        return _http_excluded_error()
+    return _safe(_get_team_sdk().dream_health_check)
 
 
 def tortoise_update_point(id: str, props: Any) -> dict:
