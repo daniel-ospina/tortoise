@@ -1954,6 +1954,10 @@ class TortoiseSDK:
         )
         # Dreaming (#85): invalidation changes the propagation graph.
         self._mark_dirty([id, corrected_by_id])
+        # Epic 903-C9 (#1247): edge TRANSFER — invalidate warm-start seeds on
+        # both endpoints' edges (a transfer is not a new/deleted edge; the
+        # C4 topology hooks don't fire here).
+        self._get_ep().invalidate_messages([id, corrected_by_id])
         return {"invalidated": True, "id": id, "corrected_by": corrected_by_id}
 
     # ── Supersede / Invalidate consolidation (epic #888 W2) ───────────
@@ -2256,6 +2260,10 @@ class TortoiseSDK:
 
         # Dreaming (#85): supersede changes the propagation graph around both.
         self._mark_dirty([old_id, new_id])
+        # Epic 903-C9 (#1247): edge TRANSFER — invalidate warm-start seeds on
+        # both endpoints' edges (supersede transfers edges with their msg_*
+        # properties; the seeds are computed under the old factor context).
+        self._get_ep().invalidate_messages([old_id, new_id])
 
         return {
             "invalidated": True,
