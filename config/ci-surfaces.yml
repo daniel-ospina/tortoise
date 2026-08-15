@@ -28,6 +28,8 @@ surfaces:
   - test_email_integration_resend.py
   - test_email_notify.py
   - test_email_signup.py
+  - test_epic903_hosted.py
+  - test_epic903_mcp.py
   - test_export_delete.py
   - test_failure_contract.py
   - test_hosted_api.py
@@ -101,10 +103,16 @@ surfaces:
   - test_embeddings.py
   - test_embeddings_filters.py
   - test_entity_stage.py
+  - test_enumeration_surfaces.py
   - test_epic903_fixtures.py
   - test_epic903_freshness.py
+  - test_epic903_lifecycle.py
+  - test_epic903_modes.py
+  - test_epic903_observability.py
+  - test_epic903_retention.py
   - test_epic903_scheduler.py
-  - test_enumeration_surfaces.py
+  - test_epic903_staleness.py
+  - test_epic903_warmstart.py
   - test_eval_metrics.py
   - test_event_log.py
   - test_event_provenance.py
@@ -244,6 +252,7 @@ surfaces:
   - test_waitlist_form.py
   - test_website_static.py
   sdk:
+  - test_client_surface.py
   - test_config.py
   - test_cross_lens.py
   - test_crypto.py

@@ -337,7 +337,10 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ToolDefinition(
         name="tortoise_dream",
         description="Run EP stabilization (dreaming, #85). "
-                    "Default: incremental dirty subgraph. Set full=True for whole-graph.",
+                    "Default: incremental dirty subgraph. Set full=True for whole-graph. "
+                    "mode (epic 903): explicit strategy override "
+                    "{\"local\", \"stale-first\", \"full\"} — wins over full; "
+                    "budget: per-pass operator cap.",
         annotations=_rw(),
         # #329: whole-graph EP is CPU-heavy — tenant MCP surface excluded
         # (stdio/operator only). REST /v1/dream remains tenant-reachable but is
@@ -345,6 +348,17 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         http_policy=False,
         sdk_method="dream",
         rest_spec=RestSpec(method="POST", path="/v1/dream"),
+    ),
+    ToolDefinition(
+        name="tortoise_dream_health",
+        description="Dream observability (epic 903-C7): zero-output "
+                    "silent-death alarm verdict + health record (last pass, "
+                    "coverage, failure rate, region_attempts, warm-start "
+                    "savings). Embedded call-triggered evaluator.",
+        annotations=_ro(),
+        http_policy=False,
+        sdk_method="dream_health_check",
+        rest_spec=RestSpec(method="GET", path="/v1/dream/health"),
     ),
     # ── Updates ───────────────────────────────────────────────────
     ToolDefinition(
