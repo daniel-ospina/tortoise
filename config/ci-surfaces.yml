@@ -107,6 +107,7 @@ surfaces:
   - test_epic903_modes.py
   - test_epic903_retention.py
   - test_epic903_scheduler.py
+  - test_epic903_warmstart.py
   - test_enumeration_surfaces.py
   - test_eval_metrics.py
   - test_event_log.py
