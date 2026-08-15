@@ -1848,6 +1848,13 @@ function App() {
             {team.tier || 'free'} tier · Upgrade
           </a>
         )}
+        {/* #1290: manage subscription — Stripe portal (upgrade/downgrade/cancel)
+            for teams with an existing Stripe customer (#310 backend exists). */}
+        {team && hasActiveSubscription && (
+          <button className="tier-badge tier-manage" onClick={manageBilling} disabled={billingPending}>
+            {billingPending ? 'Opening portal…' : 'Manage subscription'}
+          </button>
+        )}
         {team && team.status === 'flagged' && (
           <span className="tier-badge" title="Suspicious activity detected — see security alerts">⚠ flagged</span>
         )}

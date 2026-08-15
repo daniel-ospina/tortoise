@@ -92,6 +92,9 @@ tbody tr:last-child td { border-bottom: none; }
 }
 .tier-badge:hover { background: rgba(6,182,212,0.1); }
 .tier-badge.tier-team { border-color: rgba(74,222,128,0.4); color: var(--green); }
+/* #1290: manage-subscription button reuses the badge chrome */
+button.tier-badge { background: transparent; font-family: inherit; cursor: pointer; }
+button.tier-badge:disabled { opacity: 0.6; cursor: wait; }
 .inline-form { display: flex; gap: 8px; align-items: center; }
 .inline-form input, .inline-form select {
   background: var(--surface);
