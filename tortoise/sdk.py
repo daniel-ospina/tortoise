@@ -828,6 +828,17 @@ class TortoiseSDK:
         self._stale_unresolved: dict[str, dict] = {}
         self.retry_attempt_cap: int = 3
         self._retry_clock = _monotonic  # injectable for deterministic tests
+        # Epic 903-C7 (#1245): per-pass observability record — the zero-
+        # output alarm's inputs + the hosted /v1/dream/health surface
+        # (I5 field set). Updated by the dream adapters.
+        self._dream_metrics: dict = {
+            "last_pass_at": None,
+            "last_pass_output": 0,
+            "last_pass_mode": None,
+            "per_mode_counts": {},
+            "pass_count": 0,
+            "failure_count": 0,
+        }
 
     def _probe_embedded_busy(self, db_path: str) -> None:
         """Epic #900 §5.3: fail-fast on cross-process embedded overlap.
@@ -1892,6 +1903,12 @@ class TortoiseSDK:
             proj.g.query("MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t")
         # Dreaming (#85): deletion changes the graph structure around neighbors.
         self._mark_dirty([id])
+        # Epic 903-C4 (#1242): a deleted operator/claim changes the factor
+        # graph — surviving neighbors' edges carry messages computed under
+        # the OLD graph. Full drop (delete is rare; cheap). P2-review: the
+        # equivalence gate caught a 0.31 drift WITHOUT this (stale seeds
+        # reused across the deleted factor's boundary).
+        self._get_ep().invalidate_messages()
         return True
 
     def delete_point_wrapped(self, id: str) -> dict:
@@ -1948,6 +1965,10 @@ class TortoiseSDK:
         )
         # Dreaming (#85): invalidation changes the propagation graph.
         self._mark_dirty([id, corrected_by_id])
+        # Epic 903-C9 (#1247): edge TRANSFER — invalidate warm-start seeds on
+        # both endpoints' edges (a transfer is not a new/deleted edge; the
+        # C4 topology hooks don't fire here).
+        self._get_ep().invalidate_messages([id, corrected_by_id])
         return {"invalidated": True, "id": id, "corrected_by": corrected_by_id}
 
     # ── Supersede / Invalidate consolidation (epic #888 W2) ───────────
@@ -2250,6 +2271,10 @@ class TortoiseSDK:
 
         # Dreaming (#85): supersede changes the propagation graph around both.
         self._mark_dirty([old_id, new_id])
+        # Epic 903-C9 (#1247): edge TRANSFER — invalidate warm-start seeds on
+        # both endpoints' edges (supersede transfers edges with their msg_*
+        # properties; the seeds are computed under the old factor context).
+        self._get_ep().invalidate_messages([old_id, new_id])
 
         return {
             "invalidated": True,
@@ -3102,6 +3127,10 @@ class TortoiseSDK:
             )
         # Dreaming (#85): new edges change propagation — mark all inputs dirty.
         self._mark_dirty(inputs)
+        # Epic 903-C4 (#1242): a new operator changes the factor graph —
+        # existing direct-edge messages around its endpoints may be stale
+        # (a formerly operator-less claim now has an operator). Drop seeds.
+        self._get_ep().invalidate_messages(inputs)
         result = self.get_point(pid)
         # #432+#548 unified: domain payload + full point snapshot for both
         # the :GraphEvent store (subscriptions/poll) and JSONL (rebuild_all).
@@ -5173,6 +5202,9 @@ class TortoiseSDK:
         )
 
         self._mark_dirty([source_id, target_id])
+        # Epic 903-C4 (#1242): a new direct edge changes the factor graph —
+        # invalidate warm-start seeds on the endpoints' edges.
+        self._get_ep().invalidate_messages([source_id, target_id])
         return {"direct_edge": op_type, "from": source_id, "to": target_id,
                 "created": created, "deduped": not created}
 
@@ -6392,6 +6424,82 @@ class TortoiseSDK:
                 self._retry_backoff_until.pop(g, None)
                 self._stale_unresolved.pop(g, None)
 
+    def dream_health_check(self) -> dict:
+        """Epic 903-C7 (#1245): the zero-output silent-death alarm +
+        observability record (embedded evaluator — call-triggered, no
+        daemon per #176; the hosted surface is /v1/dream/health).
+
+        Alarm (COUNTER-based, never wall-clock — DE2E-8): stale backlog
+        exists (dirty roots non-empty) AND the last dream pass produced
+        zero output (affected claims == 0). A dead/silently-skipped dreamer
+        looks identical to "nothing to do" — this is the A8 detection.
+        Positive-control semantics: a backlog with REAL output is healthy —
+        the alarm MUST NOT fire.
+        """
+        backlog = len(self._dirty_roots)
+        last_output = self._dream_metrics.get("last_pass_output", 0)
+        last_pass_at = self._dream_metrics.get("last_pass_at")
+        alarm = (backlog > 0 and last_output == 0
+                 and last_pass_at is not None)
+        state = self.dream_health_state()
+        stale_backlog = sum(
+            1 for _ in self._dirty_roots)  # non-empty check below
+        return {
+            "alarm_verdict": alarm,
+            "alarm_reason": (
+                "zero_output_with_backlog" if alarm else "ok"),
+            "stale_backlog": backlog,
+            "last_pass_at": last_pass_at,
+            "last_pass_output": last_output,
+            "coverage_pct": self._metrics_coverage(),
+            "failure_rate": (
+                self._dream_metrics["failure_count"]
+                / max(self._dream_metrics["pass_count"], 1)),
+            "operator_counts": getattr(
+                self._get_dreamer(), "_last_operator_count", 0) or 0,
+            "per_mode_counts": dict(
+                self._dream_metrics.get("per_mode_counts", {})),
+            "region_attempts": state["retry_attempts"],
+            "warm_skipped_updates": state["warm_skipped_updates"],
+        }
+
+    def _metrics_coverage(self) -> float:
+        """Coverage % = fraction of live non-operator claims with a
+        lastDreamedAt stamp (graph-wide)."""
+        try:
+            proj = self._get_proj()
+            total = proj.g.query(
+                "MATCH (n:Point) "
+                "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+                "AND (n.status IS NULL OR n.status <> 'draft') "
+                "RETURN count(n)"
+            ).result_set
+            stamped = proj.g.query(
+                "MATCH (n:Point) "
+                "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+                "AND (n.status IS NULL OR n.status <> 'draft') "
+                "AND n.lastDreamedAt IS NOT NULL RETURN count(n)"
+            ).result_set
+            n_total = int(total[0][0]) if total else 0
+            n_stamped = int(stamped[0][0]) if stamped else 0
+            return (n_stamped / n_total) if n_total else 0.0
+        except Exception:
+            return 0.0
+
+    def _record_dream_metrics(self, result: dict, mode: str) -> None:
+        """Per-pass observability record (C7) — called by the dream adapters."""
+        from datetime import datetime, timezone
+        self._dream_metrics["last_pass_at"] = datetime.now(
+            timezone.utc).isoformat()
+        self._dream_metrics["last_pass_output"] = len(
+            result.get("affected_claims", []))
+        self._dream_metrics["last_pass_mode"] = result.get("mode", mode)
+        counts = self._dream_metrics["per_mode_counts"]
+        counts[mode] = counts.get(mode, 0) + 1
+        self._dream_metrics["pass_count"] += 1
+        if not result.get("converged", result.get("converged_all", True)):
+            self._dream_metrics["failure_count"] += 1
+
     def dream_health_state(self) -> dict:
         """C5-emitted region_attempts record (consumed by 903-C7's health
         surface): per-root attempt count + backoff state + stale_unresolved.
@@ -6399,11 +6507,16 @@ class TortoiseSDK:
         # P2-review (#1243): timestamp fields are _monotonic() BASE
         # (process-local seconds, meaningless across restart/process) —
         # C7's hosted health surface must not present them as wall-clock.
+        dreamer = self._get_dreamer()
         return {
             "clock": "monotonic",
             "retry_attempts": dict(self._retry_attempts),
             "retry_backoff_until": dict(self._retry_backoff_until),
             "stale_unresolved": dict(self._stale_unresolved),
+            # Epic 903-C4 (#1242): DE2E-6b cost metric — censored-update
+            # count from the last dream pass (C7 surfaces it; never gated).
+            "warm_skipped_updates": getattr(
+                dreamer, "_last_warm_skipped", 0) or 0,
         }
 
     def _mark_dirty(self, point_ids: list[str]) -> None:
@@ -6451,7 +6564,8 @@ class TortoiseSDK:
               require_calibration: bool | None = None,
               stamp_dreamed_at: bool = True,
               mode: str | None = None,
-              budget: int | None = None) -> dict:
+              budget: int | None = None,
+              warm_start: bool = True) -> dict:
         """Run EP stabilization (#85) with strategy auto-selection (epic 903).
 
         One call, three strategies (I1): ``local`` (write-triggered refresh
@@ -6493,6 +6607,11 @@ class TortoiseSDK:
                   small-graph/first-run → full; otherwise → local. The
                   scheduled path calls with mode="stale-first" explicitly
                   (903-C8 wiring) — auto never silently picks the window.
+            warm_start (epic 903-C4, #1242): True (default) — dream passes
+                  reuse the graph-persisted edge messages with gamma-skip
+                  censoring. False → a from-scratch pass (the fast path /
+                  oracle captures, e.g. F4's frozen ground truth, which must
+                  be bit-reproducible without censoring).
             budget: per-pass operator cap. None → the existing 200-op
                   selector cap (every pass bounded by construction); an
                   explicit budget overrides it; budget=0 → no-op result
@@ -6538,10 +6657,12 @@ class TortoiseSDK:
         dreamer = self._get_dreamer()
         if resolved == "local":
             return self._dream_local(dreamer, max_hops, stamp_dreamed_at,
-                                     budget)
+                                     budget, warm_start)
         if resolved == "stale-first":
-            return self._dream_stale_first(dreamer, max_hops, budget)
-        return self._dream_full(dreamer, max_hops, stamp_dreamed_at, budget)
+            return self._dream_stale_first(dreamer, max_hops, budget,
+                                           warm_start)
+        return self._dream_full(dreamer, max_hops, stamp_dreamed_at, budget,
+                                warm_start)
 
     def _resolve_dream_mode(self, mode: str | None, full: bool) -> str:
         """I1 precedence table (epic 903-C6 #1244).
@@ -6607,7 +6728,7 @@ class TortoiseSDK:
                 "scanned_count": 0}
 
     def _dream_local(self, dreamer, max_hops: int, stamp_dreamed_at: bool,
-                     budget: int | None) -> dict:
+                     budget: int | None, warm_start: bool = True) -> dict:
         """Local mode (W1): EP over the dirty roots. I1 local key-set.
 
         Dirty-root clearing keeps the #395-era retention semantics (roots in
@@ -6623,6 +6744,7 @@ class TortoiseSDK:
             anchors, max_hops=max_hops,
             stamp_dreamed_at=stamp_dreamed_at,
             op_cap=budget if budget is not None else 200,
+            warm_start=warm_start,
         )
         affected = set(result.get("affected_claims", []))
         # Epic 903-C5 (#1243) — W4 retention (the A2-bug fix): affected
@@ -6643,17 +6765,16 @@ class TortoiseSDK:
             self._register_failed_attempt(affected)
         reachable = self._window_closure(anchors, max_hops)
         coverage = (len(affected) / len(reachable)) if reachable else 0.0
-        return {
-            "mode": "local",
-            "iterations": result["iterations"],
-            "converged": result["converged"],
-            "affected_claims": result["affected_claims"],
-            "budget_used": getattr(dreamer, "_last_operator_count", 0) or 0,
-            "coverage": coverage,
-        }
+        result["coverage"] = coverage
+        result["budget_used"] = getattr(
+            dreamer, "_last_operator_count", 0) or 0
+        result["mode"] = "local"
+        self._record_dream_metrics(result, "local")
+        return result
 
     def _dream_stale_first(self, dreamer, max_hops: int,
-                           budget: int | None) -> dict:
+                           budget: int | None,
+                           warm_start: bool = True) -> dict:
         """Stale-first mode (W2): staleness-ranked window ∪ dirty roots.
 
         I1 key-set (I6→I1 mapping): ``operators_deduped`` is dropped
@@ -6667,7 +6788,8 @@ class TortoiseSDK:
         affected roots; a failed pass clears nothing (W4 retention —
         non-converged regions reselect via the window union).
         """
-        result = dreamer.dream_window(budget=budget, max_hops=max_hops)
+        result = dreamer.dream_window(budget=budget, max_hops=max_hops,
+                                     warm_start=warm_start)
         window = getattr(dreamer, "_last_window", []) or []
         affected = set(result.get("affected_claims", []))
         if result.get("converged"):
@@ -6681,18 +6803,15 @@ class TortoiseSDK:
                 set(self._dirty_roots) & affected)
         reachable = self._window_closure(window, max_hops)
         coverage = (len(affected) / len(reachable)) if reachable else 0.0
-        return {
-            "mode": "stale-first",
-            "batches": result["batches"],
-            "converged_all": result["converged_all"],
-            "converged": result["converged"],
-            "affected_claims": result["affected_claims"],
-            "budget_used": result["budget_used"],
-            "coverage": coverage,
-        }
+        result["coverage"] = coverage
+        # I6→I1 mapping: drop the scheduler-internal operators_deduped
+        # (budget_used already = distinct operators after dedup).
+        result.pop("operators_deduped", None)
+        self._record_dream_metrics(result, "stale-first")
+        return result
 
     def _dream_full(self, dreamer, max_hops: int, stamp_dreamed_at: bool,
-                    budget: int | None) -> dict:
+                    budget: int | None, warm_start: bool = True) -> dict:
         """Full mode (J3): whole-graph stabilization. I1 full key-set.
 
         An explicit budget the graph cannot satisfy raises
@@ -6701,7 +6820,7 @@ class TortoiseSDK:
         """
         result = dreamer.dream_all(
             max_hops=max_hops, stamp_dreamed_at=stamp_dreamed_at,
-            budget=budget,
+            budget=budget, warm_start=warm_start,
         )
         # P2-review (#1243): a CONVERGED full pass resolves every reachable
         # region — clear the affected roots' retry state so a later failed
@@ -6715,15 +6834,10 @@ class TortoiseSDK:
         reachable = self._reachable_claim_count()
         coverage = ((result["total_affected"] / reachable)
                     if reachable else 0.0)
-        return {
-            "mode": "full",
-            "batches": result["batches"],
-            "total_affected": result["total_affected"],
-            "converged_all": result["converged_all"],
-            "budget_used": result["budget_used"],
-            "coverage": coverage,
-            "scanned_count": result["scanned_count"],
-        }
+        result["coverage"] = coverage
+        result["mode"] = "full"
+        self._record_dream_metrics(result, "full")
+        return result
 
     def _window_closure(self, window: list[str], max_hops: int) -> set[str]:
         """Claim-hop closure of a dream window (I1 coverage denominator:
@@ -6929,8 +7043,13 @@ class TortoiseSDK:
         # stamp_dreamed_at=False — a READ never moves the freshness signal
         # that the 903-C4 stale-first scheduler ranks on.
         if factors is None and anchors is None and self._dirty_roots:
+            # Epic 903-C4 (#1242): reads are FROM-SCRATCH too (warm_start
+            # False) — the read-triggered lazy pass must be bit-identical
+            # to a from-scratch recompute (F4's oracle reproducibility
+            # contract); censoring is a background-pass optimization.
             self.dream(dirty_only=True, stamp_dreamed_at=False,
-                       require_calibration=require_calibration)
+                       require_calibration=require_calibration,
+                       warm_start=False)
             # Re-extract factors after dreaming (graph may have changed).
             factors_data, _ = proj.extract_svbp_factors()
             operator_ids = [f[0] for f in factors_data]
@@ -6956,7 +7075,13 @@ class TortoiseSDK:
             # dirty roots reachable only through legacy op_type-only operators
             # (the dream selector is {is_operator:true}-only; _affected_claims
             # is op_type-aware).
-            self.dream(dirty_only=True)
+            # Epic 903-C4 (#1242): the read-path fail-safe pass is
+            # FROM-SCRATCH (warm_start=False) — reads never censor.
+            # #1315/#1314: propagate the caller's calibration posture — the
+            # epic903 refactor re-added an unpropagated dream here (same
+            # class as the #1315 fix; line 7050/7202 already propagate).
+            self.dream(dirty_only=True, warm_start=False,
+                       require_calibration=require_calibration)
             iterations, converged = ep.run(roots, max_hops=None,
                                            evidence=run_evidence)
             if not ep._last_affected and not ep._last_truncated:
@@ -7034,6 +7159,10 @@ class TortoiseSDK:
         # Dreaming (#85, P1): a baseline change alters the prior — neighbors
         # whose confidence derived from this claim are now stale.
         self._mark_dirty([claim_id])
+        # Epic 903-C4 (#1242): a prior change alters factor behavior WITHOUT
+        # a topology change — warm-start seeds (edge messages) computed under
+        # the OLD prior are stale. Full drop (cheap) per the plan's W3 rule.
+        self._get_ep().invalidate_messages()
         return {"claim_id": claim_id, "alpha": alpha, "beta": beta, "source": source}
 
     def _invalidate_inheritance_gate(self, point_ids: list[str]) -> None:
@@ -7076,7 +7205,8 @@ class TortoiseSDK:
         if claim_id in self._dirty_roots:
             self.dream(dirty_only=True,
                        require_calibration=require_calibration,
-                       stamp_dreamed_at=False)  # read path — never stamps (epic 903-C2)
+                       stamp_dreamed_at=False,  # read path — never stamps (epic 903-C2)
+                       warm_start=False)  # from-scratch reads (epic 903-C4)
         return self._get_ep().compute_confidence(claim_id)
 
     def _apply_source_inheritance(self, recency_decay: float | None = None,

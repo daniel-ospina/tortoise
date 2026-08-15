@@ -363,7 +363,11 @@ async def _dream_worker(team_id: str) -> None:
         try:
             # Batch mark once (P3, #85) — one reverse-BFS pair, not N.
             sdk._mark_dirty(roots)
-            sdk.dream(dirty_only=True)
+            # Epic 903-C8 (#1246): explicit mode routing — a write-burst
+            # drain is LOCAL mode (W1; never silently full — the I1
+            # precedence table governs; scheduled stale-first passes call
+            # /v1/dream with mode="stale-first" explicitly).
+            sdk.dream(dirty_only=True, mode="local")
         finally:
             sdk.close()
     except Exception:
@@ -2086,20 +2090,33 @@ async def get_point(point_id: str, team: dict = Depends(get_current_team)):
 @app.post("/v1/dream")
 async def dream(
     full: bool = False,
+    mode: str | None = None,
+    budget: int | None = None,
     team: dict = Depends(get_current_team),
 ):
     """Trigger EP stabilization (dreaming, #85) for the team's graph.
 
     Incremental (default): stabilizes the team's accumulated dirty subgraph.
-    full=True: whole-graph stabilization. Fast-path queries never block on
-    this — dreaming is a background maintenance process.
+    full=True: whole-graph stabilization. mode: explicit strategy override
+    (I1 precedence — wins over full). budget: per-pass operator cap.
+    Fast-path queries never block on this — dreaming is a background
+    maintenance process.
+
+    Epic 903-C8 (#1246) budget rule: FULL-mode passes (including via the
+    mode override) count against the #329 per-team hourly bucket; window
+    (stale-first) passes are bounded solely by their per-pass operator
+    budget and do NOT consume the bucket (shared operator-hour accounting
+    is a deferred refinement).
     """
     # #329: full-graph EP stabilization is CPU-heavy; per-key rate limiting is
     # NOT the bound (tenants can hold up to max_api_keys keys). Per-team hourly
     # budget MAX_DREAM_FULL_PER_HOUR for full=True; incremental is cheap.
     import time as _t
     from tortoise.quota import MAX_DREAM_FULL_PER_HOUR
-    if full:
+    # I1 precedence: an explicit mode wins; else full=True ⇒ full; else the
+    # SDK auto-selects. The budget counts FULL passes only (incl. override).
+    effective_full = (mode == "full") if mode is not None else full
+    if effective_full:
         tid = team["team_id"]
         now_ts = _t.time()
         bucket = _DREAM_FULL_BUCKETS.setdefault(tid, [])
@@ -2107,16 +2124,24 @@ async def dream(
         # prune -> check -> append (never pop between check and append — that
         # orphans the appended timestamp and silently disables the budget)
         if len(bucket) >= MAX_DREAM_FULL_PER_HOUR:
+            # Epic 903-C8 (#1246): the pre-existing 429 gains the
+            # Retry-After header (seconds until the hourly window resets —
+            # conscious scope addition per the epic plan; consistent with the
+            # §6.1 429 contract).
+            retry_after = max(1, int(3600 - (now_ts - bucket[0])))
             raise HTTPException(
                 status_code=429,
                 detail=f"Full-graph dream budget exhausted ({MAX_DREAM_FULL_PER_HOUR}/hour). "
                        "Try incremental dreaming or wait.",
+                headers={"Retry-After": str(retry_after)},
             )
         bucket.append(now_ts)
 
     sdk = _make_sdk(namespace=team["team_id"])
     try:
-        if full:
+        if mode is not None:
+            result = sdk.dream(mode=mode, budget=budget)
+        elif full:
             result = sdk.dream(full=True)
         else:
             # Drain whatever is queued plus any in-memory dirty roots.
@@ -2130,6 +2155,21 @@ async def dream(
                 sdk._mark_dirty(queued_roots)
             result = sdk.dream(dirty_only=True)
         return result
+    finally:
+        sdk.close()
+
+
+@app.get("/v1/dream/health")
+async def dream_health(
+    team: dict = Depends(get_current_team),
+):
+    """Dream observability (epic 903-C7, #1245): the I5 field set — last-pass
+    ts, coverage %, failure rate, operator counts, per-mode counts, stale
+    backlog, alarm verdict (zero-output silent-death detection, A8),
+    region_attempts (C5) and warm-start savings (C4)."""
+    sdk = _make_sdk(namespace=team["team_id"])
+    try:
+        return sdk.dream_health_check()
     finally:
         sdk.close()
 
