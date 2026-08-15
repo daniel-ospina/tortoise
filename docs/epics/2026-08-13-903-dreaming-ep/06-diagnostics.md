@@ -85,8 +85,8 @@ production-snapshot runs are optional/TO-DO below).
 | connected components | 17 (12 operator regions + 5 isolated claims; sizes sum to 52 = 40 + 12) |
 | invariants | 8/8 PASS |
 
-**Decision: FULL refresh wins at this scale.** Recorded 2026-08-14 (epistemic
-team, DE2E-10).
+**Decision at the F5 (representative synthetic) scale: FULL refresh wins.**
+Recorded 2026-08-14 (epistemic team, DE2E-10).
 
 - `n_operators = 12 < 200` → rule 1: a full pass is bounded by the same cap
   window passes would use; windows can never beat whole-graph.
@@ -94,14 +94,26 @@ team, DE2E-10).
   claims are operator-less isolated) confirms the graph is a disjoint star
   collection — a stale-first window pass would select ≈ the same operators as
   a full pass, minus the bookkeeping.
-- **Consequence:** items 3–5 scheduler machinery scope is SIMPLIFIED — keep
-  the existing `dream(full=True)` full-pass path; do NOT build the stale-first
-  window scheduler at this scale. A recorded plan amendment files the scope
-  change before those items are implemented.
-- **Caveat:** recorded against the representative synthetic shape (F5), not a
-  production snapshot. If the production graph later shows `n_operators >=
-  200` with localized neighborhoods, the decision flips to stale-first and the
-  machinery is built as planned (this record is then amended).
+- **Consequence at F5 scale only:** the scheduler machinery would be
+  simplified to `dream(full=True)`. NOTE: this consequence was NOT applied —
+  the machinery (items 3–5) was built as planned because (a) Indicator 2
+  requires the selectable strategy regardless, and (b) the production-scale
+  data point below flips the decision.
+
+**Decision at PRODUCTION scale: STALE-FIRST refresh wins — decisively.
+Recorded 2026-08-14 (epistemic team, product owner statement + DE2E-10 rule 3).**
+
+- **Product-owner data point (2026-08-14):** production graphs will be in
+  the range **≈ 5,000–500,000 operators** — 25×–2,500× above the 200-operator
+  threshold. Rule 3 applies: stale-first windowed passes win; a full-graph
+  pass at the top of the range (500k operators) is O(whole graph) per pass —
+  infeasible as a routine operation, and `dream_all`'s `max_total_operators`
+  cap (200,000) cannot even complete a full pass at 500k.
+- **Consequence:** the stale-first scheduler (#1241, C3) is the production
+  strategy — the machinery was built as planned and this record confirms it
+  is the RIGHT choice at the real scale. The F5-scale FULL decision is
+  superseded for production by this data point; a real production-snapshot
+  measurement remains a validation (exact numbers), not a decision gate.
 
 ### Production-snapshot run — TO-DO (optional, external dependency)
 
@@ -116,10 +128,14 @@ FalkorDB with a production graph). When one is available:
 **Observed data point (2026-08-14, local dev embedded graph — NOT the
 canonical production snapshot; single-writer EVAL-only store, not
 representative of hosted tenants):** ≈ 19.6k claims / 653 operators / 1.3k
-IMPL edges — above the 200-operator threshold, so the re-evaluation trigger
-is REAL, not hypothetical. The F5-based FULL decision stands until a
-representative snapshot is measured on that graph (neighborhood analysis will
-then decide between rule 2 and rule 3).
+IMPL edges — above the 200-operator threshold, consistent with the
+product-owner production range (5k–500k operators).
+
+**SUPERSEDED by the production-scale data point above:** the product-owner
+statement (5k–500k operators) is the canonical decision input; the recorded
+decision is now STALE-FIRST at production scale. A real production snapshot
+is still valuable as a validation/measurement (exact fan-out + neighborhood
+stats to size the window budget), but the strategy decision is made.
 
 - **Outcome:** ⬜ (empty until run)
 - **Recorded by / date:** ⬜
@@ -132,5 +148,8 @@ then decide between rule 2 and rule 3).
 
 - [x] Diagnostics script (`graph-scripts/graph-diagnostics.py`) — emits all metrics + invariants
 - [x] Automated invariants tested on the F5 fixture (`tests/test_graph_diagnostics.py`)
-- [x] Decision recorded for the representative (F5) scale: **FULL**
-- [ ] Production-snapshot run (optional, TO-DO) — re-evaluation trigger
+- [x] Decision recorded for the representative (F5) scale: **FULL** (synthetic only)
+- [x] Decision recorded for PRODUCTION scale (product-owner data point
+      5k–500k operators): **STALE-FIRST** — supersedes the F5 FULL decision
+- [ ] Production-snapshot run (optional) — VALIDATION measurement (fan-out,
+      neighborhood sizes to size the window budget), not a decision gate
