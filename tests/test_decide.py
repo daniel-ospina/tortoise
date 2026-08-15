@@ -38,6 +38,11 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture
 def sdk():
     """SDK against the live FalkorDB with a unique namespace per test run."""
+    # #1302: compute_confidence/dream are fail-closed on calibration by
+    # default; these tests assert EP semantics with synthetic baselines —
+    # calibration posture is orthogonal (same convention as epic903_fixtures
+    # and the Track B suite).
+    os.environ.setdefault("TORTOISE_EP_REQUIRE_CALIBRATION", "0")
     ns = f"test_decide_{uuid.uuid4().hex[:8]}"
     sdk = TortoiseSDK(namespace=ns)
     yield sdk
