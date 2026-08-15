@@ -7077,7 +7077,11 @@ class TortoiseSDK:
             # is op_type-aware).
             # Epic 903-C4 (#1242): the read-path fail-safe pass is
             # FROM-SCRATCH (warm_start=False) — reads never censor.
-            self.dream(dirty_only=True, warm_start=False)
+            # #1315/#1314: propagate the caller's calibration posture — the
+            # epic903 refactor re-added an unpropagated dream here (same
+            # class as the #1315 fix; line 7050/7202 already propagate).
+            self.dream(dirty_only=True, warm_start=False,
+                       require_calibration=require_calibration)
             iterations, converged = ep.run(roots, max_hops=None,
                                            evidence=run_evidence)
             if not ep._last_affected and not ep._last_truncated:
