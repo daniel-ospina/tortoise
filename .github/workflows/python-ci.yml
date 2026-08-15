@@ -237,6 +237,16 @@ jobs:
         # sklearn at module scope (post-merge-validation.yml installs
         # '.[embeddings]' for the same reason).
         run: pip install -e '.[test,embeddings]'
+      - name: Clean stale redislite orphans (issue #1005 tempdir pollution)
+        # Leaky shared runners accumulate redislite tempdirs from every
+        # failed embedded-redis run — discover() then skips its stale-socket
+        # walk (>5000 entries), so the reaper chaos tests fail with
+        # "orphan not cleaned". Reap strays before the suite. Best-effort.
+        run: |
+          pkill -f "redis-server unixsocket" || true
+          TMPD=$(python3 -c "import tempfile;print(tempfile.gettempdir())")
+          find "$TMPD" -maxdepth 1 -type d -name "tmp*" -mmin +30 -exec rm -rf {} + 2>/dev/null || true
+          echo "tempdir cleaned"
       - name: Cache HF embedding model (all-MiniLM-L6-v2)
         # ~90MB; persisted so the pre-cache step below is a no-op on
         # subsequent runs and CI never re-downloads from huggingface.co.
@@ -391,6 +401,16 @@ jobs:
           python-version: '3.12'   # pyproject requires-python >= 3.12
       - name: Install package + test extras
         run: pip install -e '.[test,embeddings]'
+      - name: Clean stale redislite orphans (issue #1005 tempdir pollution)
+        # Leaky shared runners accumulate redislite tempdirs from every
+        # failed embedded-redis run — discover() then skips its stale-socket
+        # walk (>5000 entries), so the reaper chaos tests fail with
+        # "orphan not cleaned". Reap strays before the suite. Best-effort.
+        run: |
+          pkill -f "redis-server unixsocket" || true
+          TMPD=$(python3 -c "import tempfile;print(tempfile.gettempdir())")
+          find "$TMPD" -maxdepth 1 -type d -name "tmp*" -mmin +30 -exec rm -rf {} + 2>/dev/null || true
+          echo "tempdir cleaned"
       - name: Cache HF embedding model (all-MiniLM-L6-v2)
         uses: actions/cache@v4
         with:
@@ -508,6 +528,16 @@ jobs:
         # sentence_transformers (embeddings extra), and create_point calls
         # compute_embedding. Matches the sibling jobs exactly.
         run: pip install -e '.[test,embeddings]'
+      - name: Clean stale redislite orphans (issue #1005 tempdir pollution)
+        # Leaky shared runners accumulate redislite tempdirs from every
+        # failed embedded-redis run — discover() then skips its stale-socket
+        # walk (>5000 entries), so the reaper chaos tests fail with
+        # "orphan not cleaned". Reap strays before the suite. Best-effort.
+        run: |
+          pkill -f "redis-server unixsocket" || true
+          TMPD=$(python3 -c "import tempfile;print(tempfile.gettempdir())")
+          find "$TMPD" -maxdepth 1 -type d -name "tmp*" -mmin +30 -exec rm -rf {} + 2>/dev/null || true
+          echo "tempdir cleaned"
       - name: Cache HF embedding model (all-MiniLM-L6-v2)
         # Sibling parity (test/test-slow both cache BEFORE pre-caching) —
         # without the restore step every run downloads ~90MB.
