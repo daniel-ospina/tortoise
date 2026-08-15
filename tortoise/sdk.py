@@ -828,6 +828,17 @@ class TortoiseSDK:
         self._stale_unresolved: dict[str, dict] = {}
         self.retry_attempt_cap: int = 3
         self._retry_clock = _monotonic  # injectable for deterministic tests
+        # Epic 903-C7 (#1245): per-pass observability record — the zero-
+        # output alarm's inputs + the hosted /v1/dream/health surface
+        # (I5 field set). Updated by the dream adapters.
+        self._dream_metrics: dict = {
+            "last_pass_at": None,
+            "last_pass_output": 0,
+            "last_pass_mode": None,
+            "per_mode_counts": {},
+            "pass_count": 0,
+            "failure_count": 0,
+        }
 
     def _probe_embedded_busy(self, db_path: str) -> None:
         """Epic #900 §5.3: fail-fast on cross-process embedded overlap.
@@ -6413,6 +6424,82 @@ class TortoiseSDK:
                 self._retry_backoff_until.pop(g, None)
                 self._stale_unresolved.pop(g, None)
 
+    def dream_health_check(self) -> dict:
+        """Epic 903-C7 (#1245): the zero-output silent-death alarm +
+        observability record (embedded evaluator — call-triggered, no
+        daemon per #176; the hosted surface is /v1/dream/health).
+
+        Alarm (COUNTER-based, never wall-clock — DE2E-8): stale backlog
+        exists (dirty roots non-empty) AND the last dream pass produced
+        zero output (affected claims == 0). A dead/silently-skipped dreamer
+        looks identical to "nothing to do" — this is the A8 detection.
+        Positive-control semantics: a backlog with REAL output is healthy —
+        the alarm MUST NOT fire.
+        """
+        backlog = len(self._dirty_roots)
+        last_output = self._dream_metrics.get("last_pass_output", 0)
+        last_pass_at = self._dream_metrics.get("last_pass_at")
+        alarm = (backlog > 0 and last_output == 0
+                 and last_pass_at is not None)
+        state = self.dream_health_state()
+        stale_backlog = sum(
+            1 for _ in self._dirty_roots)  # non-empty check below
+        return {
+            "alarm_verdict": alarm,
+            "alarm_reason": (
+                "zero_output_with_backlog" if alarm else "ok"),
+            "stale_backlog": backlog,
+            "last_pass_at": last_pass_at,
+            "last_pass_output": last_output,
+            "coverage_pct": self._metrics_coverage(),
+            "failure_rate": (
+                self._dream_metrics["failure_count"]
+                / max(self._dream_metrics["pass_count"], 1)),
+            "operator_counts": getattr(
+                self._get_dreamer(), "_last_operator_count", 0) or 0,
+            "per_mode_counts": dict(
+                self._dream_metrics.get("per_mode_counts", {})),
+            "region_attempts": state["retry_attempts"],
+            "warm_skipped_updates": state["warm_skipped_updates"],
+        }
+
+    def _metrics_coverage(self) -> float:
+        """Coverage % = fraction of live non-operator claims with a
+        lastDreamedAt stamp (graph-wide)."""
+        try:
+            proj = self._get_proj()
+            total = proj.g.query(
+                "MATCH (n:Point) "
+                "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+                "AND (n.status IS NULL OR n.status <> 'draft') "
+                "RETURN count(n)"
+            ).result_set
+            stamped = proj.g.query(
+                "MATCH (n:Point) "
+                "WHERE (n.is_operator IS NULL OR n.is_operator = false) "
+                "AND (n.status IS NULL OR n.status <> 'draft') "
+                "AND n.lastDreamedAt IS NOT NULL RETURN count(n)"
+            ).result_set
+            n_total = int(total[0][0]) if total else 0
+            n_stamped = int(stamped[0][0]) if stamped else 0
+            return (n_stamped / n_total) if n_total else 0.0
+        except Exception:
+            return 0.0
+
+    def _record_dream_metrics(self, result: dict, mode: str) -> None:
+        """Per-pass observability record (C7) — called by the dream adapters."""
+        from datetime import datetime, timezone
+        self._dream_metrics["last_pass_at"] = datetime.now(
+            timezone.utc).isoformat()
+        self._dream_metrics["last_pass_output"] = len(
+            result.get("affected_claims", []))
+        self._dream_metrics["last_pass_mode"] = result.get("mode", mode)
+        counts = self._dream_metrics["per_mode_counts"]
+        counts[mode] = counts.get(mode, 0) + 1
+        self._dream_metrics["pass_count"] += 1
+        if not result.get("converged", result.get("converged_all", True)):
+            self._dream_metrics["failure_count"] += 1
+
     def dream_health_state(self) -> dict:
         """C5-emitted region_attempts record (consumed by 903-C7's health
         surface): per-root attempt count + backoff state + stale_unresolved.
@@ -6678,14 +6765,12 @@ class TortoiseSDK:
             self._register_failed_attempt(affected)
         reachable = self._window_closure(anchors, max_hops)
         coverage = (len(affected) / len(reachable)) if reachable else 0.0
-        return {
-            "mode": "local",
-            "iterations": result["iterations"],
-            "converged": result["converged"],
-            "affected_claims": result["affected_claims"],
-            "budget_used": getattr(dreamer, "_last_operator_count", 0) or 0,
-            "coverage": coverage,
-        }
+        result["coverage"] = coverage
+        result["budget_used"] = getattr(
+            dreamer, "_last_operator_count", 0) or 0
+        result["mode"] = "local"
+        self._record_dream_metrics(result, "local")
+        return result
 
     def _dream_stale_first(self, dreamer, max_hops: int,
                            budget: int | None,
@@ -6718,15 +6803,12 @@ class TortoiseSDK:
                 set(self._dirty_roots) & affected)
         reachable = self._window_closure(window, max_hops)
         coverage = (len(affected) / len(reachable)) if reachable else 0.0
-        return {
-            "mode": "stale-first",
-            "batches": result["batches"],
-            "converged_all": result["converged_all"],
-            "converged": result["converged"],
-            "affected_claims": result["affected_claims"],
-            "budget_used": result["budget_used"],
-            "coverage": coverage,
-        }
+        result["coverage"] = coverage
+        # I6→I1 mapping: drop the scheduler-internal operators_deduped
+        # (budget_used already = distinct operators after dedup).
+        result.pop("operators_deduped", None)
+        self._record_dream_metrics(result, "stale-first")
+        return result
 
     def _dream_full(self, dreamer, max_hops: int, stamp_dreamed_at: bool,
                     budget: int | None, warm_start: bool = True) -> dict:
@@ -6752,15 +6834,10 @@ class TortoiseSDK:
         reachable = self._reachable_claim_count()
         coverage = ((result["total_affected"] / reachable)
                     if reachable else 0.0)
-        return {
-            "mode": "full",
-            "batches": result["batches"],
-            "total_affected": result["total_affected"],
-            "converged_all": result["converged_all"],
-            "budget_used": result["budget_used"],
-            "coverage": coverage,
-            "scanned_count": result["scanned_count"],
-        }
+        result["coverage"] = coverage
+        result["mode"] = "full"
+        self._record_dream_metrics(result, "full")
+        return result
 
     def _window_closure(self, window: list[str], max_hops: int) -> set[str]:
         """Claim-hop closure of a dream window (I1 coverage denominator:

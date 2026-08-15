@@ -2134,6 +2134,21 @@ async def dream(
         sdk.close()
 
 
+@app.get("/v1/dream/health")
+async def dream_health(
+    team: dict = Depends(get_current_team),
+):
+    """Dream observability (epic 903-C7, #1245): the I5 field set — last-pass
+    ts, coverage %, failure rate, operator counts, per-mode counts, stale
+    backlog, alarm verdict (zero-output silent-death detection, A8),
+    region_attempts (C5) and warm-start savings (C4)."""
+    sdk = _make_sdk(namespace=team["team_id"])
+    try:
+        return sdk.dream_health_check()
+    finally:
+        sdk.close()
+
+
 @app.get("/v1/search")
 async def search(q: str, limit: int = Query(10, ge=1, le=100), team: dict = Depends(get_current_team)):
     """Hybrid search across Points (FTS + vector + structural, RRF-fused).
