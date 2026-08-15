@@ -19,6 +19,7 @@ surfaces:
   - test_cli_signup.py
   - test_cli_team_keys.py
   - test_client_ip_middleware.py
+  - test_client_surface.py
   - test_commit_endpoint.py
   - test_commit_schema.py
   - test_cross_subdomain_cookie_sync.py
@@ -103,6 +104,8 @@ surfaces:
   - test_entity_stage.py
   - test_epic903_fixtures.py
   - test_epic903_freshness.py
+  - test_epic903_modes.py
+  - test_epic903_retention.py
   - test_epic903_scheduler.py
   - test_enumeration_surfaces.py
   - test_eval_metrics.py
