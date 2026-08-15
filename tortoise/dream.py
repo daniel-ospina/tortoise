@@ -80,7 +80,8 @@ class Dreamer:
               direction: str = "both",
               stamp_dreamed_at: bool = True,
               trivial_stamp: bool = True,
-              op_cap: int = 200) -> dict:
+              op_cap: int = 200,
+              warm_start: bool = True) -> dict:
         """Run EP over the subgraph reachable from ``anchors``.
 
         Reuses the fast-path selector (analyze._bfs_select_operators, capped
@@ -162,7 +163,8 @@ class Dreamer:
             # — hydrate graph-persisted baselines and pass a copy to ep.run.
             # run() is call-scoped, so the copy cannot leak into later runs.
             iterations, converged, affected = self._ep_run_batch(
-                proj, seed_ids, max_hops, stamp_dreamed_at)
+                proj, seed_ids, max_hops, stamp_dreamed_at,
+                warm_start=warm_start)
             stamp = stamp_dreamed_at and converged
             # Epic 903-C2 (#1240): operator-less anchors among the dirty roots
             # are trivially stamped in the same local pass (the EP write-back
@@ -177,7 +179,8 @@ class Dreamer:
             }
 
     def _ep_run_batch(self, proj, seed_ids: list[str], max_hops: int,
-                      stamp: bool) -> tuple[int, bool, set[str]]:
+                      stamp: bool, warm_start: bool = True
+                      ) -> tuple[int, bool, set[str]]:
         """Run EP over ``seed_ids`` + the atomic UNWIND write-back (#1240).
 
         Shared by ``dream()`` and the stale-first scheduler
@@ -193,10 +196,19 @@ class Dreamer:
         # — hydrate graph-persisted baselines and pass a copy to ep.run.
         # run() is call-scoped, so the copy cannot leak into later runs.
         self._sdk._hydrate_evidence()
+        # Epic 903-C4 (#1242): dream passes WARM-START — the graph-persisted
+        # edge messages are the seed and the gamma-skip censors redundant
+        # factor updates (bounded-error reuse). The fast path
+        # (compute_confidence) never passes warm_start (default False).
         iterations, converged = ep.run(
             seed_ids, max_hops=max_hops,
             evidence=dict(self._sdk._evidence),
+            warm_start=warm_start,
         )
+        # Epic 903-C4 (#1242): DE2E-6b cost metric — the censored-update
+        # counter is recorded per run (surfaced by the SDK adapters for the
+        # 903-C7 health surface; never gated on wall-clock).
+        self._last_warm_skipped = getattr(ep, "_warm_skipped_updates", 0)
         # #395: the write-back set == the run set by construction — consume
         # ep._last_affected (stashed by run, assigned before its early
         # returns) instead of re-running the BFS (the dream.py:88 footgun).
@@ -233,7 +245,8 @@ class Dreamer:
     # ── Stale-first window scheduler (epic 903-C3, #1241) ────────────
 
     def dream_window(self, budget: int | None = None,
-                     max_hops: int = DEFAULT_MAX_HOPS) -> dict:
+                     max_hops: int = DEFAULT_MAX_HOPS,
+                     warm_start: bool = True) -> dict:
         """Stale-first windowed pass (epic 903-C3, #1241).
 
         Refreshes the stalest chunk of the graph each pass:
@@ -366,7 +379,8 @@ class Dreamer:
                     continue
                 seen_ops |= new_ops
                 _iterations, converged, aff = self._ep_run_batch(
-                    proj, seed_ids, max_hops, stamp=True)
+                    proj, seed_ids, max_hops, stamp=True,
+                    warm_start=warm_start)
                 affected |= aff
                 converged_all = converged_all and converged
             # Operator-less window claims: trivial-stamp (window-scoped scan,
@@ -424,7 +438,8 @@ class Dreamer:
                   batch_size: int = 2000,
                   max_total_operators: int = 200_000,
                   stamp_dreamed_at: bool = True,
-                  budget: int | None = None) -> dict:
+                  budget: int | None = None,
+                  warm_start: bool = True) -> dict:
         """Full-graph EP stabilization from all non-operator Points.
 
         Memory + DoS guard (#85, security P1): batches the anchor set so the
@@ -508,7 +523,8 @@ class Dreamer:
                 break
             result = self.dream(chunk, max_hops=max_hops,
                                 stamp_dreamed_at=stamp_dreamed_at,
-                                trivial_stamp=False)  # dedicated scan below
+                                trivial_stamp=False,  # dedicated scan below
+                                warm_start=warm_start)
             batches += 1
             total_affected.update(result.get("affected_claims", []))
             converged_all = converged_all and result.get("converged", False)
