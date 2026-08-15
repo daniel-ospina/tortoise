@@ -1089,9 +1089,46 @@ class TortoiseEP:
         return [{"id": r[0], "content": r[1], "alpha": r[2],
                  "beta": r[3], "variance": r[4]} for r in rows]
 
+    def invalidate_messages(self, point_ids: list[str] | None = None) -> int:
+        """Drop graph-persisted EP message state (epic 903-C4, #1242).
+
+        Warm-start seeds from the edge ``msg_alpha/beta`` (+ ``back_msg_*``)
+        properties — when the factor graph changes those seeds are stale and
+        must be dropped so the next warm-started run recomputes instead of
+        reusing them.
+
+        ``point_ids=None`` drops messages on ALL IMPL|NAND edges (cheap full
+        drop — used on evidence/baseline changes, where every prior can
+        affect any factor). A point list drops only the edges touching those
+        points (topology changes — create/delete operator/edge).
+
+        Returns the number of edges whose messages were dropped.
+        """
+        if point_ids is None:
+            rows = self.g.query(
+                "MATCH ()-[r:IMPL|NAND]->() "
+                "REMOVE r.msg_alpha, r.msg_beta, "
+                "       r.back_msg_alpha, r.back_msg_beta "
+                "RETURN count(r)"
+            ).result_set
+            return int(rows[0][0]) if rows else 0
+        if not point_ids:
+            return 0
+        rows = self.g.query(
+            "MATCH (p:Point)-[r:IMPL|NAND]-() "
+            "WHERE p.id IN $ids "
+            "REMOVE r.msg_alpha, r.msg_beta, "
+            "       r.back_msg_alpha, r.back_msg_beta "
+            "RETURN count(DISTINCT r)",
+            params={"ids": list(point_ids)},
+        ).result_set
+        return int(rows[0][0]) if rows else 0
+
     def run(self, operator_ids: list[str], max_hops: int | None = 2,
             evidence: dict[str, tuple[float, float]] | None = None,
-            include_draft: bool = False) -> tuple[int, bool]:
+            include_draft: bool = False,
+            warm_start: bool = False,
+            gamma: float = 1e-3) -> tuple[int, bool]:
         """Run EP to convergence. Batch I/O avoids SQLite crashes (#6761).
 
         Args:
@@ -1110,6 +1147,17 @@ class TortoiseEP:
                 EP identically to live ones (#780 escape hatch — legacy
                 behavior). Default False: drafts are excluded at ALL four
                 factor-extraction call sites.
+            warm_start (epic 903-C4, #1242): message censoring — the graph-
+                persisted edge messages (msg_alpha/beta, back_msg_*) are the
+                seed (loaded by _load_cache on every run); warm_start=True
+                additionally SKIPS factor updates whose input-claim values
+                changed by ≤ gamma since the factor last ran (bounded-error
+                message censoring per Ihler et al., JMLR 2005 — the license
+                for EFBP-style incremental reuse). The fast path
+                (compute_confidence) never passes warm_start=True.
+            gamma: the censoring threshold (message deltas ≤ gamma are
+                skipped). Fixed, never recomputed per-iteration (EFBP
+                pragmatic rule — exact bounds are not worth it).
 
         Returns the (iterations, converged) 2-tuple (unchanged contract —
         four destructuring callers). The run's affected-claim set is stashed
@@ -1135,6 +1183,9 @@ class TortoiseEP:
         # pre-write and the early returns) so a run that exits early never
         # leaves stale cache behind for public reads (_read_node/_write_node
         # fall through to the graph when the attribute is absent).
+        # Epic 903-C4 (#1242): censored-update counter reset per run (the
+        # DE2E-6b cost metric — Δ factor updates warm vs from-scratch).
+        self._warm_skipped_updates = 0
         for _attr in ("_node_cache", "_msg_cache", "_back_cache"):
             if hasattr(self, _attr):
                 delattr(self, _attr)
@@ -1197,6 +1248,13 @@ class TortoiseEP:
         # Only flush final results at the end — eliminates per-iteration I/O.
         self._load_cache(affected)
 
+        # Epic 903-C4 (#1242) — warm-start censoring state: per-factor
+        # last-seen input-claim snapshot. Keyed by factor identity (stable
+        # across the per-iteration shuffle).
+        warm_snapshot: dict[tuple, dict[str, tuple[float, float]]] | None = (
+            {} if warm_start else None
+        )
+
         for iteration in range(self.max_iter):
             # Re-load only on iteration 0 (already loaded above)
             # Subsequent iterations use in-memory cache updated by _write_node/_write_message
@@ -1206,7 +1264,34 @@ class TortoiseEP:
 
             random.shuffle(factors)
             for op_id, op_type, input_ids, weight, label, direction in factors:
-                self._update_factor(op_id, op_type, input_ids, weight, label, direction)
+                if warm_snapshot is not None:
+                    key = (op_id, op_type, tuple(sorted(input_ids)))
+                    last = warm_snapshot.get(key)
+                    if last is not None:
+                        delta = 0.0
+                        for cid in input_ids:
+                            cur = self._node_cache.get(cid, (1.0, 1.0))
+                            old = last.get(cid, cur)
+                            delta = max(
+                                delta,
+                                abs(cur[0] - old[0]) / max(old[0], 1e-6),
+                                abs(cur[1] - old[1]) / max(old[1], 1e-6),
+                            )
+                        if delta <= gamma:
+                            # Censored (EFBP): the factor's inputs are
+                            # sufficiently unchanged — reuse its previous
+                            # message, do not re-update.
+                            self._warm_skipped_updates += 1
+                            continue
+                    self._update_factor(op_id, op_type, input_ids, weight,
+                                        label, direction)
+                    warm_snapshot[key] = {
+                        cid: self._node_cache.get(cid, (1.0, 1.0))
+                        for cid in input_ids
+                    }
+                else:
+                    self._update_factor(op_id, op_type, input_ids, weight,
+                                        label, direction)
 
             for cid in affected:
                 self._update_claim_posterior(cid, run_evidence)

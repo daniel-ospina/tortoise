@@ -452,7 +452,11 @@ def f4_frozen_truth(seed: int | None = None) -> F4FrozenTruth:
         # re-dream mid-capture. Dream explicitly under the same pinned seed
         # so the whole capture trajectory is deterministic, then read.
         random.seed(seed)
-        clone_sdk.dream(dirty_only=True)
+        # Epic 903-C4 (#1242): the oracle is the FROZEN from-scratch ground
+        # truth — dream with warm_start=False (no gamma-skip censoring) so
+        # the capture is bit-reproducible across builders; warm-start's
+        # bounded perturbation (≈1e-5) would break the 1e-6 oracle lock.
+        clone_sdk.dream(dirty_only=True, warm_start=False)
         oracle = {key: clone_sdk.get_confidence(pid)["mean"]
                   for key, pid in clone_ids.items()}
     finally:
