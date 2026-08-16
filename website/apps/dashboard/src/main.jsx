@@ -16,7 +16,6 @@ const LAST_AUTH_METHOD = 'tortoise_last_auth_method'
 // carries no credential, only a routing signal.
 const CLAIM_KEY_STORAGE = 'tt_claim_key'
 const INVITE_TOKEN_STORAGE = 'tortoise.inviteToken'
-const [banner, setBanner] = React.useState('')
 const CLAIM_PENDING_COOKIE = 'tt_claim_pending'
 
 
@@ -83,6 +82,11 @@ try {
 
 function App() {
   // #1148-ux: last auth method (login card "Last used" pills)
+  // Invite-accept banner (#1177): success/error toast at the top of the app shell.
+  // Declared HERE (inside the component) — a module-top-level useState would
+  // crash the whole bundle: the hooks dispatcher is only mounted during a
+  // component render (P0 regression from PR #1206, issue #1280).
+  const [banner, setBanner] = React.useState('')
   const [lastAuthMethod, setLastAuthMethod] = React.useState(() => {
     try { return localStorage.getItem(LAST_AUTH_METHOD) || '' } catch { return '' }
   })
