@@ -81,12 +81,10 @@ try {
 }
 
 function App() {
-  // #1148-ux: last auth method (login card "Last used" pills)
-  // Invite-accept banner (#1177): success/error toast at the top of the app shell.
-  // Declared HERE (inside the component) — a module-top-level useState would
-  // crash the whole bundle: the hooks dispatcher is only mounted during a
-  // component render (P0 regression from PR #1206, issue #1280).
+  // #1280 (P0, mirrored from fix/1280): banner state MUST live inside the
+  // component — a module-top-level useState crashes the whole bundle.
   const [banner, setBanner] = React.useState('')
+  // #1148-ux: last auth method (login card "Last used" pills)
   const [lastAuthMethod, setLastAuthMethod] = React.useState(() => {
     try { return localStorage.getItem(LAST_AUTH_METHOD) || '' } catch { return '' }
   })
@@ -105,6 +103,11 @@ function App() {
   const [busy, setBusy] = React.useState(false)
   const [newKey, setNewKey] = React.useState(null)
   const [capNotice, setCapNotice] = React.useState('') // #1147: tier-cap upgrade prompt (keys tab)
+  // #1287: welcome-as-dashboard-subpage — first-time users land on
+  // /welcome (key reveal + MCP/SDK chooser); returning users get home.
+  const [welcomeMode, setWelcomeMode] = React.useState(
+    () => window.location.pathname === '/welcome' || window.location.pathname === '/welcome/'
+  )
 
   // #1147: build the tier-cap notice. The server's 402 detail carries the
   // real limit ('Team api_keys limit reached (N). Upgrade your plan to
@@ -475,6 +478,16 @@ function App() {
         if (!supabaseClient) { setChecking(false); return }
         const { data: { session }, error } = await supabaseClient.auth.getSession()
         if (error || !session) {
+          // #1287: dashboard guard — no OAuth session → route to the signup
+          // page (the combined Log in/Sign up card, incl. API-key login).
+          // API-key-only users (agents) keep the inline key path: a stored
+          // key resolves the team without OAuth. Otherwise redirect.
+          const storedKey = (() => { try { return localStorage.getItem(KEY_STORAGE) || '' } catch { return '' } })()
+          const claimKey = (() => { try { return sessionStorage.getItem(CLAIM_KEY_STORAGE) || '' } catch { return '' } })()
+          if (!storedKey && !claimKey) {
+            window.location.href = 'https://tortoise.premiselabs.co/signup'
+            return
+          }
           // Round-24: no session → the card's only affordance is the key input;
           // don't show the misleading 'Sign in with your Tortoise account.'
           setAuthMode('apikey')
@@ -1767,6 +1780,52 @@ function App() {
               Prefer zero-email? You can keep using your API key for graph
               operations — this is only about dashboard access.
             </p>
+          </div>
+        </main>
+      </div>
+    )
+  }
+
+  // #1287: welcome-as-dashboard-subpage — first-time users land on
+  // app.premiselabs.co/welcome after signup (welcome.html did the
+  // provisioning + key reveal-once; this is the in-dashboard onboarding:
+  // chooser + routes to the API Keys tab where the key lives).
+  if (welcomeMode && authed) {
+    return (
+      <div className="app">
+        <header>
+          <div className="logo">Tortoise</div>
+          <nav />
+          <button
+            className="ghost small"
+            onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false) }}
+          >
+            Open dashboard →
+          </button>
+        </header>
+        <main>
+          <div className="welcome-card" style={{ maxWidth: 560, margin: '0 auto', padding: '1rem 0' }}>
+            <h1 style={{ fontFamily: 'var(--serif, Georgia, serif)', fontWeight: 400, marginBottom: '0.5rem' }}>
+              Your Tortoise is ready!
+            </h1>
+            <p className="dim" style={{ marginBottom: '1.25rem' }}>
+              Your API key was shown on the welcome page — copy it now if you
+              haven't already. You can also manage keys here anytime.
+            </p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+              <button
+                className="btn-primary"
+                onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false); setTab('keys') }}
+              >
+                Go to my API keys →
+              </button>
+              <a className="btn-primary" href="https://tortoise.premiselabs.co/docs#mcp" target="_blank" rel="noreferrer">
+                Use Tortoise with MCP — set up my agent →
+              </a>
+              <a className="btn-primary" href="https://tortoise.premiselabs.co/docs#quickstart" target="_blank" rel="noreferrer">
+                Build with Tortoise — SDK quickstart →
+              </a>
+            </div>
           </div>
         </main>
       </div>
