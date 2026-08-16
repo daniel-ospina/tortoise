@@ -105,18 +105,21 @@ jobs:
             echo "::error::STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET must be set in GitHub secrets"
             exit 1
           fi
-          # Session capture LLM provider (#1197): POST /v1/sessions fails
-          # closed (503) with no provider key — the regex extraction loop was
-          # removed (#822). At least ONE provider key must be present so a
-          # deploy never silently ships a 503-on-every-capture API (beta
-          # testers' most-critical feature). Hard-error, matching the core
-          # secrets above — a provider key is deploy-source-of-truth.
+          # Session capture LLM provider (#1197, #1346): POST /v1/sessions
+          # fails closed (503) with no provider key — the regex extraction loop
+          # was removed (#822). Session capture is an OPTIONAL feature that
+          # degrades gracefully server-side (explicit 503, API boots fine):
+          # missing keys must NOT block deploys of the rest of the API (a
+          # fail-closed gate here held ALL deploys for 2+ days, shipping stale
+          # code to prod). Warn-only, matching the STRIPE_PRICE_IDS / Resend /
+          # backup (#545) optional-secret pattern — when a key is added to GH
+          # secrets the secrets-set step below propagates it to Fly on the
+          # next deploy.
           if [ -z "${{ secrets.OPENROUTER_API_KEY }}" ] && \
              [ -z "${{ secrets.DEEPSEEK_API_KEY }}" ] && \
              [ -z "${{ secrets.OPENAI_API_KEY }}" ] && \
              [ -z "${{ secrets.GEMINI_API_KEY }}" ]; then
-            echo "::error::No LLM provider key set — POST /v1/sessions fails closed (503). Set at least one of OPENROUTER_API_KEY / DEEPSEEK_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY (docs/infra-runbook.md §4.6)"
-            exit 1
+            echo "::warning::No LLM provider key set — POST /v1/sessions fails closed (503) until configured. Set at least one of OPENROUTER_API_KEY / DEEPSEEK_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY (docs/infra-runbook.md §4.6)"
           fi
           if [ -z "${{ secrets.STRIPE_PRICE_IDS }}" ]; then
             echo "::warning::STRIPE_PRICE_IDS not set — checkout/webhook tier resolution disabled until configured"
