@@ -71,12 +71,12 @@
     .container {
       width: 100%;
       max-width: 400px;
-      padding: 2rem;
+      padding: 1.5rem;
     }
 
     .logo {
       text-align: center;
-      margin-bottom: 2rem;
+      margin-bottom: 1.25rem;
     }
 
     .logo a {
@@ -102,9 +102,47 @@
     .providers {
       display: flex;
       flex-direction: column;
-      gap: 0.75rem;
-      margin-bottom: 1.5rem;
+      gap: 0.6rem;
+      margin-bottom: 0.75rem;
     }
+
+    /* #1287: combined login/signup card — Log in / Sign up toggle */
+    .auth-mode-toggle {
+      display: flex; gap: 4px; margin-bottom: 16px;
+      background: var(--surface, #0d1a2d); border: 1px solid var(--border, #1e293b);
+      border-radius: 8px; padding: 3px;
+    }
+    .auth-mode-toggle button {
+      flex: 1; padding: 7px 0; border: none; background: none;
+      color: var(--text-dim, #94a3b8); font-size: 13px; font-weight: 600;
+      border-radius: 6px; cursor: pointer;
+    }
+    .auth-mode-toggle button.active { background: var(--accent, #06b6d4); color: #04121a; }
+
+    /* #1287: API-key login — button first, input revealed on click */
+    .auth-apikey-prominent { margin-bottom: 0.5rem; }
+    .auth-apikey-prominent.has-form {
+      padding: 14px; border: 1px solid var(--border, #1e293b); border-radius: 10px;
+      background: var(--surface, #0d1a2d);
+    }
+    .auth-apikey-form { display: flex; flex-direction: column; gap: 8px; }
+    .auth-apikey-form.hidden { display: none; }
+    .btn-provider.hidden { display: none; }
+    .auth-apikey-form input {
+      padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border, #1e293b);
+      background: var(--surface, #0d1a2d); color: var(--text, #cbd5e1); font-size: 14px;
+    }
+    .auth-apikey-form input:focus { border-color: var(--accent, #06b6d4); outline: none; }
+    .auth-apikey-form button {
+      padding: 10px 14px; border-radius: 8px; border: none;
+      background: var(--accent, #06b6d4); color: #04121a; font-weight: 600; font-size: 14px; cursor: pointer;
+    }
+    .auth-apikey-back {
+      background: none !important; border: none !important; color: var(--text-dim, #94a3b8) !important;
+      font-size: 12px; padding: 0 !important; width: auto !important; cursor: pointer;
+      margin-top: 6px;
+    }
+    .auth-apikey-back:hover { color: var(--accent, #06b6d4) !important; }
 
     .btn-provider {
       display: flex;
@@ -138,7 +176,7 @@
       display: flex;
       align-items: center;
       gap: 1rem;
-      margin: 1rem 0;
+      margin: 0.5rem 0;
       color: var(--text-dim);
       font-size: 12px;
     }
@@ -152,7 +190,7 @@
     }
 
     .form-group {
-      margin-bottom: 0.75rem;
+      margin-bottom: 0.5rem;
     }
 
     .form-group label {
@@ -251,7 +289,7 @@
 
     /* Legal acceptance (clickthrough for Terms/Privacy per T5) */
     .legal-accept {
-      margin: -1rem 0 0.5rem;
+      margin: -0.5rem 0 0.5rem;
       font-family: var(--mono);
       font-size: 0.8rem;
       line-height: 1.5;
@@ -264,6 +302,20 @@
     }
     .legal-accept a:hover {
       text-decoration: underline;
+    }
+
+    /* #1287: short-viewport compaction — keep the legal-accept line,
+       OAuth buttons, and submit co-visible (legal-e2e test contract). */
+    @media (max-height: 700px) {
+      .container { padding-top: 0.5rem; padding-bottom: 1rem; }
+      .logo { margin-bottom: 0.5rem; }
+      .logo a { font-size: 1.25rem; }
+      h1 { font-size: 1.15rem; margin-bottom: 0.75rem; }
+      .providers { gap: 0.4rem; margin-bottom: 0.5rem; }
+      .auth-apikey-prominent { margin-bottom: 0.25rem; }
+      .divider { margin: 0.3rem 0; }
+      .form-group { margin-bottom: 0.35rem; }
+      .btn-submit { padding-top: 0.5rem; padding-bottom: 0.5rem; }
     }
   </style>
 </head>
@@ -281,9 +333,15 @@
     <div class="logo">
       <a href="/">Premise <span>Labs</span></a>
     </div>
-    <h1>Create your account</h1>
+    <h1 id="page-title">Create your account</h1>
 
     <div id="error" class="error" role="alert"></div>
+
+    <!-- #1287: combined login/signup card — Log in / Sign up toggle -->
+    <div class="auth-mode-toggle" role="tablist" aria-label="Log in or sign up">
+      <button role="tab" aria-selected="false" id="toggle-signin" onclick="setAuthMode(false)">Log in</button>
+      <button role="tab" aria-selected="true" class="active" id="toggle-signup" onclick="setAuthMode(true)">Sign up</button>
+    </div>
 
     <div class="providers">
       <button class="btn-provider" onclick="signInWithProvider('github')" id="btn-github">
@@ -305,11 +363,23 @@
       </button>
     </div>
 
-    <p class="legal-accept">
+    <p class="legal-accept" id="legal-accept">
       By creating an account, you agree to the
       <a href="/tos" target="_blank" rel="noopener">Terms of Service</a> and
       <a href="/privacy" target="_blank" rel="noopener">Privacy Policy</a>.
     </p>
+
+    <!-- #1287: API-key login — first-class option (anon bootstrap / agents) -->
+    <div class="auth-apikey-prominent" id="auth-apikey">
+      <button class="btn-provider" type="button" onclick="showApiKeyLogin()" id="btn-show-apikey">
+        🔑 Log in with API key
+      </button>
+      <div class="auth-apikey-form hidden" id="auth-apikey-form">
+        <input type="password" id="apikey-input" placeholder="tt_…" autocomplete="off" aria-label="API key">
+        <button type="button" id="btn-apikey-submit" onclick="loginWithApiKey()">Log in with API key</button>
+        <button type="button" class="auth-apikey-back" onclick="hideApiKeyLogin()">← back</button>
+      </div>
+    </div>
 
     <div class="divider">or</div>
 
@@ -753,6 +823,61 @@
       });
     }
 
+    // ── #1287: combined login/signup card — mode toggle + API-key login ──
+    // signup (default) = the page's native flow (server signup, confirmation).
+    // login = email+password sign-in + API-key login (existing key holders).
+    let authIsSignup = true;
+
+    function setAuthMode(isSignup) {
+      authIsSignup = isSignup;
+      document.getElementById("toggle-signin").classList.toggle("active", !isSignup);
+      document.getElementById("toggle-signin").setAttribute("aria-selected", String(!isSignup));
+      document.getElementById("toggle-signup").classList.toggle("active", isSignup);
+      document.getElementById("toggle-signup").setAttribute("aria-selected", String(isSignup));
+      document.getElementById("page-title").textContent = isSignup ? "Create your account" : "Log in to your account";
+      document.getElementById("legal-accept").style.display = isSignup ? "" : "none";
+      const submit = document.getElementById("btn-submit");
+      submit.textContent = isSignup ? "Create account" : "Log in";
+      const pw = document.getElementById("password");
+      pw.autocomplete = isSignup ? "new-password" : "current-password";
+      clearError();
+    }
+
+    function showApiKeyLogin() {
+      document.getElementById("auth-apikey").classList.add("has-form");
+      document.getElementById("btn-show-apikey").classList.add("hidden");
+      document.getElementById("auth-apikey-form").classList.remove("hidden");
+      document.getElementById("apikey-input").focus();
+    }
+
+    function hideApiKeyLogin() {
+      document.getElementById("auth-apikey").classList.remove("has-form");
+      document.getElementById("btn-show-apikey").classList.remove("hidden");
+      document.getElementById("auth-apikey-form").classList.add("hidden");
+    }
+
+    // #1287: API-key login — store the key (origin-scoped localStorage) and
+    // route to the dashboard, which resolves the team + provisions an
+    // authenticated session (claim path #1082 for anon tt_ keys).
+    async function loginWithApiKey() {
+      const key = document.getElementById("apikey-input").value.trim();
+      if (!key) { showError("Enter your API key to log in."); return; }
+      if (rateLimitRemainingMs() > 0) {
+        showError(rateLimitMessage());
+        applyRateLimitLockout();
+        return;
+      }
+      clearError();
+      setLoading(true);
+      try {
+        localStorage.setItem("tortoise_api_key", key);
+        window.location.href = DASHBOARD_URL;
+      } catch (e) {
+        setLoading(false);
+        showError("Could not store your key — try again.");
+      }
+    }
+
     // ── OAuth sign in ──────────────────────────────────────────────────────
     async function signInWithProvider(provider) {
       if (!supabaseClient) { showError("Auth not configured."); return; }
@@ -916,6 +1041,11 @@
 
     async function signUpWithEmail(event) {
       event.preventDefault();
+      // #1287: combined card — login mode routes to email+password sign-in.
+      if (!authIsSignup) {
+        await signInWithEmailPassword();
+        return;
+      }
       if (signupInFlight) return;
       signupInFlight = true;
       if (!supabaseClient) { showError("Auth not configured."); signupInFlight = false; return; }
@@ -1040,6 +1170,46 @@
         confirm.classList.remove("hidden");
         const el = document.getElementById("confirm-email");
         if (el) el.textContent = email;
+      }
+    }
+
+    // #1287: email+password LOGIN (combined-card login mode) — the page's
+    // signin.html flow, inlined so /signup serves both modes. Routes to the
+    // dashboard on success (session cookie shared cross-subdomain).
+    async function signInWithEmailPassword() {
+      if (signupInFlight) return;
+      signupInFlight = true;
+      if (!supabaseClient) { showError("Auth not configured."); signupInFlight = false; return; }
+      if (rateLimitRemainingMs() > 0) {
+        showError(rateLimitMessage());
+        applyRateLimitLockout();
+        signupInFlight = false;
+        return;
+      }
+      clearError();
+      setLoading(true);
+      try {
+        const email = document.getElementById("email").value.trim();
+        const password = document.getElementById("password").value;
+        if (!email || !password) {
+          showError("Enter your email and password.");
+          return;
+        }
+        const { data, error } = await supabaseClient.auth.signInWithPassword({ email: email, password: password });
+        if (error) {
+          const m = error.message || "";
+          if (m.includes("Invalid login")) showError("Invalid email or password.");
+          else if (m.includes("Email not confirmed")) showError("Please confirm your email address before signing in. Check your inbox (and spam) for the confirmation link.");
+          else showError(m || "Something went wrong — try again.");
+          return;
+        }
+        if (data?.user) pushSignupEvents(data.user);
+        window.location.href = WELCOME_URL;
+      } catch (e) {
+        showError((e && e.message) || "Something went wrong — try again.");
+      } finally {
+        signupInFlight = false;
+        setLoading(false);
       }
     }
 
