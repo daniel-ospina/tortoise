@@ -96,6 +96,7 @@ class GraphRanker:
         graph_boost_weight: float = DEFAULT_GRAPH_BOOST_WEIGHT,
         recency_weight: float = DEFAULT_RECENCY_WEIGHT,
         recency_half_life_days: float = DEFAULT_HALF_LIFE_DAYS,
+        use_degree: bool = True,
     ):
         total = similarity_weight + graph_boost_weight + recency_weight
         if abs(total - 1.0) > 1e-6:
@@ -108,6 +109,9 @@ class GraphRanker:
         self.graph_boost_weight = graph_boost_weight
         self.recency_weight = recency_weight
         self.recency_half_life_days = recency_half_life_days
+        # #1348: use_degree=False isolates the CONFIDENCE contribution (ablation
+        # arm — degree term neutralized so the graph_boost is confidence-only).
+        self.use_degree = use_degree
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -186,8 +190,11 @@ class GraphRanker:
                 # Events/Sessions: 0.6·aboutObject count (Objects referenced).
                 inst_norm = 1.0 - 1.0 / (1.0 + about_objects)
                 return round(0.6 * inst_norm + 0.4 * confidence, 4)
-            connectivity = 1.0 - 1.0 / (1.0 + (degree or 0))
-            return round(0.5 * confidence + 0.5 * connectivity, 4)
+            if self.use_degree:
+                connectivity = 1.0 - 1.0 / (1.0 + (degree or 0))
+                return round(0.5 * confidence + 0.5 * connectivity, 4)
+            # #1348 ablation: degree neutralized — boost is confidence-only.
+            return round(confidence, 4)
         # No graph data — degrade to neutral 0.0 (never a penalty).
         return 0.0
 

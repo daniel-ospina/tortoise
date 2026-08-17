@@ -36,6 +36,11 @@ def _args(db_path: str, **overrides):
         corpus_size = 400
         seed = 42
         limit = 50
+        depth = None
+        k_sweep = False
+        graph_ranker_arm = False
+        corpus_variant = "plain"
+        stub_projection = False
         out = None
         pool_out = None
         judge_labels = None
@@ -56,7 +61,7 @@ def test_runner_report_shape_and_gate(tmp_path):
     report1 = run_eval(_args(db1))
     out1 = write_outputs(report1, str(tmp_path / "r1.json"))
 
-    assert report1["schema_version"] == 1
+    assert report1["schema_version"] == 2  # #1348 SCHEMA v2 (fused k=60 alias retained)
     assert report1["issue"] == "1144"
     assert report1["provenance"]["db_mode"] == "embedded-falkordblite"
     assert report1["provenance"]["corpus"]["n_points"] > 0
@@ -65,8 +70,17 @@ def test_runner_report_shape_and_gate(tmp_path):
     assert report1["authored"]["n_queries"] == 50
     assert report1["authored"]["labels_status"] == "pending"
 
+    # #1348: default run is shape-identical to v1 (no fused_rerank unless the
+    # arm is ON; k_sweep/population_counts sections present; strategies ==
+    # per_query keys for the arm-OFF case).
+    assert "fused_rerank" not in report1["strategies"]
+    assert report1["population_counts"]
+    assert report1["rerank_verdict"] is None
+    perq = report1["per_query"]
+    assert set(report1["strategies"]) == set(next(iter(perq.values())))
+
     # All strategies present with all four metrics + CIs.
-    for strat in STRATEGIES:
+    for strat in report1["strategies"]:
         m = report1["metrics"][strat]
         for metric in ("ndcg@10", "p@5", "r@10", "mrr"):
             assert metric in m and "value" in m[metric] and "ci" in m[metric]

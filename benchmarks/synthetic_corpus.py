@@ -172,6 +172,11 @@ def seed_corpus(graph, points: list[dict], *, batch_size: int = 500) -> int:
 
     Matches the production write path's vecf32 encoding (sdk.py:980) so the
     stored vectors are byte-identical to real writes. Returns points created.
+
+    #1348: confidence is written ONLY when the point dict carries it (the
+    enhance_signals path) — an unconditional SET would change plain-corpus
+    GraphRanker behavior (coalesce 0.5 → written value) without tripping the
+    fingerprint, which does not check confidence.
     """
     created = 0
     for start in range(0, len(points), batch_size):
@@ -186,6 +191,7 @@ def seed_corpus(graph, points: list[dict], *, batch_size: int = 500) -> int:
             SET n.embedding = vecf32(row.embedding)
             SET n.posterior_alpha = row.posterior_alpha
             SET n.posterior_beta = row.posterior_beta
+            SET n.confidence = row.confidence
             RETURN count(n) AS created
             """,
             params={"batch": [
@@ -200,29 +206,66 @@ def seed_corpus(graph, points: list[dict], *, batch_size: int = 500) -> int:
 
 
 def seed_operator_edges(graph, rng: random.Random, n_edges_per_op: int = 200,
-                        max_total: int = 5000) -> int:
+                        max_total: int = 5000, *,
+                        topic_correlated: bool = False,
+                        oracle=None) -> int:
     """Wire operator→source IMPL edges (epistemic structure) in batches.
 
     Each operator gets up to `n_edges_per_op` IMPL edges to random non-operator
     source points, capped globally at `max_total` (scaling arms must not blow
     up graph size). Batched via UNWIND MERGE — one query per 500 edges.
-    Returns edges created."""
+    Returns edges created.
+
+    #1348 topic_correlated=True: bias edge targets toward points whose HIDDEN
+    topic matches the operator's topic — connectivity becomes topic-correlated
+    (target-topic points accrue IMPL edges). No NEW nodes are created (edges
+    connect existing operator/point nodes only), so FTS/vector inputs and
+    oracle denominators (live_ids_by_topic, r@10 grade-2 sets) are unchanged.
+    The edge COUNT may collide at max_total — the extended fingerprint hashes
+    the (op,target) edge-pair LIST to distinguish enhanced vs plain.
+    """
     ops = graph.query(
         "MATCH (op:Point {is_operator:true}) RETURN op.id"
     ).result_set
     sources = graph.query(
-        "MATCH (n:Point) WHERE n.is_operator <> true RETURN n.id"
+        "MATCH (n:Point) WHERE n.is_operator <> true RETURN n.id, n.content"
     ).result_set
     if not ops or not sources:
         return 0
     op_ids = [r[0] for r in ops]
     src_ids = [r[0] for r in sources]
+
+    # #1348: for topic-correlated edges we need the hidden topic per point.
+    # The graph does not store `topic` (seed_corpus SET is explicit-field), so
+    # derive it from the content token overlap with each topic's vocab.
+    src_topics: dict[str, int] = {}
+    if topic_correlated and oracle is not None:
+        for src_id, content in sources:
+            best_t, best_n = 0, 0
+            for t in oracle.core:
+                vocab = oracle.vocab(t)
+                n_hit = sum(1 for tok in (content or "").split() if tok in vocab)
+                if n_hit > best_n:
+                    best_t, best_n = t, n_hit
+            src_topics[src_id] = best_t
+
     pairs: list[dict] = []
     remaining = max_total
-    for op_id in op_ids:
+    for op_idx, op_id in enumerate(op_ids):
         if remaining <= 0:
             break
-        targets = rng.sample(src_ids, min(n_edges_per_op, len(src_ids), remaining))
+        if topic_correlated and oracle is not None:
+            op_topic = op_idx % oracle.n
+            # Bias: 70% of edges to same-topic sources, 30% random.
+            same = [s for s in src_ids if src_topics.get(s) == op_topic]
+            other = [s for s in src_ids if src_topics.get(s) != op_topic]
+            n_same = min(n_edges_per_op // 2, len(same), remaining)
+            n_other = min(n_edges_per_op - n_same, len(other), remaining - n_same)
+            targets = (rng.sample(same, n_same) if same else []) + \
+                      (rng.sample(other, n_other) if other else [])
+            rng.shuffle(targets)
+        else:
+            targets = rng.sample(src_ids, min(n_edges_per_op, len(src_ids), remaining))
         pairs.extend({"a": op_id, "b": t} for t in targets)
         remaining -= len(targets)
     created = 0
@@ -262,31 +305,71 @@ def verify_indexes(proj) -> dict[str, bool]:
 
 
 def corpus_fingerprint_from_graph(graph) -> dict[str, Any]:
-    """Compute the corpus fingerprint from a live graph (provenance)."""
+    """Compute the corpus fingerprint from a live graph (provenance).
+
+    #1348 extended: adds n_with_confidence + embeddings sha256 + edge-pair
+    hash so the enhancement state is DETECTABLE — embeddings + per-topic live
+    counts are byte-identical by design across plain/enhanced, and the edge
+    COUNT collides at max_total=5000 (only the edge-pair LIST differs).
+    """
     rows = graph.query(
         "MATCH (n:Point) RETURN n.pointKind, count(n), "
         "sum(CASE WHEN n.is_operator = true THEN 1 ELSE 0 END), "
         "sum(CASE WHEN n.status = 'retracted' THEN 1 ELSE 0 END), "
-        "sum(CASE WHEN n.posterior_alpha IS NOT NULL THEN 1 ELSE 0 END)"
+        "sum(CASE WHEN n.posterior_alpha IS NOT NULL THEN 1 ELSE 0 END), "
+        "sum(CASE WHEN n.confidence IS NOT NULL THEN 1 ELSE 0 END)"
     ).result_set
     kinds: dict[str, int] = {}
     total = 0
     n_ops = 0
     n_retracted = 0
     n_post = 0
+    n_conf = 0
     for row in rows:
         kinds[str(row[0])] = int(row[1])
         total += int(row[1])
         n_ops += int(row[2] or 0)
         n_retracted += int(row[3] or 0)
         n_post += int(row[4] or 0)
+        n_conf += int(row[5] or 0)
     n_edges = 0
+    edge_pairs_hash = None
     try:
         erows = graph.query(
             "MATCH (:Point)-[r:IMPL]->(:Point) RETURN count(r)"
         ).result_set
         if erows:
             n_edges = int(erows[0][0])
+        # #1348 edge-pair LIST hash (distinguishes enhanced vs plain when the
+        # count collides at max_total). Deterministic: ORDER BY both endpoints.
+        pr = graph.query(
+            "MATCH (a:Point)-[r:IMPL]->(b:Point) "
+            "RETURN a.id, b.id ORDER BY a.id, b.id"
+        ).result_set
+        if pr:
+            import hashlib
+            h = hashlib.sha256()
+            for ra, rb in pr:
+                h.update(f"{ra}|{rb}".encode())
+            edge_pairs_hash = h.hexdigest()[:16]
+    except Exception:
+        pass
+    # #1348 embeddings sha256 (ORDER BY id for determinism).
+    embeddings_hash = None
+    try:
+        erows = graph.query(
+            "MATCH (n:Point) WHERE n.embedding IS NOT NULL "
+            "RETURN n.id, n.embedding ORDER BY n.id"
+        ).result_set
+        if erows:
+            import hashlib
+            h = hashlib.sha256()
+            for _pid, vec in erows:
+                try:
+                    h.update(bytes(vec))
+                except Exception:
+                    h.update(repr(vec).encode())
+            embeddings_hash = h.hexdigest()[:16]
     except Exception:
         pass
     return {
@@ -295,7 +378,10 @@ def corpus_fingerprint_from_graph(graph) -> dict[str, Any]:
         "n_operators": n_ops,
         "n_retracted": n_retracted,
         "n_with_posterior": n_post,
+        "n_with_confidence": n_conf,
         "n_operator_edges": n_edges,
+        "edge_pairs_hash": edge_pairs_hash,
+        "embeddings_hash": embeddings_hash,
     }
 
 
@@ -476,7 +562,7 @@ def build_topic_oracle(seed: int = 42) -> TopicOracle:
 def generate_oracle_points(
     n: int, oracle: TopicOracle, *, seed: int = 42,
     retracted_fraction: float = 0.02, posterior_fraction: float = 0.5,
-    op_every: int = 50,
+    op_every: int = 50, enhance_signals: bool = False,
 ) -> tuple[list[dict], dict[int, int]]:
     """Generate `n` oracle point dicts WITHOUT touching a graph.
 
@@ -488,10 +574,29 @@ def generate_oracle_points(
     written by seed_corpus (its SET clause is explicit-field) — the oracle
     never leaks into the graph.
 
+    #1348 enhance_signals=True: adds topic-correlated `confidence` for the
+    GraphRanker verdict. RNG CONTRACT (byte-identity): posterior alpha/beta
+    stay on the MAIN seeded rng stream in both paths (identical per-iteration
+    draw counts); confidence is DERIVED from those same drawn values mapped
+    through topic membership (noisy per-topic spread with overlap — NOT a
+    clean per-topic constant, which would be tautological since topic
+    membership defines oracle grades). Posterior-less points get coalesce-0.5
+    (the GraphRanker default — simplest rng contract; coverage dilution is a
+    report field). Isolated Random(seed ^ salt) is used ONLY for extra draws
+    (none here — edges are handled by seed_operator_edges).
+
     Returns (points, topic_counts) where topic_counts maps topic id → number
     of LIVE (non-retracted, non-operator) points, the oracle's grade-2
     denominator for that topic."""
     rng = random.Random(seed)
+    # #1348 isolated stream for ENHANCEMENT-ONLY extra draws (never touches
+    # the main stream — byte-identity holds for content/embeddings/posteriors).
+    enh_rng = random.Random(seed ^ 0x1348) if enhance_signals else None
+    topic_biases = {}
+    if enhance_signals:
+        for t in oracle.core:
+            # Noisy per-topic mean shift in [-0.3, +0.3] — overlapping ranges.
+            topic_biases[t] = round(enh_rng.uniform(-0.3, 0.3), 4)
     points: list[dict] = []
     topic_counts: dict[int, int] = {k: 0 for k in oracle.core}
     for i in range(n):
@@ -527,6 +632,14 @@ def generate_oracle_points(
             alpha = rng.randint(1, 40)
             p["posterior_alpha"] = float(alpha)
             p["posterior_beta"] = float(rng.randint(1, max(40 - alpha, 1)))
+            if enhance_signals and not is_op:
+                # #1348 pinned construction: noisy topic bias + alpha-derived
+                # noise — overlapping ranges, NOT recoverable from topic alone.
+                conf = 0.5 + topic_biases[topic] + ((alpha - 20) / 40) * 0.2
+                p["confidence"] = round(max(0.0, min(1.0, conf)), 4)
+        elif enhance_signals and not is_op:
+            # Posterior-less: coalesce-0.5 fallback (simplest rng contract).
+            p["confidence"] = 0.5
         points.append(p)
         if not is_op and not retracted:
             topic_counts[topic] = topic_counts.get(topic, 0) + 1

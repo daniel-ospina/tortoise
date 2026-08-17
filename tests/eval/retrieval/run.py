@@ -74,10 +74,18 @@ from tests.eval.retrieval.queries import (  # noqa: E402
 )
 
 STRATEGIES = ("fts", "vector", "structural", "tfidf", "fused")
-SCHEMA_VERSION = 1
+# #1348: fused_rerank is an OPT-IN arm (--graph-ranker-arm) — it is NOT in
+# the default STRATEGIES so default runs keep identical metric values and
+# the committed v1 baseline reproduces byte-identically.
+RERANK_STRATEGY = "fused_rerank"
+SCHEMA_VERSION = 2
 ELEVATED_TIMEOUT_MS = 5000   # quality measurement: never truncate strategy work
 DEFAULT_CORPUS_SIZE = 2000
 DEFAULT_LIMIT = 50           # pooling depth (top-50/strategy/query per spec)
+KSWEEP = (20, 60, 100)       # #1348 k-sweep set (k=60 Cormack default)
+# #1348 pool-semantics note: eval depth == eval limit (no x2 in this harness);
+# SDK str_limit = limit x2 floor 50. --limit = returned limit (metrics are
+# computed against top-limit), --depth = per-strategy retrieval depth.
 
 
 # ── Provenance ──────────────────────────────────────────────────────────────
@@ -130,9 +138,58 @@ def _capture_provenance(proj, is_embedded: bool, extras: dict) -> dict:
 
 # ── Retrieval ───────────────────────────────────────────────────────────────
 
+def _fused_rrf(lsts: list[list[tuple[str, float]]], k: int = 60) -> list[tuple[str, float]]:
+    """RRF fusion of non-empty ranked lists at a given k (pure function)."""
+    from tortoise.search_engine import rrf_fusion
+    if not lsts:
+        return []
+    return list(rrf_fusion(lsts, k=k).items())
+
+
+def _rerank_fused(
+    fused: list[tuple[str, float]], proj, *,
+    k: int = 60, use_degree: bool = True,
+    stub_projection=None,
+) -> list[tuple[str, float]]:
+    """#1348 fused_rerank arm: fuse → truncate to limit → rerank (production
+    order sdk.py:8851→9004). Input tuples (pid, rrf_score) become result dicts
+    carrying scores.rrf (the GraphRanker similarity contract).
+
+    stub_projection: for the positive-control arm — a duck-typed projection
+    whose .g.query returns oracle-grade-derived signals in _fetch_point_signals
+    row shape; zero GraphRanker production changes (the seam already exists).
+    use_degree=False: confidence-only ablation (degree term neutralized).
+    """
+    from tortoise.ranking import GraphRanker
+    if not fused:
+        return []
+    dicts = [{"id": pid, "scores": {"rrf": score}} for pid, score in fused]
+    proj_for_rank = stub_projection if stub_projection is not None else proj
+    if stub_projection is not None:
+        # MECHANISM control: graph_boost-only (similarity_weight=0,
+        # graph_boost_weight=1.0) — the query-conditioned perfect signal.
+        ranker = GraphRanker(
+            proj_for_rank, similarity_weight=0.0, graph_boost_weight=1.0,
+            recency_weight=0.0, use_degree=use_degree,
+        )
+    else:
+        ranker = GraphRanker(proj_for_rank, use_degree=use_degree)
+    reranked = ranker.rerank(dicts, entity_type="point")
+    return [(r["id"], r["graph_ranking"]["final_score"]) for r in reranked]
+
+
 def retrieve_per_strategy(
     graph, query, kind, query_vec, tfidf_points, is_embedded,
     limit: int = DEFAULT_LIMIT,
+    *,
+    depth: int | None = None,
+    k_sweep: bool = False,
+    proj=None,
+    graph_ranker_arm: bool = False,
+    corpus_variant: str = "plain",
+    oracle=None,
+    live_ids_by_topic=None,
+    stub_projection=None,
 ) -> dict[str, list[tuple[str, float]]]:
     """Run all strategies + fused RRF for ONE query (isolation arms).
 
@@ -140,17 +197,24 @@ def retrieve_per_strategy(
     per-strategy circuit breakers) and rrf_fusion — the production path.
     TF-IDF is the in-memory fallback (not part of the chain); structural
     returns [] for kind-less queries (honest: it cannot rank text).
+
+    #1348: `depth` is the per-strategy retrieval depth (defaults to `limit`);
+    fusion runs over FULL-DEPTH lists (matching production str_limit), then
+    metrics truncate to `limit` at the caller. k_sweep=True adds fused@k for
+    k in {20,60,100} (paired by construction — identical lists, only k
+    differs). graph_ranker_arm=True adds the fused_rerank strategy.
+
     Returns {strategy: [(point_id, score)]} for fts/vector/structural/
-    tfidf/fused, each ranked best-first, truncated to `limit` per strategy.
+    tfidf/fused[/fused_rerank]/fused@{20,60,100}, ranked best-first.
     """
     from tortoise.search_engine import (
-        classify_query, degradation_chain, fallback_tfidf, rrf_fusion,
+        classify_query, degradation_chain, fallback_tfidf,
     )
 
     strategies = classify_query(query, kind)
     raw = degradation_chain(
         graph, query, kind, query_vec, strategies,
-        entity_type="point", limit=limit, is_embedded=is_embedded,
+        entity_type="point", limit=depth or limit, is_embedded=is_embedded,
         elevated_timeout_ms=ELEVATED_TIMEOUT_MS,
     )
     out: dict[str, list[tuple[str, float]]] = {
@@ -158,12 +222,73 @@ def retrieve_per_strategy(
         "vector": raw.get("vector", []),
         "structural": raw.get("structural", []),
     }
-    tf = fallback_tfidf(query, tfidf_points, limit=limit)
+    tf = fallback_tfidf(query, tfidf_points, limit=depth or limit)
     out["tfidf"] = [(d["id"], float(d.get("similarity", 0.0))) for d in tf]
-    out["fused"] = list(rrf_fusion(
-        [lst for lst in (out["fts"], out["vector"], out["structural"]) if lst]
-    ).items())
+
+    chain_lists = [lst for lst in (out["fts"], out["vector"], out["structural"]) if lst]
+    out["fused"] = _fused_rrf(chain_lists, k=60)
+    if k_sweep:
+        for k in KSWEEP:
+            out[f"fused@{k}"] = _fused_rrf(chain_lists, k=k)
+
+    # #1348 fused_rerank arm: fuse → truncate to limit → rerank.
+    if graph_ranker_arm and proj is not None:
+        fused_trunc = out["fused"][:limit]
+        # Positive control (--stub-projection) passes a per-query stub built
+        # by the runner; the ON arm uses the real projection on the corpus.
+        out[RERANK_STRATEGY] = _rerank_fused(
+            fused_trunc, proj, k=60, use_degree=(corpus_variant != "enhanced-conf-only"),
+            stub_projection=stub_projection,
+        )
     return out
+
+
+class _StubOracleProjection:
+    """#1348 positive-control seam: duck-typed projection whose .g.query
+    returns oracle-grade-derived signals in _fetch_point_signals row shape
+    [pid, conf, degree, created, alpha, beta, has_ep]. Query-conditioned per
+    query (grades come from oracle_grades_for_query for THIS query's target).
+    """
+
+    def __init__(self, oracle, live_ids_by_topic, query):
+        self.oracle = oracle
+        self.live_ids_by_topic = live_ids_by_topic
+        self._query_text = query  # NOT self.query — would shadow the method
+        self._grades: dict[str, int] | None = None
+        self.g = self  # projection.g is the query surface
+
+    def _resolve_target(self) -> int | None:
+        # The query dict's oracle_target is not available here; callers pass
+        # the target via a module-level current-query hook set by the runner.
+        return getattr(_STUB_CURRENT, "oracle_target", None)
+
+    def query(self, cypher: str, params: dict | None = None):
+        from benchmarks.synthetic_corpus import oracle_grades_for_query
+        ids = (params or {}).get("ids") or []
+        target = self._resolve_target()
+        if target is None or not ids:
+            rows = []
+        else:
+            grades = oracle_grades_for_query(
+                self.oracle, target, self.live_ids_by_topic)
+            rows = []
+            for pid in ids:
+                g = grades.get(pid, 0)
+                conf = 1.0 if g >= 2 else (0.5 if g == 1 else 0.0)
+                rows.append([pid, conf, 0, None, 1.0, 1.0, False])
+        return _StubResult(rows)
+
+
+class _StubResult:
+    def __init__(self, rows):
+        self.result_set = rows
+
+
+class _CurrentQuery:
+    oracle_target: int | None = None
+
+
+_STUB_CURRENT = _CurrentQuery()
 
 
 def _point_ids(ranked: list[tuple[str, float]]) -> list[str]:
@@ -183,18 +308,41 @@ def _tfidf_snapshot(graph) -> list[dict]:
 # ── Per-query metrics ───────────────────────────────────────────────────────
 
 def _run_oracle_query(q: dict, ctx: dict, oracle) -> dict:
-    """One oracle query → per-strategy ranked ids + metrics vs oracle labels."""
-    ranked = retrieve_per_strategy(
-        ctx["graph"], q["query"], q.get("kind"), ctx["vecs"].get(q["id"]),
-        ctx["tfidf_points"], ctx["is_embedded"], ctx["limit"],
-    )
+    """One oracle query → per-strategy ranked ids + metrics vs oracle labels.
+
+    #1348: metrics computed on each strategy's top-`limit` (k-capped by
+    compute_metrics); fused_rerank mirrors production fuse→truncate→rerank.
+    """
+    stub = None
+    if ctx.get("stub_projection") and ctx.get("graph_ranker_arm"):
+        # #1348 positive control: a per-query duck-typed stub projection whose
+        # .g.query returns oracle-grade-derived signals (query-conditioned).
+        stub = _StubOracleProjection(
+            ctx.get("oracle"), ctx.get("live_ids_by_topic"), q["query"])
+        _STUB_CURRENT.oracle_target = q.get("oracle_target")
+    try:
+        ranked = retrieve_per_strategy(
+            ctx["graph"], q["query"], q.get("kind"), ctx["vecs"].get(q["id"]),
+            ctx["tfidf_points"], ctx["is_embedded"], ctx["limit"],
+            depth=ctx.get("depth"), k_sweep=ctx.get("k_sweep", False),
+            proj=ctx.get("proj"), graph_ranker_arm=ctx.get("graph_ranker_arm", False),
+            corpus_variant=ctx.get("corpus_variant", "plain"),
+            oracle=ctx.get("oracle"), live_ids_by_topic=ctx.get("live_ids_by_topic"),
+            stub_projection=stub,
+        )
+    finally:
+        _STUB_CURRENT.oracle_target = None
     labels = oracle_grades_for_query(
         oracle, q["oracle_target"], ctx["live_ids_by_topic"],
     )
     metrics = {
-        strat: compute_metrics(_point_ids(ranked[strat]), labels)
-        for strat in STRATEGIES
+        strat: compute_metrics(_point_ids(ranked[strat])[:ctx["limit"]], labels)
+        for strat in ctx["strategies"]
     }
+    if ctx.get("k_sweep"):
+        for k in KSWEEP:
+            metrics[f"fused@{k}"] = compute_metrics(
+                _point_ids(ranked.get(f"fused@{k}", []))[:ctx["limit"]], labels)
     return ranked, metrics
 
 
@@ -202,6 +350,11 @@ def _run_authored_query(q: dict, ctx: dict) -> dict[str, list[tuple[str, float]]
     return retrieve_per_strategy(
         ctx["graph"], q["query"], q.get("kind"), ctx["vecs"].get(q["id"]),
         ctx["tfidf_points"], ctx["is_embedded"], ctx["limit"],
+        depth=ctx.get("depth"), k_sweep=ctx.get("k_sweep", False),
+        proj=ctx.get("proj"), graph_ranker_arm=ctx.get("graph_ranker_arm", False),
+        corpus_variant=ctx.get("corpus_variant", "plain"),
+        oracle=ctx.get("oracle"), live_ids_by_topic=ctx.get("live_ids_by_topic"),
+        stub_projection=ctx.get("stub_projection"),
     )
 
 
@@ -248,10 +401,17 @@ def _aggregate_with_ci(per_query, strategy, rng) -> dict:
     return out
 
 
-def _paired_vs_fused(per_query, rng) -> dict:
-    """Paired 90% CIs on (fused − strategy) deltas, in points (×100)."""
+def _paired_vs_fused(per_query, rng, strategies=("fts", "vector", "structural", "tfidf")) -> dict:
+    """Paired 90% CIs on (fused − strategy) deltas, in points (×100).
+
+    #1348: strategies set is the ACTIVE list (threaded from ctx) so fused_rerank
+    is included when the arm is ON — the paired fused_rerank−fused verdict CI.
+    """
     out = {}
-    for strat in ("fts", "vector", "structural", "tfidf"):
+    for strat in strategies:
+        if strat == "fused" or not any(qid in per_query and strat in per_query[qid]
+                                      for qid in per_query):
+            continue
         entry = {}
         for metric in ("ndcg@10", "p@5"):
             deltas = [
@@ -262,6 +422,24 @@ def _paired_vs_fused(per_query, rng) -> dict:
                 deltas, rng=rng,
             ).to_dict()
         out[strat] = entry
+    return out
+
+
+def _rerank_verdict(per_query, rng) -> dict | None:
+    """#1348 paired fused_rerank − fused verdict statistic (90% CI). Only
+    populated when the arm is ON (fused_rerank present in per-query metrics)."""
+    present = [qid for qid in per_query if "fused_rerank" in per_query[qid]]
+    if not present:
+        return None
+    out = {}
+    for metric in ("ndcg@10", "p@5", "r@10", "mrr"):
+        deltas = [
+            (per_query[qid]["fused_rerank"][metric] - per_query[qid]["fused"][metric]) * 100.0
+            for qid in present
+        ]
+        out[f"{metric}_delta_points"] = bootstrap.paired_bootstrap_ci(
+            deltas, rng=rng,
+        ).to_dict()
     return out
 
 
@@ -313,13 +491,20 @@ def _run_with_sdk(args, sdk) -> dict:
     is_embedded = getattr(proj, "_is_embedded", True)
     rng = random.Random(args.seed * 65537)  # bootstrap/CI resampling rng
 
-    # 1. Oracle + corpus.
+    # 1. Oracle + corpus. #1348: --corpus-variant enhanced seeds topic-correlated
+    # EP structure (enhance_signals) so the GraphRanker verdict is measurable.
     oracle = build_topic_oracle(args.seed)
-    points, topic_counts = generate_oracle_points(args.corpus_size, oracle, seed=args.seed)
+    enhance = getattr(args, "corpus_variant", "plain") in ("enhanced", "enhanced-conf-only")
+    points, topic_counts = generate_oracle_points(
+        args.corpus_size, oracle, seed=args.seed, enhance_signals=enhance,
+    )
     seeded = 0
     if not args.no_seed_corpus:
         seeded = seed_corpus(proj.g, points)
-        edges = seed_operator_edges(proj.g, random.Random(args.seed), n_edges_per_op=200)
+        edges = seed_operator_edges(
+            proj.g, random.Random(args.seed), n_edges_per_op=200,
+            topic_correlated=enhance, oracle=oracle,
+        )
         if not args.quiet:
             print(f"[corpus] seeded {seeded} points, {edges} operator edges")
     else:
@@ -367,10 +552,25 @@ def _run_with_sdk(args, sdk) -> dict:
     all_queries = oracle_set["queries"] + authored_set["queries"]
     vecs, use_model = _query_vecs(oracle, all_queries, args.seed)
     tfidf_points = _tfidf_snapshot(proj.g)
+    # #1348: ACTIVE strategies tuple — fused_rerank added only when the arm is
+    # ON (default runs stay shape-identical to the v1 baseline). k_sweep adds
+    # fused@{20,60,100} to per-query metrics but NOT to the strategies list.
+    active_strategies = list(STRATEGIES)
+    graph_ranker_arm = bool(getattr(args, "graph_ranker_arm", False))
+    if graph_ranker_arm:
+        active_strategies.append(RERANK_STRATEGY)
     ctx = {
         "graph": proj.g, "is_embedded": is_embedded,
         "tfidf_points": tfidf_points, "vecs": vecs, "limit": args.limit,
+        "depth": getattr(args, "depth", None),
+        "k_sweep": bool(getattr(args, "k_sweep", False)),
+        "strategies": tuple(active_strategies),
+        "proj": proj,
+        "graph_ranker_arm": graph_ranker_arm,
+        "corpus_variant": getattr(args, "corpus_variant", "plain"),
+        "oracle": oracle,
         "live_ids_by_topic": live_ids_by_topic,
+        "stub_projection": getattr(args, "stub_projection", None),
     }
 
     # 3. Oracle queries: per-strategy ranked lists + metrics.
@@ -387,7 +587,7 @@ def _run_with_sdk(args, sdk) -> dict:
                  "point_kind": next(
                     (p["pointKind"] for p in points if p["id"] == pid), "")}
                 for pid, _s in ranked[strat]
-            ] for strat in STRATEGIES},
+            ] for strat in active_strategies},
         }
 
     # 4. Authored queries: pooled top-50s (for the judges) + metrics when
@@ -408,13 +608,13 @@ def _run_with_sdk(args, sdk) -> dict:
                  "point_kind": next(
                     (p["pointKind"] for p in points if p["id"] == pid), "")}
                 for pid, _s in ranked[strat]
-            ] for strat in STRATEGIES},
+            ] for strat in active_strategies},
         }
         if judge_labels and q["id"] in judge_labels:
             labels = judge_labels[q["id"]]
             authored_per_query[q["id"]] = {
-                strat: compute_metrics(_point_ids(ranked[strat]), labels)
-                for strat in STRATEGIES
+                strat: compute_metrics(_point_ids(ranked[strat])[:args.limit], labels)
+                for strat in active_strategies
             }
     if judge_labels and authored_per_query:
         authored_meta["labels_status"] = "adjudicated"
@@ -425,7 +625,7 @@ def _run_with_sdk(args, sdk) -> dict:
     # 5. Aggregate + CIs.
     per_strategy = {
         strat: _aggregate_with_ci(oracle_per_query, strat, rng)
-        for strat in STRATEGIES
+        for strat in active_strategies
     }
     by_tier: dict[str, dict] = {}
     for tier in ("easy", "medium", "hard"):
@@ -437,13 +637,18 @@ def _run_with_sdk(args, sdk) -> dict:
                 ]})[metric]
                 for metric in METRICS
             }
-            for strat in STRATEGIES
+            for strat in active_strategies
         }
 
-    paired = _paired_vs_fused(oracle_per_query, rng)
+    paired = _paired_vs_fused(oracle_per_query, rng, strategies=tuple(active_strategies))
+    rerank_verdict = _rerank_verdict(oracle_per_query, rng) if graph_ranker_arm else None
     gate = None
     if args.baseline:
         base = json.loads(Path(args.baseline).read_text())
+        base_sv = base.get("schema_version", 1)
+        if base_sv > SCHEMA_VERSION:
+            print(f"[gate] WARN: baseline schema_version {base_sv} > runner "
+                  f"{SCHEMA_VERSION} — gating anyway (older baseline always gates)")
         gate = _gate_vs_baseline(
             oracle_per_query, base.get("per_query", {}), rng,
         )
@@ -451,15 +656,45 @@ def _run_with_sdk(args, sdk) -> dict:
     # 6. Authored pool emission (top-50/strategy/query, deduped per query).
     pool_out_path = None
     if args.pool_out and authored_pool_results:
-        pool = build_pool(authored_pool_results, corpus_fp, list(STRATEGIES))
+        pool = build_pool(authored_pool_results, corpus_fp, list(active_strategies))
         Path(args.pool_out).write_text(json.dumps(pool.to_dict(), indent=2) + "\n")
         pool_out_path = args.pool_out
 
     authored_agg = (
         {strat: _aggregate_with_ci(authored_per_query, strat, rng)
-         for strat in STRATEGIES}
+         for strat in active_strategies}
         if authored_per_query else {}
     )
+
+    # 7. #1348 k-sweep section (separate top-level block, NOT per_query keys).
+    k_sweep_section = None
+    if ctx.get("k_sweep"):
+        k_sweep_section = {
+            "k_set": list(KSWEEP),
+            "per_query": {
+                qid: {"fused": {str(k): oracle_per_query[qid].get(f"fused@{k}", {})
+                                for k in KSWEEP}}
+                for qid in sorted(oracle_per_query)
+            },
+            "aggregate": {
+                str(k): {
+                    metric: aggregate({metric: [
+                        oracle_per_query[qid].get(f"fused@{k}", {}).get(metric, 0.0)
+                        for qid in sorted(oracle_per_query)
+                    ]})[metric]
+                    for metric in METRICS
+                }
+                for k in KSWEEP
+            },
+        }
+
+    # 8. #1348 per-strategy population counts (self-declared authority).
+    pop_counts: dict[str, int] = {s: 0 for s in active_strategies}
+    for q in oracle_set["queries"]:
+        ranked, _m = _run_oracle_query(q, ctx, oracle)
+        for s in active_strategies:
+            if ranked.get(s):
+                pop_counts[s] += 1
 
     report = {
         "schema_version": SCHEMA_VERSION,
@@ -468,7 +703,12 @@ def _run_with_sdk(args, sdk) -> dict:
         "corpus_target": args.corpus_size,
         "seeded_points": seeded,
         "limit": args.limit,
-        "strategies": list(STRATEGIES),
+        "depth": getattr(args, "depth", None) or args.limit,
+        "strategies": list(active_strategies),
+        "k_sweep": k_sweep_section,
+        "population_counts": pop_counts,
+        "rerank_verdict": rerank_verdict,
+        "corpus_variant": getattr(args, "corpus_variant", "plain"),
         "oracle": {
             "n_queries": len(oracle_set["queries"]),
             "tiers": oracle_set["meta"]["tiers"],
@@ -490,17 +730,24 @@ def _run_with_sdk(args, sdk) -> dict:
             "oracle_meta": oracle_set["meta"],
             "query_mix_meta": oracle_set["meta"]["composition"],
             "limit": args.limit,
+            "depth": getattr(args, "depth", None) or args.limit,
+            "k_sweep": bool(getattr(args, "k_sweep", False)),
+            "graph_ranker_arm": graph_ranker_arm,
+            "corpus_variant": getattr(args, "corpus_variant", "plain"),
             "synthetic_query_vectors": not use_model,
             "judge_labels": args.judge_labels or "none",
         }),
         "notes": [
-            "Embedded FalkorDBLite: NO FTS/HNSW — FTS degrades to EMPTY "
-            "(the production parameter-bound queryNodes path returns no rows "
-            "on redislite), structural degrades to empty for kind-less "
-            "queries, vector runs brute-force. FTS/structural columns on "
-            "embedded runs are measurement-environment artifacts, not quality "
-            "statements — Docker FalkorDB >= 4.x is authoritative.",
-            "On embedded, fused RRF = vector alone (FTS/structural empty).",
+            "Embedded FalkorDBLite: no HNSW vector index — vector runs "
+            "brute-force; the FULLTEXT index EXISTS on embedded "
+            "(indexes.fts=true; FTS populated 40/100 queries in the committed "
+            "baseline) and structural populates only for kind-carrying queries. "
+            "FTS/structural columns on embedded runs are measurement-"
+            "environment artifacts, not quality statements — Docker FalkorDB "
+            ">= 4.x is authoritative.",
+            "On embedded, fused RRF is NOT vector alone — per-query data shows "
+            "FTS populated 40/100 queries and fused != vector on 17/100 "
+            "(fused-vs-vector nDCG@10 delta CI -3.25..-0.83, excludes 0).",
             "Query vectors on embedded are SYNTHETIC SEMANTIC stand-ins "
             "(topic-centroid sums from the oracle structure + seeded noise) "
             "because no embedding model is loaded — same information a real "
@@ -513,8 +760,26 @@ def _run_with_sdk(args, sdk) -> dict:
             "Authored queries: relevance is subjective → LLM judges + owner "
             "adjudication (judge.py); baseline reports them labels_pending "
             "until the emitted pool is judged and merged via --judge-labels.",
-            "Paired deltas (fused vs per-strategy and gate-vs-baseline) are "
-            "90% paired bootstrap CIs on per-query deltas in POINTS (x100).",
+            "Paired deltas (fused vs per-strategy, rerank verdict, and gate-"
+            "vs-baseline) are 90% paired bootstrap CIs on per-query deltas in "
+            "POINTS (x100).",
+            "#1348 pool-semantics note: eval depth == eval limit (no x2 in this "
+            "harness); SDK str_limit = limit x2 floor 50 (TORTOISE_POOL_FLOOR). "
+            "--limit = returned limit (metrics are top-limit), --depth = "
+            "per-strategy retrieval depth; all depth/k/GraphRanker measurements "
+            "here are 2-strategy fusion (RRF fts+vector) on a kind-less corpus "
+            "(structural dead), while production fuses 3 strategies — the floor "
+            "default for 3-strategy production is a projection.",
+            "#1348 k_sweep: fused@{20,60,100} computed from IDENTICAL lists "
+            "(paired by construction); k-verdict interpretable only where >=2 "
+            "strategies populate (population_counts self-declare authority). "
+            "fused key is the k=60 alias (gate compat).",
+            "#1348 fused_rerank arm: fuse -> truncate to limit -> rerank "
+            "(production order sdk.py:8851->9004); corpus-variant enhanced "
+            "seeds topic-correlated EP (n.confidence + edges, no new nodes); "
+            "oracle-proxy = query-conditioned positive control (stub "
+            "projection, graph_boost_weight=1.0); enhanced-conf-only = "
+            "confidence-only ablation (use_degree=False).",
         ],
     }
     return report
@@ -532,7 +797,7 @@ def write_outputs(report: dict, out_path: str | None) -> str:
 
 def _markdown_summary(report: dict) -> str:
     lines = ["| strategy | nDCG@10 | P@5 | R@10 | MRR |", "|---|---|---|---|---|"]
-    for strat in STRATEGIES:
+    for strat in report.get("strategies", STRATEGIES):
         m = report["metrics"][strat]
         lines.append(
             f"| {strat} | {m['ndcg@10']['value']:.3f} | {m['p@5']['value']:.3f} "
@@ -540,6 +805,12 @@ def _markdown_summary(report: dict) -> str:
         )
     g = report.get("gate_vs_baseline")
     gate_line = f"gate vs baseline: {g['verdict']}" if g else "gate: none (no --baseline)"
+    rv = report.get("rerank_verdict")
+    if rv:
+        c = rv.get("ndcg@10_delta_points", {})
+        rv_line = (f"rerank verdict nDCG@10 delta: mean={c.get('mean')} "
+                   f"CI[{c.get('lower')},{c.get('upper')}] (n={c.get('n')})")
+        return "\n".join(lines + ["", gate_line, rv_line])
     return "\n".join(lines + ["", gate_line])
 
 
@@ -547,7 +818,8 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="python -m tests.eval.retrieval.run",
         description="Issue #1144 retrieval quality eval runner (per-strategy "
-        "+ fused graded metrics, paired bootstrap CIs, baseline gate).",
+        "+ fused graded metrics, paired bootstrap CIs, baseline gate; #1348 "
+        "depth/k-sweep/GraphRanker arms).",
     )
     p.add_argument("--db", help="FalkorDB URI (docker://|bolt://) or embedded "
                    "db file path (default: $TORTOISE_DB_URI, else a fresh "
@@ -555,23 +827,50 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--corpus-size", type=int, default=DEFAULT_CORPUS_SIZE)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--limit", type=int, default=DEFAULT_LIMIT,
-                   help="pooling depth per strategy (top-K/strategy/query)")
+                   help="RETURNED limit — metrics are computed against top-limit "
+                        "(default 50; #1348 pool-semantics: eval depth == eval limit)")
+    p.add_argument("--depth", type=int, default=None,
+                   help="#1348 per-strategy retrieval depth (default = --limit; "
+                        "fusion runs over FULL-depth lists, then metrics truncate "
+                        "to --limit)")
+    p.add_argument("--k-sweep", action="store_true",
+                   help="#1348 in-loop paired k sweep: fused@{20,60,100} from "
+                        "identical lists (separate k_sweep report section)")
+    p.add_argument("--graph-ranker-arm", action="store_true",
+                   help="#1348 add fused_rerank strategy (fuse->truncate->rerank, "
+                        "production order) + paired rerank verdict CI")
+    p.add_argument("--corpus-variant", default="plain",
+                   choices=("plain", "enhanced", "enhanced-conf-only"),
+                   help="#1348 corpus EP structure: plain (baseline-identical), "
+                        "enhanced (topic-correlated confidence + edges), "
+                        "enhanced-conf-only (confidence only — ablation). "
+                        "oracle-proxy is a rerank-input mode via stub projection.")
+    p.add_argument("--stub-projection", action="store_true",
+                   help="#1348 positive control: query-conditioned oracle-grade "
+                        "signals via a duck-typed stub projection (MECHANISM test)")
     p.add_argument("--out", help="report JSON path")
     p.add_argument("--pool-out", help="write the authored-query judge pool "
                    "JSON (top-50/strategy/query, deduped)")
     p.add_argument("--judge-labels", help="merged adjudicated labels JSON "
                    "(judge.py --apply-rulings --out) → authored metrics")
     p.add_argument("--baseline", help="baseline report JSON → quality gate "
-                   "(SHIP/WARN/BLOCK vs baseline, paired on query ids)")
+                   "(SHIP/WARN/BLOCK vs baseline, paired on query ids; older "
+                   "baseline schema always gates, newer warns)")
     p.add_argument("--no-seed-corpus", action="store_true")
     p.add_argument("--rebuild-queries", action="store_true",
                    help="regenerate and overwrite the committed query JSONs")
     p.add_argument("--quiet", action="store_true")
     args = p.parse_args(argv)
+    # #1348 post-parse resolution: depth defaults to limit (argparse defaults
+    # are static — resolve after parse).
+    if args.depth is None:
+        args.depth = args.limit
 
     if not args.quiet:
         print(f"#1144 retrieval eval — corpus={args.corpus_size} "
-              f"limit={args.limit} seed={args.seed}")
+              f"limit={args.limit} depth={args.depth} seed={args.seed} "
+              f"k_sweep={args.k_sweep} arm={args.graph_ranker_arm} "
+              f"variant={args.corpus_variant}")
     report = run_eval(args)
     out = write_outputs(report, args.out)
     print("\n" + _markdown_summary(report))
