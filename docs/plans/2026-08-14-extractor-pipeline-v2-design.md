@@ -145,13 +145,36 @@ semantics.
 
 ## 5. Model selection
 
-- **S1-S5 all run deepseek-v4-flash** (owner decision: "no opus"; flash is
-  capable + cheap + the production P3 from the earlier design).
-- **solar-pro4** ($0.03/M) remains the candidate for a future cheap
-  pre-processing tier IF the flash-only design needs cost optimization — but the
-  user's current directive is the simpler single-model design; solar is parked.
-- No max_tokens caps (owner decision); temperature 0.0 for determinism (owner
-  to confirm).
+- **S1-S4 run deepseek-v4-flash** (owner decision: "no opus"); S5 = execution.
+- **solar-pro4 pre-processing tier IS IN SCOPE** (owner decision, 2026-08-14):
+  the cleaning-pass test showed solar-cleaned → flash produces richer, better-
+  structured narrative (epistemic layer with IMPL/NAND/MITIGATES reasoning) than
+  flash-direct. The cleaner is a LOSSY COMPRESSOR with a logic-preservation
+  guarantee: it strips process noise (PR numbers, commit hashes, test counts)
+  while keeping the story arc + the 3 layers + the connections. It runs BEFORE
+  flash S1. Empirical note: 3× cost on the test window, but higher-quality
+  output — cost is secondary to ship-first (owner).
+- No max_tokens caps (owner decision); temperature 0.0 for determinism.
+
+## 5.5 The prompt-optimization loop (a defined process, not ad-hoc)
+
+The pipeline's prompts are NOT written once — they are tuned through an
+owner-in-the-loop optimization cycle, exactly as the 2026-08-14 cleaning-pass
+test demonstrated (draft prompt → run on a real window → owner reviews output →
+revise prompt → rerun):
+
+1. **Draft** the prompt (S1, cleaner, S2...) from the design intent.
+2. **Run** it on a real window (w-design-bounded or similar).
+3. **Show the owner the raw output** — no pre-digestion.
+4. **Owner judges**: is the State/Epistemic/Events layering right? Is process
+   noise out? Is the granularity at the "worth remembering in six months" bar?
+5. **Revise the prompt** per the owner's corrections; rerun.
+6. Loop until the owner approves the output, then lock the prompt.
+
+This loop is a FIRST-CLASS part of the pipeline's scope — each stage's prompt
+(S1, cleaner, S2, S4) goes through it. It is the mechanism that converts "the
+model should do X" into a tested, owner-approved prompt. The loop replaces the
+old "write the prompt once and ship" assumption.
 
 ## 6. The parity validation (before building the production path)
 
