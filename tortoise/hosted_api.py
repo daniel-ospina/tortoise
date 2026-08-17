@@ -45,7 +45,9 @@ from tortoise.hosted_backup import (
     MemoryStorage,
     RestoreVerificationError,
     R2Storage,
+    _restore_into_temp_verify_swap,
     create_backup,
+    decrypt_backup,
     list_backups,
     prune_backups,
     restore_backup,
@@ -1664,7 +1666,22 @@ _register_buckets: dict[str, list[float]] = defaultdict(list)
 _register_lock = asyncio.Lock()
 _REGISTER_MAX_PER_HOUR = 3
 
-_SENSITIVE_OP_LIMITS = {"export": 20, "team_delete": 5}  # per hour per IP
+# ── Graph import (#1230 Task 2) ────────────────────────────────────────────
+# The import consumes the ``tortoise-export-v1`` artifact the export CLI
+# (#1388) produces: a one-line clear JSON header (format/version/key
+# fingerprint/blob_sha256 — NO graph content) followed by the raw encrypted
+# blob (magic || nonce || AES-256-GCM ciphertext, the existing
+# hosted_backup.encrypt_backup layout).
+_IMPORT_FORMAT = "tortoise-export-v1"
+_IMPORT_ARTIFACT_VERSION = 1
+# 64 MiB streaming cap — enforced WHILE reading the body, never via
+# Content-Length alone (a spoofed short Content-Length would otherwise let
+# an unbounded body through to buffering/decrypt; #1230 plan S4).
+_IMPORT_MAX_BYTES = 64 * 1024 * 1024
+# Idempotency-ledger / quarantine props on the Team node (control plane).
+_IMPORT_LEDGER_PROPS = ("last_import_sha256", "last_import_quarantined_sha256")
+
+_SENSITIVE_OP_LIMITS = {"export": 20, "team_delete": 5, "import": 5}  # per hour per IP
 _SENSITIVE_BUCKETS: dict[tuple[str, str], list[float]] = defaultdict(list)
 _SENSITIVE_LOCK = asyncio.Lock()
 
@@ -5230,6 +5247,402 @@ async def export_team(team_id: str, request: Request,
         "members": members,
         "plan": plan,
     }
+
+
+# ── Graph import endpoint (#1230 Task 2) ─────────────────────────────────
+# POST /v1/teams/{team_id}/import ingests a ``tortoise-export-v1`` artifact
+# (produced by the export CLI, #1388) into the team graph: owner-only auth,
+# streaming size cap, per-IP rate limit, fail-closed validation chain
+# (format → blob sha256 → key fingerprint → decrypt → payload sha256 →
+# counts), then restore into a TEMP graph → verify → atomic swap via the
+# shared ``_restore_into_temp_verify_swap`` helper (extracted from
+# ``restore_backup``). Any verify/restore failure quarantines the artifact
+# (audit + ``last_import_quarantined_sha256``) — the live graph is NEVER
+# touched on failure. Re-import of the same payload sha256 is idempotent
+# (``last_import_sha256`` ledger → 200 already-imported).
+
+
+class _ImportVerifyError(Exception):
+    """Envelope rejected by the fail-closed validation chain.
+
+    Carries the most specific artifact sha256 known at the failure point so
+    the caller can quarantine it (audit + ledger prop)."""
+
+    def __init__(self, reason: str, sha256: str):
+        super().__init__(reason)
+        self.reason = reason
+        self.sha256 = sha256
+
+
+async def _read_import_body(request: Request) -> bytes:
+    """Read the raw request body under a HARD streaming cap.
+
+    Content-Length alone is spoofable (a client can claim a small length and
+    stream unbounded bytes) — the cap is enforced while draining the stream,
+    so an oversized artifact 413s before any buffering or decrypt work.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > _IMPORT_MAX_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail="Import artifact exceeds the size cap (64 MiB)",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _decode_import_key(key_b64: str, blob: bytes) -> bytes:
+    """Decode the caller-supplied artifact key (base64, AES-256 = 32 bytes).
+
+    There is NO server-side per-team key material — the caller supplies the
+    key printed at export time (#1230 plan: the two-link sha256 chain +
+    key-fingerprint check make a wrong key fail closed pre-decrypt).
+    """
+    import base64
+    try:
+        key = base64.b64decode(key_b64.strip(), validate=True)
+    except Exception:
+        raise HTTPException(
+            status_code=422, detail="Artifact key must be base64-encoded"
+        ) from None
+    if len(key) != 32:
+        raise HTTPException(
+            status_code=422, detail="Artifact key must decode to 32 bytes (AES-256)"
+        )
+    return key
+
+
+def _import_artifact_key(request: Request, body: bytes) -> tuple[bytes, bytes]:
+    """Resolve (artifact_blob, key_bytes) from the two wire forms (#1230):
+
+      - raw artifact bytes + ``X-Tortoise-Import-Key`` header (primary;
+        Content-Type ``application/vnd.tortoise.export.v1``)
+      - JSON body ``{"artifact": <base64>, "key": <base64>}`` — for callers
+        that cannot set headers. The raw-artifact form is only treated as
+        JSON when no import-key header is present.
+    """
+    header_key = request.headers.get("X-Tortoise-Import-Key")
+    if header_key:
+        return body, _decode_import_key(header_key, body)
+    try:
+        parsed = _json.loads(body.decode("utf-8"))
+    except Exception:
+        raise HTTPException(
+            status_code=422,
+            detail=("Missing X-Tortoise-Import-Key header and body is not a "
+                    "JSON {\"artifact\", \"key\"} envelope"),
+        ) from None
+    if not isinstance(parsed, dict) or not parsed.get("artifact") or not parsed.get("key"):
+        raise HTTPException(
+            status_code=422,
+            detail="JSON body must carry base64 'artifact' and 'key' fields",
+        )
+    try:
+        import base64
+        artifact = base64.b64decode(parsed["artifact"], validate=True)
+    except Exception:
+        raise HTTPException(status_code=422, detail="JSON artifact must be base64") from None
+    if len(artifact) > _IMPORT_MAX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail="Import artifact exceeds the size cap (64 MiB)",
+        )
+    return artifact, _decode_import_key(str(parsed["key"]), artifact)
+
+
+def _validate_import_envelope(blob: bytes, key: bytes) -> dict:
+    """Fail-closed validation chain (#1230 plan Task 2 — order matters):
+
+      1. format == "tortoise-export-v1" and artifact_version == 1
+      2. blob_sha256 (clear header) matches the received encrypted blob
+      3. supplied key fingerprint matches the header key_fingerprint
+      4. decrypt the blob with the supplied key
+      5. payload_sha256 (inner envelope) matches the recomputed canonical hash
+      6. node_count/edge_count fields match len(nodes)/len(edges)
+
+    Raises ``_ImportVerifyError`` (with the quarantine sha256) on ANY failure.
+    Returns {header, inner, payload, payload_sha256, blob_sha256}.
+    """
+    import hashlib
+    whole_sha = hashlib.sha256(blob).hexdigest()
+    newline = blob.find(b"\n")
+    if newline <= 0:
+        raise _ImportVerifyError("artifact missing header line", whole_sha)
+    try:
+        header = _json.loads(blob[:newline])
+    except Exception:
+        raise _ImportVerifyError("artifact header is not valid JSON", whole_sha)
+    if not isinstance(header, dict) or header.get("format") != _IMPORT_FORMAT:
+        raise _ImportVerifyError("unsupported artifact format", whole_sha)
+    if header.get("artifact_version") != _IMPORT_ARTIFACT_VERSION:
+        raise _ImportVerifyError(
+            f"unsupported artifact_version {header.get('artifact_version')!r}", whole_sha
+        )
+    enc_blob = blob[newline + 1:]
+    enc_sha = hashlib.sha256(enc_blob).hexdigest()
+    if header.get("blob_sha256") != enc_sha:
+        raise _ImportVerifyError("blob integrity check failed (sha256 mismatch)", enc_sha)
+    fingerprint = hashlib.sha256(key).hexdigest()[:8]
+    if header.get("key_fingerprint") != fingerprint:
+        raise _ImportVerifyError("artifact key fingerprint mismatch", enc_sha)
+    try:
+        plaintext = decrypt_backup(enc_blob, key=key)
+    except ValueError as e:
+        raise _ImportVerifyError(f"decryption failed — {e}", enc_sha)
+    try:
+        inner = _json.loads(plaintext)
+    except Exception:
+        raise _ImportVerifyError("decrypted payload is not valid JSON", enc_sha)
+    if not isinstance(inner, dict) or inner.get("format") != _IMPORT_FORMAT:
+        raise _ImportVerifyError(
+            "decrypted payload is not a tortoise-export-v1 envelope", enc_sha
+        )
+    payload = inner.get("payload")
+    if not isinstance(payload, dict):
+        raise _ImportVerifyError("envelope missing payload", enc_sha)
+    # Canonical serialization (byte-stable for sha256 — #1230 plan Task 1
+    # design decision 4): json.dumps(sort_keys=True, separators=(",", ":")).
+    payload_sha = hashlib.sha256(
+        _json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    if inner.get("payload_sha256") != payload_sha:
+        raise _ImportVerifyError(
+            "payload integrity check failed (sha256 mismatch)", payload_sha
+        )
+    nodes = payload.get("nodes")
+    edges = payload.get("edges")
+    if not isinstance(nodes, list) or not isinstance(edges, list):
+        raise _ImportVerifyError("payload missing nodes/edges", payload_sha)
+    if payload.get("node_count") != len(nodes) or payload.get("edge_count") != len(edges):
+        raise _ImportVerifyError("payload node_count/edge_count mismatch", payload_sha)
+    return {
+        "header": header,
+        "inner": inner,
+        "payload": payload,
+        "payload_sha256": payload_sha,
+        "blob_sha256": enc_sha,
+    }
+
+
+def _stamp_import_prop(source, team_id: str, prop: str, value: str) -> None:
+    """Seam: stamp a Team-node prop (idempotency ledger / quarantine).
+
+    Same dialect split as ``hosted_backup._stamp_backup_latest`` (#669):
+    Supabase mode PATCHes the ``teams`` row; registry mode SETs on the Team
+    graph node. ``prop`` is allowlisted — dynamic Cypher property names are
+    never interpolated from caller input.
+    """
+    from tortoise.hosted_backup import _is_supabase_source
+    if prop not in _IMPORT_LEDGER_PROPS:
+        raise ValueError(f"unexpected import prop {prop!r}")
+    if _is_supabase_source(source):
+        source.query(
+            "teams", method="PATCH", filters=[("id", "eq", team_id)],
+            json_body={prop: value},
+        )
+    else:
+        source.query(
+            f"MATCH (t:Team {{id:$id}}) SET t.{prop} = $v",
+            params={"id": team_id, "v": value},
+        )
+
+
+async def _quarantine_import(
+    request: Request, team_id: str, user: dict, *, sha256: str, reason: str,
+) -> None:
+    """Record a rejected import: audit event + quarantine ledger prop.
+
+    Best-effort by design — a control-plane blip must never mask the 422
+    (mirrors the #669 P3 metadata contract). The live graph is NEVER touched.
+    """
+    try:
+        await _async_audit(
+            request, team_id, "quarantined_import",
+            resource_type="team", resource_id=team_id,
+            actor_user_id=user.get("user_id"),
+            detail={"sha256": sha256, "reason": reason},
+        )
+    except Exception:
+        _logger.exception("quarantined_import audit failed for team %s", team_id)
+    try:
+        from tortoise.supabase_control import get_control_plane, is_supabase_enabled
+        if is_supabase_enabled():
+            source = get_control_plane()
+        else:
+            reg = _registry_sdk()
+            try:
+                source = reg._get_registry()
+            finally:
+                reg.close()
+        await asyncio.to_thread(
+            _stamp_import_prop, source, team_id, "last_import_quarantined_sha256", sha256
+        )
+    except Exception:
+        _logger.warning("quarantine stamp failed for team %s", team_id)
+
+
+def _rebuild_import_indexes(sdk, graph_name: str) -> None:
+    """Rebuild range/FTS/vector indexes on the swapped live graph — the
+    logical dump + GRAPH.COPY restores data, not schema (mirror of the
+    backups-restore endpoint, #924 review P2). Off the event loop."""
+    db_uri = os.environ.get("TORTOISE_DB_URI")
+    if db_uri:
+        from tortoise.projection import FalkorProjection
+        dump_proj = FalkorProjection.from_uri(db_uri, graph_name=graph_name)
+    else:
+        proj = sdk._get_proj()
+        if getattr(proj, "_path", None):
+            from tortoise.projection import FalkorProjection
+            dump_proj = FalkorProjection(
+                path=proj._path, graph_name=graph_name,
+                skip_health_check=True,
+            )
+        else:
+            dump_proj = proj
+    dump_proj._ensure_indexes()
+
+
+@app.post("/v1/teams/{team_id}/import")
+async def import_team(team_id: str, request: Request,
+                      user: dict = Depends(get_current_user)):
+    """Ingest a ``tortoise-export-v1`` artifact into the team graph (#1230).
+
+    Owner-only (a full-graph overwrite must not be writable by any member
+    key — mirrors export's ``_require_owner``; authz-first: foreign/absent
+    key → 403, no existence oracle). Streaming size cap (413), artifact
+    node_count ≤ team max_points (413), per-IP rate budget (429). Fail-closed
+    validation chain (422 + quarantine — live graph untouched), then restore
+    into a TEMP graph → verify → atomic swap via the shared
+    ``_restore_into_temp_verify_swap`` helper. The payload's SELFHOST graph
+    name is NOT matched server-side (import-mode override, logged) — cross-
+    team isolation is enforced by auth. Re-import of the same payload sha256
+    → 200 {"imported": false, "already": true}. Runs on a worker thread.
+    """
+    await _check_sensitive_op_rate_limit(request, "import")
+    team_node = await _team_node(team_id)
+    deleted_at = team_node.get("deleted_at") if team_node else None
+    await _require_owner(user["user_id"], team_id, allow_removed=deleted_at)
+    if team_node is None:
+        raise HTTPException(status_code=404, detail="Team not found")
+    if deleted_at:
+        raise HTTPException(status_code=410, detail="Team is scheduled for deletion")
+
+    body = await _read_import_body(request)
+    artifact, artifact_key = _import_artifact_key(request, body)
+    try:
+        parsed = await asyncio.to_thread(
+            _validate_import_envelope, artifact, artifact_key
+        )
+    except _ImportVerifyError as e:
+        await _quarantine_import(
+            request, team_id, user, sha256=e.sha256, reason=e.reason
+        )
+        raise HTTPException(status_code=422, detail=f"Import rejected: {e.reason}")
+
+    sha = parsed["payload_sha256"]
+    # Size cap vs the team's plan (graph_size_cap / max_points) — a legitimate
+    # artifact that is simply too big for the team's graph must 413, not 422.
+    max_points = team_node.get("max_points")
+    if max_points is None:
+        max_points = team_node.get("graph_size_cap")
+    if max_points is None:
+        from tortoise.pricing import tier_limits as _tier_limits
+        max_points = _tier_limits(team_node.get("tier", "free")).get("max_graph_nodes")
+    if max_points is not None and parsed["payload"].get("node_count", 0) > max_points:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Artifact exceeds the team graph size cap ({max_points} nodes)",
+        )
+
+    lock = await _team_restore_lock(team_id)
+    async with lock:
+        # Idempotency ledger (re-read inside the lock — a concurrent import
+        # may have stamped the ledger while we validated).
+        fresh = await _team_node(team_id)
+        if fresh is not None and fresh.get("last_import_sha256") == sha:
+            await _async_audit(
+                request, team_id, "team_import",
+                resource_type="team", resource_id=team_id,
+                actor_user_id=user["user_id"],
+                detail={"sha256": sha, "already": True},
+            )
+            return {"imported": False, "already": True, "id": sha}
+
+        from tortoise.supabase_control import (
+            get_control_plane, is_supabase_enabled,
+        )
+        sdk = _make_sdk(namespace=team_id)
+        registry_sdk = None
+        try:
+            if is_supabase_enabled():
+                cp_source = get_control_plane()
+            else:
+                registry_sdk = _registry_sdk()
+                cp_source = registry_sdk._get_registry()
+            from tortoise.backup_sweep import team_graph_name
+            graph_name = team_graph_name(cp_source, team_id)
+            # Import-mode graph_name override (logged — the migration is
+            # legitimate BECAUSE the payload's selfhost graph name is not
+            # matched; cross-team isolation is enforced by owner auth).
+            _logger.info(
+                "import: restoring payload graph %r into live graph %r "
+                "(import-mode override)",
+                parsed["payload"].get("graph_name"), graph_name,
+            )
+            try:
+                result = await asyncio.to_thread(
+                    _restore_into_temp_verify_swap,
+                    sdk._get_proj().db, parsed["payload"],
+                    live_name=graph_name,
+                )
+            except RestoreVerificationError as e:
+                await _quarantine_import(
+                    request, team_id, user, sha256=sha, reason=str(e)
+                )
+                raise HTTPException(status_code=422, detail=f"Import rejected: {e}")
+            except (ValueError, KeyError) as e:
+                await _quarantine_import(
+                    request, team_id, user, sha256=sha, reason=str(e)
+                )
+                raise HTTPException(status_code=422, detail=f"Import rejected: {e}")
+            except RuntimeError as e:
+                # Server-side swap failure — verified temp graph intact, live
+                # graph untouched or recoverable; still quarantined (a failed
+                # import attempt is recorded; the ledger makes re-import converge).
+                await _quarantine_import(
+                    request, team_id, user, sha256=sha, reason=str(e)
+                )
+                raise HTTPException(status_code=503, detail=f"Import failed: {e}")
+
+            # Rebuild indexes on the swapped graph (best-effort — a rebuild
+            # failure must not fail an already-durable import).
+            try:
+                await asyncio.to_thread(_rebuild_import_indexes, sdk, graph_name)
+            except Exception as e:
+                _logger.warning(
+                    "index rebuild after import failed for team %s: %s", team_id, e
+                )
+
+            # Idempotency ledger stamp — best-effort; a crash between the swap
+            # and this stamp is the documented double-import convergence case
+            # (#1230: idempotency is convergence, not strict-once).
+            await asyncio.to_thread(
+                _stamp_import_prop, cp_source, team_id, "last_import_sha256", sha
+            )
+            await _async_audit(
+                request, team_id, "team_import",
+                resource_type="team", resource_id=team_id,
+                actor_user_id=user["user_id"],
+                detail={"sha256": sha},
+            )
+            return {"imported": True, "already": False, "id": sha, **result}
+        finally:
+            sdk.close()
+            if registry_sdk is not None:
+                registry_sdk.close()
 
 
 def _soft_delete_registry_team(team_id: str, now: str, grace_hours: float) -> None:

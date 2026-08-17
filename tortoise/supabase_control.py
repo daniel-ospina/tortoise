@@ -75,21 +75,31 @@ _TEAM_BASE_SELECT = [
     "ops_allowance", "email",
 ]
 # Additive teams columns, separately migrated after 0006 (0015 abuse state;
-# 20260813000005 dashboard_key_login). A schema one migration behind raises
-# PostgREST HTTP 400 on these; the auth seam must degrade to safe defaults
-# (un-suspended/un-flagged; key login allowed), never take down all auth
-# (#1096, defense-in-depth behind the #1095 deploy gate).
+# 20260813000005 dashboard_key_login; 20260817000001 import ledger + points
+# cap override, #1230). A schema one migration behind raises PostgREST HTTP
+# 400 on these; the auth seam must degrade to safe defaults (un-suspended/
+# un-flagged; key login allowed; import ledger unset), never take down all
+# auth (#1096, defense-in-depth behind the #1095 deploy gate).
 _TEAM_ADDITIVE_SELECT = [
     "suspended_at", "flagged_at",
     # #1148: whether API-key login is accepted for the dashboard (management
     # surface). Default true; claimed owners toggle it (session-authed).
     "dashboard_key_login",
+    # #1230: import idempotency ledger + quarantine record + points-cap
+    # override (see _TEAM_ADDITIVE_IMPORT_TIER).
+    "last_import_sha256", "last_import_quarantined_sha256", "max_points",
 ]
 # Retry tiers for the fail-soft ladder (#1096): the NEWEST migration is
 # dropped FIRST, so a schema missing only the newest additive (e.g.
 # 20260813000005) still reads the older additive state (0015 carries REAL
 # suspension data — discarding it would bypass enforcement with real data
 # present).
+_TEAM_ADDITIVE_IMPORT_TIER = [
+    # #1230 import idempotency ledger + quarantine record (Team-node props).
+    "last_import_sha256", "last_import_quarantined_sha256",
+    # points-cap override (the plan's max_points / graph_size_cap source).
+    "max_points",
+]
 _TEAM_ADDITIVE_DKL_TIER = ["dashboard_key_login"]      # 20260813000005
 _TEAM_ADDITIVE_0015_TIER = ["suspended_at", "flagged_at"]  # 0015
 
@@ -533,7 +543,8 @@ def resolve_api_key(cp, token: str) -> dict | None:
 
     team_row = _teams_row_fail_soft(
         cp, team_id, select=_QUOTA_SELECT,
-        additive_tiers=[_TEAM_ADDITIVE_DKL_TIER, _TEAM_ADDITIVE_0015_TIER])
+        additive_tiers=[_TEAM_ADDITIVE_IMPORT_TIER,
+                         _TEAM_ADDITIVE_DKL_TIER, _TEAM_ADDITIVE_0015_TIER])
     if team_row is None:
         # Key's team vanished — fail closed (401), never authenticate.
         return None
@@ -654,7 +665,8 @@ def team_by_id(cp, team_id: str) -> dict | None:
                 "backup_enabled", "backup_latest_at", "backup_restored_at",
                 "created_at", "deleted_at", "grace_hours"]
             + _TEAM_ADDITIVE_SELECT,
-        additive_tiers=[_TEAM_ADDITIVE_DKL_TIER, _TEAM_ADDITIVE_0015_TIER])
+        additive_tiers=[_TEAM_ADDITIVE_IMPORT_TIER,
+                         _TEAM_ADDITIVE_DKL_TIER, _TEAM_ADDITIVE_0015_TIER])
 
 
 # ── Session-key mint writes (E2E-2 round-trip: mint → api_keys → resolve) ──

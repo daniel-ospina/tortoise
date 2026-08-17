@@ -36,7 +36,7 @@ import os
 import re
 import secrets
 from datetime import datetime, timezone
-from typing import Protocol
+from typing import Callable, Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -592,6 +592,178 @@ def list_backups(storage: BackupStorage, team_id: str) -> list[dict]:
     return out
 
 
+def _restore_into_temp_verify_swap(
+    db,
+    payload: dict,
+    *,
+    live_name: str,
+    expected_nodes: int | None = None,
+    expected_edges: int | None = None,
+    stamp: Callable[[], None] | None = None,
+) -> dict:
+    """Temp-graph restore → verify → atomic swap — the shared stage behind
+    ``restore_backup`` and the hosted ``POST /v1/teams/{team_id}/import``
+    endpoint (epic #1230 Task 2).
+
+    ``db``: falkordb Connection handle (e.g. ``sdk._get_proj().db``) — the temp
+        graph and the live graph live on the same server.
+    ``live_name``: the graph the verified temp graph is swapped INTO.
+    ``expected_nodes/expected_edges``: counts to verify against. Default: the
+        payload's own ``node_count``/``edge_count`` — callers pass the
+        AUTHENTICATED payload (decrypted under a verified key / sha256 chain),
+        so verification can never be disabled by editing bookkeeping.
+    ``stamp``: optional post-swap callback (control-plane metadata, best-effort
+        at the caller): ``restore_backup`` stamps ``backup_restored_at`` via the
+        registry; the import endpoint stamps its ``last_import_sha256`` ledger.
+
+    Flow: restore into ``{live_name}_restore_{ts}_{rnd}`` → verify node+edge
+    counts → empty-backup-over-live guard → pre-restore safety copy of the
+    live graph → delete live → GRAPH.COPY temp → live → cleanup staging and
+    pre-restore copies. Any failure before the swap leaves the live graph
+    untouched; a swap failure leaves the verified temp + pre-restore copies
+    recoverable.
+    """
+    if expected_nodes is None:
+        expected_nodes = payload.get("node_count")
+    if expected_edges is None:
+        expected_edges = payload.get("edge_count")
+    if expected_nodes is None or expected_edges is None:
+        raise ValueError(
+            "Backup payload missing node_count/edge_count — refusing to restore "
+            "with count verification disabled"
+        )
+
+    ts = datetime.now(timezone.utc)
+    # Millisecond + random suffix — two restores of the same graph within one
+    # millisecond must not share a staging graph (a retry racing the original
+    # would contaminate counts).
+    ts_str = f"{ts.strftime('%Y%m%dT%H%M%S')}{ts.microsecond // 1000:03d}Z_{secrets.token_hex(4)}"
+    temp_name = f"{live_name}_restore_{ts_str}"
+    pre_name = f"{live_name}_pre_restore_{ts_str}"
+    temp_g = db.select_graph(temp_name)
+    try:
+        counts = restore_graph(temp_g, payload)
+    except Exception:
+        # validation failure (unsafe label, dangling edge, malformed edge) —
+        # drop the staging graph; the live graph was never touched
+        try:
+            temp_g.delete()
+        except Exception:
+            pass
+        raise
+
+    # Verify against the DECRYPTED/AUTHENTICATED payload — a tampered manifest
+    # can never disable verification (the caller's sha256 chain gates this).
+    if counts["nodes"] != expected_nodes:
+        # Partial restore — drop the staging graph (unlike the copy-failure
+        # path below, this temp graph is a failed partial restore, not a
+        # verified recovery copy). Live graph untouched.
+        try:
+            temp_g.delete()
+        except Exception:
+            pass
+        raise RestoreVerificationError(
+            f"Restore verification failed: {counts['nodes']} nodes restored, "
+            f"expected {expected_nodes} — live graph untouched"
+        )
+    if counts["edges"] != expected_edges:
+        try:
+            temp_g.delete()
+        except Exception:
+            pass
+        raise RestoreVerificationError(
+            f"Restore verification failed: {counts['edges']} edges restored, "
+            f"expected {expected_edges} — live graph untouched"
+        )
+
+    # Empty-backup guard (issue #101 class): a backup taken after a wipe (0
+    # nodes) must not silently REPLACE live data on restore — the operator
+    # would see "verified ✓" while the live graph is destroyed again. The live
+    # count read FAILS CLOSED: a query failure is NOT treated as "graph
+    # missing" — only a confirmed-absent graph (via list_graphs) is safe to
+    # proceed on. A read failure must never authorize a destructive delete.
+    live_g = db.select_graph(live_name)
+    try:
+        live_nodes = int(live_g.query("MATCH (n) RETURN count(n)").result_set[0][0])
+    except Exception:
+        # Fail closed: only a CONFIRMED-absent graph (via GRAPH.LIST) is safe to
+        # proceed on. A query failure OR a list_graphs failure (dead connection —
+        # exactly the incident-time scenario) aborts with the temp cleaned up;
+        # a read failure must never authorize a destructive delete.
+        try:
+            graph_present = live_name in set(db.list_graphs())
+        except Exception:
+            graph_present = True  # cannot confirm absence → treat as present
+        if graph_present:
+            try:
+                temp_g.delete()
+            except Exception:
+                pass
+            raise RestoreVerificationError(
+                "Cannot verify live graph state before restore — aborting (fail closed)"
+            )
+        live_nodes = 0  # confirmed absent (dropped graph) — nothing to protect
+    if live_nodes > 0 and expected_nodes == 0:
+        try:
+            temp_g.delete()
+        except Exception:
+            pass
+        raise RestoreVerificationError(
+            f"Refusing to restore an empty backup over a live graph with "
+            f"{live_nodes} nodes — live graph untouched"
+        )
+
+    # Pre-restore safety copy: before the destructive delete, snapshot the live
+    # graph so the swap is reversible even if the process dies mid-window
+    # (the 2026-08-05 "wipe followed by any write re-saves the empty state"
+    # failure chain). Best-effort — skipped when live is empty/missing.
+    pre_g = None
+    if live_nodes > 0:
+        try:
+            live_g.copy(pre_name)
+            pre_g = db.select_graph(pre_name)
+        except Exception as e:
+            logger.warning("pre-restore copy failed (continuing): %s", e)
+
+    # Swap: delete live graph then promote the verified temp graph. Delete is
+    # best-effort: the disaster-recovery path restores into a graph that was
+    # DROPPED/lost — a missing graph raises on delete but the copy below seeds
+    # it. A genuine delete failure surfaces as a copy failure ("destination key
+    # already exists") and the verified temp graph remains intact.
+    try:
+        live_g.delete()
+    except Exception as e:
+        logger.warning("live graph delete failed (proceeding to copy): %s", e)
+    try:
+        temp_g.copy(live_name)
+    except Exception as e:
+        logger.exception(
+            "GRAPH.COPY temp→live failed for %s — temp graph %s intact",
+            live_name, temp_name,
+        )
+        raise RuntimeError(
+            f"Restore swap failed — verified temp graph {temp_name} intact: {e}"
+        ) from e
+    # Success: remove the transient staging + pre-restore copies
+    for g in (temp_g, pre_g):
+        if g is not None:
+            try:
+                g.delete()
+            except Exception as e:
+                logger.warning("cleanup of %s failed: %s", getattr(g, "name", "?"), e)
+
+    if stamp is not None:
+        try:
+            stamp()
+        except Exception as e:  # best-effort metadata (#669 P3)
+            logger.warning("restore stamp failed for %s: %s", live_name, e)
+
+    return {
+        "restored": counts,
+        "restored_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 def restore_backup(
     db,
     registry,
@@ -696,147 +868,13 @@ def restore_backup(
             f"requested graph {graph_name!r} — cross-graph restore rejected"
         )
 
-    ts = datetime.now(timezone.utc)
-    # Millisecond + random suffix — two restores of the same graph within one
-    # millisecond must not share a staging graph (a retry racing the original
-    # would contaminate counts).
-    ts_str = f"{ts.strftime('%Y%m%dT%H%M%S')}{ts.microsecond // 1000:03d}Z_{secrets.token_hex(4)}"
-    temp_name = f"{live_name}_restore_{ts_str}"
-    pre_name = f"{live_name}_pre_restore_{ts_str}"
-    temp_g = db.select_graph(temp_name)
-    try:
-        counts = restore_graph(temp_g, payload)
-    except Exception:
-        # validation failure (unsafe label, dangling edge, malformed edge) —
-        # drop the staging graph; the live graph was never touched
-        try:
-            temp_g.delete()
-        except Exception:
-            pass
-        raise
-
-    # Verify against the DECRYPTED payload (authenticated by AES-GCM), not the
-    # plaintext manifest — a tampered manifest can never disable verification.
-    expected_nodes = payload.get("node_count")
-    expected_edges = payload.get("edge_count")
-    if expected_nodes is None or expected_edges is None:
-        try:
-            temp_g.delete()
-        except Exception:
-            pass
-        raise ValueError(
-            "Backup payload missing node_count/edge_count — refusing to restore "
-            "with count verification disabled"
-        )
-    if counts["nodes"] != expected_nodes:
-        # Partial restore — drop the staging graph (unlike the copy-failure
-        # path below, this temp graph is a failed partial restore, not a
-        # verified recovery copy). Live graph untouched.
-        try:
-            temp_g.delete()
-        except Exception:
-            pass
-        raise RestoreVerificationError(
-            f"Restore verification failed: {counts['nodes']} nodes restored, "
-            f"expected {expected_nodes} — live graph untouched"
-        )
-    if counts["edges"] != expected_edges:
-        try:
-            temp_g.delete()
-        except Exception:
-            pass
-        raise RestoreVerificationError(
-            f"Restore verification failed: {counts['edges']} edges restored, "
-            f"expected {expected_edges} — live graph untouched"
-        )
-
-    # Empty-backup guard (issue #101 class): a backup taken after a wipe (0
-    # nodes) must not silently REPLACE live data on restore — the operator
-    # would see "verified ✓" while the live graph is destroyed again. The live
-    # count read FAILS CLOSED: a query failure is NOT treated as "graph
-    # missing" — only a confirmed-absent graph (via list_graphs) is safe to
-    # proceed on. A read failure must never authorize a destructive delete.
-    live_g = db.select_graph(live_name)
-    try:
-        live_nodes = int(live_g.query("MATCH (n) RETURN count(n)").result_set[0][0])
-    except Exception:
-        # Fail closed: only a CONFIRMED-absent graph (via GRAPH.LIST) is safe to
-        # proceed on. A query failure OR a list_graphs failure (dead connection —
-        # exactly the incident-time scenario) aborts with the temp cleaned up;
-        # a read failure must never authorize a destructive delete.
-        try:
-            graph_present = live_name in set(db.list_graphs())
-        except Exception:
-            graph_present = True  # cannot confirm absence → treat as present
-        if graph_present:
-            try:
-                temp_g.delete()
-            except Exception:
-                pass
-            raise RestoreVerificationError(
-                "Cannot verify live graph state before restore — aborting (fail closed)"
-            )
-        live_nodes = 0  # confirmed absent (dropped graph) — nothing to protect
-    if live_nodes > 0 and expected_nodes == 0:
-        try:
-            temp_g.delete()
-        except Exception:
-            pass
-        raise RestoreVerificationError(
-            f"Refusing to restore an empty backup over a live graph with "
-            f"{live_nodes} nodes — live graph untouched"
-        )
-
-    # Pre-restore safety copy: before the destructive delete, snapshot the live
-    # graph so the swap is reversible even if the process dies mid-window
-    # (the 2026-08-05 "wipe followed by any write re-saves the empty state"
-    # failure chain). Best-effort — skipped when live is empty/missing.
-    pre_g = None
-    if live_nodes > 0:
-        try:
-            live_g.copy(pre_name)
-            pre_g = db.select_graph(pre_name)
-        except Exception as e:
-            logger.warning("pre-restore copy failed (continuing): %s", e)
-
-    # Swap: delete live graph then promote the verified temp graph. Delete is
-    # best-effort: the disaster-recovery path restores into a graph that was
-    # DROPPED/lost — a missing graph raises on delete but the copy below seeds
-    # it. A genuine delete failure surfaces as a copy failure ("destination key
-    # already exists") and the verified temp graph remains intact.
-    try:
-        live_g.delete()
-    except Exception as e:
-        logger.warning("live graph delete failed (proceeding to copy): %s", e)
-    try:
-        temp_g.copy(live_name)
-    except Exception as e:
-        logger.exception(
-            "GRAPH.COPY temp→live failed for %s — temp graph %s intact",
-            live_name, temp_name,
-        )
-        raise RuntimeError(
-            f"Restore swap failed — verified temp graph {temp_name} intact: {e}"
-        ) from e
-    # Success: remove the transient staging + pre-restore copies
-    for g in (temp_g, pre_g):
-        if g is not None:
-            try:
-                g.delete()
-            except Exception as e:
-                logger.warning("cleanup of %s failed: %s", getattr(g, "name", "?"), e)
-
-    if not drill:
-        try:
-            _stamp_backup_restored(registry, team_id)
-        except Exception as e:  # best-effort metadata (#669 P3)
-            logger.warning("restore stamp failed for %s: %s", team_id, e)
-
-    return {
-        "backup_key": backup_key,
-        "restored": counts,
-        "restored_at": datetime.now(timezone.utc).isoformat(),
-    }
+    result = _restore_into_temp_verify_swap(
+        db, payload,
+        live_name=live_name,
+        stamp=(None if drill else lambda: _stamp_backup_restored(registry, team_id)),
+    )
+    result["backup_key"] = backup_key
+    return result
 
 
 def prune_backups(
