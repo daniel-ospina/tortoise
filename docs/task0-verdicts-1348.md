@@ -79,3 +79,61 @@ linear-depth UPPER-BOUND ASSUMPTION, not measured.
 
 Mixed cell 0a-FAIL + 0c-PASS confirmed as the pre-registered GraphRanker use
 case — 0c governs Phase 2, 0a governs only the floor default.
+
+---
+
+## Phase 1 execution verdict (Task 6) — 4-class discriminator applied
+
+| depth | fused nDCG@10 | delta vs depth-20 |
+|---|---|---|
+| 10 | 0.8337 | — |
+| **20 (status quo)** | 0.8336 | 0 |
+| 25 | 0.835 | +0.14 |
+| 50 | 0.8350 | +0.14 |
+| 100 | 0.839 | +0.54 |
+
+**Outcome class: CEILING-CAPPED.** delta(20,100) = 0.54 pts < 1.0 threshold; the
+ceiling probe (Task 0c) confirmed the fused top-10 already contains the
+grade-2/1 items — depth does not change the top-10 composition on this corpus
+(top-10 RRF inertia). **FLOOR-ACTION rule:** delta(20,50) = 0.14 pts < 1.0 at
+the ADOPTED depth → **default-50 is NOT blessed by quality headroom**; the
+floor ships as an env-only opt-in config knob (still useful for the E2E-8
+latency guard + production tuneability), not a baked default.
+
+## Phase 2 execution verdict (Task 7) — GraphRanker arms
+
+All on enhanced corpus (topic-correlated confidence + connectivity), embedded,
+n=100 oracle queries, fuse→truncate→rerank (production order sdk.py:8851→9004):
+
+| arm | nDCG@10 | Δ vs fused (90% CI) | interpretation |
+|---|---|---|---|
+| fused@60 (OFF) | 0.835 | — | status quo |
+| **fused_rerank (stub positive control)** | 0.898 | **+6.30 [3.76, 8.98]** | MECHANISM: control ≈ ceiling probe 0.898 → harness NOT broken, pool IS reorderable |
+| fused_rerank (static enhanced) | 0.854 | **+1.86 [0.90, 2.82]** | REALISM: static EP signal captures ~30% of headroom |
+| fused_rerank (enhanced-conf-only, use_degree=False) | 0.838 | +0.26 [−0.59, 1.13] | ablation: confidence-only adds NOTHING (CI includes 0) |
+| fused_rerank (production-parity --depth 50 --limit 10) | 0.839 | +0.36 [0.05, 0.69] | customer-surface bracket: small but real |
+
+**Power-relevant statistic (P1-A corollary, verified):** static-confidence ↔
+per-query oracle-grade correlation ≈ **0.0003** — static confidence is
+orthogonal to query-conditioned relevance on the balanced 24-topic mix, which
+is exactly why the confidence-only ablation shows no lift while the
+topic-correlated connectivity does. Cohen's d on between-topic confidence was
+necessary-but-not-sufficient, as pre-registered.
+
+**GRAPHRANKER VERDICT: HYBRID (evidence, corpus-bounded).**
+- The graph signal as a static, query-independent EP boost delivers a real but
+  modest lift at eval depth 50 (+1.86 nDCG pts) and a small real lift at the
+  production-parity surface (+0.36, CI excludes 0) — **but the lift is carried
+  ENTIRELY by the connectivity (edge) signal; confidence alone is null**
+  (ablation CI [−0.59, 1.13]).
+- This is a mechanism-capability result on topic-correlated synthetic EP — NOT
+  a production-value claim. A static EP confidence field uncorrelated with the
+  query's target (correlation ≈ 0.0003) cannot be the differentiator; the
+  graph-structure (connectivity) signal is the component with measurable value.
+- **Recommendation: HYBRID** — wire the connectivity-weighted graph boost as an
+  optional `order_by="graph"`/composite path (adopt the STRUCTURE signal, keep
+  confidence as annotation-only), validated on real-EP data (#317 GATE INPUT B
+  labeled set / --no-seed-corpus real graph) before any production default.
+  Reject-as-primary (the full static EP boost) per the confidence-null ablation.
+- **Corpus-bound:** the +1.86 is on synthetic topic-correlated EP (weak proxy
+  per #1144); real-EP validation is the surfaced follow-up dependency.
