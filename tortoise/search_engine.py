@@ -892,6 +892,269 @@ def get_relationships(graph, point_ids: list[str]) -> dict[str, list[dict]]:
     return rels
 
 
+def get_relationships_bounded(
+    graph,
+    point_ids: list[str],
+    per_point_cap: int = 10,
+    global_budget: int = 140,
+    raw_cap: int = 3000,
+) -> dict[str, list[dict]]:
+    """Bounded, state-centric relationship decoration (#1353, D1-D14).
+
+    Replaces the unbounded 2-hop fan-out at the search-decoration call site:
+    the old query re-expanded every operator's full neighborhood PER RESULT
+    POINT (n_results × operator-degree → ~122K dicts dense @ limit=100).
+    This decouples the hops and dedupes operators across result points:
+
+      Q1a   point → its operator edges (bounded by point degree)
+      Q1b   CORRECTS edges in/out (supersede structure, direct point→point)
+      Q2b   mitigations per operator (ids also exclude mitigation points from Q2)
+      Q2    endpoints per operator (deduped), NAND-first, raw-capped
+      Q2f   per-operator family counts (family_size)
+
+    Class-aware cap: NAND edges, contested peers, superseded/retracted peers,
+    mitigated_by and CORRECTS are ALWAYS kept — exempt from the per-point cap
+    AND the global budget. The per-point cap (default 10) and global budget
+    (default 140) govern the deduped IMPL support-mass only; exhaustion
+    degrades tail results to structure counts (no peer lists).
+
+    Peer EP state is derived IN-QUERY from coalesced posterior/ep alpha+beta
+    (annotate_ep_batch parity — never NULL α/β, never a second annotation
+    pass over thousands of peers). confidence = posterior mean α/(α+β);
+    variance = _beta_variance; contested = has_ep AND variance > threshold.
+
+    Entries keep the legacy keys (predicate, mechanism, operator_id,
+    related_id, related_kind, direction) and add role, peer, family_size,
+    op_created_at. related_content is intentionally ABSENT in the list view
+    (D5 — full content via expand_relationships, D14).
+
+    get_relationships() is intentionally UNTOUCHED (D12) — topic_summarization
+    needs full NAND completeness for disputed-pair detection.
+    """
+    if not point_ids:
+        return {}
+
+    rels: dict[str, list[dict]] = {pid: [] for pid in point_ids}
+
+    try:
+        # Q1a: operator edges per point (bounded by point degree).
+        # Retracted operators excluded (operator terminal state — their edges
+        # are not live epistemic structure).
+        rows = graph.query(
+            "MATCH (n:Point) WHERE n.id IN $ids "
+            "MATCH (n)-[r:IMPL|NAND|hasPart]-(op:Point {is_operator:true}) "
+            "WHERE (op.status IS NULL OR op.status <> 'retracted') "
+            "RETURN n.id, type(r) AS et, r.idx AS n_idx, op.id AS op_id, "
+            "  op.op_type AS mechanism, coalesce(op.label, '') AS predicate, "
+            "  op.createdAt AS op_created",
+            params={"ids": point_ids},
+        ).result_set
+        point_ops: dict[str, list[tuple]] = {pid: [] for pid in point_ids}
+        op_ids: set[str] = set()
+        for row in rows:
+            pid = row[0]
+            point_ops[pid].append((row[1], row[2], row[3], row[4] or "IMPL", row[5], row[6]))
+            op_ids.add(row[3])
+
+        # Q1b: CORRECTS edges (direct point→point supersede links).
+        # Chained OPTIONAL MATCH can cartesian — dedupe in Python below.
+        corrects_out: dict[str, list[tuple]] = {pid: [] for pid in point_ids}
+        corrects_in: dict[str, list[tuple]] = {pid: [] for pid in point_ids}
+        if point_ids:
+            rows = graph.query(
+                "MATCH (n:Point) WHERE n.id IN $ids "
+                "OPTIONAL MATCH (n)-[r:CORRECTS]->(old:Point) "
+                "OPTIONAL MATCH (new:Point)-[r2:CORRECTS]->(n) "
+                "RETURN n.id, old.id, old.status, old.createdAt, "
+                "  new.id, new.status, new.createdAt",
+                params={"ids": point_ids},
+            ).result_set
+            for row in rows:
+                pid = row[0]
+                old_id, old_status, old_created = row[1], row[2], row[3]
+                new_id, new_status, new_created = row[4], row[5], row[6]
+                if old_id:
+                    corrects_out[pid].append((old_id, old_status, old_created))
+                if new_id:
+                    corrects_in[pid].append((new_id, new_status, new_created))
+
+        # Q2b: mitigations per operator — ids also feed Q2's exclusion set
+        # (direction-agnostic: legacy inbound mitigated_by graphs are covered).
+        op_mitigations: dict[str, list[dict]] = {}
+        mit_ids: set[str] = set()
+        if op_ids:
+            rows = graph.query(
+                "MATCH (op:Point {is_operator:true}) WHERE op.id IN $op_ids "
+                "MATCH (op)-[:mitigated_by]->(m:Point) "
+                "RETURN op.id, m.id, m.status, m.createdAt, m.content",
+                params={"op_ids": list(op_ids)},
+            ).result_set
+            for row in rows:
+                op_id = row[0]
+                op_mitigations.setdefault(op_id, []).append({
+                    "id": row[1], "status": row[2] or "",
+                    "created_at": row[3], "snippet": (row[4] or "")[:120],
+                })
+                mit_ids.add(row[1])
+
+        # Q2: endpoints per operator (deduped across result points), NAND-first,
+        # raw-capped so a pathological graph cannot reopen the fan-out blowup.
+        op_endpoints: dict[str, dict[str, tuple]] = {}
+        if op_ids:
+            rows = graph.query(
+                "MATCH (op:Point {is_operator:true}) WHERE op.id IN $op_ids "
+                "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point) "
+                "WHERE (other.is_operator = false OR other.is_operator IS NULL) "
+                "  AND NOT (op)-[:mitigated_by]->(other) "
+                "WITH op, r2, other "
+                "ORDER BY CASE WHEN type(r2) = 'NAND' THEN 0 ELSE 1 END, "
+                "  other.createdAt DESC "
+                "RETURN op.id, type(r2) AS et, r2.idx AS other_idx, other.id, "
+                "  other.pointKind, other.status, "
+                "  coalesce(other.posterior_alpha, other.ep_alpha, 1.0), "
+                "  coalesce(other.posterior_beta, other.ep_beta, 1.0), "
+                "  (other.posterior_alpha IS NOT NULL OR other.ep_alpha IS NOT NULL), "
+                "  other.createdAt "
+                "LIMIT $raw_cap",
+                params={"op_ids": list(op_ids), "raw_cap": raw_cap},
+            ).result_set
+            for row in rows:
+                op_id = row[0]
+                other_id = row[3]
+                op_endpoints.setdefault(op_id, {})[other_id] = (
+                    row[1], row[2], row[4] or "", row[5] or "",
+                    float(row[6]), float(row[7]), bool(row[8]), row[9],
+                )
+
+        # Q2f: family sizes per (op, edge-type).
+        op_family: dict[tuple[str, str], int] = {}
+        if op_ids:
+            rows = graph.query(
+                "MATCH (op:Point {is_operator:true}) WHERE op.id IN $op_ids "
+                "OPTIONAL MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point) "
+                "WHERE (other.is_operator = false OR other.is_operator IS NULL) "
+                "  AND NOT (op)-[:mitigated_by]->(other) "
+                "RETURN op.id, type(r2) AS et, count(other)",
+                params={"op_ids": list(op_ids)},
+            ).result_set
+            for row in rows:
+                op_family[(row[0], row[1])] = int(row[2])
+
+        # ── Assembly: class-aware, epistemically-prioritized ────────────────
+        # Priority (D4): NAND > contested > superseded/retracted >
+        # mitigated_by/CORRECTS > recency > deduped IMPL support-mass.
+        global_support_used = 0
+        for pid in point_ids:
+            criticals: list[dict] = []
+            support: list[dict] = []
+
+            for (et, n_idx, op_id, mechanism, predicate, op_created) in point_ops.get(pid, []):
+                for other_id, ep in op_endpoints.get(op_id, {}).items():
+                    if other_id == pid:
+                        continue  # self-peer exclusion
+                    et2, other_idx, kind, status, alpha, beta, has_ep, created = ep
+                    variance = _beta_variance(alpha, beta)
+                    contested = has_ep and variance > CONTESTED_VARIANCE_THRESHOLD
+                    role = "source" if (n_idx is not None and n_idx == 0) else "target"
+                    direction = "outgoing" if role == "source" else "incoming"
+                    entry = {
+                        "predicate": predicate if predicate else "",
+                        "mechanism": mechanism,
+                        "operator_id": op_id,
+                        "related_id": other_id,
+                        "related_kind": kind,
+                        "direction": direction,
+                        "role": role,
+                        "peer": {
+                            "id": other_id,
+                            "kind": kind,
+                            "status": status,
+                            "confidence": round(alpha / (alpha + beta), 4),
+                            "variance": round(variance, 6),
+                            "contested": contested,
+                            "created_at": created,
+                        },
+                        "family_size": op_family.get((op_id, et2), 0),
+                        "op_created_at": op_created,
+                    }
+                    if et2 == "NAND" or contested or status in ("superseded", "retracted", "deprecated"):
+                        criticals.append(entry)
+                    else:
+                        support.append(entry)
+
+                for m in op_mitigations.get(op_id, []):
+                    criticals.append({
+                        "predicate": "",
+                        "mechanism": "mitigated_by",
+                        "operator_id": op_id,
+                        "related_id": m["id"],
+                        "related_kind": "mitigation",
+                        "direction": "incoming",
+                        "role": "target",
+                        "peer": {
+                            "id": m["id"], "kind": "mitigation",
+                            "status": m["status"], "confidence": None,
+                            "variance": None, "contested": False,
+                            "created_at": m["created_at"],
+                        },
+                        "family_size": 0,
+                        "op_created_at": op_created,
+                    })
+
+            # CORRECTS entries (direct edges — no operator_id/family_size).
+            for (old_id, old_status, old_created) in corrects_out.get(pid, []):
+                criticals.append({
+                    "predicate": "", "mechanism": "CORRECTS", "operator_id": "",
+                    "related_id": old_id, "related_kind": "point",
+                    "direction": "outgoing", "role": "source",
+                    "peer": {"id": old_id, "kind": "point", "status": old_status or "",
+                              "confidence": None, "variance": None,
+                              "contested": False, "created_at": old_created},
+                    "family_size": 0, "op_created_at": None,
+                })
+            for (new_id, new_status, new_created) in corrects_in.get(pid, []):
+                criticals.append({
+                    "predicate": "", "mechanism": "CORRECTS", "operator_id": "",
+                    "related_id": new_id, "related_kind": "point",
+                    "direction": "incoming", "role": "target",
+                    "peer": {"id": new_id, "kind": "point", "status": new_status or "",
+                              "confidence": None, "variance": None,
+                              "contested": False, "created_at": new_created},
+                    "family_size": 0, "op_created_at": None,
+                })
+
+            # Support-mass: recency-ordered, deduped, capped by BOTH budgets.
+            support.sort(key=lambda e: e["peer"].get("created_at") or 0, reverse=True)
+            seen: set[tuple] = set()
+            deduped: list[dict] = []
+            for e in support:
+                key = (e["operator_id"], e["mechanism"], e["related_id"])
+                if key not in seen:
+                    seen.add(key)
+                    deduped.append(e)
+            support = deduped
+
+            entries = list(criticals)
+            per_point_room = max(0, per_point_cap - len(criticals))
+            global_room = max(0, global_budget - global_support_used)
+            keep = min(per_point_room, global_room, len(support))
+            entries.extend(support[:keep])
+            global_support_used += keep
+
+            # Structure counts for dropped support-mass (honest degradation).
+            dropped = support[keep:]
+            if dropped:
+                from collections import Counter
+                for mech, count in Counter(e["mechanism"] for e in dropped).items():
+                    entries.append({"predicate": "", "mechanism": mech, "count": count})
+
+            rels[pid] = entries
+    except Exception:
+        logger.warning("Bounded relationship query failed", exc_info=True)
+
+    return rels
+
+
 # ── TF-IDF fallback (in-memory, from embeddings.py) ─────────────────────────
 
 # ── Relationship / Traversal filters (#7846) ──────────────────────────────────
