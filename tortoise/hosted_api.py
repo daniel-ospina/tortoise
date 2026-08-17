@@ -5353,6 +5353,63 @@ def _import_artifact_key(request: Request, body: bytes) -> tuple[bytes, bytes]:
     return artifact, _decode_import_key(str(parsed["key"]), artifact)
 
 
+def _split_import_artifact(blob: bytes) -> tuple[dict, bytes]:
+    """Normalize the two accepted ``tortoise-export-v1`` serializations (#1230):
+
+      - wire form: one-line JSON clear header + ``b"\n"`` + raw encrypted blob
+      - CLI form (#1388): the single canonical-JSON artifact ``tortoise export``
+        writes, carrying the encrypted blob inline as ``blob_b64`` (base64)
+
+    Returns ``(header, enc_blob)`` so the rest of the fail-closed chain
+    validates identically. Raises ``_ImportVerifyError`` (quarantine sha256)
+    on malformed input — the CLI form is the documented ``tortoise export`` →
+    import journey, so a bad artifact still fails closed before any decrypt
+    work (the E2E-12 parity case #1390 exercises the CLI form end-to-end).
+    """
+    import base64
+    import hashlib
+
+    whole_sha = hashlib.sha256(blob).hexdigest()
+    newline = blob.find(b"\n")
+    if newline > 0:
+        # Wire form: header line + raw encrypted blob.
+        try:
+            header = _json.loads(blob[:newline])
+        except Exception:
+            raise _ImportVerifyError(
+                "artifact header is not valid JSON", whole_sha
+            ) from None
+        if not isinstance(header, dict):
+            raise _ImportVerifyError(
+                "artifact header is not a JSON object", whole_sha
+            )
+        return header, blob[newline + 1:]
+    # CLI form (#1388): single canonical-JSON artifact dict with blob_b64
+    # inline (no header line) — exactly what ``tortoise export`` writes.
+    try:
+        artifact = _json.loads(blob.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        raise _ImportVerifyError(
+            "artifact missing header line", whole_sha
+        ) from None
+    if not isinstance(artifact, dict) or "blob_b64" not in artifact:
+        raise _ImportVerifyError("artifact missing header line", whole_sha)
+    header = {
+        k: artifact[k] for k in (
+            "format", "artifact_version", "encrypted", "algorithm",
+            "key_fingerprint", "exporter_version", "exported_at",
+            "source_surface", "blob_sha256",
+        ) if k in artifact
+    }
+    try:
+        enc_blob = base64.b64decode(artifact["blob_b64"], validate=True)
+    except (ValueError, TypeError):
+        raise _ImportVerifyError(
+            "artifact blob_b64 is not valid base64", whole_sha
+        ) from None
+    return header, enc_blob
+
+
 def _validate_import_envelope(blob: bytes, key: bytes) -> dict:
     """Fail-closed validation chain (#1230 plan Task 2 — order matters):
 
@@ -5363,25 +5420,21 @@ def _validate_import_envelope(blob: bytes, key: bytes) -> dict:
       5. payload_sha256 (inner envelope) matches the recomputed canonical hash
       6. node_count/edge_count fields match len(nodes)/len(edges)
 
-    Raises ``_ImportVerifyError`` (with the quarantine sha256) on ANY failure.
+    Accepts both artifact serializations (see ``_split_import_artifact``): the
+    wire form (header line + raw blob) and the CLI form ``tortoise export``
+    writes (single JSON with blob_b64). Raises ``_ImportVerifyError`` (with
+    the quarantine sha256) on ANY failure.
     Returns {header, inner, payload, payload_sha256, blob_sha256}.
     """
     import hashlib
     whole_sha = hashlib.sha256(blob).hexdigest()
-    newline = blob.find(b"\n")
-    if newline <= 0:
-        raise _ImportVerifyError("artifact missing header line", whole_sha)
-    try:
-        header = _json.loads(blob[:newline])
-    except Exception:
-        raise _ImportVerifyError("artifact header is not valid JSON", whole_sha)
-    if not isinstance(header, dict) or header.get("format") != _IMPORT_FORMAT:
+    header, enc_blob = _split_import_artifact(blob)
+    if header.get("format") != _IMPORT_FORMAT:
         raise _ImportVerifyError("unsupported artifact format", whole_sha)
     if header.get("artifact_version") != _IMPORT_ARTIFACT_VERSION:
         raise _ImportVerifyError(
             f"unsupported artifact_version {header.get('artifact_version')!r}", whole_sha
         )
-    enc_blob = blob[newline + 1:]
     enc_sha = hashlib.sha256(enc_blob).hexdigest()
     if header.get("blob_sha256") != enc_sha:
         raise _ImportVerifyError("blob integrity check failed (sha256 mismatch)", enc_sha)

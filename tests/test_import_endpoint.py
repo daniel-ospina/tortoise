@@ -578,6 +578,53 @@ class TestImportHappyPath:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# CLI artifact form (#1390 — the `tortoise export` → import journey)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestImportCliArtifactForm:
+    """The ``tortoise export`` CLI (#1388) writes a single canonical-JSON
+    artifact (encrypted blob inline as ``blob_b64``) — NOT the wire form
+    (header line + raw blob). The endpoint must ingest the CLI output
+    unchanged; the E2E-12 parity case (#1390) proves the full journey."""
+
+    def test_import_cli_artifact_form_happy_path(self, sb_client, as_user):
+        from tortoise.export import artifact_bytes, build_artifact
+
+        tc, fake, db_path = sb_client
+        _seed_team(fake)
+        as_user()
+        key = os.urandom(32)
+        payload = _build_payload(n_points=3, n_edges=2)
+        # Exactly what `tortoise export --output f` writes to disk.
+        artifact = artifact_bytes(build_artifact(payload, key=key))
+        assert b"\n" not in artifact  # single canonical JSON, blob_b64 inline
+        r = _post_import(tc, artifact, key)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["imported"] is True
+        assert body["restored"] == {"nodes": 3, "edges": 2}
+        counts = _counts(db_path)
+        assert counts["nodes"] == 3
+        assert counts["edges"] == 2
+        assert counts["ids"] == ["pt-0", "pt-1", "pt-2"]
+
+    def test_import_cli_artifact_form_wrong_key_422(self, sb_client, as_user):
+        """Wrong artifact key on the CLI form fails closed (fingerprint check)
+        — same quarantine semantics as the wire form."""
+        from tortoise.export import artifact_bytes, build_artifact
+
+        tc, fake, db_path = sb_client
+        _seed_team(fake)
+        as_user()
+        key = os.urandom(32)
+        artifact = artifact_bytes(build_artifact(_build_payload(), key=key))
+        r = _post_import(tc, artifact, os.urandom(32))
+        assert r.status_code == 422, r.text
+        assert "fingerprint" in r.json()["detail"]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Idempotency (S6) + crash-mid-swap safety
 # ═══════════════════════════════════════════════════════════════════════════
 
