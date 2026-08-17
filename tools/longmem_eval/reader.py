@@ -46,11 +46,17 @@ _SYSTEM_PROMPT = (
     "mention the context."
 )
 
+# Official gen.py default generation length for non-CoT runs (the reader's
+# answer prompt is answered at temperature 0, max_tokens 500 — the official
+# call shape, no JSON mode; see build_reader).
+DEFAULT_READER_MAX_TOKENS = 500
+
 
 class Reader(Protocol):
     model_id: str
 
-    def answer(self, *, context_hits: list[dict[str, Any]], question: str) -> str: ...
+    def answer(self, *, context_hits: list[dict[str, Any]], question: str,
+               question_date: str | None = None) -> str: ...
 
 
 class LLMReader:
@@ -60,8 +66,13 @@ class LLMReader:
         self._model = model
         self.model_id = model_id
 
-    def answer(self, *, context_hits: list[dict[str, Any]], question: str) -> str:
-        context = render_context(context_hits)
+    def answer(self, *, context_hits: list[dict[str, Any]], question: str,
+               question_date: str | None = None) -> str:
+        # The context carries the official gen.py shape: a "Current Date:
+        # {question_date}" header + per-session date annotations (see
+        # retrieve.render_context) — temporal-reasoning questions are
+        # structurally unanswerable without them (P1 #1144).
+        context = render_context(context_hits, question_date=question_date)
         user = (
             f"Memory context:\n{context}\n\n"
             f"Question: {question}\n\nAnswer:"
@@ -83,7 +94,8 @@ class MockReader:
 
     model_id = "mock-reader"
 
-    def answer(self, *, context_hits: list[dict[str, Any]], question: str) -> str:
+    def answer(self, *, context_hits: list[dict[str, Any]], question: str,
+               question_date: str | None = None) -> str:
         evidence = [
             str(hit["content"]).strip()
             for hit in context_hits
@@ -142,5 +154,11 @@ def build_reader(spec: str | None = None, *, mock: bool = False) -> Reader:
                 f"set ({_PROVIDERS[provider][1]})")
     from tortoise.models import OpenAICompatModel
 
-    model = OpenAICompatModel(id=model_id, base_url=base_url, api_key_env=key_env)
+    # Official reader call shape: temperature 0, bounded max_tokens, NO
+    # response_format (JSON mode) — the answer is free text, and forcing
+    # json_object mangles free-form answers on several providers.
+    model = OpenAICompatModel(
+        id=model_id, base_url=base_url, api_key_env=key_env,
+        response_format=None, max_tokens=DEFAULT_READER_MAX_TOKENS,
+    )
     return LLMReader(model, model_id=model_id)

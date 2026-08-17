@@ -35,18 +35,31 @@ def _estimate_tokens(text: str) -> int:
     return int(len(text.split()) * 1.1)
 
 
-def render_context(hits: list[dict]) -> str:
+def render_context(hits: list[dict], *, question_date: str | None = None) -> str:
     """Render annotated hits as the reader-facing context text.
 
     Shared by the LLM reader (its prompt input) and the token estimator so
     ``context_tokens`` always matches what the reader actually consumed.
+
+    The rendering follows the OFFICIAL LongMemEval gen.py shape: a
+    ``Current Date: {question_date}`` header (the question's date, needed to
+    answer temporal-reasoning questions — "how many days ago") and a
+    per-session date annotation on every chunk. Without these, TR questions
+    are structurally unanswerable (TR ≈ 0% regardless of retrieval) — P1
+    #1144.
     """
     blocks = []
     for h in hits:
         idx = h.get("lme_session_index")
         prefix = f"[session {idx}]" if idx is not None and idx >= 0 else "[session ?]"
+        sdate = h.get("session_date")
+        if sdate:
+            prefix = f"{prefix} (session date {sdate})"
         blocks.append(f"{prefix} {h.get('content', '')}")
-    return "\n\n".join(blocks)
+    text = "\n\n".join(blocks)
+    if question_date:
+        text = f"Current Date: {question_date}\n\n{text}"
+    return text
 
 
 def hybrid_search(sdk: TortoiseSDK, query: str, limit: int) -> list[dict]:
@@ -73,6 +86,7 @@ def retrieve_for_question(
     """
     qid = question["question_id"]
     answer_sessions = set(question.get("answer_session_ids") or [])
+    dates: list[str] = question.get("haystack_dates") or []
     evidence_turn_ids = {
         f"lme:{qid}:s{si}:t{ti}"
         for si, session in enumerate(question.get("haystack_sessions") or [])
@@ -88,15 +102,19 @@ def retrieve_for_question(
 
     # Annotate hits with session/has_answer (SearchResult carries sessionId
     # only when the engine populates it; fetch is single-query and canonical).
+    # session_date comes from the dataset's haystack_dates (surfaced to the
+    # reader so temporal questions are answerable — P1 #1144).
     annotated: list[dict] = []
     for h in hits:
         p = props.get(h["id"], {})
+        si = p.get("lme_session_index", -1)
         annotated.append({
             "id": h["id"],
             "content": h["content"],
             "match_source": h.get("match_source", ""),
             "session_id": p.get("session_id", ""),
-            "lme_session_index": p.get("lme_session_index", -1),
+            "lme_session_index": si,
+            "session_date": dates[si] if 0 <= si < len(dates) else "",
             "has_answer": p.get("has_answer", False),
         })
 
@@ -119,7 +137,10 @@ def retrieve_for_question(
 
     # ── context handed to the reader (top_k) ──
     context_points = annotated[:top_k]
-    context_text = render_context(context_points)
+    # The reader consumes the SAME rendered context (with the Current Date
+    # header) — keep context_tokens aligned with what the reader saw.
+    question_date = question.get("question_date", "") or None
+    context_text = render_context(context_points, question_date=question_date)
     context_tokens = _estimate_tokens(context_text) if context_text else 0
 
     return {

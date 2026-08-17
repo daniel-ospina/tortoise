@@ -18,8 +18,10 @@ Abstention questions (``_abs`` in question_id) use the unanswerable-template.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
+import urllib.request
 from typing import Protocol
 
 from tortoise.ingest import _PROVIDERS
@@ -142,6 +144,59 @@ class Judge(Protocol):
               hypothesis: str, abstention: bool) -> bool: ...
 
 
+class OfficialJudgeModel:
+    """Exact official LongMemEval judge call shape (``evaluate_qa.py``).
+
+    The official judge call is
+    ``chat.completions.create(model=..., messages=[{"role": "user", ...}],
+    n=1, temperature=0, max_tokens=10)`` — NO ``response_format`` (JSON
+    mode), NO system message, temperature locked at 0, max_tokens locked at
+    10. Published numbers are only comparable if the judge request matches
+    this shape verbatim, so the judge uses this dedicated transport instead
+    of the shared ``OpenAICompatModel`` (which forces ``response_format`` and
+    a system message).
+    """
+
+    def __init__(self, *, id: str, base_url: str, api_key_env: str | None,
+                 timeout: int = 60):
+        self.id = id
+        self.base_url = base_url.rstrip("/")
+        self.api_key_env = api_key_env
+        self.timeout = timeout
+
+    def build_request(self, user: str) -> dict:
+        """The official kwargs — a single user message, nothing else."""
+        return {
+            "model": self.id,
+            "messages": [{"role": "user", "content": user}],
+            "n": 1,
+            "temperature": 0,
+            "max_tokens": 10,
+        }
+
+    @staticmethod
+    def parse_response(data: dict) -> str:
+        return data["choices"][0]["message"]["content"]
+
+    def _headers(self) -> dict:
+        h = {"Content-Type": "application/json"}
+        if self.api_key_env:
+            key = os.environ.get(self.api_key_env)
+            if not key:
+                raise RuntimeError(
+                    f"{self.id}: env var {self.api_key_env} is not set")
+            h["Authorization"] = f"Bearer {key}"
+        return h
+
+    def complete(self, *, user: str) -> str:
+        body = json.dumps(self.build_request(user)).encode("utf-8")
+        req = urllib.request.Request(
+            f"{self.base_url}/chat/completions", data=body,
+            headers=self._headers())
+        with urllib.request.urlopen(req, timeout=self.timeout) as r:
+            return self.parse_response(json.loads(r.read()))
+
+
 class LLMJudge:
     """Judge backed by an OpenAI-compatible chat model (official gpt-4o)."""
 
@@ -153,7 +208,9 @@ class LLMJudge:
               hypothesis: str, abstention: bool) -> bool:
         prompt = get_anscheck_prompt(
             question_type, question, answer, hypothesis, abstention=abstention)
-        raw = self._model.complete(system="", user=prompt)
+        # Official call shape: the anscheck prompt is the ONLY message (no
+        # system message, no JSON mode, max_tokens=10 — see OfficialJudgeModel).
+        raw = self._model.complete(user=prompt)
         return _parse_judge_response(raw)
 
 
@@ -216,7 +273,8 @@ def build_judge(spec: str | None = None, *, mock: bool = False) -> Judge:
             raise ValueError(
                 f"model spec names provider {provider!r} but its key is not "
                 f"set ({_PROVIDERS[provider][1]})")
-    from tortoise.models import OpenAICompatModel
-
-    model = OpenAICompatModel(id=model_id, base_url=base_url, api_key_env=key_env)
+    # Dedicated transport: the official judge call shape (no response_format,
+    # no system message, max_tokens=10) — see OfficialJudgeModel.
+    model = OfficialJudgeModel(
+        id=model_id, base_url=base_url, api_key_env=key_env)
     return LLMJudge(model, model_id=model_id)

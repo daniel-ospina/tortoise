@@ -75,8 +75,14 @@ def build_report(
     ks: tuple[int, ...],
     top_k: int,
     extra: dict[str, Any] | None = None,
+    failures: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Aggregate per-question outcomes into the report + provenance dict."""
+    """Aggregate per-question outcomes into the report + provenance dict.
+
+    ``outcomes`` must contain only COMPLETED questions (failed questions are
+    passed via ``failures`` and reported separately — a transient LLM error
+    on one question must not abort the run or skew the aggregates).
+    """
     n = len(outcomes)
 
     # ── accuracy ──
@@ -160,13 +166,34 @@ def build_report(
             "judge_model": judge_model,
             "judge_rule": "official LongMemEval get_anscheck_prompt; "
                           "label = 'yes' in response.lower()",
+            "judge_call_shape": "official evaluate_qa.py: messages=[user], "
+                                "n=1, temperature=0, max_tokens=10 — no "
+                                "response_format (JSON mode), no system "
+                                "message",
+            "reader_context_format": "official gen.py shape: 'Current Date: "
+                                     "{question_date}' header + per-session "
+                                     "date annotation on every retrieved chunk "
+                                     "(question_date + haystack_dates surfaced — "
+                                     "temporal-reasoning questions are "
+                                     "answerable)",
             "extraction_approach": extraction_approach,
             "retrieval": "Tortoise hybrid RRF (FTS+vector+structural, TF-IDF "
                          "fallback) over graph turn points + raw session "
                          "transcripts (pointKind session-transcript)",
+            "retrieval_scope": "ISOLATED per-question corpus — each question's "
+                               "haystack is ingested into a fresh graph and "
+                               "recall is measured against that question alone; "
+                               "NOT the official full-corpus indexing (official "
+                               "retrievers index all questions' histories "
+                               "together). Per-question recall@k is therefore "
+                               "computed on a smaller, question-scoped corpus "
+                               "and is not directly comparable to the paper's "
+                               "recall numbers",
             "recall_definition": "session-level: fraction of answer_session_ids "
-                                 "in top-k; turn-level: fraction of has_answer "
-                                 "turns in top-k",
+                                 "(evidence sessions) in top-k; turn-level: "
+                                 "fraction of has_answer turns in top-k; both "
+                                 "measured over the isolated per-question corpus "
+                                 "(see retrieval_scope)",
             "token_estimator": "whitespace tokens + 10% markup allowance",
             "k_values": list(ks),
             "top_k_context": top_k,
@@ -175,6 +202,8 @@ def build_report(
             "git_sha": git_sha(),
             "run_at_utc": datetime.now(timezone.utc).isoformat(),
         },
+        "failures": failures or [],
+        "n_failed": len(failures or []),
         **(extra or {}),
     }
 

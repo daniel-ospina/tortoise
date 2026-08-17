@@ -67,20 +67,31 @@ def remote_url(split: str) -> str:
 
 
 def _download(url: str, dest: Path, *, timeout: int = 120) -> Path:
-    """Download ``url`` to ``dest`` with a plain urllib request.
+    """Download ``url`` to ``dest`` atomically.
 
-    Streams to disk (the S split is tens of MB). Any failure raises — the
-    caller surfaces a clear "download failed; pass --data PATH" message.
+    Streams to a ``<dest>.part`` temp file first (the S split is tens of MB),
+    JSON-validates the downloaded bytes, THEN atomically renames into place —
+    an interrupted/corrupt download can never leave a poisoned "cache" that
+    would be served forever: the partial file is cleaned up and the next run
+    re-downloads.
     """
     print(f"[longmem_eval] downloading {url} …", file=sys.stderr)
     req = urllib.request.Request(url, headers={"User-Agent": "tortoise-longmem-eval"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        with open(dest, "wb") as f:
-            while True:
-                chunk = resp.read(1 << 20)
-                if not chunk:
-                    break
-                f.write(chunk)
+    tmp = dest.with_name(dest.name + ".part")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with open(tmp, "wb") as f:
+                while True:
+                    chunk = resp.read(1 << 20)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+        # Validate BEFORE the file can become the cache (raises on corrupt
+        # JSON, leaving the .part behind for cleanup below).
+        _read_instances(tmp)
+        os.replace(tmp, dest)
+    finally:
+        tmp.unlink(missing_ok=True)
     return dest
 
 
@@ -116,7 +127,16 @@ def load_dataset(
         cache_base = cache or cache_dir()
         cached = cache_base / SPLIT_FILES[split]
         if cached.is_file():
-            raw = _read_instances(cached)
+            try:
+                raw = _read_instances(cached)
+            except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+                if not download:
+                    raise
+                print(f"[longmem_eval] cached dataset {cached} is corrupt — "
+                      f"re-downloading", file=sys.stderr)
+                cached.unlink(missing_ok=True)
+                _download(remote_url(split), cached)
+                raw = _read_instances(cached)
             source_desc = f"cache {cached}"
         elif download:
             _download(remote_url(split), cached)
