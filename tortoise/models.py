@@ -23,26 +23,43 @@ class Model(Protocol):
     def complete(self, *, system: str, user: str) -> str: ...
 
 
+_UNSET = object()
+
+
 class OpenAICompatModel:
     def __init__(self, *, id: str, base_url: str, api_key_env: str | None = "OPENAI_API_KEY",
-                 temperature: float = 0.0, timeout: int = 60):
+                 temperature: float = 0.0, timeout: int = 60,
+                 response_format: dict | None | object = _UNSET,
+                 max_tokens: int | None = None):
         # api_key_env=None → no Authorization header.
         self.id = id
         self.base_url = base_url.rstrip("/")
         self.api_key_env = api_key_env
         self.temperature = temperature
         self.timeout = timeout
+        # response_format defaults to the legacy JSON-object mode so existing
+        # extraction callers are unaffected; pass response_format=None to opt
+        # out (the LongMemEval reader must NOT force JSON — the official
+        # benchmark call shape has no response_format). max_tokens=None → the
+        # key is omitted from the request body.
+        self.response_format = (
+            {"type": "json_object"} if response_format is _UNSET else response_format)
+        self.max_tokens = max_tokens
 
     def build_request(self, system: str, user: str) -> dict:
-        return {
+        req = {
             "model": self.id,
             "temperature": self.temperature,
-            "response_format": {"type": "json_object"},
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
         }
+        if self.response_format is not None:
+            req["response_format"] = self.response_format
+        if self.max_tokens is not None:
+            req["max_tokens"] = self.max_tokens
+        return req
 
     @staticmethod
     def parse_response(data: dict) -> str:
