@@ -95,8 +95,12 @@ def test_support_mass_capped_family_size_reported(sdk):
     )
     # related_content NOT in list view
     assert all("related_content" not in e for e in peer_entries)
-    # peer state present
+    # peer state present — and HONEST for unmeasured (no persisted EP) peers:
+    # confidence/variance must be None, never a fabricated Beta(1,1) posterior
+    # (second-model gate R3, #1353)
     assert all("peer" in e for e in peer_entries)
+    assert all(e["peer"]["confidence"] is None and e["peer"]["variance"] is None
+               for e in peer_entries), "unmeasured peers must carry None state, not 0.5/0.0833"
 
 
 def test_operator_with_zero_non_operator_endpoints(sdk):
