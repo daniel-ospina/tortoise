@@ -1,3 +1,12 @@
+---
+title: "Task 0 — Cheap Falsification Verdicts (issue #1348)"
+type: engineering
+domain: capability
+doc_status: live
+created: 2026-08-17
+subjects.team: epistemic-team
+---
+
 # Task 0 — Cheap Falsification Verdicts (issue #1348)
 
 Run: 2026-08-17, embedded FalkorDBLite, seed 42, corpus 2000, committed baseline

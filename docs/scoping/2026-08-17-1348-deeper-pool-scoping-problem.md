@@ -1,3 +1,12 @@
+---
+title: "Scoping — Issue #1348 (problem-converge)"
+type: engineering
+domain: capability
+doc_status: live
+created: 2026-08-17
+subjects.team: epistemic-team
+---
+
 # Scoping — Issue #1348 (problem-converge, fixed per problem-verify cycle 1)
 
 ## Confirmed Problem Definition (v2 — incorporates verifier P1/P2 fixes)
