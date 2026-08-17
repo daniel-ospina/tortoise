@@ -1861,6 +1861,131 @@ def _cmd_verify(args):
     return 0
 
 
+def _cmd_export(args) -> int:
+    """tortoise export — versioned, encrypted, portable graph artifact (#1388).
+
+    Wraps the production-verified logical dump (hosted_backup.dump_graph) in a
+    ``tortoise-export-v1`` envelope and encrypts by default (AES-256-GCM).
+    Key: TORTOISE_BACKUP_KEY env if set, else a fresh ephemeral key printed
+    once on the stdout JSON line (never written to disk).
+
+    Exit codes: 0 ok · 1 pre-walk or graph-unavailable failure.
+    Stdout: ONE JSON line (machine contract) unless --no-json.
+    """
+    import base64 as _b64
+    import json as _json
+    import os as _os
+    from datetime import datetime, timezone as _tz
+    from pathlib import Path
+
+    from tortoise.config import is_db_uri, resolve_db_path
+    from tortoise.export import (
+        ARTIFACT_VERSION,
+        EXPORT_FORMAT,
+        artifact_bytes,
+        build_artifact,
+    )
+    from tortoise.hosted_backup import dump_graph
+    from tortoise.projection import FalkorProjection
+
+    encrypted = not args.no_encrypt
+
+    try:
+        target = _resolve_db_target(args.db)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    is_uri = is_db_uri(target)
+    try:
+        proj = (
+            FalkorProjection.from_uri(target)
+            if is_uri
+            else FalkorProjection(resolve_db_path(target))
+        )
+    except Exception as e:
+        print(f"Error: cannot open graph {target!r}: {e}", file=sys.stderr)
+        return 1
+
+    source_surface = "selfhost" if is_uri else "embedded"
+
+    if encrypted:
+        try:
+            from tortoise.export import resolve_export_key
+            key, ephemeral = resolve_export_key(
+                _os.environ.get("TORTOISE_BACKUP_KEY", "")
+            )
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            proj.close()
+            return 1
+    else:
+        key, ephemeral = None, False
+
+    try:
+        dump = dump_graph(proj.g, graph_name=proj.graph_name)
+    except Exception as e:
+        print(f"Error: graph dump failed: {e}", file=sys.stderr)
+        proj.close()
+        return 1
+    proj.close()
+
+    try:
+        artifact = build_artifact(
+            dump, key=key, source_surface=source_surface, encrypted=encrypted
+        )
+    except Exception as e:
+        print(f"Error: envelope build failed: {e}", file=sys.stderr)
+        return 1
+
+    if args.output is None:
+        args.output = f"graph-{datetime.now(_tz.utc).strftime('%Y-%m-%d')}.tortoise"
+    out = Path(args.output)
+    try:
+        out.write_bytes(artifact_bytes(artifact))
+    except OSError as e:
+        print(f"Error: cannot write {out}: {e}", file=sys.stderr)
+        return 1
+
+    summary = {
+        "status": "ok",
+        "output": str(out),
+        "format": EXPORT_FORMAT,
+        "artifact_version": ARTIFACT_VERSION,
+        "encrypted": encrypted,
+        "algorithm": artifact["algorithm"],
+        "key_fingerprint": artifact["key_fingerprint"],
+        "source_surface": source_surface,
+        "node_count": dump["node_count"],
+        "edge_count": dump["edge_count"],
+        "blob_sha256": artifact["blob_sha256"],
+        "exported_at": artifact["exported_at"],
+    }
+    if ephemeral:
+        # The one and only place the fresh key is printed — never persisted.
+        summary["key_b64"] = _b64.b64encode(key).decode("ascii")
+    if args.json:
+        print(_json.dumps(summary))
+    else:
+        print(
+            f"Exported {dump['node_count']} nodes / {dump['edge_count']} edges → {out}"
+        )
+    if ephemeral:
+        print(
+            "⚠️  Fresh export key generated (never stored): keep the key_b64 value "
+            "from the JSON line above — you need it to decrypt/import this artifact.",
+            file=sys.stderr,
+        )
+    if not encrypted:
+        print(
+            "⚠️  WARNING: --no-encrypt — the artifact contains the FULL graph in "
+            "plaintext. Anyone with file access can read every point. Prefer the "
+            "default encryption.",
+            file=sys.stderr,
+        )
+    return 0
+
+
 def _cmd_validate(args) -> int:
     """tortoise validate --domain <slug> — advisory, read-only domain
     integrity validation (issue #405). Runs the domain's graph-surface
@@ -3727,6 +3852,28 @@ def main(argv: list[str] | None = None) -> int:
     vf = sp.add_parser("verify", help="Write/read/delete test Point — health check")
     vf.add_argument("--db", required=True, help="FalkorDB docker:// URI")
     # tortoise validate --domain <slug> (#405) — advisory domain integrity
+    # tortoise export (#1388, epic #1230 Task 1) — versioned encrypted artifact
+    ex = sp.add_parser(
+        "export",
+        help="Export the graph as a versioned, encrypted artifact (tortoise-export-v1)",
+    )
+    ex.add_argument(
+        "--output", "-o", default=None,
+        help="Output artifact path (default: graph-<YYYY-MM-DD>.tortoise)",
+    )
+    ex.add_argument(
+        "--no-encrypt", action="store_true",
+        help="DANGER: write the artifact unencrypted (plaintext graph) — warns loudly",
+    )
+    ex.add_argument(
+        "--db", default=None,
+        help=f"DB target override — URI ({uri_schemes_hint}) or absolute path "
+        "(default: TORTOISE_DB_URI / FALKORDB_* / embedded path)",
+    )
+    ex.add_argument(
+        "--json", action=argparse.BooleanOptionalAction, default=True,
+        help="Machine-readable JSON stdout (default: on; --no-json for human text)",
+    )
     vld = sp.add_parser("validate", help="Advisory domain integrity validation (graph-global rules, read-only)")
     vld.add_argument("--domain", required=True, help="Domain namespace (pack) to validate, e.g. product-strategy")
     vld.add_argument("--db", default=None, help="Docker URI or file path (default: TORTOISE_DB_URI / FALKORDB_* / embedded path)")
@@ -3953,6 +4100,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     elif args.cmd == "verify":
         return _cmd_verify(args)
+    elif args.cmd == "export":
+        return _cmd_export(args)
     elif args.cmd == "validate":
         return _cmd_validate(args)
     elif args.cmd == "migrate-db":
