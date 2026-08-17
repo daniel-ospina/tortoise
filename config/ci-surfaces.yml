@@ -104,6 +104,7 @@ surfaces:
   - test_e2e_journey.py
   - test_embedded_concurrency.py
   - test_embedded_lifecycle.py
+  - test_embedded_lifecycle_fast_close.py  # #1371 lifecycle-seam fast close
   - test_embeddings.py
   - test_embeddings_filters.py
   - test_entity_stage.py
@@ -290,14 +291,12 @@ tier1:
 - test_guard.py
 - test_harness_mcp_config.py
 - test_ids.py
-- test_indexes.py
 - test_init_apikey_validation.py
 - test_log.py
 - test_mcp_server.py
 - test_mcp_server_auth_modes.py
 - test_onboard_prompt_ref.py
 - test_onboarding_variants.py
-- test_projection.py
 - test_quota.py
 - test_ranking.py
 - test_reaper.py
@@ -308,3 +307,31 @@ tier1:
 - test_tool_registry.py
 - test_weights.py
 - test_writer_inventory.py
+
+# #1371: slow files run ONLY in the test-slow CI job, never in the fast
+# gate. Single source of truth — tools/ci_selection.py subtracts these from
+# tier-1/tier-2 selections and the workflow's test-slow job builds its file
+# list from this key (the old workflow-level SLOW_FILES env var is gone).
+# Kept in their surfaces below so --integrity still classifies them.
+slow_files:
+- test_about_edges.py
+- test_backfill_sources.py
+- test_billing.py
+- test_cli_context.py
+- test_control_plane.py
+- test_dream.py
+- test_embedded_concurrency.py
+- test_enumeration_surfaces.py
+- test_ep_sources.py
+- test_event_provenance.py
+- test_hosted_api.py
+- test_hosted_backup.py
+- test_indexes.py
+- test_ingest.py
+- test_mcp_http.py
+- test_migrate_db.py
+- test_projection.py
+- test_sdk.py
+- test_sdk_group3.py
+- test_search_engine_gaps.py
+- test_source_inheritance_own.py

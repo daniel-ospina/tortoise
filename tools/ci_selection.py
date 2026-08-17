@@ -26,7 +26,7 @@ import os
 import sys
 from pathlib import Path
 
-SELECTION_FN_VERSION = "1.0.0"
+SELECTION_FN_VERSION = "1.1.0"
 
 REPO = Path(__file__).resolve().parent.parent
 MANIFEST = REPO / "config" / "ci-surfaces.yml"
@@ -83,20 +83,26 @@ def classify_test_file(name: str, manifest: dict) -> str | None:
 
 
 def select(changed_files: list[str], event: str, manifest: dict) -> dict:
+    slow = set(manifest.get("slow_files", []))
+    # #1371: slow files run ONLY in the test-slow job — never in the fast
+    # gate's tier-1/tier-2 selections (they are already covered there).
+    # Every return path carries slow_files so the workflow's changes job can
+    # always emit it (a missing key would KeyError the nightly/schedule run).
     if event in ("push", "schedule"):
         return {"surfaces": list(manifest["surfaces"]), "full": True,
-                "test_files": "ALL"}
+                "test_files": "ALL", "slow_files": sorted(slow)}
 
-    tier1 = set(manifest.get("tier1", []))
+    tier1 = set(manifest.get("tier1", [])) - slow
     changed = [c for c in changed_files if c and not c.startswith(NON_PYTHON_PREFIXES)]
     if not changed:
         # docs-only PR -> tier 1 (curated smoke) only
-        return {"surfaces": [], "full": False, "test_files": sorted(tier1)}
+        return {"surfaces": [], "full": False, "test_files": sorted(tier1),
+                "slow_files": sorted(slow)}
 
     # Shared module -> full
     if any(c.startswith(SHARED_MODULES) for c in changed):
         return {"surfaces": list(manifest["surfaces"]), "full": True,
-                "test_files": "ALL"}
+                "test_files": "ALL", "slow_files": sorted(slow)}
 
     matched: set[str] = set()
     unknown: list[str] = []
@@ -119,7 +125,7 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
     if unknown:
         # New/unknown path -> fail-closed full matrix (scope v5 decision 1)
         return {"surfaces": list(manifest["surfaces"]), "full": True,
-                "test_files": "ALL"}
+                "test_files": "ALL", "slow_files": sorted(slow)}
 
     # Test-file changes select their owning surface
     for c in changed:
@@ -135,7 +141,9 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
     files = set(tier1)  # tier 2 = tier 1 ∪ surface-matched (scope v5 dec 5)
     for s in surfaces:
         files.update(manifest["surfaces"].get(s, []))
-    return {"surfaces": surfaces, "full": False, "test_files": sorted(files)}
+    files -= slow  # #1371: slow files never run in the fast gate
+    return {"surfaces": surfaces, "full": False, "test_files": sorted(files),
+            "slow_files": sorted(slow)}
 
 
 def integrity(manifest: dict) -> list[str]:
@@ -145,6 +153,25 @@ def integrity(manifest: dict) -> list[str]:
         if classify_test_file(f.name, manifest) is None:
             missing.append(f.name)
     return missing
+
+
+def slow_file_issues(manifest: dict) -> list[str]:
+    """#1371: slow_files must be non-empty, classified, and never in tier1.
+
+    Fail-closed so the fast gate can never silently drag a slow file back in
+    (the #1260/#1270 drift class) or drop one from test-slow coverage.
+    """
+    issues: list[str] = []
+    slow = manifest.get("slow_files", [])
+    if not slow:
+        issues.append("slow_files is empty (must list the test-slow files)")
+    tier1 = set(manifest.get("tier1", []))
+    for f in slow:
+        if classify_test_file(f, manifest) is None:
+            issues.append(f"slow file {f} is not in any surface (unclassified)")
+        if f in tier1:
+            issues.append(f"slow file {f} is also in tier1 (fast gate leak)")
+    return issues
 
 
 def main() -> int:
@@ -158,10 +185,11 @@ def main() -> int:
 
     if args.integrity:
         missing = integrity(manifest)
-        if missing:
-            print(f"❌ unlisted test files (add to config/ci-surfaces.yml): {missing}")
+        problems = missing + slow_file_issues(manifest)
+        if problems:
+            print(f"❌ manifest drift: {problems}")
             return 1
-        print("✅ integrity: all test files classified")
+        print("✅ integrity: all test files classified; slow_files consistent")
         return 0
 
     changed = [l.strip() for l in args.changed_files.splitlines() if l.strip()]

@@ -862,7 +862,9 @@ class TortoiseSDK:
         # SDK alive until exit, so a GC finalizer could never fire.
         self._t_closed = False
         import atexit as _atexit
-        _atexit.register(self._t_close)
+        # #1371: route the atexit seam through the fast-close wrapper (see
+        # FalkorDB._atexit_close). _t_close/close/__exit__ are unchanged.
+        _atexit.register(self._atexit_close)
         # Dreaming (#85): dirty claim roots awaiting EP stabilization. Write
         # paths mark affected claims dirty; dream()/lazy-read consume them.
         self._dirty_roots: set[str] = set()
@@ -5778,6 +5780,20 @@ class TortoiseSDK:
         entity kinds — use for schema discovery.
         """
         return _get_kind_expander().list_relations()
+
+    def _atexit_close(self) -> None:
+        """#1371: atexit seam — fast-close ephemeral test servers first.
+
+        Falls through to the normal _t_close when the fast path does not
+        apply.
+        """
+        from tortoise.embedded_lifecycle import atexit_fast_close
+        proj = getattr(self, "_proj", None)
+        db = getattr(proj, "db", None) if proj is not None else None
+        if db is not None and atexit_fast_close(getattr(db, "client", db)):
+            self._t_closed = True
+            return
+        self._t_close()
 
     def _t_close(self) -> None:
         """Idempotent close; safe from atexit or __exit__ (#1005).

@@ -51,6 +51,7 @@ RAW_EMBEDDED_ALLOWLIST = {
     "test_embedded_lifecycle.py",
     "test_extractor_doc.py",
     "test_extractor_priors.py",
+    "test_embedded_lifecycle_fast_close.py",  # #1371 lifecycle-seam tests
     "test_flip_gate.py",
     "test_guard.py",
     "test_hard_reject.py",

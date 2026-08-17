@@ -169,13 +169,181 @@ def _canonical_path():
     return os.path.join(d, "canonical.db")
 
 
+def _pid_alive(pid: int) -> bool:
+    """Liveness probe via kill(pid, 0) — no ambient process-table walk."""
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
+
+
+def _kill_pid(pid: int) -> None:
+    """SIGTERM-then-SIGKILL a TRACKED server pid.
+
+    #1365: the global `pkill -f redislite/bin/redis-server` used to race
+    every later test in this module. Direct pid kills only touch the servers
+    this test spawned — killpg is NOT a substitute (redislite setsid-
+    daemonizes the server, so the spawning group's kill misses it).
+    """
+    if not pid:
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        return
+    deadline = time.time() + 10
+    while time.time() < deadline and _pid_alive(pid):
+        time.sleep(0.1)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def _make_flat_tmpdir() -> str:
+    """Short flat dir under the tempdir root for child TMPDIR containment.
+
+    AF_UNIX socket paths cap at ~108 bytes on Linux — the child's autogen
+    redislite dir nests under TMPDIR, so a short shallow path is required.
+    """
+    return tempfile.mkdtemp(prefix="tchaos", dir=tempfile.gettempdir())
+
+
+def _spawn_orphan_pid(tmpdir: str | None = None) -> tuple[int, str]:
+    """Spawn a no-path redislite server and SIGKILL the parent WITHOUT
+    close() -> a genuine orphan. Returns (server_pid, socket_path).
+
+    #1365: the child prints its OWN server pid + socket (db.client.pid /
+    db.client.socket_file) so the test tracks only its own orphan — never
+    ambient candidates[0]. TMPDIR is set in the CHILD env (the parent's
+    tempfile.gettempdir() is cached by import time) for containment.
+    """
+    env = dict(os.environ)
+    env.pop("TORTOISE_DB_URI", None)
+    if tmpdir:
+        env["TMPDIR"] = tmpdir
+    code = (
+        "import os,time; os.environ.pop('TORTOISE_DB_URI',None);\n"
+        "from redislite.falkordb_client import FalkorDB; db=FalkorDB();\n"
+        "print('READY', db.client.pid, db.client.socket_file, flush=True);"
+        " time.sleep(30)"
+    )
+    p = subprocess.Popen([sys.executable, "-c", code],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         text=True, env=env)
+    import select
+    if not select.select([p.stdout], [], [], 30)[0]:
+        p.kill()
+        p.wait()
+        raise AssertionError("orphan spawn timed out")
+    line = p.stdout.readline().strip()
+    parts = line.split()
+    if len(parts) < 3 or parts[0] != "READY":
+        p.kill()
+        p.wait()
+        raise AssertionError(f"orphan spawn failed: {line!r}")
+    pid = int(parts[1])
+    sock = parts[2]
+    time.sleep(1)  # let the daemon fully detach before killing the parent
+    p.kill()
+    p.wait()
+    if not _pid_alive(pid):
+        raise AssertionError(
+            f"spawned orphan {pid} died before the test ran (spawn failure, "
+            "not a reaper failure)")
+    return pid, sock
+
+
 @pytest.fixture(autouse=True)
-def _teardown_servers():
-    """Module teardown: kill redis-servers from this test's process group."""
+def _clean_spawned_residue():
+    """#1365: delta cleanup replaces the old global pkill teardown.
+
+    The previous autouse fixture ran `pkill -f redislite/bin/redis-server`
+    after EVERY test — killing other tests' and the session server's
+    processes (a race generator, and lethal when test (a)/test-slow ran
+    concurrently). This fixture snapshots pids + socket dirs before the
+    test and kills/removes ONLY the delta (the test_reaper pattern #493).
+    """
+    def _snapshot() -> tuple[set[int], set[str]] | None:
+        """Snapshot ambient pids + socket dirs. Returns None when the probe
+        fails — the caller must SKIP cleanup entirely (fail-safe: clean
+        nothing rather than compute a delta against an empty baseline, which
+        would kill every server on the host)."""
+        pids: set[int] = set()
+        try:
+            out = subprocess.run(
+                ["pgrep", "-f", "redislite/bin/redis-server"],
+                capture_output=True, text=True, timeout=10,
+            ).stdout
+            pids = {int(p) for p in out.split() if p.strip().isdigit()}
+        except Exception:
+            return None
+        dirs: set[str] = set()
+        tmp = tempfile.gettempdir()
+        try:
+            for entry in os.scandir(tmp):
+                if entry.is_dir() and (
+                    os.path.exists(os.path.join(entry.path, "redis.socket"))
+                    or os.path.exists(os.path.join(entry.path, "redis.pid"))
+                ):
+                    dirs.add(entry.path)
+        except Exception:
+            return None
+        return pids, dirs
+
+    before = _snapshot()
+    if before is None:
+        yield  # probe failed — fail-safe: no cleanup at all
+        return
+    before_pids, before_dirs = before
     yield
     try:
-        subprocess.run(["pkill", "-f", "redislite/bin/redis-server"],
-                       capture_output=True)
+        after = _snapshot()
+        if after is None:
+            return  # probe failed — fail-safe: skip cleanup
+        after_pids, after_dirs = after
+        delta = after_pids - before_pids
+        for pid in delta:
+            _kill_pid(pid)
+        # Poll briefly so the rmtree below does not race a dying server.
+        for _ in range(6):
+            alive = {p for p in delta if _pid_alive(p)}
+            if not alive:
+                break
+            time.sleep(0.1)
+        import shutil
+        for d in after_dirs - before_dirs:
+            shutil.rmtree(d, ignore_errors=True)
+    except Exception:
+        pass
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _sweep_stale_residue():
+    """Module-start dead-dir cleanup — the test_reaper pattern (#1365):
+    remove socket dirs whose redis.pid belongs to a provably dead process
+    (crashed/killed prior run), never touching live servers."""
+    tmp = tempfile.gettempdir()
+    try:
+        for entry in os.scandir(tmp):
+            if not entry.is_dir():
+                continue
+            pid_file = os.path.join(entry.path, "redis.pid")
+            if not os.path.exists(pid_file):
+                continue
+            try:
+                with open(pid_file) as fh:
+                    pid = int(fh.read().strip())
+                os.kill(pid, 0)  # alive?
+                continue  # live server (ours or another process) — leave alone
+            except ProcessLookupError:
+                import shutil
+                shutil.rmtree(entry.path, ignore_errors=True)
+            except (ValueError, OSError, PermissionError):
+                continue  # unparseable/racy — leave alone
     except Exception:
         pass
 
@@ -289,27 +457,19 @@ def test_writer_death_keys_survive_reconnect(monkeypatch):
 
 def test_chaos_kills_only_idle_of_20(monkeypatch):
     """20 no-path servers, 10 with live clients -> reaper kills only the 10
-    idle, leaves 10 with clients."""
+    idle, leaves 10 with clients. #1365: scoped to the test's OWN 20 spawns
+    (delta-asserted) — never ambient candidates; teardown kills tracked pids
+    directly (the old global pkill is gone)."""
     from tortoise.embedded_reaper import discover, reap
     monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
-    # Spawn 20 orphan servers (SIGKILL'd parents)
-    socks = []
-    for i in range(20):
-        code = (
-            "import os,time; os.environ.pop('TORTOISE_DB_URI',None);\n"
-            "from redislite.falkordb_client import FalkorDB; db=FalkorDB();\n"
-            "print('READY', flush=True); time.sleep(30)"
-        )
-        p = subprocess.Popen([sys.executable, "-c", code],
-                             stdout=subprocess.PIPE, text=True)
-        p.stdout.readline()
-        p.kill()
-        p.wait()
-        time.sleep(0.2)
+    tmpdir = _make_flat_tmpdir()
+    own = [_spawn_orphan_pid(tmpdir) for _ in range(20)]
+    own_pids = [p for p, _ in own]
     time.sleep(1)
     found = discover()
-    candidates = [s for s in found if s["classification"] == "candidate"]
-    assert len(candidates) >= 20, f"expected >=20 candidates, got {len(candidates)}"
+    candidates = [s for s in found if s["pid"] in own_pids]
+    assert len(candidates) >= 20, \
+        f"expected >=20 own candidates, got {len(candidates)}"
     # Attach live clients to 10
     import redis as _redis
     clients = []
@@ -324,89 +484,84 @@ def test_chaos_kills_only_idle_of_20(monkeypatch):
     time.sleep(1)
     # The 10 with clients must still be alive
     alive_with_client = 0
-    for s, c in zip(candidates[:10], clients):
-        try:
-            os.kill(s["pid"], 0)
+    for s in candidates[:10]:
+        if _pid_alive(s["pid"]):
             alive_with_client += 1
-        except (ProcessLookupError, PermissionError):
-            pass
     assert alive_with_client == 10, f"client-attached servers killed: {alive_with_client}/10"
+    # The 10 idle must be dead (the reaper acted on them)
+    for s in candidates[10:]:
+        assert not _pid_alive(s["pid"]), f"idle orphan {s['pid']} survived reap"
     for c in clients:
         c.close()
-    # cleanup: kill ALL spawned servers (candidate AND protected — the 10
-    # with clients are protected-by-client and must not pollute later tests)
-    subprocess.run(["pkill", "-f", "redislite/bin/redis-server"],
-                   capture_output=True)
-    time.sleep(1)
+    # cleanup: kill ALL own spawned servers (candidate AND protected — the 10
+    # with clients were protected-by-client and must not pollute later tests)
+    for pid, _ in own:
+        _kill_pid(pid)
 
 
 def test_chaos_sigkill_mid_query_reaper_cleans(monkeypatch):
-    """SIGKILL a writer mid-query -> orphan created -> reaper finds + cleans,
-    no zombie socket."""
+    """SIGKILL a writer mid-query -> orphan created -> reaper finds + cleans
+    the test's OWN orphan, no zombie socket. #1365: delta-asserted on the
+    spawned pid — never ambient candidates[0]."""
     from tortoise.embedded_reaper import discover, reap
     monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
-    # spawn an orphan (SIGKILL'd parent)
-    code = (
-        "import os,time; os.environ.pop('TORTOISE_DB_URI',None);\n"
-        "from redislite.falkordb_client import FalkorDB; db=FalkorDB();\n"
-        "print('READY', flush=True); time.sleep(30)"
-    )
-    p = subprocess.Popen([sys.executable, "-c", code],
-                         stdout=subprocess.PIPE, text=True)
-    p.stdout.readline()
-    p.kill()
-    p.wait()
+    own_pid, sock = _spawn_orphan_pid(_make_flat_tmpdir())
+    assert _pid_alive(own_pid), "spawned orphan not alive (spawn failure)"
     time.sleep(1)
     found = discover()
-    candidates = [s for s in found if s["classification"] == "candidate"]
-    assert candidates, "no orphan candidates found"
-    pid = candidates[0]["pid"]
-    reap(candidates, dry_run=False)
-    time.sleep(1)
-    try:
-        os.kill(pid, 0)
-        assert False, "orphan not cleaned by reaper"
-    except ProcessLookupError:
-        pass  # killed — good
-    # no zombie socket left
-    sock = candidates[0]["socket_path"]
+    own = [s for s in found if s["pid"] == own_pid]
+    assert own, f"own orphan {own_pid} not discovered"
+    acted = reap(own, dry_run=False)
+    assert any(a["pid"] == own_pid for a in acted), \
+        f"reaper did not act on own orphan {own_pid}"
+    _wait_server_exit(own_pid, max_wait_s=15)
     assert not os.path.exists(sock), "zombie socket remains"
 
 
 def test_chaos_reaper_sigkill_mid_sweep_second_run_cleans(monkeypatch):
-    """SIGKILL the reaper mid-sweep -> second reaper run cleans all remaining."""
+    """SIGKILL the reaper mid-sweep -> second run cleans all remaining own
+    orphans. #1365: the kill is SYNCHRONIZED on the reaper's first own-pid
+    kill (stderr sentinel — reap() logs "killed orphan PID <pid>"), never a
+    blind sleep; the final assertion is the state of the test's OWN 3 pids.
+    """
     from tortoise.embedded_reaper import discover, reap
     monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
-    # spawn 3 orphans
-    for _ in range(3):
-        code = (
-            "import os,time; os.environ.pop('TORTOISE_DB_URI',None);\n"
-            "from redislite.falkordb_client import FalkorDB; db=FalkorDB();\n"
-            "print('READY', flush=True); time.sleep(30)"
-        )
-        p = subprocess.Popen([sys.executable, "-c", code],
-                             stdout=subprocess.PIPE, text=True)
-        p.stdout.readline()
-        p.kill()
-        p.wait()
+    tmpdir = _make_flat_tmpdir()
+    own_pids = [pid for pid, _ in (_spawn_orphan_pid(tmpdir) for _ in range(3))]
     time.sleep(1)
-    # First reaper run in a subprocess, SIGKILL it mid-sweep
+    # First reaper run in a subprocess, SIGKILL it after it reaps >=1 of OUR
+    # orphans. --batch-size 5 keeps the sweep from spending its whole batch
+    # on ambient residue before reaching our pids on a dirty runner.
     env = dict(os.environ)
     env["TORTOISE_REAPER_MIN_UPTIME"] = "0"
     reaper = subprocess.Popen(
-        [sys.executable, "-m", "tortoise.embedded_reaper", "--no-dry-run"],
+        [sys.executable, "-m", "tortoise.embedded_reaper", "--no-dry-run",
+         "--batch-size", "5"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
-    time.sleep(1.5)  # let it start sweeping
+    import select
+    import re
+    killed_own = None
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        if not select.select([reaper.stderr], [], [], 1)[0]:
+            if reaper.poll() is not None:
+                break
+            continue
+        line = reaper.stderr.readline()
+        m = re.search(r"killed orphan PID (\d+)", line)
+        if m and int(m.group(1)) in own_pids:
+            killed_own = int(m.group(1))
+            break
+    assert killed_own is not None, \
+        "reaper never reaped an own orphan (sentinel timeout)"
     reaper.kill()
     reaper.wait()
-    time.sleep(1)
-    # Second reaper run cleans all remaining
+    # Second reaper run (in-process) cleans all remaining own orphans
     found = discover()
-    candidates = [s for s in found if s["classification"] == "candidate"]
-    reap(candidates, dry_run=False)
-    time.sleep(1)
-    remaining = [s for s in discover() if s["classification"] == "candidate"]
-    assert not remaining, f"{len(remaining)} orphans remain after second run"
+    own_records = [s for s in found if s["pid"] in own_pids]
+    reap(own_records, dry_run=False)
+    for pid in own_pids:
+        _wait_server_exit(pid, max_wait_s=15)
 
 
 def test_chaos_singleton_lock_released_on_sigkill(monkeypatch):

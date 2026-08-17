@@ -428,7 +428,9 @@ class FalkorProjection(
         # - NO per-instance signal handlers (atexit suffices; avoids leaks)
         import atexit as _atexit
         self._closed = False
-        _atexit.register(self.close)
+        # #1371: route the atexit seam through the fast-close wrapper — see
+        # FalkorDB._atexit_close. close()/__exit__ are unchanged.
+        _atexit.register(self._atexit_close)
 
     # ── Ops safety (#428): health check + transparent recovery ────────────
 
@@ -1428,6 +1430,20 @@ class FalkorProjection(
             self.db.close()
         except Exception:
             pass
+
+    def _atexit_close(self) -> None:
+        """#1371: atexit seam — fast-close ephemeral test servers first.
+
+        Falls through to the normal close() when the fast path does not
+        apply (server-mode clients have no fast_close; non-ephemeral or
+        unset flag routes through the helper's False return).
+        """
+        from tortoise.embedded_lifecycle import atexit_fast_close
+        db = getattr(self, "db", None)
+        if db is not None and atexit_fast_close(getattr(db, "client", db)):
+            self._closed = True
+            return
+        self.close()
 
     def __enter__(self) -> "FalkorProjection":
         return self

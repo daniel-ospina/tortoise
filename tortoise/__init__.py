@@ -69,7 +69,25 @@ if _OriginalFalkorDB is not None:
             super().__init__(*args, **kwargs)
             import atexit as _atexit
             self._t_closed = False
-            _atexit.register(self._t_close)
+            # #1371: route the atexit seam through the fast-close wrapper
+            # (ephemeral test servers) so interpreter exit does not spend
+            # 3-4s per leaked server on redislite's response-waiting close.
+            # _t_close/close/__exit__ are unchanged — the fast path is only
+            # reachable via this registration seam.
+            _atexit.register(self._atexit_close)
+
+        def _atexit_close(self) -> None:
+            """#1371: atexit seam — fast-close ephemeral test servers first.
+
+            Falls through to the normal _t_close when the fast path does not
+            apply (non-ephemeral path, flag unset, other clients connected,
+            or the socket is unreachable).
+            """
+            from tortoise.embedded_lifecycle import atexit_fast_close
+            if atexit_fast_close(getattr(self, "client", self)):
+                self._t_closed = True
+                return
+            self._t_close()
 
         def _t_close(self) -> None:
             """Idempotent close; safe from atexit or __exit__."""

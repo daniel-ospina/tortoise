@@ -13,6 +13,12 @@ import pytest
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
+# #1371: opt-in fast interpreter-exit close for ephemeral embedded test
+# servers (tortoise/embedded_lifecycle.py) — kills the ~10-15 min atexit
+# teardown tail on every test run (local + CI + post-merge-validation, which
+# all load this conftest). User-path DBs and explicit close() are unaffected.
+os.environ.setdefault("TORTOISE_FAST_ATEXIT", "1")
+
 # #1012: session-shared embedded projection fixture (construction centralized
 # in tests/_embedded.py — one redislite server per session, not per test).
 # tests/ is a namespace package (no __init__.py): resolve it via the repo
