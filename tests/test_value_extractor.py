@@ -287,12 +287,19 @@ class TestCommitSessionRoundTrip:
 
     def test_v2_layer1_rejected_payload_not_posted(self, monkeypatch):
         """#1350: a payload that fails Layer-1 returns ok=False with the
-        Layer-1 errors and is never POSTed (fail-closed at the gate)."""
+        Layer-1 errors and is NEVER POSTed (fail-closed at the gate) — the
+        _post_commit recorder proves no call was made."""
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         from tortoise.sdk import TortoiseSDK
+        import tortoise.sdk as sdk_mod
         import tortoise.extractor_v2 as ev2
         sdk = object.__new__(TortoiseSDK)
         _real = ev2.extract_session_v2
+        posted: list[dict] = []
+
+        def _record(payload, **kw):
+            posted.append(payload)
+            return {"ok": True}
 
         def _broken(model, conversation, **kw):
             out = _real(model, conversation, **kw)
@@ -300,6 +307,7 @@ class TestCommitSessionRoundTrip:
             return out
 
         monkeypatch.setattr(ev2, "extract_session_v2", _broken)
+        monkeypatch.setattr(sdk_mod, "_post_commit", _record)
         try:
             out = sdk.commit_session(
                 conversation=[{"role": "user", "content": "x"}],
@@ -309,6 +317,20 @@ class TestCommitSessionRoundTrip:
             monkeypatch.setattr(ev2, "extract_session_v2", _real)
         assert out["ok"] is False
         assert any("Layer-1" in e for e in out["errors"])
+        assert posted == [], "Layer-1-rejected payload must never be POSTed"
+
+    def test_v2_empty_conversation_not_ok(self, monkeypatch):
+        """#1350 (review P1): an empty/blank conversation must never report
+        ok=True — nothing was committed."""
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        from tortoise.sdk import TortoiseSDK
+        sdk = object.__new__(TortoiseSDK)
+        out = sdk.commit_session(
+            conversation=[], extractor_model=V2MockModel(),
+            base_url="http://unused", api_key="k")
+        assert out["ok"] is False
+        assert out["payload"] is None
+        assert any("no payload" in e for e in out["errors"])
 
     def test_env_fallback_v1(self, monkeypatch):
         """#1350: TORTOISE_EXTRACTOR=v1 routes to the legacy path — the

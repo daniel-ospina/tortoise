@@ -1538,8 +1538,11 @@ class TortoiseSDK:
         The v2 payload is Layer-1 validated BEFORE the POST (a rejected
         payload returns ok=False with the Layer-1 errors — nothing is sent).
         ``chunk_size`` means EDUs per S1 chunk in v2 (default 50) vs EDUs per
-        summary chunk in v1 (default 6). ``existing_state`` is v1-only (v2's
-        S3 search replaces it). ``mode`` is v1-only (fail-closed vs warn).
+        summary chunk in v1 (default 6) — a caller that previously tuned
+        v1's 6-EDU summary chunks now tunes v2's S1 chunking; pass
+        extractor="v1" for the legacy meaning. ``existing_state`` is v1-only
+        (v2's S3 search replaces it). ``mode`` is v1-only (fail-closed vs
+        warn).
 
         ``summary`` may be passed directly (already extracted, v1-shaped) to
         skip extraction — routes to the v1 path. Returns the endpoint
@@ -1569,6 +1572,10 @@ class TortoiseSDK:
                                  session_id=session_id, chunk_size=chunk_size)
         payload = out.get("payload")
         errors = list(out.get("errors", []) or [])
+        if payload is None and not errors:
+            # empty/blank conversation short-circuits with no errors and no
+            # payload — never report ok=True for a nothing-committed session.
+            errors.append("no payload produced (empty or failed conversation)")
         l1_errors: list[str] = []
         if payload is not None:
             l1, _model = validate_payload_dict(payload)
@@ -1580,7 +1587,7 @@ class TortoiseSDK:
             errors = l1_errors + errors
         result = {
             "session_id": session_id,
-            "ok": not errors,
+            "ok": not errors and payload is not None,
             "errors": errors,
             "payload": payload,
             "warnings": out.get("warnings", []),
@@ -1595,7 +1602,10 @@ class TortoiseSDK:
             return result
         try:
             r = _post_commit(payload, base_url=base_url, api_key=api_key)
-            return {**r, **result, "ok": True}
+            # merge the server response but never let the extractor warnings
+            # clobber the server's domain-rule warnings[] (the §6.1 contract)
+            return {**r, **result, "ok": True,
+                    "warnings": (r.get("warnings") or []) + result["warnings"]}
         except Exception as e:
             return {**result, "ok": False, "error": str(e)}
 
