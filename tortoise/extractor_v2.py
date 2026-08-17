@@ -378,14 +378,15 @@ CONDENSED SEMANTIC CORE (from the how-to-use-tortoise skill)
 - SUPERSESSION (state objects/subjects — the state-centric lifecycle): when
   the conversation shows an entity being REPLACED — adopted B over A, "drop
   the old approach for X", "the new strategy supersedes the old one" — emit
-  the NEW entity (lifecycle created) with "supersedes": "<existing-id>" when
-  the superseded item is in the graph search results, else null. The OLD
-  entity is NOT re-created — supersede, don't duplicate. Anaphora resolves to
-  the existing graph item: "the old strategy" / "the previous approach" / "the
-  way we were doing it" refers to the existing entity of that kind from the
-  search results. Emit ONE statement point capturing the replacement
-  ("strategy-B supersedes strategy-A") with about_entities listing BOTH the
-  new and the superseded entity — that point is the graph-visible record.
+  the NEW entity (lifecycle created) with "supersedes" set to the superseded
+  item's NAME when identifiable ("strategy-A"), else null. The existing
+  graph id is filled later by the gap-review/search stage — never invent an
+  id here. The OLD entity is NOT re-created — supersede, don't duplicate.
+  Anaphora resolves to the existing graph item: "the old strategy" / "the
+  previous approach" refers to the existing entity of that kind. Emit ONE
+  statement point capturing the replacement ("strategy-B supersedes
+  strategy-A") with about_entities listing BOTH the new and the superseded
+  entity — that point is the graph-visible record.
 - DECISION EVENTS — ONLY when real: emit a decision event ONLY when the
   conversation contains a genuine commitment with reasons ("we decided",
   "the ruling is", "we're going with X"). NEVER fabricate a decision event
@@ -905,23 +906,69 @@ def _minted_kind_report(embed_list: dict, master: dict | None = None) -> list[st
     return minted
 
 
-def _resolve_superseded(ref: str, search: dict) -> str | None:
+def _resolve_superseded(ref: str, search: dict, *, kind: str = "") -> dict | None:
     """Resolve an entity ``supersedes`` ref to the S3-returned existing
-    entity (by id, or by name via the search index). Returns the existing
-    entity's canonical display (id or name) or None when unresolvable —
-    never guesses (a hallucinated id must not become a graph reference)."""
+    ENTITY dict: by id (content-addressed, unique), or by name filtered to
+    the SAME kind (a name may collide across kinds — never resolve to the
+    wrong kind's entity). Ambiguous (multiple same-kind matches) → None —
+    never guesses. Returns the entity dict so the caller can use its id,
+    name, and kind for identity checks."""
     ref = (ref or "").strip()
     if not ref or ref in ("null", "None"):
         return None
-    for e in (search or {}).get("entities", []) or []:
+    entities = [e for e in (search or {}).get("entities", []) or []
+                if isinstance(e, dict)]
+    for e in entities:
+        if e.get("id") == ref:
+            return e
+    matches = [e for e in entities
+               if _norm(e.get("name", "")) == _norm(ref)
+               and (not kind or _norm_kind(e.get("kind", "")) == _norm_kind(kind))]
+    if len(matches) == 1:
+        return matches[0]
+    return None  # 0 or >1 → caller warns, never guesses
+
+
+def _supersession_records(entity_refs: list[dict], search: dict,
+                          *, warnings: list | None = None) -> list[dict]:
+    """Shared supersession-record builder — the ONE resolution discipline for
+    both execute_embed's recording and derive_supersessions (they cannot
+    diverge). Each ref: {"name", "kind", "supersedes"}. Self-supersession
+    (the ref resolves to the new entity ITSELF — same name AND kind) is
+    skipped with a warning; records are deduped by (superseded, supersedes_by)."""
+    records: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for e in entity_refs:
         if not isinstance(e, dict):
             continue
-        if e.get("id") == ref:
-            return str(e.get("id")) or str(e.get("name"))
-    for e in (search or {}).get("entities", []) or []:
-        if isinstance(e, dict) and _norm(e.get("name", "")) == _norm(ref):
-            return str(e.get("id")) or str(e.get("name"))
-    return None
+        name = str(e.get("name", "")).strip()
+        kind = str(e.get("kind", "")).strip()
+        ref = str(e.get("supersedes") or "").strip()
+        if not name or not ref or ref in ("null", "None"):
+            continue
+        existing = _resolve_superseded(ref, search, kind=kind)
+        if not existing:
+            if warnings is not None:
+                warnings.append(f"entity '{name[:60]}' supersedes={ref!r} does not "
+                                "resolve to an S3 search result — recorded without "
+                                "a graph id")
+            continue
+        if (_norm(existing.get("name", "")) == _norm(name)
+                and _norm_kind(existing.get("kind", "")) == _norm_kind(kind)):
+            if warnings is not None:
+                warnings.append(f"entity '{name[:60]}' supersedes itself "
+                                f"({ref!r}) — skipped")
+            continue
+        display = str(existing.get("id")) or str(existing.get("name"))
+        key = (display, name)
+        if key in seen:
+            continue
+        seen.add(key)
+        records.append({
+            "superseded": display, "supersedes_by": name,
+            "evidence": "entity lifecycle supersedes (conversation-driven)",
+        })
+    return records
 
 
 def derive_supersessions(embed_list: dict, search: dict) -> list[dict]:
@@ -929,26 +976,17 @@ def derive_supersessions(embed_list: dict, search: dict) -> list[dict]:
     embed list's entity lifecycle/supersedes + the S3 search results, derive
     'entity A superseded by entity B' pairs. This is the read-side
     projection's input — the event stream (session event + filed points) is
-    the truth; object status is derived, not stored.
+    the truth; object status is derived, not stored. Shares the resolution
+    discipline with execute_embed's recording (same helper).
 
     Returns [{"superseded": ..., "supersedes_by": ..., "evidence": ...}].
     """
-    out: list[dict] = []
-    for e in embed_list.get("entities", []) or []:
-        if not isinstance(e, dict):
-            continue
-        ref = str(e.get("supersedes") or "").strip()
-        name = str(e.get("name", "")).strip()
-        if not ref or not name or ref in ("null", "None"):
-            continue
-        resolved = _resolve_superseded(ref, search)
-        if resolved:
-            out.append({
-                "superseded": resolved,
-                "supersedes_by": name,
-                "evidence": "entity lifecycle supersedes (conversation-driven)",
-            })
-    return out
+    refs = [{"name": str(e.get("name", "")).strip(),
+             "kind": str(e.get("kind", "")).strip(),
+             "supersedes": str(e.get("supersedes") or "").strip()}
+            for e in (embed_list.get("entities", []) or [])
+            if isinstance(e, dict)]
+    return _supersession_records(refs, search)
 
 
 _ENTITY_FALLBACK = {"kind": "core:other"}
@@ -983,7 +1021,8 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # ── entities (dependency order 1) ─────────────────────────────────────
     payload_entities: list[dict] = []
     link_before_create: list[dict] = []
-    supersessions: list[dict] = []   # conversation-driven supersession records
+    entity_supersede_refs: list[dict] = []   # for the supersession recording
+    supersessions: list[dict] = []           # conversation-driven supersession records
     seen_entities: set[tuple[str, str]] = set()
     for e in embed_list.get("entities", []) or []:
         if not isinstance(e, dict):
@@ -1027,22 +1066,15 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                             "merges entities by (name, kind); the state change "
                             "must ride on points/events instead")
         if supersedes_ref and supersedes_ref not in ("null", "None", ""):
-            # conversation-driven supersession: record it deterministically.
-            # The supersedes ref is either an id the S3 search returned or an
-            # entity name — validate against the S3 results, never guess.
-            resolved = _resolve_superseded(supersedes_ref, search)
-            if resolved:
-                supersessions.append({
-                    "superseded": resolved,
-                    "supersedes_by": name,
-                    "evidence": "entity lifecycle supersedes (conversation-driven)",
-                })
-            else:
-                warnings.append(f"entity '{name[:60]}' supersedes={supersedes_ref!r} "
-                                "does not resolve to an S3 search result — "
-                                "recorded without a graph id")
+            entity_supersede_refs.append({"name": name, "kind": kind,
+                                          "supersedes": supersedes_ref})
         payload_entities.append({
             "name": name, "kind": kind, "passes_frequency_gate": True})
+
+    # conversation-driven supersession: deterministic recording (the shared
+    # resolver validates against S3 by id/kind-filtered name — never guesses)
+    supersessions = _supersession_records(entity_supersede_refs, search,
+                                          warnings=warnings)
 
     # ── events (dependency order 2) ───────────────────────────────────────
     payload_events: list[dict] = []
@@ -1293,6 +1325,7 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 "search": {"mode": resolve_backend_mode(), "degraded": True,
                            "reason": "no conversation content"},
                 "payload": None, "chain_notes": [], "link_before_create": [],
+                "supersessions": [],
                 "warnings": ["empty conversation — nothing extracted"],
                 "minted_kinds": [], "stats": {}, "errors": errors}
 
@@ -1345,6 +1378,7 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     except Exception as e:  # S5 must NEVER block the pipeline (design §7.4)
         errors.append(f"S5 failed: {type(e).__name__}: {e}")
         result = {"payload": None, "chain_notes": [], "link_before_create": [],
+                  "supersessions": [],
                   "warnings": [f"S5 embed execution failed: {e}"],
                   "minted_kinds": [], "stats": {}}
     result["session_id"] = session_id

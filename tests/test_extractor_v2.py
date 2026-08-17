@@ -188,7 +188,8 @@ class TestS2:
         """#1386: S2/S4 carry the supersession mapping rule + decision-event
         discipline (never fabricate) + recoup done-things as occurrences."""
         assert "SUPERSESSION (state objects/subjects" in v2.S2_TMPL
-        assert '"supersedes": "<existing-id>"' in v2.S2_TMPL
+        assert '"supersedes" set to the superseded' in v2.S2_TMPL
+        assert "never invent an" in v2.S2_TMPL
         assert "NEVER fabricate a decision event" in v2.S2_TMPL
         assert "RECOUP DONE-THINGS as occurrence events" in v2.S2_TMPL
         assert "SUPERSESSION (state objects/subjects" in v2.S4_TMPL
@@ -491,6 +492,60 @@ class TestS5:
         out = v2.derive_supersessions(embed, search)
         assert out == [{"superseded": "obj-old", "supersedes_by": "strategy-B",
                         "evidence": "entity lifecycle supersedes (conversation-driven)"}]
+
+    def test_supersession_kind_collision_warns_no_wrong_record(self):
+        """Review fix (P1): a name colliding across kinds resolves to the
+        RIGHT kind (kind-filtered); an ambiguous SAME-kind duplicate warns
+        and records nothing (mirror _find_existing_entity's discipline)."""
+        # cross-kind collision → kind-filtered resolution picks the strategy
+        search = {"entities": [
+            {"id": "obj-feature", "name": "strategy-A", "kind": "core:feature"},
+            {"id": "obj-strategy", "name": "strategy-A", "kind": "core:strategy"},
+        ], "points": [], "events": []}
+        embed = {"entities": [
+            {"name": "strategy-B", "kind": "core:strategy", "lifecycle": "created",
+             "supersedes": "strategy-A", "note": None}],
+            "events": [], "points": [], "operators": [],
+            "chain_notes": [], "link_before_create": []}
+        result = v2.execute_embed(embed, search, session_id="s1")
+        assert result["supersessions"][0]["superseded"] == "obj-strategy"
+        # SAME-kind duplicate (ambiguous) → warn, no record, never guess
+        search2 = {"entities": [
+            {"id": "obj-a1", "name": "strategy-A", "kind": "core:strategy"},
+            {"id": "obj-a2", "name": "strategy-A", "kind": "core:strategy"},
+        ], "points": [], "events": []}
+        result2 = v2.execute_embed(embed, search2, session_id="s1")
+        assert result2["supersessions"] == []
+        assert any("does not resolve" in w for w in result2["warnings"])
+
+    def test_self_supersession_skipped(self):
+        """Review fix (P2): supersedes resolving to the entity ITSELF is
+        skipped with a warning (no self-referential cycle)."""
+        search = {"entities": [{"id": "obj-b", "name": "strategy-B",
+                                "kind": "core:strategy"}], "points": [], "events": []}
+        embed = {"entities": [
+            {"name": "strategy-B", "kind": "core:strategy", "lifecycle": "created",
+             "supersedes": "strategy-B", "note": None}],
+            "events": [], "points": [], "operators": [],
+            "chain_notes": [], "link_before_create": []}
+        result = v2.execute_embed(embed, search, session_id="s1")
+        assert result["supersessions"] == []
+        assert any("supersedes itself" in w for w in result["warnings"])
+
+    def test_failure_paths_carry_supersessions_key(self, monkeypatch):
+        """Review fix (P2): the empty-conversation and S5-failed paths return
+        the same contract (supersessions present) as the happy path."""
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        out = v2.extract_session_v2(MockModel([]), [])
+        assert "supersessions" in out and out["supersessions"] == []
+
+        class BoomModel(MockModel):
+            def complete(self, *, system, user):
+                raise RuntimeError("boom")
+
+        out2 = v2.extract_session_v2(BoomModel([]), [{"role": "user",
+                                                      "content": "x"}])
+        assert "supersessions" in out2
 
     def test_unresolved_operator_dropped(self):
         embed = json.loads(json.dumps(S2_FIXTURE))
