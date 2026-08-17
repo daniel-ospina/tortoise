@@ -36,6 +36,9 @@ except ModuleNotFoundError:  # pragma: no cover - dep-missing environment
     _OriginalFalkorDB = None  # type: ignore[assignment]
 
 from tortoise.config import RELATIVE_PATH_ERROR
+# #1371: eager import registers the batch atexit flush (module-import time,
+# before any client construction) so LIFO ordering runs it LAST.
+from tortoise.embedded_lifecycle import atexit_fast_close
 
 
 if _OriginalFalkorDB is not None:
@@ -77,13 +80,13 @@ if _OriginalFalkorDB is not None:
             _atexit.register(self._atexit_close)
 
         def _atexit_close(self) -> None:
-            """#1371: atexit seam — fast-close ephemeral test servers first.
+            """#1371: atexit seam — collect ephemeral test servers for the
+            batch flush first.
 
             Falls through to the normal _t_close when the fast path does not
             apply (non-ephemeral path, flag unset, other clients connected,
             or the socket is unreachable).
             """
-            from tortoise.embedded_lifecycle import atexit_fast_close
             if atexit_fast_close(getattr(self, "client", self)):
                 self._t_closed = True
                 return

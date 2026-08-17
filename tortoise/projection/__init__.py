@@ -96,6 +96,7 @@ class _GuardedGraph:
 
 from tortoise.config import RELATIVE_PATH_ERROR, SUPPORTED_URI_SCHEMES
 from tortoise.live import _live_only
+from tortoise.embedded_lifecycle import atexit_fast_close  # #1371: registers the batch flush
 
 # Backward-compat alias: the canonical scheme set lives in tortoise.config
 # (SUPPORTED_URI_SCHEMES) so URI-routing and connection-layer validation share
@@ -1432,13 +1433,13 @@ class FalkorProjection(
             pass
 
     def _atexit_close(self) -> None:
-        """#1371: atexit seam — fast-close ephemeral test servers first.
+        """#1371: atexit seam — collect ephemeral test servers for the
+        batch flush first.
 
         Falls through to the normal close() when the fast path does not
-        apply (server-mode clients have no fast_close; non-ephemeral or
+        apply (server-mode clients have no fast path; non-ephemeral or
         unset flag routes through the helper's False return).
         """
-        from tortoise.embedded_lifecycle import atexit_fast_close
         db = getattr(self, "db", None)
         if db is not None and atexit_fast_close(getattr(db, "client", db)):
             self._closed = True

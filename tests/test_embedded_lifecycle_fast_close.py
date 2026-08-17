@@ -85,25 +85,35 @@ def test_fast_close_non_ephemeral_falls_through():
         shutil.rmtree(user_dir, ignore_errors=True)
 
 
-def test_reopen_durability_preserved_after_fast_close():
-    """The #1371 P1 regression class: a server fast-closed at exit must have
-    its data on disk — a later process reopening the same path sees it."""
+def test_reopen_durability_via_explicit_close():
+    """The cross-process reopen classes (test_index_cli, test_flip_gate, ...)
+    persist via EXPLICIT close() (redislite's SAVE) — the fast NOSAVE path
+    only touches LEAKED servers at interpreter exit. Verify explicit close
+    still persists data across reopen (the #1371 durability firewall)."""
     from tortoise.projection import FalkorProjection
     db = os.path.join(tempfile.mkdtemp(prefix="tortoise_fast_close_"), "c.db")
     p1 = FalkorProjection(db, graph_name="test")
     p1.g.query("CREATE (n:Point {id:'durable-x'})")
-    assert atexit_fast_close(_client(p1)) is True
-    deadline = time.time() + 8
-    while _pid_alive(_client(p1).pid if hasattr(p1, 'db') else None) \
-            and time.time() < deadline:
-        time.sleep(0.05)
+    p1.close()  # explicit close -> SAVE path (unchanged by the fast atexit)
     p2 = FalkorProjection(db, graph_name="test")
     try:
         rows = p2.g.query(
             "MATCH (n:Point {id:'durable-x'}) RETURN count(n)").result_set
-        assert rows and rows[0][0] >= 1, "data lost across fast close + reopen"
+        assert rows and rows[0][0] >= 1, "explicit close must persist data"
     finally:
         p2.close()
+
+
+def test_fast_close_stops_server_and_closes_pool():
+    """A server fast-NOSAVEd at exit is stopped and its pool closed — nothing
+    left running to trip the CI orphan check."""
+    proj = _fresh_proj()
+    cli = _client(proj)
+    assert atexit_fast_close(cli) is True
+    deadline = time.time() + 8
+    while _pid_alive(cli.pid) and time.time() < deadline:
+        time.sleep(0.05)
+    assert not _pid_alive(cli.pid), "fast close did not stop the server"
 
 
 def test_exit_still_calls_close_once_with_flag_set():
@@ -142,7 +152,6 @@ def test_atexit_seams_registered():
     # FalkorProjection._atexit_close with the fast conditions -> fast path:
     # the server is stopped and the projection is marked closed WITHOUT the
     # (spied) close() being called.
-    from tortoise.embedded_lifecycle import atexit_fast_close as _fast
     calls = []
     orig_close = FalkorProjection.close
 
