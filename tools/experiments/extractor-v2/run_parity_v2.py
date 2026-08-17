@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))  # repo root
 
 from tests.model_adapters import MODELS  # noqa: E402
 from tortoise import extractor_v2 as v2  # noqa: E402
+from tortoise.extractor_v2 import _complete, _parse_json  # noqa: E402
 from tortoise.value_extractor import summarize  # noqa: E402
 
 DEFAULT_TRANSCRIPT = Path(__file__).resolve().parents[3] / \
