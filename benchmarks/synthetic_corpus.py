@@ -294,6 +294,256 @@ def corpus_fingerprint_from_graph(graph) -> dict[str, Any]:
     }
 
 
+# ── Latent-topic oracle layer (issue #1144 retrieval eval) ────────────────────
+#
+# The plain token-pool corpus (#316) cannot measure retrieval QUALITY: every
+# point is drawn from the SAME token pool, so any point containing query
+# tokens counts as a match and P@K approaches 1.0 for every strategy (no
+# signal). The oracle fixes this by giving the corpus a hidden latent-topic
+# structure:
+#
+#   - TOKENS is partitioned into N_ORACLE_TOPICS sequential chunks (topics
+#     are thematic — consecutive tokens are related, mirroring real docs).
+#   - Each seeded point gets a HIDDEN topic; its content is drawn ONLY from
+#     its topic's vocabulary and its embedding is clustered around the
+#     topic's deterministic centroid (0.75 centroid + 0.25 noise). The topic
+#     is NOT written to the graph — retrieval strategies never see it.
+#   - Each topic boundary carries a BRIDGE token shared by the two adjacent
+#     topics (NEAR neighbors). Bridge tokens create controlled distractors:
+#     a point in a near topic that token-matches the query is graded 1
+#     (partially relevant) and non-target topics are graded 0 — even when
+#     their points contain query tokens (false friends from mixed-token
+#     queries, which the old corpus could never express).
+#   - Relevance for a query with target topic T is DERIVED deterministically:
+#     grade 2 = live points in T, grade 1 = live points in NEAR(T),
+#     grade 0 = everything else. No LLM, no human labels, fully repeatable.
+#
+# This makes strategies measurable: easy queries (all tokens in T's core)
+# are near-perfect for token and cluster matchers; hard queries (bridge/
+# neighbor-heavy "ambiguous near-miss" text) pull token matchers toward
+# grade-1 distractors, so P@K < 1.0 and nDCG separates strategies.
+
+N_ORACLE_TOPICS = 24                     # 131 pool tokens / ~5.5 tokens per topic
+ORACLE_EMBED_ALPHA = 0.75                # centroid weight in point embeddings
+ORACLE_CONTENT_LEN_RANGE = (4, 8)        # oracle content draws from a ~7-token vocab
+ORACLE_QUERY_NOISE = 0.35                # noise on the synthetic query vector
+
+
+def _unit(vec: list[float]) -> list[float]:
+    """L2-normalize a vector (guard: zero vector stays zero)."""
+    norm = sum(v * v for v in vec) ** 0.5
+    if norm <= 0.0:
+        return vec
+    return [v / norm for v in vec]
+
+
+@dataclass
+class TopicOracle:
+    """Latent-topic structure of the oracle corpus (#1144).
+
+    Deterministic from the seed: topics partition TOKENS into chunks; each
+    topic has a core (exclusive tokens), one bridge token shared with the
+    NEXT topic (mod N), and a unit-norm centroid used to cluster embeddings.
+    """
+
+    core: dict[int, list[str]]            # topic id -> exclusive core tokens
+    bridges: dict[int, str]               # topic id -> token shared with (id+1) % n
+    token_to_topics: dict[str, list[int]]  # token -> owning topic ids (1 or 2)
+    centroids: dict[int, list[float]]     # topic id -> unit-norm 384-d centroid
+    n: int = N_ORACLE_TOPICS
+
+    def vocab(self, topic: int) -> list[str]:
+        """Tokens a point in `topic` may contain: core + own bridge + the
+        previous topic's bridge (so NEAR neighbors share surface tokens)."""
+        return self.core[topic] + [self.bridges[topic], self.bridges[(topic - 1) % self.n]]
+
+    def near(self, topic: int) -> list[int]:
+        """NEAR neighbors of `topic`: the two topics sharing a bridge token.
+        Points here are PARTIALLY relevant (grade 1) to a topic-`topic` query."""
+        return [(topic - 1) % self.n, (topic + 1) % self.n]
+
+    def centroid_of_token(self, token: str) -> list[float] | None:
+        """Vector for one token: its owning topic's centroid (bridge tokens →
+        the midpoint of the two owning centroids, unit-normalized). This is
+        the synthetic stand-in for a real embedding model (see
+        `query_vector_for`); it encodes token semantics, never oracle labels."""
+        owners = self.token_to_topics.get(token)
+        if not owners:
+            return None
+        if len(owners) == 1:
+            return self.centroids[owners[0]]
+        a, b = self.centroids[owners[0]], self.centroids[owners[1]]
+        return _unit([a[i] + b[i] for i in range(len(a))])
+
+    def query_vector_for(self, query: str, seed: int, noise: float = ORACLE_QUERY_NOISE) -> list[float]:
+        """Synthetic query embedding for `query` (embedded-mode stand-in).
+
+        Sums the token centroids of the query's tokens (bridge tokens pull
+        toward both owning topics — exactly the ambiguity a real model would
+        encode), adds seeded Gaussian noise, normalizes. Deterministic per
+        (query, seed). Queries with no known token fall back to the #316
+        deterministic pseudo-random vector (run_report._query_vec_for
+        pattern) so the vector arm always has a vector to run.
+        """
+        import re as _re
+        tokens = [t for t in _re.split(r"[^a-z0-9]+", query.lower()) if t]
+        vecs = [self.centroid_of_token(t) for t in tokens if t in self.token_to_topics]
+        if not vecs:
+            rng = random.Random(f"{seed}:{query}")
+            return [rng.gauss(0.0, 1.0) for _ in range(EMBEDDING_DIM)]
+        dim = len(vecs[0])
+        rng = random.Random(f"{seed}:oracle-vec:{query}")
+        # Unit-normalized noise: a raw 384-d gaussian has norm ~sqrt(384) ~ 20
+        # and would drown the centroid signal (verified: dist(qv, c0) ~ 1.15
+        # instead of ~0.12 without normalization).
+        noise_vec = _unit([rng.gauss(0.0, 1.0) for _ in range(dim)])
+        vec = [0.0] * dim
+        for v in vecs:
+            for i in range(dim):
+                vec[i] += v[i]
+        for i in range(dim):
+            vec[i] += noise * noise_vec[i]
+        return _unit(vec)
+
+    def token_topic_assignment(self, query: str) -> int | None:
+        """Deterministic target topic for a query: argmax over topics of the
+        number of query tokens in the topic's vocab; ties → lowest topic id.
+        None when no query token is in any topic vocab."""
+        import re as _re
+        tokens = [t for t in _re.split(r"[^a-z0-9]+", query.lower()) if t]
+        counts: dict[int, int] = {}
+        for tok in tokens:
+            for owner in self.token_to_topics.get(tok, []):
+                counts[owner] = counts.get(owner, 0) + 1
+        if not counts:
+            return None
+        best = max(counts.values())
+        return min(k for k, v in counts.items() if v == best)
+
+    def to_dict(self) -> dict:
+        return {
+            "n_topics": self.n,
+            "core": {k: list(v) for k, v in self.core.items()},
+            "bridges": dict(self.bridges),
+            "near": {k: self.near(k) for k in self.core},
+        }
+
+
+def build_topic_oracle(seed: int = 42) -> TopicOracle:
+    """Deterministically partition TOKENS into N_ORACLE_TOPICS topics.
+
+    Sequential chunks keep the pool's thematic ordering (pricing terms stay
+    together, retrieval terms stay together, ...). Each chunk's LAST token is
+    its bridge — shared with the next topic (mod N). Leftover tokens (150 =
+    24*6 + 6) are appended to the first 6 topics' cores.
+    """
+    n = N_ORACLE_TOPICS
+    base = len(TOKENS) // n          # 6
+    extra = len(TOKENS) - base * n   # 6
+    chunks: dict[int, list[str]] = {}
+    idx = 0
+    for k in range(n):
+        size = base + (1 if k < extra else 0)
+        chunks[k] = TOKENS[idx:idx + size]
+        idx += size
+    core: dict[int, list[str]] = {}
+    bridges: dict[int, str] = {}
+    token_to_topics: dict[str, list[int]] = {}
+    for k in range(n):
+        chunk = chunks[k]
+        bridge = chunk[-1]
+        core[k] = chunk[:-1]
+        bridges[k] = bridge
+        token_to_topics[bridge] = [k, (k + 1) % n]
+        for tok in chunk[:-1]:
+            token_to_topics.setdefault(tok, []).append(k)
+    rng = random.Random(seed * 7919)
+    centroids: dict[int, list[float]] = {}
+    for k in range(n):
+        raw = [rng.gauss(0.0, 1.0) for _ in range(EMBEDDING_DIM)]
+        centroids[k] = _unit(raw)
+    return TopicOracle(
+        core=core, bridges=bridges,
+        token_to_topics=token_to_topics, centroids=centroids, n=n,
+    )
+
+
+def generate_oracle_points(
+    n: int, oracle: TopicOracle, *, seed: int = 42,
+    retracted_fraction: float = 0.02, posterior_fraction: float = 0.5,
+    op_every: int = 50,
+) -> tuple[list[dict], dict[int, int]]:
+    """Generate `n` oracle point dicts WITHOUT touching a graph.
+
+    Same point shape as `generate_points` (id/content/pointKind/is_operator/
+    status/embedding/posterior_*) plus a HIDDEN `topic` int. Topics are
+    round-robin (topic = i % n_topics) so every topic gets a balanced slice;
+    content draws from the topic vocab; embeddings cluster around the topic
+    centroid (ORACLE_EMBED_ALPHA). The `topic` key is intentionally NOT
+    written by seed_corpus (its SET clause is explicit-field) — the oracle
+    never leaks into the graph.
+
+    Returns (points, topic_counts) where topic_counts maps topic id → number
+    of LIVE (non-retracted, non-operator) points, the oracle's grade-2
+    denominator for that topic."""
+    rng = random.Random(seed)
+    points: list[dict] = []
+    topic_counts: dict[int, int] = {k: 0 for k in oracle.core}
+    for i in range(n):
+        topic = i % oracle.n
+        is_op = (i % op_every == 0)
+        retracted = (not is_op) and rng.random() < retracted_fraction
+        with_post = (not is_op) and rng.random() < posterior_fraction
+        vocab = oracle.vocab(topic)
+        content = " ".join(rng.sample(vocab, min(rng.randint(*ORACLE_CONTENT_LEN_RANGE), len(vocab))))
+        emb = [rng.gauss(0.0, 1.0) for _ in range(EMBEDDING_DIM)]
+        centroid = oracle.centroids[topic]
+        # Unit-normalized noise: a raw 384-d gaussian has norm ~sqrt(384) ~ 20
+        # and would dominate the 0.75-weight centroid (verified: point
+        # embeddings were noise-dominated, collapsing all topical signal).
+        noise_vec = _unit(emb)
+        embedding = _unit([
+            ORACLE_EMBED_ALPHA * centroid[j] + (1.0 - ORACLE_EMBED_ALPHA) * noise_vec[j]
+            for j in range(EMBEDDING_DIM)
+        ])
+        kind = rng.choices(
+            [k for k, _ in KIND_WEIGHTS], weights=[w for _, w in KIND_WEIGHTS]
+        )[0]
+        p = {
+            "id": f"p-{i:07d}",
+            "content": content,
+            "pointKind": "operator" if is_op else kind,
+            "is_operator": is_op,
+            "status": "retracted" if retracted else "live",
+            "embedding": embedding,
+            "topic": topic,
+        }
+        if with_post:
+            alpha = rng.randint(1, 40)
+            p["posterior_alpha"] = float(alpha)
+            p["posterior_beta"] = float(rng.randint(1, max(40 - alpha, 1)))
+        points.append(p)
+        if not is_op and not retracted:
+            topic_counts[topic] = topic_counts.get(topic, 0) + 1
+    return points, topic_counts
+
+
+def oracle_grades_for_query(
+    oracle: TopicOracle, target_topic: int,
+    live_ids_by_topic: dict[int, list[str]],
+) -> dict[str, int]:
+    """Deterministic graded relevance (issue #1144): grade 2 for target-topic
+    points, grade 1 for NEAR-topic points, grade 0 for everything else.
+    `live_ids_by_topic` must contain only live (non-retracted) point ids.
+    Returns {point_id: 0|1|2} for every live point."""
+    labels: dict[str, int] = {}
+    for topic, ids in live_ids_by_topic.items():
+        grade = 2 if topic == target_topic else (1 if topic in oracle.near(target_topic) else 0)
+        for pid in ids:
+            labels[pid] = grade
+    return labels
+
+
 def default_corpus_path(workdir: str | None = None) -> str:
     """Corpus db path: a temp-file embedded DB (or a named file under workdir)."""
     if workdir:
@@ -311,4 +561,7 @@ __all__ = [
     "EMBEDDING_DIM", "KIND_WEIGHTS", "TOKENS", "CorpusFingerprint",
     "generate_points", "seed_corpus", "seed_operator_edges", "verify_indexes",
     "corpus_fingerprint_from_graph", "default_corpus_path", "load_query_mix",
+    # #1144 latent-topic oracle layer
+    "N_ORACLE_TOPICS", "ORACLE_EMBED_ALPHA", "TopicOracle",
+    "build_topic_oracle", "generate_oracle_points", "oracle_grades_for_query",
 ]

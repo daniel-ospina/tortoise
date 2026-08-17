@@ -1,0 +1,795 @@
+{
+  "meta": {
+    "issue": "1144",
+    "name": "oracle retrieval queries (synthetic, deterministic labels)",
+    "n_queries": 100,
+    "tiers": {
+      "easy": 50,
+      "medium": 30,
+      "hard": 20
+    },
+    "composition": {
+      "query_mix": 53,
+      "oracle_new": 47
+    },
+    "query_mix_excluded": {
+      "ids": [
+        "q052",
+        "q055",
+        "q056"
+      ],
+      "reason": "tokens have zero overlap with the corpus token pool \u2192 no oracle target (empty relevant set); they remain latency-mix probes in #316"
+    },
+    "relevance": "deterministic 3-level graded labels via synthetic_corpus.oracle_grades_for_query (grade 2 = oracle_target topic, grade 1 = NEAR topics, grade 0 = rest)"
+  },
+  "queries": [
+    {
+      "id": "nrq001-e",
+      "query": "zero-cost onboarding pricing",
+      "tier": "easy",
+      "source": "oracle_new",
+      "oracle_target": 0
+    },
+    {
+      "id": "nrq001-h",
+      "query": "retention handoff plans traversal pricing",
+      "tier": "hard",
+      "source": "oracle_new",
+      "oracle_target": 0
+    },
+    {
+      "id": "nrq002-e",
+      "query": "retention sessions memory",
+      "tier": "easy",
+      "source": "oracle_new",
+      "oracle_target": 1
+    },
+    {
+      "id": "nrq002-h",
+      "query": "operators traversal plans vector edges",
+      "tier": "hard",
+      "source": "oracle_new",
+      "oracle_target": 1
+    },
+    {
+      "id": "nrq003-e",
+      "query": "vector edges embedding",
+      "tier": "easy",
+      "source": "oracle_new",
+      "oracle_target": 2
+    },
+    {
+      "id": "nrq003-h",
+      "query": "operators full posterior belief index",
+      "tier": "hard",
+      "source": "oracle_new",
+      "oracle_target": 2
+    },
+    {
+      "id": "nrq004-e",
+      "query": "full posterior update",
+      "tier": "easy",
+      "source": "oracle_new",
+      "oracle_target": 3
+    },
+    {
+      "id": "nrq004-h",
+      "query": "belief content text search semantic",
+      "tier": "hard",
+      "source": "oracle_new",
+      "oracle_target": 3
+    },
+    {
+      "id": "nrq005-e",
+      "query": "semantic claims content",
+      "tier": "easy",
+      "source": "oracle_new",
+      "oracle_target": 4
+    },
+    {
+      "id": "nrq005-h",
+      "query": "search similarity fusion hybrid degraded",
+      "tier": "hard",
+      "source": "oracle_new",
+      "oracle_target": 4
+    },
+    {
+      "id": "nrq006-e",
+      "query": "strategy fallback degraded",
+      "tier": "easy",
+      "source": "oracle_new",
+      "oracle_target": 5
+    },
+    {
+      "id": "nrq006-h",
+      "query": "fusion database epistemic hybrid breaker",
+      "tier": "hard",
+      "source": "oracle_new",
+      "oracle_target": 5
+    },
+    {
+      "id": "nrq007-e",
+      "query": "circuit breaker protection",
+      "tier": "easy",
+      "source": "oracle_new",
+      "oracle_target": 6
+    },
+    {
+      "id": "nrq007-h",
+      "query": "protection confidence concepts database annotation",
+      "tier": "hard",
+      "source": "oracle_new",
+      "oracle_target": 6
+    },
+    {
+      "id": "nrq008-e",
+      "query": "relationships agent evidence",
+      "tier": "easy",
+      "source": "oracle_new",
+      "oracle_target": 7
+    },
+    {
+      "id": "nrq008-h",
+      "query": "annotation storage source evidence events",
+      "tier": "hard",
+      "source": "oracle_new",
+      "oracle_target": 7
+    },
+    {
+      "id": "nrq009-e",
+      "query": "source cross retrieval",
+      "tier": "easy",
+      "source": "oracle_new",
+      "oracle_target": 8
+    },
+    {
+      "id": "nrq009-h",
+      "query": "variance storage source threshold contested",
+      "tier": "hard",
+      "source": "oracle_new",
+      "oracle_target": 8
+    },
+    {
+      "id": "nrq010-e",
+      "query": "threshold structured recall",
+      "tier": "easy",
+      "source": "oracle_new",
+      "oracle_target": 9
+    },
+    {
+      "id": "nrq010-h",
+      "query": "contested full-scan completeness filter variance",
+      "tier": "hard",
+      "source": "oracle_new",
+      "oracle_target": 9
+    },
+    {
+      "id": "nrq011-e",
+      "query": "filter truncation floor",
+      "tier": "easy",
+      "source": "oracle_new",
+      "oracle_target": 10
+    },
+    {
+      "id": "nrq011-h",
+      "query": "completeness retracted traversal-predicate batch filter",
+      "tier": "hard",
+      "source": "oracle_new",
+      "oracle_target": 10
+    },
+    {
+      "id": "nrq012-e",
+      "query": "efficiency retracted traversal-predicate",
+      "tier": "easy",
+      "source": "oracle_new",
+      "oracle_target": 11
+    },
+    {
+      "id": "nrq012-h",
+      "query": "families is-operator flag batch expansion",
+      "tier": "hard",
+      "source": "oracle_new",
+      "oracle_target": 11
+    },
+    {
+      "id": "nrq013-e",
+      "query": "posterior-stability uncalibrated expansion",
+      "tier": "easy",
+      "source": "oracle_new",
+      "oracle_target": 12
+    },
+    {
+      "id": "nrq013-h",
+      "query": "expansion flag store prior uninformative",
+      "tier": "hard",
+      "source": "oracle_new",
+      "oracle_target": 12
+    },
+    {
+      "id": "nrq014-e",
+      "query": "legacy migration prior",
+      "tier": "easy",
+      "source": "oracle_new",
+      "oracle_target": 13
+    },
+    {
+      "id": "nrq014-h",
+      "query": "reconciliation sweep uninformative store url",
+      "tier": "hard",
+      "source": "oracle_new",
+      "oracle_target": 13
+    },
+    {
+      "id": "nrq015-e",
+      "query": "url sweep canonical",
+      "tier": "easy",
+      "source": "oracle_new",
+      "oracle_target": 14
+    },
+    {
+      "id": "nrq015-h",
+      "query": "tradeoffs reconciliation sweep milestones decision",
+      "tier": "hard",
+      "source": "oracle_new",
+      "oracle_target": 14
+    },
+    {
+      "id": "nrq016-e",
+      "query": "rationale tradeoffs milestones",
+      "tier": "easy",
+      "source": "oracle_new",
+      "oracle_target": 15
+    },
+    {
+      "id": "nrq017-e",
+      "query": "definition glossary question",
+      "tier": "easy",
+      "source": "oracle_new",
+      "oracle_target": 16
+    },
+    {
+      "id": "nrq018-e",
+      "query": "experiment activation conversion",
+      "tier": "easy",
+      "source": "oracle_new",
+      "oracle_target": 17
+    },
+    {
+      "id": "nrq019-e",
+      "query": "offline docker resource",
+      "tier": "easy",
+      "source": "oracle_new",
+      "oracle_target": 18
+    },
+    {
+      "id": "nrq020-e",
+      "query": "percentile warmup distribution",
+      "tier": "easy",
+      "source": "oracle_new",
+      "oracle_target": 19
+    },
+    {
+      "id": "nrq021-e",
+      "query": "synthetic arms right-censored",
+      "tier": "easy",
+      "source": "oracle_new",
+      "oracle_target": 20
+    },
+    {
+      "id": "nrq022-e",
+      "query": "timers elevated timeout",
+      "tier": "easy",
+      "source": "oracle_new",
+      "oracle_target": 21
+    },
+    {
+      "id": "nrq023-e",
+      "query": "cold-start boot band",
+      "tier": "easy",
+      "source": "oracle_new",
+      "oracle_target": 22
+    },
+    {
+      "id": "nrq024-e",
+      "query": "sha fingerprint git",
+      "tier": "easy",
+      "source": "oracle_new",
+      "oracle_target": 23
+    },
+    {
+      "id": "nrq025-e",
+      "query": "enterprise onboarding pricing",
+      "tier": "easy",
+      "source": "oracle_new",
+      "oracle_target": 0
+    },
+    {
+      "id": "nrq026-e",
+      "query": "sessions traversal retention",
+      "tier": "easy",
+      "source": "oracle_new",
+      "oracle_target": 1
+    },
+    {
+      "id": "nrq027-e",
+      "query": "dimension embedding edges",
+      "tier": "easy",
+      "source": "oracle_new",
+      "oracle_target": 2
+    },
+    {
+      "id": "nrq028-e",
+      "query": "posterior text full",
+      "tier": "easy",
+      "source": "oracle_new",
+      "oracle_target": 3
+    },
+    {
+      "id": "nrq029-e",
+      "query": "claims point content",
+      "tier": "easy",
+      "source": "oracle_new",
+      "oracle_target": 4
+    },
+    {
+      "id": "nrq030-e",
+      "query": "fallback degraded ranking",
+      "tier": "easy",
+      "source": "oracle_new",
+      "oracle_target": 5
+    },
+    {
+      "id": "nrq031-e",
+      "query": "epistemic protection latency",
+      "tier": "easy",
+      "source": "oracle_new",
+      "oracle_target": 6
+    },
+    {
+      "id": "nrq032-e",
+      "query": "concepts evidence relationships",
+      "tier": "easy",
+      "source": "oracle_new",
+      "oracle_target": 7
+    },
+    {
+      "id": "q001",
+      "query": "zero-cost onboarding for new teams",
+      "tier": "medium",
+      "source": "query_mix",
+      "oracle_target": 0,
+      "kind": null
+    },
+    {
+      "id": "q002",
+      "query": "pricing tiers for enterprise plans",
+      "tier": "hard",
+      "source": "query_mix",
+      "oracle_target": 0,
+      "kind": null,
+      "tier_rebalanced": [
+        "medium->hard"
+      ]
+    },
+    {
+      "id": "q003",
+      "query": "memory retention across sessions",
+      "tier": "easy",
+      "source": "query_mix",
+      "oracle_target": 1,
+      "kind": null
+    },
+    {
+      "id": "q004",
+      "query": "graph traversal operators and edges",
+      "tier": "hard",
+      "source": "query_mix",
+      "oracle_target": 1,
+      "kind": null,
+      "tier_rebalanced": [
+        "medium->hard"
+      ]
+    },
+    {
+      "id": "q005",
+      "query": "embedding dimension and vector index",
+      "tier": "easy",
+      "source": "query_mix",
+      "oracle_target": 2,
+      "kind": null
+    },
+    {
+      "id": "q006",
+      "query": "belief propagation posterior update",
+      "tier": "medium",
+      "source": "query_mix",
+      "oracle_target": 3,
+      "kind": null
+    },
+    {
+      "id": "q007",
+      "query": "full text search over point content",
+      "tier": "hard",
+      "source": "query_mix",
+      "oracle_target": 3,
+      "kind": null,
+      "tier_rebalanced": [
+        "medium->hard"
+      ]
+    },
+    {
+      "id": "q008",
+      "query": "semantic similarity between claims",
+      "tier": "easy",
+      "source": "query_mix",
+      "oracle_target": 4,
+      "kind": null
+    },
+    {
+      "id": "q009",
+      "query": "hybrid ranking fusion strategy",
+      "tier": "medium",
+      "source": "query_mix",
+      "oracle_target": 5,
+      "kind": null
+    },
+    {
+      "id": "q010",
+      "query": "degraded fallback when database fails",
+      "tier": "medium",
+      "source": "query_mix",
+      "oracle_target": 5,
+      "kind": null
+    },
+    {
+      "id": "q011",
+      "query": "circuit breaker latency protection",
+      "tier": "easy",
+      "source": "query_mix",
+      "oracle_target": 6,
+      "kind": null
+    },
+    {
+      "id": "q012",
+      "query": "epistemic annotation confidence evidence",
+      "tier": "hard",
+      "source": "query_mix",
+      "oracle_target": 7,
+      "kind": null,
+      "tier_rebalanced": [
+        "medium->hard"
+      ]
+    },
+    {
+      "id": "q013",
+      "query": "operator relationships between concepts",
+      "tier": "easy",
+      "source": "query_mix",
+      "oracle_target": 7,
+      "kind": null
+    },
+    {
+      "id": "q014",
+      "query": "agent memory graph storage",
+      "tier": "easy",
+      "source": "query_mix",
+      "oracle_target": 1,
+      "kind": null
+    },
+    {
+      "id": "q015",
+      "query": "cross entity retrieval source events",
+      "tier": "easy",
+      "source": "query_mix",
+      "oracle_target": 8,
+      "kind": null
+    },
+    {
+      "id": "q016",
+      "query": "contested claims variance threshold",
+      "tier": "medium",
+      "source": "query_mix",
+      "oracle_target": 9,
+      "kind": null
+    },
+    {
+      "id": "q017",
+      "query": "structured query over operator kind",
+      "tier": "easy",
+      "source": "query_mix",
+      "oracle_target": 9,
+      "kind": null
+    },
+    {
+      "id": "q018",
+      "query": "recall completeness full scan mode",
+      "tier": "medium",
+      "source": "query_mix",
+      "oracle_target": 9,
+      "kind": null
+    },
+    {
+      "id": "q019",
+      "query": "threshold filter score floor",
+      "tier": "medium",
+      "source": "query_mix",
+      "oracle_target": 10,
+      "kind": null
+    },
+    {
+      "id": "q020",
+      "query": "kind filter before truncation",
+      "tier": "medium",
+      "source": "query_mix",
+      "oracle_target": 10,
+      "kind": null
+    },
+    {
+      "id": "q021",
+      "query": "batch endpoint annotation efficiency",
+      "tier": "medium",
+      "source": "query_mix",
+      "oracle_target": 11,
+      "kind": null
+    },
+    {
+      "id": "q022",
+      "query": "relationship filter traversal predicate",
+      "tier": "medium",
+      "source": "query_mix",
+      "oracle_target": 1,
+      "kind": null
+    },
+    {
+      "id": "q023",
+      "query": "retracted points excluded results",
+      "tier": "medium",
+      "source": "query_mix",
+      "oracle_target": 11,
+      "kind": null
+    },
+    {
+      "id": "q024",
+      "query": "operator point is operator flag",
+      "tier": "medium",
+      "source": "query_mix",
+      "oracle_target": 4,
+      "kind": null
+    },
+    {
+      "id": "q025",
+      "query": "full scan structural kind query",
+      "tier": "medium",
+      "source": "query_mix",
+      "oracle_target": 3,
+      "kind": null
+    },
+    {
+      "id": "q026",
+      "query": "recursive expansion of kind families",
+      "tier": "easy",
+      "source": "query_mix",
+      "oracle_target": 12,
+      "kind": null
+    },
+    {
+      "id": "q027",
+      "query": "posterior stability measured variance",
+      "tier": "medium",
+      "source": "query_mix",
+      "oracle_target": 3,
+      "kind": null
+    },
+    {
+      "id": "q028",
+      "query": "uncalibrated point uninformative prior",
+      "tier": "hard",
+      "source": "query_mix",
+      "oracle_target": 12,
+      "kind": null,
+      "tier_rebalanced": [
+        "medium->hard"
+      ]
+    },
+    {
+      "id": "q029",
+      "query": "migration from legacy embedding store",
+      "tier": "easy",
+      "source": "query_mix",
+      "oracle_target": 13,
+      "kind": null
+    },
+    {
+      "id": "q030",
+      "query": "session memory reconciliation sweep",
+      "tier": "medium",
+      "source": "query_mix",
+      "oracle_target": 14,
+      "kind": null
+    },
+    {
+      "id": "q031",
+      "query": "canonical source url identity",
+      "tier": "easy",
+      "source": "query_mix",
+      "oracle_target": 14,
+      "kind": null
+    },
+    {
+      "id": "q032",
+      "query": "decision records rationale tradeoffs",
+      "tier": "medium",
+      "source": "query_mix",
+      "oracle_target": 15,
+      "kind": null
+    },
+    {
+      "id": "q033",
+      "query": "plan milestones timeline owners",
+      "tier": "medium",
+      "source": "query_mix",
+      "oracle_target": 15,
+      "kind": null
+    },
+    {
+      "id": "q034",
+      "query": "question answered evidence links",
+      "tier": "medium",
+      "source": "query_mix",
+      "oracle_target": 7,
+      "kind": null
+    },
+    {
+      "id": "q035",
+      "query": "term definition glossary vocabulary",
+      "tier": "medium",
+      "source": "query_mix",
+      "oracle_target": 16,
+      "kind": null
+    },
+    {
+      "id": "q036",
+      "query": "onboarding checklist activation steps",
+      "tier": "easy",
+      "source": "query_mix",
+      "oracle_target": 17,
+      "kind": null
+    },
+    {
+      "id": "q037",
+      "query": "pricing experiment conversion metrics",
+      "tier": "medium",
+      "source": "query_mix",
+      "oracle_target": 17,
+      "kind": null
+    },
+    {
+      "id": "q038",
+      "query": "embedding model identity offline",
+      "tier": "medium",
+      "source": "query_mix",
+      "oracle_target": 2,
+      "kind": null
+    },
+    {
+      "id": "q039",
+      "query": "docker container resource limits",
+      "tier": "medium",
+      "source": "query_mix",
+      "oracle_target": 18,
+      "kind": null
+    },
+    {
+      "id": "q040",
+      "query": "benchmark warmup steady state",
+      "tier": "easy",
+      "source": "query_mix",
+      "oracle_target": 19,
+      "kind": null
+    },
+    {
+      "id": "q041",
+      "query": "percentile latency distribution tail",
+      "tier": "medium",
+      "source": "query_mix",
+      "oracle_target": 19,
+      "kind": null
+    },
+    {
+      "id": "q042",
+      "query": "synthetic corpus scaling arms",
+      "tier": "easy",
+      "source": "query_mix",
+      "oracle_target": 20,
+      "kind": null
+    },
+    {
+      "id": "q043",
+      "query": "right censored elapsed timers",
+      "tier": "medium",
+      "source": "query_mix",
+      "oracle_target": 21,
+      "kind": null
+    },
+    {
+      "id": "q044",
+      "query": "elevated timeout uncensored completion",
+      "tier": "medium",
+      "source": "query_mix",
+      "oracle_target": 21,
+      "kind": null
+    },
+    {
+      "id": "q045",
+      "query": "cold start first query boot",
+      "tier": "medium",
+      "source": "query_mix",
+      "oracle_target": 22,
+      "kind": null
+    },
+    {
+      "id": "q046",
+      "query": "verdict band cap dominated tail",
+      "tier": "easy",
+      "source": "query_mix",
+      "oracle_target": 22,
+      "kind": null
+    },
+    {
+      "id": "q047",
+      "query": "provenance git sha fingerprint",
+      "tier": "easy",
+      "source": "query_mix",
+      "oracle_target": 23,
+      "kind": null
+    },
+    {
+      "id": "q048",
+      "query": "epistemic team handoff decision",
+      "tier": "medium",
+      "source": "query_mix",
+      "oracle_target": 0,
+      "kind": null
+    },
+    {
+      "id": "q049",
+      "query": "pricing strategy for enterprise onboarding",
+      "tier": "easy",
+      "source": "query_mix",
+      "oracle_target": 0,
+      "kind": "decision"
+    },
+    {
+      "id": "q050",
+      "query": "vector index latency budget",
+      "tier": "easy",
+      "source": "query_mix",
+      "oracle_target": 2,
+      "kind": "claim"
+    },
+    {
+      "id": "q051",
+      "query": "epistemic belief propagation",
+      "tier": "medium",
+      "source": "query_mix",
+      "oracle_target": 3,
+      "kind": "term"
+    },
+    {
+      "id": "q053",
+      "query": "kind-only structural scan",
+      "tier": "medium",
+      "source": "query_mix",
+      "oracle_target": 9,
+      "kind": "claim"
+    },
+    {
+      "id": "q054",
+      "query": "kind-only operator listing",
+      "tier": "medium",
+      "source": "query_mix",
+      "oracle_target": 9,
+      "kind": "decision"
+    }
+  ]
+}

@@ -1,0 +1,58 @@
+{
+  "issue": "1144",
+  "name": "In-house retrieval eval — labeled query sets + provenance (the loop's quality yardstick)",
+  "created": "2026-08-17",
+  "design_locked": "issue comment 2026-08-17 (eval design locked 2026-08-15, owner-approved)",
+  "annotator": "agent (feat/1144-retrieval-eval implementation) + deterministic oracle generator for the synthetic core; LLM judges + owner adjudication for the authored set (status: pending — see judge protocol below)",
+  "query_mix": {
+    "n_queries": 150,
+    "oracle": {
+      "n": 100,
+      "tiers": {"easy": 50, "medium": 30, "hard": 20},
+      "composition": {"query_mix": 53, "oracle_new": 47},
+      "query_mix_excluded": ["q052", "q055", "q056"],
+      "excluded_reason": "zero vocabulary overlap with the corpus token pool — no oracle target (empty relevant set); they remain #316 latency-mix probes",
+      "labeling": "deterministic (no judges) — graded relevance derived from the latent-topic oracle (benchmarks/synthetic_corpus.py): grade 2 = target topic, grade 1 = NEAR (bridge-sharing) topics, grade 0 = rest; hidden topic not visible to retrieval"
+    },
+    "authored": {
+      "n": 50,
+      "source": "real internal graph domain (anchor slice) — pricing/product, hybrid search engine, EP belief propagation, ops/runbooks, ontology/registry, benchmarks, memory, auth, strategy; authored from repository structure (docs/, product/, tortoise/), no query logs required",
+      "labeling": "subjective — two cross-vendor LLM judges (temp 0.0) over pooled top-50/strategy/query (deduped) + owner adjudication; kappa >= 0.60 via tools/kappa.py; adjudication acceptance >= 85% on the combined denominator, >= 10% sample"
+    }
+  },
+  "relevance_criteria": {
+    "grades": {
+      "2": "relevant — the point directly answers the query or is centrally about its topic",
+      "1": "partially relevant — related background / adjacent context, mentions the topic or a directly connected concept",
+      "0": "non-relevant — unrelated; incidental token overlap is NOT relevance"
+    },
+    "metric_mapping": {
+      "nDCG@10": "headline; graded 3-level, log2 discount: DCG = sum (2^rel - 1)/log2(i+2); IDCG from the oracle's grade-2/grade-1 counts",
+      "P@5": "binaryized at grade >= 1",
+      "R@10": "oracle denominator = grade-2 target set (ceiling 10/|target| ~ 12% at corpus 2000 / 24 topics)",
+      "MRR": "reciprocal rank of the first grade-2 doc"
+    }
+  },
+  "gate_semantics": {
+    "loop": "every retrieval optimization cycle ships iff speed improved (the #316 harness arm) AND quality did not regress",
+    "ndcg": "SHIP iff paired 90% CI on ΔnDCG@10 (points) does not exclude -2; WARN -2..-4; BLOCK < -4",
+    "p5": "BLOCK on a significant P@5 drop (paired 90% CI entirely below 0)",
+    "bootstrap": "90% paired bootstrap CIs on per-query deltas (paired on identical query ids, resample query sets)"
+  },
+  "pooling": {
+    "depth": "top-50 per strategy per query (deduped across strategies)",
+    "strategies": ["fts", "vector", "structural", "tfidf", "fused_rrf"]
+  },
+  "environment": {
+    "embedded": "smoke only — FalkorDBLite has no FTS/HNSW: FTS degrades (parameter-bound queryNodes is unreliable on redislite), structural degrades to empty without a kind, vector runs brute-force; synthetic semantic query vectors stand in for the embedding model; numbers NOT prod-parity",
+    "docker": "authoritative — Docker FalkorDB >= 4.x with HNSW + FTS indexes (auto-created at boot) and the all-MiniLM embedding model; run on-demand per optimization cycle + monthly scheduled"
+  },
+  "files": {
+    "queries": "tests/eval/retrieval/queries/oracle_queries.json + authored_queries.json",
+    "metrics": "tests/eval/retrieval/metrics.py",
+    "bootstrap": "tests/eval/retrieval/bootstrap.py",
+    "judges": "tests/eval/retrieval/judge.py",
+    "runner": "tests/eval/retrieval/run.py",
+    "baseline": "tests/eval/retrieval/baseline/"
+  }
+}

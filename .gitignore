@@ -31,3 +31,6 @@ benchmarks/reports/
 dist-client/
 client/build/
 
+
+# Issue #1144 retrieval eval outputs (regenerated per run)
+tests/eval/retrieval/reports/
