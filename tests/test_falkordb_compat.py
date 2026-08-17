@@ -23,6 +23,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tortoise.projection import FalkorProjection  # noqa: E402
+from tortoise.projection import _reset_falkordb_version_cache  # noqa: E402
+from tortoise.search_engine import degradation_chain, run_vector_query  # noqa: E402
 
 DIM = 384  # matches projection's vector index dimension
 
@@ -159,6 +161,84 @@ class TestGetFalkordbVersion:
         assert self._proj(_Db())._get_falkordb_version() is None
 
 
+class _CachedConn:
+    """Raw connection carrying a real endpoint — for the cache tests."""
+
+    def __init__(self, host: str = "cache-host", port: int = 6399):
+        self._host = host
+        self.port = port
+        self.calls = 0
+
+    def execute_command(self, *args):
+        self.calls += 1
+        if args and args[0] == "MODULE":
+            return [["name", "graph", "ver", 41803,
+                     "path", "/x/falkordb.so", "args", []]]
+        return []
+
+
+class TestVersionProbeCached:
+    """Version detection is cached per endpoint for the process lifetime
+    (#1359 review P2) — the 2-RTT probe (MODULE LIST + INFO server) must
+    not run on every projection open."""
+
+    def _proj(self, db) -> FalkorProjection:
+        proj = object.__new__(FalkorProjection)
+        proj.db = db
+        return proj
+
+    def _db(self, conn):
+        return type("_Db", (), {"connection": conn})()
+
+    def test_second_projection_on_same_endpoint_skips_probes(self):
+        """Same (host, port) → second projection hits the cache, zero
+        network probes."""
+        _reset_falkordb_version_cache()
+        try:
+            conn = _CachedConn()
+            assert self._proj(self._db(conn))._get_falkordb_version() == (4, 18, 3)
+            assert conn.calls == 1  # probed once
+
+            conn2 = _CachedConn()
+            assert self._proj(self._db(conn2))._get_falkordb_version() == (4, 18, 3)
+            assert conn2.calls == 0  # cached — no probes
+        finally:
+            _reset_falkordb_version_cache()
+
+    def test_distinct_endpoints_do_not_collide(self):
+        """Different (host, port) → each probed independently."""
+        _reset_falkordb_version_cache()
+        try:
+            conn_a = _CachedConn(host="host-a", port=6399)
+            conn_b = _CachedConn(host="host-b", port=6399)
+            assert self._proj(self._db(conn_a))._get_falkordb_version() == (4, 18, 3)
+            assert self._proj(self._db(conn_b))._get_falkordb_version() == (4, 18, 3)
+            assert conn_a.calls == 1
+            assert conn_b.calls == 1
+        finally:
+            _reset_falkordb_version_cache()
+
+    def test_unidentified_client_never_cached(self):
+        """No endpoint attrs (unit mocks) → probed fresh every call."""
+        _reset_falkordb_version_cache()
+        try:
+            class _Conn:
+                calls = 0
+
+                def execute_command(self, *args):
+                    self.calls += 1
+                    return []
+
+            conn = _Conn()
+            db = type("_Db", (), {"connection": conn})()
+            assert self._proj(db)._get_falkordb_version() is None
+            assert self._proj(db)._get_falkordb_version() is None
+            # 2 probes (MODULE LIST + INFO server) per invocation — not cached
+            assert conn.calls == 4
+        finally:
+            _reset_falkordb_version_cache()
+
+
 # ── _ensure_indexes vector branch ───────────────────────────────────────────
 
 class TestEnsureIndexesVectorApi:
@@ -226,6 +306,57 @@ class TestEnsureIndexesVectorApi:
         assert proj._vector_index_api is None
         assert any("Failed to create vector index" in r.message
                    for r in caplog.records)
+
+
+# ── run_vector_query / degradation_chain consume _vector_index_api ─────────
+
+class TestVectorIndexApiConsumption:
+    """The recorded _vector_index_api is threaded into the query path
+    (#1359 review P2): 'cypher' engines skip the failing sig-A attempt."""
+
+    QUERY_VEC = [0.1] * DIM
+
+    def test_run_vector_query_cypher_api_skips_signature_a(self):
+        """vector_index_api='cypher' → queryNodes sig B called directly;
+        sig A NOT attempted (one failed round trip saved per query)."""
+        graph = _EngineGraph(vector_api="cypher")
+        hits = run_vector_query(
+            graph, self.QUERY_VEC, limit=10, is_embedded=False,
+            vector_index_api="cypher")
+        assert [h[0] for h in hits] == ["near-1", "near-2"]
+        qn = [c for c in graph.calls if "querynodes" in c.lower()]
+        assert len(qn) == 1
+        assert "vecf32($query_vec)" in qn[0]        # sig B form only
+        assert "$query_vec, $limit" not in qn[0]    # sig A not attempted
+
+    def test_run_vector_query_procedure_api_uses_signature_a_first(self):
+        """vector_index_api='procedure' → sig A attempted first (unchanged)."""
+        graph = _EngineGraph(vector_api="procedure")
+        hits = run_vector_query(
+            graph, self.QUERY_VEC, limit=10, is_embedded=False,
+            vector_index_api="procedure")
+        assert [h[0] for h in hits] == ["near-1", "near-2"]
+        qn = [c for c in graph.calls if "querynodes" in c.lower()]
+        assert len(qn) == 1
+        assert "$query_vec, $limit" in qn[0]
+        assert "vecf32($query_vec)" not in qn[0]
+
+    def test_degradation_chain_threads_vector_index_api(self):
+        """degradation_chain forwards vector_index_api → the vector runner
+        hits sig B directly on a Cypher-native engine."""
+        graph = _EngineGraph(vector_api="cypher")
+        results = degradation_chain(
+            graph, query="find near", kind=None,
+            query_vec=self.QUERY_VEC,
+            strategies={"vector": True, "fts": False, "structural": False},
+            is_embedded=False, limit=10,
+            vector_index_api="cypher",
+        )
+        assert "vector" in results
+        assert [h[0] for h in results["vector"]] == ["near-1", "near-2"]
+        qn = [c for c in graph.calls if "querynodes" in c.lower()]
+        assert len(qn) == 1
+        assert "vecf32($query_vec)" in qn[0]
 
 
 # ── Live integration (skips when no server) ─────────────────────────────────

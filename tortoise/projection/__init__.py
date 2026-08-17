@@ -23,6 +23,20 @@ from typing import Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
 
+# Process-lifetime cache for FalkorProjection._get_falkordb_version (#1359
+# review P2): version detection costs two network RTTs (MODULE LIST + INFO
+# server) on EVERY projection open — SDK sessions, ingest, hosted per-request.
+# A server's version cannot change mid-process, so cache by endpoint
+# (server host/port or embedded db path). Unidentified clients (unit mocks)
+# are never cached — the probe stays exact for them.
+# Keyed by tuple; value is (major, minor, patch) or None (undetermined).
+_FALKORDB_VERSION_CACHE: dict[tuple, tuple[int, int, int] | None] = {}
+
+
+def _reset_falkordb_version_cache() -> None:
+    """Test hook: drop all cached version probes."""
+    _FALKORDB_VERSION_CACHE.clear()
+
 # P0 guard (#99): bulk graph-wipe classifier. Restored here in #49 Phase 2 —
 # the guard was lost from this (live) module during the v3.0 ontology rewrite
 # (0f9e6a2) and only survived in the legacy standalone projection.py, which
@@ -395,9 +409,11 @@ class FalkorProjection(
                 "Could not determine FalkorDB version — index creation will "
                 "probe the engine's API directly.")
         # #1359: which vector-index API succeeded at _ensure_indexes time
-        # ('procedure' | 'cypher' | None) — cached on the projection so the
-        # query path (search_engine.run_vector_query) can prefer the
-        # engine's query surface without re-probing per call.
+        # ('procedure' | 'cypher' | None) — recorded on the projection and
+        # consumed by search_engine.run_vector_query (threaded from sdk.py's
+        # degradation_chain and cross-lens calls): 'cypher' engines skip the
+        # failing signature-A attempt and query via signature B directly,
+        # saving one failed round trip per query.
         self._vector_index_api = None
         self._ensure_indexes()
 
@@ -957,13 +973,54 @@ class FalkorProjection(
             ).rstrip()
             raise RuntimeError(msg)
 
+    def _falkordb_version_cache_key(self):
+        """Process-lifetime cache key for version detection.
+
+        Server mode → ('server', host, port) from the raw redis connection
+        (redis Connection objects carry ``_host``/``port``). Embedded mode →
+        ('embedded', db path) — redislite's bundled module version is fixed
+        per binary, so the path just isolates distinct DBs. Returns None for
+        unidentified clients (unit mocks with no endpoint attrs) — those are
+        probed fresh every call.
+        """
+        conn = getattr(self.db, "connection", None)
+        if conn is not None:
+            host = getattr(conn, "_host", None) or getattr(conn, "host", None)
+            port = getattr(conn, "port", None)
+            if host is not None and port is not None:
+                return ("server", str(host), int(port))
+        path = getattr(self, "_path", None)
+        if path is not None:
+            return ("embedded", str(path))
+        return None
+
     def _get_falkordb_version(self):
-        """Parse FalkorDB version from db.info() or raw-connection probes.
+        """Parse FalkorDB version from db.info() or raw-connection probes,
+        cached per endpoint for the process lifetime.
 
         Issue #1359: the installed ``falkordb`` python client's ``FalkorDB``
         class has NO ``.info()`` method (``hasattr → False``), so version
         detection must fall back to server-level probes that every engine
-        answers. Tried in order:
+        answers. The probes (MODULE LIST + INFO server) cost 2 network RTTs
+        per projection open — hot path for SDK sessions / ingest / hosted
+        per-request — so the result is cached keyed by endpoint
+        (_falkordb_version_cache_key); a server's version doesn't change
+        mid-process.
+
+        Returns (major, minor, patch) tuple or None if undetermined.
+        """
+        key = self._falkordb_version_cache_key()
+        if key is not None and key in _FALKORDB_VERSION_CACHE:
+            return _FALKORDB_VERSION_CACHE[key]
+        version = self._probe_falkordb_version()
+        if key is not None:
+            _FALKORDB_VERSION_CACHE[key] = version
+        return version
+
+    def _probe_falkordb_version(self):
+        """Uncached version probe — see _get_falkordb_version.
+
+        Tried in order:
           1. ``db.info()`` — older clients that expose it.
           2. ``MODULE LIST`` via the raw redis connection — returns the
              graph module as ``['name', 'graph', 'ver', NNNNN, ...]``

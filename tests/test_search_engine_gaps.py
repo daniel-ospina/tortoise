@@ -655,6 +655,72 @@ class TestRunVectorQuery:
         assert "queryNodes('Event'," in graph.query_calls[0][0]
         assert "queryNodes('Event'," in graph.query_calls[1][0]
 
+    # ── #1359: recorded _vector_index_api consumption ────────────────
+
+    def test_cypher_api_queries_signature_b_first(self):
+        """vector_index_api='cypher' → sig B attempted directly; sig A is
+        NOT attempted (index creation recorded the Cypher-native API — the
+        failed sig-A round trip is skipped)."""
+        graph = SimpleMockGraph(result_set=[("a", 0.95), ("b", 0.8)])
+
+        result = run_vector_query(
+            graph, self.QUERY_VEC, limit=10, is_embedded=False,
+            vector_index_api="cypher")
+
+        assert result == [("a", 0.95), ("b", 0.8)]
+        assert len(graph.query_calls) == 1  # no failed sig-A attempt
+        only = graph.query_calls[0][0]
+        assert "YIELD node, score" in only
+        assert "vecf32($query_vec)" in only
+
+    def test_cypher_api_retries_signature_a_on_signature_failure(self):
+        """vector_index_api='cypher' but sig B fails with a signature error
+        → retries sig A before brute-force."""
+        graph = MultiCallGraph([
+            (None, Exception(
+                "Invalid arguments for procedure 'db.idx.vector.queryNodes'")),
+            ([("a",), ("b",)], None),
+        ])
+
+        result = run_vector_query(
+            graph, self.QUERY_VEC, limit=10, is_embedded=False,
+            vector_index_api="cypher")
+
+        assert len(result) == 2
+        assert len(graph.query_calls) == 2
+        assert "vecf32($query_vec)" in graph.query_calls[0][0]  # sig B first
+        assert "vecf32($query_vec)" not in graph.query_calls[1][0]  # sig A retry
+
+    def test_procedure_api_queries_signature_a_first(self):
+        """vector_index_api='procedure' → sig A attempted first (unchanged)."""
+        graph = SimpleMockGraph(result_set=[("a",), ("b",)])
+
+        result = run_vector_query(
+            graph, self.QUERY_VEC, limit=10, is_embedded=False,
+            vector_index_api="procedure")
+
+        assert len(result) == 2
+        assert len(graph.query_calls) == 1
+        first = graph.query_calls[0][0]
+        assert "$query_vec, $limit" in first
+        assert "YIELD node, score" not in first
+
+    def test_none_api_keeps_probe_behavior(self):
+        """vector_index_api=None → sig A first, retry sig B on signature
+        failure (historical probe behavior)."""
+        graph = MultiCallGraph([
+            (None, Exception(
+                "Type mismatch: expected Integer, Float, or Null but was List")),
+            ([("a", 1.4), ("b", -0.2)], None),
+        ])
+
+        result = run_vector_query(
+            graph, self.QUERY_VEC, limit=10, is_embedded=False,
+            vector_index_api=None)
+
+        assert result == [("a", 1.0), ("b", 0.0)]
+        assert len(graph.query_calls) == 2
+
     def test_docker_mode_generic_error_falls_back_to_brute_force(self):
         """HNSW fails with generic error → brute-force fallback."""
         graph = MultiCallGraph([

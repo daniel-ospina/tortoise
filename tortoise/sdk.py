@@ -5981,7 +5981,11 @@ class TortoiseSDK:
             if vec is None:
                 continue
             hits = run_vector_query(proj.g, vec.tolist(), limit=top_k + 1,
-                                    is_embedded=is_embedded)
+                                    is_embedded=is_embedded,
+                                    # #1359: recorded index API → skip the
+                                    # failing signature attempt on Cypher engines.
+                                    vector_index_api=getattr(
+                                        proj, "_vector_index_api", None))
             for nid, _score in hits:
                 if nid == pid or nid not in pool:
                     continue
@@ -8586,6 +8590,9 @@ class TortoiseSDK:
             entity_type=entity_type, limit=str_limit,
             is_embedded=is_embedded,
             elevated_timeout_ms=_elevated_timeout_ms,
+            # #1359: the recorded vector-index API (procedure vs Cypher-native)
+            # lets run_vector_query skip the failing signature attempt.
+            vector_index_api=getattr(proj, "_vector_index_api", None),
         )
 
         if not raw_results:
