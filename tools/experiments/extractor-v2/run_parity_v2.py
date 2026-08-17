@@ -107,23 +107,28 @@ def _containment(a: dict, b: dict) -> dict:
     b_sets = {k: _norm(b.get(k)) for k in ("decisions", "state", "logic")}
     b_raw = {k: (b.get(k) or []) for k in ("decisions", "state", "logic")}
 
-    def _near(item: str, b_items: list[dict], b_norm: set[str]) -> dict | None:
+    def _near(item: str, b_items: list[dict]) -> dict | None:
         """Closest B-side item by token overlap (0 = none). Distinguishes
-        'rephrased' (high overlap) from 'truly missing' (low/none)."""
-        import re
-        t = set(re.sub(r"[^a-z0-9 ]", " ", item).split())
-        if not t:
-            return None
+        'rephrased' (high overlap, >=2 shared tokens) from 'truly missing'
+        (low/none). Short A-side items (<3 tokens) are never classified
+        rephrased — the ratio is meaningless for them."""
+        import re as _re
+        t = set(_re.sub(r"[^a-z0-9 ]", " ", item).split())
+        if len(t) < 3:
+            return {"best": None, "overlap": 0.0}
         best, best_o = None, 0.0
         for bi in b_items:
             for key in ("content", "point", "name", "text"):
                 if not bi.get(key):
                     continue
-                s = re.sub(r"[^a-z0-9 ]", " ", str(bi[key]).strip().lower())
+                s = _re.sub(r"[^a-z0-9 ]", " ", str(bi[key]).strip().lower())
                 ts = set(s.split())
                 if not ts:
                     continue
-                o = len(t & ts) / min(len(t), len(ts))
+                shared = len(t & ts)
+                if shared < 2:  # a rephrased verdict needs >=2 shared tokens
+                    continue
+                o = shared / min(len(t), len(ts))
                 if o > best_o:
                     best_o, best = o, str(bi[key])[:80]
         return {"best": best, "overlap": round(best_o, 2)}
@@ -131,7 +136,7 @@ def _containment(a: dict, b: dict) -> dict:
     near = {k: [] for k in a_sets}
     for k in a_sets:
         for item in sorted(a_sets[k] - b_sets[k]):
-            near[k].append({"item": item[:100], "near": _near(item, b_raw[k], b_sets[k])})
+            near[k].append({"item": item[:100], "near": _near(item, b_raw[k])})
     return {
         "loss": {k: sorted(a_sets[k] - b_sets[k]) for k in a_sets},
         "gain": {k: sorted(b_sets[k] - a_sets[k]) for k in a_sets},
