@@ -388,6 +388,24 @@ class TestS5:
                     if "cleaning-pass tier" in n["searched_for"])
         assert note["found"] is True
 
+    def test_ambiguous_bare_kind_warns_never_guesses(self):
+        """Review fix: two namespaces share a bare kind ('workflow') — the
+        bare-form fallback must NOT guess; it warns and creates with the
+        explicit kind instead."""
+        search = {"entities": [
+            {"id": "obj-dev", "name": "code review", "kind": "dev:workflow"},
+            {"id": "obj-ps", "name": "code review", "kind": "product-strategy:workflow"},
+        ], "points": [], "events": []}
+        embed = json.loads(json.dumps(S2_FIXTURE))
+        embed["entities"] = [{"name": "code review", "kind": "workflow",
+                               "lifecycle": "created", "supersedes": None,
+                               "note": None}]
+        result = v2.execute_embed(embed, search, session_id="s1")
+        note = next(n for n in result["link_before_create"]
+                    if "code review" in n["searched_for"])
+        assert note["found"] is False
+        assert any("ambiguous" in w for w in result["warnings"])
+
     def test_entity_lifecycle_changed_warns(self):
         """Review fix: changed/superseded lifecycle is not expressible in the
         Layer-1 payload (Entity = name/kind only) — warn, don't silently drop."""

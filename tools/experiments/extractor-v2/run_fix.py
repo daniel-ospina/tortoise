@@ -109,7 +109,7 @@ def main():
     transcript = (Path(__file__).resolve().parents[3] / "tests/eval/w-1272/w-design-bounded.txt").read_text()
     solar = MODELS["solar-pro4"](); solar.max_tokens = 8000; solar.temperature = 0.0
     flash = MODELS["deepseek-flash"](); flash.max_tokens = 8000; flash.temperature = 0.0
-    CLEANER_TMPL = Path("cleaner-v7.md").read_text()
+    CLEANER_TMPL = (Path(__file__).resolve().parent / "cleaner-v7.md").read_text()
     from tortoise.value_extractor import compile_value_brief
     _g = compile_value_brief().get("memory_granularity", {})
     _g_text = "\n".join(f"- {ns}: {txt}" for ns, txt in _g.items())

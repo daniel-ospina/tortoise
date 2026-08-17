@@ -26,7 +26,7 @@ Granularity: the level of a decision (its resulting change in state, the
 tradeoffs and reasons behind) worth remembering in six months. If a detail
 won't matter then, drop it."""
 
-CLEANER = Path("cleaner-v5.md").read_text()
+CLEANER = (Path(__file__).resolve().parent / "cleaner-v5.md").read_text()
 
 def _complete(model, system, user):
     import threading

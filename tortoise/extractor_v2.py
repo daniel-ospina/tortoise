@@ -675,12 +675,12 @@ def _content_id(prefix: str, content: str) -> str:
 
 def _index_search(search: dict) -> dict:
     """Deterministic existing-graph index from the S3 results (the
-    link-before-create surface). Kinds are normalized to the bare folded
-    form (core:plan == plan)."""
-    idx = {"entities": {}, "points": [], "events": []}
+    link-before-create surface). Entities keep their RAW kind so lookups can
+    try exact (namespace-preserved) first, then bare-form fallback."""
+    idx = {"entities": [], "points": [], "events": []}
     for e in (search or {}).get("entities", []) or []:
         if isinstance(e, dict) and e.get("name"):
-            idx["entities"][(_norm(e["name"]), _norm_kind(e.get("kind", "")))] = e
+            idx["entities"].append(e)
     for p in (search or {}).get("points", []) or []:
         if isinstance(p, dict) and p.get("content"):
             idx["points"].append(p)
@@ -688,6 +688,28 @@ def _index_search(search: dict) -> dict:
         if isinstance(ev, dict) and ev.get("content"):
             idx["events"].append(ev)
     return idx
+
+
+def _find_existing_entity(entities: list[dict], name: str, kind: str) -> tuple[dict | None, str]:
+    """(existing, mode) — exact kind match first (namespace-preserved, case-
+    folded); bare-form fallback ONLY when unambiguous; 'ambiguous' when
+    multiple namespaces collide on the bare form (never guess which one)."""
+    norm_name = _norm(name)
+    kind_folded = str(kind).strip().lower()
+    exact = [e for e in entities
+             if _norm(e.get("name", "")) == norm_name
+             and str(e.get("kind", "")).strip().lower() == kind_folded]
+    if exact:
+        return exact[0], "exact"
+    bare = _norm_kind(kind)
+    matches = [e for e in entities
+               if _norm(e.get("name", "")) == norm_name
+               and _norm_kind(e.get("kind", "")) == bare]
+    if len(matches) == 1:
+        return matches[0], "bare"
+    if len(matches) > 1:
+        return None, "ambiguous"
+    return None, "none"
 
 
 def _find_point_match(points: list[dict], content: str) -> tuple[str, str]:
@@ -874,12 +896,18 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         if key in seen_entities:
             continue
         seen_entities.add(key)
-        existing = idx["entities"].get((_norm(name), _norm_kind(kind)))
+        existing, match_mode = _find_existing_entity(
+            idx["entities"], name, kind)
         if existing:
             link_before_create.append({
                 "searched_for": f"entity '{name}'", "found": True,
                 "note": f"existing {existing.get('id', '')} — connect, do not re-create"})
         else:
+            if match_mode == "ambiguous":
+                warnings.append(f"entity '{name[:60]}' kind '{kind}' is ambiguous "
+                                "across namespaces in the existing graph — "
+                                "created with the explicit kind (link-before-"
+                                "create cannot disambiguate)")
             link_before_create.append({
                 "searched_for": f"entity '{name}'", "found": False,
                 "note": "no match — created"})
