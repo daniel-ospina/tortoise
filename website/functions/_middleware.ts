@@ -76,7 +76,13 @@ export const onRequest: PagesFunction = async (context) => {
   if (COMPANY_HOSTS.has(hostKey)) {
     const path = url.pathname.replace(/\/+$/, "") || "/";
     if (path !== "/" && TORTOISE_ONLY.has(path)) {
-      const res = Response.redirect("https://tortoise.premiselabs.co" + path, 301);
+      // Normalize the target to the extensionless canonical (single hop; the
+      // .html raw-asset form would otherwise need a second _redirects hop on
+      // the tortoise host) and PRESERVE the query string — invite-accept
+      // (?token=…) and recovery links (?type=recovery) must not lose params.
+      const target =
+        "https://tortoise.premiselabs.co" + path.replace(/\.html$/, "") + url.search;
+      const res = Response.redirect(target, 301);
       res.headers.set("Strict-Transport-Security", HSTS["Strict-Transport-Security"]);
       return res;
     }

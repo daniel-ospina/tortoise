@@ -1,9 +1,10 @@
 # Cloudflare Pages _redirects — host-agnostic, applied AFTER Pages Functions
 # (middleware) on both premiselabs.co and tortoise.premiselabs.co.
 #
-# 1) Trailing-slash variants of indexable pages return 404 on Cloudflare
-#    Pages (no directory index) — 301 them to the canonical extensionless URL
-#    (Google's "Not found (404)" coverage bucket).
+# 1) Trailing-slash variants: Cloudflare Pages serves a built-in 308
+#    clean-URL redirect to the extensionless form; these explicit 301s
+#    standardize the status code and target so every host/path variant
+#    resolves identically to the canonical URL.
 # 2) /index.html is the raw asset behind BOTH host roots — 301 to "/" so the
 #    middleware root rewrite (company page / product page) owns the URL.
 # 3) .html extension variants of non-auth pages duplicate the extensionless

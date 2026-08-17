@@ -168,18 +168,26 @@ jobs:
       # Step 1: Deploy-completion poll — after the deploy step, poll the
       # host-consolidation contract (2026-08-17): premiselabs.co/privacy →
       # 301 → tortoise.premiselabs.co/privacy → 200 (retry ~30s × 5–10 min).
+      # The gate is the company-host 301 (DNS-independent). The tortoise-host
+      # 200 is WARN-only — a stale tortoise CNAME must never red this job
+      # (the suite's own TORTISE_HOST_CHECK contract treats stale DNS as
+      # green-with-annotation). --max-time prevents a transient connect
+      # failure from aborting the step under bash -e before the retry loop.
       - name: Poll deploy completion (company 301 → tortoise 200)
         run: |
           MAX_ATTEMPTS=20
           for i in $(seq 1 $MAX_ATTEMPTS); do
-            C301=$(curl -s -o /dev/null -w '%{http_code}' https://premiselabs.co/privacy)
-            T200=$(curl -s -o /dev/null -w '%{http_code}' https://tortoise.premiselabs.co/privacy)
-            if [ "$T200" = "200" ] && [ "$C301" = "301" ]; then
-              echo "deploy complete — premiselabs.co/privacy 301 → tortoise.premiselabs.co/privacy 200 (attempt $i)"
+            C301=$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' https://premiselabs.co/privacy || true)
+            T200=$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' https://tortoise.premiselabs.co/privacy || true)
+            if [ "$C301" = "301" ]; then
+              if [ "$T200" != "200" ]; then
+                echo "::warning::company 301 live, but tortoise host returned $T200 (stale DNS?) — deploy considered complete, verify manually"
+              fi
+              echo "deploy complete — premiselabs.co/privacy 301 (attempt $i); tortoise:${T200:-unreachable}"
               break
             fi
             if [ "$i" -eq "$MAX_ATTEMPTS" ]; then
-              echo "::error::deploy did not complete after $MAX_ATTEMPTS attempts (~$((MAX_ATTEMPTS * 30 / 60)) min) — company:$C301 tortoise:$T200"
+              echo "::error::deploy did not complete after $MAX_ATTEMPTS attempts (~$((MAX_ATTEMPTS * 30 / 60)) min) — company:$C301"
               exit 1
             fi
             echo "attempt $i/$MAX_ATTEMPTS: company:$C301 tortoise:$T200, retrying in 30s..."
