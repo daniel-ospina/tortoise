@@ -74,7 +74,7 @@ from tests.eval.retrieval.queries import (  # noqa: E402
     AUTHORED_QUERIES_PATH, ORACLE_QUERIES_PATH,
     build_oracle_query_set, load_authored_queries, load_oracle_queries,
 )
-from tools.embedder_probe import inject_model  # noqa: E402
+from tools.embedder_probe import PROBE_MODELS, inject_model  # noqa: E402
 
 STRATEGIES = ("fts", "vector", "structural", "tfidf", "fused")
 SCHEMA_VERSION = 1
@@ -110,17 +110,22 @@ def _resolved_embedding_model(use_model: bool, injected: bool) -> str:
 
     --model active: the probe-recorded candidate hf_id (the probe state IS
     the swap proof — inject_model HARD FAILs before the run otherwise). No
-    injection but a real model loaded: the default model id (the only model
-    EmbeddingModel._load resolves without the probe). Degraded (no model —
-    synthetic query vectors): 'unavailable'.
+    injection but a real model loaded: the probe state when present (in a
+    warm in-process re-run the loaded singleton may be a previously-injected
+    candidate — the probe state persists, so reporting its hf_id is truthful),
+    else the default model id (the only model EmbeddingModel._load resolves
+    without the probe). Degraded (no model — synthetic query vectors):
+    'unavailable'.
     """
     from tools import embedder_probe
+    state = embedder_probe.get_state()
     if injected:
-        state = embedder_probe.get_state()
         if state is not None:
             return str(state["hf_id"])
         return "unavailable"
     if use_model:
+        if state is not None:
+            return str(state["hf_id"])
         return embedder_probe.DEFAULT_MODEL_ID
     return "unavailable"
 
@@ -605,7 +610,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-seed-corpus", action="store_true")
     p.add_argument("--rebuild-queries", action="store_true",
                    help="regenerate and overwrite the committed query JSONs")
-    p.add_argument("--model", help="embedding model short name for query "
+    p.add_argument("--model", choices=sorted(PROBE_MODELS.keys()),
+                   help="embedding model short name for query "
                    "vectors (tools/embedder_probe PROBE_MODELS: minilm | "
                    "arctic-xs | arctic-s | bge-small); injected BEFORE the "
                    "run — HARD FAIL (EmbedderProbeError) if it cannot load")
@@ -614,6 +620,9 @@ def main(argv: list[str] | None = None) -> int:
                    "vendor config prompt_name='query')")
     p.add_argument("--quiet", action="store_true")
     args = p.parse_args(argv)
+
+    if args.query_prompt is not None and args.model is None:
+        p.error("--query-prompt requires --model")
 
     if not args.quiet:
         print(f"#1144 retrieval eval — corpus={args.corpus_size} "

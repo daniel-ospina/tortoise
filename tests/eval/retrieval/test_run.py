@@ -106,6 +106,7 @@ def _bench_args(db_path: str, **overrides):
         skip_e2e = True
         quiet = True
         model = None
+        query_prompt = None
     a = _BArgs()
     for k, v in overrides.items():
         setattr(a, k, v)
@@ -226,3 +227,123 @@ def test_benchmark_real_minilm_provenance(tmp_path):
         assert report["provenance"]["synthetic_vectors"] is False
     finally:
         embedder_probe.reset()
+
+
+# ── T3 P2 fixes: clean argparse errors + warm-stale provenance truth ───────
+
+def test_unknown_model_is_clean_argparse_error(capsys):
+    """Fix 1 (T3 P2): run.py --model <unknown> must fail at argparse (exit 2,
+    invalid choice listing the valid candidates) — never a raw KeyError
+    traceback from the probe dict lookup."""
+    with pytest.raises(SystemExit) as exc:
+        run_module.main(["--db", "unused.db", "--model", "not-a-model",
+                         "--quiet"])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "invalid choice" in err
+    assert "not-a-model" in err
+    assert "arctic-s" in err, "argparse error must list the valid choices"
+
+
+def test_unknown_benchmark_model_is_clean_argparse_error(capsys):
+    """Fix 1 (T3 P2): benchmarks/run_report.py --model <unknown> fails at
+    argparse the same way — parity with run.py."""
+    from benchmarks.run_report import main as bench_main
+
+    with pytest.raises(SystemExit) as exc:
+        bench_main(["--db", "unused.db", "--model", "not-a-model",
+                    "--quiet"])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "invalid choice" in err
+    assert "not-a-model" in err
+    assert "arctic-s" in err, "argparse error must list the valid choices"
+
+
+def test_query_prompt_without_model_is_argparse_error(capsys):
+    """Fix 2 (T3 P2): --query-prompt without --model is a silent no-op today
+    (_inject_probe_model returns early) — it must be a clean argparse error."""
+    with pytest.raises(SystemExit) as exc:
+        run_module.main(["--db", "unused.db", "--query-prompt", "query",
+                         "--quiet"])
+    assert exc.value.code == 2
+    assert "--query-prompt requires --model" in capsys.readouterr().err
+
+
+def test_warm_stale_provenance_reports_probe_state_when_loaded():
+    """Fix 3 (T3 P2): not-injected + loaded must report the probe-recorded
+    hf_id when probe state exists (warm in-process re-run — the loaded
+    singleton may be a previously-injected candidate, so DEFAULT_MODEL_ID
+    would be a lie), else the default id."""
+    from tools import embedder_probe
+
+    with patch("tools.embedder_probe.get_state",
+               return_value=_fake_state("arctic-s")):
+        # Loaded but NOT injected this run: probe state wins (truthful).
+        assert run_module._resolved_embedding_model(
+            use_model=True, injected=False) == ARCTIC_S_HF
+    with patch("tools.embedder_probe.get_state", return_value=None):
+        # No probe state → the only model _load resolves unprefixed: default.
+        assert run_module._resolved_embedding_model(
+            use_model=True, injected=False) == embedder_probe.DEFAULT_MODEL_ID
+        # Injected but no state (can't happen — inject HARD-FAILs): unavailable.
+        assert run_module._resolved_embedding_model(
+            use_model=False, injected=True) == "unavailable"
+    # Degraded: no model at all.
+    assert run_module._resolved_embedding_model(
+        use_model=False, injected=False) == "unavailable"
+
+
+def test_benchmark_warm_stale_provenance_reports_probe_state_when_loaded():
+    """Fix 3 (T3 P2): same warm-stale truthfulness in benchmarks/run_report.py
+    provenance."""
+    from benchmarks.run_report import _resolved_embedding_model
+    from tools import embedder_probe
+
+    with patch("tools.embedder_probe.get_state",
+               return_value=_fake_state("arctic-s")):
+        assert _resolved_embedding_model(
+            use_model=True, injected=False) == ARCTIC_S_HF
+    with patch("tools.embedder_probe.get_state", return_value=None):
+        assert _resolved_embedding_model(
+            use_model=True, injected=False) == embedder_probe.DEFAULT_MODEL_ID
+        assert _resolved_embedding_model(
+            use_model=False, injected=True) == "unavailable"
+
+
+@pytest.mark.skipif(not _has_embedded(), reason="embedded FalkorDBLite unavailable")
+def test_benchmark_query_prompt_threads_to_inject_model_and_provenance(tmp_path):
+    """Fix 4 (T3 P2): run_report.py --query-prompt must reach inject_model
+    (so in-path E2E-8 encodes carry the vendor prompt prefix — parity with
+    run.py) and be recorded in provenance when set."""
+    from benchmarks.run_report import run_benchmark
+
+    calls: list[tuple] = []
+
+    def _fake_inject(name, query_prompt=None):
+        calls.append((name, query_prompt))
+        return _fake_state(name)
+
+    with patch("tools.embedder_probe.inject_model",
+               side_effect=_fake_inject), \
+         patch("tools.embedder_probe.get_state",
+               return_value=_fake_state("arctic-s")):
+        report = run_benchmark(_bench_args(
+            str(tmp_path / "bench-qp.db"),
+            model="arctic-s", query_prompt="query"))
+
+    assert calls == [("arctic-s", "query")], \
+        "--query-prompt must thread to inject_model"
+    assert report["provenance"]["query_prompt"] == "query"
+
+
+def test_benchmark_query_prompt_without_model_is_argparse_error(capsys):
+    """Fix 4 (T3 P2) parity: run_report.py --query-prompt without --model is
+    the same silent no-op — clean argparse error like run.py."""
+    from benchmarks.run_report import main as bench_main
+
+    with pytest.raises(SystemExit) as exc:
+        bench_main(["--db", "unused.db", "--query-prompt", "query",
+                    "--quiet"])
+    assert exc.value.code == 2
+    assert "--query-prompt requires --model" in capsys.readouterr().err

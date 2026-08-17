@@ -69,6 +69,7 @@ from benchmarks.synthetic_corpus import (  # noqa: E402
     verify_indexes,
 )
 from tools import embedder_probe  # noqa: E402
+from tools.embedder_probe import PROBE_MODELS  # noqa: E402
 
 MIX_PATH = Path(__file__).resolve().parent / "query_mix.json"
 
@@ -105,15 +106,19 @@ def _resolved_embedding_model(use_model: bool, injected: bool) -> str:
     EMBEDDING_MODEL constant does not exist until T9/PR2, which re-points
     provenance to it). --model active: the probe-recorded candidate hf_id
     (the probe state IS the swap proof). No injection but a real model
-    loaded: the default model id (the only model EmbeddingModel._load
-    resolves without the probe). Degraded (no model — synthetic vectors):
-    'unavailable'."""
+    loaded: the probe state when present (in a warm in-process re-run the
+    loaded singleton may be a previously-injected candidate — the probe
+    state persists, so reporting its hf_id is truthful), else the default
+    model id (the only model EmbeddingModel._load resolves without the
+    probe). Degraded (no model — synthetic vectors): 'unavailable'."""
+    state = embedder_probe.get_state()
     if injected:
-        state = embedder_probe.get_state()
         if state is not None:
             return str(state["hf_id"])
         return "unavailable"
     if use_model:
+        if state is not None:
+            return str(state["hf_id"])
         return embedder_probe.DEFAULT_MODEL_ID
     return "unavailable"
 
@@ -148,6 +153,8 @@ def capture_provenance(proj, is_embedded: bool, extras: dict) -> dict:
         prov["embedded_engine"] = (
             "redislite (no FTS/HNSW — numbers NOT prod-parity; can reverse on Docker)"
         )
+    if extras.get("query_prompt") is not None:
+        prov["query_prompt"] = extras["query_prompt"]
     return prov
 
 
@@ -504,7 +511,9 @@ def _run_with_sdk(args, sdk) -> dict:
     # (query vectors are precomputed below via EmbeddingModel.get() — after
     # injection that IS the candidate). HARD FAIL if it cannot load.
     if getattr(args, "model", None) is not None:
-        embedder_probe.inject_model(args.model)
+        embedder_probe.inject_model(
+            args.model,
+            query_prompt=getattr(args, "query_prompt", None))
 
     # 2. Corpus (seed unless --no-seed-corpus).
     seeded = 0
@@ -663,6 +672,7 @@ def _run_with_sdk(args, sdk) -> dict:
     extras = {
         "embedding_model": _resolved_embedding_model(
             use_model, getattr(args, "model", None) is not None),
+        "query_prompt": getattr(args, "query_prompt", None),
         "synthetic_vectors": not use_model,
         "tfidf_available": tfidf_available,
         "indexes": indexes,
@@ -714,13 +724,22 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-seed-corpus", action="store_true",
                    help="use the existing corpus; verify indexes only")
     p.add_argument("--skip-e2e", action="store_true", help="skip the E2E SDK arm")
-    p.add_argument("--model", help="embedding model short name (tools/"
+    p.add_argument("--model", choices=sorted(PROBE_MODELS.keys()),
+                   help="embedding model short name (tools/"
                    "embedder_probe PROBE_MODELS: minilm | arctic-xs | "
                    "arctic-s | bge-small) injected before the E2E-8 "
                    "measurement; provenance records the probe-recorded model "
                    "id (#1349 pre-swap precondition runs)")
+    p.add_argument("--query-prompt", help="named prompt template threaded to "
+                   "the injected model (e.g. 'query' for the snowflake-arctic "
+                   "vendor config prompt_name='query') — parity with run.py: "
+                   "the in-path E2E-8 encode must carry the vendor prompt "
+                   "prefix (it adds tokens to every measured encode)")
     p.add_argument("--quiet", action="store_true")
     args = p.parse_args(argv)
+
+    if args.query_prompt is not None and args.model is None:
+        p.error("--query-prompt requires --model")
 
     if not args.quiet:
         print(f"#316 benchmark — corpus={args.corpus_size} samples/arm={args.samples} "
