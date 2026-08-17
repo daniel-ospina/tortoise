@@ -772,13 +772,20 @@ def _created_sort_key(value):
 
     The codebase writes ISO-8601 strings (projection) AND numeric epoch
     (RedisGraph `timestamp()` in seeded corpora) — a graph can hold both.
-    Comparing them directly raises TypeError in py3. Numeric epochs sort
-    first (deterministic), ISO strings sort lexicographically after (ISO
-    compares correctly within format).
+    Comparing them directly raises TypeError in py3. ISO strings are parsed
+    to epoch so mixed-format graphs compare by REAL instant (not format);
+    unparseable values bucket last, deterministically.
     """
     if isinstance(value, (int, float)):
         return (0, float(value))
-    return (1, str(value or ""))
+    s = str(value or "")
+    if s and s[0].isdigit() and len(s) >= 10 and ("-" in s or "T" in s):
+        try:
+            from datetime import datetime
+            return (0, datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp())
+        except ValueError:
+            pass
+    return (1, s)
 
 
 def _beta_variance(alpha: float, beta: float) -> float:
@@ -958,6 +965,13 @@ def get_relationships_bounded(
     related_id, related_kind, direction) and add role, peer, family_size,
     op_created_at. related_content is intentionally ABSENT in the list view
     (D5 — full content via expand_relationships, D14).
+
+    Contested coverage: contested peers are computed exactly from the persisted
+    α/β of every EP-bearing peer WITHIN each operator's per-op fetch (per_op_cap);
+    on pathologically dense has-EP operators, contested candidates beyond the
+    per-op cap are a documented bounded worst case (exactness via a persisted
+    contested flag is tracked in #1370). NAND, terminal-status, mitigated and
+    CORRECTS classes are always complete.
 
     get_relationships() is intentionally UNTOUCHED (D12) — topic_summarization
     needs full NAND completeness for disputed-pair detection.

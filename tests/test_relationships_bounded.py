@@ -273,6 +273,24 @@ def test_global_budget_exhaustion_degrades_to_counts(sdk):
     assert any(len(v) > 0 for v in out.values())
 
 
+def test_tail_private_op_points_get_counts_with_default_topk(sdk):
+    """Review-fix (R1): beyond expand_top_k (default 14) points with PRIVATE
+    operators still degrade to structure counts — Q2f covers ALL result ops."""
+    points = [_point(sdk, content=f"claim {i}") for i in range(20)]
+    for i, p in enumerate(points):
+        peers = [_point(sdk, content=f"p{i} peer {j}") for j in range(10)]
+        sdk.create_operator("IMPL", p["id"], [q["id"] for q in peers])
+
+    ids = [p["id"] for p in points]
+    # DEFAULT expand_top_k=14: points 15-20 have private (unshared) operators
+    out = get_relationships_bounded(_graph(sdk), ids)
+    tail = out[ids[19]]
+    assert not any("peer" in e for e in tail), "tail point must not expand peers"
+    counts = [e for e in tail if "count" in e]
+    assert counts, f"tail point must degrade to structure counts, got {tail}"
+    assert any(c["count"] > 0 for c in counts)
+
+
 # ── get_relationships regression (unbounded path intact — D12) ──────────
 
 def test_corrects_no_duplicates(sdk):
