@@ -1,11 +1,12 @@
 """End-to-end runner smoke on embedded FalkorDBLite (#1144).
 
 Warn-only semantics (mirrors tests/bench/test_smoke_embedded.py): embedded
-numbers are NOT prod-parity (no FTS/HNSW; FTS flaky, structural empty
-without kind) — the assertions target harness correctness: report shape,
-all strategies present, metrics + CIs + provenance, judge-label path, and
-the gate-vs-baseline path. The strategy columns on embedded are documented
-as environment artifacts, never asserted for absolute quality.
+numbers are NOT prod-parity (no HNSW vector index — vector runs brute-force;
+the FULLTEXT index EXISTS on embedded, structural empty without kind) — the
+assertions target harness correctness: report shape, all strategies present,
+metrics + CIs + provenance, judge-label path, and the gate-vs-baseline path.
+The strategy columns on embedded are documented as environment artifacts,
+never asserted for absolute quality.
 """
 from __future__ import annotations
 

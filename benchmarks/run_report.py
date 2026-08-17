@@ -727,8 +727,9 @@ def _run_with_sdk(args, sdk) -> dict:
             "censored samples are capped/degraded the p95 is computed over a "
             "non-representative minority → inconclusive.",
             "#317 headroom = 300 − full-E2E-uncensored-p95 (elevated column).",
-            "Embedded FalkorDBLite numbers are NOT prod-parity (no FTS/HNSW — "
-            "numbers can reverse on Docker).",
+            "Embedded FalkorDBLite numbers are NOT prod-parity (no HNSW "
+            "vector index — vector brute-force; FULLTEXT index EXISTS on "
+            "embedded; numbers can reverse on Docker).",
         ],
     }
 
