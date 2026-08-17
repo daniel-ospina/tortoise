@@ -50,9 +50,11 @@ surface vocabulary mismatch — the case reranking #317 targets).
 ## Quickstart (embedded smoke)
 
 ```bash
-# embedded — fast, NOT prod-parity (no FTS/HNSW; FTS degrades, vector runs
-# brute-force, synthetic semantic query vectors stand in for the embedding
-# model). FTS/structural columns are environment artifacts here.
+# embedded — fast, NOT prod-parity (no HNSW; vector runs brute-force,
+# synthetic semantic query vectors stand in for the embedding model).
+# NOTE: the FULLTEXT index EXISTS on embedded (indexes.fts=true; FTS
+# populated 40/100 queries in the committed baseline) — FTS/structural
+# columns are environment artifacts here, not quality statements.
 python -m tests.eval.retrieval.run \
     --db /tmp/tortoise-eval.db --corpus-size 2000 --out /tmp/report.json \
     --pool-out /tmp/pool.json

@@ -15,13 +15,14 @@ Query sets:
     computed only when adjudicated labels are merged via --judge-labels.
 
 Modes:
-  - embedded (default, smoke): an isolated embedded DB file. NO FTS/HNSW
-    in embedded FalkorDBLite — the FTS strategy degrades to empty results
-    (its production queryNodes path returns no rows on redislite) and
-    structural degrades to empty without a kind; the vector arm falls back
-    to brute-force and TF-IDF runs in-process. Synthetic semantic query
-    vectors (topic-centroid stand-ins) replace the missing embedding model.
-    Numbers are NOT prod-parity — Docker is authoritative.
+  - embedded (default, smoke): an isolated embedded DB file. NO HNSW vector
+    index in embedded FalkorDBLite — the vector arm falls back to brute-force
+    and TF-IDF runs in-process. **The FULLTEXT index EXISTS on embedded**
+    (provenance indexes.fts=true; FTS populated 40/100 queries in the
+    committed baseline) — the FTS strategy returns rows, not empty; structural
+    degrades to empty without a kind. Synthetic semantic query vectors
+    (topic-centroid stand-ins) replace the missing embedding model. Numbers
+    are NOT prod-parity — Docker is authoritative.
   - Docker FalkorDB (authoritative): --db docker://... (or TORTOISE_DB_URI)
     with real FTS + HNSW indexes and (optionally) the all-MiniLM embedding
     model; vectors encode query semantics natively.
@@ -119,8 +120,10 @@ def _capture_provenance(proj, is_embedded: bool, extras: dict) -> dict:
     }
     if is_embedded:
         prov["embedded_engine"] = (
-            "redislite (no FTS/HNSW — FTS degrades to empty, structural to "
-            "empty without kind, vector brute-force; numbers NOT prod-parity)"
+            "redislite (no HNSW vector index — vector runs brute-force; "
+            "FULLTEXT index EXISTS on embedded (indexes.fts=true; FTS "
+            "populated 40/100 queries in the committed baseline), structural "
+            "empty without kind; numbers NOT prod-parity)"
         )
     return prov
 

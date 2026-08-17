@@ -12,10 +12,13 @@ Index policy (scoping task 3: "verify-not-create"):
     provenance whether they pre-existed or were auto-created — never silently
     creates them itself.
 
-Embedded note: FalkorDBLite (redislite) has no FTS/HNSW — the vector arm
-falls back to brute-force and FTS degrades. Numbers from embedded runs are
-NOT prod-parity (scoping: "embedded FalkorDBLite excluded; numbers can
-reverse") — the Docker/HNSW path is the measurement environment.
+Embedded note: FalkorDBLite (redislite) has no HNSW vector index — the vector
+arm falls back to brute-force; the FULLTEXT index EXISTS on embedded
+(verify_indexes reports fts=true; FTS populated 40/100 queries in the #1144
+committed baseline), structural degrades to empty without a kind. Numbers
+from embedded runs are NOT prod-parity (scoping: "embedded FalkorDBLite
+excluded; numbers can reverse") — the Docker/HNSW path is the measurement
+environment.
 """
 from __future__ import annotations
 
@@ -240,7 +243,9 @@ def verify_indexes(proj) -> dict[str, bool]:
 
     Returns {"fts": bool, "vector": bool} by scanning CALL db.indexes().
     Auto-created-at-boot indexes (HNSW + FTS via _ensure_indexes) show up
-    here on Docker FalkorDB ≥4.x; embedded reports neither (expected).
+    here on Docker FalkorDB ≥4.x. On embedded FalkorDBLite the FULLTEXT index
+    EXISTS (fts=true — FTS populated 40/100 queries in the committed #1144
+    baseline) while the HNSW vector index is absent (vector runs brute-force).
     """
     found: dict[str, bool] = {"fts": False, "vector": False}
     try:

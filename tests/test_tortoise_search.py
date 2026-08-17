@@ -158,6 +158,78 @@ def test_sdk_fts_query_invalid_threshold(sdk=None):
         sdk.tortoise_fts_query("test", threshold=1.1)
 
 
+# ── #1348 pool floor ────────────────────────────────────────────────
+
+def test_sdk_fts_query_pool_size_invalid(sdk=None):
+    """pool_size < 1 must raise (#1348)."""
+    if sdk is None:
+        sdk = _new_sdk()
+    sdk.create_point("statement", "quantum physics test content")
+    with pytest.raises(ValueError, match="pool_size"):
+        sdk.tortoise_fts_query("quantum", limit=5, pool_size=0)
+    with pytest.raises(ValueError, match="pool_size"):
+        sdk.tortoise_fts_query("quantum", limit=5, pool_size=-3)
+
+
+def test_sdk_fts_query_pool_size_exact_override(sdk=None, monkeypatch=None):
+    """pool_size is an EXACT override: str_limit = pool_size regardless of
+    limit*2 or the env floor (#1348). Returned limit stays the caller's."""
+    if sdk is None:
+        sdk = _new_sdk()
+    if monkeypatch is not None:
+        monkeypatch.delenv("TORTOISE_POOL_FLOOR", raising=False)
+    for i in range(20):
+        sdk.create_point("statement", f"quantum topic number {i}")
+    # Exact override below limit*2 is honored as the retrieval depth: the
+    # returned list length is still `limit` (5), never the pool size.
+    results = sdk.tortoise_fts_query("quantum", limit=5, pool_size=12)
+    assert len(results) == 5
+
+
+def test_sdk_fts_query_env_floor_raises_pool(sdk=None, monkeypatch=None):
+    """TORTOISE_POOL_FLOOR env sets the per-strategy candidate floor;
+    returned list length is unchanged (#1348)."""
+    if sdk is None:
+        sdk = _new_sdk()
+    for i in range(20):
+        sdk.create_point("statement", f"quantum topic number {i}")
+    if monkeypatch is not None:
+        monkeypatch.setenv("TORTOISE_POOL_FLOOR", "80")
+        results = sdk.tortoise_fts_query("quantum", limit=5)
+        assert len(results) == 5
+        monkeypatch.delenv("TORTOISE_POOL_FLOOR", raising=False)
+    # Garbage env value falls back to the default (50), not a crash.
+    if monkeypatch is not None:
+        monkeypatch.setenv("TORTOISE_POOL_FLOOR", "not-a-number")
+        results = sdk.tortoise_fts_query("quantum", limit=5)
+        assert len(results) == 5
+        monkeypatch.delenv("TORTOISE_POOL_FLOOR", raising=False)
+
+
+def test_sdk_fts_query_full_scan_exempts_floor(sdk=None, monkeypatch=None):
+    """Full-scan mode (query=None, kind set) must NOT have its retrieval pool
+    floored/truncated by the #1348 candidate floor — completeness (#7811)
+    wins; the RETURNED list is still bounded by the caller's `limit`."""
+    if sdk is None:
+        sdk = _new_sdk()
+    sdk.create_point("statement", "quantum alpha")
+    sdk.create_point("statement", "quantum beta")
+    sdk.create_point("statement", "quantum gamma")
+    if monkeypatch is not None:
+        monkeypatch.setenv("TORTOISE_POOL_FLOOR", "1")
+    # limit=2 returned list is 2 (caller's limit wins), NOT capped by the
+    # floor=1 (which would return 1 if the floor truncated the pool) and NOT
+    # 100000 — the returned list respects the caller's limit.
+    results = sdk.tortoise_fts_query(kind="statement", limit=2)
+    assert len(results) == 2
+    # The floor never reduces the retrieval pool: limit=5 still returns 3
+    # (all points) even with a floor of 1 — full-scan pool is exempt.
+    results = sdk.tortoise_fts_query(kind="statement", limit=5)
+    assert len(results) == 3
+    if monkeypatch is not None:
+        monkeypatch.delenv("TORTOISE_POOL_FLOOR", raising=False)
+
+
 def test_sdk_fts_query_min_confidence(sdk=None):
     if sdk is None:
         sdk = _new_sdk()
