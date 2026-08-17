@@ -201,22 +201,152 @@ class MockModel:
         return json.dumps(self._summary)
 
 
+_V2_EMBED = {
+    "entities": [{"name": "the strategy", "kind": "core:strategy",
+                   "lifecycle": "created", "supersedes": None, "note": None}],
+    "events": [{"content": "we decided Y", "eventKind": "core:decision",
+                 "about_entities": ["the strategy"]}],
+    "points": [{"content": "X is the durable belief", "pointKind": "statement",
+                 "about_entities": ["the strategy"]}],
+    "operators": [{"src": "X is the durable belief", "dst": "we decided Y",
+                    "op_type": "IMPL"}],
+    "chain_notes": [], "link_before_create": [],
+}
+
+
+class V2MockModel:
+    """Deterministic v2-shaped mock: S1 → narrative text, S2/S4 → embed
+    list JSON (the extractor_v2 output contract)."""
+
+    def complete(self, *, system, user):
+        if "STORY SUMMARIZER" in system:
+            return "We believed X. The session revealed Y."
+        return json.dumps(_V2_EMBED)  # GRAPH MAPPER (S2) + GAP REVIEWER (S4)
+
+
+class BoomV2Model:
+    """Raises on every call — exercises the v2 error path."""
+
+    def complete(self, *, system, user):
+        raise RuntimeError("rate limited")
+
+
 class TestCommitSessionRoundTrip:
-    """T6 (#1272): the load-bearing guard — commit_session with a mock model
-    produces a Layer-1-valid payload (construct path committable)."""
-    def test_round_trip_validates(self):
+    """T6 (#1272) + #1350: commit_session (v1 and v2 paths) with a mock
+    model produces a Layer-1-valid payload (construct path committable)."""
+    def test_round_trip_validates_v1(self):
+        """v1 path (TORTOISE_EXTRACTOR=v1) keeps the legacy behavior."""
         from tortoise.sdk import TortoiseSDK
         from tortoise.commit_schema import validate_payload_dict
         sdk = object.__new__(TortoiseSDK)  # no graph init needed (summary path)
         out = sdk.commit_session(
             conversation=[{"role": "user", "content": "x"},
                           {"role": "assistant", "content": "decided X"}],
-            extractor_model=MockModel(), base_url="http://unused", api_key="k")
+            extractor_model=MockModel(), base_url="http://unused", api_key="k",
+            extractor="v1")
         assert "payload" in out
         payload = out["payload"]
         assert payload["client_commit_id"]  # T5: computed, not empty
         res, _ = validate_payload_dict(payload)
         assert res.ok, res.errors
+
+    def test_round_trip_validates_v2(self, monkeypatch):
+        """#1350: the v2 5-stage path is the DEFAULT — mock model drives
+        S1/S2/S4, S3 degrades (embedded backend), payload is Layer-1 valid
+        and carries the story_arc + v2 observability keys."""
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        from tortoise.sdk import TortoiseSDK
+        from tortoise.commit_schema import validate_payload_dict
+        sdk = object.__new__(TortoiseSDK)
+        out = sdk.commit_session(
+            conversation=[{"role": "user", "content": "we believed X"},
+                          {"role": "assistant", "content": "we decided Y"}],
+            extractor_model=V2MockModel(), base_url="http://unused", api_key="k")
+        assert "payload" in out
+        payload = out["payload"]
+        assert payload["client_commit_id"]
+        assert payload["story_arc"], "v2 must populate the story arc"
+        assert payload["points"], "v2 embed execution must emit points"
+        res, _ = validate_payload_dict(payload)
+        assert res.ok, res.errors
+        assert out["story_arc"] == payload["story_arc"]
+        assert "minted_kinds" in out and "chain_notes" in out
+        assert out["search"]["degraded"] is True  # embedded backend honored
+
+    def test_v2_error_path_reports_errors(self, monkeypatch):
+        """#1350: a raising v2 model surfaces errors (ok=False) instead of
+        writing nothing silently."""
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        from tortoise.sdk import TortoiseSDK
+        sdk = object.__new__(TortoiseSDK)
+        out = sdk.commit_session(
+            conversation=[{"role": "user", "content": "x"}],
+            extractor_model=BoomV2Model(), base_url="http://unused", api_key="k")
+        assert out["ok"] is False
+        assert any("rate limited" in e for e in out["errors"])
+
+    def test_v2_layer1_rejected_payload_not_posted(self, monkeypatch):
+        """#1350: a payload that fails Layer-1 returns ok=False with the
+        Layer-1 errors and is NEVER POSTed (fail-closed at the gate) — the
+        _post_commit recorder proves no call was made."""
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        from tortoise.sdk import TortoiseSDK
+        import tortoise.sdk as sdk_mod
+        import tortoise.extractor_v2 as ev2
+        sdk = object.__new__(TortoiseSDK)
+        _real = ev2.extract_session_v2
+        posted: list[dict] = []
+
+        def _record(payload, **kw):
+            posted.append(payload)
+            return {"ok": True}
+
+        def _broken(model, conversation, **kw):
+            out = _real(model, conversation, **kw)
+            out["payload"]["points"][0]["id"] = "not-a-content-addressed-id"
+            return out
+
+        monkeypatch.setattr(ev2, "extract_session_v2", _broken)
+        monkeypatch.setattr(sdk_mod, "_post_commit", _record)
+        try:
+            out = sdk.commit_session(
+                conversation=[{"role": "user", "content": "x"}],
+                extractor_model=V2MockModel(), base_url="http://unused",
+                api_key="k")
+        finally:
+            monkeypatch.setattr(ev2, "extract_session_v2", _real)
+        assert out["ok"] is False
+        assert any("Layer-1" in e for e in out["errors"])
+        assert posted == [], "Layer-1-rejected payload must never be POSTed"
+
+    def test_v2_empty_conversation_not_ok(self, monkeypatch):
+        """#1350 (review P1): an empty/blank conversation must never report
+        ok=True — nothing was committed."""
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        from tortoise.sdk import TortoiseSDK
+        sdk = object.__new__(TortoiseSDK)
+        out = sdk.commit_session(
+            conversation=[], extractor_model=V2MockModel(),
+            base_url="http://unused", api_key="k")
+        assert out["ok"] is False
+        assert out["payload"] is None
+        assert any("no payload" in e for e in out["errors"])
+
+    def test_env_fallback_v1(self, monkeypatch):
+        """#1350: TORTOISE_EXTRACTOR=v1 routes to the legacy path — the
+        reversibility seam for operators."""
+        monkeypatch.setenv("TORTOISE_EXTRACTOR", "v1")
+        from tortoise.sdk import TortoiseSDK
+        from tortoise.commit_schema import validate_payload_dict
+        sdk = object.__new__(TortoiseSDK)
+        out = sdk.commit_session(
+            conversation=[{"role": "user", "content": "x"}],
+            extractor_model=MockModel(), base_url="http://unused", api_key="k")
+        payload = out["payload"]
+        assert payload["story_arc"] == ""  # v1 never populates the arc
+        res, _ = validate_payload_dict(payload)
+        assert res.ok, res.errors
+        monkeypatch.delenv("TORTOISE_EXTRACTOR", raising=False)
 
     def test_error_path_payload_still_valid(self):
         """Even with extraction errors, the returned payload must be
@@ -232,7 +362,8 @@ class TestCommitSessionRoundTrip:
         })
         out = sdk.commit_session(
             conversation=[{"role": "user", "content": "x"}],
-            extractor_model=bad, base_url="http://unused", api_key="k")
+            extractor_model=bad, base_url="http://unused", api_key="k",
+            extractor="v1")
         assert out["ok"] is False
         assert any("sources" in e for e in out["errors"])
         assert out["payload"]["client_commit_id"]
