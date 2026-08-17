@@ -113,6 +113,69 @@ def test_capture_session_creates_event(sdk):
     assert edges[0][0] == res["extracted"]
 
 
+def test_capture_session_source_is_agent_session(sdk):
+    """#1352: the session Source must be agentSession-typed with capture
+    metadata + a references edge to the sessionCaptured Event — not the
+    document-typed stub the extraction projection's _link_source default
+    auto-creates (title=url, empty contentHash, no metadata)."""
+    res = sdk.capture_session(CONV)
+    sid = res["session_id"]
+    proj = sdk._get_proj()
+    rows = proj.g.query(
+        "MATCH (s:Source {url:$url}) "
+        "RETURN s.sourceKind, s.sessionId, s.capturedAt, s.contentHash, "
+        "       s.summary, s.topics, s.eventId",
+        params={"url": f"session:{sid}"},
+    ).result_set
+    assert rows, f"no Source at session:{sid}"
+    kind, s_sid, captured_at, content_hash, summary, topics, event_id = rows[0]
+    assert kind == "agentSession", f"sourceKind must be agentSession, got {kind!r}"
+    assert s_sid == sid, "sessionId must mirror the capture session id"
+    assert captured_at, "capturedAt must be set"
+    assert content_hash, "contentHash must be populated from the transcript"
+    assert summary, "summary must be derived from the conversation"
+    assert isinstance(topics, list) and topics, "topics must be derived"
+    assert event_id, "eventId must reference the sessionCaptured Event"
+    # (Source)-[:references]->(sessionCaptured Event)
+    refs = proj.g.query(
+        "MATCH (s:Source {url:$url})-[:references]->(e:Event) "
+        "RETURN e.eventId, e.eventKind",
+        params={"url": f"session:{sid}"},
+    ).result_set
+    assert refs, "Source must reference the sessionCaptured Event"
+    assert refs[0][1] == "sessionCaptured", refs
+    assert refs[0][0] == event_id, \
+        "Source.eventId must match the referenced Event"
+    # extractedFrom edges resolve to the TYPED Source (same url)
+    ep = proj.g.query(
+        "MATCH (p:Point)-[:extractedFrom]->(s:Source {url:$url}) "
+        "RETURN count(DISTINCT s.sourceKind)",
+        params={"url": f"session:{sid}"},
+    ).result_set
+    assert ep[0][0] == 1 and rows[0][0] == "agentSession", \
+        "all extracted Points must resolve to the agentSession Source"
+
+
+def test_capture_session_source_materialized_when_event_write_fails(sdk, monkeypatch):
+    """#1352: the Source materialization is independent of the Event write —
+    when the sessionCaptured Event write fails (non-fatal), the Source is
+    still upgraded to agentSession (just without the references edge)."""
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("falkordb down")
+
+    monkeypatch.setattr(sdk, "create_event", boom)
+    res = sdk.capture_session(CONV)
+    sid = res["session_id"]
+    proj = sdk._get_proj()
+    rows = proj.g.query(
+        "MATCH (s:Source {url:$url}) RETURN s.sourceKind",
+        params={"url": f"session:{sid}"},
+    ).result_set
+    assert rows and rows[0][0] == "agentSession", \
+        "Source must be agentSession-typed even when the Event write failed"
+
+
 def test_capture_session_event_recorded_write_lands(sdk):
     """EventRecorded entity write actually lands: full payload on the Event node."""
     sdk.capture_session(CONV)
