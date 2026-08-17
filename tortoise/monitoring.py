@@ -18,6 +18,11 @@ _start = time.monotonic()
 _last_ingest: float | None = None
 _sdk = None  # set by register()
 
+# Hard bound on the deep DB probe (#1384): a stopped FalkorDB (incident
+# #1381 — NXDOMAIN with /health staying ok) must flip /health to degraded
+# within a sub-second-to-1.5s window, never hang the handler.
+PROBE_TIMEOUT = 1.5
+
 # Prometheus metrics
 REQUEST_COUNT = Counter("tortoise_requests_total", "Total HTTP requests", ["endpoint"])
 REQUEST_LATENCY = Histogram("tortoise_request_latency_seconds", "Request latency")
@@ -45,16 +50,45 @@ def record_cost(team: str, cents: int) -> None:
     TEAM_COST.labels(team=team).inc(cents)
 
 
-def _check_falkordb() -> tuple[bool, str]:
-    """Test FalkorDB connectivity. Returns (ok, message)."""
-    if _sdk is None:
-        return False, "no_sdk_registered"
+def probe_db(sdk) -> dict:
+    """Deep-check graph-DB connectivity through an SDK's projection.
+
+    Runs a trivial ``RETURN 1`` on the SAME connection graph-touching
+    endpoints use (the SDK's projection — registry/shared or default graph
+    depending on caller), hard-bounded by a 1.5s worker-thread timeout: the
+    redis client's own socket_connect_timeout is 5s, far too slow for a
+    health poll, so a dead URI would otherwise hang the handler.
+
+    Returns ``{"ok": bool, "latency_ms": float, "error": str|None}`` —
+    NEVER raises, so /health can report ``status: degraded`` instead of
+    crashing the process.
+    """
+    import concurrent.futures
+
+    start = time.monotonic()
+
+    def _ping() -> None:
+        proj = sdk._get_proj()
+        proj.g.query("RETURN 1")
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(_ping)
     try:
-        proj = _sdk._get_proj()
-        proj.g.query("MATCH (n) RETURN count(n) LIMIT 1")
-        return True, "connected"
-    except Exception as e:
-        return False, str(e)[:200]
+        future.result(timeout=PROBE_TIMEOUT)
+        ok, error = True, None
+    except concurrent.futures.TimeoutError:
+        ok, error = False, f"probe timeout after {PROBE_TIMEOUT}s"
+    except Exception as e:  # noqa: BLE001 — probe reports, never raises
+        ok, error = False, str(e)[:200]
+    finally:
+        # wait=False: the worker thread may still be blocked on a dead
+        # socket — the handler must not wait for it (#1384).
+        executor.shutdown(wait=False)
+    return {
+        "ok": ok,
+        "latency_ms": round((time.monotonic() - start) * 1000, 1),
+        "error": error,
+    }
 
 
 def _counter_val(counter) -> int:
@@ -67,8 +101,15 @@ def _counter_val(counter) -> int:
 
 
 def metrics() -> dict:
-    """Return {status, falkordb, graph_size, last_ingest, errors, uptime}."""
-    falkor_ok, falkor_msg = _check_falkordb()
+    """Return {status, db, falkordb, graph_size, last_ingest, errors, uptime}.
+
+    ``db`` is the deep-check result ({ok, latency_ms, error}) added by
+    #1384; ``falkordb`` keeps the legacy message form for backward compat.
+    """
+    if _sdk is None:
+        db = {"ok": False, "latency_ms": 0.0, "error": "no_sdk_registered"}
+    else:
+        db = probe_db(_sdk)
     graph_size = 0
     try:
         if _sdk:
@@ -76,8 +117,9 @@ def metrics() -> dict:
     except Exception:
         record_error()
     return {
-        "status": "ok" if falkor_ok else "degraded",
-        "falkordb": falkor_msg,
+        "status": "ok" if db["ok"] else "degraded",
+        "db": db,
+        "falkordb": "connected" if db["ok"] else db["error"] or "unreachable",
         "graph_size": graph_size,
         "last_ingest": _last_ingest,
         "errors": _counter_val(ERROR_COUNT),

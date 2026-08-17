@@ -128,8 +128,33 @@ app.add_middleware(
 
 @app.get("/health")
 async def health():
-    """Liveness — process up."""
-    return JSONResponse({"status": "ok", "service": "tortoise-selfhost"})
+    """Liveness — process up (+ deep DB probe, #1384).
+
+    Never gates on the DB (cold-start discipline): a stopped FalkorDB flips
+    status to "degraded" with db.ok=false instead of killing the process or
+    500ing — visible immediately, no graph-touching request needed (#1381).
+    Probes TortoiseSDK(namespace="selfhost") — the SAME connection the MCP
+    tools resolve (mirrors /health/ready).
+    """
+    import asyncio
+    from tortoise.monitoring import probe_db  # lazy — liveness stays cheap
+
+    def _probe() -> dict:
+        from tortoise.sdk import TortoiseSDK
+
+        sdk = TortoiseSDK(namespace="selfhost")
+        return probe_db(sdk)
+
+    try:
+        # to_thread: a hung probe must not stall the event loop.
+        db = await asyncio.to_thread(_probe)
+    except Exception as exc:  # noqa: BLE001 — liveness never crashes
+        db = {"ok": False, "latency_ms": 0.0, "error": str(exc)[:200]}
+    return JSONResponse(
+        {"status": "ok" if db["ok"] else "degraded",
+         "service": "tortoise-selfhost",
+         "db": db}
+    )
 
 
 @app.get("/health/ready")
