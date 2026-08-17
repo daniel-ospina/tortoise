@@ -371,22 +371,24 @@ tortoise backup --db ~/.tortoise/tortoise.db           # snapshot → backups/<t
 
 ## 7. Migrating from self-hosted to cloud
 
-The supported migration path is a **replay path**: your self-hosted daemon keeps serving the graph while you set up a hosted account, and you replay your knowledge into the hosted team through the same ingest path you used originally. This is the documented fallback verified by the **E2E-12-D** suite: knowledge lives on the selfhost daemon → the customer registers a hosted team → the knowledge is replayed → the hosted surface answers with parity.
+Tortoise ships a first-class migration path: **`tortoise export` → hosted import**. Your graph — Points, operators, and edge topology — is exported as a versioned, encrypted artifact (`tortoise-export-v1`) and ingested by the hosted API, preserving **Point IDs and edge topology** (belief scores are derived, so EP recomputes server-side as on any surface). The journey is verified end-to-end by the **E2E-12-D** suite's `test_parity_export_import` case, which asserts structure parity — node/edge counts, Point IDs, operator topology — strictly stronger than the replay baseline below.
 
-> ⚠️ **No automated import today.** There is no graph-import endpoint and no bulk export→import tool — you replay knowledge manually (CLI/REST/SDK) rather than uploading a backup. An export→import tool is tracked as a follow-up epic.
+> ✅ **Automated export → import is the primary path.** The manual replay path below remains the documented fallback (and the only path on versions without the export tool).
 
-**What carries over:** everything you replay lands as first-class graph data — Points, edges (operators), and belief scores computed by the same EP propagation. Queries, `context` digests, and the MCP tools behave identically on hosted.
+**What carries over:** everything the artifact captures — Points, edges (operators), Point IDs, and edge topology. Queries, `context` digests, and the MCP tools behave identically on hosted.
 
-**What does NOT carry over:** Point IDs, edge topology, and belief scores are not copied — replayed knowledge is recreated and EP recomputes over the new graph. API keys are **not portable across surfaces**: a selfhost static key is rejected by hosted and a hosted key is rejected by your daemon (both 401 — keys are scoped per team/surface).
+**What does NOT carry over:** belief scores are not copied — EP recomputes over the imported graph. API keys are **not portable across surfaces**: a selfhost static key is rejected by hosted and a hosted key is rejected by your daemon (both 401 — keys are scoped per team/surface), so you register a fresh hosted team + key below.
 
-### Step-by-step
+### Automated path: `tortoise export` → import
 
-1. **Keep your selfhost daemon running** — the graph stays live and queryable while you set up cloud:
+1. **Export the selfhost graph** to a versioned, encrypted artifact:
 
    ```bash
-   docker compose up -d        # or leave your embedded DB in place
-   tortoise doctor             # confirm the local graph is healthy
+   tortoise export --db ~/.tortoise/tortoise.db --output graph.tortoise
+   # {"status":"ok","output":"graph.tortoise",...,"node_count":N,"edge_count":M}
    ```
+
+   The artifact is encrypted by default (AES-256-GCM). Set `TORTOISE_BACKUP_KEY` (base64 32-byte) to use a key you control; otherwise the CLI generates a fresh key and prints it once as `key_b64` on the stdout JSON line — **keep it safe, you need it to import**. `--no-encrypt` exists but warns loudly (plaintext graph on disk).
 
 2. **Register a hosted account** — [tortoise.premiselabs.co/signup](https://tortoise.premiselabs.co/signup) (Supabase sign-up), or mint a free hosted team + key with no email:
 
@@ -401,7 +403,40 @@ The supported migration path is a **replay path**: your self-hosted daemon keeps
    tortoise init --api-key tt_<your-key>   # saves .tortoise config in this directory
    ```
 
-4. **Replay the knowledge** through the hosted ingest path (run from the connected directory):
+4. **Import the artifact** into the team graph (owner session auth — the import endpoint is owner-scoped, like export):
+
+   ```bash
+   curl -X POST https://api.premiselabs.co/v1/teams/<team_id>/import \
+     -H "Authorization: Bearer <owner-session-jwt>" \
+     -H "Content-Type: application/vnd.tortoise.export.v1" \
+     -H "X-Tortoise-Import-Key: <key_b64>" \
+     --data-binary @graph.tortoise
+   # {"imported":true,"already":false,"id":"<sha>","restored":{"nodes":N,"edges":M}}
+   ```
+
+   Re-importing the same artifact is idempotent (`{"imported":false,"already":true}` — no double-swap), and a failed/tampered artifact never touches the live graph (quarantined, 422).
+
+5. **Verify parity** — the counts returned by import (`restored`) should match your source graph, and the structure tools confirm it:
+
+   ```bash
+   tortoise doctor          # selfhost health
+   tortoise team info       # hosted team + usage
+   ```
+
+   Then call the structure tools over MCP on each surface — `tortoise_check_structure` (chain integrity) and `tortoise_summarize_structure` (counts per gate) — and compare the hosted counts to your selfhost graph. When hosted reaches parity and answers your queries, decommission the daemon at your leisure.
+
+### Fallback: manual replay
+
+If you are on a version without the export tool, or you prefer to re-create knowledge rather than copy the graph, replay it through the hosted ingest path. Your selfhost daemon keeps serving the graph while you replay, and hosted answers with content parity (Point IDs and edge topology are NOT carried over by replay).
+
+1. **Keep your selfhost daemon running** — the graph stays live and queryable while you set up cloud:
+
+   ```bash
+   docker compose up -d        # or leave your embedded DB in place
+   tortoise doctor             # confirm the local graph is healthy
+   ```
+
+2. **Replay the knowledge** through the hosted ingest path (run from the connected directory):
 
    ```bash
    # Sessions/transcripts you captured while self-hosted
@@ -411,14 +446,7 @@ The supported migration path is a **replay path**: your self-hosted daemon keeps
    tortoise create-point "The decision was approved" --kind statement
    ```
 
-5. **Verify parity** — run the same checks on both surfaces:
-
-   ```bash
-   tortoise doctor          # selfhost health
-   tortoise team info       # hosted team + usage
-   ```
-
-   Then call the structure tools over MCP on each surface — `tortoise_check_structure` (chain integrity) and `tortoise_summarize_structure` (counts per gate) — and compare the hosted counts to your selfhost graph. When hosted reaches parity and answers your queries, decommission the daemon at your leisure.
+3. **Verify parity** — same checks as the automated path; replay reaches content parity (every replayed knowledge item present on hosted), the automated path additionally preserves Point IDs and edge topology.
 
 ## Meeting transcripts — manual ingestion
 
