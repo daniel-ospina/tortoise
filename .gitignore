@@ -34,3 +34,7 @@ client/build/
 
 # Issue #1144 retrieval eval outputs (regenerated per run)
 tests/eval/retrieval/reports/
+# LongMemEval runner (issue #1144): dataset cache / local downloads (never committed)
+.longmemeval_cache/
+data/longmemeval*
+longmemeval_*.report.json
