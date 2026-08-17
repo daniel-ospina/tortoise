@@ -3442,6 +3442,7 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     # (eventKind: sessionCaptured) and link extracted Points to it via
     # aboutEvent — the ontology's episodic model. The :Session node remains
     # the API-visible handle; the Event carries ontology-compliant provenance.
+    event_id = None
     try:
         event = sdk.create_event(
             f"session_{session_id}",
@@ -3458,6 +3459,15 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
         import logging
         logging.getLogger("tortoise.api").exception(
             "session Event creation failed (non-fatal)")
+
+    # #1352: the extraction projection auto-created a document-typed Source
+    # stub at `session:{id}` (default sourceKind in _link_source) — the
+    # ontology v3.6 §4.6 session source kind is agentSession. Materialize the
+    # typed Source (capture metadata + sessionId + capturedAt + eventId) and
+    # wire (Source)-[:references]->(sessionCaptured Event) — parity with the
+    # SDK capture path via the shared sdk._materialize_session_source helper.
+    sdk._materialize_session_source(
+        session_id, event_id, now, body.conversation)
 
     # Log audit event
     await _async_audit(

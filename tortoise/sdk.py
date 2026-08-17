@@ -227,6 +227,56 @@ def _session_llm_transcript(conversation: list[dict]) -> tuple[str, int]:
     return "\n".join(lines), n_sentences * 2
 
 
+# #1352: minimal stopword set for the cheap session-Source topic derivation —
+# content-word frequency over the transcript (the metadata extractor's LLM
+# path is not available on the capture path; this is the deterministic
+# fallback the session Source carries). Deliberately small — domain terms
+# (auth, http, deploy) must survive the filter.
+_SESSION_SOURCE_STOPWORDS = frozenset({
+    "a", "an", "the", "and", "or", "but", "so", "for", "with", "without",
+    "from", "into", "onto", "over", "under", "about", "against", "between",
+    "through", "during", "before", "after", "above", "below", "to", "of",
+    "in", "on", "at", "by", "is", "are", "was", "were", "be", "been",
+    "being", "have", "has", "had", "do", "does", "did", "will", "would",
+    "can", "could", "should", "may", "might", "must", "shall", "not",
+    "no", "yes", "ok", "it", "its", "this", "that", "these", "those",
+    "i", "we", "you", "he", "she", "they", "them", "me", "us", "my",
+    "our", "your", "their", "his", "her", "as", "if", "then", "than",
+    "so", "too", "very", "just", "really", "there", "here", "when",
+    "what", "which", "who", "whom", "why", "how", "all", "any", "both",
+    "each", "few", "more", "most", "other", "some", "such", "only",
+    "own", "same", "also", "because", "into", "out", "up", "down",
+    "again", "once", "ago", "now", "new", "old", "first", "last",
+    "user", "assistant", "speaker", "think", "say", "says", "said",
+    "sure", "yeah", "agree", "agreed", "want", "need", "go", "going",
+    "get", "got", "see", "know", "like", "make", "take", "come", "well",
+    "right", "okay",
+})
+
+
+def _session_source_metadata(transcript: str) -> tuple[str, list[str]]:
+    """Derive cheap capture metadata (summary + topics) for the session Source
+    from the extraction transcript (#1352) — no LLM call, deterministic:
+    the summary is the first substantive utterance, topics are the top
+    frequent content words. Returns ("", []) for an empty transcript."""
+    if not transcript.strip():
+        return "", []
+    summary = ""
+    for line in transcript.splitlines():
+        text = line.split(": ", 1)[1] if ": " in line else line
+        text = text.strip()
+        if len(text) >= 10:
+            summary = text[:200]
+            break
+    if not summary:
+        summary = transcript.strip()[:200]
+    from collections import Counter
+    words = re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", transcript.lower())
+    counts = Counter(w for w in words if w not in _SESSION_SOURCE_STOPWORDS)
+    topics = [w for w, _ in counts.most_common(6)]
+    return summary, topics
+
+
 def _session_llm_extraction_estimate(conversation: list[dict]) -> int:
     """Pre-write fail-closed estimate of new non-episodic nodes a capture will
     produce (points + operators). Hosted 402 gate input — mirrors the removed
@@ -1639,6 +1689,7 @@ class TortoiseSDK:
         extracted = self._extract_session_llm(conversation, session_id, now)
 
         # Ontology episodic model (v3.1 §4.5/§3.2): Event + aboutEvent edges.
+        event_id: str | None = None
         try:
             event = self.create_event(
                 f"session_{session_id}", "sessionCaptured",
@@ -1656,6 +1707,15 @@ class TortoiseSDK:
                 "failed (non-fatal) for session %s: %s", session_id, e,
                 exc_info=True,
             )
+
+        # #1352: the extraction projection auto-created a document-typed Source
+        # stub at `session:{id}` (default sourceKind in _link_source) — the
+        # ontology v3.6 §4.6 session source kind is agentSession. Materialize
+        # the typed Source (capture metadata + sessionId + capturedAt + eventId)
+        # and wire (Source)-[:references]->(sessionCaptured Event). Always runs:
+        # the Source upgrade is independent of the Event write's health; the
+        # references edge is skipped when no Event landed (event_id None).
+        self._materialize_session_source(session_id, event_id, now, conversation)
 
         return {
             "session_id": session_id,
@@ -1727,6 +1787,73 @@ class TortoiseSDK:
                 "text": p.get("content", "")[:200],
             })
         return extracted
+
+    def _materialize_session_source(
+        self,
+        session_id: str,
+        event_id: str | None,
+        now: str,
+        conversation: list[dict[str, str]] | None = None,
+    ) -> None:
+        """Materialize the typed session Source (#1352).
+
+        The M2 extraction projection auto-creates a Source stub at
+        ``session:{session_id}`` via ``_link_source`` with the DEFAULT
+        ``sourceKind: 'document'`` (title=url, empty contentHash, no capture
+        metadata) — but the ontology v3.6 §4.6 registers the session source
+        kind as ``agentSession``. This MERGE upgrades the stub IN PLACE
+        (sourceKind, contentHash of the stored transcript, cheap summary +
+        topics, sessionId, capturedAt, eventId) and wires
+        ``(Source)-[:references]->(sessionCaptured Event)`` — parity with the
+        ``_session_event_write`` agentSession pattern and the backfill's
+        references edge (test_backfill_sources.py).
+
+        Additive and idempotent: never touches ``_link_source`` or
+        ``_session_event_write``; re-capturing a session re-MERGEs the same
+        url. The references edge is skipped when ``event_id`` is None (Event
+        write failed — the Source materialization is independent of the
+        Event's health).
+        """
+        url = f"session:{session_id}"
+        transcript, _ = _session_llm_transcript(conversation or [])
+        summary, topics = _session_source_metadata(transcript)
+        content_hash = (
+            hashlib.sha256(transcript.encode("utf-8")).hexdigest()
+            if transcript.strip() else ""
+        )
+        params = {
+            "url": url,
+            "sk": "agentSession",
+            "sid": session_id,
+            "cap": now,
+            "ch": content_hash,
+            "sum": summary,
+            "topics": topics,
+            "now": now,
+        }
+        set_clauses = [
+            "s.sourceKind=$sk",
+            "s.sessionId=$sid",
+            "s.capturedAt=$cap",
+            "s.contentHash=$ch",
+            "s.summary=$sum",
+            "s.topics=$topics",
+            "s.ingestedAt=coalesce(s.ingestedAt, $now)",
+        ]
+        if event_id:
+            set_clauses.append("s.eventId=$eid")
+            params["eid"] = event_id
+        proj = self._get_proj()
+        proj.g.query(
+            "MERGE (s:Source {url:$url}) SET " + ", ".join(set_clauses),
+            params=params,
+        )
+        if event_id:
+            proj.g.query(
+                "MATCH (s:Source {url:$url}), (e:Event {eventId:$eid}) "
+                "MERGE (s)-[:references]->(e)",
+                params={"url": url, "eid": event_id},
+            )
 
     # ── Update / Delete consolidation (epic #888 W2, PR #912) ─────────
     # One update()/delete() for Points AND entities. The legacy methods
