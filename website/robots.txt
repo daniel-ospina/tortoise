@@ -1,0 +1,20 @@
+# robots.txt — premiselabs.co + tortoise.premiselabs.co (Cloudflare Pages, premise-labs project)
+#
+# Multi-host sitemap submission (Google "cross-submission" pattern):
+# each sitemap file contains ONLY URLs for its own host; this robots.txt is
+# served identically on both hosts (shared Pages project) and lists all three
+# sitemap locations so every host discovers the correct one.
+#
+#   premiselabs.co          → company page       (sitemap-company.xml)
+#   tortoise.premiselabs.co → product + docs + legal + auth (sitemap-product.xml)
+#   app.premiselabs.co      → dashboard          (separate tortoise-dashboard project)
+#
+# Auth-gated pages (welcome, invite-accept) are excluded from sitemaps and
+# carry <meta name="robots" content="noindex"> — no Disallow needed.
+
+User-agent: *
+Allow: /
+
+Sitemap: https://premiselabs.co/sitemap-company.xml
+Sitemap: https://tortoise.premiselabs.co/sitemap-product.xml
+Sitemap: https://app.premiselabs.co/sitemap.xml

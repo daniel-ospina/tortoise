@@ -6,6 +6,7 @@
   <title>Your Tortoise is ready! — Tortoise</title>
   <meta name="description" content="Your Tortoise knowledge graph is provisioned. Copy your API key and create your first Point.">
   <meta name="theme-color" content="#060b14">
+  <meta name="robots" content="noindex,nofollow">
   <link rel="icon" type="image/png" href="/logo.png">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -1558,8 +1559,10 @@ ${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}`,
     renderSetupPrompt();
     // Canonical onboarding prompt (#540): served by the premise-labs Pages
     // project from tortoise/onboarding/AGENT_ONBOARDING.md via deploy-pages.yml.
-    // premiselabs.co is the project's active custom domain (tortoise.premiselabs.co
-    // still CNAMEs to the legacy tortoise-landing-v2 project — see #540).
+    // Host consolidation (2026-08-17): the legal/auth pages are canonical on
+    // tortoise.premiselabs.co (same premise-labs Pages project); premiselabs.co
+    // 301s its copies there. The legacy tortoise-landing-v2 CNAME is long gone
+    // (see #540).
     // Epic #529: per-harness variants live at /onboarding/<slug>.md (staged by
     // stage_variants.py); the canonical URL stays the fallback for all tabs.
     const PROMPT_URL = "https://premiselabs.co/onboarding-prompt.md";

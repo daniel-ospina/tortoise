@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- app.premiselabs.co — dashboard sitemap (session-gated React SPA).
+     Vite copies public/ → dist/ on build; deployed by the tortoise-dashboard
+     Pages project. Same-host URLs only. -->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>https://app.premiselabs.co/</loc>
+    <changefreq>monthly</changefreq>
+    <priority>1.0</priority>
+  </url>
+</urlset>

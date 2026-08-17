@@ -8,7 +8,9 @@ Covers plan checks #1-#10 (T7 of docs/plans/2026-08-08-657-legal-pages-plan.md):
   #3  /license + /dpa 200 (both REQUIRED — G-gate ③/⑨ LOCKED)
   #4  footer legal links on product/welcome/signup/signin/self-hosted
       (BASE_URL half unconditional; TORTISE_HOST half gated on TORTISE_HOST_CHECK)
-  #5  cross-host /privacy + /tos 200 (gated)
+  #5  company-host copies of the 12 tortoise-only pages 301 → the exact
+      tortoise host URL (canonical consolidation, 2026-08-17); tortoise-host
+      copies 200 (gated)
   #6  middleware root rewrites — tortoise.* → product marker,
       premiselabs.co → index marker (gated)
   #7  same-viewport acceptance (.legal-accept vs .providers + #btn-submit at
@@ -603,10 +605,44 @@ def test_tortoise_host_footer_half(page: Page) -> None:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+def test_company_host_legal_pages_redirect_to_tortoise(page: Page) -> None:
+    """UNCONDITIONAL consolidation half (#5, 2026-08-17): all 12 tortoise-only
+    pages (docs, security, self-hosted, the 5 legal pages, signup/signin,
+    welcome, invite-accept) are canonical on tortoise.premiselabs.co; the
+    middleware 301s their copies on the exact premiselabs.co hostname
+    (redirect target is a constant, so this is safe on stale-DNS runs).
+    Local dev / *.pages.dev previews pass through with 200 — not indexed,
+    and the E2E suite runs against a dev server — so the 301 half is
+    asserted only against the production company host."""
+    prod_company = urlsplit(BASE_URL).hostname == "premiselabs.co"
+    # The full company-host consolidation surface of the middleware
+    # TORTOISE_ONLY set (extensionless forms; .html/trailing-slash variants
+    # normalize onto these canonicals).
+    for path in ("/docs", "/security", "/self-hosted", "/privacy", "/tos",
+                 "/license", "/dpa", "/aviso-privacidad", "/signup", "/signin",
+                 "/welcome", "/invite-accept"):
+        r = page.request.get(BASE_URL + path, timeout=15_000, max_redirects=0)
+        if prod_company:
+            assert r.status == 301, f"{path} on premiselabs.co → {r.status} (expected 301)"
+            # Pin the raw Location verbatim — the middleware deterministically
+            # strips trailing slashes, so a trailing-slash regression would
+            # emit a non-canonical URL (a second 301 hop via _redirects on
+            # the tortoise host) instead of the exact canonical and MUST
+            # fail this assertion.
+            expected = "https://tortoise.premiselabs.co" + path
+            location = r.headers.get("location")
+            assert location == expected, (
+                f"{path} redirects to {location!r} (expected {expected})"
+            )
+        else:
+            assert r.status == 200, f"{path} on {BASE_URL} → {r.status} (dev/preview pass-through)"
+
+
 @TORTOISE_HOST_SKIP
 def test_cross_host_privacy_and_tos_200(page: Page) -> None:
-    """The other host serves the same legal pages (middleware only rewrites
-    / — non-root paths pass through on both hosts)."""
+    """The canonical host (tortoise.premiselabs.co) serves the legal pages
+    with full content; the company-host copies 301 there (asserted in
+    test_company_host_legal_pages_redirect_to_tortoise)."""
     for path in ("/privacy", "/tos"):
         resp = page.request.get(TORTISE_HOST + path, timeout=15_000)
         assert resp.status == 200, f"{path} on {TORTISE_HOST} returned {resp.status}"

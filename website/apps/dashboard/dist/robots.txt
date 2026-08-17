@@ -1,0 +1,6 @@
+# robots.txt — app.premiselabs.co (Cloudflare Pages, tortoise-dashboard project)
+# Dashboard is a session-gated SPA; only the root is listed in the sitemap.
+User-agent: *
+Allow: /
+
+Sitemap: https://app.premiselabs.co/sitemap.xml

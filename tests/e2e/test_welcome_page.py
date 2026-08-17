@@ -1,8 +1,9 @@
 """Playwright E2E tests for the hosted onboarding welcome page (#541).
 
-Targets the live welcome page (premiselabs.co/welcome — the active custom
-domain of the premise-labs Pages project; tortoise.premiselabs.co still
-CNAMEs to a legacy project, see #540).
+Targets the live welcome page on the canonical auth host
+(tortoise.premiselabs.co/welcome — host consolidation 2026-08-17: the
+premiselabs.co copies of /welcome and the other auth/legal pages 301 to the
+tortoise host; both hosts share the premise-labs Pages project).
 
 Two test groups:
 1. Static/live tests — no Supabase session needed:
@@ -13,7 +14,7 @@ Two test groups:
    verify the welcome page v2 UI without needing real credentials.
 
 Run:  python -m pytest tests/e2e/ -q
-Env:   WELCOME_URL overrides the target (default https://premiselabs.co/welcome)
+Env:   WELCOME_URL overrides the target (default https://tortoise.premiselabs.co/welcome)
        SUPABASE_URL/SUPABASE_SERVICE_KEY enable the live no-429 signup smoke
        (skipped by default — no creds in CI; see #801).
 """
@@ -27,7 +28,9 @@ import uuid
 import pytest
 from playwright.sync_api import Page, expect
 
-WELCOME_URL = os.environ.get("WELCOME_URL", "https://premiselabs.co/welcome")
+# Canonical host for the auth surface is tortoise.premiselabs.co (host
+# consolidation 2026-08-17: premiselabs.co 301s /welcome → the tortoise host).
+WELCOME_URL = os.environ.get("WELCOME_URL", "https://tortoise.premiselabs.co/welcome")
 PROMPT_URL = os.environ.get("PROMPT_URL", "https://premiselabs.co/onboarding-prompt.md")
 
 # ── Live/static tests (no auth) ─────────────────────────────────────
@@ -118,7 +121,7 @@ def _seed_local_session(page: Page, user_id: str) -> None:
     """Seed a supabase-js session in localStorage under BOTH storage keys —
     the prod project ref (sb-ybetwichurajbfswfeqa) and the local CLI ref
     (127.0.0.1 → sb-127) — so the mocked tests run against either the live
-    site (premiselabs.co) or a wrangler pages dev preview (localhost:8788)."""
+    site (tortoise.premiselabs.co) or a wrangler pages dev preview (localhost:8788)."""
     page.add_init_script(f"""
       const session = JSON.stringify({{ 
         access_token: "fake-access-token",
@@ -489,7 +492,7 @@ def _mock_empty_membership_then_provision(page: Page, provision_status: int = 20
 
 def _clipboard_origin() -> str:
     """Clipboard permissions must be granted for the page's ACTUAL origin:
-    https://premiselabs.co in CI/live runs, http://127.0.0.1:8788 in local
+    https://tortoise.premiselabs.co in CI/live runs, http://127.0.0.1:8788 in local
     wrangler pages dev runs. Derive it from WELCOME_URL (#527 local runs)."""
     from urllib.parse import urlsplit
 
@@ -500,7 +503,7 @@ def _clipboard_origin() -> str:
 def _require_client_side_provisioning(page: Page) -> None:
     """Skip when the deployed welcome page predates the #527 client-side
     provisioning code. The CI welcome-e2e job tests the LIVE prod page
-    (premiselabs.co/welcome), which only gains provisionViaEdgeFunction once
+    (tortoise.premiselabs.co/welcome), which only gains provisionViaEdgeFunction once
     this PR deploys — so pre-deploy runs skip (green-with-annotation, the
     repo's TORTISE_HOST_CHECK pattern) and post-deploy runs exercise the
     mocked provision flow on every subsequent run."""
@@ -605,7 +608,7 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
     email = f"e2e-live-{uuid.uuid4().hex[:8]}@premise-labs.dev"
     password = f"E2eLivePass-{uuid.uuid4().hex[:8]}!"
     try:
-        page.goto("https://premiselabs.co/signup", wait_until="domcontentloaded", timeout=30_000)
+        page.goto("https://tortoise.premiselabs.co/signup", wait_until="domcontentloaded", timeout=30_000)
         page.locator("#email").fill(email)
         page.locator("#password").fill(password)
         page.locator("#btn-submit").click()
