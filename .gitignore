@@ -31,3 +31,8 @@ benchmarks/reports/
 dist-client/
 client/build/
 
+
+# LongMemEval runner (issue #1144): dataset cache / local downloads (never committed)
+.longmemeval_cache/
+data/longmemeval*
+longmemeval_*.report.json

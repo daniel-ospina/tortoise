@@ -1,0 +1,98 @@
+[
+  {
+    "question_id": "mini_ie_user_001",
+    "question_type": "single-session-user",
+    "question": "What is Ava's favorite board game?",
+    "answer": "Catan",
+    "question_date": "2025-06-15",
+    "haystack_session_ids": ["mini-s0", "mini-s1"],
+    "haystack_dates": ["2025-06-10", "2025-06-14"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "The new laptop I ordered arrived today."},
+        {"role": "assistant", "content": "Nice! How does it look?"},
+        {"role": "user", "content": "Great, the display is excellent."}
+      ],
+      [
+        {"role": "user", "content": "I played a board game with friends last night."},
+        {"role": "assistant", "content": "Fun! Which one?"},
+        {"role": "user", "content": "My favorite board game is Catan.", "has_answer": true}
+      ]
+    ],
+    "answer_session_ids": ["mini-s1"]
+  },
+  {
+    "question_id": "mini_msr_002",
+    "question_type": "multi-session",
+    "question": "Which city and month did Ava decide on for her Japan trip across her two planning conversations?",
+    "answer": "Tokyo in November",
+    "question_date": "2025-06-20",
+    "haystack_session_ids": ["mini-s0", "mini-s1"],
+    "haystack_dates": ["2025-06-01", "2025-06-12"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "I've decided to visit Japan for my next trip."},
+        {"role": "assistant", "content": "Exciting! Do you know where yet?"},
+        {"role": "user", "content": "The city I most want to see is Tokyo.", "has_answer": true}
+      ],
+      [
+        {"role": "user", "content": "I'm planning the trip for November."},
+        {"role": "assistant", "content": "Autumn is lovely there."},
+        {"role": "user", "content": "Tokyo in November it is.", "has_answer": true}
+      ]
+    ],
+    "answer_session_ids": ["mini-s0", "mini-s1"]
+  },
+  {
+    "question_id": "mini_tr_003",
+    "question_type": "temporal-reasoning",
+    "question": "How many days ago did Ava tell you she adopted a dog?",
+    "answer": "5 days ago",
+    "question_date": "2025-06-15",
+    "haystack_session_ids": ["mini-s0"],
+    "haystack_dates": ["2025-06-10"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "I adopted a dog last week."},
+        {"role": "assistant", "content": "Congratulations! What is its name?"},
+        {"role": "user", "content": "Her name is Mochi.", "has_answer": true}
+      ]
+    ],
+    "answer_session_ids": ["mini-s0"]
+  },
+  {
+    "question_id": "mini_ku_004",
+    "question_type": "knowledge-update",
+    "question": "What type of coffee does Ava currently prefer?",
+    "answer": "drip coffee",
+    "question_date": "2025-06-18",
+    "haystack_session_ids": ["mini-s0", "mini-s1"],
+    "haystack_dates": ["2025-06-02", "2025-06-16"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "I used to prefer espresso in the morning."}
+      ],
+      [
+        {"role": "user", "content": "Actually, I now prefer drip coffee over espresso.", "has_answer": true}
+      ]
+    ],
+    "answer_session_ids": ["mini-s1"]
+  },
+  {
+    "question_id": "mini_abs_005_abs",
+    "question_type": "single-session-user",
+    "question": "What is Ava's favorite color?",
+    "answer": "The user never mentioned a favorite color in the provided history.",
+    "question_date": "2025-06-15",
+    "haystack_session_ids": ["mini-s0"],
+    "haystack_dates": ["2025-06-11"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "I really like my new bicycle."},
+        {"role": "assistant", "content": "Tell me more about it."},
+        {"role": "user", "content": "It is very fast and lightweight."}
+      ]
+    ],
+    "answer_session_ids": []
+  }
+]
