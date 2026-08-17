@@ -178,6 +178,11 @@ jobs:
           [ -n "${{ secrets.DEEPSEEK_API_KEY }}" ] && ARGS="$ARGS DEEPSEEK_API_KEY=${{ secrets.DEEPSEEK_API_KEY }}"
           [ -n "${{ secrets.OPENAI_API_KEY }}" ] && ARGS="$ARGS OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}"
           [ -n "${{ secrets.GEMINI_API_KEY }}" ] && ARGS="$ARGS GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}"
+          # Session-capture extraction model (#1197/#1358): propagate the
+          # model override when set (e.g. openrouter:google/gemini-2.0-flash —
+          # the flash-class default the epic-909 gate validated). Unset → the
+          # per-provider default (deepseek-chat) applies at runtime.
+          [ -n "${{ secrets.TORTOISE_SESSION_LLM_MODEL }}" ] && ARGS="$ARGS TORTOISE_SESSION_LLM_MODEL=${{ secrets.TORTOISE_SESSION_LLM_MODEL }}"
           # Optional (env-gated at runtime): only pass when set, so unconfigured
           # backups / GitHub OAuth never fail the deploy.
           [ -n "${{ secrets.TORTOISE_BACKUP_KEY }}" ] && ARGS="$ARGS TORTOISE_BACKUP_KEY=${{ secrets.TORTOISE_BACKUP_KEY }}"
