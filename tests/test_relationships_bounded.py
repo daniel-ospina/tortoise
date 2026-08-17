@@ -275,6 +275,68 @@ def test_global_budget_exhaustion_degrades_to_counts(sdk):
 
 # ── get_relationships regression (unbounded path intact — D12) ──────────
 
+def test_corrects_no_duplicates(sdk):
+    """Review-fix: chained OPTIONAL MATCH cartesian (2 in × 1 out) must dedupe."""
+    old = _point(sdk, content="old claim")
+    x = _point(sdk, content="middle claim")
+    n1 = _point(sdk, content="newer one")
+    n2 = _point(sdk, content="newest two")
+    _graph(sdk).query(
+        "MATCH (a:Point {id:$old}), (x:Point {id:$x}), (n1:Point {id:$n1}), (n2:Point {id:$n2}) "
+        "CREATE (x)-[:CORRECTS]->(a), (n1)-[:CORRECTS]->(x), (n2)-[:CORRECTS]->(x)",
+        params={"old": old["id"], "x": x["id"], "n1": n1["id"], "n2": n2["id"]},
+    )
+    out = get_relationships_bounded(_graph(sdk), [x["id"]])
+    rels = [e for e in out[x["id"]] if e["mechanism"] == "CORRECTS"]
+    related = [e["related_id"] for e in rels]
+    assert len(related) == len(set(related)) == 3, f"CORRECTS must be deduped: {related}"
+    state = fetch_point_epistemic_state(_graph(sdk), [x["id"]])[x["id"]]
+    assert len(state["supersedes"]) == 1, "supersedes must dedupe"
+    assert state["superseded_by"]["id"] == n2["id"], "newest correcting point wins"
+
+
+def test_retracted_correcting_point_not_authority(sdk):
+    """Review-fix: a retracted correcting point is not superseding authority."""
+    old = _point(sdk, content="old")
+    x = _point(sdk, content="middle")
+    n = _point(sdk, content="new")
+    _graph(sdk).query(
+        "MATCH (x:Point {id:$x}), (old:Point {id:$old}), (n:Point {id:$n}) "
+        "CREATE (x)-[:CORRECTS]->(old), (n)-[:CORRECTS]->(x)",
+        params={"x": x["id"], "old": old["id"], "n": n["id"]},
+    )
+    _set_status(sdk, n["id"], "retracted")
+    state = fetch_point_epistemic_state(_graph(sdk), [x["id"]])[x["id"]]
+    assert state["superseded_by"] is None, "retracted correcting point must not be authority"
+
+
+def test_criticals_do_not_consume_support_room(sdk):
+    """Review-fix (D3): criticals are exempt from the per-point cap."""
+    a = _point(sdk, content="alpha")
+    peers = [_point(sdk, content=f"peer {i}") for i in range(5)]
+    sdk.create_operator("IMPL", a["id"], [p["id"] for p in peers])
+    for i in range(12):
+        sdk.create_operator("NAND", a["id"], [_point(sdk, content=f"nand {i}")["id"]])
+    out = get_relationships_bounded(_graph(sdk), [a["id"]])
+    mechs = [e["mechanism"] for e in out[a["id"]]]
+    assert mechs.count("NAND") == 12
+    assert mechs.count("IMPL") == 5, "criticals must not consume support room"
+
+
+def test_mixed_createdat_formats_no_crash(sdk):
+    """Review-fix: epoch-int + ISO-string createdAt coexist without TypeError."""
+    a = _point(sdk, content="alpha")
+    p1 = _point(sdk, content="peer iso")
+    p2 = _point(sdk, content="peer epoch")
+    sdk.create_operator("IMPL", a["id"], [p1["id"], p2["id"]])
+    _graph(sdk).query(
+        "MATCH (n:Point) WHERE n.id = $id SET n.createdAt = 1755500000",
+        params={"id": p2["id"]},
+    )
+    out = get_relationships_bounded(_graph(sdk), [a["id"]])
+    assert len([e for e in out[a["id"]] if "peer" in e]) == 2, "mixed formats must not crash"
+
+
 def test_get_relationships_regression_full_content(sdk):
     """The unbounded shared function still returns full payloads with content."""
     a = _point(sdk, content="alpha claim target")

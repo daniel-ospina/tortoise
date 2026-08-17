@@ -9042,11 +9042,29 @@ class TortoiseSDK:
         state entries (IDs + labels + direction + peer state, no content); this
         returns the complete unbounded payload for one point (single-point
         fan-out is trivially cheap) so an agent can read a neighbor's full text
-        on demand.
+        on demand. Each entry gains `related_status` (the neighbor's point
+        status — live/superseded/retracted/draft) so the full-fidelity view is
+        not blind to terminal state (#689/#898 posture).
         """
         from .search_engine import get_relationships
         proj = self._get_proj()
-        return get_relationships(proj.g, [point_id]).get(point_id, [])
+        entries = get_relationships(proj.g, [point_id]).get(point_id, [])
+        if not entries:
+            return entries
+        related_ids = [e.get("related_id") for e in entries if e.get("related_id")]
+        statuses: dict[str, str] = {}
+        if related_ids:
+            try:
+                rows = proj.g.query(
+                    "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, n.status",
+                    params={"ids": related_ids},
+                ).result_set
+                statuses = {row[0]: row[1] or "" for row in rows}
+            except Exception:
+                pass
+        for e in entries:
+            e["related_status"] = statuses.get(e.get("related_id"), "")
+        return entries
 
     # ── Recall (epic #898) — UC1 STATE ──────────────────────────────
 

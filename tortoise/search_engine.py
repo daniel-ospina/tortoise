@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import Counter
 from dataclasses import dataclass, asdict, field
 from typing import Literal
 
@@ -766,6 +767,20 @@ def degradation_chain(
 CONTESTED_VARIANCE_THRESHOLD = 0.04
 
 
+def _created_sort_key(value):
+    """Sortable key for createdAt values — safe across mixed formats.
+
+    The codebase writes ISO-8601 strings (projection) AND numeric epoch
+    (RedisGraph `timestamp()` in seeded corpora) — a graph can hold both.
+    Comparing them directly raises TypeError in py3. Numeric epochs sort
+    first (deterministic), ISO strings sort lexicographically after (ISO
+    compares correctly within format).
+    """
+    if isinstance(value, (int, float)):
+        return (0, float(value))
+    return (1, str(value or ""))
+
+
 def _beta_variance(alpha: float, beta: float) -> float:
     """Variance of the Beta(α, β) posterior: αβ/((α+β)²(α+β+1)).
 
@@ -973,7 +988,8 @@ def get_relationships_bounded(
             op_ids.add(row[3])
 
         # Q1b: CORRECTS edges (direct point→point supersede links).
-        # Chained OPTIONAL MATCH can cartesian — dedupe in Python below.
+        # Chained OPTIONAL MATCH can cartesian (m outgoing × k incoming rows)
+        # — dedupe by id in Python below.
         corrects_out: dict[str, list[tuple]] = {pid: [] for pid in point_ids}
         corrects_in: dict[str, list[tuple]] = {pid: [] for pid in point_ids}
         if point_ids:
@@ -989,15 +1005,15 @@ def get_relationships_bounded(
                 pid = row[0]
                 old_id, old_status, old_created = row[1], row[2], row[3]
                 new_id, new_status, new_created = row[4], row[5], row[6]
-                if old_id:
+                if old_id and old_id not in {o[0] for o in corrects_out[pid]}:
                     corrects_out[pid].append((old_id, old_status, old_created))
-                if new_id:
+                if new_id and new_id not in {n[0] for n in corrects_in[pid]}:
                     corrects_in[pid].append((new_id, new_status, new_created))
 
-        # Q2b: mitigations per operator — ids also feed Q2's exclusion set
-        # (direction-agnostic: legacy inbound mitigated_by graphs are covered).
+        # Q2b: mitigations per operator — ids are excluded from endpoint
+        # expansion in Cypher (direction-agnostic: legacy inbound mitigated_by
+        # graphs are covered by the NOT pattern).
         op_mitigations: dict[str, list[dict]] = {}
-        mit_ids: set[str] = set()
         if op_ids:
             rows = graph.query(
                 "MATCH (op:Point {is_operator:true}) WHERE op.id IN $op_ids "
@@ -1011,11 +1027,12 @@ def get_relationships_bounded(
                     "id": row[1], "status": row[2] or "",
                     "created_at": row[3], "snippet": (row[4] or "")[:120],
                 })
-                mit_ids.add(row[1])
 
         # Q2-crit: critical-class endpoints — NAND edges + terminal-status peers.
-        # COMPLETE, no cap: these classes must never be dropped (D3/D4). Low
-        # volume in practice (NAND + terminal points are the exception).
+        # COMPLETE, bounded only by raw_cap (safety valve for pathological
+        # terminal-heavy corpora): these classes must never be dropped by the
+        # per-point/global/per-op caps (D3/D4). Low volume in practice (NAND +
+        # terminal points are the exception).
         op_crit: dict[str, dict[str, tuple]] = {}
         if op_ids:
             rows = graph.query(
@@ -1030,8 +1047,9 @@ def get_relationships_bounded(
                 "  coalesce(other.posterior_alpha, other.ep_alpha, 1.0), "
                 "  coalesce(other.posterior_beta, other.ep_beta, 1.0), "
                 "  (other.posterior_alpha IS NOT NULL OR other.ep_alpha IS NOT NULL), "
-                "  other.createdAt",
-                params={"op_ids": list(op_ids)},
+                "  other.createdAt "
+                "LIMIT $raw_cap",
+                params={"op_ids": list(op_ids), "raw_cap": raw_cap},
             ).result_set
             for row in rows:
                 op_crit.setdefault(row[0], {})[row[3]] = (
@@ -1051,9 +1069,11 @@ def get_relationships_bounded(
 
         # Q2-hasep: EP-bearing endpoints (contested candidates — variance is
         # computed in Python from the persisted α/β, D13). Per-op capped via
-        # CALL subquery (contested is rare among has-EP peers — top-N per op
-        # covers it on realistic graphs; synthetic 50%-posterior density is
-        # the bounded worst case).
+        # CALL subquery. HONESTY NOTE: contested peers within the fetched
+        # per-op set are guaranteed (computed exactly); beyond the per-op cap
+        # on pathologically dense has-EP operators, contested coverage is a
+        # documented bounded worst case (the persisted-contested-flag
+        # follow-up in #1370 makes this exact).
         op_hasep: dict[str, dict[str, tuple]] = {}
         if expand_ops:
             rows = graph.query(
@@ -1110,17 +1130,19 @@ def get_relationships_bounded(
                 merged.update(src.get(op_id, {}))
             op_endpoints[op_id] = merged
 
-        # Q2f: family sizes per (op, edge-type) for the EXPANDED operators
-        # (plain aggregate — mitigations are rare and family is approximate
-        # disclosure; tail points beyond top-K show criticals only).
+        # Q2f: family sizes per (op, edge-type) for ALL result operators
+        # (plain aggregate — cheap; mitigations are rare and family is
+        # approximate disclosure). Covers tail points' private operators so
+        # the D3 structure-count degradation is real, and family_size on
+        # critical entries is never misleadingly 0.
         op_family: dict[tuple[str, str], int] = {}
-        if expand_ops:
+        if op_ids:
             rows = graph.query(
                 "MATCH (op:Point {is_operator:true}) WHERE op.id IN $op_ids "
                 "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point) "
                 "WHERE (other.is_operator = false OR other.is_operator IS NULL) "
                 "RETURN op.id, type(r2) AS et, count(other)",
-                params={"op_ids": list(expand_ops)},
+                params={"op_ids": list(op_ids)},
             ).result_set
             for row in rows:
                 op_family[(row[0], row[1])] = int(row[2])
@@ -1208,8 +1230,10 @@ def get_relationships_bounded(
                     "family_size": 0, "op_created_at": None,
                 })
 
-            # Support-mass: recency-ordered, deduped, capped by BOTH budgets.
-            support.sort(key=lambda e: e["peer"].get("created_at") or 0, reverse=True)
+            # Support-mass: recency-ordered (mixed-format safe), deduped, capped
+            # by BOTH budgets. Criticals are exempt from the per-point cap —
+            # they do NOT consume per-point room (D3: caps govern support only).
+            support.sort(key=lambda e: _created_sort_key(e["peer"].get("created_at")), reverse=True)
             seen: set[tuple] = set()
             deduped: list[dict] = []
             for e in support:
@@ -1220,7 +1244,7 @@ def get_relationships_bounded(
             support = deduped
 
             entries = list(criticals)
-            per_point_room = max(0, per_point_cap - len(criticals))
+            per_point_room = per_point_cap  # criticals are exempt — D3
             global_room = max(0, global_budget - global_support_used)
             keep = min(per_point_room, global_room, len(support))
             entries.extend(support[:keep])
@@ -1231,7 +1255,6 @@ def get_relationships_bounded(
             # agent still knows the structural weight (D3). Points WITH peer
             # entries disclose their full family via per-entry family_size.
             if not any("peer" in e for e in entries) and point_ops.get(pid):
-                from collections import Counter
                 # family per mechanism across this point's operators
                 mech_family = Counter()
                 for (et, _idx, op_id, mechanism, _pred, _created) in point_ops.get(pid, []):
@@ -1279,7 +1302,7 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
             "OPTIONAL MATCH (new:Point)-[r2:CORRECTS]->(n) "
             "RETURN n.id, n.status, "
             "  old.id, old.content, old.createdAt, "
-            "  new.id, new.content, new.createdAt, "
+            "  new.id, new.status, new.content, new.createdAt, "
             "  s.id, s.name, s.subjectKind, "
             "  es.id, es.name, es.subjectKind",
             params={"ids": point_ids},
@@ -1294,8 +1317,8 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
                 "subject": None,
             })
             old_id, old_content, old_created = row[2], row[3], row[4]
-            new_id, new_content, new_created = row[5], row[6], row[7]
-            if old_id:
+            new_id, new_status, new_content, new_created = row[5], row[6], row[7], row[8]
+            if old_id and old_id not in {s["id"] for s in st["supersedes"]}:
                 st["supersedes"].append({
                     "id": old_id,
                     "content_snippet": (old_content or "")[:120],
@@ -1307,11 +1330,15 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
                     "content_snippet": (new_content or "")[:120],
                     "created_at": new_created,
                 }
-                if st["superseded_by"] is None or (new_created or "") > (st["superseded_by"]["created_at"] or ""):
+                # A retracted correcting point is NOT superseding authority.
+                if new_status == "retracted":
+                    pass
+                elif st["superseded_by"] is None or _created_sort_key(new_created) > _created_sort_key(
+                        st["superseded_by"].get("created_at")):
                     st["superseded_by"] = cand
             # Subject: own aboutSubject wins; event's is the ≤1-hop fallback.
-            s_id, s_name, s_kind = row[8], row[9], row[10]
-            es_id, es_name, es_kind = row[11], row[12], row[13]
+            s_id, s_name, s_kind = row[9], row[10], row[11]
+            es_id, es_name, es_kind = row[12], row[13], row[14]
             if st["subject"] is None and s_id:
                 st["subject"] = {"id": s_id, "name": s_name or "", "kind": s_kind or ""}
             elif st["subject"] is None and es_id:

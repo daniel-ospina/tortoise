@@ -112,37 +112,32 @@ def test_expand_relationships_full_content(sdk):
     assert len(expanded) == 1
     assert "related_content" in expanded[0]
     assert "beta claim" in expanded[0]["related_content"]
+    # #689/#898 posture: full-fidelity view is not blind to terminal state
+    assert "related_status" in expanded[0]
 
 
 def test_expand_relationships_missing_point(sdk):
     assert sdk.expand_relationships("does-not-exist") == []
 
 
-def test_expand_mcp_tool():
-    """MCP surface routes to the SDK method and returns the full payload."""
+def test_expand_mcp_tool(sdk, monkeypatch):
+    """MCP surface routes to the SDK method and returns the full payload (isolated DB)."""
     from tortoise.mcp_auth import _transport_mode
-    from tortoise.mcp_server import (
-        tortoise_expand_relationships, tortoise_create_point,
-        tortoise_create_operator, tortoise_delete_point,
-    )
+    from tortoise.mcp_server import tortoise_expand_relationships
+    from tortoise import mcp_server as mcp_mod
     assert callable(tortoise_expand_relationships)
+    # repo convention: swap _get_team_sdk for the isolated fixture SDK
+    monkeypatch.setattr(mcp_mod, "_get_team_sdk", lambda: sdk)
     token = _transport_mode.set("stdio")
     try:
-        a = tortoise_create_point(kind="statement", content="alpha claim", authoredBy="test-suite")
-        b = tortoise_create_point(kind="statement", content="beta claim with unique content payload", authoredBy="test-suite")
-        aid = a.get("id") if isinstance(a, dict) else None
-        bid = b.get("id") if isinstance(b, dict) else None
-        try:
-            if aid and bid:
-                tortoise_create_operator("IMPL", aid, [bid])
-            out = tortoise_expand_relationships(aid)
-            assert isinstance(out, list), out
-            assert any("related_content" in e and "beta claim" in e["related_content"] for e in out)
-        finally:
-            if aid:
-                tortoise_delete_point(aid)
-            if bid:
-                tortoise_delete_point(bid)
+        a = sdk.create_point("statement", "alpha claim")
+        b = sdk.create_point("statement", "beta claim with unique content payload")
+        sdk.create_operator("IMPL", a["id"], [b["id"]])
+        out = tortoise_expand_relationships(a["id"])
+        assert isinstance(out, list), out
+        assert any("related_content" in e and "beta claim" in e["related_content"] for e in out)
+        # related_status annotated on the expand payload
+        assert any(e.get("related_status") is not None for e in out)
     finally:
         _transport_mode.reset(token)
 
