@@ -184,6 +184,16 @@ class TestS2:
         assert "cause-effect" in v2.S2_TMPL
         assert "operational/process lessons" in v2.S4_TMPL
 
+    def test_prompt_supersession_rules(self):
+        """#1386: S2/S4 carry the supersession mapping rule + decision-event
+        discipline (never fabricate) + recoup done-things as occurrences."""
+        assert "SUPERSESSION (state objects/subjects" in v2.S2_TMPL
+        assert '"supersedes": "<existing-id>"' in v2.S2_TMPL
+        assert "NEVER fabricate a decision event" in v2.S2_TMPL
+        assert "RECOUP DONE-THINGS as occurrence events" in v2.S2_TMPL
+        assert "SUPERSESSION (state objects/subjects" in v2.S4_TMPL
+        assert "never fabricate one for" in v2.S4_TMPL
+
     def test_minted_kind_report(self):
         bad = json.loads(json.dumps(S2_FIXTURE))
         bad["entities"].append({"name": "worktree", "kind": "worktree",
@@ -422,6 +432,65 @@ class TestS5:
         embed["entities"][0]["lifecycle"] = "superseded"
         result = v2.execute_embed(embed, {}, session_id="s1")
         assert any("lifecycle=superseded" in w for w in result["warnings"])
+
+    def test_supersession_recorded_from_s3(self):
+        """#1386: a NEW entity carrying supersedes=<existing S3 id> is recorded
+        deterministically in supersessions + link_before_create."""
+        search = {"entities": [{"id": "obj-old", "name": "strategy-A",
+                                "kind": "core:strategy"}], "points": [], "events": []}
+        embed = {"entities": [
+            {"name": "strategy-B", "kind": "core:strategy", "lifecycle": "created",
+             "supersedes": "obj-old", "note": None}],
+            "events": [], "points": [], "operators": [],
+            "chain_notes": [], "link_before_create": []}
+        result = v2.execute_embed(embed, search, session_id="s1")
+        assert result["supersessions"] == [{
+            "superseded": "obj-old", "supersedes_by": "strategy-B",
+            "evidence": "entity lifecycle supersedes (conversation-driven)"}]
+        assert result["stats"]["supersessions"] == 1
+        note = next(n for n in result["link_before_create"]
+                    if "strategy-B" in n["searched_for"])
+        assert note["found"] is False  # new entity created
+
+    def test_supersession_name_ref_resolves(self):
+        """#1386: supersedes may reference the existing entity by NAME
+        (anaphora resolution) — resolves to the S3 id."""
+        search = {"entities": [{"id": "obj-old", "name": "strategy-A",
+                                "kind": "core:strategy"}], "points": [], "events": []}
+        embed = {"entities": [
+            {"name": "strategy-B", "kind": "core:strategy", "lifecycle": "created",
+             "supersedes": "strategy-A", "note": None}],
+            "events": [], "points": [], "operators": [],
+            "chain_notes": [], "link_before_create": []}
+        result = v2.execute_embed(embed, search, session_id="s1")
+        assert result["supersessions"][0]["superseded"] == "obj-old"
+
+    def test_unresolvable_supersedes_warns_no_record(self):
+        """#1386: a supersedes ref that matches nothing in S3 warns and is
+        NOT recorded (never guess a graph id)."""
+        embed = {"entities": [
+            {"name": "strategy-B", "kind": "core:strategy", "lifecycle": "created",
+             "supersedes": "obj-hallucinated", "note": None}],
+            "events": [], "points": [], "operators": [],
+            "chain_notes": [], "link_before_create": []}
+        result = v2.execute_embed(embed, {}, session_id="s1")
+        assert result["supersessions"] == []
+        assert any("does not resolve" in w for w in result["warnings"])
+
+    def test_derive_supersessions_projection_mapping(self):
+        """#1386: the status-derivation mapping — event-structure →
+        'A superseded by B' — works standalone (the read-side projection
+        input)."""
+        search = {"entities": [{"id": "obj-old", "name": "strategy-A",
+                                "kind": "core:strategy"}], "points": [], "events": []}
+        embed = {"entities": [
+            {"name": "strategy-B", "kind": "core:strategy", "lifecycle": "created",
+             "supersedes": "strategy-A", "note": None}],
+            "events": [], "points": [], "operators": [],
+            "chain_notes": [], "link_before_create": []}
+        out = v2.derive_supersessions(embed, search)
+        assert out == [{"superseded": "obj-old", "supersedes_by": "strategy-B",
+                        "evidence": "entity lifecycle supersedes (conversation-driven)"}]
 
     def test_unresolved_operator_dropped(self):
         embed = json.loads(json.dumps(S2_FIXTURE))

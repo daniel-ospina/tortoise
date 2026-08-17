@@ -375,6 +375,27 @@ CONDENSED SEMANTIC CORE (from the how-to-use-tortoise skill)
     when you know the id, else null.
   * unchanged   = already exists — connect only, do NOT re-create.
   * superseded  = this item is being replaced by a newer one.
+- SUPERSESSION (state objects/subjects — the state-centric lifecycle): when
+  the conversation shows an entity being REPLACED — adopted B over A, "drop
+  the old approach for X", "the new strategy supersedes the old one" — emit
+  the NEW entity (lifecycle created) with "supersedes": "<existing-id>" when
+  the superseded item is in the graph search results, else null. The OLD
+  entity is NOT re-created — supersede, don't duplicate. Anaphora resolves to
+  the existing graph item: "the old strategy" / "the previous approach" / "the
+  way we were doing it" refers to the existing entity of that kind from the
+  search results. Emit ONE statement point capturing the replacement
+  ("strategy-B supersedes strategy-A") with about_entities listing BOTH the
+  new and the superseded entity — that point is the graph-visible record.
+- DECISION EVENTS — ONLY when real: emit a decision event ONLY when the
+  conversation contains a genuine commitment with reasons ("we decided",
+  "the ruling is", "we're going with X"). NEVER fabricate a decision event
+  for a supersession, a completion, or a process step — those are entity
+  lifecycle + occurrence events, not decisions.
+- RECOUP DONE-THINGS as occurrence events: when the text shows something was
+  completed (a PR merged, an issue closed, a release shipped, an approach
+  finished), emit an occurrence event capturing the DONE state stripped of
+  mechanics ids ("the EP test migration shipped", not "PR #1004 merged"). The
+  session's event stream includes what got done, not just decisions.
 - ENTITY NAMES CARRY NO MECHANICS: entity names are durable subjects/objects —
   strip ids and numbers ("EP test migration", not "pr #1004: ep test migration";
   "the draft-filter fix", not "issue #992"). Issue/PR/commit identifiers never
@@ -641,6 +662,15 @@ OUTPUT — ONE JSON object, the COMPLETE embed list (S2 + gaps), SAME contract:
 Rules:
 - Re-emit the S2 items you keep, corrected where the search results show they
   already exist (lifecycle changed/unchanged + supersedes = the existing id).
+- SUPERSESSION (state objects/subjects): when the story shows an entity
+  REPLACED ("adopted B over A", "drop the old approach") and the search
+  results contain the superseded item, emit the NEW entity with
+  "supersedes": "<existing-id>"; the old entity is NOT re-created; anaphora
+  ("the old strategy") resolves to the existing item. Emit ONE statement
+  point capturing the replacement wired to BOTH entities (about_entities =
+  [new, superseded]).
+- DECISION EVENTS only when a real decision exists — never fabricate one for
+  a supersession or completion.
 - A point that already exists in the graph (same content) → lifecycle
   unchanged, do NOT re-create.
 - OPERATOR REFERENCING: operator src/dst MUST be the EXACT content of a point
@@ -875,6 +905,52 @@ def _minted_kind_report(embed_list: dict, master: dict | None = None) -> list[st
     return minted
 
 
+def _resolve_superseded(ref: str, search: dict) -> str | None:
+    """Resolve an entity ``supersedes`` ref to the S3-returned existing
+    entity (by id, or by name via the search index). Returns the existing
+    entity's canonical display (id or name) or None when unresolvable —
+    never guesses (a hallucinated id must not become a graph reference)."""
+    ref = (ref or "").strip()
+    if not ref or ref in ("null", "None"):
+        return None
+    for e in (search or {}).get("entities", []) or []:
+        if not isinstance(e, dict):
+            continue
+        if e.get("id") == ref:
+            return str(e.get("id")) or str(e.get("name"))
+    for e in (search or {}).get("entities", []) or []:
+        if isinstance(e, dict) and _norm(e.get("name", "")) == _norm(ref):
+            return str(e.get("id")) or str(e.get("name"))
+    return None
+
+
+def derive_supersessions(embed_list: dict, search: dict) -> list[dict]:
+    """The minimal status-derivation mapping (state-centric model): from the
+    embed list's entity lifecycle/supersedes + the S3 search results, derive
+    'entity A superseded by entity B' pairs. This is the read-side
+    projection's input — the event stream (session event + filed points) is
+    the truth; object status is derived, not stored.
+
+    Returns [{"superseded": ..., "supersedes_by": ..., "evidence": ...}].
+    """
+    out: list[dict] = []
+    for e in embed_list.get("entities", []) or []:
+        if not isinstance(e, dict):
+            continue
+        ref = str(e.get("supersedes") or "").strip()
+        name = str(e.get("name", "")).strip()
+        if not ref or not name or ref in ("null", "None"):
+            continue
+        resolved = _resolve_superseded(ref, search)
+        if resolved:
+            out.append({
+                "superseded": resolved,
+                "supersedes_by": name,
+                "evidence": "entity lifecycle supersedes (conversation-driven)",
+            })
+    return out
+
+
 _ENTITY_FALLBACK = {"kind": "core:other"}
 _EVENT_FALLBACK = {"kind": "core:occurrence"}
 _POINT_FALLBACK = {"kind": "statement"}
@@ -907,6 +983,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # ── entities (dependency order 1) ─────────────────────────────────────
     payload_entities: list[dict] = []
     link_before_create: list[dict] = []
+    supersessions: list[dict] = []   # conversation-driven supersession records
     seen_entities: set[tuple[str, str]] = set()
     for e in embed_list.get("entities", []) or []:
         if not isinstance(e, dict):
@@ -943,11 +1020,27 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 "searched_for": f"entity '{name}'", "found": False,
                 "note": "no match — created"})
         lifecycle = str(e.get("lifecycle", "") or "").strip()
+        supersedes_ref = str(e.get("supersedes") or "").strip()
         if lifecycle in ("changed", "superseded"):
             warnings.append(f"entity '{name[:60]}' lifecycle={lifecycle} is not "
                             "expressible in the Layer-1 payload — the server "
                             "merges entities by (name, kind); the state change "
                             "must ride on points/events instead")
+        if supersedes_ref and supersedes_ref not in ("null", "None", ""):
+            # conversation-driven supersession: record it deterministically.
+            # The supersedes ref is either an id the S3 search returned or an
+            # entity name — validate against the S3 results, never guess.
+            resolved = _resolve_superseded(supersedes_ref, search)
+            if resolved:
+                supersessions.append({
+                    "superseded": resolved,
+                    "supersedes_by": name,
+                    "evidence": "entity lifecycle supersedes (conversation-driven)",
+                })
+            else:
+                warnings.append(f"entity '{name[:60]}' supersedes={supersedes_ref!r} "
+                                "does not resolve to an S3 search result — "
+                                "recorded without a graph id")
         payload_entities.append({
             "name": name, "kind": kind, "passes_frequency_gate": True})
 
@@ -1151,6 +1244,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
 
     return {
         "payload": payload,
+        "supersessions": supersessions,
         "chain_notes": llm_chain_notes + chain_notes,
         "link_before_create": link_before_create,
         "warnings": warnings,
@@ -1161,6 +1255,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             "search_queries": (search or {}).get("queries_run", 0),
             "search_degraded": bool((search or {}).get("degraded")),
             "chain_notes": len(chain_notes),
+            "supersessions": len(supersessions),
         },
     }
 
@@ -1311,7 +1406,7 @@ __all__ = [
     "run_s2", "render_s2_prompt",
     "resolve_backend_mode", "search_graph",
     "run_s4", "render_s4_prompt",
-    "execute_embed", "validate_chains",
+    "execute_embed", "validate_chains", "derive_supersessions",
     "extract_session_v2",
     "S1_TMPL", "S2_TMPL", "S4_TMPL", "OUTPUT_CONTRACT",
     "SUBJECTS", "EVENTS", "CHAINS",
