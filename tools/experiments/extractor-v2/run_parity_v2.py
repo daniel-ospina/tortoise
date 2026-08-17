@@ -102,6 +102,43 @@ def _path_b(flash, edus: list[dict], chunk_size: int = 50) -> dict:
     }
 
 
+def _judge_loss(model, a: dict, b: dict) -> dict:
+    """Semantic judge: for every containment-lost A item, classify whether B
+    captures the MEANING (any wording) or truly misses it. The raw text-set
+    containment cannot be met by a narrative-first pipeline by construction
+    (v2 strips mechanics + rephrases) — this is the honest indicator.
+
+    One flash call per run (batch). Returns {item: "captured"|"missing"}."""
+    import json as _json
+    lost = {k: sorted(_norm(a.get(k)) - _norm(b.get(k)))
+            for k in ("decisions", "state", "logic")}
+    items = [(k, it) for k in ("decisions", "state", "logic") for it in lost[k]]
+    if not items:
+        return {}
+    b_all = {k: [str(x.get("content") or x.get("point") or x.get("name") or "")
+                 for x in (b.get(k) or [])] for k in ("decisions", "state", "logic")}
+    user = _json.dumps({
+        "A_lost_items": [{"section": k, "item": it} for k, it in items],
+        "B_captured": b_all,
+    }, indent=1)
+    system = ("You judge epistemic-memory parity. For each A item, does ANY B item "
+              "capture its MEANING (same durable claim/decision/lesson), even in "
+              "different words or with mechanics stripped? Answer ONE JSON object "
+              "mapping the A item text -> \"captured\" or \"missing\". Judge by "
+              "meaning, not wording. Items that are pure process chatter with no "
+              "durable claim count as \"missing\" but are expected-loss, not "
+              "regression.")
+    try:
+        resp = _complete(model, system, user)
+        d = _parse_json(resp)
+    except Exception:  # judge failure degrades to text metric (loss = missing)
+        return {}
+    out = {}
+    for k, it in items:
+        out[it] = d.get(it, "missing")
+    return out
+
+
 def _containment(a: dict, b: dict) -> dict:
     a_sets = {k: _norm(a.get(k)) for k in ("decisions", "state", "logic")}
     b_sets = {k: _norm(b.get(k)) for k in ("decisions", "state", "logic")}
@@ -155,12 +192,15 @@ def main() -> None:
         else DEFAULT_TRANSCRIPT
     runs = 3
     chunk_size = 50
+    judge = True
     i = 0
     while i < len(args):
         if args[i] == "--runs" and i + 1 < len(args):
             runs = int(args[i + 1]); i += 2
         elif args[i] == "--chunk-size" and i + 1 < len(args):
             chunk_size = int(args[i + 1]); i += 2
+        elif args[i] == "--no-judge":
+            judge = False; i += 1
         else:
             print(f"[run_parity_v2] unknown arg: {args[i]}", file=sys.stderr)
             sys.exit(2)
@@ -179,6 +219,13 @@ def main() -> None:
         b = _path_b(flash, edus, chunk_size=chunk_size)
         b_secs = round(time.time() - t0)
         c = _containment(a, b)
+        semantic = {}
+        if judge:
+            semantic = _judge_loss(flash, a, b)
+            captured = sum(1 for v in semantic.values() if v == "captured")
+            missing = sum(1 for v in semantic.values() if v == "missing")
+            print(f"  semantic judge: captured_differently={captured} "
+                  f"truly_missing={missing}", flush=True)
         run = {
             "run": r,
             "A": {"decisions": len(a["decisions"]), "state": len(a["state"]),
@@ -192,6 +239,7 @@ def main() -> None:
                             "loss": c["loss"], "gain_counts": {k: len(v)
                                                                for k, v in c["gain"].items()}},
             "loss_analysis": c.get("loss_analysis", {}),
+            "semantic": semantic,
         }
         report["runs"].append(run)
         rephrased = sum(1 for k, lst in c.get("loss_analysis", {}).items()
