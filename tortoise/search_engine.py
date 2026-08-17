@@ -766,6 +766,11 @@ def degradation_chain(
 # Must match TortoiseEP.get_contested_claims (tortoise/ep.py).
 CONTESTED_VARIANCE_THRESHOLD = 0.04
 
+# Driver-level timeout for decoration queries (ms). The decoration runs OUTSIDE
+# the per-strategy circuit breakers (those guard degradation_chain); a server-side
+# kill per query bounds a hung FalkorDB's impact on search latency (#1353 review).
+_DECORATION_TIMEOUT_MS = 200
+
 
 def _created_sort_key(value):
     """Sortable key for createdAt values — safe across mixed formats.
@@ -966,12 +971,10 @@ def get_relationships_bounded(
     op_created_at. related_content is intentionally ABSENT in the list view
     (D5 — full content via expand_relationships, D14).
 
-    Contested coverage: contested peers are computed exactly from the persisted
-    α/β of every EP-bearing peer WITHIN each operator's per-op fetch (per_op_cap);
-    on pathologically dense has-EP operators, contested candidates beyond the
-    per-op cap are a documented bounded worst case (exactness via a persisted
-    contested flag is tracked in #1370). NAND, terminal-status, mitigated and
-    CORRECTS classes are always complete.
+    Contested coverage: contested peers are computed EXACTLY in Q2-crit — the
+    in-Cypher variance on the coalesced persisted α/β (same formula as
+    `_beta_variance`/TortoiseEP), so contested is cap-exempt with no sampling.
+    NAND, terminal-status, mitigated and CORRECTS classes are always complete.
 
     get_relationships() is intentionally UNTOUCHED (D12) — topic_summarization
     needs full NAND completeness for disputed-pair detection.
@@ -993,6 +996,7 @@ def get_relationships_bounded(
             "  op.op_type AS mechanism, coalesce(op.label, '') AS predicate, "
             "  op.createdAt AS op_created",
             params={"ids": point_ids},
+            timeout=_DECORATION_TIMEOUT_MS,
         ).result_set
         point_ops: dict[str, list[tuple]] = {pid: [] for pid in point_ids}
         op_ids: set[str] = set()
@@ -1014,6 +1018,7 @@ def get_relationships_bounded(
                 "RETURN n.id, old.id, old.status, old.createdAt, "
                 "  new.id, new.status, new.createdAt",
                 params={"ids": point_ids},
+                timeout=_DECORATION_TIMEOUT_MS,
             ).result_set
             for row in rows:
                 pid = row[0]
@@ -1034,6 +1039,7 @@ def get_relationships_bounded(
                 "MATCH (op)-[:mitigated_by]->(m:Point) "
                 "RETURN op.id, m.id, m.status, m.createdAt, m.content",
                 params={"op_ids": list(op_ids)},
+                timeout=_DECORATION_TIMEOUT_MS,
             ).result_set
             for row in rows:
                 op_id = row[0]
@@ -1042,11 +1048,11 @@ def get_relationships_bounded(
                     "created_at": row[3], "snippet": (row[4] or "")[:120],
                 })
 
-        # Q2-crit: critical-class endpoints — NAND edges + terminal-status peers.
-        # COMPLETE, bounded only by raw_cap (safety valve for pathological
-        # terminal-heavy corpora): these classes must never be dropped by the
-        # per-point/global/per-op caps (D3/D4). Low volume in practice (NAND +
-        # terminal points are the exception).
+        # Q2-crit: critical-class endpoints — NAND edges, terminal-status peers,
+        # AND contested peers (in-Cypher variance on the coalesced α/β — exact,
+        # no per-op sampling). COMPLETE, bounded only by raw_cap (safety valve):
+        # these classes must never be dropped by the per-point/global/per-op
+        # caps (D3/D4). Low volume in practice.
         op_crit: dict[str, dict[str, tuple]] = {}
         if op_ids:
             rows = graph.query(
@@ -1054,8 +1060,12 @@ def get_relationships_bounded(
                 "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point) "
                 "WHERE (other.is_operator = false OR other.is_operator IS NULL) "
                 "  AND NOT (op)-[:mitigated_by]->(other) "
-                "  AND (type(r2) = 'NAND' OR "
-                "       other.status IN ['superseded','retracted','deprecated']) "
+                "  AND (type(r2) = 'NAND' "
+                "       OR other.status IN ['superseded','retracted','deprecated'] "
+                "       OR ((other.posterior_alpha IS NOT NULL OR other.ep_alpha IS NOT NULL) "
+                "           AND (coalesce(other.posterior_alpha, other.ep_alpha, 1.0) * coalesce(other.posterior_beta, other.ep_beta, 1.0)) "
+                "               / ((coalesce(other.posterior_alpha, other.ep_alpha, 1.0) + coalesce(other.posterior_beta, other.ep_beta, 1.0)) ^ 2 "
+                "                  * (coalesce(other.posterior_alpha, other.ep_alpha, 1.0) + coalesce(other.posterior_beta, other.ep_beta, 1.0) + 1)) > $contested_threshold)) "
                 "RETURN op.id, type(r2) AS et, r2.idx AS other_idx, other.id, "
                 "  other.pointKind, other.status, "
                 "  coalesce(other.posterior_alpha, other.ep_alpha, 1.0), "
@@ -1063,7 +1073,9 @@ def get_relationships_bounded(
                 "  (other.posterior_alpha IS NOT NULL OR other.ep_alpha IS NOT NULL), "
                 "  other.createdAt "
                 "LIMIT $raw_cap",
-                params={"op_ids": list(op_ids), "raw_cap": raw_cap},
+                params={"op_ids": list(op_ids), "raw_cap": raw_cap,
+                        "contested_threshold": CONTESTED_VARIANCE_THRESHOLD},
+                timeout=_DECORATION_TIMEOUT_MS,
             ).result_set
             for row in rows:
                 op_crit.setdefault(row[0], {})[row[3]] = (
@@ -1072,7 +1084,7 @@ def get_relationships_bounded(
                 )
 
         # The operators of the TOP-K result points are the ones that get
-        # endpoint expansion (hasep + support). The global budget (140 ≈ 14 × 10)
+        # support endpoint expansion. The global budget (140 ≈ 14 × 10)
         # makes tail points' peer lists redundant — they degrade to structure
         # counts (D3), so their operators are not expanded (this is what keeps
         # limit=100 affordable).
@@ -1081,38 +1093,9 @@ def get_relationships_bounded(
             for (_et, _idx, op_id, _mech, _pred, _created) in point_ops.get(pid, []):
                 expand_ops.add(op_id)
 
-        # Q2-hasep: EP-bearing endpoints (contested candidates — variance is
-        # computed in Python from the persisted α/β, D13). Per-op capped via
-        # CALL subquery. HONESTY NOTE: contested peers within the fetched
-        # per-op set are guaranteed (computed exactly); beyond the per-op cap
-        # on pathologically dense has-EP operators, contested coverage is a
-        # documented bounded worst case (the persisted-contested-flag
-        # follow-up in #1370 makes this exact).
-        op_hasep: dict[str, dict[str, tuple]] = {}
-        if expand_ops:
-            rows = graph.query(
-                "MATCH (op:Point {is_operator:true}) WHERE op.id IN $op_ids "
-                "CALL { WITH op MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point) "
-                "WHERE (other.is_operator = false OR other.is_operator IS NULL) "
-                "  AND NOT (op)-[:mitigated_by]->(other) "
-                "  AND (other.posterior_alpha IS NOT NULL OR other.ep_alpha IS NOT NULL) "
-                "RETURN r2, other LIMIT $per_op } "
-                "RETURN op.id, type(r2) AS et, r2.idx AS other_idx, other.id, "
-                "  other.pointKind, other.status, "
-                "  coalesce(other.posterior_alpha, other.ep_alpha, 1.0), "
-                "  coalesce(other.posterior_beta, other.ep_beta, 1.0), "
-                "  (other.posterior_alpha IS NOT NULL OR other.ep_alpha IS NOT NULL), "
-                "  other.createdAt",
-                params={"op_ids": list(expand_ops), "per_op": per_op_cap},
-            ).result_set
-            for row in rows:
-                op_hasep.setdefault(row[0], {})[row[3]] = (
-                    row[1], row[2], row[4] or "", row[5] or "",
-                    float(row[6]), float(row[7]), bool(row[8]), row[9],
-                )
-
         # Q2-support: per-op-capped support endpoints (CALL subquery = per-op
-        # LIMIT, no global sort) for the expanded operators.
+        # LIMIT, no global sort) for the expanded operators. Contested peers
+        # are already covered EXACTLY by Q2-crit — this fetch is pure filler.
         op_support: dict[str, dict[str, tuple]] = {}
         if expand_ops:
             rows = graph.query(
@@ -1128,6 +1111,7 @@ def get_relationships_bounded(
                 "  (other.posterior_alpha IS NOT NULL OR other.ep_alpha IS NOT NULL), "
                 "  other.createdAt",
                 params={"op_ids": list(expand_ops), "per_op": per_op_cap},
+                timeout=_DECORATION_TIMEOUT_MS,
             ).result_set
             for row in rows:
                 op_support.setdefault(row[0], {})[row[3]] = (
@@ -1135,20 +1119,21 @@ def get_relationships_bounded(
                     float(row[6]), float(row[7]), bool(row[8]), row[9],
                 )
 
-        # Unified endpoint store: critical classes first, then EP candidates,
-        # then support filler (same tuple shape — dict-merge dedupes).
+        # Unified endpoint store: critical classes first, then support filler
+        # (same tuple shape — dict-merge dedupes).
         op_endpoints: dict[str, dict[str, tuple]] = {}
         for op_id in op_ids:
             merged: dict[str, tuple] = {}
-            for src in (op_crit, op_hasep, op_support):
+            for src in (op_crit, op_support):
                 merged.update(src.get(op_id, {}))
             op_endpoints[op_id] = merged
 
-        # Q2f: family sizes per (op, edge-type) for ALL result operators
-        # (plain aggregate — cheap; mitigations are rare and family is
-        # approximate disclosure). Covers tail points' private operators so
-        # the D3 structure-count degradation is real, and family_size on
-        # critical entries is never misleadingly 0.
+        # Q2f: family sizes per (op, edge-type) for ALL result operators.
+        # Plain aggregate WITHOUT the mitigation-exclusion pattern (the NOT
+        # pattern cost ~50ms here) — family is approximate disclosure and
+        # mitigations are rare (their count inflates family by exactly the
+        # separately-listed mitigations, documented). Covers tail points'
+        # private operators so the D3 structure-count degradation is real.
         op_family: dict[tuple[str, str], int] = {}
         if op_ids:
             rows = graph.query(
@@ -1157,6 +1142,7 @@ def get_relationships_bounded(
                 "WHERE (other.is_operator = false OR other.is_operator IS NULL) "
                 "RETURN op.id, type(r2) AS et, count(other)",
                 params={"op_ids": list(op_ids)},
+                timeout=_DECORATION_TIMEOUT_MS,
             ).result_set
             for row in rows:
                 op_family[(row[0], row[1])] = int(row[2])
@@ -1190,8 +1176,12 @@ def get_relationships_bounded(
                             "id": other_id,
                             "kind": kind,
                             "status": status,
-                            "confidence": round(alpha / (alpha + beta), 4),
-                            "variance": round(variance, 6),
+                            # Unmeasured (no persisted EP) peers carry None —
+                            # never a fabricated Beta(1,1) posterior (0.5/0.0833
+                            # would be internally contradictory: variance above
+                            # the contested threshold but contested=false).
+                            "confidence": round(alpha / (alpha + beta), 4) if has_ep else None,
+                            "variance": round(variance, 6) if has_ep else None,
                             "contested": contested,
                             "created_at": created,
                         },
@@ -1320,6 +1310,7 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
             "  s.id, s.name, s.subjectKind, "
             "  es.id, es.name, es.subjectKind",
             params={"ids": point_ids},
+            timeout=_DECORATION_TIMEOUT_MS,
         ).result_set
 
         for row in rows:

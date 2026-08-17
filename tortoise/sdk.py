@@ -9058,6 +9058,7 @@ class TortoiseSDK:
                 rows = proj.g.query(
                     "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, n.status",
                     params={"ids": related_ids},
+                    timeout=200,
                 ).result_set
                 statuses = {row[0]: row[1] or "" for row in rows}
             except Exception:
