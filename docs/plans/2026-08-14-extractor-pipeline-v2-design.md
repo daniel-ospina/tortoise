@@ -36,8 +36,11 @@ ground) has three structural defects the calibration runs surfaced:
 
 ## 2. The new architecture — 5 stages, one model, narrative-first
 
-One capable model (deepseek-v4-flash), 5 prompts in order, same session
-(continue-context — no repeated re-reading of the raw conversation):
+One capable model (deepseek-v4-flash) runs FOUR prompts in order, same
+session (continue-context — no repeated re-reading of the raw conversation).
+The fifth step (embed) is EXECUTION via the how-to-use-tortoise mechanics, not
+a flash prompt. The solar-pro4 pre-processing tier is a LATER optimization —
+parked, tested after the flash-only design is proven.
 
 ```
 raw conversation
@@ -59,6 +62,12 @@ raw conversation
 [S3] SEARCH THE GRAPH — using the summary, search existing memory for related
      entities/points/events (same names, topics, prior decisions). Fetch what
      exists. [NEW CAPABILITY: the extractor reads the graph.]
+
+     Backend: the REAL graph — FalkorDB via Docker (self-hosted) or the hosted
+     API (TORTOISE_DB_URI). NOT FalkorDBLite (that is test/eval-only embedded).
+     The graph-read call must resolve the active backend from the environment
+     and run the same queries a client would (entity by name+kind, points by
+     aboutObject/aboutSubject, events by entity).
   │
   ▼
 [S4] REVIEW GAPS — look at the conversation + S1 summary + S3 search results:
@@ -66,10 +75,20 @@ raw conversation
      model? Add them. Output the COMPLETE embed list.
   │
   ▼
-[S5] EMBED — using how-to-use-tortoise mechanics, execute the writes:
-     entities first → events (with aboutObject) → points (with aboutObject) →
-     operators (IMPL/NAND/MITIGATES) → connect to EXISTING graph items.
+[S5] EMBED — EXECUTION (not a flash prompt): using how-to-use-tortoise
+     mechanics, execute the writes: entities first → events (with aboutObject)
+     → points (with aboutObject) → operators (IMPL/NAND/MITIGATES) → connect
+     to EXISTING graph items.
 ```
+
+### Chunking (long conversations, up to 1M tokens)
+
+A conversation can far exceed one model window. The S1 story summary is
+CHUNKED: split the raw conversation into bounded segments (e.g. 40-60 EDUs),
+run S1 per chunk, then COMPILE the per-chunk narratives into one coherent
+story (dedup entities, stitch the arc, preserve cross-chunk connections)
+before S2. Only the compiled story + the master list go forward — S2-S5 run
+on the compiled narrative, never on the raw.
 
 ### Why this fixes the three problems
 
@@ -154,8 +173,12 @@ pipeline, at comparable or lower cost? Validate on the calibration windows
    name/topic) and inject results into the prompt. Confirm the mechanism.
 3. **Condensed semantic core** (as in §4) — confirm this is the right slice of
    how-to-use-tortoise for the prompts.
-4. **The chains' enforcement**: warn-only (as packs declare) or block in S2/S5
-   (reject connections that violate a chain)? Packs declare `enforcement: warn`.
+4. **The chains' enforcement**: WARN (owner confirmed) — flag a chain violation
+   but do not hard-block. Additionally, S2/S5 should TRY TO FIX the mapping
+   when the data is not directly against the chain: e.g. a customer entity
+   connected to an architecture requirement is re-mapped toward the nearest
+   valid chain position (customer → JTBD → useCase → ...) with a note, rather
+   than dropped or blindly kept.
 
 ## 8. Scope classification (for routing)
 
