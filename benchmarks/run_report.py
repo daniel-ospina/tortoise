@@ -218,10 +218,10 @@ def _roundrobin(items: list[dict], n: int) -> list[dict]:
 def _make_arm(arm_name: str, ctx: dict):
     """Build fn(timeout_ms, qi) → (elapsed_ms, results_count, error) for one arm.
 
-    #1348: retrieval arms run at ctx["arm_limit"] (per-strategy depth). Default
-    = the pool floor (max(2 x e2e_limit, TORTOISE_POOL_FLOOR)) so a default run
-    measures the valid e2e@new-floor minus retrieval@new-floor decomposition;
-    the pre-floor #316 baseline (depth 20) is the recorded comparator.
+    #1348: retrieval arms run at ctx["arm_limit"] (per-strategy depth), set by
+    _run_with_sdk to args.depth or max(2 x e2e_limit, TORTOISE_POOL_FLOOR). The
+    ctx.get fallback 20 below is DEFENSIVE-ONLY (pre-floor #316 comparator); the
+    run-level default lives in _run_with_sdk.
     """
     graph = ctx["graph"]
     is_embedded = ctx["is_embedded"]
@@ -282,13 +282,18 @@ def _make_arm(arm_name: str, ctx: dict):
     return fn
 
 
-def _sdk_e2e(sdk, qi: dict, elevated: int | None):
+def _sdk_e2e(sdk, qi: dict, elevated: int | None, *, pool_size: int | None = None):
     t0 = time.perf_counter()
     err = None
     count = 0
     try:
+        # #1348: pool_size threads the run-level arm_limit into the SDK e2e
+        # leg so the E2E depth MATCHES the retrieval arms (--depth desync fix,
+        # code-review P2). Default None → SDK's own str_limit (env floor or
+        # historical limit*2), preserving the #316 baseline for default runs.
         rows = sdk.tortoise_fts_query(
             query=qi.get("query"), kind=qi.get("kind"), limit=10,
+            pool_size=pool_size,
             _elevated_timeout_ms=int(elevated) if elevated is not None else None,
         )
         count = len(rows)
@@ -576,7 +581,8 @@ def _run_with_sdk(args, sdk) -> dict:
     # pre-floor comparator (depth 20) recorded in provenance.
     e2e_limit = getattr(args, "e2e_limit", 10)
     # #1348: NO baked default floor — the depth finding was CEILING-CAPPED;
-    # env-only opt-in. Unset → historical e2e_limit*2 semantics.
+    # env-only opt-in. Unset → historical e2e_limit*2 semantics. Keep the
+    # parse in sync with sdk.py tortoise_fts_query (clamp 1..10000).
     pool_floor = 0
     raw_floor = os.environ.get("TORTOISE_POOL_FLOOR", "")
     if raw_floor.strip():
@@ -584,6 +590,7 @@ def _run_with_sdk(args, sdk) -> dict:
             pool_floor = int(raw_floor)
         except (TypeError, ValueError):
             pass
+        pool_floor = max(1, min(pool_floor, 10000))  # keep in sync with sdk.py
     arm_limit = getattr(args, "depth", None) or max(e2e_limit * 2, pool_floor)
     ctx = {
         "graph": proj.g,
@@ -644,7 +651,10 @@ def _run_with_sdk(args, sdk) -> dict:
         picks = _roundrobin(e2e_qs, args.samples)
 
         def e2e_fn(timeout_ms, qi):
-            return _sdk_e2e(sdk, qi, timeout_ms if timeout_ms > CAP_MS else None)
+            # #1348: thread arm_limit as pool_size so the E2E leg runs at the
+            # same retrieval depth as the isolation arms (--depth desync fix).
+            return _sdk_e2e(sdk, qi, timeout_ms if timeout_ms > CAP_MS else None,
+                            pool_size=arm_limit)
 
         if preflight_reason is not None:
             censored = _invalidated_arm("e2e:censored", CAP_MS, args.samples, preflight_reason)
@@ -676,11 +686,17 @@ def _run_with_sdk(args, sdk) -> dict:
         "warmup": {"iters": args.warmup_iters, "max_iters": args.warmup_max_iters},
         "samples": args.samples,
         # #1348: per-arm retrieval depth + embedder/decorator pins so the
-        # e2e@new-floor minus retrieval@new-floor decomposition is auditable
-        # and embedder/decorator versions can't confound the delta.
+        # e2e@new-floor minus retrieval@new-floor decomposition is auditable.
+        # Pins reflect REAL state (code-review P2 fix — no fabricated values):
+        # embedder_pinned = whether --depth was explicitly set (the pool-20
+        # comparator must be re-measured under the same embedder); decorator
+        # state is asserted from the environment (#1353 not merged → status-quo).
         "arm_limit": arm_limit,
-        "embedder_pinned": True,  # re-measure pool-20 comparator under same embedder
-        "decorator_state": "status-quo",  # #1353 landed: no → status-quo decoration
+        "embedder_pinned": bool(getattr(args, "depth", None)),
+        "decorator_state": (
+            "status-quo" if os.environ.get("TORTOISE_1353_DECORATION", "").strip() != "1"
+            else "optimized"
+        ),
     }
     return {
         "schema_version": 1,

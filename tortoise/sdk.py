@@ -8735,11 +8735,13 @@ class TortoiseSDK:
         # limit*2 historical default. NO BAKED DEFAULT FLOOR: the depth finding
         # (Task 0, delta(20,50)=0.14 pts < 1.0) was CEILING-CAPPED, so the floor
         # is env-only opt-in — unset env behaves exactly as pre-#1348 (limit*2).
+        # pool_size is validated up front (any mode, incl. full-scan) for
+        # consistency with the limit validation bound (code-review P2 fix).
+        if pool_size is not None and (pool_size < 1 or pool_size > 10000):
+            raise ValueError(f"pool_size must be 1-10000, got {pool_size}")
         if is_full_scan:
             str_limit = 100000
         elif pool_size is not None:
-            if pool_size < 1:
-                raise ValueError(f"pool_size must be >= 1, got {pool_size}")
             str_limit = pool_size
         else:
             pool_floor = 0  # env unset → historical limit*2 (no baked default, #1348)

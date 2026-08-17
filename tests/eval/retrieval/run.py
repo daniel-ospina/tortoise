@@ -164,6 +164,14 @@ def _rerank_fused(
     from tortoise.ranking import GraphRanker
     if not fused:
         return []
+    # #1348 code-review P1 guard: a bool (argparse flag) must NEVER reach the
+    # stub-projection seam — GraphRanker(True) would silently zero every boost
+    # (True is not None → treated as a projection; _fetch_signals swallows the
+    # AttributeError). Fail loudly instead of corrupting the measurement.
+    if stub_projection is not None and not hasattr(stub_projection, "g"):
+        raise TypeError(
+            "stub_projection must be a projection-like object with .g (or None), "
+            f"got {type(stub_projection).__name__!r} — do NOT pass the argparse flag")
     dicts = [{"id": pid, "scores": {"rrf": score}} for pid, score in fused]
     proj_for_rank = stub_projection if stub_projection is not None else proj
     if stub_projection is not None:
@@ -340,22 +348,32 @@ def _run_oracle_query(q: dict, ctx: dict, oracle) -> dict:
         strat: compute_metrics(_point_ids(ranked[strat])[:ctx["limit"]], labels)
         for strat in ctx["strategies"]
     }
+    # #1348 k-sweep: fused@{20,60,100} metrics are returned SEPARATELY (NOT
+    # added to per_query — keeps the schema contract "arm-OFF per_query keys ==
+    # active strategies" true; the report's k_sweep section is built from
+    # k_metrics). P2-E code-review fix.
+    k_metrics = {}
     if ctx.get("k_sweep"):
         for k in KSWEEP:
-            metrics[f"fused@{k}"] = compute_metrics(
+            k_metrics[str(k)] = compute_metrics(
                 _point_ids(ranked.get(f"fused@{k}", []))[:ctx["limit"]], labels)
-    return ranked, metrics
+    return ranked, metrics, k_metrics
 
 
 def _run_authored_query(q: dict, ctx: dict) -> dict[str, list[tuple[str, float]]]:
+    # #1348: authored queries have NO oracle grades — the stub-projection
+    # positive control is oracle-only. Passing the raw argparse bool would
+    # construct GraphRanker(True) and silently zero every boost (the bool
+    # is not None → treated as a projection; _fetch_signals swallows the
+    # AttributeError). Always None here (code-review P1 fix).
     return retrieve_per_strategy(
         ctx["graph"], q["query"], q.get("kind"), ctx["vecs"].get(q["id"]),
         ctx["tfidf_points"], ctx["is_embedded"], ctx["limit"],
         depth=ctx.get("depth"), k_sweep=ctx.get("k_sweep", False),
         proj=ctx.get("proj"), graph_ranker_arm=ctx.get("graph_ranker_arm", False),
         corpus_variant=ctx.get("corpus_variant", "plain"),
-        oracle=ctx.get("oracle"), live_ids_by_topic=ctx.get("live_ids_by_topic"),
-        stub_projection=ctx.get("stub_projection"),
+        oracle=None, live_ids_by_topic=None,
+        stub_projection=None,
     )
 
 
@@ -558,8 +576,9 @@ def _run_with_sdk(args, sdk) -> dict:
     vecs, use_model = _query_vecs(oracle, all_queries, args.seed)
     tfidf_points = _tfidf_snapshot(proj.g)
     # #1348: ACTIVE strategies tuple — fused_rerank added only when the arm is
-    # ON (default runs stay shape-identical to the v1 baseline). k_sweep adds
-    # fused@{20,60,100} to per-query metrics but NOT to the strategies list.
+    # ON (default runs stay shape-identical to the v1 baseline). k_sweep is a
+    # separate top-level report section (fused@{20,60,100} from k_metrics, NOT
+    # per_query keys) and never touches the strategies list.
     active_strategies = list(STRATEGIES)
     graph_ranker_arm = bool(getattr(args, "graph_ranker_arm", False))
     if graph_ranker_arm:
@@ -581,9 +600,14 @@ def _run_with_sdk(args, sdk) -> dict:
     # 3. Oracle queries: per-strategy ranked lists + metrics.
     oracle_per_query: dict[str, dict] = {}
     oracle_pool_results: dict[str, dict] = {}
+    oracle_ranked: dict[str, dict] = {}
+    oracle_k_metrics: dict[str, dict] = {}
     for q in oracle_set["queries"]:
-        ranked, metrics = _run_oracle_query(q, ctx, oracle)
+        ranked, metrics, k_metrics = _run_oracle_query(q, ctx, oracle)
         oracle_per_query[q["id"]] = metrics
+        oracle_ranked[q["id"]] = ranked
+        if k_metrics:
+            oracle_k_metrics[q["id"]] = k_metrics
         oracle_pool_results[q["id"]] = {
             "_query": q["query"],
             **{strat: [
@@ -671,21 +695,19 @@ def _run_with_sdk(args, sdk) -> dict:
         if authored_per_query else {}
     )
 
-    # 7. #1348 k-sweep section (separate top-level block, NOT per_query keys).
+    # 7. #1348 k-sweep section (separate top-level block, NOT per_query keys —
+    # P2-E code-review fix: per_query stays strategy-keyed).
     k_sweep_section = None
     if ctx.get("k_sweep"):
         k_sweep_section = {
             "k_set": list(KSWEEP),
             "per_query": {
-                qid: {"fused": {str(k): oracle_per_query[qid].get(f"fused@{k}", {})
-                                for k in KSWEEP}}
-                for qid in sorted(oracle_per_query)
+                qid: oracle_k_metrics[qid] for qid in sorted(oracle_k_metrics)
             },
             "aggregate": {
                 str(k): {
                     metric: aggregate({metric: [
-                        oracle_per_query[qid].get(f"fused@{k}", {}).get(metric, 0.0)
-                        for qid in sorted(oracle_per_query)
+                        oracle_k_metrics[qid][str(k)][metric] for qid in sorted(oracle_k_metrics)
                     ]})[metric]
                     for metric in METRICS
                 }
@@ -694,11 +716,13 @@ def _run_with_sdk(args, sdk) -> dict:
         }
 
     # 8. #1348 per-strategy population counts (self-declared authority).
+    #    Computed from the step-3 ranked lists — NO second retrieval pass
+    #    (P2 code-review fix: re-running _run_oracle_query doubled eval cost
+    #    and risked count/metric disagreement on non-deterministic retrieval).
     pop_counts: dict[str, int] = {s: 0 for s in active_strategies}
-    for q in oracle_set["queries"]:
-        ranked, _m = _run_oracle_query(q, ctx, oracle)
+    for qid in oracle_ranked:
         for s in active_strategies:
-            if ranked.get(s):
+            if oracle_ranked[qid].get(s):
                 pop_counts[s] += 1
 
     report = {

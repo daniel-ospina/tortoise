@@ -118,7 +118,7 @@ n=100 oracle queries, fuse→truncate→rerank (production order sdk.py:8851→9
 |---|---|---|---|
 | fused@60 (OFF) | 0.835 | — | status quo |
 | **fused_rerank (stub positive control)** | 0.898 | **+6.30 [3.76, 8.98]** | MECHANISM: control ≈ ceiling probe 0.898 → harness NOT broken, pool IS reorderable |
-| fused_rerank (static enhanced) | 0.854 | **+1.86 [0.90, 2.82]** | REALISM: static EP signal captures ~30% of headroom |
+| fused_rerank (static enhanced) | 0.855 | **+1.99 [0.88, 3.11]** | REALISM: static EP signal captures ~30% of headroom (post code-review topic-correlation fix) |
 | fused_rerank (enhanced-conf-only, use_degree=False) | 0.838 | +0.26 [−0.59, 1.13] | ablation: confidence-only adds NOTHING (CI includes 0) |
 | fused_rerank (production-parity --depth 50 --limit 10) | 0.839 | +0.36 [0.05, 0.69] | customer-surface bracket: small but real |
 
@@ -144,5 +144,7 @@ necessary-but-not-sufficient, as pre-registered.
   confidence as annotation-only), validated on real-EP data (#317 GATE INPUT B
   labeled set / --no-seed-corpus real graph) before any production default.
   Reject-as-primary (the full static EP boost) per the confidence-null ablation.
-- **Corpus-bound:** the +1.86 is on synthetic topic-correlated EP (weak proxy
-  per #1144); real-EP validation is the surfaced follow-up dependency.
+- **Corpus-bound:** the +1.99 is on synthetic topic-correlated EP (weak proxy
+  per #1144); real-EP validation is the surfaced follow-up dependency. (Original
+  +1.86 measured before the code-review topic-derivation correction — the
+  corrected corpus yields +1.99, same conclusion.)

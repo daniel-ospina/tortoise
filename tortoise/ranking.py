@@ -191,9 +191,12 @@ class GraphRanker:
                 inst_norm = 1.0 - 1.0 / (1.0 + about_objects)
                 return round(0.6 * inst_norm + 0.4 * confidence, 4)
             if self.use_degree:
+                # Points: 0.5·persisted EP confidence + 0.5·operator
+                # connectivity (normalized incident IMPL/NAND edge count).
                 connectivity = 1.0 - 1.0 / (1.0 + (degree or 0))
                 return round(0.5 * confidence + 0.5 * connectivity, 4)
-            # #1348 ablation: degree neutralized — boost is confidence-only.
+            # #1348 ablation: degree neutralized — boost is confidence-only
+            # (use_degree=False, the confidence-only ablation arm).
             return round(confidence, 4)
         # No graph data — degrade to neutral 0.0 (never a penalty).
         return 0.0

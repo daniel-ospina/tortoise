@@ -170,13 +170,14 @@ def _point_exists(graph, pid: str) -> bool:
 def seed_corpus(graph, points: list[dict], *, batch_size: int = 500) -> int:
     """Batch-insert points via UNWIND + vecf32 (idempotent per point id).
 
-    Matches the production write path's vecf32 encoding (sdk.py:980) so the
-    stored vectors are byte-identical to real writes. Returns points created.
+    Matches the production write path's vecf32 encoding (sdk.py point-write
+    SET clause) so the stored vectors are byte-identical to real writes.
+    Returns points created.
 
     #1348: confidence is written ONLY when the point dict carries it (the
-    enhance_signals path) — an unconditional SET would change plain-corpus
-    GraphRanker behavior (coalesce 0.5 → written value) without tripping the
-    fingerprint, which does not check confidence.
+    enhance_signals path) — the SET is CASE-gated on row.confidence so a
+    plain corpus never gains (or loses) a written confidence value, and
+    re-seeding over an existing graph preserves prior confidence.
     """
     created = 0
     for start in range(0, len(points), batch_size):
@@ -191,7 +192,8 @@ def seed_corpus(graph, points: list[dict], *, batch_size: int = 500) -> int:
             SET n.embedding = vecf32(row.embedding)
             SET n.posterior_alpha = row.posterior_alpha
             SET n.posterior_beta = row.posterior_beta
-            SET n.confidence = row.confidence
+            SET n.confidence = CASE WHEN row.confidence IS NOT NULL
+                                    THEN row.confidence ELSE n.confidence END
             RETURN count(n) AS created
             """,
             params={"batch": [
@@ -225,7 +227,7 @@ def seed_operator_edges(graph, rng: random.Random, n_edges_per_op: int = 200,
     the (op,target) edge-pair LIST to distinguish enhanced vs plain.
     """
     ops = graph.query(
-        "MATCH (op:Point {is_operator:true}) RETURN op.id"
+        "MATCH (op:Point {is_operator:true}) RETURN op.id, op.content"
     ).result_set
     sources = graph.query(
         "MATCH (n:Point) WHERE n.is_operator <> true RETURN n.id, n.content"
@@ -240,7 +242,10 @@ def seed_operator_edges(graph, rng: random.Random, n_edges_per_op: int = 200,
     # derive it from the content token overlap with each topic's vocab.
     src_topics: dict[str, int] = {}
     if topic_correlated and oracle is not None:
-        for src_id, content in sources:
+        # Operators are fetched WITH content too — their hidden topic is
+        # derived the same way (code-review P2 fix: op_idx % oracle.n was a
+        # permuted map; op content tokens are the robust source).
+        for src_id, content in list(sources) + list(ops):
             best_t, best_n = 0, 0
             for t in oracle.core:
                 vocab = oracle.vocab(t)
@@ -255,8 +260,14 @@ def seed_operator_edges(graph, rng: random.Random, n_edges_per_op: int = 200,
         if remaining <= 0:
             break
         if topic_correlated and oracle is not None:
-            op_topic = op_idx % oracle.n
-            # Bias: 70% of edges to same-topic sources, 30% random.
+            # #1348 code-review P2 fix: derive the operator's topic from its
+            # OWN content tokens (same method as src_topics) — NOT (op_idx %
+            # oracle.n), which was a PERMUTED map when op_every doesn't divide
+            # oracle.n, and NOT (op_idx * op_every) which hardcodes the
+            # generate_oracle_points op spacing into this function.
+            op_topic = src_topics.get(op_id, 0)
+            # Bias: ~half the edges to same-topic sources, half random (the
+            # docstring previously claimed 70/30 — corrected to match code).
             same = [s for s in src_ids if src_topics.get(s) == op_topic]
             other = [s for s in src_ids if src_topics.get(s) != op_topic]
             n_same = min(n_edges_per_op // 2, len(same), remaining)
@@ -583,7 +594,8 @@ def generate_oracle_points(
     membership defines oracle grades). Posterior-less points get coalesce-0.5
     (the GraphRanker default — simplest rng contract; coverage dilution is a
     report field). Isolated Random(seed ^ salt) is used ONLY for extra draws
-    (none here — edges are handled by seed_operator_edges).
+    (topic-bias noise here; edge selection in seed_operator_edges) — never the
+    main stream.
 
     Returns (points, topic_counts) where topic_counts maps topic id → number
     of LIVE (non-retracted, non-operator) points, the oracle's grade-2
