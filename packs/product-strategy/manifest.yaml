@@ -1,165 +1,183 @@
-# Product Strategy Domain Extension
-# Product, Feature, Customer, Competitor, Market concepts.
-# Manifest v3 (epic #909, research-r6 §4) — kindDefs, productDelivery chain,
-# extractable relations, extraction activation + enforcement config.
-
 namespace: product-strategy
-name: "Product Strategy"
-version: "0.2.0"          # bumped: extractor-readable business logic (R6)
+name: Product Strategy
+version: 0.2.0
 tier: free
-description: "Product strategy concepts — products, features, customers, competitors, markets"
-
+description: Product strategy concepts — products, features, customers, competitors,
+  markets
 ontology:
   extends: core
-
   objectKinds:
-    - product
-    - feature
-    - customer
-    - competitor
-    - customerSegment
-    - market
-    - requirement        # NEW — chain step 5; equivalent to dev:requirement
-    - architecture       # NEW — chain step 6; the design/structural artifact
-
+  - product
+  - feature
+  - customer
+  - competitor
+  - customerSegment
+  - market
+  - requirement
+  - architecture
   subclassOf:
     feature: WorkItem
     requirement: WorkItem
     architecture: Document
-
   equivalentTo:
-    requirement: [dev:requirement]
-
+    requirement:
+    - dev:requirement
   pointKinds:
-    - jobToBeDone
-    - useCase
-    - userJourney
-    - valueProposition
-
+  - jobToBeDone
+  - useCase
+  - userJourney
+  - valueProposition
   documentKinds:
-    - competitiveAnalysis
-    - marketResearch
-    - productSpec
-    - featureSpec
-
-  # ── NEW: per-kind extractor metadata ─────────────────────────────────────
+  - competitiveAnalysis
+  - marketResearch
+  - productSpec
+  - featureSpec
   kindDefs:
     product:
-      description: "A marketable offering the company sells"
-      examples: ["Tortoise", "El Dato"]
-      nearMisses: [feature]
+      description: A marketable offering the company sells
+      examples:
+      - Tortoise
+      - El Dato
+      nearMisses:
+      - feature
     feature:
-      description: "A capability of the product that delivers value to a customer segment"
-      synonyms: ["capability", "function"]
-      nearMisses: [product, requirement]
+      description: A capability of the product that delivers value to a customer segment
+      synonyms:
+      - capability
+      - function
+      nearMisses:
+      - product
+      - requirement
     customer:
-      description: "An organization or person who buys or uses the product"
-      nearMisses: [customerSegment]
+      description: An organization or person who buys or uses the product
+      nearMisses:
+      - customerSegment
     customerSegment:
-      description: "A group of customers with shared needs the product targets"
-      synonyms: ["segment", "target market"]
-      nearMisses: [customer, market]
+      description: A group of customers with shared needs the product targets
+      synonyms:
+      - segment
+      - target market
+      nearMisses:
+      - customer
+      - market
     market:
-      description: "The competitive arena the product operates in"
-      nearMisses: [customerSegment]
+      description: The competitive arena the product operates in
+      nearMisses:
+      - customerSegment
     competitor:
-      description: "An organization offering a product that competes with ours"
+      description: An organization offering a product that competes with ours
     useCase:
-      description: "A concrete scenario in which a user achieves a goal using the product"
-      synonyms: ["use case"]
-      examples: ["As a PM I can see the roadmap so I can plan releases"]
-      nearMisses: [userJourney, jobToBeDone, requirement]
-      enforcement: retry      # confusable group → corrective retry before accept
+      description: A concrete scenario in which a user achieves a goal using the product
+      synonyms:
+      - use case
+      examples:
+      - As a PM I can see the roadmap so I can plan releases
+      nearMisses:
+      - userJourney
+      - jobToBeDone
+      - requirement
+      enforcement: retry
     userJourney:
-      description: "The ordered steps a user takes to complete a goal with the product"
-      synonyms: ["journey", "flow"]
-      examples: ["signup → first import → first query → subscribe"]
-      nearMisses: [useCase, workflow]
+      description: The ordered steps a user takes to complete a goal with the product
+      synonyms:
+      - journey
+      - flow
+      examples:
+      - signup → first import → first query → subscribe
+      nearMisses:
+      - useCase
+      - workflow
       enforcement: retry
     jobToBeDone:
-      description: "The underlying job a customer hires the product to do"
-      synonyms: ["jtbd"]
-      nearMisses: [useCase]
+      description: The underlying job a customer hires the product to do
+      synonyms:
+      - jtbd
+      nearMisses:
+      - useCase
     valueProposition:
-      description: "Why a customer segment should choose this product over alternatives"
-      synonyms: ["value prop"]
+      description: Why a customer segment should choose this product over alternatives
+      synonyms:
+      - value prop
     workflow:
-      description: "A reusable procedural sequence (core kind; chain step 4)"
-      nearMisses: [userJourney]
+      description: A reusable procedural sequence (core kind; chain step 4)
+      nearMisses:
+      - userJourney
     requirement:
-      description: "A stated need a feature must satisfy (≡ dev:requirement)"
-      nearMisses: [useCase, feature]
+      description: A stated need a feature must satisfy (≡ dev:requirement)
+      nearMisses:
+      - useCase
+      - feature
     architecture:
-      description: "The design and structural decisions for how a solution is built"
-      synonyms: ["architecture design"]
-      nearMisses: [feature]
-
-  # ── NEW: the owner's business-logic chain, first-class ──────────────────
+      description: The design and structural decisions for how a solution is built
+      synonyms:
+      - architecture design
+      nearMisses:
+      - feature
   chains:
-    - id: productDelivery
-      name: "Product Delivery Chain"
-      description: "How product strategy flows into shipped architecture"
-      # JTBD is step-0 (issue #405 decision 2026-08-15): the canonical chain
-      # matches check_structure/skill — jobToBeDone → useCase → feature →
-      # userJourney → workflow → requirement → architecture.
-      steps: [jobToBeDone, useCase, feature, userJourney, workflow, requirement, architecture]
-      enforcement: warn       # bypass → warn (block is opt-in per pack)
-
-  # ── relations: existing 4 + 2 new chain edges (extractable) ─────────────
+  - id: productDelivery
+    name: Product Delivery Chain
+    description: How product strategy flows into shipped architecture
+    steps:
+    - jobToBeDone
+    - useCase
+    - feature
+    - userJourney
+    - workflow
+    - requirement
+    - architecture
+    enforcement: warn
   relations:
-    - predicate: contains
-      mechanism: IMPL
-      semantics: hasPart
-      fromKind: product-strategy:product
-      toKind: product-strategy:feature
-      cardinality: one_to_many
-
-    - predicate: addresses
-      mechanism: IMPL
-      semantics: addresses
-      fromKind: product-strategy:feature
-      toKind: product-strategy:customerSegment
-
-    - predicate: competesWith
-      mechanism: NAND
-      semantics: opposes
-      fromKind: product-strategy:feature
-      toKind: product-strategy:competitor
-
-    - predicate: targets
-      mechanism: IMPL
-      semantics: addresses
-      fromKind: product-strategy:product
-      toKind: product-strategy:customerSegment
-
-    - predicate: addresses                     # NEW — chain edge the extractor may assert
-      mechanism: IMPL
-      semantics: addresses
-      fromKind: product-strategy:useCase
-      toKind: product-strategy:feature
-      extractable: true
-
-    - predicate: addresses
-      mechanism: IMPL
-      semantics: addresses
-      fromKind: product-strategy:requirement
-      toKind: product-strategy:architecture
-      extractable: true
-
+  - predicate: contains
+    mechanism: IMPL
+    semantics: hasPart
+    fromKind: product-strategy:product
+    toKind: product-strategy:feature
+    cardinality: one_to_many
+  - predicate: addresses
+    mechanism: IMPL
+    semantics: addresses
+    fromKind: product-strategy:feature
+    toKind: product-strategy:customerSegment
+  - predicate: competesWith
+    mechanism: NAND
+    semantics: opposes
+    fromKind: product-strategy:feature
+    toKind: product-strategy:competitor
+  - predicate: targets
+    mechanism: IMPL
+    semantics: addresses
+    fromKind: product-strategy:product
+    toKind: product-strategy:customerSegment
+  - predicate: addresses
+    mechanism: IMPL
+    semantics: addresses
+    fromKind: product-strategy:useCase
+    toKind: product-strategy:feature
+    extractable: true
+  - predicate: addresses
+    mechanism: IMPL
+    semantics: addresses
+    fromKind: product-strategy:requirement
+    toKind: product-strategy:architecture
+    extractable: true
   hierarchies:
-    - path: "Product → Feature"
-      type: hasPart
-
-# ── NEW: extraction activation + enforcement config ───────────────────────
+  - path: Product → Feature
+    type: hasPart
+  memory_granularity: 'Durable: the productDelivery chain itself — which JTBDs/use-cases/features
+    are being pursued, the chosen vs rejected options at each step, and the reasoning
+    (what supports, undermines, tempers each choice). A customer / competitor / market
+    fact is durable if it changes a decision. Ephemeral: ticket status, sprint mechanics,
+    meeting logistics.'
 extraction:
   active: true
-  sourceTypes: [conversation, document]
+  sourceTypes:
+  - conversation
+  - document
   enforcement:
     default: warn
     kinds:
       useCase: retry
       userJourney: retry
-
 connectors: []
 tools: []
 depends_on: []

@@ -45,6 +45,13 @@ def compile_value_brief(packs_dir: Path | str | None = None) -> dict:
     # prior brief (concept/standard/document/tool/workflow/WorkItem/other)
     # missed project/tag/user/skill/agent/agreement + strategy/plan/goal/
     # target and added concept (not in §5). `concept` is mapped to core:other.
+    granularity = {}
+    for ns, path in ns_files.items():
+        raw = yaml.safe_load(path.read_text()) or {}
+        g = (raw.get("ontology") or {}).get("memory_granularity")
+        if g:
+            granularity[ns] = g
+
     core = {
         "core:Project": "A project",
         "core:WorkItem": "A unit of work",
@@ -63,7 +70,7 @@ def compile_value_brief(packs_dir: Path | str | None = None) -> dict:
         "core:goal": "A goal state (commitment-state family)",
         "core:target": "A target state (commitment-state family)",
     }
-    return {**core, **kinds}
+    return {**core, **kinds, "memory_granularity": granularity}
 
 
 _VOCAB_CACHE: dict | None = None

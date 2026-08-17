@@ -65,6 +65,7 @@ MODELS = {
     # registry tunings are inert unless the CLI passes an explicit --max-tokens >= the value here
     # (the gate run used --max-tokens 12000 / 8000; a bare `--model qwen3.8-max` would starve).
     'qwen3.8-max': lambda: OpenRouterModel('qwen/qwen3.8-max', max_tokens=8000, temperature=0.0, thinking_budget=2000),
+    'solar-pro4': lambda: OpenRouterModel('upstage/solar-pro4', max_tokens=4000, temperature=0.0),
     'deepseek-v4-pro-noreason': lambda: OpenRouterModel('deepseek/deepseek-v4-pro', max_tokens=8000, temperature=0.0, disable_reasoning=True),
     'claude-opus-5': lambda: OpenRouterModel('anthropic/claude-opus-5', max_tokens=12000, temperature=0.0),
 }

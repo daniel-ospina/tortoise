@@ -1,101 +1,98 @@
-# Development Domain Extension
-# Software development concepts — epics, issues, code, APIs, infrastructure.
-# Manifest v3 (epic #909, research-r6 §6.2) — epic→issue→code chain + kindDefs.
-
 namespace: dev
-name: "Development"
-version: "0.2.0"          # bumped: extractor-readable business logic (R6)
+name: Development
+version: 0.2.0
 tier: free
-description: "Software development concepts — epics, issues, code, APIs, databases, deployments"
-
+description: Software development concepts — epics, issues, code, APIs, databases,
+  deployments
 ontology:
   extends: core
-
   objectKinds:
-    - epic
-    - issue
-    - code
-    - api
-    - database
-    - software
-    - infrastructure
-    - deployment
-    - indicator
-
+  - epic
+  - issue
+  - code
+  - api
+  - database
+  - software
+  - infrastructure
+  - deployment
+  - indicator
   subclassOf:
     epic: Project
     issue: WorkItem
-
   equivalentTo:
-    issue: [pm:issue]
-
+    issue:
+    - pm:issue
   pointKinds:
-    - requirement
-    - bug
-    - technicalDebt
-
+  - requirement
+  - bug
+  - technicalDebt
   documentKinds:
-    - architectureDoc
-    - apiSpec
-    - deployRunbook
-
-  # ── NEW: per-kind extractor metadata ─────────────────────────────────────
+  - architectureDoc
+  - apiSpec
+  - deployRunbook
   kindDefs:
     epic:
-      description: "A large body of work decomposed into issues"
-      nearMisses: [issue]
+      description: A large body of work decomposed into issues
+      nearMisses:
+      - issue
     issue:
-      description: "A tracked unit of work (≡ pm:issue)"
-      synonyms: ["ticket"]
-      nearMisses: [code]
+      description: A tracked unit of work (≡ pm:issue)
+      synonyms:
+      - ticket
+      nearMisses:
+      - code
     code:
-      description: "Source code that implements features"
-      nearMisses: [api, software]
+      description: Source code that implements features
+      nearMisses:
+      - api
+      - software
     requirement:
-      description: "A stated need a feature must satisfy (≡ product-strategy:requirement)"
-      nearMisses: [bug]
+      description: A stated need a feature must satisfy (≡ product-strategy:requirement)
+      nearMisses:
+      - bug
     architectureDoc:
-      description: "Documentation of architecture decisions (link: the architecture artifact kind is product-strategy:architecture)"
-      nearMisses: [architecture]
-
-  # ── NEW: engineering delivery chain, first-class ────────────────────────
+      description: 'Documentation of architecture decisions (link: the architecture
+        artifact kind is product-strategy:architecture)'
+      nearMisses:
+      - architecture
   chains:
-    - id: epicToCode
-      name: "Epic-to-Code Chain"
-      description: "How planned work flows from epics through issues into shipped code"
-      steps: [epic, issue, code]
-      enforcement: warn
-
+  - id: epicToCode
+    name: Epic-to-Code Chain
+    description: How planned work flows from epics through issues into shipped code
+    steps:
+    - epic
+    - issue
+    - code
+    enforcement: warn
   relations:
-    - predicate: decomposesInto
-      mechanism: IMPL
-      semantics: hasPart
-      fromKind: dev:epic
-      toKind: dev:issue
-      cardinality: one_to_many
-
-    - predicate: implements
-      mechanism: IMPL
-      semantics: addresses
-      fromKind: dev:issue
-      toKind: product-strategy:feature
-
-    - predicate: deploysTo
-      mechanism: IMPL
-      semantics: addresses
-      fromKind: dev:code
-      toKind: dev:deployment
-
-    - predicate: dependsOn
-      mechanism: IMPL
-      semantics: addresses
-      fromKind: dev:api
-      toKind: dev:database
-
+  - predicate: decomposesInto
+    mechanism: IMPL
+    semantics: hasPart
+    fromKind: dev:epic
+    toKind: dev:issue
+    cardinality: one_to_many
+  - predicate: implements
+    mechanism: IMPL
+    semantics: addresses
+    fromKind: dev:issue
+    toKind: product-strategy:feature
+  - predicate: deploysTo
+    mechanism: IMPL
+    semantics: addresses
+    fromKind: dev:code
+    toKind: dev:deployment
+  - predicate: dependsOn
+    mechanism: IMPL
+    semantics: addresses
+    fromKind: dev:api
+    toKind: dev:database
   hierarchies:
-    - path: "Epic → Issue"
-      type: hasPart
-
+  - path: Epic → Issue
+    type: hasPart
+  memory_granularity: 'Durable: root-cause analysis, the chosen fix approach vs rejected
+    alternatives, durable constraints (e.g. preserve production semantics), and environment
+    beliefs that affect future work (e.g. subagents stall under load). Ephemeral:
+    issue/PR numbers, CI status, test counts, commit hashes, tool workarounds.'
 connectors: []
 tools: []
 depends_on: []
