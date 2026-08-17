@@ -938,6 +938,17 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
                  min_confidence=min_confidence, order_by=order_by)
 
 
+def tortoise_expand_relationships(point_id: str) -> list[dict]:
+    """Full relationship payload for ONE Point, incl. each related point's content.
+
+    #1353 D14 — the expand side of the list/expand split: tortoise_search returns
+    bounded state entries (IDs + labels + direction + peer state, no content);
+    use this to read a single point's complete relationships, including the
+    related points' full text, on demand (single-point fan-out is trivially cheap).
+    """
+    return _safe(_get_team_sdk().expand_relationships, point_id)
+
+
 # ── Recall — epistemic intents (epic #898) ─────────────────────
 
 # UC1 default exponents/weights for the multiplicative gate (Wave A).

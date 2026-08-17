@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import Counter
 from dataclasses import dataclass, asdict, field
 from typing import Literal
 
@@ -182,6 +183,11 @@ class SearchResult:
     session_id: str = ""
     event_id: str = ""
     source_path: str = ""  # #167: file path for agent to open/search
+    # #1353 promoted epistemic state (D8) — first-class, absent when unknown:
+    status: str = ""  # live / superseded / deprecated / retracted / draft
+    superseded_by: dict | None = None  # {id, content_snippet, created_at} | None
+    supersedes: list[dict] = field(default_factory=list)  # [{id, content_snippet, created_at}]
+    subject: dict | None = None  # {id, name, kind} | None — ≤1 hop, fail-closed (D10)
 
     def to_dict(self) -> dict:
         """Convert to JSON-safe dict for API responses."""
@@ -207,6 +213,15 @@ class SearchResult:
             d["scores"] = asdict(self.scores)
         if self.ep and self.ep.evidence is not None:
             d["ep"] = asdict(self.ep)
+        # #1353 promoted state — additive keys, emitted only when known (#1353 D8)
+        if self.status:
+            d["status"] = self.status
+        if self.superseded_by:
+            d["superseded_by"] = self.superseded_by
+        if self.supersedes:
+            d["supersedes"] = self.supersedes
+        if self.subject:
+            d["subject"] = self.subject
         return d
 
 
@@ -751,6 +766,32 @@ def degradation_chain(
 # Must match TortoiseEP.get_contested_claims (tortoise/ep.py).
 CONTESTED_VARIANCE_THRESHOLD = 0.04
 
+# Driver-level timeout for decoration queries (ms). The decoration runs OUTSIDE
+# the per-strategy circuit breakers (those guard degradation_chain); a server-side
+# kill per query bounds a hung FalkorDB's impact on search latency (#1353 review).
+_DECORATION_TIMEOUT_MS = 200
+
+
+def _created_sort_key(value):
+    """Sortable key for createdAt values — safe across mixed formats.
+
+    The codebase writes ISO-8601 strings (projection) AND numeric epoch
+    (RedisGraph `timestamp()` in seeded corpora) — a graph can hold both.
+    Comparing them directly raises TypeError in py3. ISO strings are parsed
+    to epoch so mixed-format graphs compare by REAL instant (not format);
+    unparseable values bucket last, deterministically.
+    """
+    if isinstance(value, (int, float)):
+        return (0, float(value))
+    s = str(value or "")
+    if s and s[0].isdigit() and len(s) >= 10 and ("-" in s or "T" in s):
+        try:
+            from datetime import datetime
+            return (0, datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp())
+        except ValueError:
+            pass
+    return (1, s)
+
 
 def _beta_variance(alpha: float, beta: float) -> float:
     """Variance of the Beta(α, β) posterior: αβ/((α+β)²(α+β+1)).
@@ -890,6 +931,427 @@ def get_relationships(graph, point_ids: list[str]) -> dict[str, list[dict]]:
         logger.warning("Relationship query failed", exc_info=True)
 
     return rels
+
+
+def get_relationships_bounded(
+    graph,
+    point_ids: list[str],
+    per_point_cap: int = 10,
+    global_budget: int = 140,
+    raw_cap: int = 3000,
+    per_op_cap: int = 10,
+    expand_top_k: int = 14,
+) -> dict[str, list[dict]]:
+    """Bounded, state-centric relationship decoration (#1353, D1-D14).
+
+    Replaces the unbounded 2-hop fan-out at the search-decoration call site:
+    the old query re-expanded every operator's full neighborhood PER RESULT
+    POINT (n_results × operator-degree → ~122K dicts dense @ limit=100).
+    This decouples the hops and dedupes operators across result points:
+
+      Q1a   point → its operator edges (bounded by point degree)
+      Q1b   CORRECTS edges in/out (supersede structure, direct point→point)
+      Q2b   mitigations per operator (ids also exclude mitigation points from Q2)
+      Q2    endpoints per operator (deduped), NAND-first, raw-capped
+      Q2f   per-operator family counts (family_size)
+
+    Class-aware cap: NAND edges, contested peers, superseded/retracted peers,
+    mitigated_by and CORRECTS are ALWAYS kept — exempt from the per-point cap
+    AND the global budget. The per-point cap (default 10) and global budget
+    (default 140) govern the deduped IMPL support-mass only; exhaustion
+    degrades tail results to structure counts (no peer lists).
+
+    Peer EP state is derived IN-QUERY from coalesced posterior/ep alpha+beta
+    (annotate_ep_batch parity — never NULL α/β, never a second annotation
+    pass over thousands of peers). confidence = posterior mean α/(α+β);
+    variance = _beta_variance; contested = has_ep AND variance > threshold.
+
+    Entries keep the legacy keys (predicate, mechanism, operator_id,
+    related_id, related_kind, direction) and add role, peer, family_size,
+    op_created_at. related_content is intentionally ABSENT in the list view
+    (D5 — full content via expand_relationships, D14).
+
+    Contested coverage: contested peers are computed EXACTLY in Q2-crit — the
+    in-Cypher variance on the coalesced persisted α/β (same formula as
+    `_beta_variance`/TortoiseEP), so contested is cap-exempt with no sampling.
+    NAND, terminal-status, mitigated and CORRECTS classes are always complete.
+
+    get_relationships() is intentionally UNTOUCHED (D12) — topic_summarization
+    needs full NAND completeness for disputed-pair detection.
+    """
+    if not point_ids:
+        return {}
+
+    rels: dict[str, list[dict]] = {pid: [] for pid in point_ids}
+
+    try:
+        # Q1a: operator edges per point (bounded by point degree).
+        # Retracted operators excluded (operator terminal state — their edges
+        # are not live epistemic structure).
+        rows = graph.query(
+            "MATCH (n:Point) WHERE n.id IN $ids "
+            "MATCH (n)-[r:IMPL|NAND|hasPart]-(op:Point {is_operator:true}) "
+            "WHERE (op.status IS NULL OR op.status <> 'retracted') "
+            "RETURN n.id, type(r) AS et, r.idx AS n_idx, op.id AS op_id, "
+            "  op.op_type AS mechanism, coalesce(op.label, '') AS predicate, "
+            "  op.createdAt AS op_created",
+            params={"ids": point_ids},
+            timeout=_DECORATION_TIMEOUT_MS,
+        ).result_set
+        point_ops: dict[str, list[tuple]] = {pid: [] for pid in point_ids}
+        op_ids: set[str] = set()
+        for row in rows:
+            pid = row[0]
+            point_ops[pid].append((row[1], row[2], row[3], row[4] or "IMPL", row[5], row[6]))
+            op_ids.add(row[3])
+
+        # Q1b: CORRECTS edges (direct point→point supersede links).
+        # Chained OPTIONAL MATCH can cartesian (m outgoing × k incoming rows)
+        # — dedupe by id in Python below.
+        corrects_out: dict[str, list[tuple]] = {pid: [] for pid in point_ids}
+        corrects_in: dict[str, list[tuple]] = {pid: [] for pid in point_ids}
+        if point_ids:
+            rows = graph.query(
+                "MATCH (n:Point) WHERE n.id IN $ids "
+                "OPTIONAL MATCH (n)-[r:CORRECTS]->(old:Point) "
+                "OPTIONAL MATCH (new:Point)-[r2:CORRECTS]->(n) "
+                "RETURN n.id, old.id, old.status, old.createdAt, "
+                "  new.id, new.status, new.createdAt",
+                params={"ids": point_ids},
+                timeout=_DECORATION_TIMEOUT_MS,
+            ).result_set
+            for row in rows:
+                pid = row[0]
+                old_id, old_status, old_created = row[1], row[2], row[3]
+                new_id, new_status, new_created = row[4], row[5], row[6]
+                if old_id and old_id not in {o[0] for o in corrects_out[pid]}:
+                    corrects_out[pid].append((old_id, old_status, old_created))
+                if new_id and new_id not in {n[0] for n in corrects_in[pid]}:
+                    corrects_in[pid].append((new_id, new_status, new_created))
+
+        # Q2b: mitigations per operator — ids are excluded from endpoint
+        # expansion in Cypher (direction-agnostic: legacy inbound mitigated_by
+        # graphs are covered by the NOT pattern).
+        op_mitigations: dict[str, list[dict]] = {}
+        if op_ids:
+            rows = graph.query(
+                "MATCH (op:Point {is_operator:true}) WHERE op.id IN $op_ids "
+                "MATCH (op)-[:mitigated_by]->(m:Point) "
+                "RETURN op.id, m.id, m.status, m.createdAt, m.content",
+                params={"op_ids": list(op_ids)},
+                timeout=_DECORATION_TIMEOUT_MS,
+            ).result_set
+            for row in rows:
+                op_id = row[0]
+                op_mitigations.setdefault(op_id, []).append({
+                    "id": row[1], "status": row[2] or "",
+                    "created_at": row[3], "snippet": (row[4] or "")[:120],
+                })
+
+        # Q2-crit: critical-class endpoints — NAND edges, terminal-status peers,
+        # AND contested peers (in-Cypher variance on the coalesced α/β — exact,
+        # no per-op sampling). COMPLETE, bounded only by raw_cap (safety valve):
+        # these classes must never be dropped by the per-point/global/per-op
+        # caps (D3/D4). Low volume in practice.
+        op_crit: dict[str, dict[str, tuple]] = {}
+        if op_ids:
+            rows = graph.query(
+                "MATCH (op:Point {is_operator:true}) WHERE op.id IN $op_ids "
+                "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point) "
+                "WHERE (other.is_operator = false OR other.is_operator IS NULL) "
+                "  AND NOT (op)-[:mitigated_by]->(other) "
+                "  AND (type(r2) = 'NAND' "
+                "       OR other.status IN ['superseded','retracted','deprecated'] "
+                "       OR ((other.posterior_alpha IS NOT NULL OR other.ep_alpha IS NOT NULL) "
+                "           AND (coalesce(other.posterior_alpha, other.ep_alpha, 1.0) * coalesce(other.posterior_beta, other.ep_beta, 1.0)) "
+                "               / ((coalesce(other.posterior_alpha, other.ep_alpha, 1.0) + coalesce(other.posterior_beta, other.ep_beta, 1.0)) ^ 2 "
+                "                  * (coalesce(other.posterior_alpha, other.ep_alpha, 1.0) + coalesce(other.posterior_beta, other.ep_beta, 1.0) + 1)) > $contested_threshold)) "
+                "RETURN op.id, type(r2) AS et, r2.idx AS other_idx, other.id, "
+                "  other.pointKind, other.status, "
+                "  coalesce(other.posterior_alpha, other.ep_alpha, 1.0), "
+                "  coalesce(other.posterior_beta, other.ep_beta, 1.0), "
+                "  (other.posterior_alpha IS NOT NULL OR other.ep_alpha IS NOT NULL), "
+                "  other.createdAt "
+                "LIMIT $raw_cap",
+                params={"op_ids": list(op_ids), "raw_cap": raw_cap,
+                        "contested_threshold": CONTESTED_VARIANCE_THRESHOLD},
+                timeout=_DECORATION_TIMEOUT_MS,
+            ).result_set
+            for row in rows:
+                op_crit.setdefault(row[0], {})[row[3]] = (
+                    row[1], row[2], row[4] or "", row[5] or "",
+                    float(row[6]), float(row[7]), bool(row[8]), row[9],
+                )
+
+        # The operators of the TOP-K result points are the ones that get
+        # support endpoint expansion. The global budget (140 ≈ 14 × 10)
+        # makes tail points' peer lists redundant — they degrade to structure
+        # counts (D3), so their operators are not expanded (this is what keeps
+        # limit=100 affordable).
+        expand_ops: set[str] = set()
+        for pid in point_ids[:expand_top_k]:
+            for (_et, _idx, op_id, _mech, _pred, _created) in point_ops.get(pid, []):
+                expand_ops.add(op_id)
+
+        # Q2-support: per-op-capped support endpoints (CALL subquery = per-op
+        # LIMIT, no global sort) for the expanded operators. Contested peers
+        # are already covered EXACTLY by Q2-crit — this fetch is pure filler.
+        op_support: dict[str, dict[str, tuple]] = {}
+        if expand_ops:
+            rows = graph.query(
+                "MATCH (op:Point {is_operator:true}) WHERE op.id IN $op_ids "
+                "CALL { WITH op MATCH (op)-[r2:IMPL|hasPart]-(other:Point) "
+                "WHERE (other.is_operator = false OR other.is_operator IS NULL) "
+                "  AND NOT (op)-[:mitigated_by]->(other) "
+                "RETURN r2, other LIMIT $per_op } "
+                "RETURN op.id, type(r2) AS et, r2.idx AS other_idx, other.id, "
+                "  other.pointKind, other.status, "
+                "  coalesce(other.posterior_alpha, other.ep_alpha, 1.0), "
+                "  coalesce(other.posterior_beta, other.ep_beta, 1.0), "
+                "  (other.posterior_alpha IS NOT NULL OR other.ep_alpha IS NOT NULL), "
+                "  other.createdAt",
+                params={"op_ids": list(expand_ops), "per_op": per_op_cap},
+                timeout=_DECORATION_TIMEOUT_MS,
+            ).result_set
+            for row in rows:
+                op_support.setdefault(row[0], {})[row[3]] = (
+                    row[1], row[2], row[4] or "", row[5] or "",
+                    float(row[6]), float(row[7]), bool(row[8]), row[9],
+                )
+
+        # Unified endpoint store: critical classes first, then support filler
+        # (same tuple shape — dict-merge dedupes).
+        op_endpoints: dict[str, dict[str, tuple]] = {}
+        for op_id in op_ids:
+            merged: dict[str, tuple] = {}
+            for src in (op_crit, op_support):
+                merged.update(src.get(op_id, {}))
+            op_endpoints[op_id] = merged
+
+        # Q2f: family sizes per (op, edge-type) for ALL result operators.
+        # Plain aggregate WITHOUT the mitigation-exclusion pattern (the NOT
+        # pattern cost ~50ms here) — family is approximate disclosure and
+        # mitigations are rare (their count inflates family by exactly the
+        # separately-listed mitigations, documented). Covers tail points'
+        # private operators so the D3 structure-count degradation is real.
+        op_family: dict[tuple[str, str], int] = {}
+        if op_ids:
+            rows = graph.query(
+                "MATCH (op:Point {is_operator:true}) WHERE op.id IN $op_ids "
+                "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point) "
+                "WHERE (other.is_operator = false OR other.is_operator IS NULL) "
+                "RETURN op.id, type(r2) AS et, count(other)",
+                params={"op_ids": list(op_ids)},
+                timeout=_DECORATION_TIMEOUT_MS,
+            ).result_set
+            for row in rows:
+                op_family[(row[0], row[1])] = int(row[2])
+
+        # ── Assembly: class-aware, epistemically-prioritized ────────────────
+        # Priority (D4): NAND > contested > superseded/retracted >
+        # mitigated_by/CORRECTS > recency > deduped IMPL support-mass.
+        global_support_used = 0
+        for pid in point_ids:
+            criticals: list[dict] = []
+            support: list[dict] = []
+
+            for (et, n_idx, op_id, mechanism, predicate, op_created) in point_ops.get(pid, []):
+                for other_id, ep in op_endpoints.get(op_id, {}).items():
+                    if other_id == pid:
+                        continue  # self-peer exclusion
+                    et2, other_idx, kind, status, alpha, beta, has_ep, created = ep
+                    variance = _beta_variance(alpha, beta)
+                    contested = has_ep and variance > CONTESTED_VARIANCE_THRESHOLD
+                    role = "source" if (n_idx is not None and n_idx == 0) else "target"
+                    direction = "outgoing" if role == "source" else "incoming"
+                    entry = {
+                        "predicate": predicate if predicate else "",
+                        "mechanism": mechanism,
+                        "operator_id": op_id,
+                        "related_id": other_id,
+                        "related_kind": kind,
+                        "direction": direction,
+                        "role": role,
+                        "peer": {
+                            "id": other_id,
+                            "kind": kind,
+                            "status": status,
+                            # Unmeasured (no persisted EP) peers carry None —
+                            # never a fabricated Beta(1,1) posterior (0.5/0.0833
+                            # would be internally contradictory: variance above
+                            # the contested threshold but contested=false).
+                            "confidence": round(alpha / (alpha + beta), 4) if has_ep else None,
+                            "variance": round(variance, 6) if has_ep else None,
+                            "contested": contested,
+                            "created_at": created,
+                        },
+                        "family_size": op_family.get((op_id, et2), 0),
+                        "op_created_at": op_created,
+                    }
+                    if et2 == "NAND" or contested or status in ("superseded", "retracted", "deprecated"):
+                        criticals.append(entry)
+                    else:
+                        support.append(entry)
+
+                for m in op_mitigations.get(op_id, []):
+                    criticals.append({
+                        "predicate": "",
+                        "mechanism": "mitigated_by",
+                        "operator_id": op_id,
+                        "related_id": m["id"],
+                        "related_kind": "mitigation",
+                        "direction": "incoming",
+                        "role": "target",
+                        "peer": {
+                            "id": m["id"], "kind": "mitigation",
+                            "status": m["status"], "confidence": None,
+                            "variance": None, "contested": False,
+                            "created_at": m["created_at"],
+                        },
+                        "family_size": 0,
+                        "op_created_at": op_created,
+                    })
+
+            # CORRECTS entries (direct edges — no operator_id/family_size).
+            for (old_id, old_status, old_created) in corrects_out.get(pid, []):
+                criticals.append({
+                    "predicate": "", "mechanism": "CORRECTS", "operator_id": "",
+                    "related_id": old_id, "related_kind": "point",
+                    "direction": "outgoing", "role": "source",
+                    "peer": {"id": old_id, "kind": "point", "status": old_status or "",
+                              "confidence": None, "variance": None,
+                              "contested": False, "created_at": old_created},
+                    "family_size": 0, "op_created_at": None,
+                })
+            for (new_id, new_status, new_created) in corrects_in.get(pid, []):
+                criticals.append({
+                    "predicate": "", "mechanism": "CORRECTS", "operator_id": "",
+                    "related_id": new_id, "related_kind": "point",
+                    "direction": "incoming", "role": "target",
+                    "peer": {"id": new_id, "kind": "point", "status": new_status or "",
+                              "confidence": None, "variance": None,
+                              "contested": False, "created_at": new_created},
+                    "family_size": 0, "op_created_at": None,
+                })
+
+            # Support-mass: recency-ordered (mixed-format safe), deduped, capped
+            # by BOTH budgets. Criticals are exempt from the per-point cap —
+            # they do NOT consume per-point room (D3: caps govern support only).
+            support.sort(key=lambda e: _created_sort_key(e["peer"].get("created_at")), reverse=True)
+            seen: set[tuple] = set()
+            deduped: list[dict] = []
+            for e in support:
+                key = (e["operator_id"], e["mechanism"], e["related_id"])
+                if key not in seen:
+                    seen.add(key)
+                    deduped.append(e)
+            support = deduped
+
+            entries = list(criticals)
+            per_point_room = per_point_cap  # criticals are exempt — D3
+            global_room = max(0, global_budget - global_support_used)
+            keep = min(per_point_room, global_room, len(support))
+            entries.extend(support[:keep])
+            global_support_used += keep
+
+            # Tail degradation (beyond expand_top_k, or all support capped away):
+            # no peer entries shown → disclose family counts per mechanism so the
+            # agent still knows the structural weight (D3). Points WITH peer
+            # entries disclose their full family via per-entry family_size.
+            if not any("peer" in e for e in entries) and point_ops.get(pid):
+                # family per mechanism across this point's operators
+                mech_family = Counter()
+                for (et, _idx, op_id, mechanism, _pred, _created) in point_ops.get(pid, []):
+                    mech_family[mechanism] += op_family.get((op_id, et), 0)
+                crit_mech = Counter(e["mechanism"] for e in criticals)
+                for mech, fam in mech_family.items():
+                    leftover = fam - crit_mech.get(mech, 0)
+                    if leftover > 0:
+                        entries.append({"predicate": "", "mechanism": mech, "count": leftover})
+
+            rels[pid] = entries
+    except Exception:
+        logger.warning("Bounded relationship query failed", exc_info=True)
+
+    return rels
+
+
+def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
+    """Fetch promoted epistemic state for a batch of Points (#1353 D8/D10).
+
+    Returns {pid: {status, superseded_by, supersedes, subject}} where:
+      status         — n.status (live/superseded/deprecated/retracted/draft)
+      superseded_by  — {id, content_snippet, created_at} of the newest superseding
+                       claim (incoming CORRECTS) or None
+      supersedes     — [{id, content_snippet, created_at}] of replaced claims
+                       (outgoing CORRECTS)
+      subject        — {id, name, kind} from the point's OWN aboutSubject edge, or
+                       (fallback) its event's aboutSubject edge — ≤1 hop only.
+                       NEVER derived through operator chains (fail-closed, D10):
+                       absent = honestly unknown, never wrong-via-chain.
+
+    Chained OPTIONAL MATCHes can cartesian — deduped in Python. Rows are small
+    (per-point CORRECTS/subject counts are low-volume).
+    """
+    if not point_ids:
+        return {}
+
+    out: dict[str, dict] = {}
+    try:
+        rows = graph.query(
+            "MATCH (n:Point) WHERE n.id IN $ids "
+            "OPTIONAL MATCH (n)-[:aboutSubject]->(s:Subject) "
+            "OPTIONAL MATCH (n)-[:aboutEvent]->(ev:Event)-[:aboutSubject]->(es:Subject) "
+            "OPTIONAL MATCH (n)-[r:CORRECTS]->(old:Point) "
+            "OPTIONAL MATCH (new:Point)-[r2:CORRECTS]->(n) "
+            "RETURN n.id, n.status, "
+            "  old.id, old.content, old.createdAt, "
+            "  new.id, new.status, new.content, new.createdAt, "
+            "  s.id, s.name, s.subjectKind, "
+            "  es.id, es.name, es.subjectKind",
+            params={"ids": point_ids},
+            timeout=_DECORATION_TIMEOUT_MS,
+        ).result_set
+
+        for row in rows:
+            pid = row[0]
+            st = out.setdefault(pid, {
+                "status": row[1] or "",
+                "superseded_by": None,
+                "supersedes": [],
+                "subject": None,
+            })
+            old_id, old_content, old_created = row[2], row[3], row[4]
+            new_id, new_status, new_content, new_created = row[5], row[6], row[7], row[8]
+            if old_id and old_id not in {s["id"] for s in st["supersedes"]}:
+                st["supersedes"].append({
+                    "id": old_id,
+                    "content_snippet": (old_content or "")[:120],
+                    "created_at": old_created,
+                })
+            if new_id:
+                cand = {
+                    "id": new_id,
+                    "content_snippet": (new_content or "")[:120],
+                    "created_at": new_created,
+                }
+                # A retracted correcting point is NOT superseding authority.
+                if new_status == "retracted":
+                    pass
+                elif st["superseded_by"] is None or _created_sort_key(new_created) > _created_sort_key(
+                        st["superseded_by"].get("created_at")):
+                    st["superseded_by"] = cand
+            # Subject: own aboutSubject wins; event's is the ≤1-hop fallback.
+            s_id, s_name, s_kind = row[9], row[10], row[11]
+            es_id, es_name, es_kind = row[12], row[13], row[14]
+            if st["subject"] is None and s_id:
+                st["subject"] = {"id": s_id, "name": s_name or "", "kind": s_kind or ""}
+            elif st["subject"] is None and es_id:
+                st["subject"] = {"id": es_id, "name": es_name or "", "kind": es_kind or ""}
+    except Exception:
+        logger.warning("Epistemic-state fetch failed", exc_info=True)
+
+    return out
 
 
 # ── TF-IDF fallback (in-memory, from embeddings.py) ─────────────────────────

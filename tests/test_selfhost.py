@@ -65,7 +65,31 @@ class TestHealth:
         with tc:
             r = tc.get("/health")
             assert r.status_code == 200
-            assert r.json()["status"] == "ok"
+            body = r.json()
+            assert body["status"] == "ok"
+            # #1384 deep check: db probe rides along on liveness.
+            assert body["db"]["ok"] is True
+            assert isinstance(body["db"]["latency_ms"], (int, float))
+
+    def test_health_degraded_when_db_down(self, monkeypatch, tmp_path):
+        """#1384: a stopped FalkorDB flips /health to degraded — 200, never
+        500 or a crashed handler."""
+        tc = _client_for_env(monkeypatch, tmp_path, TORTOISE_API_KEY="k")
+        import tortoise.monitoring as mon
+
+        def _boom_probe(sdk):
+            raise ConnectionError("NXDOMAIN")
+
+        # probe_db is imported lazily from tortoise.monitoring inside the
+        # handler — patch it there, not on the selfhost module.
+        monkeypatch.setattr(mon, "probe_db", _boom_probe)
+        with tc:
+            r = tc.get("/health")
+            assert r.status_code == 200
+            body = r.json()
+            assert body["status"] == "degraded"
+            assert body["db"]["ok"] is False
+            assert "NXDOMAIN" in body["db"]["error"]
 
     def test_health_ready_embedded(self, monkeypatch, tmp_path):
         tc = _client_for_env(monkeypatch, tmp_path, TORTOISE_API_KEY="k")

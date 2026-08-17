@@ -137,11 +137,47 @@ class TestHealthEndpoints:
     """GET /health and GET /health/security."""
 
     def test_health_returns_ok(self, client):
-        """Liveness — process up, no DB dependency (#338 follow-up: the DB
-        check moved to /health/ready to avoid cold-start deploy failures)."""
+        """Liveness — process up. Deep DB check (#1384) rides along in `db`
+        but never gates liveness (the DB gate is /health/ready, #338 follow-up
+        — a DB-coupled /health caused cold-start deploy failures)."""
         r = client.get("/health")
         assert r.status_code == 200
-        assert r.json() == {"status": "ok"}
+        body = r.json()
+        assert body["status"] == "ok"
+        assert body["db"]["ok"] is True
+        assert isinstance(body["db"]["latency_ms"], (int, float))
+
+    def test_health_degraded_when_db_down(self, client, monkeypatch):
+        """#1384: a stopped FalkorDB flips /health to degraded — 200, never
+        500, and no graph-touching request was needed."""
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.setattr(
+            ha_mod, "_probe_db",
+            lambda: {"ok": False, "latency_ms": 12.3,
+                     "error": "ConnectionError: NXDOMAIN"},
+        )
+        r = client.get("/health")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "degraded"
+        assert body["db"] == {"ok": False, "latency_ms": 12.3,
+                              "error": "ConnectionError: NXDOMAIN"}
+
+    def test_health_never_raises_when_probe_raises(self, client, monkeypatch):
+        """#1384: a raising probe must never crash the liveness handler."""
+        import tortoise.hosted_api as ha_mod
+
+        def _boom():
+            raise RuntimeError("probe exploded")
+
+        monkeypatch.setattr(ha_mod, "_probe_db", _boom)
+        r = client.get("/health")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "degraded"
+        assert body["db"]["ok"] is False
+        assert "probe exploded" in body["db"]["error"]
 
     def test_health_ready_reports_db(self, client):
         """Readiness — DB connectivity (what /health used to check)."""

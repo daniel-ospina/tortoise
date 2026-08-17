@@ -220,6 +220,16 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         rest_spec=RestSpec(method="GET", path="/v1/search"),
     ),
     ToolDefinition(
+        name="tortoise_expand_relationships",
+        description="Full relationship payload for ONE Point, incl. each related point's "
+                    "content (the expand side of the #1353 list/expand split — search "
+                    "returns bounded state entries; use this to read a neighbor's full "
+                    "text on demand).",
+        annotations=_ro(),
+        http_policy=False,
+        sdk_method="expand_relationships",
+    ),
+    ToolDefinition(
         name="tortoise_recall",
         description="Epistemic recall — four intents via mode (preset + override). "
                     "mode='state' (UC1): current high-confidence state — "
@@ -1077,6 +1087,7 @@ GROUP_BY_NAME: dict[str, str] = {
     "tortoise_invalidate": "memory", "tortoise_retract_point": "memory",
     "tortoise_list_tags": "memory",
     "tortoise_list_pointkinds": "memory", "tortoise_search": "memory",
+    "tortoise_expand_relationships": "memory",
     "tortoise_recall": "memory",
     "tortoise_issue_insight": "memory",
     "tortoise_mine_conversations": "mining",
