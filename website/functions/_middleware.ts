@@ -82,9 +82,14 @@ export const onRequest: PagesFunction = async (context) => {
       // (?token=…) and recovery links (?type=recovery) must not lose params.
       const target =
         "https://tortoise.premiselabs.co" + path.replace(/\.html$/, "") + url.search;
-      const res = Response.redirect(target, 301);
-      res.headers.set("Strict-Transport-Security", HSTS["Strict-Transport-Security"]);
-      return res;
+      // Build the 301 manually — Response.redirect() returns a response with
+      // IMMUTABLE headers, so stamping HSTS on it throws (Cloudflare 1101 /
+      // 500 on every consolidated URL). Headers passed in the constructor
+      // are the response's own and mutable.
+      return new Response(null, {
+        status: 301,
+        headers: { Location: target, ...HSTS },
+      });
     }
   }
 
@@ -99,9 +104,12 @@ export const onRequest: PagesFunction = async (context) => {
       url.pathname === "/product.html" ||
       url.pathname === "/index.html")
   ) {
-    const res = Response.redirect(url.origin + "/", 301);
-    res.headers.set("Strict-Transport-Security", HSTS["Strict-Transport-Security"]);
-    return res;
+    // Same immutable-headers rule as the consolidation block above — build
+    // the 301 manually so the HSTS stamp doesn't throw (Cloudflare 1101).
+    return new Response(null, {
+      status: 301,
+      headers: { Location: url.origin + "/", ...HSTS },
+    });
   }
 
   // Only rewrite the root path — everything else serves its own asset.
