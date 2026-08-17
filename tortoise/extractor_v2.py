@@ -1,0 +1,1185 @@
+"""Extractor pipeline v2 — the 5-stage narrative-first architecture
+(epic #909, issue #1350).
+
+Design contract: docs/plans/2026-08-14-extractor-pipeline-v2-design.md
+
+```
+raw conversation
+  │
+  ▼
+[S1] STORY SUMMARY (chunked)  — flash prompt, validated + owner-approved
+     (run_s1_granular.py lineage); per-chunk narratives COMPILED into one
+     coherent story (dedup entities, stitch the arc).
+  │
+  ▼
+[S2] MAP TO EMBED — flash prompt: story + master list + condensed
+     how-to-use-tortoise semantic core → embed list
+     {entities, events, points, operators, chain_notes, link_before_create}.
+  │
+  ▼
+[S3] SEARCH THE GRAPH — REAL backend read (FalkorDB via docker:// / redis://
+     URI, or hosted API), NOT FalkorDBLite. Degrades gracefully when the
+     backend is embedded or unreachable (the pipeline proceeds empty).
+  │
+  ▼
+[S4] REVIEW GAPS — flash prompt: compiled story + S3 results + S2 list →
+     COMPLETE embed list.
+  │
+  ▼
+[S5] EMBED — EXECUTION (deterministic, not a flash prompt): resolve the
+     complete embed list against the existing-graph search results
+     (link-before-create), supersede (REVISES), validate chains (warn +
+     repair where the data allows), emit the Layer-1 commit payload in
+     dependency order (entities → events → points → operators).
+```
+
+Owner confirmations honored (issue #1350): flash runs 4 prompts (S1-S4), S5
+is execution; temperature 0.0 (via tests.model_adapters MODELS); S3 reads the
+REAL backend; chains warn + repair, hard-block never; solar-pro4 parked;
+narrative-first; master list = objects + subjects + points + events + packs +
+chains; single-flash path; no max_tokens caps.
+
+Master-list note: the v2 master list (subjects/points/events/chains) lives
+here as ``build_master_list()`` — an overlay over the v1
+``compile_value_brief()`` (which stays the kinds+granularity contract for the
+v1 enforcer; adding non-kind sections to it would pollute
+``value_extractor._object_kind_vocab``). The expansion is delivered by this
+module per design doc §3.
+"""
+from __future__ import annotations
+
+import json
+import re
+import time
+from pathlib import Path
+
+# ── The v2 master list (design doc §3) ─────────────────────────────────────
+
+SUBJECTS = {
+    "core:organization": "An organization — a company, agency, or other collective entity",
+    "core:team": "A team — a group of people working together toward shared goals",
+    "core:role": "A role — a defined function or position held by a person or a team",
+    "core:legalPerson": "A legal person — an entity with legal standing (company, foundation, org)",
+    "core:naturalPerson": "A natural person — an individual human being",
+}
+
+POINTS = {
+    "statement": "A durable belief, claim, or proposition — the extraction write kind",
+}
+
+EVENTS = {
+    "core:decision": "A commitment event — a choice made with reasons that resolves confidence",
+    "core:occurrence": "An occurrence — something that happened at a point in time",
+    "core:deployment": "A deployment event — a product or release shipped to an environment",
+    "core:review": "A review event — a review of work, code, plan, or content",
+    "core:meeting": "A meeting event — a gathering that changed or confirmed state",
+    "core:experiment": "An experiment event — a test or calibration run with measured results",
+    "core:friction": "A friction event — a discovered obstacle, pain point, or workflow failure",
+}
+
+# Chain paths use the CANONICAL kind names from the master list (no minting):
+# "jobToBeDone" is the design doc's JTBD (product-strategy:jobToBeDone).
+CHAINS = {
+    "productDelivery": {
+        "path": ["jobToBeDone", "useCase", "feature", "userJourney",
+                 "workflow", "requirement", "architecture"],
+        "note": ("Customer value flows toward delivery: customers connect to "
+                 "JTBDs/use cases, not directly to architecture. A customer "
+                 "mapped straight to an architecture requirement re-maps to "
+                 "the nearest chain position."),
+    },
+    "epicToCode": {
+        "path": ["epic", "issue", "code"],
+        "note": "Work decomposition: an epic breaks into issues; issues land in code.",
+    },
+    "campaignToChannel": {
+        "path": ["campaign", "content", "channel"],
+        "note": "Marketing flow: a campaign produces content that reaches an audience through a channel.",
+    },
+}
+
+PACK_NS = ("product-strategy:", "dev:", "marketing:", "pm:")
+
+CORE_OBJECT_KEYS = (
+    "core:Project", "core:WorkItem", "core:document", "core:tag",
+    "core:user", "core:skill", "core:tool", "core:agent",
+    "core:workflow", "core:agreement", "core:standard", "core:other",
+    "core:strategy", "core:plan", "core:goal", "core:target",
+)
+
+
+def _desc(brief: dict, key: str) -> str:
+    v = brief.get(key, "")
+    return v.get("description", "") if isinstance(v, dict) else str(v or "")
+
+
+def build_master_list() -> dict:
+    """The v2 master list: compile_value_brief() kinds + the §3 additions
+    (subjects, points, events, chains, memory_granularity). Section values
+    are {kind: description} dicts — rendered as readable text in prompts."""
+    from tortoise.value_extractor import compile_value_brief
+    brief = compile_value_brief()
+    objects = {k: _desc(brief, k) for k in CORE_OBJECT_KEYS}
+    pack_kinds = {}
+    for k, v in brief.items():
+        if k == "memory_granularity":
+            continue
+        if not k.startswith(PACK_NS):
+            continue
+        pack_kinds[k] = _desc(brief, k)
+    return {
+        "objects": objects,
+        "subjects": dict(SUBJECTS),
+        "points": dict(POINTS),
+        "events": dict(EVENTS),
+        "pack_kinds": pack_kinds,
+        "chains": {name: {"path": list(c["path"]), "note": c["note"]}
+                   for name, c in CHAINS.items()},
+        "memory_granularity": dict(brief.get("memory_granularity", {})),
+    }
+
+
+def master_kind_forms(master: dict) -> set[str]:
+    """Namespaced + bare + case-folded forms of every kind in the master list
+    (the closed-vocab check set — S5's minted-kind gate)."""
+    kinds: set[str] = set()
+    for section in ("objects", "subjects", "points", "events", "pack_kinds"):
+        for key in master.get(section, {}):
+            ns, _, kind = key.rpartition(":")
+            kinds.add(key)
+            if kind:
+                kinds.add(kind)
+                kinds.add(kind.lower())
+                kinds.add(f"{ns}:{kind.lower()}")
+            else:
+                kinds.add(key.lower())
+    return kinds
+
+
+def _render_master(master: dict) -> str:
+    lines = [
+        "MASTER LIST — the closed vocabulary. EVERY kind you emit MUST come "
+        "from this list (namespaced or bare form). Do NOT mint kinds: "
+        "\"worktree\", \"test suite\", \"approach\" are NOT kinds — re-map "
+        "to the nearest listed kind or drop the item.",
+    ]
+
+    def _group(title: str, d: dict) -> str:
+        out = [f"\n{title}"]
+        out += [f"- {k} — {v}" for k, v in d.items()]
+        return "\n".join(out)
+
+    lines.append(_group("OBJECTS (core)", master["objects"]))
+    lines.append(_group("SUBJECTS (core)", master["subjects"]))
+    lines.append(_group("POINTS", master["points"]))
+    lines.append(_group("EVENTS", master["events"]))
+    lines.append(_group("PACK KINDS (from the installed packs)", master["pack_kinds"]))
+
+    lines.append("\nCHAINS (the business logic of mapping)")
+    for name, c in master["chains"].items():
+        lines.append(f"- {name}: {' → '.join(c['path'])}")
+        lines.append(f"    {c['note']}")
+
+    g = master["memory_granularity"]
+    if g:
+        lines.append("\nMEMORY GRANULARITY (what each domain considers DURABLE "
+                     "vs EPHEMERAL — the retention bar)")
+        lines += [f"- {ns}: {txt}" for ns, txt in g.items()]
+    return "\n".join(lines)
+
+
+def _render_chains(master: dict) -> str:
+    return "\n".join(
+        f"- {name}: {' → '.join(c['path'])} — {c['note']}"
+        for name, c in master["chains"].items()
+    )
+
+
+# ── S1: STORY SUMMARY (chunked) — the validated prompt ─────────────────────
+
+S1_TMPL = """You are the STORY SUMMARIZER for the company/product epistemic memory.
+Read the whole conversation. Produce a NARRATIVE that captures what CHANGED
+about the world we operate in — the state of the product, the team, the
+domain — and WHY it changed, at the level of durable meaning, not mechanics.
+
+Use the MEMORY GRANULARITY definitions below as the rule for what to keep
+(durable) vs drop (ephemeral) — not a vague time heuristic:
+
+{memory_granularity}
+
+Apply these per domain. When a fact spans domains, keep it if ANY domain
+considers it durable. When unsure: "is this a decision, a state change, a
+durable belief, or a reason — or is it how the work was done this hour?"
+
+Focus on TWO layers, in this order:
+1. STATE (primary): subjects and objects and how they changed.
+2. EPISTEMIC (primary): the LOGIC — points that support (IMPL), attack (NAND),
+   or mitigate the relevance (MITIGATES) between points and objects.
+EVENTS (secondary): only as context for why state changed.
+
+De-emphasize process — no commit hashes, no test counts, no PR numbers, no
+review findings, no tool calls, no build steps — unless they DIRECTLY change
+state or reveal durable belief.
+
+RESTATE, DON'T REINVENT: if the conversation states a root cause or a fact,
+preserve it exactly. Do NOT invent a "We believed X" opening unless the input
+supports it.
+
+The narrative should read like: "We believed X. The session revealed Y, which
+changed our approach to Z. The reasoning: A supports it, B undermines it, C
+tempers how much it matters."
+
+Granularity: the level of a decision (its resulting change in state, the
+tradeoffs and reasons behind) worth remembering in six months, per the
+memory-granularity rules above. If a detail won't matter then, drop it."""
+
+
+def _granularity_text() -> str:
+    master = build_master_list()
+    g = master.get("memory_granularity", {})
+    return "\n".join(f"- {ns}: {txt}" for ns, txt in g.items())
+
+
+def run_s1(model, transcript: str) -> str:
+    """S1: story summary for ONE segment. Returns the narrative text
+    (the validated single-flash path, uncapped)."""
+    system = S1_TMPL.replace("{memory_granularity}", _granularity_text())
+    return _complete(model, system, "CONVERSATION:\n" + transcript)
+
+
+# ── The chunker + compiler (design doc §2) ─────────────────────────────────
+
+def chunk_transcript(edus: list[dict], target: int = 50) -> list[list[dict]]:
+    """Split the EDU stream into bounded contiguous segments (design doc:
+    40-60 EDUs per chunk). Each segment runs S1 independently, then the
+    compiler stitches them."""
+    if target < 1:
+        raise ValueError("target chunk size must be >= 1")
+    return [edus[i:i + target] for i in range(0, len(edus), target)]
+
+
+def _edus_to_text(edus: list[dict]) -> str:
+    return "\n".join(
+        f"{e['index']}: {e['role']}: {e['text']}" for e in edus)
+
+
+def _norm_sent(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip().lower())
+
+
+def _overlap_ratio(a: str, b: str) -> float:
+    """Token-overlap ratio used by the compiler's cross-chunk dedup."""
+    ta = set(_norm_sent(a).split())
+    tb = set(_norm_sent(b).split())
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / min(len(ta), len(tb))
+
+
+def _split_sentences(text: str) -> list[str]:
+    parts = re.split(r"(?<=[.!?])\s+", (text or "").strip())
+    return [p.strip() for p in parts if p.strip()]
+
+
+def compile_stories(stories: list[str]) -> str:
+    """Compile per-chunk S1 narratives into ONE coherent story.
+
+    - Stitch the arc: chunks keep their order, joined with paragraph breaks.
+    - Cross-chunk dedup: a sentence in chunk N that is a near-duplicate
+      (token overlap >= 0.85) of something already merged is dropped — the
+      entity/claim is preserved once, not re-introduced as new.
+    - Cross-chunk connections survive because the dedup keeps the FIRST
+      (earliest) articulation and later chunks only re-reference it.
+    Returns the compiled story text ('' when no chunks)."""
+    if not stories:
+        return ""
+    merged: list[str] = []
+    seen_sents: list[str] = []
+    for story in stories:
+        for sent in _split_sentences(story):
+            if len(set(_norm_sent(sent).split())) < 3:
+                # fragments (<3 tokens) are not dedup candidates — pass through
+                merged.append(sent)
+                continue
+            dup = any(_overlap_ratio(sent, prev) >= 0.85
+                      for prev in seen_sents)
+            if not dup:
+                merged.append(sent)
+                seen_sents.append(sent)
+    return "\n\n".join(merged)
+
+
+# ── S2: MAP TO EMBED — the draft prompt (owner-in-the-loop v1) ─────────────
+
+OUTPUT_CONTRACT = """{
+  "entities": [{"name": str, "kind": str, "lifecycle": "created|changed|unchanged|superseded", "supersedes": "existing-id|null", "note": str|null}],
+  "events": [{"content": str, "eventKind": str, "about_entities": [str]}],
+  "points": [{"content": str, "pointKind": "statement", "about_entities": [str]}],
+  "operators": [
+    {"src": str, "dst": str, "op_type": "IMPL|NAND"},
+    {"src": str, "dst": str, "op_type": "MITIGATES", "target_edge": {"src": str, "dst": str, "op_type": "IMPL"}, "strength": 0.1|0.3|0.5}
+  ],
+  "chain_notes": [{"chain": str, "finding": str, "action": "repaired|warned", "note": str}],
+  "link_before_create": [{"searched_for": str, "found": bool, "note": str}]
+}"""
+
+S2_TMPL = """You are the GRAPH MAPPER for the Tortoise epistemic memory.
+
+TASK
+Map the S1 STORY into the exact graph-write embed list: objects/subjects →
+entities (with lifecycle), events → Event nodes, points → Points (statement),
+connections → IMPL/NAND/MITIGATES operators. Reference ENTITIES by their names,
+EVENTS by their content, POINTS by their content.
+
+MASTER LIST
+{master_list}
+
+CONDENSED SEMANTIC CORE (from the how-to-use-tortoise skill)
+- Edge types: IMPL = supports/implies; NAND = contradicts.
+- TRUTH vs WEIGHT — two different tools for two different problems:
+  * A claim that is FACTUALLY WRONG → NAND the Point directly (truth attack).
+    Truth lives on the POINT.
+  * A claim that is TRUE but matters LESS than it seems → MITIGATES on the
+    OPERATOR/edge (relevance attack): strength 0.10 (minor caveat) / 0.30
+    (significant limitation) / 0.50 (major counter-evidence). NEVER use < 0.10
+    (negligible) or > 0.50 (would invert the claim — use NAND instead).
+  * Golden rule: relevance lives on the OPERATOR, truth lives on the POINT.
+  * NEVER NAND an option or criterion for being a bad fit — options and
+    criteria are true by definition. A bad fit is a relevance problem: attack
+    the OPERATOR (NAND or MITIGATES on the edge between them).
+- LIFECYCLE (supersession):
+  * created     = genuinely new item (searched the graph first, no match).
+  * changed     = updates an existing item — carry "supersedes": "existing-id"
+    when you know the id, else null.
+  * unchanged   = already exists — connect only, do NOT re-create.
+  * superseded  = this item is being replaced by a newer one.
+- LINK-BEFORE-CREATE: before creating ANY entity or point, search the graph for
+  an existing item (same name/topic). Record each search in link_before_create
+  (searched_for, found, note). No duplicates — dedup.
+- CHAINS — mapping must respect the chain positions (WARN, then TRY TO REPAIR):
+{chains_text}
+  If a mapping would connect across a chain in a way that violates it, WARN in
+  chain_notes and TRY TO REPAIR by re-mapping toward the nearest valid chain
+  position. NEVER invent entities to satisfy a chain.
+
+OPERATOR REFERENCING (hard rule)
+Operators wire POINTS to POINTS or POINTS to EVENTS. The src/dst strings MUST
+be the EXACT content of a point or event emitted in THIS same output — copy
+verbatim, no paraphrasing, no prefixes, no truncation. If an endpoint of an
+IMPL/NAND/MITIGATES relation has no point yet, CREATE the point first and
+reference it. NEVER use an entity name as an operator endpoint — entities are
+wired through about_entities, not through operators.
+
+VALUE FILTER — STRICT EXCLUSION (carried from v1)
+No file paths, module names, branch names, worktrees, test suites/files, issue
+ids/labels, git operations, commands run, commit hashes, PR numbers, test
+counts, review findings, tool calls, build steps — UNLESS they DIRECTLY change
+state or reveal durable belief. Process chatter is dropped; what survives is
+what changes the world model.
+
+OUTPUT CONTRACT — ONE JSON object and NOTHING else:
+{output_contract}
+
+Empty arrays are valid — extract-nothing is valid. Print ONLY the JSON object
+(no markdown fences, no commentary)."""
+
+
+def render_s2_prompt(master: dict | None = None) -> str:
+    master = master or build_master_list()
+    return (S2_TMPL
+            .replace("{master_list}", _render_master(master))
+            .replace("{chains_text}", _render_chains(master))
+            .replace("{output_contract}", OUTPUT_CONTRACT))
+
+
+def run_s2(model, story: str, master: dict | None = None) -> dict:
+    """S2: story → embed list (draft prompt v1, owner-in-the-loop pending)."""
+    out = _complete(model, render_s2_prompt(master), "S1 STORY:\n" + story)
+    return _parse_json(out)
+
+
+# ── S3: SEARCH THE GRAPH (real backend, graceful degradation) ─────────────
+
+def resolve_backend_mode() -> str:
+    """'real' when a supported TORTOISE_DB_URI (docker:// / redis:// /
+    rediss://) or a hosted API URL is configured; 'embedded' otherwise
+    (FalkorDBLite — the test/eval-only store S3 must NOT read)."""
+    import os
+    from tortoise.config import is_db_uri
+    uri = os.environ.get("TORTOISE_DB_URI")
+    if uri and is_db_uri(uri):
+        return "real"
+    if os.environ.get("TORTOISE_API_URL"):
+        return "hosted"
+    return "embedded"
+
+
+def _story_topics(story: str, cap: int = 6) -> list[str]:
+    """Deterministic topic queries from the story: first sentence of each
+    paragraph, capped."""
+    topics: list[str] = []
+    for para in (story or "").split("\n\n"):
+        first = _split_sentences(para)[:1]
+        if first:
+            topics.append(first[0][:120])
+        if len(topics) >= cap:
+            break
+    return topics
+
+
+def _derive_queries(embed_list: dict, story: str) -> dict:
+    """Deterministic query derivation: entity names → object/subject,
+    event contents → event, point contents → point, story topics → point."""
+    queries: dict[str, list[str]] = {"object": [], "event": [], "point": []}
+    seen: set[str] = set()
+
+    def _add(entity_type: str, q: str) -> None:
+        q = (q or "").strip()
+        if not q:
+            return
+        key = f"{entity_type}:{_norm_sent(q)}"
+        if key in seen:
+            return
+        seen.add(key)
+        queries[entity_type].append(q[:160])
+
+    for e in embed_list.get("entities", []) or []:
+        if e.get("name"):
+            _add("object", str(e["name"]))
+    for ev in embed_list.get("events", []) or []:
+        if ev.get("content"):
+            _add("event", str(ev["content"])[:80])
+    for p in embed_list.get("points", []) or []:
+        if p.get("content"):
+            _add("point", str(p["content"])[:80])
+    for t in _story_topics(story):
+        _add("point", t)
+    return queries
+
+
+def _fts_rows(sdk, entity_type: str, query: str, limit: int = 3) -> list[dict]:
+    rows = sdk.tortoise_fts_query(query, entity_type=entity_type, limit=limit)
+    out = []
+    for r in rows or []:
+        if entity_type in ("object", "subject"):
+            out.append({"id": r.get("id", ""), "name": r.get("content", ""),
+                        "kind": r.get("kind", "")})
+        else:
+            out.append({"id": r.get("id", ""), "content": r.get("content", ""),
+                        "kind": r.get("kind", "")})
+    return out
+
+
+def search_graph(sdk, embed_list: dict, story: str, *,
+                 max_queries: int = 15, limit: int = 3) -> dict:
+    """S3: search the REAL graph for existing entities/points/events.
+
+    - Resolves the active backend from the environment (design doc §3 owner
+      confirmation: NOT FalkorDBLite). Embedded → skip with a degraded flag.
+    - Runs the same queries a client would: entity by name+kind, points by
+      topic, events by entity (tortoise_fts_query, batch).
+    - Graceful degradation: unreachable graph (connection error/timeout)
+      returns partial results + ``degraded`` — the pipeline proceeds.
+
+    Returns:
+        {"mode": str, "degraded": bool, "reason": str|None,
+         "entities": [{id, name, kind}], "points": [{id, content, kind}],
+         "events": [{id, content, kind}], "queries_run": int}
+    """
+    mode = resolve_backend_mode()
+    empty = {"mode": mode, "degraded": True, "reason": None,
+             "entities": [], "points": [], "events": [], "queries_run": 0}
+    if mode != "real":
+        empty["reason"] = (f"S3 skipped: active backend is {mode!r} — the real "
+                           "graph (FalkorDB via docker/redis URI or hosted API) "
+                           "is required, not FalkorDBLite")
+        return empty
+    if sdk is None:
+        empty["reason"] = "S3 skipped: no graph client (sdk) provided"
+        return empty
+
+    queries = _derive_queries(embed_list, story)
+    # Bound the query budget deterministically.
+    budget = max_queries
+    bucket = {"object": "entities", "subject": "entities",
+              "event": "events", "point": "points"}
+    results: dict[str, dict] = {"entities": {}, "points": {}, "events": {}}
+    q_run = 0
+    try:
+        first = True
+        for entity_type, qs in queries.items():
+            for q in qs:
+                if q_run >= budget:
+                    break
+                q_run += 1
+                try:
+                    for row in _fts_rows(sdk, entity_type, q, limit=limit):
+                        rid = row.get("id")
+                        if not rid or rid in results[bucket[entity_type]]:
+                            continue
+                        results[bucket[entity_type]][rid] = row
+                except Exception:
+                    # FIRST-query failure = the backend is unreachable → the
+                    # outer handler degrades the whole search. Later single-
+                    # query failures are non-fatal (one bad query is not a
+                    # dead graph).
+                    if first:
+                        raise
+                    continue
+                first = False
+    except Exception as e:  # backend unreachable — degrade, don't raise
+        return {
+            "mode": mode, "degraded": True,
+            "reason": f"S3 degraded: graph search failed ({type(e).__name__}: {e})",
+            "entities": list(results["entities"].values()),
+            "points": list(results["points"].values()),
+            "events": list(results["events"].values()),
+            "queries_run": q_run,
+        }
+    return {
+        "mode": mode, "degraded": False, "reason": None,
+        "entities": list(results["entities"].values()),
+        "points": list(results["points"].values()),
+        "events": list(results["events"].values()),
+        "queries_run": q_run,
+    }
+
+
+def _render_search_results(search: dict) -> str:
+    if not search:
+        return "(no graph search results)"
+    if search.get("degraded"):
+        return (f"(graph search DEGRADED — {search.get('reason') or 'skipped'}; "
+                "no existing items available; assume everything is new)")
+    parts = []
+    if search.get("entities"):
+        parts.append("EXISTING ENTITIES (id | name | kind):\n" + "\n".join(
+            f"- {e['id']} | {e.get('name', '')} | {e.get('kind', '')}"
+            for e in search["entities"][:40]))
+    if search.get("points"):
+        parts.append("EXISTING POINTS (id | content | kind):\n" + "\n".join(
+            f"- {p['id']} | {p.get('content', '')[:120]} | {p.get('kind', '')}"
+            for p in search["points"][:40]))
+    if search.get("events"):
+        parts.append("EXISTING EVENTS (id | content | kind):\n" + "\n".join(
+            f"- {e['id']} | {e.get('content', '')[:120]} | {e.get('kind', '')}"
+            for e in search["events"][:40]))
+    if not parts:
+        return "(graph search returned no existing items)"
+    return "\n\n".join(parts)
+
+
+# ── S4: REVIEW GAPS — the complete embed list ──────────────────────────────
+
+S4_TMPL = """You are the GAP REVIEWER for the Tortoise epistemic memory.
+
+TASK
+You have: (a) the compiled story of the conversation, (b) the S2 embed list,
+(c) the results of searching the existing graph. Review for GAPS: did S2 miss
+any key entities, events, or points that AFFECT THE WORLD MODEL — durable
+objects/subjects, decisions/occurrences, or claims whose support/attack
+structure matters? Add them. Do NOT pad with process noise (the value filter
+applies — same STRICT EXCLUSION as S2).
+
+MASTER LIST (same closed vocabulary as S2 — no minted kinds)
+{master_list}
+
+CHAINS
+{chains_text}
+
+S1 STORY
+{story}
+
+S3 GRAPH SEARCH RESULTS
+{search_results}
+
+S2 EMBED LIST (may be incomplete — that is why you exist)
+{embed_list_json}
+
+OUTPUT — ONE JSON object, the COMPLETE embed list (S2 + gaps), SAME contract:
+{output_contract}
+
+Rules:
+- Re-emit the S2 items you keep, corrected where the search results show they
+  already exist (lifecycle changed/unchanged + supersedes = the existing id).
+- A point that already exists in the graph (same content) → lifecycle
+  unchanged, do NOT re-create.
+- OPERATOR REFERENCING: operator src/dst MUST be the EXACT content of a point
+  or event emitted in THIS output (copy verbatim, no paraphrasing). If an
+  endpoint has no point yet, CREATE the point first. NEVER use an entity name
+  as an operator endpoint — entities wire via about_entities.
+- MITIGATES: relevance attack on the OPERATOR edge, strength 0.10-0.50.
+  NAND: truth attack on a FACTUALLY WRONG point. Golden rule: relevance lives
+  on the OPERATOR, truth lives on the POINT. Never NAND an option/criterion
+  for being a bad fit.
+- chain_notes: flag violations, TRY TO REPAIR toward the nearest valid chain
+  position, never invent entities.
+- link_before_create: record what you searched / what the graph already had.
+Empty arrays are valid. Print ONLY the JSON object."""
+
+
+def render_s4_prompt(story: str, search: dict, embed_list: dict,
+                     master: dict | None = None) -> str:
+    master = master or build_master_list()
+    return (S4_TMPL
+            .replace("{master_list}", _render_master(master))
+            .replace("{chains_text}", _render_chains(master))
+            .replace("{story}", story)
+            .replace("{search_results}", _render_search_results(search))
+            .replace("{embed_list_json}", json.dumps(embed_list, indent=1))
+            .replace("{output_contract}", OUTPUT_CONTRACT))
+
+
+def run_s4(model, story: str, search: dict, embed_list: dict,
+           master: dict | None = None) -> dict:
+    """S4: complete the embed list (S2 + gaps). Draft prompt v1."""
+    out = _complete(model, render_s4_prompt(story, search, embed_list, master),
+                    "Complete the embed list.")
+    return _parse_json(out)
+
+
+# ── S5: EMBED — deterministic execution → Layer-1 payload ──────────────────
+
+def _norm(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip().lower())
+
+
+def _token_overlap(a: str, b: str) -> float:
+    ta = set(_norm(a).split())
+    tb = set(_norm(b).split())
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / min(len(ta), len(tb))
+
+
+def _content_id(prefix: str, content: str) -> str:
+    from tortoise.ids import content_hash
+    return f"{prefix}_{content_hash(content)[:62]}"
+
+
+def _index_search(search: dict) -> dict:
+    """Deterministic existing-graph index from the S3 results (the
+    link-before-create surface)."""
+    idx = {"entities": {}, "points": [], "events": []}
+    for e in (search or {}).get("entities", []) or []:
+        if e.get("name"):
+            idx["entities"][(_norm(e["name"]), e.get("kind", ""))] = e
+    for p in (search or {}).get("points", []) or []:
+        if p.get("content"):
+            idx["points"].append(p)
+    for ev in (search or {}).get("events", []) or []:
+        if ev.get("content"):
+            idx["events"].append(ev)
+    return idx
+
+
+def _find_point_match(points: list[dict], content: str) -> tuple[str, str]:
+    """(match_kind, existing_id) — 'exact' (same id, dedup), 'revises'
+    (supersedes by correction — new content-addressed id), or ('none', '')."""
+    norm = _norm(content)
+    for p in points:
+        if _norm(p.get("content", "")) == norm:
+            return "exact", p.get("id", "")
+    for p in points:
+        if _token_overlap(p.get("content", ""), content) >= 0.6:
+            return "revises", p.get("id", "")
+    return "none", ""
+
+
+def _chain_positions(master: dict) -> dict[str, tuple[str, int]]:
+    """kind → (chain, position) for every kind in every chain path."""
+    pos: dict[str, tuple[str, int]] = {}
+    for name, c in master.get("chains", {}).items():
+        for i, kind in enumerate(c.get("path", [])):
+            pos[kind.lower()] = (name, i)
+            bare = kind.rsplit(":", 1)[-1].lower()
+            pos[bare] = (name, i)
+    return pos
+
+
+def validate_chains(embed_list: dict, master: dict | None = None) -> list[dict]:
+    """Deterministic chain validation (design doc §7.4): WARN, then TRY TO
+    REPAIR toward the nearest valid chain position; hard-block never.
+
+    Checks entity co-mentions in about_entities: when two kinds belong to the
+    SAME chain and the pair is listed in reverse chain order, that is a
+    direct-edge violation (e.g. a customer connected straight to an
+    architecture requirement). When the nearest intermediate kind already
+    exists in the embed list's entities, the fix is possible → action
+    'repaired' (connect via the intermediate); otherwise 'warned'.
+    """
+    master = master or build_master_list()
+    pos = _chain_positions(master)
+    entity_kinds: dict[str, str] = {}
+    for e in embed_list.get("entities", []) or []:
+        if e.get("name") and e.get("kind"):
+            entity_kinds[_norm(e["name"])] = str(e["kind"])
+    notes: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in (embed_list.get("points", []) or []) + (embed_list.get("events", []) or []):
+        about = item.get("about_entities") or []
+        if not isinstance(about, list):
+            continue
+        names = [_norm(a) for a in about if isinstance(a, str)]
+        for i in range(len(names)):
+            for j in range(i + 1, len(names)):
+                ka = entity_kinds.get(names[i])
+                kb = entity_kinds.get(names[j])
+                if not ka or not kb:
+                    continue
+                pa = pos.get(ka.rsplit(":", 1)[-1].lower())
+                pb = pos.get(kb.rsplit(":", 1)[-1].lower())
+                if not pa or not pb or pa[0] != pb[0]:
+                    continue
+                if pa[1] <= pb[1]:
+                    continue  # chain order OK
+                chain = pa[0]
+                key = (names[i], names[j], chain)
+                if key in seen:
+                    continue
+                seen.add(key)
+                path = [k.rsplit(":", 1)[-1] for k in
+                        master["chains"][chain]["path"]]
+                path_lower = [p.lower() for p in path]
+                a_i, b_i = pa[1], pb[1]
+                intermediate = None
+                # nearest valid position between b and a, from the LIST.
+                for e in embed_list.get("entities", []) or []:
+                    k = str(e.get("kind", "")).rsplit(":", 1)[-1].lower()
+                    if k in path_lower and b_i < path_lower.index(k) < a_i:
+                        intermediate = str(e.get("name"))
+                        break
+                if intermediate:
+                    notes.append({
+                        "chain": chain,
+                        "finding": (f"'{names[i]}' ({ka}) connects to "
+                                    f"'{names[j]}' ({kb}) in reverse chain "
+                                    f"order ({' → '.join(path)})"),
+                        "action": "repaired",
+                        "note": f"re-map the connection via '{intermediate}' "
+                                f"(nearest valid chain position in the list)",
+                    })
+                else:
+                    notes.append({
+                        "chain": chain,
+                        "finding": (f"'{names[i]}' ({ka}) connects to "
+                                    f"'{names[j]}' ({kb}) in reverse chain "
+                                    f"order ({' → '.join(path)})"),
+                        "action": "warned",
+                        "note": "no intermediate chain kind present — flag, "
+                                "do NOT invent entities to satisfy the chain",
+                    })
+    return notes
+
+
+def _minted_kind_report(embed_list: dict, master: dict | None = None) -> list[str]:
+    """Every kind used in entities/events/points that is NOT in the master
+    list (indicator: 0 minted kinds)."""
+    master = master or build_master_list()
+    forms = master_kind_forms(master)
+    full = {k.lower() for k in forms if ":" in k}
+    bare = {k.lower().rsplit(":", 1)[-1] for k in forms}
+    minted: list[str] = []
+    for e in embed_list.get("entities", []) or []:
+        k = str(e.get("kind", ""))
+        if k and k.lower() not in full and k.lower() not in bare:
+            minted.append(f"{k} (entity '{e.get('name', '')[:60]}')")
+    for ev in embed_list.get("events", []) or []:
+        k = str(ev.get("eventKind", ""))
+        if k and k.lower() not in full and k.lower() not in bare:
+            minted.append(f"{k} (event '{ev.get('content', '')[:60]}')")
+    for p in embed_list.get("points", []) or []:
+        k = str(p.get("pointKind", ""))
+        if k and k.lower() not in full and k.lower() not in bare:
+            minted.append(f"{k} (point '{p.get('content', '')[:60]}')")
+    return minted
+
+
+_ENTITY_FALLBACK = {"kind": "core:other"}
+_EVENT_FALLBACK = {"kind": "core:occurrence"}
+_POINT_FALLBACK = {"kind": "statement"}
+
+
+def execute_embed(embed_list: dict, search: dict, *, session_id: str,
+                  story_arc: str = "", summary: str = "",
+                  extractor_version: str = "value@0.5.0+v2",
+                  master: dict | None = None) -> dict:
+    """S5: deterministic embed EXECUTION (not a flash prompt).
+
+    Maps the complete embed list to the Layer-1 commit payload in dependency
+    order (entities → events → points → operators), honoring:
+      - link-before-create: search results index every candidate (dedup).
+      - supersession: points that revise an existing topic → reason REVISES.
+      - chain warn+repair: validate_chains (never hard-block).
+      - no minted kinds: unknown kinds repair to the family fallback with a
+        warning (core:other / core:occurrence / statement).
+      - Layer-1 integrity: operators whose src/dst/target reference no emitted
+        point/event are DROPPED with a warning (mirrors _stream_to_payload);
+        MITIGATES strengths clamp to [0.10, 0.50] with a warning.
+
+    Returns {"payload", "chain_notes", "link_before_create", "warnings",
+             "minted_kinds", "stats"}.
+    """
+    master = master or build_master_list()
+    idx = _index_search(search)
+    warnings: list[str] = []
+
+    # ── entities (dependency order 1) ─────────────────────────────────────
+    payload_entities: list[dict] = []
+    link_before_create: list[dict] = []
+    entity_ids: dict[str, str] = {}   # norm name → existing id ("" if new)
+    seen_entities: set[tuple[str, str]] = set()
+    for e in embed_list.get("entities", []) or []:
+        name = str(e.get("name", "")).strip()
+        if not name:
+            continue
+        kind = str(e.get("kind", "")).strip() or "core:other"
+        if kind.lower() not in master_kind_forms(master) and \
+                kind.lower().rsplit(":", 1)[-1] not in {k.lower().rsplit(":", 1)[-1]
+                                                        for k in master_kind_forms(master)}:
+            warnings.append(f"minted entity kind {kind!r} ('{name[:60]}') "
+                            f"→ repaired to {_ENTITY_FALLBACK['kind']}")
+            kind = _ENTITY_FALLBACK["kind"]
+        key = (name, kind)
+        if key in seen_entities:
+            continue
+        seen_entities.add(key)
+        existing = idx["entities"].get((_norm(name), kind))
+        if existing:
+            entity_ids[_norm(name)] = str(existing.get("id", ""))
+            link_before_create.append({
+                "searched_for": f"entity '{name}'", "found": True,
+                "note": f"existing {existing.get('id', '')} — connect, do not re-create"})
+        else:
+            entity_ids[_norm(name)] = ""
+            link_before_create.append({
+                "searched_for": f"entity '{name}'", "found": False,
+                "note": "no match — created"})
+        payload_entities.append({
+            "name": name, "kind": kind, "passes_frequency_gate": True})
+
+    # ── events (dependency order 2) ───────────────────────────────────────
+    payload_events: list[dict] = []
+    event_ids: dict[str, str] = {}   # norm content → event id
+    event_contents: set[str] = set()
+    for ev in embed_list.get("events", []) or []:
+        content = str(ev.get("content", "")).strip()[:1000]
+        if not content:
+            continue
+        ekind = str(ev.get("eventKind", "")).strip() or "core:occurrence"
+        if ekind.lower() not in {k.lower() for k in master["events"]} and \
+                ekind.lower().rsplit(":", 1)[-1] not in {k.lower().rsplit(":", 1)[-1]
+                                                         for k in master["events"]}:
+            warnings.append(f"minted event kind {ekind!r} ('{content[:60]}') "
+                            f"→ repaired to {_EVENT_FALLBACK['kind']}")
+            ekind = _EVENT_FALLBACK["kind"]
+        n = _norm(content)
+        if n in event_contents:
+            continue
+        event_contents.add(n)
+        eid = _content_id("ev", content)
+        for ex in idx["events"]:
+            if _norm(ex.get("content", "")) == n:
+                eid = str(ex.get("id", "")) or eid
+                link_before_create.append({
+                    "searched_for": f"event '{content[:60]}'", "found": True,
+                    "note": f"existing {eid} — connect, do not re-create"})
+                break
+        else:
+            link_before_create.append({
+                "searched_for": f"event '{content[:60]}'", "found": False,
+                "note": "no match — created"})
+        event_ids[n] = eid
+        payload_events.append({
+            "id": eid, "eventKind": ekind.rsplit(":", 1)[-1] if ":" in ekind else ekind,
+            "content": content, "confidence": 0.5,
+            "about_entities": [str(a) for a in (ev.get("about_entities") or [])
+                               if isinstance(a, str) and a.strip()],
+            "source_ref": "session.md",
+        })
+
+    # ── points (dependency order 3) ───────────────────────────────────────
+    payload_points: list[dict] = []
+    point_ids: dict[str, str] = {}   # norm content → point id
+    for p in embed_list.get("points", []) or []:
+        content = str(p.get("content", "")).strip()[:1000]
+        if not content:
+            continue
+        pkind = str(p.get("pointKind", "")).strip() or "statement"
+        if pkind.lower() not in {k.lower() for k in master["points"]}:
+            warnings.append(f"minted point kind {pkind!r} ('{content[:60]}') "
+                            f"→ repaired to {_POINT_FALLBACK['kind']}")
+            pkind = _POINT_FALLBACK["kind"]
+        n = _norm(content)
+        if n in point_ids:
+            continue
+        match, existing_id = _find_point_match(idx["points"], content)
+        pid = _content_id("pt", content)
+        if match == "exact":
+            pid = existing_id or pid
+            reason = "NEW"   # identical content → same content-addressed id → dedup
+            link_before_create.append({
+                "searched_for": f"point '{content[:60]}'", "found": True,
+                "note": f"exact existing {pid} — content-addressed dedup"})
+        elif match == "revises":
+            reason = "REVISES"  # supersession: new content corrects the old
+            link_before_create.append({
+                "searched_for": f"point '{content[:60]}'", "found": True,
+                "note": f"revises existing {existing_id} — supersede by correction"})
+        else:
+            reason = "NEW"
+            link_before_create.append({
+                "searched_for": f"point '{content[:60]}'", "found": False,
+                "note": "no match — created"})
+        point_ids[n] = pid
+        payload_points.append({
+            "id": pid, "content": content, "pointKind": "statement",
+            "reason": reason, "confidence": 0.5, "c_cal": 0.5,
+            "about_entities": [str(a) for a in (p.get("about_entities") or [])
+                               if isinstance(a, str) and a.strip()],
+            "source_ref": "session.md", "quote": "", "status": "draft",
+        })
+
+    # ── operators (dependency order 4) ────────────────────────────────────
+    def _resolve(ref: str) -> str:
+        r = _norm(ref)
+        if r in point_ids:
+            return point_ids[r]
+        if r in event_ids:
+            return event_ids[r]
+        return ""
+
+    payload_operators: list[dict] = []
+    emitted_edges: set[tuple[str, str, str]] = set()
+    for op in embed_list.get("operators", []) or []:
+        o = dict(op)
+        op_type = str(o.get("op_type", "")).upper()
+        if op_type not in ("IMPL", "NAND", "MITIGATES"):
+            warnings.append(f"operator with unknown op_type {op_type!r} dropped")
+            continue
+        src = _resolve(str(o.get("src", "")))
+        dst = _resolve(str(o.get("dst", "")))
+        if not src or not dst or src == dst:
+            warnings.append(f"operator dropped: src/dst did not resolve to an "
+                            f"emitted point/event ({o.get('src')!r} → {o.get('dst')!r})")
+            continue
+        if op_type in ("IMPL", "NAND"):
+            payload_operators.append({
+                "src": src, "dst": dst, "op_type": op_type,
+                "direction": "unidirectional"})
+            emitted_edges.add((src, dst, op_type))
+            continue
+        # MITIGATES — relevance attack on an edge
+        target = o.get("target") or o.get("target_edge") or {}
+        t_src = _resolve(str(target.get("src", "")))
+        t_dst = _resolve(str(target.get("dst", "")))
+        t_type = str(target.get("op_type", "IMPL")).upper()
+        if t_type != "IMPL":
+            t_type = "IMPL"
+        strength = float(o.get("strength") or 0.3)
+        if not (0.10 <= strength <= 0.50):
+            warnings.append(f"MITIGATES strength {strength} outside [0.10, 0.50] "
+                            f"('{o.get('src', '')[:40]}'→'{o.get('dst', '')[:40]}') "
+                            "clamped")
+            strength = min(0.50, max(0.10, strength))
+        if not (t_src and t_dst and (t_src, t_dst, "IMPL") in emitted_edges):
+            warnings.append(f"MITIGATES target edge not emitted ({t_src!r}→{t_dst!r} "
+                            "IMPL) — dropped")
+            continue
+        payload_operators.append({
+            "src": src, "dst": dst, "op_type": "MITIGATES",
+            "target": {"src": t_src, "dst": t_dst, "op_type": "IMPL"},
+            "strength": round(strength, 2)})
+
+    # ── chain validation (deterministic, warn+repair, never block) ───────
+    chain_notes = validate_chains(embed_list, master)
+    llm_chain_notes = [dict(c) for c in (embed_list.get("chain_notes") or [])
+                       if isinstance(c, dict)]
+
+    # ── minted-kind audit ─────────────────────────────────────────────────
+    minted = _minted_kind_report(embed_list, master)
+
+    # ── payload assembly (mirrors _summary_to_payload / _stream_to_payload) ─
+    from datetime import datetime, timezone
+    payload = {
+        "schema_version": "1", "session_id": session_id,
+        "client_commit_id": "",
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+        "extractor": {"version": extractor_version, "mode": "byok",
+                      "calibration_version": "v2"},
+        "summary": (summary or "")[:2000],
+        "story_arc": (story_arc or "")[:4000],
+        "provenance_refs": [{"path": "session.md", "spans": []}],
+        "sources": [],
+        "entities": payload_entities, "points": payload_points,
+        "events": payload_events, "operators": payload_operators,
+        "telemetry": {
+            "extractor": {"version": extractor_version, "mode": "byok",
+                          "calibration_version": "v2"},
+            "model": {"provider": "byok", "id": "user-model", "cfg_hash": ""},
+            "counts": {"kept": len(payload_points),
+                       "candidate": len(payload_events),
+                       "segment": 1, "window": 1, "empty_windows": 0},
+            "keep_ratio": None, "dedup_hits": None, "frontier_calls": 1,
+            "llm_cost_usd": None, "extraction_ms": 0, "retry_count": 0,
+            "last_error_code": None, "confidence_histogram": None,
+        },
+    }
+    # replay-safe client_commit_id (T5 #1272 pattern — complete on both paths)
+    from tortoise.commit_schema import compute_client_commit_id
+    payload["client_commit_id"] = compute_client_commit_id(
+        payload["session_id"], payload["points"], payload["entities"],
+        payload["operators"], payload["summary"], payload["story_arc"],
+        payload.get("events", []))
+
+    return {
+        "payload": payload,
+        "chain_notes": llm_chain_notes + chain_notes,
+        "link_before_create": link_before_create,
+        "warnings": warnings,
+        "minted_kinds": minted,
+        "stats": {
+            "entities": len(payload_entities), "events": len(payload_events),
+            "points": len(payload_points), "operators": len(payload_operators),
+            "search_queries": (search or {}).get("queries_run", 0),
+            "search_degraded": bool((search or {}).get("degraded")),
+            "chain_notes": len(chain_notes),
+        },
+    }
+
+
+# ── The orchestrator ───────────────────────────────────────────────────────
+
+def _edus_from_conversation(conversation: list[dict]) -> list[dict]:
+    return [{"index": i, "role": str(t.get("role", "unknown")),
+             "text": str(t.get("content", ""))}
+            for i, t in enumerate(conversation) if t.get("content")]
+
+
+def extract_session_v2(model, conversation: list[dict], *, sdk=None,
+                       session_id: str | None = None, chunk_size: int = 50,
+                       master: dict | None = None) -> dict:
+    """The v2 production entry: conversation → S1 (chunked+compiled) → S2 →
+    S3 (real-backend search) → S4 (gap review) → S5 (embed execution).
+
+    Returns {"session_id", "story_arc", "embed_list", "search", "payload",
+             "chain_notes", "link_before_create", "warnings", "minted_kinds",
+             "stats", "errors"} — ``payload`` is the Layer-1 commit payload
+    (client_commit_id complete; POST via the existing /v1/sessions/commit
+    path).
+
+    ``sdk`` is the graph client for S3 (optional — when absent or when the
+    active backend is embedded, S3 degrades gracefully and the pipeline
+    proceeds treating everything as new).
+    """
+    import uuid
+    session_id = session_id or f"session_{uuid.uuid4().hex[:12]}"
+    errors: list[str] = []
+    edus = _edus_from_conversation(conversation)
+    if not edus:
+        return {"session_id": session_id, "story_arc": "", "embed_list": {},
+                "search": {"mode": resolve_backend_mode(), "degraded": True,
+                           "reason": "no conversation content"},
+                "payload": None, "chain_notes": [], "link_before_create": [],
+                "warnings": ["empty conversation — nothing extracted"],
+                "minted_kinds": [], "stats": {}, "errors": errors}
+
+    t0 = time.time()
+    # ── S1: chunked story summary + compile ────────────────────────────────
+    chunks = chunk_transcript(edus, target=chunk_size)
+    chunk_stories: list[str] = []
+    failed_chunks = 0
+    for chunk in chunks:
+        try:
+            chunk_stories.append(run_s1(model, _edus_to_text(chunk)))
+        except Exception as e:  # per-chunk failure is non-fatal
+            failed_chunks += 1
+            errors.append(f"S1 chunk failed: {type(e).__name__}: {e}")
+    if failed_chunks:
+        errors.append(f"{failed_chunks}/{len(chunks)} S1 chunks failed")
+    story = compile_stories(chunk_stories)
+    story_arc = story
+
+    # ── S2: map to embed ───────────────────────────────────────────────────
+    embed_list: dict = {}
+    if story:
+        try:
+            embed_list = run_s2(model, story, master)
+        except Exception as e:
+            errors.append(f"S2 failed: {type(e).__name__}: {e}")
+
+    # ── S3: search the graph (real backend, graceful degradation) ──────────
+    search = search_graph(sdk, embed_list, story)
+
+    # ── S4: review gaps → complete embed list ──────────────────────────────
+    complete_list: dict = embed_list
+    if story:
+        try:
+            s4 = run_s4(model, story, search, embed_list, master)
+            if s4 and (s4.get("entities") or s4.get("points") or
+                       s4.get("events") or s4.get("operators")):
+                complete_list = s4
+            else:
+                errors.append("S4 returned an empty list — kept S2 output")
+        except Exception as e:
+            errors.append(f"S4 failed: {type(e).__name__}: {e} — kept S2 output")
+
+    # ── S5: embed execution (deterministic) ────────────────────────────────
+    if not complete_list:
+        errors.append("no embed list produced (S2/S4 empty) — nothing to embed")
+    result = execute_embed(complete_list, search, session_id=session_id,
+                           story_arc=story_arc, master=master)
+    result["session_id"] = session_id
+    result["story_arc"] = story_arc
+    result["embed_list"] = complete_list
+    result["s2_embed"] = embed_list          # S2 raw (pre-S4) — owner loop
+    result["search"] = search
+    result["errors"] = errors
+    result["stats"]["elapsed_s"] = round(time.time() - t0, 1)
+    result["stats"]["chunks"] = len(chunks)
+    result["stats"]["failed_chunks"] = failed_chunks
+    return result
+
+
+# ── Shared helpers ─────────────────────────────────────────────────────────
+
+def _complete(model, system: str, user: str, deadline_s: int = 600) -> str:
+    """Wall-clock-bounded completion (no token caps — the model decides)."""
+    import threading
+    box = {}
+
+    def _run():
+        box["resp"] = model.complete(system=system, user=user)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout=deadline_s)
+    if t.is_alive():
+        raise TimeoutError(f"model call exceeded {deadline_s}s")
+    return box.get("resp")
+
+
+def _parse_json(response: str) -> dict:
+    m = re.search(r"\{.*\}", response or "", re.S)
+    if not m:
+        raise ValueError("no JSON block in output")
+    block = m.group(0)
+    for cut in (None, -1, -2, -3, -5, -10, -20):
+        try:
+            return json.loads(block if cut is None else block[:cut])
+        except json.JSONDecodeError:
+            continue
+    raise ValueError("unparseable JSON")
+
+
+__all__ = [
+    "build_master_list", "master_kind_forms",
+    "run_s1", "chunk_transcript", "compile_stories",
+    "run_s2", "render_s2_prompt",
+    "resolve_backend_mode", "search_graph",
+    "run_s4", "render_s4_prompt",
+    "execute_embed", "validate_chains",
+    "extract_session_v2",
+    "S1_TMPL", "S2_TMPL", "S4_TMPL", "OUTPUT_CONTRACT",
+    "SUBJECTS", "EVENTS", "CHAINS",
+]

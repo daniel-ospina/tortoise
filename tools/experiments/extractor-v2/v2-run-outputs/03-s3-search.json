@@ -1,0 +1,9 @@
+{
+  "mode": "embedded",
+  "degraded": true,
+  "reason": "S3 skipped: active backend is 'embedded' \u2014 the real graph (FalkorDB via docker/redis URI or hosted API) is required, not FalkorDBLite",
+  "entities": [],
+  "points": [],
+  "events": [],
+  "queries_run": 0
+}

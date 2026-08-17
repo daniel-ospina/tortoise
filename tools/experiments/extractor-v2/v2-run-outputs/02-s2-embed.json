@@ -1,0 +1,202 @@
+{
+  "entities": [
+    {
+      "name": "PR #1004",
+      "kind": "core:WorkItem",
+      "lifecycle": "created",
+      "supersedes": null,
+      "note": "The PR carrying residual delta for the P0 CI-red fix, including the warning label format improvement and vacuous test fix."
+    },
+    {
+      "name": "PR #1000",
+      "kind": "core:WorkItem",
+      "lifecycle": "created",
+      "supersedes": null,
+      "note": "The independently shipped PR that resolved the P0 CI-red blocker, built from dead subagent worktree branch."
+    },
+    {
+      "name": "PR #1004 warning label format improvement",
+      "kind": "core:WorkItem",
+      "lifecycle": "created",
+      "supersedes": null,
+      "note": "The change to use UUID suffix instead of timestamp prefix for operator input labels in ep.py warning."
+    },
+    {
+      "name": "test_context_free_produces_consistent_ranking fix",
+      "kind": "dev:issue",
+      "lifecycle": "created",
+      "supersedes": null,
+      "note": "The fix for the vacuous test in test_decide.py."
+    },
+    {
+      "name": "subagent stall pattern issue",
+      "kind": "dev:issue",
+      "lifecycle": "created",
+      "supersedes": null,
+      "note": "New issue to be filed in agent-infra for subagent stall at 300s parent-turn bound under load."
+    },
+    {
+      "name": "draft-filter",
+      "kind": "core:tool",
+      "lifecycle": "unchanged",
+      "supersedes": null,
+      "note": "The filter that silently excludes draft-status operator inputs; correct for production but caused the CI-red failure in tests."
+    },
+    {
+      "name": "FalkorDBLite",
+      "kind": "core:tool",
+      "lifecycle": "unchanged",
+      "supersedes": null,
+      "note": "The database causing file-lock contention under concurrent test writes."
+    },
+    {
+      "name": "agent-infra repository",
+      "kind": "core:Project",
+      "lifecycle": "unchanged",
+      "supersedes": null,
+      "note": "Target repository for the subagent stall issue."
+    }
+  ],
+  "events": [
+    {
+      "content": "#1000 merged to main at 11:53Z, restoring Python CI to green",
+      "eventKind": "core:deployment",
+      "about_entities": [
+        "PR #1000"
+      ]
+    }
+  ],
+  "points": [
+    {
+      "content": "The fix approach (migrating 11 EP tests to use status='live' + adding non-silent warning) was optimal because the alternative of changing production draft-filter semantics would violate the durable constraint of preserving production behavior.",
+      "pointKind": "statement",
+      "about_entities": [
+        "draft-filter"
+      ]
+    },
+    {
+      "content": "The draft-filter's silent degeneration is a known failure mode (#780) that must be diagnosed, not silenced.",
+      "pointKind": "statement",
+      "about_entities": [
+        "draft-filter"
+      ]
+    },
+    {
+      "content": "Point IDs are ULID-style (<hex-timestamp>-<uuid12>), so cid[:8] is a timestamp prefix shared by all points in a ~2-month window, making labels identical and insufficient for disambiguation.",
+      "pointKind": "statement",
+      "about_entities": []
+    },
+    {
+      "content": "Concurrent test DB writes from multiple agents cause FalkorDBLite file-lock contention, wedging pytest processes in uninterruptible I/O wait.",
+      "pointKind": "statement",
+      "about_entities": [
+        "FalkorDBLite"
+      ]
+    },
+    {
+      "content": "The text-first pattern (emit text before any tool calls) defeats the subagent stall under load in this environment.",
+      "pointKind": "statement",
+      "about_entities": []
+    },
+    {
+      "content": "Subagents stall at the 300s parent-turn bound under load (pattern: alive, working, but never delivers first message within window), believed caused by I/O saturation from 5+ concurrent agent sessions running full test suites (load reached 230).",
+      "pointKind": "statement",
+      "about_entities": []
+    }
+  ],
+  "operators": [
+    {
+      "src": "The fix approach (migrating 11 EP tests to use status='live' + adding non-silent warning) was optimal because the alternative of changing production draft-filter semantics would violate the durable constraint of preserving production behavior.",
+      "dst": "The draft-filter's silent degeneration is a known failure mode (#780) that must be diagnosed, not silenced.",
+      "op_type": "IMPL"
+    },
+    {
+      "src": "Point IDs are ULID-style (<hex-timestamp>-<uuid12>), so cid[:8] is a timestamp prefix shared by all points in a ~2-month window, making labels identical and insufficient for disambiguation.",
+      "dst": "The fix approach (migrating 11 EP tests to use status='live' + adding non-silent warning) was optimal because the alternative of changing production draft-filter semantics would violate the durable constraint of preserving production behavior.",
+      "op_type": "NAND"
+    },
+    {
+      "src": "Concurrent test DB writes from multiple agents cause FalkorDBLite file-lock contention, wedging pytest processes in uninterruptible I/O wait.",
+      "dst": "The fix approach (migrating 11 EP tests to use status='live' + adding non-silent warning) was optimal because the alternative of changing production draft-filter semantics would violate the durable constraint of preserving production behavior.",
+      "op_type": "MITIGATES",
+      "target_edge": {
+        "src": "The fix approach (migrating 11 EP tests to use status='live' + adding non-silent warning) was optimal because the alternative of changing production draft-filter semantics would violate the durable constraint of preserving production behavior.",
+        "dst": "The draft-filter's silent degeneration is a known failure mode (#780) that must be diagnosed, not silenced.",
+        "op_type": "IMPL"
+      },
+      "strength": 0.3
+    },
+    {
+      "src": "The text-first pattern (emit text before any tool calls) defeats the subagent stall under load in this environment.",
+      "dst": "Subagents stall at the 300s parent-turn bound under load (pattern: alive, working, but never delivers first message within window), believed caused by I/O saturation from 5+ concurrent agent sessions running full test suites (load reached 230).",
+      "op_type": "IMPL"
+    },
+    {
+      "src": "The fix approach (migrating 11 EP tests to use status='live' + adding non-silent warning) was optimal because the alternative of changing production draft-filter semantics would violate the durable constraint of preserving production behavior.",
+      "dst": "The draft-filter's silent degeneration is a known failure mode (#780) that must be diagnosed, not silenced.",
+      "op_type": "IMPL"
+    }
+  ],
+  "chain_notes": [
+    {
+      "chain": "productDelivery",
+      "finding": "No productDelivery chain mapping attempted; no use cases, features, or architecture items in the story.",
+      "action": "warned",
+      "note": "Skipped chain validation for productDelivery as no relevant entities or points were extracted."
+    },
+    {
+      "chain": "epicToCode",
+      "finding": "No epic or issue decomposition beyond individual work items; epicToCode not applicable.",
+      "action": "warned",
+      "note": "Skipped chain validation for epicToCode."
+    },
+    {
+      "chain": "campaignToChannel",
+      "finding": "No marketing entities; campaignToChannel not applicable.",
+      "action": "warned",
+      "note": "Skipped chain validation for campaignToChannel."
+    }
+  ],
+  "link_before_create": [
+    {
+      "searched_for": "PR #1004",
+      "found": false,
+      "note": "New work item; created."
+    },
+    {
+      "searched_for": "PR #1000",
+      "found": false,
+      "note": "New work item; created."
+    },
+    {
+      "searched_for": "PR #1004 warning label format improvement",
+      "found": false,
+      "note": "New work item; created."
+    },
+    {
+      "searched_for": "test_context_free_produces_consistent_ranking fix",
+      "found": false,
+      "note": "New issue; created."
+    },
+    {
+      "searched_for": "subagent stall pattern issue",
+      "found": false,
+      "note": "New issue; created."
+    },
+    {
+      "searched_for": "draft-filter",
+      "found": true,
+      "note": "Existing tool; unchanged."
+    },
+    {
+      "searched_for": "FalkorDBLite",
+      "found": true,
+      "note": "Existing tool; unchanged."
+    },
+    {
+      "searched_for": "agent-infra repository",
+      "found": true,
+      "note": "Existing project; unchanged."
+    }
+  ]
+}
