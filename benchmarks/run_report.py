@@ -207,11 +207,18 @@ def _roundrobin(items: list[dict], n: int) -> list[dict]:
 
 
 def _make_arm(arm_name: str, ctx: dict):
-    """Build fn(timeout_ms, qi) → (elapsed_ms, results_count, error) for one arm."""
+    """Build fn(timeout_ms, qi) → (elapsed_ms, results_count, error) for one arm.
+
+    #1348: retrieval arms run at ctx["arm_limit"] (per-strategy depth). Default
+    = the pool floor (max(2 x e2e_limit, TORTOISE_POOL_FLOOR)) so a default run
+    measures the valid e2e@new-floor minus retrieval@new-floor decomposition;
+    the pre-floor #316 baseline (depth 20) is the recorded comparator.
+    """
     graph = ctx["graph"]
     is_embedded = ctx["is_embedded"]
     tfidf_points = ctx["tfidf_points"]
     precomputed = ctx["precomputed"]
+    arm_limit = ctx.get("arm_limit", 20)  # per-strategy depth for this run
 
     def _vec(q: str) -> list[float] | None:
         # Vectors are precomputed for the FULL mix before any arm runs
@@ -234,11 +241,11 @@ def _make_arm(arm_name: str, ctx: dict):
         driver_timeout = int(timeout_ms)  # driver timeout must be an int (#316)
         try:
             if arm_name == "fts":
-                rows = run_fts_query(graph, q, entity_type="point", limit=20,
+                rows = run_fts_query(graph, q, entity_type="point", limit=arm_limit,
                                      timeout_ms=driver_timeout)
                 count = len(rows)
             elif arm_name == "vector":
-                rows = run_vector_query(graph, _vec(q), limit=20, timeout_ms=driver_timeout,
+                rows = run_vector_query(graph, _vec(q), limit=arm_limit, timeout_ms=driver_timeout,
                                         is_embedded=is_embedded)
                 count = len(rows)
             elif arm_name == "hybrid":
@@ -250,12 +257,12 @@ def _make_arm(arm_name: str, ctx: dict):
                 elevated = driver_timeout if driver_timeout > CAP_MS else None
                 results = degradation_chain(
                     graph, q, kind, vec, strategies, entity_type="point",
-                    limit=20, is_embedded=is_embedded,
+                    limit=arm_limit, is_embedded=is_embedded,
                     elevated_timeout_ms=elevated,
                 )
                 count = sum(len(v) for v in results.values())
             elif arm_name == "tfidf":
-                rows = fallback_tfidf(q, tfidf_points, limit=20)
+                rows = fallback_tfidf(q, tfidf_points, limit=arm_limit)
                 count = len(rows)
             else:
                 raise ValueError(f"unknown arm {arm_name}")
@@ -554,7 +561,19 @@ def _run_with_sdk(args, sdk) -> dict:
         if not args.quiet:
             print(f"[preflight] {preflight_reason} — invalidating all arms")
 
-    # 6. Arms.
+    # 6. Arms. #1348: arm_limit = per-strategy retrieval depth. Default = the
+    # pool floor (max(2 x e2e_limit, TORTOISE_POOL_FLOOR)) so a default run
+    # measures the valid e2e@new-floor minus retrieval@new-floor decomposition;
+    # pre-floor comparator (depth 20) recorded in provenance.
+    e2e_limit = getattr(args, "e2e_limit", 10)
+    pool_floor = 50
+    raw_floor = os.environ.get("TORTOISE_POOL_FLOOR", "")
+    if raw_floor.strip():
+        try:
+            pool_floor = int(raw_floor)
+        except (TypeError, ValueError):
+            pass
+    arm_limit = getattr(args, "depth", None) or max(e2e_limit * 2, pool_floor)
     ctx = {
         "graph": proj.g,
         "is_embedded": is_embedded,
@@ -562,6 +581,7 @@ def _run_with_sdk(args, sdk) -> dict:
         "seed": args.seed,
         "use_model": use_model,
         "precomputed": precomputed,
+        "arm_limit": arm_limit,
     }
     reports: dict[str, dict] = {}
     cold_start: dict[str, float] = {}
@@ -644,6 +664,12 @@ def _run_with_sdk(args, sdk) -> dict:
         "query_mix_meta": mix["meta"],
         "warmup": {"iters": args.warmup_iters, "max_iters": args.warmup_max_iters},
         "samples": args.samples,
+        # #1348: per-arm retrieval depth + embedder/decorator pins so the
+        # e2e@new-floor minus retrieval@new-floor decomposition is auditable
+        # and embedder/decorator versions can't confound the delta.
+        "arm_limit": arm_limit,
+        "embedder_pinned": True,  # re-measure pool-20 comparator under same embedder
+        "decorator_state": "status-quo",  # #1353 landed: no → status-quo decoration
     }
     return {
         "schema_version": 1,
@@ -688,6 +714,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-seed-corpus", action="store_true",
                    help="use the existing corpus; verify indexes only")
     p.add_argument("--skip-e2e", action="store_true", help="skip the E2E SDK arm")
+    p.add_argument("--depth", type=int, default=None,
+                   help="#1348 per-strategy retrieval depth (default = the pool "
+                        "floor max(2 x e2e_limit, TORTOISE_POOL_FLOOR)); the "
+                        "pre-floor #316 baseline used depth 20")
     p.add_argument("--quiet", action="store_true")
     args = p.parse_args(argv)
 
