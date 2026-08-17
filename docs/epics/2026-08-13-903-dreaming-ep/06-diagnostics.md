@@ -39,6 +39,11 @@ decision itself is recorded here by the epistemic team.
 
 ## Decision Rule (DE2E-10)
 
+**Decision:** STALE-FIRST wins at production scale (≥5k operators) per the
+recorded amendment — rule 3 applies; FULL wins below the 200-operator cap
+and on star-heavy graphs (rules 1-2). The marker is asserted by
+`test_graph_diagnostics` (marker-existence, never the value).
+
 The recorded rule (mirrored mechanically as a *hint* by the script — the
 script never decides for the human):
 
