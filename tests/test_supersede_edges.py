@@ -282,3 +282,52 @@ def test_supersede_mitigated_point_transfers(sdk):
     # mitigated_by edges are not part of the transfer (only operator→old edges
     # transfer) — but the supersede must not raise
     assert "edges_transferred" in result
+
+
+# ── #1391: terminal-status exclusion on read surfaces ────────────────
+
+def test_superseded_point_excluded_from_default_read(sdk):
+    """#1391: after supersede_point the old point (superseded+outdated) is
+    excluded from query() AND tortoise_fts_query by default — stale claims
+    are not served as current."""
+    old = _make_point(sdk, content="strategy alpha is our current strategy")
+    new = _make_point(sdk, content="strategy beta is our current strategy")
+    sdk.supersede_point(old["id"], new["id"])
+    # query() excludes it by default
+    assert old["id"] not in [p["id"] for p in sdk.query()]
+    # FTS excludes it (the terminal-status filter lives in the base query)
+    hits = sdk.tortoise_fts_query("strategy alpha", limit=10)
+    assert old["id"] not in [h["id"] for h in hits]
+    # the new (current) point remains findable
+    hits_new = sdk.tortoise_fts_query("strategy beta", limit=10)
+    assert new["id"] in [h["id"] for h in hits_new]
+
+
+def test_terminal_status_audit_opt_in(sdk):
+    """#1391: audit/history queries opt in — include_retracted surfaces ALL
+    terminal statuses; an explicit status= filter controls visibility."""
+    old = _make_point(sdk, content="old approach still referenced")
+    new = _make_point(sdk, content="new approach adopted")
+    sdk.supersede_point(old["id"], new["id"])
+    ids_default = [p["id"] for p in sdk.query()]
+    assert old["id"] not in ids_default
+    ids_all = [p["id"] for p in sdk.query(include_retracted=True)]
+    assert old["id"] in ids_all
+    ids_explicit = [p["id"] for p in sdk.query(status="superseded")]
+    assert old["id"] in ids_explicit
+
+
+def test_outdated_status_excluded_too(sdk):
+    """#1391: 'outdated' (written alongside superseded) is excluded as well —
+    the exclusion covers the full terminal set, not just retracted."""
+    old = _make_point(sdk, content="the outdated claim")
+    new = _make_point(sdk, content="the current claim")
+    sdk.supersede_point(old["id"], new["id"])
+    proj = sdk._get_proj()
+    rows = proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.status, n.outdated",
+        params={"id": old["id"]},
+    ).result_set
+    status, outdated = rows[0]
+    assert status in ("superseded", "outdated") or outdated is True
+    assert old["id"] not in [p["id"] for p in sdk.query()]

@@ -12,6 +12,25 @@ from collections import Counter
 from dataclasses import dataclass, asdict, field
 from typing import Literal
 
+# #1391: terminal (no-longer-current) Point statuses EXCLUDED from every
+# default read surface (FTS/vector/structural/operator + sdk query paths).
+# #689 excluded only 'retracted'; supersede_point writes 'superseded' +
+# 'outdated' (terminal per ONTOLOGY §512), 'deprecated' is used in practice
+# (recall_state STATE_EXCLUDED_STATUS, EP criteria) and 'archived' is the
+# same family — none must be served as current. Audit/history queries opt in
+# via include_terminal (tortoise_fts_query), sdk.query/paginated_query
+# (include_retracted=True) or an explicit status= filter.
+TERMINAL_EXCLUDED_STATUSES = (
+    "retracted", "superseded", "outdated", "archived", "deprecated")
+
+
+def _exclude_status_clause(alias: str) -> str:
+    """Cypher WHERE fragment excluding the terminal statuses on ``alias``
+    (<>-chain form — FalkorDB rejects inline string lists in ``IN``)."""
+    chain = " AND ".join(f"{alias}.status <> '{s}'"
+                          for s in TERMINAL_EXCLUDED_STATUSES)
+    return f"({alias}.status IS NULL OR ({chain}))"
+
 
 # ── Circuit breaker (#249) ──────────────────────────────────────────────────
 # Per-strategy breaker: trips after consecutive slow/failed queries so a
@@ -244,7 +263,8 @@ def classify_query(
 # ── FalkorDB query runners ──────────────────────────────────────────────────
 
 def run_fts_query(
-    graph, query: str, entity_type: str = "point", limit: int = 20, timeout_ms: int = 500
+    graph, query: str, entity_type: str = "point", limit: int = 20,
+    timeout_ms: int = 500, include_terminal: bool = False,
 ) -> list[tuple[str, float]]:
     """Run full-text search via FalkorDB FTS index.
 
@@ -271,8 +291,9 @@ def run_fts_query(
             start = time.monotonic()
             cypher = (
                 "MATCH (n:Point) "
-                "WHERE n.is_operator = true AND (n.status IS NULL OR n.status <> 'retracted') "
-                "  AND toLower(n.label) CONTAINS toLower($query) "
+                "WHERE n.is_operator = true"
+                + ("" if include_terminal else f" AND {_exclude_status_clause('n')}")
+                + "  AND toLower(n.label) CONTAINS toLower($query) "
                 "RETURN n.id, 1.0 AS score "
                 "ORDER BY score DESC "
                 "LIMIT $limit"
@@ -305,9 +326,11 @@ def run_fts_query(
         id_field = "eventId"
     else:
         id_field = "id"
-    # #689: retracted Points must not leak into FTS results.
+    # #689/#1391: terminal-status Points must not leak into FTS results
+    # (skipped when the caller opts in via include_terminal — audit/history).
     if label == "Point":
-        status_filter = "WHERE node.status IS NULL OR node.status <> 'retracted' "
+        status_filter = ("" if include_terminal
+                         else f"WHERE {_exclude_status_clause('node')} ")
     else:
         status_filter = ""
     try:
@@ -349,7 +372,7 @@ def run_fts_query(
 def run_vector_query(
     graph, query_vec: list[float], limit: int = 20, timeout_ms: int = 500,
     is_embedded: bool = True, entity_type: str = "point",
-    vector_index_api: str | None = None,
+    vector_index_api: str | None = None, include_terminal: bool = False,
 ) -> list[tuple[str, float]]:
     """Run vector similarity search via FalkorDB vector index.
 
@@ -408,7 +431,8 @@ def run_vector_query(
     if not is_embedded:
         # #689: retracted Points must not leak into vector results.
         if label == "Point":
-            vec_status_filter = "WHERE node.status IS NULL OR node.status <> 'retracted' "
+            vec_status_filter = ("" if include_terminal
+                                 else f"WHERE {_exclude_status_clause('node')} ")
         else:
             vec_status_filter = ""
         try:
@@ -515,7 +539,8 @@ def run_vector_query(
         # MATCH — see _upsert_event / session indexers).
         # #689: retracted Points must not leak into vector results.
         if label == "Point":
-            bf_status_clause = " AND (n.status IS NULL OR n.status <> 'retracted')"
+            bf_status_clause = ("" if include_terminal
+                                else f" AND {_exclude_status_clause('n')}")
         else:
             bf_status_clause = ""
         cypher = (
@@ -553,7 +578,8 @@ def run_vector_query(
 
 def run_structural_query(
     graph, kind: str | None,
-    entity_type: str = "point", limit: int = 20, timeout_ms: int = 500
+    entity_type: str = "point", limit: int = 20, timeout_ms: int = 500,
+    include_terminal: bool = False,
 ) -> list[tuple[str, float]]:
     """Run structural/kind query via range indexes.
 
@@ -606,9 +632,12 @@ def run_structural_query(
             _breaker_record("structural", True)
             return []
 
-        # #689: retracted Points must not leak into structural results.
-        if label_str == "Point":
-            conditions.append("(n.status IS NULL OR n.status <> 'retracted')")
+        # #1391: terminal-status exclusion (after the no-filters gate so a
+        # kind-less broad scan keeps main's early-return behavior — the
+        # status clause must not become the sole condition that fires the
+        # scan). include_terminal opts out for audit/history queries.
+        if not include_terminal and label_str == "Point":
+            conditions.append(_exclude_status_clause("n"))
         where_clause = " AND ".join(conditions)
         cypher = (
             f"MATCH (n:{label_str}) "
@@ -677,6 +706,7 @@ def degradation_chain(
     expanded_kinds=None,  # accepted for SDK compat; kind expansion is post-retrieval (sdk.py)
     elevated_timeout_ms: int | None = None,
     vector_index_api: str | None = None,
+    include_terminal: bool = False,
 ) -> dict[str, list[tuple[str, float]]]:
     """Run retrieval strategies in parallel with per-strategy degradation.
 
@@ -717,20 +747,20 @@ def degradation_chain(
         if strategies.get("fts") and query:
             futures[executor.submit(
                 run_fts_query, graph, query, entity_type=entity_type, limit=limit,
-                timeout_ms=runner_timeout,
+                timeout_ms=runner_timeout, include_terminal=include_terminal,
             )] = "fts"
 
         if strategies.get("vector") and query_vec:
             futures[executor.submit(
                 run_vector_query, graph, query_vec, limit=limit, is_embedded=is_embedded,
                 entity_type=entity_type, timeout_ms=runner_timeout,
-                vector_index_api=vector_index_api,
+                vector_index_api=vector_index_api, include_terminal=include_terminal,
             )] = "vector"
 
         if strategies.get("structural"):
             futures[executor.submit(
                 run_structural_query, graph, kind, entity_type=entity_type, limit=limit,
-                timeout_ms=runner_timeout,
+                timeout_ms=runner_timeout, include_terminal=include_terminal,
             )] = "structural"
 
         # Collect results with 500ms total timeout across all strategies.
@@ -991,7 +1021,7 @@ def get_relationships_bounded(
         rows = graph.query(
             "MATCH (n:Point) WHERE n.id IN $ids "
             "MATCH (n)-[r:IMPL|NAND|hasPart]-(op:Point {is_operator:true}) "
-            "WHERE (op.status IS NULL OR op.status <> 'retracted') "
+            f"WHERE {_exclude_status_clause('op')} "
             "RETURN n.id, type(r) AS et, r.idx AS n_idx, op.id AS op_id, "
             "  op.op_type AS mechanism, coalesce(op.label, '') AS predicate, "
             "  op.createdAt AS op_created",
