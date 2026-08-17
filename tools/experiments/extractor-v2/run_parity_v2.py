@@ -105,6 +105,33 @@ def _path_b(flash, edus: list[dict], chunk_size: int = 50) -> dict:
 def _containment(a: dict, b: dict) -> dict:
     a_sets = {k: _norm(a.get(k)) for k in ("decisions", "state", "logic")}
     b_sets = {k: _norm(b.get(k)) for k in ("decisions", "state", "logic")}
+    b_raw = {k: (b.get(k) or []) for k in ("decisions", "state", "logic")}
+
+    def _near(item: str, b_items: list[dict], b_norm: set[str]) -> dict | None:
+        """Closest B-side item by token overlap (0 = none). Distinguishes
+        'rephrased' (high overlap) from 'truly missing' (low/none)."""
+        import re
+        t = set(re.sub(r"[^a-z0-9 ]", " ", item).split())
+        if not t:
+            return None
+        best, best_o = None, 0.0
+        for bi in b_items:
+            for key in ("content", "point", "name", "text"):
+                if not bi.get(key):
+                    continue
+                s = re.sub(r"[^a-z0-9 ]", " ", str(bi[key]).strip().lower())
+                ts = set(s.split())
+                if not ts:
+                    continue
+                o = len(t & ts) / min(len(t), len(ts))
+                if o > best_o:
+                    best_o, best = o, str(bi[key])[:80]
+        return {"best": best, "overlap": round(best_o, 2)}
+
+    near = {k: [] for k in a_sets}
+    for k in a_sets:
+        for item in sorted(a_sets[k] - b_sets[k]):
+            near[k].append({"item": item[:100], "near": _near(item, b_raw[k], b_sets[k])})
     return {
         "loss": {k: sorted(a_sets[k] - b_sets[k]) for k in a_sets},
         "gain": {k: sorted(b_sets[k] - a_sets[k]) for k in a_sets},
@@ -112,6 +139,8 @@ def _containment(a: dict, b: dict) -> dict:
         "counts_b": {k: len(b_sets[k]) for k in a_sets},
         "loss_total": sum(len(a_sets[k] - b_sets[k]) for k in a_sets),
         "contained": all(not (a_sets[k] - b_sets[k]) for k in a_sets),
+        # per-item nearest B match: overlap >= 0.5 → rephrased, else → real drop
+        "loss_analysis": near,
     }
 
 
@@ -157,14 +186,18 @@ def main() -> None:
             "containment": {"contained": c["contained"], "loss_total": c["loss_total"],
                             "loss": c["loss"], "gain_counts": {k: len(v)
                                                                for k, v in c["gain"].items()}},
+            "loss_analysis": c.get("loss_analysis", {}),
         }
         report["runs"].append(run)
+        rephrased = sum(1 for k, lst in c.get("loss_analysis", {}).items()
+                        for it in lst if (it.get("near") or {}).get("overlap", 0) >= 0.5)
+        real_drop = c["loss_total"] - rephrased
         print(f"  A: dec={len(a['decisions'])} state={len(a['state'])} "
               f"logic={len(a['logic'])} tok={a['tokens']} {a_secs}s", flush=True)
         print(f"  B: dec={len(b['decisions'])} state={len(b['state'])} "
               f"logic={len(b['logic'])} tok={b['tokens']} {b_secs}s", flush=True)
         print(f"  containment: contained={c['contained']} loss={c['loss_total']} "
-              f"({c['loss']})", flush=True)
+              f"(rephrased≈{rephrased}, real_drop≈{real_drop})", flush=True)
     OUT.write_text(json.dumps(report, indent=2))
     print(f"\nreport -> {OUT}")
 

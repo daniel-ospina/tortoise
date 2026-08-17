@@ -175,6 +175,15 @@ class TestS2:
         assert "LINK-BEFORE-CREATE" in system
         assert "STRICT EXCLUSION" in system
 
+    def test_prompt_strip_dont_drop_operational(self):
+        """Parity-tuning (issue #1350): S1/S2/S4 must capture durable
+        operational lessons + strip-not-drop mechanics-bearing decisions."""
+        assert "STRIP, DON'T DROP" in v2.S1_TMPL
+        assert "OPERATIONAL KNOWLEDGE" in v2.S1_TMPL
+        assert "STRIP, DON'T DROP" in v2.S2_TMPL
+        assert "cause-effect" in v2.S2_TMPL
+        assert "operational/process lessons" in v2.S4_TMPL
+
     def test_minted_kind_report(self):
         bad = json.loads(json.dumps(S2_FIXTURE))
         bad["entities"].append({"name": "worktree", "kind": "worktree",

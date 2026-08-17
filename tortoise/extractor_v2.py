@@ -211,15 +211,30 @@ Apply these per domain. When a fact spans domains, keep it if ANY domain
 considers it durable. When unsure: "is this a decision, a state change, a
 durable belief, or a reason — or is it how the work was done this hour?"
 
-Focus on TWO layers, in this order:
+Focus on TWO primary layers, in this order:
 1. STATE (primary): subjects and objects and how they changed.
 2. EPISTEMIC (primary): the LOGIC — points that support (IMPL), attack (NAND),
    or mitigate the relevance (MITIGATES) between points and objects.
 EVENTS (secondary): only as context for why state changed.
+OPERATIONAL KNOWLEDGE (tertiary but DURABLE — do not drop it): cause-effect
+lessons about how the environment behaves and how the team works, when they
+would change future behavior: tool/process behaviors ("the bash tool kills
+child processes when it returns", "setsid does not exist on macOS",
+"pytest-timeout is not installed"), workflow rules ("issues without fractal
+fields default to task-workflow-standard"), and conventions that future
+sessions must know. These are durable beliefs, not process chatter — keep
+the CAUSE-EFFECT, drop the episode.
 
 De-emphasize process — no commit hashes, no test counts, no PR numbers, no
 review findings, no tool calls, no build steps — unless they DIRECTLY change
 state or reveal durable belief.
+
+STRIP, DON'T DROP: a decision that references an issue/PR is still a
+DECISION — strip the id, keep the decision ("migrate EP tests to live points
+rather than change production semantics", not "for #992, migrate..."). An
+operational lesson is still a BELIEF — strip the episode, keep the
+cause-effect. The mechanics tokens (ids, hashes, counts, paths) are noise;
+the claim they carry is not.
 
 RESTATE, DON'T REINVENT: if the conversation states a root cause or a fact,
 preserve it exactly. Do NOT invent a "We believed X" opening unless the input
@@ -360,6 +375,10 @@ CONDENSED SEMANTIC CORE (from the how-to-use-tortoise skill)
     when you know the id, else null.
   * unchanged   = already exists — connect only, do NOT re-create.
   * superseded  = this item is being replaced by a newer one.
+- ENTITY NAMES CARRY NO MECHANICS: entity names are durable subjects/objects —
+  strip ids and numbers ("EP test migration", not "pr #1004: ep test migration";
+  "the draft-filter fix", not "issue #992"). Issue/PR/commit identifiers never
+  appear in entity names, event content, or point content.
 - LINK-BEFORE-CREATE: before creating ANY entity or point, search the graph for
   an existing item (same name/topic). Record each search in link_before_create
   (searched_for, found, note). No duplicates — dedup.
@@ -377,12 +396,20 @@ IMPL/NAND/MITIGATES relation has no point yet, CREATE the point first and
 reference it. NEVER use an entity name as an operator endpoint — entities are
 wired through about_entities, not through operators.
 
-VALUE FILTER — STRICT EXCLUSION (carried from v1)
-No file paths, module names, branch names, worktrees, test suites/files, issue
-ids/labels, git operations, commands run, commit hashes, PR numbers, test
-counts, review findings, tool calls, build steps — UNLESS they DIRECTLY change
-state or reveal durable belief. Process chatter is dropped; what survives is
-what changes the world model.
+VALUE FILTER — STRICT EXCLUSION (carried from v1), SHARPENED
+Mechanics TOKENS drop: file paths, module names, branch names, worktrees,
+test suites/files, issue ids/labels, git operations, commands run, commit
+hashes, PR numbers, test counts, review findings, tool calls, build steps.
+But STRIP, DON'T DROP the durable claim they carry:
+- A decision that references an issue/PR is still a DECISION — strip the id,
+  keep the decision ("migrate EP tests to live points rather than change
+  production semantics", not "for #992, migrate...").
+- An operational/environment lesson is a durable BELIEF — keep the
+  cause-effect ("the bash tool kills child processes when it returns",
+  "backgrounded processes do not survive tool-call return"), drop the episode.
+- Process chatter with NO durable claim is dropped ("I'll fix both now",
+  "let me verify X").
+What survives is what changes the world model — including how we work.
 
 OUTPUT CONTRACT — ONE JSON object and NOTHING else:
 {output_contract}
@@ -585,9 +612,13 @@ TASK
 You have: (a) the compiled story of the conversation, (b) the S2 embed list,
 (c) the results of searching the existing graph. Review for GAPS: did S2 miss
 any key entities, events, or points that AFFECT THE WORLD MODEL — durable
-objects/subjects, decisions/occurrences, or claims whose support/attack
-structure matters? Add them. Do NOT pad with process noise (the value filter
-applies — same STRICT EXCLUSION as S2).
+objects/subjects, decisions/occurrences, claims whose support/attack
+structure matters, AND durable operational/process lessons (cause-effect
+knowledge about how the environment behaves or how the team works — e.g.
+"backgrounded processes die when the tool returns", "create_point defaults to
+draft mode")? Add them. Do NOT pad with process chatter (the value filter
+applies — same STRICT EXCLUSION as S2: strip the mechanics tokens, keep the
+durable claim).
 
 MASTER LIST (same closed vocabulary as S2 — no minted kinds)
 {master_list}
