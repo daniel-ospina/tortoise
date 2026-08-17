@@ -16,9 +16,20 @@ import time
 
 import pytest
 
-from tortoise.search_engine import degradation_chain
+from tortoise.search_engine import degradation_chain, reset_circuit_breakers
 
 pytestmark = pytest.mark.bench
+
+
+@pytest.fixture(autouse=True)
+def _reset_breakers():
+    """Circuit breakers are module-level and persist across tests (#249); a
+    vector strategy that fails in an earlier test (e.g. no index in the
+    embedded env) trips the breaker and silently skips vector in later
+    tests. Reset before each test so strategy filtering is per-test."""
+    reset_circuit_breakers()
+    yield
+    reset_circuit_breakers()
 
 
 def test_elevated_timeout_collects_more_than_censored(monkeypatch):
@@ -31,7 +42,8 @@ def test_elevated_timeout_collects_more_than_censored(monkeypatch):
         return [("p1", 1.0)]
 
     def slow_vector(graph, query_vec, limit=20, timeout_ms=500,
-                    is_embedded=True, entity_type="point"):
+                    is_embedded=True, entity_type="point",
+                    vector_index_api=None):
         time.sleep(0.6)
         return [("p2", 0.9)]
 
@@ -73,7 +85,7 @@ def test_elevated_timeout_is_default_off(monkeypatch):
     monkeypatch.setattr(
         "tortoise.search_engine.run_vector_query",
         lambda graph, query_vec, limit=20, timeout_ms=500, is_embedded=True,
-        entity_type="point": [("p2", 0.9)],
+        entity_type="point", vector_index_api=None: [("p2", 0.9)],
     )
     strategies = {"fts": True, "vector": True}
 
