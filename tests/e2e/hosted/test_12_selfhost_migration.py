@@ -29,7 +29,13 @@ from pathlib import Path
 
 import pytest
 
-from conftest import REPO_ROOT, SECRET_PEPPER, is_remote_mode, skip_unless_hosted_e2e
+from conftest import (
+    INTERNAL_KEY,
+    REPO_ROOT,
+    SECRET_PEPPER,
+    is_remote_mode,
+    skip_unless_hosted_e2e,
+)
 
 skip_unless_hosted_e2e()
 
@@ -170,3 +176,149 @@ def test_migration_destination_dup_email_409(api):
     assert r.status == 200, r.text()
     r = api.post("/v1/register", data={"email": email, "password": "E2ePass-303-x"})
     assert r.status == 409
+
+
+def _provision_owner_tenant(api, user_id: str) -> dict:
+    """Team + APIKey + owner Membership via /internal/provision (the E2E-6-D
+    pattern): register-created teams have no Membership node, but the import
+    endpoint is owner-scoped session auth — the parity journey needs a real
+    owner tenant to POST /v1/teams/{team_id}/import and read the export."""
+    team_id = f"e2e12p-{uuid.uuid4().hex[:10]}"
+    r = api.post("/internal/provision",
+                 headers={"Authorization": f"Bearer {INTERNAL_KEY}"},
+                 data={"team_id": team_id, "team_name": f"E2E12P {team_id[-6:]}",
+                       "api_key_hash": "e2e:unused-placeholder-hash",
+                       "created_by": user_id})
+    assert r.status == 200, f"internal provision: {r.status} {r.text()}"
+    return r.json()
+
+
+def _seed_parity_source_graph(db_path: str) -> dict:
+    """Build the selfhost source graph (embedded FalkorDBLite — the surface
+    `tortoise export` reads) with pinned Point IDs, an operator node, and
+    edges. Returns the source reference structure so the hosted graph can be
+    asserted at parity: node/edge counts (the `MATCH` counts behind
+    `tortoise_check_structure`), Point IDs, and the edge set (topology)."""
+    from tortoise.projection import FalkorProjection
+
+    proj = FalkorProjection(db_path)
+    try:
+        g = proj.g
+        ts = "2026-08-17T00:00:00Z"
+        # 3 Points with pinned IDs (round-trip survival is assertable).
+        for i in range(3):
+            g.query(
+                "CREATE (p:Point {id:$id, content:$c, pointKind:$k, "
+                "status:'live', createdAt:$ts})",
+                params={"id": f"parity-pt-{i}", "c": f"parity content {i}",
+                        "k": "claim", "ts": ts},
+            )
+        # Operator node (Point with is_operator=true, pinned ID) + its edge
+        # to the source point — the topology that must survive the round-trip.
+        g.query(
+            "CREATE (o:Point {id:$oid, is_operator:true, op_type:'IMPL', "
+            "direction:'bidirectional', status:'live', createdAt:$ts})",
+            params={"oid": "parity-op-0", "ts": ts},
+        )
+        g.query(
+            "MATCH (o:Point {id:$oid}), (s:Point {id:$sid}) "
+            "CREATE (o)-[:IMPL {idx:0}]->(s)",
+            params={"oid": "parity-op-0", "sid": "parity-pt-0"},
+        )
+        # A direct (non-operator) edge between two Points.
+        g.query(
+            "MATCH (a:Point {id:$a}), (b:Point {id:$b}) "
+            "CREATE (a)-[:IMPL {weight:0.8}]->(b)",
+            params={"a": "parity-pt-1", "b": "parity-pt-2"},
+        )
+        nodes = int(g.query("MATCH (n) RETURN count(n)").result_set[0][0])
+        edges = int(g.query("MATCH ()-[r]->() RETURN count(r)").result_set[0][0])
+        ids = sorted(str(r[0]) for r in g.query(
+            "MATCH (n:Point) RETURN coalesce(n.id, '')").result_set)
+        edge_set = {
+            (str(s), str(t), str(ty))
+            for s, t, ty in g.query(
+                "MATCH (a)-[r]->(b) RETURN coalesce(a.id, ''), "
+                "coalesce(b.id, ''), type(r)").result_set
+        }
+        return {"nodes": nodes, "edges": edges, "ids": ids, "edge_set": edge_set}
+    finally:
+        proj.close()
+
+
+def test_parity_export_import(api, session_jwt, tmp_path):
+    """Epic #1230 Task 3 (#1390) — export→import parity journey.
+
+    Beats the E2E-12-D baseline (test_migration_journey_selfhost_to_hosted
+    asserts content-presence only): selfhost graph (points + operator + edges)
+    → `tortoise export` subprocess (real CLI, encrypt-by-default) → fresh
+    hosted team → POST /v1/teams/{team_id}/import → structure counts, Point
+    IDs, and edge topology all match the source.
+
+    Pinned name — referenced by the `-k parity` CI selector.
+    """
+    import base64 as _b64
+    import json as _json
+
+    # 1. Source graph (embedded) → export via the REAL CLI subprocess.
+    db_path = str(tmp_path / "parity-source.db")
+    ref = _seed_parity_source_graph(db_path)
+    assert ref["nodes"] >= 4 and ref["edges"] >= 2  # 3 points + operator, 2 edges
+
+    key = os.urandom(32)
+    env = dict(os.environ, TORTOISE_BACKUP_KEY=_b64.b64encode(key).decode())
+    out = str(tmp_path / "parity.tortoise")
+    r = subprocess.run(
+        [sys.executable, "-m", "tortoise", "export",
+         "--db", db_path, "--output", out],
+        cwd=str(REPO_ROOT), env=env, capture_output=True, text=True,
+        timeout=180,
+    )
+    assert r.returncode == 0, f"tortoise export failed:\n{r.stderr}"
+    summary = _json.loads(r.stdout.strip().splitlines()[-1])
+    assert summary["status"] == "ok"
+    assert summary["encrypted"] is True
+    # The exporter's own structure counts agree with the source graph.
+    assert summary["node_count"] == ref["nodes"]
+    assert summary["edge_count"] == ref["edges"]
+
+    # 2. Fresh hosted team (owner provisioned — import is owner-scoped
+    #    session auth, mirroring the E2E-6-D export surface).
+    user_id, tok = session_jwt()
+    h = {"Authorization": f"Bearer {tok}"}
+    team_id = _provision_owner_tenant(api, user_id)["team_id"]
+
+    # 3. Import the artifact into the fresh team graph.
+    r = api.post(
+        f"/v1/teams/{team_id}/import",
+        data=Path(out).read_bytes(),
+        headers={**h,
+                 "Content-Type": "application/vnd.tortoise.export.v1",
+                 "X-Tortoise-Import-Key": _b64.b64encode(key).decode()},
+    )
+    assert r.status == 200, f"import: {r.status} {r.text()}"
+    body = r.json()
+    assert body["imported"] is True
+    assert body["restored"] == {"nodes": ref["nodes"], "edges": ref["edges"]}
+
+    # 4. Parity — structure, not content presence (strictly stronger than
+    #    the E2E-12-D baseline). The owner export snapshot surfaces the same
+    #    `MATCH (n) RETURN count(n)` / `MATCH ()-[r]->() RETURN count(r)`
+    #    counts that back `tortoise_check_structure`.
+    snapshot = api.get(f"/v1/teams/{team_id}/export", headers=h)
+    assert snapshot.status == 200, snapshot.text()
+    exp = snapshot.json()
+    assert exp["summary"]["nodes"] == ref["nodes"]
+    assert exp["summary"]["edges"] == ref["edges"]
+
+    hosted_ids = {p.get("id") for p in exp["points"]}
+    assert set(ref["ids"]) <= hosted_ids, "every source Point ID must survive"
+
+    hosted_edges = {(e["source"], e["target"], e["type"]) for e in exp["edges"]}
+    assert hosted_edges == ref["edge_set"], "edge topology must survive"
+
+    # Operator node survives with its Point ID + operator props (topology).
+    op = next(p for p in exp["points"] if p.get("id") == "parity-op-0")
+    assert op.get("is_operator") is True
+    assert op.get("op_type") == "IMPL"
+    assert op.get("direction") == "bidirectional"

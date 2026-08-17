@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — selfhost→hosted export→import migration path (#1230)
+
+A first-class migration path: `tortoise export` produces a versioned, encrypted artifact (`tortoise-export-v1`, AES-256-GCM, encrypt-by-default) from any selfhost graph (Docker FalkorDB or embedded FalkorDBLite), and the hosted `POST /v1/teams/{team_id}/import` endpoint ingests it into a team graph — preserving **Point IDs and edge topology** (belief scores are derived; EP recomputes server-side). Import is owner-scoped with streaming size/rate caps, a fail-closed validation chain (format → blob sha256 → key fingerprint → decrypt → payload sha256 → counts), temp-graph verify-before-atomic-swap, quarantine on failure (live graph never touched), and a `last_import_sha256` idempotency ledger (re-import → 200 `already:true`).
+
+- **`tortoise export`** (CLI): envelope + encrypt-by-default; `TORTOISE_BACKUP_KEY` or an ephemeral key printed once on the stdout JSON line (`key_b64`); `--no-encrypt` warns loudly; one-line JSON stdout contract.
+- **`POST /v1/teams/{team_id}/import`** (hosted): owner-scoped session auth (mirrors the export surface), raw-artifact (`X-Tortoise-Import-Key` header) or JSON-body wire forms, graph-name import-mode override (selfhost graph name never matched server-side).
+- **E2E parity**: `test_parity_export_import` in the E2E-12-D suite beats the replay baseline (content-presence) with structure parity — node/edge counts, every source Point ID, and operator edge topology match the source after the round-trip.
+- **Docs**: both quickstarts' migration sections now lead with the automated export→import path; manual replay stays the documented fallback.
+
 ### Added — thin client package (#526)
 
 The physical client/server split: `pip install` no longer embeds the engine.
