@@ -152,6 +152,7 @@ surfaces:
   - test_linear_connector.py
   - test_list_contexts.py
   - test_longmem_runner.py
+  - longmem_eval/test_vector_arm.py
   - test_lookup_hash.py
   - test_m0.py
   - test_m1.py

@@ -187,15 +187,19 @@ def ingest_haystack(sdk: TortoiseSDK, question: dict) -> dict:
 
 
 def point_props_for_hits(proj, point_ids: list[str]) -> dict[str, dict[str, Any]]:
-    """Fetch (session_id, has_answer, lme_session_index) for a list of Point
-    ids in one Cypher query (avoid N+1 on the retrieval path)."""
+    """Fetch (session_id, has_answer, lme_session_index, content) for a list
+    of Point ids in one Cypher query (avoid N+1 on the retrieval path).
+
+    ``content`` is returned since the vector arm's hits carry no content in
+    the raw hit dict (unlike FTS hits) — the reader context is built from
+    this fetch."""
     if not point_ids:
         return {}
     rows = proj.g.query(
         "MATCH (n:Point) WHERE n.id IN $ids "
         "RETURN n.id, coalesce(n.session_id, ''), coalesce(n.has_answer, false), "
-        "       coalesce(n.lme_session_index, -1)",
+        "       coalesce(n.lme_session_index, -1), coalesce(n.content, '')",
         params={"ids": point_ids},
     ).result_set
     return {row[0]: {"session_id": row[1], "has_answer": bool(row[2]),
-                     "lme_session_index": row[3]} for row in rows}
+                     "lme_session_index": row[3], "content": row[4]} for row in rows}

@@ -38,6 +38,59 @@ CLI flags: `--split s|m|oracle`, `--limit N`, `--data <local json/jsonl>`,
 questions that still fail are recorded in `report['failures']` and the run
 continues — one transient error never aborts the 500-Q run).
 
+### #1349 embedder-selection flags
+
+- `--retriever {hybrid,vector}` (default `hybrid`) — the retrieval arm.
+  `vector` is the #1349 gate arm: the query is encoded by the injected model
+  and retrieval is `tortoise.search_engine.run_vector_query` ONLY (never
+  `tortoise_fts_query`); the per-question outcome adds nDCG@10 (binary
+  has_answer gains, log₂(i+2) discount, IDCG = all evidence turns first
+  capped at 10, zero-evidence → 0.0) + P@10 (secondary) + P@5 (tertiary),
+  plus `ranked_ids` + `evidence_turn_matches`.
+- `--model <name>` — probe model short name (`minilm|arctic-xs|arctic-s|
+  bge-small`); invokes `tools.embedder_probe.inject_model` BEFORE ingest and
+  query encoding (the singleton is the candidate). HARD-FAIL semantics: a
+  graph with zero embedding-bearing points aborts the run with
+  MODEL_ENCODE_FAILED (exit 4) — empty recall is never reported as a result.
+- `--query-prompt <name>` — threaded to `inject_model` (e.g. `query` for the
+  snowflake-arctic vendor config re-validation).
+- `--retrieval-only` — skips reader/judge entirely (same retrieval output as
+  `--mock`, structurally immune to reader/judge contamination); the report's
+  accuracy is `None` with a methodology note — no bogus accuracy from
+  unset labels.
+- `--db <uri>` — FalkorDB connection mode (`docker://|redis://|rediss://|
+  bolt://`; also honors `$TORTOISE_DB_URI`). Replaces the per-question
+  tempdir embedded db so the HNSW `queryNodes` branch is reachable
+  (`_is_embedded=False`). **Per-RUN graph isolation:** each (question,
+  model-run) gets a distinct graph name (`{model}__{prompt}__{qid}`) — the
+  HNSW index is global per graph, so without this a winner-vs-control
+  spot-check's second run would silently reuse the first model's vectors.
+- `--spot-check` — named reproducible HNSW producer: runs `--model` (winner)
+  AND control (`minilm`) in one pass over the question set, emitting ONE
+  paired artifact at
+  `docs/research/2026-08-17-1349-embedder-selection/hnsw-spotcheck-{winner}.json`
+  (`{cleared, n, metric_deltas}`) for gate_1349.py's "HNSW artifact
+  present+cleared" check.
+
+Checkpoints are keyed per config
+(`{surface}__{retriever}__{model}__{prompt}`, surface ∈ embedded|hnsw) in a
+versioned format — a `--db` run never resumes against embedded-mode
+brute-force checkpoints and stale #1144-era checkpoints are unreadable, not
+misread. Writes are atomic (temp-file-then-rename); resume against a
+truncated/corrupt record re-encodes just that question with a warning.
+Breaker-open questions (vector arm) are marked `breaker_open` and routed
+through the report's dropped-question accounting — excluded from means,
+count surfaced (`report['dropped']`), never silently counted as recall 0.
+
+Encode cache (`encode_cache.py`): model-keyed
+(`sha256(model_id + prompt_name + text)`), disk-persisted, namespaced per
+(model, prompt) under the cache dir — the cross-question haystack redundancy
+is 5-10×, and the cache is what makes the 12-45h burn feasible. Active when
+`--model` is set. Concurrency model: **sequential workers** (one question at
+a time) — the simplest correct choice; per-question isolated graphs + the
+shared encode cache make parallelism a coordination cost with no correctness
+benefit.
+
 ## Dataset
 
 Official **`xiaowu0162/longmemeval-cleaned`** (the canonical cleaned
