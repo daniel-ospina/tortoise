@@ -120,8 +120,10 @@ surfaces:
   - test_extractor.py
   - test_extractor_doc.py
   - test_extractor_priors.py
+  - test_falkordb_compat.py
   - test_file_indexer.py
   - test_flip_gate.py
+  - test_frontmatter_validator.py
   - test_gate_b_tooling.py
   - test_graph_diagnostics.py
   - test_guard.py
@@ -148,6 +150,7 @@ surfaces:
   - test_judge_harness.py
   - test_linear_connector.py
   - test_list_contexts.py
+  - test_longmem_runner.py
   - test_lookup_hash.py
   - test_m0.py
   - test_m1.py
