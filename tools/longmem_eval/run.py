@@ -802,6 +802,10 @@ def run_main(argv: list[str] | None = None) -> dict[str, Any]:
                          "embedded brute-force)")
         if not args.model:
             parser.error("--spot-check requires --model <winner>")
+        if args.model == "minilm":
+            # winner == control → every metric delta is 0 by construction; the
+            # paired artifact would be meaningless. Rejected at the gate.
+            parser.error("--spot-check requires a non-control winner model")
         if args.retriever != "vector":
             parser.error("--spot-check is a vector-arm producer — pass "
                          "--retriever vector")

@@ -160,6 +160,76 @@ def test_run_main_empty_graph_exits_with_distinct_code(tmp_path, monkeypatch, ca
     assert "MODEL_ENCODE_FAILED" in err
 
 
+def test_vector_search_swallowed_failure_raises_breaker_open(tmp_path, monkeypatch, fake_embeddings):
+    """run_vector_query SWALLOWS infra failures — on timeout/connection/query
+    error it records a breaker failure and returns [] (never raises).
+    vector_search must detect the mid-call breaker bump and raise
+    VectorBreakerOpenError — an empty result is indistinguishable from a
+    legit no-hit and must never be reported as recall 0."""
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        ingest_haystack(sdk, _mini()[0])
+
+        def _swallow(graph, query_vec, limit, **kwargs):
+            se._breaker("vector").record_failure()  # what the swallow path does
+            return []
+
+        monkeypatch.setattr(se, "run_vector_query", _swallow)
+        with pytest.raises(retrieve.VectorBreakerOpenError):
+            retrieve.vector_search(sdk, "Ava board game", 10)
+    finally:
+        sdk.close()
+
+
+def test_vector_search_tripping_swallow_raises_breaker_open(tmp_path, monkeypatch, fake_embeddings):
+    """The TRIPPING call itself (the 3rd consecutive swallow) is caught too:
+    Q1/Q2 bump _fails, Q3 trips the breaker and returns [] — still must route
+    through breaker-open accounting, not recall 0."""
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        ingest_haystack(sdk, _mini()[0])
+
+        def _trip(graph, query_vec, limit, **kwargs):
+            se._breaker("vector").record_failure()  # 3rd → OPEN
+            return []
+
+        monkeypatch.setattr(se, "run_vector_query", _trip)
+        b = se._breaker("vector")
+        b.record_failure()
+        b.record_failure()  # pre-seed 2 failures; the call is the tripping one
+        assert not b.is_open()
+        with pytest.raises(retrieve.VectorBreakerOpenError):
+            retrieve.vector_search(sdk, "Ava board game", 10)
+    finally:
+        sdk.close()
+
+
+def test_midrun_breaker_failure_marks_breaker_open_not_recall_zero(tmp_path, monkeypatch, fake_embeddings):
+    """Gate-level: a swallowed run_vector_query failure mid-run must route the
+    question through breaker_open dropped-accounting — NEVER a silent recall-0
+    into the primary means."""
+    b = se._breaker("vector")
+    assert b._fails == 0
+
+    def _swallow(graph, query_vec, limit, **kwargs):
+        b.record_failure()
+        return []
+
+    monkeypatch.setattr(se, "run_vector_query", _swallow)
+    outcomes, report = runner.run_evaluation(
+        _mini()[:2], reader=MockReader(), judge=MockJudge(),
+        ks=(5,), top_k=5, split="s", work_dir=str(tmp_path),
+        retriever="vector",
+    )
+    assert len(outcomes) == 2
+    assert all(o["breaker_open"] is True for o in outcomes)
+    assert all(o.get("dropped_reason") == "breaker_open" for o in outcomes)
+    # not counted as recall 0 in the means denominator
+    assert report["n_dropped"] == 2
+    assert report["dropped"]["breaker_open"] == 2
+    assert report["n_questions"] == 0
+
+
 def test_vector_search_passes_elevated_timeout(tmp_path, monkeypatch, fake_embeddings):
     """timeout_ms=5000 must reach run_vector_query (default 500ms + breaker
     would trip on large haystacks and return [] which reads as recall 0)."""
@@ -765,3 +835,17 @@ def test_spot_check_requires_db_and_model(tmp_path):
         runner.run_main(["--db", "docker://x/y", "--spot-check", "--mock",
                          "--data", str(MINI), "--limit", "1",
                          "--output", str(tmp_path / "o.json")])
+
+
+def test_spot_check_rejects_control_model_as_winner(tmp_path, capsys):
+    """--spot-check --model minilm is a no-op producer: winner==control makes
+    every metric delta 0. Rejected at the parser gate — never run."""
+    with pytest.raises(SystemExit) as ei:
+        runner.run_main(["--db", "docker://x/y", "--spot-check",
+                         "--model", "minilm", "--retriever", "vector",
+                         "--mock", "--data", str(MINI), "--limit", "1",
+                         "--output", str(tmp_path / "o.json")])
+    # argparse error() exits with status 2 (code may be the (2, msg) tuple)
+    code = ei.value.code
+    assert code == 2 or (isinstance(code, tuple) and code[0] == 2)
+    assert "non-control winner" in capsys.readouterr().err

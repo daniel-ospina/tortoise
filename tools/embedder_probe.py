@@ -86,9 +86,12 @@ class _CandidateFactory:
     While active, every construction routes to the candidate model id, so
     ``EmbeddingModel._load()`` (function-local import, call-time resolution)
     loads the candidate. ``revision`` is forced to the pinned commit when one
-    is recorded; ``query_prompt`` is threaded as ``prompt_name`` (the arctic
-    vendor-config re-validation path — sentence-transformers applies the named
-    prompt template during encode).
+    is recorded; ``query_prompt`` is threaded as ``default_prompt_name`` (the
+    sentence-transformers>=3 constructor name — ``prompt_name`` was renamed in
+    v3.0 and threading the old name raises ``TypeError`` on the pinned range
+    ``>=3,<6``, aborting any ``--model X --query-prompt query`` run; the
+    arctic vendor-config re-validation path applies the named prompt template
+    during encode).
     """
 
     def __init__(self, original: Any, hf_id: str,
@@ -102,8 +105,8 @@ class _CandidateFactory:
         kwargs = dict(kwargs)
         if self._revision is not None:
             kwargs["revision"] = self._revision
-        if self._query_prompt is not None and "prompt_name" not in kwargs:
-            kwargs["prompt_name"] = self._query_prompt
+        if self._query_prompt is not None and "default_prompt_name" not in kwargs:
+            kwargs["default_prompt_name"] = self._query_prompt
         return self._original(self._hf_id, *args, **kwargs)
 
 

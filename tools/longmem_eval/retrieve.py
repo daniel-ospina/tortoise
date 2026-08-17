@@ -1,6 +1,6 @@
 """Hybrid + vector retrieval per LongMemEval question (issues #1144, #1349).
 
-Two retrievers, selected via ``retrieve_for_question(retrieter=...)``:
+Two retrievers, selected via ``retrieve_for_question(retriever=...)``:
 
   * ``hybrid`` (default, backward-compatible) — the repo's production hybrid
     search (``TortoiseSDK.tortoise_fts_query``: RRF fusion of FTS + vector +
@@ -68,8 +68,15 @@ class ModelEncodeFailedError(RuntimeError):
 
 class VectorBreakerOpenError(RuntimeError):
     """The vector circuit breaker is OPEN (or ``run_vector_query`` raised).
-    The runner marks the question ``breaker_open`` — excluded from the means,
-    surfaced in the dropped-question accounting — never counted as recall 0."""
+
+    Raised from :func:`vector_search` when the breaker is open BEFORE the
+    call, when ``run_vector_query`` raised mid-call, or when the post-call
+    check sees the breaker tripped/bumped during the call (``run_vector_query``
+    SWALLOWS infra failures — on timeout/connection/query error it records a
+    breaker failure and returns ``[]``, never raises; the empty result is
+    indistinguishable from a legit no-hit). The runner marks the question
+    ``breaker_open`` — excluded from the means, surfaced in the dropped-
+    question accounting — never counted as recall 0."""
 
 
 def dcg_at_k(gains: list[float], k: int) -> float:
@@ -159,8 +166,17 @@ def vector_search(sdk: TortoiseSDK, query: str, limit: int) -> list[tuple[str, f
             "vector circuit breaker is OPEN — question dropped from the "
             "vector arm (surfaced via dropped-question accounting)")
     qvec = _encode_query_vec(query)
+    # run_vector_query SWALLOWS infra failures: on timeout/connection/query
+    # error it records a breaker failure (``_breaker_record("vector", False)``)
+    # and returns [] — never raises. An empty result is indistinguishable from
+    # a legit no-hit, so snapshot the failure counter before the call and
+    # re-check after: a bumped counter (or a breaker that tripped mid-call,
+    # e.g. a concurrent strategy's failure) means the query FAILED and must
+    # route through breaker-open accounting, never recall 0.
+    breaker = search_engine._breaker("vector")
+    fails_before = breaker._fails
     try:
-        return search_engine.run_vector_query(
+        res = search_engine.run_vector_query(
             proj.g, qvec, limit,
             is_embedded=getattr(proj, "_is_embedded", True),
             vector_index_api=getattr(proj, "_vector_index_api", None),
@@ -171,6 +187,15 @@ def vector_search(sdk: TortoiseSDK, query: str, limit: int) -> list[tuple[str, f
     except Exception as e:  # noqa: BLE001 — breaker-open routing (never recall 0)
         raise VectorBreakerOpenError(
             f"run_vector_query raised for the question: {e!r}") from e
+    if breaker._fails > fails_before or breaker.is_open():
+        # The tripping call itself is caught here (Q3 in the failure series),
+        # not just the Q4 pre-check — the swallowed [] never reaches the
+        # report as recall 0 / nDCG 0.
+        raise VectorBreakerOpenError(
+            "vector query failed/breaker tripped during the call — question "
+            "dropped from the vector arm (surfaced via dropped-question "
+            "accounting)")
+    return res
 
 
 def render_context(hits: list[dict], *, question_date: str | None = None) -> str:

@@ -278,8 +278,10 @@ def test_query_prompt_threaded_to_model():
         state = probe.inject_model("arctic-xs", query_prompt="query")
         assert state["query_prompt"] == "query"
         model = EmbeddingModel.get()
-        # Threaded as prompt_name (arctic vendor-config re-validation path).
-        assert model.kwargs.get("prompt_name") == "query"
+        # Threaded as default_prompt_name (the sentence-transformers>=3 name —
+        # prompt_name was renamed in v3.0; threading the old name raises
+        # TypeError on the pinned range).
+        assert model.kwargs.get("default_prompt_name") == "query"
     finally:
         _restore_st(prev)
 
@@ -352,5 +354,48 @@ def test_real_minilm_injection_routes_encode():
         assert degraded is False
         assert vecs.shape == (1, 384)
         assert np.isfinite(vecs).all()
+    finally:
+        probe.reset()
+
+
+@pytest.mark.skipif(
+    not _minilm_cached(),
+    reason="all-MiniLM-L6-v2 not in HF cache (HF_HUB_OFFLINE in CI)",
+)
+def test_query_prompt_seam_threads_default_prompt_name_to_real_model():
+    """NON-FAKE seam test: the probe factory must thread the query prompt as
+    ``default_prompt_name`` into a REAL SentenceTransformer — threading
+    ``prompt_name`` (the pre-3.0 alias) aborts with TypeError on installed
+    5.7.0, so ANY ``--model X --query-prompt query`` run is dead on arrival
+    unless the seam uses the current name.
+
+    MiniLM's prompts config carries a NO-OP empty-template ``query`` prompt
+    (``prompts == {'query': '', 'document': ''}``) — encoding with
+    default_prompt_name="query" applies an empty template and works fine
+    (no crash, no prompt validation here; validation is a later design
+    decision, NOT part of this fix)."""
+    from sentence_transformers import SentenceTransformer as RealST
+
+    probe.reset()
+    try:
+        # (a) the factory seam directly: construction + encode with the prompt
+        factory = probe._CandidateFactory(
+            RealST, "sentence-transformers/all-MiniLM-L6-v2", None, "query")
+        model = factory("ignored", local_files_only=True)
+        assert model.get_embedding_dimension() == 384
+        vecs = np.asarray(model.encode(
+            ["tortoise is a live epistemic graph engine"]))
+        assert vecs.shape == (1, 384)
+        assert np.isfinite(vecs).all()
+        del model  # drop the direct handle before the injection below
+
+        # (b) the full injection path (real module patched, singleton swapped)
+        state = probe.inject_model("minilm", query_prompt="query")
+        assert state["query_prompt"] == "query"
+        assert state["dim"] == 384
+        vecs2, degraded = _encode(["tortoise is a live epistemic graph engine"])
+        assert degraded is False
+        assert vecs2.shape == (1, 384)
+        assert np.isfinite(vecs2).all()
     finally:
         probe.reset()
