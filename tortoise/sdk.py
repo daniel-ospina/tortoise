@@ -9035,6 +9035,19 @@ class TortoiseSDK:
 
         return [r.to_dict() for r in results[:limit]]
 
+    def expand_relationships(self, point_id: str) -> list[dict]:
+        """Full relationship payload for a single Point, incl. related_content (#1353 D14).
+
+        The expand side of the list/expand split: search list view carries bounded
+        state entries (IDs + labels + direction + peer state, no content); this
+        returns the complete unbounded payload for one point (single-point
+        fan-out is trivially cheap) so an agent can read a neighbor's full text
+        on demand.
+        """
+        from .search_engine import get_relationships
+        proj = self._get_proj()
+        return get_relationships(proj.g, [point_id]).get(point_id, [])
+
     # ── Recall (epic #898) — UC1 STATE ──────────────────────────────
 
     # Status values excluded from the UC1 "current state" view by default.

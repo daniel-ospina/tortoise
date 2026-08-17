@@ -98,3 +98,59 @@ def test_relationships_empty_when_no_operators(sdk):
     hit = next(r for r in results if r["id"] == p["id"])
     assert hit["relationships"] == []
     assert "status" in hit
+
+
+# ── Task 4: expand_relationships (SDK + MCP + registry) ─────────────────
+
+def test_expand_relationships_full_content(sdk):
+    """The expand side returns the FULL unbounded payload incl. related_content."""
+    a = sdk.create_point("statement", "alpha claim")
+    b = sdk.create_point("statement", "beta claim with unique content payload")
+    sdk.create_operator("IMPL", a["id"], [b["id"]])
+
+    expanded = sdk.expand_relationships(a["id"])
+    assert len(expanded) == 1
+    assert "related_content" in expanded[0]
+    assert "beta claim" in expanded[0]["related_content"]
+
+
+def test_expand_relationships_missing_point(sdk):
+    assert sdk.expand_relationships("does-not-exist") == []
+
+
+def test_expand_mcp_tool():
+    """MCP surface routes to the SDK method and returns the full payload."""
+    from tortoise.mcp_auth import _transport_mode
+    from tortoise.mcp_server import (
+        tortoise_expand_relationships, tortoise_create_point,
+        tortoise_create_operator, tortoise_delete_point,
+    )
+    assert callable(tortoise_expand_relationships)
+    token = _transport_mode.set("stdio")
+    try:
+        a = tortoise_create_point(kind="statement", content="alpha claim", authoredBy="test-suite")
+        b = tortoise_create_point(kind="statement", content="beta claim with unique content payload", authoredBy="test-suite")
+        aid = a.get("id") if isinstance(a, dict) else None
+        bid = b.get("id") if isinstance(b, dict) else None
+        try:
+            if aid and bid:
+                tortoise_create_operator("IMPL", aid, [bid])
+            out = tortoise_expand_relationships(aid)
+            assert isinstance(out, list), out
+            assert any("related_content" in e and "beta claim" in e["related_content"] for e in out)
+        finally:
+            if aid:
+                tortoise_delete_point(aid)
+            if bid:
+                tortoise_delete_point(bid)
+    finally:
+        _transport_mode.reset(token)
+
+
+def test_expand_tool_registered(sdk):
+    from tortoise.tool_registry import TOOL_REGISTRY
+    names = {t.name for t in TOOL_REGISTRY}
+    assert "tortoise_expand_relationships" in names
+    entry = next(t for t in TOOL_REGISTRY if t.name == "tortoise_expand_relationships")
+    assert entry.sdk_method == "expand_relationships"
+    assert entry.group == "memory"
