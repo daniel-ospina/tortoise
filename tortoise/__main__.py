@@ -1766,6 +1766,12 @@ def _cmd_onboard(args) -> int:
         md_count = len(list(Path(repo_root).rglob("*.md")))
         if md_count > 0:
             print(f"  Found {md_count} markdown files. Indexing…")
+            # #1362: frontmatter validation is OPTIONAL + warn-only — surface
+            # the shared flag so onboard users know the gate is on.
+            from tortoise.frontmatter_validator import validation_enabled
+            if validation_enabled():
+                print("  frontmatter validation ON — session files must carry "
+                      "sessionId/topics/summary (warnings only, never a hard fail)")
             # #705: pass the SAME resolved DB target init used (docker:// URI
             # or embedded path honoring --path / TORTOISE_DB_PATH) so index
             # never silently writes to the default DB.
