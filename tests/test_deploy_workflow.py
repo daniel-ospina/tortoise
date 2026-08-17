@@ -32,7 +32,7 @@ _WORKFLOW = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "
 
 # Anchors inside the workflow (the #1197 blocks). Slicing between markers keeps
 # the scan scoped: RESEND_API_KEY etc. live in other blocks and must not leak in.
-_GATE_START = "# Session capture LLM provider (#1197)"
+_GATE_START = "# Session capture LLM provider (#1197, #1346)"
 _GATE_END = 'if [ -z "${{ secrets.STRIPE_PRICE_IDS }}" ]; then'
 _PROP_START = "# Session-capture LLM provider (#1197)"
 _PROP_END = "# Optional (env-gated at runtime)"
@@ -66,8 +66,10 @@ def workflow_text() -> str:
 
 
 def test_verify_secrets_gate_matches_runtime_registry(workflow_text, registry_keys):
-    """The deploy gate's hard-required key set == _LLM_PROVIDER_KEYS, with the
-    fail-closed &&-chain shape (any missing → error) still intact.
+    """The deploy gate's key set == _LLM_PROVIDER_KEYS, with the
+    warn-only shape (::warning::, no exit 1) intact — the #1346 decision:
+    session capture is optional and degrades to a loud 503 server-side, so
+    a missing key must warn, NOT block the whole API deploy.
 
     A rename in the registry must force an update here, else the gate checks
     a stale name while the app 503s (gate passes, key never consumed)."""
@@ -80,11 +82,13 @@ def test_verify_secrets_gate_matches_runtime_registry(workflow_text, registry_ke
         f"the deploy gate pass while the app 503s every capture "
         f"(docs/infra-runbook.md §4.6)"
     )
-    # Semantics: the gate must fail when ALL keys are unset (&&-chain), not
-    # when ANY is missing (|| would hard-fail a valid single-key deploy).
-    assert " && \\" in gate and "-z \"${{ secrets." in gate, (
-        "verify-secrets gate lost its fail-closed &&-chain — a wrong operator "
-        "(e.g. ||) changes the gate's semantics while name parity still passes"
+    # Semantics (#1346/#1347): the LLM provider gate is WARN-ONLY — a missing
+    # key must NOT block the API deploy (session capture is optional, degrades
+    # to a loud 503 server-side). Assert the ::warning:: shape, not the old
+    # fail-closed exit-1 shape.
+    assert "::warning::" in gate and "::error::" not in gate, (
+        "verify-secrets LLM gate must be warn-only (::warning::, no ::error::) "
+        "— a fail-closed gate here blocks ALL API deploys (#1346)"
     )
 
 

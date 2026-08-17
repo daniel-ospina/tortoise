@@ -210,9 +210,9 @@ def test_top_k_hard_clamp(sdk, monkeypatch):
     limits: list[int] = []
     real = search_engine.run_vector_query
 
-    def spy(g, query_vec, limit, is_embedded=True):
+    def spy(g, query_vec, limit, is_embedded=True, **kwargs):
         limits.append(limit)
-        return real(g, query_vec, limit=limit, is_embedded=is_embedded)
+        return real(g, query_vec, limit=limit, is_embedded=is_embedded, **kwargs)
 
     monkeypatch.setattr(search_engine, "run_vector_query", spy)
     sdk.get_cross_lens_candidates(max_candidates=10_000, top_k=10_000)
