@@ -189,6 +189,7 @@ surfaces:
   - test_search_engine.py
   - test_search_engine_gaps.py
   - test_search_engine_nameerror.py
+  - test_search_promoted_fields.py
   - test_search_sessions_temporal.py
   - test_security.py
   - test_semantic_extractor.py
@@ -200,6 +201,7 @@ surfaces:
   - test_tool_registry.py
   - test_topic_summarization.py
   - test_tortoise_search.py
+  - test_relationships_bounded.py
   - test_value_extractor.py
   - test_extractor_v2.py
   - test_wiring_phase01.py
