@@ -80,7 +80,7 @@ import re
 import sys
 import tempfile
 import time
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -138,6 +138,29 @@ EXTRACTION_APPROACH = (
 
 def _parse_ks(raw: str) -> tuple[int, ...]:
     return tuple(sorted({int(x.strip()) for x in raw.split(",") if x.strip()}))
+
+
+@contextmanager
+def _temporary_env_var(name: str, value: str):
+    """Set ``name`` to ``value`` for the duration of the block; restore on exit.
+
+    An explicit ``--db`` must WIN over a stale pre-existing env URI (a stale
+    ``TORTOISE_DB_URI`` in the caller's shell would otherwise silently
+    redirect the spot-check to the wrong FalkorDB server — the reference
+    runner's setdefault semantics are NOT used here because the spot-check
+    is a deterministic evidence producer). The env is always restored so
+    ``run_main()`` can be invoked repeatedly in one process without leaking
+    the URI into later no-path SDK constructions (issue #1349 isolation).
+    """
+    prev = os.environ.get(name)
+    os.environ[name] = value
+    try:
+        yield
+    finally:
+        if prev is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = prev
 
 
 def _call_with_backoff(fn, *, what: str, retries: int,
@@ -199,13 +222,26 @@ def _make_question_sdk(*, db_uri: str | None, namespace: str | None,
     ``team_{namespace}``) — HNSW ``queryNodes`` branch reachable
     (``_is_embedded=False``). Embedded mode: a fresh tempdir db (isolation by
     construction). Returns (sdk, cleanup).
+
+    The ``--db`` cleanup restores ``TORTOISE_DB_URI`` to its pre-call value:
+    the setdefault below is how the URI reaches the SDK, but mutating the
+    process env permanently leaks the URI into every later SDK/validation in
+    the same process (issue #1349 test isolation).
     """
     if db_uri:
         # Mirrors tests/eval/retrieval/run.py:549 — the URI becomes the SDK's
         # connection source (setdefault: an explicit env wins, matching the
         # reference runner's semantics).
+        prev = os.environ.get("TORTOISE_DB_URI")
         os.environ.setdefault("TORTOISE_DB_URI", db_uri)
-        return TortoiseSDK(namespace=namespace), (lambda: None)
+
+        def _cleanup():
+            if prev is None:
+                os.environ.pop("TORTOISE_DB_URI", None)
+            else:
+                os.environ["TORTOISE_DB_URI"] = prev
+
+        return TortoiseSDK(namespace=namespace), _cleanup
     td = tempfile.TemporaryDirectory(dir=work_dir, prefix="lme-")
     return TortoiseSDK(os.path.join(td.name, "lme.db")), td.cleanup
 
@@ -768,14 +804,6 @@ def _build_parser() -> argparse.ArgumentParser:
 def run_main(argv: list[str] | None = None) -> dict[str, Any]:
     parser = _build_parser()
     args = parser.parse_args(argv)
-    ks = _parse_ks(args.k)
-    top_k = args.top_k
-
-    instances = ds.load_dataset(
-        args.split, limit=args.limit, data_path=args.data,
-        cache=Path(args.cache_dir).expanduser() if args.cache_dir else None,
-        download=not args.no_download,
-    )
 
     # --db: FalkorDB URI handling mirroring tests/eval/retrieval/run.py:549
     # (URI → TORTOISE_DB_URI → TortoiseSDK()). Non-URI --db is rejected —
@@ -789,7 +817,27 @@ def run_main(argv: list[str] | None = None) -> dict[str, Any]:
                 f"--db must be a FalkorDB URI (docker://|redis://|rediss://|"
                 f"bolt://), got {db_uri!r} — the per-question isolated graphs "
                 f"derive from the URI's server")
-        os.environ.setdefault("TORTOISE_DB_URI", db_uri)
+        # Test isolation (#1349): the URI must reach the SDK via the env, but
+        # the process env is restored on exit — a leaked TORTOISE_DB_URI would
+        # silently change every later run_main()/SDK in the same process.
+        with _temporary_env_var("TORTOISE_DB_URI", db_uri):
+            return _run_main(parser, args, db_uri)
+    return _run_main(parser, args, db_uri)
+
+
+def _run_main(parser: argparse.ArgumentParser, args,
+              db_uri: str | None) -> dict[str, Any]:
+    """Body of :func:`run_main` (split so the caller can scope the
+    TORTOISE_DB_URI env to the run — issue #1349 test isolation)."""
+    ks = _parse_ks(args.k)
+    top_k = args.top_k
+
+    instances = ds.load_dataset(
+        args.split, limit=args.limit, data_path=args.data,
+        cache=Path(args.cache_dir).expanduser() if args.cache_dir else None,
+        download=not args.no_download,
+    )
+
     if args.model is not None and args.model not in PROBE_MODELS:
         parser.error(f"unknown probe model {args.model!r} — known: "
                      f"{sorted(PROBE_MODELS)}")

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import sys
 import zlib
@@ -849,3 +850,31 @@ def test_spot_check_rejects_control_model_as_winner(tmp_path, capsys):
     code = ei.value.code
     assert code == 2 or (isinstance(code, tuple) and code[0] == 2)
     assert "non-control winner" in capsys.readouterr().err
+
+
+def test_db_uri_env_restored_after_cleanup(tmp_path, monkeypatch):
+    """--db env-scoping (issue #1349 test isolation): an explicit --db must
+    WIN over a stale pre-existing TORTOISE_DB_URI (a stale shell URI would
+    otherwise redirect the spot-check to the wrong server), and the env
+    must be restored on exit so later no-path SDK constructions in the same
+    process never inherit the URI (the runner runs repeatedly in-process)."""
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    assert os.environ.get("TORTOISE_DB_URI") is None
+
+    # No pre-existing env: --db sets it, cleanup unsets it
+    with runner._temporary_env_var("TORTOISE_DB_URI", "docker://localhost:6379/bench"):
+        assert os.environ.get("TORTOISE_DB_URI") == "docker://localhost:6379/bench"
+    assert os.environ.get("TORTOISE_DB_URI") is None
+
+    # Stale pre-existing env: explicit --db WINS while scoped, then restores
+    monkeypatch.setenv("TORTOISE_DB_URI", "redis://elsewhere:6379")
+    with runner._temporary_env_var("TORTOISE_DB_URI", "docker://localhost:6379/bench"):
+        assert os.environ.get("TORTOISE_DB_URI") == "docker://localhost:6379/bench"
+    assert os.environ.get("TORTOISE_DB_URI") == "redis://elsewhere:6379"
+
+    # Nested/no-op case: restore is idempotent
+    with runner._temporary_env_var("TORTOISE_DB_URI", "docker://localhost:6379/bench"):
+        with runner._temporary_env_var("TORTOISE_DB_URI", "redis://a:6379"):
+            assert os.environ.get("TORTOISE_DB_URI") == "redis://a:6379"
+        assert os.environ.get("TORTOISE_DB_URI") == "docker://localhost:6379/bench"
+    assert os.environ.get("TORTOISE_DB_URI") == "redis://elsewhere:6379"
