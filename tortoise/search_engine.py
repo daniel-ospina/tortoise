@@ -912,6 +912,8 @@ def get_relationships_bounded(
     per_point_cap: int = 10,
     global_budget: int = 140,
     raw_cap: int = 3000,
+    per_op_cap: int = 10,
+    expand_top_k: int = 14,
 ) -> dict[str, list[dict]]:
     """Bounded, state-centric relationship decoration (#1353, D1-D14).
 
@@ -1011,45 +1013,114 @@ def get_relationships_bounded(
                 })
                 mit_ids.add(row[1])
 
-        # Q2: endpoints per operator (deduped across result points), NAND-first,
-        # raw-capped so a pathological graph cannot reopen the fan-out blowup.
-        op_endpoints: dict[str, dict[str, tuple]] = {}
+        # Q2-crit: critical-class endpoints — NAND edges + terminal-status peers.
+        # COMPLETE, no cap: these classes must never be dropped (D3/D4). Low
+        # volume in practice (NAND + terminal points are the exception).
+        op_crit: dict[str, dict[str, tuple]] = {}
         if op_ids:
             rows = graph.query(
                 "MATCH (op:Point {is_operator:true}) WHERE op.id IN $op_ids "
                 "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point) "
                 "WHERE (other.is_operator = false OR other.is_operator IS NULL) "
                 "  AND NOT (op)-[:mitigated_by]->(other) "
-                "WITH op, r2, other "
-                "ORDER BY CASE WHEN type(r2) = 'NAND' THEN 0 ELSE 1 END, "
-                "  other.createdAt DESC "
+                "  AND (type(r2) = 'NAND' OR "
+                "       other.status IN ['superseded','retracted','deprecated']) "
                 "RETURN op.id, type(r2) AS et, r2.idx AS other_idx, other.id, "
                 "  other.pointKind, other.status, "
                 "  coalesce(other.posterior_alpha, other.ep_alpha, 1.0), "
                 "  coalesce(other.posterior_beta, other.ep_beta, 1.0), "
                 "  (other.posterior_alpha IS NOT NULL OR other.ep_alpha IS NOT NULL), "
-                "  other.createdAt "
-                "LIMIT $raw_cap",
-                params={"op_ids": list(op_ids), "raw_cap": raw_cap},
+                "  other.createdAt",
+                params={"op_ids": list(op_ids)},
             ).result_set
             for row in rows:
-                op_id = row[0]
-                other_id = row[3]
-                op_endpoints.setdefault(op_id, {})[other_id] = (
+                op_crit.setdefault(row[0], {})[row[3]] = (
                     row[1], row[2], row[4] or "", row[5] or "",
                     float(row[6]), float(row[7]), bool(row[8]), row[9],
                 )
 
-        # Q2f: family sizes per (op, edge-type).
-        op_family: dict[tuple[str, str], int] = {}
-        if op_ids:
+        # The operators of the TOP-K result points are the ones that get
+        # endpoint expansion (hasep + support). The global budget (140 ≈ 14 × 10)
+        # makes tail points' peer lists redundant — they degrade to structure
+        # counts (D3), so their operators are not expanded (this is what keeps
+        # limit=100 affordable).
+        expand_ops: set[str] = set()
+        for pid in point_ids[:expand_top_k]:
+            for (_et, _idx, op_id, _mech, _pred, _created) in point_ops.get(pid, []):
+                expand_ops.add(op_id)
+
+        # Q2-hasep: EP-bearing endpoints (contested candidates — variance is
+        # computed in Python from the persisted α/β, D13). Per-op capped via
+        # CALL subquery (contested is rare among has-EP peers — top-N per op
+        # covers it on realistic graphs; synthetic 50%-posterior density is
+        # the bounded worst case).
+        op_hasep: dict[str, dict[str, tuple]] = {}
+        if expand_ops:
             rows = graph.query(
                 "MATCH (op:Point {is_operator:true}) WHERE op.id IN $op_ids "
-                "OPTIONAL MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point) "
+                "CALL { WITH op MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point) "
                 "WHERE (other.is_operator = false OR other.is_operator IS NULL) "
                 "  AND NOT (op)-[:mitigated_by]->(other) "
+                "  AND (other.posterior_alpha IS NOT NULL OR other.ep_alpha IS NOT NULL) "
+                "RETURN r2, other LIMIT $per_op } "
+                "RETURN op.id, type(r2) AS et, r2.idx AS other_idx, other.id, "
+                "  other.pointKind, other.status, "
+                "  coalesce(other.posterior_alpha, other.ep_alpha, 1.0), "
+                "  coalesce(other.posterior_beta, other.ep_beta, 1.0), "
+                "  (other.posterior_alpha IS NOT NULL OR other.ep_alpha IS NOT NULL), "
+                "  other.createdAt",
+                params={"op_ids": list(expand_ops), "per_op": per_op_cap},
+            ).result_set
+            for row in rows:
+                op_hasep.setdefault(row[0], {})[row[3]] = (
+                    row[1], row[2], row[4] or "", row[5] or "",
+                    float(row[6]), float(row[7]), bool(row[8]), row[9],
+                )
+
+        # Q2-support: per-op-capped support endpoints (CALL subquery = per-op
+        # LIMIT, no global sort) for the expanded operators.
+        op_support: dict[str, dict[str, tuple]] = {}
+        if expand_ops:
+            rows = graph.query(
+                "MATCH (op:Point {is_operator:true}) WHERE op.id IN $op_ids "
+                "CALL { WITH op MATCH (op)-[r2:IMPL|hasPart]-(other:Point) "
+                "WHERE (other.is_operator = false OR other.is_operator IS NULL) "
+                "  AND NOT (op)-[:mitigated_by]->(other) "
+                "RETURN r2, other LIMIT $per_op } "
+                "RETURN op.id, type(r2) AS et, r2.idx AS other_idx, other.id, "
+                "  other.pointKind, other.status, "
+                "  coalesce(other.posterior_alpha, other.ep_alpha, 1.0), "
+                "  coalesce(other.posterior_beta, other.ep_beta, 1.0), "
+                "  (other.posterior_alpha IS NOT NULL OR other.ep_alpha IS NOT NULL), "
+                "  other.createdAt",
+                params={"op_ids": list(expand_ops), "per_op": per_op_cap},
+            ).result_set
+            for row in rows:
+                op_support.setdefault(row[0], {})[row[3]] = (
+                    row[1], row[2], row[4] or "", row[5] or "",
+                    float(row[6]), float(row[7]), bool(row[8]), row[9],
+                )
+
+        # Unified endpoint store: critical classes first, then EP candidates,
+        # then support filler (same tuple shape — dict-merge dedupes).
+        op_endpoints: dict[str, dict[str, tuple]] = {}
+        for op_id in op_ids:
+            merged: dict[str, tuple] = {}
+            for src in (op_crit, op_hasep, op_support):
+                merged.update(src.get(op_id, {}))
+            op_endpoints[op_id] = merged
+
+        # Q2f: family sizes per (op, edge-type) for the EXPANDED operators
+        # (plain aggregate — mitigations are rare and family is approximate
+        # disclosure; tail points beyond top-K show criticals only).
+        op_family: dict[tuple[str, str], int] = {}
+        if expand_ops:
+            rows = graph.query(
+                "MATCH (op:Point {is_operator:true}) WHERE op.id IN $op_ids "
+                "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point) "
+                "WHERE (other.is_operator = false OR other.is_operator IS NULL) "
                 "RETURN op.id, type(r2) AS et, count(other)",
-                params={"op_ids": list(op_ids)},
+                params={"op_ids": list(expand_ops)},
             ).result_set
             for row in rows:
                 op_family[(row[0], row[1])] = int(row[2])
@@ -1155,12 +1226,21 @@ def get_relationships_bounded(
             entries.extend(support[:keep])
             global_support_used += keep
 
-            # Structure counts for dropped support-mass (honest degradation).
-            dropped = support[keep:]
-            if dropped:
+            # Tail degradation (beyond expand_top_k, or all support capped away):
+            # no peer entries shown → disclose family counts per mechanism so the
+            # agent still knows the structural weight (D3). Points WITH peer
+            # entries disclose their full family via per-entry family_size.
+            if not any("peer" in e for e in entries) and point_ops.get(pid):
                 from collections import Counter
-                for mech, count in Counter(e["mechanism"] for e in dropped).items():
-                    entries.append({"predicate": "", "mechanism": mech, "count": count})
+                # family per mechanism across this point's operators
+                mech_family = Counter()
+                for (et, _idx, op_id, mechanism, _pred, _created) in point_ops.get(pid, []):
+                    mech_family[mechanism] += op_family.get((op_id, et), 0)
+                crit_mech = Counter(e["mechanism"] for e in criticals)
+                for mech, fam in mech_family.items():
+                    leftover = fam - crit_mech.get(mech, 0)
+                    if leftover > 0:
+                        entries.append({"predicate": "", "mechanism": mech, "count": leftover})
 
             rels[pid] = entries
     except Exception:

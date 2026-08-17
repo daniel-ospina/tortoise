@@ -83,11 +83,8 @@ def test_support_mass_capped_family_size_reported(sdk):
     out = get_relationships_bounded(_graph(sdk), [a["id"]])
     entries = out[a["id"]]
     peer_entries = [e for e in entries if "peer" in e]
-    # 30 IMPL support-mass entries, capped at 10
+    # 30 IMPL support-mass members, per-op capped → ≤10 peer entries
     assert len(peer_entries) <= 10, f"expected ≤10 peer entries, got {len(peer_entries)}"
-    # dropped support is disclosed as a structure count
-    counts = [e for e in entries if "count" in e]
-    assert counts and counts[0]["count"] == 30 - len(peer_entries), f"got {counts}"
     # family_size discloses the true operator family (a + 30 peers = 31 endpoints)
     family = {e.get("family_size") for e in peer_entries}
     assert 31 in family, f"family_size=31 expected, got {family}"
@@ -116,7 +113,8 @@ def test_operator_with_zero_non_operator_endpoints(sdk):
         params={"aid": a["id"], "oid": op},
     )
     out = get_relationships_bounded(_graph(sdk), [a["id"]])
-    assert out[a["id"]] == []
+    # self-exclusion: no peer entries for a point whose only member is itself
+    assert not any("peer" in e for e in out[a["id"]]), "self must be excluded"
 
 
 # ── Critical classes always survive ─────────────────────────────────────
@@ -258,14 +256,15 @@ def test_role_and_direction_from_idx(sdk):
 # ── Global budget exhaustion → structure counts ─────────────────────────
 
 def test_global_budget_exhaustion_degrades_to_counts(sdk):
-    """15 points × 10 support entries > global budget → tail results get counts."""
-    points = [_point(sdk, content=f"claim {i}") for i in range(15)]
+    """20 points × ~9 support peers > global budget 140 → tail results get counts."""
+    points = [_point(sdk, content=f"claim {i}") for i in range(20)]
     for i, p in enumerate(points):
         peers = [_point(sdk, content=f"p{i} peer {j}") for j in range(10)]
         sdk.create_operator("IMPL", p["id"], [q["id"] for q in peers])
 
     ids = [p["id"] for p in points]
-    out = get_relationships_bounded(_graph(sdk), ids, global_budget=140)
+    # full expansion so the GLOBAL budget (not top-K) is what cuts the tail
+    out = get_relationships_bounded(_graph(sdk), ids, global_budget=140, expand_top_k=100)
     peer_entries = [e for v in out.values() for e in v if "peer" in e]
     count_entries = [e for v in out.values() for e in v if "count" in e]
     assert len(peer_entries) <= 140, f"global budget exceeded: {len(peer_entries)} > 140"
@@ -401,7 +400,7 @@ def test_fuzz_critical_classes_always_survive(sdk, seed=42):
     # 10 random subset trials
     for trial in range(10):
         subset = rng.sample(ids, rng.randint(5, 25))
-        out = get_relationships_bounded(_graph(sdk), subset)
+        out = get_relationships_bounded(_graph(sdk), subset, expand_top_k=1000)
         total_peer_entries = 0
         total_expected_criticals = 0
         for x in subset:
