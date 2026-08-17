@@ -864,16 +864,51 @@ def _short_id() -> str:
     return uuid.uuid4().hex[:26]
 
 
+def _probe_db() -> dict:
+    """Deep-check the graph DB through the shared/default connection (#1384).
+
+    Reports ``{"ok": bool, "latency_ms": float, "error": str|None}`` via
+    monitoring.probe_db — never raises, hard-bounded (~1.5s). The probe
+    target is ``_make_sdk(namespace=None)``: the default-graph connection
+    shares the DB server with every team/registry endpoint, so a stopped
+    FalkorDB (NXDOMAIN, #1381) fails it too.
+
+    #669: NEVER probe the registry namespace — FalkorDB auto-creates the
+    graph on select, so a registry-namespaced probe RECREATES a deleted
+    registry_control_plane on every health check.
+    """
+    from tortoise.monitoring import probe_db
+    try:
+        sdk = _make_sdk(namespace=None)
+    except Exception as exc:  # noqa: BLE001 — probe reports, never raises
+        return {"ok": False, "latency_ms": 0.0, "error": str(exc)[:200]}
+    return probe_db(sdk)
+
+
 @app.get("/health")
 async def health():
-    """Liveness — process up and serving. NEVER gates on the DB.
+    """Liveness + deep DB check — process up and serving. NEVER gates on the DB.
 
     (cold-start fix, #338 follow-up): the previous DB-coupled /health caused
     deploy failures on cold machines — Fly caps the http_check grace period at
     60s, and a cold FalkorDB Cloud connection exceeds it. Liveness returns
     immediately; DB readiness is `/health/ready`.
+
+    Deep check (#1384): a lightweight graph-DB probe (RETURN 1, ≤1.5s bound)
+    rides along in `db`. A stopped FalkorDB (incident #1381 — NXDOMAIN with
+    /health staying ok) flips status to "degraded" + db.ok=false, visible
+    immediately without any graph-touching request. The handler never raises
+    and never 5xxes: a dead DB must not kill the process — deploy/backup
+    drivers gate on /health/ready, which still fails closed.
     """
-    return {"status": "ok"}
+    import asyncio
+    try:
+        # to_thread: a hung probe (firewall black-hole) must not stall the
+        # event loop — probe_db is itself bounded, but stay off the loop.
+        db = await asyncio.to_thread(_probe_db)
+    except Exception as exc:  # noqa: BLE001 — liveness never crashes
+        db = {"ok": False, "latency_ms": 0.0, "error": str(exc)[:200]}
+    return {"status": "ok" if db["ok"] else "degraded", "db": db}
 
 
 @app.get("/health/ready")

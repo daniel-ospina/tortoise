@@ -37,6 +37,38 @@ def _counter_value(counter, labels=None):
     return 0
 
 
+class TestProbeDb:
+    """probe_db() deep-check (#1384) — never raises, hard-bounded."""
+
+    def test_healthy_shape(self):
+        result = monitoring.probe_db(FakeSDK(db_ok=True))
+        assert result["ok"] is True
+        assert isinstance(result["latency_ms"], (int, float))
+        assert result["error"] is None
+
+    def test_degraded_reports_error(self):
+        result = monitoring.probe_db(FakeSDK(db_ok=False))
+        assert result["ok"] is False
+        assert "connection refused" in result["error"]
+        assert isinstance(result["latency_ms"], (int, float))
+
+    def test_never_raises_on_hung_connection(self, monkeypatch):
+        """A dead socket must not hang the handler — the worker thread is
+        abandoned after the hard timeout and the probe returns degraded."""
+        import time
+
+        class HungSDK:
+            def _get_proj(self):
+                time.sleep(30)  # simulates a blocked connect on a dead URI
+                raise AssertionError("should never get here")
+
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.05)
+        result = monitoring.probe_db(HungSDK())
+        assert result["ok"] is False
+        assert "timeout" in result["error"]
+        assert result["latency_ms"] < 2000
+
+
 class TestMetricsFunction:
     """metrics() function tests."""
 
@@ -45,6 +77,8 @@ class TestMetricsFunction:
         result = monitoring.metrics()
         assert result["status"] == "degraded"
         assert result["falkordb"] == "no_sdk_registered"
+        assert result["db"] == {"ok": False, "latency_ms": 0.0,
+                                "error": "no_sdk_registered"}
         assert result["graph_size"] == 0
 
     def test_connected_sdk_returns_ok(self):
@@ -52,6 +86,8 @@ class TestMetricsFunction:
         result = monitoring.metrics()
         assert result["status"] == "ok"
         assert result["falkordb"] == "connected"
+        assert result["db"]["ok"] is True
+        assert "latency_ms" in result["db"]
         assert result["graph_size"] == 7
 
     def test_broken_db_returns_degraded(self):
@@ -59,6 +95,8 @@ class TestMetricsFunction:
         result = monitoring.metrics()
         assert result["status"] == "degraded"
         assert "connection refused" in result["falkordb"]
+        assert result["db"]["ok"] is False
+        assert "connection refused" in result["db"]["error"]
 
     def test_includes_uptime(self):
         monitoring._sdk = FakeSDK()
