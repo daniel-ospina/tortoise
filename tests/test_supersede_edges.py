@@ -331,3 +331,22 @@ def test_outdated_status_excluded_too(sdk):
     status, outdated = rows[0]
     assert status in ("superseded", "outdated") or outdated is True
     assert old["id"] not in [p["id"] for p in sdk.query()]
+
+
+def test_outdated_flag_excluded_even_when_status_live(sdk):
+    """#1391 (review P2): invalidate_point sets outdated=true WITHOUT touching
+    status — the exclusion must cover the legacy flag too, not just terminal
+    status values."""
+    p = _make_point(sdk, content="the invalidated claim")
+    replacement = _make_point(sdk, content="the replacement claim")
+    sdk.invalidate_point(p["id"], corrected_by_id=replacement["id"])
+    proj = sdk._get_proj()
+    rows = proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.status, n.outdated",
+        params={"id": p["id"]},
+    ).result_set
+    status, outdated = rows[0]
+    assert outdated is True or status in ("superseded", "outdated")
+    assert p["id"] not in [x["id"] for x in sdk.query()]
+    # audit opt-in surfaces it
+    assert p["id"] in [x["id"] for x in sdk.query(include_retracted=True)]

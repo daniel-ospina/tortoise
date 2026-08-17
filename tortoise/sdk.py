@@ -8826,13 +8826,14 @@ class TortoiseSDK:
             # #1359: the recorded vector-index API (procedure vs Cypher-native)
             # lets run_vector_query skip the failing signature attempt.
             vector_index_api=getattr(proj, "_vector_index_api", None),
-            include_terminal=include_terminal,
+            excluded_statuses=() if include_terminal else None,
         )
 
         if not raw_results:
             # All strategies failed — fallback to in-memory TF-IDF (Point only).
             if query and entity_type == "point":
-                points = self.query(kind=kind)
+                points = self.query(kind=kind,
+                                    include_retracted=include_terminal)
                 if exclude_status and points:
                     # Same status exclusion as step 5d (#898 review round-2):
                     # the degraded fallback must not leak superseded/deprecated
@@ -9523,13 +9524,25 @@ class TortoiseSDK:
             } if pool_ids else set()
             pool_results = [dict(r, entity_type="point") for r in results
                             if r["id"] not in op_ids]
+            # #1391: retracted stays hard-excluded even when include_superseded
+            # brings the other terminal statuses back (#689 leak guard).
+            if include_superseded:
+                pool_results = [p for p in pool_results
+                                if p.get("status") != "retracted"]
         else:
             # Population scan: raw claim nodes (self.query already excludes
-            # operators + retracted).
-            nodes = self.query(kind=kind)
+            # operators + terminal statuses; include_retracted surfaces
+            # superseded/deprecated for the opt-in — retracted is then
+            # re-filtered below by excluded_set).
+            nodes = self.query(kind=kind,
+                               include_retracted=include_superseded)
             pool_results = []
             for n in nodes:
                 if (n.get("status") or "") in excluded_set:
+                    continue
+                if (n.get("status") or "") == "retracted":
+                    # #689 leak guard: retracted is never a gap candidate,
+                    # even when include_superseded surfaces the others.
                     continue
                 pool_results.append({
                     "id": n["id"],

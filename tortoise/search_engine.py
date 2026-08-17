@@ -24,12 +24,18 @@ TERMINAL_EXCLUDED_STATUSES = (
     "retracted", "superseded", "outdated", "archived", "deprecated")
 
 
-def _exclude_status_clause(alias: str) -> str:
+def _exclude_status_clause(alias: str,
+                           excluded: tuple[str, ...] = TERMINAL_EXCLUDED_STATUSES) -> str:
     """Cypher WHERE fragment excluding the terminal statuses on ``alias``
-    (<>-chain form — FalkorDB rejects inline string lists in ``IN``)."""
-    chain = " AND ".join(f"{alias}.status <> '{s}'"
-                          for s in TERMINAL_EXCLUDED_STATUSES)
-    return f"({alias}.status IS NULL OR ({chain}))"
+    (<>-chain form — FalkorDB rejects inline string lists in ``IN``), plus
+    the ``outdated=true`` legacy flag (invalidate_point writes the flag
+    without touching status). ``excluded=()`` produces the empty string
+    (no exclusion — the audit/full-scan opt-in)."""
+    if not excluded:
+        return ""
+    chain = " AND ".join(f"{alias}.status <> '{s}'" for s in excluded)
+    return (f"(({alias}.status IS NULL OR ({chain})) "
+            f"AND coalesce({alias}.outdated, false) = false)")
 
 
 # ── Circuit breaker (#249) ──────────────────────────────────────────────────
@@ -264,7 +270,7 @@ def classify_query(
 
 def run_fts_query(
     graph, query: str, entity_type: str = "point", limit: int = 20,
-    timeout_ms: int = 500, include_terminal: bool = False,
+    timeout_ms: int = 500, excluded_statuses: tuple | None = None,
 ) -> list[tuple[str, float]]:
     """Run full-text search via FalkorDB FTS index.
 
@@ -292,7 +298,8 @@ def run_fts_query(
             cypher = (
                 "MATCH (n:Point) "
                 "WHERE n.is_operator = true"
-                + ("" if include_terminal else f" AND {_exclude_status_clause('n')}")
+                + ("" if excluded_statuses == ()
+                   else f" AND {_exclude_status_clause('n', excluded_statuses or TERMINAL_EXCLUDED_STATUSES)}")
                 + "  AND toLower(n.label) CONTAINS toLower($query) "
                 "RETURN n.id, 1.0 AS score "
                 "ORDER BY score DESC "
@@ -329,8 +336,8 @@ def run_fts_query(
     # #689/#1391: terminal-status Points must not leak into FTS results
     # (skipped when the caller opts in via include_terminal — audit/history).
     if label == "Point":
-        status_filter = ("" if include_terminal
-                         else f"WHERE {_exclude_status_clause('node')} ")
+        status_filter = ("" if excluded_statuses == ()
+                         else f"WHERE {_exclude_status_clause('node', excluded_statuses or TERMINAL_EXCLUDED_STATUSES)} ")
     else:
         status_filter = ""
     try:
@@ -372,7 +379,7 @@ def run_fts_query(
 def run_vector_query(
     graph, query_vec: list[float], limit: int = 20, timeout_ms: int = 500,
     is_embedded: bool = True, entity_type: str = "point",
-    vector_index_api: str | None = None, include_terminal: bool = False,
+    vector_index_api: str | None = None, excluded_statuses: tuple | None = None,
 ) -> list[tuple[str, float]]:
     """Run vector similarity search via FalkorDB vector index.
 
@@ -431,8 +438,8 @@ def run_vector_query(
     if not is_embedded:
         # #689: retracted Points must not leak into vector results.
         if label == "Point":
-            vec_status_filter = ("" if include_terminal
-                                 else f"WHERE {_exclude_status_clause('node')} ")
+            vec_status_filter = ("" if excluded_statuses == ()
+                                 else f"WHERE {_exclude_status_clause('node', excluded_statuses or TERMINAL_EXCLUDED_STATUSES)} ")
         else:
             vec_status_filter = ""
         try:
@@ -539,8 +546,8 @@ def run_vector_query(
         # MATCH — see _upsert_event / session indexers).
         # #689: retracted Points must not leak into vector results.
         if label == "Point":
-            bf_status_clause = ("" if include_terminal
-                                else f" AND {_exclude_status_clause('n')}")
+            bf_status_clause = ("" if excluded_statuses == ()
+                                else f" AND {_exclude_status_clause('n', excluded_statuses or TERMINAL_EXCLUDED_STATUSES)}")
         else:
             bf_status_clause = ""
         cypher = (
@@ -579,7 +586,7 @@ def run_vector_query(
 def run_structural_query(
     graph, kind: str | None,
     entity_type: str = "point", limit: int = 20, timeout_ms: int = 500,
-    include_terminal: bool = False,
+    excluded_statuses: tuple | None = None,
 ) -> list[tuple[str, float]]:
     """Run structural/kind query via range indexes.
 
@@ -636,8 +643,9 @@ def run_structural_query(
         # kind-less broad scan keeps main's early-return behavior — the
         # status clause must not become the sole condition that fires the
         # scan). include_terminal opts out for audit/history queries.
-        if not include_terminal and label_str == "Point":
-            conditions.append(_exclude_status_clause("n"))
+        if excluded_statuses != () and label_str == "Point":
+            conditions.append(_exclude_status_clause(
+                "n", excluded_statuses or TERMINAL_EXCLUDED_STATUSES))
         where_clause = " AND ".join(conditions)
         cypher = (
             f"MATCH (n:{label_str}) "
@@ -706,7 +714,7 @@ def degradation_chain(
     expanded_kinds=None,  # accepted for SDK compat; kind expansion is post-retrieval (sdk.py)
     elevated_timeout_ms: int | None = None,
     vector_index_api: str | None = None,
-    include_terminal: bool = False,
+    excluded_statuses: tuple | None = None,
 ) -> dict[str, list[tuple[str, float]]]:
     """Run retrieval strategies in parallel with per-strategy degradation.
 
@@ -744,23 +752,26 @@ def degradation_chain(
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
         # Submit all enabled strategies in parallel
         runner_timeout = int(elevated_timeout_ms or 500)
+        # #1391: the caller's exclusion applies uniformly (best-match AND
+        # full-scan). Full-scan completeness callers (the #1353 supersede-
+        # structure surface) opt in via excluded_statuses=() (include_terminal).
         if strategies.get("fts") and query:
             futures[executor.submit(
                 run_fts_query, graph, query, entity_type=entity_type, limit=limit,
-                timeout_ms=runner_timeout, include_terminal=include_terminal,
+                timeout_ms=runner_timeout, excluded_statuses=excluded_statuses,
             )] = "fts"
 
         if strategies.get("vector") and query_vec:
             futures[executor.submit(
                 run_vector_query, graph, query_vec, limit=limit, is_embedded=is_embedded,
                 entity_type=entity_type, timeout_ms=runner_timeout,
-                vector_index_api=vector_index_api, include_terminal=include_terminal,
+                vector_index_api=vector_index_api, excluded_statuses=excluded_statuses,
             )] = "vector"
 
         if strategies.get("structural"):
             futures[executor.submit(
                 run_structural_query, graph, kind, entity_type=entity_type, limit=limit,
-                timeout_ms=runner_timeout, include_terminal=include_terminal,
+                timeout_ms=runner_timeout, excluded_statuses=excluded_statuses,
             )] = "structural"
 
         # Collect results with 500ms total timeout across all strategies.
