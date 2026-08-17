@@ -32,9 +32,11 @@ honest validity bounds.
    and MUST be filed as a separate issue — the artifact claim is scoped to the
    kind-less-heavy eval corpus.
    **Issue-body amendment (plan step 1):** correct #1348's Context fusion set
-   statement, the "Depends on #317 slice 1" line, and indicator 3's "#1144
-   labeled set" (which does not exist) in the GitHub issue body so downstream
-   readers don't act on the wrong fusion claim.
+   statement, the FULL Depends-on line ("#317 slice 1" AND "#1144 eval" — the
+   #1144 labeled set does not exist; amend to reference the oracle corpus as
+   the documented weak proxy), and indicator 3's "#1144 labeled set" (which
+   does not exist) in the GitHub issue body so downstream readers don't act on
+   the wrong fusion claim.
 
 2. **Eval environment pinning (P1):** pool-depth × k sweep verdicts are
    authoritative ONLY on Docker FalkorDB with FTS + vector + structural all
@@ -57,20 +59,39 @@ honest validity bounds.
    GraphRanker's point boost reads `coalesce(n.confidence, 0.5)` + operator
    degree (ranking.py:190); α/β feed only the variance/contested ANNOTATION
    (deliberately not scored, ranking.py:176-178). So the enhancement must (a1)
-   write topic-correlated `n.confidence` (e.g., target-topic points strong,
-   distractors weak — via `compute_confidence`-equivalent at seed or derived
-   from correlated posteriors), (a2) make operator-edge connectivity
-   topic-correlated (target-topic points accrue IMPL edges), (a3) keep α/β
-   correlation for the contested annotation, and (a4) state that recency stays
-   dead (or spread createdAt if recency is to be exercised — default: leave
-   dead, document). **Determinism guard:** `generate_oracle_points` shares one
-   seeded rng stream across content/embedding/posterior draws — preserve the
-   stream (map the same drawn values through topic membership, or use an
-   isolated `random.Random(seed ^ salt)` for posteriors) or the whole seeded
-   corpus changes and the committed baseline becomes non-comparable; state the
-   old baseline is then non-comparable. The verdict then reads "confidence +
-   connectivity signals add value (or not) on topic-correlated synthetic EP"
-   with explicit synthetic-EP weak-proxy bounds.
+   write topic-correlated `n.confidence` — REQUIRED construction: derived from
+   topic-biased posterior_alpha/beta with OVERLAPPING ranges (noisy
+   topic-correlated confidence; a clean per-topic constant would be
+   near-tautological — "reading the label improves ranking" — because the same
+   topic membership defines oracle grades), (a2) make operator-edge
+   connectivity topic-correlated — **edges between EXISTING operator/point
+   nodes ONLY, no new nodes created** (new operator points would shift
+   FTS/vector inputs and oracle denominators → silent sweep contamination),
+   (a3) keep α/β correlation for the contested annotation, and (a4) state that
+   recency stays dead (or spread createdAt if recency is to be exercised —
+   default: leave dead, document). **Determinism guard (campaign-wide
+   invariant):** `generate_oracle_points` shares one seeded rng stream across
+   content/embedding/posterior draws — preserve the stream (map the same drawn
+   values through topic membership, or use an isolated
+   `random.Random(seed ^ salt)` for posteriors; the posterior draws are the
+   LAST per-point draws, so an isolated stream is bit-identical for
+   content/embeddings) or the whole seeded corpus changes and the committed
+   baseline becomes non-comparable; assert corpus fingerprint (n_points,
+   per-topic live counts, embeddings byte-identical) for EVERY leg of a
+   campaign. **Retrieval-metrics are EP-blind** (verified: run_fts/vector/
+   structural score text/embedding/kind only; rrf_fusion is rank-only;
+   EP annotation is post-truncation) — path (a)'s confidence/edge writes
+   cannot alter sweep metrics; the sweep report must declare whether the
+   depth/k sweep is measured on the plain committed corpus, the enhanced
+   corpus, or both (recommended: same run as the verdict — metrics invariant).
+   **Prefer two-phase sequencing:** run the depth/k sweep on the baseline
+   corpus, then enhance for the GraphRanker leg — strictly cleaner, costs one
+   flag.
+   **GraphRanker verdict protocol (pre-registered):** TWO ARMS on the SAME
+   enhanced corpus — fused + GraphRanker-rerank ON vs OFF (indicator 3 "vs
+   current fusion" implies this); a large synthetic gain on topic-correlated
+   EP is a mechanism-capability result, not a production-value result (state
+   in the weak-proxy bound).
    **Boundary = (b) null-test scoping (documented follow-up, NOT an equal-weight
    alternative):** verdict scoped to "graph signal adds no measurable value on
    random-EP structure; validation of all three signals requires a real-EP
@@ -113,12 +134,14 @@ honest validity bounds.
    distinct str_limit knob to measure pool-at-fixed-returned-limit).
 
 6. **Baseline note correction (P2):** `baseline-embedded-2026-08-17.json`
-   notes 1 AND 2 and the run.py docstring are STALE — the embedded fulltext
-   index exists and returns rows (provenance `indexes.fts: true`); per-query
-   data shows FTS populated 40/100, structural 4/100, fused ≠ vector on 17/100
+   notes 1 AND 2, the run.py docstring, the `_capture_provenance`
+   `embedded_engine` string ("redislite (no FTS/HNSW…)"), and
+   tests/eval/retrieval/README.md:55 are STALE — the embedded fulltext index
+   exists and returns rows (provenance `indexes.fts: true`); per-query data
+   shows FTS populated 40/100, structural 4/100, fused ≠ vector on 17/100
    queries (fused-vs-vector nDCG@10 delta CI −3.25..−0.83, excludes 0).
-   In-scope doc task: correct notes 1 + 2 and the runner docstring to actual
-   embedded FTS behavior, and require the k-sweep report to include the
+   In-scope doc task: correct all four stale surfaces to actual embedded FTS
+   behavior, and require the k-sweep report to include the
    fused-vs-best-single-strategy delta (the eval already computes
    paired_vs_fused) as an explicit acceptance criterion.
 
@@ -138,7 +161,7 @@ honest validity bounds.
 ## Why This Framing (rejected alternatives)
 
 - **F1 fusion-composition as primary** — rejected: the fused< vector deficit is
-  largely an eval-corpus/embedded artifact (97/100 kind-less queries → structural
+  largely an eval-corpus/embedded artifact (95/100 kind-less queries → structural
   dead voter; FTS leg environment-specific). The k-sweep brackets the question
   (k=20 steepens toward best voter, k=100 flattens toward noise) and the eval
   already outputs paired_vs_fused — the fusion-composition question is
