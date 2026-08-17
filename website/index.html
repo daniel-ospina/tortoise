@@ -12,6 +12,7 @@
   <meta name="twitter:title" content="Premise Labs">
   <meta name="twitter:description" content="An AI lab building the premises intelligence stands on.">
   <meta name="theme-color" content="#060b14">
+  <link rel="canonical" href="https://premiselabs.co/">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -264,6 +265,21 @@
       pointer-events: none; z-index: 2;
       background: radial-gradient(ellipse at center, transparent 55%, var(--bg) 85%);
     }
+
+    /* Legal bar — fixed bottom-right, above the beats/vignette (z-index 3).
+       Links only (pointer-events: auto); the bar itself never swallows
+       clicks. Links point at the CANONICAL tortoise host — the company host
+       ​301s the legal pages there (host consolidation, 2026-08-17). */
+    .legal-bar {
+      position: fixed; right: 1.25rem; bottom: 0.75rem; z-index: 3;
+      display: flex; gap: 1.25rem; flex-wrap: wrap; justify-content: flex-end;
+      font-size: 11px; letter-spacing: 0.04em; pointer-events: none;
+    }
+    .legal-bar a {
+      color: var(--text-dim); text-decoration: none; pointer-events: auto;
+      transition: color 0.2s;
+    }
+    .legal-bar a:hover { color: var(--accent); }
   </style>
 </head>
 <body>
@@ -635,5 +651,14 @@
     })();
 
   </script>
+
+  <footer class="legal-bar" aria-label="Legal">
+    <a href="https://tortoise.premiselabs.co/privacy">Privacy Policy</a>
+    <a href="https://tortoise.premiselabs.co/aviso-privacidad">Aviso de Privacidad</a>
+    <a href="https://tortoise.premiselabs.co/tos">Terms of Service</a>
+    <a href="https://tortoise.premiselabs.co/license">License</a>
+    <a href="https://tortoise.premiselabs.co/dpa">DPA</a>
+    <a href="https://tortoise.premiselabs.co/security">Security</a>
+  </footer>
 </body>
 </html>

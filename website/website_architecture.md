@@ -166,6 +166,41 @@ avoid for the dashboard.
 
 ---
 
+## 6.5 SEO & crawler surface (2026-08-17)
+
+Multi-host sitemap + canonical setup added to fix the Google Search Console
+coverage report (2026-08-17): "Alternate page with proper canonical tag" on
+the 5 legal pages crawled via premiselabs.co, 404s on trailing-slash URLs,
+duplicate product/index URLs without canonicals, and 401s on the gated
+dashboard.
+
+| Asset | Host | Notes |
+| --- | --- | --- |
+| `website/robots.txt` | both premise-labs hosts | Google **cross-submission**: lists all three sitemap locations; each sitemap contains only same-host URLs (protocol requirement) |
+| `website/sitemap-company.xml` | `premiselabs.co` | single URL (`/`) — company page |
+| `website/sitemap-product.xml` | `tortoise.premiselabs.co` | `/`, `/docs`, `/signup`, `/signin`, `/self-hosted`, `/security`, 5 legal pages |
+| `website/_redirects` | both premise-labs hosts | trailing-slash 301s → extensionless canonicals; `/index.html → /`; `.html` dedupe for non-auth pages |
+| `website/apps/dashboard/public/{robots.txt,sitemap.xml}` | `app.premiselabs.co` | Vite copies `public/` → `dist/`; mirrored in committed `dist/` so a no-rebuild deploy still serves them |
+
+Rules:
+- **Host consolidation (the core fix):** legal pages + docs + auth are
+  canonical on `tortoise.premiselabs.co` (where the service operates and the
+  product footer links them). The middleware 301s the tortoise-only pages
+  from the exact `premiselabs.co` hostname to their canonical — a 301 is the
+  strongest consolidation signal Google has, stronger than the canonical
+  tags (which alone left the copies live and produced the coverage-report
+  "alternate page" rows). Scoped to the exact company host: local dev
+  (`127.0.0.1`) and `*.pages.dev` previews keep the pass-through (not
+  indexed; E2E suite runs against a dev server). This supersedes the
+  original "legal pages 200 on both hosts" decision (locked in
+  `docs/plans/2026-08-08-657-legal-pages-plan.md` G-gate ③/⑨; the CI
+  verify-legal poll + `tests/e2e/test_legal_pages.py` + `test_welcome_page.py`
+  were updated to the new contract in the same change).
+- **Canonical tags:** all indexable pages carry `<link rel="canonical">` — `index.html` → `https://premiselabs.co/`, `product.html` → `https://tortoise.premiselabs.co/` (served at `/`), plus docs/self-hosted/signin/signup. Legal pages already had them.
+- **Auth-gated pages** (`welcome.html`, `invite-accept.html`) are `noindex,nofollow` and excluded from sitemaps. Signin/signup stay indexable (legit entry points). Keep `.html` auth URLs as-is — OAuth `redirectTo` and invite emails reference them directly.
+- **Middleware** (runs before `_redirects`) 301s `/product`, `/product.html`, `/index.html` → `/` on the tortoise host (dedupe of the root rewrite); the company host keeps the 404 for `/product*`.
+- **Search Console submission:** add all three sitemap URLs from robots.txt as separate properties (one per host).
+
 ## 7. Key paths
 
 | What | Where |
