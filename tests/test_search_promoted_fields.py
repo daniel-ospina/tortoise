@@ -33,8 +33,9 @@ def sdk(tmp_path):
     sdk.close()
 
 
-def _scan(sdk, kind="statement", limit=50):
-    return sdk.tortoise_fts_query(query=None, kind=kind, entity_type="point", limit=limit)
+def _scan(sdk, kind="statement", limit=50, include_terminal=False):
+    return sdk.tortoise_fts_query(query=None, kind=kind, entity_type="point",
+                                  limit=limit, include_terminal=include_terminal)
 
 
 def test_full_scan_decorated_bounded(sdk):
@@ -64,7 +65,7 @@ def test_full_scan_promoted_superseded_and_subject(sdk):
     subj = sdk.create_subject("Epistemic Team", subjectKind="team")
     sdk._get_proj().create_about_edge(new["id"], subj["id"], "aboutSubject")
 
-    results = _scan(sdk)
+    results = _scan(sdk, include_terminal=True)
     old_hit = next(r for r in results if r["id"] == old["id"])
     new_hit = next(r for r in results if r["id"] == new["id"])
     assert old_hit["status"] == "superseded"

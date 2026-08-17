@@ -3479,16 +3479,21 @@ class TortoiseSDK:
         For confidence-aware queries, use tortoise_fts_query() with query=None
         for full-scan mode with EP annotation.
 
-        Retracted points (status='retracted') are excluded. Use a raw Cypher
-        query via proj.g.query() to inspect retracted tombstones.
+        #1391: the default exclusion now covers ALL terminal statuses
+        (retracted, superseded, outdated, archived) — stale claims are not
+        served as current. include_retracted (name kept for compat) surfaces
+        them for audit. Use a raw Cypher query via proj.g.query() to inspect
+        tombstones.
         """
         proj = self._get_proj()
         clauses = ["n.is_operator = false"]
         params: dict[str, Any] = {}
-        # #432 Task 2: retracted exclusion — skipped when the caller explicitly
-        # filters by status (their filter controls visibility).
+        # #1391: terminal-status exclusion — skipped when the caller explicitly
+        # filters by status (their filter controls visibility). include_retracted
+        # (name kept for compat) surfaces ALL terminal statuses for audit.
         if not include_retracted and "status" not in filters:
-            clauses.append("(n.status IS NULL OR n.status <> 'retracted')")
+            from .search_engine import _exclude_status_clause
+            clauses.append(_exclude_status_clause("n"))
         if kind:
             expanded = self._expand_kind(kind)
             if len(expanded) == 1:
@@ -3523,15 +3528,18 @@ class TortoiseSDK:
 
         #432 Task 2: retracted points (status='retracted') are EXCLUDED by
         default — pass include_retracted=True, or an explicit status= filter,
-        to surface tombstones.
+        to surface tombstones. #1391: the default exclusion now covers ALL
+        terminal statuses (retracted, superseded, outdated, archived).
         """
         proj = self._get_proj()
         clauses = ["n.is_operator = false"]
         params: dict[str, Any] = {}
-        # #432 Task 2: retracted exclusion — skipped when the caller explicitly
-        # filters by status (their filter controls visibility).
+        # #1391: terminal-status exclusion — skipped when the caller explicitly
+        # filters by status (their filter controls visibility). include_retracted
+        # (name kept for compat) surfaces ALL terminal statuses for audit.
         if not include_retracted and "status" not in filters:
-            clauses.append("(n.status IS NULL OR n.status <> 'retracted')")
+            from .search_engine import _exclude_status_clause
+            clauses.append(_exclude_status_clause("n"))
         if kind:
             expanded = self._expand_kind(kind)
             if len(expanded) == 1:
@@ -8732,6 +8740,7 @@ class TortoiseSDK:
         relationship_filter: str | None = None,
         traversal_path: str | None = None,
         exclude_status: list[str] | None = None,
+        include_terminal: bool = False,
         _elevated_timeout_ms: int | None = None,
         pool_size: int | None = None,
     ) -> list[dict]:
@@ -8740,6 +8749,9 @@ class TortoiseSDK:
         entity_type: 'point' (default), 'event', 'subject', 'document', 'object', 'operator', or 'source'.
         Full-scan mode: omit query, set kind → all Points of that kind.
         Best-match mode: provide query → RRF fusion of FTS + vector + structural.
+        include_terminal (#1391): default False — terminal-status Points
+        (retracted, superseded, outdated, archived) are excluded from the
+        BASE retrieval; pass True to surface them (audit/history queries).
 
         pool_size: EXACT per-strategy retrieval depth override (benchmark/tests).
         Precedence: pool_size > TORTOISE_POOL_FLOOR env > limit*2 (the historical
@@ -8844,12 +8856,14 @@ class TortoiseSDK:
             # #1359: the recorded vector-index API (procedure vs Cypher-native)
             # lets run_vector_query skip the failing signature attempt.
             vector_index_api=getattr(proj, "_vector_index_api", None),
+            excluded_statuses=() if include_terminal else None,
         )
 
         if not raw_results:
             # All strategies failed — fallback to in-memory TF-IDF (Point only).
             if query and entity_type == "point":
-                points = self.query(kind=kind)
+                points = self.query(kind=kind,
+                                    include_retracted=include_terminal)
                 if exclude_status and points:
                     # Same status exclusion as step 5d (#898 review round-2):
                     # the degraded fallback must not leak superseded/deprecated
@@ -9263,7 +9277,8 @@ class TortoiseSDK:
             self.STATE_EXCLUDED_STATUS - {"retracted"})
         point_results = self.tortoise_fts_query(
             query, kind=kind, entity_type="point", limit=pool,
-            exclude_status=exclude_status)
+            exclude_status=exclude_status,
+            include_terminal=include_superseded)
         object_results = (
             self.tortoise_fts_query(
                 query, kind=kind, entity_type="object", limit=pool)
@@ -9275,6 +9290,12 @@ class TortoiseSDK:
         # review round-2 P3).
         points = [dict(r, entity_type="point") for r in point_results
                   if not (r.get("content") or "").startswith("[MITIGATION]")]
+        # #1391: retracted stays hard-excluded even when include_superseded
+        # brings the other terminal statuses back (#689 leak guard) — the
+        # base retrieval opt-in (include_terminal) surfaces all terminal
+        # statuses, so recall_state re-filters retracted from its own pool.
+        if include_superseded:
+            points = [p for p in points if p.get("status") != "retracted"]
         objects = [dict(r, entity_type="object") for r in object_results]
 
         # 3. Multiplicative-gate ranking over the merged pool.
@@ -9523,7 +9544,8 @@ class TortoiseSDK:
             pool = min(max(limit * 3, 50), 10000)
             results = self.tortoise_fts_query(
                 query, kind=kind, entity_type="point", limit=pool,
-                exclude_status=exclude_status)
+                exclude_status=exclude_status,
+                include_terminal=include_superseded)
             pool_ids = [r["id"] for r in results if r.get("id")]
             op_ids = {
                 row[0] for row in proj.g.query(
@@ -9532,13 +9554,25 @@ class TortoiseSDK:
             } if pool_ids else set()
             pool_results = [dict(r, entity_type="point") for r in results
                             if r["id"] not in op_ids]
+            # #1391: retracted stays hard-excluded even when include_superseded
+            # brings the other terminal statuses back (#689 leak guard).
+            if include_superseded:
+                pool_results = [p for p in pool_results
+                                if p.get("status") != "retracted"]
         else:
             # Population scan: raw claim nodes (self.query already excludes
-            # operators + retracted).
-            nodes = self.query(kind=kind)
+            # operators + terminal statuses; include_retracted surfaces
+            # superseded/deprecated for the opt-in — retracted is then
+            # re-filtered below by excluded_set).
+            nodes = self.query(kind=kind,
+                               include_retracted=include_superseded)
             pool_results = []
             for n in nodes:
                 if (n.get("status") or "") in excluded_set:
+                    continue
+                if (n.get("status") or "") == "retracted":
+                    # #689 leak guard: retracted is never a gap candidate,
+                    # even when include_superseded surfaces the others.
                     continue
                 pool_results.append({
                     "id": n["id"],

@@ -906,7 +906,10 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
     """Hybrid search with RRF fusion + EP annotation.
 
     entity_type: 'point' (default), 'event', 'subject', 'document', 'object', 'operator', or 'source'.
-    Full-scan mode: omit query, set kind → all Points of kind.
+    Full-scan mode: omit query, set kind → all Points of kind (current-view
+    by default — terminal statuses retracted/superseded/outdated/archived/
+    deprecated excluded, #1391; pass include_terminal=True for the complete
+    supersede-structure view).
     Best-match mode: provide query → RRF fusion of FTS + vector + structural.
 
     Point results annotated with EP breakdown (confidence_mean + variance + contested + contention).
