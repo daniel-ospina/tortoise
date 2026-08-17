@@ -2,14 +2,16 @@
 //
 // Topology:
 //   premiselabs.co          → company page   (index.html)
-//   tortoise.premiselabs.co → product page   (product.html)
+//   tortoise.premiselabs.co → product page   (product.html) + docs/legal/auth
 //   app.premiselabs.co      → dashboard      (separate tortoise-dashboard project)
 //
 // Cloudflare Pages serves one project per custom domain, so we route by
 // Host header in a middleware: tortoise.* gets product.html, everything
 // else (premiselabs.co + *.pages.dev previews) gets index.html.
 // All other static assets (welcome.html, signup.html, signin.html) pass
-// through unchanged.
+// through unchanged — EXCEPT on the exact premiselabs.co hostname, where
+// the tortoise-only pages 301 to their canonical (host consolidation,
+// 2026-08-17; see the TORTOISE_ONLY block below).
 //
 // The product page lives ONLY on the tortoise host (served at its root via
 // the rewrite below). The raw /product and /product.html paths are static
@@ -34,6 +36,66 @@ export const onRequest: PagesFunction = async (context) => {
     (url.pathname === "/product" || url.pathname === "/product.html")
   ) {
     return new Response("Not Found", { status: 404, headers: HSTS });
+  }
+
+  // ── Host consolidation (SEO, 2026-08-17) ──────────────────────────────
+  // The shared Pages project serves every static asset on BOTH hosts, so the
+  // whole product surface (legal pages, docs, auth) was reachable on
+  // premiselabs.co — Google crawled both copies ("Alternate page with proper
+  // canonical tag" ×5). The service operates on tortoise.premiselabs.co
+  // (canonical tags + product-footer links already point there), so the
+  // company host 301s the tortoise-only pages to their canonical — a 301 is
+  // the strongest consolidation signal Google has (stronger than the
+  // canonical tags we kept).
+  //
+  // Scoped to the EXACT company hostname: local dev (wrangler pages dev,
+  // host=127.0.0.1) and *.pages.dev previews keep the pass-through so the
+  // legal E2E suite can run against a dev server and previews stay
+  // navigable (neither is indexed; no SEO impact). Auth flows already
+  // target the tortoise host (welcome_url, invite emails, OAuth redirectTo)
+  // and are unaffected. Runtime fetches (onboarding-prompt.md) are not in
+  // the set.
+  const TORTOISE_ONLY = new Set([
+    "/docs", "/docs.html",
+    "/security", "/security.html",
+    "/self-hosted", "/self-hosted.html",
+    "/privacy", "/privacy.html",
+    "/tos", "/tos.html",
+    "/license", "/license.html",
+    "/dpa", "/dpa.html",
+    "/aviso-privacidad", "/aviso-privacidad.html",
+    "/signup", "/signup.html",
+    "/signin", "/signin.html",
+    "/welcome", "/welcome.html",
+    "/invite-accept", "/invite-accept.html",
+  ]);
+  const COMPANY_HOSTS = new Set(["premiselabs.co"]);
+
+  // Host-header hygiene: strip port + trailing dot before matching.
+  const hostKey = host.replace(/:\d+$/, "").replace(/\.$/, "");
+  if (COMPANY_HOSTS.has(hostKey)) {
+    const path = url.pathname.replace(/\/+$/, "") || "/";
+    if (path !== "/" && TORTOISE_ONLY.has(path)) {
+      const res = Response.redirect("https://tortoise.premiselabs.co" + path, 301);
+      res.headers.set("Strict-Transport-Security", HSTS["Strict-Transport-Security"]);
+      return res;
+    }
+  }
+
+  // On the tortoise host, the raw /product, /product.html and /index.html
+  // assets are DUPLICATES of the root rewrite (which serves product.html at
+  // "/") — 301 them to "/" so Google consolidates onto a single URL (SEO
+  // coverage bucket "Duplicate without user-selected canonical"). On
+  // premiselabs.co the /index.html duplicate is handled by _redirects.
+  if (
+    host.startsWith("tortoise.") &&
+    (url.pathname === "/product" ||
+      url.pathname === "/product.html" ||
+      url.pathname === "/index.html")
+  ) {
+    const res = Response.redirect(url.origin + "/", 301);
+    res.headers.set("Strict-Transport-Security", HSTS["Strict-Transport-Security"]);
+    return res;
   }
 
   // Only rewrite the root path — everything else serves its own asset.
