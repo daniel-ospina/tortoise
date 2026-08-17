@@ -4,7 +4,7 @@ Shows FULL outputs inline."""
 from __future__ import annotations
 import json, re, sys, time
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from tests.model_adapters import MODELS
 
 S1_RAW = """You are the STORY SUMMARIZER for the company/product epistemic memory.
@@ -106,7 +106,7 @@ def _parse_json(raw):
     raise ValueError("unparseable")
 
 def main():
-    transcript = Path("tests/eval/w-1272/w-design-bounded.txt").read_text()
+    transcript = (Path(__file__).resolve().parents[3] / "tests/eval/w-1272/w-design-bounded.txt").read_text()
     solar = MODELS["solar-pro4"](); solar.max_tokens = 8000; solar.temperature = 0.0
     flash = MODELS["deepseek-flash"](); flash.max_tokens = 8000; flash.temperature = 0.0
     CLEANER_TMPL = Path("cleaner-v7.md").read_text()

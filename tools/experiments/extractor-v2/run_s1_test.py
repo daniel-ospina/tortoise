@@ -7,7 +7,7 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from tortoise.value_extractor import compile_value_brief  # noqa: E402
 from tests.model_adapters import MODELS  # noqa: E402
@@ -83,7 +83,7 @@ def _master_list() -> str:
 
 
 def main() -> None:
-    transcript = Path("tests/eval/w-1272/w-design-bounded.txt").read_text()
+    transcript = (Path(__file__).resolve().parents[3] / "tests/eval/w-1272/w-design-bounded.txt").read_text()
     edus = [l.strip() for l in transcript.splitlines()
             if l.strip() and not l.startswith("#")]
     print(f"=== window: {len(edus)} EDUs ===", flush=True)

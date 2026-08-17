@@ -51,7 +51,6 @@ from __future__ import annotations
 import json
 import re
 import time
-from pathlib import Path
 
 # ── The v2 master list (design doc §3) ─────────────────────────────────────
 
@@ -150,7 +149,8 @@ def master_kind_forms(master: dict) -> set[str]:
             if kind:
                 kinds.add(kind)
                 kinds.add(kind.lower())
-                kinds.add(f"{ns}:{kind.lower()}")
+                if ns:
+                    kinds.add(f"{ns}:{kind.lower()}")
             else:
                 kinds.add(key.lower())
     return kinds
@@ -268,12 +268,19 @@ def _norm_sent(s: str) -> str:
 
 
 def _overlap_ratio(a: str, b: str) -> float:
-    """Token-overlap ratio used by the compiler's cross-chunk dedup."""
+    """Token-overlap ratio used by the compiler's cross-chunk dedup.
+
+    Requires near-symmetric length (max/min < 1.5) so a shorter NEW sentence
+    that is a token-subset of an earlier one is NOT dropped as a duplicate
+    (asymmetric-ratio false dedup)."""
     ta = set(_norm_sent(a).split())
     tb = set(_norm_sent(b).split())
     if not ta or not tb:
         return 0.0
-    return len(ta & tb) / min(len(ta), len(tb))
+    lo, hi = min(len(ta), len(tb)), max(len(ta), len(tb))
+    if hi / lo >= 1.5:
+        return 0.0
+    return len(ta & tb) / lo
 
 
 def _split_sentences(text: str) -> list[str]:
@@ -429,7 +436,8 @@ def _story_topics(story: str, cap: int = 6) -> list[str]:
 
 def _derive_queries(embed_list: dict, story: str) -> dict:
     """Deterministic query derivation: entity names → object/subject,
-    event contents → event, point contents → point, story topics → point."""
+    event contents → event, point contents → point, story topics → point.
+    Non-dict array entries are skipped (model output can be malformed)."""
     queries: dict[str, list[str]] = {"object": [], "event": [], "point": []}
     seen: set[str] = set()
 
@@ -444,13 +452,13 @@ def _derive_queries(embed_list: dict, story: str) -> dict:
         queries[entity_type].append(q[:160])
 
     for e in embed_list.get("entities", []) or []:
-        if e.get("name"):
+        if isinstance(e, dict) and e.get("name"):
             _add("object", str(e["name"]))
     for ev in embed_list.get("events", []) or []:
-        if ev.get("content"):
+        if isinstance(ev, dict) and ev.get("content"):
             _add("event", str(ev["content"])[:80])
     for p in embed_list.get("points", []) or []:
-        if p.get("content"):
+        if isinstance(p, dict) and p.get("content"):
             _add("point", str(p["content"])[:80])
     for t in _story_topics(story):
         _add("point", t)
@@ -644,6 +652,14 @@ def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip().lower())
 
 
+def _norm_kind(k: str) -> str:
+    """Bare + case-folded kind form — the link-before-create lookup key.
+    The model may emit 'plan' where the backend stores 'core:plan'; both
+    must resolve to the same key or link-before-create misses and a
+    duplicate :Object is created server-side."""
+    return str(k or "").strip().rsplit(":", 1)[-1].lower()
+
+
 def _token_overlap(a: str, b: str) -> float:
     ta = set(_norm(a).split())
     tb = set(_norm(b).split())
@@ -659,16 +675,17 @@ def _content_id(prefix: str, content: str) -> str:
 
 def _index_search(search: dict) -> dict:
     """Deterministic existing-graph index from the S3 results (the
-    link-before-create surface)."""
+    link-before-create surface). Kinds are normalized to the bare folded
+    form (core:plan == plan)."""
     idx = {"entities": {}, "points": [], "events": []}
     for e in (search or {}).get("entities", []) or []:
-        if e.get("name"):
-            idx["entities"][(_norm(e["name"]), e.get("kind", ""))] = e
+        if isinstance(e, dict) and e.get("name"):
+            idx["entities"][(_norm(e["name"]), _norm_kind(e.get("kind", "")))] = e
     for p in (search or {}).get("points", []) or []:
-        if p.get("content"):
+        if isinstance(p, dict) and p.get("content"):
             idx["points"].append(p)
     for ev in (search or {}).get("events", []) or []:
-        if ev.get("content"):
+        if isinstance(ev, dict) and ev.get("content"):
             idx["events"].append(ev)
     return idx
 
@@ -712,11 +729,13 @@ def validate_chains(embed_list: dict, master: dict | None = None) -> list[dict]:
     pos = _chain_positions(master)
     entity_kinds: dict[str, str] = {}
     for e in embed_list.get("entities", []) or []:
-        if e.get("name") and e.get("kind"):
+        if isinstance(e, dict) and e.get("name") and e.get("kind"):
             entity_kinds[_norm(e["name"])] = str(e["kind"])
     notes: list[dict] = []
     seen: set[tuple[str, str, str]] = set()
     for item in (embed_list.get("points", []) or []) + (embed_list.get("events", []) or []):
+        if not isinstance(item, dict):
+            continue
         about = item.get("about_entities") or []
         if not isinstance(about, list):
             continue
@@ -745,6 +764,8 @@ def validate_chains(embed_list: dict, master: dict | None = None) -> list[dict]:
                 intermediate = None
                 # nearest valid position between b and a, from the LIST.
                 for e in embed_list.get("entities", []) or []:
+                    if not isinstance(e, dict):
+                        continue
                     k = str(e.get("kind", "")).rsplit(":", 1)[-1].lower()
                     if k in path_lower and b_i < path_lower.index(k) < a_i:
                         intermediate = str(e.get("name"))
@@ -781,14 +802,20 @@ def _minted_kind_report(embed_list: dict, master: dict | None = None) -> list[st
     bare = {k.lower().rsplit(":", 1)[-1] for k in forms}
     minted: list[str] = []
     for e in embed_list.get("entities", []) or []:
+        if not isinstance(e, dict):
+            continue
         k = str(e.get("kind", ""))
         if k and k.lower() not in full and k.lower() not in bare:
             minted.append(f"{k} (entity '{e.get('name', '')[:60]}')")
     for ev in embed_list.get("events", []) or []:
+        if not isinstance(ev, dict):
+            continue
         k = str(ev.get("eventKind", ""))
         if k and k.lower() not in full and k.lower() not in bare:
             minted.append(f"{k} (event '{ev.get('content', '')[:60]}')")
     for p in embed_list.get("points", []) or []:
+        if not isinstance(p, dict):
+            continue
         k = str(p.get("pointKind", ""))
         if k and k.lower() not in full and k.lower() not in bare:
             minted.append(f"{k} (point '{p.get('content', '')[:60]}')")
@@ -827,16 +854,19 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # ── entities (dependency order 1) ─────────────────────────────────────
     payload_entities: list[dict] = []
     link_before_create: list[dict] = []
-    entity_ids: dict[str, str] = {}   # norm name → existing id ("" if new)
     seen_entities: set[tuple[str, str]] = set()
     for e in embed_list.get("entities", []) or []:
+        if not isinstance(e, dict):
+            warnings.append(f"non-dict entity entry {e!r} skipped")
+            continue
         name = str(e.get("name", "")).strip()
         if not name:
             continue
         kind = str(e.get("kind", "")).strip() or "core:other"
-        if kind.lower() not in master_kind_forms(master) and \
-                kind.lower().rsplit(":", 1)[-1] not in {k.lower().rsplit(":", 1)[-1]
-                                                        for k in master_kind_forms(master)}:
+        forms = master_kind_forms(master)
+        if kind.lower() not in forms and \
+                kind.lower().rsplit(":", 1)[-1] not in {f.lower().rsplit(":", 1)[-1]
+                                                        for f in forms}:
             warnings.append(f"minted entity kind {kind!r} ('{name[:60]}') "
                             f"→ repaired to {_ENTITY_FALLBACK['kind']}")
             kind = _ENTITY_FALLBACK["kind"]
@@ -844,17 +874,21 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         if key in seen_entities:
             continue
         seen_entities.add(key)
-        existing = idx["entities"].get((_norm(name), kind))
+        existing = idx["entities"].get((_norm(name), _norm_kind(kind)))
         if existing:
-            entity_ids[_norm(name)] = str(existing.get("id", ""))
             link_before_create.append({
                 "searched_for": f"entity '{name}'", "found": True,
                 "note": f"existing {existing.get('id', '')} — connect, do not re-create"})
         else:
-            entity_ids[_norm(name)] = ""
             link_before_create.append({
                 "searched_for": f"entity '{name}'", "found": False,
                 "note": "no match — created"})
+        lifecycle = str(e.get("lifecycle", "") or "").strip()
+        if lifecycle in ("changed", "superseded"):
+            warnings.append(f"entity '{name[:60]}' lifecycle={lifecycle} is not "
+                            "expressible in the Layer-1 payload — the server "
+                            "merges entities by (name, kind); the state change "
+                            "must ride on points/events instead")
         payload_entities.append({
             "name": name, "kind": kind, "passes_frequency_gate": True})
 
@@ -863,6 +897,9 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     event_ids: dict[str, str] = {}   # norm content → event id
     event_contents: set[str] = set()
     for ev in embed_list.get("events", []) or []:
+        if not isinstance(ev, dict):
+            warnings.append(f"non-dict event entry {ev!r} skipped")
+            continue
         content = str(ev.get("content", "")).strip()[:1000]
         if not content:
             continue
@@ -902,6 +939,9 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     payload_points: list[dict] = []
     point_ids: dict[str, str] = {}   # norm content → point id
     for p in embed_list.get("points", []) or []:
+        if not isinstance(p, dict):
+            warnings.append(f"non-dict point entry {p!r} skipped")
+            continue
         content = str(p.get("content", "")).strip()[:1000]
         if not content:
             continue
@@ -933,14 +973,18 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 "note": "no match — created"})
         point_ids[n] = pid
         payload_points.append({
-            "id": pid, "content": content, "pointKind": "statement",
+            "id": pid, "content": content, "pointKind": pkind,
             "reason": reason, "confidence": 0.5, "c_cal": 0.5,
             "about_entities": [str(a) for a in (p.get("about_entities") or [])
                                if isinstance(a, str) and a.strip()],
             "source_ref": "session.md", "quote": "", "status": "draft",
         })
 
-    # ── operators (dependency order 4) ────────────────────────────────────
+    # ── operators (dependency order 4) — TWO-PASS ─────────────────────────
+    # Pass 1 emits IMPL/NAND and collects the emitted edges; pass 2 processes
+    # MITIGATES against the COMPLETE edge set so order-independence holds
+    # (a MITIGATES may legitimately precede its target IMPL in the model
+    # output).
     def _resolve(ref: str) -> str:
         r = _norm(ref)
         if r in point_ids:
@@ -951,7 +995,11 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
 
     payload_operators: list[dict] = []
     emitted_edges: set[tuple[str, str, str]] = set()
+    mitigates_pending: list[dict] = []
     for op in embed_list.get("operators", []) or []:
+        if not isinstance(op, dict):
+            warnings.append(f"non-dict operator entry {op!r} skipped")
+            continue
         o = dict(op)
         op_type = str(o.get("op_type", "")).upper()
         if op_type not in ("IMPL", "NAND", "MITIGATES"):
@@ -969,14 +1017,24 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 "direction": "unidirectional"})
             emitted_edges.add((src, dst, op_type))
             continue
-        # MITIGATES — relevance attack on an edge
+        # MITIGATES — relevance attack on an edge (deferred to pass 2)
+        mitigates_pending.append({**o, "_src": src, "_dst": dst})
+
+    for o in mitigates_pending:
+        src, dst = o.pop("_src"), o.pop("_dst")
         target = o.get("target") or o.get("target_edge") or {}
         t_src = _resolve(str(target.get("src", "")))
         t_dst = _resolve(str(target.get("dst", "")))
         t_type = str(target.get("op_type", "IMPL")).upper()
         if t_type != "IMPL":
             t_type = "IMPL"
-        strength = float(o.get("strength") or 0.3)
+        try:
+            strength = float(o.get("strength") or 0.3)
+        except (TypeError, ValueError):
+            warnings.append(f"MITIGATES strength {o.get('strength')!r} not numeric "
+                            f"('{o.get('src', '')[:40]}'→'{o.get('dst', '')[:40]}') "
+                            "→ defaulted to 0.3")
+            strength = 0.3
         if not (0.10 <= strength <= 0.50):
             warnings.append(f"MITIGATES strength {strength} outside [0.10, 0.50] "
                             f"('{o.get('src', '')[:40]}'→'{o.get('dst', '')[:40]}') "
@@ -1127,8 +1185,14 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # ── S5: embed execution (deterministic) ────────────────────────────────
     if not complete_list:
         errors.append("no embed list produced (S2/S4 empty) — nothing to embed")
-    result = execute_embed(complete_list, search, session_id=session_id,
-                           story_arc=story_arc, master=master)
+    try:
+        result = execute_embed(complete_list, search, session_id=session_id,
+                               story_arc=story_arc, master=master)
+    except Exception as e:  # S5 must NEVER block the pipeline (design §7.4)
+        errors.append(f"S5 failed: {type(e).__name__}: {e}")
+        result = {"payload": None, "chain_notes": [], "link_before_create": [],
+                  "warnings": [f"S5 embed execution failed: {e}"],
+                  "minted_kinds": [], "stats": {}}
     result["session_id"] = session_id
     result["story_arc"] = story_arc
     result["embed_list"] = complete_list
@@ -1144,18 +1208,28 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
 # ── Shared helpers ─────────────────────────────────────────────────────────
 
 def _complete(model, system: str, user: str, deadline_s: int = 600) -> str:
-    """Wall-clock-bounded completion (no token caps — the model decides)."""
+    """Wall-clock-bounded completion (no token caps — the model decides).
+
+    The model call runs in a thread; exceptions are captured and RE-RAISED
+    after join (Python threads do not propagate exceptions to the joiner —
+    without this, a rate-limit/5xx would silently return None and the caller
+    would record a phantom empty chunk)."""
     import threading
-    box = {}
+    box: dict = {}
 
     def _run():
-        box["resp"] = model.complete(system=system, user=user)
+        try:
+            box["resp"] = model.complete(system=system, user=user)
+        except BaseException as e:  # noqa: BLE001 — must propagate to caller
+            box["exc"] = e
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
     t.join(timeout=deadline_s)
     if t.is_alive():
         raise TimeoutError(f"model call exceeded {deadline_s}s")
+    if "exc" in box:
+        raise box["exc"]
     return box.get("resp")
 
 

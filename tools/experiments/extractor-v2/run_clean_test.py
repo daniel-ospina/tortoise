@@ -12,7 +12,7 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from tests.model_adapters import MODELS  # noqa: E402
 
@@ -103,7 +103,7 @@ def _tokens(model) -> dict:
 
 
 def main() -> None:
-    transcript = Path("tests/eval/w-1272/w-design-bounded.txt").read_text()
+    transcript = (Path(__file__).resolve().parents[3] / "tests/eval/w-1272/w-design-bounded.txt").read_text()
     solar = MODELS["solar-pro4"](); solar.max_tokens = 8000; solar.temperature = 0.0
     flash = MODELS["deepseek-flash"](); flash.max_tokens = 8000; flash.temperature = 0.0
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 import sys, time
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from tortoise.value_extractor import compile_value_brief
 from tests.model_adapters import MODELS
 
@@ -53,7 +53,7 @@ def _complete(model, system, user):
     return box.get("resp")
 
 def main():
-    transcript = Path("tests/eval/w-1272/w-design-bounded.txt").read_text()
+    transcript = (Path(__file__).resolve().parents[3] / "tests/eval/w-1272/w-design-bounded.txt").read_text()
     g = compile_value_brief().get("memory_granularity", {})
     g_text = "\n".join(f"- {ns}: {txt}" for ns, txt in g.items())
     S1 = S1_TMPL.replace("{memory_granularity}", g_text)

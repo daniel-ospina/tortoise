@@ -4,7 +4,7 @@ Reports cost + the cleaner's compression ratio + flash output."""
 from __future__ import annotations
 import json, sys, time
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from tests.model_adapters import MODELS
 
 S1_SYSTEM = """You are the STORY SUMMARIZER for the company/product epistemic memory.
@@ -50,7 +50,7 @@ def main():
     prompt_file = sys.argv[1]
     out_path = sys.argv[2] if len(sys.argv) > 2 else prompt_file.replace(".md", "-result.json")
     CLEAN_SYSTEM = Path(prompt_file).read_text()
-    transcript = Path("tests/eval/w-1272/w-design-bounded.txt").read_text()
+    transcript = (Path(__file__).resolve().parents[3] / "tests/eval/w-1272/w-design-bounded.txt").read_text()
     raw_tokens = len(transcript) // 4
     solar = MODELS["solar-pro4"](); solar.max_tokens = 8000; solar.temperature = 0.0
     flash = MODELS["deepseek-flash"](); flash.max_tokens = 8000; flash.temperature = 0.0

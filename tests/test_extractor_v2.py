@@ -136,6 +136,15 @@ class TestCompiler:
         assert "supports Q" in compiled
         assert compiled.index("We believed X.") < compiled.index("supports Q")
 
+    def test_no_false_dedup_of_token_subset(self):
+        """Review fix: a shorter NEW sentence that is a token-subset of an
+        earlier one must NOT be dropped (asymmetric-overlap false dedup)."""
+        s1 = "We chose the cleaning tier for the extraction pipeline."
+        s2 = "We chose the tier."
+        compiled = v2.compile_stories([s1, s2])
+        assert "We chose the tier." in compiled
+        assert "We chose the cleaning tier for the extraction pipeline." in compiled
+
     def test_empty(self):
         assert v2.compile_stories([]) == ""
         assert v2.compile_stories(["", ""]) == ""
@@ -331,6 +340,62 @@ class TestS5:
         assert op["strength"] == 0.5
         assert any("0.10, 0.50" in w for w in result["warnings"])
 
+    def test_mitigates_non_numeric_strength_defaults(self):
+        """Review fix: float('high') must not crash S5 (never-block)."""
+        embed = json.loads(json.dumps(S2_FIXTURE))
+        embed["operators"][1]["strength"] = "high"
+        result = v2.execute_embed(embed, {}, session_id="s1")
+        op = result["payload"]["operators"][1]
+        assert op["strength"] == 0.3
+        assert any("not numeric" in w for w in result["warnings"])
+
+    def test_mitigates_before_target_impr_order_independent(self):
+        """Review fix: MITIGATES may precede its target IMPL in the model
+        output — two-pass processing must keep it."""
+        embed = json.loads(json.dumps(S2_FIXTURE))
+        imp = embed["operators"][0]
+        mit = embed["operators"][1]
+        embed["operators"] = [mit, imp]  # MITIGATES first, IMPL second
+        result = v2.execute_embed(embed, {}, session_id="s1")
+        types = [o["op_type"] for o in result["payload"]["operators"]]
+        assert "MITIGATES" in types
+        assert not any("target edge not emitted" in w for w in result["warnings"])
+
+    def test_non_dict_entries_skipped(self):
+        """Review fix: non-dict array entries must not crash S3/S5."""
+        embed = json.loads(json.dumps(S2_FIXTURE))
+        embed["entities"].append("not a dict")
+        embed["points"].append(42)
+        embed["events"].append(None)
+        embed["operators"].append("bogus")
+        result = v2.execute_embed(embed, {}, session_id="s1")
+        assert any("non-dict" in w for w in result["warnings"])
+        # _derive_queries (S3) also survives
+        queries = v2._derive_queries(embed, "story")
+        assert sum(len(q) for q in queries.values()) >= 2
+
+    def test_bare_kind_link_before_create_matches(self):
+        """Review fix: model emits bare 'plan'; backend stores 'core:plan' —
+        kind-form normalization must make link-before-create match."""
+        search = {"entities": [{"id": "obj-9", "name": "cleaning-pass tier",
+                                "kind": "core:plan"}], "points": [], "events": []}
+        embed = json.loads(json.dumps(S2_FIXTURE))
+        for e in embed["entities"]:
+            if e["name"] == "cleaning-pass tier":
+                e["kind"] = "plan"  # bare form
+        result = v2.execute_embed(embed, search, session_id="s1")
+        note = next(n for n in result["link_before_create"]
+                    if "cleaning-pass tier" in n["searched_for"])
+        assert note["found"] is True
+
+    def test_entity_lifecycle_changed_warns(self):
+        """Review fix: changed/superseded lifecycle is not expressible in the
+        Layer-1 payload (Entity = name/kind only) — warn, don't silently drop."""
+        embed = json.loads(json.dumps(S2_FIXTURE))
+        embed["entities"][0]["lifecycle"] = "superseded"
+        result = v2.execute_embed(embed, {}, session_id="s1")
+        assert any("lifecycle=superseded" in w for w in result["warnings"])
+
     def test_unresolved_operator_dropped(self):
         embed = json.loads(json.dumps(S2_FIXTURE))
         embed["operators"].append({"src": "not a real content",
@@ -408,6 +473,19 @@ class TestChains:
 # ── The orchestrator (mock model, no LLM) ──────────────────────────────────
 
 class TestOrchestrator:
+    def test_model_exception_recorded_not_silent(self, monkeypatch):
+        """Review fix (P1): a raising model must surface in errors, not be
+        masked by the completion thread wrapper."""
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+
+        class BoomModel(MockModel):
+            def complete(self, *, system, user):
+                raise RuntimeError("rate limited")
+
+        conv = [{"role": "user", "content": "we decided X"}]
+        out = v2.extract_session_v2(BoomModel([]), conv)
+        assert any("rate limited" in e for e in out["errors"])
+
     def test_full_pipeline_mock(self, monkeypatch):
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         monkeypatch.delenv("TORTOISE_API_URL", raising=False)
