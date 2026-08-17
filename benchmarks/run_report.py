@@ -118,6 +118,12 @@ def capture_provenance(proj, is_embedded: bool, extras: dict) -> dict:
         "cap_ms": CAP_MS,
         "e2e_target_ms": E2E_TARGET_MS,
         "pre_registered_targets_ms": PRE_REGISTERED_TARGETS_MS,
+        # #1348: per-arm retrieval depth + embedder/decorator pins (Task 8) —
+        # the e2e@new-floor minus retrieval@new-floor decomposition is
+        # unauditable without these in the emitted report.
+        "arm_limit": extras.get("arm_limit"),
+        "embedder_pinned": extras.get("embedder_pinned", False),
+        "decorator_state": extras.get("decorator_state"),
     }
     for mod_name, attr in (("falkordb", "__version__"),):
         try:
@@ -127,7 +133,10 @@ def capture_provenance(proj, is_embedded: bool, extras: dict) -> dict:
             pass
     if is_embedded:
         prov["embedded_engine"] = (
-            "redislite (no FTS/HNSW — numbers NOT prod-parity; can reverse on Docker)"
+            "redislite (no HNSW vector index — vector runs brute-force; "
+            "FULLTEXT index EXISTS on embedded (indexes.fts=true; FTS "
+            "populated 40/100 queries in the committed #1144 baseline); "
+            "numbers NOT prod-parity — can reverse on Docker)"
         )
     return prov
 
