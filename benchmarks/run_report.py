@@ -575,7 +575,9 @@ def _run_with_sdk(args, sdk) -> dict:
     # measures the valid e2e@new-floor minus retrieval@new-floor decomposition;
     # pre-floor comparator (depth 20) recorded in provenance.
     e2e_limit = getattr(args, "e2e_limit", 10)
-    pool_floor = 50
+    # #1348: NO baked default floor — the depth finding was CEILING-CAPPED;
+    # env-only opt-in. Unset → historical e2e_limit*2 semantics.
+    pool_floor = 0
     raw_floor = os.environ.get("TORTOISE_POOL_FLOOR", "")
     if raw_floor.strip():
         try:

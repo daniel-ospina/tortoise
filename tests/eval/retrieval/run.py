@@ -84,8 +84,9 @@ DEFAULT_CORPUS_SIZE = 2000
 DEFAULT_LIMIT = 50           # pooling depth (top-50/strategy/query per spec)
 KSWEEP = (20, 60, 100)       # #1348 k-sweep set (k=60 Cormack default)
 # #1348 pool-semantics note: eval depth == eval limit (no x2 in this harness);
-# SDK str_limit = limit x2 floor 50. --limit = returned limit (metrics are
-# computed against top-limit), --depth = per-strategy retrieval depth.
+# SDK str_limit = limit x2, with env-only opt-in TORTOISE_POOL_FLOOR (no baked
+# default). --limit = returned limit (metrics are computed against top-limit),
+# --depth = per-strategy retrieval depth.
 
 
 # ── Provenance ──────────────────────────────────────────────────────────────
@@ -511,6 +512,10 @@ def _run_with_sdk(args, sdk) -> dict:
         if not args.quiet:
             print("[corpus] using existing corpus (--no-seed-corpus)")
     corpus_fp = corpus_fingerprint_from_graph(proj.g)
+    # #1348: per-topic live counts come from the oracle generator (the hidden
+    # topic key is never written to the graph — seed_corpus SET is
+    # explicit-field), merged into the fingerprint for provenance.
+    corpus_fp["topic_counts"] = dict(sorted(topic_counts.items()))
     assert corpus_fp["n_points"] > 0, "structural non-empty assertion failed"
     indexes = verify_indexes(proj)
     if not args.quiet:
@@ -764,7 +769,8 @@ def _run_with_sdk(args, sdk) -> dict:
             "vs-baseline) are 90% paired bootstrap CIs on per-query deltas in "
             "POINTS (x100).",
             "#1348 pool-semantics note: eval depth == eval limit (no x2 in this "
-            "harness); SDK str_limit = limit x2 floor 50 (TORTOISE_POOL_FLOOR). "
+            "harness); SDK str_limit = limit x2, with env-only opt-in "
+            "TORTOISE_POOL_FLOOR (no baked default). "
             "--limit = returned limit (metrics are top-limit), --depth = "
             "per-strategy retrieval depth; all depth/k/GraphRanker measurements "
             "here are 2-strategy fusion (RRF fts+vector) on a kind-less corpus "

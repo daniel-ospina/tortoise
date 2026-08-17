@@ -8664,7 +8664,8 @@ class TortoiseSDK:
         default). pool_size/floor only raise the candidate window (str_limit);
         the RETURNED limit is unchanged — truncation at result_ids[:limit]
         precedes EP decoration, so a deeper pool has zero decoration cost.
-        A pool_size below limit*2 is a no-op (the floor only raises). #1348.
+        pool_size is an EXACT override: a value below limit*2 LOWERS the pool
+        to pool_size (the env floor only raises — max(limit*2, floor)). #1348.
 
         Point results annotated with EP breakdown (confidence_mean + evidence + contention).
         Non-Point entities skip EP annotation.
@@ -8731,8 +8732,9 @@ class TortoiseSDK:
         is_embedded = getattr(proj, '_is_embedded', True)
         # Full-scan mode: no truncation — return ALL Points in context (#7811 completeness)
         # #1348 pool floor: pool_size exact override > TORTOISE_POOL_FLOOR env >
-        # limit*2 historical default. Floor/override raise the candidate window
-        # only (str_limit); the returned limit stays the caller's `limit`.
+        # limit*2 historical default. NO BAKED DEFAULT FLOOR: the depth finding
+        # (Task 0, delta(20,50)=0.14 pts < 1.0) was CEILING-CAPPED, so the floor
+        # is env-only opt-in — unset env behaves exactly as pre-#1348 (limit*2).
         if is_full_scan:
             str_limit = 100000
         elif pool_size is not None:
@@ -8740,7 +8742,7 @@ class TortoiseSDK:
                 raise ValueError(f"pool_size must be >= 1, got {pool_size}")
             str_limit = pool_size
         else:
-            pool_floor = 50
+            pool_floor = 0  # env unset → historical limit*2 (no baked default, #1348)
             raw = os.environ.get("TORTOISE_POOL_FLOOR", "")
             if raw.strip():
                 try:
