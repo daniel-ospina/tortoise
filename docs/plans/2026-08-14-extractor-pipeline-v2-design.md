@@ -123,6 +123,8 @@ chains    (productDelivery: JTBD→useCase→feature→userJourney→workflow→
            architecture · epicToCode: epic→issue→code · campaignToChannel:
            campaign→content→channel)                                     ← ADD
 + description + nearMisses per kind
++ memory_granularity per pack (what the domain considers DURABLE vs EPHEMERAL —
+  replaces the vague 'six months' heuristic with per-domain policy)
 + how the 3 layers connect (State=entities+lifecycle, Epistemic=points+operators,
   Events=timeline)
 ```
@@ -146,14 +148,13 @@ semantics.
 ## 5. Model selection
 
 - **S1-S4 run deepseek-v4-flash** (owner decision: "no opus"); S5 = execution.
-- **solar-pro4 pre-processing tier IS IN SCOPE** (owner decision, 2026-08-14):
-  the cleaning-pass test showed solar-cleaned → flash produces richer, better-
-  structured narrative (epistemic layer with IMPL/NAND/MITIGATES reasoning) than
-  flash-direct. The cleaner is a LOSSY COMPRESSOR with a logic-preservation
-  guarantee: it strips process noise (PR numbers, commit hashes, test counts)
-  while keeping the story arc + the 3 layers + the connections. It runs BEFORE
-  flash S1. Empirical note: 3× cost on the test window, but higher-quality
-  output — cost is secondary to ship-first (owner).
+- **solar-pro4 pre-processing tier: PAUSED** (owner decision, 2026-08-14, after
+  the optimization loop + stability test). The 2-model structured path was
+  cheaper at scale but leaked mechanics in 100% of runs, filled the durable_memo
+  with process, and flash truncated multi-section memos. SHIP SINGLE-FLASH for
+  now; the cleaning-path work (v1-v7 prompts, sanitizer, durable_memo schema,
+  cost model) is documented in docs/drafts/2026-08-14-extractor-v2-cleaning-
+  pass-experiment.md for future continuation.
 - No max_tokens caps (owner decision); temperature 0.0 for determinism.
 
 ## 5.5 The prompt-optimization loop (a defined process, not ad-hoc)
