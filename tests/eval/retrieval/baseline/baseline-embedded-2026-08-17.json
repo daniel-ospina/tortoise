@@ -3964,11 +3964,11 @@
     "elevated_timeout_ms": 5000,
     "synthetic_query_vectors": true,
     "judge_labels": "none",
-    "embedded_engine": "redislite (no FTS/HNSW \u2014 FTS degrades to empty, structural to empty without kind, vector brute-force; numbers NOT prod-parity)"
+    "embedded_engine": "redislite (no HNSW vector index \u2014 vector runs brute-force; FULLTEXT index EXISTS on embedded (indexes.fts=true; FTS populated 40/100 queries in this run), structural empty without kind; numbers NOT prod-parity)"
   },
   "notes": [
-    "Embedded FalkorDBLite: NO FTS/HNSW \u2014 FTS degrades to EMPTY (the production parameter-bound queryNodes path returns no rows on redislite), structural degrades to empty for kind-less queries, vector runs brute-force. FTS/structural columns on embedded runs are measurement-environment artifacts, not quality statements \u2014 Docker FalkorDB >= 4.x is authoritative.",
-    "On embedded, fused RRF = vector alone (FTS/structural empty).",
+    "Embedded FalkorDBLite: no HNSW vector index \u2014 the vector arm runs brute-force; the FULLTEXT index EXISTS on embedded (provenance indexes.fts=true; FTS populated 40/100 queries in this run) and structural populates only for the 5/100 kind-carrying queries. FTS/structural columns on embedded runs are measurement-environment artifacts, not quality statements \u2014 Docker FalkorDB >= 4.x is authoritative.",
+    "On embedded, fused RRF is NOT vector alone \u2014 per-query data shows FTS populated 40/100 queries and fused != vector on 17/100 (fused-vs-vector nDCG@10 delta CI -3.25..-0.83, excludes 0); fused (0.835) < vector alone (0.855) on this corpus (eval-corpus artifact, see #1348 scoping).",
     "Query vectors on embedded are SYNTHETIC SEMANTIC stand-ins (topic-centroid sums from the oracle structure + seeded noise) because no embedding model is loaded \u2014 same information a real embedding model encodes (token semantics), not oracle labels.",
     "R@10 uses the oracle denominator = the grade-2 target set (~77-84 points at corpus 2000/24 topics) \u2014 the ceiling is 10/|target| (~12%), so compare R@10 RELATIVELY across strategies; the recall diagnostic for retrieval-gap filing is in the top-50 pool.",
     "Authored queries: relevance is subjective \u2192 LLM judges + owner adjudication (judge.py); baseline reports them labels_pending until the emitted pool is judged and merged via --judge-labels.",

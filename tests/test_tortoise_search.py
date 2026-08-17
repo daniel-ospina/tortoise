@@ -158,6 +158,112 @@ def test_sdk_fts_query_invalid_threshold(sdk=None):
         sdk.tortoise_fts_query("test", threshold=1.1)
 
 
+# ── #1348 pool floor ────────────────────────────────────────────────
+
+def test_sdk_fts_query_pool_size_invalid(sdk=None):
+    """pool_size < 1 must raise (#1348)."""
+    if sdk is None:
+        sdk = _new_sdk()
+    sdk.create_point("statement", "quantum physics test content")
+    with pytest.raises(ValueError, match="pool_size"):
+        sdk.tortoise_fts_query("quantum", limit=5, pool_size=0)
+    with pytest.raises(ValueError, match="pool_size"):
+        sdk.tortoise_fts_query("quantum", limit=5, pool_size=-3)
+    # #1348 upper bound (code-review P2): 1-10000 inclusive, any mode.
+    with pytest.raises(ValueError, match="pool_size"):
+        sdk.tortoise_fts_query("quantum", limit=5, pool_size=10001)
+    # Boundary: 10000 is valid.
+    sdk.tortoise_fts_query("quantum", limit=5, pool_size=10000)
+    # Full-scan mode also validates (no silent ignore).
+    with pytest.raises(ValueError, match="pool_size"):
+        sdk.tortoise_fts_query(kind="statement", pool_size=0)
+
+
+def test_sdk_fts_query_pool_size_exact_override(sdk=None):
+    """pool_size is an EXACT override: str_limit = pool_size regardless of
+    limit*2 or the env floor (#1348). Returned list = min(limit, pool)
+    when pool_size < limit (cannot return more than the pool holds)."""
+    if sdk is None:
+        sdk = _new_sdk()
+    _env_clear_floor()
+    for i in range(20):
+        sdk.create_point("statement", f"quantum topic number {i}")
+    # pool_size above limit*2: pool is larger than limit → returned = limit (5).
+    results = sdk.tortoise_fts_query("quantum", limit=5, pool_size=12)
+    assert len(results) == 5
+    # pool_size below limit*2 is an EXACT override (lowers): a 4-item pool
+    # can return at most 4 results — NOT limit=5.
+    results = sdk.tortoise_fts_query("quantum", limit=5, pool_size=4)
+    assert len(results) == 4, f"exact pool_size=4 should cap results at 4, got {len(results)}"
+
+
+def _env_clear_floor():
+    """Remove TORTOISE_POOL_FLOOR from the environment (pytest-safe)."""
+    os.environ.pop("TORTOISE_POOL_FLOOR", None)
+
+
+def test_sdk_fts_query_env_floor_raises_pool(sdk=None):
+    """TORTOISE_POOL_FLOOR env sets the per-strategy candidate floor;
+    returned list length is unchanged (#1348)."""
+    if sdk is None:
+        sdk = _new_sdk()
+    for i in range(20):
+        sdk.create_point("statement", f"quantum topic number {i}")
+    try:
+        os.environ["TORTOISE_POOL_FLOOR"] = "80"
+        results = sdk.tortoise_fts_query("quantum", limit=5)
+        assert len(results) == 5
+        # Garbage env value falls back to the default (0 → historical limit*2).
+        os.environ["TORTOISE_POOL_FLOOR"] = "not-a-number"
+        results = sdk.tortoise_fts_query("quantum", limit=5)
+        assert len(results) == 5
+    finally:
+        _env_clear_floor()
+
+
+def test_sdk_fts_query_no_env_default_is_historical(sdk=None):
+    """#1348 NO BAKED DEFAULT FLOOR: with TORTOISE_POOL_FLOOR unset, str_limit
+    is the historical limit*2 (the depth finding was CEILING-CAPPED — floor is
+    env-only opt-in). pool_size below limit*2 is an EXACT override (lowers)."""
+    if sdk is None:
+        sdk = _new_sdk()
+    _env_clear_floor()
+    for i in range(20):
+        sdk.create_point("statement", f"quantum topic number {i}")
+    # No env → historical limit*2 semantics (pool 10 at limit=5) — the
+    # returned list is still the caller's limit.
+    results = sdk.tortoise_fts_query("quantum", limit=5)
+    assert len(results) == 5
+    # pool_size exact override below limit*2 LOWERS the pool (exact, not floor)
+    # → at most 4 results from a 4-item pool.
+    results = sdk.tortoise_fts_query("quantum", limit=5, pool_size=4)
+    assert len(results) == 4
+
+
+def test_sdk_fts_query_full_scan_exempts_floor(sdk=None):
+    """Full-scan mode (query=None, kind set) must NOT have its retrieval pool
+    floored/truncated by the #1348 candidate floor — completeness (#7811)
+    wins; the RETURNED list is still bounded by the caller's `limit`."""
+    if sdk is None:
+        sdk = _new_sdk()
+    sdk.create_point("statement", "quantum alpha")
+    sdk.create_point("statement", "quantum beta")
+    sdk.create_point("statement", "quantum gamma")
+    try:
+        os.environ["TORTOISE_POOL_FLOOR"] = "1"
+        # limit=2 returned list is 2 (caller's limit wins), NOT capped by the
+        # floor=1 (which would return 1 if the floor truncated the pool) and NOT
+        # 100000 — the returned list respects the caller's limit.
+        results = sdk.tortoise_fts_query(kind="statement", limit=2)
+        assert len(results) == 2
+        # The floor never reduces the retrieval pool: limit=5 still returns 3
+        # (all points) even with a floor of 1 — full-scan pool is exempt.
+        results = sdk.tortoise_fts_query(kind="statement", limit=5)
+        assert len(results) == 3
+    finally:
+        _env_clear_floor()
+
+
 def test_sdk_fts_query_min_confidence(sdk=None):
     if sdk is None:
         sdk = _new_sdk()

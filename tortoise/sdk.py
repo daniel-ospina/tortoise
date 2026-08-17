@@ -8733,12 +8733,21 @@ class TortoiseSDK:
         traversal_path: str | None = None,
         exclude_status: list[str] | None = None,
         _elevated_timeout_ms: int | None = None,
+        pool_size: int | None = None,
     ) -> list[dict]:
         """Hybrid search with RRF fusion + EP annotation.
 
         entity_type: 'point' (default), 'event', 'subject', 'document', 'object', 'operator', or 'source'.
         Full-scan mode: omit query, set kind → all Points of that kind.
         Best-match mode: provide query → RRF fusion of FTS + vector + structural.
+
+        pool_size: EXACT per-strategy retrieval depth override (benchmark/tests).
+        Precedence: pool_size > TORTOISE_POOL_FLOOR env > limit*2 (the historical
+        default). pool_size/floor only raise the candidate window (str_limit);
+        the RETURNED limit is unchanged — truncation at result_ids[:limit]
+        precedes EP decoration, so a deeper pool has zero decoration cost.
+        pool_size is an EXACT override: a value below limit*2 LOWERS the pool
+        to pool_size (the env floor only raises — max(limit*2, floor)). #1348.
 
         Point results annotated with EP breakdown (confidence_mean + evidence + contention).
         Non-Point entities skip EP annotation.
@@ -8805,7 +8814,28 @@ class TortoiseSDK:
         # 3. Run retrieval with degradation
         is_embedded = getattr(proj, '_is_embedded', True)
         # Full-scan mode: no truncation — return ALL Points in context (#7811 completeness)
-        str_limit = limit * 2 if not is_full_scan else 100000
+        # #1348 pool floor: pool_size exact override > TORTOISE_POOL_FLOOR env >
+        # limit*2 historical default. NO BAKED DEFAULT FLOOR: the depth finding
+        # (Task 0, delta(20,50)=0.14 pts < 1.0) was CEILING-CAPPED, so the floor
+        # is env-only opt-in — unset env behaves exactly as pre-#1348 (limit*2).
+        # pool_size is validated up front (any mode, incl. full-scan) for
+        # consistency with the limit validation bound (code-review P2 fix).
+        if pool_size is not None and (pool_size < 1 or pool_size > 10000):
+            raise ValueError(f"pool_size must be 1-10000, got {pool_size}")
+        if is_full_scan:
+            str_limit = 100000
+        elif pool_size is not None:
+            str_limit = pool_size
+        else:
+            pool_floor = 0  # env unset → historical limit*2 (no baked default, #1348)
+            raw = os.environ.get("TORTOISE_POOL_FLOOR", "")
+            if raw.strip():
+                try:
+                    pool_floor = int(raw)
+                except (TypeError, ValueError):
+                    pass  # garbage → default (TORTOISE_EMBEDDING_REPAIR_BACKOFF_HOURS pattern)
+                pool_floor = max(1, min(pool_floor, 10000))  # clamp per limit validation bound
+            str_limit = max(limit * 2, pool_floor)
         raw_results = degradation_chain(
             graph, query, kind, query_vec, strategies,
             entity_type=entity_type, limit=str_limit,

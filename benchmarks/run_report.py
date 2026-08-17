@@ -118,6 +118,12 @@ def capture_provenance(proj, is_embedded: bool, extras: dict) -> dict:
         "cap_ms": CAP_MS,
         "e2e_target_ms": E2E_TARGET_MS,
         "pre_registered_targets_ms": PRE_REGISTERED_TARGETS_MS,
+        # #1348: per-arm retrieval depth + embedder/decorator pins (Task 8) —
+        # the e2e@new-floor minus retrieval@new-floor decomposition is
+        # unauditable without these in the emitted report.
+        "arm_limit": extras.get("arm_limit"),
+        "embedder_pinned": extras.get("embedder_pinned", False),
+        "decorator_state": extras.get("decorator_state"),
     }
     for mod_name, attr in (("falkordb", "__version__"),):
         try:
@@ -127,7 +133,10 @@ def capture_provenance(proj, is_embedded: bool, extras: dict) -> dict:
             pass
     if is_embedded:
         prov["embedded_engine"] = (
-            "redislite (no FTS/HNSW — numbers NOT prod-parity; can reverse on Docker)"
+            "redislite (no HNSW vector index — vector runs brute-force; "
+            "FULLTEXT index EXISTS on embedded (indexes.fts=true; FTS "
+            "populated 40/100 queries in the committed #1144 baseline); "
+            "numbers NOT prod-parity — can reverse on Docker)"
         )
     return prov
 
@@ -207,11 +216,18 @@ def _roundrobin(items: list[dict], n: int) -> list[dict]:
 
 
 def _make_arm(arm_name: str, ctx: dict):
-    """Build fn(timeout_ms, qi) → (elapsed_ms, results_count, error) for one arm."""
+    """Build fn(timeout_ms, qi) → (elapsed_ms, results_count, error) for one arm.
+
+    #1348: retrieval arms run at ctx["arm_limit"] (per-strategy depth), set by
+    _run_with_sdk to args.depth or max(2 x e2e_limit, TORTOISE_POOL_FLOOR). The
+    ctx.get fallback 20 below is DEFENSIVE-ONLY (pre-floor #316 comparator); the
+    run-level default lives in _run_with_sdk.
+    """
     graph = ctx["graph"]
     is_embedded = ctx["is_embedded"]
     tfidf_points = ctx["tfidf_points"]
     precomputed = ctx["precomputed"]
+    arm_limit = ctx.get("arm_limit", 20)  # per-strategy depth for this run
 
     def _vec(q: str) -> list[float] | None:
         # Vectors are precomputed for the FULL mix before any arm runs
@@ -234,11 +250,11 @@ def _make_arm(arm_name: str, ctx: dict):
         driver_timeout = int(timeout_ms)  # driver timeout must be an int (#316)
         try:
             if arm_name == "fts":
-                rows = run_fts_query(graph, q, entity_type="point", limit=20,
+                rows = run_fts_query(graph, q, entity_type="point", limit=arm_limit,
                                      timeout_ms=driver_timeout)
                 count = len(rows)
             elif arm_name == "vector":
-                rows = run_vector_query(graph, _vec(q), limit=20, timeout_ms=driver_timeout,
+                rows = run_vector_query(graph, _vec(q), limit=arm_limit, timeout_ms=driver_timeout,
                                         is_embedded=is_embedded)
                 count = len(rows)
             elif arm_name == "hybrid":
@@ -250,12 +266,12 @@ def _make_arm(arm_name: str, ctx: dict):
                 elevated = driver_timeout if driver_timeout > CAP_MS else None
                 results = degradation_chain(
                     graph, q, kind, vec, strategies, entity_type="point",
-                    limit=20, is_embedded=is_embedded,
+                    limit=arm_limit, is_embedded=is_embedded,
                     elevated_timeout_ms=elevated,
                 )
                 count = sum(len(v) for v in results.values())
             elif arm_name == "tfidf":
-                rows = fallback_tfidf(q, tfidf_points, limit=20)
+                rows = fallback_tfidf(q, tfidf_points, limit=arm_limit)
                 count = len(rows)
             else:
                 raise ValueError(f"unknown arm {arm_name}")
@@ -266,13 +282,18 @@ def _make_arm(arm_name: str, ctx: dict):
     return fn
 
 
-def _sdk_e2e(sdk, qi: dict, elevated: int | None):
+def _sdk_e2e(sdk, qi: dict, elevated: int | None, *, pool_size: int | None = None):
     t0 = time.perf_counter()
     err = None
     count = 0
     try:
+        # #1348: pool_size threads the run-level arm_limit into the SDK e2e
+        # leg so the E2E depth MATCHES the retrieval arms (--depth desync fix,
+        # code-review P2). Default None → SDK's own str_limit (env floor or
+        # historical limit*2), preserving the #316 baseline for default runs.
         rows = sdk.tortoise_fts_query(
             query=qi.get("query"), kind=qi.get("kind"), limit=10,
+            pool_size=pool_size,
             _elevated_timeout_ms=int(elevated) if elevated is not None else None,
         )
         count = len(rows)
@@ -554,7 +575,29 @@ def _run_with_sdk(args, sdk) -> dict:
         if not args.quiet:
             print(f"[preflight] {preflight_reason} — invalidating all arms")
 
-    # 6. Arms.
+    # 6. Arms. #1348: arm_limit = per-strategy retrieval depth. Default = the
+    # pool floor (max(2 x e2e_limit, TORTOISE_POOL_FLOOR)) so a default run
+    # measures the valid e2e@new-floor minus retrieval@new-floor decomposition;
+    # pre-floor comparator (depth 20) recorded in provenance.
+    e2e_limit = getattr(args, "e2e_limit", 10)
+    # #1348: NO baked default floor — the depth finding was CEILING-CAPPED;
+    # env-only opt-in. Unset → historical e2e_limit*2 semantics. Keep the
+    # parse in sync with sdk.py tortoise_fts_query (clamp 1..10000).
+    pool_floor = 0
+    raw_floor = os.environ.get("TORTOISE_POOL_FLOOR", "")
+    if raw_floor.strip():
+        try:
+            pool_floor = int(raw_floor)
+        except (TypeError, ValueError):
+            pass
+        pool_floor = max(1, min(pool_floor, 10000))  # keep in sync with sdk.py
+    arm_limit = getattr(args, "depth", None) or max(e2e_limit * 2, pool_floor)
+    # #1348 pre-flight: arm_limit must be within the SDK pool_size validation
+    # bound (1..10000) or the e2e arm fails per-sample mid-run. Fail EARLY.
+    if not (1 <= arm_limit <= 10000):
+        raise SystemExit(
+            f"--depth/arm_limit must be 1-10000 (got {arm_limit}) — "
+            "matches the sdk.py pool_size validation bound (#1348)")
     ctx = {
         "graph": proj.g,
         "is_embedded": is_embedded,
@@ -562,6 +605,7 @@ def _run_with_sdk(args, sdk) -> dict:
         "seed": args.seed,
         "use_model": use_model,
         "precomputed": precomputed,
+        "arm_limit": arm_limit,
     }
     reports: dict[str, dict] = {}
     cold_start: dict[str, float] = {}
@@ -613,7 +657,10 @@ def _run_with_sdk(args, sdk) -> dict:
         picks = _roundrobin(e2e_qs, args.samples)
 
         def e2e_fn(timeout_ms, qi):
-            return _sdk_e2e(sdk, qi, timeout_ms if timeout_ms > CAP_MS else None)
+            # #1348: thread arm_limit as pool_size so the E2E leg runs at the
+            # same retrieval depth as the isolation arms (--depth desync fix).
+            return _sdk_e2e(sdk, qi, timeout_ms if timeout_ms > CAP_MS else None,
+                            pool_size=arm_limit)
 
         if preflight_reason is not None:
             censored = _invalidated_arm("e2e:censored", CAP_MS, args.samples, preflight_reason)
@@ -623,7 +670,11 @@ def _run_with_sdk(args, sdk) -> dict:
                 _print_e2e_row(censored, elevated)
         else:
             c0 = time.perf_counter()
-            sdk.tortoise_fts_query(query=picks[0].get("query"), kind=picks[0].get("kind"), limit=10)
+            # #1348: cold-start e2e at the same retrieval depth as the measured
+            # arms (pool_size=arm_limit) so the cold figure is not desynced.
+            sdk.tortoise_fts_query(
+                query=picks[0].get("query"), kind=picks[0].get("kind"), limit=10,
+                pool_size=arm_limit)
             cold_start["e2e"] = (time.perf_counter() - c0) * 1000
 
             censored = _run_column("e2e", e2e_fn, picks, CAP_MS, args,
@@ -644,6 +695,18 @@ def _run_with_sdk(args, sdk) -> dict:
         "query_mix_meta": mix["meta"],
         "warmup": {"iters": args.warmup_iters, "max_iters": args.warmup_max_iters},
         "samples": args.samples,
+        # #1348: per-arm retrieval depth + embedder/decorator pins so the
+        # e2e@new-floor minus retrieval@new-floor decomposition is auditable.
+        # Pins reflect REAL state (code-review P2 fix — no fabricated values):
+        # embedder_pinned = whether --depth was explicitly set (the pool-20
+        # comparator must be re-measured under the same embedder); decorator
+        # state is asserted from the environment (#1353 not merged → status-quo).
+        "arm_limit": arm_limit,
+        "embedder_pinned": bool(getattr(args, "depth", None)),
+        "decorator_state": (
+            "status-quo" if os.environ.get("TORTOISE_1353_DECORATION", "").strip() != "1"
+            else "optimized"
+        ),
     }
     return {
         "schema_version": 1,
@@ -664,8 +727,9 @@ def _run_with_sdk(args, sdk) -> dict:
             "censored samples are capped/degraded the p95 is computed over a "
             "non-representative minority → inconclusive.",
             "#317 headroom = 300 − full-E2E-uncensored-p95 (elevated column).",
-            "Embedded FalkorDBLite numbers are NOT prod-parity (no FTS/HNSW — "
-            "numbers can reverse on Docker).",
+            "Embedded FalkorDBLite numbers are NOT prod-parity (no HNSW "
+            "vector index — vector brute-force; FULLTEXT index EXISTS on "
+            "embedded; numbers can reverse on Docker).",
         ],
     }
 
@@ -688,6 +752,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-seed-corpus", action="store_true",
                    help="use the existing corpus; verify indexes only")
     p.add_argument("--skip-e2e", action="store_true", help="skip the E2E SDK arm")
+    p.add_argument("--depth", type=int, default=None,
+                   help="#1348 per-strategy retrieval depth (default = the pool "
+                        "floor max(2 x e2e_limit, TORTOISE_POOL_FLOOR)); the "
+                        "pre-floor #316 baseline used depth 20")
     p.add_argument("--quiet", action="store_true")
     args = p.parse_args(argv)
 
