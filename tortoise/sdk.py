@@ -1518,25 +1518,107 @@ class TortoiseSDK:
 
     def commit_session(self, conversation=None, session_id=None, *,
                        summary=None, existing_state=None,
-                       extractor_model=None, chunk_size=6,
-                       base_url=None, api_key=None, mode: str = "fail-closed") -> dict:
-        """The production commit path (epic #909, two-process design).
+                       extractor_model=None, chunk_size=None,
+                       base_url=None, api_key=None, mode: str = "fail-closed",
+                       extractor: str | None = None) -> dict:
+        """The production commit path (epic #909, issue #1350).
 
-        Process 1: the conversation -> summary (state/decisions/logic/issues)
-        via the value extractor (BYOK model). Process 2: the summary -> graph
-        delta against existing_state (when provided). The summary stream is
-        mapped to the derived-commit payload and POSTed to
-        /v1/sessions/commit (no raw conversation ever leaves the machine).
+        Extractor selection (reversible):
+          - v2 (DEFAULT, ``TORTOISE_EXTRACTOR=v2`` or unset): the 5-stage
+            narrative-first pipeline (extractor_v2.extract_session_v2 — S1
+            story summary chunked+compiled, S2 map-to-embed, S3 real-backend
+            graph search, S4 gap review, S5 deterministic embed execution) →
+            a complete Layer-1 payload (story_arc populated, client_commit_id
+            replay-safe) POSTed to /v1/sessions/commit.
+          - v1 (``TORTOISE_EXTRACTOR=v1`` or ``extractor='v1'`` or a direct
+            ``summary=`` argument): the legacy summarize→construct→ground
+            path. The env switch is the reversibility seam while the S2/S4
+            prompts finish the owner-in-the-loop loop (design doc §5.5).
 
-        ``summary`` may be passed directly (already extracted) to skip
-        Process 1. Returns the endpoint response, or the local extraction
-        result with the payload when the endpoint is unreachable."""
+        The v2 payload is Layer-1 validated BEFORE the POST (a rejected
+        payload returns ok=False with the Layer-1 errors — nothing is sent).
+        ``chunk_size`` means EDUs per S1 chunk in v2 (default 50) vs EDUs per
+        summary chunk in v1 (default 6) — a caller that previously tuned
+        v1's 6-EDU summary chunks now tunes v2's S1 chunking; pass
+        extractor="v1" for the legacy meaning. ``existing_state`` is v1-only
+        (v2's S3 search replaces it). ``mode`` is v1-only (fail-closed vs
+        warn).
+
+        ``summary`` may be passed directly (already extracted, v1-shaped) to
+        skip extraction — routes to the v1 path. Returns the endpoint
+        response, or the local extraction result with the payload when the
+        endpoint is unreachable."""
+        import os
         import uuid
+        session_id = session_id or f"session_{uuid.uuid4().hex[:12]}"
+        extractor = (extractor or os.environ.get("TORTOISE_EXTRACTOR", "v2")).lower()
+        if extractor == "v1" or summary is not None:
+            return self._commit_session_v1(
+                conversation, session_id, summary, existing_state,
+                extractor_model, chunk_size or 6, base_url, api_key, mode)
+        return self._commit_session_v2(
+            conversation or [], session_id, extractor_model,
+            chunk_size or 50, base_url, api_key)
+
+    def _commit_session_v2(self, conversation, session_id, extractor_model,
+                           chunk_size, base_url, api_key) -> dict:
+        """v2 path: S1→S5 via extractor_v2.extract_session_v2 → Layer-1-
+        validated payload → POST. Errors are surfaced (ok=False) with the
+        payload for inspection — never a silent partial write."""
+        from tortoise.extractor_v2 import extract_session_v2
+        from tortoise.commit_schema import validate_payload_dict
+        model = extractor_model or _default_byok_model()
+        out = extract_session_v2(model, conversation, sdk=self,
+                                 session_id=session_id, chunk_size=chunk_size)
+        payload = out.get("payload")
+        errors = list(out.get("errors", []) or [])
+        if payload is None and not errors:
+            # empty/blank conversation short-circuits with no errors and no
+            # payload — never report ok=True for a nothing-committed session.
+            errors.append("no payload produced (empty or failed conversation)")
+        l1_errors: list[str] = []
+        if payload is not None:
+            l1, _model = validate_payload_dict(payload)
+            if not l1.ok:
+                for field, reasons in l1.errors.items():
+                    for r in reasons:
+                        l1_errors.append(f"Layer-1 {field}: {r}")
+        if l1_errors:
+            errors = l1_errors + errors
+        result = {
+            "session_id": session_id,
+            "ok": not errors and payload is not None,
+            "errors": errors,
+            "payload": payload,
+            "warnings": out.get("warnings", []),
+            "minted_kinds": out.get("minted_kinds", []),
+            "chain_notes": out.get("chain_notes", []),
+            "link_before_create": out.get("link_before_create", []),
+            "story_arc": out.get("story_arc", ""),
+            "search": out.get("search", {}),
+            "stats": out.get("stats", {}),
+        }
+        if errors or payload is None:
+            return result
+        try:
+            r = _post_commit(payload, base_url=base_url, api_key=api_key)
+            # merge the server response but never let the extractor warnings
+            # clobber the server's domain-rule warnings[] (the §6.1 contract)
+            return {**r, **result, "ok": True,
+                    "warnings": (r.get("warnings") or []) + result["warnings"]}
+        except Exception as e:
+            return {**result, "ok": False, "error": str(e)}
+
+    def _commit_session_v1(self, conversation, session_id, summary,
+                           existing_state, extractor_model, chunk_size,
+                           base_url, api_key, mode) -> dict:
+        """The legacy summarize→construct→ground path (v1, #1272) — kept
+        behind TORTOISE_EXTRACTOR=v1 / direct summary= as the reversibility
+        seam. See commit_session docstring."""
         from tortoise.value_extractor import (extract_session,
                                               validate_summary, check_guards)
 
         from tortoise.value_extractor import construct_graph
-        session_id = session_id or f"session_{uuid.uuid4().hex[:12]}"
         if summary is None and conversation is not None:
             model = extractor_model or _default_byok_model()
             extracted = extract_session(
