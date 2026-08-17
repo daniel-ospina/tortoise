@@ -8760,7 +8760,8 @@ class TortoiseSDK:
         """
         from .search_engine import (
             classify_query, degradation_chain, rrf_fusion,
-            annotate_ep_batch, get_relationships, fallback_tfidf,
+            annotate_ep_batch, get_relationships_bounded,
+            fetch_point_epistemic_state, fallback_tfidf,
             SearchResult, SearchScores,
             filter_by_relationship, filter_by_traversal_predicate,
         )
@@ -9027,8 +9028,12 @@ class TortoiseSDK:
             for pid in result_ids:
                 entity_data[pid] = {"content": "", "kind": ""}
 
-        # 7.5. Fetch relationships for result Points (Point only)
-        point_relationships = get_relationships(graph, result_ids) if entity_type == "point" else {}
+        # 7.5. Fetch relationships for result Points (Point only) — bounded,
+        #      state-centric decoration (#1353 D2/D3/D4; D12 keeps the shared
+        #      unbounded get_relationships for topic_summarization).
+        point_relationships = get_relationships_bounded(graph, result_ids) if entity_type == "point" else {}
+        # 7.6. Promoted epistemic state (status/superseded_by/supersedes/subject) — #1353 D8/D10
+        point_state = fetch_point_epistemic_state(graph, result_ids) if entity_type == "point" else {}
 
         # 8. Build SearchResult objects, filter, and order
         results = []
@@ -9075,6 +9080,10 @@ class TortoiseSDK:
                 match_source=match_source,
                 ep=ep,
                 relationships=point_relationships.get(pid, []),
+                status=point_state.get(pid, {}).get("status", ""),
+                superseded_by=point_state.get(pid, {}).get("superseded_by"),
+                supersedes=point_state.get(pid, {}).get("supersedes") or [],
+                subject=point_state.get(pid, {}).get("subject"),
                 topics=cap_topics,
                 summary=cap_summary,
                 session_id=cap_session,
@@ -9107,6 +9116,38 @@ class TortoiseSDK:
         # Default: RRF relevance order (already in fused order)
 
         return [r.to_dict() for r in results[:limit]]
+
+    def expand_relationships(self, point_id: str) -> list[dict]:
+        """Full relationship payload for a single Point, incl. related_content (#1353 D14).
+
+        The expand side of the list/expand split: search list view carries bounded
+        state entries (IDs + labels + direction + peer state, no content); this
+        returns the complete unbounded payload for one point (single-point
+        fan-out is trivially cheap) so an agent can read a neighbor's full text
+        on demand. Each entry gains `related_status` (the neighbor's point
+        status — live/superseded/retracted/draft) so the full-fidelity view is
+        not blind to terminal state (#689/#898 posture).
+        """
+        from .search_engine import get_relationships
+        proj = self._get_proj()
+        entries = get_relationships(proj.g, [point_id]).get(point_id, [])
+        if not entries:
+            return entries
+        related_ids = [e.get("related_id") for e in entries if e.get("related_id")]
+        statuses: dict[str, str] = {}
+        if related_ids:
+            try:
+                rows = proj.g.query(
+                    "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, n.status",
+                    params={"ids": related_ids},
+                    timeout=200,
+                ).result_set
+                statuses = {row[0]: row[1] or "" for row in rows}
+            except Exception:
+                pass
+        for e in entries:
+            e["related_status"] = statuses.get(e.get("related_id"), "")
+        return entries
 
     # ── Recall (epic #898) — UC1 STATE ──────────────────────────────
 
