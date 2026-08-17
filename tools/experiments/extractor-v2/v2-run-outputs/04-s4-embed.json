@@ -1,0 +1,325 @@
+{
+  "entities": [
+    {
+      "name": "PR #1004",
+      "kind": "core:WorkItem",
+      "lifecycle": "created",
+      "supersedes": null,
+      "note": "PR carrying the residual delta for the P0 CI-red fix: warning-label format improvement and vacuous-test fix. Not the PR that restored green main."
+    },
+    {
+      "name": "PR #1000",
+      "kind": "core:WorkItem",
+      "lifecycle": "created",
+      "supersedes": null,
+      "note": "Independently shipped PR, built from the dead P0 subagent's worktree branch, merged to main at 11:53Z restoring Python CI to green."
+    },
+    {
+      "name": "PR #1004 warning label format improvement",
+      "kind": "core:WorkItem",
+      "lifecycle": "created",
+      "supersedes": null,
+      "note": "Change in ep.py from useless cid[:8] labels to the UUID suffix (cid.split('-')[-1]) for operator input disambiguation."
+    },
+    {
+      "name": "test_context_free_produces_consistent_ranking fix",
+      "kind": "dev:issue",
+      "lifecycle": "created",
+      "supersedes": null,
+      "note": "Fix for the vacuous test in test_decide.py, carried by PR #1004."
+    },
+    {
+      "name": "subagent stall pattern issue",
+      "kind": "dev:issue",
+      "lifecycle": "created",
+      "supersedes": null,
+      "note": "Issue to be filed in agent-infra for the 300s parent-turn bound stall under load."
+    },
+    {
+      "name": "draft-filter",
+      "kind": "core:tool",
+      "lifecycle": "unchanged",
+      "supersedes": null,
+      "note": "Filter that silently excludes draft-status operator inputs; correct for production but caused the P0 CI-red failures in tests."
+    },
+    {
+      "name": "FalkorDBLite",
+      "kind": "core:tool",
+      "lifecycle": "unchanged",
+      "supersedes": null,
+      "note": "Database causing file-lock contention under concurrent test writes from multiple agents."
+    },
+    {
+      "name": "agent-infra repository",
+      "kind": "core:Project",
+      "lifecycle": "unchanged",
+      "supersedes": null,
+      "note": "Target repository for the subagent stall pattern issue."
+    },
+    {
+      "name": "P1 #981 CLI config drift",
+      "kind": "dev:issue",
+      "lifecycle": "created",
+      "supersedes": null,
+      "note": "Open P1 work item; blocks copy-paste onboarding."
+    },
+    {
+      "name": "Mission #969 harness clickthrough capstone",
+      "kind": "dev:issue",
+      "lifecycle": "created",
+      "supersedes": null,
+      "note": "Open mission work item."
+    },
+    {
+      "name": "Mission #979 hosted E2E suite implementation",
+      "kind": "dev:issue",
+      "lifecycle": "created",
+      "supersedes": null,
+      "note": "Open mission work item; spec #980 was merged."
+    },
+    {
+      "name": "P0 CI-red issue #992",
+      "kind": "dev:issue",
+      "lifecycle": "created",
+      "supersedes": null,
+      "note": "Resolved P0 CI-red issue; root cause fixed by the draft-filter/test-status work."
+    },
+    {
+      "name": "P0 CI-red issue #998",
+      "kind": "dev:issue",
+      "lifecycle": "created",
+      "supersedes": null,
+      "note": "Resolved P0 CI-red issue; root cause fixed by the draft-filter/test-status work."
+    }
+  ],
+  "events": [
+    {
+      "content": "#1000 merged to main at 11:53Z, restoring Python CI to green",
+      "eventKind": "core:deployment",
+      "about_entities": [
+        "PR #1000"
+      ]
+    },
+    {
+      "content": "Another agent independently shipped the same P0 fix via PR #1000, built from the dead P0 subagent's worktree branch with identical commit messages.",
+      "eventKind": "core:occurrence",
+      "about_entities": [
+        "PR #1000"
+      ]
+    },
+    {
+      "content": "Review of #1004 found two P2 findings: the cid[:8] point-ID labels are indistinguishable within ~2-month windows, and test_context_free_produces_consistent_ranking remained vacuous behind a None guard.",
+      "eventKind": "core:review",
+      "about_entities": [
+        "PR #1004",
+        "PR #1004 warning label format improvement",
+        "test_context_free_produces_consistent_ranking fix"
+      ]
+    },
+    {
+      "content": "Decision to fix the P0 CI-red failures by migrating 11 EP tests to status='live' and adding a non-silent degenerate-operator warning, preserving the production draft-filter semantics.",
+      "eventKind": "core:decision",
+      "about_entities": [
+        "draft-filter",
+        "PR #1004"
+      ]
+    },
+    {
+      "content": "Targeted test runs post-rebase verified all 11 originally-red tests pass, despite extreme I/O contention (load 175-238) from wedged full-suite runs.",
+      "eventKind": "core:experiment",
+      "about_entities": [
+        "PR #1004"
+      ]
+    },
+    {
+      "content": "User directed that an issue be filed in agent-infra for the subagent stall-at-300s pattern.",
+      "eventKind": "core:decision",
+      "about_entities": [
+        "agent-infra repository",
+        "subagent stall pattern issue"
+      ]
+    }
+  ],
+  "points": [
+    {
+      "content": "Preserving production behavior is a durable constraint: the draft-filter is correct for production, and the P0 CI-red failure was caused by tests using status='draft'.",
+      "pointKind": "statement",
+      "about_entities": [
+        "draft-filter"
+      ]
+    },
+    {
+      "content": "The fix approach (migrating 11 EP tests to use status='live' + adding non-silent warning) was optimal because the alternative of changing production draft-filter semantics would violate the durable constraint of preserving production behavior.",
+      "pointKind": "statement",
+      "about_entities": [
+        "draft-filter",
+        "PR #1004"
+      ]
+    },
+    {
+      "content": "The draft-filter's silent degeneration is a known failure mode (#780) that must be diagnosed, not silenced.",
+      "pointKind": "statement",
+      "about_entities": [
+        "draft-filter"
+      ]
+    },
+    {
+      "content": "Point IDs are ULID-style (<hex-timestamp>-<uuid12>), so cid[:8] is a timestamp prefix shared by all points in a ~2-month window, making labels identical and insufficient for disambiguation.",
+      "pointKind": "statement",
+      "about_entities": [
+        "PR #1004 warning label format improvement"
+      ]
+    },
+    {
+      "content": "Concurrent test DB writes from multiple agents cause FalkorDBLite file-lock contention, wedging pytest processes in uninterruptible I/O wait.",
+      "pointKind": "statement",
+      "about_entities": [
+        "FalkorDBLite"
+      ]
+    },
+    {
+      "content": "The text-first pattern (emit text before any tool calls) defeats the subagent stall under load in this environment.",
+      "pointKind": "statement",
+      "about_entities": [
+        "agent-infra repository"
+      ]
+    },
+    {
+      "content": "Subagents stall at the 300s parent-turn bound under load (pattern: alive, working, but never delivers first message within window), believed caused by I/O saturation from 5+ concurrent agent sessions running full test suites (load reached 230).",
+      "pointKind": "statement",
+      "about_entities": [
+        "agent-infra repository"
+      ]
+    },
+    {
+      "content": "The migrated test_context_free_produces_consistent_ranking in test_decide.py was vacuous: its assertion block was gated behind a None guard that always skipped the guard body, so the test passed without checking anything.",
+      "pointKind": "statement",
+      "about_entities": [
+        "test_context_free_produces_consistent_ranking fix"
+      ]
+    },
+    {
+      "content": "Targeted test runs post-rebase verified all 11 originally-red tests pass, despite the environment's extreme I/O contention (load 175-238) from multiple wedged full-suite runs.",
+      "pointKind": "statement",
+      "about_entities": [
+        "PR #1004"
+      ]
+    },
+    {
+      "content": "PR #1004 was ready to merge as-is with no blocking review findings.",
+      "pointKind": "statement",
+      "about_entities": [
+        "PR #1004"
+      ]
+    }
+  ],
+  "operators": [
+    {
+      "src": "Preserving production behavior is a durable constraint: the draft-filter is correct for production, and the P0 CI-red failure was caused by tests using status='draft'.",
+      "dst": "The fix approach (migrating 11 EP tests to use status='live' + adding non-silent warning) was optimal because the alternative of changing production draft-filter semantics would violate the durable constraint of preserving production behavior.",
+      "op_type": "IMPL"
+    },
+    {
+      "src": "Another agent independently shipped the same P0 fix via PR #1000, built from the dead P0 subagent's worktree branch with identical commit messages.",
+      "dst": "The fix approach (migrating 11 EP tests to use status='live' + adding non-silent warning) was optimal because the alternative of changing production draft-filter semantics would violate the durable constraint of preserving production behavior.",
+      "op_type": "IMPL"
+    },
+    {
+      "src": "Point IDs are ULID-style (<hex-timestamp>-<uuid12>), so cid[:8] is a timestamp prefix shared by all points in a ~2-month window, making labels identical and insufficient for disambiguation.",
+      "dst": "PR #1004 was ready to merge as-is with no blocking review findings.",
+      "op_type": "NAND"
+    },
+    {
+      "src": "The migrated test_context_free_produces_consistent_ranking in test_decide.py was vacuous: its assertion block was gated behind a None guard that always skipped the guard body, so the test passed without checking anything.",
+      "dst": "PR #1004 was ready to merge as-is with no blocking review findings.",
+      "op_type": "NAND"
+    }
+  ],
+  "chain_notes": [
+    {
+      "chain": "productDelivery",
+      "finding": "No productDelivery chain mapping attempted; no use cases, features, or architecture items in the story.",
+      "action": "warned",
+      "note": "Skipped chain validation for productDelivery as no relevant entities or points were extracted."
+    },
+    {
+      "chain": "epicToCode",
+      "finding": "No epic or issue decomposition beyond individual work items; epicToCode not applicable.",
+      "action": "warned",
+      "note": "Skipped chain validation for epicToCode."
+    },
+    {
+      "chain": "campaignToChannel",
+      "finding": "No marketing entities; campaignToChannel not applicable.",
+      "action": "warned",
+      "note": "Skipped chain validation for campaignToChannel."
+    }
+  ],
+  "link_before_create": [
+    {
+      "searched_for": "PR #1004",
+      "found": false,
+      "note": "New work item; created."
+    },
+    {
+      "searched_for": "PR #1000",
+      "found": false,
+      "note": "New work item; created."
+    },
+    {
+      "searched_for": "PR #1004 warning label format improvement",
+      "found": false,
+      "note": "New work item; created."
+    },
+    {
+      "searched_for": "test_context_free_produces_consistent_ranking fix",
+      "found": false,
+      "note": "New issue; created."
+    },
+    {
+      "searched_for": "subagent stall pattern issue",
+      "found": false,
+      "note": "New issue; created."
+    },
+    {
+      "searched_for": "draft-filter",
+      "found": true,
+      "note": "Existing tool; unchanged."
+    },
+    {
+      "searched_for": "FalkorDBLite",
+      "found": true,
+      "note": "Existing tool; unchanged."
+    },
+    {
+      "searched_for": "agent-infra repository",
+      "found": true,
+      "note": "Existing project; unchanged."
+    },
+    {
+      "searched_for": "P1 #981 CLI config drift",
+      "found": false,
+      "note": "New open work item; created."
+    },
+    {
+      "searched_for": "Mission #969 harness clickthrough capstone",
+      "found": false,
+      "note": "New open work item; created."
+    },
+    {
+      "searched_for": "Mission #979 hosted E2E suite implementation",
+      "found": false,
+      "note": "New open work item; created."
+    },
+    {
+      "searched_for": "P0 CI-red issue #992",
+      "found": false,
+      "note": "New resolved issue; created."
+    },
+    {
+      "searched_for": "P0 CI-red issue #998",
+      "found": false,
+      "note": "New resolved issue; created."
+    }
+  ]
+}

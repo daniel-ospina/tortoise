@@ -6,11 +6,12 @@ import os, json, requests
 class OpenRouterModel:
     """Adapter for OpenRouter API — supports any model on the platform."""
     
-    def __init__(self, model_id: str, max_tokens: int = 500, temperature: float = 0.0,
+    def __init__(self, model_id: str, max_tokens: int | None = None,
+                 temperature: float = 0.0,
                  thinking_budget: int = 0, disable_reasoning: bool = False):
         self.id = model_id
         self.api_key = os.environ.get('OPENROUTER_API_KEY', '')
-        self.max_tokens = max_tokens
+        self.max_tokens = max_tokens  # None = NO CAP (omit from request body)
         self.temperature = temperature
         self.thinking_budget = thinking_budget  # for reasoning models
         self.disable_reasoning = disable_reasoning  # send reasoning.effort=none
@@ -26,9 +27,10 @@ class OpenRouterModel:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            "max_tokens": self.max_tokens,
             "temperature": self.temperature,
         }
+        if self.max_tokens is not None:
+            body["max_tokens"] = self.max_tokens
         # Enable thinking for reasoning models
         if self.thinking_budget > 0:
             body["reasoning"] = {"max_tokens": self.thinking_budget}
@@ -53,7 +55,7 @@ class OpenRouterModel:
 
 # Pre-configured models
 MODELS = {
-    'deepseek-flash': lambda: OpenRouterModel('deepseek/deepseek-v4-flash', max_tokens=500),
+    'deepseek-flash': lambda: OpenRouterModel('deepseek/deepseek-v4-flash', max_tokens=None, temperature=0.0),
     'deepseek-v4-pro': lambda: OpenRouterModel('deepseek/deepseek-v4-pro', max_tokens=500),
     'deepseek-r1-xhigh': lambda: OpenRouterModel('deepseek/deepseek-r1-0528', max_tokens=500, thinking_budget=2000),
     'deepseek-v4-pro-xhigh': lambda: OpenRouterModel('deepseek/deepseek-v4-pro', max_tokens=500, temperature=0.0),
@@ -65,6 +67,7 @@ MODELS = {
     # registry tunings are inert unless the CLI passes an explicit --max-tokens >= the value here
     # (the gate run used --max-tokens 12000 / 8000; a bare `--model qwen3.8-max` would starve).
     'qwen3.8-max': lambda: OpenRouterModel('qwen/qwen3.8-max', max_tokens=8000, temperature=0.0, thinking_budget=2000),
+    'solar-pro4': lambda: OpenRouterModel('upstage/solar-pro4', max_tokens=None, temperature=0.0),
     'deepseek-v4-pro-noreason': lambda: OpenRouterModel('deepseek/deepseek-v4-pro', max_tokens=8000, temperature=0.0, disable_reasoning=True),
     'claude-opus-5': lambda: OpenRouterModel('anthropic/claude-opus-5', max_tokens=12000, temperature=0.0),
 }

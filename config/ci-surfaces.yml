@@ -201,6 +201,7 @@ surfaces:
   - test_topic_summarization.py
   - test_tortoise_search.py
   - test_value_extractor.py
+  - test_extractor_v2.py
   - test_wiring_phase01.py
   - test_write_consolidation.py
   - test_writer_inventory.py

@@ -1,98 +1,119 @@
-# Project Management Domain Extension
-# GitHub Issues, Linear, Asana integration.
-# Registers: pm:issue, pm:sprint, pm:cardCreated, etc.
-
 namespace: pm
-name: "Project Management"
-version: "0.2.0"          # bumped: extractor-readable business logic (R6)
+name: Project Management
+version: 0.2.0
 tier: free
-description: "GitHub Issues, Linear, Asana integration for project tracking"
-
-# ── Layer 1: Ontology Extension ──────────────────────────────────────────
+description: GitHub Issues, Linear, Asana integration for project tracking
 ontology:
   extends: core
-
   objectKinds:
-    - issue          # Tracked work item (GitHub Issue, Linear issue, Asana task)
-    - sprint         # Time-boxed work period
-    - kanbanBoard    # Board with columns for visual workflow
-    - card           # Generic work unit on a board (supertype of issue, task)
-    - milestone      # Grouping of issues/cards toward a goal
-
+  - issue
+  - sprint
+  - kanbanBoard
+  - card
+  - milestone
   subclassOf:
     issue: WorkItem
     card: WorkItem
-
   eventKinds:
-    - cardCreated    # Card/issue/task was created
-    - cardMoved      # Card moved between status columns
-    - sprintStarted  # Sprint began
-    - sprintCompleted # Sprint ended
-    - stepStarted    # Workflow step began on a card
-    - stepCompleted  # Workflow step ended on a card
-    - gatePassed     # Review gate passed for a card
-    - gateBlocked    # Review gate blocked a card
-
+  - cardCreated
+  - cardMoved
+  - sprintStarted
+  - sprintCompleted
+  - stepStarted
+  - stepCompleted
+  - gatePassed
+  - gateBlocked
   pointKinds:
-    - estimate       # Story points / time estimate
-    - retrospective  # Sprint retrospective observation
-
-  # ── NEW: per-kind extractor metadata (epic #909, research-r6 §6.2) ──────
+  - estimate
+  - retrospective
   kindDefs:
     issue:
-      description: "A tracked work item (GitHub Issue, Linear issue, Asana task) — ≡ dev:issue"
-      synonyms: ["ticket", "task"]
-      nearMisses: [card]
+      description: A tracked work item (GitHub Issue, Linear issue, Asana task) —
+        ≡ dev:issue
+      synonyms:
+      - ticket
+      - task
+      nearMisses:
+      - card
     sprint:
-      description: "A time-boxed work period in which cards are committed"
-      nearMisses: [milestone]
+      description: A time-boxed work period in which cards are committed
+      nearMisses:
+      - milestone
     card:
-      description: "A generic work unit on a board (supertype of issue)"
-      nearMisses: [issue]
-
+      description: A generic work unit on a board (supertype of issue)
+      nearMisses:
+      - issue
   relations:
-    - { predicate: blocks, from: Object, to: Object, cardinality: many_to_many }
-    - { predicate: partOfSprint, from: Object, to: Object, cardinality: many_to_one }
-    - { predicate: assignedTo, from: Object, to: Subject, cardinality: many_to_one }
-    - { predicate: onBoard, from: Object, to: Object, cardinality: many_to_one }
-
-# ── Layer 2: Connectors ──────────────────────────────────────────────────
+  - predicate: blocks
+    from: Object
+    to: Object
+    cardinality: many_to_many
+  - predicate: partOfSprint
+    from: Object
+    to: Object
+    cardinality: many_to_one
+  - predicate: assignedTo
+    from: Object
+    to: Subject
+    cardinality: many_to_one
+  - predicate: onBoard
+    from: Object
+    to: Object
+    cardinality: many_to_one
+  memory_granularity: 'Durable: plan/goal/target state — what was decided, what''s
+    committed, the reasoning, and milestone outcomes. Ephemeral: card/board status,
+    sprint burndown, assignment logistics, issue triage.'
 connectors:
-  - source: github
-    sourceKind: github_issue
-    entrypoint: connector.py::GitHubConnector
-    config:
-      required: [GITHUB_TOKEN, GITHUB_REPO]
-      optional: [GITHUB_LABELS_FILTER]
-
-  - source: linear
-    sourceKind: linear_card
-    entrypoint: connector.py::LinearConnector
-    config:
-      required: [LINEAR_API_KEY]
-
-# ── Layer 3: Tools ───────────────────────────────────────────────────────
+- source: github
+  sourceKind: github_issue
+  entrypoint: connector.py::GitHubConnector
+  config:
+    required:
+    - GITHUB_TOKEN
+    - GITHUB_REPO
+    optional:
+    - GITHUB_LABELS_FILTER
+- source: linear
+  sourceKind: linear_card
+  entrypoint: connector.py::LinearConnector
+  config:
+    required:
+    - LINEAR_API_KEY
 tools:
-  - name: pm_list_issues
-    description: "List issues/cards from connected project sources with optional status filter"
-    entrypoint: tools.py::list_issues
-    params:
-      source: { type: string, enum: [github, linear, asana] }
-      status: { type: string, optional: true }
-      limit: { type: integer, optional: true, default: 50 }
-
-  - name: pm_get_sprint
-    description: "Get sprint details including assigned cards and status"
-    entrypoint: tools.py::get_sprint
-    params:
-      sprintId: { type: string }
-      source: { type: string, enum: [github, linear] }
-
-  - name: pm_board_status
-    description: "Get Kanban board overview — cards per column, stalled items, bottlenecks"
-    entrypoint: tools.py::board_status
-    params:
-      boardId: { type: string, optional: true }
-
-# ── Dependencies ──────────────────────────────────────────────────────────
+- name: pm_list_issues
+  description: List issues/cards from connected project sources with optional status
+    filter
+  entrypoint: tools.py::list_issues
+  params:
+    source:
+      type: string
+      enum:
+      - github
+      - linear
+      - asana
+    status:
+      type: string
+      optional: true
+    limit:
+      type: integer
+      optional: true
+      default: 50
+- name: pm_get_sprint
+  description: Get sprint details including assigned cards and status
+  entrypoint: tools.py::get_sprint
+  params:
+    sprintId:
+      type: string
+    source:
+      type: string
+      enum:
+      - github
+      - linear
+- name: pm_board_status
+  description: Get Kanban board overview — cards per column, stalled items, bottlenecks
+  entrypoint: tools.py::board_status
+  params:
+    boardId:
+      type: string
+      optional: true
 depends_on: []

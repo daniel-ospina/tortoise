@@ -1,0 +1,349 @@
+{
+  "schema_version": "1",
+  "session_id": "session_90457147114e",
+  "client_commit_id": "8d16a09bed41ee1a5463a8b111e51ee6674c691c275f453b566ca85eaddf6af7",
+  "captured_at": "2026-08-17T12:57:07.659974+00:00",
+  "extractor": {
+    "version": "value@0.5.0+v2",
+    "mode": "byok",
+    "calibration_version": "v2"
+  },
+  "summary": "",
+  "story_arc": "Based on the conversation, here is the narrative summary:\n\n**State Change:** The P0 CI-red issues (#992, #998) are now resolved and merged via PR #1004.\n\nThe root cause was confirmed: the draft-filter introduced in #943 silently excluded operator inputs with `status=\"draft\"`, causing degenerate operators to produce zero-confidence outputs without any diagnostic.\n\nThe fix had two parts: (1) migrating 11 EP tests to create `status=\"live\"` points (preserving production semantics), and (2) adding a non-silent warning that names the operator and every input's status when a draft-strip degenerates an operator.\n\n**Epistemic Logic:**\n- **IMPL (supports):** The fix approach was chosen over the alternative (changing production draft-filter semantics) because preserving production behavior is a durable constraint \u2014 the draft-filter is correct for production, tests were simply using the wrong status.\n\n- **NAND (undermines):** The review revealed two P2 findings that would have blocked the merge gate: (1) the diagnostic's id-truncation (`cid[:8]`) is useless because point IDs share a timestamp prefix for ~2-month windows, making all labels identical; (2) `test_context_free_produces_consistent_ranking` in the migrated file was still using draft points, creating a vacuous pass \u2014 the exact failure mode the PR was fixing, left dead in the same file.\n\n- **MITIGATES (tempers):** The environment's extreme I/O contention (load 175-238, multiple wedged full-suite runs from other agents) caused subagent stalls and timeouts, but the fix was verified through targeted test runs that proved all 11 originally-red tests pass post-rebase.\n\n**Durable Beliefs:**\n- The draft-filter's silent degeneration is a known failure mode (#780) that must be diagnosed, not silenced.\n\n- Point IDs are ULID-style (`<hex-timestamp>-<uuid12>`), so `cid[:8]` is a timestamp prefix shared by all points in a ~2-month window \u2014 insufficient for disambiguation.\n\n- Concurrent test DB writes from multiple agents cause FalkorDBLite file-lock contention, wedging pytest processes in uninterruptible I/O wait.\n\n- The text-first pattern (emit text before any tool calls) beats the subagent stall on this environment.\n\n**Remaining Open Work (post-P0 merge):**\n- P1: #981 CLI config drift (blocks copy-paste onboarding)\n- Mission: #969 harness clickthrough capstone\n- Mission: #979 hosted E2E suite implementation (spec #980 merged)\n- P2: Fix the two review findings (id-truncation diagnostic, vacuous test migration) \u2014 these are now the only remaining work from the P0 pair.\n\n## Summary of State Changes\n\n**Primary finding: The P0 CI-red blocker was resolved externally.** While I was shipping a fix for the degraded EP tests causing a CI-red state on main, another agent/process on the same machine independently discovered and shipped the same solution: PR #1000, built from the P0 subagent's dead worktree branch (same commit messages, co-author credit).\n\nThis merged to main at 11:53Z, restoring main's Python CI to green (`completed/success`).\n\nThe CI-red condition that was blocking all PRs is now resolved.\n\n**My PR #1004 carries the residual delta:** two improvements genuinely missing from main:\n1.\n\n**Durable state change in ep.py warning format:** labels changed from `cid[:8]` (indistinguishable for multi-subagent runs with same ms-timestamp prefix) to `cid.split('-')[-1]` (the UUID suffix), at the direction of reviewer P2 (conf 85).\n\nThis is d\n2.\n\n**Durable state change in test_decide.py:** one test (`test_context_free_produces_consistent_ranking`) was vacuous \u2014 its assertion block was gated behind a `None` guard that always skipped the guard body.\n\nThis was found by a reviewer (P2 conf 95) and fixed.\n\nThis test is still broken on main.\n\n**Epistemic state:**\n- **Supports:** The fix approach was optimal (11 migrations \u00d7 `status=\"live\"` + non-silent degenerate-operator exclusion warning) \u2014 the fact that the dead subagent's same commits shipped independently via #1000 confirms this was the correct fix.\n\n",
+  "provenance_refs": [
+    {
+      "path": "session.md",
+      "spans": []
+    }
+  ],
+  "sources": [],
+  "entities": [
+    {
+      "name": "PR #1004",
+      "kind": "core:WorkItem",
+      "passes_frequency_gate": true
+    },
+    {
+      "name": "PR #1000",
+      "kind": "core:WorkItem",
+      "passes_frequency_gate": true
+    },
+    {
+      "name": "PR #1004 warning label format improvement",
+      "kind": "core:WorkItem",
+      "passes_frequency_gate": true
+    },
+    {
+      "name": "test_context_free_produces_consistent_ranking fix",
+      "kind": "dev:issue",
+      "passes_frequency_gate": true
+    },
+    {
+      "name": "subagent stall pattern issue",
+      "kind": "dev:issue",
+      "passes_frequency_gate": true
+    },
+    {
+      "name": "draft-filter",
+      "kind": "core:tool",
+      "passes_frequency_gate": true
+    },
+    {
+      "name": "FalkorDBLite",
+      "kind": "core:tool",
+      "passes_frequency_gate": true
+    },
+    {
+      "name": "agent-infra repository",
+      "kind": "core:Project",
+      "passes_frequency_gate": true
+    },
+    {
+      "name": "P1 #981 CLI config drift",
+      "kind": "dev:issue",
+      "passes_frequency_gate": true
+    },
+    {
+      "name": "Mission #969 harness clickthrough capstone",
+      "kind": "dev:issue",
+      "passes_frequency_gate": true
+    },
+    {
+      "name": "Mission #979 hosted E2E suite implementation",
+      "kind": "dev:issue",
+      "passes_frequency_gate": true
+    },
+    {
+      "name": "P0 CI-red issue #992",
+      "kind": "dev:issue",
+      "passes_frequency_gate": true
+    },
+    {
+      "name": "P0 CI-red issue #998",
+      "kind": "dev:issue",
+      "passes_frequency_gate": true
+    }
+  ],
+  "points": [
+    {
+      "id": "pt_df5f886ef03916d9607a5b9d6d8a8f81e370c9be9a2e438c55ad6c88c14bfe",
+      "content": "Preserving production behavior is a durable constraint: the draft-filter is correct for production, and the P0 CI-red failure was caused by tests using status='draft'.",
+      "pointKind": "statement",
+      "reason": "NEW",
+      "confidence": 0.5,
+      "c_cal": 0.5,
+      "about_entities": [
+        "draft-filter"
+      ],
+      "source_ref": "session.md",
+      "quote": "",
+      "status": "draft"
+    },
+    {
+      "id": "pt_89e3ed7212d291960ab78fd5e0d9062561f7ab00ba9845ba13ec1cca74e3e1",
+      "content": "The fix approach (migrating 11 EP tests to use status='live' + adding non-silent warning) was optimal because the alternative of changing production draft-filter semantics would violate the durable constraint of preserving production behavior.",
+      "pointKind": "statement",
+      "reason": "NEW",
+      "confidence": 0.5,
+      "c_cal": 0.5,
+      "about_entities": [
+        "draft-filter",
+        "PR #1004"
+      ],
+      "source_ref": "session.md",
+      "quote": "",
+      "status": "draft"
+    },
+    {
+      "id": "pt_880e868d98e3ef31e6f19b84c074d0eb1482ec43b3b7d4248537429ce42f2b",
+      "content": "The draft-filter's silent degeneration is a known failure mode (#780) that must be diagnosed, not silenced.",
+      "pointKind": "statement",
+      "reason": "NEW",
+      "confidence": 0.5,
+      "c_cal": 0.5,
+      "about_entities": [
+        "draft-filter"
+      ],
+      "source_ref": "session.md",
+      "quote": "",
+      "status": "draft"
+    },
+    {
+      "id": "pt_e39a91b7c81e6d7656b94675bfa44e1d52661b799d4db033a7232dede5dcec",
+      "content": "Point IDs are ULID-style (<hex-timestamp>-<uuid12>), so cid[:8] is a timestamp prefix shared by all points in a ~2-month window, making labels identical and insufficient for disambiguation.",
+      "pointKind": "statement",
+      "reason": "NEW",
+      "confidence": 0.5,
+      "c_cal": 0.5,
+      "about_entities": [
+        "PR #1004 warning label format improvement"
+      ],
+      "source_ref": "session.md",
+      "quote": "",
+      "status": "draft"
+    },
+    {
+      "id": "pt_3f1c65665d6e7d25c7258a7269b6956037e2500c14cf05070bb88ccaa98118",
+      "content": "Concurrent test DB writes from multiple agents cause FalkorDBLite file-lock contention, wedging pytest processes in uninterruptible I/O wait.",
+      "pointKind": "statement",
+      "reason": "NEW",
+      "confidence": 0.5,
+      "c_cal": 0.5,
+      "about_entities": [
+        "FalkorDBLite"
+      ],
+      "source_ref": "session.md",
+      "quote": "",
+      "status": "draft"
+    },
+    {
+      "id": "pt_8e147f56eafbc6ff4bc90b44cd63887667ee96fe57cff983ce94969dd77080",
+      "content": "The text-first pattern (emit text before any tool calls) defeats the subagent stall under load in this environment.",
+      "pointKind": "statement",
+      "reason": "NEW",
+      "confidence": 0.5,
+      "c_cal": 0.5,
+      "about_entities": [
+        "agent-infra repository"
+      ],
+      "source_ref": "session.md",
+      "quote": "",
+      "status": "draft"
+    },
+    {
+      "id": "pt_11b3c56a24fe939c733476c6a86d27609d14d05880cf6d533ae178bd175fa0",
+      "content": "Subagents stall at the 300s parent-turn bound under load (pattern: alive, working, but never delivers first message within window), believed caused by I/O saturation from 5+ concurrent agent sessions running full test suites (load reached 230).",
+      "pointKind": "statement",
+      "reason": "NEW",
+      "confidence": 0.5,
+      "c_cal": 0.5,
+      "about_entities": [
+        "agent-infra repository"
+      ],
+      "source_ref": "session.md",
+      "quote": "",
+      "status": "draft"
+    },
+    {
+      "id": "pt_4b4842980d326b233c0cf93c6d659385876631742cfcd65df71cd90320aafd",
+      "content": "The migrated test_context_free_produces_consistent_ranking in test_decide.py was vacuous: its assertion block was gated behind a None guard that always skipped the guard body, so the test passed without checking anything.",
+      "pointKind": "statement",
+      "reason": "NEW",
+      "confidence": 0.5,
+      "c_cal": 0.5,
+      "about_entities": [
+        "test_context_free_produces_consistent_ranking fix"
+      ],
+      "source_ref": "session.md",
+      "quote": "",
+      "status": "draft"
+    },
+    {
+      "id": "pt_0c49f5af167dfec57c5d4669eb449917475ac61868fe2b73a61f36fd9f08f7",
+      "content": "Targeted test runs post-rebase verified all 11 originally-red tests pass, despite the environment's extreme I/O contention (load 175-238) from multiple wedged full-suite runs.",
+      "pointKind": "statement",
+      "reason": "NEW",
+      "confidence": 0.5,
+      "c_cal": 0.5,
+      "about_entities": [
+        "PR #1004"
+      ],
+      "source_ref": "session.md",
+      "quote": "",
+      "status": "draft"
+    },
+    {
+      "id": "pt_a46e1f0ed5fb4a98e9131465976cd65c1d9855d74b7b279fdad6eb22319a9f",
+      "content": "PR #1004 was ready to merge as-is with no blocking review findings.",
+      "pointKind": "statement",
+      "reason": "NEW",
+      "confidence": 0.5,
+      "c_cal": 0.5,
+      "about_entities": [
+        "PR #1004"
+      ],
+      "source_ref": "session.md",
+      "quote": "",
+      "status": "draft"
+    }
+  ],
+  "events": [
+    {
+      "id": "ev_aa3448b0ba829389be4bf057b9e79290b78ad61f404386881690fa6a288200",
+      "eventKind": "deployment",
+      "content": "#1000 merged to main at 11:53Z, restoring Python CI to green",
+      "confidence": 0.5,
+      "about_entities": [
+        "PR #1000"
+      ],
+      "source_ref": "session.md"
+    },
+    {
+      "id": "ev_8ab7e1cef8e3e160c0643504289007f7fb1856281dbf4ee665385f47e7142f",
+      "eventKind": "occurrence",
+      "content": "Another agent independently shipped the same P0 fix via PR #1000, built from the dead P0 subagent's worktree branch with identical commit messages.",
+      "confidence": 0.5,
+      "about_entities": [
+        "PR #1000"
+      ],
+      "source_ref": "session.md"
+    },
+    {
+      "id": "ev_bd349cefbd5ddfa141fdfa1ae9a5142ed1a43dc52b5ff49d0d296ce17226e3",
+      "eventKind": "review",
+      "content": "Review of #1004 found two P2 findings: the cid[:8] point-ID labels are indistinguishable within ~2-month windows, and test_context_free_produces_consistent_ranking remained vacuous behind a None guard.",
+      "confidence": 0.5,
+      "about_entities": [
+        "PR #1004",
+        "PR #1004 warning label format improvement",
+        "test_context_free_produces_consistent_ranking fix"
+      ],
+      "source_ref": "session.md"
+    },
+    {
+      "id": "ev_7b3d41d4be223f971bba77529395440fd11dcf7c87287d9cbfa585077a388a",
+      "eventKind": "decision",
+      "content": "Decision to fix the P0 CI-red failures by migrating 11 EP tests to status='live' and adding a non-silent degenerate-operator warning, preserving the production draft-filter semantics.",
+      "confidence": 0.5,
+      "about_entities": [
+        "draft-filter",
+        "PR #1004"
+      ],
+      "source_ref": "session.md"
+    },
+    {
+      "id": "ev_2b03b4b91c3cbe93bdb6cb43f1a9eaddce442e4bd936528c2cb093044f997d",
+      "eventKind": "experiment",
+      "content": "Targeted test runs post-rebase verified all 11 originally-red tests pass, despite extreme I/O contention (load 175-238) from wedged full-suite runs.",
+      "confidence": 0.5,
+      "about_entities": [
+        "PR #1004"
+      ],
+      "source_ref": "session.md"
+    },
+    {
+      "id": "ev_b7fa48581caa5906456aa1c8bb904e1dcf73001e94b47e54a9d357703d59a3",
+      "eventKind": "decision",
+      "content": "User directed that an issue be filed in agent-infra for the subagent stall-at-300s pattern.",
+      "confidence": 0.5,
+      "about_entities": [
+        "agent-infra repository",
+        "subagent stall pattern issue"
+      ],
+      "source_ref": "session.md"
+    }
+  ],
+  "operators": [
+    {
+      "src": "pt_df5f886ef03916d9607a5b9d6d8a8f81e370c9be9a2e438c55ad6c88c14bfe",
+      "dst": "pt_89e3ed7212d291960ab78fd5e0d9062561f7ab00ba9845ba13ec1cca74e3e1",
+      "op_type": "IMPL",
+      "direction": "unidirectional"
+    },
+    {
+      "src": "ev_8ab7e1cef8e3e160c0643504289007f7fb1856281dbf4ee665385f47e7142f",
+      "dst": "pt_89e3ed7212d291960ab78fd5e0d9062561f7ab00ba9845ba13ec1cca74e3e1",
+      "op_type": "IMPL",
+      "direction": "unidirectional"
+    },
+    {
+      "src": "pt_e39a91b7c81e6d7656b94675bfa44e1d52661b799d4db033a7232dede5dcec",
+      "dst": "pt_a46e1f0ed5fb4a98e9131465976cd65c1d9855d74b7b279fdad6eb22319a9f",
+      "op_type": "NAND",
+      "direction": "unidirectional"
+    },
+    {
+      "src": "pt_4b4842980d326b233c0cf93c6d659385876631742cfcd65df71cd90320aafd",
+      "dst": "pt_a46e1f0ed5fb4a98e9131465976cd65c1d9855d74b7b279fdad6eb22319a9f",
+      "op_type": "NAND",
+      "direction": "unidirectional"
+    }
+  ],
+  "telemetry": {
+    "extractor": {
+      "version": "value@0.5.0+v2",
+      "mode": "byok",
+      "calibration_version": "v2"
+    },
+    "model": {
+      "provider": "byok",
+      "id": "user-model",
+      "cfg_hash": ""
+    },
+    "counts": {
+      "kept": 10,
+      "candidate": 6,
+      "segment": 1,
+      "window": 1,
+      "empty_windows": 0
+    },
+    "keep_ratio": null,
+    "dedup_hits": null,
+    "frontier_calls": 1,
+    "llm_cost_usd": null,
+    "extraction_ms": 0,
+    "retry_count": 0,
+    "last_error_code": null,
+    "confidence_histogram": null
+  }
+}
