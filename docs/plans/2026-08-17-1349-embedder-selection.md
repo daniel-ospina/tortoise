@@ -210,3 +210,5 @@ Derived from the scoping wiring table (code-verified across 5+ verifier passes).
 ## Runtime Prerequisites
 
 - `uv sync --extra embeddings`; branch from origin/main (worktree guard); Docker FalkorDB ≥4.x; HF cache: MiniLM present, arctic-xs/s + bge-small downloads; LongMemEval + mini-BEIR dataset caches; no API keys for gate runs (offline); dev OPENROUTER_API_KEY for T5 judges + escalation; benchmark box 16-32GB/4-8 cores; wall-clock 12-45h typical (6 configs), escalate at 5 days.
+
+<!-- plan-review: cycles=9, status=clean, version=2.3.0 -->
