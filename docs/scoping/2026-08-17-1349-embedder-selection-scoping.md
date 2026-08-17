@@ -108,6 +108,62 @@ This definition is wrong if:
 | Self-hosted installs (Dockerfile.selfhost, first-use download 90MB→127MB) | Stakeholder | IN (note: chosen default propagates; MiniLM documented fallback) | ✅ |
 | CI (no model — TF-IDF fallback; swap invisible) | Regression surface | IN (threshold/dim regression covered by manual Docker eval) | ✅ |
 
+## Solution Approach (Phase 4-5 — Approach B: Two-PR, harness/evidence first, conditional swap second)
+
+**Selected: Approach B.** PR1 (unconditional): benchmark tooling + ALL evidence on main, zero production-code changes. PR2 (conditional, created iff `gate_1349.py` verdict = PASS): mechanical swap. Gate structurally enforced — PR2's existence IS the gate output; fail path = zero-code-change retention (no revert, no edit-stripping, and crucially **no data mutation** — re-embedded vectors only ever land if the swap lands).
+
+Rejected: A (config-driven single PR + `TORTOISE_EMBEDDING_MODEL` env seam) — env toggle is architecturally incompatible with the fixed 384-dim index + single-model bake + `HF_HUB_OFFLINE=1` (runtime toggle would need both models baked; wrong-dim runtime toggle = silent retrieval breakage); evidence entangled with swap incentivizes gaming; tips to Complex. C (throwaway-branch literal edits) — run-log provenance unauditable under mandatory review gates.
+
+**Harness injection mechanism (P1 fix, solution-verify cycle 1):** benchmark-only override honored at MODULE LOAD time — `tools/embedder_probe.py` monkeypatches `EmbeddingModel._MODEL_CLASS`/the load path with a candidate `SentenceTransformer` instance (or a module-level `_OVERRIDE_MODEL` the `_load()` thread reads), asserted 384-dim + non-None with HARD FAIL (never silent TF-IDF degrade when `--model` requested). Production does NOT ship the override: PR2's entrypoint FATAL check is extended to reject the override env var in the hosted image. This reconciles the no-env-seam production decision with the 4-model harness requirement.
+
+### PR1 tasks (unconditional — tooling + evidence, zero prod changes)
+- **T1 `tools/embedder_probe.py`** — candidate-model injection (module-load override, 384-dim + non-None assert, `reset()`, `PROBE_MODELS` registry: minilm/arctic-xs/arctic-s/bge-small → HF ids). No-prefix is the deliberate benchmark condition (rule-compliant); `prompt_name` threaded for the arctic vendor-config re-validation.
+- **T2 LongMemEval vector-only arm** — `vector_search()` in `tools/longmem_eval/retrieve.py`: encode query via injected model, `run_vector_query(proj.g, qvec, limit, is_embedded=getattr(proj, '_is_embedded', True), vector_index_api=...)`, NEVER `tortoise_fts_query`. **Embedded brute-force mode pinned** (per-question graphs are redislite — HNSW never engages in this benchmark; documented). `--retriever {hybrid,vector}` (default hybrid, backward-compat), `--model`, `--retrieval-only` (skips reader/judge — immune to contamination), per-model checkpoint keying `{retriever}__{model}`. **Mid-run encode-degrade = HARD FAIL** (degraded flag / None vector → abort model run with distinct exit code + `MODEL_ENCODE_FAILED` marker so gate refuses that run).
+- **T3 eval + benchmark parameterization** — `tests/eval/retrieval/run.py` `--model`/`--query-prompt`; `benchmarks/run_report.py` gains `--model` override + reads provenance from the actual singleton/constant (P1 fix: E2E-8 must be measurable PRE-swap).
+- **T4 `bootstrap.py` one-sided p + BH-FDR + `gate_1349.py`** — net-new (existing functions are percentile-CI, different philosophy — #1144's absolute-band SHIP/WARN/BLOCK gate must not be conflated). Gate implements the FULL pre-registered rule incl. power math: at n≈500, +5% relative on ~0.40 base ≈ mean delta 0.02 vs SE≈0.018 → one-sided p≈0.13; BH q=0.10 over 3 tests needs smallest p≤0.033 → **effective bar ≈ +8-9% relative; pre-registered as the actual threshold** (a +5% nominally would be structurally unpassable — the rule now states the real pass bar explicitly). Denominator = all filtered-split questions (non-evidence 0/0 tied deltas dilute power — documented). Multi-winner: argmax aggregate turn_recall@10, then E2E-8 latency, then model size. Absolute-fallback: control mean < 0.05 → candidate ≥ 0.30 absolute. mini-BEIR + hard tier = **informational, NOT gating** (documented; feed tiebreak + monitoring baseline).
+- **T5 labeled-pair fixture + calibration** — `tests/fixtures/labeled_pairs.jsonl` ≤200 pairs, density-weighted toward the calibration-relevant bands (0.35-0.51 cross-vocab, 0.75+ near-dup), two independent LLM judges via existing `tools/judge_harness.py` + `tools/kappa.py` κ≥0.60 semantics, owner adjudication; `tools/calibrate_thresholds.py --model <c>`. MiniLM run must reproduce #399 bands (sanity).
+- **T6 mini-BEIR harness (research surface, NOT gate)** — MS MARCO dev top-1000 q / 100k-passage sampled corpus (documented NOT leaderboard-comparable) + NFCorpus + SciFact + FiQA; **BEIR raw tsv.gz/jsonl via urllib (NO parquet — zero new deps)**, in-repo nDCG@10/R@10 scorer. **Contamination note:** arctic/bge are trained on MS MARCO — treat MS MARCO as in-domain sanity, weight the 3 OOD datasets for the selection read.
+- **T7 UX research + ADR-009 (Pending evidence) + docs registration** — hosted-vs-local analysis (mem0/Zep/LangMem server-side precedent; swap invisible to tenants; self-hosted no-bake note: first boot after swap triggers a one-time runtime model download — document size/time); decision record ships in PR1 regardless of gate outcome.
+- **T8 evidence production** — real-MiniLM Docker baseline (supersedes synthetic `baseline-embedded-2026-08-17.json`), LongMemEval-S × 4 (vector arm), hard tier × 4, mini-BEIR × 4, per-encode + E2E-8 (via T3 `--model`), labeled-pair calibration × 4. **Wall-clock pre-registered:** 500Q × ~115k-token haystacks × 4 models ≈ 8-30h on the 2GB VM; cross-question encode caching (overlapping haystack content is re-ingested per question — cache encodes); slow-model subset fallback (`--limit`) with gate power stated for that n; artifacts + `gate_1349` verdict committed. **Arctic conditional re-validation scheduled here:** if arctic wins on no-prefix → re-run LongMemEval-S + hard tier with `prompt_name='query'`; gate re-applies to the re-run.
+
+### Gate (between PRs)
+`gate_1349.py` on committed reports → PASS(model) / NO-WINNER / INSUFFICIENT-POWER. Human provenance audit (reports diffed vs committed artifacts, no cherry-picking). PR2 created iff PASS.
+
+### PR2 tasks (conditional — the swap)
+- **T9 `EMBEDDING_MODEL` constant + swap** — module constant (NO env seam in production), `embeddings.py:108` flip; header threshold table updated; **`tests/test_embeddings.py:269` asserts the constant** (P1 fix — breaks on rename otherwise); `benchmarks/run_report.py:639` reads the constant (provenance must not lie post-swap); repo-wide grep for stale `all-MiniLM-L6-v2` literals (docstrings sdk.py:490, embeddings.py header, data/embedding-retrieval.md fastembed mention — fix opportunistically).
+- **T10 Dockerfile.hosted re-bake** — model-cache bake + org-qualified FATAL path (`models--snowflake--...` / `models--BAAI--...`), CI cache key v1→v2 + pre-cache steps; Dockerfile.selfhost = NO change (runtime download, documented).
+- **T11 entrypoint.sh FATAL** — expected-cache check updated + **rejects the benchmark override env var in production**.
+- **T12 `backfill_embeddings.py --force-re-embed`** — **ALL five embedding-bearing labels** (Point/Event/Document/Source/Subject/Operator — P1 fix: entities.py:171/284/331/405/528 write embeddings; event/document ARE live vector-search surfaces via session continuity `entity_type='event'`), same no-DROP SET mechanics (auto-update verified), direct-Cypher path (no PointRevised clobber), idempotent, `--dry-run`, `--all-tenants`; maintenance window + mixed-state ranking acceptance documented.
+- **T13 no-DROP same-dim rebuild** — auto-updates on SET (test_hnsw_vector_index.py); batching + event-log growth noted; 768-dim boundary documented (would need DROP+recreate — future pool extension).
+- **T14 threshold recalibration** — VERIFIED cosine sites only: `cross_lens.py:32` (0.40), `embeddings.py:210` (0.75) + `:253` (0.3), `sdk.py:2670-2671` (dedup 0.60/0.92), `sdk.py:5617/5667/5766` (0.40 defaults). **NOT touched:** sdk.py:2858 (dedup-candidate review logic, no cosine threshold), sdk.py:7692 (RRF band-normalization 0.3/0.5 — decide separately if score-distribution-sensitive), 0.95 (EP recency decay — unrelated, untouched).
+- **T15 E2E-8 ≤300ms on post-swap image** — defined exactly: p95 warm, censored arm, default query_mix, `benchmarks/run_report.py`; per-encode microbench (1/32 texts) added for future rotation decisions; provenance reads the constant.
+- **T16 ADR-009 → Accepted** — evidence summary, per-label blast radius (P1 fix: state swap impact per label), deploy checklist, UX final statement.
+
+### Wiring table (solution)
+
+| Touch Point | Type | Covered By | Status |
+|---|---|---|---|
+| tortoise/embeddings.py (:108 literal, :210/:253 thresholds, header) | prod code | T9, T14 | ✅ |
+| tortoise/cross_lens.py (:32 duplicate threshold) | prod code | T14 | ✅ |
+| tortoise/sdk.py query-path encode (:8718) | prod code | T15 | ✅ |
+| tortoise/sdk.py cosine thresholds (:2670-2671, :5617/:5667/:5766) | prod code | T14 | ✅ |
+| tortoise/search_engine.py (:340 384 contract, run_vector_query) | read-only dep | T2; docstring → constant | ✅ |
+| Five-label embedding surface (entities.py:171/284/331/405/528) | prod data | T12 (P1 fix) | ✅ |
+| Dockerfile.hosted / entrypoint.sh | deploy | T10/T11 | ✅ |
+| hosted_api.py pre-warm | prod code | model-agnostic — no change | ✅ |
+| python-ci.yml cache | tooling | T10 (v2) | ✅ |
+| graph-scripts/backfill_embeddings.py | ops | T12 | ✅ |
+| tools/longmem_eval/ | eval tooling | T2 (on main already) | ✅ |
+| tests/eval/retrieval/ | eval tooling | T3/T4/T8 | ✅ |
+| tests/test_embeddings.py:269 | test | T9 (assert constant) | ✅ |
+| benchmarks/ (run_report :639, synthetic_corpus :29) | benchmark | T3/T9/T15 | ✅ |
+| docs/ (ADR-009, research, 00_index, embedding-retrieval.md) | docs | T7/T16 | ✅ |
+| Dockerfile.selfhost | deploy | no change (runtime download documented) | ✅ |
+| #265 encrypted tier | future constraint | not in code — suppress_embedding seam noted; ADR cross-ref | ✅ |
+
+### Runtime prerequisites
+- `uv sync --extra embeddings`; branch from **origin/main** (local main 237 commits stale — worktree guard); Docker FalkorDB ≥4.x for authoritative baseline/E2E-8; HF cache: MiniLM present, arctic-xs/s + bge-small downloads (~100-200MB); LongMemEval + mini-BEIR dataset caches; no API keys (gate runs offline `--retrieval-only`); ~16-32GB RAM, 4-8 cores; ~8-30h wall-clock pre-registered with subset fallback.
+
 ## Review Cycle Log
 
 ### problem-verify — Cycle 2
