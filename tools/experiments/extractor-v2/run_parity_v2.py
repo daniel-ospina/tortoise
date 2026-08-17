@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))  # repo root
 
 from tests.model_adapters import MODELS  # noqa: E402
 from tortoise import extractor_v2 as v2  # noqa: E402
+from tortoise.extractor_v2 import _complete, _parse_json  # noqa: E402
 from tortoise.value_extractor import summarize  # noqa: E402
 
 DEFAULT_TRANSCRIPT = Path(__file__).resolve().parents[3] / \
@@ -102,9 +103,78 @@ def _path_b(flash, edus: list[dict], chunk_size: int = 50) -> dict:
     }
 
 
+def _judge_loss(model, a: dict, b: dict) -> dict:
+    """Semantic judge: for every containment-lost A item, classify whether B
+    captures the MEANING (any wording) or truly misses it. The raw text-set
+    containment cannot be met by a narrative-first pipeline by construction
+    (v2 strips mechanics + rephrases) — this is the honest indicator.
+
+    One flash call per run (batch). Returns {item: "captured"|"missing"}."""
+    import json as _json
+    lost = {k: sorted(_norm(a.get(k)) - _norm(b.get(k)))
+            for k in ("decisions", "state", "logic")}
+    items = [(k, it) for k in ("decisions", "state", "logic") for it in lost[k]]
+    if not items:
+        return {}
+    b_all = {k: [str(x.get("content") or x.get("point") or x.get("name") or "")
+                 for x in (b.get(k) or [])] for k in ("decisions", "state", "logic")}
+    user = _json.dumps({
+        "A_lost_items": [{"section": k, "item": it} for k, it in items],
+        "B_captured": b_all,
+    }, indent=1)
+    system = ("You judge epistemic-memory parity. For each A item, does ANY B item "
+              "capture its MEANING (same durable claim/decision/lesson), even in "
+              "different words or with mechanics stripped? Answer ONE JSON object "
+              "mapping the A item text -> \"captured\" or \"missing\". Judge by "
+              "meaning, not wording. Items that are pure process chatter with no "
+              "durable claim count as \"missing\" but are expected-loss, not "
+              "regression.")
+    try:
+        resp = _complete(model, system, user)
+        d = _parse_json(resp)
+    except Exception:  # judge failure degrades to text metric (loss = missing)
+        return {}
+    out = {}
+    for k, it in items:
+        out[it] = d.get(it, "missing")
+    return out
+
+
 def _containment(a: dict, b: dict) -> dict:
     a_sets = {k: _norm(a.get(k)) for k in ("decisions", "state", "logic")}
     b_sets = {k: _norm(b.get(k)) for k in ("decisions", "state", "logic")}
+    b_raw = {k: (b.get(k) or []) for k in ("decisions", "state", "logic")}
+
+    def _near(item: str, b_items: list[dict]) -> dict | None:
+        """Closest B-side item by token overlap (0 = none). Distinguishes
+        'rephrased' (high overlap, >=2 shared tokens) from 'truly missing'
+        (low/none). Short A-side items (<3 tokens) are never classified
+        rephrased — the ratio is meaningless for them."""
+        import re as _re
+        t = set(_re.sub(r"[^a-z0-9 ]", " ", item).split())
+        if len(t) < 3:
+            return {"best": None, "overlap": 0.0}
+        best, best_o = None, 0.0
+        for bi in b_items:
+            for key in ("content", "point", "name", "text"):
+                if not bi.get(key):
+                    continue
+                s = _re.sub(r"[^a-z0-9 ]", " ", str(bi[key]).strip().lower())
+                ts = set(s.split())
+                if not ts:
+                    continue
+                shared = len(t & ts)
+                if shared < 2:  # a rephrased verdict needs >=2 shared tokens
+                    continue
+                o = shared / min(len(t), len(ts))
+                if o > best_o:
+                    best_o, best = o, str(bi[key])[:80]
+        return {"best": best, "overlap": round(best_o, 2)}
+
+    near = {k: [] for k in a_sets}
+    for k in a_sets:
+        for item in sorted(a_sets[k] - b_sets[k]):
+            near[k].append({"item": item[:100], "near": _near(item, b_raw[k])})
     return {
         "loss": {k: sorted(a_sets[k] - b_sets[k]) for k in a_sets},
         "gain": {k: sorted(b_sets[k] - a_sets[k]) for k in a_sets},
@@ -112,6 +182,8 @@ def _containment(a: dict, b: dict) -> dict:
         "counts_b": {k: len(b_sets[k]) for k in a_sets},
         "loss_total": sum(len(a_sets[k] - b_sets[k]) for k in a_sets),
         "contained": all(not (a_sets[k] - b_sets[k]) for k in a_sets),
+        # per-item nearest B match: overlap >= 0.5 → rephrased, else → real drop
+        "loss_analysis": near,
     }
 
 
@@ -121,12 +193,15 @@ def main() -> None:
         else DEFAULT_TRANSCRIPT
     runs = 3
     chunk_size = 50
+    judge = True
     i = 0
     while i < len(args):
         if args[i] == "--runs" and i + 1 < len(args):
             runs = int(args[i + 1]); i += 2
         elif args[i] == "--chunk-size" and i + 1 < len(args):
             chunk_size = int(args[i + 1]); i += 2
+        elif args[i] == "--no-judge":
+            judge = False; i += 1
         else:
             print(f"[run_parity_v2] unknown arg: {args[i]}", file=sys.stderr)
             sys.exit(2)
@@ -145,6 +220,13 @@ def main() -> None:
         b = _path_b(flash, edus, chunk_size=chunk_size)
         b_secs = round(time.time() - t0)
         c = _containment(a, b)
+        semantic = {}
+        if judge:
+            semantic = _judge_loss(flash, a, b)
+            captured = sum(1 for v in semantic.values() if v == "captured")
+            missing = sum(1 for v in semantic.values() if v == "missing")
+            print(f"  semantic judge: captured_differently={captured} "
+                  f"truly_missing={missing}", flush=True)
         run = {
             "run": r,
             "A": {"decisions": len(a["decisions"]), "state": len(a["state"]),
@@ -157,14 +239,19 @@ def main() -> None:
             "containment": {"contained": c["contained"], "loss_total": c["loss_total"],
                             "loss": c["loss"], "gain_counts": {k: len(v)
                                                                for k, v in c["gain"].items()}},
+            "loss_analysis": c.get("loss_analysis", {}),
+            "semantic": semantic,
         }
         report["runs"].append(run)
+        rephrased = sum(1 for k, lst in c.get("loss_analysis", {}).items()
+                        for it in lst if (it.get("near") or {}).get("overlap", 0) >= 0.5)
+        real_drop = c["loss_total"] - rephrased
         print(f"  A: dec={len(a['decisions'])} state={len(a['state'])} "
               f"logic={len(a['logic'])} tok={a['tokens']} {a_secs}s", flush=True)
         print(f"  B: dec={len(b['decisions'])} state={len(b['state'])} "
               f"logic={len(b['logic'])} tok={b['tokens']} {b_secs}s", flush=True)
         print(f"  containment: contained={c['contained']} loss={c['loss_total']} "
-              f"({c['loss']})", flush=True)
+              f"(rephrased≈{rephrased}, real_drop≈{real_drop})", flush=True)
     OUT.write_text(json.dumps(report, indent=2))
     print(f"\nreport -> {OUT}")
 
