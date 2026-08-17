@@ -65,11 +65,31 @@ def _valid_response() -> str:
 # ── Rubric ──────────────────────────────────────────────────────────────────
 
 def test_rubric_is_retrieval_relevance_not_extraction():
+    """The retrieval rubric is NEW and distinct from the #945 extraction
+    rubric (probe_extractor): it grades retrieval RELEVANCE over a pool,
+    with the graded 0|1|2 vocab — it must not carry over the extraction
+    rubric's closed entity-kind vocabulary (decision/event/claim/process /
+    entity / relation / IMPL / NAND / extract), or judges would grade the
+    wrong axis."""
     assert "relevance" in RELEVANCE_RUBRIC_SYSTEM.lower()
     assert "grade" in RELEVANCE_RUBRIC_SYSTEM.lower()
     assert GRADE_VOCAB == ("non_relevant", "partially", "relevant")
-    # NOT the extraction rubric's closed vocab (decision/event/claim/...).
-    assert "decision" not in RELEVANCE_RUBRIC_SYSTEM.lower().split()
+    assert "non-relevant" in RELEVANCE_RUBRIC_SYSTEM.lower()
+    assert "pool" in RELEVANCE_RUBRIC_SYSTEM.lower()
+    assert "query" in RELEVANCE_RUBRIC_SYSTEM.lower()
+    # Extraction-axis vocabulary (probe_extractor closed vocab + the
+    # extraction rubric's relations/entities) must be entirely absent.
+    import re as _re
+    extraction_vocab = (
+        "decision", "event", "claim", "process", "entity", "relation",
+        "extract", "impl", "nand", "transcript", "utterance", "ontology",
+    )
+    body = RELEVANCE_RUBRIC_SYSTEM.lower()
+    leaked = [w for w in extraction_vocab if _re.search(rf"\b{w}\b", body)]
+    assert not leaked, (
+        f"retrieval rubric leaks extraction vocabulary: {leaked} — it must "
+        "grade relevance, not extract decision/event/claim/..."
+    )
 
 
 # ── Parsing ─────────────────────────────────────────────────────────────────
@@ -218,6 +238,48 @@ def test_adjudication_unruled_disagreement_fails_closed():
         # p1 left unruled
     with pytest.raises(JudgeError, match="unruled disagreement"):
         merge_labels(a, b, tmpl)
+
+
+def test_agreement_slice_fresh_ruling_never_enters_labels():
+    """Fail-closed lock (both halves):
+
+    1. A fresh class on an AGREEMENT-SLICE point (both judges agreed) is a
+       confirmation signal, NOT a re-label: per the documented acceptance
+       formula ((agreed + rulings matching a judge) / n_judged) the
+       combined denominator already counts agreed pairs as accepted, so
+       the slice ruling content does not move the gate — and merge_labels
+       can never let the invented grade enter the labels (it uses the
+       judges' shared grade).
+    2. The FAIL-CLOSED path for fresh classes is the disagreement path:
+       merge_labels raises JudgeError (locked by
+       test_adjudication_fresh_class_fails_closed).
+    """
+    a = _labels_for({"p0": 2, "p1": 2, "p2": 2})
+    b = _labels_for({"p0": 2, "p1": 2, "p2": 2})  # no disagreements
+    tmpl = emit_rulings_template(a, b, {})
+    assert tmpl["n_disagreements"] == 0
+    assert len(tmpl["rulings"]) >= 1  # the ≥10% agreement slice
+    for r in tmpl["rulings"]:
+        assert r["sample_type"] == "agreement-slice"
+        r["owner_ruling"] = 1  # fresh class — neither judge said 1
+    stats = adjudication_stats(tmpl)
+    assert stats["accepted_rulings"] == 0
+    # Documented formula: agreed pairs are already accepted → the slice
+    # ruling is a confirmation signal, not a re-label.
+    assert stats["acceptance"] == pytest.approx(1.0)
+    assert stats["passed"] is True
+    # The invented grade NEVER enters the labels (judges' grade wins).
+    merged = merge_labels(a, b, tmpl)
+    assert merged == {"aq001": {"p0": 2, "p1": 2, "p2": 2}}
+    # Companion: the same fresh class on a DISAGREEMENT fails closed.
+    a2 = _labels_for({"p0": 2, "p1": 2})
+    b2 = _labels_for({"p0": 2, "p1": 0})
+    tmpl2 = emit_rulings_template(a2, b2, {})
+    for r in tmpl2["rulings"]:
+        r["owner_ruling"] = 1 if r["sample_type"] == "disagreement" \
+            else r["judge_a_grade"]
+    with pytest.raises(JudgeError, match="must match a judge"):
+        merge_labels(a2, b2, tmpl2)
 
 
 def test_adjudication_acceptance_floor():

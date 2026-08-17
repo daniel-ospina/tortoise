@@ -94,15 +94,45 @@ def test_precision_at_k_binaryized():
 
 
 def test_recall_at_k_oracle_denominator():
+    """Locked design: R@10 denominator = the grade-2 TARGET set, not the
+    grade-1 near-topic distractors (README + provenance.json: "oracle
+    denominator = grade-2 target set", ceiling 10/|target| ~ 12%)."""
     labels = {f"p{i}": 2 for i in range(20)} | {f"q{i}": 1 for i in range(10)}
-    # Binaryized at grade>=1 (the standard recall convention): the oracle
-    # relevant set is the 30 grade-2 + grade-1 points.
+    # Grade-2 target set is the 20 p-points; grade-1 q-points are
+    # distractors and do NOT enter the denominator.
     ids = [f"p{i}" for i in range(10)]
-    assert math.isclose(recall_at_k(ids, labels, 10), 10 / 30, rel_tol=1e-9)
+    assert math.isclose(recall_at_k(ids, labels, 10), 10 / 20, rel_tol=1e-9)
+    # Grade-1 points retrieved in the top-10 do NOT count toward recall.
+    distractor_ids = [f"q{i}" for i in range(10)]
+    assert recall_at_k(distractor_ids, labels, 10) == 0.0
     # none retrieved → 0
     assert recall_at_k(["zz"] * 10, labels, 10) == 0.0
     # empty relevant set → 0 (guarded)
     assert recall_at_k(["a"] * 10, {"a": 0}, 10) == 0.0
+
+
+def test_ndcg_denominator_normalization_fewer_than_k_relevant():
+    """Hand-computed lock: when the oracle has FEWER than k relevant docs,
+    IDCG@k normalizes over the available relevant count (not padded to k),
+    so a perfect retrieval of all 3 relevant scores exactly 1.0, and a
+    partial retrieval scores DCG/IDCG with the graded log₂ discount."""
+    ids = ["p0", "p1", "p2"]
+    labels = {f"p{i}": GRADE_RELEVANT for i in range(3)}  # only 3 relevant
+    # Perfect retrieval → nDCG = 1.0 regardless of k > |relevant|.
+    assert math.isclose(ndcg_at_k(ids, labels, 10), 1.0, rel_tol=1e-12)
+    # Partial: only p0 at rank 1 retrieved (p1, p2 below the cut).
+    #   DCG@10 = (2^2-1)/log2(2) = 3
+    #   IDCG@10 = 3/log2(2) + 3/log2(3) + 3/log2(4)   (3 ideal terms)
+    partial = ndcg_at_k(["p0", "x", "y", "z"], labels, 4)
+    expected_dcg = 3.0
+    expected_idcg = 3.0 / math.log2(2) + 3.0 / math.log2(3) + 3.0 / math.log2(4)
+    assert math.isclose(partial, expected_dcg / expected_idcg, rel_tol=1e-9)
+    # Mixed grades below k: 1 relevant + 1 partial retrieved at ranks 1,2.
+    mixed_labels = {"p0": GRADE_RELEVANT, "p1": GRADE_PARTIAL}
+    m = ndcg_at_k(["p0", "p1", "x"], mixed_labels, 10)
+    #   DCG = 3/log2(2) + 1/log2(3)
+    #   IDCG = 3/log2(2) + 1/log2(3)  (ideal = same two docs first)
+    assert math.isclose(m, 1.0, rel_tol=1e-12)
 
 
 def test_reciprocal_rank_first_relevant():
@@ -112,6 +142,17 @@ def test_reciprocal_rank_first_relevant():
     assert reciprocal_rank(["x", "y"], labels) == 0.0
     # MRR defaults to the first grade-2 (partial at rank 1 does not count)
     assert math.isclose(reciprocal_rank(["p3", "p0"], labels), 0.5)
+
+
+def test_reciprocal_rank_zero_relevant_edges():
+    """MRR = 0 whenever no grade-2 doc is in the list: empty list, no
+    grade-2 in labels at all, or grade-2 present but unretrieved."""
+    labels = {"p0": 2, "p3": 1}
+    assert reciprocal_rank([], labels) == 0.0
+    assert reciprocal_rank(["p3", "x"], labels) == 0.0      # only partial retrieved
+    assert reciprocal_rank(["x", "y", "z"], labels) == 0.0  # relevant unretrieved
+    assert reciprocal_rank(["a", "b"], {"a": 0, "b": 1}) == 0.0  # no grade-2 at all
+    assert reciprocal_rank(["a"], {}) == 0.0                 # empty labels
 
 
 def test_compute_metrics_shape():

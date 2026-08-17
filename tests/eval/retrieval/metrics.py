@@ -9,7 +9,11 @@ per the locked eval design (issue comment 2026-08-17):
     - P@5 — precision in the top-5, binaryized at grade ≥ 1
       (standard IR practice for graded relevance).
     - R@10 — recall in the top-10 against the oracle denominator
-      (the grade-2 target set, per query — "R@10 (oracle denominator)").
+      (the grade-2 TARGET set, per query — "R@10 (oracle denominator)").
+      Locked design (issue comment 2026-08-17): the denominator is the
+      per-topic LIVE grade-2 set (~77-84 points at corpus 2000/24 topics,
+      ceiling 10/|target| ~ 12%) — grade-1 near-topic points are
+      distractors, NOT recall targets.
     - MRR — reciprocal rank of the first grade-2 (truly relevant) doc.
 
 All functions are pure over (ranked point-id list, {point_id: grade}),
@@ -92,11 +96,13 @@ def recall_at_k(
     ranked_ids: Sequence[str],
     labels: Mapping[str, int],
     k: int = DEFAULT_K_RECALL,
-    min_grade: int = GRADE_PARTIAL,
+    min_grade: int = GRADE_RELEVANT,
 ) -> float:
-    """R@k against the oracle denominator: |retrieved ∩ relevant| /
-    |relevant| where relevant = {pid: grade ≥ min_grade}. Guarded: empty
-    relevant set → 0.0."""
+    """R@k against the ORACLE denominator: |retrieved ∩ relevant| /
+    |relevant| where relevant = {pid: grade ≥ min_grade}. Default min_grade
+    is GRADE_RELEVANT (2) — the denominator is the grade-2 TARGET set per
+    the locked design (grade-1 near-topic points are distractors and do not
+    count toward recall). Guarded: empty relevant set → 0.0."""
     relevant = {
         pid for pid, g in labels.items() if g >= min_grade
     }

@@ -88,6 +88,42 @@ def test_runner_report_shape_and_gate(tmp_path):
 
 
 @pytest.mark.skipif(not _has_embedded(), reason="embedded FalkorDBLite unavailable")
+def test_report_is_regenerable(tmp_path):
+    """Baseline lock (review P2.6): the report is REGENERABLE — the same
+    args on a fresh DB reproduce the identical metrics, per-query scores,
+    tier breakdown, paired deltas, oracle meta, and authored meta
+    (provenance timestamp/git_sha/host naturally differ). This is what
+    makes the committed baseline a trustworthy "where we stand" anchor
+    for the gate."""
+    r1 = run_eval(_args(str(tmp_path / "regen1.db"), corpus_size=300))
+    r2 = run_eval(_args(str(tmp_path / "regen2.db"), corpus_size=300))
+    for key in ("metrics", "per_query", "by_tier", "paired_vs_fused",
+                "oracle", "authored", "authored_metrics", "seed",
+                "corpus_target"):
+        assert r1[key] == r2[key], f"report {key} not regenerable (differs across runs)"
+
+
+@pytest.mark.skipif(not _has_embedded(), reason="embedded FalkorDBLite unavailable")
+def test_baseline_report_carries_embedded_caveats():
+    """Baseline lock (review P2.6): the committed baseline must document
+    the embedded-environment caveats (FTS/structural degrade, vector
+    brute-force, synthetic query vectors) and the R@10 oracle-denominator
+    note, so nobody reads embedded numbers as prod-parity quality."""
+    baseline = json.loads(
+        (Path(REPO_ROOT) / "tests/eval/retrieval/baseline"
+         / "baseline-embedded-2026-08-17.json").read_text()
+    )
+    assert baseline["provenance"]["db_mode"] == "embedded-falkordblite"
+    assert "embedded_engine" in baseline["provenance"]
+    joined_notes = " ".join(baseline.get("notes", [])).lower()
+    for caveat in ("fts", "structural", "brute-force", "synthetic",
+                   "not quality statements", "authoritative"):
+        assert caveat in joined_notes, f"baseline missing caveat: {caveat}"
+    assert "grade-2 target set" in joined_notes
+    assert baseline["provenance"]["corpus"]["n_points"] > 0
+
+
+@pytest.mark.skipif(not _has_embedded(), reason="embedded FalkorDBLite unavailable")
 def test_runner_pool_emission_and_judge_labels(tmp_path):
     db = str(tmp_path / "eval-pool.db")
     pool_path = str(tmp_path / "pool.json")

@@ -47,6 +47,81 @@ def test_ci_deterministic_given_seed():
     assert paired_bootstrap_ci(deltas, rng=rng1) == paired_bootstrap_ci(deltas, rng=rng2)
 
 
+def test_ci_is_exact_percentile_of_resampled_means():
+    """Percentile-method lock: the CI bounds must equal the alpha/2 and
+    1-alpha/2 quantiles of the resampled-mean distribution, at the exact
+    indices int(alpha/2 * (n-1)) and int((1-alpha/2) * (n-1)). Replicate
+    the resampling in-test with the same rng and compare bound-for-bound."""
+    rng = random.Random(99)
+    deltas = [rng.gauss(0.1, 0.7) for _ in range(50)]
+    n_resamples, alpha = 500, 0.10
+    ci = paired_bootstrap_ci(deltas, n_resamples=n_resamples, alpha=alpha,
+                             rng=random.Random(99))
+    # Recompute the resampled-mean distribution with the identical seed.
+    r2 = random.Random(99)
+    n = len(deltas)
+    means = sorted(
+        sum(deltas[r2.randrange(n)] for _ in range(n)) / n
+        for _ in range(n_resamples)
+    )
+    lo_idx = int((alpha / 2) * (n_resamples - 1))
+    hi_idx = int((1 - alpha / 2) * (n_resamples - 1))
+    assert ci.lower == pytest.approx(means[lo_idx])
+    assert ci.upper == pytest.approx(means[hi_idx])
+    assert lo_idx < hi_idx
+
+
+def test_resampling_is_paired_on_query_identity():
+    """Paired-bootstrap lock: the CI is computed over per-query deltas
+    (new − baseline per identical query id), so resampling the delta
+    indices is equivalent to resampling QUERY indices and recomputing the
+    delta per resampled query — never resampling the two arms
+    independently. Unpaired queries are dropped BEFORE resampling."""
+    qids = [f"q{i:02d}" for i in range(40)]  # zero-padded → lexicographic == numeric
+    rng = random.Random(7)
+    new = {qid: rng.random() for qid in qids}
+    baseline = {qid: rng.random() for qid in qids}
+    deltas, dropped = paired_deltas(new, baseline)
+    assert dropped == 0
+    # Direct resampling over query ids (the paired construction):
+    r1 = random.Random(1234)
+    ci = paired_bootstrap_ci(deltas, n_resamples=800, rng=r1)
+    # Recompute by resampling query ids and rebuilding (new-baseline)*100.
+    r2 = random.Random(1234)
+    n = len(qids)
+    means = []
+    for _ in range(800):
+        s = 0.0
+        for _ in range(n):
+            qid = qids[r2.randrange(n)]
+            s += (new[qid] - baseline[qid]) * 100.0
+        means.append(s / n)
+    means.sort()
+    assert ci.lower == pytest.approx(means[int(0.05 * 799)])
+    assert ci.upper == pytest.approx(means[int(0.95 * 799)])
+
+
+def test_pairing_is_by_query_id_not_position():
+    """Pairing lock: identical query sets in DIFFERENT insertion orders
+    produce the identical paired delta multiset (pairing is by query id,
+    never by list position)."""
+    qids = [f"q{i}" for i in range(12)]
+    new = {qid: i * 0.01 for i, qid in enumerate(qids)}
+    baseline = {qid: 0.05 for qid in qids}
+    d1, drop1 = paired_deltas(new, baseline)
+    # Shuffle the insertion order of BOTH arms identically — the pairing
+    # must still key on the query id.
+    shuffled = qids[3:] + qids[:3]
+    new2 = {qid: new[qid] for qid in shuffled}
+    baseline2 = {qid: baseline[qid] for qid in shuffled}
+    d2, drop2 = paired_deltas(new2, baseline2)
+    assert sorted(d1) == sorted(d2)
+    assert drop1 == drop2 == 0
+    rng1, rng2 = random.Random(3), random.Random(3)
+    assert (paired_bootstrap_ci(d1, rng=rng1)
+            == paired_bootstrap_ci(d2, rng=rng2))
+
+
 def test_ci_empty():
     ci = paired_bootstrap_ci([])
     assert ci == ConfidenceInterval(0.0, 0.0, 0.0, 0)
