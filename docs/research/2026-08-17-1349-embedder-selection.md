@@ -31,7 +31,7 @@ ownedBy: epistemic-team
 
 ## Axis 2 — Architecture (medium)
 
-- **FalkorDB vector index:** `CREATE VECTOR INDEX ... OPTIONS {dimension, similarityFunction:'cosine'|'euclidean', M, efConstruction, efRuntime}`; dims 1–4096; DROP VECTOR INDEX + recreate for rebuild; dimension change NOT in-place — full re-embed + recreate required; index is per (label, attribute) — tortoise has per-label indexes (Point/Event/Document/Source/Object/Subject), so a swap = per-label drop+recreate + full re-embed. Sources: docs.falkordb.com vector-index, mem0 blog.
+- **FalkorDB vector index:** `CREATE VECTOR INDEX ... OPTIONS {dimension, similarityFunction:'cosine'|'euclidean', M, efConstruction, efRuntime}`; dims 1–4096; DROP VECTOR INDEX + recreate for rebuild; dimension change NOT in-place — full re-embed + recreate required. **Tortoise creates exactly ONE vector index: Point.embedding, 384-dim hardcoded** (verified: `projection/__init__.py:1365` `createNodeIndex('Point','embedding',384,'HNSW')` + `:1381` `CREATE VECTOR INDEX FOR (p:Point) ON (p.embedding)`); Event/Document/Source/Object/Subject get scalar property indexes only. A swap = single drop+recreate + full Point re-embed. Sources: docs.falkordb.com vector-index, mem0 blog.
 - **Threshold calibration:** no universal cosine cutoff — sweep against a labeled near-dup/paraphrase/related/unrelated pair set per model; bands overlap across models (true paraphrases as low as 0.564, unrelated as high as 0.755); thresholds NOT portable — re-score tortoise's own labeled set under the new embedder. Sources: mixpeek calibration guide, clawrxiv 2604.01081, arXiv 2601.16907.
 
 ## Axis 3 — Hosted-vs-local embedding UX (user CRITICAL)
@@ -42,7 +42,7 @@ ownedBy: epistemic-team
 
 ## Synthesis
 
-For hosted Tortoise the precedent is unambiguous: **embeddings should be server-side (baked model)** — mem0/Zep/LangMem all run embedding inside the service stack; customer-local embedding is the self-hosted story. Baked model class = small encoder; benchmark candidates: all-MiniLM-L6-v2 (control), bge-small-en-v1.5, arctic-embed-xs, arctic-embed-s, nomic-embed-text-v1.5, **+ Qwen3-Embedding-0.6B**. NVIDIA Llama-3.2 fine-tunes are the GPU/API-tier upgrade path later. Swap gated on re-scored evidence (BEIR-contaminated, cosine bands non-portable), not published numbers.
+For hosted Tortoise the precedent is unambiguous: **embeddings should be server-side (baked model)** — mem0/Zep/LangMem all run embedding inside the service stack; customer-local embedding is the self-hosted story. Baked model class = small encoder; **the 384-dim CPU benchmark pool (pre-registered) is exactly: all-MiniLM-L6-v2 (control), snowflake-arctic-embed-xs, snowflake-arctic-embed-s, bge-small-en-v1.5** (all sentence-transformers-loadable within the `>=3,<6` pin). **nomic-embed-text-v1.5 (768-dim, trust_remote_code) and Qwen3-Embedding-0.6B (1024-native/MRL-768, ~1.2GB) are the dimension-coordination upgrade path — NOT benchmark candidates** (they collide with the #265 encrypted tier's 384-dim pin + 2GB VM budget). NVIDIA Llama-3.2 fine-tunes are the GPU/API-tier upgrade path later. Swap gated on re-scored evidence (BEIR-contaminated, cosine bands non-portable), not published numbers.
 
 ## Raw Notes
 
