@@ -123,6 +123,7 @@ surfaces:
   - test_falkordb_compat.py
   - test_file_indexer.py
   - test_flip_gate.py
+  - test_frontmatter_validator.py
   - test_gate_b_tooling.py
   - test_graph_diagnostics.py
   - test_guard.py

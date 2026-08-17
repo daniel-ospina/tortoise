@@ -8018,6 +8018,17 @@ class TortoiseSDK:
                 except Exception:
                     pass  # fallback to empty dict
 
+            # Optional frontmatter-metadata validation (#1362) — warn-only,
+            # gated by TORTOISE_VALIDATE_FRONTMATTER=1 (default OFF). The
+            # tolerant parse above is UNCHANGED ({} on malformed still
+            # degrades); this only reports missing/malformed required fields.
+            from .frontmatter_validator import validate_and_warn
+            validate_and_warn(
+                frontmatter,
+                kind="session" if eventKind == "AgentSession" else "document",
+                context=f"ingest_corpus:{rel_path}",
+            )
+
             # #330: content identity hash shared by both modes (hashlib is
             # module-imported). byte-identical re-ingest -> skipped.
             file_hash = hashlib.sha256(text.encode()).hexdigest()
@@ -11715,6 +11726,13 @@ class TortoiseSDK:
             extract_keywords_from_frontmatter as _kw_fallback,
             extract_metadata as _extract,
         )
+        # Optional frontmatter-metadata validation (#1362) — warn-only, gated
+        # by TORTOISE_VALIDATE_FRONTMATTER=1 (default OFF). Metadata-write
+        # logic below is UNCHANGED — this only reports missing/malformed
+        # required session-template fields.
+        from .frontmatter_validator import validate_and_warn
+        validate_and_warn(frontmatter, kind="session",
+                          context=f"session {session_id}")
         proj = self._get_proj()
         now = datetime.now(timezone.utc).isoformat()
         if extract_metadata:
@@ -11874,6 +11892,13 @@ class TortoiseSDK:
         WHITELIST (cycle-7/8): doc handled set only — title/documentKind/domain/
         doc_status/topics; everything else DROPPED (authoredBy never persisted;
         date/startedAt whitelisted-but-dropped → sourceDate falls to ingestedAt)."""
+        # Optional frontmatter-metadata validation (#1362) — warn-only, gated
+        # by TORTOISE_VALIDATE_FRONTMATTER=1 (default OFF). The write logic
+        # below is UNCHANGED — this only reports missing/malformed required
+        # document-template fields on the #900 index path.
+        from .frontmatter_validator import validate_and_warn
+        validate_and_warn(frontmatter, kind="document",
+                          context=f"_doc_write:{abs_path}")
         proj = self._get_proj()
         doc_kind = (str(frontmatter.get("type") or frontmatter.get("documentKind")
                         or frontmatter.get("document_kind") or ""))

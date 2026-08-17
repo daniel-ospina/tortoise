@@ -3380,6 +3380,18 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     _check_team_limit(team, "sessions")
     sdk = _make_sdk(namespace=team["team_id"])
     proj = sdk._get_proj()
+    # Optional frontmatter-metadata validation (#1362) — warn-only, gated by
+    # TORTOISE_VALIDATE_FRONTMATTER=1 (default OFF). The SessionRequest is a
+    # payload (no frontmatter block), so the shape validator runs over a
+    # SYNTHETIC dict carrying the expected-metadata surface it CAN provide:
+    # an explicit session_id and a non-empty conversation. Never blocks the
+    # capture.
+    from .frontmatter_validator import validate_and_warn
+    validate_and_warn(
+        {"session_id": body.session_id, "conversation": body.conversation},
+        kind="capture",
+        context="capture_session",
+    )
     session_id = body.session_id or f"session_{uuid.uuid4().hex[:12]}"
     now = datetime.now(timezone.utc).isoformat()
 
