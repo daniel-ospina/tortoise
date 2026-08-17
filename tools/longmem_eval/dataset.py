@@ -77,6 +77,10 @@ def _download(url: str, dest: Path, *, timeout: int = 120) -> Path:
     """
     print(f"[longmem_eval] downloading {url} …", file=sys.stderr)
     req = urllib.request.Request(url, headers={"User-Agent": "tortoise-longmem-eval"})
+    # #1360: a fresh cache dir (first run — default ~/.cache/tortoise-longmemeval
+    # doesn't pre-exist) must be auto-created; without this the .part write below
+    # crashes with FileNotFoundError.
+    dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(dest.name + ".part")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:

@@ -439,6 +439,40 @@ def test_download_is_atomic_and_validated(monkeypatch, tmp_path):
     assert not dest.with_name(dest.name + ".part").exists()
 
 
+def test_download_creates_missing_cache_dir(monkeypatch, tmp_path):
+    """#1360: a fresh (non-existent) cache dir must be auto-created — first-
+    run downloads previously crashed with FileNotFoundError writing the .part."""
+    from tools.longmem_eval import dataset as ds
+    import urllib.request
+
+    class _FakeResp:
+        def __init__(self):
+            self._payload = b'[{"question_id": "mini_x"}]'
+
+        def read(self, n):
+            data, self._payload = self._payload[:n], self._payload[n:]
+            return data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda req, timeout=120: _FakeResp())
+
+    # Parent chain does NOT exist (fresh cache on first run).
+    dest = tmp_path / "fresh" / "nested" / "cache" / ds.SPLIT_FILES["s"]
+    ds._download("https://example.invalid/x.json", dest)
+
+    assert dest.is_file()
+    assert json.loads(dest.read_text(encoding="utf-8")) == [
+        {"question_id": "mini_x"}]
+    # No .part residue
+    assert not dest.with_name(dest.name + ".part").exists()
+
+
 def test_corrupt_cache_is_not_served(monkeypatch, tmp_path):
     """A corrupt cached file must raise (or re-download), never be served."""
     from tools.longmem_eval import dataset as ds

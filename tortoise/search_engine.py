@@ -334,15 +334,28 @@ def run_fts_query(
 def run_vector_query(
     graph, query_vec: list[float], limit: int = 20, timeout_ms: int = 500,
     is_embedded: bool = True, entity_type: str = "point",
+    vector_index_api: str | None = None,
 ) -> list[tuple[str, float]]:
     """Run vector similarity search via FalkorDB vector index.
 
     query_vec must be a 384-dim embedding matching the index dimension.
 
     In Docker/server mode (is_embedded=False), uses the HNSW vector index
-    via CALL db.idx.vector.queryNodes. Falls back to brute-force
-    vec.euclideanDistance if the index is unavailable (embedded mode,
-    old FalkorDB, or index creation failed).
+    via CALL db.idx.vector.queryNodes — with both known argument orders
+    (#1359): signature A (label, attr, vec, k) for the RediSearch-style
+    repo-pinned docker image, signature B (label, attr, k, vecf32(vec))
+    for Cypher-native engines (falkordblite 0.10.0's bundled module).
+    Falls back to brute-force vec.euclideanDistance if the index is
+    unavailable (embedded mode, old FalkorDB, or index creation failed).
+
+    vector_index_api: 'procedure' | 'cypher' | None — the API that
+    succeeded at index-creation time, recorded on the projection as
+    FalkorProjection._vector_index_api (#1359). When 'cypher', the
+    signature-B form is attempted FIRST (an engine that created the index
+    via `CREATE VECTOR INDEX` rejects signature A — skipping it saves a
+    failed round trip per query). 'procedure' or None keeps the historical
+    behavior: signature A first, retry B on signature failure. Brute-force
+    remains the fallback in all cases.
 
     entity_type: 'point' (default), 'event', 'subject', 'document', 'object',
     'source', or 'operator'. The vector index is queried against the label
@@ -385,21 +398,79 @@ def run_vector_query(
             vec_status_filter = ""
         try:
             start = time.monotonic()
-            cypher = (
-                f"CALL db.idx.vector.queryNodes('{label}', 'embedding', $query_vec, $limit) "
-                "YIELD node "
-                + vec_status_filter +
-                f"RETURN node.{id_field} "
-                "LIMIT $limit"
-            )
-            rows = graph.query(
-                cypher, params={"query_vec": query_vec, "limit": limit}, timeout=timeout_ms
-            ).result_set
+
+            def _sig_cypher(sig: str) -> str:
+                if sig == "B":
+                    # Docs form: k first, vecf32-wrapped query — verified on
+                    # falkordblite 0.10.0's bundled module ("Invalid arguments
+                    # for procedure" on A, works on B).
+                    return (
+                        f"CALL db.idx.vector.queryNodes('{label}', 'embedding', $limit, vecf32($query_vec)) "
+                        "YIELD node, score "
+                        + vec_status_filter +
+                        f"RETURN node.{id_field}, score "
+                        "LIMIT $limit"
+                    )
+                # Signature A (RediSearch-style): repo-pinned docker image
+                # falkordb/falkordb-server:v4.16.7.
+                return (
+                    f"CALL db.idx.vector.queryNodes('{label}', 'embedding', $query_vec, $limit) "
+                    "YIELD node "
+                    + vec_status_filter +
+                    f"RETURN node.{id_field} "
+                    "LIMIT $limit"
+                )
+
+            def _query_nodes(sig: str):
+                return graph.query(
+                    _sig_cypher(sig),
+                    params={"query_vec": query_vec, "limit": limit},
+                    timeout=timeout_ms,
+                ).result_set
+
+            def _signature_failure(msg: str) -> bool:
+                return (
+                    "invalid arguments" in msg
+                    or "not registered" in msg
+                    or "type mismatch" in msg
+                    or "unknown procedure" in msg
+                )
+
+            # #1359: `queryNodes` argument order varies by engine version.
+            # The projection records which API succeeded at index-creation
+            # time (FalkorProjection._vector_index_api, threaded in by the
+            # caller): 'cypher' engines go straight to signature B, skipping
+            # the guaranteed-failing sig-A attempt (one failed round trip
+            # saved per query); 'procedure' engines and unrecorded (None)
+            # keep sig A first. A signature failure on the preferred form
+            # retries the other; anything else falls through to brute-force.
+            preferred = "B" if vector_index_api == "cypher" else "A"
+            fallback = "A" if preferred == "B" else "B"
+            try:
+                rows = _query_nodes(preferred)
+                sig = preferred
+            except Exception as e:
+                if not _signature_failure(str(e).lower()):
+                    raise  # non-signature failure → brute-force below
+                rows = _query_nodes(fallback)
+                sig = fallback
             elapsed = (time.monotonic() - start) * 1000
             if elapsed > timeout_ms:
                 # #561: latency warning only — keep the rows.
                 logger.warning("Vector query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
             _breaker_record("vector", True)
+            if sig == "B":
+                # Engine-native scores: cosine similarity in (-1, 1] on
+                # similarityFunction:'cosine' indexes — clamp to [0, 1]
+                # and pass through in index rank order.
+                out = []
+                for row in rows:
+                    try:
+                        score = float(row[1])
+                    except (IndexError, TypeError, ValueError):
+                        score = 0.0
+                    out.append((row[0], max(0.0, min(1.0, score))))
+                return out
             # Index results are ranked by similarity; assign rank-based scores.
             # RRF fusion uses rank not absolute scores; single-strategy mode
             # gets reasonable descending ordering.
@@ -410,7 +481,10 @@ def run_vector_query(
             if "index" in msg or "not found" in msg or "does not exist" in msg:
                 logger.info("Vector index not available — falling back to brute-force")
             else:
-                logger.warning("Vector index query failed, falling back to brute-force: %s", e)
+                # #1359: log the fallback at debug (not warning) when the
+                # index-accelerated path merely isn't supported — brute-force
+                # is the documented degradation, not an error.
+                logger.debug("Vector index query failed, falling back to brute-force: %s", e)
             # Fall through to brute-force below — the OUTCOME is recorded by
             # whichever path finishes (success or the brute-force except), so
             # one logical query counts at most once. (#249 review P1-2)
@@ -587,6 +661,7 @@ def degradation_chain(
     is_embedded: bool = True,
     expanded_kinds=None,  # accepted for SDK compat; kind expansion is post-retrieval (sdk.py)
     elevated_timeout_ms: int | None = None,
+    vector_index_api: str | None = None,
 ) -> dict[str, list[tuple[str, float]]]:
     """Run retrieval strategies in parallel with per-strategy degradation.
 
@@ -607,6 +682,11 @@ def degradation_chain(
         deadline — so a benchmark can measure true completion without the cap
         truncating the tail. Default-off: production callers never pass it and
         behavior is byte-identical.
+
+    vector_index_api: 'procedure' | 'cypher' | None — recorded on the
+        projection at index-creation time (FalkorProjection._vector_index_api,
+        #1359); forwarded to run_vector_query so Cypher-native engines skip
+        the failing signature-A attempt.
 
     Returns:
         {strategy_name: [(id, score), ...]} — only strategies that succeeded
@@ -629,6 +709,7 @@ def degradation_chain(
             futures[executor.submit(
                 run_vector_query, graph, query_vec, limit=limit, is_embedded=is_embedded,
                 entity_type=entity_type, timeout_ms=runner_timeout,
+                vector_index_api=vector_index_api,
             )] = "vector"
 
         if strategies.get("structural"):
