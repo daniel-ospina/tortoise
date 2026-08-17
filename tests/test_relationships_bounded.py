@@ -290,6 +290,134 @@ def test_get_relationships_regression_full_content(sdk):
     assert "peer" not in entries[0], "unbounded path shape unchanged"
 
 
+# ── Task 5: dense-corpus fuzz — preservation + payload budget (#1353 D3/D4) ──
+
+import random
+from collections import defaultdict
+
+
+def test_fuzz_critical_classes_always_survive(sdk, seed=42):
+    """Oracle-based preservation fuzz on a dense random graph.
+
+    Every NAND edge, contested peer, superseded/retracted peer, mitigation and
+    CORRECTS edge reachable from a subset point MUST survive the bounded
+    decoration (critical classes are exempt from both caps, D3/D4). The oracle
+    is computed from the fixture structure + EP/status knowledge — independent
+    of the function under test.
+    """
+    rng = random.Random(seed)
+    points = [sdk.create_point("statement", f"claim {i}") for i in range(40)]
+    ids = [p["id"] for p in points]
+
+    ops_of: dict[str, set] = defaultdict(set)      # point → op ids it participates in
+    op_members: dict[str, set] = defaultdict(set)  # op id → member points
+    op_mech: dict[str, str] = {}
+    mitigated: dict[str, str] = {}                  # op id → mitigation point id
+    supersedes_out: dict[str, str] = {}             # new → old
+
+    # 6 IMPL ops, ~10 endpoints each
+    for oi in range(6):
+        src = ids[rng.randrange(len(ids))]
+        tgts = rng.sample([i for i in ids if i != src], 10)
+        op = sdk.create_operator("IMPL", src, tgts)
+        op_members[op["id"]] = {src, *tgts}
+        op_mech[op["id"]] = "IMPL"
+        for m in op_members[op["id"]]:
+            ops_of[m].add(op["id"])
+
+    # 3 NAND ops
+    for _ in range(3):
+        src = ids[rng.randrange(len(ids))]
+        tgt = rng.choice([i for i in ids if i != src])
+        op = sdk.create_operator("NAND", src, [tgt])
+        op_members[op["id"]] = {src, tgt}
+        op_mech[op["id"]] = "NAND"
+        for m in op_members[op["id"]]:
+            ops_of[m].add(op["id"])
+
+    # 4 contested peers (variance 0.05 > 0.04 via ep_* coalesce path)
+    contested: set[str] = set()
+    for _ in range(4):
+        pid = ids[rng.randrange(len(ids))]
+        _set_ep(sdk, pid, 2, 2)
+        contested.add(pid)
+
+    # 3 superseded peers
+    superseded: set[str] = set()
+    for _ in range(3):
+        pid = ids[rng.randrange(len(ids))]
+        _set_status(sdk, pid, "superseded")
+        superseded.add(pid)
+
+    # 2 mitigated operators
+    for _ in range(2):
+        src = ids[rng.randrange(len(ids))]
+        tgt = rng.choice([i for i in ids if i != src])
+        op = sdk.create_operator("IMPL", src, [tgt])
+        op_members[op["id"]] = {src, tgt}
+        op_mech[op["id"]] = "IMPL"
+        m = sdk.create_point("mitigation", "weakened by missing evidence")
+        _graph(sdk).query(
+            "MATCH (op:Point {id:$o}), (m:Point {id:$m}) "
+            "CREATE (m)-[:IMPL]->(op), (op)-[:mitigated_by]->(m)",
+            params={"o": op["id"], "m": m["id"]},
+        )
+        mitigated[op["id"]] = m["id"]
+        for mm in op_members[op["id"]]:
+            ops_of[mm].add(op["id"])
+
+    # CORRECTS chain — supersede_point marks `old` superseded AND transfers
+    # old's operator edges to `new` (documented write-path behavior). The oracle
+    # mirrors the transfer so its membership matches the graph.
+    old, new = ids[0], ids[1]
+    sdk.supersede_point(old, new)
+    supersedes_out[new] = old
+    superseded.add(old)
+    for op in list(ops_of[old]):
+        op_members[op].discard(old)
+        op_members[op].add(new)
+        ops_of[new].add(op)
+    ops_of[old] = set()
+
+    # Oracle per point: expected critical entries as a MULTISET of
+    # {(mechanism, related_id)} — the function emits one entry per (point, op,
+    # other), so a peer reachable via several ops counts several times.
+    def expected_criticals(x: str) -> list:
+        exp = []
+        for op in ops_of[x]:
+            for other in op_members[op]:
+                if other == x:
+                    continue
+                if op_mech[op] == "NAND" or other in contested or other in superseded:
+                    exp.append((op_mech[op], other))
+            if op in mitigated:
+                exp.append(("mitigated_by", mitigated[op]))
+        if x in supersedes_out:
+            exp.append(("CORRECTS", supersedes_out[x]))
+        if x == old:
+            exp.append(("CORRECTS", new))
+        return exp
+
+    # 10 random subset trials
+    for trial in range(10):
+        subset = rng.sample(ids, rng.randint(5, 25))
+        out = get_relationships_bounded(_graph(sdk), subset)
+        total_peer_entries = 0
+        total_expected_criticals = 0
+        for x in subset:
+            exp = expected_criticals(x)
+            total_expected_criticals += len(exp)
+            entries = out.get(x, [])
+            present = {(e["mechanism"], e["related_id"]) for e in entries if "related_id" in e}
+            missing = set(exp) - present
+            assert not missing, f"trial {trial}: point {x} lost critical edges: {missing}"
+            total_peer_entries += len([e for e in entries if "peer" in e])
+        # payload budget: support-mass capped at 140; criticals always counted on top
+        assert total_peer_entries <= 140 + total_expected_criticals, (
+            f"trial {trial}: budget blown {total_peer_entries} > 140 + {total_expected_criticals}"
+        )
+
+
 # ── Task 2: fetch_point_epistemic_state + SearchResult promoted fields ───
 
 from tortoise.search_engine import fetch_point_epistemic_state, SearchResult, SearchScores
