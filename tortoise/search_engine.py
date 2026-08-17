@@ -182,6 +182,11 @@ class SearchResult:
     session_id: str = ""
     event_id: str = ""
     source_path: str = ""  # #167: file path for agent to open/search
+    # #1353 promoted epistemic state (D8) — first-class, absent when unknown:
+    status: str = ""  # live / superseded / deprecated / retracted / draft
+    superseded_by: dict | None = None  # {id, content_snippet, created_at} | None
+    supersedes: list[dict] = field(default_factory=list)  # [{id, content_snippet, created_at}]
+    subject: dict | None = None  # {id, name, kind} | None — ≤1 hop, fail-closed (D10)
 
     def to_dict(self) -> dict:
         """Convert to JSON-safe dict for API responses."""
@@ -207,6 +212,15 @@ class SearchResult:
             d["scores"] = asdict(self.scores)
         if self.ep and self.ep.evidence is not None:
             d["ep"] = asdict(self.ep)
+        # #1353 promoted state — additive keys, emitted only when known (#1353 D8)
+        if self.status:
+            d["status"] = self.status
+        if self.superseded_by:
+            d["superseded_by"] = self.superseded_by
+        if self.supersedes:
+            d["supersedes"] = self.supersedes
+        if self.subject:
+            d["subject"] = self.subject
         return d
 
 
@@ -1153,6 +1167,79 @@ def get_relationships_bounded(
         logger.warning("Bounded relationship query failed", exc_info=True)
 
     return rels
+
+
+def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
+    """Fetch promoted epistemic state for a batch of Points (#1353 D8/D10).
+
+    Returns {pid: {status, superseded_by, supersedes, subject}} where:
+      status         — n.status (live/superseded/deprecated/retracted/draft)
+      superseded_by  — {id, content_snippet, created_at} of the newest superseding
+                       claim (incoming CORRECTS) or None
+      supersedes     — [{id, content_snippet, created_at}] of replaced claims
+                       (outgoing CORRECTS)
+      subject        — {id, name, kind} from the point's OWN aboutSubject edge, or
+                       (fallback) its event's aboutSubject edge — ≤1 hop only.
+                       NEVER derived through operator chains (fail-closed, D10):
+                       absent = honestly unknown, never wrong-via-chain.
+
+    Chained OPTIONAL MATCHes can cartesian — deduped in Python. Rows are small
+    (per-point CORRECTS/subject counts are low-volume).
+    """
+    if not point_ids:
+        return {}
+
+    out: dict[str, dict] = {}
+    try:
+        rows = graph.query(
+            "MATCH (n:Point) WHERE n.id IN $ids "
+            "OPTIONAL MATCH (n)-[:aboutSubject]->(s:Subject) "
+            "OPTIONAL MATCH (n)-[:aboutEvent]->(ev:Event)-[:aboutSubject]->(es:Subject) "
+            "OPTIONAL MATCH (n)-[r:CORRECTS]->(old:Point) "
+            "OPTIONAL MATCH (new:Point)-[r2:CORRECTS]->(n) "
+            "RETURN n.id, n.status, "
+            "  old.id, old.content, old.createdAt, "
+            "  new.id, new.content, new.createdAt, "
+            "  s.id, s.name, s.subjectKind, "
+            "  es.id, es.name, es.subjectKind",
+            params={"ids": point_ids},
+        ).result_set
+
+        for row in rows:
+            pid = row[0]
+            st = out.setdefault(pid, {
+                "status": row[1] or "",
+                "superseded_by": None,
+                "supersedes": [],
+                "subject": None,
+            })
+            old_id, old_content, old_created = row[2], row[3], row[4]
+            new_id, new_content, new_created = row[5], row[6], row[7]
+            if old_id:
+                st["supersedes"].append({
+                    "id": old_id,
+                    "content_snippet": (old_content or "")[:120],
+                    "created_at": old_created,
+                })
+            if new_id:
+                cand = {
+                    "id": new_id,
+                    "content_snippet": (new_content or "")[:120],
+                    "created_at": new_created,
+                }
+                if st["superseded_by"] is None or (new_created or "") > (st["superseded_by"]["created_at"] or ""):
+                    st["superseded_by"] = cand
+            # Subject: own aboutSubject wins; event's is the ≤1-hop fallback.
+            s_id, s_name, s_kind = row[8], row[9], row[10]
+            es_id, es_name, es_kind = row[11], row[12], row[13]
+            if st["subject"] is None and s_id:
+                st["subject"] = {"id": s_id, "name": s_name or "", "kind": s_kind or ""}
+            elif st["subject"] is None and es_id:
+                st["subject"] = {"id": es_id, "name": es_name or "", "kind": es_kind or ""}
+    except Exception:
+        logger.warning("Epistemic-state fetch failed", exc_info=True)
+
+    return out
 
 
 # ── TF-IDF fallback (in-memory, from embeddings.py) ─────────────────────────

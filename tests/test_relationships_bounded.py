@@ -288,3 +288,93 @@ def test_get_relationships_regression_full_content(sdk):
     assert "related_content" in entries[0]
     assert "beta claim" in entries[0]["related_content"]
     assert "peer" not in entries[0], "unbounded path shape unchanged"
+
+
+# ── Task 2: fetch_point_epistemic_state + SearchResult promoted fields ───
+
+from tortoise.search_engine import fetch_point_epistemic_state, SearchResult, SearchScores
+
+
+def test_fetch_state_basic(sdk):
+    p = _point(sdk, content="plain claim")
+    state = fetch_point_epistemic_state(_graph(sdk), [p["id"]])[p["id"]]
+    assert set(state) == {"status", "superseded_by", "supersedes", "subject"}
+    assert state["subject"] is None
+    assert state["superseded_by"] is None
+    assert state["supersedes"] == []
+
+
+def test_fetch_state_subject_direct(sdk):
+    p = _point(sdk, content="claim about the team")
+    subj = sdk.create_subject("Epistemic Team", subjectKind="team")
+    sdk._get_proj().create_about_edge(p["id"], subj["id"], "aboutSubject")
+
+    state = fetch_point_epistemic_state(_graph(sdk), [p["id"]])[p["id"]]
+    assert state["subject"] == {"id": subj["id"], "name": "Epistemic Team", "kind": "team"}
+
+
+def test_fetch_state_subject_via_event(sdk):
+    """Point's event's aboutSubject resolves (≤1 hop via aboutEvent)."""
+    p = _point(sdk, content="claim from a session")
+    subj = sdk.create_subject("Daniel", subjectKind="legalPerson")
+    ev = sdk.create_event("session discussion", eventKind="humanApproval")
+    sdk._get_proj().create_about_edge(ev["id"], subj["id"], "aboutSubject")
+    sdk._get_proj().create_about_edge(p["id"], ev["id"], "aboutEvent")
+
+    state = fetch_point_epistemic_state(_graph(sdk), [p["id"]])[p["id"]]
+    assert state["subject"] == {"id": subj["id"], "name": "Daniel", "kind": "legalPerson"}
+
+
+def test_fetch_state_subject_chain_not_resolved(sdk):
+    """Subject reachable only via operator 2-hop → None (fail-closed, D10)."""
+    p = _point(sdk, content="fact about something")
+    other = _point(sdk, content="the actual subject claim")
+    subj = sdk.create_subject("Wrong Subject", subjectKind="other")
+    sdk._get_proj().create_about_edge(other["id"], subj["id"], "aboutSubject")
+    sdk.create_operator("IMPL", p["id"], [other["id"]])
+
+    state = fetch_point_epistemic_state(_graph(sdk), [p["id"]])[p["id"]]
+    assert state["subject"] is None, "chain-derived subject must NOT resolve (fail-closed)"
+
+
+def test_fetch_state_superseded_by(sdk):
+    old = _point(sdk, content="old claim that is now wrong")
+    new = _point(sdk, content="replacement claim with the truth")
+    sdk.supersede_point(old["id"], new["id"])
+
+    state = fetch_point_epistemic_state(_graph(sdk), [old["id"]])[old["id"]]
+    assert state["status"] == "superseded"
+    assert state["superseded_by"] is not None
+    assert state["superseded_by"]["id"] == new["id"]
+    assert "replacement claim" in state["superseded_by"]["content_snippet"]
+
+
+def test_fetch_state_supersedes(sdk):
+    old = _point(sdk, content="old claim")
+    new = _point(sdk, content="new claim")
+    sdk.supersede_point(old["id"], new["id"])
+
+    state = fetch_point_epistemic_state(_graph(sdk), [new["id"]])[new["id"]]
+    assert any(s["id"] == old["id"] for s in state["supersedes"])
+
+
+def test_searchresult_to_dict_additive(sdk):
+    """Promoted fields emitted when set, absent when not — additive contract."""
+    plain = SearchResult(id="p1", content="c", point_kind="statement", scores=SearchScores(rrf=0.01))
+    d = plain.to_dict()
+    assert "status" not in d and "superseded_by" not in d and "subject" not in d
+
+    decorated = SearchResult(
+        id="p2", content="c", point_kind="statement", scores=SearchScores(rrf=0.01),
+        status="superseded",
+        superseded_by={"id": "new-1", "content_snippet": "replacement", "created_at": "x"},
+        supersedes=[{"id": "old-1", "content_snippet": "old", "created_at": "y"}],
+        subject={"id": "s-1", "name": "Team", "kind": "team"},
+    )
+    d2 = decorated.to_dict()
+    assert d2["status"] == "superseded"
+    assert d2["superseded_by"]["id"] == "new-1"
+    assert d2["supersedes"][0]["id"] == "old-1"
+    assert d2["subject"]["name"] == "Team"
+    # legacy keys still present
+    assert d2["id"] == "p2" and d2["similarity"] == 0.01
