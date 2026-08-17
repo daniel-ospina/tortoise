@@ -588,6 +588,73 @@ class TestRunVectorQuery:
         assert "CALL db.idx.vector.queryNodes" in graph.query_calls[0][0]
         assert "vec.euclideanDistance" in graph.query_calls[1][0]
 
+    # ── #1359: dual queryNodes signatures ────────────────────────────
+
+    def test_docker_mode_signature_a_fails_signature_b_succeeds(self):
+        """#1359: queryNodes arg order varies by engine — sig A
+        (label, attr, vec, k) fails with 'Invalid arguments' on
+        Cypher-native engines → retry sig B (label, attr, k, vecf32(vec))
+        which returns engine-native (node, score) rows."""
+        graph = MultiCallGraph([
+            (None, Exception(
+                "Invalid arguments for procedure 'db.idx.vector.queryNodes'")),
+            ([("a", 0.95), ("b", 0.8)], None),
+        ])
+
+        result = run_vector_query(graph, self.QUERY_VEC, limit=10, is_embedded=False)
+
+        assert result == [("a", 0.95), ("b", 0.8)]
+        assert len(graph.query_calls) == 2
+        sig_b = graph.query_calls[1][0]
+        assert "YIELD node, score" in sig_b
+        assert "vecf32($query_vec)" in sig_b
+        assert "vec.euclideanDistance" not in sig_b
+
+    def test_docker_mode_signature_b_scores_clamped_to_non_negative(self):
+        """#1359: engine-native cosine scores outside [0, 1] are clamped
+        so RRF/single-strategy ordering stays sane."""
+        graph = MultiCallGraph([
+            (None, Exception("Type mismatch: expected Integer, Float, or Null but was List")),
+            ([("a", 1.4), ("b", -0.2)], None),
+        ])
+
+        result = run_vector_query(graph, self.QUERY_VEC, limit=10, is_embedded=False)
+
+        assert result == [("a", 1.0), ("b", 0.0)]
+
+    def test_docker_mode_both_signatures_fail_falls_back_to_brute_force(self):
+        """#1359: sig A 'not registered' AND sig B fails → brute-force is
+        the guaranteed-correct safety net."""
+        graph = MultiCallGraph([
+            (None, Exception(
+                "Procedure `db.idx.vector.queryNodes` is not registered")),
+            (None, Exception("vector index does not exist for label Point")),
+            ([("c", 0.85)], None),
+        ])
+
+        result = run_vector_query(graph, self.QUERY_VEC, limit=10, is_embedded=False)
+
+        assert result == [("c", 0.85)]
+        assert len(graph.query_calls) == 3
+        assert "vec.euclideanDistance" in graph.query_calls[2][0]
+
+    def test_docker_mode_unknown_procedure_retries_signature_b(self):
+        """#1359: 'not registered' on sig A triggers the sig B retry, not a
+        straight brute-force detour."""
+        graph = MultiCallGraph([
+            (None, Exception(
+                "Procedure `db.idx.vector.queryNodes` is not registered")),
+            ([("evt-1", 0.9)], None),
+        ])
+
+        result = run_vector_query(
+            graph, self.QUERY_VEC, entity_type="event", is_embedded=False)
+
+        assert result == [("evt-1", 0.9)]
+        assert len(graph.query_calls) == 2
+        assert "queryNodes('Event'," in graph.query_calls[0][0]
+        assert "queryNodes('Event'," in graph.query_calls[1][0]
+
     def test_docker_mode_generic_error_falls_back_to_brute_force(self):
         """HNSW fails with generic error → brute-force fallback."""
         graph = MultiCallGraph([

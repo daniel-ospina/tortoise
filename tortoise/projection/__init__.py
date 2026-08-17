@@ -387,8 +387,18 @@ class FalkorProjection(
                 '.'.join(map(str, self._falkordb_version)))
         elif self._falkordb_version is None:
             import logging
-            logging.getLogger(__name__).warning(
-                "Could not determine FalkorDB version. FTS and vector indexes may fail.")
+            # #1359: a None version is NOT a failure — index creation probes
+            # the engine directly (procedure vs Cypher-native fallback) and
+            # embedded/older engines skip FTS/vector gracefully. Downgraded
+            # from warning → info so a working engine doesn't spam.
+            logging.getLogger(__name__).info(
+                "Could not determine FalkorDB version — index creation will "
+                "probe the engine's API directly.")
+        # #1359: which vector-index API succeeded at _ensure_indexes time
+        # ('procedure' | 'cypher' | None) — cached on the projection so the
+        # query path (search_engine.run_vector_query) can prefer the
+        # engine's query surface without re-probing per call.
+        self._vector_index_api = None
         self._ensure_indexes()
 
         # Lifecycle hardening (plan Task 4 + issue #1005):
@@ -948,33 +958,81 @@ class FalkorProjection(
             raise RuntimeError(msg)
 
     def _get_falkordb_version(self):
-        """Parse FalkorDB version from db.info().
+        """Parse FalkorDB version from db.info() or raw-connection probes.
+
+        Issue #1359: the installed ``falkordb`` python client's ``FalkorDB``
+        class has NO ``.info()`` method (``hasattr → False``), so version
+        detection must fall back to server-level probes that every engine
+        answers. Tried in order:
+          1. ``db.info()`` — older clients that expose it.
+          2. ``MODULE LIST`` via the raw redis connection — returns the
+             graph module as ``['name', 'graph', 'ver', NNNNN, ...]``
+             where NNNNN = major*10000 + minor*100 + patch (verified on
+             falkordblite 0.10.0's bundled module: 41803 → 4.18.3).
+          3. ``INFO server`` via the raw connection — dict (newer redis
+             clients) or string; carries a ``falkordb_version`` key on
+             engines that publish it.
 
         Returns (major, minor, patch) tuple or None if undetermined.
         """
         import re
+        info_strs: list[str] = []
+
+        # 1. db.info() — not present on the current falkordb client; guard anyway.
         try:
             info = self.db.info()
-        except Exception:
-            return None
-
-        info_str = info if isinstance(info, str) else str(info)
-
-        # Module format: module:name=falkordb,ver=40000 (4.0.0)
-        m = re.search(r'module:name=(?:falkordb|graph),ver=(\d+)', info_str, re.IGNORECASE)
-        if m:
-            v = int(m.group(1))
-            return (v // 10000, (v // 100) % 100, v % 100)
-
-        # Server section: falkordb_version:4.0
-        try:
-            server = self.db.info('server')
-            server_str = server if isinstance(server, str) else str(server)
-            m = re.search(r'falkordb_version:(\d+)\.(\d+)', server_str)
-            if m:
-                return (int(m.group(1)), int(m.group(2)), 0)
+            info_strs.append(info if isinstance(info, str) else str(info))
         except Exception:
             pass
+
+        # 2+3. Raw connection probes (MODULE LIST / INFO server).
+        conn = getattr(self.db, "connection", None)
+        if conn is not None:
+            try:
+                modules = conn.execute_command("MODULE", "LIST")
+                # [['name', 'graph', 'ver', 41803, 'path', ..., 'args', []]]
+                for mod in modules or []:
+                    try:
+                        if (
+                            mod[0] == "name"
+                            and str(mod[1]).lower() in ("graph", "falkordb")
+                            and mod[2] == "ver"
+                        ):
+                            v = int(mod[3])
+                            return (v // 10000, (v // 100) % 100, v % 100)
+                    except (IndexError, TypeError, ValueError):
+                        continue
+            except Exception:
+                pass
+            try:
+                server = conn.execute_command("INFO", "server")
+                if isinstance(server, dict):
+                    for key, val in server.items():
+                        if "falkordb_version" in str(key).lower():
+                            m = re.search(
+                                r"(\d+)\.(\d+)(?:\.(\d+))?", str(val))
+                            if m:
+                                return (int(m.group(1)), int(m.group(2)),
+                                        int(m.group(3) or 0))
+                else:
+                    info_strs.append(server if isinstance(server, str)
+                                     else str(server))
+            except Exception:
+                pass
+
+        # Regex over any collected info strings.
+        for info_str in info_strs:
+            # Module format: module:name=falkordb,ver=40000 (4.0.0)
+            m = re.search(
+                r'module:name=(?:falkordb|graph),ver=(\d+)',
+                info_str, re.IGNORECASE)
+            if m:
+                v = int(m.group(1))
+                return (v // 10000, (v // 100) % 100, v % 100)
+            # Server section: falkordb_version:4.0
+            m = re.search(r'falkordb_version:(\d+)\.(\d+)', info_str)
+            if m:
+                return (int(m.group(1)), int(m.group(2)), 0)
 
         return None
 
@@ -1238,19 +1296,43 @@ class FalkorProjection(
             # ── Vector index (HNSW) — Docker/server FalkorDB only (#7764) ──
             # Embedded mode (redislite) uses brute-force vec.euclideanDistance instead.
             # HNSW requires RediSearch module, not bundled with redislite.
+            # #1359: the engine's index API varies by version — try the
+            # RediSearch-style procedure first, fall back to the Cypher-native
+            # form on engines that don't register it (verified: falkordblite
+            # 0.10.0's bundled module exposes `CREATE VECTOR INDEX ... OPTIONS`
+            # but NOT `db.idx.vector.createNodeIndex`). Record which API
+            # succeeded on self._vector_index_api for the query path.
             if not getattr(self, '_is_embedded', False):
                 try:
                     self.g.query(
                         "CALL db.idx.vector.createNodeIndex('Point', 'embedding', 384, 'HNSW')"
                     )
+                    self._vector_index_api = 'procedure'
                 except Exception as e:
                     msg = str(e).lower()
                     if "already" in msg:
-                        pass
+                        # Index already exists (prior startup). Assume the
+                        # procedure API — it either created it or the engine
+                        # is procedure-capable (docker/server image v4.16.7).
+                        self._vector_index_api = 'procedure'
                     else:
-                        import logging
-                        logging.getLogger(__name__).warning(
-                            "Failed to create vector index on Point.embedding: %s", e)
+                        # Unknown procedure / not registered / invalid args →
+                        # Cypher-native form (the modern falkordb client's own
+                        # create_node_vector_index emits exactly this).
+                        try:
+                            self.g.query(
+                                "CREATE VECTOR INDEX FOR (p:Point) ON (p.embedding) "
+                                "OPTIONS {dimension: 384, similarityFunction: 'cosine'}"
+                            )
+                            self._vector_index_api = 'cypher'
+                        except Exception as e2:
+                            msg2 = str(e2).lower()
+                            if "already" in msg2:
+                                self._vector_index_api = 'cypher'
+                            else:
+                                import logging
+                                logging.getLogger(__name__).warning(
+                                    "Failed to create vector index on Point.embedding: %s", e2)
         else:
             import logging
             logging.getLogger(__name__).info(

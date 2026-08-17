@@ -340,9 +340,12 @@ def run_vector_query(
     query_vec must be a 384-dim embedding matching the index dimension.
 
     In Docker/server mode (is_embedded=False), uses the HNSW vector index
-    via CALL db.idx.vector.queryNodes. Falls back to brute-force
-    vec.euclideanDistance if the index is unavailable (embedded mode,
-    old FalkorDB, or index creation failed).
+    via CALL db.idx.vector.queryNodes — with both known argument orders
+    (#1359): signature A (label, attr, vec, k) for the RediSearch-style
+    repo-pinned docker image, signature B (label, attr, k, vecf32(vec))
+    for Cypher-native engines (falkordblite 0.10.0's bundled module).
+    Falls back to brute-force vec.euclideanDistance if the index is
+    unavailable (embedded mode, old FalkorDB, or index creation failed).
 
     entity_type: 'point' (default), 'event', 'subject', 'document', 'object',
     'source', or 'operator'. The vector index is queried against the label
@@ -385,6 +388,15 @@ def run_vector_query(
             vec_status_filter = ""
         try:
             start = time.monotonic()
+            # #1359: `queryNodes` argument order varies by engine version.
+            #   Signature A — (label, attr, query_vec, k): repo-pinned docker
+            #   image falkordb/falkordb-server:v4.16.7 (RediSearch-style).
+            #   Signature B — (label, attr, k, vecf32(query_vec)): the docs
+            #   form; verified on falkordblite 0.10.0's bundled module
+            #   ("Invalid arguments for procedure" on A, works on B).
+            # Try A first (preserves existing behavior on the pinned image),
+            # retry with B on procedure-signature failures, else fall through
+            # to brute-force.
             cypher = (
                 f"CALL db.idx.vector.queryNodes('{label}', 'embedding', $query_vec, $limit) "
                 "YIELD node "
@@ -392,9 +404,48 @@ def run_vector_query(
                 f"RETURN node.{id_field} "
                 "LIMIT $limit"
             )
-            rows = graph.query(
-                cypher, params={"query_vec": query_vec, "limit": limit}, timeout=timeout_ms
-            ).result_set
+            try:
+                rows = graph.query(
+                    cypher, params={"query_vec": query_vec, "limit": limit}, timeout=timeout_ms
+                ).result_set
+            except Exception as e:
+                msg = str(e).lower()
+                if (
+                    "invalid arguments" in msg
+                    or "not registered" in msg
+                    or "type mismatch" in msg
+                    or "unknown procedure" in msg
+                ):
+                    # Signature B (docs form: k first, vecf32-wrapped query).
+                    cypher_b = (
+                        f"CALL db.idx.vector.queryNodes('{label}', 'embedding', $limit, vecf32($query_vec)) "
+                        "YIELD node, score "
+                        + vec_status_filter +
+                        f"RETURN node.{id_field}, score "
+                        "LIMIT $limit"
+                    )
+                    rows = graph.query(
+                        cypher_b, params={"query_vec": query_vec, "limit": limit},
+                        timeout=timeout_ms,
+                    ).result_set
+                    elapsed = (time.monotonic() - start) * 1000
+                    if elapsed > timeout_ms:
+                        logger.warning(
+                            "Vector query exceeded timeout: %.0fms > %dms",
+                            elapsed, timeout_ms)
+                    _breaker_record("vector", True)
+                    # Engine-native scores: cosine similarity in (-1, 1] on
+                    # similarityFunction:'cosine' indexes — clamp to [0, 1]
+                    # and pass through in index rank order.
+                    out = []
+                    for row in rows:
+                        try:
+                            score = float(row[1])
+                        except (IndexError, TypeError, ValueError):
+                            score = 0.0
+                        out.append((row[0], max(0.0, min(1.0, score))))
+                    return out
+                raise  # non-signature failure → brute-force below
             elapsed = (time.monotonic() - start) * 1000
             if elapsed > timeout_ms:
                 # #561: latency warning only — keep the rows.
@@ -410,7 +461,10 @@ def run_vector_query(
             if "index" in msg or "not found" in msg or "does not exist" in msg:
                 logger.info("Vector index not available — falling back to brute-force")
             else:
-                logger.warning("Vector index query failed, falling back to brute-force: %s", e)
+                # #1359: log the fallback at debug (not warning) when the
+                # index-accelerated path merely isn't supported — brute-force
+                # is the documented degradation, not an error.
+                logger.debug("Vector index query failed, falling back to brute-force: %s", e)
             # Fall through to brute-force below — the OUTCOME is recorded by
             # whichever path finishes (success or the brute-force except), so
             # one logical query counts at most once. (#249 review P1-2)
