@@ -316,11 +316,13 @@ def _tfidf_snapshot(graph) -> list[dict]:
 
 # ── Per-query metrics ───────────────────────────────────────────────────────
 
-def _run_oracle_query(q: dict, ctx: dict, oracle) -> dict:
-    """One oracle query → per-strategy ranked ids + metrics vs oracle labels.
+def _run_oracle_query(q: dict, ctx: dict, oracle) -> tuple[dict, dict, dict]:
+    """One oracle query → (ranked, metrics, k_metrics).
 
     #1348: metrics computed on each strategy's top-`limit` (k-capped by
     compute_metrics); fused_rerank mirrors production fuse→truncate→rerank.
+    k_metrics is the fused@{20,60,100} dict when k_sweep is on, else {} — kept
+    SEPARATE from per_query so per_query stays strategy-keyed (P2-E fix).
     """
     stub = None
     if ctx.get("stub_projection") and ctx.get("graph_ranker_arm"):
@@ -423,13 +425,15 @@ def _aggregate_with_ci(per_query, strategy, rng) -> dict:
 def _paired_vs_fused(per_query, rng, strategies=("fts", "vector", "structural", "tfidf")) -> dict:
     """Paired 90% CIs on (fused − strategy) deltas, in points (×100).
 
-    #1348: strategies set is the ACTIVE list (threaded from ctx) so fused_rerank
-    is included when the arm is ON — the paired fused_rerank−fused verdict CI.
+    #1348: fused_rerank is EXCLUDED here — it is not an isolation arm (it is a
+    rerank OF fused) and its comparison lives in rerank_verdict (second-model
+    gate ISSUE-2: including it doubled the fused_rerank−fused comparison with
+    the OPPOSITE sign).
     """
     out = {}
     for strat in strategies:
-        if strat == "fused" or not any(qid in per_query and strat in per_query[qid]
-                                      for qid in per_query):
+        if strat in ("fused", RERANK_STRATEGY) or not any(
+                qid in per_query and strat in per_query[qid] for qid in per_query):
             continue
         entry = {}
         for metric in ("ndcg@10", "p@5"):
@@ -808,8 +812,10 @@ def _run_with_sdk(args, sdk) -> dict:
             "(production order sdk.py:8851->9004); corpus-variant enhanced "
             "seeds topic-correlated EP (n.confidence + edges, no new nodes); "
             "oracle-proxy = query-conditioned positive control (stub "
-            "projection, graph_boost_weight=1.0); enhanced-conf-only = "
-            "confidence-only ablation (use_degree=False).",
+            "projection, graph_boost_weight=1.0); enhanced-conf-only is a "
+            "RANKER-LEVEL ablation (corpus identical to enhanced; the ranker "
+            "neutralizes the degree term via use_degree=False so the boost is "
+            "confidence-only).",
         ],
     }
     return report
@@ -872,9 +878,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--corpus-variant", default="plain",
                    choices=("plain", "enhanced", "enhanced-conf-only"),
                    help="#1348 corpus EP structure: plain (baseline-identical), "
-                        "enhanced (topic-correlated confidence + edges), "
-                        "enhanced-conf-only (confidence only — ablation). "
-                        "oracle-proxy is a rerank-input mode via stub projection.")
+                        "enhanced (topic-correlated confidence + edges). "
+                        "enhanced-conf-only is a RANKER-level ablation: corpus is "
+                        "identical to enhanced, but the ranker neutralizes the "
+                        "degree term (use_degree=False) so the boost is "
+                        "confidence-only — the corpus itself keeps topic-"
+                        "correlated edges (see report notes).")
     p.add_argument("--stub-projection", action="store_true",
                    help="#1348 positive control: query-conditioned oracle-grade "
                         "signals via a duck-typed stub projection (MECHANISM test)")

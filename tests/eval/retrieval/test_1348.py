@@ -82,6 +82,18 @@ def test_k_reorders_two_list_top10():
     assert fused100.index("d_b") < fused100.index("d_a")
 
 
+def test_fused_rerank_stub_bool_raises():
+    """#1348 code-review P1 regression: a non-projection stub (e.g. the raw
+    argparse bool) must RAISE, never silently zero every boost (True is not
+    None → would be treated as a projection; _fetch_signals would swallow the
+    AttributeError)."""
+    fused = [("d1", 0.05), ("d2", 0.04)]
+    with pytest.raises(TypeError, match="stub_projection"):
+        _rerank_fused(fused, proj=None, stub_projection=True)
+    with pytest.raises(TypeError, match="stub_projection"):
+        _rerank_fused(fused, proj=None, stub_projection="not-a-projection")
+
+
 def test_k_single_list_is_k_invariant():
     """A single ranked list is order-invariant under k (k is a monotone
     score transform) — the degeneracy that IS real for 1-strategy fusion."""
@@ -104,25 +116,31 @@ def test_fused_rerank_tuple_to_dict_adapter():
 
 def test_fused_rerank_use_degree_ablation():
     """use_degree=False neutralizes the degree term — graph_boost becomes
-    confidence-only (the confidence-only ablation arm, #1348)."""
-    class FakeProj:
-        class _G:
-            def query(self, cypher, params=None):
-                ids = (params or {}).get("ids") or []
-                # Row shape [pid, conf, degree, created, alpha, beta, has_ep].
-                rows = [[pid, 0.9, 0, None, 1.0, 1.0, False] for pid in ids]
-                return _Rows(rows)
-        g = _G()
+    confidence-only (the confidence-only ablation arm, #1348). Tests
+    graph_boost DIRECTLY (the production code path the flag changes) with
+    NON-ZERO degree so the two paths genuinely diverge (second-model gate
+    ISSUE-1: the prior full-rerank test used degree=0 → connectivity 0 in
+    both paths → vacuous; similarity weight also masked the effect)."""
+    from tortoise.ranking import GraphRanker
 
-    class _Rows:
-        def __init__(self, rows):
-            self.result_set = rows
+    # d1: high connectivity (degree 9), moderate confidence (0.5).
+    # d2: no connectivity (degree 0), high confidence (0.9).
+    sig1 = {"confidence": 0.5, "degree": 9}
+    sig2 = {"confidence": 0.9, "degree": 0}
 
-    fused = [("d1", 0.05), ("d2", 0.01)]  # d2 much lower similarity
-    # With use_degree=False and high confidence on both, similarity still
-    # dominates via the 0.5 weight — but confidence (0.9) boosts both equally.
-    reranked = _rerank_fused(fused, proj=FakeProj(), use_degree=False)
-    assert [pid for pid, _ in reranked] == ["d1", "d2"]  # similarity order kept
+    g_on = GraphRanker(None, use_degree=True)
+    g_off = GraphRanker(None, use_degree=False)
+    b1_on = g_on.graph_boost({}, sig1)   # 0.5*0.5 + 0.5*(1-1/10) = 0.70
+    b2_on = g_on.graph_boost({}, sig2)   # 0.5*0.9 + 0.5*0       = 0.45
+    b1_off = g_off.graph_boost({}, sig1)  # 0.5 (confidence only)
+    b2_off = g_off.graph_boost({}, sig2)  # 0.9 (confidence only)
+
+    # use_degree=True: connectivity lifts d1 above d2 (0.70 > 0.45).
+    assert b1_on > b2_on
+    # use_degree=False: degree neutralized — d2's higher confidence wins.
+    assert b2_off > b1_off
+    # Same signals, different flag → different boost (non-vacuous).
+    assert b1_on != b1_off and b2_on != b2_off
 
 
 def test_stub_projection_positive_control_seam():

@@ -169,6 +169,14 @@ def test_sdk_fts_query_pool_size_invalid(sdk=None):
         sdk.tortoise_fts_query("quantum", limit=5, pool_size=0)
     with pytest.raises(ValueError, match="pool_size"):
         sdk.tortoise_fts_query("quantum", limit=5, pool_size=-3)
+    # #1348 upper bound (code-review P2): 1-10000 inclusive, any mode.
+    with pytest.raises(ValueError, match="pool_size"):
+        sdk.tortoise_fts_query("quantum", limit=5, pool_size=10001)
+    # Boundary: 10000 is valid.
+    sdk.tortoise_fts_query("quantum", limit=5, pool_size=10000)
+    # Full-scan mode also validates (no silent ignore).
+    with pytest.raises(ValueError, match="pool_size"):
+        sdk.tortoise_fts_query(kind="statement", pool_size=0)
 
 
 def test_sdk_fts_query_pool_size_exact_override(sdk=None):

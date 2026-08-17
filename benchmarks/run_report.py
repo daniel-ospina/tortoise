@@ -592,6 +592,12 @@ def _run_with_sdk(args, sdk) -> dict:
             pass
         pool_floor = max(1, min(pool_floor, 10000))  # keep in sync with sdk.py
     arm_limit = getattr(args, "depth", None) or max(e2e_limit * 2, pool_floor)
+    # #1348 pre-flight: arm_limit must be within the SDK pool_size validation
+    # bound (1..10000) or the e2e arm fails per-sample mid-run. Fail EARLY.
+    if not (1 <= arm_limit <= 10000):
+        raise SystemExit(
+            f"--depth/arm_limit must be 1-10000 (got {arm_limit}) — "
+            "matches the sdk.py pool_size validation bound (#1348)")
     ctx = {
         "graph": proj.g,
         "is_embedded": is_embedded,
@@ -664,7 +670,11 @@ def _run_with_sdk(args, sdk) -> dict:
                 _print_e2e_row(censored, elevated)
         else:
             c0 = time.perf_counter()
-            sdk.tortoise_fts_query(query=picks[0].get("query"), kind=picks[0].get("kind"), limit=10)
+            # #1348: cold-start e2e at the same retrieval depth as the measured
+            # arms (pool_size=arm_limit) so the cold figure is not desynced.
+            sdk.tortoise_fts_query(
+                query=picks[0].get("query"), kind=picks[0].get("kind"), limit=10,
+                pool_size=arm_limit)
             cold_start["e2e"] = (time.perf_counter() - c0) * 1000
 
             censored = _run_column("e2e", e2e_fn, picks, CAP_MS, args,
