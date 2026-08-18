@@ -63,6 +63,15 @@ EXTRACTION_APPROACH = (
     "future option)"
 )
 
+EXTRACTION_APPROACH_V2 = (
+    "v2 extractor ingestion (#1369): the production 5-stage pipeline "
+    "(extractor_v2.extract_session_v2 — S1 story chunked+compiled, S2 "
+    "map-to-embed, S3 real-backend search, S4 gap review, S5 deterministic "
+    "embed) per haystack session; payload written as entities/events/points/"
+    "operators; raw verbatim transcripts retained; evidence-bearing points "
+    "marked has_answer by content overlap (>=0.4)"
+)
+
 
 def _parse_ks(raw: str) -> tuple[int, ...]:
     return tuple(sorted({int(x.strip()) for x in raw.split(",") if x.strip()}))
@@ -132,6 +141,8 @@ def run_evaluation(
     split: str = ds.DEFAULT_SPLIT,
     checkpoint: str | None = None,
     max_retries: int = DEFAULT_MAX_RETRIES,
+    ingest_mode: str = "deterministic",
+    extractor_model=None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Run the full per-question pipeline over ``instances``.
 
@@ -168,7 +179,12 @@ def run_evaluation(
             with tempfile.TemporaryDirectory(dir=work_dir, prefix="lme-") as td:
                 sdk = TortoiseSDK(os.path.join(td, "lme.db"))
                 try:
-                    ingest_stats = ingest_haystack(sdk, question)
+                    if ingest_mode == "v2":
+                        from .ingest_v2 import ingest_haystack_v2
+                        ingest_stats = ingest_haystack_v2(
+                            sdk, question, extractor_model)
+                    else:
+                        ingest_stats = ingest_haystack(sdk, question)
                     ret = retrieve_for_question(sdk, question, ks=ks, top_k=top_k)
 
                     t0 = time.monotonic()
@@ -231,6 +247,7 @@ def run_evaluation(
         ks=ks,
         top_k=top_k,
         split=split,
+        ingest_mode=ingest_mode,
         failures=failures,
     )
 
@@ -244,6 +261,7 @@ def outcomes_to_report(
     top_k: int,
     split: str,
     dataset_id: str = "xiaowu0162/longmemeval-cleaned",
+    ingest_mode: str = "deterministic",
     failures: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Aggregate outcomes (programmatic entry used by tests too)."""
@@ -253,7 +271,9 @@ def outcomes_to_report(
         split=split,
         reader_model=reader_model,
         judge_model=judge_model,
-        extraction_approach=EXTRACTION_APPROACH,
+        extraction_approach=(EXTRACTION_APPROACH_V2 if ingest_mode == "v2"
+                            else EXTRACTION_APPROACH),
+        ingest_mode=ingest_mode,
         ks=ks,
         top_k=top_k,
         failures=failures,
@@ -324,6 +344,15 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="context points handed to the reader (default 20)")
     p.add_argument("--mock", action="store_true",
                    help="offline mode: MockReader + MockJudge, no API keys (CI)")
+    p.add_argument("--ingest-mode", default="deterministic",
+                   choices=["deterministic", "v2"],
+                   help="ingestion: deterministic (turn points + raw transcripts) "
+                        "or v2 (the production 5-stage extractor, #1369; raw "
+                        "transcripts retained)")
+    p.add_argument("--extractor-model", default=None,
+                   help="extractor model spec for --ingest-mode v2 "
+                        "(default deepseek-flash, uncapped — the #1350 owner "
+                        "decision)")
     p.add_argument("--checkpoint", default=None,
                    help="partial-results state file (JSON) for error isolation "
                         "+ resume: completed/failed questions are checkpointed "
@@ -360,10 +389,16 @@ def run_main(argv: list[str] | None = None) -> dict[str, Any]:
     reader = build_reader(args.reader_model, mock=args.mock)
     judge = build_judge(args.judge_model, mock=args.mock)
 
+    extractor_model = None
+    if args.ingest_mode == "v2":
+        from tests.model_adapters import MODELS
+        extractor_model = MODELS["deepseek-flash"]()
+
     outcomes, report = run_evaluation(
         instances, reader=reader, judge=judge, ks=ks, top_k=top_k,
         work_dir=args.work_dir, split=args.split,
         checkpoint=args.checkpoint, max_retries=args.max_retries,
+        ingest_mode=args.ingest_mode, extractor_model=extractor_model,
     )
 
     out = args.output or str(default_report_path(args.split))

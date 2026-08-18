@@ -72,6 +72,7 @@ def build_report(
     reader_model: str,
     judge_model: str,
     extraction_approach: str,
+    ingest_mode: str = "deterministic",
     ks: tuple[int, ...],
     top_k: int,
     extra: dict[str, Any] | None = None,
@@ -164,6 +165,7 @@ def build_report(
         "methodology": {
             "reader_model": reader_model,
             "judge_model": judge_model,
+            "ingest_mode": ingest_mode,
             "judge_rule": "official LongMemEval get_anscheck_prompt; "
                           "label = 'yes' in response.lower()",
             "judge_call_shape": "official evaluate_qa.py: messages=[user], "
