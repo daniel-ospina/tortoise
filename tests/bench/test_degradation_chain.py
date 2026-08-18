@@ -37,17 +37,19 @@ def test_elevated_timeout_collects_more_than_censored(monkeypatch):
     under elevated_timeout_ms=5000 — proving the override actually elevates
     the measurement window (more strategies → more collected rows)."""
 
-    def slow_fts(graph, query, entity_type="point", limit=20, timeout_ms=500):
+    def slow_fts(graph, query, entity_type="point", limit=20, timeout_ms=500,
+                 excluded_statuses=None):
         time.sleep(0.6)
         return [("p1", 1.0)]
 
     def slow_vector(graph, query_vec, limit=20, timeout_ms=500,
                     is_embedded=True, entity_type="point",
-                    vector_index_api=None):
+                    vector_index_api=None, excluded_statuses=None):
         time.sleep(0.6)
         return [("p2", 0.9)]
 
-    def fast_structural(graph, kind, entity_type="point", limit=20, timeout_ms=500):
+    def fast_structural(graph, kind, entity_type="point", limit=20, timeout_ms=500,
+                        excluded_statuses=None):
         return [("p3", 0.5)]
 
     monkeypatch.setattr("tortoise.search_engine.run_fts_query", slow_fts)
@@ -80,12 +82,14 @@ def test_elevated_timeout_is_default_off(monkeypatch):
     set completes fully under the default 500ms cap."""
     monkeypatch.setattr(
         "tortoise.search_engine.run_fts_query",
-        lambda graph, query, entity_type="point", limit=20, timeout_ms=500: [("p1", 1.0)],
+        lambda graph, query, entity_type="point", limit=20, timeout_ms=500,
+               excluded_statuses=None: [("p1", 1.0)],
     )
     monkeypatch.setattr(
         "tortoise.search_engine.run_vector_query",
         lambda graph, query_vec, limit=20, timeout_ms=500, is_embedded=True,
-        entity_type="point", vector_index_api=None: [("p2", 0.9)],
+        entity_type="point", vector_index_api=None,
+        excluded_statuses=None: [("p2", 0.9)],
     )
     strategies = {"fts": True, "vector": True}
 
