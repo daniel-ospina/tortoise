@@ -73,6 +73,22 @@ class Dreamer:
     def __init__(self, sdk):
         self._sdk = sdk
         self._lock = threading.Lock()
+        # #1163 (multi-process EP): per-pass observability for the SDK
+        # adapters — _last_flush_skipped = the EP stale-run guard fired (a
+        # concurrent write advanced the epoch mid-run → the pass's flush and
+        # the dirty-root sweep must stand down); _last_run_ep_version = the
+        # epoch snapshot the pass started from (the sweep only clears graph
+        # flags stamped at or before it — never a newer process's marking).
+        self._last_flush_skipped: bool = False
+        self._last_run_ep_version: int = 0
+
+    def _snapshot_ep_epoch(self) -> None:
+        """Capture the graph's current EP epoch as this pass's world-view."""
+        self._last_flush_skipped = False
+        try:
+            self._last_run_ep_version = self._sdk._ep_epoch()
+        except Exception:  # noqa: BLE001 — best-effort, 0 never clears flags
+            self._last_run_ep_version = 0
 
     # ── Incremental ────────────────────────────────────────────────
 
@@ -123,6 +139,7 @@ class Dreamer:
             self._last_operator_count = 0
             return {"iterations": 0, "converged": True, "affected_claims": []}
         with self._lock:
+            self._snapshot_ep_epoch()
             proj = self._sdk._get_proj()
             from .analyze import _bfs_select_operators
             operator_ids, factor_anchors = _bfs_select_operators(
@@ -205,6 +222,15 @@ class Dreamer:
             evidence=dict(self._sdk._evidence),
             warm_start=warm_start,
         )
+        # #1163 (multi-process EP): the EP stale-run guard fired (a
+        # concurrent write advanced the epoch mid-run) — this run's computed
+        # values are stale. Stand the confidence write-back + stamping down
+        # (a stale pass must not write confidence or move freshness) and
+        # surface the flag for the SDK adapters (they must NOT sweep the
+        # dirty roots either — the newer write's markings stay).
+        self._last_flush_skipped = bool(getattr(ep, "_flush_skipped", False))
+        if self._last_flush_skipped:
+            return iterations, converged, set(ep._last_affected)
         # Epic 903-C4 (#1242): DE2E-6b cost metric — the censored-update
         # counter is recorded per run (surfaced by the SDK adapters for the
         # 903-C7 health surface; never gated on wall-clock).
@@ -307,6 +333,7 @@ class Dreamer:
                     "converged_all": True, "operators_deduped": 0,
                     "budget_used": 0, "affected_claims": []}
         with self._lock:
+            self._snapshot_ep_epoch()
             proj = self._sdk._get_proj()
             from .analyze import (_bfs_select_operators,
                                   _stale_first_claims,
@@ -473,6 +500,7 @@ class Dreamer:
         across the pass's chunks (accumulated pre-truncation).
         """
         from .exceptions import BudgetExceededError
+        self._snapshot_ep_epoch()
         proj = self._sdk._get_proj()
         rows = proj.g.query(
             "MATCH (n:Point) WHERE n.is_operator = false "

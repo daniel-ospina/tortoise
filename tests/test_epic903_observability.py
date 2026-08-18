@@ -48,10 +48,17 @@ class TestAlarm:
             f.sdk.close()
 
     def test_no_false_positive_on_healthy_idle(self):
-        """No backlog, no pass → no alarm (healthy idle)."""
+        """No backlog, no pass → no alarm (healthy idle).
+
+        #1163: dirty state is graph-persisted — "no backlog" means clearing
+        the graph flags too (the in-memory set alone rehydrates on the next
+        health check).
+        """
         f = f1_corpus()
         try:
             f.sdk._dirty_roots.clear()
+            f.sdk._get_proj().g.query(
+                "MATCH (n:Point) SET n.ep_dirty = null, n.ep_dirty_at = null")
             f.sdk._dream_metrics["last_pass_output"] = 0
             f.sdk._dream_metrics["last_pass_at"] = None
             h = f.sdk.dream_health_check()

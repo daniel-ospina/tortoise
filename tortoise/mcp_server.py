@@ -1105,9 +1105,15 @@ def tortoise_compute_confidence(factors: Any = None,
     # the no-arg path would silently return {} where today it runs whole-
     # graph EP (the #7288 timeout surface). Transport-aware branch lives in
     # the handler (precedent: _transport_mode checks at mcp_server.py:962).
+    # #1163: the graph is now the dirty-state source of truth — hydrate the
+    # request-scoped SDK's persisted dirty roots; the diagnostic only fires
+    # when the graph is TRULY clean (no persisted dirty state).
     if _transport_mode.get() == "http" and factors is None and anchors is None:
-        return {"iterations": 0, "converged": True, "confidences": {},
-                "diagnostic": "no_dirty_state_http"}
+        sdk = _get_team_sdk()
+        sdk._hydrate_dirty_roots()
+        if not sdk._dirty_roots:
+            return {"iterations": 0, "converged": True, "confidences": {},
+                    "diagnostic": "no_dirty_state_http"}
     # anchors + max_hops=None over HTTP → clamp to a deterministic bounded
     # default (max_hops=None now means full connected subgraph — unbounded
     # BFS on a multi-tenant hosted surface is not acceptable).

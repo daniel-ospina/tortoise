@@ -81,10 +81,17 @@ class TestAutoSelection:
     """I1 rule 3 auto-select branches."""
 
     def test_small_graph_auto_selects_full(self):
-        """No dirty roots + small graph (< threshold) → full (J3)."""
+        """No dirty roots + small graph (< threshold) → full (J3).
+
+        #1163: dirty state is graph-persisted — "no dirty roots" means
+        clearing the graph flags too (the in-memory set alone is just the
+        hot-path mirror and rehydrates on the next dream).
+        """
         f = f1_corpus()  # F1 is below the 50-operator threshold
         try:
             f.sdk._dirty_roots.clear()
+            f.sdk._get_proj().g.query(
+                "MATCH (n:Point) SET n.ep_dirty = null, n.ep_dirty_at = null")
             random.seed(FIXED_SEED)
             r = f.sdk.dream()
             assert r["mode"] == "full"
