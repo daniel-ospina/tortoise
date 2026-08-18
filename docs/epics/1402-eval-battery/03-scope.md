@@ -29,8 +29,8 @@ extends: 01-align.md (decision), 02-research-brief.md (research), docs/agent-rea
 2. **Tier-1 reasoning probes (R1–R5)** — five single-session probes with pre-registered rubrics + calibrated thresholds: contradiction surfacing, adversarial coverage, epistemic calibration (Brier), defeat conditions, belief-update responsiveness.
 3. **Judge validation gate** — per-rubric LLM-judge validation before any scoring (AB+BA position-bias tests, chance-corrected reliability, IRT diagnosis, stress tests per brief §UX), plus the kappa/min-signal tooling already in `tools/`.
 4. **Tier-2 longitudinal streams (L1–L6)** — interdependent-task stream (MemoryArena-style), SEA-Eval sequential stream with pseudo-evolution gate (⚠️ provisional, single-source), reasoning-quality trajectory waves, cross-session contradiction accumulation, decision-drift resistance, distillation fidelity.
-5. **Tier-3 differential sweep** — five arms (A0 no-memory, A1 long-context stuffing, A2 Mem0, A2b **Zep/Graphiti**, A3 recall-RAG, A4 Tortoise) × same battery, matched-recall protocol (ex-ante top-K factual F1 K=5, symmetric trigger, INCONCLUSIVE branch).
-6. **Benchmark parity leg** — LongMemEval, LoCoMo, MemoryArena, MemoryAgentBench per arm via existing #1144 infra + released runners (mem0ai harness, MemoryAgentBench repo); staleness/drift probes (ForgetEval-class) added to Tier-3.
+5. **Tier-3 differential sweep** — six arms (A0 no-memory, A1 long-context stuffing, A2 Mem0, A2b **Zep/Graphiti**, A3 recall-RAG, A4 Tortoise) × same battery, matched-recall protocol (ex-ante top-K factual F1 K=5, symmetric trigger, INCONCLUSIVE branch).
+6. **Benchmark parity leg** — LongMemEval, LoCoMo, MemoryArena, MemoryAgentBench per arm via existing #1144 infra + released runners (mem0ai harness, MemoryAgentBench repo); **staleness/drift probes (ForgetEval-class) added to Tier-3**.
 7. **Verdict report + claim doc** — full differentiation profile (all metrics × all arms, STRONG/STRUCTURAL/PARITY/WEAK classification with load-bearing flags), verdict outcome (UNIQUE / MECHANISM-NOT-UNIQUE / WEAK-UNMITIGATED / INCONCLUSIVE), per-weakness mitigation paths, re-run loop, artifacts-changed list; filed to docs/.
 8. **Threshold calibration run** — [cal] thresholds re-locked on the real engine per epistemic-layer §1/§8.3 discipline (calibration mode prints, never silently re-tunes).
 9. **Weakness-mitigation re-run loop** — for each load-bearing WEAK with a mitigation path, the battery is re-runnable after mitigation so "improve enough that weaknesses are not serious" is measured, not asserted.
@@ -81,7 +81,7 @@ The cut is **claim-gated**: everything needed to produce a falsifiable verdict o
 **And:** the pseudo-evolution gate fires (flat tokens while graph grows = FAIL, ⚠️ provisional label)
 
 ### E2E-3: Differential sweep renders the differentiation profile
-**Given:** five arms (A0/A1/A2/A2b/A3/A4) and the matched-recall protocol (top-K factual F1 K=5, symmetric trigger)
+**Given:** six arms (A0/A1/A2/A2b/A3/A4) and the matched-recall protocol (top-K factual F1 K=5, symmetric trigger)
 **When:** recall is matched ex-ante and the same battery runs on every arm
 **Then:** every probe (R1–R5, L1–L6, D2–D4) is scored for all arms with no exclusions
 **And:** each metric is classified STRONG/STRUCTURAL/PARITY/WEAK with a load-bearing flag, and the verdict outcome (UNIQUE / MECHANISM-NOT-UNIQUE / WEAK-UNMITIGATED / INCONCLUSIVE) is produced per the pre-committed rule (≥1 true differentiator AND no serious weakness)
@@ -118,3 +118,27 @@ The cut is **claim-gated**: everything needed to produce a falsifiable verdict o
 **Complexity:** UX low · Architecture high · Ontology low · Accessibility low.
 
 Review the scope boundaries, customer value map, and E2E test cases. Reply "proceed" to continue to detailed planning, or give feedback.
+
+---
+
+## Integration Surface Map (Test-Design Gate — full map, referenced by all child issues)
+
+| # | Surface | Type | Data Flow | Test Layer | Contract | Key Failure Modes |
+|---|---------|------|-----------|-----------|----------|-------------------|
+| S1 | Tortoise SDK write path (`create_point`, `create_operator`, `mitigate_operator`, `supersede_point`, `set_point_baseline`, `commit_session`) | DB (FalkorDB / FalkorDBLite) | Write | Integration (hermetic + Docker tiers per epistemic-layer §0) | SDK signatures + ONTOLOGY point/operator semantics; T0–T4 credibility tiers | dedup collisions; operator direction (unidirectional NAND); calibration gate blocking; EP non-convergence on loopy graphs |
+| S2 | Tortoise read/EP surface (`compute_confidence`, `get_confidence`, `get_contested_claims`, `traverse`) | DB (FalkorDB / FalkorDBLite) | Read | Integration + property tests (epistemic-layer P1–P10) | Beta posterior shape: mean + variance; contested threshold var > 0.04 | non-convergence papered over; inverted NAND behavior (P0); stale belief after supersession |
+| S3 | Agent LLM runtime (the model under test across all arms) | External service | Bidirectional | Integration (real API, pinned model/temp/seed) | chat-completions request/response; temperature 0; same model across arms | rate limits; nondeterminism; **silent fallback returning cached/empty output — must be recorded, not silent (corrupts the battery)** |
+| S4 | Differential arm adapters: Mem0 API, Zep/Graphiti API, ChromaDB vector store, long-context stuffing | External service + local store | Bidirectional | Integration (real/sandbox APIs) | vendor memory API contracts (fact add/retrieve, session scoping) | vendor API drift; rate limits; **arm isolation breach — cross-arm memory contamination invalidates the differential** |
+| S5 | Released benchmark runners: LongMemEval, LoCoMo, MemoryArena (HF dataset), SEA-Eval, MemoryAgentBench | External data + code | In | Integration (pinned dataset versions) | dataset schema: conversations/tasks/gold answers; judge contracts | dataset version drift; judge contract changes; gold-answer leakage into reader |
+| S6 | LLM-as-judge rubric surface (scoring R2/R3/L3 rubrics) | External service | In | Integration + validation gate (AB+BA position bias, chance-corrected reliability, IRT, stress tests) | rubric JSON output schema; pre-registered anchors | position bias; verbosity bias; label flips; low reliability on task/tool rubrics (2606.29920) — **unvalidated rubrics must not score** |
+| S7 | Run artifacts / telemetry (JSON reports, trajectory logs, seeds) | State / filesystem | Write | Unit (schema validation) + integration (re-run reproducibility) | report schema; pinned seeds recorded per run | partial writes; seed drift; threshold drift without [cal] re-lock |
+| S8 | Harness config: scenario corpus, thresholds, arms, budgets | Config | In | Unit (schema) | scenario JSON schema; [cal] threshold table; cost budget guard | threshold tuning post-hoc (Goodhart); corpus leakage across waves |
+
+### Bug Pattern Flags
+- **Silent function skips (critical):** any LLM error path (rate limit, timeout) that falls back to a cached/empty result would poison the battery's deltas — every episode must record model-call outcomes; cached/fallback episodes are flagged, not silently included. Required verification: episode trace shows the real model call.
+- **Race conditions:** parallel arm runs must not share memory state — arm isolation is enforced at the harness level (per-arm DB/namespace) and verified per run.
+- **N+1 queries:** episode loops must batch scenario setup (graph writes, corpus loads); per-scenario DB round-trips at 500–1,000 episodes are a cost/latency risk — flag with batch verification.
+- **Conditional guards:** [cal] threshold locking and the judge-validation gate are guards — both sides tested (gate passes / gate blocks scoring).
+
+### Checklist Notes
+- Failure modes to test explicitly per surface: S3 timeout/429/503 → episode flagged not silently retried; S4 arm isolation breach → contamination detection test; S6 judge drift → periodic re-validation during long streams; S1 EP non-convergence → honest UNDEC not confident number.
