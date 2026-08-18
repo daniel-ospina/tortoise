@@ -112,10 +112,22 @@ def _desc(brief: dict, key: str) -> str:
     return v.get("description", "") if isinstance(v, dict) else str(v or "")
 
 
+_MASTER_LIST_CACHE: dict | None = None
+
+
 def build_master_list() -> dict:
     """The v2 master list: compile_value_brief() kinds + the §3 additions
     (subjects, points, events, chains, memory_granularity). Section values
-    are {kind: description} dicts — rendered as readable text in prompts."""
+    are {kind: description} dicts — rendered as readable text in prompts.
+
+    Memoized (#1350 chunking finding): the packs are static per process —
+    re-reading + YAML-parsing every manifest per chunk cost 12.2s of a 14.3s
+    60-chunk run. Returns a deep copy so callers can't mutate the cache.
+    """
+    import copy
+    global _MASTER_LIST_CACHE
+    if _MASTER_LIST_CACHE is not None:
+        return copy.deepcopy(_MASTER_LIST_CACHE)
     from tortoise.value_extractor import compile_value_brief
     brief = compile_value_brief()
     objects = {k: _desc(brief, k) for k in CORE_OBJECT_KEYS}
@@ -126,7 +138,7 @@ def build_master_list() -> dict:
         if not k.startswith(PACK_NS):
             continue
         pack_kinds[k] = _desc(brief, k)
-    return {
+    master = {
         "objects": objects,
         "subjects": dict(SUBJECTS),
         "points": dict(POINTS),
@@ -136,6 +148,8 @@ def build_master_list() -> dict:
                    for name, c in CHAINS.items()},
         "memory_granularity": dict(brief.get("memory_granularity", {})),
     }
+    _MASTER_LIST_CACHE = copy.deepcopy(master)
+    return master
 
 
 def master_kind_forms(master: dict) -> set[str]:
@@ -494,6 +508,12 @@ def _derive_queries(embed_list: dict, story: str) -> dict:
         q = (q or "").strip()
         if not q:
             return
+        # #1350 D3: RediSearch treats 'word:' as a field-prefix and
+        # punctuation as syntax — sanitize derived query text so an FTS
+        # failure never kills a search leg.
+        q = re.sub(r"\b\w+:", " ", q)
+        q = re.sub(r"[^\w\s-]", " ", q)
+        q = re.sub(r"\s+", " ", q).strip()
         key = f"{entity_type}:{_norm_sent(q)}"
         if key in seen:
             return

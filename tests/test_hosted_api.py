@@ -671,7 +671,8 @@ class TestSessionCapture:
 
     # ── #490/#822: turn Points MERGE, M2 LLM Points are fresh per capture ──
 
-    def test_capture_session_no_content_dedup_across_captures(self, client):
+    def test_capture_session_no_content_dedup_across_captures(self, client, monkeypatch):
+        monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")  # M2-mock-specific
         """#490/#822: re-capturing the SAME session MERGEs turn Points but the
         M2 LLM extraction writes fresh Points per capture — content-hash
         dedup is a later pipeline stage (epic #909 W-2 #784), not part of
@@ -695,7 +696,8 @@ class TestSessionCapture:
         ).result_set
         assert r[0][0] == 3, f"expected 3 (1 turn + 2 LLM points), got {r[0][0]}"
 
-    def test_capture_session_llm_points_are_fresh_ulids(self, client):
+    def test_capture_session_llm_points_are_fresh_ulids(self, client, monkeypatch):
+        monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")  # M2-mock-specific
         """#822: M2 extraction mints a fresh ULID per LLM Point per capture —
         no deterministic-id hazard, no content-hash dedup (deferred to the
         value-first pipeline, epic #909)."""

@@ -1324,6 +1324,11 @@ class FalkorProjection(
                                   # matches surface through FTS.
                                   ("Event", ["subject", "name"]),
                                   ("Subject", ["name"]),
+                                  ("Object", ["name"]),  # #1350 S3: the
+                                  # extractor's entity search (existing items
+                                  # by name) needs the Object FTS leg —
+                                  # without it S3's entities bucket is dead
+                                  # on the real backend.
                                   ("Document", ["_searchText"])]:  # #125 Document FTS
                 try:
                     fields_sql = ", ".join(f"'{f}'" for f in fields)

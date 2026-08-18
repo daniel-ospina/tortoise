@@ -256,7 +256,7 @@ def test_default_llm_extracts_points(monkeypatch, client):
     assert r.status_code == 200, r.status_code
     body = r.json()
     assert body["extraction_mode"] == "llm"
-    assert body["extracted"] >= 2, body
+    assert body["extracted"] >= 1, body  # v2 mock emits one point
     assert all(p["kind"] == "statement" for p in body["points"])
     # Extracted Points are wired to the session (CONTAINS) — same contract as
     # the removed regex loop.
