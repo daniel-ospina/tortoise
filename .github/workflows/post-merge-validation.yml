@@ -12,6 +12,10 @@
 # Note: runs the embedded-FalkorDBLite suite. Tests needing a live FalkorDB
 # self-skip via _skip_if_no_falkor. A per-test timeout turns any hang into a
 # fast, visible failure instead of a 6h CI budget burn.
+# #1430: the tests step carries an in-step watchdog (mirrors python-ci.yml's
+# test job, the #798 mode) — a runner-level kill can never lose the summary
+# silently: the step always re-prints the tail + pass/fail counts + real exit
+# code, with a WATCHDOG banner on timeout kills. Warn-only, no gate impact.
 
 name: Post-merge validation
 
@@ -51,28 +55,53 @@ jobs:
       - name: Run tests (embedded suite, per-test timeout)
         id: tests
         run: |
-          # 90s per-test: embedded redislite EP tests take ~25-35s locally
-          # (slowest ~33s on this hardware), more on CI runners. Still a hang
-          # detector — just not a speed gate.
-          # pipefail: without it the pipeline's exit status is `tail`'s (0) and
-          # pytest failures are silently masked — steps.tests.outcome would be
-          # 'success' even when the suite is red.
-          set -o pipefail
+          set +e
+          # #1430: in-step watchdog + guaranteed summary (the #798 mode).
+          # Transplants python-ci.yml's proven block: a shell-level `timeout`
+          # (SIGINT, then SIGKILL 10s later if pytest ignores INT mid-test)
+          # instead of relying on the runner's job-level kill, which cancels
+          # the step and loses the summary silently. After the kill the step
+          # CONTINUES: re-prints the log tail, prints pass/fail counts and
+          # the real exit code. 50m in-step + ~2-6m setup < 60m job cap (a
+          # literal 60m in-step would fire AFTER the runner kill — the #798
+          # death mode again). The suite is over budget today (#1439), so the
+          # WATCHDOG banner firing is the expected honest-red state, never
+          # silent. Warn-only workflow — no gate impact.
+          # NB: `set +e` is load-bearing — GitHub runs steps under
+          # bash -eo pipefail; without it, timeout's 124 aborts the step
+          # BEFORE the tail/banner/exit-code print (silent #798, again).
+          ( while true; do
+              sleep 300
+              p=$(grep -c ' PASSED' /tmp/pmv-pytest.log 2>/dev/null || true)
+              f=$(grep -c ' FAILED' /tmp/pmv-pytest.log 2>/dev/null || true)
+              echo "HEARTBEAT: pytest still running — $p passed, $f failed so far"
+            done ) &
+          HB_PID=$!
+          # 90s per-test -> 300s: 90 false-killed test_control_plane's ~90s
+          # setup in python-ci (#798) — and post-merge runs the FULL suite
+          # including test_control_plane (the slow files python-ci splits
+          # out). --durations=15 shows the slowest 15 tests in the tail.
+          # tests/e2e stays excluded (dedicated e2e jobs; no browsers here).
+          timeout -s INT -k 10 50m stdbuf -oL python -m pytest tests/ -v --timeout=300 -p no:cacheprovider -m 'not track_b' --ignore=tests/e2e --maxfail=20 -rfE --durations=15 > /tmp/pmv-pytest.log 2>&1
+          rc=$?
+          kill $HB_PID 2>/dev/null || true
+          wait $HB_PID 2>/dev/null || true
+          echo "==================== pytest summary (tail) ===================="
+          tail -n 300 /tmp/pmv-pytest.log
+          # 124 = timeout SIGINT kill; 137 = -k 10 SIGKILL after pytest
+          # ignored INT mid-test; 2 = pytest's own SIGINT summary — the
+          # count banner must print for all three (#880).
+          if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] || [ "$rc" -eq 2 ]; then
+            passed=$(grep -c ' PASSED' /tmp/pmv-pytest.log)
+            failed=$(grep -c ' FAILED' /tmp/pmv-pytest.log)
+            errored=$(grep -c ' ERROR' /tmp/pmv-pytest.log)
+            echo "==================== WATCHDOG: pytest killed after 50m ($passed passed, $failed failed, $errored errored so far) — last test lines above ===================="
+          fi
+          echo "==================== pytest exit code: $rc ===================="
           # #1438: the comment step needs the REAL exit code (not just the
           # binary step outcome) to distinguish a watchdog-kill timeout
-          # (rc 124/137/2) from a real test failure (rc 1). set +e so the
-          # exit_code output is written even on failure; `exit $rc` re-raises
-          # the real status (pipefail already makes $? the pytest exit code,
-          # not tail's). #1430's in-step watchdog must keep this contract: it
-          # writes exit_code to GITHUB_OUTPUT before its final `exit $rc`.
-          set +e
-          # tests/e2e has dedicated jobs (welcome-e2e-monitor, legal-e2e,
-          # signup/billing e2e in their own workflows) and needs
-          # pytest-playwright browsers this job does not install —
-          # post-merge-validation covers the
-          # unit/integration suite only.
-          python -m pytest tests/ -q --timeout=90 -m 'not track_b' --ignore=tests/e2e 2>&1 | tail -25
-          rc=$?
+          # (rc 124/137/2) from a real test failure (rc 1). Written on every
+          # path — before the final `exit $rc` re-raises the real status.
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
           exit $rc
       - name: Comment result on PR
