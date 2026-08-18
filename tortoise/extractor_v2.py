@@ -335,8 +335,8 @@ def compile_stories(stories: list[str]) -> str:
 
 OUTPUT_CONTRACT = """{
   "entities": [{"name": str, "kind": str, "lifecycle": "created|changed|unchanged|superseded", "supersedes": "existing-id|null", "note": str|null}],
-  "events": [{"content": str, "eventKind": str, "about_entities": [str]}],
-  "points": [{"content": str, "pointKind": "statement", "about_entities": [str]}],
+  "events": [{"content": str, "eventKind": str, "about_entities": [str], "slots": {"subject": [{"name": str, "kind": str, "confidence": float}], "object": [{"name": str, "kind": str, "confidence": float}], "event": [{"name": str, "kind": str, "confidence": float}]}}],
+  "points": [{"content": str, "pointKind": "statement", "about_entities": [str], "slots": {"subject": [{"name": str, "kind": str, "confidence": float}], "object": [{"name": str, "kind": str, "confidence": float}], "event": [{"name": str, "kind": str, "confidence": float}]}}],
   "operators": [
     {"src": str, "dst": str, "op_type": "IMPL|NAND"},
     {"src": str, "dst": str, "op_type": "MITIGATES", "target_edge": {"src": str, "dst": str, "op_type": "IMPL"}, "strength": 0.1|0.3|0.5}
@@ -401,6 +401,22 @@ CONDENSED SEMANTIC CORE (from the how-to-use-tortoise skill)
   strip ids and numbers ("EP test migration", not "pr #1004: ep test migration";
   "the draft-filter fix", not "issue #992"). Issue/PR/commit identifiers never
   appear in entity names, event content, or point content.
+- PARTICIPANT SLOTS (typed roles, #1418): for EVERY point AND event emit
+  "slots" naming its participants BY ROLE: subject = the acting/held entity
+  the claim is about; object = the affected/targeted entity; event = an
+  EVENT this content is ABOUT (event-as-content). Each slot entry is
+  {"name", "kind", "confidence"} — name/kind from the MASTER LIST vocabulary
+  (no minted kinds; subject kinds from SUBJECTS, object kinds from OBJECTS,
+  event kinds from EVENTS), confidence ∈ [0,1] = your certainty the role is
+  right. Omit empty roles (no key or []).
+  subject/object names MUST reference an entity you emit in the entities[]
+  of THIS SAME output (unresolvable refs are dropped at execution — never
+  slot an entity you did not emit).
+  THE EVENT SLOT IS CONTENT, NEVER PROVENANCE (#1417): it names an event the
+  claim discusses ("the Aug 3 meeting"), never how this session captured it.
+  "The Aug 3 meeting concluded X" → event: [{"name": "the Aug 3 meeting",
+  "kind": "core:meeting", "confidence": 0.8}]. Do NOT slot capture/
+  process events.
 - LINK-BEFORE-CREATE: before creating ANY entity or point, search the graph for
   an existing item (same name/topic). Record each search in link_before_create
   (searched_for, found, note). No duplicates — dedup.
@@ -674,6 +690,14 @@ Rules:
   a supersession or completion.
 - A point that already exists in the graph (same content) → lifecycle
   unchanged, do NOT re-create.
+- PARTICIPANT SLOTS (typed roles, #1418): keep/correct every "slots" block
+  from S2 (subject/object/event roles, each entry {"name", "kind",
+  "confidence"}) and ADD missing slots where the search results identify
+  the participant. Kind from the MASTER LIST — no minted kinds. subject/
+  object names MUST reference an entity in the entities[] of THIS output
+  (unresolvable refs are dropped at execution). The event slot is event-as-
+  content (#1417): an event the content is ABOUT, never a provenance/
+  capture event.
 - OPERATOR REFERENCING: operator src/dst MUST be the EXACT content of a point
   or event emitted in THIS output (copy verbatim, no paraphrasing). If an
   endpoint has no point yet, CREATE the point first. NEVER use an entity name
@@ -733,6 +757,107 @@ def _token_overlap(a: str, b: str) -> float:
 def _content_id(prefix: str, content: str) -> str:
     from tortoise.ids import content_hash
     return f"{prefix}_{content_hash(content)[:62]}"
+
+
+def _clean_slots(raw, warnings: list[str], ctx: str,
+                 master: dict | None = None) -> dict | None:
+    """Sanitize LLM-emitted participant slots (#1418) into the Layer-1
+    shape {subject/object/event: [{name, kind, confidence}]}.
+
+    Deterministic and CARRY-ONLY — this never binds (threshold gating is
+    the #1370 write path's job): non-dict entries dropped, blank names/
+    kinds dropped, minted kinds repaired to the family fallback (the same
+    master_kind_forms gate S5 applies to entities/events — subject/object
+    kinds gate against the entity vocabulary, event kinds against the event
+    vocabulary), confidence coerced to float and clamped to [0,1]
+    (non-numeric → 0.0), unknown role keys and non-list role values dropped
+    with a warning. Returns None when no role survived (the payload entry
+    gets no slots).
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        warnings.append(f"{ctx}: slots must be an object — dropped")
+        return None
+    master = master or {}
+    entity_forms = master_kind_forms(master) if master else None
+    event_forms = {k.lower() for k in master.get("events", {})}
+    event_forms_bare = {k.lower().rsplit(":", 1)[-1]
+                        for k in master.get("events", {})}
+    out: dict[str, list[dict]] = {}
+    for role in ("subject", "object", "event"):
+        raw_refs = raw.get(role)
+        if raw_refs is None:
+            continue
+        if not isinstance(raw_refs, list):
+            warnings.append(f"{ctx}: slot role {role!r} must be a list — "
+                            "dropped")
+            continue
+        refs: list[dict] = []
+        for r in raw_refs:
+            if not isinstance(r, dict):
+                continue
+            name = str(r.get("name", "")).strip()
+            kind = str(r.get("kind", "")).strip()
+            if not name or not kind:
+                continue
+            if role == "event":
+                if kind.lower() not in event_forms and \
+                        kind.lower().rsplit(":", 1)[-1] not in event_forms_bare:
+                    warnings.append(f"minted slot kind {kind!r} ('{name[:60]}'"
+                                    f") → repaired to {_EVENT_FALLBACK['kind']}")
+                    kind = _EVENT_FALLBACK["kind"]
+            elif entity_forms and \
+                    kind.lower() not in entity_forms and \
+                    kind.lower().rsplit(":", 1)[-1] not in {
+                        f.lower().rsplit(":", 1)[-1] for f in entity_forms}:
+                warnings.append(f"minted slot kind {kind!r} ('{name[:60]}'"
+                                f") → repaired to {_ENTITY_FALLBACK['kind']}")
+                kind = _ENTITY_FALLBACK["kind"]
+            try:
+                conf = float(r.get("confidence"))
+            except (TypeError, ValueError):
+                conf = 0.0
+            refs.append({"name": name, "kind": kind,
+                         "confidence": min(1.0, max(0.0, conf))})
+        if refs:
+            out[role] = refs
+    for k in raw:
+        if k not in ("subject", "object", "event"):
+            warnings.append(f"{ctx}: unknown slot role {k!r} dropped")
+    return out or None
+
+
+def _resolve_slot_refs(slots: dict | None, entity_keys: set,
+                       warnings: list[str], ctx: str) -> dict | None:
+    """Filter participant slots to resolvable references (#1418, review fix).
+
+    subject/object slots must resolve to an EMITTED entity (name, bare
+    kind) — a stray slot must never sink the whole commit (the
+    operator-drop pattern; Layer-1's (name, kind) gate then never fires on
+    S5 output). event slots pass through untouched: they are event-as-
+    content (#1417 B2) and the #1370 write path resolves them against
+    events.
+    """
+    if not slots:
+        return slots
+    out: dict[str, list[dict]] = {}
+    for role, refs in slots.items():
+        if role == "event":
+            out[role] = refs
+            continue
+        kept = []
+        for r in refs:
+            if (r["name"], _norm_kind(r["kind"])) in entity_keys:
+                kept.append(r)
+            else:
+                warnings.append(
+                    f"{ctx}: slot {role} {r['name']!r} (kind {r['kind']!r}) "
+                    "does not resolve to an emitted entity — dropped "
+                    "(fail-closed: the write path binds emitted entities)")
+        if kept:
+            out[role] = kept
+    return out or None
 
 
 def _index_search(search: dict) -> dict:
@@ -1075,6 +1200,11 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # resolver validates against S3 by id/kind-filtered name — never guesses)
     supersessions = _supersession_records(entity_supersede_refs, search,
                                           warnings=warnings)
+    # the emitted-entity key set — participant slots (subject/object) must
+    # resolve against it (#1418, fail-closed; the write path binds emitted
+    # entities only)
+    emitted_entity_keys = {(e["name"], _norm_kind(e["kind"]))
+                           for e in payload_entities}
 
     # ── events (dependency order 2) ───────────────────────────────────────
     payload_events: list[dict] = []
@@ -1111,13 +1241,20 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 "searched_for": f"event '{content[:60]}'", "found": False,
                 "note": "no match — created"})
         event_ids[n] = eid
-        payload_events.append({
+        ev_entry = {
             "id": eid, "eventKind": ekind.rsplit(":", 1)[-1] if ":" in ekind else ekind,
             "content": content, "confidence": 0.5,
             "about_entities": [str(a) for a in (ev.get("about_entities") or [])
                                if isinstance(a, str) and a.strip()],
             "source_ref": "session.md",
-        })
+        }
+        ev_slots = _clean_slots(ev.get("slots"), warnings,
+                                f"event '{content[:60]}'", master)
+        ev_slots = _resolve_slot_refs(ev_slots, emitted_entity_keys, warnings,
+                                      f"event '{content[:60]}'")
+        if ev_slots:
+            ev_entry["slots"] = ev_slots
+        payload_events.append(ev_entry)
 
     # ── points (dependency order 3) ───────────────────────────────────────
     payload_points: list[dict] = []
@@ -1156,13 +1293,20 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 "searched_for": f"point '{content[:60]}'", "found": False,
                 "note": "no match — created"})
         point_ids[n] = pid
-        payload_points.append({
+        pt_entry = {
             "id": pid, "content": content, "pointKind": pkind,
             "reason": reason, "confidence": 0.5, "c_cal": 0.5,
             "about_entities": [str(a) for a in (p.get("about_entities") or [])
                                if isinstance(a, str) and a.strip()],
             "source_ref": "session.md", "quote": "", "status": "draft",
-        })
+        }
+        pt_slots = _clean_slots(p.get("slots"), warnings,
+                                f"point '{content[:60]}'", master)
+        pt_slots = _resolve_slot_refs(pt_slots, emitted_entity_keys, warnings,
+                                      f"point '{content[:60]}'")
+        if pt_slots:
+            pt_entry["slots"] = pt_slots
+        payload_points.append(pt_entry)
 
     # ── operators (dependency order 4) — TWO-PASS ─────────────────────────
     # Pass 1 emits IMPL/NAND and collects the emitted edges; pass 2 processes

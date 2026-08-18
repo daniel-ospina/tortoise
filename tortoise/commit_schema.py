@@ -210,6 +210,39 @@ class Entity(BaseModel):
     passes_frequency_gate: bool = True
 
 
+class SlotRef(BaseModel):
+    """A typed participant-slot reference (#1418, #1370 S1 contract).
+
+    D6's ``entity_id`` is the (name, kind) merge key — client payloads
+    carry no entity ids; the write path resolves/binds by (name, kind).
+    Per-slot confidence is an LLM soft score (D4: calibrated, not magic) —
+    the #1370 write path applies the threshold gates, not this schema.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1)
+    kind: str = Field(min_length=1)
+    confidence: float = Field(ge=0.0, le=1.0)
+
+
+class ParticipantSlots(BaseModel):
+    """Typed participant slots (#1418) — subject/object/event roles, same
+    schema for all three (the #1370 D2 vocabulary: no "agent";
+    ``Subject ≡ prov:Agent``).
+
+    The ``event`` slot binds CONTENT aboutness (event-as-content, #1417 B2)
+    — a claim *about* an event — never provenance. Additive-optional on
+    Point/CommitEvent so pre-#1418 payloads validate unchanged.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    subject: list[SlotRef] = Field(default_factory=list)
+    object: list[SlotRef] = Field(default_factory=list)
+    event: list[SlotRef] = Field(default_factory=list)
+
+
 class Point(BaseModel):
     """A single extracted point — content-addressed id, closed kind vocab."""
 
@@ -225,6 +258,7 @@ class Point(BaseModel):
     source_ref: str = Field(min_length=1)  # REQUIRED — resolves to a Source
     quote: str = Field(default="", max_length=200)
     status: Literal["live", "draft"] = "draft"
+    slots: ParticipantSlots | None = None  # #1418: typed participant slots
 
     @field_validator("id")
     @classmethod
@@ -340,6 +374,7 @@ class CommitEvent(BaseModel):
     about_entities: list[str] = Field(default_factory=list)
     source_ref: str = Field(min_length=1)  # REQUIRED — resolves to a Source
     captured_at: str | None = None
+    slots: ParticipantSlots | None = None  # #1418: typed participant slots
 
     @field_validator("id")
     @classmethod
@@ -525,6 +560,33 @@ def _point_key(p: Any) -> str:
     return _f(p, "id")
 
 
+def _bare_kind(k: Any) -> str:
+    """Bare + case-folded kind — the (name, kind) slot-entity matching key.
+    Entities merge by (name, kind) with namespace-preserving spelling
+    ("core:plan" vs "plan" are the same entity), so slot references match
+    against the bare form."""
+    return str(k or "").strip().rsplit(":", 1)[-1].lower()
+
+
+def _slot_role_refs(slots: Any) -> list[tuple[str, Any]]:
+    """(role, ref) pairs for the entity-role slots (subject/object).
+
+    The ``event`` slot is event-as-content (#1417 B2) — its resolution is
+    owned by the #1370 write path, never Layer-1 (a slot name like "the
+    Aug 3 meeting" is not an entity name and must not 422 on that basis).
+    Accepts ParticipantSlots models or plain dicts (the local extractor
+    mirrors payloads as dicts); non-dict refs are skipped defensively.
+    """
+    if not slots:
+        return []
+    if isinstance(slots, dict):
+        get = lambda role: slots.get(role) or []  # noqa: E731
+    else:
+        get = lambda role: getattr(slots, role) or []  # noqa: E731
+    return [(role, ref) for role in ("subject", "object") for ref in get(role)
+            if _f(ref, "name", "")]
+
+
 def _f(obj: Any, name: str, default: Any = None) -> Any:
     """Read a field off a Pydantic model or a plain dict."""
     if isinstance(obj, dict):
@@ -572,6 +634,10 @@ def validate_layer1(
     emitted_point_ids = {p.id for p in payload.points}
     emitted_event_ids = {e.id for e in payload.events}  # A1b (#1272): events are valid operator endpoints
     entity_names = {e.name for e in payload.entities}
+    # (name, kind) keys — the D6 merge key for typed-slot resolution (#1418):
+    # a slot must match the emitted entity's (name, bare kind), not just the
+    # name ("core:plan" ≡ "plan" via _bare_kind)
+    entity_keys = {(e.name, _bare_kind(e.kind)) for e in payload.entities}
     # The session Source identity = provenance path basename (privacy: paths
     # are basename-only; the server derives the Session Source url from it).
     session_source_ids = {Path(r.path).name for r in payload.provenance_refs}
@@ -594,6 +660,12 @@ def validate_layer1(
             if name not in entity_names:
                 add(f"events[{i}].about_entities",
                     f"entity {name!r} not in the emitted entities[]")
+        for role, ref in _slot_role_refs(ev.slots):
+            if (_f(ref, "name"), _bare_kind(_f(ref, "kind"))) not in entity_keys:
+                add(f"events[{i}].slots.{role}",
+                    f"slot {role} {_f(ref, 'name')!r} (kind "
+                    f"{_f(ref, 'kind')!r}) does not resolve to an emitted "
+                    "(name, kind) entity")
         if not ev.source_ref:
             add(f"events[{i}].source_ref", "source_ref is REQUIRED (R4)")
 
@@ -615,6 +687,12 @@ def validate_layer1(
         if unknown:
             add(f"points[{i}].about_entities",
                 f"about_entities reference unknown entities: {unknown}")
+        for role, ref in _slot_role_refs(pt.slots):
+            if (_f(ref, "name"), _bare_kind(_f(ref, "kind"))) not in entity_keys:
+                add(f"points[{i}].slots.{role}",
+                    f"slot {role} {_f(ref, 'name')!r} (kind "
+                    f"{_f(ref, 'kind')!r}) does not resolve to an emitted "
+                    "(name, kind) entity")
         if pt.source_ref not in session_source_ids and \
                 pt.source_ref not in source_urls:
             add(f"points[{i}].source_ref",
@@ -826,6 +904,56 @@ def _op_canonical(o: Any) -> dict:
     return out
 
 
+def _slots_canonical(slots: Any) -> list[dict] | None:
+    """Canonical slot form — sorted {role, name, kind} triples with per-slot
+    confidence EXCLUDED (LLM artifact — same rule as confidence/c_cal).
+
+    Returns None when the item carries no non-empty slots so the additive
+    contract never changes a pre-#1418 payload's commit id (the
+    supersessions pattern). Accepts ParticipantSlots models or plain dicts.
+    """
+    if not slots:
+        return None
+    if isinstance(slots, dict):
+        get = lambda role: slots.get(role) or []  # noqa: E731
+    else:
+        get = lambda role: getattr(slots, role) or []  # noqa: E731
+    out = [{"role": role, "name": _f(r, "name"), "kind": _f(r, "kind")}
+           for role in ("subject", "object", "event") for r in get(role)
+           if _f(r, "name", "")]
+    return sorted(out, key=lambda x: (x["role"], x["name"], x["kind"])) or None
+
+
+def _point_canonical(p: Any) -> dict:
+    """Canonical point entry — slots folded in only when present (#1418)."""
+    out = {
+        "id": _f(p, "id"),
+        "content": _f(p, "content"),
+        "pointKind": _f(p, "pointKind"),
+        "about_entities": sorted(_f(p, "about_entities", []) or []),
+        "source_ref": _f(p, "source_ref"),
+        "quote": _f(p, "quote", "") or "",
+    }
+    slots = _slots_canonical(_f(p, "slots"))
+    if slots:
+        out["slots"] = slots
+    return out
+
+
+def _event_canonical(e: Any) -> dict:
+    """Canonical event entry — slots folded in only when present (#1418)."""
+    out = {
+        "id": _f(e, "id"),
+        "eventKind": _f(e, "eventKind"),
+        "content": _f(e, "content"),
+        "about_entities": sorted(_f(e, "about_entities") or []),
+    }
+    slots = _slots_canonical(_f(e, "slots"))
+    if slots:
+        out["slots"] = slots
+    return out
+
+
 def canonical_payload(
     session_id: str,
     points: Iterable[Any],
@@ -850,15 +978,7 @@ def canonical_payload(
         "summary": summary or "",
         "story_arc": story_arc or "",
         "points": [
-            {
-                "id": _f(p, "id"),
-                "content": _f(p, "content"),
-                "pointKind": _f(p, "pointKind"),
-                "about_entities": sorted(_f(p, "about_entities", []) or []),
-                "source_ref": _f(p, "source_ref"),
-                "quote": _f(p, "quote", "") or "",
-            }
-            for p in sorted(points, key=_point_key)
+            _point_canonical(p) for p in sorted(points, key=_point_key)
         ],
         "entities": [
             {
@@ -877,12 +997,7 @@ def canonical_payload(
             )
         ],
         "events": [
-            {
-                "id": _f(e, "id"),
-                "eventKind": _f(e, "eventKind"),
-                "content": _f(e, "content"),
-                "about_entities": sorted(_f(e, "about_entities") or []),
-            }
+            _event_canonical(e)
             for e in sorted(events, key=lambda x: _f(x, "id"))
         ],
     }
