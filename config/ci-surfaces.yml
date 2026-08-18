@@ -77,6 +77,7 @@ surfaces:
   - test_turnstile_signup.py
   battery:
   - test_battery_arms.py
+  - test_battery_arms_real.py
   - test_battery_cli.py
   - test_battery_config.py
   - test_battery_corpus.py

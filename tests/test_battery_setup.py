@@ -75,7 +75,9 @@ class TestBatchSetup:
                              counter=counter)
         for sid, n in rounds.items():
             assert n <= 2, f"{sid} took {n} round trips"
-        assert counter.count == 2 * len(scenarios)
+        # ≤2 per scenario (operator-less scenarios legitimately take 1 —
+        # the #1407 production corpus has 21 operator-bearing of 134).
+        assert counter.count <= 2 * len(scenarios)
 
     def test_batch_is_idempotent(self, fresh_db):
         proj = fresh_db._get_proj()
