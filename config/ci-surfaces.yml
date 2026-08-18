@@ -31,10 +31,12 @@ surfaces:
   - test_epic903_hosted.py
   - test_epic903_mcp.py
   - test_export_delete.py
+  - test_export_cli.py
   - test_failure_contract.py
   - test_hosted_api.py
   - test_hosted_auth.py
   - test_hosted_backup.py
+  - test_import_endpoint.py
   - test_index_mcp.py
   - test_init_apikey_validation.py
   - test_mcp_client.py
