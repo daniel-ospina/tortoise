@@ -34,7 +34,7 @@ needs no client_id paste.
 3. The branded consent page (D2 — one custom HTML page reusing the
    signup/signin pattern) signs the user in via supabase-js and confirms.
    The browser session JWT is verified server-side with the **existing JWKS
-   / RS256 path** (`session_auth.verify_session_jwt` — D2: no new auth
+   / ES256+RS256 path** (`session_auth.verify_session_jwt` — D2: no new auth
    stack).
 4. `POST /oauth/consent` binds a single-use, PKCE-bound authorization code
    to (user, team).

@@ -58,9 +58,6 @@ SECRET_PEPPER = "e2e-claim-pepper-1082"
 INTERNAL_KEY = "e2e-claim-internal-1082"
 
 
-def _b64url(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
-
 
 class _JWKS:
     """EC keypair + JWKS doc (cryptography — ES256, matching real Supabase

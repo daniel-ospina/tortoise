@@ -29,6 +29,7 @@ import binascii
 import json
 import logging
 import os
+import random
 import time
 
 import httpx
@@ -44,7 +45,10 @@ _JWKS_TTL = float(os.environ.get("TORTOISE_JWKS_TTL", "300"))  # seconds
 _FETCH_TIMEOUT = float(os.environ.get("TORTOISE_JWKS_TIMEOUT", "5"))  # seconds
 _COOLDOWN_S = float(os.environ.get("TORTOISE_JWKS_COOLDOWN", "30"))  # failure/miss cooldown
 _MAX_JWKS_BYTES = 65536  # post-buffer JWKS body cap (defense-in-depth; httpx buffers first)
-_MAX_TOKEN_BYTES = 16384  # repo-enforced token cap (pyjwt 2.13 has no max_length kwarg)
+_MAX_TOKEN_BYTES = 16000  # repo-enforced token cap — BELOW the server's ~16KB
+# header-line limit (uvicorn/h11 max_incomplete_event_size) so the repo guard —
+# not a raw server 400/431 without CORS headers — is the first line of rejection
+# (pyjwt 2.13 has no max_length kwarg). Code-review #1467 P2.
 
 
 class _JWKSCache:
@@ -114,7 +118,14 @@ class _JWKSCache:
                     # healthy-but-kid-absent upstream must not refetch per
                     # request. Documented tradeoff: a flood can delay a
                     # legitimately rotated key's refetch by ≤ cooldown.
-                    self._last_failure_at = time.monotonic()
+                    # Code-review #1467 SEC-001: JITTER the miss window to
+                    # [C, 1.5·C] so a poller cannot deterministically re-arm
+                    # the cooldown at expiry (an attacker winning every round
+                    # would starve key rotation indefinitely). Failure-arm
+                    # below stays deterministic.
+                    self._last_failure_at = time.monotonic() + random.uniform(
+                        0.0, _COOLDOWN_S * 0.5
+                    )
             except HTTPException:
                 raise
             except Exception as exc:  # network, json, shape, size, filter errors

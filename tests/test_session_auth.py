@@ -23,6 +23,8 @@ import time
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
+import warnings
+
 import pytest
 from fastapi import HTTPException
 from starlette.datastructures import Headers
@@ -281,22 +283,41 @@ class TestNegativeMatrix:
             assert ei.value.status_code == 401
 
     def test_alg_absent_header(self, monkeypatch):
+        # Warm cache so the token actually reaches jwt.decode (the alg-absent
+        # → InvalidAlgorithmError path), and pin fetch-count == 1.
+        priv, pub = u.make_ec_keypair()
+        stub = warm_cache(monkeypatch, u.build_ec_jwks(pub, "kid-1"))
+        stub.count = 0
         token = u.build_token_raw(
             {"typ": "JWT", "kid": "kid-1"}, base_payload(), "AAAA"
         )
-        _require_401(monkeypatch, token, {"keys": []})
+        with pytest.raises(HTTPException) as ei:
+            verify_ok(token)
+        assert ei.value.status_code == 401
+        # Cache-served (warm): zero fetches — the point is the header path
+        # REACHES jwt.decode (alg-absent → InvalidAlgorithmError), not that a
+        # fetch happens.
+        assert stub.count == 0
 
     def test_b64_false_header(self, monkeypatch):
+        priv, pub = u.make_ec_keypair()
+        warm_cache(monkeypatch, u.build_ec_jwks(pub, "kid-1"))
         token = u.build_token_raw(
             {"alg": "ES256", "kid": "kid-1", "b64": False}, base_payload(), "AAAA"
         )
-        _require_401(monkeypatch, token, {"keys": []})
+        with pytest.raises(HTTPException) as ei:
+            verify_ok(token)
+        assert ei.value.status_code == 401
 
     def test_crit_header(self, monkeypatch):
+        priv, pub = u.make_ec_keypair()
+        warm_cache(monkeypatch, u.build_ec_jwks(pub, "kid-1"))
         token = u.build_token_raw(
             {"alg": "ES256", "kid": "kid-1", "crit": ["exp"]}, base_payload(), "AAAA"
         )
-        _require_401(monkeypatch, token, {"keys": []})
+        with pytest.raises(HTTPException) as ei:
+            verify_ok(token)
+        assert ei.value.status_code == 401
 
     def test_expired(self, monkeypatch):
         priv, pub = u.make_ec_keypair()
@@ -442,7 +463,10 @@ class TestNegativeMatrix:
     def test_wrong_typed_claims(self, monkeypatch):
         priv, pub = u.make_ec_keypair()
         warm_cache(monkeypatch, u.build_ec_jwks(pub, "kid-1"))
-        for claim, val in [("app_metadata", "x"), ("email", 123), ("exp", [9999999999])]:
+        for claim, val in [
+            ("app_metadata", "x"), ("email", 123),
+            ("exp", [9999999999]), ("exp", {"a": 1}), ("iat", [9999999999]),
+        ]:
             token = u.mint_es256_token(priv, "kid-1", base_payload(**{claim: val}), iss=FIXED_ISSUER)
             with pytest.raises(HTTPException) as ei:
                 verify_ok(token)
@@ -451,12 +475,31 @@ class TestNegativeMatrix:
     def test_oversized_token_boundary(self, monkeypatch):
         priv, pub = u.make_ec_keypair()
         warm_cache(monkeypatch, u.build_ec_jwks(pub, "kid-1"))
-        # Build a payload that pushes the token just over/under the 16KB guard.
-        # The guard is repo-enforced in _decode_header (defense-in-depth; the
-        # effective HTTP cap is the server's ~16KB header-line limit).
-        big = {"padding": "x" * 20000}
-        token_over = u.mint_es256_token(priv, "kid-1", base_payload(**big), iss=FIXED_ISSUER)
-        assert len(token_over.encode()) > 16384
+        # Repo guard (_MAX_TOKEN_BYTES=16000) is BELOW the server's ~16KB
+        # header-line cap so it — not a raw server 400/431 — is the first
+        # line of rejection (keeping the failure inside the CORS-stamped
+        # HTTPException path). Exact boundary: 16,000 → 200, 16,001 → 401.
+        def token_with(n_pad):
+            return u.mint_es256_token(
+                priv, "kid-1", base_payload(padding="x" * n_pad), iss=FIXED_ISSUER
+            )
+
+        # Base64 inflates ~4/3x, so find the padding that lands the token at
+        # the exact 16,000-byte boundary via binary search (monotonic in n).
+        lo, hi = 0, 20000
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if len(token_with(mid).encode()) < 16000:
+                lo = mid + 1
+            else:
+                hi = mid
+        token_at = token_with(lo - 1)
+        token_over = token_with(lo)
+        assert len(token_at.encode()) <= 16000 < len(token_over.encode())
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            assert verify_ok(token_at)["user_id"] == "user-123"
+            assert not [x for x in w if issubclass(x.category, DeprecationWarning)], "decode emitted DeprecationWarning (unsupported kwargs)"
         with pytest.raises(HTTPException) as ei:
             verify_ok(token_over)
         assert ei.value.status_code == 401
@@ -583,7 +626,7 @@ class TestCacheHardening:
     def test_fetch_failure_warm_serves_stale(self, monkeypatch):
         priv, pub = u.make_ec_keypair()
         stub = warm_cache(monkeypatch, u.build_ec_jwks(pub, "kid-1"))
-        sa._jwks._fetched_at = 0.0  # force a refresh attempt
+        sa._jwks._fetched_at = time.monotonic() - sa._JWKS_TTL - 1  # force TTL expiry (monotonic-relative)
         stub.error = OSError("jwks down")
         tok = u.mint_es256_token(priv, "kid-1", base_payload(), iss=FIXED_ISSUER)
         # stale key set serves the token
@@ -650,7 +693,7 @@ class TestCacheHardening:
     def test_removed_kid_after_refetch_401(self, monkeypatch):
         _, pub1 = u.make_ec_keypair()
         warm_cache(monkeypatch, u.build_ec_jwks(pub1, "kid-1"))
-        sa._jwks._fetched_at = 0.0  # force a refresh attempt
+        sa._jwks._fetched_at = time.monotonic() - sa._JWKS_TTL - 1  # force TTL expiry (monotonic-relative)
         _, pub2 = u.make_ec_keypair()
         stub = FetchStub(body=json.dumps(u.build_ec_jwks(pub2, "kid-new")).encode())
         monkeypatch.setattr(sa, "_fetch_jwks", stub)
@@ -665,7 +708,7 @@ class TestCacheHardening:
         # → K1 still verifies (documented availability-vs-security tradeoff).
         priv, pub1 = u.make_ec_keypair()
         stub = warm_cache(monkeypatch, u.build_ec_jwks(pub1, "kid-1"))
-        sa._jwks._fetched_at = 0.0  # force a refresh attempt
+        sa._jwks._fetched_at = time.monotonic() - sa._JWKS_TTL - 1  # force TTL expiry (monotonic-relative)
         stub.error = OSError("outage")
         tok = u.mint_es256_token(priv, "kid-1", base_payload(), iss=FIXED_ISSUER)
         assert verify_ok(tok)["user_id"] == "user-123"
@@ -681,7 +724,7 @@ class TestCacheHardening:
     def test_200_empty_warm_serves_stale(self, monkeypatch):
         priv, pub = u.make_ec_keypair()
         stub = warm_cache(monkeypatch, u.build_ec_jwks(pub, "kid-1"))
-        sa._jwks._fetched_at = 0.0  # force a refresh attempt
+        sa._jwks._fetched_at = time.monotonic() - sa._JWKS_TTL - 1  # force TTL expiry (monotonic-relative)
         stub.body = json.dumps({"keys": []}).encode()  # upstream returns empty
         tok = u.mint_es256_token(priv, "kid-1", base_payload(), iss=FIXED_ISSUER)
         assert verify_ok(tok)["user_id"] == "user-123"  # stale-on-empty
@@ -873,7 +916,7 @@ class TestConcurrency:
         stub.count = 0  # exclude the warm fetch from the count
         monkeypatch.setattr(sa, "_COOLDOWN_S", 30.0)
         # force TTL expiry so the non-force path refetches
-        sa._jwks._fetched_at = 0.0
+        sa._jwks._fetched_at = time.monotonic() - sa._JWKS_TTL - 1
         stub.error = OSError("down")
         tok = u.mint_es256_token(priv, "kid-1", base_payload(), iss=FIXED_ISSUER)
         outcomes = self._burst(20, tok)
@@ -921,17 +964,29 @@ class TestConcurrency:
         priv, pub1 = u.make_ec_keypair()
         stub = warm_cache(monkeypatch, u.build_ec_jwks(pub1, "kid-1"))
         stub.count = 0  # exclude the warm fetch from the count
-        sa._jwks._fetched_at = 0.0  # TTL expired
+        sa._jwks._fetched_at = time.monotonic() - sa._JWKS_TTL - 1  # TTL expired (monotonic-relative)
         tok = u.mint_es256_token(priv, "kid-1", base_payload(), iss=FIXED_ISSUER)
         outcomes = self._burst(20, tok)
         assert all(c == 200 for c in self._results(outcomes))
         assert stub.count == 1  # double-checked TTL coalescing
 
+    def test_cold_start_concurrent_all_503(self, monkeypatch):
+        # 20 concurrent requests with a cold cache + failing fetch: every
+        # outcome is HTTPException 503 (never a raw 500 / None-crash), and the
+        # lock + cooldown coalesce to exactly ONE fetch attempt.
+        stub = FetchStub(error=OSError("jwks down"))
+        monkeypatch.setattr(sa, "_fetch_jwks", stub)
+        priv, _ = u.make_ec_keypair()
+        tok = u.mint_es256_token(priv, "kid-1", base_payload(), iss=FIXED_ISSUER)
+        outcomes = self._burst(20, tok)
+        assert all(c == 503 for c in self._results(outcomes))
+        assert stub.count == 1
+
     def test_ttl_refresh_plus_miss_double_fetch(self, monkeypatch):
         priv, pub1 = u.make_ec_keypair()
         stub = warm_cache(monkeypatch, u.build_ec_jwks(pub1, "kid-1"))
         stub.count = 0  # exclude the warm fetch from the count
-        sa._jwks._fetched_at = 0.0  # TTL expired
+        sa._jwks._fetched_at = time.monotonic() - sa._JWKS_TTL - 1  # TTL expired (monotonic-relative)
         tok = u.mint_es256_token(priv, "kid-2", base_payload(), iss=FIXED_ISSUER)
         with pytest.raises(HTTPException) as ei:
             verify_ok(tok)
@@ -947,7 +1002,7 @@ class TestConcurrency:
         priv1, pub1 = u.make_ec_keypair()
         stub = warm_cache(monkeypatch, u.build_ec_jwks(pub1, "kid-1"))
         stub.count = 0  # exclude the warm fetch from the count
-        sa._jwks._fetched_at = 0.0  # TTL expired
+        sa._jwks._fetched_at = time.monotonic() - sa._JWKS_TTL - 1  # TTL expired (monotonic-relative)
         priv2, _ = u.make_ec_keypair()
         tok_valid = u.mint_es256_token(priv1, "kid-1", base_payload(), iss=FIXED_ISSUER)
         tok_forged = u.mint_es256_token(priv2, "kid-2", base_payload(), iss=FIXED_ISSUER)

@@ -14,7 +14,7 @@
 ## Context
 
 - All blockers shipped: #338 (service-model migration) via PR #554; hosted provisioning #518/#519/#292 closed; user↔team decoupling (D-series, ec8cd71).
-- Existing seams to reuse: `tortoise/mcp_auth.py` (Bearer validation), `tortoise/session_auth.py` (JWKS/RS256 + `/v1/session/key` bridge).
+- Existing seams to reuse: `tortoise/mcp_auth.py` (Bearer validation), `tortoise/session_auth.py` (JWKS ES256+RS256 + `/v1/session/key` bridge).
 - Ecosystem: MCP spec 2025-11-25 makes RFC 9728 PRM **MUST** for servers, RFC 8414/OIDC discovery **MUST** for clients; Claude.ai connectors support `oauth_dcr`; ChatGPT GPT Actions is the outlier (manual client_id/secret).
 - DCR (RFC 7591) is **MAY/fallback** in the MCP spec; emerging preferred mechanism = Client ID Metadata Documents (draft-ietf-oauth-client-id-metadata-document-00).
 - `fastmcp==3.4.6` ships a client-side OAuth 2.1 auth-code+PKCE handler; `authlib==1.7.2` already a transitive dep via `fastmcp-slim`.

@@ -110,9 +110,6 @@ def is_remote_mode() -> bool:
 
 # ── JWKS mock + session JWT mint (session-auth endpoints, E2E-6/8-D) ─────────
 
-def _b64url(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
-
 
 class _JWKSKeys:
     """EC keypair + JWKS document (cryptography — ES256, matching real
