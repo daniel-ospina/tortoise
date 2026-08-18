@@ -41,10 +41,60 @@ _PROVIDER_PRIORITY = _SESSION_LLM_PROVIDER_PRIORITY
 _SYSTEM_PROMPT = (
     "You are a helpful assistant with access to retrieved memory context "
     "from a user's long chat history. Answer the user's question using ONLY "
-    "the provided memory context. If the context does not contain enough "
-    "information to answer, say that you do not know. Be concise; do not "
-    "mention the context."
+    "the provided memory context. The context includes dated chat sessions "
+    "and, when applicable, a 'Current Date' header. When the context contains "
+    "the information needed to answer, give a direct, concrete answer — do "
+    "not hedge, refuse, or say you do not know. Only say you do not know when "
+    "the context genuinely lacks the information. Be concise; do not mention "
+    "the context."
 )
+
+# Type-specific instructions appended to the system prompt for the two
+# categories that fail at the READER (issue #1366: preference 43%, temporal
+# 62% — evidence IS retrieved, the reader hedges/miscounts). The generic
+# prompt above already flips the default toward committing; these fragments
+# give the reader the exact reasoning it must perform.
+
+_TEMPORAL_FRAGMENT = (
+    "\n\nTEMPORAL REASONING INSTRUCTIONS: this question asks about elapsed "
+    "time or ordering (e.g. how many days/weeks/months ago). Use the "
+    "'Current Date: YYYY-MM-DD' header and the per-session 'session date "
+    "YYYY-MM-DD' annotations in the context to compute the elapsed time "
+    "between the relevant session date and the current date. Commit to a "
+    "specific numeric answer (e.g. '3 days ago') — do not hedge or refuse "
+    "when the dated evidence of the event/statement in question is present "
+    "in the context. An off-by-one error in the day count is acceptable. "
+    "However, if the context contains NO dated evidence of the event or "
+    "statement the question asks about, say you do not know rather than "
+    "guessing."
+)
+
+_PREFERENCE_FRAGMENT = (
+    "\n\nPREFERENCE INSTRUCTIONS: this question asks which option the user "
+    "prefers. Find the user's turns discussing the options and commit to "
+    "the specific option the user stated or implied a preference for "
+    "(e.g. 'X is fine but I prefer Y' → Y). Answer with that option — do "
+    "not hedge, refuse, or say you do not know when the user's preference "
+    "appears in the context."
+)
+
+# question_type → the fragment that unlocks correct reasoning for it.
+_TYPE_FRAGMENTS: dict[str, str] = {
+    "temporal-reasoning": _TEMPORAL_FRAGMENT,
+    "single-session-preference": _PREFERENCE_FRAGMENT,
+}
+
+
+def system_prompt_for(question_type: str | None) -> str:
+    """The reader system prompt for a question, type-tailored.
+
+    Unknown/absent types get the hardened generic prompt; temporal-reasoning
+    and single-session-preference append their reasoning instructions (the
+    weak categories from issue #1366).
+    """
+    if not question_type:
+        return _SYSTEM_PROMPT
+    return _SYSTEM_PROMPT + _TYPE_FRAGMENTS.get(question_type, "")
 
 # Official gen.py default generation length for non-CoT runs (the reader's
 # answer prompt is answered at temperature 0, max_tokens 500 — the official
@@ -56,7 +106,8 @@ class Reader(Protocol):
     model_id: str
 
     def answer(self, *, context_hits: list[dict[str, Any]], question: str,
-               question_date: str | None = None) -> str: ...
+               question_date: str | None = None,
+               question_type: str | None = None) -> str: ...
 
 
 class LLMReader:
@@ -67,17 +118,22 @@ class LLMReader:
         self.model_id = model_id
 
     def answer(self, *, context_hits: list[dict[str, Any]], question: str,
-               question_date: str | None = None) -> str:
+               question_date: str | None = None,
+               question_type: str | None = None) -> str:
         # The context carries the official gen.py shape: a "Current Date:
         # {question_date}" header + per-session date annotations (see
         # retrieve.render_context) — temporal-reasoning questions are
-        # structurally unanswerable without them (P1 #1144).
+        # structurally unanswerable without them (P1 #1144). The system
+        # prompt is type-tailored (#1366): temporal-reasoning and
+        # single-session-preference get reasoning instructions that counter
+        # the reader's documented hedging/miscounting failures.
         context = render_context(context_hits, question_date=question_date)
         user = (
             f"Memory context:\n{context}\n\n"
             f"Question: {question}\n\nAnswer:"
         )
-        raw = self._model.complete(system=_SYSTEM_PROMPT, user=user)
+        raw = self._model.complete(
+            system=system_prompt_for(question_type), user=user)
         return raw.strip()
 
 
@@ -95,7 +151,12 @@ class MockReader:
     model_id = "mock-reader"
 
     def answer(self, *, context_hits: list[dict[str, Any]], question: str,
-               question_date: str | None = None) -> str:
+               question_date: str | None = None,
+               question_type: str | None = None) -> str:
+        # question_type is accepted for protocol parity with LLMReader (the
+        # runner forwards it unconditionally); the mock answers from evidence
+        # turns regardless of type.
+        del question_type
         evidence = [
             str(hit["content"]).strip()
             for hit in context_hits

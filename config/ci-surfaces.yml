@@ -155,6 +155,7 @@ surfaces:
   - test_judge_harness.py
   - test_linear_connector.py
   - test_list_contexts.py
+  - test_longmem_reader_prompting.py
   - test_longmem_runner.py
   - test_lookup_hash.py
   - test_m0.py
