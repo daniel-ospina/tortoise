@@ -106,11 +106,23 @@ def test_capture_session_creates_event(sdk):
         "MATCH (e:Event {eventKind:'sessionCaptured'}) RETURN count(e)"
     ).result_set
     assert events[0][0] == 1
-    # aboutEvent edges to extracted points
-    edges = proj.g.query(
+    # #1417: provenance is the point's eventId property, NOT an aboutEvent
+    # content edge (ONTOLOGY §3.4) — no aboutEvent edges may be minted by the
+    # capture path, and every extracted point must carry the event's eventId.
+    eid = proj.g.query(
+        "MATCH (e:Event {eventKind:'sessionCaptured'}) RETURN e.eventId"
+    ).result_set[0][0]
+    no_edges = proj.g.query(
         "MATCH ()-[r:aboutEvent]->(:Event {eventKind:'sessionCaptured'}) RETURN count(r)"
     ).result_set
-    assert edges[0][0] == res["extracted"]
+    assert no_edges[0][0] == 0, "capture path must not mint aboutEvent provenance"
+    stamps = proj.g.query(
+        "MATCH (n:Point) WHERE n.eventId = $eid RETURN count(n)",
+        params={"eid": eid},
+    ).result_set
+    assert stamps[0][0] == res["extracted"], (
+        "every extracted point must carry the sessionCaptured eventId"
+    )
 
 
 def test_capture_session_source_is_agent_session(sdk):

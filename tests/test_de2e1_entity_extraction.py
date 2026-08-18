@@ -107,12 +107,19 @@ def test_de2e1_session_to_entity_objects_with_provenance():
         assert {r[0] for r in event_side} == set(names), \
             f"Event-side aboutObject missing: {event_side}"
 
-        # Step 4: aboutEvent provenance anchor (session-occurrence Points)
+        # Step 4: provenance anchor (session-occurrence Points) — #1417: the
+        # point's eventId property, NOT an aboutEvent edge (ONTOLOGY §3.4
+        # reserves aboutEvent for content). No aboutEvent edges to the meeting
+        # Event may be minted; every occurrence Point carries its eventId.
         pe = g.query(
             "MATCH (p:Point)-[:aboutEvent]->(e:Event {eventId:'meeting-s1'}) "
             "RETURN count(p)",
         ).result_set
-        assert pe[0][0] >= 1, "no aboutEvent edges for occurrence Points"
+        assert pe[0][0] == 0, "aboutEvent-as-provenance must not be minted"
+        occ = g.query(
+            "MATCH (p:Point) WHERE p.eventId = 'meeting-s1' RETURN count(p)",
+        ).result_set
+        assert occ[0][0] >= 1, "occurrence Points must carry the meeting eventId"
 
         # Step 5: full provenance chain
         #   (p:Point)-[:extractedFrom]->(:Source)-[:references]->(:Event)

@@ -1681,8 +1681,10 @@ class TortoiseSDK:
         idempotent), the M2 LLM extractor (epic #909) turns the conversation
         into epistemic Points (+ IMPL/NAND operators — provenance-grounded,
         extracted via the EventAPI projection), plus a :Session node and an
-        ontology-compliant :Event {eventKind:'sessionCaptured'} with
-        aboutEvent edges. The deterministic regex loop is removed as a product
+        ontology-compliant :Event {eventKind:'sessionCaptured'} whose
+        eventId is stamped onto the extracted Points as their provenance
+        surface (#1417 — provenance is eventId, NOT the aboutEvent content
+        edge). The deterministic regex loop is removed as a product
         path — LLM extraction is the default and no-key fails closed.
 
         ``conversation`` is a list of {"role", "content"} dicts. Returns
@@ -1778,7 +1780,12 @@ class TortoiseSDK:
         # the hosted copy so the two stay in sync.
         extracted = self._extract_session_llm(conversation, session_id, now)
 
-        # Ontology episodic model (v3.1 §4.5/§3.2): Event + aboutEvent edges.
+        # Ontology episodic model (v3.1 §4.5/§3.2): Event node + the point's
+        # eventId provenance property. #1417: provenance is the point's
+        # eventId property — NOT the aboutEvent content edge (ONTOLOGY §3.4
+        # reserves aboutEvent for "What Event this describes"). Stamp each
+        # extracted point's provenance surface; aboutEvent stays clean for
+        # content (B3's event slot).
         event_id: str | None = None
         try:
             event = self.create_event(
@@ -1787,8 +1794,12 @@ class TortoiseSDK:
                 is_episodic=True,
             )
             event_id = event.get("id") or event.get("eventId")
-            for p in extracted:
-                proj.create_about_edge(p["id"], event_id, "aboutEvent")
+            if event_id:
+                proj.g.query(
+                    "MATCH (n:Point) WHERE n.id IN $ids SET n.eventId=$eid",
+                    params={"ids": [p["id"] for p in extracted],
+                            "eid": event_id},
+                )
         except Exception as e:
             # Non-fatal — mirrors hosted behavior, but surface the failure so
             # silent event-log loss is visible (#721).

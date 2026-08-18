@@ -525,15 +525,40 @@ def test_fetch_state_subject_direct(sdk):
 
 
 def test_fetch_state_subject_via_event(sdk):
-    """Point's event's aboutSubject resolves (≤1 hop via aboutEvent)."""
+    """Point's event's aboutSubject resolves (≤1 hop via the eventId property).
+
+    #1417: the fallback hop resolves the source-event via the point's eventId
+    property (the provenance surface), never via an aboutEvent edge (which is
+    content-aboutness).
+    """
     p = _point(sdk, content="claim from a session")
     subj = sdk.create_subject("Daniel", subjectKind="legalPerson")
     ev = sdk.create_event("session discussion", eventKind="humanApproval")
     sdk._get_proj().create_about_edge(ev["id"], subj["id"], "aboutSubject")
-    sdk._get_proj().create_about_edge(p["id"], ev["id"], "aboutEvent")
+    # Provenance surface: the point's eventId property — no aboutEvent edge.
+    _graph(sdk).query(
+        "MATCH (n:Point {id:$id}) SET n.eventId=$eid",
+        params={"id": p["id"], "eid": ev["id"]},
+    )
 
     state = fetch_point_epistemic_state(_graph(sdk), [p["id"]])[p["id"]]
     assert state["subject"] == {"id": subj["id"], "name": "Daniel", "kind": "legalPerson"}
+
+
+def test_fetch_state_subject_via_event_requires_eventid(sdk):
+    """#1417: the fallback requires the point's eventId property — an aboutEvent
+    edge alone (legacy/content) must NOT resolve the subject anymore."""
+    p = _point(sdk, content="claim wired only via content edge")
+    subj = sdk.create_subject("Legacy", subjectKind="team")
+    ev = sdk.create_event("legacy session", eventKind="humanApproval")
+    sdk._get_proj().create_about_edge(ev["id"], subj["id"], "aboutSubject")
+    # Only the (content) aboutEvent edge exists — no eventId on the point.
+    sdk._get_proj().create_about_edge(p["id"], ev["id"], "aboutEvent")
+
+    state = fetch_point_epistemic_state(_graph(sdk), [p["id"]])[p["id"]]
+    assert state["subject"] is None, (
+        "aboutEvent is content, not provenance — subject must not resolve"
+    )
 
 
 def test_fetch_state_subject_chain_not_resolved(sdk):

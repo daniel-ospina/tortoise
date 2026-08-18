@@ -68,6 +68,7 @@ surfaces:
   - test_turnstile_signup.py
   core:
   - test_about_edges.py
+  - test_about_event_untangle.py
   - test_alert_store.py
   - test_analytics.py
   - test_analyze.py
@@ -185,6 +186,7 @@ surfaces:
   - test_projection_version_gate.py
   - test_query_suggestions.py
   - test_reaper.py
+  - test_status_projection.py
   - test_references_edge.py
   - test_remove_context_migration.py
   - test_render.py

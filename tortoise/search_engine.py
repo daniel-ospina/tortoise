@@ -1327,7 +1327,10 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
       supersedes     — [{id, content_snippet, created_at}] of replaced claims
                        (outgoing CORRECTS)
       subject        — {id, name, kind} from the point's OWN aboutSubject edge, or
-                       (fallback) its event's aboutSubject edge — ≤1 hop only.
+                       (fallback) its source-event's aboutSubject edge — ≤1 hop only.
+                       #1417: the event hop is resolved via the point's eventId
+                       PROPERTY (the provenance surface), never via an aboutEvent
+                       edge (that edge is content-aboutness, ONTOLOGY §3.4).
                        NEVER derived through operator chains (fail-closed, D10):
                        absent = honestly unknown, never wrong-via-chain.
 
@@ -1342,7 +1345,12 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
         rows = graph.query(
             "MATCH (n:Point) WHERE n.id IN $ids "
             "OPTIONAL MATCH (n)-[:aboutSubject]->(s:Subject) "
-            "OPTIONAL MATCH (n)-[:aboutEvent]->(ev:Event)-[:aboutSubject]->(es:Subject) "
+            # #1417: provenance hop via the point's eventId property (the
+            # provenance surface) — NOT an aboutEvent edge, which is reserved
+            # for content-aboutness (ONTOLOGY §3.4). Points captured without
+            # eventId keep the old behavior (fallback absent → subject None).
+            "OPTIONAL MATCH (ev:Event) WHERE ev.eventId = n.eventId "
+            "OPTIONAL MATCH (ev)-[:aboutSubject]->(es:Subject) "
             "OPTIONAL MATCH (n)-[r:CORRECTS]->(old:Point) "
             "OPTIONAL MATCH (new:Point)-[r2:CORRECTS]->(n) "
             "RETURN n.id, n.status, "

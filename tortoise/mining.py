@@ -551,9 +551,12 @@ class ConversationMiner:
 
           - (Point)-[:aboutObject]->(Object) for Points mentioning the entity
           - (Event)-[:aboutObject]->(Object) for session events about the entity
-          - (Point)-[:aboutEvent]->(meeting Event) provenance anchor
+          - (Point).eventId -> meeting Event (provenance property, #1417)
           - (Source)-[:references]->(Event) completing the chain
             Point -[:extractedFrom]-> Source -[:references]-> Event
+
+        Note (#1417): provenance lives on the point's eventId property, not
+        an aboutEvent edge (ONTOLOGY §3.4 reserves aboutEvent for content).
 
         Deliberately bypasses the legacy _create_about_edges auto-detect path
         (projection/edges.py:69-111) so no :Subject stub nodes are created for
@@ -604,9 +607,16 @@ class ConversationMiner:
                     proj.create_about_edge(ev["eventId"], oid, "aboutObject")
             wired += 1
 
-        # Point → aboutEvent → meeting Event (session-occurrence anchor, DE2E-1)
-        for p in points:
-            proj.create_about_edge(p["id"], meeting_event, "aboutEvent")
+        # #1417: point provenance is the eventId property, NOT the aboutEvent
+        # content edge (ONTOLOGY §3.4). Stamp each extracted point's
+        # provenance surface to the meeting Event (session-occurrence anchor,
+        # DE2E-1); aboutEvent stays clean for content.
+        pids = [p["id"] for p in points if p.get("id")]
+        if pids:
+            proj.g.query(
+                "MATCH (n:Point) WHERE n.id IN $ids SET n.eventId=$eid",
+                params={"ids": pids, "eid": meeting_event},
+            )
         # Complete the provenance chain: Source -[:references]-> Event
         proj.link_source_to_entity(source_id, meeting_event, "Event")
         return wired

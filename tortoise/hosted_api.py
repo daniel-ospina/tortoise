@@ -3499,13 +3499,16 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     # regex decision/claim loop (removed as a product path). Shared with the
     # SDK copy via TortoiseSDK._extract_session_llm; extracted Points get
     # session CONTAINS edges inside that helper (same wiring the regex loop
-    # did), then aboutEvent edges below.
+    # did), then their eventId provenance stamping below.
     extracted = sdk._extract_session_llm(body.conversation, session_id, now)
 
     # Ontology v3.1 §4.5/§3.2 (#7882): also create an episodic :Event node
-    # (eventKind: sessionCaptured) and link extracted Points to it via
-    # aboutEvent — the ontology's episodic model. The :Session node remains
-    # the API-visible handle; the Event carries ontology-compliant provenance.
+    # (eventKind: sessionCaptured) and stamp its eventId onto the extracted
+    # Points as their provenance surface. #1417: provenance is the point's
+    # eventId property — NOT the aboutEvent content edge (ONTOLOGY §3.4
+    # reserves aboutEvent for "What Event this describes"). The :Session node
+    # remains the API-visible handle; the Event carries ontology-compliant
+    # provenance via the points' eventId.
     event_id = None
     try:
         event = sdk.create_event(
@@ -3517,8 +3520,12 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
             is_episodic=True,
         )
         event_id = event.get("id") or event.get("eventId")
-        for p in extracted:
-            proj.create_about_edge(p["id"], event_id, "aboutEvent")
+        if event_id:
+            proj.g.query(
+                "MATCH (n:Point) WHERE n.id IN $ids SET n.eventId=$eid",
+                params={"ids": [p["id"] for p in extracted],
+                        "eid": event_id},
+            )
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception(

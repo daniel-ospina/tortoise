@@ -197,6 +197,8 @@ Per-type edges (chosen over single polymorphic edge — FalkorDB matrix-per-type
 
 > **Legacy:** `aboutEntities` property → per-type `about*` edges. `_create_about_edges()` auto-detects Subject/Object from the legacy property. `schema:about` is polymorphic; we split per-type for graph performance.
 
+> **`aboutEvent` is content-only (#1417):** the edge means "this Point/Document describes this Event" — never "this Point was produced by this Event". Capture-path provenance (a Point produced from a session/meeting) lives on the Point's **`eventId` property** (the provenance surface, stamped by `capture_session`, hosted `/v1/sessions`, and the mining path), with the full chain `(Point)-[:extractedFrom]->(Source)-[:references]->(Event)` (§3.3/§3.4). Pre-#1417 `aboutEvent`-as-provenance edges remain readable and are semantically reinterpreted (no migration); new writes must not mint them.
+
 ### §3.3 Point → Source (Provenance)
 
 | Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
