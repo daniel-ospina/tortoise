@@ -43,7 +43,7 @@ extends: 04-plan.md (plan), 03-scope.md (scope + test-design #1404)
                       └─→ #1414 (parity) ────────────────────────────────────────────┘
 ```
 
-Acyclic; roots #1406/#1407 parallelizable; wave 2 = #1408/#1410/#1413 (depend only on #1406); #1416 is the single sink among child issues; capstone #1419 (depends on #1416+#1415) gates epic completion.
+Acyclic; roots #1406/#1407 parallelizable; wave 2 = #1408/#1410 (depend only on #1406) + #1413 (depends on #1406 + #1408); #1416 is the single sink among child issues; capstone #1419 (depends on #1416+#1415) gates epic completion.
 
 ## MECE Verification Result
 

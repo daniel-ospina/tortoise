@@ -54,7 +54,7 @@ Failure modes documented per workflow: W1 LLM fallback (flagged episode, exclude
 
 ```
 battery/                          # new top-level package (extends tools/longmem_eval patterns, Python)
-├── cli.py                        # subcommands: run | parity | calibrate | validate-judge (S8)
+├── cli.py                        # subcommands: run | parity | calibrate | validate-judge | report (S8)
 ├── config/                       # corpus.yaml, thresholds.yaml ([cal] table), arms.yaml, budget.yaml
 ├── runner/                       # episode executor + trajectory logger + seed pinning (S7)
 ├── arms/                         # S4
@@ -69,24 +69,24 @@ battery/                          # new top-level package (extends tools/longmem
 └── report/                       # profile assembler + verdict rule + mitigation paths (S7)
 ```
 
-Verdict report shape (the PO-facing artifact) — non-UNIQUE state shown (MECHANISM-NOT-UNIQUE):
+Verdict report shape (the PO-facing artifact) — non-UNIQUE state shown (MECHANISM-NOT-UNIQUE; fixture rows relabeled to be rule-consistent: only R1/R4 are structural wins, everything else PARITY):
 
 ```
 Profile: metric × arm delta matrix (all 14 families: R1–R5, L1–L6, D2–D4)
   R1  surfaced-rate      A4 0.92 | A2 0.00 | A0 0.00    → STRUCTURAL (mechanism)
-  R2  coverage subscore  A4 0.71 | A2 0.44 | A0 0.42    → STRONG (contested, load-bearing)
-  R3  Brier              A4 0.18 | A2 0.27 | A0 0.29    → STRONG (load-bearing)
+  R2  coverage subscore  A4 0.51 | A2 0.50 | A0 0.50    → PARITY
+  R3  Brier              A4 0.26 | A2 0.27 | A0 0.27    → PARITY
   R4  defeat-condition   A4 0.80 | A2 n/a  | A0 n/a     → STRUCTURAL (mechanism)
-  R5  update-correct     A4 0.82 | A2 0.55 | A0 0.57    → PARITY
-  L1  interdependent     A4 0.88 | A2 0.61 | A0 0.49    → STRONG (load-bearing)
-  L2  token trajectory   A4 conv  | A2 flat | A0 n/a    → STRONG (⚠️ provisional gate)
-  L3  quality slope      A4 +0.09 | A2 +0.01 | A0 0.00  → STRONG (load-bearing)
-  L4  cross-session      A4 1.00  | A2 0.40 | A0 0.00   → STRONG (load-bearing)
-  L5  decision-drift     A4 0.91  | A2 0.72 | A0 0.58   → STRONG (load-bearing)
-  L6  distillation       A4 0.96  | A2 n/a  | A0 n/a    → STRONG (load-bearing)
-  D2  pseudo-evol spread A4 conv  | A2 3.4× | A2b 2.1× | A3 2.8×  → STRONG
-  D3  feedback fix-rate  A4 0.66  | A0 0.41             → STRONG (load-bearing)
-  D4  adversarial        A4 0.88  | A2 0.21 | A0 0.13   → STRONG (load-bearing)
+  R5  update-correct     A4 0.55 | A2 0.54 | A0 0.53    → PARITY
+  L1  interdependent     A4 0.62 | A2 0.60 | A0 0.58    → PARITY
+  L2  token trajectory   A4 conv  | A2 flat | A0 n/a    → PARITY (provisional gate)
+  L3  quality slope      A4 +0.01 | A2 +0.01 | A0 0.00  → PARITY
+  L4  cross-session      A4 0.45  | A2 0.40 | A0 0.00   → PARITY
+  L5  decision-drift     A4 0.72  | A2 0.71 | A0 0.58   → PARITY
+  L6  distillation       A4 0.90  | A2 n/a  | A0 n/a    → PARITY
+  D2  pseudo-evol spread A4 conv  | A2 1.1× | A2b 1.0× | A3 1.2×  → PARITY
+  D3  feedback fix-rate  A4 0.44  | A0 0.41             → PARITY
+  D4  adversarial        A4 0.25  | A2 0.21 | A0 0.13   → PARITY
 Verdict: MECHANISM-NOT-UNIQUE (no empirically-contested STRONG on load-bearing axis)
 Differentiators: none contested — R1/R4 structural only
 Weaknesses: R5 PARITY (mitigation: EP damping re-calibration, re-run in loop)
@@ -105,8 +105,8 @@ No graph-schema changes. Three new artifact schemas (files, not DB):
 | Entity | Fields | Constraint |
 |---|---|---|
 | `scenario.json` (corpus) | id, tier (probe/stream/differential), family, arm-compatible prompt pack, gold answer(s), planted-contradiction pairs (R1/L4) **with injection-turn field k**, evidence-tier scripts (R3), attack_type (D4: poisoned/sybil/echo_chamber/flapping/anchoring), task_type | id unique; gold answers sealed in a gitignored store (no reader leakage, S5/S8); corpus split: train/waves/held-out (L2/L3 contamination control); k pinned per scenario |
-| `run_artifact.json` (per scenario) | run_id, seed, arm, scenario_id, episode trace (turns, tool calls, tokens), metric values, model-call outcomes enum, ep_outcome (converged | non_converged | undec), timestamps | run_id = seed+arm+scenario; **model-call outcomes ∈ {ok, rate_limited, timeout, fallback_cached, failed}** — fallback/failed episodes excluded from aggregates, reported as count (S3 flag); ep_outcome recorded per S2 (honest UNDEC never fabricated) |
-| `profile.json` (verdict) | matrix: metric (all 14: R1–R5, L1–L6, D2–D4) × arm {value, delta, classification, load_bearing}, verdict {outcome, differentiators, weaknesses, mitigation_paths, artifacts_changed}, matched_recall {f1_by_arm, trigger_fired, subset_pct}, report_status (complete | incomplete_missing_metrics) | classification ∈ {STRONG, STRUCTURAL, PARITY, WEAK}; verdict ∈ {UNIQUE, MECHANISM-NOT-UNIQUE, WEAK-UNMITIGATED, INCONCLUSIVE}; report_status incomplete blocks claim shipping |
+| `run_artifact.json` (per scenario) | run_id, seed, arm, scenario_id, episode trace (turns, tool calls, tokens), metric values, model-call outcomes enum, ep_outcome (converged \| non_converged \| undec), timestamps | run_id = seed+arm+scenario; **model-call outcomes ∈ {ok, rate_limited, timeout, fallback_cached, failed}** — fallback/failed episodes excluded from aggregates, reported as count (S3 flag); ep_outcome recorded per S2 (honest UNDEC never fabricated) |
+| `profile.json` (verdict) | matrix: metric (all 14: R1–R5, L1–L6, D2–D4) × arm {value, delta, classification, load_bearing}, verdict {outcome, differentiators, weaknesses, mitigation_paths, artifacts_changed}, matched_recall {f1_by_arm, trigger_fired, subset_pct}, report_status (complete \| incomplete_missing_metrics) | classification ∈ {STRONG, STRUCTURAL, PARITY, WEAK}; verdict ∈ {UNIQUE, MECHANISM-NOT-UNIQUE, WEAK-UNMITIGATED, INCONCLUSIVE}; report_status incomplete blocks claim shipping |
 
 Tortoise graph usage (S1/S2): R1/R4/R5 probes write/read via SDK (create_point/create_operator/mitigate/supersede/compute_confidence); L-streams accumulate across sessions in a per-arm Tortoise namespace (isolation, S4).
 
@@ -118,7 +118,7 @@ Tortoise graph usage (S1/S2): R1/R4/R5 probes write/read via SDK (create_point/c
 
 ```
 battery/                     # new top-level package (alongside tools/longmem_eval, reuses its runner/judge patterns)
-├── cli.py                   # subcommands: run | parity | calibrate | validate-judge (S8)
+├── cli.py                   # subcommands: run | parity | calibrate | validate-judge | report (S8)
 ├── config/                  # corpus.yaml, thresholds.yaml ([cal] table), arms.yaml, budget.yaml (S8)
 ├── runner/                  # episode executor + trajectory logger + seed pinning (S7)
 ├── arms/                    # ArmAdapter protocol + 6 implementations (S4)
@@ -152,7 +152,7 @@ battery/                     # new top-level package (alongside tools/longmem_ev
 | `Scorer` | `score(episode_trace, rubric_id) -> Score{metric, value, evidence}` via gated judge | `JudgeGateBlocked` if rubric unvalidated; `ScoreUnavailable` on judge failure (episode excluded, counted); records `ep_outcome` for R3 | Rubric JSON schema v1 (anchors + items) |
 | `recall.match()` | `match(corpus, arms) -> {f1_by_arm, trigger_fired, subset_pct}` | INCONCLUSIVE result object (not exception) — the verdict branch, not a crash | Pre-registered; result immutable per run |
 | `report.assemble()` | `assemble(run_artifacts, thresholds) -> Profile` (all 14 metric families) | missing metrics → report_status=incomplete (never fabricated) | Profile schema v1 |
-| CLI | `battery run --tier 1|2|3 --arms ...`; `battery parity`; `battery calibrate --print`; `battery validate-judge --rubric <id>`; `battery report` (profile + verdict assembly; logic #1415, dispatch #1406) | exit codes: 0 ok, 2 gate-blocked, 3 inconclusive, 4 arm-failed, **5 empty-corpus (refuse to start)** | Subcommand flags versioned in help |
+| CLI | `battery run --tier 1\|2\|3 --arms ...`; `battery parity`; `battery calibrate --print`; `battery validate-judge --rubric <id>`; `battery report` (profile + verdict assembly; logic #1415, dispatch #1406) | exit codes: 0 ok, 2 gate-blocked, 3 inconclusive, 4 arm-failed, **5 empty-corpus (refuse to start)** | Subcommand flags versioned in help |
 | `parity/` wrappers | pinned dataset version per runner (enumerated: LongMemEval commit X, LoCoMo vY, MemoryArena HF rev Z, MemoryAgentBench rev W — exact values locked at implementation); judge contract pinned | version mismatch → refuse to run (no silent upgrade) | Dataset version in run_artifact |
 
 Error-responses defined for every interface; contract-first — child issues implement to these signatures (test-design S1–S8 map). Contracts referenced by constant/enum name (schema enums §4), not literal strings, to survive renames (test-quality P2-6).

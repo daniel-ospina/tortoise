@@ -120,7 +120,7 @@ Design: sequential task streams, fresh context each session, **the only differen
 - **What it measures:** consolidation preserves reasoning power (not just facts) — the "dream"/summarization layer must not flatten the reasoning chain (IMPL/NAND structure).
 - **Metrics:** same Tier-1 reasoning rubric (R1–R5) scored on distilled-vs-raw arms; information-loss (contradiction pairs lost in distillation); reasoning-fidelity = distilled-score / raw-score.
 - **Gate:** reasoning-fidelity ≥ 0.95 [cal]; no contradiction pair dropped below surfacing threshold after consolidation.
-- **Anchor:** epistemic-layer G1 (contradiction recall) applied post-consolidation; "Maintainable Topic Documents" (2606.10677) 19.2-pt MemoryAgentBench gain (memory *organization* helps); SEA-Eval distillation-failure diagnostic; graph-as-memory §1.1 (summaries are derived projections, never the record).
+- **Anchor:** epistemic-layer G1 (contradiction recall) applied post-consolidation; "Maintainable Topic Documents" (2606.10677) 19.2-pt MemoryAgentBench gain (memory *organization* helps); SEA-Eval distillation-failure diagnostic; graph-as-memory §1.2/§1.5 (the graph is the record; summaries are derived projections, never the record).
 
 ---
 
@@ -145,7 +145,7 @@ Design: **same battery, six arms**, recall controlled:
 ### D2 — The longitudinal sweep
 - Run Tier-2 streams **L1/L2** × all arms (A2/A2b/A3 with their own memory backends). (D2 narrowing vs full L1–L6: the pseudo-evolution spread gate measures token-trajectory convergence + strategy reuse, which L1/L2 exercise; L3–L5 trajectory metrics are scored on the A4 arm in Tier-2 proper and appear on comparator arms only where their scenario families run there — see plan E2E-3.3.)
 - **Gate:** A4 shows the token-trajectory convergence + quality slope (L2/L3); A2/A2b/A3 show memory growth without behavior change (SEA-Eval pseudo-evolution) — pseudo-evolution spread threshold per AC-D2 (≥2× [cal]; literature reports up to 31.2×, ⚠️ single-source).
-- **Bonus metric:** LongMemEval/LoCoMo scores per arm, to *show saturation parity* — proving the reasoning delta is not explained by raw recall. (Existing infra: feat/1144 retrieval-eval + longmemevl-runner.)
+- **Bonus metric:** LongMemEval/LoCoMo + ForgetEval-class staleness scores per arm, to *show saturation parity* — proving the reasoning delta is not explained by raw recall. (Existing infra: feat/1144 retrieval-eval + longmemevl-runner; staleness probe per scope in-scope #6.)
 
 ### D3 — Iterative feedback integration (OPT-BENCH-style)
 - **Protocol:** loop — agent does task, receives structured feedback, task repeats in harder form. Measure fix-rate and improvement-per-iteration.
