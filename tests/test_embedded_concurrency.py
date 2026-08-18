@@ -480,22 +480,27 @@ def test_chaos_kills_only_idle_of_20(monkeypatch):
     time.sleep(1)
     # #1365 diagnostic: dump the own servers' visibility BEFORE the assert so
     # a CI-only discover() miss shows the actual cmdlines/pgrep state.
+    from tortoise.embedded_reaper import _socket_dir_from_cmdline
     live = _pgrep_redis_servers()
     own_live = [p for p in own_pids if p in live]
     cmdlines = {}
+    parsed = {}
     for p in own_pids:
         try:
-            cmdlines[p] = _sp.run(["ps", "-o", "command=", "-p", str(p)],
-                                  capture_output=True, text=True, timeout=3).stdout.strip()[:160]
+            out = _sp.run(["ps", "-ww", "-o", "command=", "-p", str(p)],
+                          capture_output=True, text=True, timeout=3).stdout.strip()
+            cmdlines[p] = out
         except Exception:
             cmdlines[p] = "<ps failed>"
+        parsed[p] = _socket_dir_from_cmdline(p)
     found = discover()
     candidates = [s for s in found if s["pid"] in own_pids]
     print(f"[diag] own_pids={own_pids}", flush=True)
     print(f"[diag] pgrep live={len(live)} own_live={len(own_live)} "
           f"own_live_set={sorted(set(own_pids) & set(live))}", flush=True)
     for p in own_pids:
-        print(f"[diag] pid {p} cmdline={cmdlines.get(p, '?')!r}", flush=True)
+        print(f"[diag] pid {p} parsed={parsed.get(p)!r}\n"
+              f"[diag]   cmdline={cmdlines.get(p, '?')!r}", flush=True)
     print(f"[diag] discover records={len(found)} "
           f"own_found={sorted(s['pid'] for s in found if s['pid'] in own_pids)}", flush=True)
     assert len(candidates) >= 20, \

@@ -381,7 +381,7 @@ def _cmdline(pid: int) -> str:
         return cached["cmdline"]
     try:
         out = subprocess.run(
-            ["ps", "-o", "command=", "-p", str(pid)],
+            ["ps", "-ww", "-o", "command=", "-p", str(pid)],
             capture_output=True, text=True, timeout=2,
         )
         return out.stdout
@@ -563,7 +563,7 @@ def _batch_process_info(pids: list[int]) -> dict[int, dict]:
         return {}
     try:
         out = subprocess.run(
-            ["ps", "-o", "pid=,etime=,command=",
+            ["ps", "-ww", "-o", "pid=,etime=,command=",
              "-p", ",".join(str(p) for p in pids)],
             capture_output=True, text=True, timeout=10,
         )
