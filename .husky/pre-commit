@@ -37,6 +37,22 @@ check_version() {
 
 check_version
 
+# Test-surface auto-registration (#1429) — new tests/test_*.py must be in
+# config/ci-surfaces.yml or they silently drop out of CI selection (the
+# #1262 drift trap, which recurred 4× in a week). Auto-register at COMMIT
+# time so the drift never reaches main; the CI integrity gate stays as the
+# safety net for squash/--no-verify paths. Default surface is core — review
+# the output; move the file in the manifest if another surface fits better
+# (the shared/unknown-path rules still expand selection to the full matrix
+# for broad changes). Only triggers on STAGED tests/ changes, and only
+# stages the manifest when it actually changed.
+if git diff --cached --name-only | grep -qE '^tests/.*\.py$'; then
+  if python3 tools/ci_selection.py --register --dry-run 2>/dev/null | grep -q "would register"; then
+    python3 tools/ci_selection.py --register
+    git add config/ci-surfaces.yml
+  fi
+fi
+
 # Only run lint-staged if this is a Node.js project (has package.json)
 if [ -f package.json ] && command -v npx >/dev/null 2>&1; then
   npx lint-staged

@@ -7,11 +7,15 @@ changes select their owning surface; push/schedule → full; manifest integrity.
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tools.ci_selection import load_manifest, select, integrity
+from tools.ci_selection import (
+    load_manifest, select, integrity, slow_file_issues,
+    unlisted_tests, register_tests, register, classify_test_file,
+)
 
 
 def _sel(changed, event="pull_request"):
@@ -132,3 +136,90 @@ def test_full_mode_selection_unchanged():
     assert r["full"] is True
     assert r["test_files"] == "ALL"
     assert len(r["slow_files"]) == len(load_manifest()["slow_files"])
+
+# ── #1429: auto-registration of unlisted test files ──────────────────────
+
+
+def _tmp_manifest(tests_dir: Path, extra: str = "") -> Path:
+    """Build a minimal manifest YAML with an api surface + tier1."""
+    m = tests_dir / "ci-surfaces.yml"
+    m.write_text(
+        "version: 1" + "\n" +
+        "surfaces:" + "\n" +
+        "  api:" + "\n" +
+        "  - test_existing_api.py" + "\n" +
+        "  core:" + "\n" +
+        "  - test_existing_core.py" + "\n" +
+        extra + "\n" +
+        "tier1:" + "\n" +
+        "  - test_existing_api.py" + "\n"
+    )
+    return m
+
+
+def test_register_adds_unlisted_file_under_surface():
+    with tempfile.TemporaryDirectory() as d:
+        td = Path(d)
+        (td / "test_new_thing.py").write_text("def test_x():\n    pass\n")
+        (td / "test_existing_api.py").write_text("def test_x():\n    pass\n")
+        (td / "test_existing_core.py").write_text("def test_x():\n    pass\n")
+        m = _tmp_manifest(td)
+        import yaml
+        manifest = yaml.safe_load(m.read_text())
+        added = register_tests(m, td, "api", manifest)
+        assert added == ["test_new_thing.py"]
+        # idempotent
+        manifest2 = yaml.safe_load(m.read_text())
+        assert register_tests(m, td, "api", manifest2) == []
+        # file is registered + manifest still valid
+        manifest3 = yaml.safe_load(m.read_text())
+        assert "test_new_thing.py" in manifest3["surfaces"]["api"]
+        assert classify_test_file("test_new_thing.py", manifest3) == "api"
+
+
+def test_register_creates_surface_block_if_missing():
+    with tempfile.TemporaryDirectory() as d:
+        td = Path(d)
+        (td / "test_new_sdk.py").write_text("def test_x():\n    pass\n")
+        (td / "test_existing_api.py").write_text("def test_x():\n    pass\n")
+        m = _tmp_manifest(td)
+        import yaml
+        manifest = yaml.safe_load(m.read_text())
+        added = register_tests(m, td, "sdk", manifest)
+        assert added == ["test_new_sdk.py"]
+        manifest2 = yaml.safe_load(m.read_text())
+        assert "test_new_sdk.py" in manifest2["surfaces"]["sdk"]
+        # new surface block landed BEFORE tier1:
+        txt = m.read_text()
+        assert txt.index("sdk:") < txt.index("tier1:")
+
+
+def test_register_keeps_alphabetical_order():
+    with tempfile.TemporaryDirectory() as d:
+        td = Path(d)
+        (td / "test_zzz_new.py").write_text("def test_x():\n    pass\n")
+        (td / "test_aaa_new.py").write_text("def test_x():\n    pass\n")
+        (td / "test_mmm_new.py").write_text("def test_x():\n    pass\n")
+        (td / "test_existing_api.py").write_text("def test_x():\n    pass\n")
+        m = _tmp_manifest(td)
+        import yaml
+        manifest = yaml.safe_load(m.read_text())
+        register_tests(m, td, "api", manifest)
+        manifest2 = yaml.safe_load(m.read_text())
+        api = manifest2["surfaces"]["api"]
+        assert api == sorted(api), "surface list must stay alphabetized"
+        assert api == ["test_aaa_new.py", "test_existing_api.py", "test_mmm_new.py", "test_zzz_new.py"]
+
+
+def test_register_default_surface_is_core():
+    with tempfile.TemporaryDirectory() as d:
+        td = Path(d)
+        (td / "test_new_default.py").write_text("def test_x():\n    pass\n")
+        (td / "test_existing_api.py").write_text("def test_x():\n    pass\n")
+        m = _tmp_manifest(td)
+        import yaml
+        manifest = yaml.safe_load(m.read_text())
+        register_tests(m, td, "core", manifest)
+        manifest2 = yaml.safe_load(m.read_text())
+        assert "test_new_default.py" in manifest2["surfaces"]["core"]
+
