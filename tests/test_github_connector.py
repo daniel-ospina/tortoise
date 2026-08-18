@@ -464,3 +464,49 @@ def test_ingest_one_event_per_issue(shared_proj, monkeypatch):
     assert len(proj.g.query(
         "MATCH (o:Object {id:'github-issue-test/repo-42'}) RETURN o"
     ).result_set) == 1
+
+
+# ── Routing config (#1395) ────────────────────────────────────────
+
+def test_routing_packaged_default_loads():
+    """The packaged default (tortoise/config/routing.yaml) is the fallback."""
+    gh = GitHubConnector(config={"repo": "daniel-ospina/tortoise"})
+    assert gh._routing, "packaged routing default must load"
+    repo_routing = gh._routing.get("repo_routing", {})
+    assert repo_routing.get("daniel-ospina/tortoise", {}).get("default_team") == "epistemic-team"
+
+
+def test_routing_env_override(monkeypatch, tmp_path):
+    """TORTOISE_ROUTING_CONFIG points at a user file that wins."""
+    custom = tmp_path / "custom-routing.yaml"
+    custom.write_text(
+        "repo_routing:\n  acme/product:\n    product: acme\n    default_team: acme-team\n"
+    )
+    monkeypatch.setenv("TORTOISE_ROUTING_CONFIG", str(custom))
+    gh = GitHubConnector(config={"repo": "acme/product"})
+    assert gh._routing["repo_routing"]["acme/product"]["default_team"] == "acme-team"
+
+
+def test_routing_env_override_missing_file_falls_back(monkeypatch):
+    """Missing override file → packaged default, no crash."""
+    monkeypatch.setenv("TORTOISE_ROUTING_CONFIG", "/nonexistent/routing.yaml")
+    gh = GitHubConnector(config={"repo": "daniel-ospina/tortoise"})
+    assert gh._routing, "must fall back to the packaged default"
+    assert gh._routing["repo_routing"]["daniel-ospina/tortoise"]["default_team"] == "epistemic-team"
+
+
+def test_routing_env_override_invalid_yaml_falls_back(monkeypatch, tmp_path):
+    """Invalid YAML in the override file → packaged default, no crash."""
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("repo_routing: [unclosed")
+    monkeypatch.setenv("TORTOISE_ROUTING_CONFIG", str(bad))
+    gh = GitHubConnector(config={"repo": "daniel-ospina/tortoise"})
+    assert gh._routing, "must fall back on invalid user file"
+    assert gh._routing["repo_routing"]["daniel-ospina/tortoise"]["default_team"] == "epistemic-team"
+
+
+def test_routing_route_issue_unknown_repo_ask_human():
+    """attribution_fallback: ask_human — unknown repo → no team (human decision)."""
+    gh = GitHubConnector(config={"repo": "some/unknown-repo"})
+    route = gh._route_issue([])
+    assert route.get("team") in ("", None), f"unknown repo must not get a team, got {route}"

@@ -54,13 +54,47 @@ class GitHubConnector:
         self._routing = self._load_routing()
 
     def _load_routing(self) -> dict:
-        """Load entity routing config (config/routing.yaml)."""
+        """Load entity routing config (#1395).
+
+        Precedence: TORTOISE_ROUTING_CONFIG env var (user/customer file) >
+        the packaged default (tortoise/config/routing.yaml, shipped in the
+        wheel) > built-in {} fallback. A missing/unreadable/invalid user file
+        falls back to the packaged default with a warning — never crashes.
+        """
         import yaml
-        from pathlib import Path
-        path = Path(__file__).resolve().parent.parent.parent / "config" / "routing.yaml"
-        if path.exists():
-            return yaml.safe_load(path.read_text()) or {}
-        return {}
+
+        def _load(path) -> dict:
+            try:
+                data = yaml.safe_load(path.read_text())
+                return data if isinstance(data, dict) else {}
+            except Exception:
+                return {}
+
+        # 1. User/customer override (#1395)
+        override = os.environ.get("TORTOISE_ROUTING_CONFIG")
+        if override:
+            from pathlib import Path as _Path
+            p = _Path(override)
+            if p.is_file():
+                loaded = _load(p)
+                if loaded:
+                    return loaded
+                logger.warning(
+                    "TORTOISE_ROUTING_CONFIG=%s unreadable/invalid — falling back "
+                    "to the packaged default", override,
+                )
+            else:
+                logger.warning(
+                    "TORTOISE_ROUTING_CONFIG=%s not found — falling back to the "
+                    "packaged default", override,
+                )
+
+        # 2. Packaged default (wheel + editable installs; package-data)
+        try:
+            import importlib.resources as resources
+            return _load(resources.files("tortoise").joinpath("config", "routing.yaml"))
+        except Exception:
+            return {}
 
     def _route_issue(self, labels: list[str]) -> dict:
         """Determine team + role for an issue based on routing config."""
