@@ -115,6 +115,7 @@ surfaces:
   - test_epic903_staleness.py
   - test_epic903_warmstart.py
   - test_eval_metrics.py
+  - eval/retrieval/test_gate_1349.py
   - eval/retrieval/test_run.py
   - test_event_log.py
   - test_event_provenance.py
