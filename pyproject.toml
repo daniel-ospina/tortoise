@@ -63,6 +63,11 @@ dev = [
 [tool.setuptools.packages.find]
 include = ["tortoise*", "benchmarks*"]
 
+[tool.setuptools.package-data]
+# #1395: ship the routing config with the wheel (packaged default for the
+# GitHub connector; TORTOISE_ROUTING_CONFIG overrides it).
+tortoise = ["config/routing.yaml"]
+
 [tool.pytest.ini_options]
 markers = [
     "bench: issue #316 benchmark harness tests (benchmarks/ + tests/bench/)",
