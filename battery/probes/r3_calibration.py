@@ -22,6 +22,8 @@ def brier(confidences: list[float], outcomes: list[int]) -> float:
 
 
 class R3CalibrationProbe:
+    #: Hyphenated cal-table metric key (thresholds.yaml).
+    cal_metric = "brier"
     probe_id = "R3"
     metric = "brier"
 

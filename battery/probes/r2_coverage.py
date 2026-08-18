@@ -16,6 +16,8 @@ from battery.probes.base import ProbeResult
 class R2CoverageProbe:
     """Adversarial-coverage scoring (judge-gated subscore + mechanism gate)."""
 
+    #: Hyphenated cal-table metric key (thresholds.yaml).
+    cal_metric = "coverage-subscore"
     probe_id = "R2"
     metric = "coverage_subscore"
 

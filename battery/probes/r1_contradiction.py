@@ -15,6 +15,8 @@ from battery.probes.base import ProbeResult
 class R1ContradictionProbe:
     """Scores the contradiction-surfacing gate from episode traces."""
 
+    #: Hyphenated cal-table metric key (thresholds.yaml).
+    cal_metric = "surfaced-rate"
     probe_id = "R1"
     metric = "surfaced_rate"
 

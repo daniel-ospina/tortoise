@@ -15,6 +15,8 @@ from battery.probes.base import ProbeResult
 
 
 class R5UpdateProbe:
+    #: Hyphenated cal-table metric key (thresholds.yaml).
+    cal_metric = "correct-direction-rate"
     probe_id = "R5"
     metric = "correct_direction_rate"
 

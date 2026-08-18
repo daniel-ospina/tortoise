@@ -111,3 +111,20 @@ class TestR5:
         p = R5UpdateProbe()
         traces = [{"over_reacted": True}] + [{"over_reacted": False}] * 9
         assert p.over_reaction_rate(traces) <= 0.10
+
+
+def test_load_probe_thresholds_cal_table():
+    """The [cal]-locked lookup resolves the hyphenated cal-table key and
+    hard-fails on a missing row (no silent default)."""
+    import sys
+    from pathlib import Path
+    from battery.config.thresholds import load_thresholds
+    from battery.probes.base import load_probe_thresholds
+    cfg = load_thresholds(
+        Path(__file__).resolve().parent.parent / "battery" / "config"
+        / "thresholds.yaml")
+    assert load_probe_thresholds(cfg, "surfaced-rate", "a4", 0.5) == 0.90
+    assert load_probe_thresholds(cfg, "brier", "a4", 0.5) == 0.25
+    import pytest as _p
+    with _p.raises(KeyError):
+        load_probe_thresholds(cfg, "no-such-metric", "a4", 0.5)

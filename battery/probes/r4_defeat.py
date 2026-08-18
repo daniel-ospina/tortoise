@@ -14,6 +14,8 @@ from battery.probes.base import ProbeResult
 
 
 class R4DefeatProbe:
+    #: Hyphenated cal-table metric key (thresholds.yaml).
+    cal_metric = "defeat-precision"
     probe_id = "R4"
     metric = "defeat_precision"
 
