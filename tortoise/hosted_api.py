@@ -3904,6 +3904,40 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: "CommitPayload", plan):
             passes_frequency_gate=er.entity.passes_frequency_gate,
             is_episodic=False,
         )
+
+    # ── 6b. Supersessions — client-derived records (the deterministic channel
+    # for the Object status fold, #1350). Resolve each superseded ref by id
+    # (fallback name) and emit an ObjectSuperseded event for the projection to
+    # fold into Object.status. Unresolved refs warn and are skipped (fail-open
+    # — mirrors the extractor's never-guess discipline). ──
+    for sr in payload.supersessions:
+        rows = proj.g.query(
+            "MATCH (o:Object) WHERE o.id = $ref OR o.name = $ref "
+            "RETURN o.id, o.name LIMIT 1",
+            params={"ref": sr.superseded}).result_set
+        if not rows:
+            logger.warning("supersession ref %r not found in the graph — "
+                           "skipped (fail-open)", sr.superseded)
+            continue
+        obj_id, obj_name = rows[0]
+        try:
+            sdk._emit_event(
+                "ObjectSuperseded",
+                {"id": obj_id, "name": obj_name,
+                 "supersedes_by": sr.supersedes_by,
+                 "evidence": sr.evidence or ""},
+                id=obj_id,
+            )
+            # #1350: apply the fold at live-write time (the event is the
+            # journal for rebuild replay; the projection-owned fold is what
+            # flips the status now — mirrors supersede_point's pattern).
+            sdk._get_proj()._fold_object_superseded({
+                "id": obj_id, "name": obj_name,
+                "supersedes_by": sr.supersedes_by})
+        except Exception as e:  # noqa: BLE001 — a supersession write must not
+            logger.warning("ObjectSuperseded emit failed for %r: %s",
+                           obj_name, e)
+
     for pr in reconcile.points:
         pid = pr.point.id if pr.action != "supersede" else pr.supersede_id
         for name in pr.point.about_entities:

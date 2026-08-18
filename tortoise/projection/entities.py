@@ -75,7 +75,10 @@ class _EntityHandlers:
         "id", "name", "subject_kind", "subjectKind", "createdAt", "embedding",
     })
     _OBJECT_HANDLED: frozenset = frozenset({
-        "id", "name", "object_kind", "objectKind", "createdAt", "title", "embedding",
+        "id", "name", "object_kind", "objectKind", "createdAt", "title",
+        "embedding", "status",  # #1350: status is projection-owned — an
+        # ObjectRegistered replay must NOT rewrite it via _persist_extra_props
+        # (the clobber guard: superseded stays superseded on re-mention).
     })
     _DOCUMENT_HANDLED: frozenset = frozenset({
         "id", "title", "document_kind", "documentKind", "content",
@@ -328,6 +331,7 @@ class _EntityHandlers:
         self.g.query(
             "MERGE (o:Object {name:$name}) "
             "ON CREATE SET o.id=$id, o.objectKind=coalesce($ok, 'other'), o.createdAt=coalesce($ca, $now), o.title=coalesce($title, ''), "
+            "            o.status=coalesce($st, 'live'), "
             "            o.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE o.embedding END "
             "ON MATCH SET o.id=coalesce($id, o.id), "
             "            o.objectKind=coalesce($ok, o.objectKind), "
@@ -335,6 +339,9 @@ class _EntityHandlers:
             "            o.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE o.embedding END",
             params={"id": oid, "name": name,
                     "ok": ok,
+                    "st": ev.get("status"),  # #1350: status ON CREATE only —
+                    # ON MATCH never touches it (the clobber guard: a
+                    # re-mention cannot reset superseded→live).
                     "ca": ev.get("createdAt"), "now": _now_iso(),
                     "title": title,
                     "embedding": embedding},
@@ -344,6 +351,34 @@ class _EntityHandlers:
             "MATCH (n:Object {name: $name})", {"name": name},
             ev, self._OBJECT_HANDLED,
         )
+
+    def _fold_object_superseded(self, ev: dict) -> None:
+        """#1350: fold an ObjectSuperseded event into Object.status.
+
+        Projection-owned cache of the event stream (§11 'derived values may
+        be CACHED'): a superseded Object is marked status='superseded' with
+        the successor name + timestamp. Idempotent (a replayed/duplicate
+        event re-applies the same SET); a chain A→B→C leaves A superseded by
+        B and B superseded by C (each event folds its own target).
+        """
+        oid = ev.get("id")
+        name = ev.get("name")
+        if not oid and not name:
+            return
+        supersedes_by = str(ev.get("supersedes_by") or "")[:200]
+        now = _now_iso()
+        if oid:
+            self.g.query(
+                "MATCH (o:Object {id:$id}) "
+                "SET o.status='superseded', o.supersededBy=$sb, "
+                "    o.supersededAt=$now",
+                params={"id": oid, "sb": supersedes_by, "now": now})
+        else:
+            self.g.query(
+                "MATCH (o:Object {name:$name}) "
+                "SET o.status='superseded', o.supersededBy=$sb, "
+                "    o.supersededAt=$now",
+                params={"name": name, "sb": supersedes_by, "now": now})
 
     def _upsert_document(self, ev: dict) -> None:
         """MERGE Document node."""
@@ -585,6 +620,20 @@ class _EntityHandlers:
                     "MERGE (e)-[:produces]->(o)",
                     params={"name": obj, "eid": eid},
                 )
+        # #1350: work-item status fold — GitHub/Linear lifecycle events derive
+        # the Object's status (decision 2a: in_progress/completed, completed
+        # stays NON-terminal — history recallable, not presented as current).
+        # Both producer vocabularies map (#1155 divergence).
+        _wk = (inner.get("eventKind") or "")
+        _obj_name = inner.get("object")
+        if _obj_name and _wk in ("pm:cardCreated", "github.issue.open"):
+            self.g.query(
+                "MATCH (o:Object {name:$n}) SET o.status='in_progress'",
+                params={"n": _obj_name})
+        elif _obj_name and _wk in ("pm:cardCompleted", "github.issue.closed"):
+            self.g.query(
+                "MATCH (o:Object {name:$n}) SET o.status='completed'",
+                params={"n": _obj_name})
         # Event -[:uses]-> Object (input entities, #122; #125 structured dicts)
         uses = inner.get("uses")
         if uses:

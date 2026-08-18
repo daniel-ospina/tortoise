@@ -373,6 +373,7 @@ _GRAPH_EVENT_TYPES = frozenset({
     "OperatorPromoted",  # #785: R16 zombie-operator prevention
     "DedupeRecorded",  # #784: content-dedup candidate recorded/merged
     "DedupeRejected",  # #784: content-dedup candidate rejected
+    "ObjectSuperseded",  # #1350: Object status fold source (supersession)
 })
 
 # Epic #902 A4 (§4.2): JSONL-ONLY batch_id record type — deliberately NOT in
@@ -1594,10 +1595,17 @@ class TortoiseSDK:
             "minted_kinds": out.get("minted_kinds", []),
             "chain_notes": out.get("chain_notes", []),
             "link_before_create": out.get("link_before_create", []),
+            "supersessions": out.get("supersessions", []),
             "story_arc": out.get("story_arc", ""),
             "search": out.get("search", {}),
             "stats": out.get("stats", {}),
         }
+        # #1350: carry the client-derived supersession records to the server
+        # (the deterministic channel for the Object status fold). Only set
+        # when non-empty — old-client payloads stay byte-identical.
+        supersessions = out.get("supersessions", []) or []
+        if supersessions and payload is not None:
+            payload["supersessions"] = supersessions
         if errors or payload is None:
             return result
         try:
@@ -1647,7 +1655,7 @@ class TortoiseSDK:
         payload["client_commit_id"] = compute_client_commit_id(
             payload["session_id"], payload["points"], payload["entities"],
             payload["operators"], payload["summary"], payload["story_arc"],
-            payload.get("events", []))
+            payload.get("events", []), payload.get("supersessions", []))
         if errors:
             return {"session_id": session_id, "ok": False, "errors": errors,
                     "payload": payload}
@@ -9036,7 +9044,8 @@ class TortoiseSDK:
                     }
             elif entity_type == "object":
                 rows = graph.query(
-                    "MATCH (n:Object) WHERE n.id IN $ids RETURN n.id, n.name, n.objectKind",
+                    "MATCH (n:Object) WHERE n.id IN $ids "
+                    "RETURN n.id, n.name, n.objectKind, n.status, n.supersededBy",
                     params={"ids": result_ids},
                 ).result_set
                 for row in rows:
@@ -9044,6 +9053,10 @@ class TortoiseSDK:
                     entity_data[oid] = {
                         "content": row[1] or "",
                         "kind": row[2] or "",
+                        # #1350: projection-owned status + successor (Object
+                        # status fold; absent = honestly absent)
+                        "status": row[3] or "",
+                        "superseded_by": row[4] or "",
                     }
             elif entity_type == "operator":
                 rows = graph.query(
@@ -9124,8 +9137,10 @@ class TortoiseSDK:
                 match_source=match_source,
                 ep=ep,
                 relationships=point_relationships.get(pid, []),
-                status=point_state.get(pid, {}).get("status", ""),
-                superseded_by=point_state.get(pid, {}).get("superseded_by"),
+                status=point_state.get(pid, {}).get("status", "")
+                or pt.get("status", ""),
+                superseded_by=point_state.get(pid, {}).get("superseded_by")
+                or pt.get("superseded_by") or None,
                 supersedes=point_state.get(pid, {}).get("supersedes") or [],
                 subject=point_state.get(pid, {}).get("subject"),
                 topics=cap_topics,
@@ -9284,6 +9299,14 @@ class TortoiseSDK:
                 query, kind=kind, entity_type="object", limit=pool)
             if object_centric else []
         )
+        # #1350: Object status filter (decision 2a — completed/in_progress
+        # stay visible; superseded/deprecated/archived/retracted excluded
+        # from the state view unless include_superseded brings them back).
+        objects = [dict(r, entity_type="object") for r in object_results]
+        if not include_superseded:
+            objects = [o for o in objects
+                       if (o.get("status") or "") not in
+                       ("superseded", "deprecated", "archived", "retracted")]
 
         # UC1 state view: hide mitigation bookkeeping points (they are
         # surfaced ATTACHED to results as context, not standalone claims —
@@ -9296,7 +9319,6 @@ class TortoiseSDK:
         # statuses, so recall_state re-filters retracted from its own pool.
         if include_superseded:
             points = [p for p in points if p.get("status") != "retracted"]
-        objects = [dict(r, entity_type="object") for r in object_results]
 
         # 3. Multiplicative-gate ranking over the merged pool.
         merged = points + objects
@@ -13837,7 +13859,7 @@ def _post_commit(payload: dict, *, base_url=None, api_key=None) -> dict:
     payload["client_commit_id"] = compute_client_commit_id(
         payload["session_id"], payload["points"], payload["entities"],
         payload["operators"], payload["summary"], payload["story_arc"],
-        payload.get("events", []))
+        payload.get("events", []), payload.get("supersessions", []))
     base = base_url or os.environ.get("TORTOISE_API_URL", "http://localhost:8000")
     key = api_key or os.environ.get("TORTOISE_API_KEY", "")
     import requests
