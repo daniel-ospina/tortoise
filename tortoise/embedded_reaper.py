@@ -10,10 +10,16 @@ Classification (dual-signal):
   - unknown old-format dirname pattern              -> protected (WARNING)
   - tempdir socket + uptime < MIN_UPTIME            -> protected (boot cooldown)
   - tempdir socket + uptime >= MIN_UPTIME + no db_filename + no .db -> candidate
+  - path-based + registry-recorded owner pid DEAD   -> orphan (candidate; #1427)
 
 NEVER_KILL: anything classified protected (stable singleton, path-based
 servers, boot-cooldown servers, unknown patterns). Only candidates may be
 reaped, and only after liveness + CLIENT LIST verification (see reap()).
+Issue #1427: a path-based server whose registry-recorded owner pid is
+provably dead is an orphan (the db file has no live owner), not live data
+— it reclassifies as a candidate instead of staying protected forever
+(the dominant leak class: aborted test servers). Live owners keep the
+protection; unresolvable owners (no pidfile / unreadable) fail closed.
 
 Probing is read-only and fail-closed: CLIENT LIST goes over a plain unix
 socket (redis-cli or raw RESP) and never kills or mutates the probed
@@ -265,6 +271,26 @@ def _pid_alive(pid: int) -> bool:
         return False
     except OSError:
         return False
+
+
+def _registry_owner_alive(registry: dict | None) -> bool | None:
+    """Liveness of the registry-recorded owning process (issue #1427).
+
+    The registry records a pidfile path; the pid file's content is the
+    server's owning process pid. Returns True when that pid is alive,
+    False when provably dead (orphan), None when unresolvable (no
+    pidfile, pid file missing/unreadable, unparseable content). Callers
+    must fail closed on None — an unknown owner keeps protection.
+    """
+    if not registry or not registry.get("pidfile"):
+        return None
+    try:
+        pid = int(Path(registry["pidfile"]).read_text().strip())
+    except (OSError, ValueError, TypeError):
+        return None
+    if not _pid_alive(pid):
+        return False
+    return True
 
 
 def _is_detached(pid: int) -> bool:
@@ -844,6 +870,13 @@ def _classify(socket_real: str, dbdir_real: str, tmpdir_real: str,
         if reg_dbdir_real.startswith(tmpdir_real):
             logger.warning(
                 "unrecognized dir pattern, treating as protected: %s", reg_dbdir_real)
+        # Issue #1427: a path-based server whose registry-recorded owner pid
+        # is provably dead is an orphan — the db file has no live owner, so
+        # the server is a leftover, not live data. Fall through to the
+        # cooldown/candidate path (dead pid -> candidate); live owners keep
+        # the protection below, unresolvable owners fail closed.
+        if _registry_owner_alive(registry) is False:
+            return _cooldown_check(registry)
         return "protected"
 
     # Signal 2: dbfilename is the generic 'redis.db' (no-path) vs user name.
@@ -852,11 +885,19 @@ def _classify(socket_real: str, dbdir_real: str, tmpdir_real: str,
     db_filename = registry.get("dbfilename", "")
     if db_filename and db_filename != "redis.db" \
             and not _is_ephemeral_dir(reg_dbdir_real, tmpdir_real):
+        # Issue #1427: same orphan reclassification as Signal 1 — a dead
+        # registry-recorded owner makes this a leftover, not live data.
+        if _registry_owner_alive(registry) is False:
+            return _cooldown_check(registry)
         return "protected"
 
     # Old-format registry (no dbfilename field): .db file present -> protected.
     if "dbfilename" in registry and registry.get("dbfilename") is None:
         if _dir_has_db_file(dbdir_real) and not _is_ephemeral_dir(dbdir_real, tmpdir_real):
+            # Issue #1427: same orphan reclassification — old-format
+            # path-based servers are the same protection class.
+            if _registry_owner_alive(registry) is False:
+                return _cooldown_check(registry)
             return "protected"
         basename = os.path.basename(dbdir_real)
         if not (_AUTOGEN_DIRNAME.match(basename)

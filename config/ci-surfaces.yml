@@ -209,6 +209,7 @@ surfaces:
   - test_projection_version_gate.py
   - test_query_suggestions.py
   - test_reaper.py
+  - test_reaper_orphan.py
   - test_status_projection.py
   - test_references_edge.py
   - test_remove_context_migration.py
@@ -325,6 +326,7 @@ tier1:
 - test_quota.py
 - test_ranking.py
 - test_reaper.py
+- test_reaper_orphan.py
 - test_sdk_dedup.py
 - test_sdk_ep.py
 - test_supabase_control.py
