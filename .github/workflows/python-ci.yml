@@ -210,6 +210,37 @@ jobs:
     # Outer cap: setup (checkout+install+cache) + watchdog (45m) + SIGINT
     # grace (10s) + tail print. Cap 60m ≈ 45m watchdog + ~15m setup margin.
     timeout-minutes: 60
+    # #1436: provision live FalkorDB so the ~72 live-required tests (test_ep_directional
+    # et al.) actually RUN in the fast matrix instead of silently skipping (CI was
+    # green while EP tests never ran — masked #1382). Two services cover BOTH probe
+    # families: the passworded docker://:falkordb@localhost:6379 URIs and the legacy
+    # passwordless docker://:@localhost:16379 URIs (test_search_engine / test_ingest /
+    # test_session_capture_e2e / the 16379 candidates in test_hnsw_vector_index and
+    # test_integration_search). Mirrors test-concurrency-falkor's service block.
+    # NO job-level TORTOISE_DB_URI: the ~600 embedded tests need the redislite default;
+    # the live tests' module probes set/restore their own env. ~2-3 min added runtime
+    # vs the 45m watchdog. The skip-fail guard step below fails closed if they skip.
+    services:
+      falkordb:
+        image: falkordb/falkordb-server:latest
+        env:
+          REDIS_ARGS: "--requirepass falkordb"
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli -a falkordb ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      falkordb-legacy:
+        image: falkordb/falkordb-server:latest
+        ports:
+          - 16379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     # #964: "no job activity" has two distinct causes, neither of which is a
     # missing timeout (timeouts have existed since #798/#880): (1) pytest
     # output is buffered to /tmp/pytest.log so the job log shows NOTHING for
@@ -332,7 +363,15 @@ jobs:
               echo "HEARTBEAT: pytest still running — $p passed, $f failed so far"
             done ) &
           HB_PID=$!
-          timeout -s INT -k 10 45m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b' --maxfail=20 -rfE --durations=15 > /tmp/pytest.log 2>&1
+          timeout -s INT -k 10 45m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b' --maxfail=20 -r fEs --durations=15 > /tmp/pytest.log 2>&1
+          # #1436: -v truncates skip reasons to terminal width (80 cols when
+          # redirected to a file with COLUMNS unset), dropping e.g.
+          # test_ep_directional's 81-char nodeid reason entirely — so the guard
+          # reads the -r summary, which is never truncated. -r fEs (not "-rfE
+          # then -rs"): pytest 9.1.1 replaces the report set when -r flags are
+          # repeated, so a trailing -rfE would suppress the skip summary the
+          # guard depends on (pinned by
+          # tests/test_skip_guard.py::test_workflow_keeps_rs).
           # #1371: capture pytest's real exit code IMMEDIATELY (before the
           # heartbeat kill / rc write below) and persist it for the orphan
           # check — the kill-aware logic needs it to distinguish a watchdog
@@ -361,6 +400,26 @@ jobs:
           # 429-rate-limited, stalling embedding loads up to 30s each).
           HF_HUB_OFFLINE: "1"
           TRANSFORMERS_OFFLINE: "1"
+
+      - name: "Skip-fail guard: live-FalkorDB tests must run, never skip (#1436)"
+        # The falkordb services above make the live-required tests RUN in the
+        # fast matrix. If any of them SKIP anyway (probe regression, service
+        # outage, a new live test file landing here), this guard flips RED
+        # instead of the historical silent-green that masked #1382 for days.
+        # Gated on pytest rc==0: the failure mode we guard against is exactly
+        # "pytest green + live tests skipped" — a red pytest needs no extra
+        # signal. Same semantics as test-concurrency-falkor's inline guard,
+        # extracted to a tested tool (tools/skip-guard.py + tests/test_skip_guard.py).
+        if: always()
+        run: |
+          set +e
+          RC=""
+          [ -f "${RUNNER_TEMP:-/tmp}/pytest-rc" ] && RC=$(cat "${RUNNER_TEMP:-/tmp}/pytest-rc")
+          if [ "$RC" = "0" ]; then
+            python3 tools/skip-guard.py /tmp/pytest.log
+          else
+            echo "pytest rc=$RC — skip guard skipped (job already red)"
+          fi
 
       - name: Dump redislite-hygiene end-sweep decision (issue #1103)
         # pytest capture swallows the conftest print; the orphan check below
