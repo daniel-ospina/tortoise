@@ -73,6 +73,36 @@ class TestPayloadContract:
         c2 = canonical_payload("s", [], [], [], "sum", "arc", [], [])
         assert c1 != c2, "a supersession change must change the commit id"
 
+    def test_old_client_commit_id_still_validates(self):
+        """#1350 compat guard: a pre-#1350 client computed its id over a
+        canonical WITHOUT the supersessions key — the new recompute must
+        omit the key when empty so old commits still validate (no 422)."""
+        import hashlib
+        import json
+        from tortoise.commit_schema import validate_payload_dict, canonical_payload
+        # the pre-#1350 canonical (keys before supersessions existed)
+        pre_change = json.dumps({
+            "session_id": "s1", "summary": "sum", "story_arc": "arc",
+            "points": [], "entities": [], "operators": [], "events": [],
+        }, sort_keys=True, separators=(",", ":"))
+        old_id = hashlib.sha256(pre_change.encode()).hexdigest()
+        payload = {
+            "schema_version": "1", "session_id": "s1",
+            "client_commit_id": old_id,
+            "captured_at": "2026-08-18T00:00:00+00:00",
+            "extractor": {"version": "v", "mode": "byok",
+                           "calibration_version": "v2"},
+            "summary": "sum", "story_arc": "arc", "points": [],
+            "telemetry": {"extractor": {"version": "v", "mode": "byok"},
+                           "model": {"provider": "byok", "id": "user-model"},
+                           "counts": {}},
+        }
+        l1, _ = validate_payload_dict(payload)
+        assert l1.ok, "pre-#1350 commit id must still validate"
+        # and the empty-canonical truly omits the key (byte-identical)
+        c = canonical_payload("s1", [], [], [], "sum", "arc", [], [])
+        assert '"supersessions"' not in c
+
 
 # ── Projection fold (Steps 4-6) ──────────────────────────────────────
 

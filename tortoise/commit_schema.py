@@ -885,7 +885,13 @@ def canonical_payload(
             }
             for e in sorted(events, key=lambda x: _f(x, "id"))
         ],
-        "supersessions": [
+    }
+    # #1350: supersessions are part of the canonical ONLY when present — a
+    # pre-#1350 client computed its id over a canonical WITHOUT this key, so
+    # emitting "supersessions":[] would 422 every old commit (the additive
+    # contract must not change the id of a payload that never had them).
+    if supersessions:
+        canonical["supersessions"] = [
             {
                 "superseded": _f(s, "superseded"),
                 "supersedes_by": _f(s, "supersedes_by"),
@@ -894,8 +900,7 @@ def canonical_payload(
             for s in sorted(supersessions,
                             key=lambda x: (_f(x, "superseded"),
                                             _f(x, "supersedes_by")))
-        ],
-    }
+        ]
     return json.dumps(_round3(canonical), sort_keys=True, separators=(",", ":"))
 
 
