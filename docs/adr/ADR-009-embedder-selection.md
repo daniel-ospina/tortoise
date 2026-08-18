@@ -53,7 +53,7 @@ questions. A candidate wins iff it clears the procedure on **EITHER** metric.
   gate is (a) AND (b) only.
 - **Family reduction:** the 6 configs (MiniLM, bge-small, arctic-xs ×2, arctic-s ×2)
   reduce to 3 FAMILY deltas per metric (arctic = max of its 2 configs, pre-registered
-  selection rule); m=6 = 3 families × 2 metrics. P@10 (secondary) and P@5 (tertiary)
+  selection rule); m=6 = 3 families × 2 metrics. P@10 (secondary); session_recall@10 and P@5 reported as tertiary (per scoping)
   reported, not gated.
 
 **Escalation rule (fires when NEITHER metric clears — OR-of-three):** escalate if

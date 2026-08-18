@@ -1,0 +1,27 @@
+{
+  "checkpoint_key_prefix": "hnsw__vector__{model}__{prompt}",
+  "cleared": false,
+  "control": "minilm",
+  "generated_at_utc": "2026-08-17T21:35:32.824179+00:00",
+  "git_sha": "550a22f00bdd23dd47604afec53c48806da5eb54",
+  "metric_deltas": {
+    "ndcg@10": {
+      "deltas": [],
+      "mean_delta": 0.0,
+      "n": 0,
+      "one_sided_p": null
+    },
+    "turn_recall@10": {
+      "deltas": [],
+      "mean_delta": 0.0,
+      "n": 0,
+      "one_sided_p": null
+    }
+  },
+  "n": 0,
+  "producer": "tools/longmem_eval/run.py --spot-check",
+  "retriever": "vector",
+  "rule": "one-sided paired normal-approximation z-test per co-primary metric over the FULL question set (n recorded; a post-hoc n that shrinks until p<0.10 is forbidden); BH q=0.10 over m=2 \u2192 cleared iff min one-sided p \u2264 0.05. gate_1349.py recomputes the exact bootstrap p from the per-question deltas.",
+  "surface": "hnsw",
+  "winner": "minilm"
+}
