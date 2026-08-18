@@ -381,7 +381,7 @@ def _cmdline(pid: int) -> str:
         return cached["cmdline"]
     try:
         out = subprocess.run(
-            ["ps", "-o", "command=", "-p", str(pid)],
+            ["ps", "-ww", "-o", "command=", "-p", str(pid)],
             capture_output=True, text=True, timeout=2,
         )
         return out.stdout
@@ -546,6 +546,10 @@ def _active_client_count(socket_path: str) -> int | None:
 
 
 _UNIXSOCKET_RE = re.compile(r"unixsocket:(\S+)")
+# Linux daemonized redis re-execs with its effective config as long-form
+# argv (`--unixsocket /path`); macOS uses the colon form above. Both must
+# parse or the live pass silently misses live orphans on one platform.
+_UNIXSOCKET_LONG_RE = re.compile(r"--unixsocket\s+(\S+)")
 
 # Per-sweep process-info cache (issue #1005): populated with ONE batched ps
 # call in discover(), consulted by _cmdline/_uptime_seconds so classifying
@@ -559,7 +563,7 @@ def _batch_process_info(pids: list[int]) -> dict[int, dict]:
         return {}
     try:
         out = subprocess.run(
-            ["ps", "-o", "pid=,etime=,command=",
+            ["ps", "-ww", "-o", "pid=,etime=,command=",
              "-p", ",".join(str(p) for p in pids)],
             capture_output=True, text=True, timeout=10,
         )
@@ -602,13 +606,37 @@ def _pgrep_redis_servers() -> list[int]:
 
 
 def _socket_dir_from_cmdline(pid: int) -> str | None:
-    """Extract the unixsocket dir from a redis-server cmdline."""
+    """Extract the unixsocket dir from a redis-server cmdline.
+
+    Three forms are possible (redislite starts the server as
+    `redis-server <redis.config> [--loadmodule ...]`, and the daemonized
+    redis re-execs with its effective config as argv):
+      1. Inline colon form: `unixsocket:/path/redis.socket` (macOS).
+      2. Inline long-form: `--unixsocket /path` (Linux daemonized re-exec).
+      3. Config file: the `unixsocket` directive lives in the .config arg
+         (pre-re-exec argv) — read it so the live pass is reliable
+         regardless of the argv form (#1365: the chaos tests' discover()
+         must not silently miss live orphans on one platform).
+    """
     cmdline = _cmdline(pid)
     m = _UNIXSOCKET_RE.search(cmdline)
-    if not m:
-        return None
-    sock = m.group(1)
-    return os.path.dirname(os.path.realpath(sock))
+    if m:
+        sock = m.group(1)
+        return os.path.dirname(os.path.realpath(sock))
+    m = _UNIXSOCKET_LONG_RE.search(cmdline)
+    if m:
+        sock = m.group(1)
+        return os.path.dirname(os.path.realpath(sock))
+    m = re.search(r"(\S+/redis\.config)\b", cmdline)
+    if m:
+        try:
+            text = Path(m.group(1)).read_text(errors="replace")
+            um = re.search(r"^\s*unixsocket\s+'?([^'\s]+)'?", text, re.M)
+            if um:
+                return os.path.dirname(os.path.realpath(um.group(1)))
+        except OSError:
+            pass
+    return None
 
 
 def discover(jobs: int = 1, max_tempdir_entries: int = 5000) -> list[dict]:

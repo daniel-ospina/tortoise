@@ -87,3 +87,48 @@ def test_push_and_schedule_are_full():
 def test_integrity_covers_all_test_files():
     # every tests/*.py must be classified — the drift trap (scope v5 dec 2/5)
     assert integrity(load_manifest()) == []
+
+
+def test_slow_files_never_in_fast_gate_selections():
+    # #1371: tier-1 and tier-2 selections must never contain a slow file
+    # (they run only in the test-slow job).
+    m = load_manifest()
+    slow = set(m["slow_files"])
+    assert slow, "slow_files must be non-empty"
+    assert not (set(m["tier1"]) & slow), "tier1 leaks a slow file"
+
+    docs = _sel(["docs/README.md", "website/welcome.html"])
+    assert not (set(docs["test_files"]) & slow), "docs-only tier-1 leaks slow files"
+
+    core = _sel(["tortoise/graph.py", "tortoise/ingest.py"])
+    assert not (set(core["test_files"]) & slow), "tier-2 core leaks slow files"
+
+    ep = _sel(["tortoise/decide.py", "tortoise/ranking.py"])
+    assert not (set(ep["test_files"]) & slow), "tier-2 ep leaks slow files"
+
+
+def test_slow_files_emitted_on_every_return_path():
+    # #1371: the changes job reads slow_files from every selection mode — a
+    # missing key would KeyError the nightly/schedule run or empty test-slow.
+    m = load_manifest()
+    expected = set(m["slow_files"])
+    for changed, event in [
+        ([], "push"),
+        ([], "schedule"),
+        (["docs/README.md"], "pull_request"),
+        (["tortoise/sdk.py"], "pull_request"),
+        (["mystery-dir/x.py"], "pull_request"),
+        (["tortoise/decide.py"], "pull_request"),
+    ]:
+        r = select(changed, event, m)
+        assert "slow_files" in r, f"missing slow_files for {changed}/{event}"
+        assert set(r["slow_files"]) == expected, f"bad slow_files for {changed}/{event}"
+
+
+def test_full_mode_selection_unchanged():
+    # #1371: push/schedule full mode keeps its exact contract (test_files ALL)
+    # and only gains the slow_files key.
+    r = _sel([], "push")
+    assert r["full"] is True
+    assert r["test_files"] == "ALL"
+    assert len(r["slow_files"]) == len(load_manifest()["slow_files"])

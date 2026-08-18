@@ -1103,3 +1103,30 @@ def test_run_sweep_includes_stale_pid_files(tmp_path, monkeypatch):
     assert len(pid_actions) == 1
     assert pid_actions[0]["pid_file"] == str(stale)
     assert not stale.exists()
+
+
+def test_socket_dir_from_cmdline_config_file_form(tmp_path):
+    """#1365: redis-server may start with a config FILE (unixsocket directive
+    inside it) instead of an inline `unixsocket:` argv — the live pass must
+    parse both forms or it silently misses live orphans on Linux."""
+    import tortoise.embedded_reaper as er
+    sock = tmp_path / "redis.socket"
+    cfg = tmp_path / "redis.config"
+    cfg.write_text(f"unixsocket '{sock}'\ndir '{tmp_path}'\n")
+    er._PROC_INFO_CACHE = {
+        424242: {"cmdline": f"/x/redis-server {cfg} --loadmodule /y/falkordb.so",
+                 "etime": "00:00:01"},
+        424243: {"cmdline": f"/x/redis-server unixsocket:{sock} --loadmodule /y.so",
+                 "etime": "00:00:01"},
+        424244: {"cmdline": f"/x/redis-server --unixsocket {sock} --daemonize yes",
+                 "etime": "00:00:01"},
+    }
+    try:
+        d1 = er._socket_dir_from_cmdline(424242)  # config-file form
+        d2 = er._socket_dir_from_cmdline(424243)  # inline colon form
+        d3 = er._socket_dir_from_cmdline(424244)  # long-form (Linux re-exec)
+    finally:
+        er._PROC_INFO_CACHE = {}
+    assert d1 == str(tmp_path)
+    assert d2 == str(tmp_path)
+    assert d3 == str(tmp_path)
