@@ -77,7 +77,11 @@ def build_report(
     top_k: int,
     extra: dict[str, Any] | None = None,
     failures: list[dict[str, Any]] | None = None,
+    reader_prompt_hash: str = "",
+    judge_rubric_id_hash: str = "",
 ) -> dict[str, Any]:
+    # #1414 (additive to #1144): the methodology-unchanged check for the
+    # battery parity leg compares these hashes against the baseline record.
     """Aggregate per-question outcomes into the report + provenance dict.
 
     ``outcomes`` must contain only COMPLETED questions (failed questions are
@@ -169,6 +173,8 @@ def build_report(
             "total_per_question": _lat(["total_ms"]),
         },
         "methodology": {
+            "reader_prompt_hash": reader_prompt_hash,
+            "judge_rubric_id_hash": judge_rubric_id_hash,
             "reader_model": reader_model,
             "judge_model": judge_model,
             "ingest_mode": ingest_mode,

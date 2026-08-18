@@ -70,7 +70,9 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--max-episodes", type=int, default=None,
                      help="cap episodes (budget.max_episodes wins)")
 
-    parity = sub.add_parser("parity", help="benchmark parity leg (owned by #1414)")
+    parity = sub.add_parser("parity", help="benchmark parity leg (#1414)")
+    parity.add_argument("--config", default=None, help="config dir")
+    parity.add_argument("--rubric", default=None, help="judge rubric id")
     parity.add_argument("--arms", default=None)
     parity.add_argument("--seed", type=int, default=0)
     parity.add_argument("--mock", action="store_true")
@@ -142,6 +144,47 @@ def _default_probe_pairs(rubric_id: str) -> list[tuple[str, str]]:
     return [(f"{rubric_id}-a{i}", f"{rubric_id}-b{i}") for i in range(5)]
 
 
+def _cmd_parity(args: argparse.Namespace) -> ExitCode:
+    """battery parity — run the parity leg (issue #1414; E2E-4.1)."""
+    from battery.parity.runner import (
+        BaselineMissingError,
+        PINNED_VERSIONS,
+        VersionMismatchError,
+        run_parity,
+    )
+    reader_prompt = _load_reader_prompt(args)
+    judge_rubric = args.rubric or "longmemeval-official"
+    baseline = _load_baseline(args)
+    for benchmark, version in PINNED_VERSIONS.items():
+        try:
+            res = run_parity(benchmark, version, "a4",
+                             reader_prompt, judge_rubric, baseline,
+                             accuracy=0.5, samples=0)
+            print(f"{benchmark}: v{version} methodology_matched="
+                  f"{res.methodology_matched}")
+        except (VersionMismatchError, BaselineMissingError) as e:
+            print(f"{benchmark}: {e}")
+        # any other exception propagates (exit 1) — never swallowed
+    return ExitCode.OK
+
+
+def _load_reader_prompt(args) -> str:
+    from pathlib import Path
+    config_dir = Path(args.config or args.config_dir or _DEFAULT_CONFIG)
+    rp = config_dir / "reader_prompt.md"
+    return rp.read_text(encoding="utf-8") if rp.is_file() else "default-reader"
+
+
+def _load_baseline(args) -> dict | None:
+    from pathlib import Path
+    base = Path(args.config or args.config_dir or _DEFAULT_CONFIG)
+    bl = base / "parity_baseline.json"
+    if not bl.is_file():
+        return None
+    import json
+    return json.loads(bl.read_text())
+
+
 def _cmd_run(args: argparse.Namespace) -> ExitCode:
     config = RunConfig(
         config_dir=args.config or args.config_dir,
@@ -157,7 +200,7 @@ def _cmd_run(args: argparse.Namespace) -> ExitCode:
 def _dispatch(args: argparse.Namespace) -> ExitCode:
     handlers = {
         "run": _cmd_run,
-        "parity": _stub("parity", "#1414"),
+        "parity": _cmd_parity,
         "calibrate": _stub("calibrate", "#1415"),
         "validate-judge": _cmd_validate_judge,
         "report": _stub("report", "#1415"),
