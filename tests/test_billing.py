@@ -582,6 +582,31 @@ class TestCheckoutPortal:
         )
         assert r.status_code == 503, r.text
 
+    def test_checkout_defaults_follow_dashboard_url(self, monkeypatch, billing_client):
+        """#1135: BILLING_*_URL unset → defaults derive from TORTOISE_DASHBOARD_URL
+        (env-driven host, never a hardcoded app.premiselabs.co literal)."""
+        monkeypatch.setenv("TORTOISE_DASHBOARD_URL", "https://dash.example.com")
+        monkeypatch.delenv("BILLING_SUCCESS_URL", raising=False)
+        monkeypatch.delenv("BILLING_CANCEL_URL", raising=False)
+        seen: dict[str, str] = {}
+
+        def fake_checkout(self, team_id, price_id, customer, success_url, cancel_url):
+            seen["success_url"] = success_url
+            seen["cancel_url"] = cancel_url
+            return "https://checkout.stripe.com/p/e1"
+
+        monkeypatch.setattr(billing.StripeClient, "create_customer", lambda self, e: "cus_e1")
+        monkeypatch.setattr(billing.StripeClient, "list_subscriptions", lambda self, c: [])
+        monkeypatch.setattr(billing.StripeClient, "create_checkout_session", fake_checkout)
+        r = billing_client["client"].post(
+            "/v1/billing/checkout",
+            json={"price_id": "price_200proMM"},
+            headers=billing_client["headers"],
+        )
+        assert r.status_code == 200, r.text
+        assert seen["success_url"] == "https://dash.example.com/team?session_id={CHECKOUT_SESSION_ID}"
+        assert seen["cancel_url"] == "https://dash.example.com/team?checkout=cancelled"
+
     def test_portal_returns_url(self, monkeypatch, billing_client):
         billing_client["sdk"]._get_registry().query(
             "MATCH (t:Team {id:$id}) SET t.stripe_customer_id='cus_portal1'",

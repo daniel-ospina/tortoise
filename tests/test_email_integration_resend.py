@@ -100,7 +100,7 @@ def test_bounced_address_reports_bounced():
 
 def test_invite_link_resolves():
     """The constructed invite link is live + no-referrer (false-green guard)."""
-    base = email_notify._email_link_base()
+    base = email_notify.email_link_base()
     link = f"{base}/invite-accept.html?token=linkcheck"
     r = httpx.get(link, timeout=15.0, follow_redirects=False)
     assert r.status_code == 200, f"invite link dead: {link} → {r.status_code}"
