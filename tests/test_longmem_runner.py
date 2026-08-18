@@ -505,3 +505,103 @@ def test_dataset_download_gated_on_network(monkeypatch, tmp_path):
 
     with pytest.raises(Exception):
         ds.load_dataset("s", limit=1, download=False)  # no cache → fails
+
+
+# ── #1369: v2 ingest mode (deterministic — monkeypatched extractor) ─────
+
+def test_v2_ingest_writes_payload_with_evidence_marks(tmp_path, monkeypatch):
+    """#1369: ingest_haystack_v2 writes the extractor payload (points with
+    evidence marks by content overlap, entities, events, operators) and
+    retains the Session + raw-transcript legs."""
+    import tortoise.extractor_v2 as ev2
+    from tools.longmem_eval.ingest_v2 import ingest_haystack_v2
+
+    payload = {
+        "entities": [{"name": "the strategy", "kind": "core:strategy"}],
+        "events": [{"content": "we decided X", "eventKind": "core:decision"}],
+        "points": [
+            {"id": "pt_alpha", "content": "the quantum observation is the key fact",
+             "pointKind": "statement"},
+            {"id": "pt_beta", "content": "unrelated mechanics note",
+             "pointKind": "statement"},
+        ],
+        "operators": [{"src": "pt_alpha", "dst": "pt_beta", "op_type": "IMPL"}],
+    }
+
+    def _fake_extract(model, conversation, **kw):
+        return {"payload": payload, "minted_kinds": [], "supersessions": [],
+                "errors": [], "warnings": []}
+
+    monkeypatch.setattr(ev2, "extract_session_v2", _fake_extract)
+
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        question = {
+            "question_id": "test_v2_q",
+            "haystack_session_ids": ["sess-1"],
+            "haystack_dates": ["2026-08-01"],
+            "haystack_sessions": [[
+                {"role": "user", "content": "quantum observation is key",
+                 "has_answer": True},
+                {"role": "assistant", "content": "ack"},
+            ]],
+        }
+        stats = ingest_haystack_v2(sdk, question, model=object())
+        assert stats["points"] == 2
+        assert stats["operators"] == 1
+        assert stats["entities"] == 1
+        assert stats["events"] == 1
+        # raw transcript leg retained
+        proj = sdk._get_proj()
+        raw_rows = proj.g.query(
+            "MATCH (p:Point {id:$id}) RETURN count(*)",
+            params={"id": "lme:test_v2_q:s0:raw"}).result_set
+        assert raw_rows[0][0] == 1
+        # the evidence-overlapping point carries has_answer
+        ev_rows = proj.g.query(
+            "MATCH (p:Point {id:$id}) RETURN p.has_answer",
+            params={"id": "pt_alpha"}).result_set
+        assert ev_rows[0][0] is True
+        # CONTAINS edges: session → raw + extracted points
+        cnt = proj.g.query(
+            "MATCH (s:Session {id:$id})-[:CONTAINS]->(p) RETURN count(*)",
+            params={"id": "lme:test_v2_q:s0"}).result_set
+        assert cnt[0][0] == 3  # raw + 2 points
+    finally:
+        sdk.close()
+
+
+def test_v2_ingest_cli_flag(tmp_path, monkeypatch):
+    """#1369: --ingest-mode v2 is a valid CLI flag and routes to the v2
+    ingestion — the report methodology records ingest_mode=v2 and the
+    extractor stats surface (monkeypatched extractor, no API)."""
+    import subprocess
+    import sys
+    r = subprocess.run(
+        [sys.executable, "-m", "tools.longmem_eval.run", "--help"],
+        capture_output=True, text=True, cwd=str(Path(__file__).parent.parent))
+    assert "--ingest-mode" in r.stdout
+    assert "deterministic" in r.stdout and "v2" in r.stdout
+
+    # Real routing: run the mini with --ingest-mode v2 --mock and a
+    # monkeypatched extractor; the report must record the v2 methodology
+    # and the ingest stats must show the mocked points.
+    import tortoise.extractor_v2 as ev2
+    from tools.longmem_eval.run import run_main
+
+    payload = {"entities": [], "events": [], "points": [
+        {"id": "pt_cli", "content": "the answer to the question",
+         "pointKind": "statement"}], "operators": []}
+
+    def _fake(model, conversation, **kw):
+        return {"payload": payload, "minted_kinds": [], "supersessions": [],
+                "errors": [], "warnings": []}
+
+    monkeypatch.setattr(ev2, "extract_session_v2", _fake)
+    report = run_main(["--data", str(MINI), "--limit", "1", "--split", "s",
+                       "--ingest-mode", "v2", "--mock"])
+    assert report["methodology"]["ingest_mode"] == "v2"
+    assert "v2 extractor ingestion" in report["methodology"]["extraction_approach"]
+    o = report["outcomes"][0]
+    assert o["n_ingest_errors"] == 0
+    assert report["retrieval"]["evidence_recall@k"] is not None

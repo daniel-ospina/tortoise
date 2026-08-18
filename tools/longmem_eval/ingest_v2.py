@@ -35,19 +35,40 @@ logger = logging.getLogger(__name__)
 from .ingest import SESSION_TRANSCRIPT_KIND, _point_exists, _session_transcript  # noqa: E402
 
 
+_STOPWORDS = {"the", "a", "an", "is", "are", "was", "were", "to", "of",
+               "and", "or", "in", "on", "at", "for", "with", "it", "its",
+               "this", "that", "i", "you", "he", "she", "we", "they",
+               "my", "your", "me", "him", "her", "us", "them", "do", "did",
+               "does", "have", "has", "had", "be", "been", "not", "no",
+               "yes", "ok", "okay", "so", "but", "if", "then", "there",
+               "here", "what", "when", "why", "how", "just", "very", "really"}
+
+
+def _tokens(text: str) -> set[str]:
+    return {t for t in re.sub(r"[^a-z0-9 ]", " ", (text or "").lower()).split()
+            if t not in _STOPWORDS and len(t) > 1}
+
+
 def _overlap(a: str, b: str) -> float:
-    ta = set(re.sub(r"[^a-z0-9 ]", " ", (a or "").lower()).split())
-    tb = set(re.sub(r"[^a-z0-9 ]", " ", (b or "").lower()).split())
-    if not ta or not tb:
+    """Answer-content coverage: the fraction of the answer turn's content
+    tokens present in the candidate point (stopwords stripped). Directional
+    — a point is evidence only when it substantially contains the answer's
+    meaning, not when it merely shares filler words."""
+    tb = _tokens(b)
+    if not tb:
         return 0.0
-    return len(ta & tb) / min(len(ta), len(tb))
+    ta = _tokens(a)
+    if not ta:
+        return 0.0
+    return len(ta & tb) / len(tb)
 
 
 def _evidence_marked(content: str, evidence_turns: list[str],
                      threshold: float = 0.4) -> bool:
-    """True when a v2 point's content overlaps an answer turn enough to count
-    as 'contains the answer' (the extractor's recall contribution)."""
-    return any(_overlap(content, turn) >= threshold for turn in evidence_turns)
+    """True when a v2 point contains >= threshold of an answer turn's content
+    tokens (stopword-stripped, >=2 content tokens required)."""
+    return any(_overlap(content, turn) >= threshold
+               and len(_tokens(turn)) >= 2 for turn in evidence_turns)
 
 
 def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
@@ -76,9 +97,18 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
     for p in payload.get("points", []) or []:
         content = str(p.get("content", "")).strip()
         pid = str(p.get("id", "")).strip()
-        if not content or not pid or _point_exists(proj, pid):
+        if not content or not pid:
             continue
         is_evidence = _evidence_marked(content, evidence_turns)
+        if _point_exists(proj, pid):
+            # #1369 review P2: content-addressed collision across sessions —
+            # OR-in this session's evidence marking (first-writer props keep
+            # the session id; the raw-transcript leg mitigates attribution).
+            if is_evidence:
+                proj.g.query(
+                    "MATCH (p:Point {id:$id}) SET p.has_answer = true",
+                    params={"id": pid})
+            continue
         try:
             sdk.create_point(
                 "statement", content, id=pid, session_id=sid,
@@ -115,6 +145,18 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
         if op_type not in ("IMPL", "NAND") or not src or not dst:
             continue
         if not _point_exists(proj, src) or not _point_exists(proj, dst):
+            continue
+        # #1369 review P2: operator idempotency — create_operator mints a
+        # fresh node each call; guard on the (op_type, src, dst) triple
+        # (op_type is validated IMPL/NAND — safe to inline as the rel type).
+        existing = proj.g.query(
+            f"MATCH (o:Point {{is_operator:true, op_type:$t}})-[:{op_type} {{idx:0}}]->(s) "
+            f"WHERE s.id = $src "
+            f"MATCH (o)-[:{op_type} {{idx:1}}]->(d) WHERE d.id = $dst "
+            "RETURN count(*) LIMIT 1",
+            params={"t": op_type,
+                    "src": src, "dst": dst}).result_set
+        if existing and existing[0][0]:
             continue
         try:
             sdk.create_operator(op_type, src, [dst],

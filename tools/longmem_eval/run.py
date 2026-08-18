@@ -218,8 +218,10 @@ def run_evaluation(
                 "label": label,
                 "hypothesis": hypothesis,
                 "ingest": ingest_stats,
+                "n_ingest_errors": len(ingest_stats.get("errors", []) or []),
                 "session_recall@k": ret["session_recall@k"],
                 "turn_recall@k": ret["turn_recall@k"],
+                "evidence_recall@k": ret.get("evidence_recall@k"),
                 "context_tokens": ret["context_tokens"],
                 "context_point_count": ret["context_point_count"],
                 "retrieval_latency_ms": ret["retrieval_latency_ms"],
@@ -282,7 +284,8 @@ def outcomes_to_report(
                 {k: o[k] for k in (
                     "question_id", "question_type", "question_date", "label",
                     "hypothesis", "session_recall@k", "turn_recall@k",
-                    "context_tokens", "retrieval_latency_ms", "reader_latency_ms",
+                    "evidence_recall@k", "n_ingest_errors", "context_tokens",
+                    "retrieval_latency_ms", "reader_latency_ms",
                     "judge_latency_ms", "total_ms",
                 )}
                 for o in outcomes
@@ -304,7 +307,14 @@ def _print_summary(report: dict[str, Any]) -> None:
     ret = report["retrieval"]
     print("retrieval recall@k (session / turn):")
     for k, v in ret["session_recall@k"].items():
-        print(f"  k={k:<3} session {v}   turn {ret['turn_recall@k'][k]}")
+        ev = (ret.get("evidence_recall@k") or {}).get(k)
+        suffix = f"   evidence {ev}" if ev is not None else ""
+        print(f"  k={k:<3} session {v}   turn {ret['turn_recall@k'][k]}{suffix}")
+    ingest_errors = sum(o.get("n_ingest_errors", 0)
+                        for o in report.get("outcomes", []))
+    if ingest_errors:
+        print(f"⚠ {ingest_errors} v2-ingest error(s) across questions — "
+              f"recall may be raw-transcript-only (see report outcomes)")
     print(f"context tokens mean:     {ret['context_tokens_mean']}")
     lat = report["latency_ms"]
     print(f"latency (ms) retrieval/reader/judge/total:")
@@ -392,7 +402,13 @@ def run_main(argv: list[str] | None = None) -> dict[str, Any]:
     extractor_model = None
     if args.ingest_mode == "v2":
         from tests.model_adapters import MODELS
-        extractor_model = MODELS["deepseek-flash"]()
+        if args.extractor_model:
+            if args.extractor_model not in MODELS:
+                raise SystemExit(f"unknown extractor model {args.extractor_model!r}; "
+                                 f"known: {sorted(MODELS)}")
+            extractor_model = MODELS[args.extractor_model]()
+        else:
+            extractor_model = MODELS["deepseek-flash"]()
 
     outcomes, report = run_evaluation(
         instances, reader=reader, judge=judge, ks=ks, top_k=top_k,
