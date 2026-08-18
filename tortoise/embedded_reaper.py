@@ -546,6 +546,10 @@ def _active_client_count(socket_path: str) -> int | None:
 
 
 _UNIXSOCKET_RE = re.compile(r"unixsocket:(\S+)")
+# Linux daemonized redis re-execs with its effective config as long-form
+# argv (`--unixsocket /path`); macOS uses the colon form above. Both must
+# parse or the live pass silently misses live orphans on one platform.
+_UNIXSOCKET_LONG_RE = re.compile(r"--unixsocket\s+(\S+)")
 
 # Per-sweep process-info cache (issue #1005): populated with ONE batched ps
 # call in discover(), consulted by _cmdline/_uptime_seconds so classifying
@@ -604,17 +608,22 @@ def _pgrep_redis_servers() -> list[int]:
 def _socket_dir_from_cmdline(pid: int) -> str | None:
     """Extract the unixsocket dir from a redis-server cmdline.
 
-    Two forms are possible (redislite starts the server as
+    Three forms are possible (redislite starts the server as
     `redis-server <redis.config> [--loadmodule ...]`, and the daemonized
-    redis may or may not re-exec with its effective config as argv):
-      1. Inline: `unixsocket:/path/redis.socket` (observed on macOS).
-      2. Config file: the `unixsocket` directive lives in the .config arg
-         (observed on Linux builds) — read it so the live pass is reliable
+    redis re-execs with its effective config as argv):
+      1. Inline colon form: `unixsocket:/path/redis.socket` (macOS).
+      2. Inline long-form: `--unixsocket /path` (Linux daemonized re-exec).
+      3. Config file: the `unixsocket` directive lives in the .config arg
+         (pre-re-exec argv) — read it so the live pass is reliable
          regardless of the argv form (#1365: the chaos tests' discover()
          must not silently miss live orphans on one platform).
     """
     cmdline = _cmdline(pid)
     m = _UNIXSOCKET_RE.search(cmdline)
+    if m:
+        sock = m.group(1)
+        return os.path.dirname(os.path.realpath(sock))
+    m = _UNIXSOCKET_LONG_RE.search(cmdline)
     if m:
         sock = m.group(1)
         return os.path.dirname(os.path.realpath(sock))

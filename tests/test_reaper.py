@@ -1118,11 +1118,15 @@ def test_socket_dir_from_cmdline_config_file_form(tmp_path):
                  "etime": "00:00:01"},
         424243: {"cmdline": f"/x/redis-server unixsocket:{sock} --loadmodule /y.so",
                  "etime": "00:00:01"},
+        424244: {"cmdline": f"/x/redis-server --unixsocket {sock} --daemonize yes",
+                 "etime": "00:00:01"},
     }
     try:
         d1 = er._socket_dir_from_cmdline(424242)  # config-file form
-        d2 = er._socket_dir_from_cmdline(424243)  # inline form
+        d2 = er._socket_dir_from_cmdline(424243)  # inline colon form
+        d3 = er._socket_dir_from_cmdline(424244)  # long-form (Linux re-exec)
     finally:
         er._PROC_INFO_CACHE = {}
     assert d1 == str(tmp_path)
     assert d2 == str(tmp_path)
+    assert d3 == str(tmp_path)
