@@ -55,15 +55,16 @@ def test_symmetric_trigger_includes_a4():
 
 
 def test_inconclusive_branch():
-    """Divergent arm drops most probes → <50% subset → INCONCLUSIVE."""
+    """Strong RAG arm vs weak graph arm answering a disjoint question →
+    intersection < 50% → INCONCLUSIVE (E2E-3.7 exercised, not vacuous)."""
     probes = default_probes()
     all_ids = {p.id for p in probes}
     arms = _arms({"a2": all_ids, "a4": {next(iter(all_ids))}})
     r = match_recall(probes, arms)
-    if r.trigger_fired:
-        assert r.outcome in ("matched", "inconclusive")
-        if r.subset_pct < 0.5:
-            assert r.outcome == "inconclusive"  # E2E-3.7 branch
+    assert r.trigger_fired
+    assert r.subset_pct < 0.5
+    assert r.outcome == "inconclusive"
+    assert r.f1_by_arm["a4"] < r.f1_by_arm["a2"]
 
 
 def test_result_immutable():
@@ -72,6 +73,8 @@ def test_result_immutable():
     arms = _arms({"a4": {p.id for p in probes}})
     r = match_recall(probes, arms)
     assert dataclasses.is_dataclass(r) and r.__dataclass_params__.frozen
+    with pytest.raises(TypeError):
+        r.f1_by_arm["a4"] = 0.0  # Mapping is immutable (not a plain dict)
 
 
 def test_balanced_subset_rerun():

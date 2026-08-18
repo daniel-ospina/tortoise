@@ -14,7 +14,7 @@ profile.json and never re-interpreted post-hoc).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol, Sequence
+from typing import Mapping, Protocol, Sequence
 
 #: Factual top-K used for the recall match (plan §2 W2).
 TOP_K = 5
@@ -38,13 +38,19 @@ class FactualProbe:
 class RecallResult:
     """Immutable matched-recall outcome for one run."""
 
-    f1_by_arm: dict[str, float]
+    f1_by_arm: Mapping[str, float]
     trigger_fired: bool
     subset_pct: float
     outcome: str  # "matched" | "inconclusive"
 
     def __post_init__(self) -> None:
-        assert self.outcome in ("matched", "inconclusive")
+        if self.outcome not in ("matched", "inconclusive"):
+            raise ValueError(f"invalid outcome: {self.outcome!r}")
+        # Freeze the per-arm F1 map (immutable per run — never
+        # re-interpreted post-hoc).
+        object.__setattr__(self, "f1_by_arm",
+                           __import__("types").MappingProxyType(
+                               dict(self.f1_by_arm)))
 
 
 class Retriever(Protocol):
@@ -70,14 +76,20 @@ def default_probes() -> list[FactualProbe]:
 
 def _f1_at_k(retrieved: Sequence[str], gold: str, k: int = TOP_K) -> float:
     """F1 at K: does the gold appear in the top-K retrieved texts?
-    Token-overlap precision/recall over the top-K (deterministic)."""
+    Token-overlap precision/recall over the top-K (deterministic);
+    recall counts DISTINCT matched gold tokens and caps at 1.0 (a single
+    retrieved text can only match each gold token once)."""
     top = [r.lower() for r in retrieved[:k]]
     gold_tokens = set(gold.lower().split())
     if not gold_tokens:
         return 0.0
-    hit = sum(1 for t in top if any(g in t for g in gold_tokens))
-    recall = hit / len(gold_tokens) if gold_tokens else 0.0
-    precision = hit / max(len(top), 1)
+    matched = set()
+    for t in top:
+        for g in gold_tokens:
+            if g in t:
+                matched.add(g)
+    recall = min(len(matched) / len(gold_tokens), 1.0)
+    precision = len(matched) / max(len(top), 1)
     if precision + recall == 0:
         return 0.0
     return 2 * precision * recall / (precision + recall)
@@ -111,19 +123,20 @@ def match_recall(probes: Sequence[FactualProbe],
         return RecallResult(f1_by_arm=f1, trigger_fired=False,
                             subset_pct=1.0, outcome="matched")
 
-    # Balanced subset: keep probes where the divergent arm's retrieval
-    # overlaps the best arm's (arms "agree" on the question).
     divergent = [aid for aid, v in f1.items() if best - v > tolerance]
     best_arm = max(f1, key=f1.get)
-    kept: list[FactualProbe] = []
-    for p in probes:
-        best_hits = _f1_at_k(retrievers[best_arm].retrieve_factual(
-            p.question, top_k), p.gold, top_k)
-        div_hits = any(
-            _f1_at_k(retrievers[a].retrieve_factual(p.question, top_k),
-                     p.gold, top_k) > 0.0 for a in divergent)
-        if best_hits > 0.0 or div_hits:
-            kept.append(p)
+    kept = [
+        p for p in probes
+        if _f1_at_k(retrievers[best_arm].retrieve_factual(
+            p.question, top_k), p.gold, top_k) > 0.0
+        and all(_f1_at_k(retrievers[a].retrieve_factual(p.question, top_k),
+                         p.gold, top_k) > 0.0 for a in divergent)
+    ]
+
+    # Balanced subset: keep probes where the best arm AND every divergent
+    # arm both retrieve the gold (arms "agree" on the question). If the
+    # arms answer DISJOINT questions, the intersection collapses below the
+    # floor → INCONCLUSIVE (the match is not meaningful).
     subset_pct = len(kept) / len(probes) if probes else 0.0
     if subset_pct < subset_floor:
         return RecallResult(f1_by_arm=f1, trigger_fired=True,
