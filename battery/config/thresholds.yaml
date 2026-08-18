@@ -9,3 +9,7 @@ cal:
   # metric -> {arm -> value}. Values are [cal]-locked; re-locking is a
   # reviewable table change (calibration mode prints, never silently tunes).
   surfaced-rate: {a4: 0.90, a0: 0.00}
+  coverage-subscore: {a4: 0.50, a0: 0.35}
+  brier: {a4: 0.25, a0: 0.30}
+  defeat-precision: {a4: 0.70, a0: 0.00}
+  correct-direction-rate: {a4: 0.90, a0: 0.50}
