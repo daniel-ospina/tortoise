@@ -78,7 +78,6 @@ surfaces:
   - test_bfs_audit.py
   - test_build_window_transcript.py
   - test_canonical.py
-  - test_calibrate_thresholds.py
   - test_capture_session.py
   - test_ci_selection.py
   - test_connector_loader.py
@@ -101,7 +100,6 @@ surfaces:
   - test_e2e_journey.py
   - test_embedded_concurrency.py
   - test_embedded_lifecycle.py
-  - test_embedder_probe.py
   - test_embeddings.py
   - test_embeddings_filters.py
   - test_entity_stage.py
@@ -116,8 +114,6 @@ surfaces:
   - test_epic903_staleness.py
   - test_epic903_warmstart.py
   - test_eval_metrics.py
-  - eval/retrieval/test_gate_1349.py
-  - eval/retrieval/test_run.py
   - test_event_log.py
   - test_event_provenance.py
   - test_event_store.py
@@ -152,12 +148,9 @@ surfaces:
   - test_issue_insight.py
   - test_joint_index_ingest.py
   - test_judge_harness.py
-  - test_labeled_pairs_schema.py
   - test_linear_connector.py
   - test_list_contexts.py
   - test_longmem_runner.py
-  - longmem_eval/test_vector_arm.py
-  - mini_beir/test_mini_beir.py
   - test_lookup_hash.py
   - test_m0.py
   - test_m1.py
@@ -182,7 +175,6 @@ surfaces:
   - test_pack_kinds.py
   - test_pack_registry_gaps.py
   - test_pack_state.py
-  - test_pair_label_runner.py
   - test_pipeline_cli.py
   - test_pre_migration_safety.py
   - test_projection.py
@@ -279,6 +271,29 @@ surfaces:
   - test_sdk_props_coercion.py
   - test_tortoise_client.py
   - test_version_vector.py
+# eval (#1349): benchmark/eval tooling tests — probe, LongMemEval/mini-BEIR
+# harnesses, threshold tools, and the pre-existing bench + eval/retrieval
+# subdir suites. All 17 PR1 files; test_backfill_embeddings_force.py is
+# registered by T12 (PR2). tests/e2e/ (17 files) is deliberately NOT
+# registered — covered by welcome-e2e-monitor + legal-e2e + ENV_BROKEN_FILES.
+  eval:
+    - bench/test_bench_core.py
+    - bench/test_degradation_chain.py
+    - bench/test_roundrobin.py
+    - bench/test_smoke_embedded.py
+    - eval/retrieval/test_bootstrap.py
+    - eval/retrieval/test_gate_1349.py
+    - eval/retrieval/test_integration.py
+    - eval/retrieval/test_run.py
+    - eval/retrieval/test_metrics.py
+    - eval/retrieval/test_judge.py
+    - eval/retrieval/test_oracle.py
+    - longmem_eval/test_vector_arm.py
+    - mini_beir/test_mini_beir.py
+    - test_embedder_probe.py
+    - test_labeled_pairs_schema.py
+    - test_calibrate_thresholds.py
+    - test_pair_label_runner.py
 tier1:
 - test_cli_serve.py
 - test_config.py

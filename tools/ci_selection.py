@@ -26,7 +26,7 @@ import os
 import sys
 from pathlib import Path
 
-SELECTION_FN_VERSION = "1.0.0"
+SELECTION_FN_VERSION = "1.1.0"
 
 REPO = Path(__file__).resolve().parent.parent
 MANIFEST = REPO / "config" / "ci-surfaces.yml"
@@ -58,6 +58,13 @@ SOURCE_PATTERNS = {
     "api": ("tortoise/hosted_api.py", "tortoise/__main__.py", "tortoise/mcp_auth.py",
             "tortoise/quota.py", "tortoise/supabase_control.py",
             "tortoise/selfhost_api.py", "tortoise/session_auth.py"),
+    # eval (#1349): the probe, LongMemEval/mini-BEIR harnesses, threshold
+    # tools, benchmark infra, and the backfill script all produce gate
+    # evidence — their tests live in the eval surface (config/ci-surfaces.yml).
+    "eval": ("tools/longmem_eval/", "tools/mini_beir/",
+             "tools/embedder_probe.py", "tools/calibrate_thresholds.py",
+             "tools/pair_label_runner.py", "benchmarks/",
+             "graph-scripts/backfill_embeddings.py"),
     # core is the fallback for any other python-relevant path
 }
 
@@ -69,6 +76,21 @@ NON_PYTHON_PREFIXES = (
     ".ci-checks/", "supabase/",
 )
 
+# tools/ paths that ARE python-relevant for selection (#1349). The flat
+# NON_PYTHON_PREFIXES tuple above includes "tools/", which would swallow
+# every tools change before SOURCE_PATTERNS matching (a tools-only PR would
+# yield empty changed -> tier-1 smoke). These carve-out paths are re-included
+# by the filter expression in select() so tools/longmem_eval/run.py etc. can
+# select the eval surface. NOT wholesale tools/ removal: unrelated tools
+# changes (e.g. tools/kappa.py) must keep failing closed to the old behavior.
+TOOL_CARVEOUTS = (
+    "tools/longmem_eval/",
+    "tools/mini_beir/",
+    "tools/embedder_probe.py",
+    "tools/calibrate_thresholds.py",
+    "tools/pair_label_runner.py",
+)
+
 
 def load_manifest() -> dict:
     import yaml  # local import (uv provides pyyaml via the dev group)
@@ -76,8 +98,17 @@ def load_manifest() -> dict:
 
 
 def classify_test_file(name: str, manifest: dict) -> str | None:
+    """Return the surface owning a test file.
+
+    ``name`` is the ``tests/``-relative path (e.g. ``longmem_eval/test_vector_arm.py``)
+    or a bare basename (backward-compat: the manifest was basename-keyed
+    before subdir registration). Both forms are checked against each
+    surface's entries, so subdir files classify correctly and legacy
+    top-level basename entries keep working.
+    """
+    base = name.rsplit("/", 1)[-1]
     for surface, files in manifest["surfaces"].items():
-        if name in files:
+        if name in files or base in files:
             return surface
     return None
 
@@ -88,7 +119,11 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
                 "test_files": "ALL"}
 
     tier1 = set(manifest.get("tier1", []))
-    changed = [c for c in changed_files if c and not c.startswith(NON_PYTHON_PREFIXES)]
+    # Filter out non-python-relevant paths, but RE-INCLUDE the tools carve-out
+    # paths so they reach SOURCE_PATTERNS (see TOOL_CARVEOUTS).
+    changed = [c for c in changed_files
+               if c and (not c.startswith(NON_PYTHON_PREFIXES)
+                         or c.startswith(TOOL_CARVEOUTS))]
     if not changed:
         # docs-only PR -> tier 1 (curated smoke) only
         return {"surfaces": [], "full": False, "test_files": sorted(tier1)}
@@ -139,11 +174,21 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
 
 
 def integrity(manifest: dict) -> list[str]:
-    """All tests/*.py must be in the manifest — the drift trap."""
+    """All tests/**/test_*.py must be in the manifest — the drift trap.
+
+    Recursive (rglob) so subdir test files are drift-checked too; the
+    tests/e2e/ prefix is deliberately SKIPPED (#1349 — 4 direct + 13 hosted
+    files, covered by welcome-e2e-monitor + legal-e2e jobs + ENV_BROKEN_FILES).
+    Files are classified by their tests/-relative path so subdir files match
+    the manifest's subdir keys.
+    """
     missing = []
-    for f in sorted(TESTS_DIR.glob("test_*.py")):
-        if classify_test_file(f.name, manifest) is None:
-            missing.append(f.name)
+    for f in sorted(TESTS_DIR.rglob("test_*.py")):
+        rel = f.relative_to(TESTS_DIR)
+        if rel.parts[0] == "e2e":
+            continue
+        if classify_test_file(str(rel), manifest) is None:
+            missing.append(str(rel))
     return missing
 
 

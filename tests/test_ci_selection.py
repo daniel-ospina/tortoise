@@ -2,7 +2,9 @@
 
 Covers the fail-closed selection rules: docs-only → tier 1; surface changes →
 tier 1 ∪ surface; shared modules → full; unknown paths → full; test-file
-changes select their owning surface; push/schedule → full; manifest integrity.
+changes select their owning surface; push/schedule → full; manifest integrity
+(recursive rglob since #1349 — subdir test files, tests/e2e/ exempt; tool-path
+carve-out so tools/longmem_eval/ etc. select the eval surface).
 """
 from __future__ import annotations
 
@@ -11,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tools.ci_selection import load_manifest, select, integrity
+from tools.ci_selection import load_manifest, select, integrity, classify_test_file
 
 
 def _sel(changed, event="pull_request"):
@@ -85,5 +87,89 @@ def test_push_and_schedule_are_full():
 
 
 def test_integrity_covers_all_test_files():
-    # every tests/*.py must be classified — the drift trap (scope v5 dec 2/5)
+    # every tests/**/test_*.py (except tests/e2e/) must be classified — the
+    # drift trap (scope v5 dec 2/5; rglob since #1349)
     assert integrity(load_manifest()) == []
+
+
+def test_integrity_rglob_flags_unregistered_subdir(monkeypatch, tmp_path):
+    # a subdir test file absent from the manifest is drift-flagged — the
+    # non-recursive glob used to miss subdir files entirely (#1349)
+    import tools.ci_selection as cs
+    (tmp_path / "test_top.py").write_text("")
+    (tmp_path / "bench").mkdir()
+    (tmp_path / "bench" / "test_bench_x.py").write_text("")
+    monkeypatch.setattr(cs, "TESTS_DIR", tmp_path)
+    manifest = load_manifest()
+    manifest["surfaces"]["core"].append("test_top.py")
+    missing = cs.integrity(manifest)
+    assert "bench/test_bench_x.py" in missing
+    assert "test_top.py" not in missing
+
+
+def test_integrity_rglob_registered_subdir_clean(monkeypatch, tmp_path):
+    # registering the subdir file (relative-path key) clears the flag
+    import tools.ci_selection as cs
+    (tmp_path / "test_top.py").write_text("")
+    (tmp_path / "bench").mkdir()
+    (tmp_path / "bench" / "test_bench_x.py").write_text("")
+    monkeypatch.setattr(cs, "TESTS_DIR", tmp_path)
+    manifest = load_manifest()
+    manifest["surfaces"]["core"].append("test_top.py")
+    manifest["surfaces"]["eval"].append("bench/test_bench_x.py")
+    assert cs.integrity(manifest) == []
+
+
+def test_integrity_rglob_skips_e2e(monkeypatch, tmp_path):
+    # tests/e2e/ (4 direct + 13 hosted) is deliberately NOT registered —
+    # covered by welcome-e2e-monitor + legal-e2e + ENV_BROKEN_FILES
+    import tools.ci_selection as cs
+    (tmp_path / "e2e").mkdir()
+    (tmp_path / "e2e" / "test_browser.py").write_text("")
+    (tmp_path / "e2e" / "hosted").mkdir()
+    (tmp_path / "e2e" / "hosted" / "test_01_signup.py").write_text("")
+    monkeypatch.setattr(cs, "TESTS_DIR", tmp_path)
+    assert cs.integrity(load_manifest()) == []
+
+
+def test_classify_relative_path_and_basename_backcompat():
+    m = load_manifest()
+    # relative-path form (subdir files, #1349)
+    assert classify_test_file("eval/retrieval/test_gate_1349.py", m) == "eval"
+    assert classify_test_file("longmem_eval/test_vector_arm.py", m) == "eval"
+    assert classify_test_file("bench/test_bench_core.py", m) == "eval"
+    # basename backward-compat (legacy top-level keys)
+    assert classify_test_file("test_decide.py", m) == "ep"
+    assert classify_test_file("test_embedder_probe.py", m) == "eval"
+    # unknown files classify to nothing
+    assert classify_test_file("nope.py", m) is None
+    assert classify_test_file("subdir/nope.py", m) is None
+
+
+def test_tools_longmem_change_selects_eval_not_tier1():
+    # tools/longmem_eval/ is carved out of NON_PYTHON_PREFIXES — a harness
+    # change selects the eval surface instead of dropping to tier-1 smoke
+    r = _sel(["tools/longmem_eval/run.py"])
+    assert r["full"] is False
+    assert r["surfaces"] == ["eval"]
+    assert "eval/retrieval/test_run.py" in r["test_files"]
+    assert set(r["test_files"]) != _tier1()
+
+
+def test_unrelated_tools_change_still_tier1():
+    # tools/kappa.py is NOT in TOOL_CARVEOUTS — it keeps the old behavior
+    # (filtered as non-python-relevant → tier-1 smoke; never eval/full)
+    r = _sel(["tools/kappa.py"])
+    assert r["full"] is False
+    assert r["surfaces"] == []
+    assert set(r["test_files"]) == _tier1()
+
+
+def test_backfill_script_only_change_selects_eval():
+    # graph-scripts/backfill_embeddings.py is a SOURCE_PATTERNS["eval"]
+    # path — a backfill-only PR selects the eval surface (its test,
+    # test_backfill_embeddings_force.py, is registered there by T12/PR2)
+    r = _sel(["graph-scripts/backfill_embeddings.py"])
+    assert r["full"] is False
+    assert "eval" in r["surfaces"]
+    assert "test_pair_label_runner.py" in r["test_files"]
