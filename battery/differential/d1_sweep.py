@@ -32,13 +32,26 @@ class SweepMatrix:
         return tuple(sorted({a for fam in self.values.values() for a in fam}))
 
 
+CANONICAL_ARMS: tuple[str, ...] = ("a0", "a1", "a2", "a2b", "a3", "a4")
+
+
 def build_matrix(results: dict[str, dict[str, float]],
                 matched_recall: dict[str, Any] | None = None) -> SweepMatrix:
-    """results: family -> arm -> measured value (14 families, 6 arms)."""
+    """results: family -> arm -> measured value (14 families × 6 arms).
+
+    Validates BOTH dimensions — a 14×2 partial-arm matrix would silently
+    green-light the "full profile, no exclusions" claim (code-review P1).
+    """
     missing = [f for f in METRIC_FAMILIES if f not in results]
     if missing:
         raise ValueError(
             f"sweep matrix incomplete — missing families: {missing} "
             f"(full profile, no exclusions — owner decision)")
+    for fam, arms in results.items():
+        missing_arms = [a for a in CANONICAL_ARMS if a not in arms]
+        if missing_arms:
+            raise ValueError(
+                f"sweep matrix incomplete — family {fam} missing arms: "
+                f"{missing_arms} (every family must cover all 6 arms)")
     return SweepMatrix(values=results,
                        matched_recall=matched_recall or {})

@@ -32,11 +32,21 @@ class FeedbackLoopResult:
 
 
 def parse_feedback(raw: dict[str, Any]) -> FeedbackItem:
-    """The pinned feedback format (judge-generated, #1412 clarity fix)."""
+    """The PINNED feedback format (judge-generated, #1412 clarity fix).
+
+    Fail-closed: malformed judge output (missing the pinned keys) raises —
+    a silently-defaulted feedback item would be filed as empty evidence.
+    """
+    missing = [k for k in ("issue", "expected_fix", "evidence_span")
+               if not raw.get(k)]
+    if missing:
+        raise ValueError(
+            f"feedback item missing pinned keys: {missing} "
+            f"(format: {{issue, expected_fix, evidence_span}})")
     return FeedbackItem(
-        issue=str(raw.get("issue", "")),
-        expected_fix=str(raw.get("expected_fix", "")),
-        evidence_span=str(raw.get("evidence_span", "")))
+        issue=str(raw["issue"]),
+        expected_fix=str(raw["expected_fix"]),
+        evidence_span=str(raw["evidence_span"]))
 
 
 def evaluate_loop(iterations: list[dict[str, Any]]) -> FeedbackLoopResult:

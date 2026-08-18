@@ -24,10 +24,18 @@ class TestD1:
             build_matrix(partial)  # no exclusions — full profile
 
     def test_matrix_builds(self):
-        full = {f: {"a4": 1.0, "a2": 0.5} for f in METRIC_FAMILIES}
+        from battery.differential.d1_sweep import CANONICAL_ARMS
+        full = {f: {a: 1.0 for a in CANONICAL_ARMS} for f in METRIC_FAMILIES}
         m = build_matrix(full, {"f1_by_arm": {"a4": 0.9}})
         assert len(m.families()) == 14
-        assert "a4" in m.arms() and "a2" in m.arms()
+        assert len(m.arms()) == 6
+
+    def test_partial_arm_matrix_refused(self):
+        from battery.differential.d1_sweep import CANONICAL_ARMS
+        two_arms = {f: {a: 1.0 for a in CANONICAL_ARMS[:2]}
+                    for f in METRIC_FAMILIES}
+        with pytest.raises(ValueError):
+            build_matrix(two_arms)  # every family must cover all 6 arms
 
 
 class TestD2:

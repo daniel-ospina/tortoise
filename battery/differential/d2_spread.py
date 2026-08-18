@@ -19,6 +19,10 @@ class SpreadResult:
     passed: bool
     a4_reduction: float
     arm_trajectories: dict[str, tuple[float, ...]] = field(default_factory=dict)
+    #: Memory arms that ALSO converged (evidence AGAINST the differential —
+    #: memory arms are expected flat-or-rising; converging arms are
+    #: observable, not silently dropped).
+    converging_memory_arms: tuple[str, ...] = ()
 
 
 def _trajectory_change(trajectory: tuple[float, ...]) -> float:
@@ -45,15 +49,20 @@ def compute_spread(a4_trajectory: tuple[float, ...],
                             a4_reduction=a4_change,
                             arm_trajectories=arm_trajectories)
     a4_final = a4_trajectory[-1]
+    converging = tuple(
+        a for a, t in arm_trajectories.items()
+        if len(t) >= 2 and _trajectory_change(t) < 0)
     flat_arm_finals = [
-        t[-1] for t in arm_trajectories.values()
+        t[-1] for a, t in arm_trajectories.items()
         if len(t) >= 2 and _trajectory_change(t) >= 0]
     if not flat_arm_finals or a4_final <= 0:
         return SpreadResult(spread=0.0, passed=False,
                             a4_reduction=a4_change,
-                            arm_trajectories=arm_trajectories)
+                            arm_trajectories=arm_trajectories,
+                            converging_memory_arms=converging)
     spread = (sum(flat_arm_finals) / len(flat_arm_finals)) / a4_final
     return SpreadResult(
         spread=spread, passed=spread >= threshold,
         a4_reduction=a4_change,
-        arm_trajectories=arm_trajectories)
+        arm_trajectories=arm_trajectories,
+        converging_memory_arms=converging)
