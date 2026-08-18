@@ -219,6 +219,7 @@ def run_evaluation(
                 "hypothesis": hypothesis,
                 "ingest": ingest_stats,
                 "n_ingest_errors": len(ingest_stats.get("errors", []) or []),
+                "ingest_error_text": (ingest_stats.get("errors") or [None])[0],
                 "session_recall@k": ret["session_recall@k"],
                 "turn_recall@k": ret["turn_recall@k"],
                 "evidence_recall@k": ret.get("evidence_recall@k"),
