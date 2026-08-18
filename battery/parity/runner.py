@@ -124,7 +124,8 @@ def score_staleness(probe: StalenessProbe,
     recognized by the tokens unique to the current claim. Ambiguous
     answers (no distinctive match) FAIL closed.
     """
-    norm = lambda t: set(t.lower().split())
+    import re
+    norm = lambda t: set(re.findall(r"[a-z0-9/_-]+", t.lower()))
     old_tokens = norm(probe.old_claim)
     cur_tokens = norm(probe.current_claim)
     stale_unique = old_tokens - cur_tokens
