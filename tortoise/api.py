@@ -174,7 +174,20 @@ class EventAPI:
                 if svbp is not None:
                     self._svbp = svbp
             if self._svbp is not None:
-                factors, _ = self.projection.extract_svbp_factors()
+                # #1162: scope the warm-start to THIS operator — the old
+                # global extract_svbp_factors() ran 2 batch graph queries
+                # (O(graph)) on every operator write when the quadrature
+                # extra (jax) is installed. The new operator's factor is
+                # fully known here: same weight rule (3.0 NAND / 1.0 IMPL)
+                # and >=2-input degenerate exclusion as extract_svbp_factors
+                # (the EP local path's weights differ — compute_operator_weight
+                # applies NAND_BASE_WEIGHT=8.0), so per-write cost drops to
+                # O(1) with zero graph queries.
+                if len(_inputs) >= 2:
+                    weight = 3.0 if op_type == "NAND" else 1.0
+                    factors = [(p["id"], op_type, list(_inputs), weight)]
+                else:
+                    factors = []
                 if factors:
                     old_max = self._svbp.max_iter
                     self._svbp.max_iter = 5

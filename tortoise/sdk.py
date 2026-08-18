@@ -7298,76 +7298,46 @@ class TortoiseSDK:
                 operator_ids.append(src)
                 operator_ids.append(tgt)
             operator_ids = list(dict.fromkeys(operator_ids))
-        else:
-            # ── No-arg (#395 AC8): empty/clean graph short-circuits to
-            # 'no_dirty_roots' BEFORE factor extraction; otherwise extract
-            # the whole-graph factor set for the auto path below.
-            roots0 = list(self._dirty_roots)
-            if not roots0:
+            if not operator_ids:
                 return {"iterations": 0, "converged": True, "confidences": {},
-                        "diagnostic": "no_dirty_roots"}
-            factors_data, _ = proj.extract_svbp_factors()
-            operator_ids = [f[0] for f in factors_data]
-        if not operator_ids:
-            return {"iterations": 0, "converged": True, "confidences": {}, "diagnostic": "no_factors"}
-        # Lazy consistency (#85): only the WHOLE-GRAPH (no-arg, no factors,
-        # no anchors) computation dreams the dirty subgraph first so the
-        # auto-extracted factors see stabilized values. The factors/anchors
-        # paths run directly on their selected operator set.
-        # Epic 903-C2 (#1240): read-triggered dreams pass
-        # stamp_dreamed_at=False — a READ never moves the freshness signal
-        # that the 903-C4 stale-first scheduler ranks on.
-        if factors is None and anchors is None:
-            if self._dirty_roots:
-                # Epic 903-C4 (#1242): reads are FROM-SCRATCH too (warm_start
-                # False) — the read-triggered lazy pass must be bit-identical
-                # to a from-scratch recompute (F4's oracle reproducibility
-                # contract); censoring is a background-pass optimization.
-                self.dream(dirty_only=True, stamp_dreamed_at=False,
-                           require_calibration=require_calibration,
-                           warm_start=False)
-                # Re-extract factors after dreaming (graph may have changed).
-                factors_data, _ = proj.extract_svbp_factors()
-                operator_ids = [f[0] for f in factors_data]
-                if not operator_ids:
-                    return {"iterations": 0, "converged": True, "confidences": {}, "diagnostic": "no_factors"}
-                iterations, converged = ep.run(
-                    operator_ids, max_hops=max_hops, evidence=run_evidence)
-            else:
-                # ── No-arg: LOCAL EP over the affected subgraph (#395, delta C) ──
-                # The interactive default no longer scans the whole graph with
-                # extract_svbp_factors(). Dirty roots seed a max_hops=None local
-                # run over the exact affected closure. Empty graph →
-                # 'no_dirty_roots' (AC8).
-                roots = list(self._dirty_roots)
-                if not roots:
-                    return {"iterations": 0, "converged": True, "confidences": {},
-                            "diagnostic": "no_dirty_roots"}
-                # Bounded fail-safe pass (dream, max_hops=2) FIRST — preserves the
-                # dirty-clear/retry lifecycle (#85); then the exact local pass
-                # (max_hops=None). Roots are captured BEFORE the dream so the
-                # exact pass seeds the ORIGINAL dirty set (the dream clears
-                # converged roots). Double-pass rationale (scoping P2): bounded-
-                # then-exact is a fail-safe against dream-alone silently dropping
-                # dirty roots reachable only through legacy op_type-only operators
-                # (the dream selector is {is_operator:true}-only; _affected_claims
-                # is op_type-aware).
-                # Epic 903-C4 (#1242): the read-path fail-safe pass is
-                # FROM-SCRATCH (warm_start=False) — reads never censor.
-                # #1315/#1314: propagate the caller's calibration posture — the
-                # epic903 refactor re-added an unpropagated dream here (same
-                # class as the #1315 fix; line 7050/7202 already propagate).
-                self.dream(dirty_only=True, warm_start=False,
-                           require_calibration=require_calibration)
-                iterations, converged = ep.run(roots, max_hops=None,
-                                               evidence=run_evidence)
-                if not ep._last_affected and not ep._last_truncated:
-                    return {"iterations": iterations, "converged": converged,
-                            "confidences": {}, "diagnostic": "no_factors"}
-        else:
-            # factors / anchors: run EP on the selected operator set directly.
+                        "diagnostic": "no_factors"}
             iterations, converged = ep.run(
                 operator_ids, max_hops=max_hops, evidence=run_evidence)
+        else:
+            # ── No-arg (#395 AC8 + delta C): LOCAL EP over the affected
+            # subgraph — dirty roots seed a max_hops=None run over the exact
+            # affected closure; NO global extract_svbp_factors() scan (AC2 —
+            # the epic-903 refactor regressed this no-arg path to a
+            # whole-graph extract+run; restored to the #395 local contract,
+            # #1162). Clean graph → 'no_dirty_roots' (AC8).
+            roots = list(self._dirty_roots)
+            if not roots:
+                return {"iterations": 0, "converged": True, "confidences": {},
+                        "diagnostic": "no_dirty_roots"}
+            # Bounded fail-safe pass (dream, max_hops=2) FIRST — preserves the
+            # dirty-clear/retry lifecycle (#85); then the exact local pass
+            # (max_hops=None). Roots are captured BEFORE the dream so the
+            # exact pass seeds the ORIGINAL dirty set (the dream clears
+            # converged roots). Double-pass rationale (scoping P2): bounded-
+            # then-exact is a fail-safe against dream-alone silently dropping
+            # dirty roots reachable only through legacy op_type-only operators
+            # (the dream selector is {is_operator:true}-only; _affected_claims
+            # is op_type-aware).
+            # Epic 903-C4 (#1242): the read-path fail-safe pass is
+            # FROM-SCRATCH (warm_start=False) — reads never censor.
+            # Epic 903-C2 (#1240): a READ never moves the freshness signal
+            # that the 903-C4 stale-first scheduler ranks on.
+            # #1315/#1314: propagate the caller's calibration posture — the
+            # epic903 refactor re-added an unpropagated dream here (same
+            # class as the #1315 fix; line 7050/7202 already propagate).
+            self.dream(dirty_only=True, stamp_dreamed_at=False,
+                       warm_start=False,
+                       require_calibration=require_calibration)
+            iterations, converged = ep.run(roots, max_hops=None,
+                                           evidence=run_evidence)
+            if not ep._last_affected and not ep._last_truncated:
+                return {"iterations": iterations, "converged": converged,
+                        "confidences": {}, "diagnostic": "no_factors"}
         confidences = {}
         proj = self._get_proj()
         from datetime import datetime, timezone
