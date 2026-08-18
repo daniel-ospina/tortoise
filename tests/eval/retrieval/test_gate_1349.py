@@ -326,6 +326,7 @@ def write_escalation_artifact(tmp_path: Path, *, winner: str = "arctic-s",
                               judge_available: bool = True,
                               fingerprint: str | None = None,
                               per_question: dict | None = None,
+                              config: str | None = None,
                               n: int = GATE_N) -> dict:
     bv = base_values()
     ctrl = bv["ctrl_tr"]
@@ -341,6 +342,7 @@ def write_escalation_artifact(tmp_path: Path, *, winner: str = "arctic-s",
     artifact = {
         "producer": "tools/longmem_eval/run.py (escalation judged run)",
         "surface": "hnsw", "winner": winner, "control": "minilm",
+        "config": config,
         "judge_id": "openrouter:test", "n": n,
         "judge_available": judge_available,
         "question_set_fingerprint": fingerprint,
@@ -368,6 +370,19 @@ def test_n_adaptive_bar_m6_pins():
 
 def test_n_adaptive_bar_degenerate_control():
     assert n_adaptive_bar(0.40, 300, 0.0) == float("inf")
+
+
+def test_n_adaptive_bar_computes_z_from_q_over_m():
+    """P2 fix: z is derived from q/m INSIDE the bar (Φ⁻¹(1−q/m)) — the
+    hardcoded z=2.128 baked in q/m=0.0167 and the q/m params were dead."""
+    import statistics as _st
+    assert _st.NormalDist().inv_cdf(1 - 0.10 / 6) == pytest.approx(
+        2.128, abs=0.002)
+    # m=6/q=0.10 pin is preserved.
+    assert n_adaptive_bar(0.40, 300, 0.40) == pytest.approx(0.123, abs=0.001)
+    # q and m are LIVE: a stricter FDR level raises the bar.
+    assert n_adaptive_bar(0.40, 300, 0.40, q=0.05, m=6) > \
+        n_adaptive_bar(0.40, 300, 0.40, q=0.10, m=6)
 
 
 # ── decision-rule outcomes ──────────────────────────────────────────────────
@@ -814,6 +829,62 @@ def test_escalation_judged_question_set_fingerprint_pin(tmp_path):
     assert "fingerprint" in out["escalation"]["judged"]["reason"].lower()
 
 
+def test_escalation_judged_per_q_must_cover_full_burn_set(tmp_path):
+    """P0 fix: an artifact declaring the FULL-set fingerprint but carrying
+    per_question for only HALF the burn questions must NOT pass — the
+    fingerprint pins the question set, not the per-question coverage. With
+    the HNSW spot-check WAIVED on the escalation path, that subset would be
+    the ONLY gate on shipping (each subset question +0.08 → p=0)."""
+    manifest = build_burn(tmp_path, ctrl_sd=0.15)
+    _apply_escalation_deltas(manifest)
+    subset = _qids()[:150]  # 150/300 — declared fp covers the full set
+    ctrl = base_values(ctrl_sd=0.15)["ctrl_tr"]
+    per_q = {qid: {"winner": ctrl[i] + 0.08, "control": ctrl[i]}
+             for i, qid in enumerate(subset)}
+    esc = write_escalation_artifact(
+        tmp_path, winner="arctic-s",
+        fingerprint=question_set_fingerprint(_qids()),
+        per_question=per_q)
+    manifest["escalation_judged"] = esc
+    out = run_gate(tmp_path, manifest)
+    assert out["verdict"] == "NO-WINNER"
+    assert "per_question" in out["escalation"]["judged"]["reason"].lower()
+
+
+def test_escalation_pass_uses_judged_config(tmp_path):
+    """P2 fix: the escalation judged artifact records which config ran on
+    HNSW; when present, THAT config is the swap config (the vector-burn
+    config deltas are from the embedded surface, not the judged run)."""
+    manifest = build_burn(tmp_path, ctrl_sd=0.15)
+    _apply_escalation_deltas(manifest)
+    esc = write_escalation_artifact(tmp_path, winner="arctic-s", gain=0.08,
+                                    config="arctic-s-query")
+    manifest["escalation_judged"] = esc
+    pre = dict(PRE)
+    pre.pop("hnsw_spotcheck")
+    manifest["preconditions"] = pre
+    out = run_gate(tmp_path, manifest)
+    assert out["verdict"] == "PASS(arctic-s)"
+    assert out["escalation"]["judged"]["pass"] is True
+    assert out["swap_config"] == "arctic-s-query"
+    assert out["split_config_rule"] == "judged-run-config"
+
+
+def test_escalation_judged_degenerate_control(tmp_path):
+    """P2 fix: judged control accuracy below the CONTROL_DEGENERATE floor
+    makes the relative gain meaningless (a near-zero denominator inflates
+    gain toward inf) → NO-WINNER, mirroring the main-rule floor."""
+    manifest = build_burn(tmp_path, ctrl_sd=0.15)
+    _apply_escalation_deltas(manifest)
+    per_q = {qid: {"winner": 0.02, "control": 0.001} for qid in _qids()}
+    esc = write_escalation_artifact(tmp_path, winner="arctic-s",
+                                    per_question=per_q)
+    manifest["escalation_judged"] = esc
+    out = run_gate(tmp_path, manifest)
+    assert out["verdict"] == "NO-WINNER"
+    assert "degenerate control" in out["escalation"]["judged"]["reason"]
+
+
 def test_escalation_top2_selection(tmp_path):
     """The escalation block reports the top-2 families by combined rank
     (control always judged as the third)."""
@@ -835,6 +906,29 @@ def test_missing_config_hard_fail(tmp_path):
     out = run_gate(tmp_path, manifest)
     assert out["verdict"] == "BLOCKED"
     assert any("config" in r.lower() for r in out["blocking_reasons"])
+
+
+def test_duplicate_config_names_block(tmp_path):
+    """P1 fix: report_data is keyed by config name — two configs sharing a
+    name silently overwrite, dropping one run's evidence from family
+    reduction (model counts and len(configs)==6 still pass). Must
+    HARD-FAIL."""
+    manifest = build_burn(tmp_path)
+    manifest["configs"][3]["name"] = "arctic-xs"  # arctic-xs-query → dup
+    out = run_gate(tmp_path, manifest)
+    assert out["verdict"] == "BLOCKED"
+    assert any("duplicate config names" in r for r in out["blocking_reasons"])
+
+
+def test_arctic_family_requires_vendor_prompt_pair(tmp_path):
+    """P2 fix: an arctic family must run BOTH the no-prefix config and the
+    vendor prompt_name="query" config — two no-prefix arctic configs
+    silently drop the vendor-prompt evidence from family reduction."""
+    manifest = build_burn(tmp_path)
+    manifest["configs"][3]["prompt"] = None  # arctic-xs-query → no-prefix
+    out = run_gate(tmp_path, manifest)
+    assert out["verdict"] == "BLOCKED"
+    assert any("prompt_name" in r for r in out["blocking_reasons"])
 
 
 def test_report_sha_mismatch_hard_fail(tmp_path):
@@ -1053,7 +1147,7 @@ def test_product_call_missing_blocks(tmp_path):
     manifest = build_burn(tmp_path, preconditions=pre)
     out = run_gate(tmp_path, manifest)
     assert out["verdict"] == "BLOCKED"
-    assert any("product_call" in r for r in out["blocking_reasons"])
+    assert any("product-call.json missing" in r for r in out["blocking_reasons"])
 
 
 def test_product_call_illegal_enum_blocks(tmp_path):
@@ -1147,6 +1241,69 @@ def test_hnsw_spotcheck_recomputed_mismatch_blocks(tmp_path):
                                                      "ndcg@10": 0.0}})
     out = run_gate(tmp_path, manifest)
     assert out["verdict"] == "BLOCKED"
+
+
+def test_hnsw_spotcheck_delta_count_must_match_burn(tmp_path):
+    """P1 fix: the artifact declares n=300 + cleared=True but carries only
+    100 per-question deltas (each +0.30 → recomputed p=0). The gate must
+    NOT recompute p over an unverified subset — the delta count must equal
+    the FULL filtered-split question set per metric."""
+    manifest = build_burn(tmp_path,
+                          deltas={"arctic-s": {"turn_recall@10": 0.06,
+                                               "ndcg@10": 0.0},
+                                  "arctic-s-query": {"turn_recall@10": 0.06,
+                                                     "ndcg@10": 0.0}})
+    # Overwrite the default spot-check with the adversarial subset artifact.
+    (tmp_path / "hnsw-spotcheck.json").write_text(json.dumps(
+        {"cleared": True, "n": GATE_N, "winner": "arctic-s",
+         "control": "minilm",
+         "metric_deltas": {
+             "turn_recall@10": {"n": GATE_N, "mean_delta": 0.30,
+                                "one_sided_p": 0.0,
+                                "deltas": [0.30] * 100},
+             "ndcg@10": {"n": GATE_N, "mean_delta": 0.0,
+                          "one_sided_p": 1.0, "deltas": [0.0] * GATE_N}}}),
+        encoding="utf-8")
+    out = run_gate(tmp_path, manifest)
+    assert out["verdict"] == "BLOCKED"
+    assert any("per-question deltas" in r for r in out["blocking_reasons"])
+
+
+def test_hnsw_spotcheck_winner_null_blocks(tmp_path):
+    """P1 fix: a spot-check artifact with winner:null must NOT validate the
+    gate's winner — an unattributed artifact proves nothing about the
+    shipped candidate."""
+    manifest = build_burn(tmp_path,
+                          deltas={"arctic-s": {"turn_recall@10": 0.06,
+                                               "ndcg@10": 0.0},
+                                  "arctic-s-query": {"turn_recall@10": 0.06,
+                                                     "ndcg@10": 0.0}})
+    (tmp_path / "hnsw-spotcheck.json").write_text(json.dumps(
+        {"cleared": True, "n": GATE_N, "winner": None, "control": "minilm",
+         "metric_deltas": {
+             "turn_recall@10": {"n": GATE_N, "mean_delta": 0.05,
+                                "one_sided_p": 0.0,
+                                "deltas": [0.05] * GATE_N},
+             "ndcg@10": {"n": GATE_N, "mean_delta": 0.0,
+                          "one_sided_p": 1.0, "deltas": [0.0] * GATE_N}}}),
+        encoding="utf-8")
+    out = run_gate(tmp_path, manifest)
+    assert out["verdict"] == "BLOCKED"
+    assert any("gate winner" in r for r in out["blocking_reasons"])
+
+
+def test_no_winner_without_spotcheck_not_blocked(tmp_path):
+    """P2 fix: a NO-WINNER burn with NO spot-check artifact must not be
+    BLOCK-masked — there is no winner to spot-check, so the precondition is
+    WAIVED (the spot-check gates a shipped winner only)."""
+    manifest = build_burn(tmp_path)  # all families ≈ control → NO-WINNER
+    pre = dict(PRE)
+    pre.pop("hnsw_spotcheck")
+    manifest["preconditions"] = pre
+    out = run_gate(tmp_path, manifest)
+    assert out["verdict"] == "NO-WINNER"
+    assert out["blocked"] is False
+    assert out["hnsw_waived"] is True
 
 
 def test_e2e8_over_300ms_blocks(tmp_path):
@@ -1296,6 +1453,18 @@ def test_cli_python_dash_m_entrypoint(tmp_path):
     assert out_path.is_file()
     saved = json.loads(out_path.read_text(encoding="utf-8"))
     assert saved["verdict"] == "NO-WINNER"
+
+
+def test_cli_manifest_parse_error_clean_message(tmp_path, capsys):
+    """P2 fix: an unreadable/malformed manifest prints a clean error and
+    exits non-zero (fail-closed) — no traceback."""
+    mpath = tmp_path / "bad-manifest.json"
+    mpath.write_text("{not json", encoding="utf-8")
+    rc = gate_1349.main(["--manifest", str(mpath)])
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "manifest" in (captured.out + captured.err).lower()
+    assert "Traceback" not in (captured.out + captured.err)
 
 
 def test_code_sha_uncommitted_edit_drifts_when_head_equals_sha(tmp_path):

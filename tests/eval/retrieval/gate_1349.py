@@ -211,16 +211,20 @@ def paper_category(question_type: str | None) -> str | None:
 # ── n-adaptive bar + provenance helpers (pure, unit-tested) ─────────────────
 
 def n_adaptive_bar(sd: float, n: int, control_mean: float, *,
-                   q: float = Q, m: int = M, z: float = Z) -> float:
+                   q: float = Q, m: int = M) -> float:
     """The effective bar: z(1−q/m)·(sd/√n)/control_mean.
 
-    Derived from the ACTUAL per-question data (empirical sd of the paired
-    deltas and n). As n falls the bar rises (n=200/300/500 → ≈+15.1/+12.3/
-    +9.5% at sd=0.40, control=0.40). Reported as evidence — the win gate is
-    (a) nominal floor AND (b) BH rejection only.
+    z is derived INSIDE from the pairwise-FDR level (z = Φ⁻¹(1−q/m); m=6,
+    q=0.10 → z≈2.128 — the code-review P2: the old hardcoded z=2.128 baked
+    in q/m=0.0167 and left the q/m params dead). Derived from the ACTUAL
+    per-question data (empirical sd of the paired deltas and n). As n falls
+    the bar rises (n=200/300/500 → ≈+15.1/+12.3/+9.5% at sd=0.40,
+    control=0.40). Reported as evidence — the win gate is (a) nominal floor
+    AND (b) BH rejection only.
     """
     if n <= 0 or control_mean <= 0:
         return float("inf")
+    z = statistics.NormalDist().inv_cdf(1 - q / m)
     return z * (sd / math.sqrt(n)) / control_mean
 
 
@@ -378,6 +382,28 @@ def validate_manifest(
         if counts.get(model) != want:
             errors.append(f"(a) model {model!r} must have exactly {want} "
                           f"config(s), got {counts.get(model, 0)}")
+
+    # P1 fix (code-review): report_data is keyed by config NAME — two configs
+    # sharing a name silently overwrite, dropping one run's evidence from the
+    # family reduction while model counts and len(configs)==6 still pass.
+    names = [c.get("name") for c in configs if isinstance(c, dict)]
+    if len(set(names)) != len(names):
+        dup = sorted((repr(n) for n in names if names.count(n) > 1))
+        errors.append(f"(a) duplicate config names {dup} — report_data is "
+                      "keyed by name; a duplicate silently drops one "
+                      "config's evidence from family reduction")
+
+    # P2 fix (code-review): each arctic family must run BOTH the no-prefix
+    # config and the vendor prompt_name="query" config — the family delta
+    # is the max of the pair; two no-prefix configs would silently drop the
+    # vendor-prompt evidence.
+    for model in ("arctic-xs", "arctic-s"):
+        prompts = {c.get("prompt") for c in configs
+                   if isinstance(c, dict) and c.get("model") == model}
+        if prompts != {None, "query"}:
+            errors.append(f"(a) {model} must run both the no-prefix config "
+                          f"and the vendor prompt_name=\"query\" config — "
+                          f"got prompts {sorted(str(p) for p in prompts)}")
 
     required_keys = ("name", "model", "prompt", "resolved_revision", "n",
                      "checkpoint_state", "report_sha", "code_sha", "report")
@@ -790,9 +816,17 @@ def decision_rule(
         stat_verdict = f"PASS({winner})"
     elif escalation.get("triggered") and escalation.get("judged", {}).get("pass"):
         winner = escalation["judged"]["winner"]
-        swap_config, split_rule = _swap_config_for(
-            winner, family_configs[winner], cleared, config_mean_deltas,
-            family_rels)
+        # P2 fix (code-review): the judged run executed on HNSW — if the
+        # artifact records which config ran there, THAT config is the swap
+        # config (the vector-burn config deltas are from the embedded
+        # surface, not the judged run); else fall back to the split rule.
+        judged_cfg = escalation["judged"].get("config")
+        if judged_cfg in family_configs.get(winner, []):
+            swap_config, split_rule = judged_cfg, "judged-run-config"
+        else:
+            swap_config, split_rule = _swap_config_for(
+                winner, family_configs[winner], cleared, config_mean_deltas,
+                family_rels)
         stat_verdict = f"PASS({winner})"
     else:
         stat_verdict = "NO-WINNER"
@@ -911,6 +945,17 @@ def _evaluate_escalation(manifest, manifest_dir, top2, ctrl_data,
         return fail(f"question-set fingerprint mismatch: judged run covers a "
                     f"different question set than the burn's FULL filtered "
                     f"set — a post-hoc n cherry-pick is forbidden")
+    # P0 fix (code-review): the fingerprint pins the question SET, not the
+    # per-question coverage — an artifact declaring the full-set fingerprint
+    # but carrying per_question for only a subset must not pass (with the
+    # HNSW spot-check WAIVED on the escalation path, that subset would be
+    # the ONLY gate on shipping).
+    if set(per_q) != set(burn_qids):
+        return fail(f"judged per_question keys ({len(per_q)}) do not cover "
+                    f"the burn's FULL filtered question set "
+                    f"({len(burn_qids)}) — the fingerprint alone cannot pin "
+                    "per-question evidence; a post-hoc n that shrinks until "
+                    "p<0.10 is a cherry-picking window (forbidden)")
     deltas = [per_q[q]["winner"] - per_q[q]["control"]
               for q in sorted(per_q)
               if per_q[q].get("winner") is not None
@@ -920,12 +965,21 @@ def _evaluate_escalation(manifest, manifest_dir, top2, ctrl_data,
                     "NO-WINNER")
     ctrl_acc = _mean([per_q[q]["control"] for q in sorted(per_q)
                       if per_q[q].get("control") is not None])
-    gain = _mean(deltas) / ctrl_acc if ctrl_acc > 0 else float("inf")
+    # P2 fix (code-review): mirror CONTROL_DEGENERATE — a near-zero judged
+    # control accuracy makes the relative gain meaningless (denominator
+    # → 0 inflates gain toward inf) → NO-WINNER.
+    if ctrl_acc < CONTROL_DEGENERATE:
+        return fail(f"judged control accuracy {ctrl_acc:.4f} below the "
+                    f"{CONTROL_DEGENERATE:.0%} floor — a degenerate control "
+                    "makes relative gain meaningless (pre-registered "
+                    "NO-WINNER)")
+    gain = _mean(deltas) / ctrl_acc
     p = one_sided_bootstrap_p(deltas, n_resamples=n_resamples)
     passed = gain >= NOMINAL_FLOOR and p < ESCALATION_P
     return {
         "pass": passed,
         "winner": winner,
+        "config": art.get("config"),
         "relative_gain": round(gain, 4),
         "one_sided_p": round(p, 6),
         "n": len(deltas),
@@ -981,7 +1035,14 @@ def _check_hnsw_spotcheck(manifest, manifest_dir, n_resamples,
     deltas (m=2: BH q=0.10 → min p ≤ 0.05) and requires the artifact's
     declared ``cleared`` to agree. The artifact is pinned to the winner and
     to its own n = the FULL filtered-split question set (a subset spot-check
-    that shrinks until p clears is a cherry-picking window — forbidden)."""
+    that shrinks until p clears is a cherry-picking window — forbidden); the
+    per-metric delta count must also equal the full set (the p is recomputed
+    over those deltas — a short delta list is an unverified subset).
+
+    This check is only evaluated when there IS a winner: on NO-WINNER /
+    INSUFFICIENT-POWER there is nothing to spot-check, so the precondition
+    is WAIVED in :func:`check_preconditions` (a missing artifact must not
+    BLOCK-mask an honest non-passing outcome)."""
     path = (manifest.get("preconditions") or {}).get("hnsw_spotcheck")
     if not path:
         return {"name": "hnsw_spotcheck", "met": False,
@@ -995,10 +1056,14 @@ def _check_hnsw_spotcheck(manifest, manifest_dir, n_resamples,
     except (json.JSONDecodeError, UnicodeDecodeError, OSError):
         return {"name": "hnsw_spotcheck", "met": False,
                 "detail": "HNSW spot-check artifact unreadable"}
-    if winner is not None and art.get("winner") not in (None, winner):
+    # P1 fix (code-review): winner:null must NOT validate the gate's winner
+    # — an unattributed artifact proves nothing about the shipped candidate.
+    if winner is not None and art.get("winner") != winner:
         return {"name": "hnsw_spotcheck", "met": False,
                 "detail": f"HNSW spot-check artifact winner "
-                          f"{art.get('winner')!r} != gate winner {winner!r}"}
+                          f"{art.get('winner')!r} != gate winner {winner!r} — "
+                          "a null/unattributed artifact does not validate "
+                          "the gate winner"}
     art_n = art.get("n")
     if burn_qids is not None and art_n != len(burn_qids):
         return {"name": "hnsw_spotcheck", "met": False,
@@ -1015,6 +1080,19 @@ def _check_hnsw_spotcheck(manifest, manifest_dir, n_resamples,
             return {"name": "hnsw_spotcheck", "met": False,
                     "detail": f"HNSW spot-check missing per-question deltas "
                               f"for {metric} (the gate recomputes the p)"}
+        # P1 fix (code-review): the declared n only pins the artifact's OWN
+        # count — the recomputed p must be over deltas covering the FULL
+        # filtered-split set (a subset of deltas that shrinks until p clears
+        # is a cherry-picking window, forbidden).
+        if burn_qids is None or len(deltas) != len(burn_qids):
+            expect = (f"{len(burn_qids)}" if burn_qids is not None
+                      else "unknown (no burn set)")
+            return {"name": "hnsw_spotcheck", "met": False,
+                    "detail": f"HNSW spot-check {metric} carries "
+                              f"{len(deltas)} per-question deltas != the FULL "
+                              f"filtered-split question set ({expect}) — "
+                              "recomputing p over an unverified subset is a "
+                              "cherry-picking window (forbidden)"}
         recomputed.append(one_sided_bootstrap_p(deltas, n_resamples=n_resamples))
     cleared_recomputed = min(recomputed) <= Q / 2  # m=2: q/2 = 0.05 (z≈1.645)
     declared = bool(art.get("cleared"))
@@ -1091,7 +1169,12 @@ def _check_issue265(manifest) -> dict:
 
 
 def check_preconditions(manifest, manifest_dir, stats, n_resamples) -> tuple[list[dict], list[str]]:
-    """Validate the HARD PR2 preconditions; returns (checks, errors)."""
+    """Validate the HARD PR2 preconditions; returns (checks, errors).
+
+    The HNSW spot-check is WAIVED whenever there is no winner to validate
+    (escalation path — the judged run on HNSW supersedes it; and P2 fix:
+    NO-WINNER / INSUFFICIENT-POWER — a missing artifact must not BLOCK-mask
+    an honest non-passing outcome)."""
     checks: list[dict] = []
     errors: list[str] = []
 
@@ -1109,6 +1192,17 @@ def check_preconditions(manifest, manifest_dir, stats, n_resamples) -> tuple[lis
                                  "(GATE (c) is satisfied by the escalation "
                                  "run itself; the standard spot-check is "
                                  "waived)"})
+    elif stats.get("winner") is None:
+        # P2 fix (code-review): no winner → nothing to spot-check. The
+        # precondition is WAIVED (the spot-check gates a SHIPPED winner
+        # only); a missing/unreadable artifact must not turn an honest
+        # NO-WINNER / INSUFFICIENT-POWER into a BLOCKED mask.
+        stats["hnsw_waived"] = True
+        checks.append({"name": "hnsw_spotcheck", "met": True,
+                       "detail": "WAIVED — no winner to spot-check "
+                                 "(NO-WINNER/INSUFFICIENT-POWER); the HNSW "
+                                 "spot-check validates a shipped winner "
+                                 "only"})
     else:
         stats["hnsw_waived"] = False
         checks.append(_check_hnsw_spotcheck(
@@ -1244,7 +1338,13 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     manifest_path = Path(args.manifest)
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
+        # P2 fix (code-review): clean fail-closed message, not a traceback.
+        print(f"ERROR: cannot load manifest {manifest_path}: {e!r}",
+              file=sys.stderr)
+        return 1
     manifest_dir = manifest_path.parent
     repo_root = Path(args.repo) if args.repo else \
         Path(__file__).resolve().parent.parent.parent.parent
