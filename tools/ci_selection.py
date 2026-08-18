@@ -32,6 +32,9 @@ REPO = Path(__file__).resolve().parent.parent
 MANIFEST = REPO / "config" / "ci-surfaces.yml"
 TESTS_DIR = REPO / "tests"
 
+# bash/heredoc-safe newline (the pi bash wrapper mangles raw \n in heredocs)
+NL = chr(10)
+
 # Shared/cross-cutting modules -> full matrix (conservative per scope v5).
 SHARED_MODULES = (
     "tortoise/sdk.py",
@@ -148,11 +151,77 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
 
 def integrity(manifest: dict) -> list[str]:
     """All tests/*.py must be in the manifest — the drift trap."""
+    return unlisted_tests(TESTS_DIR, manifest)
+
+
+def unlisted_tests(tests_dir: Path, manifest: dict) -> list[str]:
+    """Top-level tests/test_*.py absent from every surface in the manifest."""
     missing = []
-    for f in sorted(TESTS_DIR.glob("test_*.py")):
+    for f in sorted(tests_dir.glob("test_*.py")):
         if classify_test_file(f.name, manifest) is None:
             missing.append(f.name)
     return missing
+
+
+def register_tests(manifest_path: Path, tests_dir: Path, surface: str,
+                   manifest: dict) -> list[str]:
+    """Auto-register unlisted test files under `surface` (#1429).
+
+    Text-preserving: appends `  - name.py` in alphabetical position inside the
+    surface's list block, keeping the hand-curated manifest format. Idempotent.
+    Returns the files that were registered (empty when already clean). The
+    default surface is `core` — the selection logic's own fallback; the shared
+    / unknown-path / push-to-main rules still expand to the full matrix, so a
+    misclassified new test keeps running on every broad change.
+    """
+    missing = unlisted_tests(tests_dir, manifest)
+    if not missing:
+        return []
+    lines = manifest_path.read_text().splitlines(keepends=True)
+    # locate the surface block: "  <surface>:" then "  - name" lines (strip
+    # any trailing inline comment from the key)
+    block_start = None
+    for i, ln in enumerate(lines):
+        key = ln.split("#", 1)[0].rstrip()
+        if key == f"  {surface}:":
+            block_start = i
+            break
+    if block_start is None:
+        # append the new surface block at the end of the surfaces: mapping.
+        # The surfaces are the only 2-space-indented mapping keys, followed by
+        # the top-level tier1: key (column 0) — that is the reliable boundary.
+        anchor = next((i for i, ln in enumerate(lines) if ln.startswith("tier1:")), len(lines))
+        new_block = [f"  {surface}:{NL}"] + [f"  - {n}{NL}" for n in missing]
+        lines[anchor:anchor] = new_block
+    else:
+        # collect existing entries in this block (until next "  x:" or non-list line)
+        end = block_start + 1
+        entries = []
+        while end < len(lines) and (lines[end].startswith("  - ") or lines[end].lstrip().startswith("#")):
+            if lines[end].startswith("  - "):
+                entries.append(lines[end])
+            end += 1
+        names = [e.strip()[2:].split("#", 1)[0].rstrip() for e in entries]  # "  - name.py" -> "name.py" (strip trailing comments)
+        # INSERT-ONLY: place each new name at its alphabetical position among
+        # the existing entries; never re-order pre-existing lines (keeps the
+        # diff surgical — normalizing the whole block would churn the manifest).
+        to_add = [n for n in missing if n not in set(names)]
+        for n in sorted(to_add):
+            pos = 0
+            while pos < len(names) and names[pos] < n:
+                pos += 1
+            lines[block_start + 1 + pos:block_start + 1 + pos] = [f"  - {n}{NL}"]
+            names.insert(pos, n)
+            end += 1
+    manifest_path.write_text("".join(lines))
+    return missing
+
+
+def register(manifest_path: Path, tests_dir: Path, surface: str) -> list[str]:
+    """Load + register in one call (CLI entry)."""
+    import yaml
+    manifest = yaml.safe_load(manifest_path.read_text())
+    return register_tests(manifest_path, tests_dir, surface, manifest)
 
 
 def slow_file_issues(manifest: dict) -> list[str]:
@@ -179,6 +248,12 @@ def main() -> int:
     ap.add_argument("--changed-files", default="", help="newline-separated changed files")
     ap.add_argument("--event", default="pull_request", choices=["push", "pull_request", "schedule"])
     ap.add_argument("--integrity", action="store_true", help="verify manifest coverage")
+    ap.add_argument("--register", action="store_true",
+                    help="auto-register unlisted test files in the manifest (#1429)")
+    ap.add_argument("--surface", default="core",
+                    choices=["api", "core", "ep", "onboarding", "sdk"],
+                    help="surface for --register (default: core — the selection fallback)")
+    ap.add_argument("--dry-run", action="store_true", help="preview --register without writing")
     args = ap.parse_args()
 
     manifest = load_manifest()
@@ -190,6 +265,22 @@ def main() -> int:
             print(f"❌ manifest drift: {problems}")
             return 1
         print("✅ integrity: all test files classified; slow_files consistent")
+        return 0
+
+    if args.register:
+        if args.dry_run:
+            missing = unlisted_tests(TESTS_DIR, manifest)
+            if missing:
+                print(f"ℹ️  would register under {args.surface}: {missing}")
+            else:
+                print("✅ nothing to register")
+            return 0
+        added = register(MANIFEST, TESTS_DIR, args.surface)
+        if added:
+            print(f"✅ registered {len(added)} test file(s) under {args.surface}: {added}")
+            print("   review: config/ci-surfaces.yml — move a file to another surface if the default is wrong.")
+        else:
+            print("✅ manifest already covers all test files")
         return 0
 
     changed = [l.strip() for l in args.changed_files.splitlines() if l.strip()]
