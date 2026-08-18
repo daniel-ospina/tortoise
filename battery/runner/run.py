@@ -158,8 +158,11 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
 
     # ── budget guard (before any episode; budget wins over --max-episodes) ─
     n_episodes = len(scenarios) * len(config.arms)
+    # Per-arm cost uses the arm's own episode count (len(scenarios)) — the
+    # scope DD12 formula is Σ scenarios × tokens/eps(arm) × price/1k(arm);
+    # n_episodes (total) stays the budget-cap parameter.
     total_cost = sum(
-        arm_map[a].estimated_cost_usd(n_episodes) if a in arm_map else 0.0
+        arm_map[a].estimated_cost_usd(len(scenarios)) if a in arm_map else 0.0
         for a in config.arms)
     refusal = budget.over_budget(n_episodes=n_episodes,
                                  estimated_cost_usd=total_cost,

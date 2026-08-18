@@ -125,7 +125,13 @@ def _coerce_scenario(raw: dict[str, Any], gold_base: Path) -> Scenario:
         if gr is not None:
             if not isinstance(gr, dict) or "path" not in gr or "sha256" not in gr:
                 raise ConfigError(f"scenario {sid}: gold_ref must be {{path, sha256}}")
-            gold_path = (gold_base / gr["path"]).resolve()
+            gold_base_resolved = gold_base.resolve()
+            gold_path = (gold_base_resolved / gr["path"]).resolve()
+            # Containment guard: gold paths must stay under the sealed store
+            # (code-review P3 — no traversal out of the gold root).
+            if not gold_path.is_relative_to(gold_base_resolved):
+                raise GoldVerificationError(
+                    f"scenario {sid}: gold path escapes the sealed store: {gold_path}")
             expected = str(gr["sha256"]).lower()
             if not gold_path.is_file():
                 raise GoldVerificationError(
