@@ -110,8 +110,14 @@ def _cmd_validate_judge(args: argparse.Namespace) -> ExitCode:
     rubric_text = _load_rubric_text(args, rubric_id)
     pairs = _default_probe_pairs(rubric_id)
     client = JudgeClient(force_mock=args.mock)
+    # Kappa leg: two judge passes over the SAME probe items (E2E-5.1
+    # chance-corrected reliability is actually measured, not hardcoded).
+    labels_a = [client.judge(rubric_id, f"kappa-a{i}", p[0]).verdict
+                for i, p in enumerate(pairs)]
+    labels_b = [client.judge(rubric_id, f"kappa-b{i}", p[1]).verdict
+                for i, p in enumerate(pairs)]
     record = validate_rubric(rubric_id, rubric_text, client, pairs,
-                             ["a"] * 4, ["a"] * 4, n_items=4)
+                             labels_a, labels_b, n_items=4)
     from pathlib import Path as _Path
     records_path = _Path(args.out or _DEFAULT_OUT) / "judge" / "records.json"
     registry = RubricRegistry(records_path)
@@ -133,7 +139,7 @@ def _load_rubric_text(args, rubric_id: str) -> str:
 
 
 def _default_probe_pairs(rubric_id: str) -> list[tuple[str, str]]:
-    return [(f"{rubric_id}-a{i}", f"{rubric_id}-b{i}") for i in range(4)]
+    return [(f"{rubric_id}-a{i}", f"{rubric_id}-b{i}") for i in range(5)]
 
 
 def _cmd_run(args: argparse.Namespace) -> ExitCode:

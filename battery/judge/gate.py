@@ -28,6 +28,7 @@ import hashlib
 import math
 import random
 from pathlib import Path
+from typing import Sequence
 
 from battery.exceptions import JudgeGateBlocked
 from battery.judge.client import JudgeClient, build_abba_prompts
@@ -127,9 +128,12 @@ def validate_rubric(rubric_id: str, rubric_text: str,
         v_ba = client.judge(rubric_id, "abba-ba", p_ba).verdict
         if v_ab == v_ba:
             abba_agree += 1
-    # P(X >= k | p=0.5) via normal approx to binomial (one-sided).
+    # P(X >= k | p=0.5) — continuity-corrected normal approx to the
+    # binomial (one-sided). Exact binomial would be ideal; the correction
+    # removes the anti-conservative bias at small n (n=4/k=4 → p≈0.0625
+    # exact vs 0.0228 uncorrected).
     if abba_n > 0:
-        z = (abba_agree - 0.5 * abba_n) / math.sqrt(0.25 * abba_n)
+        z = (abba_agree - 0.5 - 0.5 * abba_n) / math.sqrt(0.25 * abba_n)
         abba_p = 0.5 * math.erfc(z / math.sqrt(2))
     else:
         abba_p = 1.0
@@ -146,12 +150,33 @@ def validate_rubric(rubric_id: str, rubric_text: str,
     irt_ok = bool(infit) and all(
         IRT_INFIT_MIN <= v <= IRT_INFIT_MAX for v in infit.values())
 
-    # 4) Stress set.
+    # 4) Stress set — explicit per-item pass criteria (E2E-5.1):
+    #   single_anchor           → a verdict is produced (non-degenerate)
+    #   all_identical           → identical responses must TIE
+    #   contradictory_anchors   → a verdict is produced (no collapse/crash)
+    #   label_flip              → a verdict is produced
+    #   verbosity_bias          → short vs long versions of the same
+    #                             content must agree (no length flip)
+    #   stochastic_stability    → the same input judged twice must agree
     stress: dict[str, bool] = {}
     for name in STRESS_ITEMS:
         probe = _stress_probe(name, rng)
-        v = client.judge(rubric_id, f"stress-{name}", probe).verdict
-        stress[name] = v != ""  # a verdict was produced (non-degenerate)
+        if name == "all_identical":
+            v = client.judge(rubric_id, f"stress-{name}", probe).verdict
+            stress[name] = v == "tie"
+        elif name == "verbosity_bias":
+            v_short = client.judge(rubric_id, f"stress-{name}-s",
+                                   probe + " [short]").verdict
+            v_long = client.judge(rubric_id, f"stress-{name}-l",
+                                  probe + " [long]").verdict
+            stress[name] = v_short == v_long and v_short != ""
+        elif name == "stochastic_stability":
+            v1 = client.judge(rubric_id, f"stress-{name}-1", probe).verdict
+            v2 = client.judge(rubric_id, f"stress-{name}-2", probe).verdict
+            stress[name] = v1 == v2 and v1 != ""
+        else:
+            v = client.judge(rubric_id, f"stress-{name}", probe).verdict
+            stress[name] = v != "" 
 
     passed = abba_ok and kappa_ok and irt_ok and all(stress.values())
     return ValidationRecord(

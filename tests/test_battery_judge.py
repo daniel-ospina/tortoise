@@ -22,10 +22,13 @@ RUBRIC = "R2 adversarial-coverage rubric: does the memo consider counter-argumen
 
 
 class _GoodJudge(JudgeClient):
-    """Deterministic judge that agrees with itself across orders."""
+    """Deterministic judge: ties identical responses (stress all_identical),
+    otherwise consistent 'better' — passes every leg."""
 
     def judge(self, rubric_id, item_id, prompt, temperature=0.0):
         from battery.judge.client import JudgeCall
+        if "identical" in prompt:
+            return JudgeCall(rubric_id, item_id, "tie", 0.9)
         return JudgeCall(rubric_id, item_id, "better", 0.9)
 
 
@@ -34,12 +37,12 @@ class _NoisyJudge(JudgeClient):
 
     def judge(self, rubric_id, item_id, prompt, temperature=0.0):
         from battery.judge.client import JudgeCall
-        flip = "ba" in item_id
+        flip = item_id.endswith("-ba")  # AB+BA position flip
         return JudgeCall(rubric_id, item_id, "worse" if flip else "better", 0.8)
 
 
 def test_cohens_kappa_perfect():
-    assert _cohens_kappa(["a", "b", "c"], ["a", "b", "c"]) == 1.0
+    assert _cohens_kappa(["a", "b", "c", "d", "e"], ["a", "b", "c", "d", "e"]) == 1.0
 
 
 def test_cohens_kappa_none_intersection():
@@ -47,16 +50,16 @@ def test_cohens_kappa_none_intersection():
 
 
 def test_good_rubric_passes():
-    pairs = [("resp1", "resp2"), ("resp3", "resp4"), ("resp5", "resp6")]
+    pairs = [("resp1", "resp2"), ("resp3", "resp4"), ("resp5", "resp6"), ("resp7", "resp8"), ("resp9", "resp10")]
     rec = validate_rubric("r2", RUBRIC, _GoodJudge(), pairs,
-                          ["a", "b"], ["a", "b"], n_items=2)
+                          ["a", "b", "c", "d", "e"], ["a", "b", "c", "d", "e"], n_items=2)
     assert rec.passed
 
 
 def test_noisy_rubric_blocks():
-    pairs = [("resp1", "resp2"), ("resp3", "resp4")]
+    pairs = [("resp1", "resp2"), ("resp3", "resp4"), ("resp5", "resp6"), ("resp7", "resp8"), ("resp9", "resp10")]
     rec = validate_rubric("r2", RUBRIC, _NoisyJudge(), pairs,
-                          ["a", "b"], ["a", "b"], n_items=2)
+                          ["a", "b", "c", "d", "e"], ["a", "b", "c", "d", "e"], n_items=2)
     assert not rec.passed
     assert "position-bias" in rec.blocked_reason
 
@@ -77,11 +80,24 @@ def test_registry_fail_closed(tmp_path):
 
 def test_registry_drift_blocks(tmp_path):
     reg = RubricRegistry(tmp_path / "judge" / "records.json")
-    pairs = [("r1", "r2"), ("r3", "r4"), ("r5", "r6")]
+    pairs = [("r1", "r2"), ("r3", "r4"), ("r5", "r6"), ("r7", "r8"), ("r9", "r10")]
     rec = validate_rubric("r2", RUBRIC, _GoodJudge(), pairs,
-                          ["a", "b", "c"], ["a", "b", "c"], n_items=2)
+                          ["a", "b", "c", "d", "e"], ["a", "b", "c", "d", "e"], n_items=2)
     reg.save(rec)
     assert reg.validated("r2", RUBRIC)
     # Changed rubric text (checksum drift) → blocked (E2E-5.2 stale rubric).
     with pytest.raises(JudgeGateBlocked):
         reg.require_validated("r2", RUBRIC + " changed")
+
+
+def test_registry_disk_round_trip(tmp_path):
+    """Save → re-load from disk → validated (the _load path)."""
+    from battery.judge.gate import RubricRegistry
+    path = tmp_path / "judge" / "records.json"
+    reg = RubricRegistry(path)
+    pairs = [("r1", "r2"), ("r3", "r4"), ("r5", "r6"), ("r7", "r8"), ("r9", "r10")]
+    rec = validate_rubric("r2", RUBRIC, _GoodJudge(), pairs,
+                          ["a", "b", "c", "d", "e"], ["a", "b", "c", "d", "e"], n_items=2)
+    reg.save(rec)
+    reg2 = RubricRegistry(path)  # fresh instance reads disk
+    assert reg2.validated("r2", RUBRIC)

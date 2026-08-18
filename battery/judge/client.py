@@ -41,13 +41,14 @@ class JudgeClient:
                  model_id: str | None = None, *, force_mock: bool = False):
         self._model_fn = model_fn
         self._model_id = model_id or os.environ.get(
-            "BATTERY_JUDGE_MODEL") or os.environ.get(
-            "LLM_MODEL") or "deepseek/deepseek-chat-v3"
-        # Real mode requires BOTH a key AND a usable model id — an invalid
-        # id (e.g. the mock default) must never trigger a real HTTP call.
+            "BATTERY_JUDGE_MODEL") or os.environ.get("LLM_MODEL") or ""
+        # Real mode requires a key AND an explicit model id from config
+        # (BATTERY_JUDGE_MODEL/LLM_MODEL or the model_id arg). An absent
+        # model id ALWAYS means mock — a bare env key never triggers real
+        # HTTP calls, and the "mock-judge" sentinel is gone.
         self._real = (not force_mock and self._model_fn is None
                       and bool(os.environ.get("OPENROUTER_API_KEY"))
-                      and self._model_id != "mock-judge")
+                      and bool(self._model_id))
 
     @property
     def real(self) -> bool:
