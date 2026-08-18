@@ -1,6 +1,7 @@
 version: 1
 surfaces:
   api:
+  - test_1162_add_operator_local_svbp.py
   - test_abuse.py
   - test_abuse_integration.py
   - test_agent_signup.py
