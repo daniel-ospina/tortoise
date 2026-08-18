@@ -24,8 +24,8 @@ class L4CrossSessionStream:
             return StreamResult(self.stream_id, self.metric, 0.0, False,
                                 threshold, ())
         ok = [s for s in sessions
-              if s.get("surfaced_session", 0) is not None
-              and s.get("surfaced_session", 0) <= int(s.get("query_session", 0))
+              if "surfaced_session" in s and s["surfaced_session"] is not None
+              and int(s["surfaced_session"]) <= int(s.get("query_session", 0))
               and s.get("resolved_via_supersede", False)]
         rate = len(ok) / len(sessions)
         latencies = [int(s.get("surfaced_session", 0))
@@ -40,8 +40,9 @@ class L4CrossSessionStream:
     def latency_trend(self, sessions: list[dict[str, Any]]) -> bool:
         """Surfacing latency must NOT rise as the graph grows (earlier
         surfacing with density). Compares first-half vs second-half mean."""
-        lat = [int(s.get("surfaced_session", 0)) - int(s.get("planted_session", 0))
-               for s in sessions if s.get("surfaced_session")]
+        lat = [int(s["surfaced_session"]) - int(s.get("planted_session", 0))
+               for s in sessions
+               if "surfaced_session" in s and s["surfaced_session"] is not None]
         if len(lat) < 4:
             return True  # insufficient data — no trend claim
         half = len(lat) // 2

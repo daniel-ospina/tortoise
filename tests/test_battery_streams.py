@@ -110,6 +110,22 @@ class TestL4:
                      "query_session": 6, "resolved_via_supersede": False}]
         assert not st.score(sessions, None, 1.0).passed
 
+    def test_absent_surfaced_key_fails_closed(self):
+        """A trace producer that OMITS surfaced_session must not pass the
+        100% gate (absent ≠ surfaced at session 0)."""
+        st = L4CrossSessionStream()
+        sessions = [{"planted_session": 1, "query_session": 6,
+                     "resolved_via_supersede": True}]
+        assert not st.score(sessions, None, 1.0).passed
+
+    def test_latency_trend_rising_fails(self):
+        st = L4CrossSessionStream()
+        rising = [{"planted_session": 1, "surfaced_session": 2},
+                  {"planted_session": 2, "surfaced_session": 4},
+                  {"planted_session": 3, "surfaced_session": 7},
+                  {"planted_session": 4, "surfaced_session": 9}]
+        assert not st.latency_trend(rising)  # 1,2,4,5 -> second half higher
+
 
 class TestL5:
     def test_drift_gates(self):
