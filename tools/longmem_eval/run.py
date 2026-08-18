@@ -296,6 +296,10 @@ def outcomes_to_report(
         split=split,
         reader_model=reader_model,
         judge_model=judge_model,
+        # #1414 parity-leg producer: persist the methodology hashes (the
+        # battery's unchanged-check compares these).
+        reader_prompt_hash=_sha16(reader_prompt_source()),
+        judge_rubric_id_hash=_sha16(JUDGE_RUBRIC_ID),
         extraction_approach=(EXTRACTION_APPROACH_V2 if ingest_mode == "v2"
                             else EXTRACTION_APPROACH),
         ingest_mode=ingest_mode,
@@ -336,38 +340,6 @@ def reader_prompt_source() -> str:
         "on every retrieved chunk (question_date + haystack_dates surfaced — "
         "temporal-reasoning questions are answerable)"
     )
-
-    return build_report(
-        outcomes,
-        dataset_id=dataset_id,
-        split=split,
-        reader_model=reader_model,
-        judge_model=judge_model,
-        # #1414 parity-leg producer: persist the methodology hashes so the
-        # battery's unchanged-check has a baseline to compare (the parity
-        # module hashes the SAME source strings).
-        reader_prompt_hash=_sha16(reader_prompt_source()),
-        judge_rubric_id_hash=_sha16(JUDGE_RUBRIC_ID),
-        extraction_approach=(EXTRACTION_APPROACH_V2 if ingest_mode == "v2"
-                            else EXTRACTION_APPROACH),
-        ingest_mode=ingest_mode,
-        ks=ks,
-        top_k=top_k,
-        failures=failures,
-        extra={
-            "outcomes": [
-                {k: o[k] for k in (
-                    "question_id", "question_type", "question_date", "label",
-                    "hypothesis", "session_recall@k", "turn_recall@k",
-                    "evidence_recall@k", "n_ingest_errors", "context_tokens",
-                    "retrieval_latency_ms", "reader_latency_ms",
-                    "judge_latency_ms", "total_ms",
-                )}
-                for o in outcomes
-            ]
-        },
-    )
-
 
 def _print_summary(report: dict[str, Any]) -> None:
     acc = report["accuracy"]
