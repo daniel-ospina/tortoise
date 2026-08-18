@@ -1269,6 +1269,59 @@ def test_hnsw_spotcheck_delta_count_must_match_burn(tmp_path):
     assert any("per-question deltas" in r for r in out["blocking_reasons"])
 
 
+def test_hnsw_spotcheck_dropped_qids_full_coverage_passes(tmp_path):
+    """Contract fix: the artifact may DROP questions (breaker_open/absent
+    in either arm) — those keep None sentinels in the full-length deltas
+    and are listed in dropped_qids. len(deltas) + len(dropped_qids) == the
+    burn set validates full coverage (never a shrinking subset), and the
+    recomputed one-sided p skips the dropped sentinels."""
+    manifest = build_burn(tmp_path,
+                          deltas={"arctic-s": {"turn_recall@10": 0.06,
+                                               "ndcg@10": 0.0},
+                                  "arctic-s-query": {"turn_recall@10": 0.06,
+                                                     "ndcg@10": 0.0}})
+    (tmp_path / "hnsw-spotcheck.json").write_text(json.dumps({
+        "cleared": True, "n": GATE_N, "winner": "arctic-s",
+        "control": "minilm", "dropped_qids": ["lme_0000", "lme_0001"],
+        "metric_deltas": {
+            "turn_recall@10": {"n": GATE_N - 2, "mean_delta": 0.05,
+                                "one_sided_p": 0.0,
+                                "deltas": [None, None]
+                                           + [0.05] * (GATE_N - 2)},
+            "ndcg@10": {"n": GATE_N - 2, "mean_delta": 0.0,
+                         "one_sided_p": 1.0,
+                         "deltas": [None, None] + [0.0] * (GATE_N - 2)}},
+    }), encoding="utf-8")
+    out = run_gate(tmp_path, manifest)
+    assert out["verdict"] == "PASS(arctic-s)"
+    assert out["blocked"] is False
+
+
+def test_hnsw_spotcheck_dropped_coverage_mismatch_blocks(tmp_path):
+    """dropped_qids is present but len(deltas) + len(dropped_qids) != the
+    burn set → the artifact still hides a subset behind the dropped
+    accounting (here: full-length deltas PLUS a phantom dropped qid →
+    coverage overcounts) — blocked (fail-closed on full coverage)."""
+    manifest = build_burn(tmp_path,
+                          deltas={"arctic-s": {"turn_recall@10": 0.06,
+                                               "ndcg@10": 0.0},
+                                  "arctic-s-query": {"turn_recall@10": 0.06,
+                                                     "ndcg@10": 0.0}})
+    (tmp_path / "hnsw-spotcheck.json").write_text(json.dumps({
+        "cleared": True, "n": GATE_N, "winner": "arctic-s",
+        "control": "minilm", "dropped_qids": ["lme_0000"],
+        "metric_deltas": {
+            "turn_recall@10": {"n": GATE_N, "mean_delta": 0.05,
+                                "one_sided_p": 0.0,
+                                "deltas": [0.05] * GATE_N},
+            "ndcg@10": {"n": GATE_N, "mean_delta": 0.0,
+                         "one_sided_p": 1.0, "deltas": [0.0] * GATE_N}},
+    }), encoding="utf-8")
+    out = run_gate(tmp_path, manifest)
+    assert out["verdict"] == "BLOCKED"
+    assert any("per-question deltas" in r for r in out["blocking_reasons"])
+
+
 def test_hnsw_spotcheck_winner_null_blocks(tmp_path):
     """P1 fix: a spot-check artifact with winner:null must NOT validate the
     gate's winner — an unattributed artifact proves nothing about the

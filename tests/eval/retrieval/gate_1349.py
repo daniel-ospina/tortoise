@@ -1035,9 +1035,14 @@ def _check_hnsw_spotcheck(manifest, manifest_dir, n_resamples,
     deltas (m=2: BH q=0.10 → min p ≤ 0.05) and requires the artifact's
     declared ``cleared`` to agree. The artifact is pinned to the winner and
     to its own n = the FULL filtered-split question set (a subset spot-check
-    that shrinks until p clears is a cherry-picking window — forbidden); the
-    per-metric delta count must also equal the full set (the p is recomputed
-    over those deltas — a short delta list is an unverified subset).
+    that shrinks until p clears is a cherry-picking window — forbidden);
+    per metric the delta list must COVER the full set: with the dropped
+    accounting shape, len(deltas) + len(dropped_qids) == the full set, where
+    dropped_qids are breaker_open/absent questions recorded as None
+    sentinels in the full-length deltas and skipped by the recomputed p. An
+    artifact WITHOUT dropped_qids (old shape) falls back to the strict
+    len(deltas) == full set check (fail-closed — a short delta list is an
+    unverified subset).
 
     This check is only evaluated when there IS a winner: on NO-WINNER /
     INSUFFICIENT-POWER there is nothing to spot-check, so the precondition
@@ -1072,6 +1077,8 @@ def _check_hnsw_spotcheck(manifest, manifest_dir, n_resamples,
                           "spot-check that shrinks until p clears is a "
                           "cherry-picking window (forbidden)"}
     md = art.get("metric_deltas") or {}
+    dropped_qids = art.get("dropped_qids") or []
+    new_shape = "dropped_qids" in art
     recomputed: list[float] = []
     for metric in CO_PRIMARY:
         entry = md.get(metric) or {}
@@ -1081,19 +1088,37 @@ def _check_hnsw_spotcheck(manifest, manifest_dir, n_resamples,
                     "detail": f"HNSW spot-check missing per-question deltas "
                               f"for {metric} (the gate recomputes the p)"}
         # P1 fix (code-review): the declared n only pins the artifact's OWN
-        # count — the recomputed p must be over deltas covering the FULL
-        # filtered-split set (a subset of deltas that shrinks until p clears
-        # is a cherry-picking window, forbidden).
-        if burn_qids is None or len(deltas) != len(burn_qids):
+        # count — the recomputed p must be over deltas COVERING the FULL
+        # filtered-split set. New shape: dropped questions are listed in
+        # dropped_qids and keep None sentinels in the full-length deltas, so
+        # the PAIRED (non-None) delta count + len(dropped_qids) must equal the
+        # burn set. Old shape (no dropped_qids field): strict len(deltas) ==
+        # burn set, fail-closed (a subset of deltas that shrinks until p
+        # clears is a cherry-picking window, forbidden).
+        paired = [d for d in deltas if d is not None]
+        if new_shape:
+            covered = len(paired) + len(dropped_qids)
+        else:
+            covered = len(deltas)
+        if burn_qids is None or covered != len(burn_qids):
             expect = (f"{len(burn_qids)}" if burn_qids is not None
                       else "unknown (no burn set)")
             return {"name": "hnsw_spotcheck", "met": False,
-                    "detail": f"HNSW spot-check {metric} carries "
-                              f"{len(deltas)} per-question deltas != the FULL "
-                              f"filtered-split question set ({expect}) — "
+                    "detail": f"HNSW spot-check {metric} covers {covered} "
+                              f"questions ({len(paired)} paired per-question "
+                              f"deltas + {len(dropped_qids)} dropped) != the "
+                              f"FULL filtered-split question set ({expect}) — "
                               "recomputing p over an unverified subset is a "
                               "cherry-picking window (forbidden)"}
-        recomputed.append(one_sided_bootstrap_p(deltas, n_resamples=n_resamples))
+        # None sentinels are the dropped questions — skip them in the
+        # recomputed p (the one-sided test runs on the paired non-dropped).
+        if not paired:
+            return {"name": "hnsw_spotcheck", "met": False,
+                    "detail": f"HNSW spot-check {metric} carries no usable "
+                              f"per-question deltas (all questions dropped) — "
+                              "nothing to recompute"}
+        recomputed.append(one_sided_bootstrap_p(paired,
+                                                n_resamples=n_resamples))
     cleared_recomputed = min(recomputed) <= Q / 2  # m=2: q/2 = 0.05 (z≈1.645)
     declared = bool(art.get("cleared"))
     if declared != cleared_recomputed:

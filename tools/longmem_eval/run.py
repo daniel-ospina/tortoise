@@ -580,21 +580,28 @@ def _normal_cdf(x: float) -> float:
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
 
-def _delta_summary(deltas: list[float]) -> dict[str, Any]:
+def _delta_summary(deltas: list[float | None]) -> dict[str, Any]:
     """One-sided paired normal-approximation summary of winner−control deltas.
 
+    ``deltas`` is the FULL-length per-question list in burn order; entries
+    that are None are DROPPED questions (breaker_open/absent in either arm)
+    and are skipped by the n/mean/var/p math — but they keep their slot in
+    the emitted ``deltas`` list so the gate sees the full coverage.
+
     The exact bootstrap p is recomputed by gate_1349.py from the per-question
-    ``deltas`` — this is the artifact's T2-level directional read (m=2 bar:
-    BH q=0.10 → the smallest p must be ≤ 0.05, z ≈ 1.645).
+    ``deltas`` (None sentinels skipped) — this is the artifact's T2-level
+    directional read (m=2 bar: BH q=0.10 → the smallest p must be ≤ 0.05,
+    z ≈ 1.645).
     """
-    n = len(deltas)
+    valid = [d for d in deltas if d is not None]
+    n = len(valid)
     base = {"n": n, "deltas": list(deltas)}
     if n == 0:
         return {"mean_delta": 0.0, "one_sided_p": None, **base}
-    mean = sum(deltas) / n
+    mean = sum(valid) / n
     if n == 1:
         return {"mean_delta": round(mean, 6), "one_sided_p": None, **base}
-    var = sum((d - mean) ** 2 for d in deltas) / (n - 1)
+    var = sum((d - mean) ** 2 for d in valid) / (n - 1)
     std = math.sqrt(var)
     if std == 0.0:
         p = 0.0 if mean > 0.0 else 1.0  # deterministic sign
@@ -607,16 +614,31 @@ def _delta_summary(deltas: list[float]) -> dict[str, Any]:
 def _build_spotcheck_artifact(winner: str, control: str,
                               results: dict[str, dict[str, dict]],
                               ks: tuple[int, ...]) -> dict[str, Any]:
-    """Paired winner-vs-control artifact shape: {cleared, n, metric_deltas}."""
+    """Paired winner-vs-control artifact shape: {cleared, n, dropped_qids,
+    metric_deltas}.
+
+    ``n`` is the FULL question count the spot-check ran (the union of both
+    arms, in burn order) — never the shrinking intersection. Each metric's
+    ``deltas`` is full-length (one entry per qid); a qid that is
+    breaker_open or absent in either arm is recorded as a None sentinel and
+    listed in ``dropped_qids`` (the paired p skips it)."""
     k = "10" if "10" in (str(x) for x in ks) else str(ks[-1])
-    qids = sorted(set(results[winner]) & set(results[control]))
+    full_qids = sorted(set(results[winner]) | set(results[control]))
+
+    def _dropped(qid: str) -> bool:
+        w, c = results[winner].get(qid), results[control].get(qid)
+        return (w is None or c is None
+                or w.get("breaker_open") or c.get("breaker_open"))
+
+    dropped_qids = [qid for qid in full_qids if _dropped(qid)]
     metric_deltas: dict[str, Any] = {}
     for metric in ("turn_recall@10", "ndcg@10"):
-        deltas: list[float] = []
-        for qid in qids:
-            w, c = results[winner][qid], results[control][qid]
-            if w.get("breaker_open") or c.get("breaker_open"):
-                continue  # dropped questions are excluded from the paired set
+        deltas: list[float | None] = []
+        for qid in full_qids:
+            w, c = results[winner].get(qid), results[control].get(qid)
+            if _dropped(qid):
+                deltas.append(None)  # sentinel: dropped, no paired delta
+                continue
             if metric == "turn_recall@10":
                 dw = w.get("turn_recall@k", {}).get(k, 0.0)
                 dc = c.get("turn_recall@k", {}).get(k, 0.0)
@@ -636,15 +658,18 @@ def _build_spotcheck_artifact(winner: str, control: str,
         "retriever": "vector",
         "winner": winner,
         "control": control,
-        "n": len(qids),
+        "n": len(full_qids),
+        "dropped_qids": dropped_qids,
         "metric_deltas": metric_deltas,
         "cleared": cleared,
         "rule": ("one-sided paired normal-approximation z-test per co-primary "
-                 "metric over the FULL question set (n recorded; a post-hoc n "
-                 "that shrinks until p<0.10 is forbidden); BH q=0.10 over m=2 "
-                 "→ cleared iff min one-sided p ≤ 0.05. gate_1349.py "
-                 "recomputes the exact bootstrap p from the per-question "
-                 "deltas."),
+                 "metric over the non-dropped questions of the FULL question "
+                 "set (n records the full count; a post-hoc n that shrinks "
+                 "until p<0.10 is forbidden — dropped breaker_open/absent "
+                 "qids keep None sentinels in the full-length deltas and are "
+                 "listed in dropped_qids); BH q=0.10 over m=2 → cleared iff "
+                 "min one-sided p ≤ 0.05. gate_1349.py recomputes the exact "
+                 "bootstrap p from the per-question deltas."),
         "checkpoint_key_prefix": "hnsw__vector__{model}__{prompt}",
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "git_sha": git_sha(),

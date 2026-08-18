@@ -825,6 +825,85 @@ def test_spot_check_emits_paired_artifact(tmp_path, monkeypatch, fake_embeddings
     assert isinstance(data["cleared"], bool)
     for m in data["metric_deltas"].values():
         assert "mean_delta" in m and "n" in m
+    # full-set contract: the mock CONTROL arm trips the vector breaker
+    # (every outcome breaker_open) — the artifact must still cover the FULL
+    # question set: full-length deltas with None sentinels + dropped_qids
+    # (never a silent shrink to an empty paired subset), n = full count.
+    assert data["dropped_qids"] == ["mini_ie_user_001", "mini_msr_002"]
+    assert all(len(m["deltas"]) == data["n"]
+               for m in data["metric_deltas"].values())
+    assert all(all(d is None for d in m["deltas"])
+               for m in data["metric_deltas"].values())
+    assert all(m["n"] == 0 for m in data["metric_deltas"].values())
+
+
+def _spotcheck_outcome(qid, *, breaker_open=False, tr10=0.5, ndcg=0.4) -> dict:
+    return {
+        "question_id": qid, "breaker_open": breaker_open,
+        "turn_recall@k": {"10": tr10}, "ndcg@10": ndcg,
+    }
+
+
+def test_spotcheck_artifact_dropped_question_sentinel():
+    """Contract fix (#1349 gate): the spot-check artifact covers the FULL
+    question set. A question breaker_open in one arm is DROPPED from the
+    paired computation but keeps its slot as a None sentinel in the
+    full-length per-metric deltas and is listed in dropped_qids — so the
+    gate can distinguish "present, delta computed" from "dropped", and
+    n = the full count (never the shrinking intersection)."""
+    results = {
+        "arctic-s": {
+            "q1": _spotcheck_outcome("q1", tr10=0.9, ndcg=0.8),
+            "q2": _spotcheck_outcome("q2", tr10=0.7, ndcg=0.6),
+            "q3": _spotcheck_outcome("q3", tr10=0.5, ndcg=0.4),
+        },
+        "minilm": {
+            "q1": _spotcheck_outcome("q1", tr10=0.8, ndcg=0.7),
+            # q2 is breaker_open in the CONTROL arm → dropped
+            "q2": _spotcheck_outcome("q2", breaker_open=True),
+            "q3": _spotcheck_outcome("q3", tr10=0.1, ndcg=0.0),
+        },
+    }
+    art = runner._build_spotcheck_artifact("arctic-s", "minilm", results,
+                                           ks=(10,))
+    assert art["n"] == 3                          # FULL count, not paired subset
+    assert art["dropped_qids"] == ["q2"]
+    for m in ("turn_recall@10", "ndcg@10"):
+        entry = art["metric_deltas"][m]
+        # None sentinel at q2, paired deltas at q1/q3 (float-exact)
+        assert entry["deltas"][0] == pytest.approx(0.1)
+        assert entry["deltas"][1] is None
+        assert entry["deltas"][2] == pytest.approx(0.4)
+        assert entry["n"] == 2                     # non-dropped only
+        # p/mean over the 2 valid deltas — identical to a direct summary
+        ref = runner._delta_summary([0.1, 0.4])
+        assert entry["mean_delta"] == ref["mean_delta"]
+        assert entry["one_sided_p"] == ref["one_sided_p"]
+
+
+def test_spotcheck_artifact_absent_question_dropped():
+    """A question ABSENT from one arm entirely is also dropped (not a
+    silent intersection shrink): full set = the UNION of both arms, and the
+    missing qid keeps its None sentinel + dropped_qids entry."""
+    results = {
+        "arctic-s": {
+            "q1": _spotcheck_outcome("q1", tr10=0.9, ndcg=0.8),
+            "q3": _spotcheck_outcome("q3", tr10=0.5, ndcg=0.4),
+        },
+        "minilm": {
+            "q1": _spotcheck_outcome("q1", tr10=0.8, ndcg=0.7),
+            # q3 absent from the control arm entirely
+        },
+    }
+    art = runner._build_spotcheck_artifact("arctic-s", "minilm", results,
+                                           ks=(10,))
+    assert art["n"] == 2                          # union of both arms
+    assert art["dropped_qids"] == ["q3"]
+    for m in ("turn_recall@10", "ndcg@10"):
+        entry = art["metric_deltas"][m]
+        assert entry["deltas"][0] == pytest.approx(0.1)  # q1 paired delta
+        assert entry["deltas"][1] is None                # q3 dropped
+        assert entry["n"] == 1
 
 
 def test_spot_check_requires_db_and_model(tmp_path):
