@@ -14,7 +14,7 @@ extends: 01-align.md, 02-research-brief.md, 03-scope.md (incl. Integration Surfa
 
 **Test-design issue:** #1404 (integration-surface map S1–S8 — every section below carries its surfaces)
 
-**Review status:** rewritten after 4-reviewer gate (substeps 1–6: 1 P1 + 7 P2; e2e-coverage: 1 P0 + 3 P1 + 3 P2; e2e-reproducibility: 4 P1 + 3 P2; test-quality: 2 P0 + 4 P1 + 1 P2). All fixed in this revision — D2–D4 first-class, L3–L6 + D2–D4 detailed E2Es, failure-path + negative-case tests, reproducibility pins, enum/schema consistency.
+**Review status:** rewritten after 4-reviewer gate (substeps 1–6: 1 P1 + 7 P2; e2e-coverage: 1 P0 + 3 P1 + 3 P2; e2e-reproducibility: 4 P1 + 3 P2; test-quality: 2 P0 + 4 P1 + 1 P2 — §7 subtotal: 3 P0 + 11 P1 + 7 P2; grand total incl. substeps 1–6: 3 P0 + 12 P1 + 14 P2; coherence review §8: 3 P2 fixed after the rewrite). All fixed in this revision — D2–D4 first-class, L3–L6 + D2–D4 detailed E2Es, failure-path + negative-case tests, reproducibility pins, enum/schema consistency. **Human gate #2 (plan approval):** approved by owner 2026-08-14 ("go") — plan is the approved basis for decomposition.
 
 ---
 
@@ -282,7 +282,7 @@ Fleshes out the 7 high-level E2Es from scope into executable scenarios (setup / 
 **Cross-substep consistency checks:**
 - Journeys J1–J7 ↔ Workflows W1–W7 (explicit J↔W map, §1) ↔ sections 4–6 (each workflow's surfaces resolve to interface contracts) ✓
 - E2E detailed (25 scenarios) ↔ scope high-level E2E-1…7 via the parent→child map above (full coverage, no orphans) ✓
-- AC coverage: all 14 AC metric families mapped to ≥1 detailed E2E (R1: 1.1/1.2; R2: 1.1; R3: 1.1/1.3; R4: 1.1; R5: 1.1; L1: 2.2; L2: 2.1; L3: 2.3; L4: 2.4; L5: 2.5; L6: 2.6; D1: 3.1/3.2; D2: 3.3; D3: 3.4; D4: 3.5) ✓
+- AC coverage: all 14 metric families (R1–R5, L1–L6, D2–D4) + the D1 verdict-rule AC mapped to ≥1 detailed E2E (R1: 1.1/1.2; R2: 1.1; R3: 1.1/1.3; R4: 1.1; R5: 1.1; L1: 2.2; L2: 2.1; L3: 2.3; L4: 2.4; L5: 2.5; L6: 2.6; D1: 3.1/3.2; D2: 3.3; D3: 3.4; D4: 3.5) ✓
 - Data model enums (STRONG/STRUCTURAL/PARITY/WEAK; UNIQUE/MECHANISM-NOT-UNIQUE/WEAK-UNMITIGATED/INCONCLUSIVE; {ok,rate_limited,timeout,fallback_cached,failed}; ep_outcome) ↔ verdict rule in battery spec §6 ↔ align fix-1/fix-3 ↔ scope E2E-3/6 ✓
 - Matched-recall (K=5, symmetric trigger ≥0.10-F1-below-corpus-best, <50% → INCONCLUSIVE) identical across align, spec, scope, plan §2/§6 ✓
 - Arm set A0/A1/A2/A2b/A3/A4 identical across spec arm table, scope, plan §3/§5 ✓
@@ -307,4 +307,4 @@ Fleshes out the 7 high-level E2Es from scope into executable scenarios (setup / 
 
 **Improvement opportunities:** (1) after a stable UNIQUE verdict, the deferred adaptive-test generator (SEAL-style) reuses the harness; (2) the profile report doubles as the sales evidence artifact — presentation polish deferred to the claim doc; (3) parity-leg staleness probes (ForgetEval-class) extend S5 without architecture change; (4) D3 feedback loop can seed the adaptive-test generator later.
 
-**Gate (FINAL):** plan internally consistent (mappings verified above); all 14 AC families covered by detailed E2Es; risks identified + mitigated; ready for decomposition (epic-decompose). Test-design #1404 recorded.
+**Gate (FINAL):** plan internally consistent (mappings verified above); all 14 metric families + D1 verdict-rule AC covered by detailed E2Es; risks identified + mitigated; ready for decomposition (epic-decompose). Test-design #1404 recorded.

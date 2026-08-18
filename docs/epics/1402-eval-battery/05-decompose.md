@@ -29,6 +29,7 @@ extends: 04-plan.md (plan), 03-scope.md (scope + test-design #1404)
 | 1414 | Parity leg (LongMemEval/LoCoMo/MemoryArena/MemoryAgentBench/ForgetEval) | standard | #1406, #1408, #1144 | §5 parity/; E2E-4.1 |
 | 1415 | Report/verdict assembler + calibration (+ `battery report` subcommand) | complex | #1409, #1410, #1411, #1412, #1413 | §5 report/; E2E-3.2/6.1-fixtures/6.2/7.1 |
 | 1416 | Battery execution + verdict report (real-run, claim doc) | complex | #1406..#1415, #1350, #1144 | scope item 7/9; E2E-6.1-real-run/7.2 |
+| 1419 | Capstone: clickthrough verification (post-deploy-verify pattern) | standard | #1416, #1415 | scope E2E-1…7 (high-level) + test-design #1404 surfaces; gates epic completion |
 
 **External deps:** #1350 (extractor v2 — graph input quality), #1144 (retrieval-eval baseline + runner infra), #1369 (LongMemEval ingestion wiring, relevant to #1414).
 
@@ -42,7 +43,7 @@ extends: 04-plan.md (plan), 03-scope.md (scope + test-design #1404)
                       └─→ #1414 (parity) ────────────────────────────────────────────┘
 ```
 
-Acyclic; roots #1406/#1407 parallelizable; wave 2 = #1408/#1410/#1413 (depend only on #1406); #1416 is the single sink.
+Acyclic; roots #1406/#1407 parallelizable; wave 2 = #1408/#1410/#1413 (depend only on #1406); #1416 is the single sink among child issues; capstone #1419 (depends on #1416+#1415) gates epic completion.
 
 ## MECE Verification Result
 
