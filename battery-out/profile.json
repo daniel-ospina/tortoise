@@ -1,0 +1,20 @@
+{
+  "matrix": {},
+  "verdict": {
+    "outcome": "MECHANISM-NOT-UNIQUE",
+    "differentiators": [],
+    "weaknesses": [],
+    "mitigation_paths": {},
+    "artifacts_changed": [
+      "positioning copy",
+      "product-success-eval claim section",
+      "graph-as-memory hypothesis annex"
+    ]
+  },
+  "matched_recall": {},
+  "report_status": "incomplete_missing_metrics",
+  "families": {
+    "measured": 0,
+    "expected": 14
+  }
+}
