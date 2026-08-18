@@ -40,4 +40,5 @@ data/longmemeval*
 longmemeval_*.report.json
 
 # Local Tortoise CLI state (API key + endpoint) — machine-local, never commit
+.tortoise
 .tortoise/
