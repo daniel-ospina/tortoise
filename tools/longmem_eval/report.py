@@ -72,6 +72,7 @@ def build_report(
     reader_model: str,
     judge_model: str,
     extraction_approach: str,
+    ingest_mode: str = "deterministic",
     ks: tuple[int, ...],
     top_k: int,
     extra: dict[str, Any] | None = None,
@@ -113,11 +114,16 @@ def build_report(
     # ── retrieval recall@k (session + turn level, mean over questions) ──
     session_recall: dict[str, float] = {}
     turn_recall: dict[str, float] = {}
+    evidence_recall: dict[str, float] = {}
     for k in ks:
         sr = [o["session_recall@k"].get(str(k), 0.0) for o in outcomes]
         tr = [o["turn_recall@k"].get(str(k), 0.0) for o in outcomes]
         session_recall[str(k)] = _mean(sr)
         turn_recall[str(k)] = _mean(tr)
+        er = [(o.get("evidence_recall@k") or {}).get(str(k), None)
+              for o in outcomes]
+        if any(v is not None for v in er):
+            evidence_recall[str(k)] = _mean([v or 0.0 for v in er])
 
     # ── context tokens ──
     ctx = [o["context_tokens"] for o in outcomes]
@@ -151,6 +157,7 @@ def build_report(
         "retrieval": {
             "session_recall@k": session_recall,
             "turn_recall@k": turn_recall,
+            "evidence_recall@k": evidence_recall or None,
             "context_tokens_mean": ctx_mean,
             "context_point_count_mean": round(
                 sum(o["context_point_count"] for o in outcomes) / n, 2) if n else 0,
@@ -164,6 +171,7 @@ def build_report(
         "methodology": {
             "reader_model": reader_model,
             "judge_model": judge_model,
+            "ingest_mode": ingest_mode,
             "judge_rule": "official LongMemEval get_anscheck_prompt; "
                           "label = 'yes' in response.lower()",
             "judge_call_shape": "official evaluate_qa.py: messages=[user], "

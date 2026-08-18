@@ -1358,6 +1358,7 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
 
     # ── S4: review gaps → complete embed list ──────────────────────────────
     complete_list: dict = embed_list
+    s4_warnings: list[str] = []
     if story:
         try:
             s4 = run_s4(model, story, search, embed_list, master)
@@ -1365,7 +1366,8 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                        s4.get("events") or s4.get("operators")):
                 complete_list = s4
             else:
-                errors.append("S4 returned an empty list — kept S2 output")
+                # graceful degradation — S2 output stands; not an error
+                s4_warnings.append("S4 returned an empty list — kept S2 output")
         except Exception as e:
             errors.append(f"S4 failed: {type(e).__name__}: {e} — kept S2 output")
 
@@ -1387,6 +1389,8 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     result["s2_embed"] = embed_list          # S2 raw (pre-S4) — owner loop
     result["search"] = search
     result["errors"] = errors
+    if s4_warnings:
+        result["warnings"] = s4_warnings + (result.get("warnings") or [])
     result["stats"]["elapsed_s"] = round(time.time() - t0, 1)
     result["stats"]["chunks"] = len(chunks)
     result["stats"]["failed_chunks"] = failed_chunks
