@@ -193,6 +193,7 @@ def run_evaluation(
                             context_hits=ret["hits"],
                             question=question["question"],
                             question_date=question.get("question_date", "") or None,
+                            question_type=question.get("question_type", "") or None,
                         ),
                         what=f"reader for {qid}", retries=max_retries)
                     reader_ms = (time.monotonic() - t0) * 1000.0
