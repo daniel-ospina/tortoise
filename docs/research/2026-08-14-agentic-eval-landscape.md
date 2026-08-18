@@ -113,3 +113,7 @@ Sources: "From LLM Reasoning to Autonomous AI Agents" survey (2504.19678), markt
 1. Do you want the eval to prove *capability* (does the agent reason well) or *improvement* (does the agent get better with live use)? SEA-Eval-style longitudinal metrics are the only current answer for the latter.
 2. Is the target task family reasoning-heavy? The literature (2604.20006) warns reasoning is where memory helps least — pick task families where recall→reuse is observable (decisions, workflows, preferences) OR design the test to isolate what memory adds.
 3. Budget: arena-style (MindGames/TextArena) gives competitive ELO improvement curves but heavy infra; a synthetic sequential-stream battery (SEA-Eval style) is lighter and closer to your existing harness.
+
+## Raw Notes
+
+- [2026-08-14] Primary evidence ledger: this synthesis was compiled from ~12 external queries (Perplexity sonar + Exa) with per-claim confidence tiers recorded inline (High/Medium ⚠️ single-source). Source categories: academic (arXiv/ACL/ICLR/ICML), practitioner (benchlm.ai, tessl.io, kili-technology, agora-intelligence, agentmarketcap), official benchmark pages (tau-bench, arcprize, memoryarena.github.io, seaeval.github.io), and repo-owned eval lineage (#1144/#1369/#1350/#909). Fresh-context verifier confirmed no hallucinated citations (2026-08-14). Epic-level raw notes and the assumptions register live in `docs/epics/1402-eval-battery/02-research-brief.md`; this file is the PRIOR_RESEARCH source for downstream stages.

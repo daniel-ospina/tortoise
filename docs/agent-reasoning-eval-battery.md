@@ -131,7 +131,8 @@ Design: **same battery, five arms**, recall controlled:
 |---|---|
 | A0 control | Plain agent, no memory (fresh context every session) |
 | A1 long-context | Everything stuffed into context window (the "1M-token" arm) |
-| A2 generic memory | Key-value/semantic memory store (Mem0/Zep/LangMem-class) |
+| A2 generic memory | Key-value/semantic memory store (Mem0 — managed API, industry default) |
+| A2b strongest comparator | Zep/Graphiti (temporal knowledge graph, bi-temporal facts, invalidation-not-deletion — architecturally closest to Tortoise; research brief §Tech Stack: "Zep must be an arm") |
 | A3 recall-RAG | Retrieval-augmented transcripts/decisions (flat claims, no propagation) |
 | A4 tortoise | Epistemic graph + Decide workflow (the treatment) |
 
@@ -139,12 +140,11 @@ Design: **same battery, five arms**, recall controlled:
 - Run Tier-1 probes (R1–R5) × all five arms, single-session. Recall/retrieval metrics are *diagnostics only*.
 - **Differentiation profile (no exclusions — owner decision 2026-08-14):** ALL probes (R1–R5; L1–L6; D2–D4) are scored on ALL arms and reported in a full delta profile. Every metric is classified: **STRONG** (Tortoise wins, delta ≥ [cal] threshold, empirically contested) / **STRUCTURAL** (Tortoise wins but by-construction — the graph's primitives firing; honest label: competitors could replicate the primitive) / **PARITY** (within ±[cal] threshold) / **WEAK** (comparator wins, delta ≥ [cal] threshold). Each metric carries a **load-bearing flag** — is the axis customer-visible (contradiction, staleness, calibration, decision consistency, improvement-over-time)?
 - **Matched-recall definition (ex ante):** equal top-K factual retrieval F1 (K=5) on a factual probe subset of the scenario corpus, measured before the reasoning battery runs. **Symmetric trigger:** if ANY arm (A0–A4) falls ≥0.10 F1 short of the corpus-best factual retrieval, rerun on a recall-matched balanced subset; if that subset is <50% of the corpus, the differential verdict is **INCONCLUSIVE** (reported, not re-interpreted).
-- **Gate:** A4 ≥ A1/A2/A3 on **≥ 2 of 3 contested metrics** (R2/R3/R5) at matched recall. **Each contested leg counts its primary outcome metric only:** R2 = judged adversarial-coverage subscore (the Decide-workflow process-fidelity clause, "≥80% reach 3+ cycles", is a mechanism diagnostic — reported, not scored); R3 = Brier; R5 = correct-direction rate. The honest expectation from the literature: A2/A3 close the recall gap with A4 but not the *reasoning* gap — that's the differentiator claim.
 - **Verdict rule (owner decision 2026-08-14, replaces the ≥2-of-3 gate):** the verdict is a **differentiation profile** — every metric scored on every arm, no exclusions ("if we're better we want to know"). The "unique" claim ships when **≥1 TRUE DIFFERENTIATOR** (STRONG on a load-bearing axis — empirically won, not structural) **AND no SERIOUS WEAKNESS** (no load-bearing WEAK lacking a documented mitigation path). Structural wins are reported and count toward the profile, but cannot alone support "unique" (competitors could replicate the primitive). WEAKs each carry a mitigation path; the battery is re-runnable so "improve enough that weaknesses are not serious" is testable.
 
 ### D2 — The longitudinal sweep
-- Run Tier-2 streams (L1–L4) × five arms (A2/A3 with their own memory backends).
-- **Gate:** A4 shows the token-trajectory convergence + quality slope (L2/L3); A2/A3 show memory growth without behavior change (SEA-Eval pseudo-evolution) — i.e., the literature's 31.2× token spread reproduced.
+- Run Tier-2 streams (L1–L4) × all arms (A2/A2b/A3 with their own memory backends).
+- **Gate:** A4 shows the token-trajectory convergence + quality slope (L2/L3); A2/A2b/A3 show memory growth without behavior change (SEA-Eval pseudo-evolution) — pseudo-evolution spread threshold per AC-D2 (≥2× [cal]; literature reports up to 31.2×, ⚠️ single-source).
 - **Bonus metric:** LongMemEval/LoCoMo scores per arm, to *show saturation parity* — proving the reasoning delta is not explained by raw recall. (Existing infra: feat/1144 retrieval-eval + longmemevl-runner.)
 
 ### D3 — Iterative feedback integration (OPT-BENCH-style)
