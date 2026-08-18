@@ -157,6 +157,7 @@ surfaces:
   - test_list_contexts.py
   - test_longmem_runner.py
   - longmem_eval/test_vector_arm.py
+  - mini_beir/test_mini_beir.py
   - test_lookup_hash.py
   - test_m0.py
   - test_m1.py
