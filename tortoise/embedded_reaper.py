@@ -1005,8 +1005,11 @@ def _classify(socket_real: str, dbdir_real: str, tmpdir_real: str,
         # the server is a leftover, not live data. Fall through to the
         # cooldown/candidate path (dead pid -> candidate); live owners keep
         # the protection below, unresolvable owners fail closed.
+        # #1383 review: pass the authoritative known_pid through — a LIVE
+        # server (pgrep-found) with a STALE registry pidfile must never
+        # classify stale_socket via the registry fallback.
         if _registry_owner_alive(registry) is False:
-            return _cooldown_check(registry)
+            return _cooldown_check(registry, pid=pid)
         return "protected"
 
     # Signal 2: dbfilename is the generic 'redis.db' (no-path) vs user name.
@@ -1017,8 +1020,9 @@ def _classify(socket_real: str, dbdir_real: str, tmpdir_real: str,
             and not _is_ephemeral_dir(reg_dbdir_real, tmpdir_real):
         # Issue #1427: same orphan reclassification as Signal 1 — a dead
         # registry-recorded owner makes this a leftover, not live data.
+        # #1383 review: known_pid pass-through (see Signal 1 comment).
         if _registry_owner_alive(registry) is False:
-            return _cooldown_check(registry)
+            return _cooldown_check(registry, pid=pid)
         return "protected"
 
     # Old-format registry (no dbfilename field): .db file present -> protected.
@@ -1026,8 +1030,9 @@ def _classify(socket_real: str, dbdir_real: str, tmpdir_real: str,
         if _dir_has_db_file(dbdir_real) and not _is_ephemeral_dir(dbdir_real, tmpdir_real):
             # Issue #1427: same orphan reclassification — old-format
             # path-based servers are the same protection class.
+            # #1383 review: known_pid pass-through (see Signal 1 comment).
             if _registry_owner_alive(registry) is False:
-                return _cooldown_check(registry)
+                return _cooldown_check(registry, pid=pid)
             return "protected"
         basename = os.path.basename(dbdir_real)
         if not (_AUTOGEN_DIRNAME.match(basename)
@@ -1329,21 +1334,27 @@ def _remove_stale_socket_dir(record: dict, dry_run: bool) -> dict | None:
     # Guard 6/7: atomic rename-aside then re-verify BEFORE the irreversible
     # rmtree. The renamed dir is the quarantine — if re-verification fails,
     # the dir stays for operator inspection / next-sweep convergence.
+    # The reaper-owned marker is written BEFORE the rename (review P2): a
+    # marker-write failure AFTER the rename would leave a suffix dir with no
+    # marker that NO handler can reclaim — discover pass 2 skips quarantine
+    # suffix dirs, _sweep_quarantine_dirs requires the marker, and guard 0
+    # rejects the suffix — a permanent leak. Pre-rename failure aborts with
+    # the dir intact (retried next sweep); a stray marker on a later rename
+    # failure is inert (redis ignores unknown files; the marker is simply
+    # re-written on the next successful rename).
+    try:
+        with open(os.path.join(dbdir_real, REAPER_OWNED_MARKER), "w") as fh:
+            fh.write("reaper-owned\n")
+    except OSError:
+        logger.warning("could not write reaper marker, aborting: %s",
+                       dbdir_real)
+        return None
     renamed = dbdir_real + STALE_QUARANTINE_SUFFIX + str(time.time_ns())
     try:
         os.rename(dbdir_real, renamed)
     except OSError as exc:
         logger.warning("stale dir rename failed (%s), skipping: %s",
                        exc, dbdir_real)
-        return None
-    # #1383 security review (Issue 3): mark the quarantine as reaper-owned
-    # so _sweep_quarantine_dirs never rmtrees a same-suffix foreign dir.
-    try:
-        with open(os.path.join(renamed, REAPER_OWNED_MARKER), "w") as fh:
-            fh.write("reaper-owned\n")
-    except OSError:
-        logger.warning("could not write reaper marker, leaving quarantine: %s",
-                       renamed)
         return None
     renamed_sock = os.path.join(renamed, "redis.socket")
     if not os.path.exists(renamed_sock):

@@ -1276,6 +1276,43 @@ def test_classify_live_never_stale_socket_for_respawned_server(monkeypatch):
         shutil.rmtree(base, ignore_errors=True)
 
 
+def test_classify_live_never_stale_socket_for_path_based_server(monkeypatch):
+    """Regression (review P1): the known_pid pass-through must ALSO hold for
+    PATH-BASED servers (user dir + user dbfilename in the registry) — the
+    #1427 orphan branches previously dropped known_pid and re-read the stale
+    registry pidfile, misclassifying a LIVE server as stale_socket."""
+    from tortoise.embedded_reaper import _classify_dir
+    monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
+    base = Path(tempfile.mkdtemp(prefix="tt_"))
+    try:
+        dbdir = base / "redislite_pb"
+        dbdir.mkdir()
+        sp = dbdir / "redis.socket"
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.bind(str(sp))
+        s.close()
+        (dbdir / "redis.pid").write_text("99999999\n")  # stale/dead owner
+        # Path-based registry: user dir OUTSIDE the ephemeral tempdir +
+        # user dbfilename (Signal 1 + Signal 2 both say "protected class").
+        (dbdir / "x.settings").write_text(json.dumps({
+            "pidfile": str(dbdir / "redis.pid"),
+            "unixsocket": str(sp),
+            "dir": str(Path.home()),
+            "dbfilename": "pathbased_reaper_test.db",
+        }))
+        # LIVE server (pgrep-found): must never classify stale_socket.
+        rec = _classify_dir(str(dbdir), str(sp), known_pid=os.getpid())
+        assert rec["classification"] in ("candidate", "protected"), \
+            f"live path-based server misclassified: {rec['classification']}"
+        assert rec["classification"] != "stale_socket"
+        # Dead leftover dir walk (no known_pid): stays stale_socket — the
+        # #1427 orphan reclassification must not regress.
+        rec2 = _classify_dir(str(dbdir), str(sp))
+        assert rec2["classification"] == "stale_socket"
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
 def test_classify_dir_client_count_none_on_probe_failure(monkeypatch):
     """Probe-failed client count records None, not a false 0 — must FAIL
     pre-fix (old behavior records 0) and pin the fix."""
