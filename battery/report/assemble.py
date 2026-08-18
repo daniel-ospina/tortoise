@@ -49,8 +49,10 @@ def assemble(run_artifacts: dict[str, dict[str, dict[str, float]]],
         matrix[fam] = {}
         for arm, value in arms.items():
             # Best COMPARATOR = max over the OTHER arms (never the cell's
-            # own arm — a self-comparison always classifies PARITY).
-            best_comparator = max(v for a, v in arms.items() if a != arm)
+            # own arm — a self-comparison always classifies PARITY). A
+            # single-arm family has no comparator (guard: code-review P2).
+            others = [v for a, v in arms.items() if a != arm]
+            best_comparator = max(others) if others else 0.0
             cell = classify_cell(fam, arm, value, best_comparator,
                                  delta_threshold)
             classifications.append(cell)

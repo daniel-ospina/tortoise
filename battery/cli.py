@@ -31,7 +31,7 @@ from battery.runner.run import RunConfig, run_battery
 
 _DEFAULT_CONFIG = "battery/config"
 _DEFAULT_OUT = "battery-out"
-from pathlib import Path as _Path  # noqa: E402
+from pathlib import Path as _Path
 
 
 class _ArgparseExit(RuntimeError):
@@ -196,6 +196,10 @@ def _cmd_report(args: argparse.Namespace) -> ExitCode:
     from battery.differential.d1_sweep import METRIC_FAMILIES
     from battery.report.assemble import assemble, save_profile
     artifacts = _load_measured_artifacts(args)
+    if not artifacts:
+        print("WARNING: zero measured families found — no sweep artifacts "
+              "in the out dir; the verdict below is a NO-DATA state, not a "
+              "substantive claim.")
     mitigation = _load_mitigations(args)
     recall = _load_recall(args)
     thresholds = load_thresholds(
@@ -219,6 +223,10 @@ def _cmd_calibrate(args: argparse.Namespace) -> ExitCode:
     from battery.report.calibrate import cal_table_hash, print_deltas
     thresholds = load_thresholds(_Path(args.config or args.config_dir
                                        or _DEFAULT_CONFIG) / "thresholds.yaml")
+    if not getattr(args, "print_deltas", False):
+        print("use `battery calibrate --print` to print [cal] deltas "
+              "(print-only; re-lock is a reviewable table change).")
+        return ExitCode.OK
     print(f"cal table hash: {cal_table_hash(thresholds.cal_rows)}")
     for line in print_deltas(thresholds.cal_rows, _load_measured_artifacts(args)):
         print(line)
@@ -273,7 +281,6 @@ def _dispatch(args: argparse.Namespace) -> ExitCode:
         "parity": _cmd_parity,
         "calibrate": _cmd_calibrate,
         "validate-judge": _cmd_validate_judge,
-        "report": _cmd_report,
         "report": _cmd_report,
     }
     return handlers[args.subcommand](args)

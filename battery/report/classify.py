@@ -46,7 +46,10 @@ def classify_cell(family: str, arm: str, value: float,
     - PARITY: within ±delta of the comparator
     - WEAK: comparator beats value by ≥ delta
     """
-    if family in STRUCTURAL_FAMILIES and arm == "a4":
+    if (family in STRUCTURAL_FAMILIES and arm == "a4"
+            and value >= best_comparator):
+        # Structural label only when the primitive actually WON — an a4
+        # loss on R1/R4 must surface as WEAK, never masked (code-review P2).
         return CellClassification(family, arm, value, "STRUCTURAL",
                                   family in LOAD_BEARING_FAMILIES)
     if value >= best_comparator + delta_threshold:
