@@ -508,5 +508,16 @@ def test_routing_env_override_invalid_yaml_falls_back(monkeypatch, tmp_path):
 def test_routing_route_issue_unknown_repo_ask_human():
     """attribution_fallback: ask_human — unknown repo → no team (human decision)."""
     gh = GitHubConnector(config={"repo": "some/unknown-repo"})
+    assert gh._routing["attribution_fallback"] == "ask_human", "fallback pinned"
     route = gh._route_issue([])
     assert route.get("team") in ("", None), f"unknown repo must not get a team, got {route}"
+    assert route.get("role") == "product-implementer"
+
+
+def test_routing_env_override_empty_dict_wins(monkeypatch, tmp_path):
+    """An explicit {} override is a VALID 'no routing' choice — not masked."""
+    empty = tmp_path / "empty-routing.yaml"
+    empty.write_text("{}\n")
+    monkeypatch.setenv("TORTOISE_ROUTING_CONFIG", str(empty))
+    gh = GitHubConnector(config={"repo": "daniel-ospina/tortoise"})
+    assert gh._routing == {}, "empty-dict override must win over the packaged default"

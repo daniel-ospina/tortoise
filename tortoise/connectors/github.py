@@ -63,12 +63,13 @@ class GitHubConnector:
         """
         import yaml
 
-        def _load(path) -> dict:
+        def _load(path) -> dict | None:
+            """Return the dict on success (even an empty dict), None on failure."""
             try:
                 data = yaml.safe_load(path.read_text())
-                return data if isinstance(data, dict) else {}
+                return data if isinstance(data, dict) else None
             except Exception:
-                return {}
+                return None
 
         # 1. User/customer override (#1395)
         override = os.environ.get("TORTOISE_ROUTING_CONFIG")
@@ -77,8 +78,8 @@ class GitHubConnector:
             p = _Path(override)
             if p.is_file():
                 loaded = _load(p)
-                if loaded:
-                    return loaded
+                if loaded is not None:
+                    return loaded  # even {} — an explicit "no routing" override
                 logger.warning(
                     "TORTOISE_ROUTING_CONFIG=%s unreadable/invalid — falling back "
                     "to the packaged default", override,
