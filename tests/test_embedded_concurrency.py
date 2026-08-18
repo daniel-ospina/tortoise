@@ -170,14 +170,25 @@ def _canonical_path():
 
 
 def _pid_alive(pid: int) -> bool:
-    """Liveness probe via kill(pid, 0) — no ambient process-table walk."""
+    """Liveness probe via kill(pid, 0) — no ambient process-table walk.
+
+    Linux: a ZOMBIE process still answers kill(0) (it exists until reaped),
+    but it is dead — the /proc stat check treats it as not-alive so the
+    delta fixture / waiters never block on unreapable zombies (#1365)."""
     if not pid:
         return False
     try:
         os.kill(pid, 0)
-        return True
     except (ProcessLookupError, PermissionError):
         return False
+    try:
+        with open(f"/proc/{pid}/stat") as fh:
+            state = fh.read().split()[2]
+        if state == "Z":
+            return False  # zombie: dead, awaiting reap
+    except (OSError, IndexError):
+        pass  # macOS: no /proc — plain kill(0) behavior
+    return True
 
 
 def _kill_pid(pid: int) -> None:

@@ -602,13 +602,32 @@ def _pgrep_redis_servers() -> list[int]:
 
 
 def _socket_dir_from_cmdline(pid: int) -> str | None:
-    """Extract the unixsocket dir from a redis-server cmdline."""
+    """Extract the unixsocket dir from a redis-server cmdline.
+
+    Two forms are possible (redislite starts the server as
+    `redis-server <redis.config> [--loadmodule ...]`, and the daemonized
+    redis may or may not re-exec with its effective config as argv):
+      1. Inline: `unixsocket:/path/redis.socket` (observed on macOS).
+      2. Config file: the `unixsocket` directive lives in the .config arg
+         (observed on Linux builds) — read it so the live pass is reliable
+         regardless of the argv form (#1365: the chaos tests' discover()
+         must not silently miss live orphans on one platform).
+    """
     cmdline = _cmdline(pid)
     m = _UNIXSOCKET_RE.search(cmdline)
-    if not m:
-        return None
-    sock = m.group(1)
-    return os.path.dirname(os.path.realpath(sock))
+    if m:
+        sock = m.group(1)
+        return os.path.dirname(os.path.realpath(sock))
+    m = re.search(r"(\S+/redis\.config)\b", cmdline)
+    if m:
+        try:
+            text = Path(m.group(1)).read_text(errors="replace")
+            um = re.search(r"^\s*unixsocket\s+'?([^'\s]+)'?", text, re.M)
+            if um:
+                return os.path.dirname(os.path.realpath(um.group(1)))
+        except OSError:
+            pass
+    return None
 
 
 def discover(jobs: int = 1, max_tempdir_entries: int = 5000) -> list[dict]:
