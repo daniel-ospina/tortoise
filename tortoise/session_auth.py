@@ -29,7 +29,7 @@ import binascii
 import json
 import logging
 import os
-import random
+import secrets
 import time
 
 import httpx
@@ -122,9 +122,11 @@ class _JWKSCache:
                     # [C, 1.5·C] so a poller cannot deterministically re-arm
                     # the cooldown at expiry (an attacker winning every round
                     # would starve key rotation indefinitely). Failure-arm
-                    # below stays deterministic.
-                    self._last_failure_at = time.monotonic() + random.uniform(
-                        0.0, _COOLDOWN_S * 0.5
+                    # below stays deterministic. CSPRNG draw (secrets) —
+                    # re-review flagged MT19937 state-recovery as theoretical;
+                    # secrets removes the argument at zero cost.
+                    self._last_failure_at = time.monotonic() + (
+                        secrets.randbelow(int(_COOLDOWN_S * 500)) / 1000
                     )
             except HTTPException:
                 raise

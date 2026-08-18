@@ -478,7 +478,9 @@ class TestNegativeMatrix:
         # Repo guard (_MAX_TOKEN_BYTES=16000) is BELOW the server's ~16KB
         # header-line cap so it — not a raw server 400/431 — is the first
         # line of rejection (keeping the failure inside the CORS-stamped
-        # HTTPException path). Exact boundary: 16,000 → 200, 16,001 → 401.
+        # HTTPException path). Boundary: ≤16,000 → 200 (15,999 bytes),
+        # >16,000 → 401 (16,001 bytes) — 16,000 itself is unrepresentable
+        # due to base64 quantization.
         def token_with(n_pad):
             return u.mint_es256_token(
                 priv, "kid-1", base_payload(padding="x" * n_pad), iss=FIXED_ISSUER
@@ -607,16 +609,22 @@ class TestNegativeMatrix:
 
     def test_deeply_nested_payload(self, monkeypatch):
         # Hand-encode a ~1,200-deep nested payload (~2-3KB, under the 16KB
-        # guard). On CPython C-json this exercises a DecodeError path; on
-        # pure-python-json runtimes it exercises RecursionError. Either way:
-        # 401, never 500.
+        # guard) and WARM the cache so the token actually reaches jwt.decode.
+        # The malformed signature (AAAA) → InvalidSignatureError pins the
+        # decode-boundary fail-closed path (401, never 500). The RecursionError
+        # arm of the catch tuple is unreachable-defensive on CPython (C-json
+        # trips it only at ~10k nesting, >16KB guard) — not pinned here.
+        priv, pub = u.make_ec_keypair()
+        warm_cache(monkeypatch, u.build_ec_jwks(pub, "kid-1"))
         nested = "x"
         for _ in range(1200):
             nested = [nested]
         payload_b64 = u._b64url(json.dumps({"x": nested}).encode())
         header_b64 = u._b64url(json.dumps({"alg": "ES256", "kid": "kid-1"}).encode())
         token = f"{header_b64}.{payload_b64}.AAAA"
-        _require_401(monkeypatch, token, {"keys": []})
+        with pytest.raises(HTTPException) as ei:
+            verify_ok(token)
+        assert ei.value.status_code == 401
 
 
 # ── Cache hardening ───────────────────────────────────────────────────────
