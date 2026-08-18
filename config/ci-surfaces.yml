@@ -201,6 +201,7 @@ surfaces:
   - test_pack_registry_gaps.py
   - test_pack_state.py
   - test_pipeline_cli.py
+  - test_postmerge_verdict.py
   - test_pre_migration_safety.py
   - test_projection.py
   - test_projection_lifecycle.py
