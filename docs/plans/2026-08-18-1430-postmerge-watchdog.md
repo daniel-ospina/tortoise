@@ -96,6 +96,11 @@ Replace the current body (which is `set -o pipefail` + `python -m pytest tests/ 
             echo "==================== WATCHDOG: pytest killed after 50m ($passed passed, $failed failed, $errored errored so far) — last test lines above ===================="
           fi
           echo "==================== pytest exit code: $rc ===================="
+          # #1438: write the REAL exit code to GITHUB_OUTPUT before the final
+          # exit — the comment step distinguishes a watchdog-kill timeout
+          # (rc 124/137/2) from a real test failure (rc 1) from it. Must stay
+          # on every path, ahead of `exit $rc`.
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
           exit $rc
 ```
 
@@ -103,6 +108,7 @@ Replace the current body (which is `set -o pipefail` + `python -m pytest tests/ 
 - `set +e` is the FIRST line — GitHub runs steps under `bash -eo pipefail`; without it, `timeout` returning 124 aborts the step BEFORE the tail/banner/exit-code print (silent #798, reintroduced).
 - Do NOT copy python-ci's `$FILES` / `needs.changes` / `matrix.half` machinery — nonexistent in this workflow; the target stays `tests/ -m 'not track_b' --ignore=tests/e2e`.
 - The step's final `exit $rc` propagates the real code → `steps.tests.outcome` = 'failure' on rc 124/137/2/1 → comment step + fail step behave as today (verified: a step failure keeps `if: always()` successors running; a JOB cancel is what kills them).
+- `echo "exit_code=$rc" >> "$GITHUB_OUTPUT"` MUST run before `exit $rc` on every path — the comment step reads `steps.tests.outputs.exit_code` for its #1438 tri-state verdict; dropping it empties the output and breaks the verdict.
 - Log path `/tmp/pmv-pytest.log` (distinct from python-ci's `/tmp/pytest.log`).
 
 **Step 2: Update the header comment**
@@ -111,7 +117,7 @@ Add a `#1430` line to the workflow header note block (e.g. next to the per-test-
 
 **Step 3: Diff-review against python-ci.yml**
 
-Confirm the transplant differs from python-ci's `test` job block ONLY in the 4 documented deviations: watchdog 50m (vs 45m — full suite vs half), target `tests/` (vs `$FILES`), `--ignore=tests/e2e` retained, no HF env vars (no pre-cache step here; setting `HF_HUB_OFFLINE=1` would break the embedding download post-merge legitimately needs).
+Confirm the transplant differs from python-ci's `test` job block ONLY in the documented deviations: watchdog 50m (vs 45m — full suite vs half), target `tests/` (vs `$FILES`), `--ignore=tests/e2e` retained, `-rfE` (vs python-ci's `-r fEs` — post-merge has no #1436 skip-guard to feed, so no `-rs` needed), the `exit_code` GITHUB_OUTPUT write (post-merge's comment step needs it; python-ci persists its rc to a file for its orphan check instead), and no HF env vars (no pre-cache step here; setting `HF_HUB_OFFLINE=1` would break the embedding download post-merge legitimately needs).
 
 ## Task 2: Static + behavioral validation
 
