@@ -103,18 +103,16 @@ class TestArmUnavailable:
 
     def test_mem0_real_mode_failure_raises(self, scenarios, monkeypatch):
         # A bad key + unreachable host must raise ArmUnavailable, never
-        # return partial memories silently.
+        # return partial memories silently. The network seam is monkeypatched
+        # to raise URLError deterministically (hermetic CI).
+        import urllib.error
+        def _boom(*a, **k):
+            raise urllib.error.URLError("unreachable")
+        monkeypatch.setattr("urllib.request.urlopen", _boom)
         a = A2Mem0Arm(api_key="bad-key")
         a.setup_scenarios(scenarios)
-        try:
-            with pytest.raises(ArmUnavailable):
-                a.retrieve(_ctx(a, scenarios[0]))
-        except Exception as e:  # network blocked in sandbox — still must not pass silently
-            if not isinstance(e, ArmUnavailable):
-                # unreachable network is acceptable in hermetic CI — the
-                # contract is "never partial memories"; a network error
-                # raising SOMETHING is fail-closed.
-                assert True
+        with pytest.raises(ArmUnavailable):
+            a.retrieve(_ctx(a, scenarios[0]))
 
 
 class TestA4Graph:

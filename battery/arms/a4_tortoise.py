@@ -67,7 +67,9 @@ class A4TortoiseArm:
         try:
             g = self._scenario_graph(context.scenario)
             rows = g.query(
-                "MATCH (p:Point) RETURN p.id AS id, p.content AS content, "
+                "MATCH (p:Point) WHERE p.is_operator <> true "
+                "AND p.content IS NOT NULL "
+                "RETURN p.id AS id, p.content AS content, "
                 "p.status AS status LIMIT 20").result_set
             # Filter to live claims the episode can cite.
             out = []

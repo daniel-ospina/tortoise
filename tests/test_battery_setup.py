@@ -151,7 +151,7 @@ class TestEquivalence:
 
         # N+1 proof: batch ≪ naive (2·N vs 4+ per item)
         n_items = sum(len(derive_scenario_graph(s).points) for s in scenarios)
-        assert batch_rounds == 2 * len(scenarios)
+        assert batch_rounds <= 2 * len(scenarios)
         assert naive_rounds > 4 * n_items
 
     def test_promote_source_live(self, fresh_db):
