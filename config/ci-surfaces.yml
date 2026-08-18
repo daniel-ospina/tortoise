@@ -200,6 +200,7 @@ surfaces:
   - test_security.py
   - test_semantic_extractor.py
   - test_slack_connector.py
+  - test_status_projection.py
   - test_stop_writes.py
   - test_suggest_entry_points.py
   - test_supabase_control.py
