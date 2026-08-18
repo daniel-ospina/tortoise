@@ -7276,7 +7276,11 @@ async def github_callback(code: str | None = None, state: str | None = None,
     `error` is the standard OAuth denial query param. (Note: tests must use
     follow_redirects=False — the 302 target is the external welcome page.)
     """
-    welcome_url = "https://tortoise.premiselabs.co/welcome.html"
+    # #1135: welcome page lives on the static-Pages host — derive from the
+    # same env-driven base as the email links (EMAIL_LINK_BASE_URL), never a
+    # second hardcoded host literal.
+    from tortoise.email_notify import email_link_base
+    welcome_url = f"{email_link_base()}/welcome.html"
 
     if error:
         _track_analytics_event("", "onboarding_error",
@@ -8022,10 +8026,30 @@ async def backups_drill(request: Request, body: dict):
     return {"status": "drill_ok", "target_graph": target_graph, **result}
 
 
+def _dashboard_base() -> str:
+    """Dashboard host — single env-driven source (#1135).
+
+    Matches the CLI claim-flow convention (__main__.py: TORTOISE_DASHBOARD_URL,
+    default https://app.premiselabs.co); billing redirect defaults derive from
+    it so the dashboard host is configured once.
+    """
+    v = os.environ.get("TORTOISE_DASHBOARD_URL")
+    return v.strip() if v and v.strip() else "https://app.premiselabs.co"
+
+
 _BILLING_ACTIVE_STATUSES = ("active", "trialing", "past_due")
-_BILLING_DEFAULT_SUCCESS_URL = "https://app.premiselabs.co/team?session_id={CHECKOUT_SESSION_ID}"
-_BILLING_DEFAULT_CANCEL_URL = "https://app.premiselabs.co/team?checkout=cancelled"
-_BILLING_DEFAULT_PORTAL_RETURN = "https://app.premiselabs.co/team"
+
+
+def _billing_default_success_url() -> str:
+    return f"{_dashboard_base()}/team?session_id={{CHECKOUT_SESSION_ID}}"
+
+
+def _billing_default_cancel_url() -> str:
+    return f"{_dashboard_base()}/team?checkout=cancelled"
+
+
+def _billing_default_portal_return() -> str:
+    return f"{_dashboard_base()}/team"
 
 
 def _billing_error_to_http(exc: Exception) -> HTTPException:
@@ -8133,8 +8157,8 @@ def _billing_checkout_sync(team: dict, price_id: str) -> dict:
     try:
         url = client.create_checkout_session(
             team_id, price_id, customer_id,
-            os.environ.get("BILLING_SUCCESS_URL", _BILLING_DEFAULT_SUCCESS_URL),
-            os.environ.get("BILLING_CANCEL_URL", _BILLING_DEFAULT_CANCEL_URL),
+            os.environ.get("BILLING_SUCCESS_URL", _billing_default_success_url()),
+            os.environ.get("BILLING_CANCEL_URL", _billing_default_cancel_url()),
         )
     except Exception as e:  # noqa: BLE001
         raise _billing_error_to_http(e) from e
@@ -8170,7 +8194,7 @@ def _billing_portal_sync(team: dict) -> dict:
     try:
         url = StripeClient().create_portal_session(
             customer_id,
-            os.environ.get("BILLING_PORTAL_RETURN_URL", _BILLING_DEFAULT_PORTAL_RETURN),
+            os.environ.get("BILLING_PORTAL_RETURN_URL", _billing_default_portal_return()),
         )
     except Exception as e:  # noqa: BLE001
         raise _billing_error_to_http(e) from e

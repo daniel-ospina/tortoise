@@ -57,7 +57,12 @@ def _from_address() -> str:
     return _env("RESEND_FROM_EMAIL") or "noreply@premiselabs.co"
 
 
-def _email_link_base() -> str:
+def email_link_base() -> str:
+    """Email-link host — single env-driven source (#1135).
+
+    Also the welcome.html host (hosted_api github_callback); shared so the
+    static-Pages host is configured once via EMAIL_LINK_BASE_URL.
+    """
     return _env("EMAIL_LINK_BASE_URL") or "https://tortoise.premiselabs.co"
 
 
@@ -233,7 +238,7 @@ async def _send_resend(to: str, subject: str, html_body: str, text_body: str,
 
 
 def _build_invite_link(token: str) -> str:
-    return f"{_email_link_base()}/invite-accept.html?token={token}"
+    return f"{email_link_base()}/invite-accept.html?token={token}"
 
 
 async def _send_invite_attempt(invitee_email: str, team_name: str, role: str,

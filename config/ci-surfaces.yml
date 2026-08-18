@@ -272,6 +272,7 @@ surfaces:
   - test_onboarding_variants.py
   - test_signup_form_safety.py
   - test_waitlist_form.py
+  - test_welcome_url_consolidation.py
   - test_website_static.py
   sdk:
   - test_client_surface.py
