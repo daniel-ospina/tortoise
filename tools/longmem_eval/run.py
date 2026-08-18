@@ -246,6 +246,15 @@ def _make_question_sdk(*, db_uri: str | None, namespace: str | None,
     return TortoiseSDK(os.path.join(td.name, "lme.db")), td.cleanup
 
 
+def _ensure_work_dir(work_dir: str | None) -> None:
+    """Create the work dir if missing — ``TemporaryDirectory(dir=…)`` and
+    the checkpoint file both require the parent to exist, and a fresh run
+    with a new ``--work-dir`` must not fail on a missing directory (issue
+    #1349 T8 pilot: observed FileNotFoundError on every question)."""
+    if work_dir:
+        Path(work_dir).mkdir(parents=True, exist_ok=True)
+
+
 # ── checkpoint IO (atomic + keyed + per-outcome validated) ─────────────────
 
 def _load_checkpoint(path: str | None, *, run_key: str,
@@ -854,6 +863,7 @@ def _run_main(parser: argparse.ArgumentParser, args,
               db_uri: str | None) -> dict[str, Any]:
     """Body of :func:`run_main` (split so the caller can scope the
     TORTOISE_DB_URI env to the run — issue #1349 test isolation)."""
+    _ensure_work_dir(args.work_dir)
     ks = _parse_ks(args.k)
     top_k = args.top_k
 
