@@ -351,6 +351,20 @@ class CommitEvent(BaseModel):
         return v
 
 
+class SupersessionRecord(BaseModel):
+    """A client-derived entity supersession (#1350, decision 1a): the
+    extractor observed 'entity B replaces entity A' in the conversation. The
+    server persists it as an ObjectSuperseded event; the projection folds it
+    into Object.status. Additive-optional so old clients' payloads still
+    validate (no migration)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    superseded: str = Field(min_length=1)   # existing entity id OR name
+    supersedes_by: str = Field(min_length=1)  # the new entity's name
+    evidence: str = Field(default="")
+
+
 class CommitPayload(BaseModel):
     """The full POST /v1/sessions/commit request body (§6.1)."""
 
@@ -369,6 +383,7 @@ class CommitPayload(BaseModel):
     points: list[Point] = Field(default_factory=list)
     events: list[CommitEvent] = Field(default_factory=list)  # #1013: Event nodes
     operators: list[Operator] = Field(default_factory=list)
+    supersessions: list[SupersessionRecord] = Field(default_factory=list)  # #1350
     telemetry: Telemetry
 
     @field_validator("captured_at")
@@ -638,6 +653,7 @@ def validate_layer1(
         payload.session_id, payload.points, payload.entities,
         payload.operators, payload.summary, payload.story_arc,
         payload.events,   # #1013: events are part of the canonical
+        payload.supersessions,  # #1350: supersessions are too (replay-safe)
     )
     if payload.client_commit_id != expected:
         add("client_commit_id",
@@ -818,6 +834,7 @@ def canonical_payload(
     summary: str,
     story_arc: str,
     events: Iterable[Any] = (),
+    supersessions: Iterable[Any] = (),
 ) -> str:
     """Deterministic canonical JSON over the §6.1 commitment fields.
 
@@ -868,6 +885,16 @@ def canonical_payload(
             }
             for e in sorted(events, key=lambda x: _f(x, "id"))
         ],
+        "supersessions": [
+            {
+                "superseded": _f(s, "superseded"),
+                "supersedes_by": _f(s, "supersedes_by"),
+                "evidence": _f(s, "evidence", "") or "",
+            }
+            for s in sorted(supersessions,
+                            key=lambda x: (_f(x, "superseded"),
+                                            _f(x, "supersedes_by")))
+        ],
     }
     return json.dumps(_round3(canonical), sort_keys=True, separators=(",", ":"))
 
@@ -880,13 +907,16 @@ def compute_client_commit_id(
     summary: str,
     story_arc: str,
     events: Iterable[Any] = (),
+    supersessions: Iterable[Any] = (),
 ) -> str:
     """SHA-256 over the canonical payload (ids.content_hash — the existing
     idempotency-key primitive, plan §6.1). Events are part of the canonical
-    (issue #1013): changing an event changes the commit id."""
+    (issue #1013): changing an event changes the commit id. Supersessions
+    are part of the canonical too (#1350): a changed supersession changes
+    the id — the Object status fold is replay-safe on the same id."""
     return content_hash(
         canonical_payload(session_id, points, entities, operators,
-                          summary, story_arc, events)
+                          summary, story_arc, events, supersessions)
     )
 
 

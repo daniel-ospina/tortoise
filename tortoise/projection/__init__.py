@@ -641,6 +641,11 @@ class FalkorProjection(
             return self._upsert_event(ev)
         elif t == "SubjectAdded":
             self._upsert_subject(ev)
+        elif t == "ObjectSuperseded":
+            # #1350: fold the client-derived supersession into Object.status
+            # (projection-owned cache of the event stream — §11 'derived
+            # values may be CACHED'). Rebuild-replay-safe via this branch.
+            return self._fold_object_superseded(ev)
         elif t == "ObjectRegistered":
             self._upsert_object(ev)
         elif t == "DocumentCreated":

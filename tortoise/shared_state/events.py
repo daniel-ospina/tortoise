@@ -169,6 +169,7 @@ CLAIM_EVENT_TYPES = (
     "OperatorPromoted",   # #785: R16 zombie-operator prevention
     "DedupeRecorded",     # #784: content-dedup candidate recorded/merged
     "DedupeRejected",     # #784: content-dedup candidate rejected
+    "ObjectSuperseded",   # #1350: Object status fold source (supersession)
 )
 
 
