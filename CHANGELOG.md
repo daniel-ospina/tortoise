@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — battery harness core (#1406)
+
+The Agent-Reasoning Eval Battery harness core (epic #1402): a `battery/` package extending `tools/longmem_eval` runner patterns — episode runner (trajectory logging, seed pinning, model-call outcome tracking, batch scenario setup), CLI (`run|parity|calibrate|validate-judge|report` + exit codes 0/1/2/3/4/5), and `battery/config/` YAML loaders (corpus/thresholds/arms/budget with [cal] table lock + gold sha256 verification).
+
+- **`battery run`** (mock arms, no API keys): per-scenario `run_artifact.json` (run_id = seed+arm+scenario, model-call outcome enum {ok, rate_limited, timeout, fallback_cached, failed}, ep_outcome) + `summary.json`; budget guard (exit 1); empty corpus refuses with exit 5 (E2E-1.4); all-failed → exit 4 after artifacts.
+- **`--batch-setup`** (N+1 fix): batched scenario graph writes at ≤2 DB round-trips per scenario (2·N total) at the query boundary, with batch==naive graph-state equivalence and idempotent MERGE setup.
+- **Determinism (E2E-7.1)**: same seed + temp 0 + PYTHONHASHSEED-pinned subprocess runs → |Δ| ≤ 1e-6 across metric values; per-attempt `TORTOISE_DB_PATH` isolation.
+- **Contracts for child issues**: `ArmAdapter` protocol + `ArmUnavailable`, `Scorer` seam (`ScorerResult{metrics, ep_outcome}`), contract exceptions (`JudgeGateBlocked`→2, `InconclusiveRun`→3, `IsolationBreach`→4, `EmptyCorpus`→5), run_artifact/summary schemas v1.0, sealed-gold boundary at the corpus loader.
+
 ### Added — selfhost→hosted export→import migration path (#1230)
 
 A first-class migration path: `tortoise export` produces a versioned, encrypted artifact (`tortoise-export-v1`, AES-256-GCM, encrypt-by-default) from any selfhost graph (Docker FalkorDB or embedded FalkorDBLite), and the hosted `POST /v1/teams/{team_id}/import` endpoint ingests it into a team graph — preserving **Point IDs and edge topology** (belief scores are derived; EP recomputes server-side). Import is owner-scoped with streaming size/rate caps, a fail-closed validation chain (format → blob sha256 → key fingerprint → decrypt → payload sha256 → counts), temp-graph verify-before-atomic-swap, quarantine on failure (live graph never touched), and a `last_import_sha256` idempotency ledger (re-import → 200 `already:true`).

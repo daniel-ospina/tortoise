@@ -1,0 +1,11 @@
+# [cal]-locked thresholds (issue #1406). Top-level keys for this slice:
+# determinism {epsilon} + cal {rows}. Per-metric AC-gated epsilons are added
+# by #1409. The cal table hash (canonical serialization) is recorded in
+# artifact provenance — the mechanical lock #1415's print-only re-tune reads.
+determinism:
+  epsilon: 1e-6
+
+cal:
+  # metric -> {arm -> value}. Values are [cal]-locked; re-locking is a
+  # reviewable table change (calibration mode prints, never silently tunes).
+  surfaced-rate: {a4: 0.90, a0: 0.00}
