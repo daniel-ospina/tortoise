@@ -1781,7 +1781,12 @@ class TortoiseSDK:
         # M2 LLM extraction over the whole conversation (#822) — replaces the
         # regex decision/claim loop (removed as a product path). Shared with
         # the hosted copy so the two stay in sync.
-        extracted = self._extract_session_llm(conversation, session_id, now)
+        # #1350: capture runs the v2 5-stage extractor (hosted + selfhost);
+        # the M2 two-stage extractor remains behind TORTOISE_SESSION_EXTRACTOR=m2.
+        if os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2":
+            extracted = self._extract_session_llm(conversation, session_id, now)
+        else:
+            extracted = self._extract_session_v2(conversation, session_id, now)
 
         # Ontology episodic model (v3.1 §4.5/§3.2): Event node + the point's
         # eventId provenance property. #1417: provenance is the point's
@@ -1890,6 +1895,116 @@ class TortoiseSDK:
                 "kind": p.get("pointKind") or "statement",
                 "text": p.get("content", "")[:200],
             })
+        return extracted
+
+    def _extract_session_v2(
+        self,
+        conversation: list[dict[str, str]],
+        session_id: str,
+        now: str,
+    ) -> list[dict]:
+        """v2 LLM extraction over a conversation (#1350) — the 5-stage
+        pipeline for hosted/self-hosted capture, replacing the M2 two-stage
+        extractor. Runs extractor_v2.extract_session_v2 (S1 story → S2 map →
+        S3 real-backend search → S4 gap review → S5 embed) and writes the
+        Layer-1 payload (entities/events/points/operators) to THIS SDK's
+        graph — entities via create_entity, points via create_point with the
+        content-addressed ids, events via create_event, IMPL/NAND via
+        create_operator — then wires session CONTAINS + aboutObject edges.
+
+        Returns the same [{id, kind, text}] contract as _extract_session_llm
+        so the capture loops (hosted + selfhost, which share this) stay
+        unchanged. Fails closed without a provider key.
+        """
+        if not os.environ.get("OPENROUTER_API_KEY") and not os.environ.get(
+                "DEEPSEEK_API_KEY") and not os.environ.get("OPENAI_API_KEY"):
+            raise ValueError(
+                "_extract_session_v2 requires an LLM provider key "
+                "(OPENROUTER_API_KEY / DEEPSEEK_API_KEY / OPENAI_API_KEY — "
+                "#1350) or TORTOISE_SESSION_LLM_MOCK=1")
+        from tortoise.extractor_v2 import extract_session_v2
+        from tests.model_adapters import MODELS
+        if os.environ.get("TORTOISE_SESSION_LLM_MOCK") == "1":
+            model = _V2SessionMock()
+        else:
+            # _default_byok_model (this module) is the configured BYOK adapter
+            # (env-driven); fall back to the uncapped flash adapter.
+            model = _default_byok_model() or MODELS["deepseek-flash"]()
+
+        out = extract_session_v2(model, conversation, sdk=self,
+                                 session_id=session_id)
+        payload = out.get("payload") or {}
+        proj = self._get_proj()
+
+        # ── entities ──
+        for e in payload.get("entities", []) or []:
+            name = str(e.get("name", "")).strip()
+            if not name:
+                continue
+            try:
+                self.create_entity("object", name,
+                                   objectKind=str(e.get("kind", "core:other")),
+                                   is_episodic=False)
+            except Exception:  # noqa: BLE001 — best-effort per entity
+                pass
+
+        # ── points + aboutObject edges + session CONTAINS ──
+        extracted: list[dict] = []
+        for pt in payload.get("points", []) or []:
+            pid = str(pt.get("id", "")).strip()
+            content = str(pt.get("content", "")).strip()
+            if not pid or not content:
+                continue
+            try:
+                self.create_point(
+                    str(pt.get("pointKind", "statement")), content,
+                    id=pid, session_id=session_id, is_episodic=False,
+                    status="draft",
+                    # #1350: link the extracted point to the session Source
+                    # (mirrors the M2 EventAPI provenance; create_point wires
+                    # the extractedFrom edge).
+                    extractedFrom=f"session:{session_id}",
+                )
+                for name in (pt.get("about_entities") or []):
+                    if isinstance(name, str) and name.strip():
+                        proj.g.query(
+                            "MATCH (p:Point {id:$pid}), (o:Object {name:$n}) "
+                            "MERGE (p)-[:aboutObject]->(o)",
+                            params={"pid": pid, "n": name.strip()})
+                proj.g.query(
+                    "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
+                    "MERGE (s)-[:CONTAINS]->(p)",
+                    params={"sid": session_id, "pid": pid})
+                extracted.append({
+                    "id": pid, "kind": "statement", "text": content[:200]})
+            except Exception:  # noqa: BLE001 — best-effort per point
+                pass
+
+        # ── events ──
+        for ev in payload.get("events", []) or []:
+            content = str(ev.get("content", "")).strip()
+            if not content:
+                continue
+            try:
+                self.create_event(
+                    content[:80],
+                    str(ev.get("eventKind", "core:occurrence")).rsplit(":", 1)[-1],
+                    sessionId=session_id, is_episodic=True)
+            except Exception:  # noqa: BLE001
+                pass
+
+        # ── operators (IMPL/NAND; MITIGATES recorded, not written) ──
+        for op in payload.get("operators", []) or []:
+            op_type = str(op.get("op_type", "")).upper()
+            src, dst = str(op.get("src", "")), str(op.get("dst", ""))
+            if op_type not in ("IMPL", "NAND") or not src or not dst:
+                continue
+            try:
+                self.create_operator(op_type, src, [dst],
+                                     direction="unidirectional",
+                                     promote_source=False)
+            except Exception:  # noqa: BLE001
+                pass
         return extracted
 
     def _materialize_session_source(
@@ -13873,6 +13988,24 @@ class TortoiseSDK:
             params={"key": self._CALIBRATION_MARKER_KEY},
         ).result_set
         return bool(rows)
+
+
+class _V2SessionMock:
+    """Deterministic offline v2 extractor stand-in (TORTOISE_SESSION_LLM_MOCK=1,
+    #1350). complete() adapts the v2 pipeline's prompts: S1 → narrative text,
+    S2/S4 → the embed-list JSON. Mirrors tests' V2MockModel."""
+
+    def complete(self, *, system: str, user: str) -> str:
+        if "STORY SUMMARIZER" in system:
+            return "The session revealed a new strategy."
+        return ("{\"entities\": [{\"name\": \"the strategy\", "
+                "\"kind\": \"core:strategy\", \"lifecycle\": \"created\", "
+                "\"supersedes\": null, \"note\": null}], "
+                "\"events\": [{\"content\": \"we decided on the new strategy\", "
+                "\"eventKind\": \"core:decision\", \"about_entities\": [\"the strategy\"]}], "
+                "\"points\": [{\"content\": \"the new strategy is durable\", "
+                "\"pointKind\": \"statement\", \"about_entities\": [\"the strategy\"]}], "
+                "\"operators\": [], \"chain_notes\": [], \"link_before_create\": []}")
 
 
 def _default_byok_model():

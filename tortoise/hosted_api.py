@@ -3500,7 +3500,13 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     # SDK copy via TortoiseSDK._extract_session_llm; extracted Points get
     # session CONTAINS edges inside that helper (same wiring the regex loop
     # did), then their eventId provenance stamping below.
-    extracted = sdk._extract_session_llm(body.conversation, session_id, now)
+    # #1350: capture runs the v2 5-stage extractor; the M2 two-stage
+    # extractor remains behind TORTOISE_SESSION_EXTRACTOR=m2 (same seam as
+    # the SDK copy so the two capture loops stay in sync).
+    if os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2":
+        extracted = sdk._extract_session_llm(body.conversation, session_id, now)
+    else:
+        extracted = sdk._extract_session_v2(body.conversation, session_id, now)
 
     # Ontology v3.1 §4.5/§3.2 (#7882): also create an episodic :Event node
     # (eventKind: sessionCaptured) and stamp its eventId onto the extracted

@@ -46,7 +46,7 @@ def test_capture_session_shape(sdk):
     res = sdk.capture_session(CONV)
     assert res["session_id"].startswith("session_")
     assert res["turns"] == 3
-    assert res["extracted"] >= 2
+    assert res["extracted"] >= 1
     assert all(p["kind"] in ("decision", "statement") for p in res["points"])
     # #822: extraction_mode reports what actually ran — the M2 LLM extractor.
     assert res["extraction_mode"] == "llm"
@@ -81,7 +81,8 @@ def test_capture_session_no_provider_fails_closed(sdk, monkeypatch):
         sdk.capture_session(CONV)
 
 
-def test_capture_session_llm_points_fresh_per_capture(sdk):
+def test_capture_session_llm_points_fresh_per_capture(sdk, monkeypatch):
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")  # M2-mock-specific
     """#822: M2 extraction mints a fresh ULID per Point per capture —
     content-hash dedup is a later pipeline stage (epic #909 W-2 #784)."""
     sdk.capture_session(CONV)
@@ -90,8 +91,8 @@ def test_capture_session_llm_points_fresh_per_capture(sdk):
         "MATCH (p:Point) WHERE p.pointKind IS NULL RETURN count(p)"
     ).result_set
     # 4 LLM points per capture (one per sentence; "ok" is below the 3-char
-    # utterance floor) × 2 captures — no dedup.
-    assert stmt[0][0] == 8, f"expected 8 fresh LLM points, got {stmt[0][0]}"
+    # utterance floor) × 2 captures — no dedup (M2 mock semantics, untyped).
+    assert stmt[0][0] == 8, f"expected 8 fresh M2 LLM points, got {stmt[0][0]}"
 
 
 def test_capture_session_turn_cap(sdk):
@@ -231,7 +232,7 @@ def test_capture_session_zero_extraction(sdk):
     res = sdk.capture_session(plain)
     # 2 utterances → 2 LLM points (the value gate is epic #909's future
     # value_extractor; M2 is utterance→point).
-    assert res["extracted"] == 2, res
+    assert res["extracted"] == 1, res
     # Empty conversation → 0 extractions, turns still land.
     res = sdk.capture_session([])
     assert res["extracted"] == 0
@@ -245,9 +246,9 @@ def test_capture_session_zero_extraction(sdk):
     # Only the two utterance Points from the first capture exist (no epistemic
     # points from the empty capture).
     stmt = proj.g.query(
-        "MATCH (p:Point) WHERE p.pointKind IS NULL RETURN count(p)"
+        "MATCH (p:Point) WHERE p.pointKind = 'statement' RETURN count(p)"
     ).result_set
-    assert stmt[0][0] == 2, "the two utterance Points from the first capture only"
+    assert stmt[0][0] == 1, "the v2-extracted point from the first capture only"
 
 
 def test_capture_session_contains_edges_when_speaker_repeats(sdk):
@@ -268,19 +269,19 @@ def test_capture_session_contains_edges_to_extractions(sdk):
     """Extraction-side CONTAINS edges: M2 LLM Points must be wired to the
     session, and extraction actually creates the epistemic Points (#822)."""
     res = sdk.capture_session(CONV)
-    assert res["extracted"] >= 2, "CONV must produce at least one point each"
+    assert res["extracted"] >= 1, "CONV must produce at least one point each"
     sid = res["session_id"]
     proj = sdk._get_proj()
     # At least one extraction created an untyped (M2) epistemic Point
     kinds = proj.g.query(
-        "MATCH (p:Point) WHERE p.pointKind IS NULL RETURN count(p)"
+        "MATCH (p:Point) WHERE p.pointKind = 'statement' RETURN count(p)"
     ).result_set
     total = kinds[0][0]
-    assert total >= 2, "extraction loop must create epistemic Points"
+    assert total >= 1, "extraction loop must create epistemic Points"
     # Every extracted point is CONTAINS-connected to this session
     connected = proj.g.query(
         "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
-        "WHERE p.pointKind IS NULL RETURN collect(p.id)",
+        "WHERE p.pointKind = 'statement' RETURN collect(p.id)",
         params={"sid": sid},
     ).result_set[0][0]
     assert len(connected) == res["extracted"], \
@@ -308,7 +309,7 @@ def test_capture_session_role_coerced_to_string(sdk):
         "non-string roles stored as their str() form"
     # Speaker values are strings (ontology `speaker | string`), extraction still ran
     assert all(isinstance(r[0], str) for r in rows)
-    assert res["extracted"] >= 2
+    assert res["extracted"] >= 1
 
 
 def test_capture_session_exactly_at_cap(sdk):
@@ -356,7 +357,8 @@ def test_capture_session_non_string_content_coerced(sdk):
         "dict content stored as its str() form"
 
 
-def test_capture_session_long_turn_extracts_only_stored_text(sdk):
+def test_capture_session_long_turn_extracts_only_stored_text(sdk, monkeypatch):
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")  # M2-mock-specific
     """#721 provenance: extraction scans the STORED (truncated) turn text.
     A turn > 5000 chars stores content[:5000]; a phrase past the cut must NOT
     be extracted — its source text exists in no stored turn. Every extracted
@@ -555,3 +557,28 @@ def test_session_relation_flood_capped_estimate_is_true_ceiling():
         f"operator flood escaped the cap: {api.operators} > {api.points} points")
     assert api.points + api.operators <= est, (
         f"estimate {est} < actual nodes {api.points + api.operators}")
+
+
+# ── #1350: v2 capture (the default since this wiring) ─────────────────
+
+def test_capture_session_v2_default_routes_and_writes(sdk):
+    """#1350: capture runs the v2 5-stage extractor by default — the mocked
+    v2 output (one statement point) lands with the session CONTAINS + the
+    session Source extractedFrom link + eventId provenance."""
+    import os
+    os.environ.pop("TORTOISE_SESSION_EXTRACTOR", None)
+    res = sdk.capture_session([{"role": "user", "content": "x"},
+                               {"role": "assistant", "content": "we decided"}])
+    assert res["extracted"] >= 1
+    proj = sdk._get_proj()
+    sid = res["session_id"]
+    # the extracted statement point carries the eventId provenance stamp
+    stmt = proj.g.query(
+        "MATCH (p:Point {pointKind:'statement'}) RETURN p.id, p.eventId"
+    ).result_set
+    assert stmt and stmt[0][1], "v2 extracted point must be eventId-stamped"
+    # the session Source link (extractedFrom) resolves
+    src = proj.g.query(
+        "MATCH (s:Source {url:$url}) RETURN count(*)",
+        params={"url": f"session:{sid}"}).result_set
+    assert src[0][0] == 1, "session Source must exist"
