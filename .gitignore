@@ -38,3 +38,6 @@ tests/eval/retrieval/reports/
 .longmemeval_cache/
 data/longmemeval*
 longmemeval_*.report.json
+
+# Local Tortoise CLI state (API key + endpoint) — machine-local, never commit
+.tortoise/
