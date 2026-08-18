@@ -78,6 +78,7 @@ surfaces:
   - test_bfs_audit.py
   - test_build_window_transcript.py
   - test_canonical.py
+  - test_calibrate_thresholds.py
   - test_capture_session.py
   - test_ci_selection.py
   - test_connector_loader.py
@@ -151,6 +152,7 @@ surfaces:
   - test_issue_insight.py
   - test_joint_index_ingest.py
   - test_judge_harness.py
+  - test_labeled_pairs_schema.py
   - test_linear_connector.py
   - test_list_contexts.py
   - test_longmem_runner.py
@@ -179,6 +181,7 @@ surfaces:
   - test_pack_kinds.py
   - test_pack_registry_gaps.py
   - test_pack_state.py
+  - test_pair_label_runner.py
   - test_pipeline_cli.py
   - test_pre_migration_safety.py
   - test_projection.py
