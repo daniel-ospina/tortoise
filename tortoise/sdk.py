@@ -8888,7 +8888,8 @@ class TortoiseSDK:
                         _fb_store.put(_key, _snap)
                 if _snap is not None:
                     return search_snapshot(
-                        query, _snap, limit=limit, exclude_status=exclude_status,
+                        query, _snap, limit=limit, kind=kind,
+                        exclude_status=exclude_status,
                         include_terminal=include_terminal,
                     )
                 points = self.query(kind=kind,
