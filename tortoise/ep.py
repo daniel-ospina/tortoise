@@ -70,11 +70,39 @@ class TortoiseEP:
         # (per-hop cap or affected≈full) during the most recent run.
         self._last_affected: set[str] = set()
         self._last_truncated: bool = False
+        # #1163 (multi-process EP): the graph-wide EP epoch snapshot for THIS
+        # run — captured at load (``_load_cache``), re-read by the flush guard
+        # so a stale run (a concurrent ``_mark_dirty`` advanced the epoch
+        # mid-run) cannot clobber the newer run's ep_alpha/msg_alpha writes
+        # (the #6761 batch-I/O load→flush race). ``_flush_skipped`` records
+        # that the guard fired. -1 = no snapshot taken (a DIRECT flush with
+        # manually-set caches is unconditional — only load→flush runs are
+        # guarded).
+        self._run_ep_version: int = -1
+        self._flush_skipped: bool = False
+
+    def _graph_ep_version(self) -> int:
+        """Current graph-wide EP epoch (the :EpMeta node's ep_version).
+
+        0 on a graph that has never dirtied EP (no EpMeta node yet)."""
+        rows = self.g.query(
+            "MATCH (m:EpMeta) RETURN m.ep_version").result_set
+        if not rows:
+            return 0
+        try:
+            return int(rows[0][0])
+        except (TypeError, ValueError):
+            return 0
 
     # ── Batch I/O cache (#6761) ──────────────────────────────────
 
     def _load_cache(self, affected_claims: set[str]):
         """Load all node params and edge messages into Python dicts."""
+        # #1163: the flush guard's load-side snapshot — the epoch as this
+        # run SAW the graph. A concurrent _mark_dirty after this point
+        # advances the graph epoch; the flush then self-rejects.
+        self._run_ep_version = self._graph_ep_version()
+        self._flush_skipped = False
         self._node_cache: dict[str, tuple[float, float]] = {}
         self._msg_cache: dict[tuple[str, str, str], tuple[float, float]] = {}
         # Operator-less direct-edge back-messages (#888 W5): the back-message
@@ -122,12 +150,33 @@ class TortoiseEP:
             for src, tgt, rel, ma, mb in back_rows:
                 self._back_cache[(src, tgt, rel)] = (float(ma), float(mb))
 
-    def _flush_cache(self):
+    def _flush_cache(self) -> bool:
         """Write all cached data back to FalkorDB in batch.
 
         Attribute-safe (#330): caches may be absent (never loaded, or removed
         by the per-run lifecycle) — flush whatever is present.
+
+        #1163 (multi-process EP): stale-run guard — when the graph's
+        ep_version advanced past the version this run loaded (``_run_ep_version``
+        — a concurrent process marked something dirty mid-run, so this run's
+        cached state is stale), the ENTIRE flush is rejected: no ep_alpha/
+        msg_alpha writes interleave with the newer run's. ``self._flush_skipped``
+        records the rejection for the dreamer (confidence write-back + dirty-
+        flag sweep must also stand down). Returns True when the flush ran (or
+        had nothing to write), False when the stale-run guard rejected it.
         """
+        if (getattr(self, "_node_cache", None)
+                or getattr(self, "_msg_cache", None)
+                or getattr(self, "_back_cache", None)):
+            current = self._graph_ep_version()
+            if self._run_ep_version >= 0 and current > self._run_ep_version:
+                # A concurrent write marked claims dirty mid-run: reject this
+                # stale flush rather than clobber the newer run's writes.
+                # Only load→flush runs are guarded (a snapshot exists); a
+                # direct flush with manually-set caches is unconditional.
+                self._flush_skipped = True
+                return False
+        self._flush_skipped = False
         if getattr(self, "_node_cache", None):
             immutable = getattr(self, "_immutable_priors", set())
             params_list = [
@@ -180,6 +229,7 @@ class TortoiseEP:
                         "SET r.back_msg_alpha = p.a, r.back_msg_beta = p.b",
                         params={"params": params_list},
                     )
+        return True
 
     def _clear_caches(self) -> None:
         """Remove the batch caches so post-run reads hit the graph (#330)."""
@@ -1170,6 +1220,9 @@ class TortoiseEP:
         # run's affected set / guard state.
         self._last_affected = set()
         self._last_truncated = False
+        # #1163: flush-guard diagnostics reset at entry (a vacuous run that
+        # never loads a cache must not carry a previous run's skip flag).
+        self._flush_skipped = False
         # Run-level evidence is CALL-SCOPED (#330): merge into a local dict so
         # self._evidence is never mutated by run() — otherwise a later run()
         # without evidence would re-apply (and re-write to the graph) stale

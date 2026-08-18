@@ -6629,6 +6629,17 @@ class TortoiseSDK:
                     "backoff_state": "capped",
                     "reason": "non_converged",
                 }
+                # #1163: a capped root is dropped from the dirty set — its
+                # GRAPH flag must go too, or a fresh SDK would rehydrate it
+                # and retry forever (the cap is meaningless cross-process).
+                try:
+                    self._get_proj().g.query(
+                        "MATCH (n:Point {id:$id}) "
+                        "SET n.ep_dirty = null, n.ep_dirty_at = null",
+                        params={"id": root},
+                    )
+                except Exception:  # noqa: BLE001 — retention must never break
+                    pass
             else:
                 self._retry_attempts[root] = attempts
                 self._retry_backoff_until[root] = now + min(
@@ -6693,6 +6704,10 @@ class TortoiseSDK:
         Positive-control semantics: a backlog with REAL output is healthy —
         the alarm MUST NOT fire.
         """
+        # #1163: hydrate graph-persisted dirty roots first so the hosted
+        # health surface sees cross-process backlog (a fresh request-scoped
+        # SDK would otherwise report a zero backlog over dirty graphs).
+        self._hydrate_dirty_roots()
         backlog = len(self._dirty_roots)
         last_output = self._dream_metrics.get("last_pass_output", 0)
         last_pass_at = self._dream_metrics.get("last_pass_at")
@@ -6776,6 +6791,75 @@ class TortoiseSDK:
                 dreamer, "_last_warm_skipped", 0) or 0,
         }
 
+    def _ep_epoch(self) -> int:
+        """Current graph-wide EP epoch (the :EpMeta node's ep_version).
+
+        0 on a graph that has never dirtied EP. #1163: the epoch is the
+        ordering stamp for dirty markings AND the multi-process stale-run
+        guard — see ``TortoiseEP._flush_cache``."""
+        try:
+            rows = self._get_proj().g.query(
+                "MATCH (m:EpMeta) RETURN m.ep_version").result_set
+            if not rows:
+                return 0
+            return int(rows[0][0])
+        except (TypeError, ValueError):
+            return 0
+
+    def _hydrate_dirty_roots(self) -> set[str]:
+        """Merge graph-persisted dirty roots (#1163) into the in-memory set.
+
+        The graph (``n.ep_dirty = true``) is the cross-process source of
+        truth; ``_dirty_roots`` is the hot-path mirror. A fresh SDK (HTTP
+        request scope, hosted dream worker) hydrates here so persisted dirty
+        state survives request/process boundaries — the #395 local-EP
+        no-arg path then works over HTTP. Returns the roots newly loaded
+        from the graph (empty when the graph is clean or the in-memory set
+        already covers them). Best-effort: a hydration failure never breaks
+        a dream.
+        """
+        if self._dirty_roots:
+            return set()
+        try:
+            rows = self._get_proj().g.query(
+                "MATCH (n:Point) WHERE n.ep_dirty = true RETURN n.id"
+            ).result_set
+            loaded = {r[0] for r in rows}
+            self._dirty_roots |= loaded
+            return loaded
+        except Exception:  # noqa: BLE001
+            return set()
+
+    def _sweep_dirty_roots(self, affected: set[str],
+                           run_ep: int | None = None) -> None:
+        """Sweep a converged pass's affected claims from BOTH the in-memory
+        dirty set and the graph flags (#1163).
+
+        The graph sweep is epoch-guarded: a flag stamped at a NEWER epoch
+        than ``run_ep`` (the pass's world-view snapshot) is never cleared —
+        a concurrent process re-marked it dirty mid-run and its marking
+        must survive. ``run_ep=None`` (single-process callers without a
+        snapshot) clears unconditionally.
+        """
+        self._dirty_roots -= affected
+        self._reset_retry_state(affected)
+        if not affected:
+            return
+        ids = list(affected)
+        if run_ep is None:
+            self._get_proj().g.query(
+                "MATCH (n:Point) WHERE n.id IN $ids AND n.ep_dirty = true "
+                "SET n.ep_dirty = null, n.ep_dirty_at = null",
+                params={"ids": ids},
+            )
+        else:
+            self._get_proj().g.query(
+                "MATCH (n:Point) WHERE n.id IN $ids AND n.ep_dirty = true "
+                "AND n.ep_dirty_at <= $run_ep "
+                "SET n.ep_dirty = null, n.ep_dirty_at = null",
+                params={"ids": ids, "run_ep": run_ep},
+            )
+
     def _mark_dirty(self, point_ids: list[str]) -> None:
         """Mark claims whose confidence is now stale after a write.
 
@@ -6783,6 +6867,13 @@ class TortoiseSDK:
         operators that target it, then the claims those operators target.
         The dream expands to max_hops=2 for full propagation — do not reduce
         the dream's max_hops below 2 without expanding this marking.
+
+        #1163 (multi-process EP): the marking is GRAPH-PERSISTED — the
+        mutated points + reverse-BFS claims get ``ep_dirty = true`` with an
+        ``ep_dirty_at`` ordering stamp, and the graph-wide ``:EpMeta``
+        ``ep_version`` epoch advances (every write that dirties EP bumps it).
+        The in-memory ``_dirty_roots`` set stays as the hot-path mirror; any
+        process (fresh request-scoped SDK) hydrates from the graph.
         """
         # #1375: every write that dirties EP also invalidates the degraded-
         # fallback corpus snapshot (covers create/update/supersede/retract/
@@ -6800,6 +6891,15 @@ class TortoiseSDK:
         # priors / properties changed).
         self._dirty_roots.update(point_ids)
         proj = self._get_proj()
+        # #1163: advance the graph-wide EP epoch FIRST — the new value is the
+        # ordering stamp for this write's dirty markings (and the stale-run
+        # guard's discriminator).
+        rows = proj.g.query(
+            "MERGE (m:EpMeta) "
+            "SET m.ep_version = coalesce(m.ep_version, 0) + 1 "
+            "RETURN m.ep_version"
+        ).result_set
+        ep_version = int(rows[0][0]) if rows else 1
         # Operators targeting the mutated points (reverse of operator→point).
         rows = proj.g.query(
             "MATCH (op:Point {is_operator:true})-[:IMPL|NAND]->(p:Point) "
@@ -6807,15 +6907,25 @@ class TortoiseSDK:
             params={"ids": list(point_ids)},
         ).result_set
         op_ids = [r[0] for r in rows]
-        if not op_ids:
-            return
-        # Claims those operators target (1-hop forward from operators).
-        rows = proj.g.query(
-            "MATCH (op:Point {is_operator:true})-[:IMPL|NAND]->(c:Point) "
-            "WHERE op.id IN $oids RETURN DISTINCT c.id",
-            params={"oids": op_ids},
-        ).result_set
-        self._dirty_roots.update(r[0] for r in rows)
+        dirty_ids = list(point_ids)
+        if op_ids:
+            # Claims those operators target (1-hop forward from operators).
+            rows = proj.g.query(
+                "MATCH (op:Point {is_operator:true})-[:IMPL|NAND]->(c:Point) "
+                "WHERE op.id IN $oids RETURN DISTINCT c.id",
+                params={"oids": op_ids},
+            ).result_set
+            dirty_ids += [r[0] for r in rows]
+        # #1163: persist the dirty markings (points + reverse-BFS claims) so
+        # any process/request can see them — the graph is the source of
+        # truth, the in-memory set above is the mirror.
+        proj.g.query(
+            "UNWIND $ids AS pid "
+            "MATCH (n:Point {id: pid}) "
+            "SET n.ep_dirty = true, n.ep_dirty_at = $ep",
+            params={"ids": dirty_ids, "ep": ep_version},
+        )
+        self._dirty_roots.update(dirty_ids)
 
     #: Accepted explicit dream modes (epic 903-C6 #1244, I1 precedence table).
     _DREAM_MODES = ("local", "stale-first", "full")
@@ -6917,6 +7027,12 @@ class TortoiseSDK:
             require_calibration = _ep_require_calibration_default()
         if require_calibration:
             self._ensure_calibrated("dream")
+        # #1163 (multi-process EP): merge graph-persisted dirty roots into
+        # the in-memory set so a fresh SDK (HTTP request scope, hosted dream
+        # worker) runs the same local EP the writing process would (the W1
+        # write-context rule below then resolves to local). Best-effort and
+        # skipped when the in-memory set already covers the state.
+        self._hydrate_dirty_roots()
         resolved = self._resolve_dream_mode(mode, full)
         if budget is not None and budget <= 0:
             # I1: budget=0 → no-op result, not an error. No EP, no stamps.
@@ -7020,15 +7136,18 @@ class TortoiseSDK:
         # unconditional ``-= affected`` dropped non-converged roots, leaving
         # regions permanently stale. Capped roots are surfaced as
         # ``stale_unresolved`` (region_attempts record, consumed by 903-C7).
-        if result.get("converged", False):
-            self._dirty_roots -= affected
-            self._reset_retry_state(affected)
+        if result.get("converged", False) and not getattr(
+                dreamer, "_last_flush_skipped", False):
+            # #1163: the sweep is epoch-guarded — a concurrent process's
+            # newer marking (ep_dirty_at > the pass's snapshot) survives.
+            self._sweep_dirty_roots(
+                affected, run_ep=getattr(dreamer, "_last_run_ep_version", None))
             # P2-review (#1243): prune deleted-point zombies — delete_point
             # marks the deleted id dirty (reverse-BFS finds no edges), so a
             # nonexistent Point can sit in _dirty_roots forever, pinning
             # auto-select to local and inflating the W5 backlog alarm.
             self._prune_nonexistent_dirty_roots()
-        else:
+        elif not result.get("converged", False):
             self._register_failed_attempt(affected)
         reachable = self._window_closure(anchors, max_hops)
         coverage = (len(affected) / len(reachable)) if reachable else 0.0
@@ -7059,10 +7178,13 @@ class TortoiseSDK:
                                      warm_start=warm_start)
         window = getattr(dreamer, "_last_window", []) or []
         affected = set(result.get("affected_claims", []))
-        if result.get("converged"):
-            self._dirty_roots -= affected
-            self._reset_retry_state(affected)
-        else:
+        if result.get("converged") and not getattr(
+                dreamer, "_last_flush_skipped", False):
+            # #1163: guarded sweep (a concurrent process's newer marking
+            # survives — the stale-run flush guard stands the pass down).
+            self._sweep_dirty_roots(
+                affected, run_ep=getattr(dreamer, "_last_run_ep_version", None))
+        elif not result.get("converged"):
             # Epic 903-C5 (#1243): a failed window pass registers attempts on
             # the retained dirty roots (retention already keeps them via the
             # W2 union — the attempt cap bounds the retry loop).
@@ -7092,11 +7214,14 @@ class TortoiseSDK:
         # P2-review (#1243): a CONVERGED full pass resolves every reachable
         # region — clear the affected roots' retry state so a later failed
         # window pass cannot surface an already-converged region as
-        # stale_unresolved, and prune deleted-point zombies.
-        if result.get("converged_all", False):
+        # stale_unresolved, and prune deleted-point zombies. #1163: the
+        # guarded sweep stands down when the stale-run guard fired (a
+        # concurrent process re-marked dirty mid-pass).
+        if result.get("converged_all", False) and not getattr(
+                dreamer, "_last_flush_skipped", False):
             affected = set(result.get("affected_claims", []))
-            self._dirty_roots -= affected
-            self._reset_retry_state(affected)
+            self._sweep_dirty_roots(
+                affected, run_ep=getattr(dreamer, "_last_run_ep_version", None))
             self._prune_nonexistent_dirty_roots()
         reachable = self._reachable_claim_count()
         coverage = ((result["total_affected"] / reachable)
@@ -7310,6 +7435,10 @@ class TortoiseSDK:
             # the epic-903 refactor regressed this no-arg path to a
             # whole-graph extract+run; restored to the #395 local contract,
             # #1162). Clean graph → 'no_dirty_roots' (AC8).
+            # #1163 (multi-process EP): hydrate graph-persisted dirty roots
+            # first — a fresh request-scoped SDK must run the same local EP
+            # the writing process would (the HTTP no-arg acceptance).
+            self._hydrate_dirty_roots()
             roots = list(self._dirty_roots)
             if not roots:
                 return {"iterations": 0, "converged": True, "confidences": {},

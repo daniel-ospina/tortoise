@@ -141,10 +141,14 @@ class TestDe2e12dCrashInterplay:
     def test_unstamped_claims_reselect_after_dirty_set_loss(self):
         f = f2_staleness_regions()
         try:
-            # Simulate a crash: the in-memory dirty set is gone, and the
-            # null-stamp region was never dreamed (stamps are null).
+            # Simulate a crash: the dirty state is gone — both the in-memory
+            # set AND the graph flags (#1163: the graph is the persisted
+            # source of truth, so a genuine dirty-set loss clears both), and
+            # the null-stamp region was never dreamed (stamps are null).
             f.sdk._dirty_roots.clear()
             proj = f.sdk._get_proj()
+            proj.g.query(
+                "MATCH (n:Point) SET n.ep_dirty = null, n.ep_dirty_at = null")
             null = [c for c in f.regions if c.name == "null"][0]
             # Null-stamp claims must be null (never dreamed → crash window).
             for cid in null.claims:
