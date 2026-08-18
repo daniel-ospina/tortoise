@@ -78,6 +78,7 @@ surfaces:
   battery:
   - test_battery_arms.py
   - test_battery_judge.py
+  - test_battery_parity.py
   - test_battery_recall.py
   - test_battery_arms_real.py
   - test_battery_cli.py
