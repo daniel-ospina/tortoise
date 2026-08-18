@@ -218,8 +218,12 @@ def search_snapshot(
     if not points:
         return []
 
-    query_vec = _encode_query(query, snap)
+    try:
+        query_vec = _encode_query(query, snap)
+    except Exception:  # noqa: BLE001 — degraded path never crashes (#1375 R2)
+        query_vec = None
     scored: list[dict] = []
+    vectors_failed = False
     if query_vec is not None and snap["doc_vecs"] is not None:
         try:
             doc_vecs = snap["doc_vecs"]
@@ -242,10 +246,10 @@ def search_snapshot(
                 for i in order
                 if sims[i] >= threshold
             ][:limit]
-        except Exception:  # noqa: BLE001 — degraded scoring never crashes
-            scored = []
-    if not scored and query_vec is None:
-        # Cached vectors unavailable — legacy in-memory scorer (same inputs).
+        except Exception:  # noqa: BLE001 — transient vector failure → legacy
+            vectors_failed = True
+    if (not scored and query_vec is None) or vectors_failed:
+        # Cached vectors unavailable/failed — legacy in-memory scorer (same inputs).
         scored = search_points(query, points, threshold=threshold, limit=limit)
 
     meta = {p["id"]: p for p in points}
