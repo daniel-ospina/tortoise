@@ -1,0 +1,38 @@
+# Battery smoke corpus (issue #1406) — 2 scenarios referencing COMMITTED
+# fixtures (battery/golds/fixtures/). #1407 authors the production corpus;
+# this smoke set exercises the loader + runner end-to-end in CI.
+#
+# Scenario schema (type-only validation; tier-mandatory enforcement is
+# #1407-owned): id, tier (probe|stream|differential), family, task_type,
+# attack_type, split (train|waves|held_out), prompt_pack (list of
+# {role, content}), gold_ref {path, sha256}, k, contradiction_pairs
+# [{claim_a, claim_b, injection_turn}], evidence_scripts [...]
+scenarios:
+  - id: r1-001
+    tier: probe
+    family: contradiction-surfacing
+    task_type: decision
+    attack_type: ""
+    split: train
+    k: 3
+    prompt_pack:
+      - {role: user, content: "Adopt a memory backend for the team workspace. Give your reasoning."}
+      - {role: assistant, content: "I adopt the new memory backend; it keeps decisions in context."}
+      - {role: user, content: "The new backend violates our data-retention policy."}
+    gold_ref: {path: fixtures/gold-r1-001.txt, sha256: b9bf58d0cb6a34cfcc68270ffe630720b0633331ecef7a5916107c6f675f5e1f}
+    contradiction_pairs:
+      - {claim_a: "The new memory backend is safe.", claim_b: "The new memory backend violates data-retention policy.", injection_turn: 3}
+
+  - id: r1-002
+    tier: probe
+    family: contradiction-surfacing
+    task_type: decision
+    attack_type: ""
+    split: train
+    k: 2
+    prompt_pack:
+      - {role: user, content: "Is the deadline met if we ship on Friday?"}
+      - {role: user, content: "The release train leaves Thursday; Friday is too late."}
+    gold_ref: {path: fixtures/gold-r1-002.txt, sha256: 2bd91bb31140c9ec146788218440c371586043fcd84440657b110d32de772ab7}
+    contradiction_pairs:
+      - {claim_a: "Shipping Friday meets the deadline.", claim_b: "The release train leaves Thursday.", injection_turn: 2}

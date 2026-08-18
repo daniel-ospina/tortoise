@@ -1,0 +1,6 @@
+# Budget guard (issue #1406). The FULL-corpus estimate gates: the runner
+# refuses to start when estimated cost exceeds max_estimated_cost_usd OR
+# --max-episodes > max_episodes (budget wins). Defaults are sized to PASS
+# the smoke corpus (over-budget refusal is tested via fixture configs).
+max_episodes: 1000
+max_estimated_cost_usd: 50.0

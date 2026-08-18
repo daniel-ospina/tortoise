@@ -1,0 +1,19 @@
+# Arms config (issue #1406) — schema locked here; adapters ship in #1408.
+# Each entry: arm_id, adapter (battery.arms.<name>), config {}, and the
+# per-arm cost constants the budget formula uses.
+arms:
+  - arm_id: mock
+    adapter: battery.arms.mock
+    config: {}
+    price_per_1k_usd: 0.0
+    expected_tokens_per_episode: 64
+  - arm_id: a0
+    adapter: battery.arms.a0_plain
+    config: {}
+    price_per_1k_usd: 0.5
+    expected_tokens_per_episode: 500
+  - arm_id: a4
+    adapter: battery.arms.a4_tortoise
+    config: {}
+    price_per_1k_usd: 0.5
+    expected_tokens_per_episode: 800
