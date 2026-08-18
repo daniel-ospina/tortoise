@@ -24,7 +24,9 @@ from battery.enums import Tier
 from battery.exceptions import ConfigError, EmptyCorpus, GoldVerificationError
 
 _TIERS = {t.value for t in Tier}
-_SPLITS = {"train", "waves", "held_out"}
+_SPLITS = {"train", "waves", "held_out", "wave-1", "wave-2", "wave-3"}
+# wave-N aliases: schema.py SPLITS uses explicit wave-1..3; "waves" kept for
+# backward compat with the #1406 smoke corpus.
 _ATTACK_TYPES = {"", "poisoned", "sybil", "echo_chamber", "flapping", "anchoring"}
 
 
@@ -55,7 +57,13 @@ class ContradictionPair:
 
 @dataclass(frozen=True)
 class Scenario:
-    """One scenario (plan §4 entity model, in YAML form)."""
+    """One scenario (plan §4 entity model, in YAML form).
+
+    Supports both the #1406 smoke schema (prompt_pack + gold_ref) and the
+    #1407 production schema (prompt {system,turns,question} + inline gold) —
+    the loader normalizes both to this record; the reader path never sees
+    gold text (to_episode_context).
+    """
 
     id: str
     tier: Tier
@@ -68,13 +76,17 @@ class Scenario:
     k: int | None
     contradiction_pairs: tuple[ContradictionPair, ...] = ()
     evidence_scripts: tuple[str, ...] = ()
+    #: Inline gold (production schema) — scorer-side accessor only.
+    inline_gold: str = ""
 
     #: Sealed gold text — the ONLY scoring-side access surface. The episode
     #: context handed to arms/agents never contains gold text.
     def golds(self) -> tuple[str, ...]:
-        if self.gold_ref is None:
-            return ()
-        return (self.gold_ref.read_text(),)
+        if self.gold_ref is not None:
+            return (self.gold_ref.read_text(),)
+        if self.inline_gold:
+            return (self.inline_gold,)
+        return ()
 
     def to_episode_context(self) -> dict[str, Any]:
         """Reader/arm-visible projection — gold text is NEVER included."""
@@ -110,12 +122,32 @@ def _coerce_scenario(raw: dict[str, Any], gold_base: Path) -> Scenario:
         if split not in _SPLITS:
             raise ConfigError(f"scenario {sid}: invalid split {split!r}")
         pp = raw.get("prompt_pack", [])
-        if not isinstance(pp, list):
+        if not pp and "prompt" in raw:
+            # #1407 production schema: prompt {system, turns, question}.
+            pr = raw["prompt"]
+            if not isinstance(pr, dict):
+                raise ConfigError(f"scenario {sid}: prompt must be a dict")
+            pp = []
+            if pr.get("system"):
+                pp.append({"role": "system", "content": str(pr["system"])})
+            for t in pr.get("turns", []) or []:
+                pp.append({"role": str(t.get("role", "user")),
+                           "content": str(t.get("content", ""))})
+            if pr.get("question"):
+                pp.append({"role": "user", "content": str(pr["question"])})
+        elif not isinstance(pp, list):
             raise ConfigError(f"scenario {sid}: prompt_pack must be a list")
         prompt_pack = tuple(
             {"role": str(t.get("role", "user")), "content": str(t.get("content", ""))}
             for t in pp
         )
+        # Inline gold (production schema) — scorer-side only.
+        inline_gold = ""
+        gold_raw = raw.get("gold")
+        if isinstance(gold_raw, dict) and gold_raw.get("expected"):
+            inline_gold = str(gold_raw["expected"])
+        elif gold_raw is not None:
+            raise ConfigError(f"scenario {sid}: gold must be {{expected: ...}}")
         k = raw.get("k")
         if k is not None and not isinstance(k, int):
             raise ConfigError(f"scenario {sid}: k must be an int")
@@ -143,11 +175,21 @@ def _coerce_scenario(raw: dict[str, Any], gold_base: Path) -> Scenario:
                     f"(expected {expected}, got {actual})")
             gold_ref = GoldRef(path=gr["path"], sha256=expected,
                                abs_path=str(gold_path))
+        # #1407 production schema uses planted_contradictions [{claim,
+        # counter_claim, k}] — normalized to the plan-§4 contradiction_pairs
+        # [{claim_a, claim_b, injection_turn}] the runner/probes consume.
+        pairs_raw = raw.get("contradiction_pairs")
+        if not pairs_raw and raw.get("planted_contradictions"):
+            pairs_raw = [
+                {"claim_a": p["claim"], "claim_b": p["counter_claim"],
+                 "injection_turn": p.get("k", k or 5)}
+                for p in raw["planted_contradictions"]
+            ]
         pairs = tuple(
             ContradictionPair(
                 claim_a=str(p["claim_a"]), claim_b=str(p["claim_b"]),
-                injection_turn=int(p.get("injection_turn", k or 0)))
-            for p in raw.get("contradiction_pairs", [])
+                injection_turn=int(p.get("injection_turn", k or 5)))
+            for p in pairs_raw or []
         )
         scripts = tuple(str(s) for s in raw.get("evidence_scripts", []))
     except ConfigError:
@@ -158,7 +200,7 @@ def _coerce_scenario(raw: dict[str, Any], gold_base: Path) -> Scenario:
         id=sid, tier=tier, family=family, task_type=task_type,
         attack_type=attack_type, split=split, prompt_pack=prompt_pack,
         gold_ref=gold_ref, k=k, contradiction_pairs=pairs,
-        evidence_scripts=scripts,
+        evidence_scripts=scripts, inline_gold=inline_gold,
     )
 
 

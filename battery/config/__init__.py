@@ -13,5 +13,13 @@ from battery.config.thresholds import ThresholdsConfig, load_thresholds
 __all__ = [
     "ArmConfig", "BudgetConfig", "ContradictionPair", "GoldRef", "Scenario",
     "ThresholdsConfig", "estimate_cost", "load_arms", "load_budget",
-    "load_corpus", "load_thresholds", "scenarios_by_tier",
+    "load_corpus", "load_thresholds", "scenarios_by_tier", "ATTACK_TYPES", "FAMILIES", "SPLITS", "TASK_TYPES", "TIERS",
 ]
+
+from battery.config.schema import (
+    ATTACK_TYPES,
+    FAMILIES,
+    SPLITS,
+    TASK_TYPES,
+    TIERS,
+)
