@@ -6748,6 +6748,16 @@ class TortoiseSDK:
         The dream expands to max_hops=2 for full propagation — do not reduce
         the dream's max_hops below 2 without expanding this marking.
         """
+        # #1375: every write that dirties EP also invalidates the degraded-
+        # fallback corpus snapshot (covers create/update/supersede/retract/
+        # operator/mitigation/delete/ingest/dream write surfaces in one hook).
+        try:
+            from tortoise.fallback_snapshot import _store as _fb_store, snapshot_key
+            _fb_store.invalidate(
+                snapshot_key(self._get_proj(), getattr(self, "_namespace", None)),
+            )
+        except Exception:  # noqa: BLE001 — invalidation must never break a write
+            pass
         if not point_ids:
             return
         # The mutated points themselves are always dirty (their baseline
@@ -8862,6 +8872,25 @@ class TortoiseSDK:
         if not raw_results:
             # All strategies failed — fallback to in-memory TF-IDF (Point only).
             if query and entity_type == "point":
+                # #1375: serve from the cached lean corpus snapshot when
+                # available (kills the ~350ms full-payload re-fetch + per-call
+                # TF-IDF re-fit). Falls back to the legacy path when the
+                # snapshot is unavailable (too big / build failed).
+                from tortoise.fallback_snapshot import (
+                    _store as _fb_store, snapshot_key, build_snapshot,
+                    search_snapshot,
+                )
+                _key = snapshot_key(proj, getattr(self, "_namespace", None))
+                _snap = _fb_store.get(_key)
+                if _snap is None:
+                    _snap = build_snapshot(proj)
+                    if _snap is not None:
+                        _fb_store.put(_key, _snap)
+                if _snap is not None:
+                    return search_snapshot(
+                        query, _snap, limit=limit, exclude_status=exclude_status,
+                        include_terminal=include_terminal,
+                    )
                 points = self.query(kind=kind,
                                     include_retracted=include_terminal)
                 if exclude_status and points:
