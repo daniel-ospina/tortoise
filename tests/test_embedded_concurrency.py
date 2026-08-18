@@ -471,14 +471,33 @@ def test_chaos_kills_only_idle_of_20(monkeypatch):
     idle, leaves 10 with clients. #1365: scoped to the test's OWN 20 spawns
     (delta-asserted) — never ambient candidates; teardown kills tracked pids
     directly (the old global pkill is gone)."""
-    from tortoise.embedded_reaper import discover, reap
+    from tortoise.embedded_reaper import discover, reap, _pgrep_redis_servers
+    import subprocess as _sp
     monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
     tmpdir = _make_flat_tmpdir()
     own = [_spawn_orphan_pid(tmpdir) for _ in range(20)]
     own_pids = [p for p, _ in own]
     time.sleep(1)
+    # #1365 diagnostic: dump the own servers' visibility BEFORE the assert so
+    # a CI-only discover() miss shows the actual cmdlines/pgrep state.
+    live = _pgrep_redis_servers()
+    own_live = [p for p in own_pids if p in live]
+    cmdlines = {}
+    for p in own_pids:
+        try:
+            cmdlines[p] = _sp.run(["ps", "-o", "command=", "-p", str(p)],
+                                  capture_output=True, text=True, timeout=3).stdout.strip()[:160]
+        except Exception:
+            cmdlines[p] = "<ps failed>"
     found = discover()
     candidates = [s for s in found if s["pid"] in own_pids]
+    print(f"[diag] own_pids={own_pids}", flush=True)
+    print(f"[diag] pgrep live={len(live)} own_live={len(own_live)} "
+          f"own_live_set={sorted(set(own_pids) & set(live))}", flush=True)
+    for p in own_pids:
+        print(f"[diag] pid {p} cmdline={cmdlines.get(p, '?')!r}", flush=True)
+    print(f"[diag] discover records={len(found)} "
+          f"own_found={sorted(s['pid'] for s in found if s['pid'] in own_pids)}", flush=True)
     assert len(candidates) >= 20, \
         f"expected >=20 own candidates, got {len(candidates)}"
     # Attach live clients to 10
