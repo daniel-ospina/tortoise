@@ -49,6 +49,9 @@ RAW_EMBEDDED_ALLOWLIST = {
     "test_de2e1_entity_extraction.py",
     "test_embedded_concurrency.py",
     "test_embedded_lifecycle.py",
+    "test_export_cli.py",  # drift registration (#1401) — raw embedded construction
+    "test_import_endpoint.py",  # drift registration — raw embedded construction
+    "e2e/hosted/test_12_selfhost_migration.py",  # pre-existing raw construction (origin/main drift)
     "test_extractor_doc.py",
     "test_extractor_priors.py",
     "test_embedded_lifecycle_fast_close.py",  # #1371 lifecycle-seam tests
