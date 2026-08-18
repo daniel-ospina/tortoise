@@ -121,6 +121,43 @@ def test_kappa_middle_band_fixture_computed():
     assert 0.50 <= k < 0.60  # the middle band
 
 
+# ── Shared po/pe core (cohens_kappa) — single source for both gates ──────────
+
+def test_cohens_kappa_shared_core_hand_computed():
+    """The shared core reproduces the pair-label runner's hand-computed
+    matrices — the same po/pe math, vocab-agnostic (a/c here stand in for
+    any category vocabulary)."""
+    assert kp.cohens_kappa(["a", "b", "c", "a"], ["a", "b", "c", "a"]) == pytest.approx(1.0)
+    # A=[a,a,c,c], B=[c,c,a,a]: po=0, pe=0.5 → κ = -1.0
+    assert kp.cohens_kappa(["a", "a", "c", "c"], ["c", "c", "a", "a"]) == pytest.approx(-1.0)
+    # A=[a,a,c,c], B=[a,c,a,c]: po=0.5, pe=0.5 → κ = 0.0
+    assert kp.cohens_kappa(["a", "a", "c", "c"], ["a", "c", "a", "c"]) == pytest.approx(0.0)
+    # A=[a,a,c], B=[a,c,c]: po=2/3; pe=(2/3·1/3)+(1/3·2/3)=4/9 → κ = 0.4
+    assert kp.cohens_kappa(["a", "a", "c"], ["a", "c", "c"]) == pytest.approx(0.4)
+    # Single-category judges: pe == 1.0 → κ = 1.0, never NaN
+    assert kp.cohens_kappa(["a", "a", "a"], ["a", "a", "a"]) == pytest.approx(1.0)
+
+
+def test_cohens_kappa_rejects_empty_and_misaligned():
+    """The κ formula is undefined over 0 units; misalignment would silently
+    compute garbage — both must raise."""
+    with pytest.raises(ValueError):
+        kp.cohens_kappa([], [])
+    with pytest.raises(ValueError):
+        kp.cohens_kappa(["a"], ["a", "b"])
+
+
+def test_kappa_delegates_to_shared_core():
+    """tools.kappa.kappa() (intersection window contract) aligns the common
+    EDUs' classes and delegates the MATH to cohens_kappa — same result."""
+    a = [L(0, "decision"), L(1, "event"), L(2, "claim"), L(3, "none")]
+    b = [L(0, "decision"), L(1, "claim"), L(2, "claim"), L(3, "event")]
+    assert kp.kappa(a, b) == kp.cohens_kappa(
+        ["decision", "event", "claim", "none"],
+        ["decision", "claim", "claim", "event"],
+    ) == pytest.approx(1 / 3)
+
+
 # ── Nothing-verdict agreement ───────────────────────────────────────────────
 
 def test_nothing_agreement_jaccard():

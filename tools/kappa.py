@@ -60,6 +60,7 @@ import argparse
 import json
 import sys
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -94,29 +95,59 @@ def _indexed(labels: list[Label]) -> dict[int, Label]:
     return {label.edu_index: label for label in labels}
 
 
+def cohens_kappa(a_labels: Sequence[str], b_labels: Sequence[str]) -> float:
+    """Cohen's κ po/pe core over two equal-length, index-aligned category
+    sequences — the SINGLE source of the κ formula for both agreement gates.
+
+    Shared by the extraction-window gate (kappa(), below) and the pair-label
+    gate (tools/pair_label_runner.py). Callers with a different input contract
+    (window intersection vs full-sequence lists) align their categories and
+    delegate the MATH here — a future correction (e.g. a prevalence
+    adjustment) lands once and propagates to both gates with no drift.
+
+    pe == 1.0 (a judge used a single category): κ = 1.0 iff po == 1.0, else
+    0.0 — identical verdicts are perfect agreement, never a NaN.
+
+    Raises ValueError on empty or length-mismatched input: the κ formula is
+    undefined over 0 units, and misalignment would silently compute garbage.
+    """
+    if not a_labels or len(a_labels) != len(b_labels):
+        raise ValueError(
+            "cohens_kappa requires equal-length non-empty category "
+            f"sequences (got {len(a_labels)} vs {len(b_labels)})"
+        )
+    n = len(a_labels)
+    po = sum(1 for a, b in zip(a_labels, b_labels) if a == b) / n
+    a_counts = Counter(a_labels)
+    b_counts = Counter(b_labels)
+    pe = sum((a_counts[c] / n) * (b_counts[c] / n)
+             for c in set(a_counts) | set(b_counts))
+    if pe == 1.0:
+        # Single-category raters: identical verdicts are perfect agreement.
+        # pe == 1.0 implies both judges use one identical category over the
+        # compared units, which forces po == 1.0 — the else branch is a
+        # defensive guard, not a reachable path (review P2, PR #975).
+        return 1.0 if po == 1.0 else 0.0
+    return (po - pe) / (1 - pe)
+
+
 def kappa(a_labels: list[Label], b_labels: list[Label]) -> float | None:
     """Cohen's κ over the class verdicts of the two label sets.
 
     Only EDUs labeled by BOTH judges participate (the intersection). Returns
-    None when the intersection is empty (no comparable verdicts).
+    None when the intersection is empty (no comparable verdicts). The po/pe
+    math is the shared cohens_kappa() core — the common EDUs' classes are
+    aligned and delegated (single source, no duplicated formula).
     """
     a = _indexed(a_labels)
     b = _indexed(b_labels)
     common = sorted(a.keys() & b.keys())
     if not common:
         return None
-    n = len(common)
-    po = sum(1 for idx in common if a[idx].class_ == b[idx].class_) / n
-    a_counts = Counter(a[idx].class_ for idx in common)
-    b_counts = Counter(b[idx].class_ for idx in common)
-    pe = sum((a_counts[c] / n) * (b_counts[c] / n) for c in set(a_counts) | set(b_counts))
-    if pe == 1.0:
-        # Single-category raters: identical verdicts are perfect agreement.
-        # pe == 1.0 implies both judges use one identical category over the
-        # intersection, which forces po == 1.0 — the else branch is a
-        # defensive guard, not a reachable path (review P2, PR #975).
-        return 1.0 if po == 1.0 else 0.0
-    return (po - pe) / (1 - pe)
+    return cohens_kappa(
+        [a[idx].class_ for idx in common],
+        [b[idx].class_ for idx in common],
+    )
 
 
 def nothing_agreement(a_labels: list[Label], b_labels: list[Label]) -> tuple[float, dict[str, int]]:

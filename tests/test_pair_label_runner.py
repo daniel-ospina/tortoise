@@ -105,6 +105,22 @@ def test_kappa_empty_inputs_error():
         plr.kappa([I, U], [I, U, N])  # length mismatch = misaligned labels
 
 
+def test_runner_kappa_is_shared_core_adapter():
+    """The runner's kappa is a thin adapter: identical results to the shared
+    tools.kappa.cohens_kappa core for the same hand-computed matrices — a
+    correction to the κ math can never drift between the two gates."""
+    from tools.kappa import cohens_kappa
+    matrices = [
+        ([I, N, U, I], [I, N, U, I]),
+        ([I, I, U, U], [U, U, I, I]),
+        ([I, I, U, U], [I, U, I, U]),
+        ([I, I, U], [I, U, U]),
+        ([I, I, I], [I, I, I]),
+    ]
+    for a, b in matrices:
+        assert plr.kappa(a, b) == pytest.approx(cohens_kappa(a, b))
+
+
 # ── single-judge failure → abort ───────────────────────────────────────
 
 def test_single_judge_api_failure_aborts_and_never_emits(tmp_path):
@@ -141,9 +157,25 @@ def test_parse_label_bare_token():
     assert plr._parse_label("NEAR_DUPLICATE", "j", 0) == N
 
 
-def test_parse_label_free_text_single_token():
-    assert plr._parse_label("The answer is IMPLIES.", "j", 0) == I
-    assert plr._parse_label("UNRELATED — no relation here", "j", 0) == U
+def test_parse_label_bare_token_lowercase():
+    # The whole answer is exactly the label word — casing is not prose signal.
+    assert plr._parse_label("implies", "j", 0) == I
+
+
+def test_parse_label_explicit_label_colon_form():
+    assert plr._parse_label("LABEL: IMPLIES", "j", 0) == I
+    assert plr._parse_label("label: unrelated", "j", 0) == U
+
+
+def test_parse_label_free_text_aborts():
+    # Free-text prose that merely CONTAINS one vocab token is NOT a label:
+    # "Passage A implies B entirely" is UNRELATED prose but would silently
+    # parse as IMPLIES. Fail closed — the answer must BE the label.
+    for prose in ("The answer is IMPLIES.",
+                  "UNRELATED — no relation here",
+                  "Passage A implies B entirely"):
+        with pytest.raises(plr.PairLabelError, match="label"):
+            plr._parse_label(prose, "j", 0)
 
 
 def test_parse_label_ambiguous_aborts():

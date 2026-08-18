@@ -36,7 +36,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -45,7 +44,7 @@ _REPO_ROOT = str(Path(__file__).resolve().parent.parent)
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from tools.kappa import KAPPA_GREEN  # noqa: E402 — single source of truth
+from tools.kappa import KAPPA_GREEN, cohens_kappa  # noqa: E402 — single source of truth
 
 #: The pair-label vocabulary shared with the fixture schema.
 LABEL_VOCAB = ("IMPLIES", "NEAR_DUPLICATE", "UNRELATED")
@@ -66,28 +65,19 @@ class PairLabelError(ValueError):
 def kappa(a_labels: list[str], b_labels: list[str]) -> float:
     """Cohen's κ over two equal-length, index-aligned label sequences.
 
-    Mirrors the tools/kappa.py po/pe formula (plan: "reuse the kappa math
-    pattern") on the FULL pair set — pair labeling requires every pair to
-    be judged by both judges, so the "intersection" of the window-based
-    implementation is the whole sequence here.
-
-    pe == 1.0 (a judge used a single category): κ = 1.0 iff po == 1.0,
-    else 0.0 — identical verdicts are perfect agreement, never a NaN.
+    Thin adapter over the SHARED tools.kappa.cohens_kappa math. The runner's
+    input contract is full-sequence (every pair is judged by both judges, so
+    there is no window intersection to compute) — the runner-specific length
+    check raises PairLabelError and the MATH is delegated to the single
+    source in tools/kappa.py, so a formula correction can never drift
+    between the two gates.
     """
     if not a_labels or len(a_labels) != len(b_labels):
         raise PairLabelError(
             "kappa requires equal-length non-empty label sequences "
             f"(got {len(a_labels)} vs {len(b_labels)})"
         )
-    n = len(a_labels)
-    po = sum(1 for a, b in zip(a_labels, b_labels) if a == b) / n
-    a_counts = Counter(a_labels)
-    b_counts = Counter(b_labels)
-    pe = sum((a_counts[c] / n) * (b_counts[c] / n)
-             for c in set(a_counts) | set(b_counts))
-    if pe == 1.0:
-        return 1.0 if po == 1.0 else 0.0
-    return (po - pe) / (1 - pe)
+    return cohens_kappa(a_labels, b_labels)
 
 
 def decide(kappa_value: float | None) -> dict:
@@ -104,25 +94,31 @@ def decide(kappa_value: float | None) -> dict:
 
 
 def _parse_label(text: str, judge_id: str, pair_index: int) -> str:
-    """Extract the label from a judge's answer.
+    """Extract the label from a judge's answer — fail-closed on prose.
 
-    Word-boundary match over the label vocabulary. A bare label (the prompt
-    demands "Reply with only the label word") or a free-text answer
-    mentioning exactly ONE label token parses; an answer containing
-    MULTIPLE label tokens (e.g. "NEAR_DUPLICATE — the passage implies …")
-    is AMBIGUOUS and aborts fail-closed — a silently misattributed label
-    would corrupt the durable recalibration artifact, so ambiguity is never
-    resolved by guesswork.
+    The prompt demands "Reply with only the label word", so only two forms
+    are accepted:
+      * a BARE token: the whole stripped answer is exactly one vocab word
+        (case-insensitive) — "IMPLIES", "implies"
+      * an explicit "LABEL: X" form — "LABEL: IMPLIES"
+    Anything else — including free-text prose that merely CONTAINS one vocab
+    token ("Passage A implies B entirely" means UNRELATED but would silently
+    parse as IMPLIES) — ABORTS fail-closed, consistent with the multi-token
+    ambiguity abort. Judge quality feeds the durable calibration artifact; a
+    silent mislabel is exactly what the fail-closed design prevents.
     """
     import re
-    upper = text.upper()
-    found = [label for label in LABEL_VOCAB
-             if re.search(rf"\b{label}\b", upper)]
-    if len(found) == 1:
-        return found[0]
+    stripped = text.strip()
+    if stripped.upper() in LABEL_VOCAB:
+        return stripped.upper()
+    explicit = re.fullmatch(r"\s*LABEL\s*[:：]\s*([A-Za-z_]+)\s*", text,
+                            re.IGNORECASE)
+    if explicit and explicit.group(1).upper() in LABEL_VOCAB:
+        return explicit.group(1).upper()
     raise PairLabelError(
-        f"judge {judge_id!r} returned an ambiguous label for pair "
-        f"{pair_index}: {text!r} — found {sorted(found) or 'no label token'}; "
+        f"judge {judge_id!r} returned a non-bare/ambiguous answer for pair "
+        f"{pair_index}: {text!r} — expected a bare label token "
+        f"({', '.join(LABEL_VOCAB)}) or the explicit 'LABEL: X' form; "
         "aborting (no partial labels emitted)"
     )
 
