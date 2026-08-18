@@ -11,15 +11,22 @@ Classification (dual-signal):
   - tempdir socket + uptime < MIN_UPTIME            -> protected (boot cooldown)
   - tempdir socket + uptime >= MIN_UPTIME + no db_filename + no .db -> candidate
   - path-based + registry-recorded owner pid DEAD   -> orphan (candidate; #1427)
+  - registry pidfile pid dead (Z-aware)           -> stale_socket (#1383)
+    (dead-pid leftover dir — guarded-rmtree reaped, never a killable
+    'candidate'; no CLIENT LIST probe happens — no server exists to list)
 
 NEVER_KILL: anything classified protected (stable singleton, path-based
 servers, boot-cooldown servers, unknown patterns). Only candidates may be
-reaped, and only after liveness + CLIENT LIST verification (see reap()).
+killed, and only after liveness + CLIENT LIST verification (see reap()).
 Issue #1427: a path-based server whose registry-recorded owner pid is
 provably dead is an orphan (the db file has no live owner), not live data
 — it reclassifies as a candidate instead of staying protected forever
 (the dominant leak class: aborted test servers). Live owners keep the
 protection; unresolvable owners (no pidfile / unreadable) fail closed.
+stale_socket records are NOT killed — they are removed via the guarded
+rmtree action _remove_stale_socket_dir (containment -> pidfile re-read ->
+ECONNREFUSED-only socket re-probe -> mtime age -> atomic rename-aside ->
+post-rename re-probe -> rmtree of the renamed path only).
 
 Probing is read-only and fail-closed: CLIENT LIST goes over a plain unix
 socket (redis-cli or raw RESP) and never kills or mutates the probed
@@ -48,6 +55,31 @@ PROBE_TIMEOUT = 2.0  # seconds for raw socket probes
 # unresponsive orphans (issue #1005 — the 2s timeout made serial sweeps
 # take minutes).
 PROBE_SOCKET_TIMEOUT = 0.5
+# #1383: bounded retry before fail-closed skip — a single load-induced
+# read/connect timeout must not strand a live orphan (indicator b). Only
+# timeout-phase failures retry; refused/missing are reliable verdicts.
+RAW_RESP_PROBE_ATTEMPTS = 2
+# Boot-window shield for the stale-dir removal path (#1383): a leftover
+# dir younger than this is never rmtree'd (the creating server may be
+# mid-startup). Mirrors INDEX_PID_MIN_AGE_DEFAULT (30s) and the boot-
+# cooldown philosophy; deliberately NOT coupled to TORTOISE_REAPER_MIN_UPTIME
+# (live-server boot cooldown) — different semantics.
+STALE_SOCKET_MIN_AGE_DEFAULT = 30
+# Max stale removals per reap() call (#1383). Bounds the SERIAL stale work
+# vs the 120s SIGALRM. Common case: dead sockets answer ECONNREFUSED
+# instantly, so 200 removals cost <1s. Worst case (every probe hangs at
+# 0.5s, 3 probes per stale) may exceed the SIGALRM — idempotent (next sweep
+# converges); the budget is the backstop for the common case.
+STALE_SWEEP_BUDGET = 200
+# Rename-aside suffix marking a reaper-owned quarantine dir (plan-review
+# P1: discover pass 2 and the stale action must both skip these — they are
+# handled exclusively by _sweep_quarantine_dirs).
+STALE_QUARANTINE_SUFFIX = ".reaper-stale-"
+# #1383 security review (Issue 3): ownership marker written into a
+# quarantine at rename time — the sweep only rmtrees dirs carrying it, so a
+# same-suffix foreign dir (another tool's temp naming, a planted decoy) is
+# never touched.
+REAPER_OWNED_MARKER = ".reaper-owned"
 _AUTOGEN_DIRNAME = re.compile(r"^(redislite_|tmp)[a-zA-Z0-9_]+$")
 
 # Ephemeral tmp-tree prefixes (under the system tempdir) that test code
@@ -266,11 +298,23 @@ def _parse_etime(etime: str) -> float:
 def _pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
-        return True
     except (ProcessLookupError, PermissionError):
         return False
     except OSError:
         return False
+    # #1383: a zombie answers kill(0) but its fds are gone — treat as dead
+    # (precedent: test_embedded_concurrency._pid_alive, #1365). Linux-only:
+    # macOS has no /proc; plain kill(0) behavior there is documented.
+    try:
+        stat_text = Path(f"/proc/{pid}/stat").read_text()
+        # stat = "pid (comm) state ..." — comm may contain spaces, so the
+        # state field is the first token AFTER the closing paren.
+        state = stat_text[stat_text.rfind(")") + 2:].split()[0]
+        if state == "Z":
+            return False
+    except (OSError, IndexError, ValueError):
+        pass  # macOS: no /proc — fall back to kill(0) semantics
+    return True
 
 
 def _registry_owner_alive(registry: dict | None) -> bool | None:
@@ -415,20 +459,26 @@ def _cmdline(pid: int) -> str:
         return ""
 
 
-def _probe_socket(socket_path: str) -> str:
+def _probe_socket(socket_path: str, timeout: float = PROBE_TIMEOUT) -> str:
     """Raw unix-socket connect probe (never redis-py — can't spawn).
 
-    Returns 'dead' (ECONNREFUSED / no listener), 'alive' (accepts), or
-    'undetermined' (timeout / error).
+    Four verdicts (#1383 — FileNotFoundError must NOT collapse into 'dead':
+    a missing socket file is the mid-startup window and must fail closed):
+      - 'dead'         (ECONNREFUSED — socket FILE EXISTS, no listener)
+      - 'missing'      (FileNotFoundError — no socket file at all)
+      - 'alive'        (accepts connections)
+      - 'undetermined' (timeout / other error)
     """
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(PROBE_TIMEOUT)
+        s.settimeout(timeout)
         try:
             s.connect(socket_path)
             return "alive"
-        except (ConnectionRefusedError, FileNotFoundError):
+        except ConnectionRefusedError:
             return "dead"
+        except FileNotFoundError:
+            return "missing"
         except socket.timeout:
             return "undetermined"
         except OSError:
@@ -437,6 +487,33 @@ def _probe_socket(socket_path: str) -> str:
             s.close()
     except OSError:
         return "undetermined"
+
+
+def _probe_socket_any(socket_path: str,
+                      timeout: float = PROBE_SOCKET_TIMEOUT) -> str:
+    """Probe a socket path that may exceed the macOS AF_UNIX sun_path limit
+    (~104 bytes): the quarantine suffix can push a deep dir over it, making
+    connect() fail ENAMETOOLONG even for a LIVE server. Probes through a
+    SHORT symlink to the same inode (a server holding the socket accepts
+    through any path to that inode) when the path is long; direct probe
+    otherwise. Fail closed ('undetermined') if the symlink cannot be made.
+    """
+    path = os.path.abspath(socket_path)
+    if len(path.encode("utf-8", "surrogateescape")) <= 100:
+        return _probe_socket(path, timeout=timeout)
+    link = os.path.join(_real_gettempdir(),
+                        f".rp_{os.getpid()}_{time.time_ns()}.sock")
+    try:
+        os.symlink(socket_path, link)
+    except OSError:
+        return "undetermined"  # cannot verify — fail closed
+    try:
+        return _probe_socket(link, timeout=timeout)
+    finally:
+        try:
+            os.unlink(link)
+        except OSError:
+            pass
 
 
 def _client_list(socket_path: str) -> list[dict] | None:
@@ -480,23 +557,61 @@ def _raw_resp_client_list(socket_path: str) -> list[dict] | None:
     fallback built a redislite FalkorDB client whose close() KILLED the
     orphan it was probing — fail-open data loss on the no-redis-cli path).
 
-    Returns parsed clients, or None on any connect/read/parse failure so
-    callers fail closed (never reap a server whose client state is unknown).
+    #1383 bounded retry: RAW_RESP_PROBE_ATTEMPTS attempts of
+    PROBE_SOCKET_TIMEOUT each, but only when the attempt failed on a
+    socket.timeout in the READ or CONNECT phase (a loaded single-threaded
+    server queuing CLIENT LIST / filling its backlog — both are
+    load-sensitive, both retryable). Reliable verdicts (ECONNREFUSED /
+    missing / other errors) never retry. Exhausted -> None -> callers fail
+    closed unchanged.
     """
+    for _attempt in range(RAW_RESP_PROBE_ATTEMPTS):
+        clients, status = _raw_resp_probe_once(socket_path)
+        if status != "timeout":  # ok, refused, missing, error
+            return clients
+        # timeout-phase failure: retry (bounded)
+    return None
+
+
+def _raw_resp_probe_once(socket_path: str) -> tuple[list[dict] | None, str]:
+    """One probe attempt; returns (parsed clients or None, status).
+
+    status ∈ {ok, refused, missing, timeout, error} — 'timeout' (read OR
+    connect phase) is the only retryable outcome (socket.timeout ⊂ OSError
+    on 3.10+, so it must be caught BEFORE the generic OSError handler).
+    The socket is ALWAYS closed (outer finally — the connect-phase early
+    returns must not leak FDs; plan-review cycle 2 P1).
+    """
+    s = None
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.settimeout(PROBE_SOCKET_TIMEOUT)
         try:
             s.connect(socket_path)
+        except ConnectionRefusedError:
+            return None, "refused"
+        except FileNotFoundError:
+            return None, "missing"
+        except socket.timeout:
+            return None, "timeout"  # connect-phase timeout — retryable too
+        except OSError:
+            return None, "error"
+        try:
             s.sendall(b"*2\r\n$6\r\nCLIENT\r\n$4\r\nLIST\r\n")
             raw = _read_resp_reply(s)
-        finally:
-            s.close()
-    except OSError:  # includes socket.timeout (Python 3.10+)
-        return None
+        except socket.timeout:
+            return None, "timeout"  # read-phase timeout — the retry target
+        except OSError:
+            return None, "error"
+    finally:
+        if s is not None:
+            try:
+                s.close()
+            except OSError:
+                pass
     if raw is None:
-        return None
-    return _parse_client_list(raw)
+        return None, "error"  # malformed/truncated reply — not timing
+    return _parse_client_list(raw), "ok"
 
 
 def _read_resp_reply(sock: socket.socket) -> str | None:
@@ -707,7 +822,9 @@ def _discover_from_live(live_pids, jobs, tmpdir, seen_dirs,
         if not sock_dir:
             return None
         socket_path = os.path.join(sock_dir, "redis.socket")
-        rec = _classify_dir(sock_dir, socket_path)
+        # #1383: pass the pgrep pid as known_pid so a stale registry
+        # pidfile can never misclassify a LIVE server as stale_socket.
+        rec = _classify_dir(sock_dir, socket_path, known_pid=pid)
         if rec is None:
             return None
         rec["pid"] = pid  # pgrep pid is authoritative for live servers
@@ -751,6 +868,12 @@ def _discover_from_live(live_pids, jobs, tmpdir, seen_dirs,
     for entry in entries:
         if not entry.is_dir():
             continue
+        # #1383 plan-review P1: reaper-owned quarantine dirs (*.reaper-
+        # stale-*) are handled exclusively by _sweep_quarantine_dirs —
+        # never classify them (a guard-7-preserved LIVE server in a moved
+        # dir would otherwise classify 'candidate' and be KILLED).
+        if STALE_QUARANTINE_SUFFIX in entry.name:
+            continue
         try:
             socket_path = os.path.join(entry.path, "redis.socket")
             if not os.path.exists(socket_path):
@@ -787,32 +910,39 @@ def _discover_from_live(live_pids, jobs, tmpdir, seen_dirs,
     return results
 
 
-def _classify_dir(dbdir: str, socket_path: str) -> dict | None:
+def _classify_dir(dbdir: str, socket_path: str,
+                  known_pid: int | None = None) -> dict | None:
     """Classify a single candidate dir. Returns record or None (skip)."""
     registry = _registry_for(dbdir)
     dbdir_real = os.path.realpath(dbdir)
     socket_real = os.path.realpath(socket_path)
     tmpdir_real = _real_gettempdir()
 
-    classification = _classify(socket_real, dbdir_real, tmpdir_real, registry)
-    # Issue #1005: servers whose registry dir is gone (pytest cleaned the tmp
-    # tree at session end) are always reaping-safe — the owning suite ended.
-    reg_dir = (registry or {}).get("dir", (registry or {}).get("dbdir", ""))
-    dir_missing = _dir_missing_on_disk(reg_dir)
-    pid = None
-    if registry and registry.get("pidfile"):
+    # Authoritative pid: pass-1 live servers supply the pgrep pid (always
+    # live — a stale registry pidfile must never misclassify them #1383);
+    # pass-2 walk dirs fall back to the registry pidfile.
+    pid = known_pid
+    if pid is None and registry and registry.get("pidfile"):
         try:
             pid = int(Path(registry["pidfile"]).read_text().strip())
         except (OSError, ValueError):
             pid = None
 
+    classification = _classify(socket_real, dbdir_real, tmpdir_real,
+                               registry, pid=pid)
+    # Issue #1005: servers whose registry dir is gone (pytest cleaned the tmp
+    # tree at session end) are always reaping-safe — the owning suite ended.
+    reg_dir = (registry or {}).get("dir", (registry or {}).get("dbdir", ""))
+    dir_missing = _dir_missing_on_disk(reg_dir)
+
     uptime = _uptime_seconds(pid) if pid else None
-    client_count = 0
+    # #1383: probe-failed client count records None (unknown), never a
+    # misleading 0. Only a verified zero is 0.
+    client_count = None
     if classification == "candidate" and pid and _pid_alive(pid):
-        # None (probe failed) means unknown — reap() will fail closed.
-        # Keep the record field an int (None is internal to the probe).
         cc = _active_client_count(socket_real)
-        client_count = 0 if cc is None else cc
+        if cc is not None:
+            client_count = cc
 
     return {
         "pid": pid,
@@ -827,7 +957,7 @@ def _classify_dir(dbdir: str, socket_path: str) -> dict | None:
 
 
 def _classify(socket_real: str, dbdir_real: str, tmpdir_real: str,
-              registry: dict | None) -> str:
+              registry: dict | None, pid: int | None = None) -> str:
     """Dual-signal classification (plan Task 1).
 
     Signal 1 — registry dbdir: path-based servers register a USER directory
@@ -853,7 +983,7 @@ def _classify(socket_real: str, dbdir_real: str, tmpdir_real: str,
                 "unrecognized dir pattern, treating as protected: %s", dbdir_real)
             return "protected"
         # auto-generated dirname, no .db file -> could be a no-path server
-        return _cooldown_check(registry)
+        return _cooldown_check(registry, pid=pid)
 
     # Signal 1: registry 'dir' is a USER dir (not auto tempdir) -> path-based.
     reg_dbdir = registry.get("dir", registry.get("dbdir", ""))
@@ -906,17 +1036,24 @@ def _classify(socket_real: str, dbdir_real: str, tmpdir_real: str,
                 "unrecognized dir pattern, treating as protected: %s", dbdir_real)
             return "protected"
 
-    return _cooldown_check(registry)
+    return _cooldown_check(registry, pid=pid)
 
 
-def _cooldown_check(registry: dict | None) -> str:
-    """Boot-cooldown: fresh servers (uptime < MIN_UPTIME) are protected."""
-    pid = None
-    if registry and registry.get("pidfile"):
+def _cooldown_check(registry: dict | None,
+                    pid: int | None = None) -> str:
+    """Boot-cooldown: fresh servers (uptime < MIN_UPTIME) are protected.
+
+    #1383: a DEAD authoritative pid (Z-aware) classifies 'stale_socket' —
+    a leftover dir no process owns, reapable by guarded rmtree — instead of
+    a phantom 'candidate' reap()'s liveness-first gate can never act on.
+    """
+    if pid is None and registry and registry.get("pidfile"):
         try:
             pid = int(Path(registry["pidfile"]).read_text().strip())
         except (OSError, ValueError):
             pid = None
+    if pid is not None and not _pid_alive(pid):
+        return "stale_socket"
     uptime = _uptime_seconds(pid) if pid else 0.0
     min_uptime = _parse_min_uptime()
     if uptime is not None and uptime < min_uptime:
@@ -938,27 +1075,36 @@ def _dir_has_db_file(dbdir: str) -> bool:
 def phase1_probe(record: dict) -> dict:
     """Ordered discovery: resolve stale-PID sockets via raw probe FIRST.
 
-    Returns record with updated classification:
-      - stale_PID + probe dead   -> 'stale_socket' (removable)
-      - stale_PID + probe alive  -> live, real PID derived
-      - stale_PID + probe undetermined -> 'undetermined'
-      - pid alive                -> unchanged
+    #1383 contract update: only a confirmed 'dead' socket (ECONNREFUSED —
+    the socket FILE exists, no listener) classifies 'stale_socket';
+    'missing' (vanished socket — mid-startup) and 'undetermined' fail
+    closed. An 'alive' socket upgrades to 'candidate' with the real pid
+    derived (live orphan — kill semantics). A record whose pid became
+    alive since discovery is reclassified 'candidate' (a live server must
+    never stay stale_socket).
     """
     if record.get("pid") and _pid_alive(record["pid"]):
+        if record.get("classification") != "candidate":
+            record["classification"] = "candidate"
         return record
     if not record.get("socket_path"):
         return record
-    probe = _probe_socket(record["socket_path"])
+    # #1383 security review (Issue 2): a connect-only verdict needs no
+    # response — use the SHORT socket timeout so a hostile full-backlog
+    # socket farm cannot hang the sweep (2.0s x N dirs would trip the
+    # 120s SIGALRM and abort every cron run).
+    probe = _probe_socket(record["socket_path"],
+                          timeout=PROBE_SOCKET_TIMEOUT)
     if probe == "dead":
         record["classification"] = "stale_socket"
     elif probe == "alive":
         real_pid = _derive_real_pid(record["socket_path"], record.get("pid"))
         if real_pid:
             record["pid"] = real_pid
-            record["classification"] = record.get("classification")
+            record["classification"] = "candidate"
         else:
             record["classification"] = "undetermined"
-    else:  # undetermined
+    else:  # missing / undetermined
         record["classification"] = "undetermined"
     return record
 
@@ -966,35 +1112,61 @@ def phase1_probe(record: dict) -> dict:
 def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = None,
          sigterm_timeout: float = 10.0, kill_pacing: float = KILL_PACING_DEFAULT,
          only_safe: bool = False) -> list[dict]:
-    """Reap candidate records safely (plan Task 2). Returns acted-upon list.
+    """Reap records safely (#1383: the two-verb action engine).
 
-    Only 'candidate' records are killed, and only after CLIENT LIST shows 0
-    active clients (double-checked). Path-based / protected / stale_socket /
-    undetermined records are NEVER killed here.
+    Returns acted-upon list.
 
-    only_safe=True (issue #1005 concurrency guard): restrict to dir-gone
-    (dir_missing) candidates — the owning suite's tmp tree was cleaned, so
-    the server cannot belong to a running suite — plus DETACHED candidates
-    (issue #1115): a live ephemeral server whose direct parent is init was
-    reparented after its whole spawning tree exited, so no live process
-    holds it; reaping it cannot disturb a running suite. Live ephemeral
-    servers with 0 clients still owned by a live process are skipped so a
-    concurrent suite's between-tests idle server is never killed.
+    - 'candidate' records are KILLED, and only after CLIENT LIST shows 0
+      active clients (double-checked). Path-based / protected /
+      undetermined records are NEVER acted on.
+    - 'stale_socket' records (dead-pid leftover dirs) are REMOVED via the
+      guarded rmtree action _remove_stale_socket_dir — a 9-guard chain
+      (containment -> pidfile re-read -> ECONNREFUSED-only socket re-probe
+      -> mtime age x2 -> atomic rename-aside -> post-rename re-probe ->
+      moved-pidfile check -> rmtree of the renamed path only). Stale
+      removals never consume the kill batch_size and are capped by
+      STALE_SWEEP_BUDGET; they run in every mode including only_safe (the
+      guards ARE the safety) and dry_run (reported, not mutated).
+
+    only_safe=True (issue #1005 concurrency guard): restrict KILLS to
+    dir-gone (dir_missing) candidates — the owning suite's tmp tree was
+    cleaned, so the server cannot belong to a running suite — plus DETACHED
+    candidates (issue #1115): a live ephemeral server whose direct parent
+    is init was reparented after its whole spawning tree exited, so no live
+    process holds it; reaping it cannot disturb a running suite. Live
+    ephemeral servers with 0 clients still owned by a live process are
+    skipped so a concurrent suite's between-tests idle server is never
+    killed. (Unchanged #1005/#1115 behavior for LIVE candidates.)
     """
     acted = []
     killed = 0
+    stale_removed = 0  # #1383: stale removals budgeted separately from kills
     for record in records:
-        if batch_size is not None and killed >= batch_size:
-            break
         classification = record.get("classification")
+        if classification == "stale_socket":
+            if stale_removed >= STALE_SWEEP_BUDGET:
+                continue  # budget exhausted — remainder converges next sweep
+            # #1383: dead-pid leftover dir — no process to kill; guarded
+            # rmtree (see _remove_stale_socket_dir). Safe under only_safe
+            # by construction (the guards re-verify deadness at action time).
+            acted_rec = _remove_stale_socket_dir(record, dry_run)
+            if acted_rec is not None:
+                acted.append(acted_rec)
+                stale_removed += 1
+            continue
         if classification != "candidate":
-            if classification in ("protected", "stale_socket", "undetermined"):
+            if classification in ("protected", "undetermined"):
                 logger.warning(
                     "skipping path-based/non-candidate server: %s",
                     record.get("socket_path"))
             continue
+        # Kill budget: bounds process kills only (bgsave-storm semantics).
+        # Stale cleanup above is budgeted separately (STALE_SWEEP_BUDGET).
+        # `continue` (not break) so interleaved stale records after the
+        # budget is exhausted are still processed (#1383 branch ordering).
+        if batch_size is not None and killed >= batch_size:
+            continue
         if only_safe and not (record.get("dir_missing")
-                              or classification == "stale_socket"
                               or _is_detached(record.get("pid") or 0)):
             logger.info(
                 "concurrent-suite guard: skipping live ephemeral candidate %s",
@@ -1003,7 +1175,7 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
 
         # Liveness-first: never kill a dead PID's leftovers via connect.
         if not record.get("pid") or not _pid_alive(record["pid"]):
-            logger.warning("dead socket connect failure, skipping: %s",
+            logger.warning("dead pid, skipping: %s",
                            record.get("socket_path"))
             continue
 
@@ -1036,7 +1208,17 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
             continue
 
         _kill(record["pid"], sigterm_timeout)
-        _cleanup_tempdir(record.get("dbdir"))
+        # #1383 security review (Issue 1): the KILL path's tempdir cleanup
+        # must honor the same containment discipline as the stale path — a
+        # pgrep-decoy's crafted dbdir must never be rmtree'd. Legit kills
+        # always target ephemeral test trees, so this breaks nothing.
+        dbdir = record.get("dbdir")
+        if dbdir and _is_ephemeral_dir(
+                os.path.realpath(dbdir), os.path.realpath(tempfile.gettempdir())):
+            _cleanup_tempdir(dbdir)
+        else:
+            logger.warning("kill path: skipping tempdir cleanup for "
+                           "non-ephemeral dbdir %r", dbdir)
         logger.warning("killed orphan PID %s (%s)",
                        record["pid"], record["socket_path"])
         acted.append(record)
@@ -1044,6 +1226,151 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
         if kill_pacing > 0:
             time.sleep(kill_pacing)  # avoid synchronized shutdown bursts (#1005)
     return acted
+
+
+def _remove_stale_socket_dir(record: dict, dry_run: bool) -> dict | None:
+    """Reap a stale_socket record: guarded rmtree of the leftover dir.
+
+    #1383 — the FIRST reap() action gated on negative evidence, so the
+    chain re-verifies deadness at action time (TOCTOU discipline, #1231
+    template). Every abort = WARNING + no partial delete (re-verified next
+    sweep). The rename-aside + post-rename re-probe convert the worst case
+    (delete a live server's data) into 'leave a quarantined dir'.
+
+    The 9 guards:
+      0. re-entry: dbdir already carrying the quarantine suffix is
+         reaper-owned — handled exclusively by _sweep_quarantine_dirs
+      1. already gone  -> reported acted (no error)
+      2. containment: _is_ephemeral_dir under the tempdir (semi-public
+         reap() must refuse crafted/errant records)
+      3. pidfile re-read: a now-LIVE pid = respawn/pid-reuse -> abort
+      4. socket re-probe (short timeout): only ECONNREFUSED ('dead' — file
+         exists, no listener) proceeds; 'missing'/'alive'/'undetermined'
+         all fail closed
+      5. mtime age guard x2 (boot window; the second stat narrows the
+         create-during-guard-chain window)
+      6. atomic rename-aside to <dir>.reaper-stale-<ns>; rename OSError
+         -> abort, dir intact
+      7. post-rename socket re-probe on the MOVED socket (a server that
+         moved with its dir still answers) — live -> leave quarantine
+      8. moved pidfile re-read: a live pid written during the window
+         (backlog-full ECONNREFUSED hardening) -> leave quarantine
+      then rmtree ONLY the renamed path; partial rmtree leftovers converge
+      via the quarantine sweep on the next pass.
+    """
+    dbdir = record.get("dbdir")
+    socket_path = record.get("socket_path")
+    if not dbdir or not socket_path:
+        logger.warning("stale_socket record missing dbdir/socket, skipping")
+        return None
+    dbdir_real = os.path.realpath(dbdir)
+    # Guard 0 (re-entry, plan-review P1): a dir that ALREADY carries the
+    # quarantine suffix is reaper-owned — handled exclusively by
+    # _sweep_quarantine_dirs; never rename it a second time.
+    if STALE_QUARANTINE_SUFFIX in os.path.basename(dbdir_real):
+        logger.warning("quarantine dir passed to stale action, skipping: %s",
+                       dbdir_real)
+        return None
+    # Guard 1: containment — reap() is semi-public; never delete outside
+    # the ephemeral tempdir tree (classification already enforces this for
+    # discover() records; guard against crafted/errant direct records).
+    # Evaluated BEFORE the already-gone fast path: a crafted record pointing
+    # at a nonexistent path outside the tempdir must NOT be reported acted
+    # (plan-review cycle 3 — containment is the honest verdict).
+    if not _is_ephemeral_dir(dbdir_real, _real_gettempdir()):
+        logger.warning("stale dir outside ephemeral tempdir, skipping: %s",
+                       dbdir_real)
+        return None
+    # Guard 2: already gone (an ephemeral dir that vanished between
+    # discovery and action is reported acted — nothing left to delete)
+    if not os.path.exists(dbdir_real):
+        logger.info("stale dir already gone: %s", dbdir_real)
+        return record
+    # Guard 3: re-read the pidfile — a now-live pid means respawn/pid-reuse
+    pid = None
+    pidfile = os.path.join(dbdir_real, "redis.pid")
+    try:
+        pid = int(Path(pidfile).read_text().strip())
+    except (OSError, ValueError):
+        pid = None
+    if pid is not None and _pid_alive(pid):
+        logger.warning("stale dir pidfile now alive (%s), skipping: %s",
+                       pid, dbdir_real)
+        return None
+    # Guard 4: re-probe the socket with the SHORT timeout. Only
+    # 'dead' (ECONNREFUSED — socket file exists, no listener) proceeds;
+    # 'missing' (mid-startup), 'alive', 'undetermined' all fail closed.
+    probe = _probe_socket_any(socket_path, timeout=PROBE_SOCKET_TIMEOUT)
+    if probe != "dead":
+        logger.warning("stale dir socket probe %s, skipping: %s",
+                       probe, dbdir_real)
+        return None
+    # Guard 5: mtime age guard (boot window) + re-stat right before rename
+    # (the second stat narrows the create-during-guard-chain window)
+    try:
+        age = time.time() - os.stat(dbdir_real).st_mtime
+    except OSError:
+        return None
+    if age < STALE_SOCKET_MIN_AGE_DEFAULT:
+        logger.info("stale dir too young (%.1fs), skipping: %s",
+                    age, dbdir_real)
+        return None
+    try:  # re-stat immediately before the irreversible rename
+        age = time.time() - os.stat(dbdir_real).st_mtime
+        if age < STALE_SOCKET_MIN_AGE_DEFAULT:
+            logger.info("stale dir mtime changed mid-chain, skipping: %s",
+                        dbdir_real)
+            return None
+    except OSError:
+        return None
+    if dry_run:
+        logger.warning("[DRY-RUN] would remove stale socket dir %s", dbdir_real)
+        return record
+    # Guard 6/7: atomic rename-aside then re-verify BEFORE the irreversible
+    # rmtree. The renamed dir is the quarantine — if re-verification fails,
+    # the dir stays for operator inspection / next-sweep convergence.
+    renamed = dbdir_real + STALE_QUARANTINE_SUFFIX + str(time.time_ns())
+    try:
+        os.rename(dbdir_real, renamed)
+    except OSError as exc:
+        logger.warning("stale dir rename failed (%s), skipping: %s",
+                       exc, dbdir_real)
+        return None
+    # #1383 security review (Issue 3): mark the quarantine as reaper-owned
+    # so _sweep_quarantine_dirs never rmtrees a same-suffix foreign dir.
+    try:
+        with open(os.path.join(renamed, REAPER_OWNED_MARKER), "w") as fh:
+            fh.write("reaper-owned\n")
+    except OSError:
+        logger.warning("could not write reaper marker, leaving quarantine: %s",
+                       renamed)
+        return None
+    renamed_sock = os.path.join(renamed, "redis.socket")
+    if not os.path.exists(renamed_sock):
+        logger.warning("quarantined socket vanished, leaving dir: %s", renamed)
+        return None  # leave quarantine (next sweep re-probes)
+    if _probe_socket_any(renamed_sock, timeout=PROBE_SOCKET_TIMEOUT) != "dead":
+        logger.warning("quarantined socket live, leaving dir: %s", renamed)
+        return None  # live server in the moved dir — do NOT delete
+    # Guard 8: pidfile written during the window (backlog-full ECONNREFUSED
+    # hardening — a live server that refuses connects can still write its pid)
+    try:
+        moved_pid = int(Path(os.path.join(renamed, "redis.pid")).read_text().strip())
+    except (OSError, ValueError):
+        moved_pid = None
+    if moved_pid is not None and _pid_alive(moved_pid):
+        logger.warning("quarantined pidfile now alive (%s), leaving dir: %s",
+                       moved_pid, renamed)
+        return None
+    _cleanup_tempdir(renamed)
+    if os.path.exists(renamed):
+        logger.warning("partial rmtree leftover, will re-probe next sweep: %s",
+                       renamed)
+    logger.warning("removed stale socket dir %s (was %s)", renamed, dbdir_real)
+    # Acted record: `dbdir` stays the ORIGINAL (pre-rename) path so all
+    # existing acted assertions hold; the renamed/quarantined path rides in
+    # `removed_dir` for --json correlation (plan-review cycle 2).
+    return {**record, "removed_dir": renamed}
 
 
 def _kill(pid: int, sigterm_timeout: float) -> None:
@@ -1199,6 +1526,95 @@ def sweep_stale_index_pid_files(lock_dir: str | None = None,
     return removed
 
 
+def _sweep_quarantine_dirs(dry_run: bool = False,
+                           budget: int = STALE_SWEEP_BUDGET) -> list[str]:
+    """Re-probe *.reaper-stale-* quarantine leftovers and remove dead ones.
+
+    #1383 convergence: a partial-rmtree or respawn-during-rename leaves a
+    renamed dir. discover() pass 2 SKIPS quarantine dirs (reaper-owned —
+    plan-review P1), so this pass is their only handler: re-probe the
+    moved socket (a server moved with its dir retains its socket inode, so
+    the probe is authoritative) and remove only dead ones. Same budget
+    CONSTANT as reap()'s stale branch but a SEPARATE counter — one sweep
+    can remove up to 2xSTALE_SWEEP_BUDGET (plan-review cycle 2). Gated on
+    the same tempdir walk-size guard; symlinked entries are skipped (mirror
+    discover pass 2).
+    """
+    tmpdir = _real_gettempdir()
+    try:
+        entry_count = os.stat(tmpdir).st_nlink
+    except OSError:
+        entry_count = 0
+    if entry_count > 5000:  # same perf guard as discover() pass 2
+        return []
+    removed = []
+    try:
+        entries = list(os.scandir(tmpdir))
+    except (PermissionError, OSError):
+        return removed
+    for entry in entries:
+        if not entry.is_dir() or entry.is_symlink():
+            continue  # symlink safety mirrors discover pass 2 (cycle 2)
+        if STALE_QUARANTINE_SUFFIX not in entry.name:
+            continue
+        if len(removed) >= budget:
+            break
+        q = entry.path
+        # #1383 security review (Issue 3): only rmtree dirs carrying the
+        # reaper-owned marker — a same-suffix foreign dir (another tool's
+        # temp naming, a planted decoy) must never be touched. The marker
+        # is written at rename-aside time in the stale action.
+        if not os.path.exists(os.path.join(q, REAPER_OWNED_MARKER)):
+            continue
+        if not _is_ephemeral_dir(os.path.realpath(q),
+                                 os.path.realpath(tempfile.gettempdir())):
+            continue  # containment re-verify (defense in depth)
+        qsock = os.path.join(q, "redis.socket")
+        # Guard-8 equivalent (cycle-3 P1): a LIVE backlog-full server
+        # answers ECONNREFUSED ('dead') — the moved pidfile is the
+        # discriminator. A guard-8-preserved quarantine left by reap() in
+        # the SAME sweep must never be rmtree'd here.
+        try:
+            qpid = int(Path(os.path.join(q, "redis.pid")).read_text().strip())
+        except (OSError, ValueError):
+            qpid = None
+        if qpid is not None and _pid_alive(qpid):
+            logger.warning("quarantined dir pidfile live (%s), leaving: %s",
+                           qpid, q)
+            continue
+        if not os.path.exists(qsock):
+            # Partial-rmtree shell (SIGALRM interrupt deleted the socket
+            # first): only a server that unlinked its socket leaves a
+            # socket-less quarantine — and an unlinked socket serves
+            # nobody. Remove once aged (mtime guard) so the shell
+            # converges instead of leaking (plan-review P1).
+            try:
+                qage = time.time() - os.stat(q).st_mtime
+            except OSError:
+                continue
+            if qage < STALE_SOCKET_MIN_AGE_DEFAULT:
+                continue
+            if dry_run:
+                logger.warning("[DRY-RUN] would remove quarantined dir %s", q)
+                removed.append(q)
+                continue
+            _cleanup_tempdir(q)
+            removed.append(q)
+            logger.warning("removed socket-less quarantined dir %s", q)
+            continue
+        if _probe_socket_any(qsock, timeout=PROBE_SOCKET_TIMEOUT) != "dead":
+            logger.warning("quarantined dir socket live, leaving: %s", q)
+            continue
+        if dry_run:
+            logger.warning("[DRY-RUN] would remove quarantined dir %s", q)
+            removed.append(q)
+            continue
+        _cleanup_tempdir(q)
+        removed.append(q)
+        logger.warning("removed quarantined dir %s", q)
+    return removed
+
+
 def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
                jobs: int = 8, kill_pacing: float = KILL_PACING_DEFAULT,
                sweep_pid_files: bool = True) -> list[dict]:
@@ -1207,13 +1623,27 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
     jobs>1 parallelizes the per-candidate CLIENT LIST probes (the dominant
     cost at hundreds of leaked servers — issue #1005); kills stay serial
     with pacing.
+
+    NOTE: the reaper singleton lock is held by main() (CLI); direct callers
+    (tests, conftest session hygiene) run unlocked — pre-existing contract,
+    unchanged by #1383.
     """
     records = discover(jobs=jobs)
-    candidates = [r for r in records if r["classification"] == "candidate"]
-    # Phase 1: resolve stale-PID records via probe before any kill
-    resolved = [phase1_probe(r) for r in candidates]
+    # #1383: reapable classes are candidate (live orphan -> kill) and
+    # stale_socket (dead-pid leftover dir -> guarded rmtree). Phase 1
+    # resolves stale-pid records before any action.
+    reapables = [r for r in records
+                 if r["classification"] in ("candidate", "stale_socket")]
+    resolved = [phase1_probe(r) for r in reapables]
     acted = reap(resolved, dry_run=dry_run, batch_size=batch_size,
                  kill_pacing=kill_pacing, only_safe=only_safe)
+    # #1383: quarantine convergence (partial-rmtree/respawn leftovers)
+    try:
+        for q in _sweep_quarantine_dirs(dry_run=dry_run):
+            acted.append({"pid": None, "quarantine_dir": q,
+                          "classification": "stale_quarantine"})
+    except Exception as exc:  # never fail the sweep over hygiene
+        logger.warning("quarantine sweep failed: %s", exc)
     # #1231 T3: stale per-session index-lock pid files (crash leftovers).
     # Runs after the socket sweep under the same singleton lock; age-guarded
     # and TOCTOU-hardened via SessionIndexLock.force_release().
@@ -1286,6 +1716,9 @@ def main(argv: list[str] | None = None) -> int:
         print(_json.dumps([
             {"pid": r.get("pid"), "socket_path": r.get("socket_path"),
              "pid_file": r.get("pid_file"),
+             "dbdir": r.get("dbdir"),
+             "removed_dir": r.get("removed_dir"),
+             "quarantine_dir": r.get("quarantine_dir"),
              "classification": r.get("classification")}
             for r in acted
         ]))

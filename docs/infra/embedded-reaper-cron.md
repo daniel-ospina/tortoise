@@ -45,8 +45,17 @@ Load: `launchctl load ~/Library/LaunchAgents/com.tortoise.embedded-reaper.plist`
 
 ## Safety
 
-- Default is **dry-run** — only `--no-dry-run` actually kills.
+- Default is **dry-run** — only `--no-dry-run` actually mutates.
 - `--timeout` (default 120s, env `TORTOISE_REAPER_TIMEOUT`) bounds each sweep.
 - Singleton lock (`~/.tortoise/.reaper.lock`) prevents cron/manual overlap.
 - Only **no-path tempdir orphans** are killed; path-based servers (stable
   singleton, CWD leaks) are NEVER touched (that's Child 2's migration job).
+- `--no-dry-run` also **rmtrees dead-pid leftover dirs** (`stale_socket`
+  classification, issue #1383): age-gated (≥30s), pidfile re-verified dead
+  (zombie-aware), socket re-probed (ECONNREFUSED only), atomic rename-aside
+  + post-rename re-probe, and the renamed quarantine is rmtree'd last — a
+  live server's data can never be deleted (worst case leaves a
+  `*.reaper-stale-*` quarantine dir, which later sweeps converge). Runs in
+  ALL modes including `--only-safe`; dry-run reports them without mutating.
+  `--json` output carries `dbdir`, `removed_dir`, and `quarantine_dir` keys
+  for stale actions.
