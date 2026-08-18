@@ -1378,12 +1378,19 @@ class TestSessionEventAlignment:
         assert ev, "Event node missing for session"
         eid = ev[0][0]
 
-        # Extracted Points link to the Event via aboutEvent (ontology §3.2)
-        linked = proj.g.query(
+        # #1417: provenance is the point's eventId property, NOT an aboutEvent
+        # content edge — extracted Points carry the sessionCaptured eventId;
+        # no aboutEvent edges are minted by the capture path.
+        no_edges = proj.g.query(
             "MATCH (e:Event {eventId:$eid})<-[:aboutEvent]-(p:Point) RETURN count(p)",
             params={"eid": eid},
         ).result_set
-        assert linked[0][0] >= 1, "no extracted Points linked to Event"
+        assert no_edges[0][0] == 0, "capture path must not mint aboutEvent provenance"
+        stamped = proj.g.query(
+            "MATCH (p:Point) WHERE p.eventId = $eid RETURN count(p)",
+            params={"eid": eid},
+        ).result_set
+        assert stamped[0][0] >= 1, "extracted Points must carry the Event's eventId"
 
 
 # ── MCP sub-app mount (#236) ─────────────────────────────────────
