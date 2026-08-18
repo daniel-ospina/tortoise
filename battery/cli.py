@@ -31,6 +31,7 @@ from battery.runner.run import RunConfig, run_battery
 
 _DEFAULT_CONFIG = "battery/config"
 _DEFAULT_OUT = "battery-out"
+from pathlib import Path as _Path
 
 
 class _ArgparseExit(RuntimeError):
@@ -77,9 +78,11 @@ def _parser() -> argparse.ArgumentParser:
     parity.add_argument("--seed", type=int, default=0)
     parity.add_argument("--mock", action="store_true")
 
-    cal = sub.add_parser("calibrate", help="threshold calibration (owned by #1415)")
+    cal = sub.add_parser("calibrate", help="threshold calibration (#1415)")
     cal.add_argument("--print", action="store_true", dest="print_deltas",
                      help="print [cal] deltas without re-locking")
+    cal.add_argument("--config", default=None, help="config dir")
+    cal.add_argument("--out", default=_DEFAULT_OUT, help="artifacts dir")
 
     vj = sub.add_parser("validate-judge", help="judge validation gate (#1410)")
     vj.add_argument("--rubric", required=True, help="rubric id")
@@ -88,8 +91,9 @@ def _parser() -> argparse.ArgumentParser:
     vj.add_argument("--mock", action="store_true",
                     help="hermetic mock-judge run (no model API)")
 
-    report = sub.add_parser("report", help="verdict report (owned by #1415)")
-    report.add_argument("--out", default=_DEFAULT_OUT)
+    report = sub.add_parser("report", help="verdict report (#1415)")
+    report.add_argument("--config", default=None, help="config dir")
+    report.add_argument("--out", default=_DEFAULT_OUT, help="artifacts dir")
 
     return p
 
@@ -185,6 +189,80 @@ def _load_baseline(args) -> dict | None:
     return json.loads(bl.read_text())
 
 
+def _cmd_report(args: argparse.Namespace) -> ExitCode:
+    """battery report — assemble the differentiation profile + verdict
+    (issue #1415; E2E-3.2/6.1/6.2)."""
+    from battery.config.thresholds import load_thresholds
+    from battery.differential.d1_sweep import METRIC_FAMILIES
+    from battery.report.assemble import assemble, save_profile
+    artifacts = _load_measured_artifacts(args)
+    if not artifacts:
+        print("WARNING: zero measured families found — no sweep artifacts "
+              "in the out dir; the verdict below is a NO-DATA state, not a "
+              "substantive claim.")
+    mitigation = _load_mitigations(args)
+    recall = _load_recall(args)
+    thresholds = load_thresholds(
+        _Path(args.config or args.config_dir or _DEFAULT_CONFIG)
+        / "thresholds.yaml")
+    delta = thresholds.classification_delta
+    profile = assemble(artifacts, METRIC_FAMILIES, mitigation, recall,
+                       delta_threshold=delta)
+    out = save_profile(profile, _Path(args.out or _DEFAULT_OUT) / "profile.json")
+    print(f"verdict: {profile.verdict.outcome} "
+          f"(families {profile.families_measured}/"
+          f"{profile.families_expected}, {profile.report_status})")
+    print(f"profile written: {out}")
+    return ExitCode.OK
+
+
+def _cmd_calibrate(args: argparse.Namespace) -> ExitCode:
+    """battery calibrate --print — print [cal] deltas, NEVER assert or
+    re-lock (issue #1415; E2E-7.1)."""
+    from battery.config.thresholds import load_thresholds
+    from battery.report.calibrate import cal_table_hash, print_deltas
+    thresholds = load_thresholds(_Path(args.config or args.config_dir
+                                       or _DEFAULT_CONFIG) / "thresholds.yaml")
+    if not getattr(args, "print_deltas", False):
+        print("use `battery calibrate --print` to print [cal] deltas "
+              "(print-only; re-lock is a reviewable table change).")
+        return ExitCode.OK
+    print(f"cal table hash: {cal_table_hash(thresholds.cal_rows)}")
+    for line in print_deltas(thresholds.cal_rows, _load_measured_artifacts(args)):
+        print(line)
+    print("PRINT ONLY — re-lock is a reviewable table change (never auto).")
+    return ExitCode.OK
+
+
+def _load_measured_artifacts(args) -> dict:
+    from pathlib import Path as _P
+    base = _P(args.out or _DEFAULT_OUT)
+    data = {}
+    for fam_file in base.glob("family_*.json"):
+        import json
+        fam = json.loads(fam_file.read_text())
+        data.update(fam)
+    return data
+
+
+def _load_mitigations(args) -> dict:
+    from pathlib import Path as _P
+    p = _P(args.config or args.config_dir or _DEFAULT_CONFIG) / "mitigations.yaml"
+    if not p.is_file():
+        return {}
+    import yaml
+    return yaml.safe_load(p.read_text()) or {}
+
+
+def _load_recall(args) -> dict | None:
+    from pathlib import Path as _P
+    p = _P(args.out or _DEFAULT_OUT) / "recall.json"
+    if not p.is_file():
+        return None
+    import json
+    return json.loads(p.read_text())
+
+
 def _cmd_run(args: argparse.Namespace) -> ExitCode:
     config = RunConfig(
         config_dir=args.config or args.config_dir,
@@ -201,9 +279,9 @@ def _dispatch(args: argparse.Namespace) -> ExitCode:
     handlers = {
         "run": _cmd_run,
         "parity": _cmd_parity,
-        "calibrate": _stub("calibrate", "#1415"),
+        "calibrate": _cmd_calibrate,
         "validate-judge": _cmd_validate_judge,
-        "report": _stub("report", "#1415"),
+        "report": _cmd_report,
     }
     return handlers[args.subcommand](args)
 

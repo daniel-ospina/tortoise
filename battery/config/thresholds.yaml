@@ -8,6 +8,9 @@ determinism:
 cal:
   # metric -> {arm -> value}. Values are [cal]-locked; re-locking is a
   # reviewable table change (calibration mode prints, never silently tunes).
+  # The differential classification margin (STRONG/WEAK vs best comparator)
+  # is itself [cal]-locked (issue #1415 P2-3).
+  classification-delta: 0.10
   surfaced-rate: {a4: 0.90, a0: 0.00}
   coverage-subscore: {a4: 0.50, a0: 0.35}
   brier: {a4: 0.25, a0: 0.30}

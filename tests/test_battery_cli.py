@@ -94,13 +94,14 @@ class TestExitCodes:
         assert code is ExitCode.OPERATIONAL
 
     def test_stubs_exit1_with_ownership(self, capsys):
-        # parity is IMPLEMENTED in #1414 (was a stub) — clean exit 0
-        # (baseline-missing is reported per-benchmark, not an error).
+        # parity/report/calibrate are IMPLEMENTED (#1414/#1415) — clean
+        # exits (baseline-missing and empty-artifacts are reported, not
+        # errors); no stub ownership messages remain.
         assert main(["parity"]) is ExitCode.OK
-        assert main(["calibrate", "--print"]) is ExitCode.OPERATIONAL
-        assert main(["report"]) is ExitCode.OPERATIONAL
+        assert main(["calibrate", "--print"]) is ExitCode.OK
+        assert main(["report"]) is ExitCode.OK
         err = capsys.readouterr().err
-        assert "#1415" in err
+        assert "stub" not in err.lower()
         # validate-judge is IMPLEMENTED in #1410 (was a stub): hermetic mock
         # run returns GATE_BLOCKED (2) in default config or OK (0) on a
         # passing mock rubric — never OPERATIONAL.
