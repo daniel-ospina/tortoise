@@ -1296,3 +1296,32 @@ def test_cli_python_dash_m_entrypoint(tmp_path):
     assert out_path.is_file()
     saved = json.loads(out_path.read_text(encoding="utf-8"))
     assert saved["verdict"] == "NO-WINNER"
+
+
+def test_code_sha_uncommitted_edit_drifts_when_head_equals_sha(tmp_path):
+    """spec-review P2 fix: an UNCOMMITTED worktree edit on a scoped path
+    must drift the gate even when HEAD == burn sha — the old `elif head !=
+    code_sha` guard skipped the diff exactly in the standard post-burn
+    state, letting a live mid-burn edit pass. `git diff <sha>` (working-tree
+    diff) covers both committed-after-sha and uncommitted edits."""
+    manifest = build_burn(tmp_path, code_sha="sha-burn-1")
+    out = run_gate(
+        tmp_path, manifest,
+        head_sha_fn=lambda repo: "sha-burn-1",   # HEAD == burn sha
+        changed_files_fn=lambda sha, repo: ["tools/longmem_eval/run.py"])
+    assert out["verdict"] == "BLOCKED"
+    assert any("code_sha" in r for r in out["blocking_reasons"])
+
+
+def test_is_gate_question_filter_branches():
+    """Direct pin of the category filter (spec-review P3): single-session-*
+    prefix, in-set exact types, non-listed exclusion, and _abs exclusion."""
+    assert gate_1349.is_gate_question("single-session-preference", "q1")
+    assert gate_1349.is_gate_question("single-session-user", "q1")
+    assert gate_1349.is_gate_question("temporal-reasoning", "q1")
+    assert gate_1349.is_gate_question("knowledge-update", "q1")
+    assert gate_1349.is_gate_question("multi-session", "q1")
+    assert not gate_1349.is_gate_question("single-session-assistant_abs", "q_abs")
+    assert not gate_1349.is_gate_question("some-other-type", "q1")
+    assert not gate_1349.is_gate_question(None, "q1")
+    assert not gate_1349.is_gate_question("temporal-reasoning", None)

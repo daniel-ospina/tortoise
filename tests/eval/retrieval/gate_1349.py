@@ -464,7 +464,11 @@ def validate_manifest(
         if head is None:
             errors.append("(d) cannot resolve repo HEAD — code provenance "
                           "unverifiable (fail closed)")
-        elif head != code_sha:
+        else:
+            # spec-review P2 fix: run the working-tree diff UNCONDITIONALLY —
+            # ``git diff <code_sha>`` covers both commits-after-sha AND
+            # uncommitted worktree edits, so a live mid-burn edit on a scoped
+            # path drifts the gate even when HEAD still equals the burn sha.
             changed = (changed_files_fn(code_sha, repo_root)
                        if changed_files_fn is not None
                        else _git_changed(code_sha, repo_root))
