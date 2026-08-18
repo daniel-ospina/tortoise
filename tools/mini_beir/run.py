@@ -260,13 +260,18 @@ def _download_zip(name: str, dest: Path, *, timeout: int = 120) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(dest.name + ".part")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            with open(tmp, "wb") as f:
-                while True:
-                    chunk = resp.read(1 << 20)
-                    if not chunk:
-                        break
-                    f.write(chunk)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                with open(tmp, "wb") as f:
+                    while True:
+                        chunk = resp.read(1 << 20)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+        except (urllib.error.URLError, OSError, TimeoutError) as e:
+            # P1 (code review): network failures must surface as a clean
+            # DatasetError (per-dataset fail-closed), not a bare traceback.
+            raise DatasetError(f"{name}: download failed: {e}") from e
         if not zipfile.is_zipfile(tmp):
             raise DatasetError(
                 f"{name}: downloaded file is not a valid zip (truncated or "
@@ -776,11 +781,22 @@ def run_main(argv: list[str] | None = None) -> dict:
         results["datasets"]["synthetic"] = entry
     else:
         for name in DATASETS:
-            ds = load_dataset(name, cache=cache_root,
-                              download=not args.no_download)
-            entry = evaluate_dataset(name, ds, model, limit=args.limit)
-            entry["source"] = "remote"
-            results["datasets"][name] = entry
+            try:
+                ds = load_dataset(name, cache=cache_root,
+                                  download=not args.no_download)
+                entry = evaluate_dataset(name, ds, model, limit=args.limit)
+                entry["source"] = "remote"
+                results["datasets"][name] = entry
+            except DatasetError as e:
+                # P1 (code review): one dataset failing must not discard
+                # completed runs — record the failure per-dataset and
+                # continue, so the results JSON shows exactly which
+                # datasets succeeded (fail-closed per-dataset, not per-run).
+                results["datasets"][name] = {
+                    "error": str(e), "source": "remote",
+                    "metrics": {"ndcg@10": None, "r@10": None},
+                    "n_queries": 0,
+                }
         results["digests"] = _collect_digests(cache_root)
 
     if "msmarco" in results["datasets"]:

@@ -24,6 +24,8 @@ import json
 import math
 import re
 import sys
+import urllib.error
+import urllib.request
 import zipfile
 from pathlib import Path
 
@@ -543,3 +545,48 @@ def test_sample_corpus_reservoir_deterministic_and_bounded():
     # 1-passage corpus → the single passage
     one = mb.sample_corpus(corpus[:1], n=100, seed=1349)
     assert one == corpus[:1]
+
+
+def test_dataset_failure_recorded_not_abort(tmp_path, monkeypatch):
+    """P1 (code review): one dataset failing must not discard completed runs —
+    the failure is recorded per-dataset and the results JSON still writes."""
+    monkeypatch.setattr(mb, "inject_model",
+                        lambda name, query_prompt=None: {
+                            "name": name, "hf_id": f"hf/{name}",
+                            "resolved_revision": None, "query_prompt": None,
+                            "dim": 384})
+    seen = []
+
+    def _flaky_load(name, cache, download=True):
+        seen.append(name)
+        if name == "nfcorpus":
+            raise mb.DatasetError("nfcorpus: download failed (simulated)")
+        return _dummy_dataset()
+
+    def _dummy_dataset():
+        cp = tmp_path / "dummy_corpus.jsonl"
+        cp.write_text(json.dumps({"_id": "d1", "text": "x"}) + "\n")
+        return {"name": "dummy", "corpus_path": str(cp),
+                "queries": [], "qrels": {}}
+
+    monkeypatch.setattr(mb, "load_dataset", _flaky_load)
+    out = tmp_path / "out"
+    res = mb.run_main(["--model", "minilm", "--output-dir", str(out),
+                       "--cache-dir", str(tmp_path / "cache")])
+    assert "nfcorpus" in res["datasets"]
+    assert "error" in res["datasets"]["nfcorpus"]
+    assert res["datasets"]["nfcorpus"]["metrics"]["ndcg@10"] is None
+    # other datasets proceeded
+    assert any("error" not in d for d in res["datasets"].values())
+    # results JSON still written
+    assert (out / "mini_beir-minilm.json").exists()
+
+
+def test_network_failure_wraps_as_dataset_error(tmp_path, monkeypatch):
+    """P1: urlopen URLError surfaces as DatasetError, not a bare traceback."""
+    def _boom(req, timeout=120):
+        raise urllib.error.URLError("simulated network down")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _boom)
+    with pytest.raises(mb.DatasetError):
+        mb._download_zip("nfcorpus", tmp_path / "nfcorpus.zip")

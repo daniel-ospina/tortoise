@@ -34,9 +34,11 @@ LongMemEval gate arm, so the two surfaces stay directly comparable.
    records the note per dataset.
 3. NFCorpus / SciFact / FiQA run on the **full corpus** (3,633 / 5,183 /
    57,638 passages) with the full qrels-constrained test sets (323 / 300 /
-   648 queries) — these are comparable with published BEIR numbers at the
-   standard binary-relevance nDCG@10 convention, though the identical-metric
-   requirement only holds within this harness.
+   648 queries). **NOT leaderboard-reproducible**: this harness binaryizes
+   qrels at score > 0 (the BEIR leaderboard uses graded gains on
+   nfcorpus/fiqa), so numbers are comparable **across models within this
+   harness** only — the identical-metric requirement holds within this
+   surface, not against published BEIR tables.
 
 ## Datasets & sources
 
