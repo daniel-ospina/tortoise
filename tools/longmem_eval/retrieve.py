@@ -35,6 +35,57 @@ def _estimate_tokens(text: str) -> int:
     return int(len(text.split()) * 1.1)
 
 
+def _annotate_hits(hits: list[dict], props: dict, dates: list[str]) -> list[dict]:
+    """Annotate raw search hits with session linkage + promoted state.
+
+    Extracted from ``retrieve_for_question`` (#1367) so the passthrough of
+    the search payload's D8 supersession fields (``superseded_by`` /
+    ``supersedes`` — #1353) is unit-testable. Additive keys: a hit from the
+    full retrieval path (Docker/HNSW) carries them when the graph has
+    CORRECTS edges; the embedded TF-IDF fallback never decorates, so they
+    stay None/[] and ``render_context`` renders byte-identically to today.
+    """
+    annotated: list[dict] = []
+    for h in hits:
+        p = props.get(h["id"], {})
+        si = p.get("lme_session_index", -1)
+        annotated.append({
+            "id": h["id"],
+            "content": h["content"],
+            "match_source": h.get("match_source", ""),
+            "session_id": p.get("session_id", ""),
+            "lme_session_index": si,
+            "session_date": dates[si] if 0 <= si < len(dates) else "",
+            "has_answer": p.get("has_answer", False),
+            # #1367: promoted supersession state — pass the search payload's
+            # D8 fields through (superseded_by = newest incoming CORRECTS
+            # claim; supersedes = outgoing CORRECTS claims). Reused, not
+            # re-detected.
+            "superseded_by": h.get("superseded_by"),
+            "supersedes": h.get("supersedes") or [],
+        })
+    return annotated
+
+
+def _supersede_marker(h: dict) -> str:
+    """Supersession marker text for one hit (#1367). Empty when the hit has
+    no supersession state. Uses the promoted content_snippet (≤120 chars,
+    #1353 D8) — for LongMemEval's short turns the snippet IS the claim.
+    Each relationship renders in its own bracket group (reader-parsing
+    clarity)."""
+    marks: list[str] = []
+    sb = h.get("superseded_by") or {}
+    snippet = (sb.get("content_snippet") or "").strip()
+    if snippet:
+        marks.append(f"[SUPERSEDED BY: {snippet}]")
+    supersedes = h.get("supersedes") or []
+    snips = [(s.get("content_snippet") or "").strip()
+             for s in supersedes if (s.get("content_snippet") or "").strip()]
+    if snips:
+        marks.append("[SUPERSEDES: " + " ; ".join(snips) + "]")
+    return " ".join(marks)
+
+
 def render_context(hits: list[dict], *, question_date: str | None = None) -> str:
     """Render annotated hits as the reader-facing context text.
 
@@ -47,6 +98,14 @@ def render_context(hits: list[dict], *, question_date: str | None = None) -> str
     per-session date annotation on every chunk. Without these, TR questions
     are structurally unanswerable (TR ≈ 0% regardless of retrieval) — P1
     #1144.
+
+    #1367: hits carrying the promoted supersession state (superseded_by /
+    supersedes — #1353 D8) are annotated so the reader sees "this statement
+    replaced that one": a superseded hit is marked ``[SUPERSEDED BY:
+    <newest superseding claim>]`` and a superseding hit ``[SUPERSEDES:
+    <replaced claims>]`` (the superseding claim's content is included via
+    its snippet; when the superseding point is itself in the hits its full
+    content renders too). Hits without the state render byte-identically.
     """
     blocks = []
     for h in hits:
@@ -55,6 +114,11 @@ def render_context(hits: list[dict], *, question_date: str | None = None) -> str
         sdate = h.get("session_date")
         if sdate:
             prefix = f"{prefix} (session date {sdate})"
+        marker = _supersede_marker(h)
+        if marker:
+            # _supersede_marker already returns self-bracketed groups
+            # (e.g. "[SUPERSEDED BY: x] [SUPERSEDES: y]") — no extra wrap.
+            prefix = f"{prefix} {marker}"
         blocks.append(f"{prefix} {h.get('content', '')}")
     text = "\n\n".join(blocks)
     if question_date:
@@ -100,23 +164,14 @@ def retrieve_for_question(
 
     props = point_props_for_hits(sdk._get_proj(), [h["id"] for h in hits])
 
-    # Annotate hits with session/has_answer (SearchResult carries sessionId
-    # only when the engine populates it; fetch is single-query and canonical).
-    # session_date comes from the dataset's haystack_dates (surfaced to the
-    # reader so temporal questions are answerable — P1 #1144).
-    annotated: list[dict] = []
-    for h in hits:
-        p = props.get(h["id"], {})
-        si = p.get("lme_session_index", -1)
-        annotated.append({
-            "id": h["id"],
-            "content": h["content"],
-            "match_source": h.get("match_source", ""),
-            "session_id": p.get("session_id", ""),
-            "lme_session_index": si,
-            "session_date": dates[si] if 0 <= si < len(dates) else "",
-            "has_answer": p.get("has_answer", False),
-        })
+    # Annotate hits with session/has_answer + promoted supersession state
+    # (#1367). SearchResult carries sessionId only when the engine populates
+    # it; fetch is single-query and canonical. session_date comes from the
+    # dataset's haystack_dates (surfaced to the reader so temporal questions
+    # are answerable — P1 #1144). superseded_by/supersedes pass through from
+    # the search payload's D8 fields (additive; embedded mode never decorates
+    # → None/[] → no markers).
+    annotated = _annotate_hits(hits, props, dates)
 
     # ── recall@k (session-level + turn-level) ──
     session_recall: dict[str, float] = {}

@@ -25,7 +25,7 @@ from tools.longmem_eval.judge import (  # noqa: E402
 )
 from tools.longmem_eval.reader import MockReader, build_reader  # noqa: E402
 from tools.longmem_eval.retrieve import (  # noqa: E402
-    render_context, retrieve_for_question,
+    _annotate_hits, render_context, retrieve_for_question,
 )
 from tools.longmem_eval.run import run_evaluation, run_main  # noqa: E402
 
@@ -327,6 +327,154 @@ def test_render_context_without_dates_is_backward_compatible():
     hits = [{"id": "x", "content": "hi", "lme_session_index": 0}]
     assert render_context(hits) == "[session 0] hi"
     assert render_context(hits, question_date=None) == "[session 0] hi"
+
+
+# ── #1367: supersede/NAND structure surfaced to the reader ────────────────
+
+def test_render_context_annotates_superseded_and_superseding_hits():
+    """#1367: a superseded hit must carry a SUPERSEDED BY marker (with the
+    superseding claim's content_snippet) and a superseding hit a SUPERSEDES
+    marker — the reader must see "this statement replaced that one" (the
+    knowledge-update + multi-session weakness). Reuses the #1353 promoted
+    D8 fields; no second supersede-detection path."""
+    hits = [
+        {"id": "ku_old", "content": "I used to prefer espresso in the morning.",
+         "lme_session_index": 0, "session_date": "2025-06-02",
+         "superseded_by": {
+             "id": "ku_new",
+             "content_snippet": "Actually, I now prefer drip coffee over espresso.",
+             "created_at": "2025-06-16",
+         }},
+        {"id": "ku_new", "content": "Actually, I now prefer drip coffee over espresso.",
+         "lme_session_index": 1, "session_date": "2025-06-16",
+         "supersedes": [{"id": "ku_old",
+                          "content_snippet": "I used to prefer espresso in the morning.",
+                          "created_at": "2025-06-02"}]},
+    ]
+    text = render_context(hits, question_date="2025-06-18")
+    assert text.startswith("Current Date: 2025-06-18")
+    # the superseded hit is marked AND the superseding claim is present
+    assert "[SUPERSEDED BY: Actually, I now prefer drip coffee over espresso.]" in text
+    assert "I used to prefer espresso in the morning." in text
+    # the superseding hit carries the replaced-claim marker
+    assert "[SUPERSEDES: I used to prefer espresso in the morning.]" in text
+    # the superseding claim's full content is in the context either way
+    assert "Actually, I now prefer drip coffee over espresso." in text
+
+
+def test_render_context_multiple_supersedes_and_chain_midpoint():
+    """#1367: multiple replaced claims join with ' ; ' and a hit that both
+    replaced something AND was replaced (a chain mid-point) shows both
+    markers."""
+    hits = [{"id": "mid", "content": "I now prefer pour-over.",
+             "lme_session_index": 0,
+             "supersedes": [
+                 {"id": "a", "content_snippet": "espresso first",
+                  "created_at": "d1"},
+                 {"id": "b", "content_snippet": "drip second",
+                  "created_at": "d2"}],
+             "superseded_by": {
+                 "id": "c", "content_snippet": "cold brew third",
+                 "created_at": "d3"}}]
+    text = render_context(hits)
+    assert "[SUPERSEDED BY: cold brew third] [SUPERSEDES: espresso first ; drip second]" in text
+
+
+def test_render_context_supersede_markers_absent_without_promoted_fields():
+    """#1367 backward compat: hits WITHOUT the promoted D8 fields (embedded
+    TF-IDF fallback — CI) render byte-identically to today; empty/None
+    supersession state adds no markers either."""
+    hits = [{"id": "x", "content": "hi", "lme_session_index": 0,
+             "session_date": "2025-06-10"}]
+    assert render_context(hits) == (
+        "[session 0] (session date 2025-06-10) hi")
+    hits2 = [{"id": "x", "content": "hi", "lme_session_index": 0,
+              "superseded_by": None, "supersedes": []}]
+    assert render_context(hits2) == "[session 0] hi"
+    # a malformed promoted entry (missing content_snippet) is ignored
+    hits3 = [{"id": "x", "content": "hi", "lme_session_index": 0,
+              "superseded_by": {"id": "y"}, "supersedes": [{"id": "z"}]}]
+    assert render_context(hits3) == "[session 0] hi"
+
+
+def test_annotate_hits_passes_through_supersession_state():
+    """#1367: the annotation step carries the search payload's promoted
+    superseded_by/supersedes into the annotated hits the reader sees — and
+    stays a no-op (None/[]) when the engine didn't decorate (embedded)."""
+    raw = [
+        # full-path (Docker/HNSW): D8 fields present on the raw hit
+        {"id": "ku_old", "content": "I used to prefer espresso.",
+         "match_source": "rrf",
+         "superseded_by": {"id": "ku_new",
+                            "content_snippet": "drip now", "created_at": "t"}},
+        # embedded fallback: raw hit carries NO promoted keys
+        {"id": "plain", "content": "just a fact", "match_source": "tfidf"},
+    ]
+    props = {"ku_old": {"lme_session_index": 0, "session_id": "s0",
+                         "has_answer": False},
+             "plain": {"lme_session_index": 1, "session_id": "s1",
+                        "has_answer": False}}
+    annotated = _annotate_hits(raw, props, ["2025-06-02", "2025-06-16"])
+    by_id = {h["id"]: h for h in annotated}
+    assert by_id["ku_old"]["superseded_by"] == {
+        "id": "ku_new", "content_snippet": "drip now", "created_at": "t"}
+    assert by_id["ku_old"]["supersedes"] == []
+    assert by_id["plain"]["superseded_by"] is None
+    assert by_id["plain"]["supersedes"] == []
+    # every annotated hit carries the keys (reader-side contract)
+    assert all("superseded_by" in h and "supersedes" in h for h in annotated)
+    # the decorated hit renders with its marker end-to-end
+    text = render_context(annotated[:1])
+    assert "[SUPERSEDED BY: drip now]" in text
+
+
+def test_retrieve_for_question_surfaces_supersession_annotation(tmp_path):
+    """#1367 integration: a real superseded claim in the eval graph (via the
+    PRODUCTION supersede_point → CORRECTS edge) is (a) carried through
+    retrieve_for_question's annotated hits as superseded_by/supersedes keys
+    and (b) rendered with the SUPERSEDED BY marker when decorated by the
+    production fetch_point_epistemic_state — the exact path the Docker/HNSW
+    eval takes. Embedded CI itself can't decorate (snapshot fallback), so the
+    decoration is applied with the real graph machinery, not a fake."""
+    from tortoise.search_engine import fetch_point_epistemic_state
+
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        q = next(x for x in _mini()
+                 if x["question_id"] == "mini_ku_004")
+        ingest_haystack(sdk, q)
+        # real supersession on the eval graph (CORRECTS ku_new → ku_old)
+        sdk.create_point(
+            "statement", "I used to prefer espresso in the morning.",
+            id="ku_old", status="live", lme_question_id=q["question_id"],
+            lme_session_index=0, is_episodic=True)
+        sdk.create_point(
+            "statement", "I now prefer drip coffee over espresso.",
+            id="ku_new", status="live", lme_question_id=q["question_id"],
+            lme_session_index=1, is_episodic=True)
+        sdk.supersede_point("ku_old", "ku_new")
+
+        ret = retrieve_for_question(sdk, q, ks=(5,), top_k=20)
+        assert all("superseded_by" in h and "supersedes" in h
+                   for h in ret["hits"])
+
+        # the production decoration (what tortoise_fts_query applies on the
+        # full path) sees the CORRECTS edge — the reader would get the marker
+        state = fetch_point_epistemic_state(sdk._get_proj().g, ["ku_old"])
+        assert state["ku_old"]["superseded_by"]["id"] == "ku_new"
+        assert state["ku_old"]["status"] == "superseded"
+
+        # simulate the full-path hit → annotation → rendering pipeline
+        raw_hit = {"id": "ku_old", "content": "I used to prefer espresso in the morning.",
+                   "match_source": "rrf", "superseded_by": state["ku_old"]["superseded_by"]}
+        props = {"ku_old": {"lme_session_index": 0, "session_id": "s0",
+                             "has_answer": False}}
+        [annotated] = _annotate_hits([raw_hit], props, ["2025-06-02"])
+        text = render_context([annotated], question_date=q.get("question_date"))
+        assert "[SUPERSEDED BY: I now prefer drip coffee over espresso.]" in text
+        assert "I used to prefer espresso in the morning." in text
+    finally:
+        sdk.close()
 
 
 # ── Error isolation + checkpoint/resume (P2) ───────────────────────────────
