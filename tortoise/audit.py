@@ -16,7 +16,9 @@ Ontology (docs/ONTOLOGY.md §5 edge vocabulary):
     current write path.
   - Source tiering lives on Source nodes (``sourceKind`` / ``credibilityTier``
     — resolve_tier: explicit tier > sourceKind tier-form > registry default).
-    Point-level ``sourceKind`` is legacy (#398).
+    Point-level ``sourceKind`` is legacy (#398): the point-level check only
+    flags evidence with NO Source provenance chain (true legacy gaps); tiering
+    gaps on Sources are owned by the Source-level check.
 
 Usage:
     from tortoise.audit import audit_graph
@@ -33,6 +35,25 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+
+# resolve_tier precedence: explicit credibilityTier (T0-T4) > sourceKind
+# tier-form (T0-T4) > registry default > None (neutral). The Source-level check
+# (7) keys on this OUTCOME, not the raw fields (#1158): a Source whose
+# sourceKind is unregistered (registry default None) or whose credibilityTier is
+# malformed ('T9') resolves neutral and is flagged. Registry-tiered kinds are
+# computed dynamically so runtime register_source_kind_default() mappings are
+# honored (SOURCE_KIND_DEFAULTS non-None entries are exactly T0-T4 by default).
+from tortoise.source_credibility import SOURCE_KIND_DEFAULTS, TIER_PRIORS
+
+# Cypher list literal of canonical tier forms, e.g. ['T0', 'T1', 'T2', 'T3', 'T4'].
+_TIER_LIT = str(sorted(TIER_PRIORS))
+
+
+def _registry_tiered_kinds_lit() -> str:
+    """Cypher list literal of sourceKind values that resolve to a non-neutral
+    tier via the registry (T0-T4 forms plus any runtime-registered mappings)."""
+    return str(sorted(k for k, v in SOURCE_KIND_DEFAULTS.items()
+                      if v in TIER_PRIORS))
 
 # Sample cap per check. COUNTS are computed uncapped; samples are capped so a
 # large violations set does not balloon the JSON payload.
@@ -259,15 +280,22 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
     )
 
     # ── 1. missing_sourceKind — point-level (LEGACY, low) ───────────
-    # Point-level sourceKind is a legacy annotation (#398) — the canonical
-    # check is the Source-level variant (check 7). Kept so legacy-era graphs
-    # surface the artifact; LOW severity + legacy marker, never a current-
-    # ontology violation.
+    # Point-level sourceKind is a legacy annotation (#398). This check ONLY
+    # flags a true legacy provenance gap: evidence with no point-level
+    # sourceKind AND no Source provenance chain (no extractedFrom edge to ANY
+    # Source) — pre-#398 points. Points backed by a Source are never flagged
+    # here: their tiering gap is owned by the Source-level check (7), so a
+    # correct Source-level annotation clears the only relevant metric (#1158).
+    no_provenance_w = (
+        "OPTIONAL MATCH (ev)-[:extractedFrom]->(src:Source)\n"
+        "WITH op, ev, src WHERE src IS NULL\n"
+    )
     count1 = _count(
         proj,
         f"MATCH (op:Point {{is_operator: true}})-[:IMPL|NAND]->(ev:Point)\n"
         f"WHERE {_op_in_kinds('op', 'ev')} AND ev.sourceKind IS NULL "
         "AND ev.is_operator = false\n"
+        f"{no_provenance_w}"
         "WITH DISTINCT op, ev\n"
         "RETURN count(*)",
         params=params,
@@ -277,6 +305,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         f"MATCH (op:Point {{is_operator: true}})-[:IMPL|NAND]->(ev:Point)\n"
         f"WHERE {_op_in_kinds('op', 'ev')} AND ev.sourceKind IS NULL "
         "AND ev.is_operator = false\n"
+        f"{no_provenance_w}"
         f"RETURN DISTINCT op.id, ev.id, ev.content LIMIT {SAMPLE_LIMIT}",
         params=params,
     )
@@ -285,13 +314,14 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             issue_type="missing_sourceKind",
             severity="low",
             node_id=str(ev_id),
-            detail=(f"Evidence '{ev_content}' (from operator {op_id}) has no "
-                    "point-level sourceKind [legacy annotation]"),
+            detail=(f"Legacy evidence '{ev_content}' (from operator {op_id}) has "
+                    "no point-level sourceKind and no Source provenance "
+                    "(extractedFrom)"),
             # Point-level sourceKind is legacy — tier the SOURCE node instead
             # (#398); see the missing_sourceKind_source check (7).
-            fix=("tier the SOURCE node backing this point via "
-                 "tortoise_set_source_tier(url, 'T0'..'T4') or "
-                 "create_source(url, kind, tier=...)"),
+            fix=("wire provenance + tier the source: create_source(url, kind, "
+                 "tier=...) then MATCH (ev:Point {id:'%s'}), (s:Source "
+                 "{url:'...'}) CREATE (ev)-[:extractedFrom]->(s)" % ev_id),
             legacy=True,
         )
         for op_id, ev_id, ev_content in rows1
@@ -513,15 +543,25 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
     ], count6b, legacy=True)
 
     # ── 7. missing_sourceKind_source (medium, #1158) ──────────────
-    # Canonical source-tiering check: Sources backing in-scope evidence with
-    # NO tier annotation at all (sourceKind AND credibilityTier both unset —
-    # a Source with credibilityTier only is valid, resolve_tier reads it).
+    # Canonical source-tiering check, keyed on resolve_tier OUTCOME (not the
+    # raw field): a Source is untiered iff its effective tier is neutral —
+    # credibilityTier NOT a T0-T4 form AND sourceKind NOT a T0-T4 form AND
+    # sourceKind NOT a registry-tiered kind (runtime registrations honored).
+    # Explicitly-neutral legacy kinds (registry → None) and unregistered kinds
+    # resolve neutral → flagged (the #334 remediation population). A Source
+    # with credibilityTier only is valid (resolve_tier reads it).
+    source_untiered_w = (
+        f"NOT ((src.credibilityTier IS NOT NULL AND "
+        f"src.credibilityTier IN {_TIER_LIT})"
+        f" OR (src.sourceKind IS NOT NULL AND src.sourceKind IN {_TIER_LIT})"
+        f" OR (src.sourceKind IS NOT NULL AND "
+        f"src.sourceKind IN {_registry_tiered_kinds_lit()}))"
+    )
     count7 = _count(
         proj,
         f"MATCH (op:Point {{is_operator: true}})-[:IMPL|NAND]->(ev:Point)"
         "-[:extractedFrom]->(src:Source)\n"
-        f"WHERE {_op_in_kinds('op', 'ev')} "
-        "AND src.sourceKind IS NULL AND src.credibilityTier IS NULL\n"
+        f"WHERE {_op_in_kinds('op', 'ev')} AND {source_untiered_w}\n"
         "WITH DISTINCT src, ev\n"
         "RETURN count(*)",
         params=params,
@@ -530,8 +570,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
         proj,
         f"MATCH (op:Point {{is_operator: true}})-[:IMPL|NAND]->(ev:Point)"
         "-[:extractedFrom]->(src:Source)\n"
-        f"WHERE {_op_in_kinds('op', 'ev')} "
-        "AND src.sourceKind IS NULL AND src.credibilityTier IS NULL\n"
+        f"WHERE {_op_in_kinds('op', 'ev')} AND {source_untiered_w}\n"
         f"RETURN DISTINCT src.url, ev.id, ev.content LIMIT {SAMPLE_LIMIT}",
         params=params,
     )
@@ -540,8 +579,9 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             issue_type="missing_sourceKind_source",
             severity="medium",
             node_id=str(src_url),
-            detail=(f"Source '{src_url}' (backing evidence '{ev_content}') has "
-                    "no sourceKind / credibilityTier"),
+            detail=(f"Source '{src_url}' (backing evidence '{ev_content}') "
+                    "resolves to a NEUTRAL tier (no explicit credibilityTier / "
+                    "tier-form or registry-tiered sourceKind)"),
             fix=(f"tier the source: tortoise_set_source_tier('{src_url}', "
                  f"'T0'..'T4') or create_source('{src_url}', kind, tier=...)"),
         )

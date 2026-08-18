@@ -254,6 +254,82 @@ def test_check7_source_missing_tier(sdk):
     assert ch["samples"][0]["node_id"] == "https://example.com/untiered"
 
 
+def test_check1_point_backed_by_tiered_source_not_flagged(sdk):
+    """#1158: a point backed by a tiered Source is NOT a point-level legacy gap.
+    The point-level check must not false-positive on current-ontology graphs
+    whose tiering lives on the Source (a Source-level annotation can never move
+    the point-level metric)."""
+    _create(sdk, "ev", "content:'from tiered source', pointKind:'statement', "
+                       "is_operator:false, status:'live'")
+    _create(sdk, "op1", "is_operator:true, op_type:'IMPL', pointKind:'statement', status:'live'")
+    _edge(sdk, "op1", "ev", "IMPL")
+    _q(sdk, "CREATE (s:Source {url:'https://example.com/tiered', "
+            "sourceKind:'news', credibilityTier:'T2'})")
+    _q(sdk, "MATCH (e:Point {id:'ev'}), (s:Source {url:'https://example.com/tiered'}) "
+            "CREATE (e)-[:extractedFrom]->(s)")
+
+    report = sdk.audit()
+    ch1 = _check(report, "missing_sourceKind")
+    assert ch1 is None or ch1["count"] == 0
+    ch7 = _check(report, "missing_sourceKind_source")
+    assert ch7 is None or ch7["count"] == 0
+
+
+def test_check1_legacy_point_with_untiered_source_owned_by_check7(sdk):
+    """A point WITH an extractedFrom edge to an UNTIERED Source is not a
+    point-level legacy gap (it has provenance) — check 7 flags the Source
+    instead. Single-report division: no double-flagging of one root cause."""
+    _create(sdk, "ev", "content:'from untiered source', pointKind:'statement', "
+                       "is_operator:false, status:'live'")
+    _create(sdk, "op1", "is_operator:true, op_type:'IMPL', pointKind:'statement', status:'live'")
+    _edge(sdk, "op1", "ev", "IMPL")
+    _q(sdk, "CREATE (s:Source {url:'https://example.com/untiered'})")
+    _q(sdk, "MATCH (e:Point {id:'ev'}), (s:Source {url:'https://example.com/untiered'}) "
+            "CREATE (e)-[:extractedFrom]->(s)")
+
+    report = sdk.audit()
+    ch1 = _check(report, "missing_sourceKind")
+    assert ch1 is None or ch1["count"] == 0
+    ch7 = _check(report, "missing_sourceKind_source")
+    assert ch7 is not None and ch7["count"] == 1
+    assert ch7["samples"][0]["node_id"] == "https://example.com/untiered"
+
+
+def test_check7_kind_resolving_neutral_flagged(sdk):
+    """#1158: key the Source check on resolve_tier OUTCOME, not the raw field.
+    A Source whose sourceKind is an unregistered kind ('news' → registry default
+    None → neutral) is effectively untiered and must be flagged."""
+    _create(sdk, "ev", "content:'from news source', pointKind:'statement', "
+                       "is_operator:false, status:'live'")
+    _create(sdk, "op1", "is_operator:true, op_type:'IMPL', pointKind:'statement', status:'live'")
+    _edge(sdk, "op1", "ev", "IMPL")
+    _q(sdk, "CREATE (s:Source {url:'https://example.com/news', sourceKind:'news'})")
+    _q(sdk, "MATCH (e:Point {id:'ev'}), (s:Source {url:'https://example.com/news'}) "
+            "CREATE (e)-[:extractedFrom]->(s)")
+
+    report = sdk.audit()
+    ch = _check(report, "missing_sourceKind_source")
+    assert ch is not None and ch["count"] == 1
+    assert ch["samples"][0]["node_id"] == "https://example.com/news"
+
+
+def test_check7_explicit_tier_beats_neutral_kind(sdk):
+    """Explicit credibilityTier wins over a neutral-resolving sourceKind
+    (resolve_tier precedence) → not flagged."""
+    _create(sdk, "ev", "content:'from explicitly tiered source', pointKind:'statement', "
+                       "is_operator:false, status:'live'")
+    _create(sdk, "op1", "is_operator:true, op_type:'IMPL', pointKind:'statement', status:'live'")
+    _edge(sdk, "op1", "ev", "IMPL")
+    _q(sdk, "CREATE (s:Source {url:'https://example.com/news-tiered', "
+            "sourceKind:'news', credibilityTier:'T2'})")
+    _q(sdk, "MATCH (e:Point {id:'ev'}), (s:Source {url:'https://example.com/news-tiered'}) "
+            "CREATE (e)-[:extractedFrom]->(s)")
+
+    report = sdk.audit()
+    ch = _check(report, "missing_sourceKind_source")
+    assert ch is None or ch["count"] == 0
+
+
 # ── 3. Uncounted totals vs capped samples ─────────────────────────
 
 def test_counts_uncapped_samples_capped(sdk):
