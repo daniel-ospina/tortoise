@@ -96,10 +96,20 @@ class TestExitCodes:
     def test_stubs_exit1_with_ownership(self, capsys):
         assert main(["parity"]) is ExitCode.OPERATIONAL
         assert main(["calibrate", "--print"]) is ExitCode.OPERATIONAL
-        assert main(["validate-judge", "--rubric", "r2"]) is ExitCode.OPERATIONAL
         assert main(["report"]) is ExitCode.OPERATIONAL
         err = capsys.readouterr().err
-        assert "#1414" in err and "#1415" in err and "#1410" in err
+        assert "#1414" in err and "#1415" in err
+        # validate-judge is IMPLEMENTED in #1410 (was a stub): hermetic mock
+        # run returns GATE_BLOCKED (2) in default config or OK (0) on a
+        # passing mock rubric — never OPERATIONAL.
+        # validate-judge is IMPLEMENTED in #1410 (was a stub): hermetic
+        # mock run returns OK (0) on a passing mock rubric — never
+        # OPERATIONAL. (Real-mode calls are env-gated and never exercised
+        # in hermetic tests — OPENROUTER_API_KEY present or not.)
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            assert main(["validate-judge", "--rubric", "r2", "--mock",
+                         "--out", td]) is ExitCode.OK
 
 
 class TestDispatchMapping:

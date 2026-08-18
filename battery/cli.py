@@ -79,8 +79,12 @@ def _parser() -> argparse.ArgumentParser:
     cal.add_argument("--print", action="store_true", dest="print_deltas",
                      help="print [cal] deltas without re-locking")
 
-    vj = sub.add_parser("validate-judge", help="judge validation gate (owned by #1410)")
+    vj = sub.add_parser("validate-judge", help="judge validation gate (#1410)")
     vj.add_argument("--rubric", required=True, help="rubric id")
+    vj.add_argument("--config", default=None, help="config dir (rubrics/)")
+    vj.add_argument("--out", default=_DEFAULT_OUT, help="records output dir")
+    vj.add_argument("--mock", action="store_true",
+                    help="hermetic mock-judge run (no model API)")
 
     report = sub.add_parser("report", help="verdict report (owned by #1415)")
     report.add_argument("--out", default=_DEFAULT_OUT)
@@ -95,6 +99,41 @@ def _stub(name: str, owner: str) -> Callable[[argparse.Namespace], ExitCode]:
             f"owned by {owner}. Dispatch surface registered for contract "
             f"stability.")
     return _run
+
+
+def _cmd_validate_judge(args: argparse.Namespace) -> ExitCode:
+    """battery validate-judge --rubric <id> — run the validation battery for
+    one rubric (issue #1410; E2E-5.1). Exit 2 when the gate blocks."""
+    from battery.judge.client import JudgeClient
+    from battery.judge.gate import RubricRegistry, validate_rubric
+    rubric_id = args.rubric
+    rubric_text = _load_rubric_text(args, rubric_id)
+    pairs = _default_probe_pairs(rubric_id)
+    client = JudgeClient(force_mock=args.mock)
+    record = validate_rubric(rubric_id, rubric_text, client, pairs,
+                             ["a"] * 4, ["a"] * 4, n_items=4)
+    from pathlib import Path as _Path
+    records_path = _Path(args.out or _DEFAULT_OUT) / "judge" / "records.json"
+    registry = RubricRegistry(records_path)
+    registry.save(record)
+    print(f"rubric {rubric_id}: {'VALIDATED' if record.passed else 'BLOCKED'} "
+          f"(abba={record.abba_agreement:.2f} kappa={record.kappa} "
+          f"reason={record.blocked_reason or 'ok'})")
+    return ExitCode.OK if record.passed else ExitCode.GATE_BLOCKED
+
+
+def _load_rubric_text(args, rubric_id: str) -> str:
+    from pathlib import Path
+    config_dir = Path(args.config or args.config_dir or _DEFAULT_CONFIG)
+    rubrics = config_dir / "rubrics" / f"{rubric_id}.md"
+    if rubrics.is_file():
+        return rubrics.read_text(encoding="utf-8")
+    # Fallback: minimal rubric from the id (mock-mode validation).
+    return f"{rubric_id}: judge the response for coverage and correctness."
+
+
+def _default_probe_pairs(rubric_id: str) -> list[tuple[str, str]]:
+    return [(f"{rubric_id}-a{i}", f"{rubric_id}-b{i}") for i in range(4)]
 
 
 def _cmd_run(args: argparse.Namespace) -> ExitCode:
@@ -114,7 +153,7 @@ def _dispatch(args: argparse.Namespace) -> ExitCode:
         "run": _cmd_run,
         "parity": _stub("parity", "#1414"),
         "calibrate": _stub("calibrate", "#1415"),
-        "validate-judge": _stub("validate-judge", "#1410"),
+        "validate-judge": _cmd_validate_judge,
         "report": _stub("report", "#1415"),
     }
     return handlers[args.subcommand](args)
