@@ -1347,8 +1347,9 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
             "OPTIONAL MATCH (n)-[:aboutSubject]->(s:Subject) "
             # #1417: provenance hop via the point's eventId property (the
             # provenance surface) — NOT an aboutEvent edge, which is reserved
-            # for content-aboutness (ONTOLOGY §3.4). Points captured without
-            # eventId keep the old behavior (fallback absent → subject None).
+            # for content-aboutness (ONTOLOGY §3.4). Legacy aboutEvent-only
+            # points (no eventId property) no longer resolve — the fallback
+            # now requires the eventId property (review P2).
             "OPTIONAL MATCH (ev:Event) WHERE ev.eventId = n.eventId "
             "OPTIONAL MATCH (ev)-[:aboutSubject]->(es:Subject) "
             "OPTIONAL MATCH (n)-[r:CORRECTS]->(old:Point) "
