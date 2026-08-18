@@ -121,6 +121,16 @@ def retrieve_for_question(
     # ── recall@k (session-level + turn-level) ──
     session_recall: dict[str, float] = {}
     turn_recall: dict[str, float] = {}
+    # #1369: v2-mode evidence — has_answer-marked extracted points (the
+
+    # extractor's recall contribution). The deterministic leg's evidence
+    # turns carry turn ids; the v2 leg marks the extracted points instead,
+    # so turn recall is computed over the marks when present.
+    ev_rows = sdk._get_proj().g.query(
+        "MATCH (p:Point) WHERE p.lme_question_id = $q AND p.has_answer = true "
+        "RETURN count(*)", params={"q": qid}).result_set
+    evidence_point_count = ev_rows[0][0] if ev_rows else 0
+    _evidence_recall: dict[str, float] = {}
     for k in ks:
         top = annotated[:k]
         if answer_sessions:
@@ -129,11 +139,19 @@ def retrieve_for_question(
                 len(answer_sessions & retrieved_sessions) / len(answer_sessions))
         else:
             session_recall[str(k)] = 0.0
-        if evidence_turn_ids:
-            top_ids = {h["id"] for h in top}
-            turn_recall[str(k)] = len(evidence_turn_ids & top_ids) / len(evidence_turn_ids)
+        if evidence_point_count:
+            # v2 leg: did the extracted point CONTAINING the answer surface?
+            ev_hits = {h["id"] for h in top if h["has_answer"]}
+            turn_recall[str(k)] = len(ev_hits) / evidence_point_count
+            _evidence_recall[str(k)] = len(ev_hits) / evidence_point_count
         else:
-            turn_recall[str(k)] = 0.0
+            _evidence_recall[str(k)] = 0.0
+            if evidence_turn_ids:
+                # deterministic leg: did the evidence TURN surface?
+                top_ids = {h["id"] for h in top}
+                turn_recall[str(k)] = len(evidence_turn_ids & top_ids) / len(evidence_turn_ids)
+            else:
+                turn_recall[str(k)] = 0.0
 
     # ── context handed to the reader (top_k) ──
     context_points = annotated[:top_k]
@@ -148,6 +166,7 @@ def retrieve_for_question(
         "hits": annotated,
         "session_recall@k": session_recall,
         "turn_recall@k": turn_recall,
+        "evidence_recall@k": _evidence_recall,
         "context_tokens": context_tokens,
         "context_point_count": len(context_points),
         "retrieval_latency_ms": round(latency_ms, 2),
