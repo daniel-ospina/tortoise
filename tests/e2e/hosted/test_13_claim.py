@@ -63,39 +63,29 @@ def _b64url(data: bytes) -> str:
 
 
 class _JWKS:
-    """RSA keypair + JWKS doc (cryptography — RS256, matching session_auth)."""
+    """EC keypair + JWKS doc (cryptography — ES256, matching real Supabase
+    signing; #1460: previously RSA/RS256)."""
 
     def __init__(self) -> None:
-        from cryptography.hazmat.primitives.asymmetric import rsa
+        from tests._session_jwt_utils import build_ec_jwks, make_ec_keypair
 
         self.kid = "claim-e2e-jwk"
-        self.private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-        nums = self.private_key.public_key().public_numbers()
-        self.jwks = {"keys": [{
-            "kty": "RSA", "use": "sig", "alg": "RS256", "kid": self.kid,
-            "n": _b64url(nums.n.to_bytes((nums.n.bit_length() + 7) // 8, "big")),
-            "e": _b64url(nums.e.to_bytes((nums.e.bit_length() + 7) // 8, "big")),
-        }]}
+        self.private_key, pub = make_ec_keypair()
+        self.jwks = build_ec_jwks(pub, self.kid)
 
     def mint(self, supabase_url: str, user_id: str, email: str,
              providers: list[str]) -> str:
-        from cryptography.hazmat.primitives import hashes
-        from cryptography.hazmat.primitives.asymmetric import padding
+        from tests._session_jwt_utils import mint_es256_token
 
         now = int(time.time())
-        header = {"alg": "RS256", "typ": "JWT", "kid": self.kid}
         payload = {
             "iss": f"{supabase_url.rstrip('/')}/auth/v1",
             "aud": "authenticated", "sub": user_id, "email": email,
             "app_metadata": {"providers": providers},
             "iat": now, "exp": now + 3600,
         }
-        signing_input = (
-            f"{_b64url(json.dumps(header).encode())}."
-            f"{_b64url(json.dumps(payload).encode())}"
-        ).encode()
-        sig = self.private_key.sign(signing_input, padding.PKCS1v15(), hashes.SHA256())
-        return signing_input.decode() + "." + _b64url(sig)
+        return mint_es256_token(self.private_key, self.kid, payload,
+                                iss=payload["iss"])
 
 
 class _SupabaseMockHandler(BaseHTTPRequestHandler):

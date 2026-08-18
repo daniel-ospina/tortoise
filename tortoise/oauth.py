@@ -12,7 +12,7 @@ Flow (locked scoping decisions 2026-08-15, docs/scoping/2026-08-15-524-oauth-mcp
     (served by hosted_api).
   * P2 — authorization code + PKCE (RFC 7636, S256 only) against the Supabase
     control plane. The browser session JWT is verified server-side with the
-    existing JWKS/RS256 path (session_auth.verify_session_jwt — D2: "reuse
+    existing JWKS path (session_auth.verify_session_jwt — D2: "reuse
     JWKS verify"). Branded consent = ONE custom HTML page (D2).
   * P3 — Dynamic Client Registration (RFC 7591) at ``POST /register`` (D1).
   * P4 — token→team mapping via RFC 8707 resource indicator, client-declared

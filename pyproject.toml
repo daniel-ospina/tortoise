@@ -26,6 +26,11 @@ dependencies = [
     "fastmcp==3.4.6",
     "prometheus-client>=0.16",
     "posthog>=3.0",
+    # Session-JWT verification (session_auth.py, #1460). Was transitive via
+    # `mcp` — promoted to a direct dep so a future mcp bump can't drop it
+    # silently. The [crypto] extra is required for ES256/RS256 JWKS verify
+    # (cryptography is already pinned via joserfc/backups).
+    "pyjwt[crypto]>=2.13,<3",
 ]
 
 [project.scripts]
