@@ -48,3 +48,6 @@ longmemeval_*.report.json
 
 # Battery sealed golds (production gold answers — never committed; #1406)
 battery/golds/sealed/*
+
+# Issue #1407 eval-battery scenario corpus — sealed gold store (never committed)
+battery/config/.gold_store/

@@ -41,10 +41,18 @@ def default_corpus():
 
 
 class TestCorpusSchema:
-    def test_smoke_corpus_loads(self, default_corpus):
-        assert [s.id for s in default_corpus] == ["r1-001", "r1-002"]
+    def test_production_corpus_loads(self, default_corpus):
+        # #1407 production corpus replaces the #1406 2-scenario smoke corpus.
+        assert len(default_corpus) >= 100
         assert default_corpus[0].tier is Tier.PROBE
-        assert default_corpus[0].contradiction_pairs[0].injection_turn == 3
+        assert default_corpus[0].prompt_pack  # prompt -> prompt_pack normalized
+        # k is pinned per planted contradiction (plan §4; production schema
+        # nests it in planted_contradictions[].k — normalized to
+        # contradiction_pairs[].injection_turn by the loader).
+        ct = [s for s in default_corpus
+              if s.task_type == "contradiction" and s.contradiction_pairs]
+        assert ct and all(
+            p.injection_turn == 5 for s in ct for p in s.contradiction_pairs)
 
     def test_type_violation_rejected(self, tmp_path):
         p = _write_corpus(tmp_path, [{"id": "x", "tier": "nonsense", "family": "f"}])
@@ -59,18 +67,22 @@ class TestCorpusSchema:
         assert loaded[0].evidence_scripts == ("e1",)
 
     def test_tier_filter(self, default_corpus):
-        assert len(scenarios_by_tier(default_corpus, Tier.PROBE)) == 2
-        assert scenarios_by_tier(default_corpus, Tier.STREAM) == []
+        probes = scenarios_by_tier(default_corpus, Tier.PROBE)
+        streams = scenarios_by_tier(default_corpus, Tier.STREAM)
+        assert len(probes) > 0 and len(streams) > 0
+        assert all(s.tier is Tier.PROBE for s in probes)
 
     def test_episode_context_has_no_gold(self, default_corpus):
-        ctx = str(default_corpus[0].to_episode_context())
-        assert "The decision is to adopt" not in ctx  # gold text absent
+        with_gold = next(s for s in default_corpus if s.golds())
+        ctx = str(with_gold.to_episode_context())
+        assert with_gold.golds()[0] not in ctx  # gold text absent
 
 
 class TestGoldBoundary:
     def test_golds_only_via_golds_surface(self, default_corpus):
-        golds = default_corpus[0].golds()
-        assert len(golds) == 1 and "decision is to adopt" in golds[0]
+        with_gold = next(s for s in default_corpus if s.golds())
+        golds = with_gold.golds()
+        assert len(golds) == 1 and golds[0]  # sealed gold accessible scorer-side
 
     def test_missing_gold_fails_closed(self, tmp_path):
         sc = [{"id": "a", "tier": "probe", "family": "f",

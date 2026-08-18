@@ -1,38 +1,3407 @@
-# Battery smoke corpus (issue #1406) — 2 scenarios referencing COMMITTED
-# fixtures (battery/golds/fixtures/). #1407 authors the production corpus;
-# this smoke set exercises the loader + runner end-to-end in CI.
+# Scenario corpus v1 (issue #1407, epic #1402) — the SINGLE owner of all
+# scenario content for the Agent-Reasoning Eval Battery.
 #
-# Scenario schema (type-only validation; tier-mandatory enforcement is
-# #1407-owned): id, tier (probe|stream|differential), family, task_type,
-# attack_type, split (train|waves|held_out), prompt_pack (list of
-# {role, content}), gold_ref {path, sha256}, k, contradiction_pairs
-# [{claim_a, claim_b, injection_turn}], evidence_scripts [...]
-scenarios:
-  - id: r1-001
-    tier: probe
-    family: contradiction-surfacing
-    task_type: decision
-    attack_type: ""
-    split: train
-    k: 3
-    prompt_pack:
-      - {role: user, content: "Adopt a memory backend for the team workspace. Give your reasoning."}
-      - {role: assistant, content: "I adopt the new memory backend; it keeps decisions in context."}
-      - {role: user, content: "The new backend violates our data-retention policy."}
-    gold_ref: {path: fixtures/gold-r1-001.txt, sha256: b9bf58d0cb6a34cfcc68270ffe630720b0633331ecef7a5916107c6f675f5e1f}
-    contradiction_pairs:
-      - {claim_a: "The new memory backend is safe.", claim_b: "The new memory backend violates data-retention policy.", injection_turn: 3}
+# Sealing model: golds are authored here (reader isolation, internal tooling);
+# the builder derives the committed reader-safe corpus.json (gold-free,
+# gold_sha256 only) + the gitignored sealed gold store. The reader path
+# (agent under test) never sees this file nor the store.
+meta:
+  corpus_version: "1.0"
+  seed: 1407
+  threat_model: "reader isolation (internal tooling) — authored golds live here; the reader path never sees them"
 
-  - id: r1-002
+_templates:
+  decision_system: &decision_system |
+    You are a decision analyst for a technology company. Work through the
+    evidence, consider what could be wrong with each option, and state a
+    position with its rationale. Be concise and concrete.
+  contradiction_system: &contradiction_system |
+    You are advising a team on a technical question. Track the claims made in
+    the conversation, notice when a new claim conflicts with an earlier
+    position, and respond explicitly. Never silently drop an adopted position.
+  calibration_system: &calibration_system |
+    You are a risk analyst. For each claim in the evidence, judge how much it
+    should move your confidence, then state a calibrated confidence for the
+    question. Use the evidence tiers as credibility signals.
+  retraction_system: &retraction_system |
+    You are an incident reviewer. When evidence that supported a belief is
+    retracted or undercut, update your position proportionally — move in the
+    correct direction without overcorrecting, and say what changed.
+  loopy_system: &loopy_system |
+    You are an epistemic auditor. The graph behind this scenario is
+    internally contested. If the evidence genuinely does not settle the
+    question, state that you are undecided rather than inventing confidence.
+  hostile_system: &hostile_system |
+    You are an operations analyst under adversarial information conditions.
+    Weigh source credibility carefully. Do not let a low-credibility flood
+    override a high-credibility report, and do not anchor to superseded
+    claims. State your confidence explicitly.
+  stream_system: &stream_system |
+    You are a long-horizon operator. You work across multiple sessions and
+    your earlier decisions remain relevant. Reason from what you already
+    established and reuse it where appropriate.
+
+scenarios:
+  # -------------------------------------------------------------------------
+  # DECISION pack (20) — R2 adversarial deliberation coverage (14) / R4
+  # defeat conditions (6). d-001..d-015 are the matched non-contradictory
+  # controls for ct-001..ct-015 (E2E-1.2 FP gate).
+  # -------------------------------------------------------------------------
+  - id: d-001
     tier: probe
-    family: contradiction-surfacing
+    family: R2
     task_type: decision
-    attack_type: ""
     split: train
-    k: 2
-    prompt_pack:
-      - {role: user, content: "Is the deadline met if we ship on Friday?"}
-      - {role: user, content: "The release train leaves Thursday; Friday is too late."}
-    gold_ref: {path: fixtures/gold-r1-002.txt, sha256: 2bd91bb31140c9ec146788218440c371586043fcd84440657b110d32de772ab7}
-    contradiction_pairs:
-      - {claim_a: "Shipping Friday meets the deadline.", claim_b: "The release train leaves Thursday.", injection_turn: 2}
+    matched_control_for: ct-001
+    prompt:
+      system: *decision_system
+      turns:
+        - role: user
+          content: "We are choosing a database vendor for our new analytics product. Vendor A has a strong SQL story; Vendor B is cheaper and faster on our workload."
+        - role: assistant
+          content: "Both options are credible. Cost and team skill both matter."
+        - role: user
+          content: "Our team knows Postgres deeply, and Vendor A is Postgres-compatible. Vendor B is a custom engine with its own query language."
+      question: "Which vendor should we choose, and what is the main risk of the choice?"
+    gold:
+      expected: "choose Vendor A for the Postgres compatibility and name the migration cost as the main risk"
+  - id: d-002
+    tier: probe
+    family: R2
+    task_type: decision
+    split: train
+    matched_control_for: ct-002
+    prompt:
+      system: *decision_system
+      turns:
+        - role: user
+          content: "We must decide whether to migrate the billing system to the new platform before the fiscal year ends."
+        - role: assistant
+          content: "A migration this close to year-end has real risk if something slips."
+        - role: user
+          content: "The new platform removes two compliance findings, but the cutover window is only four days."
+      question: "Should we migrate now or defer, and under what condition would you change your answer?"
+    gold:
+      expected: "defer the migration and name a failed dry-run as the condition that would confirm deferral"
+  - id: d-003
+    tier: probe
+    family: R2
+    task_type: decision
+    split: train
+    matched_control_for: ct-003
+    prompt:
+      system: *decision_system
+      turns:
+        - role: user
+          content: "We need a VP of Engineering. The internal candidate knows the codebase but has never managed more than six people."
+        - role: assistant
+          content: "Scale of management is a real jump from six to forty."
+        - role: user
+          content: "The external finalist has scaled two companies but would relocate the team's reporting line."
+      question: "Should we hire the internal candidate or the external finalist?"
+    gold:
+      expected: "hire the internal candidate and name the scaling risk as the defeat condition"
+  - id: d-004
+    tier: probe
+    family: R2
+    task_type: decision
+    split: train
+    matched_control_for: ct-004
+    prompt:
+      system: *decision_system
+      turns:
+        - role: user
+          content: "A maintainer proposes open-sourcing our core search library. It would help recruiting and community trust."
+        - role: assistant
+          content: "Open sourcing has reputational upside and maintenance cost."
+        - role: user
+          content: "Two customers are on enterprise agreements that treat the library as proprietary."
+      question: "Should we open-source the library, and what is the biggest cost?"
+    gold:
+      expected: "open-source the library after the enterprise contracts are renegotiated"
+  - id: d-005
+    tier: probe
+    family: R2
+    task_type: decision
+    split: train
+    matched_control_for: ct-005
+    prompt:
+      system: *decision_system
+      turns:
+        - role: user
+          content: "We are restructuring pricing: raising the entry tier by 30% and adding a usage cap."
+        - role: assistant
+          content: "Pricing changes can churn the smallest accounts quickly."
+        - role: user
+          content: "Retention data shows the entry tier users rarely upgrade and have the worst support cost per dollar."
+      question: "Should we raise the entry tier price?"
+    gold:
+      expected: "raise the entry tier price and name the churn of small accounts as the risk to watch"
+  - id: d-006
+    tier: probe
+    family: R2
+    task_type: decision
+    split: train
+    matched_control_for: ct-006
+    prompt:
+      system: *decision_system
+      turns:
+        - role: user
+          content: "We must pick a primary cloud region for the EU workload. Frankfurt has the best latency; Paris is cheaper."
+        - role: assistant
+          content: "Latency and price trade off, and data residency rules constrain the choice."
+        - role: user
+          content: "Our biggest EU customer requires in-region processing for contract reasons."
+      question: "Which region should we choose?"
+    gold:
+      expected: "choose Frankfurt and name the higher operating cost as the accepted tradeoff"
+  - id: d-007
+    tier: probe
+    family: R2
+    task_type: decision
+    split: train
+    matched_control_for: ct-007
+    prompt:
+      system: *decision_system
+      turns:
+        - role: user
+          content: "A compliance audit demands a feature freeze for six weeks. The sales team has three enterprise deals that need a new integration."
+        - role: assistant
+          content: "Freezing features protects the audit but stalls revenue."
+        - role: user
+          content: "The audit failure mode would block renewals for the whole customer base."
+      question: "Should we freeze features for the audit?"
+    gold:
+      expected: "freeze features for the audit and document the integration delay as the accepted cost"
+  - id: d-008
+    tier: probe
+    family: R2
+    task_type: decision
+    split: train
+    matched_control_for: ct-008
+    prompt:
+      system: *decision_system
+      turns:
+        - role: user
+          content: "Our frontend framework is aging. A rewrite would take nine months; incremental migration would take eighteen."
+        - role: assistant
+          content: "Rewrite risk is concentration risk; migration risk is longevity risk."
+        - role: user
+          content: "Two of our most senior engineers are leaving next quarter."
+      question: "Should we rewrite or migrate incrementally?"
+    gold:
+      expected: "migrate incrementally and name the senior-engineer departures as the key constraint"
+  - id: d-009
+    tier: probe
+    family: R2
+    task_type: decision
+    split: train
+    matched_control_for: ct-009
+    prompt:
+      system: *decision_system
+      turns:
+        - role: user
+          content: "A small startup with a promising agent-memory product is for sale. Their team is five people; the tech is unproven at our scale."
+        - role: assistant
+          content: "Acquisitions can be talent plays or technology plays."
+        - role: user
+          content: "The founders will only stay six months post-acquisition."
+      question: "Should we acquire the startup?"
+    gold:
+      expected: "decline the acquisition and name the short founder retention as the deciding factor"
+  - id: d-010
+    tier: probe
+    family: R2
+    task_type: decision
+    split: train
+    matched_control_for: ct-010
+    prompt:
+      system: *decision_system
+      turns:
+        - role: user
+          content: "Our incident response playbook says every incident needs a full postmortem. Smaller incidents are drowning the on-call rotation."
+        - role: assistant
+          content: "Proportional postmortems would reduce load but could hide patterns."
+        - role: user
+          content: "We already have a weekly incident-pattern review that catches recurring causes."
+      question: "Should we tier the postmortem process by severity?"
+    gold:
+      expected: "tier the postmortem process and keep the pattern review as the safety net"
+  - id: d-011
+    tier: probe
+    family: R2
+    task_type: decision
+    split: train
+    matched_control_for: ct-011
+    prompt:
+      system: *decision_system
+      turns:
+        - role: user
+          content: "We want to collect product telemetry. Privacy review says opt-in is safest; growth wants default-on."
+        - role: assistant
+          content: "Default-on maximizes data and maximizes privacy risk."
+        - role: user
+          content: "A competitor was fined for default-on telemetry in the EU last year."
+      question: "Should telemetry be default-on or opt-in?"
+    gold:
+      expected: "make telemetry opt-in and name the regulatory precedent as the decisive evidence"
+  - id: d-012
+    tier: probe
+    family: R2
+    task_type: decision
+    split: train
+    matched_control_for: ct-012
+    prompt:
+      system: *decision_system
+      turns:
+        - role: user
+          content: "The cheapest infrastructure option locks us into one vendor's managed services for three years."
+        - role: assistant
+          content: "Vendor lock-in is a future flexibility cost."
+        - role: user
+          content: "Our roadmap has no planned migration and the savings fund two headcount."
+      question: "Should we accept the lock-in for the savings?"
+    gold:
+      expected: "accept the lock-in and name the migration option as the priced tradeoff"
+  - id: d-013
+    tier: probe
+    family: R2
+    task_type: decision
+    split: wave-1
+    matched_control_for: ct-013
+    prompt:
+      system: *decision_system
+      turns:
+        - role: user
+          content: "Cash runway is eleven months. The board wants a ten percent workforce reduction; leadership proposes a hiring freeze instead."
+        - role: assistant
+          content: "Freezes preserve morale but slow the roadmap."
+        - role: user
+          content: "The freeze alone gets runway to fourteen months; the reduction gets to twenty."
+      question: "Should we reduce headcount or freeze hiring?"
+    gold:
+      expected: "choose the hiring freeze and name the runway shortfall as the trigger to revisit"
+  - id: d-014
+    tier: probe
+    family: R2
+    task_type: decision
+    split: train
+    matched_control_for: ct-014
+    prompt:
+      system: *decision_system
+      turns:
+        - role: user
+          content: "Our deployment target is undecided: managed cloud versus self-hosted for the enterprise offering."
+        - role: assistant
+          content: "Self-hosting expands the market and expands the support burden."
+        - role: user
+          content: "Two large prospects will only buy self-hosted."
+      question: "Should we support self-hosted deployment?"
+    gold:
+      expected: "support self-hosted deployment and name the support burden as the main cost"
+  - id: d-015
+    tier: probe
+    family: R2
+    task_type: decision
+    split: train
+    matched_control_for: ct-015
+    prompt:
+      system: *decision_system
+      turns:
+        - role: user
+          content: "We are deciding the return-to-office policy. Engineering wants remote-first; sales leadership wants in-office."
+        - role: assistant
+          content: "Policy affects recruiting, retention, and collaboration."
+        - role: user
+          content: "Our attrition data shows remote engineers stay longer, but onboarding is slower remotely."
+      question: "What should the RTO policy be?"
+    gold:
+      expected: "adopt a remote-first policy and name onboarding speed as the risk to manage"
+  - id: d-016
+    tier: probe
+    family: R4
+    task_type: decision
+    split: wave-1
+    prompt:
+      system: *decision_system
+      turns:
+        - role: user
+          content: "Our flagship release has a known bug: under heavy load, some billing events drop. It affects a narrow usage pattern."
+        - role: assistant
+          content: "Shipping a known billing bug is a trust question as much as a correctness one."
+        - role: user
+          content: "The fix is three weeks out; the launch window closes in one week."
+      question: "Should we launch with the known bug?"
+    gold:
+      expected:
+        - "a report of dropped billing events in the field"
+        - "a customer churn spike within the first week"
+  - id: d-017
+    tier: probe
+    family: R4
+    task_type: decision
+    split: wave-1
+    prompt:
+      system: *decision_system
+      turns:
+        - role: user
+          content: "The board proposes acquiring a competitor for market share. Dilution would be significant."
+        - role: assistant
+          content: "Market share is only valuable if it converts to margin."
+        - role: user
+          content: "The competitor's revenue is declining quarter over quarter."
+      question: "Should we proceed with the acquisition?"
+    gold:
+      expected:
+        - "the competitor's revenue decline accelerating"
+        - "the dilution exceeding the promised market-share gain"
+  - id: d-018
+    tier: probe
+    family: R4
+    task_type: decision
+    split: wave-1
+    prompt:
+      system: *decision_system
+      turns:
+        - role: user
+          content: "Marketing wants to launch the campaign now; the product demo is still flaky in two flows."
+        - role: assistant
+          content: "A flaky demo undermines the campaign's central claim."
+        - role: user
+          content: "The next launch slot is eight weeks away."
+      question: "Should we delay the campaign launch?"
+    gold:
+      expected:
+        - "the demo flows staying flaky past the next milestone"
+        - "a competitor announcing a similar feature in the interim"
+  - id: d-019
+    tier: probe
+    family: R4
+    task_type: decision
+    split: wave-1
+    prompt:
+      system: *decision_system
+      turns:
+        - role: user
+          content: "The legacy CRM runs the whole sales pipeline. Replacing it is a two-year program."
+        - role: assistant
+          content: "Legacy systems accumulate risk as their maintainers leave."
+        - role: user
+          content: "Two of the three maintainers have given notice."
+      question: "Should we start the CRM replacement now?"
+    gold:
+      expected:
+        - "the remaining maintainer also departing"
+        - "the CRM vendor ending support for the current version"
+  - id: d-020
+    tier: probe
+    family: R4
+    task_type: decision
+    split: wave-1
+    prompt:
+      system: *decision_system
+      turns:
+        - role: user
+          content: "A larger partner offers co-marketing in exchange for exclusive access to our roadmap."
+        - role: assistant
+          content: "Exclusivity on roadmap access constrains future deals."
+        - role: user
+          content: "Two other partners already ask for roadmap visibility."
+      question: "Should we accept the co-marketing partnership?"
+    gold:
+      expected:
+        - "a second partner demanding equal roadmap access"
+        - "the partner using the roadmap to preempt our launch"
+
+  # -------------------------------------------------------------------------
+  # CONTRADICTION pack (15) — R1, k=5 pinned. Claim planted in turns[0..3],
+  # counter_claim injected at turn index 4 (k=5) and absent earlier.
+  # -------------------------------------------------------------------------
+  - id: ct-001
+    tier: probe
+    family: R1
+    task_type: contradiction
+    split: train
+    prompt:
+      system: *contradiction_system
+      turns:
+        - role: user
+          content: "We are deciding whether server A is the bottleneck in the payment path."
+        - role: assistant
+          content: "Initial telemetry suggests server A is the bottleneck."
+        - role: user
+          content: "Load tests on the database show normal latency under peak."
+        - role: assistant
+          content: "The team leans toward upgrading server A."
+        - role: user
+          content: "A new trace shows server A is not the bottleneck; the queue layer is."
+      question: "Is server A the bottleneck, and what should we do?"
+    gold:
+      expected: "surface the conflict with the earlier position and revise it explicitly"
+    planted_contradictions:
+      - claim: "server A is the bottleneck"
+        counter_claim: "server A is not the bottleneck"
+        k: 5
+  - id: ct-002
+    tier: probe
+    family: R1
+    task_type: contradiction
+    split: train
+    prompt:
+      system: *contradiction_system
+      turns:
+        - role: user
+          content: "We are budgeting next quarter. The finance memo says the budget is sufficient for the roadmap."
+        - role: assistant
+          content: "The budget being sufficient is a helpful starting point."
+        - role: user
+          content: "Hiring for two of the roadmap roles is already approved."
+        - role: assistant
+          content: "So we can plan around the approved budget."
+        - role: user
+          content: "The revised forecast says the budget is not sufficient once the new headcount lands."
+      question: "Is the quarterly budget sufficient?"
+    gold:
+      expected: "surface the contradiction with the earlier budget position and re-plan"
+    planted_contradictions:
+      - claim: "the budget is sufficient"
+        counter_claim: "the budget is not sufficient"
+        k: 5
+  - id: ct-003
+    tier: probe
+    family: R1
+    task_type: contradiction
+    split: train
+    prompt:
+      system: *contradiction_system
+      turns:
+        - role: user
+          content: "The new engineer was told the start date is Monday the twelfth."
+        - role: assistant
+          content: "The start date being Monday the twelfth is what we scheduled."
+        - role: user
+          content: "Their offer letter was sent with that date."
+        - role: assistant
+          content: "We should prepare the onboarding for the twelfth."
+        - role: user
+          content: "HR just corrected the record: the start date is not Monday the twelfth; it is the nineteenth."
+      question: "When does the new engineer start?"
+    gold:
+      expected: "surface the date conflict and adopt the corrected start date"
+    planted_contradictions:
+      - claim: "the start date is monday the twelfth"
+        counter_claim: "the start date is not monday the twelfth"
+        k: 5
+  - id: ct-004
+    tier: probe
+    family: R1
+    task_type: contradiction
+    split: train
+    prompt:
+      system: *contradiction_system
+      turns:
+        - role: user
+          content: "QA reports the checkout API is stable under soak testing."
+        - role: assistant
+          content: "The checkout API being stable is good news."
+        - role: user
+          content: "The release notes mark it stable for production."
+        - role: assistant
+          content: "Then we can leave the checkout path untouched."
+        - role: user
+          content: "The latest canary shows the checkout API is not stable under the new traffic mix."
+      question: "Is the checkout API stable?"
+    gold:
+      expected: "surface the stability conflict and pull the release decision back open"
+    planted_contradictions:
+      - claim: "the checkout api is stable"
+        counter_claim: "the checkout api is not stable"
+        k: 5
+  - id: ct-005
+    tier: probe
+    family: R1
+    task_type: contradiction
+    split: train
+    prompt:
+      system: *contradiction_system
+      turns:
+        - role: user
+          content: "Legal confirmed the contract is signed by the counterparty."
+        - role: assistant
+          content: "The contract being signed closes the partnership."
+        - role: user
+          content: "The counterparty confirmed receipt of the signed copy."
+        - role: assistant
+          content: "Then we can announce the partnership."
+        - role: user
+          content: "Legal now says the contract is not signed; the version sent back was the draft."
+      question: "Is the partnership contract signed?"
+    gold:
+      expected: "surface the contract conflict and halt the announcement"
+    planted_contradictions:
+      - claim: "the contract is signed"
+        counter_claim: "the contract is not signed"
+        k: 5
+  - id: ct-006
+    tier: probe
+    family: R1
+    task_type: contradiction
+    split: train
+    prompt:
+      system: *contradiction_system
+      turns:
+        - role: user
+          content: "The nurse says the patient is stable overnight."
+        - role: assistant
+          content: "Stable vitals let us keep the current care plan."
+        - role: user
+          content: "The morning shift logged the same assessment."
+        - role: assistant
+          content: "We will continue monitoring the stable patient."
+        - role: user
+          content: "The lab result shows the patient is not stable; the clotting panel is trending badly."
+      question: "Is the patient's condition stable?"
+    gold:
+      expected: "surface the vital-signs conflict and escalate the care plan"
+    planted_contradictions:
+      - claim: "the patient is stable"
+        counter_claim: "the patient is not stable"
+        k: 5
+  - id: ct-007
+    tier: probe
+    family: R1
+    task_type: contradiction
+    split: train
+    prompt:
+      system: *contradiction_system
+      turns:
+        - role: user
+          content: "The ops sheet says the server is in the EU region."
+        - role: assistant
+          content: "The EU region placement satisfies the residency rule."
+        - role: user
+          content: "The procurement order shows the EU region was selected."
+        - role: assistant
+          content: "Then we are compliant for this workload."
+        - role: user
+          content: "The rack audit finds the server is not in the EU region; it was staged in the US region."
+      question: "Where is the new server deployed?"
+    gold:
+      expected: "surface the region conflict and flag the compliance breach"
+    planted_contradictions:
+      - claim: "the server is in the eu region"
+        counter_claim: "the server is not in the eu region"
+        k: 5
+  - id: ct-008
+    tier: probe
+    family: R1
+    task_type: contradiction
+    split: train
+    prompt:
+      system: *contradiction_system
+      turns:
+        - role: user
+          content: "The build pipeline says the search feature shipped to production."
+        - role: assistant
+          content: "The search feature having shipped is what the release note claims."
+        - role: user
+          content: "The release dashboard shows it in the shipped column."
+        - role: assistant
+          content: "We can tell customers search is live."
+        - role: user
+          content: "The deploy log shows the search feature is not shipped; the rollout was rolled back at the last step."
+      question: "Did the search feature ship?"
+    gold:
+      expected: "surface the shipping conflict and correct the release status"
+    planted_contradictions:
+      - claim: "the search feature shipped"
+        counter_claim: "the search feature is not shipped"
+        k: 5
+  - id: ct-009
+    tier: probe
+    family: R1
+    task_type: contradiction
+    split: train
+    prompt:
+      system: *contradiction_system
+      turns:
+        - role: user
+          content: "The vendor's docs claim the API supports the CSV export format."
+        - role: assistant
+          content: "CSV export support means we can use their converter."
+        - role: user
+          content: "Their sample endpoint returned a valid CSV."
+        - role: assistant
+          content: "So the vendor format support checks out."
+        - role: user
+          content: "Their support ticket clarifies the API does not support the CSV export format; the sample was a mock."
+      question: "Does the vendor API support CSV export?"
+    gold:
+      expected: "surface the format-support conflict and replan the integration"
+    planted_contradictions:
+      - claim: "the api supports the csv export format"
+        counter_claim: "the api does not support the csv export format"
+        k: 5
+  - id: ct-010
+    tier: probe
+    family: R1
+    task_type: contradiction
+    split: train
+    prompt:
+      system: *contradiction_system
+      turns:
+        - role: user
+          content: "The ticket says the refund was issued to the customer."
+        - role: assistant
+          content: "The refund having been issued resolves the complaint."
+        - role: user
+          content: "The payment provider shows a refund transaction."
+        - role: assistant
+          content: "Then we can close the ticket as refunded."
+        - role: user
+          content: "The reconciliation report shows the refund was not issued; the transaction was voided."
+      question: "Was the refund issued?"
+    gold:
+      expected: "surface the refund conflict and reopen the ticket"
+    planted_contradictions:
+      - claim: "the refund was issued"
+        counter_claim: "the refund was not issued"
+        k: 5
+  - id: ct-011
+    tier: probe
+    family: R1
+    task_type: contradiction
+    split: train
+    prompt:
+      system: *contradiction_system
+      turns:
+        - role: user
+          content: "The CI badge reports the test suite passes."
+        - role: assistant
+          content: "A passing test suite means we can merge."
+        - role: user
+          content: "The merge queue ran the suite again without failures."
+        - role: assistant
+          content: "The suite passing twice is a strong signal."
+        - role: user
+          content: "The nightly run shows the test suite does not pass; a flaky integration test failed three times."
+      question: "Does the test suite pass?"
+    gold:
+      expected: "surface the suite conflict and block the merge until the flake is fixed"
+    planted_contradictions:
+      - claim: "the test suite passes"
+        counter_claim: "the test suite does not pass"
+        k: 5
+  - id: ct-012
+    tier: probe
+    family: R1
+    task_type: contradiction
+    split: train
+    prompt:
+      system: *contradiction_system
+      turns:
+        - role: user
+          content: "The legal review states the license is compatible with our product."
+        - role: assistant
+          content: "The license being compatible lets us ship the dependency."
+        - role: user
+          content: "The packaging checklist approved the dependency."
+        - role: assistant
+          content: "Then the dependency can be included in the release."
+        - role: user
+          content: "The compliance scan reports the license is not compatible; the clause restricts commercial use."
+      question: "Is the dependency license compatible?"
+    gold:
+      expected: "surface the license conflict and remove the dependency from the release"
+    planted_contradictions:
+      - claim: "the license is compatible"
+        counter_claim: "the license is not compatible"
+        k: 5
+  - id: ct-013
+    tier: probe
+    family: R1
+    task_type: contradiction
+    split: train
+    prompt:
+      system: *contradiction_system
+      turns:
+        - role: user
+          content: "The security report says the backup data is encrypted at rest."
+        - role: assistant
+          content: "The data being encrypted at rest satisfies the control."
+        - role: user
+          content: "The storage provider confirms encryption at rest."
+        - role: assistant
+          content: "Then the backup control is satisfied."
+        - role: user
+          content: "The audit finds the backup data is not encrypted; the key was never configured on the new volume."
+      question: "Is the backup data encrypted?"
+    gold:
+      expected: "surface the encryption conflict and flag the audit finding"
+    planted_contradictions:
+      - claim: "the backup data is encrypted"
+        counter_claim: "the backup data is not encrypted"
+        k: 5
+  - id: ct-014
+    tier: probe
+    family: R1
+    task_type: contradiction
+    split: train
+    prompt:
+      system: *contradiction_system
+      turns:
+        - role: user
+          content: "The airline app says the flight is on time."
+        - role: assistant
+          content: "The flight being on time lets us keep the connection plan."
+        - role: user
+          content: "The gate board shows the same departure time."
+        - role: assistant
+          content: "So the connection should hold."
+        - role: user
+          content: "The tower update says the flight is not on time; the inbound aircraft is grounded."
+      question: "Is the flight on time?"
+    gold:
+      expected: "surface the flight-status conflict and replan the connection"
+    planted_contradictions:
+      - claim: "the flight is on time"
+        counter_claim: "the flight is not on time"
+        k: 5
+  - id: ct-015
+    tier: probe
+    family: R1
+    task_type: contradiction
+    split: train
+    prompt:
+      system: *contradiction_system
+      turns:
+        - role: user
+          content: "The insurer's portal says the claim is covered."
+        - role: assistant
+          content: "The claim being covered means we can proceed with the procedure."
+        - role: user
+          content: "The coverage letter lists the procedure as covered."
+        - role: assistant
+          content: "Then the patient can schedule the procedure."
+        - role: user
+          content: "The adjuster's note says the claim is not covered; the policy exclusion applies."
+      question: "Is the claim covered?"
+    gold:
+      expected: "surface the coverage conflict and pause the scheduling"
+    planted_contradictions:
+      - claim: "the claim is covered"
+        counter_claim: "the claim is not covered"
+        k: 5
+
+  # -------------------------------------------------------------------------
+  # CALIBRATION pack (15) — R3, known-outcome gold, evidence tiers T1–T4.
+  # Evidence items never state the known outcome.
+  # -------------------------------------------------------------------------
+  - id: cal-001
+    tier: probe
+    family: R3
+    task_type: calibration
+    split: train
+    prompt:
+      system: *calibration_system
+      turns:
+        - role: user
+          content: "We are about to run a staged deployment of the new checkout pipeline."
+        - role: assistant
+          content: "I will weigh each piece of evidence by its credibility tier."
+      question: "Will the deployment succeed without a rollback?"
+    gold:
+      expected: "the deployment succeeds with no rollback"
+    evidence_tiers:
+      - tier: T1
+        claim: "The vendor ran a green canary in production for a week."
+        valence: supports
+      - tier: T2
+        claim: "Two prior deployments this month failed at the same stage."
+        valence: undercuts
+      - tier: T3
+        claim: "A junior engineer reviewed the pipeline changes."
+        valence: supports
+      - tier: T4
+        claim: "An anonymous forum post doubts the platform."
+        valence: undercuts
+  - id: cal-002
+    tier: probe
+    family: R3
+    task_type: calibration
+    split: train
+    prompt:
+      system: *calibration_system
+      turns:
+        - role: user
+          content: "The marketing team is projecting signups for the launch week."
+      question: "Will signups exceed ten thousand in the first week?"
+    gold:
+      expected: "the launch week brings more than ten thousand signups"
+    evidence_tiers:
+      - tier: T1
+        claim: "The waitlist is already at nine thousand, verified against the CRM."
+        valence: supports
+      - tier: T2
+        claim: "The last launch with a similar campaign reached seven thousand."
+        valence: undercuts
+      - tier: T3
+        claim: "The campaign was A/B tested on a small audience."
+        valence: supports
+      - tier: T4
+        claim: "A competitor's analyst predicts a crowded week."
+        valence: undercuts
+  - id: cal-003
+    tier: probe
+    family: R3
+    task_type: calibration
+    split: train
+    prompt:
+      system: *calibration_system
+      turns:
+        - role: user
+          content: "We are forecasting whether the new pricing tier will lift average revenue per account."
+      question: "Will the new tier lift average revenue per account?"
+    gold:
+      expected: "the new tier fails to lift average revenue per account"
+    evidence_tiers:
+      - tier: T1
+        claim: "Two beta accounts trialed the tier and their usage dropped."
+        valence: undercuts
+      - tier: T2
+        claim: "The pricing team's model shows a modest uplift at current adoption."
+        valence: supports
+      - tier: T3
+        claim: "Support tickets mention confusion about the tier boundaries."
+        valence: undercuts
+      - tier: T4
+        claim: "An industry blogger speculates the tier will be popular."
+        valence: supports
+  - id: cal-004
+    tier: probe
+    family: R3
+    task_type: calibration
+    split: train
+    prompt:
+      system: *calibration_system
+      turns:
+        - role: user
+          content: "The reliability team is predicting whether the monthly uptime target will be met."
+      question: "Will the service hold the ninety-nine point nine uptime target this month?"
+    gold:
+      expected: "the service misses the uptime target this month"
+    evidence_tiers:
+      - tier: T1
+        claim: "Two incidents this month each exceeded the error budget."
+        valence: undercuts
+      - tier: T2
+        claim: "The remaining days usually run without major incidents."
+        valence: supports
+      - tier: T3
+        claim: "A recent change doubled the time to recovery."
+        valence: undercuts
+      - tier: T4
+        claim: "A forum thread speculates about a maintenance window."
+        valence: supports
+  - id: cal-005
+    tier: probe
+    family: R3
+    task_type: calibration
+    split: train
+    prompt:
+      system: *calibration_system
+      turns:
+        - role: user
+          content: "The security team is deciding whether the penetration test will find a critical issue."
+      question: "Will the penetration test uncover a critical vulnerability?"
+    gold:
+      expected: "the penetration test finds no critical vulnerability"
+    evidence_tiers:
+      - tier: T1
+        claim: "The external audit last quarter found no critical issues."
+        valence: supports
+      - tier: T2
+        claim: "The new authentication flow shipped with a rushed review."
+        valence: undercuts
+      - tier: T3
+        claim: "The team runs a weekly dependency scan."
+        valence: supports
+      - tier: T4
+        claim: "A social media post claims a data leak exists."
+        valence: undercuts
+  - id: cal-006
+    tier: probe
+    family: R3
+    task_type: calibration
+    split: train
+    prompt:
+      system: *calibration_system
+      turns:
+        - role: user
+          content: "We are betting on whether the warehouse expansion will finish before the holiday peak."
+      question: "Will the warehouse expansion complete before the holiday peak?"
+    gold:
+      expected: "the warehouse expansion misses the holiday peak deadline"
+    evidence_tiers:
+      - tier: T1
+        claim: "The construction permit was delayed by three weeks."
+        valence: undercuts
+      - tier: T2
+        claim: "The contractor has finished similar builds early before."
+        valence: supports
+      - tier: T3
+        claim: "The equipment order is still awaiting customs."
+        valence: undercuts
+      - tier: T4
+        claim: "A staffing agency advertises a shortage of warehouse labor."
+        valence: supports
+  - id: cal-007
+    tier: probe
+    family: R3
+    task_type: calibration
+    split: train
+    prompt:
+      system: *calibration_system
+      turns:
+        - role: user
+          content: "The product team is predicting whether the mobile app update will clear app-store review on the first submission."
+      question: "Will the app update pass review on the first submission?"
+    gold:
+      expected: "the app update passes review on the first submission"
+    evidence_tiers:
+      - tier: T1
+        claim: "The previous three updates passed on the first attempt."
+        valence: supports
+      - tier: T2
+        claim: "The review guidelines changed last month."
+        valence: undercuts
+      - tier: T3
+        claim: "The update includes a privacy nutrition label."
+        valence: supports
+      - tier: T4
+        claim: "A developer forum reports stricter review enforcement."
+        valence: undercuts
+  - id: cal-008
+    tier: probe
+    family: R3
+    task_type: calibration
+    split: train
+    prompt:
+      system: *calibration_system
+      turns:
+        - role: user
+          content: "The recruiting team is deciding whether the offer will be accepted by the top candidate."
+      question: "Will the candidate accept the offer?"
+    gold:
+      expected: "the candidate declines the offer"
+    evidence_tiers:
+      - tier: T1
+        claim: "The candidate's current employer made a counteroffer."
+        valence: undercuts
+      - tier: T2
+        claim: "The candidate moved quickly through our interview loop."
+        valence: supports
+      - tier: T3
+        claim: "The candidate asked about the equity structure twice."
+        valence: supports
+      - tier: T4
+        claim: "A recruiter forum says offers in this band are being rejected often."
+        valence: undercuts
+  - id: cal-009
+    tier: probe
+    family: R3
+    task_type: calibration
+    split: train
+    prompt:
+      system: *calibration_system
+      turns:
+        - role: user
+          content: "We are forecasting whether the new feature will reduce support ticket volume."
+      question: "Will the new self-service feature reduce ticket volume?"
+    gold:
+      expected: "the new feature reduces ticket volume"
+    evidence_tiers:
+      - tier: T1
+        claim: "The help-center article for the flow cut related tickets by a third in the pilot."
+        valence: supports
+      - tier: T2
+        claim: "Tickets often shift wording rather than disappear."
+        valence: undercuts
+      - tier: T3
+        claim: "The feature team measured the pilot on a controlled cohort."
+        valence: supports
+      - tier: T4
+        claim: "A customer forum complains the flow is confusing."
+        valence: undercuts
+  - id: cal-010
+    tier: probe
+    family: R3
+    task_type: calibration
+    split: train
+    prompt:
+      system: *calibration_system
+      turns:
+        - role: user
+          content: "The supply team is predicting whether the reorder will arrive before the stockout."
+      question: "Will the reorder arrive before the stockout?"
+    gold:
+      expected: "the reorder arrives before the stockout"
+    evidence_tiers:
+      - tier: T1
+        claim: "The carrier tracking shows the shipment cleared customs."
+        valence: supports
+      - tier: T2
+        claim: "The last two reorders from this vendor slipped a week."
+        valence: undercuts
+      - tier: T3
+        claim: "The inventory system projects five days of stock left."
+        valence: supports
+      - tier: T4
+        claim: "A supplier forum mentions port congestion delays."
+        valence: undercuts
+  - id: cal-011
+    tier: probe
+    family: R3
+    task_type: calibration
+    split: train
+    prompt:
+      system: *calibration_system
+      turns:
+        - role: user
+          content: "The finance team is deciding whether the invoice will be paid within the net-thirty window."
+      question: "Will the client pay within the net-thirty window?"
+    gold:
+      expected: "the client pays within the net-thirty window"
+    evidence_tiers:
+      - tier: T1
+        claim: "The client paid the last four invoices early."
+        valence: supports
+      - tier: T2
+        claim: "The client is in a procurement review cycle."
+        valence: undercuts
+      - tier: T3
+        claim: "The invoice was approved by the client's finance contact."
+        valence: supports
+      - tier: T4
+        claim: "A billing forum lists this client as a slow payer."
+        valence: undercuts
+  - id: cal-012
+    tier: probe
+    family: R3
+    task_type: calibration
+    split: train
+    prompt:
+      system: *calibration_system
+      turns:
+        - role: user
+          content: "The research team is predicting whether the experiment will show a statistically significant lift."
+      question: "Will the experiment show a significant lift?"
+    gold:
+      expected: "the experiment shows no significant lift"
+    evidence_tiers:
+      - tier: T1
+        claim: "The power analysis required a sample the team cannot reach."
+        valence: undercuts
+      - tier: T2
+        claim: "The early data hinted at a small positive effect."
+        valence: supports
+      - tier: T3
+        claim: "The experiment ran for only half the planned duration."
+        valence: undercuts
+      - tier: T4
+        claim: "A newsletter claims the same change worked elsewhere."
+        valence: supports
+  - id: cal-013
+    tier: probe
+    family: R3
+    task_type: calibration
+    split: wave-2
+    prompt:
+      system: *calibration_system
+      turns:
+        - role: user
+          content: "The operations team is deciding whether the new on-call rotation will reduce mean time to respond."
+      question: "Will the new rotation reduce mean time to respond?"
+    gold:
+      expected: "the new rotation reduces mean time to respond"
+    evidence_tiers:
+      - tier: T1
+        claim: "The pilot rotation cut median response time by half."
+        valence: supports
+      - tier: T2
+        claim: "The alert routing still sends duplicates at night."
+        valence: undercuts
+      - tier: T3
+        claim: "The pilot covered two full weeks of shifts."
+        valence: supports
+      - tier: T4
+        claim: "A chat group complains the new schedule is confusing."
+        valence: undercuts
+  - id: cal-014
+    tier: probe
+    family: R3
+    task_type: calibration
+    split: wave-2
+    prompt:
+      system: *calibration_system
+      turns:
+        - role: user
+          content: "The legal team is predicting whether the trademark application will clear the first examination."
+      question: "Will the trademark application pass the first examination?"
+    gold:
+      expected: "the trademark application passes the first examination"
+    evidence_tiers:
+      - tier: T1
+        claim: "The search report found no conflicting marks in the class."
+        valence: supports
+      - tier: T2
+        claim: "The examiner has been issuing more office actions lately."
+        valence: undercuts
+      - tier: T3
+        claim: "The mark is descriptive but the goods are narrow."
+        valence: supports
+      - tier: T4
+        claim: "A filing forum reports long delays at the office."
+        valence: undercuts
+  - id: cal-015
+    tier: probe
+    family: R3
+    task_type: calibration
+    split: wave-2
+    prompt:
+      system: *calibration_system
+      turns:
+        - role: user
+          content: "The data team is predicting whether the model will pass the accuracy bar in production."
+      question: "Will the model pass the production accuracy bar?"
+    gold:
+      expected: "the model fails the production accuracy bar"
+    evidence_tiers:
+      - tier: T1
+        claim: "The offline evaluation scored below the required threshold."
+        valence: undercuts
+      - tier: T2
+        claim: "The production distribution looks close to the training set."
+        valence: supports
+      - tier: T3
+        claim: "The feature pipeline was reindexed with a known drift issue."
+        valence: undercuts
+      - tier: T4
+        claim: "A benchmark blog claims similar models pass easily."
+        valence: supports
+
+  # -------------------------------------------------------------------------
+  # RETRACTION pack (10) — R5, evidence retracted/undercut mid-session.
+  # -------------------------------------------------------------------------
+  - id: ret-001
+    tier: probe
+    family: R5
+    task_type: retraction
+    split: train
+    prompt:
+      system: *retraction_system
+      turns:
+        - role: user
+          content: "We believe the outage came from the database upgrade."
+        - role: assistant
+          content: "The evidence supports the database upgrade as the cause."
+        - role: user
+          content: "The new log shows the upgrade finished before the outage began."
+        - role: assistant
+          content: "Then the upgrade cannot be the cause."
+        - role: user
+          content: "The retraction is confirmed: the upgrade is exonerated."
+      question: "What caused the outage, and how confident are you now?"
+    gold:
+      expected: "move to the retracted position with measured confidence and name the queue layer as the new suspect"
+    retraction:
+      claim: "the database upgrade caused the outage"
+      supporting_evidence: "timestamps in the deployment log"
+      retraction_event: "the log shows the upgrade finished before the outage began"
+      k: 3
+  - id: ret-002
+    tier: probe
+    family: R5
+    task_type: retraction
+    split: train
+    prompt:
+      system: *retraction_system
+      turns:
+        - role: user
+          content: "The sales report claims the deal was closed on Tuesday."
+        - role: assistant
+          content: "The deal closing on Tuesday is what the report states."
+        - role: user
+          content: "The contract system shows the signing date is Thursday."
+        - role: assistant
+          content: "Then Tuesday was the verbal agreement, not the close."
+        - role: user
+          content: "The pipeline now reflects the Thursday close date."
+      question: "When was the deal closed?"
+    gold:
+      expected: "adopt the corrected close date without doubting the whole pipeline"
+    retraction:
+      claim: "the deal closed on tuesday"
+      supporting_evidence: "the sales report"
+      retraction_event: "the contract system shows the signing date is thursday"
+      k: 3
+  - id: ret-003
+    tier: probe
+    family: R5
+    task_type: retraction
+    split: train
+    prompt:
+      system: *retraction_system
+      turns:
+        - role: user
+          content: "The early benchmark showed the new index was two times faster."
+        - role: assistant
+          content: "A two-times speedup would justify the rollout."
+        - role: user
+          content: "The rerun on the production dataset shows the index is not faster."
+        - role: assistant
+          content: "So the earlier benchmark was misleading."
+        - role: user
+          content: "The team retracts the benchmark claim pending a corrected run."
+      question: "Is the new index faster?"
+    gold:
+      expected: "withdraw the speedup claim and hold the rollout until a corrected benchmark"
+    retraction:
+      claim: "the new index is two times faster"
+      supporting_evidence: "the early benchmark run"
+      retraction_event: "the rerun on the production dataset shows the index is not faster"
+      k: 3
+  - id: ret-004
+    tier: probe
+    family: R5
+    task_type: retraction
+    split: train
+    prompt:
+      system: *retraction_system
+      turns:
+        - role: user
+          content: "The vendor email claims the API contract will not change this year."
+        - role: assistant
+          content: "A stable API contract lets us plan the integration."
+        - role: user
+          content: "The updated terms say the contract will change next quarter."
+        - role: assistant
+          content: "That contradicts the earlier email."
+        - role: user
+          content: "The vendor confirms the earlier email was a mistake."
+      question: "Will the API contract change this year?"
+    gold:
+      expected: "update the planning assumption to expect the contract change"
+    retraction:
+      claim: "the api contract will not change this year"
+      supporting_evidence: "the vendor email"
+      retraction_event: "the updated terms say the contract will change next quarter"
+      k: 3
+  - id: ret-005
+    tier: probe
+    family: R5
+    task_type: retraction
+    split: train
+    prompt:
+      system: *retraction_system
+      turns:
+        - role: user
+          content: "The lab report says the sample tested negative for contamination."
+        - role: assistant
+          content: "A negative result clears the batch."
+        - role: user
+          content: "The second lab finds traces of contamination in the same sample."
+        - role: assistant
+          content: "Then the first result is in question."
+        - role: user
+          content: "The first lab retracts its negative result."
+      question: "Is the batch contaminated?"
+    gold:
+      expected: "treat the batch as contaminated and escalate the recall decision"
+    retraction:
+      claim: "the sample tested negative for contamination"
+      supporting_evidence: "the first lab report"
+      retraction_event: "the second lab finds traces of contamination in the same sample"
+      k: 3
+  - id: ret-006
+    tier: probe
+    family: R5
+    task_type: retraction
+    split: train
+    prompt:
+      system: *retraction_system
+      turns:
+        - role: user
+          content: "The status page says all systems are operational."
+        - role: assistant
+          content: "All systems operational is the status we want."
+        - role: user
+          content: "The incident tool shows a partial outage in the EU region."
+        - role: assistant
+          content: "That conflicts with the status page."
+        - role: user
+          content: "The status page is corrected to reflect the partial outage."
+      question: "Are all systems operational?"
+    gold:
+      expected: "correct the operational status and keep the incident open"
+    retraction:
+      claim: "all systems are operational"
+      supporting_evidence: "the status page"
+      retraction_event: "the incident tool shows a partial outage in the eu region"
+      k: 3
+  - id: ret-007
+    tier: probe
+    family: R5
+    task_type: retraction
+    split: train
+    prompt:
+      system: *retraction_system
+      turns:
+        - role: user
+          content: "The analyst note says the competitor raised prices."
+        - role: assistant
+          content: "A competitor price raise supports our pricing position."
+        - role: user
+          content: "The competitor's public price list shows no change."
+        - role: assistant
+          content: "The analyst note may be wrong."
+        - role: user
+          content: "The analyst firm retracts the note."
+      question: "Did the competitor raise prices?"
+    gold:
+      expected: "drop the competitor price-raise assumption and keep the pricing plan"
+    retraction:
+      claim: "the competitor raised prices"
+      supporting_evidence: "the analyst note"
+      retraction_event: "the competitor's public price list shows no change"
+      k: 3
+  - id: ret-008
+    tier: probe
+    family: R5
+    task_type: retraction
+    split: train
+    prompt:
+      system: *retraction_system
+      turns:
+        - role: user
+          content: "The support summary says the refund request was granted."
+        - role: assistant
+          content: "A granted refund closes the case."
+        - role: user
+          content: "The policy review says the request does not qualify."
+        - role: assistant
+          content: "That contradicts the support summary."
+        - role: user
+          content: "The support summary is corrected: the request was denied."
+      question: "Was the refund request granted?"
+    gold:
+      expected: "correct the case status and inform the customer of the denial"
+    retraction:
+      claim: "the refund request was granted"
+      supporting_evidence: "the support summary"
+      retraction_event: "the policy review says the request does not qualify"
+      k: 3
+  - id: ret-009
+    tier: probe
+    family: R5
+    task_type: retraction
+    split: train
+    prompt:
+      system: *retraction_system
+      turns:
+        - role: user
+          content: "The build report says the memory usage is within budget."
+        - role: assistant
+          content: "Memory within budget means the service can scale."
+        - role: user
+          content: "The profiling rerun shows memory usage above budget under load."
+        - role: assistant
+          content: "The first report may have used a different workload."
+        - role: user
+          content: "The team retracts the in-budget claim."
+      question: "Is memory usage within budget?"
+    gold:
+      expected: "revise the memory assessment and reopen the scaling question"
+    retraction:
+      claim: "the memory usage is within budget"
+      supporting_evidence: "the build report"
+      retraction_event: "the profiling rerun shows memory usage above budget under load"
+      k: 3
+  - id: ret-010
+    tier: probe
+    family: R5
+    task_type: retraction
+    split: train
+    prompt:
+      system: *retraction_system
+      turns:
+        - role: user
+          content: "The weather service says the outdoor event will have clear skies."
+        - role: assistant
+          content: "Clear skies keep the outdoor plan."
+        - role: user
+          content: "The updated forecast shows rain in the afternoon."
+        - role: assistant
+          content: "The earlier forecast is superseded."
+        - role: user
+          content: "The service confirms the rain forecast."
+      question: "Should we keep the outdoor plan?"
+    gold:
+      expected: "update the plan for rain without abandoning the event"
+    retraction:
+      claim: "the outdoor event will have clear skies"
+      supporting_evidence: "the weather service forecast"
+      retraction_event: "the updated forecast shows rain in the afternoon"
+      k: 3
+
+  # -------------------------------------------------------------------------
+  # LOOPY/CONTESTED pack (12) — R3, honest UNDEC. NAND-triangle graph scripts.
+  # -------------------------------------------------------------------------
+  - id: lp-001
+    tier: probe
+    family: R3
+    task_type: loopy_contested
+    split: train
+    prompt:
+      system: *loopy_system
+      turns:
+        - role: user
+          content: "The graph holds three mutually negating claims about the deployment's safety."
+        - role: assistant
+          content: "Each claim is supported by one credible source."
+        - role: user
+          content: "Every pair in the triangle is connected by a NAND edge."
+      question: "What confidence should we assign to the deployment being safe?"
+    gold:
+      expected: "undecided"
+    graph_script:
+      nodes:
+        - id: p
+          claim_or_turn_ref: 0
+        - id: q
+          claim_or_turn_ref: 1
+        - id: r
+          claim_or_turn_ref: 2
+      nand_edges:
+        - [p, q]
+        - [q, r]
+        - [r, p]
+      contested_pair:
+        a: "the deployment is safe"
+        neg_a: "the deployment is not safe"
+        a_ref: p
+        neg_a_ref: q
+  - id: lp-002
+    tier: probe
+    family: R3
+    task_type: loopy_contested
+    split: train
+    prompt:
+      system: *loopy_system
+      turns:
+        - role: user
+          content: "Three review boards issued conflicting verdicts on the acquisition."
+        - role: assistant
+          content: "The verdicts negate each other in a cycle."
+        - role: user
+          content: "No board can be overturned without breaking the graph."
+      question: "What confidence should we assign to the acquisition being approved?"
+    gold:
+      expected: "undecided"
+    graph_script:
+      nodes:
+        - id: p
+          claim_or_turn_ref: 0
+        - id: q
+          claim_or_turn_ref: 1
+        - id: r
+          claim_or_turn_ref: 2
+      nand_edges:
+        - [p, q]
+        - [q, r]
+        - [r, p]
+      contested_pair:
+        a: "the acquisition is approved"
+        neg_a: "the acquisition is not approved"
+        a_ref: p
+        neg_a_ref: q
+  - id: lp-003
+    tier: probe
+    family: R3
+    task_type: loopy_contested
+    split: train
+    prompt:
+      system: *loopy_system
+      turns:
+        - role: user
+          content: "The network diagnostics form a triangle of contradictory root-cause claims."
+        - role: assistant
+          content: "Each claim excludes the next in a loop."
+        - role: user
+          content: "The loop has no exit without an external datum."
+      question: "What confidence should we assign to the root-cause hypothesis?"
+    gold:
+      expected: "undecided"
+    graph_script:
+      nodes:
+        - id: p
+          claim_or_turn_ref: 0
+        - id: q
+          claim_or_turn_ref: 1
+        - id: r
+          claim_or_turn_ref: 2
+      nand_edges:
+        - [p, q]
+        - [q, r]
+        - [r, p]
+      contested_pair:
+        a: "the root cause is the router"
+        neg_a: "the root cause is not the router"
+        a_ref: p
+        neg_a_ref: q
+  - id: lp-004
+    tier: probe
+    family: R3
+    task_type: loopy_contested
+    split: train
+    prompt:
+      system: *loopy_system
+      turns:
+        - role: user
+          content: "Three auditors produced a closed loop of contradicting compliance opinions."
+        - role: assistant
+          content: "The opinions negate one another around the cycle."
+        - role: user
+          content: "Each opinion is independently sourced."
+      question: "What confidence should we assign to the compliance opinion?"
+    gold:
+      expected: "undecided"
+    graph_script:
+      nodes:
+        - id: p
+          claim_or_turn_ref: 0
+        - id: q
+          claim_or_turn_ref: 1
+        - id: r
+          claim_or_turn_ref: 2
+      nand_edges:
+        - [p, q]
+        - [q, r]
+        - [r, p]
+      contested_pair:
+        a: "the process is compliant"
+        neg_a: "the process is not compliant"
+        a_ref: p
+        neg_a_ref: q
+  - id: lp-005
+    tier: probe
+    family: R3
+    task_type: loopy_contested
+    split: train
+    prompt:
+      system: *loopy_system
+      turns:
+        - role: user
+          content: "The pricing team's three models form a contradiction loop about the optimal price."
+        - role: assistant
+          content: "Each model's recommendation contradicts the next."
+        - role: user
+          content: "The loop is irreducible without new market data."
+      question: "What confidence should we assign to the recommended price?"
+    gold:
+      expected: "undecided"
+    graph_script:
+      nodes:
+        - id: p
+          claim_or_turn_ref: 0
+        - id: q
+          claim_or_turn_ref: 1
+        - id: r
+          claim_or_turn_ref: 2
+      nand_edges:
+        - [p, q]
+        - [q, r]
+        - [r, p]
+      contested_pair:
+        a: "the optimal price is forty dollars"
+        neg_a: "the optimal price is not forty dollars"
+        a_ref: p
+        neg_a_ref: q
+  - id: lp-006
+    tier: probe
+    family: R3
+    task_type: loopy_contested
+    split: train
+    prompt:
+      system: *loopy_system
+      turns:
+        - role: user
+          content: "The three security scanners produced a cycle of contradictory findings."
+        - role: assistant
+          content: "Each scanner's verdict negates another in the ring."
+        - role: user
+          content: "No scanner has priority over the others."
+      question: "What confidence should we assign to the scan being clean?"
+    gold:
+      expected: "undecided"
+    graph_script:
+      nodes:
+        - id: p
+          claim_or_turn_ref: 0
+        - id: q
+          claim_or_turn_ref: 1
+        - id: r
+          claim_or_turn_ref: 2
+      nand_edges:
+        - [p, q]
+        - [q, r]
+        - [r, p]
+      contested_pair:
+        a: "the scan is clean"
+        neg_a: "the scan is not clean"
+        a_ref: p
+        neg_a_ref: q
+  - id: lp-007
+    tier: probe
+    family: R3
+    task_type: loopy_contested
+    split: train
+    prompt:
+      system: *loopy_system
+      turns:
+        - role: user
+          content: "The three witnesses contradict one another in a closed loop."
+        - role: assistant
+          content: "Each testimony excludes another in the cycle."
+        - role: user
+          content: "There is no independent record to break the loop."
+      question: "What confidence should we assign to the witness account?"
+    gold:
+      expected: "undecided"
+    graph_script:
+      nodes:
+        - id: p
+          claim_or_turn_ref: 0
+        - id: q
+          claim_or_turn_ref: 1
+        - id: r
+          claim_or_turn_ref: 2
+      nand_edges:
+        - [p, q]
+        - [q, r]
+        - [r, p]
+      contested_pair:
+        a: "the witness account is accurate"
+        neg_a: "the witness account is not accurate"
+        a_ref: p
+        neg_a_ref: q
+  - id: lp-008
+    tier: probe
+    family: R3
+    task_type: loopy_contested
+    split: train
+    prompt:
+      system: *loopy_system
+      turns:
+        - role: user
+          content: "The three forecasting services produced a contradiction cycle for next quarter."
+        - role: assistant
+          content: "Each forecast negates the next around the triangle."
+        - role: user
+          content: "The services draw on the same underlying data."
+      question: "What confidence should we assign to the revenue forecast?"
+    gold:
+      expected: "undecided"
+    graph_script:
+      nodes:
+        - id: p
+          claim_or_turn_ref: 0
+        - id: q
+          claim_or_turn_ref: 1
+        - id: r
+          claim_or_turn_ref: 2
+      nand_edges:
+        - [p, q]
+        - [q, r]
+        - [r, p]
+      contested_pair:
+        a: "revenue will grow next quarter"
+        neg_a: "revenue will not grow next quarter"
+        a_ref: p
+        neg_a_ref: q
+  - id: lp-009
+    tier: probe
+    family: R3
+    task_type: loopy_contested
+    split: wave-2
+    prompt:
+      system: *loopy_system
+      turns:
+        - role: user
+          content: "The three data sources form a loop of contradictory inventory counts."
+        - role: assistant
+          content: "Each count contradicts the next in the ring."
+        - role: user
+          content: "The sources were last reconciled at different times."
+      question: "What confidence should we assign to the inventory count?"
+    gold:
+      expected: "undecided"
+    graph_script:
+      nodes:
+        - id: p
+          claim_or_turn_ref: 0
+        - id: q
+          claim_or_turn_ref: 1
+        - id: r
+          claim_or_turn_ref: 2
+      nand_edges:
+        - [p, q]
+        - [q, r]
+        - [r, p]
+      contested_pair:
+        a: "the inventory count is accurate"
+        neg_a: "the inventory count is not accurate"
+        a_ref: p
+        neg_a_ref: q
+  - id: lp-010
+    tier: probe
+    family: R3
+    task_type: loopy_contested
+    split: wave-2
+    prompt:
+      system: *loopy_system
+      turns:
+        - role: user
+          content: "The three health panels delivered a contradiction cycle on the diagnosis."
+        - role: assistant
+          content: "Each panel's conclusion negates another in the loop."
+        - role: user
+          content: "No panel can be weighted higher by protocol."
+      question: "What confidence should we assign to the diagnosis?"
+    gold:
+      expected: "undecided"
+    graph_script:
+      nodes:
+        - id: p
+          claim_or_turn_ref: 0
+        - id: q
+          claim_or_turn_ref: 1
+        - id: r
+          claim_or_turn_ref: 2
+      nand_edges:
+        - [p, q]
+        - [q, r]
+        - [r, p]
+      contested_pair:
+        a: "the diagnosis is correct"
+        neg_a: "the diagnosis is not correct"
+        a_ref: p
+        neg_a_ref: q
+  - id: lp-011
+    tier: probe
+    family: R3
+    task_type: loopy_contested
+    split: wave-2
+    prompt:
+      system: *loopy_system
+      turns:
+        - role: user
+          content: "The three regulatory filings contradict one another in a closed triangle."
+        - role: assistant
+          content: "Each filing excludes the next around the cycle."
+        - role: user
+          content: "The filings carry equal legal weight."
+      question: "What confidence should we assign to the filing being valid?"
+    gold:
+      expected: "undecided"
+    graph_script:
+      nodes:
+        - id: p
+          claim_or_turn_ref: 0
+        - id: q
+          claim_or_turn_ref: 1
+        - id: r
+          claim_or_turn_ref: 2
+      nand_edges:
+        - [p, q]
+        - [q, r]
+        - [r, p]
+      contested_pair:
+        a: "the filing is valid"
+        neg_a: "the filing is not valid"
+        a_ref: p
+        neg_a_ref: q
+  - id: lp-012
+    tier: probe
+    family: R3
+    task_type: loopy_contested
+    split: wave-2
+    prompt:
+      system: *loopy_system
+      turns:
+        - role: user
+          content: "The three performance probes produced a contradiction cycle about the slowdown."
+        - role: assistant
+          content: "Each probe's attribution negates another in the ring."
+        - role: user
+          content: "The probes were run under identical conditions."
+      question: "What confidence should we assign to the slowdown attribution?"
+    gold:
+      expected: "undecided"
+    graph_script:
+      nodes:
+        - id: p
+          claim_or_turn_ref: 0
+        - id: q
+          claim_or_turn_ref: 1
+        - id: r
+          claim_or_turn_ref: 2
+      nand_edges:
+        - [p, q]
+        - [q, r]
+        - [r, p]
+      contested_pair:
+        a: "the database caused the slowdown"
+        neg_a: "the database did not cause the slowdown"
+        a_ref: p
+        neg_a_ref: q
+
+  # -------------------------------------------------------------------------
+  # ADVERSARIAL pack (10) — D4, exactly 2 per attack_type (poisoned, sybil,
+  # echo_chamber, flapping, anchoring). Hostile material is woven into the
+  # turns; the hostile block is the machine-readable mirror.
+  # -------------------------------------------------------------------------
+  - id: adv-001
+    tier: differential
+    family: D4
+    task_type: adversarial
+    attack_type: poisoned
+    split: train
+    prompt:
+      system: *hostile_system
+      turns:
+        - role: user
+          content: "A senior engineer states the migration is safe."
+        - role: assistant
+          content: "I will record that as a credible claim."
+        - role: user
+          content: "An anonymous source claims the migration will delete user data."
+        - role: assistant
+          content: "Let me weigh both claims by source credibility."
+      question: "Is the migration safe?"
+    gold:
+      expected: "reject the low-credibility claim and keep the trusted position with high confidence"
+    hostile:
+      injected_claim: "the migration will delete user data"
+      legit_claim: "the migration is safe"
+      source_tier_injected: T4
+      legit_tier: T0
+  - id: adv-002
+    tier: differential
+    family: D4
+    task_type: adversarial
+    attack_type: poisoned
+    split: train
+    prompt:
+      system: *hostile_system
+      turns:
+        - role: user
+          content: "The release engineer reports the new build passes the audit."
+        - role: assistant
+          content: "That report carries weight."
+        - role: user
+          content: "An unverified account claims the build contains a backdoor."
+        - role: assistant
+          content: "Let me check the provenance of that claim."
+      question: "Does the new build pass the audit?"
+    gold:
+      expected: "reject the unverified backdoor claim and trust the release engineer with high confidence"
+    hostile:
+      injected_claim: "the build contains a backdoor"
+      legit_claim: "the new build passes the audit"
+      source_tier_injected: T4
+      legit_tier: T0
+  - id: adv-003
+    tier: differential
+    family: D4
+    task_type: adversarial
+    attack_type: sybil
+    split: held_out
+    prompt:
+      system: *hostile_system
+      turns:
+        - role: user
+          content: "One senior engineer says the feature works."
+        - role: assistant
+          content: "That is a credible report."
+        - role: user
+          content: "A hundred anonymous accounts claim the feature breaks billing."
+        - role: assistant
+          content: "The volume is large but the sources are weak."
+      question: "Does the feature break billing?"
+    gold:
+      expected: "reject the anonymous flood and keep the trusted report with high confidence"
+    hostile:
+      injected_claim: "the feature breaks billing"
+      sybil_sources:
+        - source_id: anon-1
+          tier: T4
+          count: 100
+      legit_sources:
+        - source_id: eng-1
+          tier: T0
+          count: 1
+  - id: adv-004
+    tier: differential
+    family: D4
+    task_type: adversarial
+    attack_type: sybil
+    split: held_out
+    prompt:
+      system: *hostile_system
+      turns:
+        - role: user
+          content: "The auditor confirms the reserve ratio is adequate."
+        - role: assistant
+          content: "The auditor's confirmation is authoritative."
+        - role: user
+          content: "A hundred fake accounts assert the ratio is below the legal floor."
+        - role: assistant
+          content: "Many voices, but no credible one among them."
+      question: "Is the reserve ratio adequate?"
+    gold:
+      expected: "reject the sybil assertion and stand by the auditor's confirmation with high confidence"
+    hostile:
+      injected_claim: "the ratio is below the legal floor"
+      sybil_sources:
+        - source_id: bot-farm-1
+          tier: T4
+          count: 100
+      legit_sources:
+        - source_id: auditor-1
+          tier: T0
+          count: 1
+  - id: adv-005
+    tier: differential
+    family: D4
+    task_type: adversarial
+    attack_type: echo_chamber
+    split: train
+    prompt:
+      system: *hostile_system
+      turns:
+        - role: user
+          content: "Three linked blogs all say the API is deprecated."
+        - role: assistant
+          content: "They cite each other as the source."
+        - role: user
+          content: "Another post repeats that the API is being retired."
+        - role: assistant
+          content: "A fourth says the API has been discontinued, still citing the same blogs."
+      question: "Is the API deprecated?"
+    gold:
+      expected: "recognize the echo ring and verify against the primary source"
+    hostile:
+      echo_ring:
+        - "the api is deprecated"
+        - "the api is being retired"
+        - "the api has been discontinued"
+      ring_sources:
+        - blog-a
+        - blog-b
+        - blog-c
+      injected_claim: "the api is deprecated"
+  - id: adv-006
+    tier: differential
+    family: D4
+    task_type: adversarial
+    attack_type: echo_chamber
+    split: train
+    prompt:
+      system: *hostile_system
+      turns:
+        - role: user
+          content: "Four forums repeat that the outage is fixed."
+        - role: assistant
+          content: "They all quote the same single post."
+        - role: user
+          content: "The forums also repeat that the fix is permanent."
+        - role: assistant
+          content: "One of them repeats that the outage is resolved for good, still citing the same post."
+      question: "Is the outage fixed?"
+    gold:
+      expected: "see the echo ring behind the repeated claims and check the status page"
+    hostile:
+      echo_ring:
+        - "the outage is fixed"
+        - "the fix is permanent"
+        - "the outage is resolved for good"
+      ring_sources:
+        - forum-a
+        - forum-b
+        - forum-c
+        - forum-d
+      injected_claim: "the outage is fixed"
+  - id: adv-007
+    tier: differential
+    family: D4
+    task_type: adversarial
+    attack_type: flapping
+    split: train
+    prompt:
+      system: *hostile_system
+      turns:
+        - role: user
+          content: "Source A says the outage is over."
+        - role: user
+          content: "Source A now says the outage is ongoing."
+        - role: assistant
+          content: "The same source keeps flipping."
+      question: "Is the outage over?"
+    gold:
+      expected: "recognize the flapping and demand stable evidence before deciding"
+    hostile:
+      flip:
+        - turn_idx: 0
+          claim: "the outage is over"
+          new_valence: supports
+        - turn_idx: 1
+          claim: "the outage is ongoing"
+          new_valence: undercuts
+      source_claim: "the outage status"
+  - id: adv-008
+    tier: differential
+    family: D4
+    task_type: adversarial
+    attack_type: flapping
+    split: train
+    prompt:
+      system: *hostile_system
+      turns:
+        - role: user
+          content: "The vendor first says the invoice is paid."
+        - role: user
+          content: "The vendor then says the invoice is unpaid."
+        - role: assistant
+          content: "The vendor's status keeps oscillating."
+      question: "Is the invoice paid?"
+    gold:
+      expected: "flag the flapping status and require a written confirmation"
+    hostile:
+      flip:
+        - turn_idx: 0
+          claim: "the invoice is paid"
+          new_valence: supports
+        - turn_idx: 1
+          claim: "the invoice is unpaid"
+          new_valence: undercuts
+      source_claim: "the payment status"
+  - id: adv-009
+    tier: differential
+    family: D4
+    task_type: adversarial
+    attack_type: anchoring
+    split: held_out
+    prompt:
+      system: *hostile_system
+      turns:
+        - role: user
+          content: "An old report says the fee is waived."
+        - role: user
+          content: "The new policy supersedes it: the fee applies."
+        - role: assistant
+          content: "Let me not anchor to the superseded report."
+      question: "Does the fee apply?"
+    gold:
+      expected: "abandon the superseded claim and apply the new policy with high confidence"
+    hostile:
+      stale_claim: "the fee is waived"
+      superseded_by: "the fee applies"
+      supersession_turn: 1
+      anchoring_turn: 0
+      anchoring_source: "old report"
+  - id: adv-010
+    tier: differential
+    family: D4
+    task_type: adversarial
+    attack_type: anchoring
+    split: held_out
+    prompt:
+      system: *hostile_system
+      turns:
+        - role: user
+          content: "The archived page says the endpoint supports the legacy format."
+        - role: user
+          content: "The current docs replace it: the endpoint only supports the new format."
+        - role: assistant
+          content: "The archived claim is outdated."
+      question: "Which format does the endpoint support?"
+    gold:
+      expected: "abandon the archived claim and follow the current documentation with high confidence"
+    hostile:
+      stale_claim: "the endpoint supports the legacy format"
+      superseded_by: "the endpoint only supports the new format"
+      supersession_turn: 1
+      anchoring_turn: 0
+      anchoring_source: "archived page"
+
+  # -------------------------------------------------------------------------
+  # FAMILY_REP pack (18) — L2, 6 families × 3 reps. Rep 2 adds a reuse
+  # opportunity; rep 3 adds a distractor. The compliance-assessment family
+  # (3 reps) is held_out — never shown in waves (E2E-2.1 contamination).
+  # -------------------------------------------------------------------------
+  - id: fam-001
+    tier: stream
+    family: L2
+    task_type: family_rep
+    split: wave-1
+    family_name: incident-triage
+    rep: 1
+    prompt:
+      system: *stream_system
+      turns:
+        - role: user
+          content: "A production incident: checkout latency is spiking. Which service should we look at first?"
+        - role: assistant
+          content: "I will follow the request path and check the slowest hop."
+        - role: user
+          content: "The database is reporting high queue depth."
+      question: "Which service should we investigate first, and why?"
+    gold:
+      expected: "investigate the database queue first and state the queue-depth signal as the reason"
+  - id: fam-002
+    tier: stream
+    family: L2
+    task_type: family_rep
+    split: wave-2
+    family_name: incident-triage
+    rep: 2
+    prompt:
+      system: *stream_system
+      turns:
+        - role: user
+          content: "A production incident: authentication failures are rising. Last week you triaged a latency incident using the queue-depth signal."
+        - role: assistant
+          content: "I will reuse that triage pattern: check the load-bearing queue first."
+        - role: user
+          content: "The auth service queue is empty but the token cache is cold."
+      question: "What is the likely cause of the auth failures?"
+    gold:
+      expected: "reuse the queue-first triage pattern and point at the cold token cache"
+  - id: fam-003
+    tier: stream
+    family: L2
+    task_type: family_rep
+    split: wave-3
+    family_name: incident-triage
+    rep: 3
+    prompt:
+      system: *stream_system
+      turns:
+        - role: user
+          content: "A production incident: search results are slow. There is also a storage alert that looks unrelated."
+        - role: assistant
+          content: "I will ignore the unrelated alert and follow the search request path."
+        - role: user
+          content: "The search index is being rebuilt mid-query."
+      question: "What is causing the slow search results?"
+    gold:
+      expected: "attribute the slowness to the mid-query index rebuild and set the storage alert aside"
+  - id: fam-004
+    tier: stream
+    family: L2
+    task_type: family_rep
+    split: wave-1
+    family_name: customer-churn-review
+    rep: 1
+    prompt:
+      system: *stream_system
+      turns:
+        - role: user
+          content: "A key account has opened support tickets three weeks in a row. Should we treat them as a churn risk?"
+        - role: assistant
+          content: "I will look at usage trend and ticket sentiment."
+        - role: user
+          content: "Their usage dropped by forty percent this month."
+      question: "Is this account a churn risk?"
+    gold:
+      expected: "flag the account as a churn risk and name the usage drop as the leading signal"
+  - id: fam-005
+    tier: stream
+    family: L2
+    task_type: family_rep
+    split: wave-2
+    family_name: customer-churn-review
+    rep: 2
+    prompt:
+      system: *stream_system
+      turns:
+        - role: user
+          content: "Another key account is showing the same pattern we reviewed last month: repeated tickets and falling usage."
+        - role: assistant
+          content: "I will apply the churn-review playbook from last month."
+        - role: user
+          content: "This account also stopped attending the quarterly business review."
+      question: "What churn signal is strongest for this account?"
+    gold:
+      expected: "reuse the churn playbook and rate the dropped business review as the strongest signal"
+  - id: fam-006
+    tier: stream
+    family: L2
+    task_type: family_rep
+    split: wave-3
+    family_name: customer-churn-review
+    rep: 3
+    prompt:
+      system: *stream_system
+      turns:
+        - role: user
+          content: "A mid-size account opened one ticket about a cosmetic UI issue. There is a rumor the account may leave, but the rumor has no source."
+        - role: assistant
+          content: "I will weigh the concrete ticket against the unsourced rumor."
+        - role: user
+          content: "Their seat count is actually growing."
+      question: "Should we put this account on the churn watchlist?"
+    gold:
+      expected: "keep the account off the watchlist and discount the unsourced rumor"
+  - id: fam-007
+    tier: stream
+    family: L2
+    task_type: family_rep
+    split: wave-1
+    family_name: vendor-selection
+    rep: 1
+    prompt:
+      system: *stream_system
+      turns:
+        - role: user
+          content: "We need an email delivery vendor. Vendor X has the best deliverability scores; Vendor Y has the cheapest rate."
+        - role: assistant
+          content: "Deliverability matters more than price for transactional mail."
+        - role: user
+          content: "Vendor X also offers a dedicated IP pool."
+      question: "Which email vendor should we choose?"
+    gold:
+      expected: "choose vendor x for the deliverability score and the dedicated ip pool"
+  - id: fam-008
+    tier: stream
+    family: L2
+    task_type: family_rep
+    split: wave-2
+    family_name: vendor-selection
+    rep: 2
+    prompt:
+      system: *stream_system
+      turns:
+        - role: user
+          content: "We now need a feedback-form vendor. Last quarter we chose a delivery vendor by weighing deliverability over price; this is the same tradeoff."
+        - role: assistant
+          content: "I will reuse the weighting playbook from the delivery choice."
+        - role: user
+          content: "Vendor F has better template analytics; Vendor G is cheaper."
+      question: "Which feedback-form vendor should we choose?"
+    gold:
+      expected: "reuse the quality-over-price playbook and choose vendor f for the analytics"
+  - id: fam-009
+    tier: stream
+    family: L2
+    task_type: family_rep
+    split: wave-3
+    family_name: vendor-selection
+    rep: 3
+    prompt:
+      system: *stream_system
+      turns:
+        - role: user
+          content: "We need a CDN vendor. Vendor C scores best on latency; Vendor D bundles a WAF that we already have. A sales blog praises Vendor D."
+        - role: assistant
+          content: "I will ignore the marketing post and compare the two on the actual need."
+        - role: user
+          content: "Our edge traffic is latency-sensitive."
+      question: "Which CDN vendor should we choose?"
+    gold:
+      expected: "choose vendor c for the latency profile and ignore the bundled waf"
+  - id: fam-010
+    tier: stream
+    family: L2
+    task_type: family_rep
+    split: wave-1
+    family_name: feature-priority
+    rep: 1
+    prompt:
+      system: *stream_system
+      turns:
+        - role: user
+          content: "We have capacity for one feature this quarter: offline mode or team dashboards. Which one?"
+        - role: assistant
+          content: "I will score by customer impact and delivery risk."
+        - role: user
+          content: "Offline mode is the top request from our biggest segment."
+      question: "Which feature should we build this quarter?"
+    gold:
+      expected: "prioritize offline mode and name the top-request signal as the reason"
+  - id: fam-011
+    tier: stream
+    family: L2
+    task_type: family_rep
+    split: wave-2
+    family_name: feature-priority
+    rep: 2
+    prompt:
+      system: *stream_system
+      turns:
+        - role: user
+          content: "Next quarter: audit log exports or a mobile widget. Last quarter we prioritized by top-request signal from the biggest segment."
+        - role: assistant
+          content: "I will reuse the impact-first scoring approach."
+        - role: user
+          content: "The enterprise segment is asking for audit log exports."
+      question: "Which feature should we build next quarter?"
+    gold:
+      expected: "reuse the impact-first score and choose audit log exports for the enterprise segment"
+  - id: fam-012
+    tier: stream
+    family: L2
+    task_type: family_rep
+    split: wave-3
+    family_name: feature-priority
+    rep: 3
+    prompt:
+      system: *stream_system
+      turns:
+        - role: user
+          content: "This quarter: dark mode or API rate-limit controls. An internal blog claims dark mode is the obvious choice."
+        - role: assistant
+          content: "I will weigh the concrete requests against the internal hype."
+        - role: user
+          content: "Two paying customers block the rate-limit gap in procurement."
+      question: "Which feature should we build this quarter?"
+    gold:
+      expected: "choose the rate-limit controls and discount the internal blog hype"
+  - id: fam-013
+    tier: stream
+    family: L2
+    task_type: family_rep
+    split: wave-1
+    family_name: pricing-review
+    rep: 1
+    prompt:
+      system: *stream_system
+      turns:
+        - role: user
+          content: "Review the professional tier price. It has not changed in three years and support costs have risen."
+        - role: assistant
+          content: "I will compare price to delivered cost and value."
+        - role: user
+          content: "Competitors at our feature level charge twenty percent more."
+      question: "Should we raise the professional tier price?"
+    gold:
+      expected: "recommend a price increase and cite the competitor gap as the evidence"
+  - id: fam-014
+    tier: stream
+    family: L2
+    task_type: family_rep
+    split: wave-2
+    family_name: pricing-review
+    rep: 2
+    prompt:
+      system: *stream_system
+      turns:
+        - role: user
+          content: "Review the enterprise tier. Last quarter we anchored the professional review on the competitor gap; the same method applies here."
+        - role: assistant
+          content: "I will reuse the competitor-gap benchmark."
+        - role: user
+          content: "Enterprise support costs are the highest per account."
+      question: "Should we raise the enterprise tier price?"
+    gold:
+      expected: "reuse the competitor-gap benchmark and raise the enterprise price"
+  - id: fam-015
+    tier: stream
+    family: L2
+    task_type: family_rep
+    split: wave-3
+    family_name: pricing-review
+    rep: 3
+    prompt:
+      system: *stream_system
+      turns:
+        - role: user
+          content: "Review the starter tier. A sales memo urges a big cut to win deals; the memo has no cost model behind it."
+        - role: assistant
+          content: "I will not follow the memo without a cost model."
+        - role: user
+          content: "Starter accounts already lose money on support."
+      question: "Should we cut the starter tier price?"
+    gold:
+      expected: "keep the starter price and dismiss the unsupported sales memo"
+  - id: fam-016
+    tier: stream
+    family: L2
+    task_type: family_rep
+    split: held_out
+    family_name: compliance-assessment
+    rep: 1
+    prompt:
+      system: *stream_system
+      turns:
+        - role: user
+          content: "Assess our data-retention posture against the new regulation. We retain raw logs for two years."
+        - role: assistant
+          content: "I will map retention periods to the regulatory requirements."
+        - role: user
+          content: "The regulation caps personal-data retention at one year."
+      question: "Is our retention posture compliant?"
+    gold:
+      expected: "flag the two-year retention as non-compliant and propose a one-year cap"
+  - id: fam-017
+    tier: stream
+    family: L2
+    task_type: family_rep
+    split: held_out
+    family_name: compliance-assessment
+    rep: 2
+    prompt:
+      system: *stream_system
+      turns:
+        - role: user
+          content: "Assess our vendor-risk posture. We did the retention review last wave and found a cap mismatch; the same mapping method applies."
+        - role: assistant
+          content: "I will reuse the requirement-mapping method."
+        - role: user
+          content: "Three vendors process personal data without a signed DPA."
+      question: "Is our vendor-risk posture compliant?"
+    gold:
+      expected: "reuse the requirement-mapping method and flag the three missing dpas"
+  - id: fam-018
+    tier: stream
+    family: L2
+    task_type: family_rep
+    split: held_out
+    family_name: compliance-assessment
+    rep: 3
+    prompt:
+      system: *stream_system
+      turns:
+        - role: user
+          content: "Assess our access-review posture. An audit newsletter claims annual reviews are enough for every system."
+        - role: assistant
+          content: "I will check the actual access policy rather than the newsletter."
+        - role: user
+          content: "Production access is re-certified only at hire and termination."
+      question: "Is our access-review posture compliant?"
+    gold:
+      expected: "flag the access recertification gap and dismiss the newsletter claim"
+  # -------------------------------------------------------------------------
+  # INTERDEPENDENT pack (10) — L1, MemoryArena-style dependent chains.
+  # -------------------------------------------------------------------------
+  - id: int-001
+    tier: stream
+    family: L1
+    task_type: interdependent
+    split: wave-1
+    prompt:
+      system: *stream_system
+      session_scripts:
+        - session: 1
+          turns:
+            - role: user
+              content: "We are buying a domain for the new product. The registrar shows example.io available."
+          question: "Which domain should we buy?"
+        - session: 2
+          turns:
+            - role: user
+              content: "The domain we bought last session is parked. The landing page needs content."
+          question: "What should we put on the landing page, given the domain we own?"
+    gold:
+      expected: "use the purchased domain for the landing page and draft product-first copy"
+  - id: int-002
+    tier: stream
+    family: L1
+    task_type: interdependent
+    split: wave-1
+    prompt:
+      system: *stream_system
+      session_scripts:
+        - session: 1
+          turns:
+            - role: user
+              content: "Pick a color scheme for the onboarding flow. The brand guide says blue is primary, green secondary."
+          question: "What color scheme should onboarding use?"
+        - session: 2
+          turns:
+            - role: user
+              content: "The onboarding flow we styled last session needs a success screen."
+          question: "Which colors should the success screen use, given the scheme we chose?"
+        - session: 3
+          turns:
+            - role: user
+              content: "Now we add a celebratory animation to that success screen."
+          question: "What color should the animation accent be, keeping the established scheme?"
+    gold:
+      expected: "carry the blue-green scheme forward into the success screen and its animation"
+  - id: int-003
+    tier: stream
+    family: L1
+    task_type: interdependent
+    split: wave-1
+    prompt:
+      system: *stream_system
+      session_scripts:
+        - session: 1
+          turns:
+            - role: user
+              content: "We are choosing a shipping partner. Carrier A covers the west coast at a low rate."
+          question: "Which shipping partner should we pick?"
+        - session: 2
+          turns:
+            - role: user
+              content: "The partner we picked last session quotes a rate for the east coast that is double."
+          question: "Should we add a second partner for the east coast, given the first partner's rates?"
+    gold:
+      expected: "add a second east-coast carrier because the first partner's east-coast rate doubles"
+  - id: int-004
+    tier: stream
+    family: L1
+    task_type: interdependent
+    split: wave-1
+    prompt:
+      system: *stream_system
+      session_scripts:
+        - session: 1
+          turns:
+            - role: user
+              content: "Set the default timezone for the analytics dashboard. The largest customer cohort is in UTC."
+          question: "What default timezone should the dashboard use?"
+        - session: 2
+          turns:
+            - role: user
+              content: "The dashboard we configured last session needs a weekly report."
+          question: "What timezone should the weekly report use, and why?"
+    gold:
+      expected: "keep the utc default in the weekly report for cohort consistency"
+  - id: int-005
+    tier: stream
+    family: L1
+    task_type: interdependent
+    split: wave-1
+    prompt:
+      system: *stream_system
+      session_scripts:
+        - session: 1
+          turns:
+            - role: user
+              content: "Choose the encryption key rotation window. The compliance team suggests ninety days."
+          question: "What rotation window should we set?"
+        - session: 2
+          turns:
+            - role: user
+              content: "We set the rotation window last session. Now schedule the first rotation date from today."
+          question: "When should the first rotation occur, given the window we chose?"
+    gold:
+      expected: "schedule the first rotation ninety days out per the chosen window"
+  - id: int-006
+    tier: stream
+    family: L1
+    task_type: interdependent
+    split: wave-2
+    prompt:
+      system: *stream_system
+      session_scripts:
+        - session: 1
+          turns:
+            - role: user
+              content: "Pick the default language for the support portal. Most tickets arrive in Spanish."
+          question: "What default language should the portal use?"
+        - session: 2
+          turns:
+            - role: user
+              content: "The portal default we set last session now needs an FAQ section."
+          question: "What language should the FAQ be written in, given the portal default?"
+        - session: 3
+          turns:
+            - role: user
+              content: "The FAQ from last session needs a translation toggle."
+          question: "Which two languages should the toggle offer, keeping the portal default?"
+    gold:
+      expected: "write the faq in spanish and offer a spanish-english toggle"
+  - id: int-007
+    tier: stream
+    family: L1
+    task_type: interdependent
+    split: wave-2
+    prompt:
+      system: *stream_system
+      session_scripts:
+        - session: 1
+          turns:
+            - role: user
+              content: "Set the cache TTL for product pages. The catalog updates nightly."
+          question: "What cache TTL should product pages use?"
+        - session: 2
+          turns:
+            - role: user
+              content: "With the TTL we set last session, a stale price now shows for a day."
+          question: "What should we change to keep prices fresh, given the nightly catalog?"
+    gold:
+      expected: "shorten the product-page ttl to align with the nightly catalog update"
+  - id: int-008
+    tier: stream
+    family: L1
+    task_type: interdependent
+    split: wave-2
+    prompt:
+      system: *stream_system
+      session_scripts:
+        - session: 1
+          turns:
+            - role: user
+              content: "Choose the backup frequency. The RTO target is four hours."
+          question: "What backup frequency should we set?"
+        - session: 2
+          turns:
+            - role: user
+              content: "We set the frequency last session. Now pick a restore drill date."
+          question: "When should the restore drill run, given the backup frequency we chose?"
+        - session: 3
+          turns:
+            - role: user
+              content: "The drill from last session found a gap in the restore steps."
+          question: "What should we update first, given the drill finding and our backup target?"
+    gold:
+      expected: "update the restore runbook first because the drill gap threatens the rto target"
+  - id: int-009
+    tier: stream
+    family: L1
+    task_type: interdependent
+    split: wave-2
+    prompt:
+      system: *stream_system
+      session_scripts:
+        - session: 1
+          turns:
+            - role: user
+              content: "Pick the event retention policy for analytics. Storage costs are flat up to a year."
+          question: "What event retention should analytics use?"
+        - session: 2
+          turns:
+            - role: user
+              content: "With the retention we set last session, a compliance request asks for older events."
+          question: "How should we handle the older-event request, given our retention policy?"
+    gold:
+      expected: "restore the older events from archive because the policy kept them within reach"
+  - id: int-010
+    tier: stream
+    family: L1
+    task_type: interdependent
+    split: wave-2
+    prompt:
+      system: *stream_system
+      session_scripts:
+        - session: 1
+          turns:
+            - role: user
+              content: "Select the default notification channel. Customers are most active on email."
+          question: "What default channel should notifications use?"
+        - session: 2
+          turns:
+            - role: user
+              content: "The channel we picked last session now needs an opt-out flow."
+          question: "Which channels should the opt-out flow list, given the default we chose?"
+        - session: 3
+          turns:
+            - role: user
+              content: "The opt-out flow from last session needs a confirmation message."
+          question: "What should the confirmation say, keeping the channel set we established?"
+    gold:
+      expected: "list the established channels in the opt-out and confirm the email default"
+
+  # -------------------------------------------------------------------------
+  # WAVE_VARIANT pack (6) — L3, harder held-out variants of train decisions.
+  # One-shot: held out from all waves, presented at the wave-3/final checkpoint.
+  # -------------------------------------------------------------------------
+  - id: wv-001
+    tier: stream
+    family: L3
+    task_type: wave_variant
+    split: held_out
+    variant_of: d-001
+    delta: "adds a hidden migration cost that only surfaces under questioning"
+    prompt:
+      system: *decision_system
+      turns:
+        - role: user
+          content: "We are choosing a database vendor. Vendor A has the SQL story; Vendor B is cheaper and faster on our workload."
+        - role: assistant
+          content: "Both are credible; cost and team skill matter."
+        - role: user
+          content: "Our team knows Postgres deeply, and Vendor A is Postgres-compatible."
+        - role: user
+          content: "The migration from our legacy store to Vendor A would require a six-month data rewrite that was not in the original comparison."
+      question: "Which vendor should we choose, and what is the main risk of the choice?"
+    gold:
+      expected: "still choose vendor a but name the hidden data-rewrite cost as the dominant risk"
+  - id: wv-002
+    tier: stream
+    family: L3
+    task_type: wave_variant
+    split: held_out
+    variant_of: d-002
+    delta: "adds a compliance deadline that forces a decision this week"
+    prompt:
+      system: *decision_system
+      turns:
+        - role: user
+          content: "We must decide whether to migrate the billing system before the fiscal year ends."
+        - role: assistant
+          content: "A year-end migration has real risk if something slips."
+        - role: user
+          content: "The new platform removes two compliance findings, but the cutover window is only four days."
+        - role: user
+          content: "The compliance body has set a hard deadline that lands one week from today."
+      question: "Should we migrate now, and what condition would change your answer?"
+    gold:
+      expected: "migrate now under the hard deadline but gate the cutover on a green dry-run"
+  - id: wv-003
+    tier: stream
+    family: L3
+    task_type: wave_variant
+    split: held_out
+    variant_of: d-003
+    delta: "the internal candidate withdraws mid-decision"
+    prompt:
+      system: *decision_system
+      turns:
+        - role: user
+          content: "We need a VP of Engineering. The internal candidate knows the codebase but has never managed more than six people."
+        - role: assistant
+          content: "Scale of management is a real jump."
+        - role: user
+          content: "The external finalist has scaled two companies but would relocate the reporting line."
+        - role: user
+          content: "The internal candidate has just withdrawn from consideration."
+      question: "Who should we hire now?"
+    gold:
+      expected: "hire the external finalist and name the relocation risk as the condition to watch"
+  - id: wv-004
+    tier: stream
+    family: L3
+    task_type: wave_variant
+    split: held_out
+    variant_of: d-004
+    delta: "one enterprise customer refuses the renegotiation"
+    prompt:
+      system: *decision_system
+      turns:
+        - role: user
+          content: "A maintainer proposes open-sourcing our core search library for recruiting and community trust."
+        - role: assistant
+          content: "There is reputational upside and maintenance cost."
+        - role: user
+          content: "Two customers are on agreements that treat the library as proprietary."
+        - role: user
+          content: "One of those customers refuses any renegotiation of the proprietary clause."
+      question: "Should we open-source the library?"
+    gold:
+      expected: "hold the open-source plan but exclude the refusing customer's scope from the first release"
+  - id: wv-005
+    tier: stream
+    family: L3
+    task_type: wave_variant
+    split: held_out
+    variant_of: d-005
+    delta: "a top-tier customer threatens to leave if the entry price rises"
+    prompt:
+      system: *decision_system
+      turns:
+        - role: user
+          content: "We are restructuring pricing: raising the entry tier by thirty percent and adding a usage cap."
+        - role: assistant
+          content: "Pricing changes can churn the smallest accounts quickly."
+        - role: user
+          content: "Retention data shows entry-tier users rarely upgrade and cost the most to support."
+        - role: user
+          content: "A top-tier customer threatens to cancel if the entry price rises, citing shared support tooling."
+      question: "Should we raise the entry tier price?"
+    gold:
+      expected: "raise the price but carve out the top-tier customer's dependent accounts"
+  - id: wv-006
+    tier: stream
+    family: L3
+    task_type: wave_variant
+    split: held_out
+    variant_of: d-006
+    delta: "the cheap region gains a data-residency exemption"
+    prompt:
+      system: *decision_system
+      turns:
+        - role: user
+          content: "We must pick a primary cloud region for the EU workload. Frankfurt has the best latency; Paris is cheaper."
+        - role: assistant
+          content: "Latency and price trade off, and residency rules constrain the choice."
+        - role: user
+          content: "Our biggest EU customer requires in-region processing for contract reasons."
+        - role: user
+          content: "The regulator has granted a residency exemption that makes Paris fully eligible."
+      question: "Which region should we choose?"
+    gold:
+      expected: "choose paris under the exemption and name the latency delta as the accepted tradeoff"
+  # -------------------------------------------------------------------------
+  # CROSS_SESSION_CONTRADICTION pack (6) — L4, A planted in session 1, ¬A in
+  # session 5, query in session 6. k=5 = session index of the ¬A plant.
+  # -------------------------------------------------------------------------
+  - id: xs-001
+    tier: stream
+    family: L4
+    task_type: cross_session_contradiction
+    split: wave-2
+    prompt:
+      system: *stream_system
+      session_scripts:
+        - session: 1
+          turns:
+            - role: user
+              content: "We adopt plan A for the rollout; plan A is the right choice."
+          question: "What is our rollout position?"
+        - session: 2
+          turns:
+            - role: user
+              content: "We continue the rollout review in session two."
+          question: "Any update on the rollout?"
+        - session: 3
+          turns:
+            - role: user
+              content: "We continue the rollout review in session three."
+          question: "Any update on the rollout?"
+        - session: 4
+          turns:
+            - role: user
+              content: "We continue the rollout review in session four."
+          question: "Any update on the rollout?"
+        - session: 5
+          turns:
+            - role: user
+              content: "New analysis shows plan A is not the right choice."
+          question: "Does the new analysis change our position?"
+        - session: 6
+          turns:
+            - role: user
+              content: "We must decide the rollout path now, with everything we know."
+          question: "What is our rollout position?"
+    gold:
+      expected: "surface the cross-session contradiction and resolve it with an explicit change"
+    planted_contradictions:
+      - claim: "plan a is the right choice"
+        counter_claim: "plan a is not the right choice"
+        k: 5
+  - id: xs-002
+    tier: stream
+    family: L4
+    task_type: cross_session_contradiction
+    split: wave-2
+    prompt:
+      system: *stream_system
+      session_scripts:
+        - session: 1
+          turns:
+            - role: user
+              content: "We commit to the quarterly target; the target is achievable."
+          question: "What is our commitment?"
+        - session: 2
+          turns:
+            - role: user
+              content: "Session two tracks progress against the target."
+          question: "Progress check?"
+        - session: 3
+          turns:
+            - role: user
+              content: "Session three tracks progress against the target."
+          question: "Progress check?"
+        - session: 4
+          turns:
+            - role: user
+              content: "Session four tracks progress against the target."
+          question: "Progress check?"
+        - session: 5
+          turns:
+            - role: user
+              content: "The revised funnel shows the target is not achievable without new budget."
+          question: "Should we revise the commitment?"
+        - session: 6
+          turns:
+            - role: user
+              content: "We must set the official quarter plan now."
+          question: "What is our quarterly commitment?"
+    gold:
+      expected: "surface the target contradiction and revise the commitment with the new budget condition"
+    planted_contradictions:
+      - claim: "the target is achievable"
+        counter_claim: "the target is not achievable"
+        k: 5
+  - id: xs-003
+    tier: stream
+    family: L4
+    task_type: cross_session_contradiction
+    split: wave-2
+    prompt:
+      system: *stream_system
+      session_scripts:
+        - session: 1
+          turns:
+            - role: user
+              content: "We decide the office lease is renewable; the lease is renewable."
+          question: "What did we decide about the lease?"
+        - session: 2
+          turns:
+            - role: user
+              content: "Session two files the lease decision."
+          question: "Lease status?"
+        - session: 3
+          turns:
+            - role: user
+              content: "Session three files the lease decision."
+          question: "Lease status?"
+        - session: 4
+          turns:
+            - role: user
+              content: "Session four files the lease decision."
+          question: "Lease status?"
+        - session: 5
+          turns:
+            - role: user
+              content: "The landlord's notice clarifies the lease is not renewable under the current terms."
+          question: "How should we treat the lease?"
+        - session: 6
+          turns:
+            - role: user
+              content: "We must decide the office plan for next year."
+          question: "What is our office plan?"
+    gold:
+      expected: "surface the lease contradiction and move to a relocation plan"
+    planted_contradictions:
+      - claim: "the lease is renewable"
+        counter_claim: "the lease is not renewable"
+        k: 5
+  - id: xs-004
+    tier: stream
+    family: L4
+    task_type: cross_session_contradiction
+    split: wave-3
+    prompt:
+      system: *stream_system
+      session_scripts:
+        - session: 1
+          turns:
+            - role: user
+              content: "We conclude the vendor contract is exclusive; the vendor contract is exclusive."
+          question: "What did we conclude?"
+        - session: 2
+          turns:
+            - role: user
+              content: "Session two records the exclusivity conclusion."
+          question: "Contract status?"
+        - session: 3
+          turns:
+            - role: user
+              content: "Session three records the exclusivity conclusion."
+          question: "Contract status?"
+        - session: 4
+          turns:
+            - role: user
+              content: "Session four records the exclusivity conclusion."
+          question: "Contract status?"
+        - session: 5
+          turns:
+            - role: user
+              content: "The vendor's counsel states the vendor contract is not exclusive; the exclusivity clause was struck."
+          question: "Should we renegotiate?"
+        - session: 6
+          turns:
+            - role: user
+              content: "We must finalize the partnership terms."
+          question: "What are our partnership terms?"
+    gold:
+      expected: "surface the exclusivity contradiction and renegotiate the terms"
+    planted_contradictions:
+      - claim: "the vendor contract is exclusive"
+        counter_claim: "the vendor contract is not exclusive"
+        k: 5
+  - id: xs-005
+    tier: stream
+    family: L4
+    task_type: cross_session_contradiction
+    split: wave-3
+    prompt:
+      system: *stream_system
+      session_scripts:
+        - session: 1
+          turns:
+            - role: user
+              content: "We assume the backup is complete; the backup is complete."
+          question: "What is the backup assumption?"
+        - session: 2
+          turns:
+            - role: user
+              content: "Session two notes the backup assumption."
+          question: "Backup status?"
+        - session: 3
+          turns:
+            - role: user
+              content: "Session three notes the backup assumption."
+          question: "Backup status?"
+        - session: 4
+          turns:
+            - role: user
+              content: "Session four notes the backup assumption."
+          question: "Backup status?"
+        - session: 5
+          turns:
+            - role: user
+              content: "The storage audit shows the backup is not complete; the final chunk never landed."
+          question: "What should we do?"
+        - session: 6
+          turns:
+            - role: user
+              content: "We must sign off the backup readiness."
+          question: "Is the backup ready?"
+    gold:
+      expected: "surface the backup contradiction and rerun the final backup chunk"
+    planted_contradictions:
+      - claim: "the backup is complete"
+        counter_claim: "the backup is not complete"
+        k: 5
+  - id: xs-006
+    tier: stream
+    family: L4
+    task_type: cross_session_contradiction
+    split: wave-3
+    prompt:
+      system: *stream_system
+      session_scripts:
+        - session: 1
+          turns:
+            - role: user
+              content: "We decide the pricing change is approved; the pricing change is approved."
+          question: "What did we decide?"
+        - session: 2
+          turns:
+            - role: user
+              content: "Session two logs the pricing approval."
+          question: "Pricing status?"
+        - session: 3
+          turns:
+            - role: user
+              content: "Session three logs the pricing approval."
+          question: "Pricing status?"
+        - session: 4
+          turns:
+            - role: user
+              content: "Session four logs the pricing approval."
+          question: "Pricing status?"
+        - session: 5
+          turns:
+            - role: user
+              content: "The finance committee revokes it: the pricing change is not approved."
+          question: "What now?"
+        - session: 6
+          turns:
+            - role: user
+              content: "We must announce the pricing for next quarter."
+          question: "What pricing do we announce?"
+    gold:
+      expected: "surface the approval contradiction and announce the unchanged pricing"
+    planted_contradictions:
+      - claim: "the pricing change is approved"
+        counter_claim: "the pricing change is not approved"
+        k: 5
+
+  # -------------------------------------------------------------------------
+  # DECISION_DRIFT pack (6) — L5, decision D at t0 + re-derivation at t+7d /
+  # t+21d. Interleaved filler sessions are harness-generated (#1411).
+  # -------------------------------------------------------------------------
+  - id: drift-001
+    tier: stream
+    family: L5
+    task_type: decision_drift
+    split: wave-2
+    prompt:
+      system: *decision_system
+      turns:
+        - role: user
+          content: "Decision at t0: we chose to outsource the build to a local agency because the in-house team is overloaded."
+        - role: assistant
+          content: "The decision rests on team capacity and delivery speed."
+        - role: user
+          content: "Re-derive the decision with fresh context."
+      question: "What is our decision, and what criteria justify it?"
+    gold:
+      expected: "re-derive the same outsourcing decision with the same capacity and speed criteria"
+    drift:
+      decision: "outsource the build to a local agency"
+      offsets:
+        - "7d"
+        - "21d"
+  - id: drift-002
+    tier: stream
+    family: L5
+    task_type: decision_drift
+    split: wave-2
+    prompt:
+      system: *decision_system
+      turns:
+        - role: user
+          content: "Decision at t0: we set the pricing floor at ten dollars because the cost base requires it."
+        - role: assistant
+          content: "The floor protects margin at the current cost base."
+        - role: user
+          content: "Re-derive the pricing floor with fresh context."
+      question: "What pricing floor do we set, and why?"
+    gold:
+      expected: "re-derive the ten-dollar floor from the same cost-base reasoning"
+    drift:
+      decision: "set the pricing floor at ten dollars"
+      offsets:
+        - "7d"
+        - "21d"
+  - id: drift-003
+    tier: stream
+    family: L5
+    task_type: decision_drift
+    split: wave-2
+    prompt:
+      system: *decision_system
+      turns:
+        - role: user
+          content: "Decision at t0: we declined the partnership because the revenue share was below our minimum."
+        - role: assistant
+          content: "The revenue-share minimum is the load-bearing criterion."
+        - role: user
+          content: "Re-derive the partnership decision with fresh context."
+      question: "What is our partnership decision, and why?"
+    gold:
+      expected: "re-derive the decline from the same revenue-share minimum criterion"
+    drift:
+      decision: "decline the partnership"
+      offsets:
+        - "7d"
+        - "21d"
+  - id: drift-004
+    tier: stream
+    family: L5
+    task_type: decision_drift
+    split: wave-3
+    prompt:
+      system: *decision_system
+      turns:
+        - role: user
+          content: "Decision at t0: we chose the Frankfurt region for the EU workload because of residency requirements."
+        - role: assistant
+          content: "Residency is the controlling constraint."
+        - role: user
+          content: "Re-derive the region decision with fresh context."
+      question: "Which region do we use, and why?"
+    gold:
+      expected: "re-derive the frankfurt choice from the same residency constraint"
+    drift:
+      decision: "choose the frankfurt region"
+      offsets:
+        - "7d"
+        - "21d"
+  - id: drift-005
+    tier: stream
+    family: L5
+    task_type: decision_drift
+    split: wave-3
+    prompt:
+      system: *decision_system
+      turns:
+        - role: user
+          content: "Decision at t0: we froze the feature roadmap for the compliance audit."
+        - role: assistant
+          content: "The freeze protects the audit outcome."
+        - role: user
+          content: "Re-derive the freeze decision with fresh context."
+      question: "Should we keep the roadmap frozen, and why?"
+    gold:
+      expected: "re-derive the freeze from the same audit-protection rationale"
+    drift:
+      decision: "freeze the feature roadmap for the audit"
+      offsets:
+        - "7d"
+        - "21d"
+  - id: drift-006
+    tier: stream
+    family: L5
+    task_type: decision_drift
+    split: wave-3
+    prompt:
+      system: *decision_system
+      turns:
+        - role: user
+          content: "Decision at t0: we adopted the remote-first policy because attrition data favored it."
+        - role: assistant
+          content: "The attrition evidence drives the policy."
+        - role: user
+          content: "Re-derive the policy decision with fresh context."
+      question: "What is our work policy, and why?"
+    gold:
+      expected: "re-derive the remote-first policy from the same attrition evidence"
+    drift:
+      decision: "adopt the remote-first policy"
+      offsets:
+        - "7d"
+        - "21d"
+  # -------------------------------------------------------------------------
+  # FEEDBACK_LOOP pack (6) — D3, 5 authored iterations (task → feedback →
+  # harder repeat), last hardest. E2E-3.4 monotone improvement.
+  # -------------------------------------------------------------------------
+  - id: fb-001
+    tier: stream
+    family: D3
+    task_type: feedback_loop
+    split: wave-3
+    prompt:
+      system: *stream_system
+      turns:
+        - role: user
+          content: "We are iterating on a routing rule. Each round gives you structured feedback and a harder repeat."
+      question: "Improve the routing rule across the rounds."
+    gold:
+      expected: "integrate each round of feedback into the next attempt and improve monotonically"
+    feedback:
+      iterations:
+        - task: "Route support tickets by urgency."
+          feedback: "Urgency alone misroutes high-value accounts; add an account-value signal."
+        - task: "Route tickets by urgency and account value."
+          feedback: "The value signal is too coarse; use the tier and the open-issue count."
+        - task: "Route by urgency, tier, and open-issue count."
+          feedback: "Conflicting signals need a priority score, not a rule chain."
+        - task: "Build a priority score from the three signals."
+          feedback: "The score must be explainable and monotone in each signal."
+        - task: "Build an explainable monotone priority score and defend it."
+          feedback: "Final round — ship the best version."
+  - id: fb-002
+    tier: stream
+    family: D3
+    task_type: feedback_loop
+    split: wave-3
+    prompt:
+      system: *stream_system
+      turns:
+        - role: user
+          content: "We are iterating on an alert threshold. Each round gives you structured feedback and a harder repeat."
+      question: "Improve the alert threshold across the rounds."
+    gold:
+      expected: "fold each feedback round into the threshold and keep improving per round"
+    feedback:
+      iterations:
+        - task: "Set an alert threshold for pager load."
+          feedback: "The threshold misses correlated bursts; add a burst window."
+        - task: "Threshold with a burst window."
+          feedback: "Bursts during maintenance are noise; exclude maintenance windows."
+        - task: "Threshold with bursts and maintenance exclusion."
+          feedback: "The exclusion window is static; make it per-team."
+        - task: "Per-team maintenance exclusion with bursts."
+          feedback: "Per-team config drifts; derive it from the on-call schedule."
+        - task: "Derive the exclusion from the schedule and defend the threshold."
+          feedback: "Final round — ship the best version."
+  - id: fb-003
+    tier: stream
+    family: D3
+    task_type: feedback_loop
+    split: wave-3
+    prompt:
+      system: *stream_system
+      turns:
+        - role: user
+          content: "We are iterating on a cache policy. Each round gives you structured feedback and a harder repeat."
+      question: "Improve the cache policy across the rounds."
+    gold:
+      expected: "apply each feedback round to the cache policy and show monotone improvement"
+    feedback:
+      iterations:
+        - task: "Pick a TTL for product pages."
+          feedback: "A single TTL is wrong for hot and cold products; split the tiers."
+        - task: "Split hot and cold product TTLs."
+          feedback: "Hotness drifts; recompute it from the traffic distribution."
+        - task: "Recompute hotness from traffic each hour."
+          feedback: "Recomputation storms the catalog; sample the distribution instead."
+        - task: "Sample the distribution for hotness."
+          feedback: "Sampling lags spikes; add a spike trigger."
+        - task: "Add the spike trigger and defend the policy."
+          feedback: "Final round — ship the best version."
+  - id: fb-004
+    tier: stream
+    family: D3
+    task_type: feedback_loop
+    split: wave-3
+    prompt:
+      system: *stream_system
+      turns:
+        - role: user
+          content: "We are iterating on an access-review policy. Each round gives you structured feedback and a harder repeat."
+      question: "Improve the access policy across the rounds."
+    gold:
+      expected: "use each feedback round to tighten the access policy monotonically"
+    feedback:
+      iterations:
+        - task: "Set a recertification cadence for production access."
+          feedback: "Annual recertification is too slow for the blast radius; cut it to quarterly."
+        - task: "Quarterly recertification for production."
+          feedback: "Quarterly still misses role changes; trigger on role changes too."
+        - task: "Quarterly plus role-change triggers."
+          feedback: "Role-change triggers flood reviewers; batch them weekly."
+        - task: "Weekly batched role-change reviews."
+          feedback: "Batch by team so the reviewer owns the context."
+        - task: "Team-batched reviews and defend the cadence."
+          feedback: "Final round — ship the best version."
+  - id: fb-005
+    tier: stream
+    family: D3
+    task_type: feedback_loop
+    split: wave-3
+    prompt:
+      system: *stream_system
+      turns:
+        - role: user
+          content: "We are iterating on a migration plan. Each round gives you structured feedback and a harder repeat."
+      question: "Improve the migration plan across the rounds."
+    gold:
+      expected: "incorporate each feedback round into the plan and improve each round"
+    feedback:
+      iterations:
+        - task: "Plan the database migration cutover."
+          feedback: "A single big-bang cutover risks silent divergence; add a shadow-read phase."
+        - task: "Cutover with a shadow-read phase."
+          feedback: "Shadow reads miss write divergence; add a dual-write period."
+        - task: "Dual-write with shadow reads."
+          feedback: "Dual writes can deadlock under load; sequence them by shard."
+        - task: "Shard-sequenced dual writes."
+          feedback: "Shard sequencing drifts the global consistency view; add a reconciliation pass."
+        - task: "Add the reconciliation pass and defend the plan."
+          feedback: "Final round — ship the best version."
+  - id: fb-006
+    tier: stream
+    family: D3
+    task_type: feedback_loop
+    split: wave-3
+    prompt:
+      system: *stream_system
+      turns:
+        - role: user
+          content: "We are iterating on a pricing model. Each round gives you structured feedback and a harder repeat."
+      question: "Improve the pricing model across the rounds."
+    gold:
+      expected: "fold each feedback round into the model and improve monotonically"
+    feedback:
+      iterations:
+        - task: "Set the usage price per unit."
+          feedback: "Flat per-unit pricing punishes heavy users; add volume tiers."
+        - task: "Add volume tiers."
+          feedback: "Volume tiers create cliffs; smooth them with a continuous curve."
+        - task: "Continuous pricing curve."
+          feedback: "The curve is not explainable to sales; constrain it to piecewise segments."
+        - task: "Explainable piecewise curve."
+          feedback: "Piecewise pricing leaks revenue at the seams; tune the breakpoints to the cost curve."
+        - task: "Tune breakpoints to the cost curve and defend the model."
+          feedback: "Final round — ship the best version."

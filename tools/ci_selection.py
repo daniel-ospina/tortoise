@@ -53,6 +53,7 @@ SHARED_MODULES = (
 # Source-path patterns that trigger each surface (surface -> test files come
 # from the manifest).
 SOURCE_PATTERNS = {
+    "battery": ("battery/",),
     "onboarding": ("tortoise/onboarding/", "website/welcome.html",
                    "website/onboarding-prompt.md", "website/self-hosted.html"),
     "ep": ("tortoise/decide.py", "tortoise/dream.py", "tortoise/analyze.py",

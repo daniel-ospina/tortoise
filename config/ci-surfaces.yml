@@ -75,6 +75,16 @@ surfaces:
   - test_subscriptions.py
   - test_telegram_push.py
   - test_turnstile_signup.py
+  battery:
+  - test_battery_arms.py
+  - test_battery_cli.py
+  - test_battery_config.py
+  - test_battery_corpus.py
+  - test_battery_determinism.py
+  - test_battery_enums.py
+  - test_battery_run.py
+  - test_battery_runner.py
+  - test_battery_setup.py
   core:
   - test_about_edges.py
   - test_about_event_untangle.py

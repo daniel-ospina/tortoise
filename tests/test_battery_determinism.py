@@ -43,7 +43,11 @@ class TestDeterminism:
 
         arts1 = sorted(p for p in run1_dir.glob("*.json") if p.name != "summary.json")
         arts2 = sorted(p for p in run2_dir.glob("*.json") if p.name != "summary.json")
-        assert len(arts1) == len(arts2) == 2
+        # Artifact count = scenario count (production corpus is 100+; the
+        # count is derived from the corpus, not hardcoded).
+        from battery.config.corpus import load_corpus
+        expected = len(load_corpus(CONFIG / "corpus.yaml"))
+        assert len(arts1) == len(arts2) == expected
         for p1, p2 in zip(arts1, arts2):
             a1 = json.loads(p1.read_text())
             a2 = json.loads(p2.read_text())
