@@ -126,9 +126,16 @@ class RoundTripCounter:
 
 def batch_setup(proj, scenarios: Sequence[Scenario], *,
                 embedding_fn: Callable[[str], list[float] | None] | None = None,
-                counter: RoundTripCounter | None = None) -> dict[str, int]:
+                counter: RoundTripCounter | None = None,
+                namespaced: bool = False) -> dict[str, int]:
     """Write every scenario's graph in ≤2 round trips per scenario (2·N
     total), per-scenario namespace. Returns {scenario_id: round_trips}.
+
+    Namespace isolation (scenario_namespace → battery_<id> graph) is wired
+    for graph-backed arms (#1408): pass namespaced=True to route each
+    scenario's queries into its own graph (no cross-scenario MERGE
+    collapse). The default (namespaced=False) keeps batch-vs-naive
+    equivalence on the same graph for the harness tests.
 
     Query 1: guarded points CREATE (MERGE on deterministic id — idempotent;
     status only set ON CREATE so a promoted live point is never downgraded).
@@ -147,7 +154,16 @@ def batch_setup(proj, scenarios: Sequence[Scenario], *,
         # loudly" — ValueError, same class).
         _validate_operator_endpoints(graph)
         ns = scenario_namespace(scenario.id)
-        g = counter if counter is not None else proj.g
+        # #1408 wiring (was the #1406 P2-2 deferral): graph-backed arms (A4)
+        # isolate per-scenario graphs via db.select_graph(ns). The counter
+        # path (equivalence tests) keeps the default graph so batch-vs-naive
+        # comparison stays on the same semantics.
+        if counter is not None:
+            g = counter
+        elif namespaced:
+            g = proj.db.select_graph(ns)
+        else:
+            g = proj.g
         # Query 1 — points (guarded CREATE on deterministic id).
         point_rows = []
         for p in graph.points:

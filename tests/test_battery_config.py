@@ -131,7 +131,7 @@ class TestCalTable:
 class TestArmsAndBudget:
     def test_arms_load(self):
         arms = load_arms(CONFIG / "arms.yaml")
-        assert set(arms) == {"mock", "a0", "a4"}
+        assert set(arms) == {"mock", "a0", "a1", "a2", "a2b", "a3", "a4"}
         assert arms["mock"].price_per_1k_usd == 0.0
 
     def test_budget_estimate(self):

@@ -12,6 +12,26 @@ arms:
     config: {}
     price_per_1k_usd: 0.5
     expected_tokens_per_episode: 500
+  - arm_id: a1
+    adapter: battery.arms.a1_longctx
+    config: {}
+    price_per_1k_usd: 0.5
+    expected_tokens_per_episode: 600
+  - arm_id: a2
+    adapter: battery.arms.a2_mem0
+    config: {}
+    price_per_1k_usd: 1.0
+    expected_tokens_per_episode: 700
+  - arm_id: a2b
+    adapter: battery.arms.a2b_zep
+    config: {}
+    price_per_1k_usd: 1.0
+    expected_tokens_per_episode: 700
+  - arm_id: a3
+    adapter: battery.arms.a3_rag
+    config: {}
+    price_per_1k_usd: 0.5
+    expected_tokens_per_episode: 400
   - arm_id: a4
     adapter: battery.arms.a4_tortoise
     config: {}
