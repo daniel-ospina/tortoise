@@ -307,8 +307,12 @@ def workflow_matrix_issues(workflow_path: str, manifest: dict) -> list[str]:
     inc = wf.get("jobs", {}).get("test", {}).get("strategy", {}).get("matrix", {}).get("include", [])
     for row in inc:
         files = str(row.get("files", ""))
-        if not files.startswith("${{ fromJSON(needs.changes.outputs.matrix_"):
-            issues.append(f"matrix row {row.get('half')} files is not derived (fromJSON matrix_*)")
+        # #1472 regression fix: the matrix rows consume the SPACE-JOINED
+        # matrix_a/matrix_b outputs directly (fromJSON(...) yields a JS array
+        # that renders as "Array" in the shell `for f in ${{ matrix.files }}`
+        # loop — every full-matrix run collected tests/Array.py).
+        if not files.startswith("${{ needs.changes.outputs.matrix_"):
+            issues.append(f"matrix row {row.get('half')} files is not derived (matrix_* output)")
     if "ENV_BROKEN_FILES" in wf.get("env", {}):
         issues.append("workflow env re-defines ENV_BROKEN_FILES (single source is ci_selection.py)")
     return issues

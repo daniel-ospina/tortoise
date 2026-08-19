@@ -191,8 +191,13 @@ jobs:
         id: push-matrix
         run: |
           MATRIX=$(python3 tools/ci_selection.py --emit-push-matrix)
-          echo "matrix_a=$(echo "$MATRIX" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["half_a"]))')" >> "$GITHUB_OUTPUT"
-          echo "matrix_b=$(echo "$MATRIX" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["half_b"]))')" >> "$GITHUB_OUTPUT"
+          # #1472 regression fix: emit SPACE-JOINED STRINGS (the old
+          # hardcoded `files: >-` format). fromJSON(...) in the matrix
+          # include yields a JS array, which renders as "Array" in the
+          # shell `for f in ${{ matrix.files }}` loop (template-context
+          # toString) — every full-matrix run collected tests/Array.py.
+          echo "matrix_a=$(echo "$MATRIX" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["half_a"]))')" >> "$GITHUB_OUTPUT"
+          echo "matrix_b=$(echo "$MATRIX" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["half_b"]))')" >> "$GITHUB_OUTPUT"
       - name: Tier-2 duration split (#1473)
         # #1473: LPT-pack the tier-2 selected files across halves a/b by
         # measured duration (config/ci-surfaces.yml durations) instead of the
@@ -236,9 +241,9 @@ jobs:
         half: [a, b]
         include:
           - half: a
-            files: ${{ fromJSON(needs.changes.outputs.matrix_a) }}
+            files: ${{ needs.changes.outputs.matrix_a }}
           - half: b
-            files: ${{ fromJSON(needs.changes.outputs.matrix_b) }}
+            files: ${{ needs.changes.outputs.matrix_b }}
     name: test (${{ matrix.half }})
     # Outer cap: setup (checkout+install+cache) + watchdog (45m) + SIGINT
     # grace (10s) + tail print. Cap 60m ≈ 45m watchdog + ~15m setup margin.
