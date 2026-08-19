@@ -74,19 +74,21 @@ def _page_js_errors(page: Page) -> list[str]:
     return errors
 
 
-def test_js_disabled_form_submission_does_not_echo_credentials(
-        browser) -> None:
+def test_js_disabled_modal_unreachable_no_credential_echo(browser) -> None:
     """#527 original bug: with JS disabled (CDN blocked / CSP / regression),
-    the native form submission must not put credentials in the URL. method=post
-    + action=/signup means the browser POSTs to /signup and Cloudflare Pages
-    discards the body — the URL stays clean."""
+    credentials must never reach the URL. The email form now lives in a modal
+    opened by JS (#1494) — without JS it stays closed, so there is NO
+    submittable credential surface at all (stronger than the old method=post
+    belt, and the modal forms still carry method=post + explicit action per
+    the #527 contract)."""
     with browser.new_context(java_script_enabled=False) as nojs_ctx:
         nojs_page = nojs_ctx.new_page()
         nojs_page.goto(BASE_URL + "/signup", wait_until="domcontentloaded", timeout=30_000)
-        nojs_page.locator("#email").fill("nojs-527@premise-labs.dev")
-        nojs_page.locator("#password").fill("NoJsPass-527!")
-        nojs_page.locator("#btn-submit").click()
-        nojs_page.wait_for_timeout(800)
+        # Neither modal can open without JS — the credential forms are
+        # unreachable, so nothing can echo into the URL.
+        assert nojs_page.locator("#email-modal").is_hidden()
+        assert nojs_page.locator("#email-form").is_hidden()
+        assert nojs_page.locator("#apikey-modal").is_hidden()
         url = nojs_page.url
         assert "email=" not in url, f"credentials echoed into URL: {url}"
         assert "password=" not in url, f"credentials echoed into URL: {url}"
@@ -138,6 +140,7 @@ def test_429_signup_rate_limit_is_humanized(page: Page) -> None:
     page.route("**/v1/signup/email*", handle)
     page.route("**/auth/v1/signup*", handle)
     page.goto(BASE_URL + "/signup", wait_until="domcontentloaded", timeout=30_000)
+    page.locator("#btn-email").click()
     page.locator("#email").fill("rate-527@premise-labs.dev")
     page.locator("#password").fill("RatePass-527!")
     page.locator("#btn-submit").click()
@@ -215,6 +218,7 @@ def test_429_short_tier_lockout_60s_then_expiry(page: Page) -> None:
     page.route("**/v1/signup/email*", handle)
     page.route("**/auth/v1/signup*", handle)
     page.goto(BASE_URL + "/signup", wait_until="domcontentloaded", timeout=30_000)
+    page.locator("#btn-email").click()
     page.locator("#email").fill("rate-short@premise-labs.dev")
     page.locator("#password").fill("RatePass-Short!")
     page.locator("#btn-submit").click()
@@ -289,6 +293,7 @@ def test_non_rate_limit_error_does_not_lock_out(page: Page) -> None:
     page.route("**/v1/signup/email*", handle)
     page.route("**/auth/v1/signup*", handle)
     page.goto(BASE_URL + "/signup", wait_until="domcontentloaded", timeout=30_000)
+    page.locator("#btn-email").click()
     page.locator("#email").fill("nolate@premise-labs.dev")
     page.locator("#password").fill("ShortPass!")
     page.locator("#btn-submit").click()
@@ -361,6 +366,7 @@ def test_resend_429_sets_lockout_and_disables_resend(page: Page) -> None:
     page.route("**/v1/signup/email*", handle_server)
     page.route("**/auth/v1/**", handle_legacy)
     page.goto(BASE_URL + "/signup", wait_until="domcontentloaded", timeout=30_000)
+    page.locator("#btn-email").click()
     page.locator("#email").fill("resend-429@premise-labs.dev")
     page.locator("#password").fill("ResendPass-429!")
     page.locator("#btn-submit").click()
@@ -491,6 +497,7 @@ def test_mock_email_signup_created_signs_in_and_redirects_url_clean(page: Page) 
     page.route("**/auth/v1/signup*", handle)
     page.route("**/auth/v1/token*", handle)
     page.goto(BASE_URL + "/signup", wait_until="domcontentloaded", timeout=30_000)
+    page.locator("#btn-email").click()
     page.locator("#email").fill(email)
     page.locator("#password").fill("E2ePass-12345!")
     page.locator("#btn-submit").click()

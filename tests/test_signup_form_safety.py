@@ -42,14 +42,15 @@ def test_email_form_is_post_with_explicit_action() -> None:
     signup_form = re.search(r'<form[^>]*id="email-form"[^>]*>', SIGNUP).group(0)
     signin_form = re.search(r'<form[^>]*id="email-form"[^>]*>', SIGNIN).group(0)
     assert re.search(r'method="post"', signup_form), "signup form must be method=post"
-    assert re.search(r'action="/signup"', signup_form), "signup form must action=/signup"
+    # #1494: the ONE email form now lives in the email modal (signup AND
+    # login per the toggle); its action is the same-path canonical /auth.
+    assert re.search(r'action="/auth"', signup_form), "signup form must action=/auth"
     assert re.search(r'method="post"', signin_form), "signin form must be method=post"
     assert re.search(r'action="/signin"', signin_form), "signin form must action=/signin"
-    # #1493: the login MODAL's form is the live login surface — same #527
-    # contract, same-path canonical (/auth), pinned so it can't regress.
-    modal_form = re.search(r'<form[^>]*id="modal-email-form"[^>]*>', SIGNUP).group(0)
-    assert re.search(r'method="post"', modal_form), "modal form must be method=post"
-    assert re.search(r'action="/auth"', modal_form), "modal form must action=/auth"
+    # The API-key modal form keeps the same #527 contract (no GET echo).
+    apikey_form = re.search(r'<form[^>]*id="apikey-form"[^>]*>', SIGNUP).group(0)
+    assert re.search(r'method="post"', apikey_form), "apikey form must be method=post"
+    assert re.search(r'action="/auth"', apikey_form), "apikey form must action=/auth"
 
 
 def test_email_and_password_have_autocomplete() -> None:
@@ -306,4 +307,8 @@ def test_welcome_waits_for_session_before_erroring() -> None:
     supabase-js builds."""
     assert "waitForSession" in WELCOME
     assert "SIGNED_IN" in WELCOME
-    assert 'window.location.href = "/auth"' in WELCOME  # no-session → /auth
+    # #1494: the no-session redirect uses location.replace — hard gate,
+    # Back cannot return to /welcome; the head gate covers the immediate
+    # cookie-missing case, this is the async-callback fallback.
+    assert 'window.location.replace("/auth"' in WELCOME
+    assert 'window.location.replace("/auth" + window.location.search + landingHash)' in WELCOME
