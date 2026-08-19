@@ -62,6 +62,13 @@ def _patch_tortoise_sdk_init(db_path: str):
         _orig_init(self, db_path, namespace=namespace)
 
     ha_mod.TortoiseSDK.__init__ = _patched_init
+    # Break the _make_sdk embedded fallback anchor (#1470): _FALLBACK_KEEPALIVE
+    # is module-level and survives test files, so an anchored SDK bound to a
+    # PREVIOUS test's temp DB leaks state into this test (the anchor's socket
+    # dies when that tempdir is removed → redis.socket ConnectionError, or the
+    # previous graph's rows appear in the "fresh" temp DB). Clear it so
+    # _make_sdk re-binds to THIS test's temp DB.
+    ha_mod._FALLBACK_KEEPALIVE.clear()
     return _orig_init
 
 
