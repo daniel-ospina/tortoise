@@ -34,6 +34,11 @@ def client(tmp_path):
         orig_init(self, db_path=resolved, namespace=namespace, **kw)
 
     TortoiseSDK.__init__ = _patched
+    # #1497: break the _make_sdk embedded fallback anchor — module-level
+    # _FALLBACK_KEEPALIVE survives tests, so an anchored SDK bound to a prior
+    # test's temp DB leaks state / dies socket. Re-bind to THIS temp DB.
+    from tortoise.hosted_api import _FALLBACK_KEEPALIVE
+    _FALLBACK_KEEPALIVE.clear()
     from tortoise.hosted_api import get_current_team
     app.dependency_overrides[get_current_team] = lambda: {
         "team_id": "test-team-1", "tier": "free", "key_id": "k1",

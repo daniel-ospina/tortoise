@@ -366,6 +366,10 @@ def _patch_tortoise_sdk_init(db_path: str):
         _orig(self, db_path, namespace=namespace)
 
     ha_mod.TortoiseSDK.__init__ = _patched
+    # #1497: break the _make_sdk embedded fallback anchor — module-level
+    # _FALLBACK_KEEPALIVE survives tests, so an anchored SDK bound to a prior
+    # test's temp DB leaks state / dies socket. Re-bind to THIS temp DB.
+    ha_mod._FALLBACK_KEEPALIVE.clear()
     return _orig
 
 

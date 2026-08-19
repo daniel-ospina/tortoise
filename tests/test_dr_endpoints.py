@@ -43,6 +43,11 @@ def client():
             _orig_init(self, db_path, namespace=namespace)
 
         ha_mod.TortoiseSDK.__init__ = _patched_init
+        # #1497: break the _make_sdk embedded fallback anchor — module-level
+        # _FALLBACK_KEEPALIVE survives tests, so an anchored SDK bound to a
+        # prior test's temp DB leaks state / dies socket. Re-bind to THIS
+        # temp DB.
+        ha_mod._FALLBACK_KEEPALIVE.clear()
         try:
             with TestClient(ha_mod.app) as tc:
                 yield tc

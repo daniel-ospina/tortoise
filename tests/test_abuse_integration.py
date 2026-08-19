@@ -120,6 +120,11 @@ def _patch_sdk_init(ha, db_path):
         orig(self, db_path, namespace=namespace)
 
     ha.TortoiseSDK.__init__ = patched
+    # #1497: break the _make_sdk embedded fallback anchor — module-level
+    # _FALLBACK_KEEPALIVE survives tests, so an anchored SDK bound to a prior
+    # test's temp DB leaks state / dies socket. Re-bind to THIS temp DB.
+    from tortoise.hosted_api import _FALLBACK_KEEPALIVE
+    _FALLBACK_KEEPALIVE.clear()
     return orig
 
 
