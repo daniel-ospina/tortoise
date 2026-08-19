@@ -13361,9 +13361,13 @@ class TortoiseSDK:
         # ``_create_entity``'s reject_id is bypassed for the sanctioned route.
         for _k in ("sourcePath", "source_path", "id", "is_episodic"):
             if _k in props:
+                # #1501: name the actual sanctioned keyword per key (is_episodic
+                # became a sanctioned create_source keyword in this change).
+                sanctioned = ("source_path" if _k in ("sourcePath", "source_path")
+                              else _k)
                 raise ValueError(
                     f"{_k!r} is a server-managed field and cannot be set via "
-                    f"props — use the sanctioned create_source(source_path=) "
+                    f"props — use the sanctioned create_source({sanctioned}=) "
                     f"keyword (epic #900 §4.1)."
                 )
         ev = {
