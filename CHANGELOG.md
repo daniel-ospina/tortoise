@@ -4,6 +4,45 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Reaper discover/reap production semantics (#1383)
+
+The embedded reaper's discover/reap contract is now honest: every
+`'candidate'` record is reapable, and live-but-unprobeable orphans are no
+longer stranded by a single load-induced probe timeout.
+
+- **Classification honesty**: a dead authoritative pid (zombie-aware
+  `_pid_alive` — `/proc` Z-state discriminator, #1365 precedent) classifies
+  `stale_socket` — never the phantom `'candidate'` reap()'s liveness-first
+  gate could not act on. Pass-1 live servers carry their pgrep pid as
+  `known_pid` so a stale registry pidfile can never misclassify a LIVE
+  server as `stale_socket`; probe-failed client counts record `None`
+  (unknown), never a misleading `0`.
+- **`reap()` two-verb action engine**: `stale_socket` records are removed
+  via a 9-guard guarded rmtree (`_remove_stale_socket_dir`): quarantine
+  re-entry skip, ephemeral-tempdir containment, pidfile re-read, short
+  ECONNREFUSED-only socket re-probe, mtime age x2, atomic rename-aside,
+  post-rename re-probe (short-symlink probing keeps deep dirs under the
+  macOS AF_UNIX 104-byte sun_path limit), moved-pidfile check, then rmtree
+  of the renamed path only. Stale removals never consume the kill
+  `batch_size` and are capped by `STALE_SWEEP_BUDGET`; they run in every
+  mode including `--only-safe` (the guards are the safety).
+- **Bounded probe retry**: `_raw_resp_client_list` retries once on a
+  read/connect-phase `socket.timeout` (2×0.5s) before the fail-closed
+  `None`; refused/missing are reliable verdicts and never retry — a loaded
+  server filling its backlog no longer strands on a single timeout.
+- **Quarantine convergence**: discover() pass 2 skips `*.reaper-stale-*`
+  dirs (reaper-owned — a guard-7-preserved LIVE server in a moved dir must
+  never classify `candidate`); `_sweep_quarantine_dirs` re-probes and
+  removes dead quarantine leftovers, and `_run_sweep` emits
+  `stale_quarantine` acted records.
+- **`--json` output**: now carries `dbdir`, `removed_dir`, `quarantine_dir`
+  keys; may emit `"classification": "stale_socket"` (dead/None pid; `dbdir`
+  stays the original path, `removed_dir` the renamed/quarantined path) and
+  `"stale_quarantine"` entries.
+- Regression guards: #1005/#1115 `only_safe` kill behavior for LIVE
+  candidates unchanged; #1379 discovery fixes (`ps -ww`, 3 argv forms)
+  untouched.
+
 ### Added — battery harness core (#1406)
 
 The Agent-Reasoning Eval Battery harness core (epic #1402): a `battery/` package extending `tools/longmem_eval` runner patterns — episode runner (trajectory logging, seed pinning, model-call outcome tracking, batch scenario setup), CLI (`run|parity|calibrate|validate-judge|report` + exit codes 0/1/2/3/4/5), and `battery/config/` YAML loaders (corpus/thresholds/arms/budget with [cal] table lock + gold sha256 verification).
