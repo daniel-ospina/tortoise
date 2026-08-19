@@ -291,7 +291,10 @@ jobs:
         # test_embeddings.py, test_cross_lens.py, test_sdk_group3.py import
         # sklearn at module scope (post-merge-validation.yml installs
         # '.[embeddings]' for the same reason).
-        run: pip install -e '.[test,embeddings]'
+        # uv: test_battery_corpus.py::test_builder_determinism_cross_process
+        # shells out to `uv run` to build the corpus in subprocesses with
+        # different PYTHONHASHSEED — the runner has no uv by default.
+        run: pip install -e '.[test,embeddings]' uv
       - name: Clean stale redislite orphans (issue #1005 tempdir pollution)
         # Leaky shared runners accumulate redislite tempdirs from every
         # failed embedded-redis run — discover() then skips its stale-socket

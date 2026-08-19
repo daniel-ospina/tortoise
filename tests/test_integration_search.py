@@ -126,7 +126,29 @@ def _create_test_points(sdk):
 
 # ── Cross-entity search (#7849) ────────────────────────────────────────────
 
+
+@pytest.fixture
+def mcp_transport(monkeypatch):
+    """Initialize the MCP transport mode so _safe()'s auth gate passes.
+
+    Without this, _safe() returns the fail-closed "MCP transport mode not
+    initialized" error before any validation runs — the entity_type
+    validation tests would assert against the auth error, not the real one.
+    Stdio mode with no TORTOISE_API_KEY = local dev mode (the CI/live-FalkorDB
+    default), which is what these tests exercise.
+    """
+    from tortoise.mcp_auth import _transport_mode
+
+    monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+    token = _transport_mode.set("stdio")
+    try:
+        yield
+    finally:
+        _transport_mode.reset(token)
+
+
 @pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="FalkorDB not available")
+@pytest.mark.usefixtures("mcp_transport")
 class TestCrossEntitySearch:
     """Test tortoise_search with entity_type='event' and 'subject'."""
 
@@ -366,6 +388,7 @@ class TestMigrationScript:
 # ── MCP tool surface (#7849) ───────────────────────────────────────────────
 
 @pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="FalkorDB not available")
+@pytest.mark.usefixtures("mcp_transport")
 class TestMCPSurface:
     """Test tortoise_search with relationship_filter and traversal_path."""
 

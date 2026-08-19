@@ -110,6 +110,16 @@ def _do_migrate(sdk: TortoiseSDK, dry_run: bool = False) -> dict:
     return results
 
 
+def migrate(sdk: TortoiseSDK, dry_run: bool = False) -> dict:
+    """Public API: run kind migration across all entity types.
+
+    Thin wrapper over `_do_migrate` (kept as a public entry point for
+    programmatic consumers; the leading-underscore rename in #442 broke
+    `from tortoise.migrate_kinds import migrate`).
+    """
+    return _do_migrate(sdk, dry_run=dry_run)
+
+
 if __name__ == "__main__":
     import os
 
@@ -122,7 +132,7 @@ if __name__ == "__main__":
         print(f"Using embedded DB at {resolve_db_path()} (set TORTOISE_DB_URI to run against a server)")
         sdk = TortoiseSDK(db_path=resolve_db_path())
         results = _do_migrate(sdk, dry_run=dry_run)
-        return
+        exit(0)
     if not is_docker_uri(uri):
         print("Set TORTOISE_DB_URI to a docker:// URI to run migration")
         exit(1)
