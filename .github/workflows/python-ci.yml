@@ -133,10 +133,11 @@ env:
   # Excluded from the `test` job and run in parallel in `test-slow`
   # (#798, tracked slow files: #647). #1371: the SLOW_FILES env var is gone —
   # the single source of truth is config/ci-surfaces.yml `slow_files:`;
-  # test-slow builds its file list from the changes job's slow_files output.
+  # #1471: test-slow's legs are committed duration-balanced lists, pinned to
+  # that config by a fail-closed drift guard (union check). The push matrix
+  # and env-broken exclusions are derived by the selector (#1472).
   # Env-broken in this job (tests/e2e needs browsers; test_agent_signup needs
-  # a live redis on 6379) — #1472: single source is tools/ci_selection.py
-  # (ENV_BROKEN_FILES); the push matrix derivation excludes them.
+  # a live redis on 6379) — single source is tools/ci_selection.py.
 
 jobs:
   changes:
@@ -496,13 +497,37 @@ jobs:
     needs: changes
     if: needs.changes.outputs.python == 'true'
     runs-on: ubuntu-latest
-    # Slow files run serially here; generous caps so the summary is
-    # guaranteed to print (a runner kill would lose it — the #798 mode).
-    # Watchdog (75m) + SIGINT grace + tail print; ~17 min for the original
-    # 12 files, ~30 min expected with the 6 added by the fast-job rebalance,
-    # ~36-38 min with test_ep_sources + test_sdk_group3 added 2026-08-10 (#880),
-    # ~55-60 min with the #1266 ingest/index trim (8 files moved 2026-08-18 —
-    # still ~15+ min under the 75m watchdog).
+    # #1471: two parallel duration-balanced legs (matrix), mirroring the `test`
+    # job's #880 pattern. Serial pytest was 37:44 (run 32241846147, 2026-08-19)
+    # — the true critical path of every main push (last python-ci job to
+    # finish). Split measured 2026-08-19 (CI --durations=15 data + header-
+    # verified facts + test-count calibration): leg a ≈ 18.5m, leg b ≈ 18.3m
+    # of pytest time vs ~38m serial — main-push wall-clock drops to
+    # ~max(leg) ≈ 23-24m incl. setup (~40-50% cut). Separate runners = zero
+    # hermeticity risk (slow files share no state across processes).
+    # Each leg keeps the 75m watchdog + 5-min heartbeat + guaranteed-summary
+    # tail (#798/#964); the drift-guard step pins the union of both legs to
+    # config/ci-surfaces.yml `slow_files:` — a new slow file can never
+    # silently drop out of CI.
+    strategy:
+      fail-fast: false
+      matrix:
+        half: [a, b]
+        include:
+          - half: a
+            files: >-
+              test_about_edges test_billing test_control_plane test_dream
+              test_ep_sources test_flip_gate test_hosted_api test_hosted_backup
+              test_index_cli test_indexes test_ingest_bundle test_ingest_mode
+              test_projection test_sdk_group3 test_source_inheritance_own
+          - half: b
+            files: >-
+              test_backfill_sources test_cli_context test_embedded_concurrency
+              test_enumeration_surfaces test_event_provenance
+              test_index_directory test_ingest test_ingest_validation
+              test_mcp_http test_migrate_db test_projection_lifecycle
+              test_reaper test_sdk test_search_engine_gaps
+    name: test-slow (${{ matrix.half }})
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
@@ -558,7 +583,27 @@ jobs:
                           raise
                       time.sleep(10 * attempt)
           EOF
-      - name: Run slow test suite (known-slow files, #647)
+      - name: Drift guard — legs cover exactly config slow_files (#1471)
+        # #1471: the committed leg lists MUST stay the full slow-file set — a
+        # new slow file added to config/ci-surfaces.yml `slow_files:` that
+        # lands in neither leg silently drops coverage (the #1260/#1270 drift
+        # class). Parses the workflow's own matrix include + the config and
+        # fails closed. Runs in both legs (<1s, yaml proven on the runner —
+        # the changes job uses it on every event).
+        run: |
+          python3 - <<'EOF'
+          import yaml
+          wf = yaml.safe_load(open('.github/workflows/python-ci.yml'))
+          inc = wf['jobs']['test-slow']['strategy']['matrix']['include']
+          legs = {i['half']: set(i['files'].split()) for i in inc}
+          cfg = {f[:-3] if f.endswith('.py') else f for f in yaml.safe_load(open('config/ci-surfaces.yml'))['slow_files']}
+          union = set().union(*legs.values())
+          if union != cfg:
+              print(f"❌ test-slow leg drift: missing={sorted(cfg - union)} extra={sorted(union - cfg)}")
+              raise SystemExit(1)
+          print(f"legs cover exactly {len(cfg)} slow files (union == config)")
+          EOF
+      - name: Run slow test suite — leg ${{ matrix.half }} (known-slow files, #647)
         # Same guaranteed-summary treatment as the fast job (#798).
         # Per-test --timeout=300: these files have tests/setups that
         # legitimately take >90s; 300s still caps any hang.
@@ -568,9 +613,11 @@ jobs:
         # progress to the live job log every 5 min.
         run: |
           set +e
-          # #1371: slow files come from the selector's single source of
-          # truth (config/ci-surfaces.yml slow_files) via the changes job.
-          FILES=$(echo '${{ needs.changes.outputs.slow_files }}' | python3 -c "import json,sys; print(' '.join('tests/'+f for f in json.load(sys.stdin)))")
+          # #1471: this leg's committed duration-balanced file list (measured
+          # 2026-08-19, see job header); the drift guard above pins the union
+          # of both legs to config/ci-surfaces.yml slow_files.
+          FILES=""
+          for f in ${{ matrix.files }}; do FILES="$FILES tests/$f.py"; done
           if [ -z "$FILES" ]; then
             echo "no slow files selected — skipping"
             exit 0
