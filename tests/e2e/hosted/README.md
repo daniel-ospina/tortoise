@@ -77,7 +77,7 @@ Every case carries ≥2 negative tests.
   local `STRIPE_PRICE_IDS` catalog → hermetic tier bump, zero Stripe network
   (E2E-3-D; the real-checkout live leg stays with the precedent suite
   `tests/e2e/test_billing_upgrade.py`, gated on `STRIPE_TEST_*`).
-- Local JWKS mock + minted RS256 JWTs for the session-auth plane
+- Local JWKS mock + minted ES256 JWTs for the session-auth plane
   (E2E-6-D/8-D).
 - Second subprocesses: a minimal-env "bare" server (unconfigured negatives)
   and the selfhost daemon (E2E-12-D).

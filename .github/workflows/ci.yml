@@ -287,7 +287,7 @@ jobs:
     # Hermetic seams: TORTOISE_BACKUP_STORAGE=memory (backups), fixture
     # pricing via TORTOISE_PRICING_PATH, self-signed Stripe webhooks against
     # a local secret (tier bump without Stripe network), local JWKS mock +
-    # minted RS256 JWTs (session-auth plane). Suite self-boots the server
+    # minted ES256 JWTs (session-auth plane). Suite self-boots the server
     # (fixture), so the job is one pytest invocation — legal-e2e pattern
     # minus the external-server step. Measured locally: ~60-120s suite.
     runs-on: ubuntu-latest
