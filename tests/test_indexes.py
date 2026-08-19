@@ -185,15 +185,15 @@ def test_get_entity_parity_all_types(sdk):
     assert sdk.get_entity("http://parity").get("url") == "http://parity"
     # every CANONICAL entity node is resolvable by one of id/eventId/url.
     # Internal event-store nodes (:GraphEvent/:GraphEventMeta — emitted by
-    # create_point's PointAdded via event_store, #432) and registry nodes
-    # (Session/APIKey/Team/Tag, separate registry graph) are intentionally OUT
-    # of scope for entity resolution (_get_entity resolves only the 6
+    # create_point's PointAdded via event_store, #432) and the graph-wide
+    # :EpMeta EP-epoch bookkeeping node (#1163) are intentionally OUT of
+    # scope for entity resolution. (_get_entity resolves only the 6
     # canonical labels; GraphEvent keys on event_id, not id/eventId/url —
     # #647 sweep catch).
     rows = proj.g.query(
         "MATCH (n) RETURN n.id, labels(n)[0], n.url, n.eventId").result_set
     assert rows, "no nodes created"
-    INTERNAL = {"GraphEvent", "GraphEventMeta"}
+    INTERNAL = {"GraphEvent", "GraphEventMeta", "EpMeta"}
     for r in rows:
         label = r[1]
         if label in INTERNAL:

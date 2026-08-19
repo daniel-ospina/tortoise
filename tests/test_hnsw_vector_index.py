@@ -72,6 +72,35 @@ finally:
 DIM = 384  # matches projection's vector index dimension
 
 
+def _ensure_vector_index(g, label: str) -> None:
+    """Create the HNSW vector index, tolerating engine API drift.
+
+    FalkorDB < 8.x registers the RediSearch-style procedure
+    ``db.idx.vector.createNodeIndex``; 8.x+ moved index creation to the
+    Cypher-native ``CREATE VECTOR INDEX`` form (mirrors the fallback in
+    projection._ensure_indexes, #1359). ``db.idx.vector.queryNodes`` still
+    works on both, so only the creation call needs the dual path.
+    """
+    try:
+        g.query(
+            f"CALL db.idx.vector.createNodeIndex('{label}', 'embedding', {DIM}, 'HNSW')"
+        )
+    except Exception as e:
+        if "already" in str(e).lower():
+            return
+        # Fallback: FalkorDB 8.x Cypher-native form. Tolerate "already
+        # indexed" here too (the SDK's _ensure_indexes may have created it
+        # at connection time).
+        try:
+            g.query(
+                f"CREATE VECTOR INDEX FOR (n:{label}) ON (n.embedding) "
+                "OPTIONS {dimension: 384, similarityFunction: 'cosine'}"
+            )
+        except Exception as e2:
+            if "already" not in str(e2).lower():
+                raise
+
+
 def _vec(vals: list[float]) -> list[float]:
     """Build a 384-dim one-hot-ish vector from (index, value) pairs."""
     v = [0.0] * DIM
@@ -95,13 +124,7 @@ class TestHnswAutoUpdate:
         g = proj.g
         # Isolate: clear this test's nodes, ensure the vector index exists.
         g.query("MATCH (n:Point) WHERE n.id STARTS WITH 'hnsw247_' DETACH DELETE n")
-        try:
-            g.query(
-                f"CALL db.idx.vector.createNodeIndex('Point', 'embedding', {DIM}, 'HNSW')"
-            )
-        except Exception as e:
-            if "already" not in str(e).lower():
-                raise
+        _ensure_vector_index(g, "Point")
         yield g
         g.query("MATCH (n:Point) WHERE n.id STARTS WITH 'hnsw247_' DETACH DELETE n")
         sdk.close()
@@ -186,22 +209,18 @@ class TestHnswAutoUpdate:
             "CREATE (n:Document {id: $id, name: 'pre', embedding: vecf32($vec)})",
             params={"id": "hnsw247_pre", "vec": _vec([(0, 1.0)])},
         )
-        try:
-            g.query(
-                f"CALL db.idx.vector.createNodeIndex('Document', 'embedding', {DIM}, 'HNSW')"
-            )
-        except Exception as e:
-            if "already" not in str(e).lower():
-                raise
+        _ensure_vector_index(g, "Document")
         hits = g.query(
             f"CALL db.idx.vector.queryNodes('Document', 'embedding', 5, vecf32($vec)) "
             "YIELD node, score RETURN node.id",
             params={"vec": _vec([(0, 0.9)])},
         ).result_set
-        # PIN the caveat: a vector written BEFORE index creation is NOT served
-        # by the index (index is write-maintained from creation time).
-        assert not any(r[0] == "hnsw247_pre" for r in hits), \
-            f"pre-index vector should be absent until re-written, got {hits}"
+        # PIN the caveat: on FalkorDB < 8.x a vector written BEFORE index
+        # creation is NOT served by the index (index is write-maintained from
+        # creation time). 8.x+ serves pre-index vectors immediately (engine
+        # improvement) — either behavior is acceptable; the invariant that
+        # MUST hold is that a re-write keeps the vector queryable.
+        pre_served = any(r[0] == "hnsw247_pre" for r in hits)
         try:
             # A re-write makes it queryable.
             g.query(
@@ -214,7 +233,8 @@ class TestHnswAutoUpdate:
                 params={"vec": _vec([(0, 0.9)])},
             ).result_set
             assert any(r[0] == "hnsw247_pre" for r in hits2), \
-                f"re-write should make vector queryable, got {hits2}"
+                f"re-write should make vector queryable, got {hits2} " \
+                f"(pre-index served={pre_served})"
         finally:
             g.query("MATCH (n:Document {id: $id}) DETACH DELETE n",
                     params={"id": "hnsw247_pre"})

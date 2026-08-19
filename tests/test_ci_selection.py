@@ -316,7 +316,8 @@ def test_fast_files_absent_from_halves_reports_coverage_hole():
 
 
 def test_real_workflow_halves_are_consistent():
-    # #1472: the matrix halves are now DERIVED from the manifest (fromJSON) —
+    # #1472: the matrix halves are now DERIVED from the manifest
+    # (space-joined matrix_* outputs) —
     # the #1266 discipline runs against the derivation. Verify the derived
     # halves carry every fast file exactly once and tilt is bounded.
     from tools.ci_selection import (TESTS_DIR, push_legs,

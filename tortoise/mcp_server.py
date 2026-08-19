@@ -926,18 +926,26 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
                     threshold: float = 0.0, limit: int = 10,
                     min_confidence: float = 0.0,
                     order_by: str = "relevance",
-                    entity_type: str = "point") -> list[dict]:
+                    entity_type: str = "point",
+                    relationship_filter: str | None = None,
+                    traversal_path: str | None = None) -> list[dict]:
     """Hybrid search with RRF fusion + EP annotation.
 
     entity_type: 'point' (default), 'event', 'subject', 'document', 'object', 'operator', or 'source'.
     Full-scan mode: omit query, set kind → all Points of kind (current-view
     by default — terminal statuses retracted/superseded/outdated/archived/
-    deprecated excluded, #1391; pass include_terminal=True for the complete
-    supersede-structure view).
+    deprecated excluded, #1391; the SDK tortoise_fts_query exposes
+    include_terminal=True for the complete supersede-structure view).
     Best-match mode: provide query → RRF fusion of FTS + vector + structural.
 
     Point results annotated with EP breakdown (confidence_mean + variance + contested + contention).
     min_confidence defaults to 0.0 (no filter).
+
+    relationship_filter: 'predicate:target_id' — only return points connected to
+        target_id via an operator with label=predicate
+        (e.g., 'addresses:customerSegment-1').
+    traversal_path: 'FromKind→ToKind' — only return points that participate in
+        a relationship path of the form FromKind→ToKind (e.g., 'Product→Feature').
 
     order_by (#25, #560):
       - 'relevance' (default): pure RRF fusion order (FTS + vector + structural).
@@ -962,7 +970,9 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
     return _safe(_get_team_sdk().tortoise_fts_query, query, kind=kind,
                  threshold=threshold, limit=limit,
                  entity_type=entity_type,
-                 min_confidence=min_confidence, order_by=order_by)
+                 min_confidence=min_confidence, order_by=order_by,
+                 relationship_filter=relationship_filter,
+                 traversal_path=traversal_path)
 
 
 def tortoise_expand_relationships(point_id: str) -> list[dict]:
