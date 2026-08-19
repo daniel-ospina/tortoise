@@ -12,6 +12,14 @@
 # Note: runs the embedded-FalkorDBLite suite. Tests needing a live FalkorDB
 # self-skip via _skip_if_no_falkor. A per-test timeout turns any hang into a
 # fast, visible failure instead of a 6h CI budget burn.
+#
+# #1439: the validate job excludes config/ci-surfaces.yml `slow_files:` (the
+# 21 files python-ci.yml's test-slow job already covers on the same merge
+# commit) from the pytest run — post-merge ≈ python-ci's fast gate (~28-32m
+# incl. setup vs the 60m cap) instead of re-running the full suite (measured
+# 58m31s of pytest, run 32104818556 — cancelled at the cap on every merge).
+# The HF model cache/pre-cache + offline pins and the stale-redislite-orphan
+# reap are ported from python-ci's test job for the same reliability parity.
 # #1430: the tests step carries an in-step watchdog (mirrors python-ci.yml's
 # test job, the #798 mode) — a runner-level kill can never lose the summary
 # silently: the step always re-prints the tail + pass/fail counts + real exit
@@ -52,6 +60,67 @@ jobs:
           # pytest-asyncio: tests/test_github_indexer.py uses @pytest.mark.asyncio
           # (mirrors the python-ci.yml '.[test,embeddings]' surface, #493).
           pip install -e '.[embeddings]' falkordblite pytest pytest-timeout pytest-asyncio 2>&1 | tail -2
+      - name: Clean stale redislite orphans (issue #1005 tempdir pollution)
+        # Leaky shared runners accumulate redislite tempdirs from every
+        # failed embedded-redis run — discover() then skips its stale-socket
+        # walk (>5000 entries), so the reaper chaos tests fail with
+        # "orphan not cleaned". Reap strays before the suite. Best-effort.
+        # (#1439 parity port from python-ci's test job.)
+        run: |
+          pkill -f "redis-server unixsocket" || true
+          TMPD=$(python3 -c "import tempfile;print(tempfile.gettempdir())")
+          find "$TMPD" -maxdepth 1 -type d -name "tmp*" -mmin +30 -exec rm -rf {} + 2>/dev/null || true
+          echo "tempdir cleaned"
+      - name: Cache HF embedding model (all-MiniLM-L6-v2)
+        # ~90MB; persisted so the pre-cache step below is a no-op on
+        # subsequent runs and CI never re-downloads from huggingface.co.
+        # Same repo-wide key as python-ci — its runs already populate this
+        # cache, so post-merge restores it with zero download on most merges.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-embedding-cache-v1-${{ runner.os }}
+          restore-keys: |
+            hf-embedding-cache-v1-${{ runner.os }}-
+      - name: Pre-cache embedding model (all-MiniLM-L6-v2)
+        # Best-effort: when the model is already cached (actions/cache
+        # restore) this is a no-op. When the download succeeds, the suite
+        # exercises the real embedding path. When it fails (HF unreachable
+        # from runner — observed: "couldn't connect to huggingface.co"),
+        # the runtime already degrades gracefully to TF-IDF fallback
+        # (embeddings.py catches load failure), so a failed download is a
+        # WARNING, never a job failure.
+        # #964: a hung HF download (stalled TCP, no error raised) would
+        # otherwise stall the step for the full job cap with no output —
+        # step-level timeout bounds it; continue-on-error turns the timeout
+        # into a warning, not a failure. #1211-class: on HF-unreachable
+        # runners, tight retries (3 × 5s backoff) fail fast so the suite
+        # falls back to TF-IDF instead of burning the watchdog budget.
+        # (#1439 parity port from python-ci's test job.)
+        continue-on-error: true
+        timeout-minutes: 6
+        run: |
+          python - <<'EOF'
+          import os, time
+          os.environ["HF_HUB_OFFLINE"] = "1"
+          from sentence_transformers import SentenceTransformer
+          try:
+              SentenceTransformer("all-MiniLM-L6-v2")
+              print("embedding model: cached, no download needed")
+          except Exception:
+              print("embedding model: not cached — downloading (with retries)")
+              del os.environ["HF_HUB_OFFLINE"]
+              for attempt in range(1, 4):
+                  try:
+                      SentenceTransformer("all-MiniLM-L6-v2")
+                      print("embedding model: downloaded")
+                      break
+                  except Exception as e:
+                      print(f"download attempt {attempt}/3 failed: {e}")
+                      if attempt == 3:
+                          raise
+                      time.sleep(5 * attempt)
+          EOF
       - name: Run tests (embedded suite, per-test timeout)
         id: tests
         run: |
@@ -64,9 +133,10 @@ jobs:
           # CONTINUES: re-prints the log tail, prints pass/fail counts and
           # the real exit code. 50m in-step + ~2-6m setup < 60m job cap (a
           # literal 60m in-step would fire AFTER the runner kill — the #798
-          # death mode again). The suite is over budget today (#1439), so the
-          # WATCHDOG banner firing is the expected honest-red state, never
-          # silent. Warn-only workflow — no gate impact.
+          # death mode again). The suite is over budget today (#1439) — #1439
+          # excludes the slow files below, so the WATCHDOG banner firing is
+          # the honest-red exception (HF outage, loaded runner), never silent.
+          # Warn-only workflow — no gate impact.
           # NB: `set +e` is load-bearing — GitHub runs steps under
           # bash -eo pipefail; without it, timeout's 124 aborts the step
           # BEFORE the tail/banner/exit-code print (silent #798, again).
@@ -78,11 +148,18 @@ jobs:
             done ) &
           HB_PID=$!
           # 90s per-test -> 300s: 90 false-killed test_control_plane's ~90s
-          # setup in python-ci (#798) — and post-merge runs the FULL suite
-          # including test_control_plane (the slow files python-ci splits
-          # out). --durations=15 shows the slowest 15 tests in the tail.
+          # setup in python-ci (#798) — test_control_plane is in slow_files,
+          # so post-merge does NOT run it anymore (#1439).
+          # --durations=15 shows the slowest 15 tests in the tail.
           # tests/e2e stays excluded (dedicated e2e jobs; no browsers here).
-          timeout -s INT -k 10 50m stdbuf -oL python -m pytest tests/ -v --timeout=300 -p no:cacheprovider -m 'not track_b' --ignore=tests/e2e --maxfail=20 -rfE --durations=15 > /tmp/pmv-pytest.log 2>&1
+          # #1439: SLOW_IGNORES drops the 21 slow files (config/ci-surfaces.yml
+          # slow_files — single source of truth, same yaml.safe_load read as
+          # python-ci's changes job). Runtime read = drift-proof: a slow file
+          # added to the manifest auto-excludes here; one removed auto-re-enters.
+          # Unquoted $SLOW_IGNORES word-splits into --ignore flags; empty
+          # (missing key) falls back to the full suite.
+          SLOW_IGNORES=$(python3 -c "import yaml; m=yaml.safe_load(open('config/ci-surfaces.yml')); print(' '.join('--ignore=tests/'+f for f in m.get('slow_files', [])))")
+          timeout -s INT -k 10 50m stdbuf -oL python -m pytest tests/ -v --timeout=300 -p no:cacheprovider -m 'not track_b' --ignore=tests/e2e $SLOW_IGNORES --maxfail=20 -rfE --durations=15 > /tmp/pmv-pytest.log 2>&1
           rc=$?
           kill $HB_PID 2>/dev/null || true
           wait $HB_PID 2>/dev/null || true
@@ -104,6 +181,13 @@ jobs:
           # path — before the final `exit $rc` re-raises the real status.
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
           exit $rc
+        env:
+          # #1439 parity with python-ci's test job: deterministic embeddings —
+          # the model is pre-cached above; tests must NEVER reach
+          # huggingface.co mid-suite (shared runner IPs get 429-rate-limited,
+          # stalling embedding loads up to 30s each).
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
       - name: Comment result on PR
         if: always()
         uses: actions/github-script@v7
