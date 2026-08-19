@@ -378,3 +378,11 @@ slow_files:
 - test_sdk_group3.py
 - test_search_engine_gaps.py
 - test_source_inheritance_own.py
+
+# #1472: unclassifiable-as-top-level files that still run in the push matrix
+# (bench suite — tests/bench/* is not a top-level test_*.py surface).
+push_extra:
+- bench/test_bench_core.py
+- bench/test_degradation_chain.py
+- bench/test_roundrobin.py
+- bench/test_smoke_embedded.py
