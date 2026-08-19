@@ -1,9 +1,9 @@
 # Post-merge validation (#559)
 #
-# Closes the "done means merged, not verified" gap: every PR merged into main
-# runs the test suite against the merged head and posts the result on the PR.
-# On FAIL it also flags the linked issue (parsed from "Closes #N" in the PR
-# body) so an issue can never be silently 'done' while its change is red.
+# Closes the "done means merged, not verified" gap: every push to main runs
+# the test suite against the pushed head and posts the result on the merged
+# PR. On FAIL it also flags the linked issue (parsed from "Closes #N" in the
+# PR body) so an issue can never be silently 'done' while its change is red.
 #
 # Warn-only by design (mirrors post-deploy-verify): it detects problems and
 # makes them visible; it does not roll back. The issue stays open until the
@@ -24,43 +24,196 @@
 # test job, the #798 mode) — a runner-level kill can never lose the summary
 # silently: the step always re-prints the tail + pass/fail counts + real exit
 # code, with a WATCHDOG banner on timeout kills. Warn-only, no gate impact.
+#
+# #1474: sound-dedup vs python-ci's push-to-main full run. This workflow used
+# to trigger on pull_request:closed and re-run the FULL suite on every merged
+# tree — but python-ci.yml already validates the same tree with the full
+# matrix on push:main. The naive skip (PR-CI-green + tree-equal) is WRONG
+# (PR CI is a tiered subset on a different install), so this workflow now:
+#   - triggers on push:main (the merged tree, github.sha) instead,
+#   - polls the python-ci push-run conclusion for the SAME tree via the API
+#     (actions: read; event=push + head_sha=full SHA — the head_sha filter
+#     returns 0 results for abbreviated SHAs, verified 2026-08-19),
+#   - SKIPS the redundant pytest run (only comments "covered" + reports
+#     success — the aggregator pattern) when that run is completed+success,
+#   - FALLS OPEN to the full run on any other state (failure/cancelled/
+#     queued/in_progress past the 110-min poll cap/run never appearing/API
+#     error/no PR attribution) — the #1438 tri-state verdict + #559 issue
+#     flag contract is preserved byte-for-byte on the fall-open path.
+# PR/issue attribution moves off the (absent-on-push) pull_request payload to
+# the merge commit message + PR fetch, parsed by .github/scripts/
+# postmerge-dedup.js (unit-tested, tests/test_postmerge_dedup.py).
+#
+# #1474 gate polarity (P1, verifier-found): every suite/comment gate below
+# tests `skip != 'true'`, NOT `== 'false'` — if the dedup-check job fails
+# outside its try/catch, its outputs are EMPTY strings, and `'' != 'true'`
+# evaluates true (full run = fall-open). The `== 'false'` polarity would make
+# `'' == 'false'` false and silently skip the whole suite → a false-green
+# check with zero tests. Only the skip-path comment gates on `== 'true'`.
 
 name: Post-merge validation
 
 on:
-  pull_request:
-    types: [closed]
+  push:
+    branches: [main]
 
 concurrency:
   group: postmerge-validation
   cancel-in-progress: false
 
-# The comment step posts on the PR and the linked issue — the default
-# read-only token for pull_request events cannot do that.
+# The comment steps post on the PR and the linked issue — the default
+# read-only token for push events cannot do that. `actions: read` is new
+# (#1474): the dedup-check job lists python-ci's workflow runs via the API.
 permissions:
   contents: read
+  actions: read
   issues: write
   pull-requests: write
 
 jobs:
-  validate:
-    if: github.event.pull_request.merged == true
+  dedup-check:
+    # #1474: sound-dedup gate. Decides whether python-ci's push-to-main full
+    # run on THIS tree (event=push, head_sha=github.sha) has already concluded
+    # green. NEVER fails the workflow: every exception inside the script falls
+    # open (skip=false → validate runs the full suite).
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120  # poll cap is 110m (queue wait + ~55m suite); script timeouts inside
+    outputs:
+      skip: ${{ steps.dedup.outputs.skip }}
+      pr_number: ${{ steps.dedup.outputs.pr_number }}
+      issue_number: ${{ steps.dedup.outputs.issue_number }}
+      push_run_id: ${{ steps.dedup.outputs.push_run_id }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          ref: ${{ github.sha }}  # deterministic — a mid-run main advance must not move the tree
+      - name: Dedup decision — poll python-ci push run on same tree
+        id: dedup
+        uses: actions/github-script@v7
+        env:
+          POLL_INTERVAL_MS: "30000"
+          POLL_CAP_MS: "6600000"   # 110 min: push runs serialize (shared group, no cancel), so
+                                   # our run can sit in queue (~55m) before its suite (~55m) starts
+          EMPTY_GRACE_POLLS: "5"   # run-creation race is seconds; 5 empty polls (2.5 min) means
+                                   # the run will never appear (broken/disabled python-ci.yml) → fall open
+        with:
+          script: |
+            const { parsePrNumberFromMergeMessage, parseIssueNumberFromBody, dedupDecision } =
+              require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/postmerge-dedup.js`);
+            const { owner, repo } = context.repo;
+            const sha = context.sha;  // full 40-char pushed SHA (head_sha filter requires it)
+            const interval = parseInt(process.env.POLL_INTERVAL_MS || '30000', 10);
+            const cap = parseInt(process.env.POLL_CAP_MS || '6600000', 10);
+            const emptyGrace = parseInt(process.env.EMPTY_GRACE_POLLS || '5', 10);
+            const out = { skip: 'false', pr_number: '', issue_number: '', push_run_id: '' };
+            try {
+              // 1) PR attribution — best-effort; only affects comment/flag, NEVER the skip decision.
+              const headMsg = context.payload.head_commit && context.payload.head_commit.message;
+              const prNumber = headMsg ? parsePrNumberFromMergeMessage(headMsg) : null;
+              if (prNumber) {
+                const pr = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
+                // Tree-attribution guard: only trust the PR if the merged tree IS the pushed tree.
+                if (pr.data.merge_commit_sha === sha) {
+                  out.pr_number = String(prNumber);
+                  const issue = parseIssueNumberFromBody(pr.data.body || '');
+                  if (issue) out.issue_number = String(issue);
+                }
+              }
+              // 2) Poll python-ci's push run for this exact tree.
+              const deadline = Date.now() + cap;
+              let emptyPolls = 0;
+              let pushRun = null;
+              while (Date.now() < deadline) {
+                const runs = await github.rest.actions.listWorkflowRuns({
+                  owner, repo,
+                  workflow_id: 'python-ci.yml',
+                  event: 'push',           // filters out pull_request + schedule runs
+                  head_sha: sha,
+                  per_page: 100,  # #1474 review P3: a SHA with >10 reruns must still see the newest run
+                });
+                const candidates = (runs.data && runs.data.workflow_runs) || [];
+                if (candidates.length === 0) {
+                  // Run not listed yet (creation race) → keep polling; if it never
+                  // appears within the grace, fall open instead of burning the cap.
+                  if (++emptyPolls >= emptyGrace) break;
+                  await new Promise(r => setTimeout(r, interval));
+                  continue;
+                }
+                emptyPolls = 0;
+                candidates.sort((a, b) => b.id - a.id);  // re-runs supersede (max id wins)
+                pushRun = candidates[0];
+                if (pushRun.status === 'completed') break;
+                await new Promise(r => setTimeout(r, interval));
+              }
+              if (pushRun && pushRun.status === 'completed') {
+                out.push_run_id = String(pushRun.id);
+                out.skip = dedupDecision(pushRun.status, pushRun.conclusion) ? 'true' : 'false';
+              }
+              // else: poll cap or empty-grace exhausted → skip stays 'false' (fall open).
+            } catch (err) {
+              core.warning(`post-merge dedup fell open (error: ${err.message})`);
+            }
+            for (const [k, v] of Object.entries(out)) core.setOutput(k, v);
+
+  validate:
+    # #1474: this job is the check branch protection tracks. `if: always()` +
+    # `needs: dedup-check`: if dedup-check itself fails, the suite still runs
+    # (all gates below use `skip != 'true'` → empty outputs fall open).
+    needs: dedup-check
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      # #1474 review (P1): checkout MUST run unconditionally FIRST — the
+      # skip-comment step requires postmerge-dedup.js from the workspace, and
+      # the skip path never ran checkout before (empty runner -> MODULE_NOT_FOUND
+      # -> red check + no comment on the primary path).
+      - uses: actions/checkout@v4
+      # #1474 skip path — python-ci's push run on this tree was green; only
+      # comment "covered" (aggregator reports success; no second pytest run).
+      - name: Skip — covered by python-ci push run (no re-run)
+        if: needs.dedup-check.outputs.skip == 'true'
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ needs.dedup-check.outputs.pr_number }}
+          PUSH_RUN_ID: ${{ needs.dedup-check.outputs.push_run_id }}
+        with:
+          script: |
+            // #1474: post-merge elides the redundant run. The branch-protection
+            // check stays green (this step succeeds); the covered-comment makes
+            // the skip visible on the PR. No PR attribution (direct push) →
+            // no-op: the python-ci push run still validated the tree.
+            const { buildSkipCommentBody } =
+              require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/postmerge-dedup.js`);
+            const prNumber = process.env.PR_NUMBER;
+            if (!prNumber) {
+              core.info('no PR attribution (direct push?) — covered-comment skipped; the push run already validated this tree');
+            } else {
+              const body = buildSkipCommentBody({
+                sha8: context.sha.slice(0, 8),
+                runUrl: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+                pushRunId: process.env.PUSH_RUN_ID,
+              });
+              await github.rest.issues.createComment({
+                issue_number: parseInt(prNumber, 10),
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body,
+              });
+            }
       - uses: actions/setup-python@v5
+        if: needs.dedup-check.outputs.skip != 'true'
         with:
           python-version: '3.12'  # pyproject requires-python >= 3.12 (mirrors python-ci.yml)
       - name: Install
+        if: needs.dedup-check.outputs.skip != 'true'
         run: |
           set -o pipefail  # don't let `tail` mask a pip failure
           # pytest-asyncio: tests/test_github_indexer.py uses @pytest.mark.asyncio
           # (mirrors the python-ci.yml '.[test,embeddings]' surface, #493).
           pip install -e '.[embeddings]' falkordblite pytest pytest-timeout pytest-asyncio 2>&1 | tail -2
       - name: Clean stale redislite orphans (issue #1005 tempdir pollution)
+        if: needs.dedup-check.outputs.skip != 'true'
         # Leaky shared runners accumulate redislite tempdirs from every
         # failed embedded-redis run — discover() then skips its stale-socket
         # walk (>5000 entries), so the reaper chaos tests fail with
@@ -72,6 +225,7 @@ jobs:
           find "$TMPD" -maxdepth 1 -type d -name "tmp*" -mmin +30 -exec rm -rf {} + 2>/dev/null || true
           echo "tempdir cleaned"
       - name: Cache HF embedding model (all-MiniLM-L6-v2)
+        if: needs.dedup-check.outputs.skip != 'true'
         # ~90MB; persisted so the pre-cache step below is a no-op on
         # subsequent runs and CI never re-downloads from huggingface.co.
         # Same repo-wide key as python-ci — its runs already populate this
@@ -83,6 +237,7 @@ jobs:
           restore-keys: |
             hf-embedding-cache-v1-${{ runner.os }}-
       - name: Pre-cache embedding model (all-MiniLM-L6-v2)
+        if: needs.dedup-check.outputs.skip != 'true'
         # Best-effort: when the model is already cached (actions/cache
         # restore) this is a no-op. When the download succeeds, the suite
         # exercises the real embedding path. When it fails (HF unreachable
@@ -123,6 +278,7 @@ jobs:
           EOF
       - name: Run tests (embedded suite, per-test timeout)
         id: tests
+        if: needs.dedup-check.outputs.skip != 'true'
         run: |
           set +e
           # #1430: in-step watchdog + guaranteed summary (the #798 mode).
@@ -189,7 +345,7 @@ jobs:
           HF_HUB_OFFLINE: "1"
           TRANSFORMERS_OFFLINE: "1"
       - name: Comment result on PR
-        if: always()
+        if: always() && needs.dedup-check.outputs.skip != 'true'
         uses: actions/github-script@v7
         env:
           # github-script v7 does not expose `steps` in the JS scope (and
@@ -200,6 +356,10 @@ jobs:
           # cancellation is a timeout, not a breakage.
           TESTS_OUTCOME: ${{ steps.tests.outcome }}
           TESTS_EXIT_CODE: ${{ steps.tests.outputs.exit_code }}
+          # #1474: on push:main there is no pull_request payload — attribution
+          # comes from the dedup-check job (merge commit message + PR fetch).
+          PR_NUMBER: ${{ needs.dedup-check.outputs.pr_number }}
+          ISSUE_NUMBER: ${{ needs.dedup-check.outputs.issue_number }}
         with:
           script: |
             // #1438 tri-state verdict — the logic lives in a plain-CJS module
@@ -207,32 +367,44 @@ jobs:
             // (tests/test_postmerge_verdict.py) instead of living untestable
             // inside the github-script block. The module's CLI dry-run mode
             // mirrors exactly this call: verdict + comment body + flag decision.
+            // #1474: inputs unchanged — only the PR/issue numbers now come from
+            // the dedup-check job outputs instead of context.payload.pull_request.
             const { computeVerdict, buildCommentBody, shouldFlagLinkedIssue } =
               require(`${process.env.GITHUB_WORKSPACE}/.github/scripts/postmerge-verdict.js`);
-            const pr = context.payload.pull_request;
+            const prNumber = process.env.PR_NUMBER;
             const verdict = computeVerdict(process.env.TESTS_OUTCOME, process.env.TESTS_EXIT_CODE);
-            const body = buildCommentBody(verdict, {
-              sha8: pr.merge_commit_sha.slice(0, 8),
-              runUrl: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
-            });
-            await github.rest.issues.createComment({
-              issue_number: pr.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body,
-            });
+            if (!prNumber) {
+              // #1474: no PR attribution (direct push to main, non-merge commit)
+              // — nothing to comment on; the check outcome + run log remain the
+              // signal. A comment here would 4xx on an empty issue_number and
+              // spuriously red the check despite green tests.
+              core.info(`verdict ${verdict} computed but no PR to comment on (direct push?)`);
+            } else {
+              const body = buildCommentBody(verdict, {
+                sha8: context.sha.slice(0, 8),
+                runUrl: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              });
+              await github.rest.issues.createComment({
+                issue_number: parseInt(prNumber, 10),
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body,
+              });
+            }
             if (shouldFlagLinkedIssue(verdict)) {
               // Flag the linked issue ("Closes #N" / "Fixes #N" in the body)
               // — only a REAL failure implies the change is bad. A timeout
               // never flags the issue (#1438 indicator a).
-              const m = (pr.body || '').match(/(?:closes|fixes|resolves)\s+#(\d+)/i);
-              if (m) {
+              const issueNumber = process.env.ISSUE_NUMBER;
+              if (issueNumber) {
                 await github.rest.issues.createComment({
-                  issue_number: parseInt(m[1], 10),
+                  issue_number: parseInt(issueNumber, 10),
                   owner: context.repo.owner,
                   repo: context.repo.repo,
-                  body: `⚠️ The PR that closed this issue (#${pr.number}) **failed post-merge validation** — see run ${context.runId}. Keeping this visible until the failure is resolved; the issue is not considered done.`,
+                  body: `⚠️ The PR that closed this issue (#${prNumber}) **failed post-merge validation** — see run ${context.runId}. Keeping this visible until the failure is resolved; the issue is not considered done.`,
                 });
+              } else {
+                core.warning('verdict failed but no linked issue was parsed — issue flag skipped');
               }
             }
       - name: Fail the check
