@@ -163,29 +163,7 @@
     .auth-mode-toggle button.active { background: var(--accent, #06b6d4); color: #04121a; }
 
     /* #1287: API-key login — button first, input revealed on click */
-    .auth-apikey-prominent { margin-bottom: 0.5rem; }
-    .auth-apikey-prominent.has-form {
-      padding: 14px; border: 1px solid var(--border, #1e293b); border-radius: 10px;
-      background: var(--surface, #0d1a2d);
-    }
-    .auth-apikey-form { display: flex; flex-direction: column; gap: 8px; }
-    .auth-apikey-form.hidden { display: none; }
     .btn-provider.hidden { display: none; }
-    .auth-apikey-form input {
-      padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border, #1e293b);
-      background: var(--surface, #0d1a2d); color: var(--text, #cbd5e1); font-size: 14px;
-    }
-    .auth-apikey-form input:focus { border-color: var(--accent, #06b6d4); outline: none; }
-    .auth-apikey-form button {
-      padding: 10px 14px; border-radius: 8px; border: none;
-      background: var(--accent, #06b6d4); color: #04121a; font-weight: 600; font-size: 14px; cursor: pointer;
-    }
-    .auth-apikey-back {
-      background: none !important; border: none !important; color: var(--text-dim, #94a3b8) !important;
-      font-size: 12px; padding: 0 !important; width: auto !important; cursor: pointer;
-      margin-top: 6px;
-    }
-    .auth-apikey-back:hover { color: var(--accent, #06b6d4) !important; }
 
     /* Email+password login popup (login mode) — the inline form is
        signup-only; login opens this focused dialog from a provider-style
@@ -281,8 +259,8 @@
       background: var(--border);
     }
     /* `.hidden` alone loses to `.divider { display: flex }` (equal
-       specificity, later source order) — pinned rule keeps the login-mode
-       hide working (the inline email form is signup-only). */
+       specificity, later source order) — kept for the legacy inline form's
+       divider, no longer rendered on the modal-only auth card. */
     .divider.hidden { display: none; }
 
     .form-group {
@@ -411,8 +389,6 @@
       .logo a { font-size: 1.25rem; }
       h1 { font-size: 1.15rem; margin-bottom: 0.75rem; }
       .providers { gap: 0.4rem; margin-bottom: 0.5rem; }
-      .auth-apikey-prominent { margin-bottom: 0.25rem; }
-      .divider { margin: 0.3rem 0; }
       .form-group { margin-bottom: 0.35rem; }
       .btn-submit { padding-top: 0.5rem; padding-bottom: 0.5rem; }
     }
@@ -1100,7 +1076,6 @@
     // class; node --check does NOT catch TDZ — only a runtime ?mode=login
     // landing does).
     const MODAL_FOCUS_SELECTOR = 'button, input, select, textarea, a[href], [tabindex]:not([tabindex="-1"])';
-    let modalLoginInFlight = false;
     let modalWasOpened = false;  // focus restore only after a real open (a11y)
     let apiKeyModalWasOpened = false;  // same, for the API-key modal
 
@@ -1146,8 +1121,11 @@
       submit.textContent = isSignup ? "Create account" : "Log in";
       // #1494 review P2-3: a mode toggle mid-lockout must not restore the
       // OTHER mode's label on expiry — re-capture so the countdown restore
-      // matches the visible mode.
+      // matches the visible mode. Also drop a stale spinner-restore payload
+      // (a signInAndGo failure mid-request flipped the mode; setLoading(false)
+      // must not resurrect the old mode's label).
       delete submit.dataset.originalLabel;
+      delete submit.dataset.originalHTML;
       const pw = document.getElementById("password");
       pw.autocomplete = isSignup ? "new-password" : "current-password";
       hideEmailModal();
@@ -1165,6 +1143,14 @@
       // Log in submit (#863) and a cold bucket re-enables the button.
       applyRateLimitLockout();
       applyLoginRateLimitLockout();
+      // #1494 review: re-show the pending lockout's EXPLANATION — the
+      // re-assert only mutates the button; the copy was cleared above and
+      // must return so a disabled countdown button is never unexplained.
+      const errBox = document.getElementById("error");
+      if (!errBox.classList.contains("visible")) {
+        if (rateLimitRemainingMs() > 0) showError(rateLimitMessage());
+        else if (loginRateLimitRemainingMs() > 0) showError(loginRateLimitMessage());
+      }
     }
 
     function showApiKeyModal() {
