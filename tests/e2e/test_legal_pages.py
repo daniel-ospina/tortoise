@@ -713,9 +713,11 @@ def test_product_served_on_tortoise_host(page: Page) -> None:
 
 @pytest.mark.parametrize("viewport", [(1280, 720), (375, 667)])
 def test_signup_acceptance_same_viewport(page: Page, viewport: tuple[int, int]) -> None:
-    """The acceptance statement is visible in the SAME viewport as both the
-    .providers OAuth buttons and #btn-submit — bounding-box assertion, not
-    mere DOM presence (S1 / scope §5.7 #7)."""
+    """The acceptance statement is visible in the SAME viewport as the four
+    provider options — bounding-box assertion, not mere DOM presence
+    (S1 / scope §5.7 #7). The email submit lives in the on-demand modal
+    (#1494), so the co-visible set is the acceptance line + the option
+    buttons."""
     width, height = viewport
     page.set_viewport_size({"width": width, "height": height})
     _goto(page, BASE_URL + "/signup")
@@ -728,13 +730,18 @@ def test_signup_acceptance_same_viewport(page: Page, viewport: tuple[int, int]) 
     assert "by creating an account, you agree to the" in text
     assert "terms of service" in text and "privacy policy" in text
 
+    # The four options are all present and visible.
+    for btn_id in ("btn-github", "btn-google", "btn-apikey", "btn-email"):
+        expect(page.locator("#" + btn_id)).to_be_visible()
+
     boxes = page.evaluate(
         """() => {
             const r = (sel) => {
                 const b = document.querySelector(sel).getBoundingClientRect();
                 return {x: b.x, y: b.y, w: b.width, h: b.height};
             };
-            return {acc: r('.legal-accept'), prov: r('.providers'), btn: r('#btn-submit')};
+            return {acc: r('.legal-accept'), prov: r('.providers'),
+                    email: r('#btn-email'), apikey: r('#btn-apikey')};
         }"""
     )
 
@@ -744,36 +751,33 @@ def test_signup_acceptance_same_viewport(page: Page, viewport: tuple[int, int]) 
     def x_overlap(a: dict, b: dict) -> bool:
         return min(a["x"] + a["w"], b["x"] + b["w"]) - max(a["x"], b["x"]) > 0
 
-    # All three fully visible in the viewport at the same time.
-    assert all(in_viewport(boxes[k]) for k in ("acc", "prov", "btn")), \
-        f"acceptance not co-visible with OAuth buttons + submit at {width}x{height}: {boxes}"
-    # Same visible column (shared x-range) with both neighbours.
-    assert x_overlap(boxes["acc"], boxes["prov"]) and x_overlap(boxes["acc"], boxes["btn"])
+    # Acceptance + options + the modal-launching buttons fully visible together.
+    assert all(in_viewport(boxes[k]) for k in ("acc", "prov", "email", "apikey")), \
+        f"acceptance not co-visible with options at {width}x{height}: {boxes}"
+    # Same visible column (shared x-range) with the neighbours.
+    assert x_overlap(boxes["acc"], boxes["prov"]) and x_overlap(boxes["acc"], boxes["email"])
 
 
 def test_signup_acceptance_dom_structure(page: Page) -> None:
-    """DOM parentage (P1-2): .legal-accept is a SIBLING of .providers (and
-    .divider), PRECEDES <form id="email-form"> in document order, and is NOT
-    a descendant of the form. Links resolve to /tos and /privacy."""
+    """DOM parentage (P1-2): .legal-accept is a SIBLING of .providers,
+    PRECEDES <form id="email-form"> in document order, and is NOT a
+    descendant of the form. Links resolve to /tos and /privacy."""
     _goto(page, BASE_URL + "/signup")
 
     struct = page.evaluate(
         """() => {
             const acc = document.querySelector('.legal-accept');
             const prov = document.querySelector('.providers');
-            const div = document.querySelector('.divider');
             const form = document.querySelector('#email-form');
             const order = new Map([...document.querySelectorAll('*')].map((el, i) => [el, i]));
             return {
                 siblingOfProviders: acc && prov && acc.parentElement === prov.parentElement,
-                siblingOfDivider: acc && div && acc.parentElement === div.parentElement,
                 precedesForm: acc && form && order.get(acc) < order.get(form),
                 notInForm: acc && form && !form.contains(acc),
             };
         }"""
     )
     assert struct["siblingOfProviders"], ".legal-accept is not a sibling of .providers"
-    assert struct["siblingOfDivider"], ".legal-accept is not a sibling of .divider"
     assert struct["precedesForm"], ".legal-accept does not precede #email-form"
     assert struct["notInForm"], ".legal-accept must not be a descendant of the form"
 
@@ -885,6 +889,7 @@ def test_mock_email_signup_created_signs_in_and_redirects(page: Page) -> None:
     _goto(page, BASE_URL + "/signup")
     expect(page.locator(".legal-accept")).to_be_visible()
 
+    page.locator("#btn-email").click()
     page.locator("#email").fill(email)
     page.locator("#password").fill("E2ePass-12345!")
     page.locator("#btn-submit").click()

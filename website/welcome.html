@@ -8,6 +8,45 @@
   <meta name="theme-color" content="#060b14">
   <meta name="robots" content="noindex,nofollow">
   <link rel="icon" type="image/png" href="/logo.png">
+  <!-- #1494: hard gate — /welcome is POST-auth. Without a session (and no
+       in-flight OAuth/confirmation token in the hash) replace to /auth
+       IMMEDIATELY — before the provisioning UI paints — and location.replace
+       keeps Back from returning here. Recovery links (#type=recovery) and
+       confirmation/OAuth callbacks (#access_token=…) are exempt (their
+       tokens are consumed below). Falls back to the async session wait. -->
+  <script>
+    (function () {
+      try {
+        if (/#(access_token|error|type=)/.test(window.location.hash)) return;
+        // Session can live in the parent-domain cookie (supabase-session.js)
+        // OR the legacy origin-scoped localStorage key (pre-#1225 cohort —
+        // the head gate runs BEFORE migrateLegacySession; also seeds the
+        // welcome-e2e harness). Check both. A corrupt cookie value must fall
+        // through to the localStorage read, not abort the whole gate.
+        var raw = null;
+        try {
+          var m = document.cookie.match(/(?:^|; )sb-tortoise-auth-token=([^;]*)/);
+          if (m) raw = decodeURIComponent(m[1]);
+        } catch (e) { raw = null; }
+        if (raw) {
+          try { raw = JSON.parse(raw); } catch (e) { raw = null; }
+        }
+        if (!raw) {
+          try {
+            var legacy = window.localStorage.getItem("sb-ybetwichurajbfswfeqa-auth-token");
+            if (legacy) raw = JSON.parse(legacy);
+          } catch (e) { raw = null; }
+        }
+        if (!raw || !raw.access_token) {
+          window.location.replace("/auth" + window.location.search + window.location.hash);
+          return;
+        }
+        if (raw.expires_at && raw.expires_at * 1000 <= Date.now()) {
+          window.location.replace("/auth" + window.location.search + window.location.hash);
+        }
+      } catch (e) { /* best-effort — the async session wait below still applies */ }
+    })();
+  </script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -960,8 +999,9 @@ you up to 6 yes/no questions and set up your Tortoise memory.
         // callback target (#1224 state-expiry lands as ?error=…, which the
         // /auth banner renders; supabase-js consumes #access_token=… on the
         // destination to complete the session). Recovery landings are
-        // handled earlier (recoveryMode).
-        window.location.href = "/auth" + window.location.search + landingHash;
+        // handled earlier (recoveryMode). location.replace: Back must not
+        // return to this page (#1494 hard gate).
+        window.location.replace("/auth" + window.location.search + landingHash);
         return;
       }
 
