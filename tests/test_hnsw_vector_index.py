@@ -233,7 +233,8 @@ class TestHnswAutoUpdate:
                 params={"vec": _vec([(0, 0.9)])},
             ).result_set
             assert any(r[0] == "hnsw247_pre" for r in hits2), \
-                f"re-write should make vector queryable, got {hits2}"
+                f"re-write should make vector queryable, got {hits2} " \
+                f"(pre-index served={pre_served})"
         finally:
             g.query("MATCH (n:Document {id: $id}) DETACH DELETE n",
                     params={"id": "hnsw247_pre"})
