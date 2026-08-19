@@ -151,3 +151,130 @@ def _neutralize_redislite_cleanup(client) -> None:
         client.pidfile = None
     except Exception:
         pass
+
+
+# ── Issue #1475: deterministic close-on-GC (lifecycle finalize) ────────────
+#
+# Leaked (never-explicitly-closed) SDK/projection objects used to be pinned
+# alive until interpreter exit by atexit strong-refs (both ours and
+# redislite's internal `atexit.register(self._cleanup, ...)` at client.py),
+# so ~200 embedded servers/suite accumulated and were only closed at exit.
+# Close-on-GC cuts that surface mid-suite.
+#
+# The weakref.finalize dead-referent constraint ("finalizer callbacks cannot
+# dereference their own referent — it is already dead") is worked around
+# here: the finalizer is attached to the OWNER (the SDK/projection layer),
+# which is kept collectable by the deref-and-call atexit seams
+# (register_atexit_close). It never touches its own (dead) referent — it
+# derefs a weakref to the DB client, which redislite's own atexit pin keeps
+# alive for the process lifetime, and closes via that client. The captured
+# weakref IS the "registry entry"; the pinned client is the liveness anchor.
+
+import weakref as _weakref
+
+
+def register_atexit_close(obj) -> None:
+    """#1475: register ``obj._atexit_close`` at exit WITHOUT pinning ``obj``
+    alive until exit.
+
+    A plain ``atexit.register(obj._atexit_close)`` holds a strong bound-method
+    ref and would make close-on-GC impossible (the object could never be
+    collected). ``weakref.WeakMethod`` cannot be registered directly either:
+    atexit invokes the registered callable and discards the return value,
+    and ``WeakMethod.__call__`` RETURNS the bound method instead of invoking
+    it — the seam would silently no-op for BOTH live and dead objects. This
+    wrapper derefs a plain weakref and invokes the method only while the
+    object is still alive — behavior for live objects is byte-identical to
+    the pre-#1475 strong registration.
+    """
+    import atexit as _atexit
+    _atexit.register(_atexit_call_if_alive, _weakref.ref(obj))
+
+
+def _atexit_call_if_alive(ref) -> None:
+    """atexit callback: invoke ``_atexit_close`` only if the referent is
+    still alive (collected objects were already closed by their finalizer
+    on GC — no double close; collected or not, the exit close stays exactly
+    as it was before #1475 for live objects)."""
+    obj = ref()
+    if obj is not None:
+        obj._atexit_close()
+
+
+def register_gc_close(owner, db) -> None:
+    """Register a finalizer that closes `db` deterministically when `owner`
+    is garbage-collected (issue #1475).
+
+    `owner` is the collectable layer (FalkorProjection); `db` is its
+    embedded FalkorDB client. The finalizer never dereferences its own
+    (dead) referent — it derefs the captured weakref to the pinned client
+    (kept alive by redislite's own atexit) and closes through that. The
+    #1371 shared-server guard and ephemeral fast-close gating apply
+    unchanged. Idempotent; never raises.
+
+    NOTE: host-mode (docker/URI) clients are not pinned by redislite — the
+    captured weakref derefs to None when `owner` is collected and the
+    finalizer no-ops (safe by construction).
+    """
+    if owner is None or db is None:
+        return
+    _weakref.finalize(owner, _gc_close, _weakref.ref(db))
+
+
+def _gc_close(db_ref) -> None:
+    """GC-time close callback (issue #1475).
+
+    Mirrors redislite's own last-client close semantics so leaked servers
+    die deterministically mid-suite while shared servers are never killed
+    out from under a live co-tenant:
+      - explicitly closed clients (``_t_closed``) -> strict no-op (the
+        server stays under its remaining owners and dies at exit — the
+        exact pre-#1475 semantics; never double-close)
+      - probe failure (pool already disconnected by a bare close()) -> no-op
+        (never assume last-client on a failed probe at GC time — that
+        shortcut is only safe at interpreter exit, where every client of
+        this process is dying anyway)
+      - shared server (count > 1) -> disconnect our pool only; the last
+        owner's close/GC/exit shuts the server down
+      - last client -> #1371 fast-close (ephemeral test-tree + flag:
+        fire-and-forget NOSAVE) else redislite's normal close
+        (``_cleanup``: SAVE + pidfile/socket cleanup)
+    Never raises (GC context).
+    """
+    db = db_ref()
+    if db is None:
+        return  # not a redislite-pinned client — nothing to do
+    client = getattr(db, "client", db)
+    # Explicit close()/__exit__ are routed through db._t_close by the
+    # projection, which sets _t_closed — the finalizer is a strict no-op
+    # then (the socket_file guard below would not catch it: redislite's
+    # close() is a redis-py pool disconnect that keeps the server and the
+    # socket path intact; only _cleanup nulls socket_file).
+    if getattr(db, "_t_closed", False):
+        return
+    if getattr(client, "_tortoise_fast_closed", False):
+        return  # already fast-closed by an earlier seam (NOSAVE)
+    if getattr(client, "socket_file", None) is None:
+        return  # server already shut down
+    # Probe the server's client count BEFORE touching the pool.
+    try:
+        count = client._connection_count()
+    except Exception:
+        return  # cannot determine sharing -> leave the server alone
+    if count > 1:
+        # Other clients (this process or another) share the server — drop
+        # our connection only; the last owner's close/GC/exit shuts it down.
+        try:
+            client.connection_pool.disconnect()
+        except Exception:
+            pass
+        return
+    try:
+        if atexit_fast_close(client):
+            return
+    except Exception:
+        pass  # probe/gating failure -> fall through to the normal close
+    try:
+        client._cleanup()
+    except Exception:
+        pass

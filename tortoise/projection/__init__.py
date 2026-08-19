@@ -96,7 +96,11 @@ class _GuardedGraph:
 
 from tortoise.config import RELATIVE_PATH_ERROR, SUPPORTED_URI_SCHEMES
 from tortoise.live import _live_only
-from tortoise.embedded_lifecycle import atexit_fast_close  # #1371: registers the batch flush
+from tortoise.embedded_lifecycle import (
+    atexit_fast_close,  # #1371: registers the batch flush
+    register_atexit_close,
+    register_gc_close,
+)
 
 # Backward-compat alias: the canonical scheme set lives in tortoise.config
 # (SUPPORTED_URI_SCHEMES) so URI-routing and connection-layer validation share
@@ -421,17 +425,28 @@ class FalkorProjection(
         # Lifecycle hardening (plan Task 4 + issue #1005):
         # - _closed flag for idempotent close()
         # - atexit so a NORMAL process exit never orphans the server (the
-        #   dominant #1005 leak path). No weakref.finalize: the atexit bound
-        #   method keeps the projection alive until exit, so a GC finalizer
-        #   could never fire — mid-session close is via __enter__/__exit__
-        #   or explicit close(); hard-killed processes' strays are reaped by
-        #   the conftest hygiene sweeps (tortoise.embedded_reaper).
+        #   dominant #1005 leak path). #1475: the atexit seam is registered
+        #   through a deref-and-call wrapper (register_atexit_close) so the
+        #   projection stays COLLECTABLE — a strong bound method would pin
+        #   it alive until exit and a GC finalizer could never fire. At
+        #   exit, _atexit_close still runs whenever the object is alive;
+        #   collected objects were already closed by their finalizer.
+        # - #1475 close-on-GC: deterministic close for LEAKED projections
+        #   (never explicitly closed) — the finalizer works around the
+        #   dead-referent constraint by closing via a weakref to the pinned
+        #   internal client (redislite's own atexit keeps it alive), not via
+        #   the dead referent itself.
         # - NO per-instance signal handlers (atexit suffices; avoids leaks)
-        import atexit as _atexit
         self._closed = False
         # #1371: route the atexit seam through the fast-close wrapper — see
         # FalkorDB._atexit_close. close()/__exit__ are unchanged.
-        _atexit.register(self._atexit_close)
+        register_atexit_close(self)
+        # #1475: close-on-GC for leaked projections. Embedded clients only —
+        # host-mode (docker/URI) clients deref to None and the finalizer
+        # no-ops. The finalizer reuses the #1371 seam (ephemeral fast-close
+        # gating + last-client guard), so explicit close()/__exit__ paths
+        # and the atexit seam are unchanged.
+        register_gc_close(self, self.db)
 
     # ── Ops safety (#428): health check + transparent recovery ────────────
 
@@ -1433,7 +1448,14 @@ class FalkorProjection(
             return
         self._closed = True
         try:
-            self.db.close()
+            # #1475: route through db._t_close (when present) so the db's
+            # _t_closed flag is set — the GC finalizer must recognize this
+            # client as explicitly closed and stay a strict no-op (a bare
+            # db.close() is a redis-py pool disconnect that leaves the
+            # server + socket intact). Host-mode db (no _t_close) keeps the
+            # plain close.
+            close = getattr(self.db, "_t_close", None) or self.db.close
+            close()
         except Exception:
             pass
 
