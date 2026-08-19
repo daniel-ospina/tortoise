@@ -565,6 +565,37 @@ class TestModelAdapterBounds:
         assert body["temperature"] == 0.0
         assert body["model"] == "deepseek/deepseek-v4-flash"
 
+    def test_adapter_body_uncapped_omits_max_tokens(self, monkeypatch):
+        """#1468: max_tokens=None must OMIT the cap from the request body —
+        the uncapped output budget the v2 session extractor's flash fallback
+        needs (capped adapters truncate and silently lose chunks). Mirrors
+        tests/model_adapters.py's OpenRouterModel(max_tokens=None) semantics
+        without importing the test module from production."""
+        from tortoise.sdk import _model_adapter
+        import requests as _requests
+        captured = {}
+
+        class _FakeResp:
+            def raise_for_status(self):
+                pass
+            def json(self):
+                return {"choices": [{"message": {"content": "ok"}}]}
+
+        def _fake_post(url, **kwargs):
+            captured["body"] = kwargs.get("json", {})
+            return _FakeResp()
+
+        monkeypatch.setattr(_requests, "post", _fake_post)
+        adapter = _model_adapter("deepseek/deepseek-v4-flash",
+                                 max_tokens=None, temperature=0.0)
+        out = adapter.complete(system="s", user="u")
+        assert out == "ok"
+        body = captured["body"]
+        assert "max_tokens" not in body, (
+            "max_tokens=None must omit the cap from the request body")
+        assert body["temperature"] == 0.0
+        assert body["model"] == "deepseek/deepseek-v4-flash"
+
 
 class TestR1R3Discriminator:
     """T16 (#1272): the SUMMARY_SYSTEM prompt must carry the R1∧R3 decision

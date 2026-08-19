@@ -582,3 +582,88 @@ def test_capture_session_v2_default_routes_and_writes(sdk):
         "MATCH (s:Source {url:$url}) RETURN count(*)",
         params={"url": f"session:{sid}"}).result_set
     assert src[0][0] == 1, "session Source must exist"
+
+
+def test_capture_session_v2_mock_seam_satisfies_provider_gate(sdk, monkeypatch):
+    """#1468: TORTOISE_SESSION_LLM_MOCK=1 must satisfy _extract_session_v2's
+    provider gate even with ALL provider keys absent — the hosted e2e server
+    scrubs keys and runs the offline seam. The gate previously checked only
+    keys (contradicting its own error message), raising ValueError → HTTP 500
+    on POST /v1/sessions. Padded value (" 1 ") must also satisfy the gate
+    (normalized like the sibling gates — strict == "1" would diverge the
+    inner gate from the outer gates and 500 again)."""
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", " 1 ")
+    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
+    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
+              "GEMINI_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    res = sdk.capture_session([{"role": "user", "content": "x"},
+                               {"role": "assistant", "content": "we decided"}])
+    assert res["extracted"] >= 1
+
+
+def test_capture_session_v2_default_adapter_is_uncapped(sdk, monkeypatch):
+    """#1468: the v2 extractor's DEFAULT adapter (no TORTOISE_EXTRACT_MODEL
+    override) must be the production in-module adapter with an UNCAPPED
+    output budget — never the test-only tests.model_adapters.MODELS
+    (ModuleNotFoundError on the hosted server → HTTP 500 on POST /v1/sessions),
+    and never the capped 4000-token default (the 5-stage extractor truncates
+    and silently loses chunks)."""
+    from tortoise import sdk as sdk_module
+    from tortoise.sdk import _V2SessionMock
+
+    # Clear the autouse mock seam + install a provider key so the real
+    # (non-mock) branch of _extract_session_v2 runs.
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-1468")
+    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
+    monkeypatch.delenv("TORTOISE_EXTRACT_MODEL", raising=False)
+
+    captured = {}
+
+    def _fake_model_adapter(model_id, max_tokens=4000, temperature=0.0):
+        captured["model_id"] = model_id
+        captured["max_tokens"] = max_tokens
+        captured["temperature"] = temperature
+        return _V2SessionMock()  # offline stand-in with the real complete() contract
+
+    monkeypatch.setattr(sdk_module, "_model_adapter", _fake_model_adapter)
+
+    res = sdk.capture_session([{"role": "user", "content": "x"},
+                               {"role": "assistant", "content": "we decided"}])
+    assert captured["model_id"] == "deepseek/deepseek-v4-flash"
+    assert captured["max_tokens"] is None, (
+        "v2 default must be UNCAPPED (max_tokens=None) — capped adapters "
+        "truncate and silently lose chunks (#1468)")
+    assert captured["temperature"] == 0.0
+    assert res["extracted"] >= 1
+
+
+def test_capture_session_v2_extract_model_override_stays_capped(sdk, monkeypatch):
+    """#1468: an explicit TORTOISE_EXTRACT_MODEL override keeps the bounded
+    4000-token default (summary/construct posture, T13 #1272) — only the
+    DEFAULT v2 adapter is uncapped."""
+    from tortoise import sdk as sdk_module
+    from tortoise.sdk import _V2SessionMock
+
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key-1468")
+    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
+    monkeypatch.setenv("TORTOISE_EXTRACT_MODEL", "deepseek/deepseek-v4-pro")
+
+    captured = {}
+
+    def _fake_model_adapter(model_id, max_tokens=4000, temperature=0.0):
+        captured["model_id"] = model_id
+        captured["max_tokens"] = max_tokens
+        captured["temperature"] = temperature
+        return _V2SessionMock()
+
+    monkeypatch.setattr(sdk_module, "_model_adapter", _fake_model_adapter)
+
+    res = sdk.capture_session([{"role": "user", "content": "x"},
+                               {"role": "assistant", "content": "we decided"}])
+    assert captured["model_id"] == "deepseek/deepseek-v4-pro"
+    assert captured["max_tokens"] == 4000, (
+        "explicit TORTOISE_EXTRACT_MODEL override must keep the bounded default")
+    assert res["extracted"] >= 1

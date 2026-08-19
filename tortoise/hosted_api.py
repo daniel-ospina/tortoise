@@ -277,7 +277,6 @@ async def _lifespan(app):
             def _sweep_events() -> None:
                 try:
                     from tortoise.event_store import purge_expired, purge_overflow
-                    from tortoise.registry import registry_sdk  # noqa: F401  (not used; teams via loop below)
                     days = int(os.environ.get("TORTOISE_EVENT_RETENTION_DAYS", "30"))
                     cap = int(os.environ.get("TORTOISE_EVENT_MAX_PER_TEAM", "500000"))
                     # Sweep every registered team's graph (registry Team nodes).
