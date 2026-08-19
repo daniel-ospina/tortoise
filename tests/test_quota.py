@@ -324,7 +324,12 @@ class TestSessionsQuota:
             for i in range(8):
                 tenant.create_point("statement", f"filler point {i}")
             assert count_team_usage(tid, "sessions", sdk=tenant) == 1
-            assert count_team_usage(tid, "points", sdk=tenant) == 9
+            # 10 = 1 plain + 8 fillers + 1 v2-extracted value point (the
+            # deterministic _V2SessionMock extracts one point from "ok";
+            # extracted value points are non-episodic and count against the
+            # points quota by design — the capture estimate 2×Σ accounts for
+            # them, #1350/#1486). Turn points stay episodic (not counted).
+            assert count_team_usage(tid, "points", sdk=tenant) == 10
         finally:
             tenant.close()
 
@@ -412,9 +417,13 @@ class TestIsEpisodicBackfill:
             tenant.capture_session(
                 [{"role": "user", "content": "ok"}], session_id="new_s1")
             # Nothing to backfill — new capture nodes already carry the flag
+            # (turn Point, Event, and the session-provenance Source all stamp
+            # is_episodic at creation; _link_source stamps session refs, #1486).
             assert run_backfill(proj) == {"matched": 0, "updated": 0}
-            # The turn Point is episodic → points quota sees no inflation
-            assert count_team_usage(tid, "points", sdk=tenant) == 0
+            # The turn Point is episodic; the ONE v2-extracted value point
+            # (deterministic _V2SessionMock, non-episodic by design) is the
+            # only point counted against the quota (#1350/#1486).
+            assert count_team_usage(tid, "points", sdk=tenant) == 1
             # Session counted by the sessions branch
             assert count_team_usage(tid, "sessions", sdk=tenant) == 1
         finally:

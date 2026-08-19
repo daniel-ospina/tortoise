@@ -685,6 +685,7 @@ class TestIntrospection:
             "update_entity": "tortoise_update_entity",
             "create_edge": "tortoise_create_edge",
             "ingest": "tortoise_ingest",
+            "index_directory": "tortoise_index_files",  # #1043 index path (Sources/Documents + edges) — quota-gated write
         }
         # every wrap site must be a known write method (new wrap → fail here)
         unknown = wrapped_methods - set(method_to_tool)
