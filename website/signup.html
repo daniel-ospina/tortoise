@@ -33,9 +33,12 @@
         if (!raw) return;
         var s = JSON.parse(raw);
         if (!s || !s.access_token) return;
-        if (s.expires_at && s.expires_at * 1000 < Date.now()) return;
-        var claim = /(?:^|; )tt_claim_pending=/.test(document.cookie);
-        window.location.replace(claim ? "https://app.premiselabs.co/?claim=1" : window.location.origin + "/welcome.html");
+        // Same predicate as the welcome gate (missing expires_at treated as
+        // valid; strictly future).
+        if (!s.expires_at || s.expires_at * 1000 > Date.now()) {
+          var claim = /(?:^|; )tt_claim_pending=/.test(document.cookie);
+          window.location.replace(claim ? "https://app.premiselabs.co/?claim=1" : window.location.origin + "/welcome.html");
+        }
       } catch (e) { /* best-effort — the async bounce below still applies */ }
     })();
   </script>
@@ -874,19 +877,20 @@
 
     function applyLoginRateLimitLockout() {
       if (loginRateLimitTimer) { clearInterval(loginRateLimitTimer); loginRateLimitTimer = null; }
-      // #1494: the email surface is a single modal now (both modes share
-      // #btn-submit) and the API-key modal is a login surface too — the
-      // login-bucket countdown targets both login buttons.
+      // #1494: the email surface is a single modal now. #863 separation is
+      // preserved at the BUTTON level: the login bucket only disables
+      // #btn-submit while the user is in LOGIN mode (the signup bucket owns
+      // it in signup mode); #btn-apikey-confirm is always a login surface.
       const btn = document.getElementById("btn-submit");
       const apikeyBtn = document.getElementById("btn-apikey-confirm");
       const update = function () {
         const ms = loginRateLimitRemainingMs();
         if (ms <= 0) {
-          // #1494 review P2-1: BOTH buckets share #btn-submit — if the OTHER
-          // bucket is still locked, leave the button to it (its own interval
-          // re-asserts within a tick; the pre-flight checks block submits
-          // regardless). Never re-enable into an active lockout.
-          if (rateLimitRemainingMs() > 0) return;
+          // BOTH buckets share #btn-submit — the cross-bucket defer is
+          // MODE-AWARE: only leave the button to the other bucket when that
+          // bucket owns it (a signup lockout must NOT disable the Log in
+          // submit, and vice versa — #863).
+          if (rateLimitRemainingMs() > 0 && authIsSignup) return;
           if (btn && btn.dataset.originalLabel) {
             btn.textContent = btn.dataset.originalLabel;
             delete btn.dataset.originalLabel;
@@ -902,7 +906,7 @@
         const label = "Try again in "
           + String(Math.floor(totalSec / 60)).padStart(2, "0") + ":"
           + String(totalSec % 60).padStart(2, "0");
-        if (btn) {
+        if (!authIsSignup && btn) {
           if (!btn.dataset.originalLabel && btn.textContent.trim()) {
             btn.dataset.originalLabel = btn.textContent;
           }
@@ -914,8 +918,6 @@
       update();
       if (loginRateLimitRemainingMs() > 0) loginRateLimitTimer = setInterval(update, 1000);
     }
-    // On load: honor a persisted login lockout (modal button countdown).
-    if (loginRateLimitRemainingMs() > 0) applyLoginRateLimitLockout();
 
     function isEmailBucketError(error) {
       if (!error) return false;
@@ -983,14 +985,23 @@
       if (rateLimitTimer) { clearInterval(rateLimitTimer); rateLimitTimer = null; }
       const btn = document.getElementById("btn-submit");
       const resend = document.getElementById("btn-resend");
+      // #1494 review: clearError() only on the locked→unlocked TRANSITION —
+      // the no-lockout call path (signUpWithEmail's finally, every submit)
+      // must not wipe a just-shown non-rate-limit error before the modal
+      // mirrors it into view. "Locked" is signaled by the tier key (written
+      // by setRateLimitLockout, removed at expiry) OR remaining time — the
+      // tier key covers a lockout forced into the past before re-applying.
+      var lockoutWasActive = false;
+      try { lockoutWasActive = sessionStorage.getItem(RATE_LIMIT_TIER_KEY) !== null; } catch (e) {}
+      lockoutWasActive = lockoutWasActive || rateLimitRemainingMs() > 0;
       const update = function () {
         const ms = rateLimitRemainingMs();
         if (ms <= 0) {
-          // #1494 review P2-1: BOTH buckets share #btn-submit — if the login
-          // bucket is still locked, leave the button to it (its own interval
-          // re-asserts within a tick; the pre-flight checks block submits
-          // regardless). Never re-enable into an active lockout.
-          if (loginRateLimitRemainingMs() > 0) return;
+          // BOTH buckets share #btn-submit — the cross-bucket defer is
+          // MODE-AWARE: only leave the button to the other bucket when that
+          // bucket owns it (a login lockout must NOT disable the Sign up
+          // submit, and vice versa — #863).
+          if (loginRateLimitRemainingMs() > 0 && !authIsSignup) return;
           if (btn && btn.dataset.originalLabel) {
             btn.textContent = btn.dataset.originalLabel;
             delete btn.dataset.originalLabel;
@@ -1004,10 +1015,13 @@
           // clicks, so the cooldown timer alone could never recover it).
           if (resend) resend.disabled = (Date.now() < resendCooldownUntil);
           // Lockout over: drop the stale rate-limit message + tier so the
-          // form reads clean (code-review P4).
-          clearError();
-          rateLimitTier = "short";
-          try { sessionStorage.removeItem(RATE_LIMIT_TIER_KEY); } catch (e) {}
+          // form reads clean (code-review P4) — only when it was actually
+          // locked (the no-lockout call path must preserve a fresh error).
+          if (lockoutWasActive) {
+            clearError();
+            rateLimitTier = "short";
+            try { sessionStorage.removeItem(RATE_LIMIT_TIER_KEY); } catch (e) {}
+          }
           if (rateLimitTimer) { clearInterval(rateLimitTimer); rateLimitTimer = null; }
           return;
         }
@@ -1015,7 +1029,10 @@
         const label = "Try again in "
           + String(Math.floor(totalSec / 60)).padStart(2, "0") + ":"
           + String(totalSec % 60).padStart(2, "0");
-        if (btn) {
+        // #863 separation at the BUTTON level: the signup bucket owns
+        // #btn-submit in signup mode only (the login bucket owns it in login
+        // mode) — a signup rate limit must never disable the Log in submit.
+        if (authIsSignup && btn) {
           // P2 hardening: never capture an empty label (setLoading's spinner
           // swaps innerHTML → textContent "" mid-request). Guard on trimmed
           // truthiness so the label restore can never blank the button.
@@ -1032,13 +1049,6 @@
       // idle interval's first tick could re-enable #btn-submit mid-request
       // (double-submit → duplicate confirmation email → bucket burn, #801).
       if (rateLimitRemainingMs() > 0) rateLimitTimer = setInterval(update, 1000);
-    }
-    // On load: honor a persisted lockout (and explain why the button is off).
-    // Skip when the CDN guard already surfaced "temporarily unavailable"
-    // (#527 — a blocked supabase-js CDN must stay in its fail-closed state).
-    if (window.supabaseClient && rateLimitRemainingMs() > 0) {
-      showError(rateLimitMessage());
-      applyRateLimitLockout();
     }
 
     // ── Loading state ──────────────────────────────────────────────────────
@@ -1063,6 +1073,16 @@
     // signup (default) = the page's native flow (server signup, confirmation).
     // login = email+password sign-in + API-key login (existing key holders).
     let authIsSignup = true;
+
+    // On load: honor a persisted lockout — the lockout updates are
+    // MODE-AWARE (they read authIsSignup above), so these MUST run after the
+    // declaration (a TDZ ReferenceError here would kill the whole script,
+    // the #527 failure class).
+    if (loginRateLimitRemainingMs() > 0) applyLoginRateLimitLockout();
+    if (window.supabaseClient && rateLimitRemainingMs() > 0) {
+      showError(rateLimitMessage());
+      applyRateLimitLockout();
+    }
 
     // Modal bindings hoisted ABOVE the ?mode=login init below — setAuthMode
     // → hideEmailModal/hideApiKeyModal read the flags, and a TDZ
@@ -1100,14 +1120,15 @@
       document.getElementById("legal-accept").style.display = isSignup ? "" : "none";
       // #1494: FOUR always-visible options — the labels follow the mode so
       // each button states its workflow (GitHub/Google → OAuth page; API key
-      // / email → modal with confirm + cancel).
+      // / email → modal with confirm + cancel). API-key is login-only (paste
+      // an EXISTING key — #1287), so its labels are mode-independent.
       var modeWord = isSignup ? "Sign up" : "Log in";
       document.getElementById("label-github").textContent = modeWord + " with GitHub";
       document.getElementById("label-google").textContent = modeWord + " with Google";
-      document.getElementById("label-apikey").textContent = modeWord + " with API key";
+      document.getElementById("label-apikey").textContent = "Log in with API key";
       document.getElementById("label-email").textContent = modeWord + " with email";
       document.getElementById("email-modal-title").textContent = modeWord + " with email";
-      document.getElementById("apikey-modal-title").textContent = modeWord + " with API key";
+      document.getElementById("apikey-modal-title").textContent = "Log in with API key";
       // Forgot-password is a login-mode affordance (new accounts have no
       // password to reset).
       document.getElementById("modal-forgot-link").style.display = isSignup ? "none" : "";
@@ -1122,6 +1143,13 @@
       hideEmailModal();
       hideApiKeyModal();
       clearError();
+      // #1494 review: re-assert BOTH lockouts so the visible surface matches
+      // the mode just toggled — each apply is mode-aware (owns #btn-submit
+      // only in its own mode; the expiry branches defer to the other bucket
+      // only when it owns the button), so a signup lockout never disables the
+      // Log in submit (#863) and a cold bucket re-enables the button.
+      applyRateLimitLockout();
+      applyLoginRateLimitLockout();
     }
 
     function showApiKeyModal() {
@@ -1354,6 +1382,7 @@
       if (rateLimitRemainingMs() > 0) {
         showError(rateLimitMessage());
         applyRateLimitLockout();
+        signupInFlight = false;  // #1494 review: never leak the guard on the early return
         return;
       }
       clearError();
@@ -1482,6 +1511,10 @@
 
     function showEmailModal() {
       modalWasOpened = true;
+      // #1494 review: the check-your-inbox state hides #email-form (the
+      // modal form) — re-show it on every open so the form can't stay
+      // hidden for the rest of the page's life.
+      document.getElementById("email-form").classList.remove("hidden");
       document.getElementById("email-modal").classList.remove("hidden");
       document.body.style.overflow = "hidden";
       document.getElementById("modal-error").classList.remove("visible");
@@ -1562,7 +1595,11 @@
       const inbox = document.getElementById("confirmation-required");
       if (inbox && !inbox.classList.contains("hidden")) hideEmailModal();
       const banner = document.getElementById("error");
-      if (banner.classList.contains("visible") && banner.textContent) {
+      // #1494 review: mirror the banner text whenever it is non-empty —
+      // applyRateLimitLockout's no-lockout path may have removed the .visible
+      // class (it now only clearError()s on the locked→unlocked transition,
+      // but a non-rate-limit error must never be dropped from the modal).
+      if (banner.textContent && banner.textContent.trim()) {
         showModalError(banner.textContent);
         banner.classList.remove("visible");
       }
@@ -1648,6 +1685,9 @@
       } finally {
         signupInFlight = false;
         setLoading(false);
+        // #1493/#1494 review: setLoading(false) re-enabled every button —
+        // re-assert the login lockout (countdown + disabled) if a 429 set it.
+        if (loginRateLimitRemainingMs() > 0) applyLoginRateLimitLockout();
       }
     }
 
