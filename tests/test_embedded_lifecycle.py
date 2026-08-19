@@ -215,3 +215,103 @@ def test_no_new_raw_embedded_constructions():
         f"un-allowlisted FalkorDB(/FalkorProjection( constructions — add the "
         f"file to RAW_EMBEDDED_ALLOWLIST with justification: "
         f"{offenders_falkor}")
+
+
+# ── Issue #1475: deterministic close-on-GC (lifecycle finalize) ────────────
+
+def _pid_alive(pid):
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
+
+
+def _wait_server_dead(pid, timeout=10):
+    deadline = time.time() + timeout
+    while _pid_alive(pid) and time.time() < deadline:
+        time.sleep(0.05)
+    return not _pid_alive(pid)
+
+
+def test_leaked_projection_closes_on_gc(tmp_path):
+    """#1475: a leaked (never-closed) projection's embedded server shuts down
+    deterministically on GC, not only at atexit. The finalizer works around
+    the dead-referent constraint by closing via a weakref to the pinned
+    internal client (kept alive by redislite's own atexit registration)."""
+    from tortoise.projection import FalkorProjection
+    proj = FalkorProjection(str(tmp_path / "gc_proj.db"), graph_name="test")
+    cli = getattr(proj.db, "client", proj.db)
+    pid = cli.pid
+    assert _pid_alive(pid), "server should be running before GC"
+    del proj, cli
+    gc.collect()
+    assert _wait_server_dead(pid), (
+        "leaked projection's server survived GC — close-on-GC did not fire"
+    )
+
+
+def test_leaked_sdk_closes_on_gc(tmp_path):
+    """#1475: a leaked TortoiseSDK (the dominant per-suite leak path) closes
+    its embedded server when the SDK is collected — its projection dies in
+    the same refcount cascade and the projection's finalizer shuts the
+    server down mid-suite."""
+    from tortoise.sdk import TortoiseSDK
+    sdk = TortoiseSDK(str(tmp_path / "gc_sdk.db"))
+    sdk.get_point("missing-1475")  # force lazy projection creation
+    assert sdk._proj is not None
+    cli = getattr(sdk._proj.db, "client", sdk._proj.db)
+    pid = cli.pid
+    assert _pid_alive(pid), "server should be running before GC"
+    del sdk, cli
+    gc.collect()
+    assert _wait_server_dead(pid), (
+        "leaked SDK's server survived GC — close-on-GC did not fire"
+    )
+
+
+def test_explicit_close_then_gc_safe(monkeypatch, tmp_path):
+    """#1475: explicit close() is unaffected; a later GC of the (already
+    closed) projection is a safe no-op — exactly one close call, no crash,
+    server stays dead."""
+    from tortoise.projection import FalkorProjection
+    from tortoise import FalkorDB as TFalkorDB
+    calls = []
+    orig_close = TFalkorDB.close
+
+    def recorder(self):
+        calls.append("close")
+        return orig_close(self)
+
+    monkeypatch.setattr(TFalkorDB, "close", recorder)
+    proj = FalkorProjection(str(tmp_path / "gc_explicit.db"), graph_name="test")
+    cli = getattr(proj.db, "client", proj.db)
+    pid = cli.pid
+    proj.close()
+    assert calls == ["close"]
+    del proj, cli
+    gc.collect()
+    assert calls == ["close"], "GC finalizer must not double-close"
+    assert _wait_server_dead(pid), "server should be dead after explicit close"
+
+
+def test_shared_server_survives_single_gc(tmp_path):
+    """#1475: two clients on ONE server — GC of the first must NOT kill the
+    shared server (the #1371 last-client guard). The server dies only when
+    the last client is collected."""
+    from tortoise.projection import FalkorProjection
+    db_path = str(tmp_path / "gc_shared.db")
+    a = FalkorProjection(db_path, graph_name="test")
+    b = FalkorProjection(db_path, graph_name="test")
+    cli_a = getattr(a.db, "client", a.db)
+    pid = cli_a.pid
+    assert _pid_alive(pid)
+    del a, cli_a
+    gc.collect()
+    time.sleep(0.5)
+    assert _pid_alive(pid), "shared server killed while a live client remains"
+    del b
+    gc.collect()
+    assert _wait_server_dead(pid), "last client's GC should shut the server down"
