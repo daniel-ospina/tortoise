@@ -21,18 +21,29 @@
         // Session can live in the parent-domain cookie (supabase-session.js)
         // OR the legacy origin-scoped localStorage key (pre-#1225 cohort —
         // the head gate runs BEFORE migrateLegacySession; also seeds the
-        // welcome-e2e harness). Check both.
+        // welcome-e2e harness). Check both. A corrupt cookie value must fall
+        // through to the localStorage read, not abort the whole gate.
         var raw = null;
-        var m = document.cookie.match(/(?:^|; )sb-tortoise-auth-token=([^;]*)/);
-        if (m) raw = decodeURIComponent(m[1]);
-        if (!raw) {
-          try { raw = window.localStorage.getItem("sb-ybetwichurajbfswfeqa-auth-token"); } catch (e) {}
-        }
+        try {
+          var m = document.cookie.match(/(?:^|; )sb-tortoise-auth-token=([^;]*)/);
+          if (m) raw = decodeURIComponent(m[1]);
+        } catch (e) { raw = null; }
         if (raw) {
-          var s = JSON.parse(raw);
-          if (s && s.access_token && (!s.expires_at || s.expires_at * 1000 > Date.now())) return;
+          try { raw = JSON.parse(raw); } catch (e) { raw = null; }
         }
-        window.location.replace("/auth" + window.location.search + window.location.hash);
+        if (!raw) {
+          try {
+            var legacy = window.localStorage.getItem("sb-ybetwichurajbfswfeqa-auth-token");
+            if (legacy) raw = JSON.parse(legacy);
+          } catch (e) { raw = null; }
+        }
+        if (!raw || !raw.access_token) {
+          window.location.replace("/auth" + window.location.search + window.location.hash);
+          return;
+        }
+        if (raw.expires_at && raw.expires_at * 1000 <= Date.now()) {
+          window.location.replace("/auth" + window.location.search + window.location.hash);
+        }
       } catch (e) { /* best-effort — the async session wait below still applies */ }
     })();
   </script>

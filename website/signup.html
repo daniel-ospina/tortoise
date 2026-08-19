@@ -23,19 +23,27 @@
         if (p.get("error") || p.get("error_code")) return;
         // Session can live in the parent-domain cookie (supabase-session.js)
         // OR the legacy origin-scoped localStorage key (pre-#1225 cohort —
-        // the head gate runs BEFORE migrateLegacySession). Check both.
+        // the head gate runs BEFORE migrateLegacySession). Check both. A
+        // corrupt cookie value must fall through to the localStorage read,
+        // not abort the whole gate.
         var raw = null;
-        var m = document.cookie.match(/(?:^|; )sb-tortoise-auth-token=([^;]*)/);
-        if (m) raw = decodeURIComponent(m[1]);
-        if (!raw) {
-          try { raw = window.localStorage.getItem("sb-ybetwichurajbfswfeqa-auth-token"); } catch (e) {}
+        try {
+          var m = document.cookie.match(/(?:^|; )sb-tortoise-auth-token=([^;]*)/);
+          if (m) raw = decodeURIComponent(m[1]);
+        } catch (e) { raw = null; }
+        if (raw) {
+          try { raw = JSON.parse(raw); } catch (e) { raw = null; }
         }
-        if (!raw) return;
-        var s = JSON.parse(raw);
-        if (!s || !s.access_token) return;
+        if (!raw) {
+          try {
+            var legacy = window.localStorage.getItem("sb-ybetwichurajbfswfeqa-auth-token");
+            if (legacy) raw = JSON.parse(legacy);
+          } catch (e) { raw = null; }
+        }
+        if (!raw || !raw.access_token) return;
         // Same predicate as the welcome gate (missing expires_at treated as
         // valid; strictly future).
-        if (!s.expires_at || s.expires_at * 1000 > Date.now()) {
+        if (!raw.expires_at || raw.expires_at * 1000 > Date.now()) {
           var claim = /(?:^|; )tt_claim_pending=/.test(document.cookie);
           window.location.replace(claim ? "https://app.premiselabs.co/?claim=1" : window.location.origin + "/welcome.html");
         }
@@ -886,6 +894,13 @@
       const update = function () {
         const ms = loginRateLimitRemainingMs();
         if (ms <= 0) {
+          // #1494 review: the login bucket OWNS #btn-apikey-confirm — it
+          // must be re-enabled on expiry regardless of the mode-aware defer
+          // (which only defers #btn-submit to the signup bucket).
+          if (apikeyBtn) apikeyBtn.disabled = false;
+          loginRateLimitTier = "short";
+          try { sessionStorage.removeItem(LOGIN_RATE_LIMIT_TIER_KEY); } catch (e) {}
+          if (loginRateLimitTimer) { clearInterval(loginRateLimitTimer); loginRateLimitTimer = null; }
           // BOTH buckets share #btn-submit — the cross-bucket defer is
           // MODE-AWARE: only leave the button to the other bucket when that
           // bucket owns it (a signup lockout must NOT disable the Log in
@@ -896,10 +911,6 @@
             delete btn.dataset.originalLabel;
           }
           if (btn) btn.disabled = false;
-          if (apikeyBtn) apikeyBtn.disabled = false;
-          loginRateLimitTier = "short";
-          try { sessionStorage.removeItem(LOGIN_RATE_LIMIT_TIER_KEY); } catch (e) {}
-          if (loginRateLimitTimer) { clearInterval(loginRateLimitTimer); loginRateLimitTimer = null; }
           return;
         }
         const totalSec = Math.max(0, Math.floor(ms / 1000));
@@ -988,15 +999,26 @@
       // #1494 review: clearError() only on the locked→unlocked TRANSITION —
       // the no-lockout call path (signUpWithEmail's finally, every submit)
       // must not wipe a just-shown non-rate-limit error before the modal
-      // mirrors it into view. "Locked" is signaled by the tier key (written
-      // by setRateLimitLockout, removed at expiry) OR remaining time — the
-      // tier key covers a lockout forced into the past before re-applying.
+      // mirrors it into view. Signal = remaining time OR a live tier key —
+      // the key is removed on every expiry transition (defer branch + this
+      // branch) and at on-load, so a genuinely stale key can't re-trigger
+      // the clear (the forced-expiry e2e re-apply relies on the key).
       var lockoutWasActive = false;
       try { lockoutWasActive = sessionStorage.getItem(RATE_LIMIT_TIER_KEY) !== null; } catch (e) {}
       lockoutWasActive = lockoutWasActive || rateLimitRemainingMs() > 0;
       const update = function () {
         const ms = rateLimitRemainingMs();
         if (ms <= 0) {
+          // Cleanup on the expiry transition happens BEFORE the mode-aware
+          // defer — the tier key + interval + #btn-resend must not linger
+          // while the other bucket owns #btn-submit.
+          if (lockoutWasActive) {
+            clearError();
+            rateLimitTier = "short";
+            try { sessionStorage.removeItem(RATE_LIMIT_TIER_KEY); } catch (e) {}
+          }
+          if (rateLimitTimer) { clearInterval(rateLimitTimer); rateLimitTimer = null; }
+          if (resend) resend.disabled = (Date.now() < resendCooldownUntil);
           // BOTH buckets share #btn-submit — the cross-bucket defer is
           // MODE-AWARE: only leave the button to the other bucket when that
           // bucket owns it (a login lockout must NOT disable the Sign up
@@ -1007,22 +1029,6 @@
             delete btn.dataset.originalLabel;
           }
           if (btn) btn.disabled = false;
-          // #btn-resend: re-enable ONLY when no 60s resend cooldown is pending
-          // (resendCooldownUntil set by resendConfirmation). Never re-enable it
-          // blindly — a blind re-enable would defeat the #527 cooldown and
-          // re-open the shared-bucket burn (#801); leaving it disabled forever
-          // would strand users after lockout expiry (disabled buttons swallow
-          // clicks, so the cooldown timer alone could never recover it).
-          if (resend) resend.disabled = (Date.now() < resendCooldownUntil);
-          // Lockout over: drop the stale rate-limit message + tier so the
-          // form reads clean (code-review P4) — only when it was actually
-          // locked (the no-lockout call path must preserve a fresh error).
-          if (lockoutWasActive) {
-            clearError();
-            rateLimitTier = "short";
-            try { sessionStorage.removeItem(RATE_LIMIT_TIER_KEY); } catch (e) {}
-          }
-          if (rateLimitTimer) { clearInterval(rateLimitTimer); rateLimitTimer = null; }
           return;
         }
         const totalSec = Math.max(0, Math.floor(ms / 1000));
@@ -1077,7 +1083,11 @@
     // On load: honor a persisted lockout — the lockout updates are
     // MODE-AWARE (they read authIsSignup above), so these MUST run after the
     // declaration (a TDZ ReferenceError here would kill the whole script,
-    // the #527 failure class).
+    // the #527 failure class). A stale tier key with no remaining time is
+    // dropped (it must never re-trigger the error-clear path).
+    if (rateLimitRemainingMs() <= 0) {
+      try { sessionStorage.removeItem(RATE_LIMIT_TIER_KEY); } catch (e) {}
+    }
     if (loginRateLimitRemainingMs() > 0) applyLoginRateLimitLockout();
     if (window.supabaseClient && rateLimitRemainingMs() > 0) {
       showError(rateLimitMessage());
@@ -1143,6 +1153,11 @@
       hideEmailModal();
       hideApiKeyModal();
       clearError();
+      // #1494 review: re-show the option buttons — the check-your-inbox
+      // state hides them and a mode toggle must never leave the card empty.
+      document.querySelectorAll(".btn-provider").forEach(function (b) {
+        b.classList.remove("hidden");
+      });
       // #1494 review: re-assert BOTH lockouts so the visible surface matches
       // the mode just toggled — each apply is mode-aware (owns #btn-submit
       // only in its own mode; the expiry branches defer to the other bucket
@@ -1229,17 +1244,20 @@
         showError(humanizeAuthError(err));
       } finally {
         setLoading(false);
-        // #1493: setLoading(false) re-enabled EVERY button (modal submit
+        // #1494: setLoading(false) re-enabled EVERY button (modal submit
         // included) and restored labels — re-assert the login-bucket
         // countdown/disabled state for the modal.
         if (loginRateLimitRemainingMs() > 0) applyLoginRateLimitLockout();
         // Re-apply the signup lockout ONLY when active — on its no-lockout
         // path applyRateLimitLockout calls clearError(), which would wipe a
         // just-shown provider error (e.g. provider_disabled) (#1493 review).
+        // #1494 review: and only re-show the lockout message when the attempt
+        // did NOT surface its own error — a provider error must never be
+        // clobbered by the rate-limit copy.
         if (rateLimitRemainingMs() > 0) {
           applyRateLimitLockout();
-          // P4: restore the lockout explanation (clearError wiped it).
-          showError(rateLimitMessage());
+          const banner = document.getElementById("error");
+          if (!banner.classList.contains("visible")) showError(rateLimitMessage());
         }
       }
     }
