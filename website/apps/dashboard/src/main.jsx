@@ -485,7 +485,7 @@ function App() {
           const storedKey = (() => { try { return localStorage.getItem(KEY_STORAGE) || '' } catch { return '' } })()
           const claimKey = (() => { try { return sessionStorage.getItem(CLAIM_KEY_STORAGE) || '' } catch { return '' } })()
           if (!storedKey && !claimKey) {
-            window.location.href = 'https://tortoise.premiselabs.co/signup'
+            window.location.href = 'https://tortoise.premiselabs.co/auth'
             return
           }
           // Round-24: no session → the card's only affordance is the key input;
@@ -1713,7 +1713,7 @@ function App() {
             (API keys remain valid for graph operations).
           </p>
           <p className="dim small">
-            <a href="https://tortoise.premiselabs.co/signin.html" target="_blank" rel="noreferrer">
+            <a href="https://tortoise.premiselabs.co/auth" target="_blank" rel="noreferrer">
               Sign in with GitHub or Google →
             </a>
           </p>

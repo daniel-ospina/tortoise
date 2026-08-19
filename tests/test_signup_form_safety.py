@@ -233,7 +233,7 @@ def test_docs_promise_intact() -> None:
     """The docs must still promise the exact journey this issue protects:
     sign up → welcome page → API key shown once."""
     docs = (WEBSITE / "docs.html").read_text()
-    assert "Sign up at" in docs and "/signup" in docs
+    assert "Sign up at" in docs and "/auth" in docs
     assert "API key on the welcome page" in docs
     assert "shown once" in docs
 
@@ -280,9 +280,10 @@ def test_inline_scripts_pass_node_syntax_check(fname: str) -> None:
 
 def test_welcome_waits_for_session_before_erroring() -> None:
     """welcome.html must give the email-confirmation / OAuth callback a
-    bounded wait for the session (SIGNED_IN / getSession) before declaring
-    "No active session" — prevents bouncing legitimate callbacks to a dead
-    state on older/cached supabase-js builds."""
+    bounded wait for the session (SIGNED_IN / getSession) before redirecting
+    an unauthenticated visitor to the single auth page (/auth) — prevents
+    bouncing legitimate callbacks to a dead state on older/cached
+    supabase-js builds."""
     assert "waitForSession" in WELCOME
     assert "SIGNED_IN" in WELCOME
-    assert "No active session" in WELCOME  # message retained (E2E contract)
+    assert 'window.location.href = "/auth"' in WELCOME  # no-session → /auth

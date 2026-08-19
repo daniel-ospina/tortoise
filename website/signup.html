@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Sign up — Tortoise</title>
-  <meta name="description" content="Create your Tortoise account and start building your knowledge graph.">
+  <title>Log in or sign up — Tortoise</title>
+  <meta name="description" content="Log in to Tortoise or create your account — one page for everything.">
   <meta name="theme-color" content="#060b14">
-  <link rel="canonical" href="https://tortoise.premiselabs.co/signup">
+  <link rel="canonical" href="https://tortoise.premiselabs.co/auth">
   <link rel="icon" type="image/png" href="/logo.png">
   <style>
     .hidden {
@@ -47,7 +47,7 @@
       border-bottom: 1px solid var(--border, #1e293b);
       backdrop-filter: blur(8px);
     }
-    .topbar .logo { display: flex; align-items: center; text-decoration: none; line-height: 1; }
+    .topbar .logo { display: flex; align-items: center; text-decoration: none; line-height: 1; margin: 0; }
     .topbar .logo img { height: 40px; width: auto; display: block; }
     .topbar nav { flex: 1; display: flex; gap: 16px; }
     .topbar nav a { color: var(--text-dim, #94a3b8); text-decoration: none; font-size: 14px; }
@@ -371,7 +371,7 @@
       <a href="https://tortoise.premiselabs.co/">Product</a>
       <a href="/docs">Docs</a>
     </nav>
-    <a class="login" href="/signin.html">Login</a>
+    <a class="login" href="/auth">Login</a>
   </div>
 
   <div class="container">
@@ -494,7 +494,7 @@
     </div>
 
     <div class="footer">
-      <p>Already have an account? <a href="/signin.html">Sign in</a></p>
+      <p>Already have an account? <a href="/auth" onclick="setAuthMode(false); return false;">Sign in</a></p>
       <p class="footer-legal"><a href="/privacy">Privacy Policy</a> · <a href="/tos">Terms of Service</a> · <a href="/license">License</a> · <a href="/dpa">DPA</a> · <a href="/security">Security</a></p>
     </div>
   </div>
@@ -647,6 +647,17 @@
     // `let` does NOT create a window property — the watchdog must not show a
     // false "temporarily unavailable" on healthy loads, #527).
     window.supabaseClient = supabaseClient;
+
+    // Single auth page at /auth — a visitor who is ALREADY signed in is
+    // bounced to the dashboard/welcome (claim routing honored) instead of
+    // seeing the login card.
+    if (supabaseClient) {
+      supabaseClient.auth.getSession().then(function (r) {
+        if (r && r.data && r.data.session) {
+          window.location.href = claimRedirectTarget();
+        }
+      }).catch(function () { /* best-effort */ });
+    }
 
     // ── Error display ──────────────────────────────────────────────────────
     function showError(message) {
@@ -1084,8 +1095,8 @@
         // #801 review P1: the account ALREADY exists (created server-side) —
         // a sign-in failure here is transient (network/clock), not a bad
         // password. Point the user at the sign-in page instead of dead-ending.
-        showError("Account created — but signing you in failed. Please sign in at /signin.html.");
-        setTimeout(function () { window.location.href = "/signin.html"; }, 1500);
+        showError("Account created — but signing you in failed. Please sign in at /auth.");
+        setTimeout(function () { window.location.href = "/auth"; }, 1500);
         return;
       }
       if (data?.user) pushSignupEvents(data.user);
@@ -1364,7 +1375,7 @@
     }
 
     // #1287: email+password LOGIN (combined-card login mode) — the page's
-    // signin.html flow, inlined so /signup serves both modes. Routes to the
+    // legacy signin flow, inlined so /auth serves both modes. Routes to the
     // dashboard on success (session cookie shared cross-subdomain).
     async function signInWithEmailPassword() {
       if (signupInFlight) return;

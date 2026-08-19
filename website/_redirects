@@ -7,9 +7,23 @@
 #    resolves identically to the canonical URL.
 # 2) /index.html is the raw asset behind BOTH host roots — 301 to "/" so the
 #    middleware root rewrite (company page / product page) owns the URL.
-# 3) .html extension variants of non-auth pages duplicate the extensionless
-#    canonical — 301 them (docs/self-hosted only; auth pages keep .html
-#    because OAuth redirectTo + invite emails reference it directly).
+# 3) AUTH CONSOLIDATION: there is ONE auth page — /auth (served from the
+#    signup.html asset via a 200 rewrite). The legacy /signup and /signin
+#    URLs (and their .html / trailing-slash variants) 301 to /auth so the
+#    whole funnel (login buttons, dashboard/welcome redirects, OAuth +
+#    recovery links, marketing CTAs) converges on a single screen. The 200
+#    rewrite is terminal — the target asset is served without re-evaluating
+#    redirect rules.
+
+# /auth is served by the middleware (functions/_middleware.ts — it owns
+# the URL on every host, rewriting to the /signup asset). /signup itself
+# stays a redirect-free legacy alias of the same page (clean-URL resolution
+# serves signup.html; the canonical tag points at /auth, so SEO
+# consolidates). /signin and its variants 301 to /auth — the old standalone
+# login screen is gone:
+/signin   /auth  301
+/signin/  /auth  301
+/signin.html  /auth  301
 
 # Trailing-slash → canonical
 /privacy/  /privacy  301
@@ -20,8 +34,6 @@
 /aviso-privacidad/  /aviso-privacidad  301
 /docs/     /docs     301
 /self-hosted/  /self-hosted  301
-/signin/   /signin   301
-/signup/   /signup   301
 /welcome/  /welcome  301
 /invite-accept/  /invite-accept  301
 

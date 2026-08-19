@@ -66,6 +66,7 @@ export const onRequest: PagesFunction = async (context) => {
     "/aviso-privacidad", "/aviso-privacidad.html",
     "/signup", "/signup.html",
     "/signin", "/signin.html",
+    "/auth", "/auth.html",
     "/welcome", "/welcome.html",
     "/invite-accept", "/invite-accept.html",
   ]);
@@ -91,6 +92,23 @@ export const onRequest: PagesFunction = async (context) => {
         headers: { Location: target, ...HSTS },
       });
     }
+  }
+
+  // ── Single auth page at /auth ─────────────────────────────────────────
+  // One auth screen for the whole funnel (topbar login buttons,
+  // welcome/dashboard redirects, marketing CTAs, OAuth + recovery links).
+  // /auth serves the signup.html asset — the combined Log in / Sign up
+  // card. The company-host block above already 301'd /auth onto the
+  // tortoise host; on every other host (tortoise, pages.dev previews,
+  // local dev) serve the asset directly. Legacy /signup + /signin (all
+  // variants) are 301'd to /auth via _redirects.
+  if (url.pathname === "/auth" || url.pathname === "/auth.html") {
+    // Rewrite to the extensionless auth asset, PRESERVING the query string —
+    // the #1224 OAuth state-expiry banner reads ?error=… on this page, so a
+    // callback landing on /auth must keep its params. context.next()
+    // continues to the static-asset fallback (clean-URL resolution serves
+    // signup.html), NOT back through this middleware — no redirect loop.
+    return context.next(new Request(url.origin + "/signup" + url.search, context.request));
   }
 
   // On the tortoise host, the raw /product, /product.html and /index.html

@@ -312,14 +312,14 @@
 <body>
   <!-- Floating top menu (#1288): transparent, cyan Login top-right → /signup -->
   <div class="floating-topmenu">
-    <a class="login-btn" href="/signup">Login</a>
+    <a class="login-btn" href="/auth">Login</a>
   </div>
   <!-- OAuth error banner (#1224): Supabase redirects here with
        ?error=...&error_code=bad_oauth_state when the OAuth state TTL
        expired mid-login — surface it instead of failing silently. -->
   <div id="oauth-error" class="oauth-error-banner" role="alert" hidden>
     <span id="oauth-error-msg"></span>
-    <a id="oauth-error-retry" href="/signup">Sign up again →</a>
+    <a id="oauth-error-retry" href="/auth">Sign up again →</a>
   </div>
   <canvas id="graph-canvas"></canvas>
   <div id="vignette"></div>
@@ -328,7 +328,7 @@
     <section id="beat-hero" class="beat">
       <h1>Memory that makes your agents <span>smarter</span></h1>
       <p class="hero-sub">Tortoise is the memory and reasoning system that enables your agents to make complex decisions without losing track of the variables or being swayed by the last message. They don&rsquo;t just recall facts. They understand why decisions were made and reason with auditable world models.</p>
-      <a href="/signup" class="cta-start hero-cta">Connect your agent →</a>
+      <a href="/auth" class="cta-start hero-cta">Connect your agent →</a>
     </section>
     <section id="beat-how" class="beat">
       <h2>A <span>computational</span> memory graph</h2>
@@ -694,7 +694,7 @@
           <div class="price">${fmtPrice(t.price).big}<span>/mo</span></div>
           <p class="billing">${fmtPrice(t.price).total}</p>
           <div class="features">${features}${excluded}</div>
-          <a href="/signup" class="btn${name === 'free' ? ' secondary' : ''}">${cta}</a>
+          <a href="/auth" class="btn${name === 'free' ? ' secondary' : ''}">${cta}</a>
         </div>`;
       }).join('');
       document.getElementById('pricing-usage-line').textContent = `${PRICING.display.overage_line} — applies to Pro and Team`;
@@ -707,7 +707,7 @@
         <div class="actions">
           <a href="/self-hosted">Self-hosted setup guide →</a>
           <a href="https://github.com/daniel-ospina/tortoise" target="_blank" rel="noopener">Self-host on GitHub →</a>
-          <a href="/signup">Migrate to cloud anytime →</a>
+          <a href="/auth">Migrate to cloud anytime →</a>
         </div>`;
     }
 

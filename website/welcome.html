@@ -35,7 +35,7 @@
       border-bottom: 1px solid var(--border, #1e293b);
       backdrop-filter: blur(8px);
     }
-    .topbar .logo { display: flex; align-items: center; text-decoration: none; line-height: 1; }
+    .topbar .logo { display: flex; align-items: center; text-decoration: none; line-height: 1; margin: 0; }
     .topbar .logo img { height: 40px; width: auto; display: block; }
     .topbar nav { flex: 1; display: flex; gap: 16px; }
     .topbar nav a { color: var(--text-dim, #94a3b8); text-decoration: none; font-size: 14px; }
@@ -625,7 +625,7 @@
     <!-- Error state -->
     <div id="error-state" class="error-state hidden" role="alert">
       <p id="error-message">Something went wrong during provisioning.</p>
-      <p><a href="/signup.html">Try signing up again</a> · <a href="mailto:hello@premiselabs.co">Contact support</a></p>
+      <p><a href="/auth">Try signing up again</a> · <a href="mailto:hello@premiselabs.co">Contact support</a></p>
     </div>
 
     <!-- Success state -->
@@ -816,11 +816,11 @@ you up to 6 yes/no questions and set up your Tortoise memory.
       <h1>Reset your password</h1>
       <div id="reset-error" class="error-state hidden" role="alert">
         <p id="reset-error-text"></p>
-        <p><a href="/signin.html">Back to sign in</a></p>
+        <p><a href="/auth">Back to sign in</a></p>
       </div>
       <div id="reset-success" class="hidden" role="status">
         <p id="reset-success-text"></p>
-        <p><a href="/signin.html">Sign in with your new password →</a></p>
+        <p><a href="/auth">Sign in with your new password →</a></p>
       </div>
       <form id="reset-form" method="post" action="/welcome" onsubmit="resetPassword(event)">
         <div class="form-group">
@@ -949,7 +949,11 @@ you up to 6 yes/no questions and set up your Tortoise memory.
       }
 
       if (!session) {
-        showError("No active session. Please sign up first — or if you just clicked a confirmation link, refresh this page in a few seconds.");
+        // Single auth page at /auth — no session here means the visitor
+        // hasn't authed yet (or the confirmation link is stale); send them
+        // to the one auth screen instead of dead-ending on this post-auth
+        // page. Recovery landings are handled earlier (recoveryMode).
+        window.location.href = "/auth";
         return;
       }
 

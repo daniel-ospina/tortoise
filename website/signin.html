@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Sign in — Tortoise</title>
+  <title>Log in — Tortoise</title>
   <meta name="description" content="Sign in to your Tortoise account and continue building your knowledge graph.">
   <meta name="theme-color" content="#060b14">
-  <link rel="canonical" href="https://tortoise.premiselabs.co/signin">
+  <link rel="canonical" href="https://tortoise.premiselabs.co/auth">
   <link rel="icon" type="image/png" href="/logo.png">
   <style>
     .hidden {
@@ -37,7 +37,7 @@
       border-bottom: 1px solid var(--border, #1e293b);
       backdrop-filter: blur(8px);
     }
-    .topbar .logo { display: flex; align-items: center; text-decoration: none; line-height: 1; }
+    .topbar .logo { display: flex; align-items: center; text-decoration: none; line-height: 1; margin: 0; }
     .topbar .logo img { height: 40px; width: auto; display: block; }
     .topbar nav { flex: 1; display: flex; gap: 16px; }
     .topbar nav a { color: var(--text-dim, #94a3b8); text-decoration: none; font-size: 14px; }
@@ -277,7 +277,7 @@
       <a href="https://tortoise.premiselabs.co/">Product</a>
       <a href="/docs">Docs</a>
     </nav>
-    <a class="login" href="/signin.html">Login</a>
+    <a class="login" href="/auth">Login</a>
   </div>
 
   <div class="container">
@@ -346,7 +346,7 @@
     </noscript>
 
     <div class="footer">
-      <p>Don't have an account? <a href="/signup.html">Sign up</a></p>
+      <p>Don't have an account? <a href="/auth">Sign up</a></p>
       <p class="footer-legal"><a href="/privacy">Privacy Policy</a> · <a href="/tos">Terms of Service</a> · <a href="/license">License</a> · <a href="/dpa">DPA</a> · <a href="/security">Security</a></p>
     </div>
   </div>
