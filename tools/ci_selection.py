@@ -472,7 +472,8 @@ def main() -> int:
         problems = missing + slow_file_issues(manifest) \
             + leg_coverage_issues(manifest) + duration_issues(manifest)
         # #1472: the matrix rows must come from the selector derivation
-        # (fromJSON) — when they do, the #1266 halves-parse tie check is
+        # (space-joined matrix_* outputs) — when they do, the #1266
+        # halves-parse tie check is
         # subsumed (the derivation guarantees no slow leaks / dupes / dead
         # files by construction). Legacy hardcoded halves keep the #1266 check.
         wf_issues = workflow_matrix_issues(
