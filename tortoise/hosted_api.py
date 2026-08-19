@@ -78,6 +78,41 @@ _logger = logging.getLogger(__name__)
 _FALLBACK_KEEPALIVE: dict[str, "TortoiseSDK"] = {}
 
 
+def _anchor_usable(anchor: "TortoiseSDK", db_path: str) -> bool:
+    """True if the anchored SDK still holds the CURRENT embedded DB.
+
+    The anchor's whole purpose is to HOLD the embedded redislite server
+    alive for the db_path requests use. Two conditions make it worse than
+    none (it would keep serving a stale/dead server forever):
+
+    - path drift: the anchor is bound to a PREVIOUS db_path (a test
+      fixture's tempdir that no longer exists, or a changed
+      TORTOISE_DB_PATH). Its daemon may still be alive and answer queries,
+      so a ping-style probe ALONE cannot detect this — the graph the anchor
+      holds is simply not the one the current request will use.
+    - a dead daemon with the same path (crash, volume wipe) — probe catches
+      that.
+
+    The path comparison is O(1) and runs before the (cheaper-but-still-real)
+    graph probe so a drifted anchor is evicted without a query.
+    """
+    proj = getattr(anchor, "_proj", None)
+    if proj is None:
+        return False
+    proj_path = getattr(proj, "_path", None)
+    if proj_path is not None:
+        try:
+            same = (str(proj_path) == str(db_path)) or (
+                str(proj_path) != ":memory:"
+                and os.path.abspath(proj_path) == os.path.abspath(db_path)
+            )
+        except (TypeError, ValueError):
+            same = False
+        if not same:
+            return False
+    return proj._probe_ok()
+
+
 def _make_sdk(*, namespace: str | None = None) -> TortoiseSDK:
     """Build an SDK backed by TORTOISE_DB_URI, or embedded mode when unset.
 
@@ -98,6 +133,19 @@ def _make_sdk(*, namespace: str | None = None) -> TortoiseSDK:
         import tempfile
         db_path = os.path.join(tempfile.gettempdir(), "tortoise.db")
     anchor = _FALLBACK_KEEPALIVE.get(namespace or "")
+    if anchor is not None and not _anchor_usable(anchor, db_path):
+        # #1502: the anchor is bound to a stale/dead embedded server — a
+        # previous test's tempdir (removed at fixture teardown, the CI
+        # failure class: redis.socket ConnectionError / 500 / stale rows)
+        # or a daemon that crashed. The old code only self-healed when
+        # `anchor._proj is None` — a stored-but-drifted projection was
+        # served forever. Evict + recreate below instead.
+        try:
+            anchor.close()
+        except Exception:
+            pass
+        _FALLBACK_KEEPALIVE.pop(namespace or "", None)
+        anchor = None
     if anchor is None:
         anchor = TortoiseSDK(db_path=db_path, namespace=namespace)
         try:
@@ -108,14 +156,6 @@ def _make_sdk(*, namespace: str | None = None) -> TortoiseSDK:
             # anchor may connect on a later call.
             pass
         _FALLBACK_KEEPALIVE.setdefault(namespace or "", anchor)
-    elif anchor._proj is None:
-        # Self-heal: the anchor was stored unconnected (transient failure
-        # above, or created under a test patch). Try once more so keepalive
-        # is not permanently off for this namespace.
-        try:
-            anchor._get_proj()
-        except Exception:
-            pass
     sdk = TortoiseSDK(db_path=db_path, namespace=namespace)
     return sdk
 

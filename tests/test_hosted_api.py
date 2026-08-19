@@ -2301,3 +2301,69 @@ class TestProxyProtoRedirect:
             r = tc.post("/mcp", headers={"X-Forwarded-Proto": "http"})
         assert r.status_code == 307
         assert r.headers["location"].startswith("http://"), r.headers["location"]
+
+
+def test_make_sdk_reuses_healthy_anchor(monkeypatch):
+    """#1502: a healthy anchor bound to the CURRENT db_path is kept and
+    reused across _make_sdk calls — the keepalive's whole point. Eviction
+    must only happen for a stale (path-drifted) or dead anchor."""
+    import uuid
+    import tortoise.hosted_api as ha
+
+    ns = f"selfheal-keep-{uuid.uuid4().hex}"
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            db = os.path.join(td, "test.db")
+            monkeypatch.setenv("TORTOISE_DB_PATH", db)
+            sdk1 = ha._make_sdk(namespace=ns)
+            anchor1 = ha._FALLBACK_KEEPALIVE.get(ns)
+            assert anchor1 is not None, "anchor not stored"
+            assert anchor1._proj is not None, "anchor not connected"
+            # same path, live server → same anchor served again
+            ha._make_sdk(namespace=ns)
+            anchor2 = ha._FALLBACK_KEEPALIVE.get(ns)
+            assert anchor2 is anchor1, "healthy anchor was evicted"
+            # probe is a real check: the anchor answers queries
+            assert ha._anchor_usable(anchor1, db) is True
+    finally:
+        ha._FALLBACK_KEEPALIVE.pop(ns, None)
+
+
+def test_make_sdk_rebinds_stale_anchor(monkeypatch):
+    """#1502: _make_sdk evicts a keepalive anchor whose embedded DB path
+    drifted (previous test's tempdir removed, TORTOISE_DB_PATH changed)
+    instead of serving the stale graph forever.
+
+    The module-level _FALLBACK_KEEPALIVE anchor holds the embedded redislite
+    server alive across calls. When the path changes (fixture teardown in
+    CI), every later _make_sdk call previously returned the stale anchor →
+    redis.socket ConnectionError / 500 / previous test's rows. The anchor
+    must be evicted and re-bound to the CURRENT TORTOISE_DB_PATH.
+    """
+    import uuid
+    import tortoise.hosted_api as ha
+
+    ns = f"selfheal-{uuid.uuid4().hex}"
+    try:
+        with tempfile.TemporaryDirectory() as td1:
+            db1 = os.path.join(td1, "a.db")
+            monkeypatch.setenv("TORTOISE_DB_PATH", db1)
+            sdk1 = ha._make_sdk(namespace=ns)
+            anchor1 = ha._FALLBACK_KEEPALIVE.get(ns)
+            assert anchor1 is not None, "anchor not stored"
+            assert anchor1._proj is not None
+            # stale-path detection works even while the daemon is alive
+            assert ha._anchor_usable(anchor1, os.path.join(td1, "other.db")) is False
+        # td1 removed → the anchor's tempdir is gone (stale anchor)
+        with tempfile.TemporaryDirectory() as td2:
+            db2 = os.path.join(td2, "b.db")
+            monkeypatch.setenv("TORTOISE_DB_PATH", db2)
+            sdk2 = ha._make_sdk(namespace=ns)
+            anchor2 = ha._FALLBACK_KEEPALIVE.get(ns)
+            # old stale anchor must have been evicted, not served
+            assert anchor2 is not None, "anchor not re-bound"
+            assert anchor2 is not anchor1, "stale anchor served"
+            # and the returned SDK is live against the current path
+            assert sdk2._get_proj() is not None
+    finally:
+        ha._FALLBACK_KEEPALIVE.pop(ns, None)
