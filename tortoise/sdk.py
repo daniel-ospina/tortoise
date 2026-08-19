@@ -433,6 +433,19 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
             raise ValueError(
                 f"{key!r} is a server-managed field and cannot be set via props."
             )
+    # #1486 (code-review P1): is_episodic is the points-quota discriminator
+    # (quota.py counts only `is_episodic IS NULL OR = false` points). A tenant
+    # setting it true via props would exclude their points from the quota —
+    # unlimited points past the paid-tier cap. Server-managed: internal
+    # capture/extractor callers set it via the explicit `is_episodic` kwarg on
+    # create_point/create_entity/create_event/update_point (bound before this
+    # props passthrough runs), and the MCP tenant tools reject it at the
+    # boundary — this reject is the fail-closed backstop for any other surface.
+    if "is_episodic" in props:
+        raise ValueError(
+            "'is_episodic' is a server-managed field (quota discriminator) "
+            "and cannot be set via props."
+        )
     if reject_id and "id" in props:
         raise ValueError("'id' is server-managed and cannot be set via props.")
     return props
@@ -1317,13 +1330,19 @@ class TortoiseSDK:
                 type_, self._event_log_path, exc,
             )
 
-    def create_point(self, kind: str, content: str, **props) -> dict:
+    def create_point(self, kind: str, content: str, *, is_episodic: bool | None = None,
+                      **props) -> dict:
+        # #1486 (code-review P1): is_episodic is a SERVER-MANAGED flag — bound
+        # to this explicit param (never the props passthrough, which
+        # _sanitize_props rejects). Internal capture/extractor callers pass it
+        # here; tenant props cannot reach it (MCP boundary rejects + sanitize
+        # backstop).
         """Create a new Point node. Raises ValueError if kind is invalid.
 
         Set dedup=True for idempotent creation (matches by content hash).
         """
         self._validate_kind(kind)
-        _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        _coerce_props(props)
         # #329: server-managed fields rejected on the props passthrough
         # (the explicit-id path via props.pop("id") below is preserved for operators)
         props = _sanitize_props(props)
@@ -1339,6 +1358,8 @@ class TortoiseSDK:
                 "anchors for EP scoping, extractedFrom for provenance. See #49."
             )
 
+        if is_episodic is not None:
+            props["is_episodic"] = is_episodic  # server-managed (explicit param only)
         # Calibration: pop credibility before storing as node property
         credibility = props.pop("credibility", None)
         # Always compute and store content hash — dedup flag only gates the
@@ -2149,7 +2170,7 @@ class TortoiseSDK:
             return self.delete_point(id)
         return self.delete_entity(id)
 
-    def update_point(self, id: str, **props) -> dict:
+    def update_point(self, id: str, *, is_episodic: bool | None = None, **props) -> dict:
         """Update properties on an existing Point. Returns updated point dict.
 
         Implementation behind update(id, ...) — the consolidated Point/entity
@@ -2162,6 +2183,8 @@ class TortoiseSDK:
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         # #329: id mutation + server-managed fields rejected
         props = _sanitize_props(props, reject_id=True)
+        if is_episodic is not None:
+            props["is_episodic"] = is_episodic  # server-managed (explicit param only)
 
         # #49 Phase 2: context is REMOVED — raise TypeError if passed
         if "context" in props:
@@ -4039,6 +4062,17 @@ class TortoiseSDK:
             violations.append({
                 "section": section, "index": index,
                 "message": f"ingest: {section}[{index}] batch_id is "
+                           f"server-managed and cannot be set on bundle items",
+            })
+        # #1486 (P0 re-review): is_episodic is the points-quota discriminator —
+        # a tenant marking bundle items episodic would exclude them from the
+        # points quota (unlimited points past the paid-tier cap). Rejected at
+        # shape time so the **item splats below can never bind the SDK's
+        # explicit server-managed params.
+        if "is_episodic" in item:
+            violations.append({
+                "section": section, "index": index,
+                "message": f"ingest: {section}[{index}] is_episodic is "
                            f"server-managed and cannot be set on bundle items",
             })
         if section == "points":
@@ -10791,7 +10825,8 @@ class TortoiseSDK:
     # ── Entity CRUD (ONTOLOGY v2.5 §3, all 7 types) ──────────────────
 
     def _create_entity(self, label: str, id_val: str, props: dict, event_type: str,
-                       *, _skip_sanitize: bool = False) -> dict:
+                       *, _skip_sanitize: bool = False,
+                       is_episodic: bool | None = None) -> dict:
         """Generic entity creation. Applies to graph via projection (event log + FalkorDB).
 
         ``_skip_sanitize=True`` (epic #900 T3, create_source's sanctioned
@@ -10802,9 +10837,16 @@ class TortoiseSDK:
         out ``api.add_document(source_path=)``; create_source(source_path=) is
         the mirror route).
         """
-        # #329: id + sourcePath/source_path are server-managed — reject
+        # #329: id + sourcePath/source_path are server-managed — reject.
+        # is_episodic is ALSO server-managed (#1486, quota discriminator) —
+        # NEVER popped here: the sanitizer's unconditional reject is the
+        # fail-closed backstop, and the ONLY way the flag is set is the
+        # explicit `is_episodic` parameter below (internal callers), merged
+        # into the event dict AFTER sanitize.
         if not _skip_sanitize:
             props = _sanitize_props(props, reject_id=True)
+        if is_episodic is not None:
+            props["is_episodic"] = is_episodic  # server-managed (explicit param only)
         proj = self._get_proj()
         # Build event dict
         event = {"type": event_type, "id": id_val, **props}
@@ -10895,7 +10937,8 @@ class TortoiseSDK:
                 total += r.result_set[0][0]
         return bool(total)
 
-    def create_entity(self, type: str, name: str, **props) -> dict:
+    def create_entity(self, type: str, name: str, *, is_episodic: bool | None = None,
+                       **props) -> dict:
         """Create an entity — consolidated surface (epic #888 W2, PR #912).
 
         ``type`` routes to the right entity kind:
@@ -10915,13 +10958,17 @@ class TortoiseSDK:
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         t = (type or "").strip().lower()
         if t == "subject":
-            node = self._create_entity("Subject", _entity_name_id("Subject", name), {
-                "name": name, "subjectKind": props.pop("subjectKind", "other"),
-                "status": "live", **props}, "SubjectAdded")
+            node = self._create_entity(
+                "Subject", _entity_name_id("Subject", name),
+                {"name": name, "subjectKind": props.pop("subjectKind", "other"),
+                 "status": "live", **props},
+                "SubjectAdded", is_episodic=is_episodic)
         elif t == "object":
-            node = self._create_entity("Object", _entity_name_id("Object", name), {
-                "name": name, "objectKind": props.pop("objectKind", "other"),
-                "status": "live", **props}, "ObjectRegistered")
+            node = self._create_entity(
+                "Object", _entity_name_id("Object", name),
+                {"name": name, "objectKind": props.pop("objectKind", "other"),
+                 "status": "live", **props},
+                "ObjectRegistered", is_episodic=is_episodic)
         elif t == "event":
             eventKind = props.pop("eventKind", None)
             if not eventKind:
@@ -10935,7 +10982,8 @@ class TortoiseSDK:
             about_document = props.pop("aboutDocument", None)
             node = self._create_entity("Event", eid, {
                 "eventId": eid, "name": name, "eventKind": eventKind,
-                "eventStatus": "scheduled", **props}, "EventRecorded")
+                "eventStatus": "scheduled", **props}, "EventRecorded",
+                is_episodic=is_episodic)
             proj = self._get_proj()
             if about_subject:
                 proj.create_about_edge(eid, about_subject, "aboutSubject")
@@ -10963,7 +11011,7 @@ class TortoiseSDK:
             node = self._create_entity("Document", did, {
                 "title": name, "documentKind": documentKind,
                 "objectKind": "document", "status": "draft", **props},
-                "DocumentCreated")
+                "DocumentCreated", is_episodic=is_episodic)
         else:
             raise ValueError(
                 f"create_entity: unknown type {type!r} — must be one of "
@@ -11032,16 +11080,23 @@ class TortoiseSDK:
     def create_subject(self, name: str, subjectKind: str = "other", **props) -> dict:
         """Thin alias for create_entity(type='subject') — epic #888 W2."""
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        if "is_episodic" in props:  # #1486: server-managed (quota discriminator)
+            raise ValueError(
+                "'is_episodic' is a server-managed field and cannot be set via props.")
         return self.create_entity("subject", name,
                                   subjectKind=subjectKind, **props)["node"]
 
     def create_object(self, name: str, objectKind: str = "other", **props) -> dict:
         """Thin alias for create_entity(type='object') — epic #888 W2."""
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        if "is_episodic" in props:  # #1486: server-managed (quota discriminator)
+            raise ValueError(
+                "'is_episodic' is a server-managed field and cannot be set via props.")
         return self.create_entity("object", name,
                                   objectKind=objectKind, **props)["node"]
 
-    def create_event(self, name: str, eventKind: str, **props) -> dict:
+    def create_event(self, name: str, eventKind: str, *, is_episodic: bool | None = None,
+                      **props) -> dict:
         """Create an Event node (alias for create_entity(type='event')).
 
         If aboutSubject, aboutObject, aboutPoint, or aboutDocument are provided
@@ -11053,6 +11108,15 @@ class TortoiseSDK:
         rather than stored as string properties.
         """
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        # Second-model gate P2: a single-nested props={"is_episodic": true}
+        # flattens here and would splat-bind create_entity's explicit param —
+        # reject it; the explicit `is_episodic` param (internal callers) is the
+        # only channel.
+        if "is_episodic" in props:
+            raise ValueError(
+                "'is_episodic' is a server-managed field and cannot be set via props.")
+        if is_episodic is not None:
+            props["is_episodic"] = is_episodic  # server-managed (explicit param only)
         return self.create_entity("event", name,
                                   eventKind=eventKind, **props)["node"]
 
@@ -13294,7 +13358,7 @@ class TortoiseSDK:
         # it (the sanitizer's docstring carve-out; §4.1). ``id`` overrides are
         # equally server-managed (node identity) — rejected here because
         # ``_create_entity``'s reject_id is bypassed for the sanctioned route.
-        for _k in ("sourcePath", "source_path", "id"):
+        for _k in ("sourcePath", "source_path", "id", "is_episodic"):
             if _k in props:
                 raise ValueError(
                     f"{_k!r} is a server-managed field and cannot be set via "
