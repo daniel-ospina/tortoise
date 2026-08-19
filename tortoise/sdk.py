@@ -11074,12 +11074,18 @@ class TortoiseSDK:
     def create_subject(self, name: str, subjectKind: str = "other", **props) -> dict:
         """Thin alias for create_entity(type='subject') — epic #888 W2."""
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        if "is_episodic" in props:  # #1486: server-managed (quota discriminator)
+            raise ValueError(
+                "'is_episodic' is a server-managed field and cannot be set via props.")
         return self.create_entity("subject", name,
                                   subjectKind=subjectKind, **props)["node"]
 
     def create_object(self, name: str, objectKind: str = "other", **props) -> dict:
         """Thin alias for create_entity(type='object') — epic #888 W2."""
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        if "is_episodic" in props:  # #1486: server-managed (quota discriminator)
+            raise ValueError(
+                "'is_episodic' is a server-managed field and cannot be set via props.")
         return self.create_entity("object", name,
                                   objectKind=objectKind, **props)["node"]
 
@@ -11096,6 +11102,13 @@ class TortoiseSDK:
         rather than stored as string properties.
         """
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        # Second-model gate P2: a single-nested props={"is_episodic": true}
+        # flattens here and would splat-bind create_entity's explicit param —
+        # reject it; the explicit `is_episodic` param (internal callers) is the
+        # only channel.
+        if "is_episodic" in props:
+            raise ValueError(
+                "'is_episodic' is a server-managed field and cannot be set via props.")
         if is_episodic is not None:
             props["is_episodic"] = is_episodic  # server-managed (explicit param only)
         return self.create_entity("event", name,
