@@ -460,6 +460,13 @@ def run_main(argv: list[str] | None = None) -> dict[str, Any]:
                 raise SystemExit(f"unknown extractor model {args.extractor_model!r}; "
                                  f"known: {sorted(MODELS)}")
             extractor_model = MODELS[args.extractor_model]()
+        elif os.environ.get("TORTOISE_EXTRACTOR_PROVIDER") == "openrouter":
+            extractor_model = MODELS["deepseek-flash"]()  # forced OpenRouter
+        elif os.environ.get("DEEPSEEK_API_KEY"):
+            # #1350: the extractor's LLM calls were hitting OpenRouter
+            # connection errors under load — the direct DeepSeek API is the
+            # same model (deepseek-v4-flash), different route, no OR hop.
+            extractor_model = MODELS["deepseek-flash-direct"]()
         else:
             extractor_model = MODELS["deepseek-flash"]()
 
