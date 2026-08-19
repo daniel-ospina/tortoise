@@ -862,17 +862,16 @@ class TortoiseSDK:
         # closing). No weakref.finalize: the atexit bound method keeps the
         # SDK alive until exit, so a GC finalizer could never fire.
         self._t_closed = False
-        import atexit as _atexit
-        import weakref as _weakref
         # #1371: route the atexit seam through the fast-close wrapper (see
         # FalkorDB._atexit_close). _t_close/close/__exit__ are unchanged.
-        # #1475: registered through weakref.WeakMethod so the SDK stays
-        # COLLECTABLE (a strong bound method would pin it alive until exit
-        # and prevent close-on-GC for leaked SDKs — the projection's
-        # finalizer closes the server when the SDK dies with it). At exit,
-        # WeakMethod invokes _atexit_close only while the object is still
-        # alive — behavior for live objects is unchanged.
-        _atexit.register(_weakref.WeakMethod(self._atexit_close))
+        # #1475 review (P2): register through the embedded_lifecycle wrapper —
+        # a bare weakref.WeakMethod is a silent NO-OP (WeakMethod.__call__
+        # RETURNS the bound method instead of invoking it, so atexit never
+        # runs the body). The wrapper derefs a plain weakref and invokes the
+        # method only while the object is alive, keeping the SDK collectable
+        # (close-on-GC) without pinning it.
+        from .embedded_lifecycle import register_atexit_close
+        register_atexit_close(self)
         # Dreaming (#85): dirty claim roots awaiting EP stabilization. Write
         # paths mark affected claims dirty; dream()/lazy-read consume them.
         self._dirty_roots: set[str] = set()
