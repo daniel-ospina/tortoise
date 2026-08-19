@@ -407,6 +407,19 @@ jobs:
           HF_HUB_OFFLINE: "1"
           TRANSFORMERS_OFFLINE: "1"
 
+      - name: Upload pytest log (measurement artifact, #1477)
+        # #1477: non-gating upload so ci-timing.yml can extract per-file
+        # durations (--durations=15 section) from the REAL run. if: always() +
+        # continue-on-error + if-no-files-found: ignore ⇒ this step can never
+        # red the gate (the early-exit path writes no /tmp/pytest.log).
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-log-${{ github.job }}-${{ matrix.half }}
+          path: /tmp/pytest.log
+          if-no-files-found: ignore
+
       - name: "Skip-fail guard: live-FalkorDB tests must run, never skip (#1436)"
         # The falkordb services above make the live-required tests RUN in the
         # fast matrix. If any of them SKIP anyway (probe regression, service
@@ -586,6 +599,16 @@ jobs:
           HF_HUB_OFFLINE: "1"
           TRANSFORMERS_OFFLINE: "1"
 
+      - name: Upload pytest log (measurement artifact, #1477)
+        # #1477: non-gating upload — same contract as the fast job's upload.
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-log-${{ github.job }}
+          path: /tmp/pytest.log
+          if-no-files-found: ignore
+
   test-concurrency-falkor:
     # #942 target 2: prove concurrent-writer atomicity on the REAL FalkorDB
     # sidecar — the durable path the flipped docs now default to. Runs ONLY
@@ -694,6 +717,15 @@ jobs:
           fi
           echo "==================== pytest exit code: $rc ===================="
           exit $rc
+      - name: Upload pytest log (measurement artifact, #1477)
+        # #1477: non-gating upload — same contract as the fast job's upload.
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-log-${{ github.job }}
+          path: /tmp/pytest.log
+          if-no-files-found: ignore
       - name: Validate docker-compose.yml (ports + header edits)
         # T1 Step 6 ships with zero other verification — no workflow validates
         # compose today. ubuntu-latest has docker + the repo checked out.
@@ -782,6 +814,16 @@ jobs:
           rc=$?
           tail -25 /tmp/trackb.log
           echo "track-b rc=$rc (must-pass — gate member)"
+      - name: Upload track-b log (measurement artifact, #1477)
+        # #1477: non-gating upload — track-b writes /tmp/trackb.log (no
+        # --durations, but the PASSED/FAILED lines feed the flake signal).
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-log-${{ github.job }}
+          path: /tmp/trackb.log
+          if-no-files-found: ignore
 
   python-ci-gate:
     if: always()
