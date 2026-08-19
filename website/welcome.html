@@ -816,11 +816,11 @@ you up to 6 yes/no questions and set up your Tortoise memory.
       <h1>Reset your password</h1>
       <div id="reset-error" class="error-state hidden" role="alert">
         <p id="reset-error-text"></p>
-        <p><a href="/auth">Back to sign in</a></p>
+        <p><a href="/auth?mode=login">Back to sign in</a></p>
       </div>
       <div id="reset-success" class="hidden" role="status">
         <p id="reset-success-text"></p>
-        <p><a href="/auth">Sign in with your new password →</a></p>
+        <p><a href="/auth?mode=login">Sign in with your new password →</a></p>
       </div>
       <form id="reset-form" method="post" action="/welcome" onsubmit="resetPassword(event)">
         <div class="form-group">
@@ -881,8 +881,12 @@ you up to 6 yes/no questions and set up your Tortoise memory.
     // during createClient init — snapshot the hash FIRST so a recovery-link
     // landing (type=recovery) is recognized even when PASSWORD_RECOVERY is
     // not emitted (supabase/auth#1948). Recovery mode short-circuits
-    // provisioning below.
-    const recoveryLanding = /[?&#]type=recovery/.test(window.location.hash);
+    // provisioning below. The same early snapshot feeds the no-session
+    // redirect (a confirmation/OAuth callback's #access_token=… fragment
+    // must survive the hop to /auth — supabase-js strips it from the URL
+    // during init, so reading location.hash later would read empty).
+    const landingHash = window.location.hash;
+    const recoveryLanding = /[?&#]type=recovery/.test(landingHash);
     let recoveryMode = recoveryLanding;
 
     let supabaseClient = null;
@@ -957,7 +961,7 @@ you up to 6 yes/no questions and set up your Tortoise memory.
         // /auth banner renders; supabase-js consumes #access_token=… on the
         // destination to complete the session). Recovery landings are
         // handled earlier (recoveryMode).
-        window.location.href = "/auth" + window.location.search + window.location.hash;
+        window.location.href = "/auth" + window.location.search + landingHash;
         return;
       }
 

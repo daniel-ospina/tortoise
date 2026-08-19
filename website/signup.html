@@ -482,7 +482,7 @@
       <div class="modal">
         <button type="button" class="modal-close" id="btn-modal-close" aria-label="Close" onclick="hideEmailLoginModal()">×</button>
         <h2 id="email-login-title">Log in with email</h2>
-        <form id="modal-email-form" method="post" action="/signin" onsubmit="modalEmailLogin(event)">
+        <form id="modal-email-form" method="post" action="/auth" onsubmit="modalEmailLogin(event)">
           <div class="form-group">
             <label for="modal-email">Email</label>
             <input type="email" id="modal-email" name="email" placeholder="you@example.com" required autocomplete="email">
@@ -1010,8 +1010,15 @@
     // path point here. MUST run after `let authIsSignup` above — setAuthMode
     // reads it, and a TDZ ReferenceError here would kill this whole script
     // (the #527 failure class: one bad line disables everything below it).
+    // Skips when ?error/?error_code present — setAuthMode's clearError()
+    // must not wipe the #1224 OAuth state-expiry banner.
     if (new URLSearchParams(window.location.search).get("mode") === "login") {
-      setAuthMode(false);
+      var modeParams = new URLSearchParams(window.location.search);
+      // #1224: never wipe the OAuth state-expiry banner (setAuthMode clears
+      // the error box) on a crafted ?mode=login&error=… landing.
+      if (!modeParams.get("error") && !modeParams.get("error_code")) {
+        setAuthMode(false);
+      }
     }
 
     function setAuthMode(isSignup) {
@@ -1101,6 +1108,10 @@
       } finally {
         setLoading(false);
         applyRateLimitLockout();   // re-apply the lockout state (#801)
+        // #1493: setLoading(false) re-enabled EVERY button (modal submit
+        // included) and restored labels — re-assert the login-bucket
+        // countdown/disabled state for the modal.
+        if (loginRateLimitRemainingMs() > 0) applyLoginRateLimitLockout();
         // P4: signInWithProvider's clearError() wiped the lockout explanation
         // — restore it when a lockout is still active so the user knows why
         // the email form is disabled.
@@ -1374,8 +1385,10 @@
     // overlay).
     const MODAL_FOCUS_SELECTOR = 'button, input, select, textarea, a[href], [tabindex]:not([tabindex="-1"])';
     let modalLoginInFlight = false;
+    let modalWasOpened = false;  // focus restore only after a real open (a11y)
 
     function showEmailLoginModal() {
+      modalWasOpened = true;
       document.getElementById("email-login-modal").classList.remove("hidden");
       document.body.style.overflow = "hidden";
       document.getElementById("modal-error").classList.remove("visible");
@@ -1386,8 +1399,10 @@
     function hideEmailLoginModal() {
       document.getElementById("email-login-modal").classList.add("hidden");
       document.body.style.overflow = "";
-      // Restore focus to the launching button (a11y APG dialog pattern) — a
-      // no-op when the button is hidden (mode switch to signup).
+      // Restore focus to the launching button (a11y APG dialog pattern) —
+      // only when the modal was actually opened by the user (setAuthMode
+      // also closes it on load; a load-time focus grab would be hostile).
+      if (!modalWasOpened) return;
       const launcher = document.getElementById("btn-email-login");
       if (launcher && launcher.offsetParent !== null) launcher.focus();
     }
@@ -1522,9 +1537,11 @@
       if (signupInFlight) return;
       signupInFlight = true;
       if (!supabaseClient) { showError("Auth not configured."); signupInFlight = false; return; }
-      if (rateLimitRemainingMs() > 0) {
-        showError(rateLimitMessage());
-        applyRateLimitLockout();
+      // #1493: LOGIN surface → login bucket (tortoise_signin_*) — a legacy
+      // safety net for the inline form; must never touch the signup bucket.
+      if (loginRateLimitRemainingMs() > 0) {
+        showError(loginRateLimitMessage());
+        applyLoginRateLimitLockout();
         signupInFlight = false;
         return;
       }

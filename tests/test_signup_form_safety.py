@@ -45,6 +45,11 @@ def test_email_form_is_post_with_explicit_action() -> None:
     assert re.search(r'action="/signup"', signup_form), "signup form must action=/signup"
     assert re.search(r'method="post"', signin_form), "signin form must be method=post"
     assert re.search(r'action="/signin"', signin_form), "signin form must action=/signin"
+    # #1493: the login MODAL's form is the live login surface — same #527
+    # contract, same-path canonical (/auth), pinned so it can't regress.
+    modal_form = re.search(r'<form[^>]*id="modal-email-form"[^>]*>', SIGNUP).group(0)
+    assert re.search(r'method="post"', modal_form), "modal form must be method=post"
+    assert re.search(r'action="/auth"', modal_form), "modal form must action=/auth"
 
 
 def test_email_and_password_have_autocomplete() -> None:

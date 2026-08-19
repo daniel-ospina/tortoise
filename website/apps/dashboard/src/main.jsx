@@ -540,12 +540,19 @@ function App() {
                   if (b && b.detail) claimMsg = typeof b.detail === 'string' ? b.detail : JSON.stringify(b.detail)
                 } catch { /* non-JSON body */ }
                 setClaimError(claimMsg)
+                // #1493: a FAILED claim must not leave the tt_claim_pending
+                // marker behind — it would hijack the next /auth visit's
+                // OAuth redirect + signed-in bounce to the claim route for
+                // the full cookie TTL (up to 1h). Clear on failure/abandon.
+                clearClaimPendingMarker()
               }
             } catch (e) {
               setClaimError((e && e.message) || 'Claim failed — try again.')
+              clearClaimPendingMarker()
             }
           } else {
             setClaimError('Claim interrupted — paste your tt_ key again to continue.')
+            clearClaimPendingMarker()
           }
         }
 
