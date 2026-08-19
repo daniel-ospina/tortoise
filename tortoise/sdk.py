@@ -89,6 +89,16 @@ def _session_llm_provider() -> str | None:
     return None
 
 
+def _session_llm_mock_enabled() -> bool:
+    """TORTOISE_SESSION_LLM_MOCK=1 test seam — normalized exactly like the
+    sibling gates (sdk._build_session_llm_extractor, hosted_api.
+    _llm_provider_available): strip + lower, so a padded env value (" 1 ")
+    can't diverge the outer gates from _extract_session_v2's inner gate
+    (divergence = ValueError → HTTP 500, the #1468 failure class)."""
+    return os.environ.get(
+        "TORTOISE_SESSION_LLM_MOCK", "").strip().lower() == "1"
+
+
 def _build_session_llm_extractor():
     """Build the M2 LLMExtractor for session capture from the configured
     provider (or None when no provider key is set — the no-key case fails
@@ -1914,22 +1924,38 @@ class TortoiseSDK:
 
         Returns the same [{id, kind, text}] contract as _extract_session_llm
         so the capture loops (hosted + selfhost, which share this) stay
-        unchanged. Fails closed without a provider key.
+        unchanged. Fails closed without a provider key — the
+        TORTOISE_SESSION_LLM_MOCK=1 offline seam also satisfies the gate
+        (hosted e2e runs the seam with provider keys scrubbed, #1468).
         """
-        if not os.environ.get("OPENROUTER_API_KEY") and not os.environ.get(
-                "DEEPSEEK_API_KEY") and not os.environ.get("OPENAI_API_KEY"):
+        if not _session_llm_mock_enabled() \
+                and not os.environ.get("OPENROUTER_API_KEY") \
+                and not os.environ.get("DEEPSEEK_API_KEY") \
+                and not os.environ.get("OPENAI_API_KEY"):
             raise ValueError(
                 "_extract_session_v2 requires an LLM provider key "
                 "(OPENROUTER_API_KEY / DEEPSEEK_API_KEY / OPENAI_API_KEY — "
                 "#1350) or TORTOISE_SESSION_LLM_MOCK=1")
         from tortoise.extractor_v2 import extract_session_v2
-        from tests.model_adapters import MODELS
-        if os.environ.get("TORTOISE_SESSION_LLM_MOCK") == "1":
+        if _session_llm_mock_enabled():
             model = _V2SessionMock()
         else:
-            # _default_byok_model (this module) is the configured BYOK adapter
-            # (env-driven); fall back to the uncapped flash adapter.
-            model = _default_byok_model() or MODELS["deepseek-flash"]()
+            # _model_adapter (this module) is the in-module BYOK adapter.
+            # Default (no TORTOISE_EXTRACT_MODEL override): an UNCAPPED
+            # output budget — the v2 5-stage extractor needs the full
+            # budget (capped 4000-token adapters truncate and silently lose
+            # chunks). #1468: the default used to be the test-only
+            # tests.model_adapters.MODELS["deepseek-flash"]() (uncapped
+            # OpenRouterModel) — tests/ is absent from the production image →
+            # ModuleNotFoundError → HTTP 500 on POST /v1/sessions. Now built
+            # in-module via _model_adapter(max_tokens=None): same uncapped
+            # semantics, no tests import. An explicit TORTOISE_EXTRACT_MODEL
+            # override keeps the bounded 4000-token default (summary/construct
+            # posture, T13 #1272).
+            configured = os.environ.get("TORTOISE_EXTRACT_MODEL", "").strip()
+            model = (_model_adapter(configured) if configured
+                     else _model_adapter("deepseek/deepseek-v4-flash",
+                                         max_tokens=None, temperature=0.0))
 
         out = extract_session_v2(model, conversation, sdk=self,
                                  session_id=session_id)
@@ -14015,13 +14041,16 @@ def _default_byok_model():
     return _model_adapter(name)
 
 
-def _model_adapter(model_id: str, max_tokens: int = 4000, temperature: float = 0.0):
+def _model_adapter(model_id: str, max_tokens: int | None = 4000, temperature: float = 0.0):
     """BYOK model adapter with explicit bounds (T13 #1272).
 
     The production summary/construct workload needs a real output budget —
     the gate-judge default (500) truncates summaries and silently loses
     chunks. 4000 is the summary/construct-sized default (temperature 0.0
-    for determinism); callers may override."""
+    for determinism); callers may override. max_tokens=None means UNCAPPED —
+    the cap is omitted from the request body entirely (#1468): the v2 session
+    extractor's flash fallback needs the full output budget (capped
+    4000-token adapters truncate and lose chunks)."""
     import os
     key = os.environ.get("OPENROUTER_API_KEY", "")
     url = os.environ.get("OPENROUTER_BASE_URL",
@@ -14030,14 +14059,16 @@ def _model_adapter(model_id: str, max_tokens: int = 4000, temperature: float = 0
     class _Compat:
         def complete(self, *, system, user):
             import requests
+            body = {"model": model_id,
+                    "messages": [{"role": "system", "content": system},
+                                 {"role": "user", "content": user}],
+                    "temperature": temperature}
+            if max_tokens is not None:
+                body["max_tokens"] = max_tokens
             r = requests.post(url, headers={
                 "Authorization": f"Bearer {key}",
                 "Content-Type": "application/json"},
-                json={"model": model_id,
-                      "messages": [{"role": "system", "content": system},
-                                   {"role": "user", "content": user}],
-                      "max_tokens": max_tokens,
-                      "temperature": temperature},
+                json=body,
                 timeout=600)
             r.raise_for_status()
             return r.json()["choices"][0]["message"]["content"]
