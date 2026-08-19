@@ -303,6 +303,8 @@ surfaces:
   - test_config.py
   - test_cross_lens.py
   - test_crypto.py
+  - test_postmerge_dedup.py
+  - test_ci_timing.py
   - test_ids.py
   - test_log.py
   - test_models.py
@@ -386,3 +388,23 @@ push_extra:
 - bench/test_degradation_chain.py
 - bench/test_roundrobin.py
 - bench/test_smoke_embedded.py
+
+# #1473: measured per-file durations (seconds) for the tier-2 PR split.
+# Source: --durations=15 output of CI runs 32193298962/32241846147/32243341350,
+# max-per-run aggregation (heavy tail). Missing files default to 2.0s in the
+# split. Keys must be classified, non-slow test files (enforced by --integrity).
+durations:
+  test_calibration.py: 52.1
+  test_battery_setup.py: 26.0
+  test_main_guards.py: 19.5
+  test_ops_safety.py: 16.8
+  test_audit.py: 14.5
+  test_battery_corpus.py: 13.5
+  test_a9_direct_edge_traversal.py: 13.2
+  test_backup_e2e.py: 13.1
+  test_capture_session.py: 10.7
+  test_embedded_lifecycle_fast_close.py: 9.1
+  test_analyze_scoped.py: 5.2
+  test_projection_version_gate.py: 5.1
+  test_analyze.py: 3.9
+
