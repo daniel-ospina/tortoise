@@ -153,6 +153,8 @@ jobs:
       slow_files: ${{ steps.select.outputs.slow_files }}
       matrix_a: ${{ steps.push-matrix.outputs.matrix_a }}
       matrix_b: ${{ steps.push-matrix.outputs.matrix_b }}
+      a_files: ${{ steps.split.outputs.a_files }}
+      b_files: ${{ steps.split.outputs.b_files }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -191,6 +193,18 @@ jobs:
           MATRIX=$(python3 tools/ci_selection.py --emit-push-matrix)
           echo "matrix_a=$(echo "$MATRIX" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["half_a"]))')" >> "$GITHUB_OUTPUT"
           echo "matrix_b=$(echo "$MATRIX" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["half_b"]))')" >> "$GITHUB_OUTPUT"
+      - name: Tier-2 duration split (#1473)
+        # #1473: LPT-pack the tier-2 selected files across halves a/b by
+        # measured duration (config/ci-surfaces.yml durations) instead of the
+        # duration-blind parity split — a heavy matched surface can no longer
+        # dump most of its runtime on one half. Only on PRs with a tier-2
+        # selection (full=false); the full-matrix path uses matrix.files.
+        id: split
+        if: github.event_name == 'pull_request' && steps.select.outputs.full == 'false'
+        run: |
+          SPLIT=$(echo '${{ needs.changes.outputs.test_files }}' | python3 tools/ci_selection.py --split)
+          echo "a_files=$(echo "$SPLIT" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["a"]))')" >> "$GITHUB_OUTPUT"
+          echo "b_files=$(echo "$SPLIT" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["b"]))')" >> "$GITHUB_OUTPUT"
       - name: Manifest integrity (drift gate, #1262)
         # Unconditional: every event runs the integrity check so new test
         # files can never silently drift out of selection again (the #1260
@@ -352,16 +366,9 @@ jobs:
             # full matrix: this half's matrix.files (slow files excluded)
             for f in ${{ matrix.files }}; do FILES="$FILES tests/$f.py"; done
           else
-            # #1371 tier 2: selected surface files, parity-split across both
-            # halves so a big PR uses BOTH runners instead of overloading half
-            # a (the old behavior ran everything in half a; half b idled).
-            SELECTED=$(echo '${{ needs.changes.outputs.test_files }}' | python3 -c "import json,sys; print(' '.join('tests/'+f for f in json.load(sys.stdin)))")
-            A_FILES=""; B_FILES=""; i=0
-            for f in $SELECTED; do
-              if [ $((i % 2)) -eq 0 ]; then A_FILES="$A_FILES $f"; else B_FILES="$B_FILES $f"; fi
-              i=$((i+1))
-            done
-            if [ "${{ matrix.half }}" = "a" ]; then FILES="$A_FILES"; else FILES="$B_FILES"; fi
+            # #1473 tier 2: selected surface files, LPT duration-balanced
+            # across both halves (split computed once in the changes job).
+            if [ "${{ matrix.half }}" = "a" ]; then FILES="${{ needs.changes.outputs.a_files }}"; else FILES="${{ needs.changes.outputs.b_files }}"; fi
           fi
           if [ -z "$FILES" ]; then
             echo "no selected files for this half — skipping"

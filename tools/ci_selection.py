@@ -257,8 +257,10 @@ def push_legs(manifest: dict) -> dict:
                   if f not in slow and f not in ENV_BROKEN_FILES)
     half_a = fast[0::2]
     half_b = fast[1::2]
-    for f in manifest.get("push_extra", []):
-        half_b.append(f.replace(".py", ""))
+    # #1485: distribute push_extra (bench files) EVENLY so the halves stay
+    # within the #1266 ±3 tolerance (all-bench-in-half-b caused 135 vs 139).
+    for i, f in enumerate(manifest.get("push_extra", [])):
+        (half_a if i % 2 == 0 else half_b).append(f.replace(".py", ""))
     strip = lambda xs: sorted(x.replace(".py", "") for x in xs)
     return {"half_a": strip(half_a), "half_b": strip(half_b),
             "slow": strip(slow), "env_broken": sorted(ENV_BROKEN_FILES)}
@@ -402,6 +404,46 @@ def fast_files_absent_from_halves(manifest: dict, halves: dict[str, list[str]]) 
     return sorted(f for f in fast if f[:-3] not in halfset)
 
 
+def split_fast_gate(files, durations: dict, default_weight: float = 2.0):
+    """#1473: LPT greedy pack of the selected fast-gate files across halves
+    a/b by measured duration — deterministic (ties -> a; assignment order).
+    Raises ValueError on non-list input (guards the 'ALL' full-mode string).
+    """
+    if not isinstance(files, list):
+        raise ValueError(f"split_fast_gate expects a list, got {type(files).__name__}")
+    weighted = []
+    for f in files:
+        name = f[len("tests/"):] if f.startswith("tests/") else f
+        weighted.append((name, durations.get(name, default_weight)))
+    a, b = [], []
+    ta = tb = 0.0
+    for name, w in sorted(weighted, key=lambda x: (-x[1], x[0])):
+        if ta <= tb:
+            a.append("tests/" + name)
+            ta += w
+        else:
+            b.append("tests/" + name)
+            tb += w
+    return a, b
+
+
+def duration_issues(manifest: dict) -> list[str]:
+    """#1473: every durations key must be classified and non-slow."""
+    issues = []
+    durations = manifest.get("durations", {})
+    slow = set(manifest.get("slow_files", []))
+    classified = set()
+    for s, files in manifest["surfaces"].items():
+        classified.update(files)
+    classified.update(manifest.get("tier1", []))
+    for name in durations:
+        if name in slow:
+            issues.append(f"durations key {name} is a slow file (must be fast-gate)")
+        if name not in classified:
+            issues.append(f"durations key {name} is not classified in the manifest")
+    return issues
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--changed-files", default="", help="newline-separated changed files")
@@ -415,6 +457,8 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", help="preview --register without writing")
     ap.add_argument("--emit-push-matrix", action="store_true",
                     help="#1472: print the derived push halves {half_a, half_b}")
+    ap.add_argument("--split", action="store_true",
+                    help="#1473: LPT-pack the stdin JSON test-file list into {a, b}")
     args = ap.parse_args()
 
     manifest = load_manifest()
@@ -422,7 +466,7 @@ def main() -> int:
     if args.integrity:
         missing = integrity(manifest)
         problems = missing + slow_file_issues(manifest) \
-            + leg_coverage_issues(manifest)
+            + leg_coverage_issues(manifest) + duration_issues(manifest)
         # #1472: the matrix rows must come from the selector derivation
         # (fromJSON) — when they do, the #1266 halves-parse tie check is
         # subsumed (the derivation guarantees no slow leaks / dupes / dead
@@ -469,6 +513,16 @@ def main() -> int:
     if args.emit_push_matrix:
         legs = push_legs(manifest)
         print(json.dumps({"half_a": legs["half_a"], "half_b": legs["half_b"]}))
+        return 0
+
+    if args.split:
+        files = json.loads(sys.stdin.read())
+        a, b = split_fast_gate(files, manifest.get("durations", {}))
+        result = {"a": a, "b": b}
+        out_dir = Path(os.environ.get("CI_SELECTION_ARTIFACT_DIR", REPO / ".ci-selection"))
+        out_dir.mkdir(exist_ok=True)
+        (out_dir / "split.json").write_text(json.dumps(result, indent=2))
+        print(json.dumps(result))
         return 0
 
     changed = [l.strip() for l in args.changed_files.splitlines() if l.strip()]

@@ -355,3 +355,61 @@ def test_integrity_no_matrix_drift():
     assert leg_coverage_issues(m) == []
     wf = REPO / ".github" / "workflows" / "python-ci.yml"
     assert workflow_matrix_issues(str(wf), m) == []
+
+
+def test_split_balances_heavy_files():
+    """#1473: LPT puts the heavy files on alternating halves."""
+    from tools.ci_selection import split_fast_gate
+    files = ["tests/test_calibration.py", "tests/test_analyze.py",
+             "tests/test_main_guards.py", "tests/test_ops_safety.py"]
+    durations = {"test_calibration.py": 52.1, "test_analyze.py": 3.9,
+                 "test_main_guards.py": 19.5, "test_ops_safety.py": 16.8}
+    a, b = split_fast_gate(files, durations)
+    # LPT: calibration(52.1)->a, main_guards(19.5)->b, ops_safety(16.8)->b,
+    # analyze(3.9)->b (a stays heavier after calibration).
+    assert a == ["tests/test_calibration.py"]
+    assert sorted(b) == ["tests/test_analyze.py", "tests/test_main_guards.py",
+                         "tests/test_ops_safety.py"]
+    # imbalance bounded (vs parity which could cluster 52.1+19.5 on one half)
+    wa = 52.1
+    wb = 19.5 + 16.8 + 3.9
+    assert max(wa, wb) / min(wa, wb) < 1.5
+
+
+def test_split_is_deterministic_and_ties_go_a():
+    from tools.ci_selection import split_fast_gate
+    files = ["tests/test_a.py", "tests/test_b.py"]
+    a1, b1 = split_fast_gate(files, {"test_a.py": 1.0, "test_b.py": 1.0})
+    a2, b2 = split_fast_gate(files, {"test_a.py": 1.0, "test_b.py": 1.0})
+    assert a1 == a2 and b1 == b2
+    assert a1 == ["tests/test_a.py"]  # tie -> a
+
+
+def test_split_default_weight_for_unmeasured():
+    from tools.ci_selection import split_fast_gate
+    files = ["tests/test_new_a.py", "tests/test_new_b.py"]
+    a, b = split_fast_gate(files, {})  # no durations -> default 2.0
+    assert sorted(a + b) == sorted(files)
+    assert len(a) == 1 and len(b) == 1
+
+
+def test_split_rejects_non_list():
+    from tools.ci_selection import split_fast_gate
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        split_fast_gate("ALL", {})
+
+
+def test_duration_integrity():
+    from tools.ci_selection import duration_issues, load_manifest
+    m = load_manifest()
+    assert duration_issues(m) == []
+    # a slow-file key must fail
+    bad = dict(m)
+    bad["durations"] = {"test_about_edges.py": 10.0}  # a slow file
+    assert duration_issues(bad) != []
+    # an unclassified key must fail
+    bad2 = dict(m)
+    bad2["durations"] = {"not_a_real_file.py": 10.0}
+    assert duration_issues(bad2) != []
+
