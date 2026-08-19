@@ -56,6 +56,8 @@ class OpenRouterModel:
 # Pre-configured models
 MODELS = {
     'deepseek-flash': lambda: OpenRouterModel('deepseek/deepseek-v4-flash', max_tokens=None, temperature=0.0),
+    'deepseek-flash-direct': lambda: DeepSeekDirectModel('deepseek-v4-flash', max_tokens=None, temperature=0.0),
+    'deepseek-v4-pro-direct': lambda: DeepSeekDirectModel('deepseek-v4-pro', max_tokens=None, temperature=0.0),
     'deepseek-v4-pro': lambda: OpenRouterModel('deepseek/deepseek-v4-pro', max_tokens=500),
     'deepseek-r1-xhigh': lambda: OpenRouterModel('deepseek/deepseek-r1-0528', max_tokens=500, thinking_budget=2000),
     'deepseek-v4-pro-xhigh': lambda: OpenRouterModel('deepseek/deepseek-v4-pro', max_tokens=500, temperature=0.0),
@@ -108,3 +110,41 @@ class OllamaModel:
 OLLAMA_MODELS = {
     'phi4-mini': lambda: OllamaModel('phi4-mini:latest', max_tokens=500),
 }
+
+
+class DeepSeekDirectModel(OpenRouterModel):
+    """Direct DeepSeek API adapter (api.deepseek.com) — same model ids as
+    OpenRouter (deepseek-v4-flash / v4-pro) but no OpenRouter hop. Used when
+    DEEPSEEK_API_KEY is set and TORTOISE_EXTRACTOR_PROVIDER != 'openrouter'
+    (#1350 — the extractor's LLM calls were hitting OpenRouter connection
+    errors under load; the direct API is the same model, different route)."""
+
+    def __init__(self, model_id: str, max_tokens: int | None = None,
+                 temperature: float = 0.0, **kw):
+        super().__init__(model_id, max_tokens=max_tokens,
+                         temperature=temperature, **kw)
+        self.api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+
+    def complete(self, *, system: str, user: str) -> str:
+        import requests as _r
+        body = {
+            "model": self.id,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "temperature": self.temperature,
+        }
+        if self.max_tokens is not None:
+            body["max_tokens"] = self.max_tokens
+        r = _r.post("https://api.deepseek.com/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {self.api_key}",
+                             "Content-Type": "application/json"},
+                    json=body, timeout=60)
+        r.raise_for_status()
+        data = r.json()
+        usage = data.get("usage", {})
+        self.last_prompt_tokens = usage.get("prompt_tokens", 0)
+        self.last_completion_tokens = usage.get("completion_tokens", 0)
+        return data["choices"][0]["message"]["content"]
+
