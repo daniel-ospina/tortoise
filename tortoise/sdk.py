@@ -4058,6 +4058,17 @@ class TortoiseSDK:
                 "message": f"ingest: {section}[{index}] batch_id is "
                            f"server-managed and cannot be set on bundle items",
             })
+        # #1486 (P0 re-review): is_episodic is the points-quota discriminator —
+        # a tenant marking bundle items episodic would exclude them from the
+        # points quota (unlimited points past the paid-tier cap). Rejected at
+        # shape time so the **item splats below can never bind the SDK's
+        # explicit server-managed params.
+        if "is_episodic" in item:
+            violations.append({
+                "section": section, "index": index,
+                "message": f"ingest: {section}[{index}] is_episodic is "
+                           f"server-managed and cannot be set on bundle items",
+            })
         if section == "points":
             # kind is OPTIONAL (CYCLE-25: kind-absent defaults to
             # 'statement'); content is required.
@@ -10808,7 +10819,8 @@ class TortoiseSDK:
     # ── Entity CRUD (ONTOLOGY v2.5 §3, all 7 types) ──────────────────
 
     def _create_entity(self, label: str, id_val: str, props: dict, event_type: str,
-                       *, _skip_sanitize: bool = False) -> dict:
+                       *, _skip_sanitize: bool = False,
+                       is_episodic: bool | None = None) -> dict:
         """Generic entity creation. Applies to graph via projection (event log + FalkorDB).
 
         ``_skip_sanitize=True`` (epic #900 T3, create_source's sanctioned
@@ -10821,14 +10833,14 @@ class TortoiseSDK:
         """
         # #329: id + sourcePath/source_path are server-managed — reject.
         # is_episodic is ALSO server-managed (#1486, quota discriminator) —
-        # popped here so the sanitizer stays strict; it is re-injected below
-        # (only reachable via create_entity's explicit param, which the MCP
-        # boundary guards).
+        # NEVER popped here: the sanitizer's unconditional reject is the
+        # fail-closed backstop, and the ONLY way the flag is set is the
+        # explicit `is_episodic` parameter below (internal callers), merged
+        # into the event dict AFTER sanitize.
         if not _skip_sanitize:
-            _episodic = props.pop("is_episodic", None)
             props = _sanitize_props(props, reject_id=True)
-            if _episodic is not None:
-                props["is_episodic"] = _episodic
+        if is_episodic is not None:
+            props["is_episodic"] = is_episodic  # server-managed (explicit param only)
         proj = self._get_proj()
         # Build event dict
         event = {"type": event_type, "id": id_val, **props}
@@ -10938,17 +10950,19 @@ class TortoiseSDK:
         a suggested IMPL/NAND/mitigate relation — advisory only, never enforced.
         """
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
-        if is_episodic is not None:
-            props["is_episodic"] = is_episodic  # server-managed (explicit param only)
         t = (type or "").strip().lower()
         if t == "subject":
-            node = self._create_entity("Subject", _entity_name_id("Subject", name), {
-                "name": name, "subjectKind": props.pop("subjectKind", "other"),
-                "status": "live", **props}, "SubjectAdded")
+            node = self._create_entity(
+                "Subject", _entity_name_id("Subject", name),
+                {"name": name, "subjectKind": props.pop("subjectKind", "other"),
+                 "status": "live", **props},
+                "SubjectAdded", is_episodic=is_episodic)
         elif t == "object":
-            node = self._create_entity("Object", _entity_name_id("Object", name), {
-                "name": name, "objectKind": props.pop("objectKind", "other"),
-                "status": "live", **props}, "ObjectRegistered")
+            node = self._create_entity(
+                "Object", _entity_name_id("Object", name),
+                {"name": name, "objectKind": props.pop("objectKind", "other"),
+                 "status": "live", **props},
+                "ObjectRegistered", is_episodic=is_episodic)
         elif t == "event":
             eventKind = props.pop("eventKind", None)
             if not eventKind:
@@ -10962,7 +10976,8 @@ class TortoiseSDK:
             about_document = props.pop("aboutDocument", None)
             node = self._create_entity("Event", eid, {
                 "eventId": eid, "name": name, "eventKind": eventKind,
-                "eventStatus": "scheduled", **props}, "EventRecorded")
+                "eventStatus": "scheduled", **props}, "EventRecorded",
+                is_episodic=is_episodic)
             proj = self._get_proj()
             if about_subject:
                 proj.create_about_edge(eid, about_subject, "aboutSubject")
@@ -10990,7 +11005,7 @@ class TortoiseSDK:
             node = self._create_entity("Document", did, {
                 "title": name, "documentKind": documentKind,
                 "objectKind": "document", "status": "draft", **props},
-                "DocumentCreated")
+                "DocumentCreated", is_episodic=is_episodic)
         else:
             raise ValueError(
                 f"create_entity: unknown type {type!r} — must be one of "
@@ -13324,7 +13339,7 @@ class TortoiseSDK:
         # it (the sanitizer's docstring carve-out; §4.1). ``id`` overrides are
         # equally server-managed (node identity) — rejected here because
         # ``_create_entity``'s reject_id is bypassed for the sanctioned route.
-        for _k in ("sourcePath", "source_path", "id"):
+        for _k in ("sourcePath", "source_path", "id", "is_episodic"):
             if _k in props:
                 raise ValueError(
                     f"{_k!r} is a server-managed field and cannot be set via "
