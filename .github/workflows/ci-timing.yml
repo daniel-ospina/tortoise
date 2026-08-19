@@ -1,0 +1,146 @@
+name: CI Timing Measurement
+
+# #1477 — measurement artifact only. NEVER a gate: nothing here is in
+# python-ci-gate's needs, no step here can red a required check, and the
+# refresh path opens a PR (branch-protection safe, auto-merge repo policy)
+# only when the committed artifact content actually changed — zero bot spam.
+#
+# Weekly (Monday 04:30 UTC) + on demand: samples the latest completed
+# push-to-main Python CI run, extracts real per-step durations (Jobs API)
+# + per-file durations (uploaded /tmp/pytest.log artifacts), and refreshes
+# docs/ci-timing.md + docs/ci-timing.json.
+
+on:
+  schedule:
+    - cron: '30 4 * * 1'
+  workflow_dispatch:
+
+# Minimal scopes: Jobs API + artifact download need actions:read; the
+# refresh job additionally requests contents/pull-requests write at job level.
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ci-timing-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+    outputs:
+      run_id: ${{ steps.find.outputs.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find latest completed push-to-main Python CI run
+        id: find
+        run: |
+          # #1477: comparable data requires the FULL matrix — PR smoke runs and
+          # nightlies are excluded (event=push + branch=main), cancelled runs
+          # are skipped (conclusion filter below).
+          RUNS=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/python-ci.yml/runs?event=push&branch=main&status=completed&exclude_pull_requests=true&per_page=10")
+          RUN_ID=$(printf '%s' "$RUNS" | python3 -c '
+            import json, sys
+            runs = json.load(sys.stdin).get("workflow_runs", [])
+            for r in runs:
+                if r.get("conclusion") in ("success", "failure"):
+                    print(r["id"])
+                    break
+          ')
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          if [ -n "$RUN_ID" ]; then
+            echo "sampled run: $RUN_ID"
+          else
+            echo "::warning::no completed push-to-main python-ci run found in the last 10"
+          fi
+
+      - name: Download pytest log artifacts from sampled run
+        # Artifacts may legitimately be absent (older than retention, run
+        # cancelled before the log existed). continue-on-error: the measure
+        # job then produces step-timing-only data with a missing-log note.
+        id: download
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: pytest-log-*
+          run-id: ${{ steps.find.outputs.run_id }}
+          path: logs
+
+      - name: Generate CI timing artifact
+        run: |
+          # Writes into the repo checkout's docs/ so the previously committed
+          # ci-timing.json seeds the bounded history (accumulation across weeks).
+          python3 tools/ci_timing.py \
+            --repo "$GITHUB_REPOSITORY" \
+            --run-id "${{ steps.find.outputs.run_id }}" \
+            --logs-dir logs \
+            --out-dir docs \
+            --max-history 52
+          echo "=== ci-timing.md (head) ==="
+          head -30 out/ci-timing.md
+
+      - name: Upload generated timing files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-timing
+          path: |
+            docs/ci-timing.md
+            docs/ci-timing.json
+          if-no-files-found: ignore
+
+  refresh:
+    # Committed-artifact refresh — schedule/dispatch ONLY (never on the
+    # push path; that would re-open a PR per push). Opens a PR only when
+    # the generated content differs from the committed file (deterministic
+    # output ⇒ no-diff weeks produce no PR at all).
+    needs: measure
+    if: success() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download generated timing files
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-timing
+          path: generated
+
+      - name: Open refresh PR if content changed
+        run: |
+          set -e
+          BRANCH="chore/ci-timing-refresh-$(git rev-parse --short HEAD)"
+          if git diff --no-index --quiet docs/ci-timing.md generated/ci-timing.md \
+             && git diff --no-index --quiet docs/ci-timing.json generated/ci-timing.json; then
+            echo "timing artifact unchanged — no PR needed"
+            exit 0
+          fi
+          echo "timing artifact changed — opening refresh PR"
+          git switch -c "$BRANCH"
+          cp generated/ci-timing.md docs/ci-timing.md
+          cp generated/ci-timing.json docs/ci-timing.json
+          git add docs/ci-timing.md docs/ci-timing.json
+          git -c user.name="tortoise-ci[bot]" -c user.email="actions@github.com" \
+            commit -m "chore(ci): refresh CI timing artifact (#1477)"
+          git push -u origin "$BRANCH"
+          if [ "$(gh pr list --head "$BRANCH" --state open --json number --jq 'length')" = "0" ]; then
+            gh pr create --base main --head "$BRANCH" \
+              --title "chore(ci): refresh CI timing artifact (#1477)" \
+              --body "Weekly refresh of the CI timing measurement artifact (docs/ci-timing.md + docs/ci-timing.json). No code changes — measurement data only. Auto-merged per repo policy."
+          else
+            echo "refresh PR already open for $BRANCH — skipping"
+          fi

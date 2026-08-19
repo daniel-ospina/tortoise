@@ -12,6 +12,7 @@ ownedBy: epistemic-team
 | Area | Path |
 | --- | --- |
 | Backup/DR runbook | `docs/ops/registry-backup-dr.md` |
+| CI timing measurement artifact (#1477) | `docs/ci-timing.md` |
 | Post-flip verification runbook (#669) | `docs/ops/669-post-flip-verification.md` |
 | Ontology | `docs/ONTOLOGY.md` |
 | Registry graph schema | `docs/registry-graph-schema.md` |
