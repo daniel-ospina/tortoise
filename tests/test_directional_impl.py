@@ -126,7 +126,12 @@ def get_mean(result, point_id):
 
 
 def make_point(sdk, content, kind="statement"):
-    return sdk.create_point(kind, content)
+    # #943: create_point defaults to status='draft'; the #780 draft filter
+    # strips draft inputs, degenerating IMPL factors (<2 live inputs) → zero
+    # cascade (#992). Mirror of the #1000/#1004 sweep applied to
+    # test_ep_directional (#1382) — target conclusions here are never
+    # operator sources, so mark live explicitly.
+    return sdk.create_point(kind, content, status="live")
 
 
 def make_operator(sdk, source_id, target_id, op_type="IMPL", label=None, direction=None):
@@ -202,11 +207,16 @@ def test_impl_directional_refuted_conclusion():
     )
     print(f"  ✅ Conclusion B refuted: {b_mean:.4f} < 0.80")
 
-    # Conclusion B should still be above 0.35 (IMPL + NAND tug-of-war)
-    assert b_mean > 0.40, (
-        f"❌ Conclusion B too low: {b_mean:.4f}"
+    # Conclusion B should still be above a non-degeneracy floor. Post-#855/#871
+    # the engine does not boost NAND messages to weakly-evidenced claims, so a
+    # T0 NAND on an unevidenced claim settles ~0.20 even with T0 IMPL support
+    # (measured 0.1955; pure-support reference 0.6533). Band, not floor-only:
+    # the 0.5 draft-default prior would pass a bare >0.05 floor, silently
+    # re-introducing the #943/#780 regression this sweep eliminates (#1382).
+    assert 0.05 < b_mean < 0.45, (
+        f"❌ Conclusion B outside contested range: {b_mean:.4f}"
     )
-    print(f"  ✅ Conclusion B in reasonable range: 0.40 < {b_mean:.4f} < 0.80")
+    print(f"  ✅ Conclusion B refuted but not degenerate: {b_mean:.4f}")
 
     sdk.close()
     print("  ✅ TEST 1 PASSED")

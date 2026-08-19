@@ -24,6 +24,9 @@ DEFAULT_EPSILON = 1e-6
 class ThresholdsConfig:
     determinism_epsilon: float = DEFAULT_EPSILON
     cal_rows: tuple[tuple[str, str, float], ...] = ()
+    #: Differential classification margin (STRONG/WEAK vs best comparator) —
+    #: [cal]-locked in thresholds.yaml `cal.classification-delta` (#1415 P2-3).
+    classification_delta: float = 0.10
 
     def cal_table_hash(self) -> str:
         """sha256 of the CANONICAL serialization — rows sorted by
@@ -49,7 +52,11 @@ def load_thresholds(path: str | Path) -> ThresholdsConfig:
     if epsilon < 0:
         raise ConfigError("thresholds: determinism.epsilon must be non-negative")
 
-    cal_raw = raw.get("cal") or {}
+    cal_raw = dict(raw.get("cal") or {})
+    classification_delta = float(cal_raw.pop("classification-delta", 0.10))
+    if not 0 < classification_delta < 1:
+        raise ConfigError(
+            "thresholds: cal.classification-delta must be in (0, 1)")
     cal_rows: list[tuple[str, str, float]] = []
     for metric, arms in cal_raw.items():
         if not isinstance(arms, dict):
@@ -58,4 +65,6 @@ def load_thresholds(path: str | Path) -> ThresholdsConfig:
             if not isinstance(value, (int, float)):
                 raise ConfigError(f"thresholds: cal.{metric}.{arm} must be numeric")
             cal_rows.append((str(metric), str(arm), float(value)))
-    return ThresholdsConfig(determinism_epsilon=float(epsilon), cal_rows=tuple(cal_rows))
+    return ThresholdsConfig(determinism_epsilon=float(epsilon),
+                            cal_rows=tuple(cal_rows),
+                            classification_delta=classification_delta)

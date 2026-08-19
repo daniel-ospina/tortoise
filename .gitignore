@@ -51,3 +51,6 @@ battery/golds/sealed/*
 
 # Issue #1407 eval-battery scenario corpus — sealed gold store (never committed)
 battery/config/.gold_store/
+
+# Battery eval run artifacts (local, never committed)
+battery-out/

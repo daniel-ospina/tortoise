@@ -143,6 +143,7 @@ def run_evaluation(
     max_retries: int = DEFAULT_MAX_RETRIES,
     ingest_mode: str = "deterministic",
     extractor_model=None,
+    workers: int = 1,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Run the full per-question pipeline over ``instances``.
 
@@ -159,21 +160,24 @@ def run_evaluation(
     done, prior_failures = _load_checkpoint(checkpoint)
     outcomes: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = list(prior_failures)
+    import threading
+    _lock = threading.Lock()
 
-    for i, question in enumerate(instances):
+    def _run_one(question: dict, i: int) -> None:
+        """Per-question pipeline — isolated graph, parallel-safe."""
         qid = question["question_id"]
         print(f"[longmem_eval] [{i + 1}/{len(instances)}] {qid} "
               f"({question.get('question_type', '?')})", file=sys.stderr)
         if qid in done:
             print(f"  [resume] {qid} already completed — reusing checkpoint",
                   file=sys.stderr)
-            outcomes.append(done[qid])
-            continue
+            with _lock:
+                outcomes.append(done[qid])
+            return
         if any(f["question_id"] == qid for f in failures):
             print(f"  [resume] {qid} previously failed — skipping "
                   f"(delete the checkpoint to retry)", file=sys.stderr)
-            continue
-
+            return
         t_q_start = time.monotonic()
         try:
             with tempfile.TemporaryDirectory(dir=work_dir, prefix="lme-") as td:
@@ -231,18 +235,35 @@ def run_evaluation(
                 "judge_latency_ms": round(judge_ms, 2),
                 "total_ms": round((time.monotonic() - t_q_start) * 1000.0, 2),
             }
-            outcomes.append(outcome)
-            done[qid] = outcome
+            with _lock:
+                outcomes.append(outcome)
+                done[qid] = outcome
         except Exception as e:  # noqa: BLE001 — per-question isolation (P2)
             print(f"[longmem_eval] question {qid} FAILED (non-fatal, "
                   f"continuing): {e!r}", file=sys.stderr)
-            failures.append({
-                "question_id": qid,
-                "question_type": question.get("question_type", ""),
-                "error": repr(e),
-                "failed_at_utc": datetime.now(timezone.utc).isoformat(),
-            })
-        _save_checkpoint(checkpoint, list(done.values()), failures)
+            with _lock:
+                failures.append({
+                    "question_id": qid,
+                    "question_type": question.get("question_type", ""),
+                    "error": repr(e),
+                    "failed_at_utc": datetime.now(timezone.utc).isoformat(),
+                })
+        with _lock:
+            _save_checkpoint(checkpoint, list(done.values()), failures)
+
+    # ── dispatch: sequential (workers=1) or a thread pool ──
+    if workers <= 1:
+        for i, question in enumerate(instances):
+            _run_one(question, i)
+    else:
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+            futures = [
+                ex.submit(_run_one, question, i)
+                for i, question in enumerate(instances)
+            ]
+            for f in concurrent.futures.as_completed(futures):
+                f.result()  # re-raise any unexpected error
 
     return outcomes, outcomes_to_report(
         outcomes,
@@ -269,37 +290,14 @@ def outcomes_to_report(
     failures: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Aggregate outcomes (programmatic entry used by tests too)."""
-
-
-def _sha16(text: str) -> str:
-    import hashlib
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
-
-
-#: The judge rubric identity the parity module hashes against (must match
-#: battery.parity's judge_rubric_id source string).
-JUDGE_RUBRIC_ID = "longmemeval-official"
-
-
-def reader_prompt_source() -> str:
-    """The reader prompt content the parity module hashes. Mirrors the
-    longmem_eval reader prompt; must be kept in sync with
-    battery.parity.runner (the unchanged-check compares both sides)."""
-    return (
-        "Current Date: {question_date} header + per-session date annotation "
-        "on every retrieved chunk (question_date + haystack_dates surfaced — "
-        "temporal-reasoning questions are answerable)"
-    )
-
     return build_report(
         outcomes,
         dataset_id=dataset_id,
         split=split,
         reader_model=reader_model,
         judge_model=judge_model,
-        # #1414 parity-leg producer: persist the methodology hashes so the
-        # battery's unchanged-check has a baseline to compare (the parity
-        # module hashes the SAME source strings).
+        # #1414 parity-leg producer: persist the methodology hashes (the
+        # battery's unchanged-check compares these).
         reader_prompt_hash=_sha16(reader_prompt_source()),
         judge_rubric_id_hash=_sha16(JUDGE_RUBRIC_ID),
         extraction_approach=(EXTRACTION_APPROACH_V2 if ingest_mode == "v2"
@@ -322,6 +320,26 @@ def reader_prompt_source() -> str:
         },
     )
 
+
+def _sha16(text: str) -> str:
+    import hashlib
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+#: The judge rubric identity the parity module hashes against (must match
+#: battery.parity's judge_rubric_id source string).
+JUDGE_RUBRIC_ID = "longmemeval-official"
+
+
+def reader_prompt_source() -> str:
+    """The reader prompt content the parity module hashes. Mirrors the
+    longmem_eval reader prompt; must be kept in sync with
+    battery.parity.runner (the unchanged-check compares both sides)."""
+    return (
+        "Current Date: {question_date} header + per-session date annotation "
+        "on every retrieved chunk (question_date + haystack_dates surfaced — "
+        "temporal-reasoning questions are answerable)"
+    )
 
 def _print_summary(report: dict[str, Any]) -> None:
     acc = report["accuracy"]
@@ -392,6 +410,12 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="extractor model spec for --ingest-mode v2 "
                         "(default deepseek-flash, uncapped — the #1350 owner "
                         "decision)")
+    p.add_argument("--workers", type=int, default=1,
+                   help="parallel question workers (default 1 = sequential). "
+                        "Each question runs in its own isolated graph; the "
+                        "practical ceiling is provider rate limits + machine "
+                        "memory (each worker spawns an embedded redislite "
+                        "server). 8-16 on a quiet machine")
     p.add_argument("--checkpoint", default=None,
                    help="partial-results state file (JSON) for error isolation "
                         "+ resume: completed/failed questions are checkpointed "
@@ -444,6 +468,7 @@ def run_main(argv: list[str] | None = None) -> dict[str, Any]:
         work_dir=args.work_dir, split=args.split,
         checkpoint=args.checkpoint, max_retries=args.max_retries,
         ingest_mode=args.ingest_mode, extractor_model=extractor_model,
+        workers=max(1, args.workers),
     )
 
     out = args.output or str(default_report_path(args.split))
