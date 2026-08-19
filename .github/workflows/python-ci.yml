@@ -293,8 +293,13 @@ jobs:
         # '.[embeddings]' for the same reason).
         # uv: test_battery_corpus.py::test_builder_determinism_cross_process
         # shells out to `uv run` to build the corpus in subprocesses with
-        # different PYTHONHASHSEED — the runner has no uv by default.
-        run: pip install -e '.[test,embeddings]' uv
+        # different PYTHONHASHSEED — the runner has no uv by default. Pre-warm
+        # the uv project env (uv sync --frozen --no-dev) so the test's `uv run`
+        # is a near-no-op instead of a cold 1-3 min sync inside its 300s
+        # subprocess timeout.
+        run: |
+          pip install -e '.[test,embeddings]' uv
+          uv sync --frozen --no-dev
       - name: Clean stale redislite orphans (issue #1005 tempdir pollution)
         # Leaky shared runners accumulate redislite tempdirs from every
         # failed embedded-redis run — discover() then skips its stale-socket
