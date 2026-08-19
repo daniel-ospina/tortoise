@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -31,6 +32,12 @@ SELECTION_FN_VERSION = "1.1.0"
 REPO = Path(__file__).resolve().parent.parent
 MANIFEST = REPO / "config" / "ci-surfaces.yml"
 TESTS_DIR = REPO / "tests"
+WORKFLOW = REPO / ".github" / "workflows" / "python-ci.yml"
+
+# #1266: the test (a)/(b) halves must stay count-balanced within this delta.
+# A tilt beyond it means someone added files to one half without rebalancing
+# (the exact drift that pushed half (a) over the watchdog cap).
+HALF_IMBALANCE_TOLERANCE = 3
 
 # bash/heredoc-safe newline (the pi bash wrapper mangles raw \n in heredocs)
 NL = chr(10)
@@ -244,6 +251,77 @@ def slow_file_issues(manifest: dict) -> list[str]:
     return issues
 
 
+def parse_matrix_halves(workflow_text: str) -> dict[str, list[str]]:
+    """#1266: extract the test job's (a)/(b) matrix halves from python-ci.yml.
+
+    The halves are folded scalars (`files: >-`) with bare file names
+    (no .py) — the run step maps them to `tests/<name>.py` and `bench/*`.
+    Returns {"a": [...], "b": [...]} — empty when the parse fails so callers
+    can fail closed on "workflow changed shape" instead of silently passing.
+    """
+    halves: dict[str, list[str]] = {}
+    for m in re.finditer(r"- half: ([ab])\n\s+files: >-\n\s+([^\n]+)\n", workflow_text):
+        halves[m.group(1)] = m.group(2).split()
+    return halves
+
+
+def workflow_halves_issues(manifest: dict, halves: dict[str, list[str]],
+                           tests_dir: Path | None = None) -> list[str]:
+    """#1266: fail-closed checks tying the workflow's matrix halves to the
+    manifest — the fast gate must never leak a slow file, carry a file that
+    left the manifest, list a dead file, run a file twice, or tilt.
+
+    bench/* entries are exempt (they live outside tests/ and the manifest).
+    """
+    issues: list[str] = []
+    if not halves:
+        return ["no matrix halves found in python-ci.yml (workflow parse failure)"]
+    tests_dir = tests_dir or TESTS_DIR
+    slow = set(manifest.get("slow_files", []))
+    all_manifest = set()
+    for fs in manifest["surfaces"].values():
+        all_manifest.update(fs)
+    # bare name -> .py name (halves store bare names, manifest stores .py)
+    by_bare = {f[:-3]: f for f in all_manifest}
+    slow_bare = {f[:-3] for f in slow}
+    seen: set[str] = set()
+    for half, files in halves.items():
+        for f in files:
+            if f.startswith("bench/"):
+                continue
+            if f in slow_bare:
+                issues.append(f"slow file {f}.py leaked into half {half} (fast gate leak — test-slow only, #1266)")
+            elif f not in by_bare:
+                issues.append(f"half {half} entry {f} is not in any manifest surface (unclassified drift, #1266)")
+            if not (tests_dir / f"{f}.py").exists():
+                issues.append(f"half {half} entry {f} has no tests/{f}.py (dead entry, #1266)")
+            if f in seen:
+                issues.append(f"half entry {f} is in BOTH halves (double-run, #1266)")
+            seen.add(f)
+    counts = {h: len(fs) for h, fs in halves.items()}
+    if abs(counts.get("a", 0) - counts.get("b", 0)) > HALF_IMBALANCE_TOLERANCE:
+        issues.append(
+            f"matrix halves imbalanced: a={counts.get('a', 0)} vs "
+            f"b={counts.get('b', 0)} (tolerance ±{HALF_IMBALANCE_TOLERANCE}) — "
+            "rebalance before adding more files (#1266)")
+    return issues
+
+
+def fast_files_absent_from_halves(manifest: dict, halves: dict[str, list[str]]) -> list[str]:
+    """#1266 (informational): manifest fast files that are in NO half — the
+    full-matrix coverage hole. Slow files and bench/* are excluded. Kept as
+    a warning (not fail-closed): closing it would push 100+ files into the
+    fast gate and blow the watchdog budget (see the scoping doc).
+    """
+    slow = set(manifest.get("slow_files", []))
+    fast = set()
+    for fs in manifest["surfaces"].values():
+        fast.update(fs)
+    fast -= slow
+    halfset = {f for fs in halves.values() for f in fs}
+    return sorted(f for f in fast if f[:-3] not in halfset)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--changed-files", default="", help="newline-separated changed files")
@@ -262,10 +340,19 @@ def main() -> int:
     if args.integrity:
         missing = integrity(manifest)
         problems = missing + slow_file_issues(manifest)
+        # #1266: the workflow's matrix halves are a second source of truth —
+        # fail closed on slow leaks / unclassified / dead / duplicate / tilt.
+        halves = parse_matrix_halves(WORKFLOW.read_text())
+        problems += workflow_halves_issues(manifest, halves)
         if problems:
             print(f"❌ manifest drift: {problems}")
             return 1
-        print("✅ integrity: all test files classified; slow_files consistent")
+        absent = fast_files_absent_from_halves(manifest, halves)
+        if absent:
+            sample = ", ".join(absent[:8])
+            print(f"⚠️  {len(absent)} manifest fast files are in NO half "
+                  f"(full-matrix coverage hole, #1266): {sample} …")
+        print("✅ integrity: all test files classified; slow_files consistent; halves consistent")
         return 0
 
     if args.register:

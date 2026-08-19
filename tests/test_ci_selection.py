@@ -223,3 +223,105 @@ def test_register_default_surface_is_core():
         manifest2 = yaml.safe_load(m.read_text())
         assert "test_new_default.py" in manifest2["surfaces"]["core"]
 
+
+
+# ── #1266: matrix halves ↔ manifest consistency ──────────────────────────
+# The test (a)/(b) halves in python-ci.yml are a second source of truth next
+# to config/ci-surfaces.yml. The #1262 integrity gate only covers manifest
+# coverage — a slow file can leak into a half (fast-gate leak), a half can
+# carry a file that left the manifest (unclassified drift), a half can tilt
+# (rebalance drift), and files can silently fall out of BOTH halves (coverage
+# hole). These tests pin the fail-closed checks on the actionable classes.
+
+WF_HALVES_FIXTURE = """\
+name: Python CI
+jobs:
+  test:
+    strategy:
+      matrix:
+        half: [a, b]
+        include:
+          - half: a
+            files: >-
+              test_api test_auth test_slow_leak test_dead_entry
+          - half: b
+            files: >-
+              test_api test_crypto bench/test_roundrobin
+"""
+
+
+def _halves_manifest(extra_slow: str = "") -> dict:
+    return {
+        "surfaces": {
+            "api": ["test_api.py", "test_auth.py", "test_crypto.py"],
+            "core": ["test_slow_leak.py", "test_dead_entry.py"],
+        },
+        "tier1": ["test_api.py"],
+        "slow_files": ["test_slow_leak.py"],
+    }
+
+
+def test_parse_matrix_halves_extracts_both_halves():
+    from tools.ci_selection import parse_matrix_halves
+    halves = parse_matrix_halves(WF_HALVES_FIXTURE)
+    assert set(halves) == {"a", "b"}
+    assert halves["a"] == ["test_api", "test_auth", "test_slow_leak", "test_dead_entry"]
+    assert halves["b"] == ["test_api", "test_crypto", "bench/test_roundrobin"]
+
+
+def test_halves_slow_leak_flagged():
+    from tools.ci_selection import parse_matrix_halves, workflow_halves_issues
+    halves = parse_matrix_halves(WF_HALVES_FIXTURE)
+    issues = workflow_halves_issues(_halves_manifest(), halves)
+    assert any("test_slow_leak" in i and "leak" in i for i in issues), issues
+
+
+def test_halves_unclassified_entry_flagged():
+    from tools.ci_selection import parse_matrix_halves, workflow_halves_issues
+    m = _halves_manifest()
+    m["surfaces"]["api"] = ["test_api.py", "test_crypto.py"]  # drop test_auth
+    halves = parse_matrix_halves(WF_HALVES_FIXTURE)
+    issues = workflow_halves_issues(m, halves)
+    assert any("test_auth" in i and "surface" in i for i in issues), issues
+
+
+def test_halves_duplicate_entry_flagged():
+    from tools.ci_selection import workflow_halves_issues
+    halves = {"a": ["test_api"], "b": ["test_api", "test_crypto"]}
+    issues = workflow_halves_issues(_halves_manifest(), halves)
+    assert any("test_api" in i and "BOTH halves" in i for i in issues), issues
+
+
+def test_halves_imbalance_flagged_beyond_tolerance():
+    from tools.ci_selection import workflow_halves_issues
+    halves = {"a": ["test_api", "test_auth", "test_crypto",
+                     "test_slow_leak", "test_dead_entry"],
+              "b": ["test_api"]}
+    issues = workflow_halves_issues(_halves_manifest(), halves)
+    assert any("imbalanced" in i for i in issues), issues
+
+
+def test_halves_imbalance_within_tolerance_clean():
+    from tools.ci_selection import workflow_halves_issues
+    halves = {"a": ["test_api", "test_auth"], "b": ["test_crypto", "test_api"]}
+    issues = workflow_halves_issues(_halves_manifest(), halves)
+    assert not any("imbalanced" in i for i in issues), issues
+
+
+def test_fast_files_absent_from_halves_reports_coverage_hole():
+    from tools.ci_selection import fast_files_absent_from_halves
+    halves = {"a": ["test_api"], "b": ["test_crypto"]}
+    absent = fast_files_absent_from_halves(_halves_manifest(), halves)
+    assert absent == ["test_auth.py", "test_dead_entry.py"], absent  # slow excluded
+
+
+def test_real_workflow_halves_are_consistent():
+    # Regression gate: the committed python-ci.yml halves must never leak a
+    # slow file, carry an unclassified/dead/duplicate entry, or tilt beyond
+    # ±3 — the #1266 rebalance discipline, enforced by --integrity.
+    from tools.ci_selection import (WORKFLOW, TESTS_DIR, parse_matrix_halves,
+                                    workflow_halves_issues)
+    halves = parse_matrix_halves(WORKFLOW.read_text())
+    assert set(halves) == {"a", "b"}, halves
+    issues = workflow_halves_issues(load_manifest(), halves, TESTS_DIR)
+    assert issues == [], f"real workflow halves drift: {issues}"
