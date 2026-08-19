@@ -190,7 +190,7 @@ FOOTER_SELECTOR = "footer, .legal-footer, .footer"
 # with NO pricing content — the id="pricing-section" anchor exists only in
 # product.html (served at '/' on the tortoise host via the middleware rewrite).
 PRICING_PAGE_URL = "https://tortoise.premiselabs.co/#pricing-section"
-FOOTER_PAGES = ("/welcome", "/signup", "/signin", "/self-hosted.html")
+FOOTER_PAGES = ("/welcome", "/auth", "/signup", "/signin", "/self-hosted.html")
 CRAWL_PAGES = (
     "/welcome", "/signup", "/signin", "/self-hosted.html", "/docs.html",
     "/privacy", "/tos", "/license", "/dpa", "/security",
@@ -619,7 +619,7 @@ def test_company_host_legal_pages_redirect_to_tortoise(page: Page) -> None:
     # TORTOISE_ONLY set (extensionless forms; .html/trailing-slash variants
     # normalize onto these canonicals).
     for path in ("/docs", "/security", "/self-hosted", "/privacy", "/tos",
-                 "/license", "/dpa", "/aviso-privacidad", "/signup", "/signin",
+                 "/license", "/dpa", "/aviso-privacidad", "/auth", "/signup", "/signin",
                  "/welcome", "/invite-accept"):
         r = page.request.get(BASE_URL + path, timeout=15_000, max_redirects=0)
         if prod_company:
@@ -635,7 +635,13 @@ def test_company_host_legal_pages_redirect_to_tortoise(page: Page) -> None:
                 f"{path} redirects to {location!r} (expected {expected})"
             )
         else:
-            assert r.status == 200, f"{path} on {BASE_URL} → {r.status} (dev/preview pass-through)"
+            # Dev/preview pass-through: most tortoise-only pages serve
+            # 200; the auth consolidation 301s apply on EVERY host, so
+            # /signin → /auth here too (single auth page).
+            expected_dev = 301 if path == "/signin" else 200
+            assert r.status == expected_dev, (
+                f"{path} on {BASE_URL} → {r.status} (expected {expected_dev} dev pass-through)"
+            )
 
 
 @TORTOISE_HOST_SKIP
@@ -1162,7 +1168,7 @@ def test_consent_js_served_and_banner_present(page: Page) -> None:
     assert "__META_PIXEL_ID__" in js, \
         "consent.js missing the dormant Meta Pixel stub (placeholder ID, fail-safe)"
 
-    for path in ("/signup", "/signin", "/welcome"):
+    for path in ("/auth", "/signup", "/signin", "/welcome"):
         raw = page.request.get(BASE_URL + path, timeout=15_000).text()
         assert re.search(r'<script[^>]+src="/consent\.js"[^>]*>', raw, re.I), \
             f"{path}: missing consent.js script tag"

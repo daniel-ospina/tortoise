@@ -45,6 +45,11 @@ def test_email_form_is_post_with_explicit_action() -> None:
     assert re.search(r'action="/signup"', signup_form), "signup form must action=/signup"
     assert re.search(r'method="post"', signin_form), "signin form must be method=post"
     assert re.search(r'action="/signin"', signin_form), "signin form must action=/signin"
+    # #1493: the login MODAL's form is the live login surface — same #527
+    # contract, same-path canonical (/auth), pinned so it can't regress.
+    modal_form = re.search(r'<form[^>]*id="modal-email-form"[^>]*>', SIGNUP).group(0)
+    assert re.search(r'method="post"', modal_form), "modal form must be method=post"
+    assert re.search(r'action="/auth"', modal_form), "modal form must action=/auth"
 
 
 def test_email_and_password_have_autocomplete() -> None:
@@ -138,8 +143,14 @@ def test_rate_limit_lockout_guards_present() -> None:
     assert "sessionStorage" in SIGNUP
     # the guard runs before any request: top-of-handler early return
     assert "rateLimitRemainingMs() > 0" in SIGNUP
-    # #863: signin.html carries the same two-tier machinery with page-scoped
-    # keys + the recovery surface wired in.
+    # #863: the LOGIN surface (email modal + forgot-password) carries its own
+    # page-scoped bucket on the auth page (tortoise_signin_* — migrated from
+    # the retired signin.html) so a login throttle never disables the signup
+    # form; signin.html keeps the same machinery as a legacy static pin.
+    assert "tortoise_signin_rate_limited_until" in SIGNUP
+    assert "tortoise_signin_rate_limit_tier" in SIGNUP
+    assert "LOGIN_RATE_LIMIT_KEY" in SIGNUP
+    assert "resetPasswordForEmail" in SIGNUP
     assert "tortoise_signin_rate_limited_until" in SIGNIN
     assert "tortoise_signin_rate_limit_tier" in SIGNIN
     assert "RATE_LIMIT_LOCKOUT_MS" in SIGNIN
@@ -150,10 +161,19 @@ def test_rate_limit_lockout_guards_present() -> None:
 
 
 def test_recovery_flow_present() -> None:
-    """#863: the recovery request-link flow on signin.html (POST
-    /auth/v1/recover surface) and the reset-password landing on welcome.html
-    (recovery-link redirect target) must exist with the #527 form-safety
-    contract and the #863 double-submit guards + expired-link copy."""
+    """#863: the recovery request-link flow — now on the single auth page's
+    login modal (email + forgot-password, POST /auth/v1/recover surface via
+    resetPasswordForEmail) — plus the legacy signin.html pins and the
+    reset-password landing on welcome.html (recovery-link redirect target).
+    #527 form-safety contract + #863 double-submit guards + expired-link
+    copy must hold."""
+    # The LIVE surface: auth page login modal carries the forgot-password
+    # entry + login-scoped bucket (#863 separation, #1493).
+    assert 'id="modal-forgot-link"' in SIGNUP
+    assert "modalForgotPassword" in SIGNUP
+    assert "resetPasswordForEmail" in SIGNUP
+    assert "LOGIN_RATE_LIMIT_KEY" in SIGNUP  # login bucket ≠ signup bucket
+    # Legacy signin.html pins (file retained for static contract).
     assert 'id="forgot-link"' in SIGNIN
     assert 'id="recovery-form"' in SIGNIN
     assert 'id="btn-recovery"' in SIGNIN
@@ -233,7 +253,7 @@ def test_docs_promise_intact() -> None:
     """The docs must still promise the exact journey this issue protects:
     sign up → welcome page → API key shown once."""
     docs = (WEBSITE / "docs.html").read_text()
-    assert "Sign up at" in docs and "/signup" in docs
+    assert "Sign up at" in docs and "/auth" in docs
     assert "API key on the welcome page" in docs
     assert "shown once" in docs
 
@@ -280,9 +300,10 @@ def test_inline_scripts_pass_node_syntax_check(fname: str) -> None:
 
 def test_welcome_waits_for_session_before_erroring() -> None:
     """welcome.html must give the email-confirmation / OAuth callback a
-    bounded wait for the session (SIGNED_IN / getSession) before declaring
-    "No active session" — prevents bouncing legitimate callbacks to a dead
-    state on older/cached supabase-js builds."""
+    bounded wait for the session (SIGNED_IN / getSession) before redirecting
+    an unauthenticated visitor to the single auth page (/auth) — prevents
+    bouncing legitimate callbacks to a dead state on older/cached
+    supabase-js builds."""
     assert "waitForSession" in WELCOME
     assert "SIGNED_IN" in WELCOME
-    assert "No active session" in WELCOME  # message retained (E2E contract)
+    assert 'window.location.href = "/auth"' in WELCOME  # no-session → /auth

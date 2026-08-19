@@ -20,7 +20,7 @@ auth pages, dashboard, and billing. Written 2026-08-14 from the current
 | Host | Serves | Deployment |
 | --- | --- | --- |
 | `premiselabs.co` | Company page (`website/index.html`) | Cloudflare Pages project `premise-labs` |
-| `tortoise.premiselabs.co` | Product page (`website/product.html` at `/`), docs, signin, signup, welcome, invite-accept, legal | Cloudflare Pages project `premise-labs` (same project, host-routed) |
+| `tortoise.premiselabs.co` | Product page (`website/product.html` at `/`), docs, auth (`/auth`), welcome, invite-accept, legal | Cloudflare Pages project `premise-labs` (same project, host-routed) |
 | `app.premiselabs.co` | Dashboard (React SPA, `website/apps/dashboard`) | Cloudflare Pages project `tortoise-dashboard` (separate) |
 | `api.premiselabs.co` | Hosted API (FastAPI, `tortoise/hosted_api.py`) | Fly.io app `tortoise-y4mjjq` |
 
@@ -46,8 +46,7 @@ Host routing lives in `website/functions/_middleware.ts`:
 | Company | `website/index.html` | Premise Labs brand page, waitlist form |
 | Product | `website/product.html` | Tortoise marketing: features, pricing (Free/Solo/Pro/Team), self-hosted section |
 | Docs | `website/docs.html` | Static docs: what/how/quickstart/MCP/API |
-| Sign in | `website/signin.html` | GitHub / Google / email+password, forgot-password (GoTrue recover) |
-| Sign up | `website/signup.html` | GitHub / Google / email+password, check-your-inbox confirmation branch |
+| Auth (single page) | `website/signup.html` served at `/auth` | Combined Log in / Sign up card — GitHub / Google / email+password (modal login + forgot-password) / API key; `/signin*` 301 → `/auth`; `/signup` is a redirect-free alias |
 | Welcome | `website/welcome.html` | Post-signup provisioning: team + API key (reveal-once), two-path chooser (one-click MCP prompt vs SDK quickstart), auto-redirect to dashboard |
 | Invite accept | `website/invite-accept.html` | Public team-invite accept page (`/invite-accept?token=…`), reads `/v1/invites/info` |
 | Dashboard | `website/apps/dashboard/` (React + Vite) | Session-gated app: Overview / API Keys / Graphs / Members, billing CTAs |
@@ -57,22 +56,25 @@ Host routing lives in `website/functions/_middleware.ts`:
 
 ## 3. Auth flows
 
-### Sign up / sign in (current)
+### Auth (single page — /auth, #1490/#1493)
 
 ```
-/signup or /signin
-  → Supabase PKCE OAuth (GitHub/Google) or email+password
+/auth (served from signup.html by the middleware)
+  → Supabase PKCE OAuth (GitHub/Google) or email+password or API key
   → /welcome.html (provision team + key; claim-aware redirect target)
   → app.premiselabs.co (auto-redirect ~1.2s; manual "Open Dashboard →" fallback)
 ```
+
+- `/signin`, `/signin/`, `/signin.html` → 301 `/auth` (all hosts); `/signup`
+  variants serve the same page as a legacy alias (canonical `/auth`).
 
 - **Claim branch:** an unclaimed `tt_` key pasted on the dashboard sets a
   non-secret `tt_claim_pending` cookie → OAuth `redirectTo` becomes
   `app.premiselabs.co/?claim=1` (never mints a stray team on welcome).
 - **Invite branch:** `?invite_token=` is stashed (sessionStorage on the
   dashboard) → accept fires on `SIGNED_IN` → green "Welcome to the team!" banner.
-- **Recovery branch:** forgot-password → GoTrue recover email →
-  `/welcome#type=recovery` → reset form → back to signin.
+- **Recovery branch:** forgot-password (auth-page login modal) → GoTrue
+  recover email → `/welcome#type=recovery` → reset form → back to `/auth?mode=login`.
 
 ### Dashboard auth card (#1148)
 
@@ -119,10 +121,11 @@ not per seat (#310/#432).
 The user-approved end state for the auth/marketing surfaces:
 
 1. **Product landing** — `tortoise.premiselabs.co` with a floating transparent
-   top menu: only a cyan **Login** button top-right → routes to `/signup`.
-2. **Signup page** — new design (combined login/signup card + Premise Labs
-   logo); redirects to the dashboard on successful signup.
-3. **Dashboard guard** — no OAuth session → redirect to `/signup` (replaces the
+   top menu: only a cyan **Login** button top-right → routes to `/auth`.
+2. **Auth page** — one page at `/auth` (combined login/signup card + Premise
+   Labs logo; signin.html retired via 301); redirects to the dashboard on
+   successful signup.
+3. **Dashboard guard** — no OAuth session → redirect to `/auth` (replaces the
    inline auth card as the entry).
 4. **Invite accept page** — same design language as the signup page.
 5. **Dashboard** — `app.premiselabs.co` (React SPA).
@@ -131,11 +134,10 @@ The user-approved end state for the auth/marketing surfaces:
 
 > The new-design work was built into the **dashboard auth card** (#1148) and
 > the **invite-accept prototype** (PR #1206: `docs/prototypes/` logo assets +
-> `invite-accept.html` topbar with the Premise Labs logo) but was **never
-> applied to the static `signin.html` / `signup.html`** — those still show the
-> old design. Also, `/logo.png` referenced by `invite-accept.html` is **not
-> shipped** (only prototype copies exist under `docs/prototypes/assets/`), so
-> the deployed logo silently hides via `onerror`.
+> `invite-accept.html` topbar with the Premise Labs logo). The combined-card
+> design was subsequently applied to the static auth page (`/auth`, served
+> from `signup.html` — #1287/#1490/#1493) and `/logo.png` ships from the
+> website root (#1323).
 
 ---
 

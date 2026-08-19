@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Sign up — Tortoise</title>
-  <meta name="description" content="Create your Tortoise account and start building your knowledge graph.">
+  <title>Log in or sign up — Tortoise</title>
+  <meta name="description" content="Log in to Tortoise or create your account — one page for everything.">
   <meta name="theme-color" content="#060b14">
-  <link rel="canonical" href="https://tortoise.premiselabs.co/signup">
+  <link rel="canonical" href="https://tortoise.premiselabs.co/auth">
   <link rel="icon" type="image/png" href="/logo.png">
   <style>
     .hidden {
@@ -47,7 +47,7 @@
       border-bottom: 1px solid var(--border, #1e293b);
       backdrop-filter: blur(8px);
     }
-    .topbar .logo { display: flex; align-items: center; text-decoration: none; line-height: 1; }
+    .topbar .logo { display: flex; align-items: center; text-decoration: none; line-height: 1; margin: 0; }
     .topbar .logo img { height: 40px; width: auto; display: block; }
     .topbar nav { flex: 1; display: flex; gap: 16px; }
     .topbar nav a { color: var(--text-dim, #94a3b8); text-decoration: none; font-size: 14px; }
@@ -145,6 +145,47 @@
     }
     .auth-apikey-back:hover { color: var(--accent, #06b6d4) !important; }
 
+    /* Email+password login popup (login mode) — the inline form is
+       signup-only; login opens this focused dialog from a provider-style
+       button (#1287 follow-up). */
+    .modal-overlay {
+      position: fixed; inset: 0; z-index: 200;
+      background: rgba(6, 11, 20, 0.82);
+      backdrop-filter: blur(4px);
+      display: flex; align-items: center; justify-content: center;
+      padding: 1rem;
+    }
+    .modal-overlay.hidden { display: none; }
+    .modal {
+      width: 100%; max-width: 360px;
+      background: var(--surface, #0d1a2d);
+      border: 1px solid var(--border, #1e293b);
+      border-radius: 12px;
+      padding: 1.5rem;
+      position: relative;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+    }
+    .modal h2 {
+      font-family: var(--serif);
+      font-size: 1.25rem; font-weight: 400;
+      color: var(--text, #cbd5e1);
+      margin-bottom: 1rem;
+    }
+    .modal-close {
+      position: absolute; top: 0.6rem; right: 0.75rem;
+      background: none !important; border: none !important;
+      color: var(--text-dim, #94a3b8) !important;
+      font-size: 1.4rem; line-height: 1; cursor: pointer;
+      padding: 0 !important; width: auto !important;
+    }
+    .modal-close:hover { color: var(--accent, #06b6d4) !important; }
+    .modal .form-group { margin-bottom: 0.75rem; }
+    .modal .error { margin-bottom: 0.75rem; }
+    .modal .modal-recovery { margin-top: 0.6rem; font-size: 12px; text-align: center; }
+    .modal .modal-recovery a { color: var(--accent, #06b6d4); text-decoration: none; }
+    .modal .modal-recovery a:hover { text-decoration: underline; }
+    .modal #modal-note { margin-top: 0.5rem; text-align: center; }
+
     .btn-provider {
       display: flex;
       align-items: center;
@@ -189,6 +230,10 @@
       height: 1px;
       background: var(--border);
     }
+    /* `.hidden` alone loses to `.divider { display: flex }` (equal
+       specificity, later source order) — pinned rule keeps the login-mode
+       hide working (the inline email form is signup-only). */
+    .divider.hidden { display: none; }
 
     .form-group {
       margin-bottom: 0.5rem;
@@ -274,6 +319,9 @@
       text-decoration: underline;
     }
 
+    .footer p { margin: 0.15rem 0; }
+    .footer .footer-legal { margin-top: 0.45rem; font-size: 12px; }
+
     .loading-spinner {
       display: inline-block;
       width: 16px;
@@ -327,7 +375,7 @@
       <a href="https://tortoise.premiselabs.co/">Product</a>
       <a href="/docs">Docs</a>
     </nav>
-    <a class="login" href="/signin.html">Login</a>
+    <a class="login" href="/auth" onclick="setAuthMode(false); return false;">Login</a>
   </div>
 
   <div class="container">
@@ -343,6 +391,14 @@
       <button role="tab" aria-selected="false" id="toggle-signin" onclick="setAuthMode(false)">Log in</button>
       <button role="tab" aria-selected="true" class="active" id="toggle-signup" onclick="setAuthMode(true)">Sign up</button>
     </div>
+
+    <!-- Legal acceptance (T5) sits directly under the mode toggle, ABOVE all
+         sign-in options — it is a statement, not an option in the list. -->
+    <p class="legal-accept" id="legal-accept">
+      By creating an account, you agree to the
+      <a href="/tos" target="_blank" rel="noopener">Terms of Service</a> and
+      <a href="/privacy" target="_blank" rel="noopener">Privacy Policy</a>.
+    </p>
 
     <div class="providers">
       <button class="btn-provider" onclick="signInWithProvider('github')" id="btn-github">
@@ -362,13 +418,18 @@
         </svg>
         Continue with Google
       </button>
+      <!-- Login mode: email+password is a popup-launching button, like the
+           OAuth options (hidden in signup mode — the inline form below is
+           the signup path). -->
+      <button class="btn-provider hidden" type="button" onclick="showEmailLoginModal()" id="btn-email-login">
+        <!-- Email icon -->
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="4" width="20" height="16" rx="2"/>
+          <path d="M22 6l-10 7L2 6"/>
+        </svg>
+        Log in with email
+      </button>
     </div>
-
-    <p class="legal-accept" id="legal-accept">
-      By creating an account, you agree to the
-      <a href="/tos" target="_blank" rel="noopener">Terms of Service</a> and
-      <a href="/privacy" target="_blank" rel="noopener">Privacy Policy</a>.
-    </p>
 
     <!-- #1287: API-key login — first-class option (anon bootstrap / agents) -->
     <div class="auth-apikey-prominent" id="auth-apikey">
@@ -382,7 +443,7 @@
       </div>
     </div>
 
-    <div class="divider">or</div>
+    <div class="divider" id="auth-divider">or</div>
 
     <form id="email-form" method="post" action="/signup" onsubmit="signUpWithEmail(event)">
       <div class="form-group">
@@ -414,10 +475,33 @@
       <p class="dim small" id="resend-note"></p>
     </div>
 
+    <!-- Email+password login popup (login mode): opened by the "Log in with
+         email" button. Form is method=post + action per the #527 form-safety
+         contract (no GET credential echo if JS fails). -->
+    <div class="modal-overlay hidden" id="email-login-modal" role="dialog" aria-modal="true" aria-labelledby="email-login-title">
+      <div class="modal">
+        <button type="button" class="modal-close" id="btn-modal-close" aria-label="Close" onclick="hideEmailLoginModal()">×</button>
+        <h2 id="email-login-title">Log in with email</h2>
+        <form id="modal-email-form" method="post" action="/auth" onsubmit="modalEmailLogin(event)">
+          <div class="form-group">
+            <label for="modal-email">Email</label>
+            <input type="email" id="modal-email" name="email" placeholder="you@example.com" required autocomplete="email">
+          </div>
+          <div class="form-group">
+            <label for="modal-password">Password</label>
+            <input type="password" id="modal-password" name="password" placeholder="••••••••" required autocomplete="current-password">
+          </div>
+          <div id="modal-error" class="error" role="alert"></div>
+          <button type="submit" class="btn-submit" id="btn-modal-login">Log in</button>
+          <p class="modal-recovery"><a href="#" id="modal-forgot-link" onclick="modalForgotPassword(event)">Forgot password?</a></p>
+          <p id="modal-note" class="dim small" role="status"></p>
+        </form>
+      </div>
+    </div>
+
     <div class="footer">
-      Already have an account? <a href="/signin.html">Sign in</a> ·
-      <a href="/privacy">Privacy Policy</a> · <a href="/tos">Terms of Service</a> ·
-      <a href="/license">License</a> · <a href="/dpa">DPA</a> · <a href="/security">Security</a>
+      <p>Already have an account? <a href="/auth" onclick="setAuthMode(false); return false;">Sign in</a></p>
+      <p class="footer-legal"><a href="/privacy">Privacy Policy</a> · <a href="/tos">Terms of Service</a> · <a href="/license">License</a> · <a href="/dpa">DPA</a> · <a href="/security">Security</a></p>
     </div>
   </div>
 
@@ -570,6 +654,23 @@
     // false "temporarily unavailable" on healthy loads, #527).
     window.supabaseClient = supabaseClient;
 
+    // Single auth page at /auth — a visitor who is ALREADY signed in is
+    // bounced to the dashboard/welcome (claim routing honored) instead of
+    // seeing the login card. #1224: an OAuth state-expiry landing (?error=…)
+    // must show the banner, NOT bounce — the failed attempt is exactly the
+    // audience the banner exists for (and the bounced redirect would mask
+    // the failure).
+    if (supabaseClient) {
+      supabaseClient.auth.getSession().then(function (r) {
+        if (r && r.data && r.data.session) {
+          var p = new URLSearchParams(window.location.search);
+          if (!p.get("error") && !p.get("error_code")) {
+            window.location.href = claimRedirectTarget();
+          }
+        }
+      }).catch(function () { /* best-effort */ });
+    }
+
     // ── Error display ──────────────────────────────────────────────────────
     function showError(message) {
       const el = document.getElementById("error");
@@ -686,6 +787,81 @@
     let rateLimitUntil = 0;      // in-memory mirror — the lockout still holds when sessionStorage is unavailable (#801 code-review)
     let rateLimitTier = "short"; // in-memory tier mirror — copy stays correct when storage is cleared mid-lockout (P4)
     let resendCooldownUntil = 0; // #527 60s resend cooldown (shared bucket, #801)
+
+    // ── LOGIN-surface lockout bucket (#863 separation, #1493) ──────────────
+    // The login surface (email modal + forgot-password) keeps its OWN bucket
+    // (tortoise_signin_* — migrated from the retired signin.html) so a login
+    // throttle can never disable the signup form, and a signup 429 (project-
+    // wide email bucket, 1h) can't block login. #863 deliberately separated
+    // the two surfaces; the #1490-era modal shared the signup keys.
+    const LOGIN_RATE_LIMIT_KEY = "tortoise_signin_rate_limited_until";
+    const LOGIN_RATE_LIMIT_TIER_KEY = "tortoise_signin_rate_limit_tier";
+    let loginRateLimitUntil = 0;
+    let loginRateLimitTier = "short";
+    let loginRateLimitTimer = null;
+
+    function loginRateLimitRemainingMs() {
+      try {
+        const stored = parseInt(sessionStorage.getItem(LOGIN_RATE_LIMIT_KEY) || "0", 10);
+        const until = Number.isFinite(stored) ? Math.max(stored, loginRateLimitUntil) : loginRateLimitUntil;
+        return Math.max(0, until - Date.now());
+      } catch (e) { return Math.max(0, loginRateLimitUntil - Date.now()); }
+    }
+
+    function setLoginRateLimitLockout(error) {
+      const ms = isEmailBucketError(error) ? RATE_LIMIT_LOCKOUT_MS : SHORT_RATE_LIMIT_LOCKOUT_MS;
+      loginRateLimitUntil = Math.max(loginRateLimitUntil, Date.now() + ms);
+      loginRateLimitTier = (loginRateLimitTier === "email" || isEmailBucketError(error)) ? "email" : "short";
+      try {
+        const existing = parseInt(sessionStorage.getItem(LOGIN_RATE_LIMIT_KEY) || "0", 10);
+        const until = Math.max(Number.isFinite(existing) ? existing : 0, loginRateLimitUntil);
+        sessionStorage.setItem(LOGIN_RATE_LIMIT_KEY, String(until));
+        sessionStorage.setItem(LOGIN_RATE_LIMIT_TIER_KEY, loginRateLimitTier);
+      } catch (e) {}
+      applyLoginRateLimitLockout();
+    }
+
+    function loginRateLimitMessage() {
+      if (loginRateLimitRemainingMs() <= 0) return "";
+      let tier = loginRateLimitTier;
+      try { tier = sessionStorage.getItem(LOGIN_RATE_LIMIT_TIER_KEY) || tier; } catch (e) {}
+      if (tier === "email") return EMAIL_BUCKET_RATE_LIMIT_COPY;
+      return "Too many attempts from this network. Please try again in a minute.";
+    }
+
+    function applyLoginRateLimitLockout() {
+      if (loginRateLimitTimer) { clearInterval(loginRateLimitTimer); loginRateLimitTimer = null; }
+      const btn = document.getElementById("btn-modal-login");
+      const update = function () {
+        const ms = loginRateLimitRemainingMs();
+        if (ms <= 0) {
+          if (btn && btn.dataset.originalLabel) {
+            btn.textContent = btn.dataset.originalLabel;
+            delete btn.dataset.originalLabel;
+          }
+          if (btn) btn.disabled = false;
+          loginRateLimitTier = "short";
+          try { sessionStorage.removeItem(LOGIN_RATE_LIMIT_TIER_KEY); } catch (e) {}
+          if (loginRateLimitTimer) { clearInterval(loginRateLimitTimer); loginRateLimitTimer = null; }
+          return;
+        }
+        const totalSec = Math.max(0, Math.floor(ms / 1000));
+        const label = "Try again in "
+          + String(Math.floor(totalSec / 60)).padStart(2, "0") + ":"
+          + String(totalSec % 60).padStart(2, "0");
+        if (btn) {
+          if (!btn.dataset.originalLabel && btn.textContent.trim()) {
+            btn.dataset.originalLabel = btn.textContent;
+          }
+          btn.textContent = label;
+          btn.disabled = true;
+        }
+      };
+      update();
+      if (loginRateLimitRemainingMs() > 0) loginRateLimitTimer = setInterval(update, 1000);
+    }
+    // On load: honor a persisted login lockout (modal button countdown).
+    if (loginRateLimitRemainingMs() > 0) applyLoginRateLimitLockout();
 
     function isEmailBucketError(error) {
       if (!error) return false;
@@ -829,6 +1005,30 @@
     // login = email+password sign-in + API-key login (existing key holders).
     let authIsSignup = true;
 
+    // Modal bindings hoisted ABOVE the ?mode=login init below — setAuthMode
+    // → hideEmailLoginModal reads modalWasOpened, and a TDZ ReferenceError
+    // here would kill this whole script (the #527 failure class; node
+    // --check does NOT catch TDZ — only a runtime ?mode=login landing does).
+    const MODAL_FOCUS_SELECTOR = 'button, input, select, textarea, a[href], [tabindex]:not([tabindex="-1"])';
+    let modalLoginInFlight = false;
+    let modalWasOpened = false;  // focus restore only after a real open (a11y)
+
+    // #1493: ?mode=login lands on the Log in tab — the topbar "Login"
+    // buttons on docs/signin/invite-accept and the signInAndGo recovery
+    // path point here. MUST run after `let authIsSignup` above — setAuthMode
+    // reads it, and a TDZ ReferenceError here would kill this whole script
+    // (the #527 failure class: one bad line disables everything below it).
+    // Skips when ?error/?error_code present — setAuthMode's clearError()
+    // must not wipe the #1224 OAuth state-expiry banner.
+    if (new URLSearchParams(window.location.search).get("mode") === "login") {
+      var modeParams = new URLSearchParams(window.location.search);
+      // #1224: never wipe the OAuth state-expiry banner (setAuthMode clears
+      // the error box) on a crafted ?mode=login&error=… landing.
+      if (!modeParams.get("error") && !modeParams.get("error_code")) {
+        setAuthMode(false);
+      }
+    }
+
     function setAuthMode(isSignup) {
       authIsSignup = isSignup;
       document.getElementById("toggle-signin").classList.toggle("active", !isSignup);
@@ -837,6 +1037,12 @@
       document.getElementById("toggle-signup").setAttribute("aria-selected", String(isSignup));
       document.getElementById("page-title").textContent = isSignup ? "Create your account" : "Log in to your account";
       document.getElementById("legal-accept").style.display = isSignup ? "" : "none";
+      // Login mode: email+password is a popup-launching button (like the
+      // OAuth options); the inline email form + "or" divider are signup-only.
+      document.getElementById("btn-email-login").classList.toggle("hidden", isSignup);
+      document.getElementById("email-form").classList.toggle("hidden", !isSignup);
+      document.getElementById("auth-divider").classList.toggle("hidden", !isSignup);
+      hideEmailLoginModal();
       const submit = document.getElementById("btn-submit");
       submit.textContent = isSignup ? "Create account" : "Log in";
       const pw = document.getElementById("password");
@@ -909,11 +1115,18 @@
         showError(humanizeAuthError(err));
       } finally {
         setLoading(false);
-        applyRateLimitLockout();   // re-apply the lockout state (#801)
-        // P4: signInWithProvider's clearError() wiped the lockout explanation
-        // — restore it when a lockout is still active so the user knows why
-        // the email form is disabled.
-        if (rateLimitRemainingMs() > 0) showError(rateLimitMessage());
+        // #1493: setLoading(false) re-enabled EVERY button (modal submit
+        // included) and restored labels — re-assert the login-bucket
+        // countdown/disabled state for the modal.
+        if (loginRateLimitRemainingMs() > 0) applyLoginRateLimitLockout();
+        // Re-apply the signup lockout ONLY when active — on its no-lockout
+        // path applyRateLimitLockout calls clearError(), which would wipe a
+        // just-shown provider error (e.g. provider_disabled) (#1493 review).
+        if (rateLimitRemainingMs() > 0) {
+          applyRateLimitLockout();
+          // P4: restore the lockout explanation (clearError wiped it).
+          showError(rateLimitMessage());
+        }
       }
     }
 
@@ -999,9 +1212,11 @@
       if (error) {
         // #801 review P1: the account ALREADY exists (created server-side) —
         // a sign-in failure here is transient (network/clock), not a bad
-        // password. Point the user at the sign-in page instead of dead-ending.
-        showError("Account created — but signing you in failed. Please sign in at /signin.html.");
-        setTimeout(function () { window.location.href = "/signin.html"; }, 1500);
+        // password. We're already ON the auth page — switch to the Log in
+        // tab in place (a reload would land on the Sign up tab and wipe the
+        // message).
+        setAuthMode(false);
+        showError("Account created — but signing you in failed. Please try signing in below.");
         return;
       }
       if (data?.user) pushSignupEvents(data.user);
@@ -1174,16 +1389,167 @@
       }
     }
 
+    // ── Email+password login popup (login mode) ────────────────────────────
+    // Login mode replaces the inline email form with a "Log in with email"
+    // button (like the OAuth options) that opens this focused dialog. Errors
+    // surface INSIDE the modal (the page-level banner sits behind the
+    // overlay).
+
+    function showEmailLoginModal() {
+      modalWasOpened = true;
+      document.getElementById("email-login-modal").classList.remove("hidden");
+      document.body.style.overflow = "hidden";
+      document.getElementById("modal-error").classList.remove("visible");
+      document.getElementById("modal-note").textContent = "";
+      document.getElementById("modal-email").focus();
+    }
+
+    function hideEmailLoginModal() {
+      document.getElementById("email-login-modal").classList.add("hidden");
+      document.body.style.overflow = "";
+      // Restore focus to the launching button (a11y APG dialog pattern) —
+      // only when the modal was actually opened by the user (setAuthMode
+      // also closes it on load; a load-time focus grab would be hostile).
+      if (!modalWasOpened) return;
+      const launcher = document.getElementById("btn-email-login");
+      if (launcher && launcher.offsetParent !== null) launcher.focus();
+    }
+
+    // Escape closes the modal ONLY when it is open (guarded — a global
+    // unguarded handler would close it under an in-flight submit).
+    document.addEventListener("keydown", function (e) {
+      if (e.key !== "Escape") return;
+      const modal = document.getElementById("email-login-modal");
+      if (modal && !modal.classList.contains("hidden")) hideEmailLoginModal();
+    });
+
+    // Tab cycles within the modal (focus trap — the overlay must not let
+    // keyboard focus reach background controls). Focusables are computed in
+    // DOM order (close button is FIRST in the markup), and the wrap happens
+    // at the natural tab-order boundaries.
+    document.addEventListener("keydown", function (e) {
+      if (e.key !== "Tab") return;
+      const modal = document.getElementById("email-login-modal");
+      if (!modal || modal.classList.contains("hidden")) return;
+      const focusables = Array.prototype.slice.call(modal.querySelectorAll(MODAL_FOCUS_SELECTOR))
+        .filter(function (el) { return el.offsetParent !== null; });
+      if (!focusables.length) return;
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const active = document.activeElement;
+      if (e.shiftKey && active === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    });
+
+    function showModalError(message) {
+      const el = document.getElementById("modal-error");
+      el.textContent = message;
+      el.classList.add("visible");
+    }
+
+    // Shared login error copy (modal + legacy inline path).
+    function loginErrorMessage(error) {
+      const m = (error && error.message) || "";
+      if (m.includes("Invalid login")) return "Invalid email or password.";
+      if (m.includes("Email not confirmed")) return "Please confirm your email address before signing in. Check your inbox (and spam) for the confirmation link.";
+      return m || "Something went wrong — try again.";
+    }
+
+    async function modalEmailLogin(event) {
+      if (event) event.preventDefault();
+      if (modalLoginInFlight) return;
+      modalLoginInFlight = true;
+      if (!supabaseClient) { showModalError("Sign-in is temporarily unavailable."); modalLoginInFlight = false; return; }
+      const email = document.getElementById("modal-email").value.trim();
+      const password = document.getElementById("modal-password").value;
+      if (!email || !password) { showModalError("Enter your email and password."); modalLoginInFlight = false; return; }
+      if (loginRateLimitRemainingMs() > 0) { showModalError(loginRateLimitMessage()); applyLoginRateLimitLockout(); modalLoginInFlight = false; return; }
+      document.getElementById("modal-error").classList.remove("visible");
+      document.getElementById("modal-note").textContent = "";
+      const btn = document.getElementById("btn-modal-login");
+      btn.disabled = true;
+      try {
+        const { data, error } = await supabaseClient.auth.signInWithPassword({ email: email, password: password });
+        if (error) {
+          // Two-tier lockout on the LOGIN bucket (#863 separation) — a login
+          // rate-limit must not disable the signup form, and vice versa.
+          if (isRateLimitError(error)) {
+            setLoginRateLimitLockout(error);
+            showModalError(isEmailBucketError(error) ? humanizeAuthError(error) : loginRateLimitMessage());
+          } else {
+            showModalError(loginErrorMessage(error));
+          }
+          return;
+        }
+        if (data?.user) pushSignupEvents(data.user);
+        window.location.href = WELCOME_URL;
+      } catch (e) {
+        showModalError((e && e.message) || "Something went wrong — try again.");
+      } finally {
+        modalLoginInFlight = false;
+        // #1493 review: re-assert the lockout — a rate-limit error already
+        // disabled the button + started the countdown; a blind re-enable
+        // would flicker it back on for a tick.
+        if (loginRateLimitRemainingMs() > 0) {
+          applyLoginRateLimitLockout();
+        } else {
+          btn.disabled = false;
+        }
+      }
+    }
+
+    // Forgot-password from the login modal — resetPasswordForEmail with the
+    // same two-tier login-bucket discipline (#863). The reset link returns
+    // to /welcome.html (recoveryMode landing, #863).
+    let modalForgotInFlight = false;  // double-submit guard (shared email bucket, #801)
+    async function modalForgotPassword(event) {
+      if (event) event.preventDefault();
+      if (modalForgotInFlight) return;
+      modalForgotInFlight = true;
+      const email = document.getElementById("modal-email").value.trim();
+      if (!email) { showModalError("Enter your email address first — we'll send the reset link there."); modalForgotInFlight = false; return; }
+      if (loginRateLimitRemainingMs() > 0) { showModalError(loginRateLimitMessage()); applyLoginRateLimitLockout(); modalForgotInFlight = false; return; }
+      document.getElementById("modal-error").classList.remove("visible");
+      document.getElementById("modal-note").textContent = "";
+      try {
+        const { error } = await supabaseClient.auth.resetPasswordForEmail(email, {
+          redirectTo: window.location.origin + WELCOME_URL,
+        });
+        if (error) {
+          if (isRateLimitError(error)) {
+            setLoginRateLimitLockout(error);
+            showModalError(isEmailBucketError(error) ? humanizeAuthError(error) : loginRateLimitMessage());
+          } else {
+            showModalError(humanizeAuthError(error));
+          }
+          return;
+        }
+        const note = document.getElementById("modal-note");
+        note.textContent = "Reset link sent — check your inbox (and spam).";
+      } catch (e) {
+        showModalError((e && e.message) || "Something went wrong — try again.");
+      } finally {
+        modalForgotInFlight = false;
+      }
+    }
+
     // #1287: email+password LOGIN (combined-card login mode) — the page's
-    // signin.html flow, inlined so /signup serves both modes. Routes to the
+    // legacy signin flow, inlined so /auth serves both modes. Routes to the
     // dashboard on success (session cookie shared cross-subdomain).
     async function signInWithEmailPassword() {
       if (signupInFlight) return;
       signupInFlight = true;
       if (!supabaseClient) { showError("Auth not configured."); signupInFlight = false; return; }
-      if (rateLimitRemainingMs() > 0) {
-        showError(rateLimitMessage());
-        applyRateLimitLockout();
+      // #1493: LOGIN surface → login bucket (tortoise_signin_*) — a legacy
+      // safety net for the inline form; must never touch the signup bucket.
+      if (loginRateLimitRemainingMs() > 0) {
+        showError(loginRateLimitMessage());
+        applyLoginRateLimitLockout();
         signupInFlight = false;
         return;
       }
@@ -1198,10 +1564,7 @@
         }
         const { data, error } = await supabaseClient.auth.signInWithPassword({ email: email, password: password });
         if (error) {
-          const m = error.message || "";
-          if (m.includes("Invalid login")) showError("Invalid email or password.");
-          else if (m.includes("Email not confirmed")) showError("Please confirm your email address before signing in. Check your inbox (and spam) for the confirmation link.");
-          else showError(m || "Something went wrong — try again.");
+          showError(loginErrorMessage(error));
           return;
         }
         if (data?.user) pushSignupEvents(data.user);

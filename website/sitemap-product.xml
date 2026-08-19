@@ -15,14 +15,9 @@
     <priority>0.8</priority>
   </url>
   <url>
-    <loc>https://tortoise.premiselabs.co/signup</loc>
+    <loc>https://tortoise.premiselabs.co/auth</loc>
     <changefreq>monthly</changefreq>
     <priority>0.6</priority>
-  </url>
-  <url>
-    <loc>https://tortoise.premiselabs.co/signin</loc>
-    <changefreq>monthly</changefreq>
-    <priority>0.5</priority>
   </url>
   <url>
     <loc>https://tortoise.premiselabs.co/self-hosted</loc>

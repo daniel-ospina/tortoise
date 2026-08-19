@@ -199,10 +199,13 @@ jobs:
         # duration-blind parity split — a heavy matched surface can no longer
         # dump most of its runtime on one half. Only on PRs with a tier-2
         # selection (full=false); the full-matrix path uses matrix.files.
+        # NOTE: reads steps.select.outputs.test_files — the split runs INSIDE
+        # the changes job, so `needs.changes` (the job's own output) is
+        # ALWAYS empty and would crash --split with empty stdin (#1492).
         id: split
         if: github.event_name == 'pull_request' && steps.select.outputs.full == 'false'
         run: |
-          SPLIT=$(echo '${{ needs.changes.outputs.test_files }}' | python3 tools/ci_selection.py --split)
+          SPLIT=$(echo '${{ steps.select.outputs.test_files }}' | python3 tools/ci_selection.py --split)
           echo "a_files=$(echo "$SPLIT" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["a"]))')" >> "$GITHUB_OUTPUT"
           echo "b_files=$(echo "$SPLIT" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["b"]))')" >> "$GITHUB_OUTPUT"
       - name: Manifest integrity (drift gate, #1262)

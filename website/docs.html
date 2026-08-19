@@ -30,7 +30,7 @@
 
     /* Top bar */
     .topbar { display: flex; align-items: center; gap: 20px; padding: 14px 24px; border-bottom: 1px solid var(--border); background: rgba(6, 11, 20, 0.9); position: sticky; top: 0; z-index: 10; }
-    .topbar .logo { display: flex; align-items: center; text-decoration: none; line-height: 1; }
+    .topbar .logo { display: flex; align-items: center; text-decoration: none; line-height: 1; margin: 0; }
     .topbar .logo img { height: 40px; width: auto; display: block; }
     .topbar nav { flex: 1; display: flex; gap: 16px; }
     .topbar nav a { color: var(--text-dim); text-decoration: none; font-size: 14px; }
@@ -79,7 +79,7 @@
       <a href="https://tortoise.premiselabs.co/">Product</a>
       <a href="/docs" class="active">Docs</a>
     </nav>
-    <a class="login" href="/signin.html">Login</a>
+    <a class="login" href="/auth?mode=login">Login</a>
   </div>
 
   <div class="wrap">
@@ -139,7 +139,7 @@
     <h2 id="quickstart">Quickstart (5 minutes)</h2>
     <div class="card">
       <h3>1. Create an account</h3>
-      <p>Sign up at <a href="/signup">tortoise.premiselabs.co/signup</a>. You'll get an API key on the welcome page — copy it. It's shown once.</p>
+      <p>Sign up at <a href="/auth">tortoise.premiselabs.co/auth</a>. You'll get an API key on the welcome page — copy it. It's shown once.</p>
     </div>
     <div class="card">
       <h3>2. Write your first Point</h3>
