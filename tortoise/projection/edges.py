@@ -206,12 +206,25 @@ class _EdgeHandlers:
         but connectors pass specific values (github_issue, slack_message, linear_card, etc.).
         ``label`` selects the source-side entity label — Point (default) or Document
         (create_document provenance, #394).
+
+        Session-provenance refs (`session:<id>`, written by the capture
+        extractors) stamp `is_episodic=true` ON CREATE — the backfill's
+        condition 4 (graph-scripts/backfill_is_episodic.py) treats
+        Session-linked Sources as episodic; a new capture creating a
+        flag-less Source would otherwise keep matching the one-time backfill
+        (issue #1486). Non-session Sources (documents, connectors) are
+        untouched.
         """
+        params = {"url": source_ref, "sk": source_kind, "now": _now_iso()}
+        ep_clause = ""
+        if str(source_ref).startswith("session:"):
+            params["ep"] = True
+            ep_clause = ", s.is_episodic=$ep"
         self.g.query(
             "MERGE (s:Source {url:$url}) "
             "ON CREATE SET s.sourceKind=$sk, s.title=$url, "
-            "    s.contentHash='', s.ingestedAt=$now",
-            params={"url": source_ref, "sk": source_kind, "now": _now_iso()},
+            f"    s.contentHash='', s.ingestedAt=$now{ep_clause}",
+            params=params,
         )
         self.g.query(
             f"MATCH (n:{label} {{id:$pid}}), (s:Source {{url:$url}}) "
