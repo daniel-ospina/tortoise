@@ -267,8 +267,9 @@ async def verify_session_jwt(request: Request) -> dict:
         # PyJWK.from_dict / wrong-typed / out-of-range claim failures are NOT
         # PyJWTError subclasses — fail closed. (binascii.Error is a ValueError
         # subclass — kept for self-documentation. RecursionError is
-        # unreachable-defensive: CPython C-json trips it only at ~10k nesting
-        # (>16KB guard), but pure-python-json runtimes trip it ~1k levels.
+        # defensive: json parsers are recursion-limited (runtime-dependent —
+        # CPython C-json ~10k nesting, pure-python json ~1k), so a small
+        # deeply-nested header can trip it — keep the entry.
         # UnsupportedAlgorithm covers FIPS/ancient-OpenSSL backends. ⛔ All
         # names in this tuple are bound at module/function top — except-clause
         # names are evaluated at match time, before the body runs.)
