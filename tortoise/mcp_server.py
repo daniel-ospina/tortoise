@@ -601,6 +601,27 @@ ERR_BUNDLE_INVALID = -32008
 ERR_INVALID = -32003
 
 
+# #1486 (code-review P1): server-managed node properties tenant props must
+# never set. is_episodic is the points-quota discriminator (quota.py counts
+# only `is_episodic IS NULL OR = false` points) — a tenant setting it true
+# would exclude their points from the quota (unlimited points past the
+# paid-tier cap). sourcePath/source_path/id are the pre-existing #329
+# denylist. The MCP tools reject these AT THE BOUNDARY (before the `**props`
+# unpack can bind the SDK's explicit server-managed params); the SDK's
+# _sanitize_props reject is the fail-closed backstop.
+_SERVER_MANAGED_PROPS = frozenset({"is_episodic", "sourcePath", "source_path", "id"})
+
+
+def _reject_server_managed_props(props: dict) -> str | None:
+    """Return an error message if tenant props attempt server-managed fields."""
+    bad = _SERVER_MANAGED_PROPS & set(props or {})
+    if not bad:
+        return None
+    return ("server-managed field(s) cannot be set via props: "
+            f"{sorted(bad)}")
+
+
+
 def _http_excluded_error() -> dict:
     """#236: JSON-RPC error for tools excluded from the tenant HTTP surface (D4)."""
     return {
@@ -641,6 +662,9 @@ def tortoise_create_point(kind: str, content: str,
       evidence is a role (not a kind), use Source for provenance.
     """
     props = _parse(props)
+    _reject = _reject_server_managed_props(props)
+    if _reject:
+        return {"error": _reject, "code": ERR_INVALID}
     merged = dict(props or {})
     if authoredBy:
         merged["authoredBy"] = authoredBy
@@ -1205,6 +1229,9 @@ def tortoise_dream_health() -> dict:
 def tortoise_update_point(id: str, props: Any) -> dict:
     """Update properties on a Point. Safe — modifies one Point only."""
     props = _parse(props)
+    _reject = _reject_server_managed_props(props)
+    if _reject:
+        return {"error": _reject, "code": ERR_INVALID}
     return _safe(_quota_gated(_get_team_sdk().update_point, "points"), id, **(props or {}))
 
 def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
@@ -1738,6 +1765,9 @@ def tortoise_create_entity(type: str, name: str, props: Any = None) -> dict:
     mitigate connections to related Points (advisory, not enforced).
     """
     props = _parse(props)
+    _reject = _reject_server_managed_props(props)
+    if _reject:
+        return {"error": _reject, "code": ERR_INVALID}
     return _safe(_quota_gated(_get_team_sdk().create_entity, "points"),
                  type, name, **(props or {}))
 
@@ -1747,6 +1777,9 @@ def tortoise_update(id: str, props: Any = None) -> dict:
     (draft→live promote via status, version increment for Point:Object,
     status validation); entities get a plain property update."""
     props = _parse(props)
+    _reject = _reject_server_managed_props(props)
+    if _reject:
+        return {"error": _reject, "code": ERR_INVALID}
     return _safe(_quota_gated(_get_team_sdk().update, "points"),
                  id, **(props or {}))
 
@@ -1790,16 +1823,25 @@ def tortoise_operator_action(action: str, id: str, reason: str | None = None,
 def tortoise_create_subject(name: str, subjectKind: str, props: Any = None) -> dict:
     """Create a Subject node (team, role, organization, person)."""
     props = _parse(props)
+    _reject = _reject_server_managed_props(props)
+    if _reject:
+        return {"error": _reject, "code": ERR_INVALID}
     return _safe(_quota_gated(_get_team_sdk().create_subject, "points"), name, subjectKind, **(props or {}))
 
 def tortoise_create_object(name: str, objectKind: str, props: Any = None) -> dict:
     """Create an Object node (product, customer, skill, etc.)."""
     props = _parse(props)
+    _reject = _reject_server_managed_props(props)
+    if _reject:
+        return {"error": _reject, "code": ERR_INVALID}
     return _safe(_quota_gated(_get_team_sdk().create_object, "points"), name, objectKind, **(props or {}))
 
 def tortoise_create_event(name: str, eventKind: str, props: Any = None) -> dict:
     """Create an Event node (meeting, decision, deployment, etc.)."""
     props = _parse(props)
+    _reject = _reject_server_managed_props(props)
+    if _reject:
+        return {"error": _reject, "code": ERR_INVALID}
     return _safe(_quota_gated(_get_team_sdk().create_event, "points"), name, eventKind, **(props or {}))
 
 
@@ -1871,6 +1913,9 @@ def tortoise_search_sessions(query: str, agent: str | None = None, topics: Any =
 def tortoise_create_document(title: str, documentKind: str, props: Any = None) -> dict:
     """Create a Document node (research, planDoc, meetingNotes, etc.)."""
     props = _parse(props)
+    _reject = _reject_server_managed_props(props)
+    if _reject:
+        return {"error": _reject, "code": ERR_INVALID}
     return _safe(_quota_gated(_get_team_sdk().create_document, "points"), title, documentKind, **(props or {}))
 
 @mcp.tool(annotations=ToolAnnotations(idempotentHint=True))
@@ -1884,6 +1929,9 @@ def tortoise_create_source(url: str, sourceKind: str, tier: str | None = None,
     sourceKind); ``sourceDate`` is the evidence-age clock for recency decay.
     """
     props = _parse(props) or {}
+    _reject = _reject_server_managed_props(props)
+    if _reject:
+        return {"error": _reject, "code": ERR_INVALID}
     # tier/sourceDate are first-class kwargs (#398) — pop from props if a legacy
     # caller passed them there (kwarg wins; avoids TypeError on splat).
     props.pop("tier", None)
@@ -1937,6 +1985,9 @@ def tortoise_get_entity(id: str) -> dict:
 def tortoise_update_entity(id: str, props: Any = None) -> dict:
     """Update any entity's properties."""
     props = _parse(props)
+    _reject = _reject_server_managed_props(props)
+    if _reject:
+        return {"error": _reject, "code": ERR_INVALID}
     return _safe(_quota_gated(_get_team_sdk().update_entity, "points"), id, **(props or {}))
 
 def tortoise_delete_entity(id: str) -> bool:
