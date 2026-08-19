@@ -1005,6 +1005,15 @@
     // login = email+password sign-in + API-key login (existing key holders).
     let authIsSignup = true;
 
+    // #1493: ?mode=login lands on the Log in tab — the topbar "Login"
+    // buttons on docs/signin/invite-accept and the signInAndGo recovery
+    // path point here. MUST run after `let authIsSignup` above — setAuthMode
+    // reads it, and a TDZ ReferenceError here would kill this whole script
+    // (the #527 failure class: one bad line disables everything below it).
+    if (new URLSearchParams(window.location.search).get("mode") === "login") {
+      setAuthMode(false);
+    }
+
     function setAuthMode(isSignup) {
       authIsSignup = isSignup;
       document.getElementById("toggle-signin").classList.toggle("active", !isSignup);
@@ -1181,9 +1190,11 @@
       if (error) {
         // #801 review P1: the account ALREADY exists (created server-side) —
         // a sign-in failure here is transient (network/clock), not a bad
-        // password. Point the user at the sign-in page instead of dead-ending.
-        showError("Account created — but signing you in failed. Please sign in at /auth.");
-        setTimeout(function () { window.location.href = "/auth"; }, 1500);
+        // password. We're already ON the auth page — switch to the Log in
+        // tab in place (a reload would land on the Sign up tab and wipe the
+        // message).
+        setAuthMode(false);
+        showError("Account created — but signing you in failed. Please try signing in below.");
         return;
       }
       if (data?.user) pushSignupEvents(data.user);
@@ -1458,18 +1469,28 @@
         showModalError((e && e.message) || "Something went wrong — try again.");
       } finally {
         modalLoginInFlight = false;
-        btn.disabled = false;
+        // #1493 review: re-assert the lockout — a rate-limit error already
+        // disabled the button + started the countdown; a blind re-enable
+        // would flicker it back on for a tick.
+        if (loginRateLimitRemainingMs() > 0) {
+          applyLoginRateLimitLockout();
+        } else {
+          btn.disabled = false;
+        }
       }
     }
 
     // Forgot-password from the login modal — resetPasswordForEmail with the
     // same two-tier login-bucket discipline (#863). The reset link returns
     // to /welcome.html (recoveryMode landing, #863).
+    let modalForgotInFlight = false;  // double-submit guard (shared email bucket, #801)
     async function modalForgotPassword(event) {
       if (event) event.preventDefault();
+      if (modalForgotInFlight) return;
+      modalForgotInFlight = true;
       const email = document.getElementById("modal-email").value.trim();
-      if (!email) { showModalError("Enter your email address first — we'll send the reset link there."); return; }
-      if (loginRateLimitRemainingMs() > 0) { showModalError(loginRateLimitMessage()); applyLoginRateLimitLockout(); return; }
+      if (!email) { showModalError("Enter your email address first — we'll send the reset link there."); modalForgotInFlight = false; return; }
+      if (loginRateLimitRemainingMs() > 0) { showModalError(loginRateLimitMessage()); applyLoginRateLimitLockout(); modalForgotInFlight = false; return; }
       document.getElementById("modal-error").classList.remove("visible");
       document.getElementById("modal-note").textContent = "";
       try {
@@ -1489,6 +1510,8 @@
         note.textContent = "Reset link sent — check your inbox (and spam).";
       } catch (e) {
         showModalError((e && e.message) || "Something went wrong — try again.");
+      } finally {
+        modalForgotInFlight = false;
       }
     }
 
