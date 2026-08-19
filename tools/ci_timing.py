@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import os
 import re
 import subprocess
 import sys
@@ -115,7 +116,11 @@ def parse_log(path: Path) -> dict:
                 "error": f"unreadable: {exc}"}
 
     for line in lines:
-        if "WATCHDOG:" in line:
+        # #1477 review P2: the WATCHDOG banner is shell-echoed to the step's
+        # stdout AFTER pytest's output is redirected, so the artifact never
+        # contains it. pytest's own interrupt summary (KeyboardInterrupt) is
+        # the reliable in-log signal for a watchdog-killed run.
+        if "KeyboardInterrupt" in line or "WATCHDOG:" in line:
             killed = True
         if "slowest" in line and "durations" in line:
             in_durations = True
@@ -183,7 +188,11 @@ def candidate_flakes(history: list[dict]) -> list[dict]:
 
 def render_md(run: dict, steps: dict, files: dict, counts: dict, killed: bool,
               run_id: str, history: list[dict], flakes: list[dict]) -> str:
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # #1477 review P2: CI_TIMING_NOW lets tests freeze the clock (the
+    # back-to-back subprocess invocations in the determinism test otherwise
+    # straddle a second boundary and flake).
+    now = (os.environ.get("CI_TIMING_NOW")
+           or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
     lines = [FRONT_MATTER,
              "# CI Timing Measurement Artifact",
              "",
@@ -310,7 +319,8 @@ def main() -> int:
         log_sources.append({"log": Path(log_path).name, "error": parsed["error"],
                             "counts": parsed["counts"]})
 
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now = (os.environ.get("CI_TIMING_NOW")
+           or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
     row = {
         "sample_time": now,
         "run_id": run_id or None,

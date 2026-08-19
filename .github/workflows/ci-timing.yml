@@ -84,7 +84,7 @@ jobs:
             --out-dir docs \
             --max-history 52
           echo "=== ci-timing.md (head) ==="
-          head -30 out/ci-timing.md
+          head -30 docs/ci-timing.md
 
       - name: Upload generated timing files
         if: always()

@@ -163,11 +163,12 @@ def test_generate_is_deterministic_and_bounds_history(tmp_path: Path, fake_env: 
     write_log(tmp_path, "pytest-log-test-a/pytest.log")
     tools = Path(__file__).resolve().parent.parent / "tools" / "ci_timing.py"
     out1 = tmp_path / "out1"
+    frozen_env = dict(os.environ, CI_TIMING_NOW="2026-08-18T00:00:00Z")
     run1 = subprocess.run(
         [sys.executable, str(tools),
          "--repo", "daniel-ospina/tortoise", "--run-id", "4242",
          "--logs-dir", str(tmp_path / "logs"), "--out-dir", str(out1)],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, check=True, env=frozen_env,
     )
     assert "wrote" in run1.stdout
 
@@ -189,7 +190,7 @@ def test_generate_is_deterministic_and_bounds_history(tmp_path: Path, fake_env: 
         [sys.executable, str(tools),
          "--repo", "daniel-ospina/tortoise", "--run-id", "4242",
          "--logs-dir", str(tmp_path / "logs"), "--out-dir", str(out3)],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, check=True, env=frozen_env,
     )
     assert (out1 / "ci-timing.json").read_bytes() == (out3 / "ci-timing.json").read_bytes()
     assert (out1 / "ci-timing.md").read_bytes() == (out3 / "ci-timing.md").read_bytes()
