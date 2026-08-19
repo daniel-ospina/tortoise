@@ -337,3 +337,31 @@ jobs:
       - run: pip install -e '.[test]'
       - name: Run the #669 pre-deploy flip gate
         run: bash .github/scripts/verify-cutover
+
+  agent-infra-ci:
+    # #303 — generic stack CI from agent-infra reusable workflows, pinned to a
+    # semver tag (@v0.1.0). Bump = tag + manifest ci.ref edit; agent-infra
+    # check blocks on a stale pin. GitHub Actions CANNOT parse symlinked
+    # workflow files (#555), so the reusable workflow is a real committed file
+    # in agent-infra/.github/workflows/python-ci.yml.
+    #
+    # Re-created after agent-infra went PUBLIC (was blocked: public repos
+    # cannot call reusable workflows in private repos — #1494 revert). Now the
+    # call resolves.
+    #
+    # Surface kept generic-only (D4): the heavy tiered test split stays local
+    # in python-ci.yml (repo-specific strategy); migration guards, pricing,
+    # client-build, e2e gates stay local siblings above.
+    #   test-command: ''      — tests run in python-ci.yml (uv split)
+    #   typecheck-command: '' — no mypy config in this repo; auto-detect would
+    #                           fail (mypy on the whole package)
+    #   lint-command: narrow  — the ruff default surface carries pre-existing
+    #                           debt (F401/E501, no [tool.ruff]); the syntax
+    #                           class (E9/F63/F7) is green on main
+    uses: daniel-ospina/agent-infra/.github/workflows/python-ci.yml@v0.1.0
+    with:
+      python-version: '3.12'
+      test-command: ''
+      lint-command: 'ruff check . --select E9,F63,F7 --ignore F706'
+      typecheck-command: ''
+    secrets: inherit
