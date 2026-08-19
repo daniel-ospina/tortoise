@@ -433,6 +433,144 @@ class TestCommitIdMismatch:
             b["summary"], b["story_arc"])
 
 
+# ── Participant slots (#1418: object + event-as-content) ─────────────────────
+
+_SLOTS = {
+    "subject": [{"name": "Alpha", "kind": "Team", "confidence": 0.8}],
+    "object": [{"name": "Alpha", "kind": "Project", "confidence": 0.9}],
+    "event": [{"name": "the Aug 3 meeting", "kind": "meeting",
+                "confidence": 0.7}],
+}
+
+# emitted entities the _SLOTS subject/object refs must resolve against
+_SLOT_ENTITIES = [
+    {"name": "Alpha", "kind": "Project", "passes_frequency_gate": True},
+    {"name": "Alpha", "kind": "Team", "passes_frequency_gate": True},
+]
+
+
+class TestParticipantSlots:
+    """#1418 — commit_schema ACCEPTS the S1 typed-slot contract from the
+    #1370 re-validation (additive-optional, extra="forbid" shape)."""
+
+    def test_point_accepts_slots(self):
+        result, payload = _check(_raw_payload(
+            entities=_SLOT_ENTITIES, points=[_point(0, slots=_SLOTS)]))
+        assert result.ok, result.errors
+        assert payload.points[0].slots.subject[0].confidence == 0.8
+
+    def test_event_accepts_slots(self):
+        raw = _raw_payload(entities=_SLOT_ENTITIES)
+        raw["events"] = [{"id": "ev_" + "1" * 62, "eventKind": "meeting",
+                           "content": "the Aug 3 meeting concluded X",
+                           "confidence": 0.9, "about_entities": ["Alpha"],
+                           "source_ref": "session.md", "slots": _SLOTS}]
+        result, payload = _check(raw)
+        assert result.ok, result.errors
+        assert payload.events[0].slots.event[0].name == "the Aug 3 meeting"
+
+    def test_additive_optional_old_payloads_validate(self):
+        # pre-#1418 payloads (no slots) must validate unchanged AND keep the
+        # same commit id (additive field must not change old ids)
+        raw = _raw_payload()
+        before = compute_client_commit_id(
+            raw["session_id"], raw["points"], raw["entities"],
+            raw["operators"], raw["summary"], raw["story_arc"],
+            raw.get("events", []))
+        result, payload = _check(raw)
+        assert result.ok
+        assert payload.points[0].slots is None
+        assert raw["client_commit_id"] == before
+
+    def test_empty_slots_object_is_valid(self):
+        result, _ = _check(_raw_payload(points=[_point(0, slots={})]))
+        assert result.ok, result.errors
+
+    def test_subject_object_slot_names_must_reference_entities(self):
+        # mirrors the about_entities check — the "inherited" fail-closed
+        # direction the #1370 re-validation names (typed slots reuse entity
+        # names; names must resolve against emitted entities[])
+        result, _ = _check(_raw_payload(points=[_point(
+            0, slots={"subject": [{"name": "Ghost", "kind": "Team",
+                                    "confidence": 0.8}]})]))
+        assert not result.ok
+        assert result.errors["points[0].slots.subject"]
+
+    def test_slot_kind_mismatch_422(self):
+        # the D6 key is (name, kind) — a slot whose name exists but whose
+        # kind doesn't match any emitted entity must not bind
+        result, _ = _check(_raw_payload(points=[_point(0, slots=_SLOTS)]))
+        assert not result.ok
+        assert result.errors["points[0].slots.subject"]
+
+    def test_slot_bare_kind_matches_namespaced_entity(self):
+        # "plan" ≡ "core:plan" (namespace-preserving merge spelling)
+        result, _ = _check(_raw_payload(entities=[
+            {"name": "Alpha", "kind": "core:plan",
+             "passes_frequency_gate": True}],
+            points=[_point(0, slots={"object": [
+                {"name": "Alpha", "kind": "plan", "confidence": 0.9}]})]))
+        assert result.ok, result.errors
+
+    def test_event_slot_not_entity_checked(self):
+        # event-as-content: the write-path resolver owns event-slot
+        # resolution (#1370); Layer-1 must NOT 422 on it
+        result, _ = _check(_raw_payload(
+            entities=_SLOT_ENTITIES, points=[_point(0, slots=_SLOTS)]))
+        assert result.ok, result.errors
+
+    def test_slot_confidence_out_of_range_422(self):
+        result, _ = _check(_raw_payload(points=[_point(
+            0, slots={"subject": [{"name": "Alpha", "kind": "Team",
+                                    "confidence": 1.5}]})]))
+        assert not result.ok
+        assert any(k.startswith("points[0].slots") for k in result.errors)
+
+    def test_slot_unknown_role_key_422(self):
+        # extra="forbid" — the role vocabulary is exactly subject/object/event
+        result, _ = _check(_raw_payload(points=[_point(
+            0, slots={"agent": [{"name": "Alpha", "kind": "Role",
+                                  "confidence": 0.8}]})]))
+        assert not result.ok
+        assert any(k.startswith("points[0].slots") for k in result.errors)
+
+    def test_slot_confidence_excluded_from_canonical(self):
+        # per-slot confidence is an LLM artifact — same rule as confidence/
+        # c_cal: it must NOT change the commit id
+        a = _raw_payload(points=[_point(0, slots=_SLOTS)])
+        b = _raw_payload(points=[_point(0, slots={
+            "subject": [{"name": "Alpha", "kind": "Team",
+                          "confidence": 0.99}],
+            "object": [{"name": "Alpha", "kind": "Project",
+                          "confidence": 0.99}],
+            "event": [{"name": "the Aug 3 meeting", "kind": "meeting",
+                        "confidence": 0.99}]})])
+        assert compute_client_commit_id(
+            a["session_id"], a["points"], a["entities"], a["operators"],
+            a["summary"], a["story_arc"], a.get("events", [])) == \
+            compute_client_commit_id(
+                b["session_id"], b["points"], b["entities"],
+                b["operators"], b["summary"], b["story_arc"],
+                b.get("events", []))
+
+    def test_slot_name_change_changes_id(self):
+        a = _raw_payload(points=[_point(0, slots=_SLOTS)])
+        b = _raw_payload(points=[_point(0, slots={
+            "subject": [{"name": "Beta", "kind": "Team",
+                          "confidence": 0.8}],
+            "object": [{"name": "Alpha", "kind": "Project",
+                          "confidence": 0.9}],
+            "event": [{"name": "the Aug 3 meeting", "kind": "meeting",
+                        "confidence": 0.7}]})])
+        assert compute_client_commit_id(
+            a["session_id"], a["points"], a["entities"], a["operators"],
+            a["summary"], a["story_arc"], a.get("events", [])) != \
+            compute_client_commit_id(
+                b["session_id"], b["points"], b["entities"],
+                b["operators"], b["summary"], b["story_arc"],
+                b.get("events", []))
+
+
 class TestAtomicity:
     def test_coordination_cue(self):
         assert atomicity_violations("we will ship A and B and C", "decision")

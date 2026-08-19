@@ -621,6 +621,164 @@ class TestChains:
         assert result["payload"]["points"]  # still emitted
 
 
+# ── Participant slots (#1418: object + event-as-content) ─────────────────────
+
+SLOTS_FIXTURE = {
+    "entities": [
+        {"name": "single-flash pipeline", "kind": "core:plan",
+         "lifecycle": "created", "supersedes": None, "note": None},
+        {"name": "cleaning-pass tier", "kind": "core:plan",
+         "lifecycle": "created", "supersedes": None, "note": None},
+        {"name": "the team", "kind": "core:team",
+         "lifecycle": "created", "supersedes": None, "note": None},
+        {"name": "the owner", "kind": "core:role",
+         "lifecycle": "created", "supersedes": None, "note": None},
+    ],
+    "events": [
+        {"content": "The owner paused the solar cleaning tier",
+         "eventKind": "core:decision",
+         "about_entities": ["cleaning-pass tier"],
+         "slots": {"subject": [{"name": "the owner", "kind": "core:role",
+                                 "confidence": 0.85}],
+                    "object": [{"name": "cleaning-pass tier",
+                                 "kind": "core:plan", "confidence": 0.9}]}},
+    ],
+    "points": [
+        {"content": "single-flash with granularity is the working path",
+         "pointKind": "statement",
+         "about_entities": ["single-flash pipeline", "cleaning-pass tier"],
+         "slots": {"subject": [{"name": "the team", "kind": "core:team",
+                                 "confidence": 0.8}],
+                    "object": [{"name": "single-flash pipeline",
+                                 "kind": "core:plan", "confidence": 0.9}],
+                    "event": [{"name": "the Aug 3 meeting",
+                                "kind": "core:meeting", "confidence": 0.7}]}},
+    ],
+    "operators": [],
+    "chain_notes": [],
+    "link_before_create": [],
+}
+
+
+class TestParticipantSlots:
+    """#1418 — the v2 extractor emits object + event slots (with per-slot
+    confidence) in addition to subject, per the #1370 S1 re-validation
+    contract: OUTPUT_CONTRACT → execute_embed → commit_schema."""
+
+    def test_output_contract_carries_slot_shape(self):
+        # one shared constant consumed by BOTH S2 (MAP) and S4 (REVIEW)
+        assert '"slots"' in v2.OUTPUT_CONTRACT
+        for role in ("subject", "object", "event"):
+            assert role in v2.OUTPUT_CONTRACT
+        assert "confidence" in v2.OUTPUT_CONTRACT
+
+    def test_s2_and_s4_templates_teach_slots(self):
+        for tmpl in (v2.S2_TMPL, v2.S4_TMPL):
+            assert "PARTICIPANT SLOTS" in tmpl
+            for role in ("subject", "object", "event"):
+                assert role in tmpl
+            assert "provenance" in tmpl.lower()  # event slot binds content, never provenance
+
+    def test_execute_embed_carries_point_slots_with_confidence(self):
+        result = v2.execute_embed(SLOTS_FIXTURE, {}, session_id="s1")
+        pt = result["payload"]["points"][0]
+        slots = pt["slots"]
+        assert slots["subject"] == [{"name": "the team", "kind": "core:team",
+                                     "confidence": 0.8}]
+        assert slots["object"] == [{"name": "single-flash pipeline",
+                                     "kind": "core:plan", "confidence": 0.9}]
+        # event-as-content: the point claims the Aug 3 meeting concluded X
+        assert slots["event"] == [{"name": "the Aug 3 meeting",
+                                    "kind": "core:meeting", "confidence": 0.7}]
+
+    def test_execute_embed_carries_event_slots(self):
+        result = v2.execute_embed(SLOTS_FIXTURE, {}, session_id="s1")
+        ev = result["payload"]["events"][0]
+        assert ev["slots"]["subject"] == [{"name": "the owner",
+                                             "kind": "core:role",
+                                             "confidence": 0.85}]
+        assert ev["slots"]["object"] == [{"name": "cleaning-pass tier",
+                                             "kind": "core:plan",
+                                             "confidence": 0.9}]
+
+    def test_slots_payload_passes_layer1(self):
+        from tortoise.commit_schema import validate_payload_dict
+        result = v2.execute_embed(SLOTS_FIXTURE, {}, session_id="s1")
+        l1, _model = validate_payload_dict(result["payload"])
+        assert l1.ok, l1.errors
+
+    def test_slots_absent_when_embed_has_none(self):
+        # S5 must not fabricate slots for embed entries that never had them
+        result = v2.execute_embed(S2_FIXTURE, {}, session_id="s1")
+        assert "slots" not in result["payload"]["points"][0]
+        assert "slots" not in result["payload"]["events"][0]
+
+    def test_slot_sanitization(self):
+        embed = json.loads(json.dumps(SLOTS_FIXTURE))
+        embed["points"][0]["slots"]["subject"] = [
+            {"name": "the team", "kind": "core:team", "confidence": "high"},
+            {"name": "", "kind": "core:team", "confidence": 0.9},
+            "not-a-dict",
+        ]
+        embed["points"][0]["slots"]["agent"] = [
+            {"name": "the agent", "kind": "core:role", "confidence": 0.9},
+        ]
+        embed["points"][0]["slots"]["object"][0]["confidence"] = 1.7
+        result = v2.execute_embed(embed, {}, session_id="s1")
+        slots = result["payload"]["points"][0]["slots"]
+        # non-numeric confidence → 0.0 (deterministic, never a crash)
+        assert slots["subject"] == [{"name": "the team", "kind": "core:team",
+                                     "confidence": 0.0}]
+        # unknown role key dropped
+        assert "agent" not in slots
+        # confidence clamped into [0, 1]
+        assert slots["object"][0]["confidence"] == 1.0
+        warns = " ".join(result["warnings"])
+        assert "agent" in warns
+
+    def test_slot_minted_kind_repaired(self):
+        # P2-1 review fix: slot kinds gate against the same master_kind_forms
+        # vocabulary S5 applies to entities — a near-miss kind is repaired
+        # (never silently divergent), and the repaired (name, kind) then
+        # resolves against the emitted entity
+        embed = json.loads(json.dumps(SLOTS_FIXTURE))
+        embed["entities"].append({"name": "mystery thing",
+                                   "kind": "core:other", "lifecycle": "created",
+                                   "supersedes": None, "note": None})
+        embed["points"][0]["slots"]["subject"] = [
+            {"name": "mystery thing", "kind": "minted:garbage",
+             "confidence": 0.8}]
+        result = v2.execute_embed(embed, {}, session_id="s1")
+        slots = result["payload"]["points"][0]["slots"]
+        assert slots["subject"] == [{"name": "mystery thing",
+                                      "kind": "core:other",
+                                      "confidence": 0.8}]
+        assert any("minted" in w and "minted:garbage" in w
+                   for w in result["warnings"])
+
+    def test_slot_unresolved_entity_dropped_with_warning(self):
+        # P2-2 review fix: a stray subject/object slot must never sink the
+        # whole commit — dropped with a warning (operator-drop pattern);
+        # event slots pass through untouched (write-path resolved)
+        embed = json.loads(json.dumps(SLOTS_FIXTURE))
+        embed["points"][0]["slots"]["subject"] = [
+            {"name": "ghost entity", "kind": "core:role", "confidence": 0.8}]
+        result = v2.execute_embed(embed, {}, session_id="s1")
+        slots = result["payload"]["points"][0]["slots"]
+        assert "subject" not in slots          # dropped
+        assert slots["event"]                 # event role untouched
+        warns = " ".join(result["warnings"])
+        assert "ghost entity" in warns and "dropped" in warns
+
+    def test_non_list_role_value_warns(self):
+        embed = json.loads(json.dumps(SLOTS_FIXTURE))
+        embed["points"][0]["slots"]["subject"] = {
+            "name": "the team", "kind": "core:team", "confidence": 0.8}
+        result = v2.execute_embed(embed, {}, session_id="s1")
+        assert "subject" not in result["payload"]["points"][0]["slots"]
+        assert any("must be a list" in w for w in result["warnings"])
+
+
 # ── The orchestrator (mock model, no LLM) ──────────────────────────────────
 
 class TestOrchestrator:
