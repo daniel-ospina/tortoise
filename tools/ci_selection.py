@@ -516,7 +516,11 @@ def main() -> int:
         return 0
 
     if args.split:
-        files = json.loads(sys.stdin.read())
+        # #1492: an empty stdin (the split step's output expression resolving
+        # to "") must degrade to an empty selection — NOT crash --split for
+        # every tier-2 PR (json.loads('') raises).
+        raw = sys.stdin.read().strip()
+        files = json.loads(raw) if raw else []
         a, b = split_fast_gate(files, manifest.get("durations", {}))
         result = {"a": a, "b": b}
         out_dir = Path(os.environ.get("CI_SELECTION_ARTIFACT_DIR", REPO / ".ci-selection"))
