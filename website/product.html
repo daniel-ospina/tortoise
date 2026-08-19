@@ -310,7 +310,7 @@
   </style>
 </head>
 <body>
-  <!-- Floating top menu (#1288): transparent, cyan Login top-right → /signup -->
+  <!-- Floating top menu (#1288): transparent, cyan Login top-right → /auth -->
   <div class="floating-topmenu">
     <a class="login-btn" href="/auth">Login</a>
   </div>
@@ -409,7 +409,7 @@
         var retry = document.getElementById('oauth-error-retry');
         if (!el || !msgEl) return;
         msgEl.textContent = msg + 'Please try again — it takes under a minute.';
-        if (retry) retry.href = '/signup?' + window.location.search.slice(1);
+        if (retry) retry.href = '/auth?' + window.location.search.slice(1);
         el.hidden = false;
       } catch (e) { /* banner is best-effort */ }
     })();

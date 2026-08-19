@@ -138,8 +138,14 @@ def test_rate_limit_lockout_guards_present() -> None:
     assert "sessionStorage" in SIGNUP
     # the guard runs before any request: top-of-handler early return
     assert "rateLimitRemainingMs() > 0" in SIGNUP
-    # #863: signin.html carries the same two-tier machinery with page-scoped
-    # keys + the recovery surface wired in.
+    # #863: the LOGIN surface (email modal + forgot-password) carries its own
+    # page-scoped bucket on the auth page (tortoise_signin_* — migrated from
+    # the retired signin.html) so a login throttle never disables the signup
+    # form; signin.html keeps the same machinery as a legacy static pin.
+    assert "tortoise_signin_rate_limited_until" in SIGNUP
+    assert "tortoise_signin_rate_limit_tier" in SIGNUP
+    assert "LOGIN_RATE_LIMIT_KEY" in SIGNUP
+    assert "resetPasswordForEmail" in SIGNUP
     assert "tortoise_signin_rate_limited_until" in SIGNIN
     assert "tortoise_signin_rate_limit_tier" in SIGNIN
     assert "RATE_LIMIT_LOCKOUT_MS" in SIGNIN
@@ -150,10 +156,19 @@ def test_rate_limit_lockout_guards_present() -> None:
 
 
 def test_recovery_flow_present() -> None:
-    """#863: the recovery request-link flow on signin.html (POST
-    /auth/v1/recover surface) and the reset-password landing on welcome.html
-    (recovery-link redirect target) must exist with the #527 form-safety
-    contract and the #863 double-submit guards + expired-link copy."""
+    """#863: the recovery request-link flow — now on the single auth page's
+    login modal (email + forgot-password, POST /auth/v1/recover surface via
+    resetPasswordForEmail) — plus the legacy signin.html pins and the
+    reset-password landing on welcome.html (recovery-link redirect target).
+    #527 form-safety contract + #863 double-submit guards + expired-link
+    copy must hold."""
+    # The LIVE surface: auth page login modal carries the forgot-password
+    # entry + login-scoped bucket (#863 separation, #1493).
+    assert 'id="modal-forgot-link"' in SIGNUP
+    assert "modalForgotPassword" in SIGNUP
+    assert "resetPasswordForEmail" in SIGNUP
+    assert "LOGIN_RATE_LIMIT_KEY" in SIGNUP  # login bucket ≠ signup bucket
+    # Legacy signin.html pins (file retained for static contract).
     assert 'id="forgot-link"' in SIGNIN
     assert 'id="recovery-form"' in SIGNIN
     assert 'id="btn-recovery"' in SIGNIN

@@ -16,11 +16,14 @@
 #    redirect rules.
 
 # /auth is served by the middleware (functions/_middleware.ts — it owns
-# the URL on every host, rewriting to the /signup asset). /signup itself
-# stays a redirect-free legacy alias of the same page (clean-URL resolution
-# serves signup.html; the canonical tag points at /auth, so SEO
+# the URL on every host, rewriting to the /signup asset). /signup and its
+# variants stay a redirect-free legacy alias of the same page (clean-URL
+# resolution serves signup.html; the canonical tag points at /auth, so SEO
 # consolidates). /signin and its variants 301 to /auth — the old standalone
-# login screen is gone:
+# login screen is gone. Trailing-slash variants are pinned 301s (the file's
+# standardization contract; Pages' built-in 308s are not relied on):
+/auth/   /auth  301
+/signup/  /signup  301
 /signin   /auth  301
 /signin/  /auth  301
 /signin.html  /auth  301

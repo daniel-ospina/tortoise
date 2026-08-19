@@ -625,7 +625,7 @@
     <!-- Error state -->
     <div id="error-state" class="error-state hidden" role="alert">
       <p id="error-message">Something went wrong during provisioning.</p>
-      <p><a href="/auth">Try signing up again</a> · <a href="mailto:hello@premiselabs.co">Contact support</a></p>
+      <p><a href="https://app.premiselabs.co">Go to dashboard</a> · <a href="mailto:hello@premiselabs.co">Contact support</a></p>
     </div>
 
     <!-- Success state -->
@@ -950,10 +950,14 @@ you up to 6 yes/no questions and set up your Tortoise memory.
 
       if (!session) {
         // Single auth page at /auth — no session here means the visitor
-        // hasn't authed yet (or the confirmation link is stale); send them
-        // to the one auth screen instead of dead-ending on this post-auth
-        // page. Recovery landings are handled earlier (recoveryMode).
-        window.location.href = "/auth";
+        // hasn't authed yet (or the callback is slow). Send them to the one
+        // auth screen instead of dead-ending on this post-auth page.
+        // PRESERVE search + hash: welcome.html is the OAuth/email-confirmation
+        // callback target (#1224 state-expiry lands as ?error=…, which the
+        // /auth banner renders; supabase-js consumes #access_token=… on the
+        // destination to complete the session). Recovery landings are
+        // handled earlier (recoveryMode).
+        window.location.href = "/auth" + window.location.search + window.location.hash;
         return;
       }
 

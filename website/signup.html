@@ -181,6 +181,10 @@
     .modal-close:hover { color: var(--accent, #06b6d4) !important; }
     .modal .form-group { margin-bottom: 0.75rem; }
     .modal .error { margin-bottom: 0.75rem; }
+    .modal .modal-recovery { margin-top: 0.6rem; font-size: 12px; text-align: center; }
+    .modal .modal-recovery a { color: var(--accent, #06b6d4); text-decoration: none; }
+    .modal .modal-recovery a:hover { text-decoration: underline; }
+    .modal #modal-note { margin-top: 0.5rem; text-align: center; }
 
     .btn-provider {
       display: flex;
@@ -371,7 +375,7 @@
       <a href="https://tortoise.premiselabs.co/">Product</a>
       <a href="/docs">Docs</a>
     </nav>
-    <a class="login" href="/auth">Login</a>
+    <a class="login" href="/auth" onclick="setAuthMode(false); return false;">Login</a>
   </div>
 
   <div class="container">
@@ -489,6 +493,8 @@
           </div>
           <div id="modal-error" class="error" role="alert"></div>
           <button type="submit" class="btn-submit" id="btn-modal-login">Log in</button>
+          <p class="modal-recovery"><a href="#" id="modal-forgot-link" onclick="modalForgotPassword(event)">Forgot password?</a></p>
+          <p id="modal-note" class="dim small" role="status"></p>
         </form>
       </div>
     </div>
@@ -650,11 +656,17 @@
 
     // Single auth page at /auth — a visitor who is ALREADY signed in is
     // bounced to the dashboard/welcome (claim routing honored) instead of
-    // seeing the login card.
+    // seeing the login card. #1224: an OAuth state-expiry landing (?error=…)
+    // must show the banner, NOT bounce — the failed attempt is exactly the
+    // audience the banner exists for (and the bounced redirect would mask
+    // the failure).
     if (supabaseClient) {
       supabaseClient.auth.getSession().then(function (r) {
         if (r && r.data && r.data.session) {
-          window.location.href = claimRedirectTarget();
+          var p = new URLSearchParams(window.location.search);
+          if (!p.get("error") && !p.get("error_code")) {
+            window.location.href = claimRedirectTarget();
+          }
         }
       }).catch(function () { /* best-effort */ });
     }
@@ -775,6 +787,81 @@
     let rateLimitUntil = 0;      // in-memory mirror — the lockout still holds when sessionStorage is unavailable (#801 code-review)
     let rateLimitTier = "short"; // in-memory tier mirror — copy stays correct when storage is cleared mid-lockout (P4)
     let resendCooldownUntil = 0; // #527 60s resend cooldown (shared bucket, #801)
+
+    // ── LOGIN-surface lockout bucket (#863 separation, #1493) ──────────────
+    // The login surface (email modal + forgot-password) keeps its OWN bucket
+    // (tortoise_signin_* — migrated from the retired signin.html) so a login
+    // throttle can never disable the signup form, and a signup 429 (project-
+    // wide email bucket, 1h) can't block login. #863 deliberately separated
+    // the two surfaces; the #1490-era modal shared the signup keys.
+    const LOGIN_RATE_LIMIT_KEY = "tortoise_signin_rate_limited_until";
+    const LOGIN_RATE_LIMIT_TIER_KEY = "tortoise_signin_rate_limit_tier";
+    let loginRateLimitUntil = 0;
+    let loginRateLimitTier = "short";
+    let loginRateLimitTimer = null;
+
+    function loginRateLimitRemainingMs() {
+      try {
+        const stored = parseInt(sessionStorage.getItem(LOGIN_RATE_LIMIT_KEY) || "0", 10);
+        const until = Number.isFinite(stored) ? Math.max(stored, loginRateLimitUntil) : loginRateLimitUntil;
+        return Math.max(0, until - Date.now());
+      } catch (e) { return Math.max(0, loginRateLimitUntil - Date.now()); }
+    }
+
+    function setLoginRateLimitLockout(error) {
+      const ms = isEmailBucketError(error) ? RATE_LIMIT_LOCKOUT_MS : SHORT_RATE_LIMIT_LOCKOUT_MS;
+      loginRateLimitUntil = Math.max(loginRateLimitUntil, Date.now() + ms);
+      loginRateLimitTier = (loginRateLimitTier === "email" || isEmailBucketError(error)) ? "email" : "short";
+      try {
+        const existing = parseInt(sessionStorage.getItem(LOGIN_RATE_LIMIT_KEY) || "0", 10);
+        const until = Math.max(Number.isFinite(existing) ? existing : 0, loginRateLimitUntil);
+        sessionStorage.setItem(LOGIN_RATE_LIMIT_KEY, String(until));
+        sessionStorage.setItem(LOGIN_RATE_LIMIT_TIER_KEY, loginRateLimitTier);
+      } catch (e) {}
+      applyLoginRateLimitLockout();
+    }
+
+    function loginRateLimitMessage() {
+      if (loginRateLimitRemainingMs() <= 0) return "";
+      let tier = loginRateLimitTier;
+      try { tier = sessionStorage.getItem(LOGIN_RATE_LIMIT_TIER_KEY) || tier; } catch (e) {}
+      if (tier === "email") return EMAIL_BUCKET_RATE_LIMIT_COPY;
+      return "Too many attempts from this network. Please try again in a minute.";
+    }
+
+    function applyLoginRateLimitLockout() {
+      if (loginRateLimitTimer) { clearInterval(loginRateLimitTimer); loginRateLimitTimer = null; }
+      const btn = document.getElementById("btn-modal-login");
+      const update = function () {
+        const ms = loginRateLimitRemainingMs();
+        if (ms <= 0) {
+          if (btn && btn.dataset.originalLabel) {
+            btn.textContent = btn.dataset.originalLabel;
+            delete btn.dataset.originalLabel;
+          }
+          if (btn) btn.disabled = false;
+          loginRateLimitTier = "short";
+          try { sessionStorage.removeItem(LOGIN_RATE_LIMIT_TIER_KEY); } catch (e) {}
+          if (loginRateLimitTimer) { clearInterval(loginRateLimitTimer); loginRateLimitTimer = null; }
+          return;
+        }
+        const totalSec = Math.max(0, Math.floor(ms / 1000));
+        const label = "Try again in "
+          + String(Math.floor(totalSec / 60)).padStart(2, "0") + ":"
+          + String(totalSec % 60).padStart(2, "0");
+        if (btn) {
+          if (!btn.dataset.originalLabel && btn.textContent.trim()) {
+            btn.dataset.originalLabel = btn.textContent;
+          }
+          btn.textContent = label;
+          btn.disabled = true;
+        }
+      };
+      update();
+      if (loginRateLimitRemainingMs() > 0) loginRateLimitTimer = setInterval(update, 1000);
+    }
+    // On load: honor a persisted login lockout (modal button countdown).
+    if (loginRateLimitRemainingMs() > 0) applyLoginRateLimitLockout();
 
     function isEmailBucketError(error) {
       if (!error) return false;
@@ -1281,6 +1368,7 @@
       document.getElementById("email-login-modal").classList.remove("hidden");
       document.body.style.overflow = "hidden";
       document.getElementById("modal-error").classList.remove("visible");
+      document.getElementById("modal-note").textContent = "";
       document.getElementById("modal-email").focus();
     }
 
@@ -1346,19 +1434,19 @@
       const email = document.getElementById("modal-email").value.trim();
       const password = document.getElementById("modal-password").value;
       if (!email || !password) { showModalError("Enter your email and password."); modalLoginInFlight = false; return; }
-      if (rateLimitRemainingMs() > 0) { showModalError(rateLimitMessage()); modalLoginInFlight = false; return; }
+      if (loginRateLimitRemainingMs() > 0) { showModalError(loginRateLimitMessage()); applyLoginRateLimitLockout(); modalLoginInFlight = false; return; }
       document.getElementById("modal-error").classList.remove("visible");
+      document.getElementById("modal-note").textContent = "";
       const btn = document.getElementById("btn-modal-login");
       btn.disabled = true;
       try {
         const { data, error } = await supabaseClient.auth.signInWithPassword({ email: email, password: password });
         if (error) {
-          // Same two-tier lockout discipline as signUpWithEmail (#801/#863):
-          // a rate-limited login sets the lockout (and its copy) instead of
-          // leaking the raw engine message through loginErrorMessage.
+          // Two-tier lockout on the LOGIN bucket (#863 separation) — a login
+          // rate-limit must not disable the signup form, and vice versa.
           if (isRateLimitError(error)) {
-            setRateLimitLockout(error);
-            showModalError(isEmailBucketError(error) ? humanizeAuthError(error) : rateLimitMessage());
+            setLoginRateLimitLockout(error);
+            showModalError(isEmailBucketError(error) ? humanizeAuthError(error) : loginRateLimitMessage());
           } else {
             showModalError(loginErrorMessage(error));
           }
@@ -1371,6 +1459,36 @@
       } finally {
         modalLoginInFlight = false;
         btn.disabled = false;
+      }
+    }
+
+    // Forgot-password from the login modal — resetPasswordForEmail with the
+    // same two-tier login-bucket discipline (#863). The reset link returns
+    // to /welcome.html (recoveryMode landing, #863).
+    async function modalForgotPassword(event) {
+      if (event) event.preventDefault();
+      const email = document.getElementById("modal-email").value.trim();
+      if (!email) { showModalError("Enter your email address first — we'll send the reset link there."); return; }
+      if (loginRateLimitRemainingMs() > 0) { showModalError(loginRateLimitMessage()); applyLoginRateLimitLockout(); return; }
+      document.getElementById("modal-error").classList.remove("visible");
+      document.getElementById("modal-note").textContent = "";
+      try {
+        const { error } = await supabaseClient.auth.resetPasswordForEmail(email, {
+          redirectTo: window.location.origin + WELCOME_URL,
+        });
+        if (error) {
+          if (isRateLimitError(error)) {
+            setLoginRateLimitLockout(error);
+            showModalError(isEmailBucketError(error) ? humanizeAuthError(error) : loginRateLimitMessage());
+          } else {
+            showModalError(humanizeAuthError(error));
+          }
+          return;
+        }
+        const note = document.getElementById("modal-note");
+        note.textContent = "Reset link sent — check your inbox (and spam).";
+      } catch (e) {
+        showModalError((e && e.message) || "Something went wrong — try again.");
       }
     }
 

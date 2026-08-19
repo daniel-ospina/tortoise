@@ -100,8 +100,9 @@ export const onRequest: PagesFunction = async (context) => {
   // /auth serves the signup.html asset — the combined Log in / Sign up
   // card. The company-host block above already 301'd /auth onto the
   // tortoise host; on every other host (tortoise, pages.dev previews,
-  // local dev) serve the asset directly. Legacy /signup + /signin (all
-  // variants) are 301'd to /auth via _redirects.
+  // local dev) serve the asset directly. /signin (all variants) is 301'd to
+  // /auth via _redirects; /signup remains a redirect-free alias of the same
+  // page (canonical /auth).
   if (url.pathname === "/auth" || url.pathname === "/auth.html") {
     // Rewrite to the extensionless auth asset, PRESERVING the query string —
     // the #1224 OAuth state-expiry banner reads ?error=… on this page, so a

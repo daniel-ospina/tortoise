@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import uuid
 
@@ -36,12 +37,12 @@ PROMPT_URL = os.environ.get("PROMPT_URL", "https://premiselabs.co/onboarding-pro
 # ── Live/static tests (no auth) ─────────────────────────────────────
 
 
-def test_welcome_page_loads_and_shows_no_session_error(page: Page) -> None:
-    """Without a Supabase session the page must show the error state
-    (loading → 'No active session') — the base contract of the page."""
+def test_welcome_page_no_session_redirects_to_auth(page: Page) -> None:
+    """Without a Supabase session the page must send the visitor to the
+    single auth page (/auth) after the bounded session wait — the
+    no-session contract of the page (single auth surface, #1493)."""
     page.goto(WELCOME_URL, wait_until="domcontentloaded", timeout=30_000)
-    expect(page.locator("#error-state")).not_to_be_hidden(timeout=15_000)
-    expect(page.locator("#error-message")).to_contain_text("No active session")
+    expect(page).to_have_url(re.compile(r"/auth($|\?|#)"), timeout=25_000)
 
 
 def test_onboarding_prompt_serves_markdown(page: Page) -> None:
