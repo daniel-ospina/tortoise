@@ -316,12 +316,42 @@ def test_fast_files_absent_from_halves_reports_coverage_hole():
 
 
 def test_real_workflow_halves_are_consistent():
-    # Regression gate: the committed python-ci.yml halves must never leak a
-    # slow file, carry an unclassified/dead/duplicate entry, or tilt beyond
-    # ±3 — the #1266 rebalance discipline, enforced by --integrity.
-    from tools.ci_selection import (WORKFLOW, TESTS_DIR, parse_matrix_halves,
+    # #1472: the matrix halves are now DERIVED from the manifest (fromJSON) —
+    # the #1266 discipline runs against the derivation. Verify the derived
+    # halves carry every fast file exactly once and tilt is bounded.
+    from tools.ci_selection import (TESTS_DIR, push_legs,
                                     workflow_halves_issues)
-    halves = parse_matrix_halves(WORKFLOW.read_text())
-    assert set(halves) == {"a", "b"}, halves
+    legs = push_legs(load_manifest())
+    halves = {"a": set(legs["half_a"]), "b": set(legs["half_b"])}
     issues = workflow_halves_issues(load_manifest(), halves, TESTS_DIR)
-    assert issues == [], f"real workflow halves drift: {issues}"
+    assert issues == [], f"derived halves drift: {issues}"
+    assert abs(len(halves["a"]) - len(halves["b"])) <= 3, "tilt beyond ±3"
+
+
+def test_push_legs_partitions_every_classified_file():
+    """#1472: every classified file lands in exactly one push leg."""
+    from tools.ci_selection import push_legs, ENV_BROKEN_FILES
+    m = load_manifest()
+    legs = push_legs(m)
+    slow = {f.replace(".py", "") for f in m["slow_files"]}
+    classified = set()
+    for s, files in m["surfaces"].items():
+        classified.update(files)
+    classified.update(m["tier1"])
+    classified.update(m["slow_files"])
+    fast = {f.replace(".py", "") for f in classified if f not in m["slow_files"]}
+    fast |= {f.replace(".py", "") for f in m.get("push_extra", [])}
+    broken = {f.replace(".py", "") for f in ENV_BROKEN_FILES}
+    assert set(legs["half_a"]) | set(legs["half_b"]) == fast - broken
+    assert not (set(legs["half_a"]) & set(legs["half_b"])), "leg overlap"
+    # bench push_extra lands in half b
+    assert any(f.startswith("bench/") for f in legs["half_b"])
+
+
+def test_integrity_no_matrix_drift():
+    """#1472: integrity must pass with the derived matrix (no hardcoded lists)."""
+    from tools.ci_selection import leg_coverage_issues, workflow_matrix_issues, REPO
+    m = load_manifest()
+    assert leg_coverage_issues(m) == []
+    wf = REPO / ".github" / "workflows" / "python-ci.yml"
+    assert workflow_matrix_issues(str(wf), m) == []

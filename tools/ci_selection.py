@@ -27,7 +27,7 @@ import re
 import sys
 from pathlib import Path
 
-SELECTION_FN_VERSION = "1.1.0"
+SELECTION_FN_VERSION = "1.2.0"
 
 REPO = Path(__file__).resolve().parent.parent
 MANIFEST = REPO / "config" / "ci-surfaces.yml"
@@ -232,6 +232,86 @@ def register(manifest_path: Path, tests_dir: Path, surface: str) -> list[str]:
     return register_tests(manifest_path, tests_dir, surface, manifest)
 
 
+# #1472: files excluded from the fast push legs by construction (they cannot
+# run in THIS job — no live redis on 6379 for test_agent_signup; tests/e2e is
+# excluded by construction since unlisted_tests only globs top-level files).
+ENV_BROKEN_FILES = {"test_agent_signup.py"}
+
+
+def push_legs(manifest: dict) -> dict:
+    """#1472: partition every manifest-classified file into exactly one push
+    leg (half_a / half_b / slow / env_broken), parity-split the fast set.
+
+    Single source of truth for the workflow's push matrix: registration in
+    the manifest is sufficient — no manual matrix edit. Returns .py-less
+    names (the workflow's matrix format). push_extra (bench files, not
+    classifiable as top-level surfaces) appends to half b.
+    """
+    slow = set(manifest.get("slow_files", []))
+    classified = set()
+    for s, files in manifest["surfaces"].items():
+        classified.update(files)
+    classified.update(manifest.get("tier1", []))
+    classified.update(slow)
+    fast = sorted(f for f in classified
+                  if f not in slow and f not in ENV_BROKEN_FILES)
+    half_a = fast[0::2]
+    half_b = fast[1::2]
+    for f in manifest.get("push_extra", []):
+        half_b.append(f.replace(".py", ""))
+    strip = lambda xs: sorted(x.replace(".py", "") for x in xs)
+    return {"half_a": strip(half_a), "half_b": strip(half_b),
+            "slow": strip(slow), "env_broken": sorted(ENV_BROKEN_FILES)}
+
+
+def leg_coverage_issues(manifest: dict) -> list[str]:
+    """#1472 reverse drift: every classified file in exactly one push leg."""
+    slow = set(manifest.get("slow_files", []))
+    legs = push_legs(manifest)
+    half_a = {f + ".py" for f in legs["half_a"]}
+    half_b = {f + ".py" for f in legs["half_b"]}
+    fast = half_a | half_b
+    issues = []
+    overlap = fast & slow
+    if overlap:
+        issues.append(f"fast/slow overlap: {sorted(overlap)}")
+    if fast & ENV_BROKEN_FILES:
+        issues.append(f"fast/env-broken overlap: {sorted(fast & ENV_BROKEN_FILES)}")
+    if slow & ENV_BROKEN_FILES:
+        issues.append(f"slow/env-broken overlap: {sorted(slow & ENV_BROKEN_FILES)}")
+    classified = set()
+    for s, files in manifest["surfaces"].items():
+        classified.update(files)
+    classified.update(manifest.get("tier1", []))
+    classified.update(slow)
+    for f in manifest.get("push_extra", []):
+        if f in classified:
+            issues.append(f"push_extra {f} is a classified top-level file (move it into a surface)")
+    for f in sorted(ENV_BROKEN_FILES):
+        if f not in classified:
+            issues.append(f"env-broken {f} is not classified in the manifest")
+    return issues
+
+
+def workflow_matrix_issues(workflow_path: str, manifest: dict) -> list[str]:
+    """#1472: the workflow's matrix rows must come from the derivation, never
+    re-hardcoded lists; ENV_BROKEN_FILES must not be duplicated in env."""
+    import yaml
+    issues = []
+    try:
+        wf = yaml.safe_load(open(workflow_path))
+    except Exception as exc:
+        return [f"cannot parse workflow {workflow_path}: {exc}"]
+    inc = wf.get("jobs", {}).get("test", {}).get("strategy", {}).get("matrix", {}).get("include", [])
+    for row in inc:
+        files = str(row.get("files", ""))
+        if not files.startswith("${{ fromJSON(needs.changes.outputs.matrix_"):
+            issues.append(f"matrix row {row.get('half')} files is not derived (fromJSON matrix_*)")
+    if "ENV_BROKEN_FILES" in wf.get("env", {}):
+        issues.append("workflow env re-defines ENV_BROKEN_FILES (single source is ci_selection.py)")
+    return issues
+
+
 def slow_file_issues(manifest: dict) -> list[str]:
     """#1371: slow_files must be non-empty, classified, and never in tier1.
 
@@ -333,17 +413,32 @@ def main() -> int:
                     choices=["api", "core", "ep", "onboarding", "sdk"],
                     help="surface for --register (default: core — the selection fallback)")
     ap.add_argument("--dry-run", action="store_true", help="preview --register without writing")
+    ap.add_argument("--emit-push-matrix", action="store_true",
+                    help="#1472: print the derived push halves {half_a, half_b}")
     args = ap.parse_args()
 
     manifest = load_manifest()
 
     if args.integrity:
         missing = integrity(manifest)
-        problems = missing + slow_file_issues(manifest)
-        # #1266: the workflow's matrix halves are a second source of truth —
-        # fail closed on slow leaks / unclassified / dead / duplicate / tilt.
-        halves = parse_matrix_halves(WORKFLOW.read_text())
-        problems += workflow_halves_issues(manifest, halves)
+        problems = missing + slow_file_issues(manifest) \
+            + leg_coverage_issues(manifest)
+        # #1472: the matrix rows must come from the selector derivation
+        # (fromJSON) — when they do, the #1266 halves-parse tie check is
+        # subsumed (the derivation guarantees no slow leaks / dupes / dead
+        # files by construction). Legacy hardcoded halves keep the #1266 check.
+        wf_issues = workflow_matrix_issues(
+            REPO / ".github" / "workflows" / "python-ci.yml", manifest)
+        problems += wf_issues
+        if not wf_issues:
+            # derived rows: feed the derived halves so the #1266 tie checks
+            # still run against the ACTUAL execution split.
+            legs = push_legs(manifest)
+            halves = {"a": set(legs["half_a"]), "b": set(legs["half_b"])}
+            problems += workflow_halves_issues(manifest, halves)
+        else:
+            halves = parse_matrix_halves(WORKFLOW.read_text())
+            problems += workflow_halves_issues(manifest, halves)
         if problems:
             print(f"❌ manifest drift: {problems}")
             return 1
@@ -369,6 +464,11 @@ def main() -> int:
             print("   review: config/ci-surfaces.yml — move a file to another surface if the default is wrong.")
         else:
             print("✅ manifest already covers all test files")
+        return 0
+
+    if args.emit_push_matrix:
+        legs = push_legs(manifest)
+        print(json.dumps({"half_a": legs["half_a"], "half_b": legs["half_b"]}))
         return 0
 
     changed = [l.strip() for l in args.changed_files.splitlines() if l.strip()]
