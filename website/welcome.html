@@ -8,41 +8,27 @@
   <meta name="theme-color" content="#060b14">
   <meta name="robots" content="noindex,nofollow">
   <link rel="icon" type="image/png" href="/logo.png">
-  <!-- #1494: hard gate — /welcome is POST-auth. Without a session (and no
-       in-flight OAuth/confirmation token in the hash) replace to /auth
-       IMMEDIATELY — before the provisioning UI paints — and location.replace
-       keeps Back from returning here. Recovery links (#type=recovery) and
-       confirmation/OAuth callbacks (#access_token=…) are exempt (their
-       tokens are consumed below). Falls back to the async session wait. -->
+  <!-- #1225/#1511: shared session bridge + gate helpers — loaded FIRST so
+       the gate's readValidSession is synchronous at gate time. -->
+  <script src="/assets/supabase-session.js"></script>
+  <!-- #1494/#1511: hard gate — /welcome is POST-auth. Without a VALID
+       session (the shared readValidSession enforces strict expiry — the
+       stale-session leak class) replace to /auth IMMEDIATELY, clearing the
+       stale session first so no gate can re-bounce it (loop-safety by
+       construction). location.replace keeps Back from returning here.
+       Recovery links (#type=recovery) and confirmation/OAuth callbacks
+       (#access_token=…) are exempt (their tokens are consumed below). -->
   <script>
     (function () {
       try {
         if (/#(access_token|error|type=)/.test(window.location.hash)) return;
-        // Session can live in the parent-domain cookie (supabase-session.js)
-        // OR the legacy origin-scoped localStorage key (pre-#1225 cohort —
-        // the head gate runs BEFORE migrateLegacySession; also seeds the
-        // welcome-e2e harness). Check both. A corrupt cookie value must fall
-        // through to the localStorage read, not abort the whole gate.
-        var raw = null;
-        try {
-          var m = document.cookie.match(/(?:^|; )sb-tortoise-auth-token=([^;]*)/);
-          if (m) raw = decodeURIComponent(m[1]);
-        } catch (e) { raw = null; }
-        if (raw) {
-          try { raw = JSON.parse(raw); } catch (e) { raw = null; }
-        }
-        if (!raw) {
-          try {
-            var legacy = window.localStorage.getItem("sb-ybetwichurajbfswfeqa-auth-token");
-            if (legacy) raw = JSON.parse(legacy);
-          } catch (e) { raw = null; }
-        }
-        if (!raw || !raw.access_token) {
-          window.location.replace("/auth" + window.location.search + window.location.hash);
-          return;
-        }
-        if (raw.expires_at && raw.expires_at * 1000 <= Date.now()) {
-          window.location.replace("/auth" + window.location.search + window.location.hash);
+        var s = (typeof window.readValidSession === "function") ? window.readValidSession() : null;
+        if (!s) {
+          // Stale/invalid session present → clear it (cookie + legacy keys)
+          // so the /auth gate can't re-bounce it back here.
+          if (typeof window.clearStoredSession === "function") window.clearStoredSession();
+          if (typeof window.bounceToAuth === "function") window.bounceToAuth(window.location.search, window.location.hash);
+          else window.location.replace("/auth" + window.location.search + window.location.hash);
         }
       } catch (e) { /* best-effort — the async session wait below still applies */ }
     })();
@@ -876,9 +862,7 @@ you up to 6 yes/no questions and set up your Tortoise memory.
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
-  <!-- #1225: cross-subdomain session bridge — parent-domain cookie storage so the
-       session parsed here (OAuth/email callback) is visible on app.premiselabs.co. -->
-  <script src="/assets/supabase-session.js"></script>
+  <!-- #1225: the session bridge loads in <head> (before the gate). -->
   <script>
     // ── Configuration ──────────────────────────────────────────────────────
     const SUPABASE_URL = "https://ybetwichurajbfswfeqa.supabase.co";
@@ -1174,10 +1158,18 @@ you up to 6 yes/no questions and set up your Tortoise memory.
 
       // Both attempts failed — humanized message, never raw JSON.
       const status = response ? response.status : null;
+      if (status === 401) {
+        // #1511: the session is stale/invalid (not just missing) — welcome
+        // must never render for unauthenticated users. Strip the callback
+        // hash, clear the stale session (cookie + legacy keys — so /auth's
+        // gate can't re-bounce it), and go to /auth.
+        if (typeof window.clearStoredSession === "function") window.clearStoredSession();
+        if (typeof window.bounceToAuth === "function") window.bounceToAuth();
+        else window.location.replace("/auth");
+        return;
+      }
       showError(
-        status === 401
-          ? "We couldn't verify your session to set up your team. Please sign out and sign in again — or contact support at hello@premiselabs.co."
-          : "We couldn't set up your team automatically. Please refresh and try again — or contact support at hello@premiselabs.co."
+        "We couldn't set up your team automatically. Please refresh and try again — or contact support at hello@premiselabs.co."
       );
     }
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 import uuid
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
@@ -140,6 +141,40 @@ class TestSessionLogin:
         r = _exchange(client, key)
         assert r.status_code == 200, r.text
         assert r.json()["user"]["id"] == _OWNER
+
+    def test_verify_response_without_expires_at_gets_injected(self, client, fake, monkeypatch):
+        """#1511: real GoTrue /verify returns no expires_at (only expires_in) —
+        the server must inject it (epoch seconds) so the client's storeSession
+        strict-validity check accepts the cookie session. Mock-parity pin."""
+        _seed_team(fake)
+        key = _mint_key(fake, created_by=_OWNER)
+
+        def _get(url, **kwargs):
+            return httpx.Response(200, json={"id": _OWNER, "email": "owner@example.com"},
+                                  request=httpx.Request("GET", url))
+
+        def _post(url, **kwargs):
+            if url.endswith("/auth/v1/admin/generate_link"):
+                return httpx.Response(200, json={"hashed_token": "ht-1"},
+                                      request=httpx.Request("POST", url))
+            if url.endswith("/auth/v1/verify"):
+                # NO expires_at — the real GoTrue AccessTokenResponse shape.
+                return httpx.Response(200, json={
+                    "access_token": "at", "refresh_token": "rt",
+                    "expires_in": 3600, "token_type": "bearer",
+                    "user": {"id": _OWNER, "email": "owner@example.com"}},
+                    request=httpx.Request("POST", url))
+            raise AssertionError(f"unexpected POST {url}")
+
+        monkeypatch.setattr(httpx, "get", _get)
+        monkeypatch.setattr(httpx, "post", _post)
+        r = _exchange(client, key)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["expires_in"] == 3600
+        assert body.get("expires_at")
+        now = int(time.time())
+        assert abs(body["expires_at"] - (now + 3600)) < 30
 
     def test_invalid_key_401(self, client, fake):
         r = _exchange(client, "tt_does-not-exist")

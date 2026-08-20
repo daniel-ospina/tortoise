@@ -2923,9 +2923,18 @@ def _gotrue_admin_mint_session(email: str) -> dict:
             f"session token expired or already consumed (HTTP {verify_resp.status_code})"
         )
     try:
-        return verify_resp.json()
+        session = verify_resp.json()
     except ValueError:
         raise RuntimeError("session verification returned a non-JSON body")
+    # supabase-js sessions carry expires_at (epoch seconds); GoTrue's
+    # AccessTokenResponse only ships expires_in, and the client stores this
+    # JSON DIRECTLY in the parent-domain cookie (no supabase-js round trip to
+    # compute it) — inject it so readValidSession (strict: missing/past
+    # expires_at = invalid) accepts the stored session.
+    expires_in = session.get("expires_in")
+    if session and expires_in and not session.get("expires_at"):
+        session["expires_at"] = int(time.time()) + int(expires_in)
+    return session
 
 
 @app.post("/v1/signup/email", response_model=EmailSignupResponse)
