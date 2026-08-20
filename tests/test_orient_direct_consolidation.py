@@ -59,6 +59,19 @@ def mcp_sdk(sdk):
     mcp_mod.sdk = orig_sdk
 
 
+def _strip_timing(d: dict) -> dict:
+    """Strip timing-sensitive fields (uptime, db.latency_ms) before a
+    cross-call equality — #1517: metrics() measures wall-clock at call time,
+    so two calls land ms apart and byte-equality flakes under load."""
+    if not isinstance(d, dict):
+        return d
+    out = {k: v for k, v in d.items() if k not in ("uptime", "latency_ms")}
+    if isinstance(out.get("db"), dict):
+        out["db"] = {k: v for k, v in out["db"].items()
+                     if k != "latency_ms"}
+    return out
+
+
 def _seed_graph(sdk: TortoiseSDK) -> dict:
     """Deterministic seed: points, source, tag, entity, event, operator."""
     p1 = sdk.create_point("statement", "alpha claim", authoredBy="tester")
@@ -152,7 +165,10 @@ class TestOverviewSections:
     def test_section_health_matches_legacy(self, sdk, mcp_sdk):
         from tortoise.mcp_server import tortoise_health, tortoise_overview
         result = tortoise_overview(section="health")
-        assert result == tortoise_health()
+        # #1517: db.latency_ms is a wall-clock measurement taken at call time
+        # — the two calls land ms apart, so strip it before comparing (the
+        # contract is the health shape + ok/error semantics, not the exact ms).
+        assert _strip_timing(result) == _strip_timing(tortoise_health())
         assert set(result) >= {"status", "falkordb", "graph_size"}
 
     def test_section_status_matches_legacy(self, sdk, mcp_sdk):
@@ -210,10 +226,16 @@ class TestOverviewDefaultSummary:
         combined = tortoise_overview()
 
         def _stable(d):
-            # uptime is time-varying (increases between calls) — strip it so
-            # the comparison is deterministic; everything else is stable.
-            if isinstance(d, dict) and "uptime" in d:
-                d = {k: v for k, v in d.items() if k != "uptime"}
+            # uptime + db.latency_ms are time-varying (increase/measured
+            # between calls) — strip them so the comparison is deterministic;
+            # everything else is stable. #1517: latency_ms is a wall-clock
+            # probe at call time, so byte-equality on it flakes under load.
+            if isinstance(d, dict):
+                d = {k: v for k, v in d.items()
+                     if k not in ("uptime", "latency_ms")}
+                if isinstance(d.get("db"), dict):
+                    d["db"] = {k: v for k, v in d["db"].items()
+                                if k != "latency_ms"}
             return d
 
         for sec in ("taxonomy", "structure", "pointkinds", "tags", "sources",
