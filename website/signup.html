@@ -8,45 +8,25 @@
   <meta name="theme-color" content="#060b14">
   <link rel="canonical" href="https://tortoise.premiselabs.co/auth">
   <link rel="icon" type="image/png" href="/logo.png">
-  <!-- #1494: hard gate — a visitor who is ALREADY signed in must reach their
-       destination WITHOUT seeing the auth card flash. Synchronous cookie
-       check (the supabase-js session lives in the .premiselabs.co
-       parent-domain cookie, supabase-session.js format:
-       encodeURIComponent(JSON session)) runs before first paint, and
-       location.replace keeps Back from returning here. Skipped when
-       ?error/?error_code present — the #1224 OAuth state-expiry banner must
-       render. Falls back to the async getSession bounce below. -->
+  <!-- #1225: cross-subdomain session bridge — loaded in <head> BEFORE the
+       gate below (the gate's readValidSession is synchronous at gate time). -->
+  <script src="/assets/supabase-session.js"></script>
+  <!-- #1494: hard gate — a visitor with a VALID session must reach their
+       destination WITHOUT seeing the auth card flash. The shared
+       readValidSession enforces STRICT validity (missing/past expires_at =
+       invalid — the stale-session leak class); location.replace keeps Back
+       from returning here. Skipped when ?error/?error_code present — the
+       #1224 OAuth state-expiry banner must render. Falls back to the async
+       getSession bounce below. -->
   <script>
     (function () {
       try {
         var p = new URLSearchParams(window.location.search);
         if (p.get("error") || p.get("error_code")) return;
-        // Session can live in the parent-domain cookie (supabase-session.js)
-        // OR the legacy origin-scoped localStorage key (pre-#1225 cohort —
-        // the head gate runs BEFORE migrateLegacySession). Check both. A
-        // corrupt cookie value must fall through to the localStorage read,
-        // not abort the whole gate.
-        var raw = null;
-        try {
-          var m = document.cookie.match(/(?:^|; )sb-tortoise-auth-token=([^;]*)/);
-          if (m) raw = decodeURIComponent(m[1]);
-        } catch (e) { raw = null; }
-        if (raw) {
-          try { raw = JSON.parse(raw); } catch (e) { raw = null; }
-        }
-        if (!raw) {
-          try {
-            var legacy = window.localStorage.getItem("sb-ybetwichurajbfswfeqa-auth-token");
-            if (legacy) raw = JSON.parse(legacy);
-          } catch (e) { raw = null; }
-        }
-        if (!raw || !raw.access_token) return;
-        // Same predicate as the welcome gate (missing expires_at treated as
-        // valid; strictly future).
-        if (!raw.expires_at || raw.expires_at * 1000 > Date.now()) {
-          var claim = /(?:^|; )tt_claim_pending=/.test(document.cookie);
-          window.location.replace(claim ? "https://app.premiselabs.co/?claim=1" : window.location.origin + "/welcome.html");
-        }
+        var s = (typeof window.readValidSession === "function") ? window.readValidSession() : null;
+        if (!s) return;  // no VALID session → stay on the auth card
+        var claim = /(?:^|; )tt_claim_pending=/.test(document.cookie);
+        window.location.replace(claim ? "https://app.premiselabs.co/?claim=1" : window.location.origin + "/welcome.html");
       } catch (e) { /* best-effort — the async bounce below still applies */ }
     })();
   </script>
@@ -199,6 +179,10 @@
       padding: 0 !important; width: auto !important;
     }
     .modal-close:hover { color: var(--accent, #06b6d4) !important; }
+    .last-used {
+      font-size: 11px; font-weight: 400; color: var(--accent, #06b6d4);
+      margin-left: 0.5rem; opacity: 0.9;
+    }
     .modal .form-group { margin-bottom: 0.75rem; }
     .modal .error { margin-bottom: 0.75rem; }
     .modal .modal-recovery { margin-top: 0.6rem; font-size: 12px; text-align: center; }
@@ -540,9 +524,7 @@
        dead form — the historical trigger for the credential-echo bug. -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"
           onerror="(function(){var e=document.getElementById('error');if(e){e.textContent='Signup is temporarily unavailable (script blocked). Please try again later.';e.classList.add('visible');}})()"></script>
-  <!-- #1225: cross-subdomain session bridge — parent-domain cookie storage so the
-       session created here is visible on app.premiselabs.co (dashboard). -->
-  <script src="/assets/supabase-session.js"></script>
+  <!-- #1225: the session bridge now loads in <head> (before the gate). -->
   <script>
     // ── Configuration ──────────────────────────────────────────────────────
     const SUPABASE_URL = "https://ybetwichurajbfswfeqa.supabase.co";
@@ -693,6 +675,11 @@
     if (supabaseClient) {
       supabaseClient.auth.getSession().then(function (r) {
         if (r && r.data && r.data.session) {
+          // #1511: strict validity — missing/past expires_at is NOT authed
+          // (a presence-only bounce here loops /auth↔welcome with the
+          // welcome gate's validity check).
+          var s = r.data.session;
+          if (!s.expires_at || s.expires_at * 1000 <= Date.now()) return;
           var p = new URLSearchParams(window.location.search);
           if (!p.get("error") && !p.get("error_code")) {
             window.location.href = claimRedirectTarget();
@@ -1079,6 +1066,8 @@
     let modalWasOpened = false;  // focus restore only after a real open (a11y)
     let apiKeyModalWasOpened = false;  // same, for the API-key modal
 
+    applyLastUsedPills();  // #1511/D3: "Last used" on the used-last option
+
     // #1493: ?mode=login lands on the Log in tab — the topbar "Login"
     // buttons on docs/signin/invite-accept and the signInAndGo recovery
     // path point here. MUST run after `let authIsSignup` above — setAuthMode
@@ -1114,6 +1103,7 @@
       document.getElementById("label-email").textContent = modeWord + " with email";
       document.getElementById("email-modal-title").textContent = modeWord + " with email";
       document.getElementById("apikey-modal-title").textContent = "Log in with API key";
+      applyLastUsedPills();  // #1511/D3: labels were rewritten — re-pin the pill
       // Forgot-password is a login-mode affordance (new accounts have no
       // password to reset).
       document.getElementById("modal-forgot-link").style.display = isSignup ? "none" : "";
@@ -1175,11 +1165,13 @@
       el.classList.add("visible");
     }
 
-    // #1494: API-key login — paste an existing key (agents / anon bootstrap)
-    // in a focused modal. The key is stored (origin-scoped localStorage) and
-    // routes to the dashboard, which resolves the team + provisions an
-    // authenticated session (claim path #1082 for anon tt_ keys). Login-bucket
-    // discipline (#863) — API-key login never sends email.
+    // #1494/#1511: API-key login — paste an existing key (agents / anon
+    // bootstrap) in a focused modal. #1511: the key is exchanged for a REAL
+    // session server-side (POST /v1/session/login) — the session lands in
+    // the parent-domain cookie via supabase-session.js, so the dashboard is
+    // authenticated WITHOUT the raw key crossing origins (the old
+    // tortoise-origin localStorage write was SOP-invisible to the dashboard
+    // → the infinite origin bounce). Login-bucket discipline (#863).
     async function loginWithApiKey(event) {
       if (event) event.preventDefault();
       const key = document.getElementById("apikey-input").value.trim();
@@ -1191,13 +1183,123 @@
       }
       document.getElementById("apikey-modal-error").classList.remove("visible");
       setLoading(true);
+      // #1511 (code-review P2): the buttons STAY disabled + spun across the
+      // exchange await (a double-click/Enter would otherwise fire duplicate
+      // exchanges → duplicate GoTrue mints + 503s and double rate-bucket
+      // consumption). Re-enabled on every non-navigation terminal path.
+      var reenable = function () { setLoading(false); };
       try {
-        localStorage.setItem("tortoise_api_key", key);
+        const resp = await fetch(SIGNUP_API_URL + "/v1/session/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ api_key: key }),
+        });
+        if (resp.status === 429) {
+          // The exchange bucket is 5/hr/IP server-side (Retry-After ~1h) —
+          // surface the hour-scale copy, NOT the 60s email-bucket lockout
+          // (which would send the user into a retry-429 loop). The bucket
+          // separation (#863) is kept: this 429 is never fed into the
+          // email-bucket lockout.
+          var retryAfter = 3600;
+          try { retryAfter = parseInt(resp.headers.get("Retry-After") || "", 10) || 3600; } catch (e) {}
+          var mins = Math.max(1, Math.ceil(retryAfter / 60));
+          showApiKeyModalError("Too many sign-in attempts from this network — try again in about " + mins + " minutes.");
+          reenable();
+          return;
+        }
+        if (resp.status === 502 || resp.status === 503) {
+          showApiKeyModalError("Sign-in is temporarily unavailable — try again in a moment.");
+          reenable();
+          return;
+        }
+        if (!resp.ok) {
+          let detail = {};
+          try { detail = (await resp.json()).detail || {}; } catch (e) {}
+          const code = detail.error_code || "";
+          if (code === "ANON_TEAM_NO_OWNER") {
+            // #1511/D2: this key belongs to an unclaimed team — funnel to the
+            // dashboard claim card (the raw key never crosses origins; the
+            // user re-pastes it there).
+            setClaimPendingMarker();
+            window.location.href = "https://app.premiselabs.co/?claim=1";
+            return;
+          }
+          if (code === "KEY_NOT_USER_MINTED") {
+            showApiKeyModalError("This key can't be used to sign in — mint a new key in the dashboard or use GitHub/Google.");
+            reenable();
+            return;
+          }
+          if (code === "ACCOUNT_MISSING") {
+            showApiKeyModalError("Your account couldn't be found — contact support.");
+            reenable();
+            return;
+          }
+          if (code === "dashboard_login_disabled") {
+            showApiKeyModalError("API-key login is disabled for this team — sign in with GitHub or Google.");
+            reenable();
+            return;
+          }
+          showApiKeyModalError("Invalid API key.");
+          reenable();
+          return;
+        }
+        const session = await resp.json();
+        if (typeof window.storeSession !== "function") {
+          showApiKeyModalError("Sign-in is temporarily unavailable.");
+          reenable();
+          return;
+        }
+        // Store the session DIRECTLY in the parent-domain cookie (auth.
+        // setSession does a network round trip — refresh/getUser — which is
+        // neither instant nor reliable here). storeSession returns false when
+        // the write didn't take (cookie-blocked browser) → clear error.
+        if (!window.storeSession(session)) {
+          showApiKeyModalError("Sign-in needs cookies enabled — please enable cookies and try again.");
+          reenable();
+          return;
+        }
+        try { window.setLastAuthMethod("apikey"); } catch (e) {}
         window.location.href = DASHBOARD_URL;
       } catch (e) {
         setLoading(false);
-        showApiKeyModalError("Could not store your key — try again.");
+        showApiKeyModalError("Sign-in failed — check your connection and try again.");
       }
+    }
+
+    // #1511/D2: set the non-secret tt_claim_pending marker (parent-domain
+    // cookie) so the dashboard claim card renders after the anon funnel.
+    function setClaimPendingMarker() {
+      try {
+        var expires = new Date(Date.now() + 3600 * 1000).toUTCString();
+        var domain = (window.location.hostname === "premiselabs.co"
+                      || window.location.hostname.endsWith(".premiselabs.co"))
+          ? "; Domain=.premiselabs.co" : "";
+        document.cookie = "tt_claim_pending=1" + domain +
+          "; Path=/; SameSite=Lax" + (window.location.protocol === "https:" ? "; Secure" : "") +
+          "; Expires=" + expires;
+      } catch (e) { /* best-effort */ }
+    }
+
+    // #1511/D3: "Last used" pills on the four option buttons.
+    function applyLastUsedPills() {
+      try {
+        var m = (typeof window.getLastAuthMethod === "function") ? window.getLastAuthMethod() : "";
+        var ids = { github: "label-github", google: "label-google",
+                    apikey: "label-apikey", email: "label-email" };
+        for (var k in ids) {
+          var label = document.getElementById(ids[k]);
+          if (!label) continue;
+          var old = label.querySelector(".last-used");
+          if (old) old.remove();
+          if (m === k) {
+            var span = document.createElement("span");
+            span.className = "last-used";
+            span.setAttribute("aria-label", "Last used");
+            span.textContent = "Last used";
+            label.appendChild(span);
+          }
+        }
+      } catch (e) { /* best-effort */ }
     }
 
     // ── OAuth sign in ──────────────────────────────────────────────────────
@@ -1223,6 +1325,7 @@
         // the provider redirect navigates the page away before any conversion
         // event could be pushed/reliably attributed to the user id.
         if (data?.url) {
+          try { window.setLastAuthMethod(provider); } catch (e) {}
           window.location.href = data.url;
         }
       } catch (err) {
@@ -1683,6 +1786,7 @@
           return;
         }
         if (data?.user) pushSignupEvents(data.user);
+        try { window.setLastAuthMethod("email"); } catch (e) {}
         window.location.href = WELCOME_URL;
       } catch (e) {
         showError((e && e.message) || "Something went wrong — try again.");

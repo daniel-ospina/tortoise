@@ -27,6 +27,11 @@ PAGES = [
     REPO_ROOT / "website" / "signup.html",
     REPO_ROOT / "website" / "signin.html",
     REPO_ROOT / "website" / "welcome.html",
+    # #1511: the dashboard loads the shared script + gate helpers (its gate
+    # never calls createTortoiseSupabaseClient — the client is built in
+    # main.jsx — so the wiring assertion below relaxes the factory check for
+    # this entry).
+    REPO_ROOT / "website" / "apps" / "dashboard" / "index.html",
 ]
 
 
@@ -111,6 +116,38 @@ def test_all_tortoise_pages_wire_the_shared_bridge() -> None:
         assert 'src="/assets/supabase-session.js"' in text, (
             f"{page.name}: missing shared bridge script tag"
         )
-        assert "createTortoiseSupabaseClient(" in text, (
-            f"{page.name}: createClient not routed through the shared factory"
-        )
+        if page.name == "index.html":
+            # #1511 dashboard variant: its gate uses the shared helpers, not
+            # the factory (the client is built in main.jsx).
+            assert "readValidSession(" in text,                 f"{page.name}: dashboard gate must use readValidSession"
+        else:
+            assert "createTortoiseSupabaseClient(" in text, (
+                f"{page.name}: createClient not routed through the shared factory"
+            )
+
+
+# ── #1511 shared gate helpers ────────────────────────────────────────────────
+
+
+def test_shared_helpers_present() -> None:
+    """The #1511 auth-gate helpers (readValidSession/clearStoredSession/
+    getLastAuthMethod/setLastAuthMethod/bounceToAuth) exist on the shared
+    bridge + window, with the strict validity predicate."""
+    text = _read(SHARED)
+    for fn in ("readValidSession", "clearStoredSession",
+               "getLastAuthMethod", "setLastAuthMethod", "bounceToAuth",
+               "storeSession"):
+        assert f"var {fn} = function" in text, f"missing helper {fn}"
+        assert f"window.{fn} = {fn}" in text, f"missing window export {fn}"
+    # Strict validity: missing OR past expires_at = INVALID (presence ≠ auth).
+    assert "!s.expires_at || s.expires_at * 1000 <= Date.now()" in text
+
+
+def test_dashboard_public_copy_is_byte_identical() -> None:
+    """The dashboard loads the shared script from its own public/ copy (the
+    dashboard is a separate Pages project — dist/ only deploys). It must stay
+    byte-identical to the shared file (Task 5 asserts the built dist copy)."""
+    public_copy = REPO_ROOT / "website" / "apps" / "dashboard" / "public" / "assets" / "supabase-session.js"
+    assert public_copy.exists(), "missing dashboard public/ copy"
+    assert public_copy.read_text(encoding="utf-8") == _read(SHARED), \
+        "dashboard public/ copy drifted from the shared file"

@@ -71,6 +71,8 @@ surfaces:
   - test_session_indexer_ollama.py
   - test_session_key.py
   - test_session_key_http.py
+  - test_session_login.py
+  - test_session_login_helpers.py
   - test_session_semantic_search.py
   - test_subscriptions.py
   - test_telegram_push.py

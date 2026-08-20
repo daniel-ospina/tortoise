@@ -1,6 +1,6 @@
 ---
 title: "Auth architecture — standard patterns vs Tortoise (research + audit)"
-type: research
+type: operations
 domain: operations
 doc_status: live
 created: 2026-08-19
@@ -134,3 +134,95 @@ the token regardless of which subdomain presented it.
 4. **Stale legacy localStorage sessions** after a dashboard sign-out are a
    narrow transient (migrateLegacySession clears them on first load) — no
    security boundary (server-side revocation governs).
+
+## 5. #1511 — auth unification: one page, strict validity, key→session exchange
+
+Issue #1511 (2026-08-19/20) closed the remaining gaps: the dashboard could
+strand users on a key-only card, `/auth` lacked "Last used" labels, browser
+API-key login was broken (a cross-origin localStorage write the dashboard
+couldn't read), and stale sessions leaked into `/welcome`. What changed:
+
+### 5.1 The dashboard never shows auth UI
+
+- The embedded key-only card and its handlers/state are **gone**. The
+  dashboard's only `!authed` surface is the **claim-paste** screen
+  (paste `tt_` → OAuth → claim), reachable exclusively by genuine
+  claim-intent (`tt_claim_key` sessionStorage, `tt_claim_pending` cookie,
+  or `?claim=1`).
+- Everything else redirects **instantly** to `/auth` — the synchronous
+  head gate (shared `readValidSession`) + the mount effect's
+  origin-aware `bounceToAuth` (`location.replace`, Back-proof).
+- The old "stored key = credential" exemption is gone: a stored
+  `tortoise_api_key` is a "Last used" *hint* on `/auth`, never a
+  dashboard credential.
+
+### 5.2 `/auth` is the only login surface, with "Last used"
+
+- Four options on one card: **GitHub, Google, API key, email/password**
+  (email via modal). A non-secret parent-domain cookie
+  (`tt_last_auth_method`, one-time migration from the dashboard's legacy
+  `tortoise_last_auth_method`) labels the option used last.
+- Both gates (synchronous head + async `getSession` bounce) enforce
+  **strict validity** — `access_token` present **and** `expires_at`
+  present + future. Missing/past `expires_at` = not authed (the
+  presence-over-validity class of bug is gone).
+
+### 5.3 Browser API-key login: the server-side exchange
+
+The raw `tt_` key never crosses origins (it can't ride a cookie — it's a
+graph credential; it can't be written cross-origin — SOP). Instead:
+
+1. `/auth` pastes the key → `POST /v1/session/login` (JSON body) →
+   the server validates it via the normal key-resolution path (parity
+   with `/v1/team`), applies a **forced** dashboard-key-login gate, and
+   mints a real Supabase session **server-side**: GoTrue admin
+   `generate_link {type:magiclink}` (no email is sent) + service-role
+   `/verify` → the full `AccessTokenResponse` (+ injected `expires_at`,
+   which GoTrue's `/verify` does not ship).
+2. The mint target is the key's **creator** (an active team member — no
+   member-key escalation). `created_by`-attribution was fixed so
+   dashboard-minted keys record the session user's UUID; "api"/NULL
+   creators are 403 `KEY_NOT_USER_MINTED`; ownerless (anon) teams funnel
+   to the dashboard claim flow (`tt_claim_pending` + `?claim=1`).
+3. The client stores the returned session **directly into the parent-domain
+   cookie** (supabase-js `auth.setSession` does a network round trip — not
+   instant, not mockable), verifies the write (`storeSession` →
+   `readValidSession`), sets the last-used marker, and lands on the
+   dashboard.
+4. Guards: per-IP rate-limit bucket (5/hr, real client IP), audit
+   `session_mint`, post-verify membership backstop (TOCTOU), distinct
+   error codes (`ANON_TEAM_NO_OWNER`, `KEY_NOT_USER_MINTED`,
+   `ACCOUNT_MISSING`, `dashboard_login_disabled`), 502/503 transient
+   (never fed into the login lockout bucket).
+
+### 5.4 Welcome never renders unauthenticated
+
+- The head gate + `waitForSession` use strict validity. A provisioning
+  **401** (stale/invalid session) now strips the callback hash, clears the
+  session (cookie + legacy keys — so `/auth`'s gate can't re-bounce it),
+  and redirects to `/auth`. Non-401 failures keep the retry-once +
+  contact-support error state.
+
+### 5.5 Shared client helpers
+
+`website/assets/supabase-session.js` (copied to the dashboard's
+`public/assets/`) exposes one validity predicate + clear + last-used +
+bounce helpers — loop-safety by construction across all three pages:
+
+- `readValidSession()` — strict cookie→legacy read
+- `clearStoredSession()` — cookie + both legacy localStorage keys
+- `get/setLastAuthMethod()` — `tt_last_auth_method`
+- `bounceToAuth(search, hash)` — origin-aware absolute/relative target
+- `storeSession(session)` — direct parent-cookie write (the exchange path)
+
+### 5.6 Test coverage
+
+- `tests/test_session_login.py` (18) — exchange contract, evaluation order, error tree, rate limit, TOCTOU, expires_at injection, transport 502, session-identity backstop, session-attribution.
+- `tests/test_session_login_helpers.py` (6) — mint-target resolution.
+- `tests/e2e/test_session_login_flow.py` — two-origin loop regression
+  (exchange → cookie → dashboard renders; no cookie → instant redirect;
+  ANON → claim funnel) via prod-domain route interception.
+- `tests/e2e/test_dashboard_gate.py`, `test_welcome_page.py` (401 →
+  clear → `/auth`, no welcome↔/auth loop), `test_cross_subdomain_cookie_sync.py`
+  (helper presence + byte parity), `test_writer_inventory.py` /
+  `TestCreateApiKeySessionAttribution` (created_by = session UUID).

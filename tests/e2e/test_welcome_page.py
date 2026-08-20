@@ -420,7 +420,8 @@ def test_reveal_shows_key_once_then_returning_state(page: Page) -> None:
 
 
 def _mock_empty_membership_then_provision(page: Page, provision_status: int = 201,
-                                           existing_membership: bool = False) -> dict:
+                                           existing_membership: bool = False,
+                                           seed_session: bool = True) -> dict:
     """Seed a session with NO real membership and intercept the client-side
     provisioning flow: team_memberships returns the PLACEHOLDER row
     (team_id='' — what the on_auth_user_created trigger inserts at signup;
@@ -455,7 +456,8 @@ def _mock_empty_membership_then_provision(page: Page, provision_status: int = 20
         "graph_name": f"team_{user_id[:8]}",
     }
 
-    _seed_local_session(page, user_id)
+    if seed_session:
+        _seed_local_session(page, user_id)
 
     def _handle(route):
         url = route.request.url
@@ -537,10 +539,12 @@ def test_welcome_provisions_via_edge_function_when_no_membership(page: Page) -> 
 
 
 def test_welcome_provision_failure_retries_once_then_contact_support(page: Page) -> None:
-    """#527: a failed provision call (401) is retried exactly ONCE, then the
-    page shows a humanized error with a contact-support note — never raw
-    JSON, never a broken page."""
-    state = _mock_empty_membership_then_provision(page, provision_status=401)
+    """#527/#1511: a failed provision call (500 — non-auth) is retried exactly
+    ONCE, then the page shows a humanized error with a contact-support note —
+    never raw JSON, never a broken page. The 401 case now CLEARS the session
+    and redirects to /auth (separate test), so the retry/error-state path is
+    pinned against a non-401 failure."""
+    state = _mock_empty_membership_then_provision(page, provision_status=500)
     page.goto(WELCOME_URL, wait_until="domcontentloaded", timeout=30_000)
     _require_client_side_provisioning(page)
     expect(page.locator("#error-state")).not_to_be_hidden(timeout=30_000)
@@ -549,6 +553,64 @@ def test_welcome_provision_failure_retries_once_then_contact_support(page: Page)
     assert "{" not in msg, f"error leaks raw JSON: {msg!r}"
     assert len(state["provision_requests"]) == 2, \
         f"expected 1 retry (2 calls total), got {len(state['provision_requests'])}"
+
+
+def test_welcome_provision_401_clears_session_and_redirects_to_auth(page: Page) -> None:
+    """#1511: a provision 401 (stale/invalid session) CLEARS the session and
+    redirects to /auth — welcome must never render for unauthenticated users,
+    and a cleared session can't loop back (the /auth gate won't re-bounce it).
+    The session is seeded as a COOKIE (set once per context) — the shared
+    init-script localStorage seeding re-seeds on EVERY navigation, which
+    would defeat the clear and re-loop (a test-harness artifact)."""
+    user_id = _fake_user_id()
+    session = {
+        "access_token": "fake-access-token",
+        "refresh_token": "fake-refresh-token",
+        "expires_in": 3600,
+        "expires_at": 2 ** 31,
+        "token_type": "bearer",
+        "user": {"id": user_id, "email": "e2e@premise-labs.dev"},
+    }
+    import urllib.parse as _up
+    # Seed the session as a COOKIE (set once per context) — the shared
+    # init-script localStorage seeding re-seeds on EVERY navigation, which
+    # would defeat the clear and re-loop (a test-harness artifact). The
+    # cookie must be seeded with the SAME domain shape clearStoredSession
+    # deletes: on a premiselabs.co target that's the parent-domain
+    # (.premiselabs.co — a host-only seed would survive the delete and the
+    # /auth gate would re-bounce it → loop, per VGATE review); on a local
+    # preview (localhost:8788) both the write and the delete are host-only.
+    if "premiselabs.co" in WELCOME_URL:
+        cookie_domain = ".premiselabs.co"
+    else:
+        cookie_domain = None  # host-only (url form) — matches the local delete
+    if cookie_domain:
+        # Domain cookie (prod shape) — Playwright needs domain + path, no url.
+        _cookie = {"name": "sb-tortoise-auth-token",
+                   "value": _up.quote(json.dumps(session)),
+                   "domain": cookie_domain, "path": "/"}
+    else:
+        # Host-only cookie (local preview) — url form, no path attr.
+        _cookie = {"name": "sb-tortoise-auth-token",
+                   "value": _up.quote(json.dumps(session)),
+                   "url": WELCOME_URL.rstrip("/")}
+    page.context.add_cookies([_cookie])
+    state = _mock_empty_membership_then_provision(page, provision_status=401, seed_session=False)
+    page.goto(WELCOME_URL, wait_until="domcontentloaded", timeout=30_000)
+    _require_client_side_provisioning(page)
+    expect(page).to_have_url(re.compile(r"/auth($|\?|#)"), timeout=20_000)
+    # No-loop contract (VGATE review): the session is CLEARED — the /auth
+    # gate must stay put, not re-bounce the still-valid session back to
+    # welcome. A single to_have_url can FALSE-PASS on a transit of a live
+    # welcome↔/auth oscillation, so assert STABILITY: no /welcome navigation
+    # may occur during the observation window (a cleared session never
+    # navigates back).
+    bounced_back = []
+    page.on("framenavigated", lambda f: bounced_back.append(f.url)
+            if f == page.main_frame and "/welcome" in f.url else None)
+    page.wait_for_timeout(3_000)
+    assert not bounced_back, f"welcome↔/auth loop live: {bounced_back}"
+    expect(page).to_have_url(re.compile(r"/auth($|\?|#)"), timeout=5_000)
 
 
 def test_welcome_existing_membership_skips_provisioning(page: Page) -> None:
