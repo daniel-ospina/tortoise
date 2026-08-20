@@ -41,7 +41,7 @@
 - **Given:** a conversation containing "my personal best 5K time is 27:12" (user-asserted, stated early in the conversation) and an assistant suggestion that is NOT the fact
 - **When:** a KU/preference question asks for the value
 - **Then:** the verbatim value (27:12) is retrievable and evidence-marked (M6 marks)
-- **And:** the answer reflects the user-asserted fact, not the assistant suggestion (`source_role` via source-turn)
+- **And:** the answer reflects the user-asserted fact, not the assistant suggestion (speaker derived at read time from the source-turn link → the turn's existing `speaker`/`[role]`)
 - **And:** the fact asserted early in the conversation survives the S4 pass (E4 merges-not-replaces)
 - **Owned negatives:** assistant-suggestion-only turn → must NOT surface as a user fact (the negative complement); value compressed by the "counts-are-noise" filter → E2 regression, assertion fails loudly.
 

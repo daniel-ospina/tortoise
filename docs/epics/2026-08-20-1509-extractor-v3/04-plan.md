@@ -74,17 +74,27 @@ session ─▶ CAPTURE (fail-closed, P1)         question ─▶ QUERY PARSE
 
 | Entity | Change | Type |
 |---|---|---|
-| Point | `source_role` ("user"/"assistant"/"unknown") — speaker via source-turn link (`quote`/offsets) | additive property (E3) |
+| Point | **no new `source_role` property** — speaker is DERIVED at read time from the source-turn link (`quote`/offsets → the turn's existing `speaker`/`[role]`); the point carries a `source_turn_id` reference | additive property (E3) |
 | Point | `quote` (verbatim source text — already in commit_schema) | existing (E3/M6) |
 | Point | `when` (date/validity slot) + `valid_at`/`invalid_at` (E6-last) | additive property (E1/E6) |
 | Point | `search_keys` (2–4 aliases + verbatim tokens) | additive property (E3/R2) |
 | Point | `source_session_id` (source-session attribution for evidence marking) | additive property (M6) |
-| Point | `has_answer` (raw-chunk containment mark) | additive property (M6) |
-| Point | state-value Tier-A marker + confidence (EP machinery already exists) | additive property (E2) |
+| Point | `has_answer` — **eval-instrumentation only** (the LME ground-truth mark for evidence metrics; NOT a production ontology concept); M6 marks raw transcript chunks that contain the answer turn (substring containment) | eval-instrumentation property (M6) |
+| Point | state-value Tier-A marker + confidence (EP machinery already exists) — **scope: extraction-selection guidance + optional retrieval/decoration bias, NOT a per-type retrieval pipeline** (see Data Model Research Notes below) | additive property (E2) |
 | Point↔Point | CORRECTS edges on supersession (SDK `supersede_point`/`correct_point` exist, never called) | existing edge, now written (E5/E7) |
 | Point | NOOP duplicates: additive `duplicates`/link property on the existing point (NOT a new edge — the ontology's Point↔Point edges are IMPL/NAND/hasPart/CORRECTS, none express "duplicate of"; IMPL would couple EP weights — the how-to-use-tortoise hazard; prior art: REPHRASE is a dedup label, not a written operator) | additive property (E7) |
 | Session/Event | `startedAt`/session date threaded into extraction (E1) | existing fields |
 | Status | superseded points → status fold via existing `ObjectSuperseded` machinery (already shipped #1425) | existing (E5) |
+
+### Data Model Research Notes
+
+> **Findings date:** 2026-08-20. Sources: Hindsight (arXiv 2512.12818 + vectorize docs), EverMemOS (Synix source-level analysis), redhat-ai-americas memory-hub survey. Also appended to the epic brief's Raw Notes.
+
+**Who uses typed-fact classification — and is the Tier-A marker optimal?**
+- **Hindsight (benchmark leader: 91.4% LongMemEval) uses exactly this pattern:** every extracted fact is classified at extraction into world / experience / opinion / observation; retrieval is type-aware (a `types` filter narrows which networks are searched); a background **consolidation layer folds facts into observations** (deduplicated, evidence-grounded beliefs with quotes + proof counts, refined-not-overwritten) — structurally very close to our Tier A/B split + E7 consolidation + EP-confidence. It also grounds every fact on TWO temporal axes (occurrence time + mention time), validating our `when` vs `createdAt` split.
+- **EverMemOS goes further (7 memory types, per-type extractors/stores/retrieval) but pays infra complexity** (4 backends, no cross-system transactions — a consistency hazard).
+- **The adversarial counterpoint (redhat memory-hub survey):** "type classification earns its keep at extraction, not retrieval" — tags don't change how the retrieval pipeline processes a memory (semantic search already surfaces what's relevant), and "if the type genuinely matters it belongs in the memory text itself". Its corollary is exactly our design: Tier-A's value is (a) extraction-selection guidance (the value-filter carve-out: don't strip "27:12") and (b) the verbatim value lives IN the text (via `quote` + verbatim retention).
+- **Conclusion: keep the Tier-A marker, refined scope** — it is a classification HINT used for extraction selection + optional retrieval/decoration bias (state questions, current-state rendering), NOT a per-type retrieval pipeline (Hindsight's per-type parallel pipelines are the over-engineering trap; EverMemOS's per-type backends are the anti-pattern). The value must live in the text, which it does.
 
 Integrity constraints: `client_commit_id` covers `supersessions` at ALL 3 compute sites (execute_embed / _post_commit / ingest) — surface map #23/#24 three-site agreement test; length-guarded `_token_overlap` (no false REVISES at ≥0.6 on short points); self-supersede + ambiguous-match guards.
 
