@@ -22,7 +22,7 @@ Edge cases covered per journey: J1 — empty/blank conversation (never ok=True f
 
 **Write path (capture → extract → consolidate → index):**
 1. Capture (fail-closed): turn points land; `_extract_session_v2` consults `out["errors"]`; errors surface on the contract; `extraction_mode` truthful (P1).
-2. Extract (two-tier, date-anchored): S1 date-anchored digest → S2 classifies EDUs → Tier A state-value points (verbatim value, `quote`, `when`, `search_keys`, `source_role`) / Tier B narrative points (compressed); S4 merges-not-replaces (E4).
+2. Extract (two-tier, date-anchored): S1 date-anchored digest → S2 classifies EDUs → Tier A state-value points (verbatim value, `quote`, `when`, `search_keys`, `source_turn_id` — speaker derived from the turn's role) / Tier B narrative points (compressed); S4 merges-not-replaces (E4).
 3. Consolidate (E5+E7, on the shared graph): S3 real-backend search (entity-resolved) → 4-way decision (ADD/UPDATE/DELETE soft/NOOP link) → supersession records in payload + `client_commit_id`; CORRECTS edges materialized; validity windows set (E6 later).
 4. Index: BM25-OR sparse + dense embeddings (write-time) + raw turn-chunks + events timeline; evidence marked (source-session + verbatim + raw-chunk containment, M6).
 
@@ -123,7 +123,7 @@ Contract-first. All additive / reversible (env seams preserved).
 | Interface | Contract |
 |---|---|
 | `extract_session_v2(model, conversation, *, session_id, chunk_size, session_date)` | new `session_date` kwarg (E1); returns payload + errors + supersessions + warnings (never silent) |
-| S2/S4 OUTPUT_CONTRACT | + `source_role`, `search_keys`, `when`, `quote`; Tier-A state-value section (E2/E3) |
+| S2/S4 OUTPUT_CONTRACT | + `search_keys`, `when`, `quote` + `source_turn_id` (speaker DERIVED from the source turn — NO `source_role` property, owner clarification); Tier-A state-value section (E2/E3) |
 | Layer-1 payload | + `supersessions` (already client-carried #1425 — now always populated E5); `client_commit_id` includes supersessions (3-site agreement) |
 | Capture response | `extraction_mode` truthful; extraction errors surface (non-200 or additive `warnings`) — never silent `extracted: 0` (P1) |
 | Provider routing | `TORTOISE_EXTRACTOR_PROVIDER` = deepseek-direct | openrouter; gate checks exactly what the adapter consumes; 401/402/403 fatal (P2/M2) |
@@ -159,7 +159,7 @@ Negative cases per test: see the ownership table in 05-detailed-e2e.md (12 negat
 | Risk | Mitigation |
 |---|---|
 | V3 bet doesn't pay on a valid run (parity vs raw) | Success criteria per-category (A9); union design evidence; run protocol isolates (pilot → fixes → 500) |
-| Real-backend infra friction (FalkorDB docker, FTS, embedder) | E2E-1 gates it early; cut order protects E7 (thesis) over R2/R5 |
+| Real-backend infra friction (FalkorDB docker, FTS, embedder) | E2E-1 gates it early; cut order: R2/R5 first — E5+E7 (thesis, one unit) NEVER cut; M/P never cut |
 | 402 recurrence (billing vs cap unknown) | M2 pre-flight with realistic S1-sized probe; fatal-4xx class; budget assumption A6 |
 | Consolidation quality weak (entity resolution) | E7 includes Graphiti two-phase entity resolution; E2E-11 |
 | E7 entity-resolution LLM failure on the write path | deterministic-first phase; LLM fallback degrades to ADD (resolution skipped) — never blocks capture (P1); routes through P2/M3 |
