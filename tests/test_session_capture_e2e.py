@@ -37,7 +37,11 @@ def _proj():
     # R4 (#221): read TORTOISE_DB_URI at CALL time (not module import) so the
     # conftest per-test fixture's unique graph name is honored. The wipe below
     # is then scoped to this test's own graph — no cross-test pollution.
-    uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_e2e125")
+    # #1518: a prior matrix test can leave TORTOISE_DB_URI="" (embedded
+    # forcing) — treat empty as unset and fall back to the 16379 default
+    # (the .get() default only applies when the key is ABSENT).
+    uri = os.environ.get("TORTOISE_DB_URI") or \
+        "docker://:@localhost:16379/tortoise_test_e2e125"
     proj = FalkorProjection.from_uri(uri)
     proj.g.query("MATCH (n) DETACH DELETE n")  # test-prefixed — safe (own graph)
     proj._ensure_indexes()

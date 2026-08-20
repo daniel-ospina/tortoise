@@ -27,7 +27,9 @@ from tools.longmem_eval.reader import MockReader, build_reader  # noqa: E402, RU
 from tools.longmem_eval.retrieve import (  # noqa: E402, RUF100
     _annotate_hits, render_context, retrieve_for_question,
 )
-from tools.longmem_eval.run import run_evaluation, run_main  # noqa: E402, RUF100
+from tools.longmem_eval.run import (  # noqa: E402
+    outcomes_to_report, run_evaluation, run_main,
+)
 
 MINI = Path(__file__).parent / "fixtures" / "longmemeval_mini.json"
 
@@ -79,6 +81,102 @@ def test_mini_pipeline_end_to_end_mock(tmp_path):
     assert m["git_sha"]
     assert m["run_at_utc"]
     assert m["k_values"] == [5, 10, 20]
+
+
+def test_outcomes_to_report_golden_shape():
+    """Golden report-shape pin (M1/S22, issue #1522): outcomes_to_report
+    returns a dict with the full published key set. Regression guard — commit
+    4acb47d4 absorbed the build_report(...) return into reader_prompt_source
+    as dead code, making outcomes_to_report(...) implicitly return None; the
+    restore (2f7c3df8) is pinned here so the report contract (E2E-2: report is
+    a real dict) cannot silently regress again."""
+    outcomes = [{
+        "question_id": "q-golden-1",
+        "question_type": "single-session-user",
+        "question_date": "2024-01-15",
+        "label": True,
+        "hypothesis": "golden hypothesis",
+        "session_recall@k": {"5": 1.0, "10": 1.0, "20": 1.0},
+        "turn_recall@k": {"5": 0.5, "10": 0.5, "20": 0.5},
+        "evidence_recall@k": {"5": 1.0, "10": 1.0, "20": 1.0},
+        "n_ingest_errors": 0,
+        "context_tokens": 120,
+        "context_point_count": 3,
+        "retrieval_latency_ms": 11.0,
+        "reader_latency_ms": 22.0,
+        "judge_latency_ms": 33.0,
+        "total_ms": 66.0,
+    }]
+    report = outcomes_to_report(
+        outcomes,
+        reader_model="golden-reader",
+        judge_model="golden-judge",
+        ks=(5, 10, 20),
+        top_k=20,
+        split="s",
+    )
+    # The regression made this None — a real dict is the whole point (E2E-2).
+    assert isinstance(report, dict)
+    # Top-level key set is the published report contract.
+    assert set(report) == {
+        "benchmark", "dataset", "split", "n_questions", "accuracy",
+        "retrieval", "latency_ms", "methodology", "failures", "n_failed",
+        "outcomes",
+    }
+    assert report["benchmark"] == "LongMemEval"
+    assert report["dataset"] == "xiaowu0162/longmemeval-cleaned"
+    assert report["split"] == "s"
+    assert report["n_questions"] == 1
+
+    acc = report["accuracy"]
+    assert acc["overall"] == 1.0
+    assert acc["task_averaged"] == 1.0
+    assert acc["per_category"]["Information Extraction"] == {
+        "accuracy": 1.0, "n": 1}
+    assert acc["per_type"]["single-session-user"] == {"accuracy": 1.0, "n": 1}
+
+    ret = report["retrieval"]
+    assert ret["session_recall@k"] == {"5": 1.0, "10": 1.0, "20": 1.0}
+    assert ret["turn_recall@k"] == {"5": 0.5, "10": 0.5, "20": 0.5}
+    assert ret["evidence_recall@k"] == {"5": 1.0, "10": 1.0, "20": 1.0}
+    assert ret["context_tokens_mean"] == 120.0
+    assert ret["context_point_count_mean"] == 3.0
+
+    lat = report["latency_ms"]
+    assert lat["retrieval"]["mean_ms"] == 11.0
+    assert lat["reader"]["mean_ms"] == 22.0
+    assert lat["judge"]["mean_ms"] == 33.0
+    assert lat["total_per_question"]["mean_ms"] == 66.0
+
+    m = report["methodology"]
+    assert m["reader_model"] == "golden-reader"
+    assert m["judge_model"] == "golden-judge"
+    assert m["k_values"] == [5, 10, 20]
+    assert m["top_k_context"] == 20
+    # #1414 parity hashes — produced by reader_prompt_source/JUDGE_RUBRIC_ID.
+    assert m["reader_prompt_hash"]
+    assert m["judge_rubric_id_hash"]
+
+    # Layer-1 payload projection (surface 22) is carried under extra.
+    assert len(report["outcomes"]) == 1
+    assert report["outcomes"][0] == {
+        "question_id": "q-golden-1",
+        "question_type": "single-session-user",
+        "question_date": "2024-01-15",
+        "label": True,
+        "hypothesis": "golden hypothesis",
+        "session_recall@k": {"5": 1.0, "10": 1.0, "20": 1.0},
+        "turn_recall@k": {"5": 0.5, "10": 0.5, "20": 0.5},
+        "evidence_recall@k": {"5": 1.0, "10": 1.0, "20": 1.0},
+        "n_ingest_errors": 0,
+        "context_tokens": 120,
+        "retrieval_latency_ms": 11.0,
+        "reader_latency_ms": 22.0,
+        "judge_latency_ms": 33.0,
+        "total_ms": 66.0,
+    }
+    assert report["failures"] == []
+    assert report["n_failed"] == 0
 
 
 def test_cli_smoke(tmp_path):
