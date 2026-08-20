@@ -56,10 +56,19 @@ def extract_nodeid(line: str) -> str:
 
 
 def find_violations(log_text: str) -> list[str]:
+    # Exclude _live_utils.py-sourced skips: _skip_unless_live_uri's reason
+    # ("requires TORTOISE_DB_URI (live FalkorDB sidecar…)") legitimately
+    # contains "FalkorDB" but is the INTENTIONAL URI-gate for the
+    # test-concurrency-falkor job — those tests skip VISIBLY in every other
+    # surface by design (#942 vacuity-kill), and the fast matrix must not go
+    # red for them. The guard targets AVAILABILITY regressions (a probe
+    # should have found the provisioned falkordb service and didn't), which
+    # is a different reason family.
     return [
         extract_nodeid(line)
         for line in log_text.splitlines()
         if _SKIPPED_MARK in line and _FALKORDB_RE.search(line)
+        and "_live_utils.py" not in line
     ]
 
 
