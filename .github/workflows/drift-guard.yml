@@ -1,0 +1,28 @@
+# drift-guard CI gate (epic #1509 P3 / issue #1531)
+# Fails when a long-lived branch has drifted from origin/main beyond the
+# threshold (commits on main missing from the branch). The v3 epic's
+# real-backend E2Es all gate on 'worktree == origin/main' — this makes the
+# gate loud. Behind-only: rebased branches report 0 regardless of commits
+# ahead. Follows redis-guard.yml conventions (checkout@v4, python3 tools/).
+name: drift-guard
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: drift-guard-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  drift-guard:
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth 0: counting commits behind origin/main needs full history.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run drift-guard
+        run: python3 tools/drift-guard.py
