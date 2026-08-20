@@ -2016,3 +2016,53 @@ def test_raw_resp_client_list_does_not_retry_missing_socket():
     """FileNotFoundError (mid-startup) — no retry, None."""
     from tortoise.embedded_reaper import _raw_resp_client_list
     assert _raw_resp_client_list("/nonexistent/reaper-missing.sock") is None
+
+
+def test_reap_only_safe_protects_live_pid_dir_gone(monkeypatch):
+    """#1557: only_safe must NOT kill a LIVE-pid server whose dir is
+    missing — that is a test-tempdir lifecycle race (the test's mkdtemp dir
+    briefly absent under matrix load), not an orphan. Redislite servers
+    daemonize to ppid=1, so _is_detached is True for all of them and cannot
+    discriminate; the dir_missing + live-pid combination is the discriminator.
+    """
+    from tortoise.embedded_reaper import reap
+    monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
+    # Spawn a real (live, daemonized) server we control.
+    import subprocess as sp
+    import sys as _sys
+    code = (
+        "import os,time; os.environ.pop('TORTOISE_DB_URI',None);\n"
+        "from redislite.falkordb_client import FalkorDB; db=FalkorDB();\n"
+        "print('READY ' + db.client.socket_file, flush=True); time.sleep(30)"
+    )
+    proc = sp.Popen([_sys.executable, "-c", code],
+                    stdout=sp.PIPE, text=True)
+    try:
+        import select
+        if not select.select([proc.stdout], [], [], 30)[0]:
+            proc.kill()
+            raise AssertionError("server did not start")
+        sock = proc.stdout.readline().strip().split()[-1]
+        # find the live server pid (the daemonized child, not the subprocess)
+        r = sp.run(["ps", "-eo", "pid,ppid,command"], capture_output=True,
+                   text=True)
+        server_pid = None
+        for line in r.stdout.splitlines():
+            if sock in line and "redis-server" in line:
+                server_pid = int(line.split()[0])
+                break
+        assert server_pid, "daemonized server pid not found"
+        assert _pid_alive_for(server_pid), "server should be live"
+        # dir_missing=True + live pid → must be protected under only_safe
+        record = {"socket_path": sock, "pid": server_pid,
+                  "dbdir": "/nonexistent/race-dir", "dir_missing": True,
+                  "classification": "candidate"}
+        acted = reap([record], dry_run=False, only_safe=True)
+        time.sleep(0.5)
+        assert _pid_alive_for(server_pid), (
+            "live-pid dir-gone server killed under only_safe — #1557 race")
+        assert not any(r.get("socket_path") == sock for r in acted), \
+            "server should not be acted on"
+    finally:
+        proc.kill()
+        proc.wait(timeout=5)
