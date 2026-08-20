@@ -1034,7 +1034,7 @@ async def health_security():
 
 # ── Auth Dependency ────────────────────────────────────────────────
 
-SKIP_AUTH = {"/health", "/health/ready", "/docs", "/openapi.json", "/v1/register", "/v1/signup/email", "/webhooks/stripe"}
+SKIP_AUTH = {"/health", "/health/ready", "/docs", "/openapi.json", "/v1/register", "/v1/signup/email", "/webhooks/stripe", "/v1/session/login"}
 
 
 async def _audit_auth_failure(request: Request, reason: str) -> None:
@@ -1335,7 +1335,14 @@ async def get_current_team_session(request: Request) -> dict:
         return team
     # Session JWT (eyJ...) — verify + resolve the user's team.
     user = await get_current_user(request)
-    return await _session_user_team(request, user)
+    team = await _session_user_team(request, user)
+    # #1511: the session user is attached so key-minting endpoints can
+    # record who minted (created_by = user UUID, enabling the session
+    # exchange); the key-auth/override branches return before this, so
+    # their team dicts carry no session_user_id (create_api_key falls back
+    # to "api").
+    team["session_user_id"] = user["user_id"]
+    return team
 
 
 def _check_team_limit(team: dict, resource: str) -> None:
@@ -1833,6 +1840,21 @@ async def _check_register_rate_limit(request: Request) -> None:
         retry_after_s=3600)
 
 
+def _dashboard_key_login_reason(team: dict) -> str | None:
+    """#1148/#1511: why the team's dashboard-login flag rejects a KEY-auth
+    credential, or None when the credential may proceed. Unconditional — the
+    caller decides whether the request IS key-auth (the /v1/session/login
+    exchange authenticates by the body key, so it calls this directly; the
+    other management endpoints keep the header-sniffing wrapper)."""
+    if team.get("dashboard_key_login", True):
+        return None  # enabled (default) — no gate
+    return (
+        "API-key dashboard login is disabled for this team. "
+        "Sign in with your Tortoise account (GitHub/Google) to manage keys, "
+        "backups, and billing. API keys remain valid for graph operations."
+    )
+
+
 def _check_dashboard_key_login(team: dict, request: Request) -> None:
     """#1148: when a team has dashboard_key_login=false, KEY-authenticated
     requests to management endpoints (keys mint/revoke, backups restore,
@@ -1844,17 +1866,14 @@ def _check_dashboard_key_login(team: dict, request: Request) -> None:
     Detection: a key-auth request carries a ``tt_`` Bearer token; a session
     request carries a Supabase JWT (starts with ``eyJ``). The flag lives on
     the resolved team dict."""
-    if team.get("dashboard_key_login", True):
-        return  # enabled (default) — no gate
+    reason = _dashboard_key_login_reason(team)
+    if reason is None:
+        return
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer tt_"):
         raise HTTPException(
             status_code=403,
-            detail={"error_code": "dashboard_login_disabled",
-                    "message": "API-key dashboard login is disabled for this team. "
-                               "Sign in with your Tortoise account (GitHub/Google) "
-                               "to manage keys, backups, and billing. API keys "
-                               "remain valid for graph operations."},
+            detail={"error_code": "dashboard_login_disabled", "message": reason},
         )
 
 
@@ -1917,6 +1936,12 @@ async def _check_signup_ip_rate_limit(request: Request) -> None:
 _CLAIM_MAX_PER_24H = 2
 _CLAIM_WINDOW = 24 * 3600
 _CLAIM_BUCKETS: dict[str, list[float]] = defaultdict(list)
+# #1511: session-exchange per-IP bucket (5/hr) — real per-IP via
+# ClientIPMiddleware (PATH_LIMITS would bucket on the Fly proxy IP = global).
+_SESSION_BUCKETS: dict[str, list[float]] = defaultdict(list)
+_SESSION_LOGIN_LOCK = asyncio.Lock()
+_SESSION_LOGIN_LIMIT = 5
+_SESSION_LOGIN_WINDOW_S = 3600
 _CLAIM_LOCK = asyncio.Lock()
 
 
@@ -2373,6 +2398,122 @@ async def team_info(team: dict = Depends(get_current_team)):
         # would fail the Pydantic bool and 500 every /v1/team call).
         dashboard_key_login=team.get("dashboard_key_login", True) is not False,
     )
+
+
+@app.post("/v1/session/login")
+async def session_login(request: Request):
+    """#1511: exchange a ``tt_`` API key for a real Supabase session.
+
+    The key rides the JSON BODY (the exchange is key-auth by definition —
+    the header-sniffing dashboard-login wrapper could never see it, so the
+    gate is FORCED via _dashboard_key_login_reason). Resolution/parity via
+    _get_current_team_supabase (401 invalid/revoked/expired/disabled, 403
+    suspended). The mint target is the key's CREATOR (an active team
+    member) — no member-key escalation (a member's key mints the member's
+    session). The session is minted SERVER-SIDE via GoTrue admin
+    generate_link (no email sent) + /verify and returned to the client,
+    which stores it in the parent-domain cookie — the raw key never crosses
+    origins. Response/error contract (plan Task 2): 200 session JSON;
+    401 invalid key; 403 suspended / dashboard_login_disabled /
+    ANON_TEAM_NO_OWNER / KEY_NOT_USER_MINTED / ACCOUNT_MISSING;
+    429 per-IP rate-limit; 502 GoTrue transport; 503 retryable token
+    consumed/expired. Audit: session_mint.
+    """
+    from tortoise.supabase_control import (
+        get_control_plane, is_anon_team, mint_target_user_for_key,
+        membership_for_user_team,
+    )
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    token = (body or {}).get("api_key") or ""
+    if not token.startswith("tt_"):
+        await _audit_auth_failure(request, "invalid_key")
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    # Per-IP rate limit (5/hr) — real client IP via ClientIPMiddleware
+    # (PATH_LIMITS buckets on the Fly proxy IP = global).
+    ip = (getattr(request.state, "client_ip", None)
+          or (request.client.host if request.client else None))
+    if ip:
+        await _check_ip_bucket_rate_limit(
+            request, buckets=_SESSION_BUCKETS, lock=_SESSION_LOGIN_LOCK,
+            limit=_SESSION_LOGIN_LIMIT, window_s=_SESSION_LOGIN_WINDOW_S,
+            detail={"error_code": "session_login_rate_limited",
+                    "message": "Too many session logins. Try again in about an hour."},
+            retry_after_s=_SESSION_LOGIN_WINDOW_S, key=ip)
+
+    # Key parity + suspension (the #767 resolution path; raises 401/403).
+    team = await _get_current_team_supabase(request, token)
+
+    # FORCED dashboard-login gate.
+    reason = _dashboard_key_login_reason(team)
+    if reason is not None:
+        raise HTTPException(status_code=403,
+                            detail={"error_code": "dashboard_login_disabled",
+                                    "message": reason})
+
+    team_id = team["team_id"]
+    created_by = team.get("created_by")
+
+    # created_by decision tree: UUID → mint the CREATOR's session; anon/
+    # identity (owner-less team) → claim funnel; "api"/NULL/unknown →
+    # KEY_NOT_USER_MINTED.
+    cp = get_control_plane()
+    target = mint_target_user_for_key(cp, created_by, team_id)
+    if target is None:
+        if created_by is not None and created_by != "api" \
+                and is_anon_team(cp, team_id):
+            raise HTTPException(
+                status_code=403,
+                detail={"error_code": "ANON_TEAM_NO_OWNER",
+                        "message": "This key belongs to an unclaimed team. "
+                                   "Continue to claim it."})
+        raise HTTPException(
+            status_code=403,
+            detail={"error_code": "KEY_NOT_USER_MINTED",
+                    "message": "This key cannot be used to sign in. Mint a new "
+                               "key in the dashboard or use GitHub/Google."})
+
+    # GoTrue user fetch (404 → ACCOUNT_MISSING).
+    gotrue = _gotrue_admin_get_user(target)
+    if gotrue is None:
+        raise HTTPException(
+            status_code=403,
+            detail={"error_code": "ACCOUNT_MISSING",
+                    "message": "Your account could not be found. Contact support."})
+    status, user_body = gotrue
+    if status >= 400:
+        raise HTTPException(status_code=502, detail="Auth service unavailable")
+    email = user_body.get("email")
+    if not email:
+        raise HTTPException(
+            status_code=403,
+            detail={"error_code": "ACCOUNT_MISSING",
+                    "message": "Your account could not be found. Contact support."})
+
+    # Mint — retryable consumed/expired token → 503 (NOT the lockout bucket).
+    try:
+        session = _gotrue_admin_mint_session(email)
+    except RuntimeError as exc:
+        msg = str(exc).lower()
+        if "expired" in msg or "consumed" in msg:
+            raise HTTPException(status_code=503,
+                                detail="Session login timed out — try again.")
+        raise HTTPException(status_code=502, detail="Auth service unavailable")
+
+    # Post-verify membership backstop (TOCTOU: creator removed mid-mint).
+    if membership_for_user_team(cp, target, team_id) is None:
+        raise HTTPException(
+            status_code=403,
+            detail={"error_code": "KEY_NOT_USER_MINTED",
+                    "message": "This key cannot be used to sign in. Mint a new "
+                               "key in the dashboard or use GitHub/Google."})
+
+    await _async_audit(request, team_id, "session_mint",
+                       actor_user_id=target, detail={"via": "api_key"})
+    return session
 
 
 @app.get("/v1/packs")
@@ -3156,8 +3297,10 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
             "key_prefix": key_prefix,
             "created_via": "provisioned",  # NOT NULL in 0007; counts vs the
             # recovery-mint cap like the registry's NULL created_via rows
-            "created_by": "api",  # registry parity (created_by=user on
-            # session mints; team/keys mints are key-scoped, not user-scoped)
+            "created_by": team.get("session_user_id") or "api",  # #1511: the
+            # session user UUID when the mint was session-authed (so
+            # dashboard-minted keys can drive the /v1/session/login exchange);
+            # key-auth/override mints keep "api" (registry parity).
             "created_at": now,
             "revoked_at": None,
             "expires_at": None,
