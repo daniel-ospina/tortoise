@@ -27,6 +27,11 @@ PAGES = [
     REPO_ROOT / "website" / "signup.html",
     REPO_ROOT / "website" / "signin.html",
     REPO_ROOT / "website" / "welcome.html",
+    # #1511: the dashboard loads the shared script + gate helpers (its gate
+    # never calls createTortoiseSupabaseClient — the client is built in
+    # main.jsx — so the wiring assertion below relaxes the factory check for
+    # this entry).
+    REPO_ROOT / "website" / "apps" / "dashboard" / "index.html",
 ]
 
 
@@ -111,9 +116,14 @@ def test_all_tortoise_pages_wire_the_shared_bridge() -> None:
         assert 'src="/assets/supabase-session.js"' in text, (
             f"{page.name}: missing shared bridge script tag"
         )
-        assert "createTortoiseSupabaseClient(" in text, (
-            f"{page.name}: createClient not routed through the shared factory"
-        )
+        if page.name == "index.html":
+            # #1511 dashboard variant: its gate uses the shared helpers, not
+            # the factory (the client is built in main.jsx).
+            assert "readValidSession(" in text,                 f"{page.name}: dashboard gate must use readValidSession"
+        else:
+            assert "createTortoiseSupabaseClient(" in text, (
+                f"{page.name}: createClient not routed through the shared factory"
+            )
 
 
 # ── #1511 shared gate helpers ────────────────────────────────────────────────

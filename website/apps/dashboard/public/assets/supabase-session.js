@@ -245,8 +245,13 @@
   var bounceToAuth = function (search, hash) {
     try {
       var target;
-      if (window.location.origin === 'https://app.premiselabs.co') {
-        target = (window.__AUTH_BASE_URL || 'https://tortoise.premiselabs.co') + '/auth';
+      if (window.__AUTH_BASE_URL) {
+        // Test seam (localhost e2e) — forces the absolute target.
+        target = window.__AUTH_BASE_URL + '/auth';
+      } else if (window.location.origin === 'https://app.premiselabs.co') {
+        // Dashboard origin → the tortoise auth page (relative /auth on the
+        // app origin is a dead end).
+        target = 'https://tortoise.premiselabs.co/auth';
       } else {
         target = '/auth';
       }

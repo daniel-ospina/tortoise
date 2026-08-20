@@ -6,31 +6,28 @@
     <title>Tortoise Dashboard</title>
     <link rel="icon" href="data:," /> <!-- Round-7: kill the favicon.ico 404 console error -->
     <meta name="theme-color" content="#060b14" />
-    <!-- #1498: INSTANT auth gate — read the shared session cookie
-         synchronously (supabase-session.js parent-domain cookie,
-         encodeURIComponent(JSON session)) BEFORE the app bundle loads or
-         renders. No session + no stored API key + no claim in flight →
-         location.replace to the single auth page (Back-proof, no
-         "checking session" flash, no network round-trip — getSession() can
-         trigger a token refresh and take ~1s; the app's async check remains
-         as the authoritative post-mount step for key/claim holders). -->
+    <!-- #1225/#1511: shared session bridge + gate helpers — loaded FIRST so
+         the gate's readValidSession is synchronous at gate time. -->
+    <script src="/assets/supabase-session.js"></script>
+    <!-- #1498/#1511: INSTANT auth gate — the shared readValidSession enforces
+         STRICT session validity (missing/past expires_at = invalid) BEFORE
+         the app bundle renders. No VALID session + no claim in flight →
+         bounceToAuth (origin-aware location.replace; Back-proof, no
+         "checking session" flash). The storedKey exemption is GONE (#1511:
+         a stored key is a "Last used" hint on /auth, not a dashboard
+         credential); the claim flow (paste tt_ → OAuth → claim) survives via
+         the tt_claim_key + tt_claim_pending/?claim=1 exemptions. -->
     <script>
       (function () {
         try {
-          var hasSession = false;
-          var m = document.cookie.match(/(?:^|; )sb-tortoise-auth-token=([^;]*)/);
-          if (m) {
-            try {
-              var s = JSON.parse(decodeURIComponent(m[1]));
-              hasSession = !!(s && s.access_token && (!s.expires_at || s.expires_at * 1000 > Date.now()));
-            } catch (e) { hasSession = false; }
-          }
-          var claimKey = null, storedKey = null;
+          var hasSession = (typeof window.readValidSession === "function") ? !!window.readValidSession() : false;
+          var claimKey = null;
           try { claimKey = window.sessionStorage.getItem("tt_claim_key"); } catch (e) {}
-          try { storedKey = window.localStorage.getItem("tortoise_api_key"); } catch (e) {}
           var claimPending = /(?:^|; )tt_claim_pending=/.test(document.cookie);
-          if (!hasSession && !storedKey && !claimKey && !claimPending) {
-            window.location.replace("https://tortoise.premiselabs.co/auth");
+          var claimIntent = /[?&#]claim=1/.test(window.location.href);
+          if (!hasSession && !claimKey && !claimPending && !claimIntent) {
+            if (typeof window.bounceToAuth === "function") window.bounceToAuth();
+            else window.location.replace("https://tortoise.premiselabs.co/auth");
           }
         } catch (e) { /* best-effort — the app's async check still applies */ }
       })();
