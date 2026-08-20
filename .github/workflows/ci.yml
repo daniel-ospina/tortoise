@@ -197,8 +197,31 @@ jobs:
           node-version: '22'   # --experimental-strip-types needs >= 22.6 (#373 harness)
       - run: pip install -e '.[test]'
       - run: python -m playwright install --with-deps chromium
-      - name: Run welcome page E2E (mocked; live smoke self-skips) (#373)
+      # #1511: serve THIS branch's website/ (wrangler pages dev, mirroring the
+      # legal-e2e job) instead of the LIVE page — the strict-validity gates,
+      # the provision-401 clear→/auth path and the waitForSession validity
+      # check land in this PR and only exist in the deployed page AFTER merge.
+      - name: Start wrangler pages dev preview (website/ = Pages root)
+        run: |
+          cd website
+          npx --yes wrangler@4 pages dev . --port 8788 --ip 127.0.0.1 \
+            --compatibility-date=2024-09-23 \
+            > /tmp/wrangler.log 2>&1 &
+          echo $! > /tmp/wrangler.pid
+          for i in $(seq 1 120); do
+            if curl -fsS http://127.0.0.1:8788/ >/dev/null 2>&1; then
+              echo "wrangler dev ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::wrangler dev server failed to start"
+          tail -50 /tmp/wrangler.log || true
+          exit 1
+      - name: Run welcome page E2E (mocked against the local preview) (#373/#1511)
         run: python -m pytest tests/e2e/test_welcome_page.py -q -rs -p no:cacheprovider
+        env:
+          WELCOME_URL: http://127.0.0.1:8788/welcome
       - name: Run waitlist edge-function behavioral harness (#373)
         run: node --experimental-strip-types tests/test_waitlist_subscribe.mjs
       - name: Run tenant-provision CORS runtime harness (#1110)

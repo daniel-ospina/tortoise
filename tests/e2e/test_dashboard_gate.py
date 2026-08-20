@@ -21,21 +21,20 @@ Flows:
 """
 from __future__ import annotations
 
+import json
 import os
 import re
-import sys
 import urllib.parse
 from pathlib import Path
-
-import json
-import time
-import urllib.parse
 
 import pytest
 from playwright.sync_api import Page, expect
 
 from tests.e2e.test_session_login_flow import (
-    _session_json, _wire_prod_domains, AUTH_HOST, APP_HOST,
+    APP_HOST,
+    AUTH_HOST,
+    _session_json,
+    _wire_prod_domains,
 )
 
 if not os.environ.get("RUN_DASHBOARD_E2E"):
@@ -56,7 +55,7 @@ def _wire_auth_intercept(page: Page) -> None:
 
     def handle(route):
         url = route.request.url
-        if url.startswith(AUTH_TARGET) or url.startswith("https://tortoise.premiselabs.co/"):
+        if url.startswith((AUTH_TARGET, "https://tortoise.premiselabs.co/")):
             local = AUTH_LOCAL + url[len(AUTH_TARGET):]
             try:
                 resp = page.request.get(local)
