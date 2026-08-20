@@ -159,7 +159,7 @@ Negative cases per test: see the ownership table in 05-detailed-e2e.md (12 negat
 | Risk | Mitigation |
 |---|---|
 | V3 bet doesn't pay on a valid run (parity vs raw) | Success criteria per-category (A9); union design evidence; run protocol isolates (pilot → fixes → 500) |
-| Real-backend infra friction (FalkorDB docker, FTS, embedder) | E2E-1 gates it early; cut order protects E7 (thesis) over R2/R5 |
+| Real-backend infra friction (FalkorDB docker, FTS, embedder) | E2E-1 gates it early; cut order: R2/R5 first — E5+E7 (thesis, one unit) NEVER cut; M/P never cut |
 | 402 recurrence (billing vs cap unknown) | M2 pre-flight with realistic S1-sized probe; fatal-4xx class; budget assumption A6 |
 | Consolidation quality weak (entity resolution) | E7 includes Graphiti two-phase entity resolution; E2E-11 |
 | E7 entity-resolution LLM failure on the write path | deterministic-first phase; LLM fallback degrades to ADD (resolution skipped) — never blocks capture (P1); routes through P2/M3 |

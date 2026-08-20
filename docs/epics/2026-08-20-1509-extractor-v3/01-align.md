@@ -81,7 +81,7 @@ aboutObjects: extractor
 - The ontology needs no changes (2.2 resolved as Points, owner-approved A) — confidence: **high**
 - DeepSeek-direct is production-viable — confidence: **high** (adapter already proven in the eval)
 - **Per-run API budget is secured and within cost envelope — confidence: medium.** The single demonstrated cause of the void v2 run was financial (21,342× HTTP 402 billing wall). Estimate: 500 questions × ~180 extractor calls + reader + judge ≈ $15–40/run on DeepSeek-direct (flash pricing) + judge gpt-4o (~$10–20) — must be confirmed with a pre-flight billing probe (scope M2) before each run. Budget failure = run void, so this is a gated assumption, not an afterthought.
-- Team/agent capacity to land the full M+P+E/R/A build while production v2 stays live — confidence: **medium.** If capacity binds, cut order is explicit: R2/R5 (retrieval stack improvements) first, then E5 (supersession end-to-end) — harness (M) and production (P) are never cut.
+- Team/agent capacity to land the full M+P+E/R/A build while production v2 stays live — confidence: **medium.** If capacity binds, cut order is explicit: R2/R5 (retrieval stack improvements) first — **E5+E7 (supersession + consolidation, the V3 thesis) are NEVER cut together as a unit** (E7 builds on E5); harness (M) and production (P) are never cut.
 - Iteration loop (run → learn → V4) stays affordable (each run ~2.5 days + API cost) — confidence: **medium**
 
 **Recommendation:** PROCEED. Ship the harness+production core first (it's urgent regardless of design direction), then the E/R/A build, then ONE run that becomes the V4 baseline. The risk that the V3 bet doesn't pay is real but bounded — the harness fixes retain value in every world.
