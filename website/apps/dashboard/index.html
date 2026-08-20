@@ -6,6 +6,35 @@
     <title>Tortoise Dashboard</title>
     <link rel="icon" href="data:," /> <!-- Round-7: kill the favicon.ico 404 console error -->
     <meta name="theme-color" content="#060b14" />
+    <!-- #1498: INSTANT auth gate — read the shared session cookie
+         synchronously (supabase-session.js parent-domain cookie,
+         encodeURIComponent(JSON session)) BEFORE the app bundle loads or
+         renders. No session + no stored API key + no claim in flight →
+         location.replace to the single auth page (Back-proof, no
+         "checking session" flash, no network round-trip — getSession() can
+         trigger a token refresh and take ~1s; the app's async check remains
+         as the authoritative post-mount step for key/claim holders). -->
+    <script>
+      (function () {
+        try {
+          var hasSession = false;
+          var m = document.cookie.match(/(?:^|; )sb-tortoise-auth-token=([^;]*)/);
+          if (m) {
+            try {
+              var s = JSON.parse(decodeURIComponent(m[1]));
+              hasSession = !!(s && s.access_token && (!s.expires_at || s.expires_at * 1000 > Date.now()));
+            } catch (e) { hasSession = false; }
+          }
+          var claimKey = null, storedKey = null;
+          try { claimKey = window.sessionStorage.getItem("tt_claim_key"); } catch (e) {}
+          try { storedKey = window.localStorage.getItem("tortoise_api_key"); } catch (e) {}
+          var claimPending = /(?:^|; )tt_claim_pending=/.test(document.cookie);
+          if (!hasSession && !storedKey && !claimKey && !claimPending) {
+            window.location.replace("https://tortoise.premiselabs.co/auth");
+          }
+        } catch (e) { /* best-effort — the app's async check still applies */ }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
