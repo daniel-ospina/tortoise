@@ -1254,15 +1254,18 @@ class FalkorProjection(
             )
         except Exception as e:
             msg = str(e).lower()
-            if "is_operator" in msg or "lastdreamedat" in msg:
-                # Server mode: single-property indexes from older
+            if not getattr(self, "_is_embedded", False) \
+                    and ("is_operator" in msg or "lastdreamedat" in msg):
+                # Server mode only: single-property indexes from older
                 # _ensure_indexes runs (plain `is_operator` OR plain
                 # `lastDreamedAt`) block the composite — FalkorDB rejects a
                 # composite containing an already-indexed attribute.
                 # The composite subsumes both singles, so drop them and
                 # retry once. (Idempotent: a later startup with the
                 # composite present hits "already indexed" on the composite
-                # and no-ops below.)
+                # and no-ops below.) Embedded is deliberately EXCLUDED — the
+                # plain lastDreamedAt index there is the correct one and must
+                # not be dropped/recreated on every reopen (churn).
                 try:
                     for _single in ("is_operator", "lastDreamedAt"):
                         try:
