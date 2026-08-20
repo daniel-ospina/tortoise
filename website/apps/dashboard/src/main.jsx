@@ -903,6 +903,15 @@ function App() {
     if (authSubRef.current) { authSubRef.current.unsubscribe?.(); authSubRef.current = null }
     teamKeysRef.current = {}
     try { if (supabaseClient) await supabaseClient.auth.signOut() } catch { /* best-effort */ }
+    // #1511: the key-only card is gone — after signOut the dashboard has NO
+    // !authed UI. Always go to /auth (origin-aware; the app-origin gate emits
+    // the absolute target) so the sign-out lands on the login page instead of
+    // the dead redirect shell. clearStoredSession is belt-and-braces (signOut
+    // already clears the cookie via the adapter; a blocked script is covered
+    // by the mount-effect redirect on next load).
+    if (typeof window.clearStoredSession === 'function') window.clearStoredSession()
+    if (typeof window.bounceToAuth === 'function') window.bounceToAuth()
+    else window.location.replace('https://tortoise.premiselabs.co/auth')
   }
 
   async function loadAll(key) {

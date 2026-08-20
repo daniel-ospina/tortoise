@@ -28,8 +28,8 @@ from tortoise.hosted_api import app
 from tests.fake_control_plane import FakeControlPlane
 
 _SUPABASE_URL = "https://sessionlogin.supabase.co"
-_OWNER = "u-owner-1111-2222-3333-444444444444"
-_MEMBER = "u-member-1111-2222-3333-444444444444"
+_OWNER = "e7e0794e-267d-427c-a3a2-7d01cfd5611e"
+_MEMBER = "fa3d811a-e4c8-4cf4-a001-aa2959472d85"
 
 
 @pytest.fixture(autouse=True)
@@ -233,6 +233,22 @@ class TestSessionLogin:
     def test_identity_key_on_claimed_team_403_key_not_user_minted(self, client, fake):
         _seed_team(fake)
         key = _mint_key(fake, created_by="reg-xyz")
+        r = _exchange(client, key)
+        assert r.status_code == 403
+        assert r.json()["detail"]["error_code"] == "KEY_NOT_USER_MINTED"
+
+    def test_uuid_creator_non_member_on_anon_team_403_key_not_user_minted(
+            self, client, fake):
+        """Pinned order (VGATE P3): the claim funnel is for IDENTITY-shaped
+        creators ONLY — a UUID creator who is no longer an active member (a
+        team that lost its claimed owner) is KEY_NOT_USER_MINTED, never
+        ANON_TEAM_NO_OWNER."""
+        fake.seed("teams", [{"id": "t-anon2", "name": "T", "tier": "free",
+                             "max_users": 5, "max_graphs": 5, "graph_size_cap": 10000,
+                             "ops_allowance": 1000, "email": None}])
+        fake.seed("team_memberships", [{"team_id": "t-anon2", "identity": "anon-xyz",
+                                        "role": "owner", "status": "active"}])
+        key = _mint_key(fake, team_id="t-anon2", created_by=_MEMBER)  # UUID, not a member
         r = _exchange(client, key)
         assert r.status_code == 403
         assert r.json()["detail"]["error_code"] == "KEY_NOT_USER_MINTED"

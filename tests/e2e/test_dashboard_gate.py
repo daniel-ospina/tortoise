@@ -27,8 +27,16 @@ import sys
 import urllib.parse
 from pathlib import Path
 
+import json
+import time
+import urllib.parse
+
 import pytest
 from playwright.sync_api import Page, expect
+
+from tests.e2e.test_session_login_flow import (
+    _session_json, _wire_prod_domains, AUTH_HOST, APP_HOST,
+)
 
 if not os.environ.get("RUN_DASHBOARD_E2E"):
     pytest.skip("dashboard e2e: opt-in via RUN_DASHBOARD_E2E=1", allow_module_level=True)
@@ -105,3 +113,23 @@ def test_claim_intent_shows_claim_paste(page: Page, claim_seed: str) -> None:
     page.add_init_script("window.__AUTH_BASE_URL = 'https://tortoise.premiselabs.co';")
     page.goto(url, wait_until="domcontentloaded", timeout=30_000)
     expect(page.locator("body")).to_contain_text("Claim your team", timeout=20_000)
+
+
+def test_logout_redirects_to_auth(page: Page) -> None:
+    """#1511 (VGATE P1): a signed-in user clicking Log out is redirected to
+    /auth — the key-only card is gone, so sign-out must land on the login
+    page, never the dead redirect shell. Requires the loop harness: a valid
+    session cookie → dashboard renders → Log out → /auth."""
+    _wire_prod_domains(page)
+    page.context.add_cookies([{
+        "name": "sb-tortoise-auth-token",
+        "value": urllib.parse.quote(json.dumps(_session_json())),
+        "domain": ".premiselabs.co", "path": "/",
+    }])
+    page.add_init_script(f"window.__AUTH_BASE_URL = '{AUTH_HOST}';")
+    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    expect(page.locator("body")).to_contain_text("Graphs", timeout=20_000)
+    page.locator(".account-blob-btn").click()
+    expect(page.locator(".account-menu-logout")).to_be_visible()
+    page.locator(".account-menu-logout").click()
+    expect(page).to_have_url(re.compile(rf"^{re.escape(AUTH_HOST)}/auth"), timeout=20_000)

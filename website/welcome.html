@@ -944,13 +944,19 @@ you up to 6 yes/no questions and set up your Tortoise memory.
           resolve(session);
         };
         timer = setTimeout(() => finish(null), timeoutMs);
+        // #1511: only a STRICTLY VALID session resolves the wait (access_token
+        // + expires_at present + future) — presence is not auth. A stale
+        // session falls through to the timeout → the no-session redirect /
+        // provisioning-401 backstop instead of leaking into welcome.
+        const isValid = (s) => s && s.access_token && s.expires_at &&
+          s.expires_at * 1000 > Date.now();
         try {
           authSub = supabaseClient.auth.onAuthStateChange((event, session) => {
-            if (event === "SIGNED_IN" && session) finish(session);
+            if (event === "SIGNED_IN" && isValid(session)) finish(session);
           }).data.subscription;
         } catch (e) { /* no auth subscription available — getSession poll only */ }
         supabaseClient.auth.getSession()
-          .then(({ data: d }) => { if (d.session) finish(d.session); })
+          .then(({ data: d }) => { if (isValid(d.session)) finish(d.session); })
           .catch(() => {});
       });
     }

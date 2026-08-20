@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json as _json
 import logging
+import re
 import math
 import os
 import threading
@@ -2463,7 +2464,14 @@ async def session_login(request: Request):
     cp = get_control_plane()
     target = mint_target_user_for_key(cp, created_by, team_id)
     if target is None:
-        if created_by is not None and created_by != "api" \
+        # Pinned evaluation order (plan Task 2): the claim funnel is for
+        # IDENTITY-shaped creators (anon-team keys from provisioning) ONLY —
+        # a UUID creator who is no longer an active member (e.g. the team
+        # lost its owner) is KEY_NOT_USER_MINTED, never the claim funnel.
+        _is_uuid = bool(re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+            created_by or "", re.IGNORECASE))
+        if created_by is not None and created_by != "api" and not _is_uuid \
                 and is_anon_team(cp, team_id):
             raise HTTPException(
                 status_code=403,
