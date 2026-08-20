@@ -218,6 +218,33 @@ class TestCreateEventAboutEdges:
         ).result_set
         assert r[0][0] is True, "name-valued aboutSubject no longer resolves"
 
+    def test_create_event_prefixed_object_no_stub(self, sdk):
+        """#1516: same invariants for the aboutObject branch (obj-<hex26>)
+        — the four about* guards are copy-paste identical, so cover more
+        than one to catch a future divergence."""
+        obj = sdk.create_object("gadget-x", "product")
+        ev = sdk.create_event("prefixed-obj-event", "deployment",
+                              aboutObject=obj["id"])
+        proj = sdk._get_proj()
+        eid = ev["eventId"]
+        stub = proj.g.query(
+            "MATCH (o:Object {name:$name}) RETURN count(o)",
+            params={"name": obj["id"]},
+        ).result_set
+        assert stub[0][0] == 0, \
+            f"stub Object created named after the id: {obj['id']}"
+        canon = proj.g.query(
+            "MATCH (o:Object {id:$oid}) RETURN count(o)",
+            params={"oid": obj["id"]},
+        ).result_set
+        assert canon[0][0] == 1, "canonical Object not unique"
+        r = proj.g.query(
+            "MATCH (e:Event {eventId:$eid})-[a:aboutObject]->"
+            "(o:Object {id:$oid}) RETURN count(a)",
+            params={"eid": eid, "oid": obj["id"]},
+        ).result_set
+        assert r[0][0] == 1, "aboutObject edge did not land on canonical node"
+
 
 # ── Existing edges unbroken (regression) ────────────────────────────────
 

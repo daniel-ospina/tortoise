@@ -503,7 +503,12 @@ def _is_entity_id(s: str) -> bool:
     """Return True if *s* is an entity id: the prefixed _entity_name_id format
     OR a bare ULID. Used by the about* wiring guards (create_entity event
     branch) so ID-valued aboutSubject/aboutObject/aboutPoint/aboutDocument
-    props never hit the name-resolution fallback."""
+    props never hit the name-resolution fallback.
+
+    Boundary: a NAME shaped exactly like ``[a-z]{2,3}-<26 lowercase hex>``
+    (e.g. ``ab-0123456789abcdef0123456789``) is classified as an id and skips
+    name resolution — vanishingly rare for human names and consistent with
+    the pre-existing bare-ULID/Crockford behavior."""
     return bool(_is_ulid(s) or _ENTITY_ID_RE.match(s))
 
 
