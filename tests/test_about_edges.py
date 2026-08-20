@@ -173,6 +173,51 @@ class TestCreateEventAboutEdges:
             ).result_set
             assert r[0][0] is True, f"{edge} edge missing"
 
+    def test_create_event_prefixed_id_no_stub(self, sdk):
+        """#1516: prefixed entity ids (sub-<hex26>) must NOT run the name
+        fallback (which minted stub Subject nodes named after the id and
+        wired spurious aboutSubject edges). The edge must land on the
+        canonical node only, with zero stubs."""
+        subj = sdk.create_subject("ida", "engineer")
+        ev = sdk.create_event("prefixed-id-event", "meeting",
+                              aboutSubject=subj["id"])
+        proj = sdk._get_proj()
+        eid = ev["eventId"]
+        # (a) no stub Subject node whose name equals the id
+        stub = proj.g.query(
+            "MATCH (s:Subject {name:$name}) RETURN count(s)",
+            params={"name": subj["id"]},
+        ).result_set
+        assert stub[0][0] == 0, \
+            f"stub Subject created named after the id: {subj['id']}"
+        # (b) exactly one Subject node with the canonical id
+        canon = proj.g.query(
+            "MATCH (s:Subject {id:$sid}) RETURN count(s)",
+            params={"sid": subj["id"]},
+        ).result_set
+        assert canon[0][0] == 1, "canonical Subject not unique"
+        # (c) the aboutSubject edge lands on the canonical node only
+        r = proj.g.query(
+            "MATCH (e:Event {eventId:$eid})-[a:aboutSubject]->"
+            "(s:Subject {id:$sid}) RETURN count(a)",
+            params={"eid": eid, "sid": subj["id"]},
+        ).result_set
+        assert r[0][0] == 1, "aboutSubject edge did not land on canonical node"
+
+    def test_create_event_name_still_resolves(self, sdk):
+        """#1516: a PLAIN-NAME aboutSubject still runs the name fallback
+        (creates/resolves the Subject by name) — the guard must only skip
+        id-shaped values, not names."""
+        ev = sdk.create_event("name-event", "meeting",
+                              aboutSubject="brand-new-team")
+        proj = sdk._get_proj()
+        r = proj.g.query(
+            "MATCH (e:Event {eventId:$eid})-[a:aboutSubject]->"
+            "(s:Subject {name:'brand-new-team'}) RETURN count(a) > 0",
+            params={"eid": ev["eventId"]},
+        ).result_set
+        assert r[0][0] is True, "name-valued aboutSubject no longer resolves"
+
 
 # ── Existing edges unbroken (regression) ────────────────────────────────
 
