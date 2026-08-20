@@ -1,0 +1,34 @@
+# Issue #1511 — Auth unification: dashboard never shows auth UI; browser API-key login via server-side session exchange
+
+**Level:** task · **complexity:** complex · **base:** origin/main (post-#1498/#1506 auth consolidation)
+
+## Confirmed Problem
+Unauthenticated users are stranded on surfaces lacking the full auth options (the dashboard's key-only card) or leak into post-auth pages (welcome), because: (a) the routing gates on three surfaces trust storage *presence* over session *validity* (missing/expired `expires_at` treated as valid — including the `/auth` async `getSession` bounce, which is pure presence); (b) the browser API-key login is broken cross-origin (the `/auth` modal writes tortoise-origin localStorage the dashboard can't read → every key-login attempt bounces back); (c) no single working auth entry point with the four options + a "Last used" hint. User decisions: **D1=(a)** server-side key→session exchange; **D2** keep the dashboard claim flow; **D3** Last-used in a non-secret parent-domain cookie.
+
+## Solution (converged; verified — no P0/P1)
+1. **API — new `POST /v1/session/login`** (hosted_api.py): `resolve_api_key` parity (401 revoked/expired/disabled, 403 suspended) → **force** the `dashboard_key_login` gate (not header-sniffed — the key rides the body) → owner lookup: `team_memberships` role=owner; **branch on the result**: owner `user_id` NULL → 409/403 `ANON_TEAM_NO_OWNER` (claim funnel); owner set but GoTrue user 404 → distinct `OWNER_ACCOUNT_MISSING` error (never the claim funnel) → admin `GET /auth/v1/admin/users/{id}` for the canonical email → admin `POST /auth/v1/admin/generate_link {type:magiclink}` (verified: NO email sent; single-use; auto-mints a phantom user if the email has no account — hence the GET-first ordering) → service-role `POST /auth/v1/verify {token_hash, type:email}` (returns the full session incl. `user`) → **post-verify membership sanity check** (owner_id + team_id, role=owner — kills the GET→generate_link TOCTOU) → return the session JSON. **Gate the exchange to owner-created keys** (`key.created_by == owner user_id`) — member-minted keys must not mint the owner's session. Dedicated per-IP rate-limit bucket (~5/hr, registered in `SKIP_AUTH` + `_bucket_key`), audit `session_mint`. Use `email_otp` from the generate_link response + the canonical email (GoTrue hashes `GenerateTokenHash(email, otp)` — case mismatch breaks redeem); double-submit → retryable.
+2. **/auth (signup.html):** `loginWithApiKey` → `POST /v1/session/login` → 200: `supabaseClient.auth.setSession(...)` (the adapter persists to the `.premiselabs.co` cookie) → **verify `readValidSession()` after** (cookie-blocked browsers → clear error, not a silent loop) → write `tt_last_auth_method=apikey` → `location.replace(DASHBOARD_URL)`. Errors: 401 invalid key; 403 ANON_TEAM_NO_OWNER → set `tt_claim_pending` marker + redirect to `app.premiselabs.co/?claim=1` (the claim card re-paste, D2 — the key never crosses origins); 403 OWNER_ACCOUNT_MISSING → message + re-paste; 429 → existing login lockout. Remove the dead tortoise-origin `tortoise_api_key` write (and clear any residue). **Harden the head gate AND the async `getSession` bounce** (valid = access_token + expires_at present + future; missing = invalid) — kills the /auth↔welcome loop.
+3. **Dashboard:** drop the `storedKey` exemption (keep claim-intent: `tt_claim_key` + `tt_claim_pending`/`?claim=1`). Delete the key-only card + handlers/state. `!authed` = claim-paste screen only for genuine claim-intent, else a redirect shell (mount effect `location.replace('/auth')`). Mount effect validity-checks `getSession`. **Sequencing: lands in the SAME change as the exchange** (never remove the card before the transport works). The dashboard loads the shared `supabase-session.js` (copied into `apps/dashboard/public/` — same file; the existing sync test keeps the two copies honest) before its gate; `typeof` guards so a blocked script degrades to the mount-effect fallback.
+4. **Welcome:** head gate + async `waitForSession` reject missing/expired `expires_at`; provisioning 401 → **clear hash + `clearStoredSession()`** (cookie + legacy localStorage) → `location.replace('/auth')`.
+5. **Shared helpers (supabase-session.js, additive):** `readValidSession()` (strict validity, single predicate), `clearStoredSession()` (Domain-correct), `getLastAuthMethod()`/`setLastAuthMethod()` (`tt_last_auth_method` parent-domain cookie, one-time migration from the dashboard's legacy app-origin `LAST_AUTH_METHOD`), `bounceToAuth(search, hash)`. **Head-gate load order:** the shared script moves to `<head>` (or the gate inlines) so `readValidSession` is synchronous at gate time on every page.
+6. **Last-used pills on /auth:** all four options; written by every success path (OAuth pre-redirect, email, exchange, claim).
+
+## Edge cases (from the verifier gates)
+anon→claim marker chain · phantom-owner branch · member-key→owner-session gating · async-bounce loop · callback hash exemptions + strip-on-401 · legacy localStorage clear · stale claimKey (not in-flight → /auth) · cookie-blocked post-exchange verify · GoTrue OTP expiry pinned (≤1 day at default; server-side redeem makes it moot) · key-residue hygiene.
+
+## Wiring
+hosted_api.py (+ GoTrue admin helpers) · supabase_control.py (owner resolution) · supabase-session.js · signup.html · welcome.html · dashboard index.html + main.jsx + public/ + dist · tests: **new test_session_login.py** (FakeControlPlane + monkeypatched httpx, mirror test_claim_endpoints.py), test_cross_subdomain_cookie_sync.py (wiring assertions for the shared helpers + dashboard copy), welcome-e2e (validity + 401→/auth), form-safety e2e (exchange path), legal e2e (gate predicate), **a loop-regression e2e** (key login → exchange → cookie → dashboard renders; without the cookie → redirects).
+
+## Rejected alternatives
+API-1 (client verifyOtp — two round trips + supabase-js drift surface; better if we ever want to kill the hosted-API auth dependency) · API-3 (two-phase voucher — most plumbing; better if strict credential-origin separation + app-controlled token semantics become a product need) · Client-A (minimal churn — the local-fix pattern that let this bug recur; better for a one-off patch) · Client-C (dual-store last-used — sync machinery for a cosmetic pill; better if the pill must survive a cookie wipe).
+
+## Complexity
+| Domain | Rating |
+|--------|--------|
+| Architecture | high (new API endpoint + session mint + cross-origin flow) |
+| UX | medium (auth flows, labels) |
+| Security | high (session minting, key parity, member-key gating, rate limits) |
+| Ontology | low |
+
+## Verification (target)
+The four user flows live: (a) dashboard no session → instant /auth; (b) paste key on /auth → exchange → dashboard authed (cookie session); (c) /auth shows Last used on the right option; (d) stale session → /auth not welcome, no loop. Claim flow intact. Static + all e2e suites green.
