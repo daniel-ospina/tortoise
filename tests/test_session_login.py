@@ -23,9 +23,9 @@ from fastapi.testclient import TestClient
 
 import tortoise.hosted_api as ha_mod
 import tortoise.supabase_control as sc
+from tests.fake_control_plane import FakeControlPlane
 from tortoise.auth import lookup_hash
 from tortoise.hosted_api import app
-from tests.fake_control_plane import FakeControlPlane
 
 _SUPABASE_URL = "https://sessionlogin.supabase.co"
 _OWNER = "e7e0794e-267d-427c-a3a2-7d01cfd5611e"
@@ -191,7 +191,6 @@ class TestSessionLogin:
         key = _mint_key(fake)
         # Force the flag off on the resolved team (resolve_api_key reads
         # dashboard_key_login from the teams row — seed it off).
-        from tortoise.supabase_control import resolve_api_key
         monkeypatch.setattr(sc, "get_control_plane", lambda: FakeControlPlane(
             tables={"teams": [{"id": "t1", "name": "T", "tier": "free", "max_users": 5,
                                "max_graphs": 5, "graph_size_cap": 10000, "ops_allowance": 1000,
