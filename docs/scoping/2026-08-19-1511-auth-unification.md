@@ -1,3 +1,12 @@
+---
+title: "Scoping: #1511 — Auth unification (dashboard never shows auth UI; browser API-key login via server-side session exchange)"
+type: decisions
+domain: operations
+doc_status: live
+created: 2026-08-19
+ownedBy: epistemic-team
+---
+
 # Issue #1511 — Auth unification: dashboard never shows auth UI; browser API-key login via server-side session exchange
 
 **Level:** task · **complexity:** complex · **base:** origin/main (post-#1498/#1506 auth consolidation)

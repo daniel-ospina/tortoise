@@ -1,3 +1,12 @@
+---
+title: "#1511 Auth Unification Implementation Plan"
+type: decisions
+domain: operations
+doc_status: live
+created: 2026-08-19
+ownedBy: epistemic-team
+---
+
 <!-- research-path: docs/scoping/2026-08-19-1511-auth-unification.md -->
 
 # #1511 Auth Unification Implementation Plan

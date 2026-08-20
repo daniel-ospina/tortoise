@@ -1,6 +1,6 @@
 ---
 title: "Auth architecture — standard patterns vs Tortoise (research + audit)"
-type: research
+type: operations
 domain: operations
 doc_status: live
 created: 2026-08-19
