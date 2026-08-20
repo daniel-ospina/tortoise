@@ -2434,7 +2434,13 @@ async def session_login(request: Request):
     # fixed here for the new unauthenticated endpoint.
     if not isinstance(body, dict):
         body = {}
-    token = (body or {}).get("api_key") or ""
+    # Security review r2 (P2): a non-STRING api_key value inside a dict body
+    # ({"api_key": 12345}) would raise AttributeError on .startswith → raw
+    # 500 before the rate-limit + audit. Coerce the value as well as the body.
+    token = body.get("api_key")
+    if not isinstance(token, str):
+        token = ""
+    token = token.strip()
     if not token.startswith("tt_"):
         await _audit_auth_failure(request, "invalid_key")
         raise HTTPException(status_code=401, detail="Invalid API key")

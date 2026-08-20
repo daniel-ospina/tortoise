@@ -268,6 +268,8 @@ class TestSessionLogin:
         r2 = client.post("/v1/session/login", content='"abc"',
                          headers={"Content-Type": "application/json"})
         assert r2.status_code == 401, r2.text
+        r3 = client.post("/v1/session/login", json={"api_key": 12345})
+        assert r3.status_code == 401, r3.text  # non-string key value (P2-1)
 
     def test_gotrue_transport_error_502(self, client, fake, monkeypatch):
         """Code-review P1: an httpx transport exception from the GoTrue admin

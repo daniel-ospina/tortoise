@@ -798,10 +798,10 @@ function claimIntentInFlight() {
   // to an anon team (same key, same graph, memories intact).
   async function claimSignIn(provider) {
     setClaimError('')
-    // #1511 (code-review P2): the claim-paste screen REQUIRES the pasted key
-    // — the localStorage fallback may hold a pre-#1511 stored key or another
-    // team's bootstrap key, and running the claim with the wrong credential
-    // 403s with no clue which key was used.
+    // #1511 (code-review P2): the claim uses the VISIBLE input (apiKey
+    // state mirrored into the ref) — what's on screen is what's used. A
+    // pre-filled stored key is visible and deliberate; a wrong-team key
+    // 403s with the claim error. No hidden localStorage fallback.
     const k = (apiKeyRef.current || '').trim()
     if (!k.startsWith('tt_')) {
       setClaimError('Paste your tt_ API key above, then connect a login to claim your team.')
