@@ -76,8 +76,29 @@ def _require_key(authorization: str | None = Header(default=None)) -> None:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
+# #1475: per-request SDKs are closed-on-GC, which would shut down the
+# embedded redislite server between requests (create → list → dead socket).
+# Pin ONE SDK per embedded DB path as the server's liveness anchor (mirrors
+# hosted_api._FALLBACK_KEEPALIVE); fresh per-request SDKs share the pinned
+# server via the same path. Keyed by TORTOISE_DB_PATH because selfhost tests
+# reload the module per-test with a fresh path — a single "selfhost" key
+# would pin the FIRST test's server and orphan every later one.
+_SELFHOST_KEEPALIVE: dict[str, "TortoiseSDK"] = {}
+
+
 def _sdk():
     from tortoise.sdk import TortoiseSDK
+    if not os.environ.get("TORTOISE_DB_URI"):
+        # Embedded mode: hold the server alive across requests (see above).
+        db_path = os.environ.get("TORTOISE_DB_PATH", "/data/tortoise.db")
+        anchor = _SELFHOST_KEEPALIVE.get(db_path)
+        if anchor is None:
+            anchor = TortoiseSDK(db_path=db_path, namespace="selfhost")
+            try:
+                anchor._get_proj()  # eager: hold the connection so the server survives
+            except Exception:
+                pass
+            _SELFHOST_KEEPALIVE.setdefault(db_path, anchor)
     return TortoiseSDK(namespace="selfhost")
 
 

@@ -103,7 +103,14 @@ def _fabricate_path_based_dir(tmp_path, pid, sub="redislite_orphan"):
 
 def test_classify_path_based_dead_owner_is_orphan_candidate(tmp_path):
     """#1427: path-based server whose registry-recorded owner pid is
-    provably dead -> orphan candidate, not protected."""
+    provably dead -> orphan, not protected.
+
+    #1383: the dead-pid classification is now 'stale_socket' (honest label —
+    a dead-pid leftover dir has no live server, so it is reapable via the
+    guarded-rmtree action _remove_stale_socket_dir, never a killable
+    'candidate'). The #1427 contract — dead owner -> reapable, NOT
+    protected — is unchanged.
+    """
     sock_dir = tmp_path / "redislite_sock"
     sock_dir.mkdir()
     pidfile = sock_dir / "redis.pid"
@@ -112,7 +119,7 @@ def test_classify_path_based_dead_owner_is_orphan_candidate(tmp_path):
     dbdir = str(tmp_path / "user-data-dir")
     registry = _path_based_registry(sock_dir, dbdir, pidfile)
     assert _classify(str(sock_dir), dbdir, str(tmp_path), registry) \
-        == "candidate"
+        == "stale_socket"
 
 
 def test_classify_path_based_live_owner_stays_protected(tmp_path):
@@ -149,14 +156,15 @@ def test_classify_path_based_unresolvable_owner_fails_closed(tmp_path):
 
 def test_discover_classifies_orphaned_path_based_server_as_candidate(tmp_path):
     """#1427: a leaked path-based server (registry dir + named db_filename,
-    dead owner pid) is discovered as an orphan candidate — never
-    'protected', so the sweep's reap path can act on it."""
+    dead owner pid) is discovered as an orphan — never 'protected', so the
+    sweep's reap path can act on it. #1383: dead-pid leftovers classify
+    'stale_socket' (guarded-rmtree reapable), not 'candidate' (killable)."""
     sock_dir, _socket_path = _fabricate_path_based_dir(tmp_path, _dead_pid())
     with monkeypatch_tempdir(tmp_path):
         found = discover()
     matches = [s for s in found if str(sock_dir) in s.get("dbdir", "")]
     assert matches, "orphaned path-based server not discovered"
-    assert matches[0]["classification"] == "candidate"
+    assert matches[0]["classification"] == "stale_socket"
 
 
 def test_discover_path_based_live_owner_stays_protected(tmp_path):

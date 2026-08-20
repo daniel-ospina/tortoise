@@ -65,6 +65,18 @@ def workflow_text() -> str:
     return _WORKFLOW.read_text(encoding="utf-8")
 
 
+# #1358: TORTOISE_SESSION_LLM_MODEL is a MODEL OVERRIDE knob (selects the
+# flash-class model when a provider key is present), NOT a provider key — it
+# has no 503-gate requirement and does not belong in _LLM_PROVIDER_KEYS, but
+# it IS propagated to Fly. The provider-parity tests must allow it as the
+# known non-provider extra in the propagation block.
+_PROP_EXTRA_KEYS = {"TORTOISE_SESSION_LLM_MODEL"}
+
+
+def _prop_region(text: str) -> str:
+    return _region(text, _PROP_START, _PROP_END)
+
+
 def test_verify_secrets_gate_matches_runtime_registry(workflow_text, registry_keys):
     """The deploy gate's key set == _LLM_PROVIDER_KEYS, with the
     warn-only shape (::warning::, no exit 1) intact — the #1346 decision:
@@ -93,17 +105,19 @@ def test_verify_secrets_gate_matches_runtime_registry(workflow_text, registry_ke
 
 
 def test_secrets_set_propagation_matches_runtime_registry(workflow_text, registry_keys):
-    """The secrets-set step propagates EXACTLY the runtime registry key set.
+    """The secrets-set step propagates the runtime registry key set (plus
+    the #1358 model-override extra, which is a non-provider knob).
 
     The gate and propagation must agree with the registry — a key gated on but
     never propagated ships a deploy that 503s despite a passing gate."""
     prop = _region(workflow_text, _PROP_START, _PROP_END)
     prop_keys = _key_names(prop)
     assert prop_keys, "no secrets.<KEY> found in the secrets-set provider block — marker drift"
-    assert prop_keys == set(registry_keys), (
+    assert prop_keys == set(registry_keys) | _PROP_EXTRA_KEYS, (
         f"Fly secrets propagation keys {sorted(prop_keys)} != runtime registry "
-        f"{sorted(registry_keys)} — a registry rename not mirrored here ships "
-        f"the gate passing while the key never reaches Fly (503-on-every-capture)"
+        f"{sorted(registry_keys)} (+ {sorted(_PROP_EXTRA_KEYS)} extra) — a "
+        f"registry rename not mirrored here ships the gate passing while the "
+        f"key never reaches Fly (503-on-every-capture)"
     )
     # Semantics: each registry key must be APPENDED to the flyctl ARGS — a key
     # merely referenced (echoed or commented) passes name parity but still never
@@ -118,10 +132,17 @@ def test_secrets_set_propagation_matches_runtime_registry(workflow_text, registr
 
 
 def test_gate_and_propagation_agree_with_each_other(workflow_text, registry_keys):
-    """Gate ⊆ propagation ⊆ gate — the two blocks can never diverge."""
+    """Gate ⊆ propagation ⊆ gate — the two blocks can never diverge
+    (modulo the #1358 model-override extra, which is propagated but not
+    gated: it is a tuning knob, not a 503-gate requirement)."""
     gate = _region(workflow_text, _GATE_START, _GATE_END)
     prop = _region(workflow_text, _PROP_START, _PROP_END)
-    assert _key_names(gate) == _key_names(prop) == set(registry_keys), (
+    assert _key_names(gate) == set(registry_keys), (
+        "verify-secrets gate references a key set that drifted from the "
+        "runtime registry — a key gated on but never propagated (or vice "
+        "versa) is a deploy hazard"
+    )
+    assert _key_names(prop) == set(registry_keys) | _PROP_EXTRA_KEYS, (
         "verify-secrets gate and secrets-set propagation reference DIFFERENT key "
         "sets — a key gated on but not propagated (or vice versa) is a deploy hazard"
     )

@@ -1212,9 +1212,15 @@ class FalkorProjection(
         index for the Node By Index Scan perf win.
         """
         # ── Range indexes (always safe, pre-4.x compatible) ──
+        # NOTE: the single `is_operator` index is NOT created here on
+        # server mode — the composite (is_operator, lastDreamedAt) below
+        # subsumes it (leftmost prefix serves `n.is_operator = false`), and
+        # FalkorDB rejects a composite containing an already-indexed
+        # attribute ("Attribute 'is_operator' is already indexed"), which
+        # silently disabled the lastDreamedAt composite (the epic-903
+        # staleness-ranking index). Embedded skips is_operator entirely
+        # (#522 stale-bool-type repair).
         point_props = ("id", "pointKind", "content_hash")
-        if not getattr(self, "_is_embedded", False):
-            point_props = (*point_props, "is_operator")
         for prop in point_props:
             try:
                 self.g.query(f"CREATE INDEX FOR (n:Point) ON (n.{prop})")
@@ -1248,7 +1254,35 @@ class FalkorProjection(
             )
         except Exception as e:
             msg = str(e).lower()
-            if "already indexed" in msg or "already exists" in msg:
+            if "is_operator" in msg or "lastdreamedat" in msg:
+                # Server mode: single-property indexes from older
+                # _ensure_indexes runs (plain `is_operator` OR plain
+                # `lastDreamedAt`) block the composite — FalkorDB rejects a
+                # composite containing an already-indexed attribute.
+                # The composite subsumes both singles, so drop them and
+                # retry once. (Idempotent: a later startup with the
+                # composite present hits "already indexed" on the composite
+                # and no-ops below.)
+                try:
+                    for _single in ("is_operator", "lastDreamedAt"):
+                        try:
+                            self.g.query(f"DROP INDEX ON :Point({_single})")
+                        except Exception:
+                            pass  # no such single index — fine
+                    self.g.query(
+                        "CREATE INDEX FOR (n:Point) ON ("
+                        + ", ".join(f"n.{p}" for p in dreamed_props) + ")"
+                    )
+                except Exception as e2:
+                    msg2 = str(e2).lower()
+                    if "already indexed" in msg2 or "already exists" in msg2:
+                        pass  # composite already exists from prior startup
+                    else:
+                        import logging
+                        logging.getLogger(__name__).error(
+                            "Failed to create index on :Point(%s): %s",
+                            ", ".join(dreamed_props), e2)
+            elif "already indexed" in msg or "already exists" in msg:
                 pass  # expected — index exists from prior startup
             else:
                 import logging

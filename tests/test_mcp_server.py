@@ -1,5 +1,7 @@
 """Tests for mcp_server — MCP tool registration, _safe wrapper, and tool behavior."""
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -948,6 +950,13 @@ class TestStdioEntrypointToolRegistration:
         # #942 test-only escape hatch: tools/list needs no DB; avoid a
         # hard error from main()'s missing-config guard.
         env["TORTOISE_ALLOW_EMBEDDED"] = "1"
+        # Isolate the subprocess's embedded DB: tools/list probes the default
+        # ~/.tortoise/tortoise.db path, which collides with the running pytest
+        # session's own embedded servers (_probe_embedded_busy →
+        # EmbeddedStoreBusyError → subprocess dies → JSONDecodeError on empty
+        # stdout). A per-test temp path avoids the ambient default entirely.
+        env["TORTOISE_DB_PATH"] = os.path.join(
+            tempfile.mkdtemp(prefix="mcp-stdio-"), "tortoise.db")
         repo_root = Path(__file__).resolve().parents[1]
 
         proc = subprocess.Popen(
