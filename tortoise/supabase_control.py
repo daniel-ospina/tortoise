@@ -646,6 +646,24 @@ def membership_for_user_team(cp, user_id: str, team_id: str) -> dict | None:
     return {"team_id": team_id, "role": rows[0]["role"]}
 
 
+def mint_target_user_for_key(cp, key_created_by, team_id: str) -> str | None:
+    """#1511: the user a key's session-exchange should mint for.
+
+    Returns the key's creator user_id when it is an ACTIVE member of the
+    team (the exchange mints the CREATOR's session — no escalation: a
+    member's key mints the member's session, team-scoped claims only), else
+    None. The endpoint branches on the `created_by` SHAPE BEFORE calling:
+    an anon/identity string on an owner-less team → ANON_TEAM_NO_OWNER; an
+    "api"/NULL/unknown shape → KEY_NOT_USER_MINTED. Control-plane fact only
+    (FakeControlPlane-testable); the GoTrue admin fetch + mint live in
+    hosted_api.py.
+    """
+    if not key_created_by:
+        return None
+    mem = membership_for_user_team(cp, key_created_by, team_id)
+    return key_created_by if mem is not None else None
+
+
 def team_by_id(cp, team_id: str) -> dict | None:
     """Team row (registry-properties-shaped dict) or None.
 

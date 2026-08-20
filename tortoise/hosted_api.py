@@ -2711,6 +2711,82 @@ def _supabase_admin_create_user(email: str, password: str) -> tuple[int, dict]:
     return resp.status_code, body
 
 
+def _gotrue_admin_get_user(user_id: str) -> tuple[int, dict] | None:
+    """#1511: fetch a Supabase auth user via the GoTrue ADMIN API (GET).
+
+    Returns (status_code, json_body) of the GoTrue response, or None on 404
+    (the account is missing/ghosted — the caller maps that to ACCOUNT_MISSING).
+    Raises on transport errors (the caller maps those to 502).
+    """
+    import httpx
+    url = os.environ.get("SUPABASE_URL", "").rstrip("/")
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_SERVICE_KEY")
+    resp = httpx.get(
+        f"{url}/auth/v1/admin/users/{user_id}",
+        headers={"Authorization": f"Bearer {key}", "apikey": key},
+        timeout=15.0,
+    )
+    if resp.status_code == 404:
+        return None
+    try:
+        body = resp.json()
+    except ValueError:
+        body = {}
+    return resp.status_code, body
+
+
+def _gotrue_admin_mint_session(email: str) -> dict:
+    """#1511: mint a Supabase session for an auth user via the GoTrue ADMIN
+    API (generate_link magiclink → service-role /verify).
+
+    Verified against supabase/auth source: admin generate_link does NOT send
+    an email; the magiclink token is single-use; `/verify` with
+    {token_hash, type:"magiclink"} returns the full AccessTokenResponse. The
+    canonical email comes from the admin user row (the caller resolves it via
+    _gotrue_admin_get_user FIRST — generate_link on a missing email would
+    silently auto-create a phantom unconfirmed user).
+
+    Raises RuntimeError on a consumed/expired token (retryable) and on
+    transport errors (the caller maps 502/503).
+    """
+    import httpx
+    url = os.environ.get("SUPABASE_URL", "").rstrip("/")
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_SERVICE_KEY")
+    headers = {"Authorization": f"Bearer {key}", "apikey": key,
+               "Content-Type": "application/json"}
+    link_resp = httpx.post(
+        f"{url}/auth/v1/admin/generate_link",
+        json={"type": "magiclink", "email": email},
+        headers=headers,
+        timeout=15.0,
+    )
+    if link_resp.status_code >= 400:
+        raise RuntimeError(f"session-link issuance failed (HTTP {link_resp.status_code})")
+    try:
+        link_body = link_resp.json()
+    except ValueError:
+        raise RuntimeError("session-link issuance returned a non-JSON body")
+    token_hash = link_body.get("hashed_token")
+    if not token_hash:
+        raise RuntimeError("session-link issuance returned no hashed_token")
+    verify_resp = httpx.post(
+        f"{url}/auth/v1/verify",
+        json={"token_hash": token_hash, "type": "magiclink"},
+        headers=headers,
+        timeout=15.0,
+    )
+    if verify_resp.status_code >= 400:
+        # Single-use token consumed by a concurrent/retried exchange — the
+        # caller treats this as retryable (re-issue), NOT a fatal error.
+        raise RuntimeError(
+            f"session token expired or already consumed (HTTP {verify_resp.status_code})"
+        )
+    try:
+        return verify_resp.json()
+    except ValueError:
+        raise RuntimeError("session verification returned a non-JSON body")
+
+
 @app.post("/v1/signup/email", response_model=EmailSignupResponse)
 async def email_signup(request: Request):
     """Server-side email signup — the #801 over_email_send_rate_limit fix.
