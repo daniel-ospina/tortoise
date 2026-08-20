@@ -110,13 +110,18 @@ class _CandidateFactory:
         return self._original(self._hf_id, *args, **kwargs)
 
 
-def inject_model(name: str, query_prompt: str | None = None) -> dict[str, Any]:
+def inject_model(name: str, query_prompt: str | None = None,
+             load_timeout: float | None = None) -> dict[str, Any]:
     """Inject candidate ``name`` as the active embedding model.
 
     Args:
         name: short name in :data:`PROBE_MODELS`.
         query_prompt: optional named prompt template threaded to the model
             (e.g. ``"query"`` for the snowflake-arctic vendor config).
+        load_timeout: override ``EmbeddingModel._LOAD_TIMEOUT_S`` (default
+            30s). The burn's first load of a model on a contended machine can
+            exceed 30s (bge-small measured ~57s) — pass a longer window for
+            the evidence burn (the hosted pre-warm uses 300s).
 
     Returns:
         The recorded probe state: ``{name, hf_id, resolved_revision,
@@ -164,7 +169,7 @@ def inject_model(name: str, query_prompt: str | None = None) -> dict[str, Any]:
             st.SentenceTransformer = wrapper
             _patch = (st, original, wrapper)
             EmbeddingModel._reset()  # clear singleton + failure cooldown
-            model = EmbeddingModel.get()
+            model = EmbeddingModel.get(load_timeout=load_timeout)
             if model is None:
                 raise EmbedderProbeError(
                     f"probe model {name!r} ({hf_id}) FAILED TO LOAD — refusing "

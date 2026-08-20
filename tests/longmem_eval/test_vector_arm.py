@@ -759,7 +759,7 @@ def test_spot_check_emits_paired_artifact(tmp_path, monkeypatch, fake_embeddings
     {cleared, n, metric_deltas} — consumed by gate_1349.py."""
     injected: list[str] = []
     monkeypatch.setattr(runner, "inject_model",
-                        lambda name, query_prompt=None: (
+                        lambda name, query_prompt=None, load_timeout=None: (
                             injected.append(name),
                             {"name": name, "hf_id": f"hf/{name}",
                              "resolved_revision": None, "query_prompt": query_prompt,

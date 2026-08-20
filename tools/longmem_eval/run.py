@@ -692,7 +692,8 @@ def _run_spot_check(args, instances: list[dict], *, ks, top_k, db_uri) -> dict:
     cache_root = Path(args.cache_dir).expanduser() if args.cache_dir else ds.cache_dir()
     results: dict[str, dict[str, dict]] = {}
     for model in (winner, control):
-        state = inject_model(model, query_prompt=args.query_prompt)
+        state = inject_model(model, query_prompt=args.query_prompt,
+                              load_timeout=getattr(args, "load_timeout", None))
         model_id = state.get("hf_id") or PROBE_MODELS.get(model) or DEFAULT_MODEL_ID
         cache = encode_cache.EncodeCache(
             encode_cache.cache_path_for(cache_root, model, args.query_prompt),
@@ -833,6 +834,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-download", action="store_true",
                    help="fail instead of downloading the dataset")
     return p
+    p.add_argument("--load-timeout", type=float, default=None,
+                help="EmbeddingModel load timeout override (seconds) — the burn first-load on a contended machine can exceed the 30s default (bge-small measured ~57s)")
 
 
 def run_main(argv: list[str] | None = None) -> dict[str, Any]:
@@ -901,7 +904,8 @@ def _run_main(parser: argparse.ArgumentParser, args,
     # candidate); the encode cache is active for model runs (burn path).
     encode_cache_inst = None
     if args.model:
-        state = inject_model(args.model, query_prompt=args.query_prompt)
+        state = inject_model(args.model, query_prompt=args.query_prompt,
+                              load_timeout=getattr(args, "load_timeout", None))
         cache_root = Path(args.cache_dir).expanduser() if args.cache_dir else ds.cache_dir()
         model_id = state.get("hf_id") or PROBE_MODELS[args.model] or DEFAULT_MODEL_ID
         encode_cache_inst = encode_cache.EncodeCache(
