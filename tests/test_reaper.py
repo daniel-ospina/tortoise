@@ -941,13 +941,14 @@ def test_reap_only_safe_skips_live_ephemeral_without_killing(monkeypatch):
     assert killed == []  # nothing was killed
 
 
-def test_reap_only_safe_reaps_detached_orphan(monkeypatch):
-    """only_safe=True must reap a DETACHED candidate (direct parent is init
-    — its spawning tree fully exited), even though it is a live ephemeral
-    server. This bounds orphan accumulation under concurrent suites
-    (issue #1115 option A): a server with no live holder is a dead-end, so
-    a suite's start/end sweep can clean it without waiting for the global
-    'last suite standing'.
+def test_reap_detached_orphan_full_sweep(monkeypatch):
+    """A genuine orphan (spawning subprocess SIGKILLed) is reaped by the
+    FULL sweep (only_safe=False — the single-suite end sweep / explicit
+    reap). Under only_safe=True the reaper NEVER kills live-pid servers
+    (#1557: redislite daemonizes to ppid=1, so all servers are "detached"
+    and the orphan is indistinguishable from a concurrent suite's live
+    server — only_safe's contract is "never disturb a concurrent suite",
+    #1005). Genuine orphans converge at the full end sweep.
     """
     from tortoise.embedded_reaper import discover, reap
     monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
@@ -956,11 +957,9 @@ def test_reap_only_safe_reaps_detached_orphan(monkeypatch):
     match = [s for s in found if s["socket_path"] == sock][0]  # noqa: RUF015
     assert match["classification"] == "candidate"
     pid = match["pid"]
-    # The orphan's spawning subprocess was SIGKILLed, so it is reparented
-    # (ppid 1) — the new detached criterion must admit it in only_safe mode.
-    reap([match], dry_run=False, only_safe=True)
+    reap([match], dry_run=False, only_safe=False)
     time.sleep(1)
-    assert not _pid_alive_for(pid), "detached orphan was not reaped in only_safe"
+    assert not _pid_alive_for(pid), "detached orphan was not reaped in full sweep"
 
 
 def test_reap_only_safe_protects_live_parented_server(monkeypatch):
@@ -2018,51 +2017,115 @@ def test_raw_resp_client_list_does_not_retry_missing_socket():
     assert _raw_resp_client_list("/nonexistent/reaper-missing.sock") is None
 
 
-def test_reap_only_safe_protects_live_pid_dir_gone(monkeypatch):
-    """#1557: only_safe must NOT kill a LIVE-pid server whose dir is
-    missing — that is a test-tempdir lifecycle race (the test's mkdtemp dir
-    briefly absent under matrix load), not an orphan. Redislite servers
-    daemonize to ppid=1, so _is_detached is True for all of them and cannot
-    discriminate; the dir_missing + live-pid combination is the discriminator.
+def test_reap_only_safe_protects_live_pid_dir_present(monkeypatch):
+    """#1557: only_safe must NOT kill a LIVE-pid server while a suite is
+    active — even when its dir is intact and it has 0 clients. Redislite
+    servers daemonize to ppid=1, so _is_detached is True for ALL of them:
+    the detached criterion cannot discriminate a concurrent suite's
+    between-tests idle server from a genuine orphan. Protect ANY live-pid
+    server under only_safe while a live suite marker exists (the #1005
+    concurrency guarantee). Genuine dir-gone orphans have a DEAD pid and go
+    through the stale_socket path.
     """
-    from tortoise.embedded_reaper import reap
-    monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
-    # Spawn a real (live, daemonized) server we control.
+    from tortoise.embedded_reaper import discover, phase1_probe, reap
+    from tortoise.embedded_reaper import ACTIVE_SUITES_DIR
     import subprocess as sp
     import sys as _sys
-    code = (
-        "import os,time; os.environ.pop('TORTOISE_DB_URI',None);\n"
-        "from redislite.falkordb_client import FalkorDB; db=FalkorDB();\n"
-        "print('READY ' + db.client.socket_file, flush=True); time.sleep(30)"
-    )
-    proc = sp.Popen([_sys.executable, "-c", code],
-                    stdout=sp.PIPE, text=True)
+    monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
+    # Register a live suite marker (the conftest writes pid=<os.getpid()>).
+    os.makedirs(ACTIVE_SUITES_DIR, exist_ok=True)
+    marker = os.path.join(ACTIVE_SUITES_DIR, f"test-{os.getpid()}-{time.time_ns()}")
+    with open(marker, "w") as fh:
+        fh.write(f"pid={os.getpid()}\n")
     try:
-        import select
-        if not select.select([proc.stdout], [], [], 30)[0]:
+        code = (
+            "import os,time; os.environ.pop('TORTOISE_DB_URI',None);\n"
+            "from redislite.falkordb_client import FalkorDB; db=FalkorDB();\n"
+            "print('READY ' + db.client.socket_file, flush=True); time.sleep(30)"
+        )
+        proc = sp.Popen([_sys.executable, "-c", code],
+                        stdout=sp.PIPE, text=True)
+        try:
+            import select
+            if not select.select([proc.stdout], [], [], 30)[0]:
+                proc.kill()
+                raise AssertionError("server did not start")
+            sock = proc.stdout.readline().strip().split()[-1]
+            r = sp.run(["ps", "-eo", "pid,ppid,command"], capture_output=True,
+                       text=True)
+            server_pid = None
+            for line in r.stdout.splitlines():
+                if sock in line and "redis-server" in line:
+                    server_pid = int(line.split()[0])
+                    break
+            assert server_pid, "daemonized server pid not found"
+            assert _pid_alive_for(server_pid), "server should be live"
+            # End-to-end: discover + phase1 + reap(only_safe=True) must NOT
+            # kill a live server while a suite is active (dir present, 0
+            # clients — the concurrent-suite between-tests case).
+            found = discover()
+            match = [s for s in found if s["socket_path"] == sock]
+            if match:
+                match = [phase1_probe(match[0])]
+                reap(match, dry_run=False, only_safe=True)
+            time.sleep(0.5)
+            assert _pid_alive_for(server_pid), (
+                "live-pid server killed under only_safe while suite active "
+                "— #1557 / #1005 concurrency guarantee")
+        finally:
             proc.kill()
-            raise AssertionError("server did not start")
-        sock = proc.stdout.readline().strip().split()[-1]
-        # find the live server pid (the daemonized child, not the subprocess)
-        r = sp.run(["ps", "-eo", "pid,ppid,command"], capture_output=True,
-                   text=True)
-        server_pid = None
-        for line in r.stdout.splitlines():
-            if sock in line and "redis-server" in line:
-                server_pid = int(line.split()[0])
-                break
-        assert server_pid, "daemonized server pid not found"
-        assert _pid_alive_for(server_pid), "server should be live"
-        # dir_missing=True + live pid → must be protected under only_safe
-        record = {"socket_path": sock, "pid": server_pid,
-                  "dbdir": "/nonexistent/race-dir", "dir_missing": True,
-                  "classification": "candidate"}
-        acted = reap([record], dry_run=False, only_safe=True)
-        time.sleep(0.5)
-        assert _pid_alive_for(server_pid), (
-            "live-pid dir-gone server killed under only_safe — #1557 race")
-        assert not any(r.get("socket_path") == sock for r in acted), \
-            "server should not be acted on"
+            proc.wait(timeout=5)
     finally:
-        proc.kill()
-        proc.wait(timeout=5)
+        os.unlink(marker) if os.path.exists(marker) else None
+
+
+def test_reap_only_safe_protects_live_pid_dir_gone(monkeypatch):
+    """#1557: only_safe must NOT kill a LIVE-pid server whose dir is
+    missing — the test-tempdir lifecycle race. Same protection as the
+    dir-present case (any live-pid server while a suite is active)."""
+    from tortoise.embedded_reaper import reap
+    from tortoise.embedded_reaper import ACTIVE_SUITES_DIR
+    import subprocess as sp
+    import sys as _sys
+    monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
+    os.makedirs(ACTIVE_SUITES_DIR, exist_ok=True)
+    marker = os.path.join(ACTIVE_SUITES_DIR, f"test-{os.getpid()}-{time.time_ns()}")
+    with open(marker, "w") as fh:
+        fh.write(f"pid={os.getpid()}\n")
+    try:
+        code = (
+            "import os,time; os.environ.pop('TORTOISE_DB_URI',None);\n"
+            "from redislite.falkordb_client import FalkorDB; db=FalkorDB();\n"
+            "print('READY ' + db.client.socket_file, flush=True); time.sleep(30)"
+        )
+        proc = sp.Popen([_sys.executable, "-c", code],
+                        stdout=sp.PIPE, text=True)
+        try:
+            import select
+            if not select.select([proc.stdout], [], [], 30)[0]:
+                proc.kill()
+                raise AssertionError("server did not start")
+            sock = proc.stdout.readline().strip().split()[-1]
+            r = sp.run(["ps", "-eo", "pid,ppid,command"], capture_output=True,
+                       text=True)
+            server_pid = None
+            for line in r.stdout.splitlines():
+                if sock in line and "redis-server" in line:
+                    server_pid = int(line.split()[0])
+                    break
+            assert server_pid, "daemonized server pid not found"
+            assert _pid_alive_for(server_pid), "server should be live"
+            record = {"socket_path": sock, "pid": server_pid,
+                      "dbdir": "/nonexistent/race-dir", "dir_missing": True,
+                      "classification": "candidate"}
+            acted = reap([record], dry_run=False, only_safe=True)
+            time.sleep(0.5)
+            assert _pid_alive_for(server_pid), (
+                "live-pid dir-gone server killed under only_safe — #1557 race")
+            assert not any(r.get("socket_path") == sock for r in acted), \
+                "server should not be acted on"
+        finally:
+            proc.kill()
+            proc.wait(timeout=5)
+    finally:
+        os.unlink(marker) if os.path.exists(marker) else None

@@ -1178,6 +1178,35 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
                 record.get("socket_path"))
             continue
 
+        # #1557: in only_safe mode, a live-pid server whose registry owner
+        # is ALIVE (or unknown) is a concurrent suite's server — protect it.
+        # redislite servers daemonize to ppid=1, so _is_detached is True for
+        # ALL of them (the #1115 "spawning tree exited" intent is false for
+        # redislite: a test-owned server is reparented at birth while its
+        # pytest parent is alive). The discriminator is the registry owner
+        # pid (the process that spawned the server): a test server's owner
+        # (pytest) is alive -> protect; a genuine orphan's owner subprocess
+        # was killed -> _registry_owner_alive is False -> still reaped;
+        # unresolvable owner (None) -> fail closed -> protect. This preserves
+        # the #1005 only_safe guarantee (never disturb a concurrent suite's
+        # server) AND keeps reaping true orphans.
+        # #1557 (final): a live-pid server under only_safe is NEVER killed —
+        # redislite daemonizes to ppid=1 (all servers are "detached") and the
+        # registry owner is None for no-path servers, so the reaper cannot
+        # distinguish a concurrent suite's live test server from a
+        # killed-subprocess orphan on pid/registry alone. only_safe's
+        # contract is "never disturb a concurrent suite" (#1005) — err on
+        # protection: skip ANY live-pid server. Genuine orphans are reaped
+        # by the FULL sweep (only_safe=False, the single-suite end sweep)
+        # and by the stale_socket path (dead-pid leftover dirs).
+        if only_safe and record.get("pid") and _pid_alive(record["pid"]):
+            logger.info(
+                "concurrent-suite guard: live-pid server protected under "
+                "only_safe (daemonized, cannot distinguish orphan from "
+                "test server), skipping %s",
+                record.get("socket_path"))
+            continue
+
         # #1557: in only_safe mode, a LIVE-pid candidate whose dir is
         # missing is a TEST-TEMPDIR LIFECYCLE RACE, not an orphan — protect
         # it (redislite daemonizes to ppid=1 so _is_detached is True for ALL
