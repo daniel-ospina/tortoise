@@ -51,7 +51,7 @@
 - **When:** a KU question asks the current value
 - **Then:** the newer value is answered; the superseded point is co-retrieved and rendered `[SUPERSEDED BY: …]`
 - **And:** the supersession chain exists end-to-end in the graph (CORRECTS edges; no drops at write/ingest/read); terminal-status exclusion does not hide the superseded point (include_terminal opt-in for co-retrieval)
-- **Owned negatives:** self-supersede → no point→itself edge, no crash; identical-value re-assertion → NOOP, no new supersession (E7); length-guarded overlap → a 5-token point sharing 3 tokens with a 50-token point is NOT a REVISES.
+- **Owned negatives:** self-supersede → no point→itself edge, no crash; identical-value re-assertion → NO new supersession created at E5 level (the NOOP-link assertion lives in E2E-11/E2E-10); length-guarded overlap → a 5-token point sharing 3 tokens with a 50-token point is NOT a REVISES.
 
 ## E2E-7: Abstention comes from evidence, not the label
 - **Layer:** reader unit + e2e (surface 4; A1) · **Setup:** reader pinned (M5); A1 fragment loaded; `_abs` never crosses (assert the reader call site receives `question_type` only).
@@ -77,7 +77,7 @@
 - **Owned negatives:** ambiguous restore (two candidates, unclear interval) → explicit ambiguity signal, no silent wrong answer.
 
 ## E2E-10: Diversity + budget-capped context (R1; cross-encoder/MMR assertions V4-conditional)
-- **Layer:** integration (surfaces 11/15; R1 + UX-3) · **Setup:** R1 session-dedup + context budget cap; UX-3 rendering (points first, chunks backfill).
+- **Layer:** integration (surface 25 reader-context-format/UX-3; R1 + UX-3) · **Setup:** R1 session-dedup + context budget cap; UX-3 rendering (points first, chunks backfill).
 - **Given:** a question whose evidence spans many near-duplicate raw chunks from one session
 - **When:** retrieval returns top-k and the context is rendered
 - **Then:** per-session chunk count ≤ cap (R1 dedup) — one session family can't monopolize the pool; the context stays within the token budget; extracted points render first, raw chunks backfill

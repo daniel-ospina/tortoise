@@ -22,7 +22,7 @@ Edge cases covered per journey: J1 — empty/blank conversation (never ok=True f
 
 **Write path (capture → extract → consolidate → index):**
 1. Capture (fail-closed): turn points land; `_extract_session_v2` consults `out["errors"]`; errors surface on the contract; `extraction_mode` truthful (P1).
-2. Extract (two-tier, date-anchored): S1 date-anchored digest → S2 classifies EDUs → Tier A state-value points (verbatim value, `quote`, `when`, `search_keys`, `source_role`) / Tier B narrative points (compressed); S4 merges-not-replaces (E4).
+2. Extract (two-tier, date-anchored): S1 date-anchored digest → S2 classifies EDUs → Tier A state-value points (verbatim value, `quote`, `when`, `search_keys`, `source_turn_id` — speaker derived from the turn's role) / Tier B narrative points (compressed); S4 merges-not-replaces (E4).
 3. Consolidate (E5+E7, on the shared graph): S3 real-backend search (entity-resolved) → 4-way decision (ADD/UPDATE/DELETE soft/NOOP link) → supersession records in payload + `client_commit_id`; CORRECTS edges materialized; validity windows set (E6 later).
 4. Index: BM25-OR sparse + dense embeddings (write-time) + raw turn-chunks + events timeline; evidence marked (source-session + verbatim + raw-chunk containment, M6).
 
@@ -123,7 +123,7 @@ Contract-first. All additive / reversible (env seams preserved).
 | Interface | Contract |
 |---|---|
 | `extract_session_v2(model, conversation, *, session_id, chunk_size, session_date)` | new `session_date` kwarg (E1); returns payload + errors + supersessions + warnings (never silent) |
-| S2/S4 OUTPUT_CONTRACT | + `source_role`, `search_keys`, `when`, `quote`; Tier-A state-value section (E2/E3) |
+| S2/S4 OUTPUT_CONTRACT | + `search_keys`, `when`, `quote` + `source_turn_id` (speaker DERIVED from the source turn — NO `source_role` property, owner clarification); Tier-A state-value section (E2/E3) |
 | Layer-1 payload | + `supersessions` (already client-carried #1425 — now always populated E5); `client_commit_id` includes supersessions (3-site agreement) |
 | Capture response | `extraction_mode` truthful; extraction errors surface (non-200 or additive `warnings`) — never silent `extracted: 0` (P1) |
 | Provider routing | `TORTOISE_EXTRACTOR_PROVIDER` = deepseek-direct | openrouter; gate checks exactly what the adapter consumes; 401/402/403 fatal (P2/M2) |
