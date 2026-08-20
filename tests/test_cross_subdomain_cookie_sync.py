@@ -125,7 +125,8 @@ def test_shared_helpers_present() -> None:
     bridge + window, with the strict validity predicate."""
     text = _read(SHARED)
     for fn in ("readValidSession", "clearStoredSession",
-               "getLastAuthMethod", "setLastAuthMethod", "bounceToAuth"):
+               "getLastAuthMethod", "setLastAuthMethod", "bounceToAuth",
+               "storeSession"):
         assert f"var {fn} = function" in text, f"missing helper {fn}"
         assert f"window.{fn} = {fn}" in text, f"missing window export {fn}"
     # Strict validity: missing OR past expires_at = INVALID (presence ≠ auth).

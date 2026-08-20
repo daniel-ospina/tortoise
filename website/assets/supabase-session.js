@@ -254,11 +254,26 @@
     } catch (e) { /* best-effort */ }
   };
 
+  // #1511: store a session directly into the parent-domain cookie (the
+  // supabase-js session shape: access_token/refresh_token/expires_at/…).
+  // The dashboard/welcome clients read it via getSession() (storage read,
+  // shape-validated — no network). We do NOT use auth.setSession here: it
+  // performs a network round trip (refresh if expired/unparseable, else
+  // GoTrue /user) which is neither instant nor mockable in the exchange flow.
+  var storeSession = function (session) {
+    if (!session || !session.access_token || !session.refresh_token) return false;
+    try {
+      supabaseStorage.setItem(COOKIE_NAME, JSON.stringify(session));
+      return readValidSession() !== null;
+    } catch (e) { return false; }
+  };
+
   window.__tortoiseSessionBridge.readValidSession = readValidSession;
   window.__tortoiseSessionBridge.clearStoredSession = clearStoredSession;
   window.__tortoiseSessionBridge.getLastAuthMethod = getLastAuthMethod;
   window.__tortoiseSessionBridge.setLastAuthMethod = setLastAuthMethod;
   window.__tortoiseSessionBridge.bounceToAuth = bounceToAuth;
+  window.__tortoiseSessionBridge.storeSession = storeSession;
   // The head gates are synchronous inline scripts — expose the helpers
   // directly so a gate can call window.readValidSession() without awaiting
   // the bridge object (typeof guards in the gates cover a blocked script).
@@ -267,4 +282,5 @@
   window.getLastAuthMethod = getLastAuthMethod;
   window.setLastAuthMethod = setLastAuthMethod;
   window.bounceToAuth = bounceToAuth;
+  window.storeSession = storeSession;
 })();
