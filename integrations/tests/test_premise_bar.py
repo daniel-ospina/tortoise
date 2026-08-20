@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
 """Tests for premise_bar — menu bar app launcher."""
-import json, os, sys, tempfile, unittest
-from pathlib import Path
+import json, os, sys, tempfile, unittest  # noqa: E401, I001
+from pathlib import Path  # noqa: F401
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "menu-bar"))
-import premise_bar
+import premise_bar  # noqa: I001
 
 # Rest of tests unchanged from the working version above
 class TestConfigLoading(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+        self.tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)  # noqa: SIM115
         self.orig_path = premise_bar.CONFIG_PATH
     def tearDown(self):
         premise_bar.CONFIG_PATH = self.orig_path
         os.unlink(self.tmp.name)
     def test_load_valid_config(self):
         config = {"services": [{"id":"t","name":"T","icon":"x","check":{"type":"http","url":"http://localhost:9999"},"launch":{"type":"shell","command":"echo ok"},"stop":{"type":"shell","command":"echo ok"}}]}
-        with open(self.tmp.name,"w") as f: json.dump(config,f)
+        with open(self.tmp.name,"w") as f: json.dump(config,f)  # noqa: E701
         premise_bar.CONFIG_PATH = self.tmp.name
         self.assertEqual(len(premise_bar.load_config()),1)
     def test_load_empty_config(self):
-        with open(self.tmp.name,"w") as f: json.dump({"services":[]},f)
+        with open(self.tmp.name,"w") as f: json.dump({"services":[]},f)  # noqa: E701
         premise_bar.CONFIG_PATH = self.tmp.name
         self.assertEqual(premise_bar.load_config(),[])
     def test_missing_creates_default(self):

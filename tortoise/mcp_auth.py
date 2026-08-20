@@ -72,7 +72,7 @@ def _get_team_sdk() -> TortoiseSDK:
 # ── HTTP tool allow-list (derived from registry; #454) ────────────────
 # New tools are EXCLUDED from the tenant HTTP surface unless registered with
 # http_policy=True in tool_registry.py. Zero manual sync — see #454.
-from tortoise.tool_registry import get_http_allowed as _get_http_allowed
+from tortoise.tool_registry import get_http_allowed as _get_http_allowed  # noqa: E402, I001
 HTTP_ALLOWED: frozenset[str] = _get_http_allowed()
 
 
@@ -185,7 +185,7 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
                 # selfhost. #524: OAuth access tokens (oat_) introspect via
                 # tortoise.oauth — hosted-only (registry mode has no OAuth
                 # tables → None → 401).
-                from tortoise.supabase_control import (
+                from tortoise.supabase_control import (  # noqa: I001
                     get_control_plane, is_supabase_enabled, resolve_api_key,
                 )
                 if is_supabase_enabled():
@@ -219,7 +219,7 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
             # authority. Pop the LRU entry so a re-resolution is required
             # after un-suspension; clear the signal when the fresh
             # resolution says the team is NOT suspended (AC8 self-heal).
-            from tortoise.abuse import (appeal_url, clear_suspended,
+            from tortoise.abuse import (appeal_url, clear_suspended,  # noqa: I001
                                         is_suspended_signal, suspended_message)
             suspended_at = team.get("suspended_at")
             if suspended_at is None and not is_supabase_enabled():

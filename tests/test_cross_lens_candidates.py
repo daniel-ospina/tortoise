@@ -19,7 +19,7 @@ embedded FalkorDBLite store.
 """
 from __future__ import annotations
 
-import os
+import os  # noqa: F401
 import sys
 from pathlib import Path
 
@@ -28,9 +28,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tortoise.embeddings import EmbeddingModel  # noqa: E402
-from tortoise.sdk import TortoiseSDK  # noqa: E402
-from tortoise.source_credibility import SOURCE_KIND_DEFAULTS  # noqa: E402
+from tortoise.embeddings import EmbeddingModel  # noqa: E402, I001, RUF100
+from tortoise.sdk import TortoiseSDK  # noqa: E402, RUF100
+from tortoise.source_credibility import SOURCE_KIND_DEFAULTS  # noqa: E402, RUF100
 
 
 # ── deterministic embedding model ────────────────────────────────────
@@ -317,7 +317,7 @@ def _transport_context():
 
 
 def test_mcp_tool_registered_readonly():
-    from tortoise.tool_registry import TOOL_REGISTRY, GROUP_BY_NAME
+    from tortoise.tool_registry import TOOL_REGISTRY, GROUP_BY_NAME  # noqa: I001
     td = next(t for t in TOOL_REGISTRY
               if t.name == "tortoise_find_cross_lens_candidates")
     assert td.sdk_method == "get_cross_lens_candidates"

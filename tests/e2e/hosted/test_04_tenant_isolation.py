@@ -6,7 +6,7 @@ revoked keys stop authenticating immediately.
 
 Negatives: foreign point id → 404; revoked key → 401; garbage bearer → 401.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import pytest
 

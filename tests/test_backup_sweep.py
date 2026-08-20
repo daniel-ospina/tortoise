@@ -1,6 +1,6 @@
 """Tests for tortoise/backup_sweep.py — the per-team knowledge-graph sweep."""
 
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import json
 import tempfile
@@ -19,7 +19,7 @@ from tortoise.backup_sweep import (
     team_graph_name,
 )
 from tortoise.hosted_backup import MemoryStorage
-from tests._embedded import wipe  # noqa: E402
+from tests._embedded import wipe  # noqa: E402, RUF100
 from tortoise.projection import FalkorProjection
 
 _STREAM_KEY = b"r" * 32  # registry_stream_key (Fly-only, #661)
@@ -63,7 +63,7 @@ def _seed_team_graph(proj, team_id: str, n: int = 5) -> None:
 
 
 def test_enumerate_teams_returns_registry_ids(shared_proj):
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         proj = shared_proj
         if proj is None:
             return
@@ -76,7 +76,7 @@ def test_enumerate_teams_returns_registry_ids(shared_proj):
 
 def test_enumerate_teams_fail_closed_on_query_error(shared_proj):
     """Enum-source failure must raise (never be classified as chronic NO_TEAMS)."""
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         proj = shared_proj
         if proj is None:
             return
@@ -92,7 +92,7 @@ def test_enumerate_teams_fail_closed_on_query_error(shared_proj):
 
 
 def test_sweep_no_teams_is_signal_not_incident(shared_proj):
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         proj = shared_proj
         if proj is None:
             return
@@ -109,7 +109,7 @@ def test_sweep_no_teams_is_signal_not_incident(shared_proj):
 
 def test_sweep_enum_delta_fires_incident(shared_proj):
     """A prior team count > 0 → 0 is an incident, not chronic NO_TEAMS."""
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         proj = shared_proj
         if proj is None:
             return
@@ -131,7 +131,7 @@ def test_sweep_enum_delta_suppressed_during_flip_window(monkeypatch, shared_proj
     flip (team universe legitimately drops to 0 — the pre-deploy gate
     asserts both stores are empty first). The state is still persisted and
     the guard returns as soon as the flag is unset."""
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         proj = shared_proj
         if proj is None:
             return
@@ -156,7 +156,7 @@ def test_sweep_enum_delta_suppressed_during_flip_window(monkeypatch, shared_proj
 
 
 def test_sweep_backs_up_team_and_writes_state(shared_proj):
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         if shared_proj is None:
             return
         proj = _make_env(None, shared_proj)
@@ -182,7 +182,7 @@ def test_sweep_backs_up_team_and_writes_state(shared_proj):
 
 
 def test_sweep_size_guard_aborts_before_dump(shared_proj):
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         if shared_proj is None:
             return
         proj = _make_env(None, shared_proj)
@@ -200,7 +200,7 @@ def test_sweep_size_guard_aborts_before_dump(shared_proj):
 
 def test_sweep_data_loss_candidate_on_transition(shared_proj):
     """>0 → 0 nodes fires DATA_LOSS_CANDIDATE; steady-0 never does."""
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         if shared_proj is None:
             return
         proj = _make_env(None, shared_proj)
@@ -223,7 +223,7 @@ def test_sweep_data_loss_candidate_on_transition(shared_proj):
 
 def test_sweep_steady_zero_never_fires(shared_proj):
     """A chronically-empty team graph is a signal, not an incident."""
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         proj = shared_proj
         if proj is None:
             return
@@ -241,7 +241,7 @@ def test_sweep_steady_zero_never_fires(shared_proj):
 
 def test_sweep_p0_guard_deletes_wrong_graph_upload(shared_proj):
     """A backup whose manifest names the wrong graph is deleted, not kept."""
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         if shared_proj is None:
             return
         proj = _make_env(None, shared_proj)
@@ -276,7 +276,7 @@ def test_sweep_p0_guard_deletes_wrong_graph_upload(shared_proj):
 
 def test_enumerate_eligible_teams_filters_by_tier_and_backup_enabled(shared_proj):
     """Only teams with tier != 'free' AND backup_enabled = true are returned."""
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         proj = shared_proj
         if proj is None:
             return
@@ -296,7 +296,7 @@ def test_enumerate_eligible_teams_filters_by_tier_and_backup_enabled(shared_proj
 
 def test_enumerate_eligible_teams_empty_when_no_pro_teams(shared_proj):
     """Returns [] when every team is free-tier or backup_disabled."""
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         proj = shared_proj
         if proj is None:
             return
@@ -310,7 +310,7 @@ def test_enumerate_eligible_teams_empty_when_no_pro_teams(shared_proj):
 
 def test_enumerate_eligible_teams_fail_closed(shared_proj):
     """Query failure raises RuntimeError — never silent []."""
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         proj = shared_proj
         if proj is None:
             return
@@ -327,7 +327,7 @@ def test_enumerate_eligible_teams_fail_closed(shared_proj):
 
 def test_team_sweep_backs_up_pro_team_and_prunes(shared_proj):
     """(a) With team_sweep_enabled=True and a Pro team → backup + prune runs."""
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         proj = shared_proj
         if proj is None:
             return
@@ -371,7 +371,7 @@ def test_team_sweep_backs_up_pro_team_and_prunes(shared_proj):
 
 def test_team_sweep_no_eligible_teams_fires_alert(shared_proj):
     """(b) team_sweep_enabled=True + 0 eligible teams → NO_ELIGIBLE_TEAMS incident."""
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         proj = shared_proj
         if proj is None:
             return
@@ -396,7 +396,7 @@ def test_team_sweep_no_eligible_teams_fires_alert(shared_proj):
         kinds = [i["kind"] for i in res["incidents"]]
         assert "NO_ELIGIBLE_TEAMS" in kinds
         # Verify dedup characteristics: team_id is empty (platform-level alert).
-        noop = [i for i in res["incidents"] if i["kind"] == "NO_ELIGIBLE_TEAMS"][0]
+        noop = [i for i in res["incidents"] if i["kind"] == "NO_ELIGIBLE_TEAMS"][0]  # noqa: RUF015
         assert noop["team_id"] == ""
         assert "0 eligible" in noop["detail"]["message"]
         # Re-run: incident is returned again (dedup is the alert store's job).
@@ -411,7 +411,7 @@ def test_team_sweep_no_eligible_teams_fires_alert(shared_proj):
 
 def test_team_sweep_flag_off_backs_up_all_teams(shared_proj):
     """(c) team_sweep_enabled=False → all teams backed up (existing behavior)."""
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         proj = shared_proj
         if proj is None:
             return
@@ -444,7 +444,7 @@ def test_team_sweep_flag_off_backs_up_all_teams(shared_proj):
 
 def test_team_sweep_enum_failure_when_enabled(shared_proj):
     """Fail-closed: eligible-team query failure returns enum_failed status."""
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         proj = shared_proj
         if proj is None:
             return
@@ -468,7 +468,7 @@ def test_team_sweep_enum_failure_when_enabled(shared_proj):
 
 def test_sweep_uses_registry_stream_key_not_backup_key(shared_proj):
     """#661: sweep archives use REGISTRY_STREAM_KEY, not TORTOISE_BACKUP_KEY."""
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         if shared_proj is None:
             return
         proj = _make_env(None, shared_proj)
@@ -503,7 +503,7 @@ def test_sweep_uses_registry_stream_key_not_backup_key(shared_proj):
 
 def test_sweep_missing_registry_stream_key_fail_closed(shared_proj):
     """#661: empty registry_stream_key → fail-closed error."""
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         if shared_proj is None:
             return
         proj = _make_env(None, shared_proj)
@@ -526,7 +526,7 @@ def test_sweep_per_label_drift_catches_small_label_wipe(shared_proj):
     """#661: a 40% invitation-label wipe fires DATA_LOSS_CANDIDATE while the
     overall node count drops <50% — proving the per-label guard catches what
     the flat ratio misses."""
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         if shared_proj is None:
             return
         proj = _make_env(None, shared_proj)
@@ -596,7 +596,7 @@ def test_sweep_per_label_drift_catches_small_label_wipe(shared_proj):
 
 def test_sweep_per_label_drift_ignores_steady_labels(shared_proj):
     """Labels that stay the same or grow are not flagged as breaches."""
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         if shared_proj is None:
             return
         proj = _make_env(None, shared_proj)
@@ -696,7 +696,7 @@ def test_check_per_label_drift_unit():
 # (PostgREST dialect). These tests drive the Supabase side through the
 # in-memory FakeControlPlane — zero network.
 
-from tests.fake_control_plane import ErrorControlPlane, FakeControlPlane
+from tests.fake_control_plane import ErrorControlPlane, FakeControlPlane  # noqa: E402
 
 
 def _fake_teams() -> FakeControlPlane:
@@ -736,7 +736,7 @@ def test_team_graph_name_reads_from_teams(shared_proj):
     cp = _fake_teams()
     assert team_graph_name(cp, "team_b") == "team_beta"
     # Registry mode: deterministic team_{id} (no graph_name stored there).
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         proj = shared_proj
         if proj is None:
             return
@@ -761,7 +761,7 @@ def test_sweep_supabase_source_backs_up_teams_graph_name(shared_proj):
     """Full sweep with a Supabase source: enumerates teams, dumps the graph
     teams.graph_name names (NOT team_{id}), stamps backup_latest_at on the row.
     This is the E2E-4 enumeration+stamp leg against the seam fake."""
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         proj = shared_proj
         if proj is None:
             return
@@ -806,7 +806,7 @@ def test_sweep_supabase_source_backs_up_teams_graph_name(shared_proj):
 def test_team_sweep_supabase_eligible_only(shared_proj):
     """team_sweep_enabled=True with a Supabase source: only Pro+backup_enabled
     teams are enumerated (free/disabled teams are skipped)."""
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         proj = shared_proj
         if proj is None:
             return
@@ -833,7 +833,7 @@ def test_team_sweep_supabase_eligible_only(shared_proj):
 
 def test_sweep_supabase_enum_failure_fail_closed(shared_proj):
     """A Supabase enumeration failure → enum_failed status (never NO_TEAMS)."""
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         proj = shared_proj
         if proj is None:
             return
@@ -852,7 +852,7 @@ def test_sweep_supabase_resolution_flap_fires_incident(shared_proj):
     """A control plane that dies between enumeration and the per-team phase
     (every graph_name read fails) must file an incident — never a clean
     no_work that looks healthy to the #596 watcher."""
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         proj = shared_proj
         if proj is None:
             return
@@ -879,7 +879,7 @@ def test_sweep_supabase_resolution_flap_fires_incident(shared_proj):
         assert res["teams_backed_up"] == 0
         kinds = [i["kind"] for i in res["incidents"]]
         assert "GRAPH_NAME_RESOLUTION_FAIL" in kinds
-        inc = [i for i in res["incidents"] if i["kind"] == "GRAPH_NAME_RESOLUTION_FAIL"][0]
+        inc = [i for i in res["incidents"] if i["kind"] == "GRAPH_NAME_RESOLUTION_FAIL"][0]  # noqa: RUF015
         assert inc["detail"]["total"] == 2
         assert inc["detail"]["failed"] == 2
         # Per-team errors are still isolated and surfaced.
@@ -890,7 +890,7 @@ def test_sweep_supabase_resolution_flap_fires_incident(shared_proj):
 def test_sweep_supabase_partial_resolution_failure_is_isolated(shared_proj):
     """A partial resolution failure stays per-team: no incident, other teams
     still back up (mirrors data-plane per-team isolation)."""
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         proj = shared_proj
         if proj is None:
             return
@@ -930,7 +930,7 @@ def test_sweep_supabase_partial_resolution_failure_is_isolated(shared_proj):
 def test_sweep_supabase_stamp_blip_is_best_effort(shared_proj):
     """#669 P3: a Supabase stamp PATCH blip must not fail an otherwise-durable
     backup — the archive stands, the sweep reports backed_up."""
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         proj = shared_proj
         if proj is None:
             return

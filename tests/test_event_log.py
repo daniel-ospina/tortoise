@@ -4,8 +4,8 @@ Covers: dedup, SHA-256 integrity, scan_incomplete, recover.
 """
 from __future__ import annotations
 
-import hashlib
-import json
+import hashlib  # noqa: F401
+import json  # noqa: F401
 import sys
 import tempfile
 from pathlib import Path
@@ -15,7 +15,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 try:
-    from shared_state.events import register_event_type
+    from shared_state.events import register_event_type  # noqa: I001
     from shared_state.event_log import (
         append_event,
         replay_events,
@@ -34,7 +34,7 @@ def _register_types():
         "card_created", "step_started", "step_completed",
         "gate_passed", "gate_blocked", "card_completed", "card_failed",
     ):
-        try:
+        try:  # noqa: SIM105
             register_event_type(t)
         except ValueError:
             pass  # already registered
@@ -95,8 +95,8 @@ class TestIntegrity:
 
     def test_verify_hash_deterministic(self, tmp_log):
         append_event(tmp_log, "card_created", {"card_id": "c1"}, event_id="ev-1")
-        ok1, h1 = verify_hash(tmp_log)
-        ok2, h2 = verify_hash(tmp_log)
+        ok1, h1 = verify_hash(tmp_log)  # noqa: RUF059
+        ok2, h2 = verify_hash(tmp_log)  # noqa: RUF059
         assert h1 == h2  # same content → same hash
 
     def test_verify_hash_changes_with_content(self, tmp_log):

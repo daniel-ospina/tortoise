@@ -7,7 +7,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.sdk import TortoiseSDK  # noqa: E402
+from tortoise.sdk import TortoiseSDK  # noqa: E402, RUF100
 
 
 def _tmp_db() -> str:
@@ -17,7 +17,7 @@ def _tmp_db() -> str:
 def _seed(sdk: TortoiseSDK) -> list[str]:
     """Create test Points and return their IDs."""
     ids = []
-    for content, context, kind in [
+    for content, context, kind in [  # noqa: B007
         ("competitor X analysis", "competitor-research", "analysis"),
         ("competitor Y profile", "competitor-research", "profile"),
         ("competitor Z in-depth research", "competitor-research", "competitor-research"),

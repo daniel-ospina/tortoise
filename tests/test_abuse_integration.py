@@ -32,7 +32,7 @@ os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from fastapi.testclient import TestClient
+from fastapi.testclient import TestClient  # noqa: I001
 
 import tortoise.supabase_control as sc
 from tortoise import abuse
@@ -213,7 +213,7 @@ class TestPointBurst:
             assert tc.get("/v1/team/keys", headers=_auth()).status_code == 200
             # quiet → burst AFTER the window: a new episode re-flags, never
             # suspends on its first evaluation (stale-flag protection)
-            past = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+            past = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()  # noqa: UP017
             for e in fake.tables["abuse_events"]:
                 if e["event_type"] in ("flag", "point_create"):
                     e["created_at"] = past
@@ -237,8 +237,8 @@ class TestPointBurst:
             # event into the continuity band (flag, now-window] so the breach
             # genuinely spans the boundary. The rest stay fresh → the window
             # sum still breaches.
-            past = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
-            band = (datetime.now(timezone.utc) - timedelta(minutes=90)).isoformat()
+            past = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()  # noqa: UP017
+            band = (datetime.now(timezone.utc) - timedelta(minutes=90)).isoformat()  # noqa: UP017
             flag_rows = [e for e in fake.tables["abuse_events"]
                          if e["event_type"] == "flag"]
             flag_rows[0]["created_at"] = past
@@ -359,7 +359,7 @@ class TestExfiltration:
     def test_writes_not_counted_as_reads(self, env):
         """Delta 11: a POST burst never fires read velocity."""
         with TestClient(env["app"]) as tc:
-            for i in range(120):
+            for i in range(120):  # noqa: B007
                 pass  # threshold math below uses GET-only counting
             for i in range(101):
                 tc.post("/v1/points", headers=_auth(),
@@ -399,7 +399,7 @@ class TestMcp:
     def _mcp_client(self):
         """Minimal Starlette app wrapped ONLY in TeamResolutionMiddleware —
         exercises the same resolution/suspension/geo path the /mcp mount uses."""
-        from starlette.applications import Starlette
+        from starlette.applications import Starlette  # noqa: I001
         from starlette.responses import JSONResponse
         from starlette.routing import Route
         from tortoise.mcp_auth import TeamResolutionMiddleware
@@ -567,7 +567,7 @@ class TestMintGateAndAlerts:
         """status ∈ {active, flagged} over HTTP — suspension 403s earlier."""
         fake = env["fake"]
         fake.tables["teams"][0]["flagged_at"] = \
-            datetime.now(timezone.utc).isoformat()
+            datetime.now(timezone.utc).isoformat()  # noqa: UP017
         with TestClient(env["app"]) as tc:
             r = tc.get("/v1/team", headers=_auth())
         assert r.status_code == 200
@@ -623,7 +623,7 @@ class _Resp:
 
 class TestIntrospection:
     def test_write_tool_names_cover_all_quota_gated(self):
-        from tortoise.mcp_server import WRITE_TOOL_NAMES, _QUOTA_GATED
+        from tortoise.mcp_server import WRITE_TOOL_NAMES, _QUOTA_GATED  # noqa: I001
         assert WRITE_TOOL_NAMES >= _QUOTA_GATED
         assert "tortoise_ingest" in WRITE_TOOL_NAMES
         assert "tortoise_onboarding_demo_create" in WRITE_TOOL_NAMES
@@ -632,7 +632,7 @@ class TestIntrospection:
         """Dual membership by source: every Point-creating _quota_gated wrap
         passes abuse_weight; update-family wraps do not (delta 8 drift guard
         — a future Point-creating tool cannot silently re-open the bypass)."""
-        import re
+        import re  # noqa: F401, I001
         import tortoise.mcp_server as ms
         src = Path(ms.__file__).read_text()
 
@@ -660,7 +660,7 @@ class TestIntrospection:
         every one is classified as a write in WRITE_TOOL_NAMES via the pinned
         method→tool map. A new wrapped write tool with no map entry fails
         here; a mapped tool missing from WRITE_TOOL_NAMES fails here too."""
-        import re
+        import re  # noqa: I001
         import tortoise.mcp_server as ms
         src = Path(ms.__file__).read_text()
         wrapped_methods = set(re.findall(
@@ -702,7 +702,7 @@ class TestIntrospection:
     def test_mcp_read_hook_classification(self, monkeypatch):
         """maybe_record_mcp_read: writes skipped, reads counted, selfhost and
         no-team skipped, kill-switch respected."""
-        import tortoise.mcp_server as ms
+        import tortoise.mcp_server as ms  # noqa: I001
         import tortoise.abuse as abuse_mod
         calls = []
         monkeypatch.setattr(abuse_mod, "record_read",

@@ -10,7 +10,7 @@ Note: the `context` kwarg was REMOVED from the API in #49 — pointKind is
 the filtering dimension (see sdk.create_point's explicit TypeError).
 Runs with FalkorDBLite (embedded) — no Docker needed.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import json
 import os
@@ -29,10 +29,10 @@ _TORTOISE_ROOT = Path(__file__).resolve().parents[1]
 if str(_TORTOISE_ROOT) not in sys.path:
     sys.path.insert(0, str(_TORTOISE_ROOT))
 
-import pytest
+import pytest  # noqa: E402
 
-from tortoise import tortoise_client
-from tortoise.sdk import TortoiseSDK
+from tortoise import tortoise_client  # noqa: E402
+from tortoise.sdk import TortoiseSDK  # noqa: E402
 
 
 def _fresh_sdk() -> TortoiseSDK:
@@ -77,7 +77,7 @@ def _restore_db_env():
     # Windows hazard and a latent lock-contention source on macOS).
     while _FRESH_SDKS:
         sdk = _FRESH_SDKS.pop()
-        try:
+        try:  # noqa: SIM105
             sdk.close()
         except Exception:
             pass

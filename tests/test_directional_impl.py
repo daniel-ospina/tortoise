@@ -11,7 +11,7 @@ Validates:
 
 MUST run against a live FalkorDB. Uses test-prefixed isolated namespaces.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import os
 import sys
@@ -25,9 +25,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # after) — NOT at import time. An import-time set leaks into every later test
 # file (#176 contamination).
 
-from tortoise.sdk import TortoiseSDK
+from tortoise.sdk import TortoiseSDK  # noqa: I001
 from tortoise.ep import TortoiseEP
-from tortoise.weights import compute_operator_weight
+from tortoise.weights import compute_operator_weight  # noqa: F401
 
 # Requires live FalkorDB (Docker). Skip gracefully when unavailable so the
 # no-Docker embedded suite stays green (AGENTS.md). Probe targets the DOCKER
@@ -180,7 +180,7 @@ def test_impl_directional_refuted_conclusion():
     op_nand = make_operator(sdk, defeater_c["id"], conclusion_b["id"], "NAND")
 
     # Verify operator properties
-    proj = sdk._get_proj()
+    proj = sdk._get_proj()  # noqa: F841
     print(f"  IMPL operator: id={op_impl['id']}, label={op_impl.get('label', 'none')}")
     print(f"  NAND operator: id={op_nand['id']}, label={op_nand.get('label', 'none')}")
 
@@ -254,7 +254,7 @@ def test_haspart_bidirectional():
     # Create hasPart operator
     op = make_operator(sdk, whole["id"], part["id"], "IMPL", label="hasPart")
 
-    proj = sdk._get_proj()
+    proj = sdk._get_proj()  # noqa: F841
     print(f"  hasPart operator: id={op['id']}, label={op.get('label', 'none')}")
 
     result = run_ep(sdk)
@@ -326,7 +326,7 @@ def test_haspart_nand_affects_whole():
     sdk.set_point_baseline(defeater["id"], *TIER_MAP["T0"])
 
     op_haspart = make_operator(sdk, whole["id"], part["id"], "IMPL", label="hasPart")
-    op_nand = make_operator(sdk, defeater["id"], part["id"], "NAND")
+    op_nand = make_operator(sdk, defeater["id"], part["id"], "NAND")  # noqa: F841
 
     print(f"  hasPart operator: label={op_haspart.get('label', 'none')}")
 
@@ -395,7 +395,7 @@ def test_nand_symmetric():
     sdk.set_point_baseline(claim_a["id"], *TIER_MAP["T0"])
     sdk.set_point_baseline(claim_b["id"], *TIER_MAP["T0"])
 
-    op = make_operator(sdk, claim_a["id"], claim_b["id"], "NAND")
+    op = make_operator(sdk, claim_a["id"], claim_b["id"], "NAND")  # noqa: F841
 
     result = run_ep(sdk)
 
@@ -419,7 +419,7 @@ def test_nand_symmetric():
     # Both should be above 35% (not zeroed out)
     assert a_mean > 0.35, f"❌ Claim A too low: {a_mean:.4f}"
     assert b_mean > 0.35, f"❌ Claim B too low: {b_mean:.4f}"
-    print(f"  ✅ Both claims in reasonable range: > 0.35")
+    print(f"  ✅ Both claims in reasonable range: > 0.35")  # noqa: F541
 
     # Symmetry: A and B should be roughly equal (within tolerance)
     assert abs(a_mean - b_mean) < 0.05, (
@@ -462,7 +462,7 @@ def test_addresses_directional():
     sdk.set_point_baseline(defeater["id"], *TIER_MAP["T0"])
 
     op_addr = make_operator(sdk, need["id"], feature["id"], "IMPL", label="addresses", direction="unidirectional")
-    op_nand = make_operator(sdk, defeater["id"], feature["id"], "NAND")
+    op_nand = make_operator(sdk, defeater["id"], feature["id"], "NAND")  # noqa: F841
 
     print(f"  addresses operator: label={op_addr.get('label', 'none')}")
 

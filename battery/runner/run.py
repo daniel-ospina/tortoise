@@ -12,16 +12,16 @@ Exit code computed AFTER all episode artifacts + summary are written (exit
 from __future__ import annotations
 
 import os
-import sys
+import sys  # noqa: F401
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Sequence  # noqa: F401, UP035
 
 from battery.arms.base import ArmAdapter, ArmUnavailable
-from battery.arms.mock import InjectionPolicy, MockArm
+from battery.arms.mock import InjectionPolicy, MockArm  # noqa: F401
 from battery.config import (
     ArmConfig,
-    BudgetConfig,
+    BudgetConfig,  # noqa: F401
     Scenario,
     ThresholdsConfig,
     load_arms,
@@ -31,7 +31,7 @@ from battery.config import (
     scenarios_by_tier,
 )
 from battery.enums import EpOutcome, ExitCode, ModelCallOutcome, Tier
-from battery.exceptions import ConfigError, IsolationBreach
+from battery.exceptions import ConfigError, IsolationBreach  # noqa: F401
 from battery.runner.aggregate import aggregate
 from battery.runner.artifacts import (
     build_run_artifact,
@@ -42,7 +42,7 @@ from battery.runner.artifacts import (
     write_run_artifact,
     write_summary,
 )
-from battery.runner.episode import EpisodeResult, EpisodeTracker, TurnRecord
+from battery.runner.episode import EpisodeResult, EpisodeTracker, TurnRecord  # noqa: F401
 from battery.runner.scorers import (
     HARNESS_METRIC_IDS,
     HarnessScorer,
@@ -52,10 +52,10 @@ from battery.runner.scorers import (
     resolve_scorer,
 )
 from battery.runner.setup import (
-    RoundTripCounter,
-    batch_setup,
-    derive_scenario_graph,
-    naive_setup,
+    RoundTripCounter,  # noqa: F401
+    batch_setup,  # noqa: F401
+    derive_scenario_graph,  # noqa: F401
+    naive_setup,  # noqa: F401
 )
 
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
@@ -67,7 +67,7 @@ class RunConfig:
 
     def __init__(self, *, config_dir: Path | None = None, out_dir: Path | None = None,
                  seed: int = 0, tier: Tier | None = None, arms: list[str] | None = None,
-                 mock: bool = False, batch_setup: bool = False,
+                 mock: bool = False, batch_setup: bool = False,  # noqa: F811
                  scorer_specs: list[str] | None = None, max_episodes: int | None = None,
                  db_path: str | None = None):
         self.config_dir = Path(config_dir) if config_dir else DEFAULT_CONFIG_DIR
@@ -79,7 +79,7 @@ class RunConfig:
         self.max_episodes = max_episodes
         self.db_path = db_path
         # --mock sets arms=[mock]; --arms takes precedence when both given.
-        self.arms = list(arms) if arms else (["mock"] if mock else ["mock"])
+        self.arms = list(arms) if arms else (["mock"] if mock else ["mock"])  # noqa: RUF034
         self.scorer_specs = scorer_specs or ["harness"]
 
 
@@ -95,7 +95,7 @@ def _resolve_arm(arm_id: str, arm_config: ArmConfig, *, mock: bool) -> ArmAdapte
         mod = importlib.import_module(module_name)
         cls = getattr(mod, arm_id_to_cls(arm_id))
         return cls(**arm_config.config)
-    except Exception as e:  # noqa: BLE001 — resolution failure → usage error
+    except Exception as e:  # noqa: BLE001, RUF100
         raise ConfigError(f"cannot resolve arm {arm_id!r} "
                           f"({arm_config.adapter}): {e}") from e
 
@@ -171,7 +171,7 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
         raise ConfigError(f"budget guard: {refusal}")
 
     # ── attempt dir (sub-second stamp — two sequential runs never collide) ─
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")  # noqa: UP017
     attempt_dir = config.out_dir / ts
     attempt_dir.mkdir(parents=True, exist_ok=True)
 
@@ -200,7 +200,7 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
             arms_out.append(_arm_summary_block(arm_id, arm_present=False))
             any_arm_failed = True
             continue
-        except Exception as e:  # noqa: BLE001 — arm-init failure → exit 4
+        except Exception as e:  # noqa: BLE001, RUF100
             arms_out.append(_arm_summary_block(arm_id, arm_present=False,
                                                reason=f"init: {e!r}"))
             any_arm_failed = True
@@ -262,7 +262,7 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
     summary = build_summary(
         arms=arms_out, exit_code=int(exit_code), run_ids=all_run_ids,
         artifacts=all_artifacts, seed=config.seed,
-        timestamps={"written_utc": datetime.now(timezone.utc).isoformat()})
+        timestamps={"written_utc": datetime.now(timezone.utc).isoformat()})  # noqa: UP017
     validate_summary_keys(summary)
     write_summary(attempt_dir, summary)
     stdout(str(attempt_dir))  # stdout contract (Task 6): attempt dir = LAST line
@@ -339,5 +339,5 @@ def _git_sha() -> str:
                              text=True, timeout=5,
                              cwd=Path(__file__).resolve().parent.parent.parent)
         return out.stdout.strip() or "unknown"
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001, RUF100
         return "unknown"

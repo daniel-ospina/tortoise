@@ -143,7 +143,7 @@ class _JWKSKeys:
 class _JWKSHandler(BaseHTTPRequestHandler):
     jwks_doc: bytes = b"{}"
 
-    def do_GET(self):  # noqa: N802
+    def do_GET(self):  # noqa: N802, RUF100
         if self.path == "/auth/v1/.well-known/jwks.json":
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -251,7 +251,7 @@ class _ServerProc:
         self.base_url = f"http://127.0.0.1:{self.port}"
         self._log_path = Path(db_path).parent / f"{name}-uvicorn.log"
         env = _build_server_env(db_path, jwks_url, bare=bare)
-        self._log_fh = open(self._log_path, "wb")
+        self._log_fh = open(self._log_path, "wb")  # noqa: SIM115
         self.proc = subprocess.Popen(
             [sys.executable, "-m", "uvicorn", app,
              "--host", "127.0.0.1", "--port", str(self.port),
@@ -278,7 +278,7 @@ class _ServerProc:
                                             timeout=2) as r:
                     if r.status == 200:
                         return
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001, RUF100
                 last_err = str(e)
             time.sleep(0.25)
         raise RuntimeError(
@@ -289,7 +289,7 @@ class _ServerProc:
         try:
             lines = self._log_path.read_text(errors="replace").splitlines()
             return "\n".join(lines[-n:])
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, RUF100
             return "(no log)"
 
     def stop(self) -> None:
@@ -306,9 +306,9 @@ class _ServerProc:
                 except (ProcessLookupError, PermissionError, OSError):
                     self.proc.kill()
                 self.proc.wait(timeout=5)
-        try:
+        try:  # noqa: SIM105
             self._log_fh.close()
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, RUF100
             pass
 
 
@@ -324,7 +324,7 @@ def _boot_with_retry(factory, attempts: int = 2):
         try:
             server.wait_ready()
             return server
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001, RUF100
             last_exc = e
             server.stop()
             if attempt == attempts:
@@ -353,7 +353,7 @@ def hosted_env():
     keys = _JWKSKeys()
     jwks_srv, jwks_url = _start_jwks_server(keys)
 
-    def _mk_hosted() -> "_ServerProc":
+    def _mk_hosted() -> "_ServerProc":  # noqa: UP037
         # Fresh DB dir PER ATTEMPT — a partial redislite init must not
         # poison the retry (test_12 selfhost precedent, #176).
         d = tempfile.mkdtemp(prefix="tortoise_hosted_e2e_")
@@ -385,7 +385,7 @@ def bare_hosted_server(hosted_env):
     keys = _JWKSKeys()
     jwks_srv, jwks_url = _start_jwks_server(keys)
 
-    def _mk_bare() -> "_ServerProc":
+    def _mk_bare() -> "_ServerProc":  # noqa: UP037
         d = tempfile.mkdtemp(prefix="tortoise_hosted_e2e_bare_")
         tmpdirs.append(d)
         return _ServerProc("bare", "tortoise.hosted_api:app",

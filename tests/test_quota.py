@@ -34,7 +34,7 @@ def _embedded_env(monkeypatch, tmp_path):
 @pytest.fixture
 def reg_sdk(monkeypatch, tmp_path):
     """Registry SDK with a team provisioned (same embedded DB as the env)."""
-    from tortoise.sdk import TortoiseSDK
+    from tortoise.sdk import TortoiseSDK  # noqa: I001
     import os
     db = os.path.join(tmp_path, "quota.db")
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
@@ -78,7 +78,7 @@ class TestEnforceTeamLimit:
         enforce_team_limit(None, "points")  # must not raise
 
     def test_at_limit_raises(self, tmp_path):
-        from tortoise.sdk import TortoiseSDK
+        from tortoise.sdk import TortoiseSDK  # noqa: I001
         import os
         db = os.path.join(tmp_path, "team.db")
         sdk = TortoiseSDK(db, namespace="team1")
@@ -89,7 +89,7 @@ class TestEnforceTeamLimit:
         sdk.close()
 
     def test_below_limit_passes(self, tmp_path):
-        from tortoise.sdk import TortoiseSDK
+        from tortoise.sdk import TortoiseSDK  # noqa: I001
         import os
         db = os.path.join(tmp_path, "team.db")
         sdk = TortoiseSDK(db, namespace="team1")
@@ -103,7 +103,7 @@ class TestEnforceTeamLimit:
 
         Also verifies ERROR-level logging (#686 alerting).
         """
-        from tortoise.sdk import TortoiseSDK
+        from tortoise.sdk import TortoiseSDK  # noqa: I001
         import logging
         import os
         db = os.path.join(tmp_path, "team.db")
@@ -269,7 +269,7 @@ class TestSessionsQuota:
 
     def test_sessions_count_returns_session_nodes_and_41st_402(
             self, reg_sdk, tmp_path):
-        from tortoise.sdk import TortoiseSDK
+        from tortoise.sdk import TortoiseSDK  # noqa: I001
         import os
         db = os.path.join(tmp_path, "quota.db")
         tid = _find_team_id(reg_sdk)
@@ -311,7 +311,7 @@ class TestSessionsQuota:
 
     def test_sessions_branch_ignores_non_session_nodes(self, reg_sdk, tmp_path):
         """Only :Session nodes count — plain Points never inflate sessions."""
-        from tortoise.sdk import TortoiseSDK
+        from tortoise.sdk import TortoiseSDK  # noqa: I001
         import os
         db = os.path.join(tmp_path, "quota.db")
         tid = _find_team_id(reg_sdk)
@@ -340,7 +340,7 @@ class TestIsEpisodicBackfill:
     the points branch counts them as episodic (no false 402)."""
 
     def _make_tenant(self, reg_sdk, tmp_path):
-        from tortoise.sdk import TortoiseSDK
+        from tortoise.sdk import TortoiseSDK  # noqa: I001
         import os
         return TortoiseSDK(
             os.path.join(tmp_path, "quota.db"), namespace=_find_team_id(reg_sdk))
@@ -440,7 +440,7 @@ class TestBudgetConstants:
         assert MAX_VALUE_POINTS_PER_SESSION == {"soft": 15, "hard": 25, "ceiling": 50}
 
     def test_max_payload_points(self):
-        from tortoise.quota import (
+        from tortoise.quota import (  # noqa: I001
             MAX_ENTITIES, MAX_OPERATORS, MAX_PAYLOAD_POINTS,
             MAX_VALUE_POINTS_PER_SESSION,
         )
@@ -450,5 +450,5 @@ class TestBudgetConstants:
         # R-decoupling: the Layer-1 raw cap is deliberately a SEPARATE named
         # constant from the budget ceiling (same numeric value — the name
         # prevents wiring the wrong 50, plan §4.4).
-        assert MAX_PAYLOAD_POINTS == MAX_VALUE_POINTS_PER_SESSION["ceiling"]
+        assert MAX_PAYLOAD_POINTS == MAX_VALUE_POINTS_PER_SESSION["ceiling"]  # noqa: SIM300
         assert MAX_PAYLOAD_POINTS == 50  # explicit value, not derived

@@ -105,7 +105,7 @@ def test_sdk_success_response_key_set_equal(sdk):
 def test_mcp_success_response_key_set_equal(sdk, monkeypatch):
     """A12 indicator 1 (MCP surface): tortoise_ingest returns the SAME key
     set through the handler layer."""
-    import tortoise.mcp_server as mcp_mod
+    import tortoise.mcp_server as mcp_mod  # noqa: I001
     from tortoise.mcp_auth import (_current_team_id, _current_team_limits,
                                    _transport_mode)
     _transport_mode.set("stdio")
@@ -144,7 +144,7 @@ def test_failure_response_shape_no_results_key(sdk, monkeypatch):
     with pytest.raises(BundleValidationError):
         sdk.ingest(bad, granularity="granular")
     # MCP surface: structured {error, code: ERR_BUNDLE_INVALID, violations}
-    import tortoise.mcp_server as mcp_mod
+    import tortoise.mcp_server as mcp_mod  # noqa: I001
     from tortoise.mcp_auth import (_current_team_id, _current_team_limits,
                                    _transport_mode)
     _transport_mode.set("stdio")
@@ -156,7 +156,7 @@ def test_failure_response_shape_no_results_key(sdk, monkeypatch):
         res = mcp_mod.tortoise_ingest(bundle=bad, granularity="granular")
         assert "error" in res, "failure response must carry the error key"
         assert res["code"] == mcp_mod.ERR_BUNDLE_INVALID
-        assert "violations" in res and res["violations"]
+        assert "violations" in res and res["violations"]  # noqa: RUF019
         assert "results" not in res, "failure shape must have no results key"
     finally:
         _transport_mode.set(None)

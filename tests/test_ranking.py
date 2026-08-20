@@ -18,8 +18,8 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.ranking import GraphRanker, recency_decay, _min_max_normalize  # noqa: E402
-from tortoise.sdk import TortoiseSDK  # noqa: E402
+from tortoise.ranking import GraphRanker, recency_decay, _min_max_normalize  # noqa: E402, I001, RUF100
+from tortoise.sdk import TortoiseSDK  # noqa: E402, RUF100
 
 # Legacy predicate name for negative-direction tests (#281).
 # Kept as a constant so no edge-syntax literal appears in source
@@ -67,7 +67,7 @@ def test_weights_must_sum_to_one():
 def test_rerank_annotates_and_sorts():
     ranker = GraphRanker()  # no projection → signals from result dicts only
     results = [
-        {"id": "a", "scores": {"rrf": 0.03}, "createdAt": datetime.now(timezone.utc).isoformat()},
+        {"id": "a", "scores": {"rrf": 0.03}, "createdAt": datetime.now(timezone.utc).isoformat()},  # noqa: UP017
         {"id": "b", "scores": {"rrf": 0.01}, "createdAt": "2026-01-01T00:00:00+00:00"},
     ]
     out = ranker.rerank(results, entity_type="point")
@@ -88,7 +88,7 @@ def test_rerank_annotates_and_sorts():
 def test_rerank_recency_demotes_old_equivalent_results():
     # Same similarity + same graph signals; only age differs (AC3).
     ranker = GraphRanker()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)  # noqa: UP017
     results = [
         {"id": "old", "scores": {"rrf": 0.02}, "createdAt": (now - timedelta(days=60)).isoformat()},
         {"id": "new", "scores": {"rrf": 0.02}, "createdAt": (now - timedelta(days=1)).isoformat()},
@@ -149,7 +149,7 @@ def _use_shared_embedded_db(shared_embedded_db):
 def _fresh_sdk():
     db_path = os.path.join(tempfile.mkdtemp(prefix="tortoise_ranking_"), "test.db")
     sdk = TortoiseSDK(db_path)
-    try:
+    try:  # noqa: SIM105
         sdk._get_proj().g.query("MATCH (n) DETACH DELETE n")
     except Exception:
         pass
@@ -166,7 +166,7 @@ def _set_confidence(sdk, pid: str, conf: float):
 def test_order_by_graph_ranks_high_ep_above_low_ep():
     """AC1: identical similarity → persisted EP confidence decides order."""
     sdk = _fresh_sdk()
-    proj = sdk._get_proj()
+    proj = sdk._get_proj()  # noqa: F841
     p_high = sdk.create_point("statement", "vector embedding cache invalidation strategy")
     p_low = sdk.create_point("statement", "cache strategy invalidation vector embedding")
     _set_confidence(sdk, p_high["id"], 0.9)
@@ -218,7 +218,7 @@ def test_suggest_entry_points_with_graph_ranker():
     _set_confidence(sdk, p_low["id"], 0.05)
 
     # Without ranker — substring confidence order (identical lengths → tie).
-    plain = sdk.suggest_entry_points("pricing subscription", limit=10)
+    plain = sdk.suggest_entry_points("pricing subscription", limit=10)  # noqa: F841
     # With ranker — persisted EP confidence breaks the tie. The embedded FTS
     # gives zero RRF for this query (→ zero-signal fallback returns []), so
     # mock the hybrid query deterministically with rrf > 0 to exercise the

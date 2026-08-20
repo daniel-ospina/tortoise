@@ -18,12 +18,12 @@ release commitment: the old binary + new journal = silent record loss
 Harness conventions (§7): fresh embedded DB per test; graph assertions via
 raw Cypher; extract_metadata=False (no network).
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import json
 import os
 import shutil
-import tempfile
+import tempfile  # noqa: F401
 from pathlib import Path
 
 import pytest
@@ -85,7 +85,7 @@ def _hash_pair_sweep(g) -> int:
 
 def _all_three_corpus(tmp_path: Path) -> Path:
     """A corpus with one file of EACH type (session/meeting/doc)."""
-    c = tmp_path / "corpus"; c.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
     (c / "s1.md").write_text(SESSION_FIXTURE.format(sid="r1", title="S1"))
     (c / "m1.md").write_text(MEETING_FIXTURE.format(title="M1"))
     (c / "d1.md").write_text(DOC_FIXTURE.format(title="D1"))
@@ -103,7 +103,7 @@ def test_s13_rebuild_drops_session_meeting_edges_doc_survives(tmp_path):
     DocumentCreated event's source_url override → replay's #205 auto-wire);
     Source/Event/Document nodes all survive; no phantom Sources; REQUIRED
     sweep clean."""
-    events_dir = tmp_path / "events"; events_dir.mkdir()
+    events_dir = tmp_path / "events"; events_dir.mkdir()  # noqa: E702
     events = str(events_dir / "events.jsonl")
     corpus = _all_three_corpus(tmp_path)
     sdk = _sdk(tmp_path, events=events)
@@ -117,7 +117,7 @@ def test_s13_rebuild_drops_session_meeting_edges_doc_survives(tmp_path):
         log = EventLog(events)
         assert len(log.read_all()) >= 3
         proj = sdk._get_proj()
-        counts = proj.rebuild_all(str(events_dir))
+        counts = proj.rebuild_all(str(events_dir))  # noqa: F841
         # node survival: 3 Sources, 2 Events (session+meeting), 1 Document
         assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 3
         assert g.query("MATCH (e:Event) RETURN count(e)").result_set[0][0] == 2
@@ -149,7 +149,7 @@ def test_s13_post_rebuild_version_equality_and_sweep(tmp_path):
     """T12 cycle-19: post-rebuild Source/Event `version` equality vs
     pre-rebuild + the hash-pair sweep == 0 checkpoint (after the re-index
     repair oracle runs)."""
-    events_dir = tmp_path / "events"; events_dir.mkdir()
+    events_dir = tmp_path / "events"; events_dir.mkdir()  # noqa: E702
     corpus = _all_three_corpus(tmp_path)
     sdk = _sdk(tmp_path, events=str(events_dir / "events.jsonl"))
     try:
@@ -184,7 +184,7 @@ def test_s15_torn_tail_journal_rebuilds_to_crash_free_state(tmp_path):
     counted, never raised) AND rebuild_all recovers to the crash-free
     structural state (the wipe-after-parse pin: ALL jsonl parsed BEFORE the
     wipe, so a torn line is a survivable skip, not total loss)."""
-    events_dir = tmp_path / "events"; events_dir.mkdir()
+    events_dir = tmp_path / "events"; events_dir.mkdir()  # noqa: E702
     log_path = str(events_dir / "events.jsonl")
     corpus = _all_three_corpus(tmp_path)
     sdk = _sdk(tmp_path, events=log_path)
@@ -214,7 +214,7 @@ def test_s15_mid_file_malformed_raises_actionable(tmp_path):
     actionable error naming the file and line (a mid-file skip would drop a
     record that IS in the journal; the tail-tear tolerance covers only the
     trailing line)."""
-    events_dir = tmp_path / "events"; events_dir.mkdir()
+    events_dir = tmp_path / "events"; events_dir.mkdir()  # noqa: E702
     log_path = str(events_dir / "events.jsonl")
     corpus = _all_three_corpus(tmp_path)
     sdk = _sdk(tmp_path, events=log_path)
@@ -242,7 +242,7 @@ def test_s15_restore_drill_end_to_end(tmp_path):
     replay source), (3) the db file → fresh graph → restore via rebuild_all
     (line-tolerant) → re-index → count(Source)==file_count, zero duplicate
     urls, edges restored."""
-    events_dir = tmp_path / "events"; events_dir.mkdir()
+    events_dir = tmp_path / "events"; events_dir.mkdir()  # noqa: E702
     log_path = str(events_dir / "events.jsonl")
     corpus = _all_three_corpus(tmp_path)
     db = _db(tmp_path)
@@ -253,7 +253,7 @@ def test_s15_restore_drill_end_to_end(tmp_path):
     finally:
         sdk.close()
     # backup: corpus + events dir + db (SDK closed so the db file is free)
-    backup = tmp_path / "backup"; backup.mkdir()
+    backup = tmp_path / "backup"; backup.mkdir()  # noqa: E702
     shutil.copytree(str(corpus), str(backup / "corpus"))
     shutil.copytree(str(events_dir), str(backup / "events"))
     shutil.copy2(db, str(backup / "t.db"))
@@ -262,7 +262,7 @@ def test_s15_restore_drill_end_to_end(tmp_path):
     sdk2 = TortoiseSDK(_db(tmp_path, "restored.db"), namespace="e2e-900")
     try:
         proj = sdk2._get_proj()
-        counts = proj.rebuild_all(str(backup / "events"))
+        counts = proj.rebuild_all(str(backup / "events"))  # noqa: F841
         g = sdk2._get_proj().g
         # nodes survive; session/meeting edges dropped per S13
         assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 3
@@ -289,10 +289,10 @@ def test_t12_backfill_rebuild_wipe_semantics(tmp_path):
     are ABSENT post-rebuild (wipe + replay — unjournaled legacy nodes), the
     backfill Sources are present (journaled via create_source), and a re-run
     of backfill on the surviving corpus converges."""
-    import hashlib
+    import hashlib  # noqa: F401, I001
     from tortoise.file_indexer import compute_file_hash
-    events_dir = tmp_path / "events"; events_dir.mkdir()
-    corpus = tmp_path / "corpus"; corpus.mkdir()
+    events_dir = tmp_path / "events"; events_dir.mkdir()  # noqa: E702
+    corpus = tmp_path / "corpus"; corpus.mkdir()  # noqa: E702
     (corpus / "docA.md").write_text(DOC_FIXTURE.format(title="DocA"))
     stored = compute_file_hash(str(corpus / "docA.md"))
     sdk = _sdk(tmp_path, events=str(events_dir / "events.jsonl"))
@@ -328,7 +328,7 @@ def test_t12_old_logic_skips_unknown_record_types(tmp_path):
     never a crash. This is the forward-only release contract: the OLD binary
     replaying a NEW journal skips the new record kinds (documented silent
     record loss — the rollback hazard the forward-only commitment names)."""
-    events_dir = tmp_path / "events"; events_dir.mkdir()
+    events_dir = tmp_path / "events"; events_dir.mkdir()  # noqa: E702
     log_path = str(events_dir / "events.jsonl")
     corpus = _all_three_corpus(tmp_path)
     sdk = _sdk(tmp_path, events=log_path)
@@ -339,7 +339,7 @@ def test_t12_old_logic_skips_unknown_record_types(tmp_path):
             f.write(json.dumps({"type": "FutureRecordKind2027",
                                 "id": "future-1", "payload": {"x": 1}}) + "\n")
         proj = sdk._get_proj()
-        counts = proj.rebuild_all(str(events_dir))   # must NOT raise
+        counts = proj.rebuild_all(str(events_dir))   # must NOT raise  # noqa: F841
         g = sdk._get_proj().g
         # known kinds replayed; the unknown kind skipped silently
         assert g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0] == 3
@@ -357,8 +357,8 @@ def test_t12_instantiates_edges_rebuild_drop_and_restore(tmp_path):
     """T12 cycle-19 (c): a session Event's issue/PR aboutObject edges are
     DROPPED by rebuild (created indexer-side, never journaled) and RESTORED
     by the re-index (the session upsert re-runs _connect_issue_objects)."""
-    events_dir = tmp_path / "events"; events_dir.mkdir()
-    corpus = tmp_path / "corpus"; corpus.mkdir()
+    events_dir = tmp_path / "events"; events_dir.mkdir()  # noqa: E702
+    corpus = tmp_path / "corpus"; corpus.mkdir()  # noqa: E702
     (corpus / "s.md").write_text(
         "---\nsessionId: r9\ntitle: Issues\nissues: [repo#1]\n"
         "prs: [repo#2]\n---\nBody with issue references")

@@ -24,7 +24,7 @@ from tortoise.mcp_client import (
 
 __version__ = "0.2.0"  # lockstep with tortoise-graph minor (docs/client-server-split.md)
 
-__all__ = [
+__all__ = [  # noqa: RUF022
     "available",
     "call_tool",
     "get_client",

@@ -3,7 +3,7 @@
 Polls Slack channels for messages and threads, maps them to EventRecorded JSONL.
 Requires: slack-sdk (pip install slack-sdk).
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import json
 import hmac
@@ -14,13 +14,13 @@ import threading
 import time
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from typing import Any, Callable
+from typing import Any, Callable  # noqa: UP035
 
 logger = logging.getLogger(__name__)
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
 
 class SlackConnector:
@@ -160,7 +160,7 @@ class SlackConnector:
         if self._server is not None:
             if self._thread is not None and self._thread.is_alive():
                 return self.webhook_port
-            try:
+            try:  # noqa: SIM105
                 self._server.server_close()
             except OSError:
                 pass
@@ -281,7 +281,7 @@ class SlackConnector:
 def _ts_to_iso(ts: str) -> str:
     """Convert Slack timestamp (e.g. '1690000000.123456') to ISO format."""
     try:
-        return datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat()
+        return datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat()  # noqa: UP017
     except (ValueError, TypeError):
         return _now_iso()
 

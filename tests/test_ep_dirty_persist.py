@@ -23,7 +23,7 @@ from contextlib import contextmanager
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest
+import pytest  # noqa: F401
 
 from tortoise.sdk import TortoiseSDK
 

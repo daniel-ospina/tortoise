@@ -353,15 +353,25 @@ jobs:
     # in python-ci.yml (repo-specific strategy); migration guards, pricing,
     # client-build, e2e gates stay local siblings above.
     #   test-command: ''      — tests run in python-ci.yml (uv split)
-    #   typecheck-command: '' — no mypy config in this repo; auto-detect would
-    #                           fail (mypy on the whole package)
-    #   lint-command: narrow  — the ruff default surface carries pre-existing
-    #                           debt (F401/E501, no [tool.ruff]); the syntax
-    #                           class (E9/F63/F7) is green on main
+    #   lint-command: full    — [tool.ruff] in pyproject.toml pins the rule
+    #                           surface (E/F/B/UP/I/SIM/RUF, line-length 100);
+    #                           the ~3.7k violation baseline is recorded as
+    #                           per-line `# noqa` directives + the ignore list
+    #                           (#1503, docs/lint-baseline-1503.md) so `ruff
+    #                           check .` passes green and stays active for new
+    #                           code. Previously narrowed to the syntax class
+    #                           (E9/F63/F7) because no config existed.
+    #   typecheck-command: full — [tool.mypy] in pyproject.toml (baseline via
+    #                           disable_error_code, #1503); the command is
+    #                           explicit because the workflow's package
+    #                           auto-detect would pick `battery/` (first
+    #                           top-level dir with __init__.py, sorted) — not
+    #                           the engine. `mypy tortoise/` is what the
+    #                           baseline was measured against.
     uses: daniel-ospina/agent-infra/.github/workflows/python-ci.yml@v0.1.0
     with:
       python-version: '3.12'
       test-command: ''
-      lint-command: 'ruff check . --select E9,F63,F7 --ignore F706'
-      typecheck-command: ''
+      lint-command: 'ruff check .'
+      typecheck-command: 'mypy tortoise/'
     secrets: inherit

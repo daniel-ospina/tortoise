@@ -12,13 +12,13 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.api import EventAPI, provenance
+from tortoise.api import EventAPI, provenance  # noqa: F401, I001
 from tortoise.extractor import (
     _document_sections, _strip_frontmatter, _DocumentPointStage,
-    _POINTS_DOC_SYS, _RELATIONS_DOC_SYS, _json,
-    LLMExtractor, MockModel, extract_from_document,
+    _POINTS_DOC_SYS, _RELATIONS_DOC_SYS, _json,  # noqa: F401
+    LLMExtractor, MockModel, extract_from_document,  # noqa: F401
 )
-from tortoise.idempotency import document_key, IngestKey
+from tortoise.idempotency import document_key, IngestKey  # noqa: F401
 from tortoise.log import EventLog
 from tortoise.projection import FalkorProjection
 
@@ -206,7 +206,7 @@ def test_extract_from_document_basic():
 
 def test_extract_from_document_not_a_document():
     """extract_from_document on non-markdown returns zero stats."""
-    api, log = _api()
+    api, log = _api()  # noqa: RUF059
     text = "Alice: Hello world, this is a conversation."
     stats = extract_from_document(
         text, "chat.txt", api,
@@ -230,7 +230,7 @@ def test_extract_from_document_operators():
         "But however the memory usage is concerning for large graphs but "
         "the performance gains justify the additional resource consumption."
     )
-    stats = extract_from_document(
+    stats = extract_from_document(  # noqa: F841
         text, "graph.md", api,
         point_model=MockModel("cheap"),
         relation_model=MockModel("reason"),
@@ -254,7 +254,7 @@ def test_extract_from_document_operators():
 
 def test_begin_ingest_idempotent():
     """Re-running same document at same version is a no-op."""
-    api, log = _api()
+    api, log = _api()  # noqa: RUF059
     text = "## Section\nContent here is more than twenty characters for extraction."
     key = document_key(text)
     extractor_version = "mock:v1"
@@ -271,7 +271,7 @@ def test_begin_ingest_idempotent():
 
 def test_begin_ingest_force():
     """--force overrides idempotency gate."""
-    api, log = _api()
+    api, log = _api()  # noqa: RUF059
     text = "## Section\nContent here is more than twenty characters for extraction."
     key = document_key(text)
     extractor_version = "mock:v1"
@@ -354,7 +354,7 @@ def test_e2e_no_duplicate_point_ids():
     """Each PointAdded event produces a unique point ID."""
     api, log = _api()
     text = "## A\nContent here is more than twenty characters for testing.\n## B\nMore content that is also long enough to pass minimum threshold."
-    stats = extract_from_document(
+    stats = extract_from_document(  # noqa: F841
         text, "unique.md", api,
         point_model=MockModel("cheap"),
         relation_model=MockModel("reason"),
@@ -370,7 +370,7 @@ def test_e2e_no_duplicate_point_ids():
 
 def test_domain_pointkind_injection():
     """When domain is provided, pointKind prompt includes domain-specific values."""
-    from tortoise.extractor import _DocumentPointStage, _build_pointkind_prompt
+    from tortoise.extractor import _DocumentPointStage, _build_pointkind_prompt  # noqa: I001
     from tortoise.domain_loader import load_manifest
 
     # Load manifest to register product-strategy kinds
@@ -405,7 +405,7 @@ def test_domain_unrecognized_kind_warning():
     """_warn_unrecognized_kinds uses the 2-arg kind_is_known(kind, 'pointKind')
     (#951 — previously a silent TypeError, research-r6 §1.2): known kinds stay
     silent, unknown kinds print a warning (best-effort, never blocks)."""
-    import sys, io
+    import sys, io  # noqa: E401, I001
     from tortoise.extractor import _warn_unrecognized_kinds
 
     # Known kinds → no warning
@@ -424,7 +424,7 @@ def test_domain_unrecognized_kind_warning():
 
 def test_e2e_extraction_with_domain_flag():
     """E2E: extract_from_document with --domain produces points with domain kinds."""
-    import sys, io
+    import sys, io  # noqa: E401, I001
     api, log = _api()
     text = (
         "## Product Strategy\n"

@@ -15,7 +15,7 @@ Cypher on ``sdk._get_proj().g``; no network (``extract_metadata=False`` on the
 new index path short-circuits session embeddings — §6.1 I15). ``corpus_name``
 in expected values = basename of the fixture corpus dir (``<C>`` below).
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import os
 import threading
@@ -298,7 +298,7 @@ def test_e2e8_coexistence_embedding_gate_heal(tmp_path, monkeypatch):
         health_before = sdk.session_index_health(str(c))
         sweep_before = _hash_pair_sweep(g)
 
-        def _available(self, *a, **k):  # noqa: ANN001
+        def _available(self, *a, **k):  # noqa: ANN001, RUF100
             return [0.1] * 384
         monkeypatch.setattr(sdkmod.TortoiseSDK, "_session_embedding", _available)
         r = sdk.index_directory(str(c), extract_metadata=True)
@@ -328,7 +328,7 @@ def test_e2e8_degraded_deleted_file(tmp_path):
     """E2E-8 degraded variant: delete one source file before backfill →
     Source still created, contentHash == Event.file_hash, counted in
     degraded_no_file; second run zero-create."""
-    c = tmp_path / "corpus"; c.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
     gone = c / "gone.md"
     gone.write_text(SESSION_FIXTURE.format(sid="g1", n=1))
     stored = compute_file_hash(str(gone))
@@ -360,7 +360,7 @@ def test_e2e8_edge_null_hash_no_file(tmp_path):
     deleted → errors[] entry, NO Source created (REQUIRED contentHash cannot
     be honored), run continues over remaining files; identical in dry-run and
     real run."""
-    c = tmp_path / "corpus"; c.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
     (c / "ok.md").write_text(SESSION_FIXTURE.format(sid="ok1", n=1))
     sdk = _sdk()
     try:
@@ -392,9 +392,9 @@ def test_e2e8_edge_outside_root(tmp_path):
     """E2E-8(b): legacy Event whose source_file is not relativizable under the
     corpus root → errors[] entry counted IDENTICALLY in dry-run and real run
     (would_create excludes it)."""
-    c = tmp_path / "corpus"; c.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
     (c / "ok.md").write_text(SESSION_FIXTURE.format(sid="ok1", n=1))
-    outside = tmp_path / "outside"; outside.mkdir()
+    outside = tmp_path / "outside"; outside.mkdir()  # noqa: E702
     (outside / "x.md").write_text("outside body")
     sdk = _sdk()
     try:
@@ -422,7 +422,7 @@ def test_e2e8_edge_edited_since_capture(tmp_path):
     was stored → backfill creates the Source with the CURRENT file hash, the
     Event KEEPS its stored file_hash (additive-only), the mismatch is recorded
     in errors[], sweep == +1, second backfill run zero-create."""
-    c = tmp_path / "corpus"; c.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
     p = c / "s1.md"
     p.write_text(SESSION_FIXTURE.format(sid="legacy1", n=1))
     stored = compute_file_hash(str(p))
@@ -460,7 +460,7 @@ def test_e2e8_edge_over_limit(tmp_path, monkeypatch):
     WITHOUT forking a second Source (the backfill Source already owns the
     url)."""
     import tortoise.file_indexer as fimod
-    c = tmp_path / "corpus"; c.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
     big = c / "big.md"
     big.write_text(SESSION_FIXTURE.format(sid="big1", n=1))
     stored = compute_file_hash(str(big))
@@ -510,8 +510,8 @@ def test_e2e8_hardlink_out_fail_closed_and_escape(tmp_path, monkeypatch):
     index_directory reports the hardlink file failed WITHOUT forking a second
     Source (the backfill Source already owns the url)."""
     import tortoise.file_indexer as fimod
-    c = tmp_path / "corpus"; c.mkdir()
-    outside = tmp_path / "outside"; outside.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
+    outside = tmp_path / "outside"; outside.mkdir()  # noqa: E702
     (outside / "out.md").write_text(
         "---\nsessionId: ho\ntitle: HO\n---\nBody")
     os.link(outside / "out.md", c / "hardlink-out.md")
@@ -582,7 +582,7 @@ def test_e2e8_hardlink_pair_sibling(tmp_path):
     Sources at BOTH urls, degraded_no_file == 2 + errors[] entries; second
     run zero-create (both Events skipped)."""
     import tortoise.file_indexer as fimod
-    c = tmp_path / "corpus"; c.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
     (c / "a.md").write_text(SESSION_FIXTURE.format(sid="hpa", n=1))
     os.link(c / "a.md", c / "b.md")
     stored = compute_file_hash(str(c / "a.md"))
@@ -630,7 +630,7 @@ def test_e2e8_hardlink_pair_mixed_deleted(tmp_path):
     (degraded_no_file), while the REMAINING path's nlink drops to 1 →
     scanned/read normally (Source from the CURRENT file hash); two distinct
     urls, one Source each, the run completes honestly."""
-    c = tmp_path / "corpus"; c.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
     (c / "a.md").write_text(SESSION_FIXTURE.format(sid="hpa", n=1))
     os.link(c / "a.md", c / "b.md")
     stored = compute_file_hash(str(c / "a.md"))
@@ -666,7 +666,7 @@ def test_e2e8_mixed_state_dry_run(tmp_path):
     dry_run would_create EXCLUDES already-existing Sources, would_link counts
     ONLY missing edges (never double-counts the linked ones); the subsequent
     real run confirms exactly those numbers."""
-    c = tmp_path / "corpus"; c.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
     (c / "a.md").write_text(SESSION_FIXTURE.format(sid="m1", n=1))
     (c / "b.md").write_text(SESSION_FIXTURE.format(sid="m2", n=2))
     sdk = _sdk()
@@ -703,7 +703,7 @@ def test_e2e8_pre_320_shape_structural(tmp_path):
     """E2E-8 pre-#320-shape leg (cycle-21): an AgentSession Event with NO
     source_file AND no file_hash → errors[] structural entry, NO Source, NO
     raise, run completes, dry-run counts identically."""
-    c = tmp_path / "corpus"; c.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
     (c / "ok.md").write_text(SESSION_FIXTURE.format(sid="ok1", n=1))
     sdk = _sdk()
     try:
@@ -736,7 +736,7 @@ def test_e2e8_undecodable_source_file(tmp_path, monkeypatch):
     name → errors[] entry (cause filename), run continues, never an aborting
     raise (the shared per-file guard at the entry points)."""
     import tortoise.file_indexer as fimod
-    c = tmp_path / "corpus"; c.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
     (c / "ok.md").write_text(SESSION_FIXTURE.format(sid="ok1", n=1))
     sdk = _sdk()
     try:
@@ -784,7 +784,7 @@ def test_e2e8_kill_between_crash_repair(tmp_path, monkeypatch):
     exists — W2 crash-repair pin), edge exists; third run created == 0,
     linked == 0 (convergence)."""
     import tortoise.sdk as sdkmod
-    c = tmp_path / "corpus"; c.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
     (c / "s1.md").write_text(SESSION_FIXTURE.format(sid="legacy1", n=1))
     sdk = _sdk()
     orig_link = sdkmod.TortoiseSDK._backfill_link
@@ -846,7 +846,7 @@ def test_e2e8_source_write_failure_honest_counters(tmp_path, monkeypatch):
     graph; a re-run REPAIRS both the Source and the edge (created==1 /
     linked==1 / errors==[]); the third run converges (skipped==1)."""
     import tortoise.sdk as sdkmod
-    c = tmp_path / "corpus"; c.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
     (c / "s1.md").write_text(SESSION_FIXTURE.format(sid="legacy1", n=1))
     sdk = _sdk()
     orig = sdkmod.TortoiseSDK._index_source_merge
@@ -857,7 +857,7 @@ def test_e2e8_source_write_failure_honest_counters(tmp_path, monkeypatch):
                              file_hash=compute_file_hash(str(c / "s1.md")),
                              title="S1")
 
-        def _boom(self, *a, **k):  # noqa: ANN001, ANN002, ANN003
+        def _boom(self, *a, **k):  # noqa: ANN001, ANN002, ANN003, RUF100
             raise RuntimeError("simulated Source-write failure (db class)")
         monkeypatch.setattr(sdkmod.TortoiseSDK, "_index_source_merge", _boom)
         r1 = sdk.backfill_sources(str(c))
@@ -896,7 +896,7 @@ def test_e2e8_concurrent_backfill_and_index(tmp_path):
     a test failure) → count(Source) == 1 (url MERGE convergence across two
     different code paths), count(Event) == 1, count(references) == 1, honest
     counters, second-run zero-create."""
-    c = tmp_path / "corpus"; c.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
     (c / "conv.md").write_text(SESSION_FIXTURE.format(sid="legacy1", n=1))
     db = _db()
     seed = TortoiseSDK(db, namespace="e2e-900")
@@ -936,11 +936,11 @@ def test_e2e8_concurrent_backfill_and_index(tmp_path):
                 results[i] = sdk.backfill_sources(str(c))
             else:
                 results[i] = sdk.index_directory(str(c), extract_metadata=False)
-        except BaseException as e:  # noqa: BLE001 — surfaced after the join
+        except BaseException as e:  # noqa: BLE001, RUF100
             errors.append(e)
-            try:
+            try:  # noqa: SIM105
                 barrier.wait(timeout=60)
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001, RUF100
                 pass
         finally:
             sdk.close()
@@ -1010,8 +1010,8 @@ def test_e2e8_moved_file_pure_move(tmp_path):
     forward run creates the fresh Source at the new url; the two-Source
     fork is EXPLICITLY counted; the post-forward sweep == 0 (pure-move:
     content-unchanged, both pairs hash-equal)."""
-    c = tmp_path / "corpus"; c.mkdir()
-    sub = c / "archive"; sub.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
+    sub = c / "archive"; sub.mkdir()  # noqa: E702
     old = c / "moved.md"
     old.write_text(SESSION_FIXTURE.format(sid="mv1", n=1))
     stored = compute_file_hash(str(old))
@@ -1043,7 +1043,7 @@ def test_e2e8_moved_file_pure_move(tmp_path):
         # fork explicitly counted) — the new-path file is session-classified
         # and the OLD Event already owns session_mv1 (primary election keeps
         # the Event; the new Source is registered + edge-less by election)
-        rf = sdk.index_directory(str(c), extract_metadata=False)
+        rf = sdk.index_directory(str(c), extract_metadata=False)  # noqa: F841
         urls = [x[0] for x in g.query("MATCH (s:Source) RETURN s.url").result_set]
         assert len(urls) == 2                 # the two-Source fork
         assert f"corpus://{c.name}/moved.md" in urls
@@ -1059,8 +1059,8 @@ def test_e2e8_moved_file_edited_move(tmp_path):
     frontmatter sessionId PINNED to match the legacy Event (cycle-15 pin),
     content EDITED at the new path → post-forward sweep == 1 (the old
     degraded Source vs the refreshed legacy Event — exclusion class 3)."""
-    c = tmp_path / "corpus"; c.mkdir()
-    sub = c / "archive"; sub.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
+    sub = c / "archive"; sub.mkdir()  # noqa: E702
     old = c / "moved.md"
     old.write_text(SESSION_FIXTURE.format(sid="mv2", n=1))
     stored = compute_file_hash(str(old))
@@ -1083,7 +1083,7 @@ def test_e2e8_moved_file_edited_move(tmp_path):
         # distinguishing `moved` wording fires ONLY on a hash match, plan
         # cycle-15); the forward run still produces the two-Source fork.
         assert r["errors"][0]["cause"] == "missing"
-        rf = sdk.index_directory(str(c), extract_metadata=False)
+        rf = sdk.index_directory(str(c), extract_metadata=False)  # noqa: F841
         urls = [x[0] for x in g.query("MATCH (s:Source) RETURN s.url").result_set]
         assert len(urls) == 2                 # two-Source fork
         # EDITED-move: the old pair is a raw-sweep MISMATCH (old Source
@@ -1099,8 +1099,8 @@ def test_e2e8_delete_after_fork(tmp_path):
     fork, delete the NEW-path file → re-run backfill → created == 0, no
     THIRD Source resurrected from the stored file_hash at either url, run
     completes, health bucket documented."""
-    c = tmp_path / "corpus"; c.mkdir()
-    sub = c / "archive"; sub.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
+    sub = c / "archive"; sub.mkdir()  # noqa: E702
     old = c / "moved.md"
     old.write_text(SESSION_FIXTURE.format(sid="mv3", n=1))
     stored = compute_file_hash(str(old))
@@ -1147,8 +1147,8 @@ def test_e2e8_same_inode_convergence_seam(tmp_path, monkeypatch):
     Source (first sorted path) and links BOTH Events onto it; the second
     run reports both Events skipped."""
     import types as _types
-    c = tmp_path / "corpus"; c.mkdir()
-    a = c / "a.md"; b = c / "b.md"
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
+    a = c / "a.md"; b = c / "b.md"  # noqa: E702
     a.write_text(SESSION_FIXTURE.format(sid="alias1", n=1))
     b.write_text(SESSION_FIXTURE.format(sid="alias1", n=1))  # SAME content
     stored = compute_file_hash(str(a))
@@ -1206,8 +1206,8 @@ def test_e2e8_same_inode_convergence_mount_bind(tmp_path):
     paths of ONE physical file converge onto a single Source (first sorted
     path), both Events linked, second run both skipped."""
     import subprocess as _sp
-    c = tmp_path / "corpus"; c.mkdir()
-    realdir = tmp_path / "real"; realdir.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
+    realdir = tmp_path / "real"; realdir.mkdir()  # noqa: E702
     (realdir / "f.md").write_text(SESSION_FIXTURE.format(sid="mnt1", n=1))
     stored = compute_file_hash(str(realdir / "f.md"))
     alias = c / "alias"

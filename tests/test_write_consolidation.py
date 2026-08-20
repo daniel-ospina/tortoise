@@ -497,7 +497,7 @@ class TestEventAboutEdgesSemanticProxy:
 @pytest.fixture(autouse=True)
 def _transport_context():
     """MCP tools require an initialized transport mode (#236 auth gate)."""
-    from tortoise.mcp_auth import (
+    from tortoise.mcp_auth import (  # noqa: I001
         _current_team_id, _current_team_limits, _transport_mode,
     )
     _transport_mode.set("stdio")
@@ -511,7 +511,7 @@ def _transport_context():
 
 class TestMcpHandlers:
     def test_tortoise_create_entity_and_update_and_delete(self):
-        from tortoise.mcp_server import (
+        from tortoise.mcp_server import (  # noqa: I001
             tortoise_create_entity, tortoise_delete, tortoise_update,
         )
         r = tortoise_create_entity("object", "Mcp Entity",
@@ -540,7 +540,7 @@ class TestMcpHandlers:
         assert "error" in r and "unknown action" in r["error"]
 
     def test_tortoise_supersede_transfer_edges_param(self):
-        from tortoise.mcp_server import (
+        from tortoise.mcp_server import (  # noqa: I001
             tortoise_create_point, tortoise_supersede,
         )
         a = tortoise_create_point("statement", "mcp old claim zz")
@@ -551,7 +551,7 @@ class TestMcpHandlers:
         assert "error" not in r and r["invalidated"] is True
 
     def test_tortoise_create_edge_returns_rich_dict(self):
-        from tortoise.mcp_server import (
+        from tortoise.mcp_server import (  # noqa: I001
             tortoise_create_edge, tortoise_create_entity, tortoise_create_point,
         )
         p = tortoise_create_point("statement", "mcp edge claim")

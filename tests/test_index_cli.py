@@ -198,11 +198,11 @@ def test_e2e16_vii_sandbox_out_of_base_symlink(tmp_path):
     base symlink probe in the corpus → child run completes, probe `failed`,
     in-base files indexed (positive + negative sandbox through the real
     layer)."""
-    base = tmp_path / "base"; base.mkdir()
-    outside = tmp_path / "outside"; outside.mkdir()
+    base = tmp_path / "base"; base.mkdir()  # noqa: E702
+    outside = tmp_path / "outside"; outside.mkdir()  # noqa: E702
     (outside / "leak.md").write_text(SESSION_FIXTURE.format(
         sid="leak", title="Leak"))
-    corpus = base / "corpus"; corpus.mkdir()
+    corpus = base / "corpus"; corpus.mkdir()  # noqa: E702
     (corpus / "s1.md").write_text(SESSION_FIXTURE.format(sid="cli7", title="S"))
     (corpus / "leak.md").symlink_to(outside / "leak.md")
     r = _run_cli([str(corpus), "--db", _db_path(tmp_path)],
@@ -224,7 +224,7 @@ def test_e2e16_viii_corpus_name_two_same_basename_corpora(tmp_path):
     layer; exit 0 + stdout JSON in both arms)."""
     root_a = tmp_path / "ra" / "corpus"
     root_b = tmp_path / "rb" / "corpus"
-    root_a.mkdir(parents=True); root_b.mkdir(parents=True)
+    root_a.mkdir(parents=True); root_b.mkdir(parents=True)  # noqa: E702
     assert root_a.name == root_b.name == "corpus"
     (root_a / "s1.md").write_text(SESSION_FIXTURE.format(sid="cpa", title="A"))
     (root_b / "s1.md").write_text(SESSION_FIXTURE.format(sid="cpb", title="B"))
@@ -394,7 +394,7 @@ def test_e2e15_a_happy_path_reaches_new_primitive(tmp_path, monkeypatch):
     opens FRESH after the child completes (RDB persisted) and reads the
     indexed state. Deterministic drain: poll for child completion, then open."""
     import time as _time
-    corpus = tmp_path / "corpus"; corpus.mkdir()
+    corpus = tmp_path / "corpus"; corpus.mkdir()  # noqa: E702
     sess = corpus / "s.md"
     sess.write_text("---\nsessionId: hk1\ntitle: Hook\n---\nBody")
     transcript = tmp_path / "t.jsonl"
@@ -442,7 +442,7 @@ def test_e2e15_h_two_consecutive_fire_truncate(tmp_path):
     second run's output (truncate-on-open — the append-vs-truncate
     discriminator)."""
     import time as _time
-    corpus = tmp_path / "corpus"; corpus.mkdir()
+    corpus = tmp_path / "corpus"; corpus.mkdir()  # noqa: E702
     (corpus / "s.md").write_text("---\nsessionId: hk2\ntitle: Hook\n---\nBody")
     transcript = tmp_path / "t.jsonl"
     transcript.write_text(json.dumps({
@@ -552,8 +552,8 @@ def test_e2e15_b_d2_symlink_root_escape(tmp_path):
     still exits 0; a clean-error implementation fails on purpose).
     """
     import time as _time
-    base = tmp_path / "base"; base.mkdir()
-    outside = tmp_path / "outside"; outside.mkdir()
+    base = tmp_path / "base"; base.mkdir()  # noqa: E702
+    outside = tmp_path / "outside"; outside.mkdir()  # noqa: E702
     (outside / "s.md").write_text(
         "---\nsessionId: esc1\ntitle: Esc\n---\nBody")
     corpus_link = base / "corpus-link"
@@ -624,9 +624,9 @@ def test_e2e15_c_lock_contention(tmp_path):
     present (Source + Event + edge) — the positive control proving the sweep
     ran, processed the corpus, and honored the lock for the held sessionId
     only; hook exits 0."""
-    import time as _time
+    import time as _time  # noqa: I001
     from tortoise.index_lock import SessionIndexLock
-    corpus = tmp_path / "corpus"; corpus.mkdir()
+    corpus = tmp_path / "corpus"; corpus.mkdir()  # noqa: E702
     (corpus / "s1.md").write_text(
         "---\nsessionId: lock1\ntitle: Lock1\n---\nBody1")
     (corpus / "s2.md").write_text(
@@ -697,7 +697,7 @@ def test_e2e15_e2_graph_unreachable_dead_uri(tmp_path):
     EMPTY (a silent fallback to an embedded DB would index the fixture into
     a LIVE graph)."""
     import time as _time
-    corpus = tmp_path / "corpus"; corpus.mkdir()
+    corpus = tmp_path / "corpus"; corpus.mkdir()  # noqa: E702
     (corpus / "s.md").write_text(
         "---\nsessionId: dead1\ntitle: Dead\n---\nBody")
     transcript = tmp_path / "t.jsonl"
@@ -754,10 +754,10 @@ def test_t8_metadata_parity_in_process(tmp_path, monkeypatch):
     TORTOISE_INDEX_NO_NETWORK var UNSET → e.embedding non-null (the legacy
     sweep's embedding behavior preserved); with the var SET → embedding
     None (the var-overrides-flag precedence, cycle-12 pin)."""
-    import types
+    import types  # noqa: I001
     import tortoise.__main__ as main_mod
     import tortoise.sdk as sdk_mod
-    corpus = tmp_path / "corpus"; corpus.mkdir()
+    corpus = tmp_path / "corpus"; corpus.mkdir()  # noqa: E702
     (corpus / "s.md").write_text(SESSION_FIXTURE.format(sid="par1", title="P"))
     db = os.path.join(str(tmp_path), "par.db")
     calls = {"n": 0}
@@ -832,7 +832,7 @@ def test_e2e15_h2_crash_mid_write_recovery(tmp_path):
     end-to-end)."""
     import signal as _sig
     import time as _time
-    corpus = tmp_path / "corpus"; corpus.mkdir()
+    corpus = tmp_path / "corpus"; corpus.mkdir()  # noqa: E702
     (corpus / "s.md").write_text("---\nsessionId: hk3\ntitle: Hook\n---\nBody")
     transcript = tmp_path / "t.jsonl"
     transcript.write_text(json.dumps({
@@ -859,12 +859,12 @@ def test_e2e15_h2_crash_mid_write_recovery(tmp_path):
         _time.sleep(0.5)
     # kill any leftover sweep child + daemon to force a partial capture
     for proc in _iter_child_pythons(env["TORTOISE_DB_PATH"]):
-        try:
+        try:  # noqa: SIM105
             os.kill(proc, _sig.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
     _time.sleep(1)
-    partial = Path(cap).read_text() if Path(cap).exists() else ""
+    partial = Path(cap).read_text() if Path(cap).exists() else ""  # noqa: F841
     # fire 2: the truncate clears the partial → the file holds the COMPLETE
     # second report (JSON line parseable, no partial residue)
     r2 = _run_hook(env=env, transcript_path=transcript)
@@ -890,7 +890,7 @@ def test_e2e15_h2_crash_mid_write_recovery(tmp_path):
 def _iter_child_pythons(db_path: str):
     """Best-effort: find sweep-child python processes holding the given db
     (via the db .settings registry's pidfile when present)."""
-    import subprocess as _sp
+    import subprocess as _sp  # noqa: F401
     pidfile = db_path + ".settings"
     if not Path(pidfile).exists():
         return []

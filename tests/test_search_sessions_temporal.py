@@ -18,7 +18,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.sdk import TortoiseSDK                          # noqa: E402
+from tortoise.sdk import TortoiseSDK  # noqa: E402, I001, RUF100
 
 # R5 (#221): session-scoped shared embedded DB path (set by autouse fixture
 # below) — one redislite server per session instead of one per test.
@@ -37,7 +37,7 @@ def _fresh_sdk():
     sdk = TortoiseSDK(db_path)
     # Wipe before use (shared DB — hermeticity comes from the wipe, not a
     # fresh path). Embedded mode bypasses the test-graph guard (#99).
-    try:
+    try:  # noqa: SIM105
         sdk._get_proj().g.query("MATCH (n) DETACH DELETE n")
     except Exception:
         pass

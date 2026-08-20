@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
-import ci_timing  # noqa: E402
+import ci_timing  # noqa: E402, RUF100
 
 FAKE_RUN = {
     "id": 4242,
@@ -200,14 +200,14 @@ def test_generate_is_deterministic_and_bounds_history(tmp_path: Path, fake_env: 
     repo_docs = tmp_path / "repo" / "docs"
     repo_docs.mkdir(parents=True)
     shutil.copy(out1 / "ci-timing.json", repo_docs / "ci-timing.json")
-    run2 = subprocess.run(
+    run2 = subprocess.run(  # noqa: F841
         [sys.executable, str(tools),
          "--repo", "daniel-ospina/tortoise", "--run-id", "4242",
          "--logs-dir", str(tmp_path / "logs"), "--out-dir", str(repo_docs)],
         capture_output=True, text=True, check=True,
     )
     assert len(json.loads((repo_docs / "ci-timing.json").read_text())["history"]) == 2
-    run3 = subprocess.run(
+    run3 = subprocess.run(  # noqa: F841
         [sys.executable, str(tools),
          "--repo", "daniel-ospina/tortoise", "--run-id", "4242",
          "--logs-dir", str(tmp_path / "logs"), "--out-dir", str(repo_docs),

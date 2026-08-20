@@ -48,7 +48,7 @@ def _load_input(args) -> dict:
     """Load decision data from --input file or inline JSON arguments."""
     if args.input:
         input_path = args.input
-        raw = open(input_path, encoding="utf-8").read()
+        raw = open(input_path, encoding="utf-8").read()  # noqa: SIM115
         suffix = os.path.splitext(input_path)[1]
         if suffix in (".yaml", ".yml"):
             try:
@@ -128,7 +128,7 @@ def main():
 
     # Connect to graph
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from tortoise.sdk import TortoiseSDK
+    from tortoise.sdk import TortoiseSDK  # noqa: I001
     from tortoise.projection import FalkorProjection
 
     uri = args.db or os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise")

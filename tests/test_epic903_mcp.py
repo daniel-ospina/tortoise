@@ -8,7 +8,7 @@ BudgetExceededError → ERR_QUOTA, unknown mode ValueError → ERR_INVALID;
 """
 from __future__ import annotations
 
-import pytest
+import pytest  # noqa: F401
 
 from tortoise.tool_registry import TOOL_REGISTRY
 
@@ -53,7 +53,7 @@ class TestErrorMapping:
             raise BudgetExceededError("full budget 1 unsatisfiable")
 
         from unittest.mock import patch
-        with patch.object(ms, "_transport_mode",
+        with patch.object(ms, "_transport_mode",  # noqa: SIM117
                           type("TM", (), {"get": staticmethod(lambda: "stdio")})):
             with patch.object(ms, "_is_dev_mode", return_value=True):
                 result = ms._safe(boom)
@@ -62,7 +62,7 @@ class TestErrorMapping:
 
     def test_unknown_mode_maps_to_err_invalid(self):
         """Unknown dream mode → ERR_INVALID (the tool's ValueError catch)."""
-        import tortoise.mcp_server as ms
+        import tortoise.mcp_server as ms  # noqa: I001
         from unittest.mock import patch
 
         class FakeSdk:
@@ -70,7 +70,7 @@ class TestErrorMapping:
                 raise ValueError("unknown dream mode 'quantum' — expected "
                                  "one of 'local', 'stale-first', 'full'")
 
-        with patch.object(ms, "_get_team_sdk", return_value=FakeSdk()):
+        with patch.object(ms, "_get_team_sdk", return_value=FakeSdk()):  # noqa: SIM117
             with patch.object(ms, "_transport_mode", type("TM", (), {"get": staticmethod(lambda: "stdio")})):
                 with patch.object(ms, "_is_dev_mode", return_value=True):
                     r = ms.tortoise_dream(mode="quantum")

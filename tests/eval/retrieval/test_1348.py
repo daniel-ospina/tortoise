@@ -16,7 +16,7 @@ Covers the pre-registered falsification mechanics:
 """
 from __future__ import annotations
 
-import json
+import json  # noqa: F401
 import os
 import random
 import sys
@@ -27,15 +27,15 @@ REPO_ROOT = str(Path(__file__).resolve().parent.parent.parent.parent)
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-import pytest
+import pytest  # noqa: E402
 
-from benchmarks.synthetic_corpus import (
+from benchmarks.synthetic_corpus import (  # noqa: E402
     build_topic_oracle,
     generate_oracle_points,
     seed_corpus,
     seed_operator_edges,
 )
-from tests.eval.retrieval.run import _fused_rrf, _rerank_fused
+from tests.eval.retrieval.run import _fused_rrf, _rerank_fused  # noqa: E402
 
 
 def _new_sdk():
@@ -147,14 +147,14 @@ def test_stub_projection_positive_control_seam():
     """The positive-control seam: a duck-typed projection whose .g.query
     returns oracle-grade-derived signals in _fetch_point_signals row shape.
     With graph_boost_weight=1.0 the control reproduces oracle-greedy order."""
-    from tests.eval.retrieval.run import _StubOracleProjection, _STUB_CURRENT
+    from tests.eval.retrieval.run import _StubOracleProjection, _STUB_CURRENT  # noqa: I001
 
     oracle = build_topic_oracle(42)
     live_ids_by_topic = {k: [f"p-{k}-{i}" for i in range(10)] for k in oracle.core}
     stub = _StubOracleProjection(oracle, live_ids_by_topic, "query")
     _STUB_CURRENT.oracle_target = 0
     try:
-        rows = stub.g.query("x", params={"ids": [f"p-0-1", f"p-0-2"]}).result_set
+        rows = stub.g.query("x", params={"ids": [f"p-0-1", f"p-0-2"]}).result_set  # noqa: F541
         # grade 2 (target topic 0) → conf 1.0, degree 0 (neutralized).
         assert rows[0][0] == "p-0-1"
         assert rows[0][1] == 1.0
@@ -205,7 +205,7 @@ def test_enhancement_zero_main_stream_draw_growth():
     oracle = build_topic_oracle(42)
     p_plain, _ = generate_oracle_points(200, oracle, seed=42, enhance_signals=False)
     p_enh, _ = generate_oracle_points(200, oracle, seed=42, enhance_signals=True)
-    for pp, pe in zip(p_plain, p_enh):
+    for pp, pe in zip(p_plain, p_enh):  # noqa: B905
         assert pp["id"] == pe["id"]
         assert pp["content"] == pe["content"]
         assert pp["embedding"] == pe["embedding"]

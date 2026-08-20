@@ -70,7 +70,7 @@ class TestDe2e6:
         """D1 (T1) + D2 (T2, refute cues) → draft-to-draft NAND; validFrom
         stamped from the session dates; belief_timeline shows the ordered
         chain with linked_by NAND."""
-        r1 = _mine(sdk, D1_TX, "s-d1", T1, str(tmp_path))
+        r1 = _mine(sdk, D1_TX, "s-d1", T1, str(tmp_path))  # noqa: F841
         r2 = _mine(sdk, D2_TX, "s-d2", T2, str(tmp_path))
         assert r2["temporal_wired"] >= 1, r2
         pts = _decision_points(sdk)
@@ -95,9 +95,9 @@ class TestDe2e6:
         """D1 promoted live, then D2 mined: NO NAND at extraction, the
         temporal candidate surfaces to the review queue; after D2's
         promotion the NAND is wired live→live and the timeline shows both."""
-        r1 = _mine(sdk, D1_TX, "s-v-d1", T1, str(tmp_path))
+        r1 = _mine(sdk, D1_TX, "s-v-d1", T1, str(tmp_path))  # noqa: F841
         pts = _decision_points(sdk)
-        d1 = [p for p in pts if p[1].startswith("We decided to use port")][0]
+        d1 = [p for p in pts if p[1].startswith("We decided to use port")][0]  # noqa: RUF015
         sdk.promote_point(d1[0])
         r2 = _mine(sdk, D2_TX, "s-v-d2", T2, str(tmp_path))
         assert r2["temporal_wired"] == 0, r2
@@ -106,7 +106,7 @@ class TestDe2e6:
         assert cands, "temporal candidate must surface to the review queue"
         assert cands[0]["target_id"] == d1[0]
         pts2 = _decision_points(sdk)
-        d2 = [p for p in pts2 if p[1].startswith("We decided to revert")][0]
+        d2 = [p for p in pts2 if p[1].startswith("We decided to revert")][0]  # noqa: RUF015
         assert _nand_between(sdk, d2[0], d1[0]) == 0, (
             "no NAND may be wired to a live prior at extraction"
         )
@@ -123,8 +123,8 @@ class TestDe2e6:
     def test_explicit_replacement_supersedes(self, sdk, tmp_path):
         """D3 with supersede cues (prior live) → replacement candidate;
         approve + promote → supersede_point: D1 outdated:true + CORRECTS."""
-        r1 = _mine(sdk, D1_TX, "s-r-d1", T1, str(tmp_path))
-        d1 = [p for p in _decision_points(sdk)
+        r1 = _mine(sdk, D1_TX, "s-r-d1", T1, str(tmp_path))  # noqa: F841
+        d1 = [p for p in _decision_points(sdk)  # noqa: RUF015
               if p[1].startswith("We decided to use port")][0]
         sdk.promote_point(d1[0])
         r3 = _mine(sdk, D3_TX, "s-r-d3", T3, str(tmp_path))
@@ -133,7 +133,7 @@ class TestDe2e6:
         repl = [c for c in cands if c["replacement"]]
         assert repl, f"replacement candidate expected: {cands}"
         sdk.approve_merge(repl[0]["id"], action="merge")
-        d3 = [p for p in _decision_points(sdk)
+        d3 = [p for p in _decision_points(sdk)  # noqa: RUF015
               if p[1].startswith("We decided to supersede")][0]
         promoted = sdk.promote_point(d3[0])
         assert promoted["superseded"] is True, promoted
@@ -150,16 +150,16 @@ class TestDe2e6:
 
     def test_no_date_falls_back_to_ingested(self, sdk, tmp_path):
         """No frontmatter date → validFrom == ingestedAt (documented)."""
-        r = _mine(sdk, D1_TX, "s-n-d1", None, str(tmp_path))
+        r = _mine(sdk, D1_TX, "s-n-d1", None, str(tmp_path))  # noqa: F841
         pts = _decision_points(sdk)
-        d1 = [p for p in pts if p[1].startswith("We decided to use port")][0]
+        d1 = [p for p in pts if p[1].startswith("We decided to use port")][0]  # noqa: RUF015
         assert d1[2], "validFrom must be stamped (fallback ingestedAt)"
         assert d1[2] != T1  # not the fake session date — the ingest timestamp
 
     def test_source_session_provenance(self, sdk, tmp_path):
         """#438 carve-out audit: temporal candidates carry source_session."""
-        r1 = _mine(sdk, D1_TX, "s-p-d1", T1, str(tmp_path))
-        d1 = [p for p in _decision_points(sdk)
+        r1 = _mine(sdk, D1_TX, "s-p-d1", T1, str(tmp_path))  # noqa: F841
+        d1 = [p for p in _decision_points(sdk)  # noqa: RUF015
               if p[1].startswith("We decided to use port")][0]
         sdk.promote_point(d1[0])
         _mine(sdk, D2_TX, "s-p-d2", T2, str(tmp_path))
@@ -179,8 +179,8 @@ class TestDe2e6ReviewFixes:
     def test_replace_wording_is_replacement(self, sdk, tmp_path):
         """P1: 'replace' wording must be an explicit-replacement candidate
         (was: treated as a plain contradiction — no supersede)."""
-        r1 = _mine(sdk, D1_TX, "s-f-r1", T1, str(tmp_path))
-        d1 = [p for p in _decision_points(sdk)
+        r1 = _mine(sdk, D1_TX, "s-f-r1", T1, str(tmp_path))  # noqa: F841
+        d1 = [p for p in _decision_points(sdk)  # noqa: RUF015
               if p[1].startswith("We decided to use port")][0]
         sdk.promote_point(d1[0])
         r3 = _mine(sdk,
@@ -206,8 +206,8 @@ class TestDe2e6ReviewFixes:
     def test_yaml_date_object_no_crash(self, sdk, tmp_path):
         """P2: unquoted YAML date (datetime.date) must not crash the pass —
         validFrom normalized to ISO."""
-        from tortoise.sdk import TortoiseSDK
-        d1 = sdk.create_point("decision", "We decided to use port 16379.",
+        from tortoise.sdk import TortoiseSDK  # noqa: F401
+        d1 = sdk.create_point("decision", "We decided to use port 16379.",  # noqa: F841
                               status="live")
         corpus = tmp_path / "corpus-y"
         corpus.mkdir()
@@ -225,9 +225,9 @@ class TestDe2e6ReviewFixes:
 
     def test_reapprove_same_action_noop(self, sdk, tmp_path):
         """P2: re-approving with the same action emits no duplicate event."""
-        import json
-        r1 = _mine(sdk, D1_TX, "s-i-d1", T1, str(tmp_path))
-        d1 = [p for p in _decision_points(sdk)
+        import json  # noqa: F401
+        r1 = _mine(sdk, D1_TX, "s-i-d1", T1, str(tmp_path))  # noqa: F841
+        d1 = [p for p in _decision_points(sdk)  # noqa: RUF015
               if p[1].startswith("We decided to use port")][0]
         sdk.promote_point(d1[0])
         _mine(sdk, D2_TX, "s-i-d2", T2, str(tmp_path))
@@ -241,15 +241,15 @@ class TestDe2e6ReviewFixes:
     def test_timeline_keeps_superseded_prior(self, sdk, tmp_path):
         """P2: after a replacement supersede, the timeline still shows the
         outdated prior (CORRECTS chain), with linked_by CORRECTS."""
-        r1 = _mine(sdk, D1_TX, "s-t-d1", T1, str(tmp_path))
-        d1 = [p for p in _decision_points(sdk)
+        r1 = _mine(sdk, D1_TX, "s-t-d1", T1, str(tmp_path))  # noqa: F841
+        d1 = [p for p in _decision_points(sdk)  # noqa: RUF015
               if p[1].startswith("We decided to use port")][0]
         sdk.promote_point(d1[0])
-        r3 = _mine(sdk, D3_TX, "s-t-d3", T3, str(tmp_path))
+        r3 = _mine(sdk, D3_TX, "s-t-d3", T3, str(tmp_path))  # noqa: F841
         cands = sdk.list_dedup_candidates(candidate_type="temporal")
-        repl = [c for c in cands if c["replacement"]][0]
+        repl = [c for c in cands if c["replacement"]][0]  # noqa: RUF015
         sdk.approve_merge(repl["id"], action="merge")
-        d3 = [p for p in _decision_points(sdk)
+        d3 = [p for p in _decision_points(sdk)  # noqa: RUF015
               if p[1].startswith("We decided to supersede")][0]
         sdk.promote_point(d3[0])
         timeline = sdk.belief_timeline("port 16379")
@@ -261,7 +261,7 @@ class TestDe2e6ReviewFixes:
         """P2 (round 2): with more entries than the limit, the NEWEST belief
         must stay visible (the cap applies from the newest end — superseded
         priors no longer evict current beliefs)."""
-        for i, (tx, sid, dte) in enumerate([
+        for i, (tx, sid, dte) in enumerate([  # noqa: B007
             ("Alice: We decided to use port 16379.\n", "s-l1", T1),
             ("Alice: We decided to move to port 16380.\n", "s-l2", T2),
             ("Alice: We decided to adopt port 16390.\n", "s-l3", T3),
@@ -273,13 +273,13 @@ class TestDe2e6ReviewFixes:
             if p[3] == "draft":
                 sdk.promote_point(p[0])
         # Supersede the oldest with a replacement.
-        d4 = sdk.create_point("decision",
+        d4 = sdk.create_point("decision",  # noqa: F841
                               "We decided to replace the port 16379 decision "
                               "with 16400.", status="live")
-        proj = sdk._get_proj()
+        proj = sdk._get_proj()  # noqa: F841
         # (direct supersede for the limit test — the mining replacement path
         # is covered elsewhere)
-        from tortoise.sdk import TortoiseSDK as _S
+        from tortoise.sdk import TortoiseSDK as _S  # noqa: F401
         d4b = sdk.create_point("decision", "We decided to use port 16400.",
                                status="live")
         sdk.supersede_point(pts[0][0], d4b["id"])

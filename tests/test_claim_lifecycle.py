@@ -13,7 +13,7 @@ from tortoise.sdk import POINT_STATUS_VALUES
 
 
 def test_status_vocabulary():
-    assert POINT_STATUS_VALUES == frozenset(
+    assert POINT_STATUS_VALUES == frozenset(  # noqa: SIM300
         {"draft", "live", "retracted", "superseded", "outdated", "archived"}
     )
     assert "challenged" not in POINT_STATUS_VALUES
@@ -33,7 +33,7 @@ def test_update_point_rejects_status_changes_except_promote(sdk_factory, tmp_pat
     sdk = sdk_factory(tmp_path)
     p = sdk.create_point("statement", "status-guard")
     for bad in ("retracted", "superseded", "outdated", "archived"):
-        with pytest.raises(ValueError, match="retract_point|supersede_point"):
+        with pytest.raises(ValueError, match="retract_point|supersede_point"):  # noqa: RUF043
             sdk.update_point(p["id"], status=bad)
 
 
@@ -146,7 +146,7 @@ def test_code_writes_only_valid_statuses(sdk_factory, tmp_path):
 
     # create_operator: promotes source to live
     p2 = sdk.create_point("statement", "parity-2")
-    op = sdk.create_operator("IMPL", p2["id"], [p["id"]])
+    op = sdk.create_operator("IMPL", p2["id"], [p["id"]])  # noqa: F841
     assert sdk.get_point(p2["id"])["status"] == "live"
     assert "live" in POINT_STATUS_VALUES
 
@@ -203,7 +203,7 @@ def test_all_documented_transitions_allowed(sdk_factory, tmp_path):
 
 def test_every_status_in_values_has_transition_entry(sdk_factory, tmp_path):
     """Every status in POINT_STATUS_VALUES has an entry in _ALLOWED_TRANSITIONS."""
-    from tortoise.sdk import POINT_STATUS_VALUES, _ALLOWED_TRANSITIONS
+    from tortoise.sdk import POINT_STATUS_VALUES, _ALLOWED_TRANSITIONS  # noqa: I001
 
     for status in POINT_STATUS_VALUES:
         assert status in _ALLOWED_TRANSITIONS, \

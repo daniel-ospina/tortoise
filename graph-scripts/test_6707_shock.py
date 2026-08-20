@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Historical — uses embedded tortoise.db. Do not run against production Docker.
 """(#6707) Verification script for shock propagation on FalkorDB."""
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import sys
 sys.path.insert(0, '/Users/home/eldato/negation-game-explorations/tortoise')
@@ -67,7 +67,7 @@ if no_edge:
     r3 = proj.propagate_shock(no_edge[0][0])
     # Isolated node: 0.5 edge-ratio, delta=0 < threshold → no change recorded
     assert len(r3) == 0, f'Isolated node should have no changes, got {len(r3)}'
-    print(f'✅ Isolated node: no edges → stays 0.5 (delta=0 < threshold)')
+    print(f'✅ Isolated node: no edges → stays 0.5 (delta=0 < threshold)')  # noqa: F541
     # Verify it still has default confidence in DB
     conf = proj._confidence(no_edge[0][0])
     assert conf == 0.5, f'Isolated node confidence should be 0.5, got {conf}'

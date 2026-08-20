@@ -309,7 +309,7 @@ def test_send_budget_month_counter_survives_day_rollover():
     email_notify._send_counts_day = 90
     email_notify._send_counts_month = 2999
     email_notify._send_counts_day_period = "2000-01-01"  # stale day → resets
-    email_notify._send_counts_month_period = datetime.now(timezone.utc).strftime("%Y-%m")  # current month → kept
+    email_notify._send_counts_month_period = datetime.now(timezone.utc).strftime("%Y-%m")  # current month → kept  # noqa: UP017
     exceeded, _ = email_notify._budget_exceeded()
     assert email_notify._send_counts_day == 0
     assert email_notify._send_counts_month == 2999  # not reset at day rollover

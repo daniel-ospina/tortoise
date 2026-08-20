@@ -3,7 +3,7 @@
 Covers Team, Membership, APIKey, Invitation CRUD via FalkorDBLite.
 No Postgres required — audit events fall back to JSONL.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import pytest
 from tortoise.sdk import TortoiseSDK
@@ -26,7 +26,7 @@ def team(sdk):
     """
     result = sdk.team_create("test-team")
     yield result
-    try:
+    try:  # noqa: SIM105
         sdk.team_delete(result["id"], confirmation="test-team")
     except Exception:
         pass  # best-effort cleanup
@@ -207,7 +207,7 @@ class TestAPIKeyCRUD:
 
     def test_apikey_create_returns_plaintext_once(self, sdk, team):
         result = sdk.apikey_create(team["id"], "user-1")
-        plaintext = result["api_key"]
+        plaintext = result["api_key"]  # noqa: F841
         # Listing should NOT include plaintext
         keys = sdk.apikey_list(team["id"])
         for k in keys:
@@ -296,7 +296,7 @@ class TestInvitationCRUD:
         inv = sdk.invitation_create(team["id"], "exp@test.com", "admin", "user-1")
         # Manually set expires_at to past
         reg = sdk._get_registry()
-        past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()  # noqa: UP017
         reg.query(
             "MATCH (i:Invitation {id:$id}) SET i.expires_at = $exp",
             params={"id": inv["id"], "exp": past},
@@ -348,7 +348,7 @@ class TestInvitationCRUD:
         # Manually expire
         reg = sdk._get_registry()
         from datetime import datetime, timedelta, timezone
-        past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()  # noqa: UP017
         reg.query(
             "MATCH (i:Invitation {id:$id}) SET i.expires_at = $exp",
             params={"id": inv["id"], "exp": past},

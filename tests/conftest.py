@@ -24,10 +24,10 @@ os.environ.setdefault("TORTOISE_FAST_ATEXIT", "1")
 # tests/ is a namespace package (no __init__.py): resolve it via the repo
 # root so conftest loads under `uv run pytest tests/` too (python -m pytest
 # adds cwd, but uv run does not — CI uv-lock-check, issue #1012).
-import sys
+import sys  # noqa: I001
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from tests._embedded import shared_proj  # noqa: F401  (fixture re-export)
+from tests._embedded import shared_proj  # noqa: F401, I001
 
 from tortoise.sdk import TortoiseSDK
 from tortoise.pricing import tier_limits
@@ -55,7 +55,7 @@ def provision_test_user():
                     "nodes": lim["max_graph_nodes"]},
         )
         if demo_seed:
-            try:
+            try:  # noqa: SIM105
                 sdk._graph_create(team["id"], "demo", kind="custom")
             except Exception:
                 pass
@@ -68,7 +68,7 @@ def provision_test_user():
 
     yield factory
     for sdk in created:
-        try:
+        try:  # noqa: SIM105
             sdk.close()
         except Exception:
             pass
@@ -178,7 +178,7 @@ def _redislite_hygiene():
         # poison file cannot degrade every future suite's sweep to only-safe
         # (the foreign-pytest guard still covers the markerless case)
         if marker_path:
-            try:
+            try:  # noqa: SIM105
                 os.remove(marker_path)
             except OSError:
                 pass
@@ -228,7 +228,7 @@ def _redislite_hygiene():
         if _teardown_ran[0]:
             return
         if marker_path:
-            try:
+            try:  # noqa: SIM105
                 os.remove(marker_path)
             except OSError:
                 pass
@@ -329,7 +329,7 @@ def _redislite_hygiene():
     # suites (markers) AND foreign pytest processes (old-conftest suites).
     # Full sweep only when we are the last suite standing.
     if marker_path:
-        try:
+        try:  # noqa: SIM105
             os.remove(marker_path)
         except OSError:
             pass

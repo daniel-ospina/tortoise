@@ -3,7 +3,7 @@
 Phase 0 (#7748): Foundation — FalkorDB indexes, RRF fusion, degradation chain,
 3-tier query classifier, EP batch annotation, and tortoise_fts_query() API.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import logging
 import threading
@@ -56,7 +56,7 @@ class _CircuitBreaker:
     or (probe failure) → OPEN. At most one HALF_OPEN probe is in flight.
     """
 
-    __slots__ = ("fail_threshold", "cooldown_seconds", "_fails", "_open_until",
+    __slots__ = ("fail_threshold", "cooldown_seconds", "_fails", "_open_until",  # noqa: RUF023
                  "_probing", "_lock")
 
     def __init__(self, fail_threshold: int = 3, cooldown_seconds: float = 30.0):
@@ -84,7 +84,7 @@ class _CircuitBreaker:
     def is_open(self) -> bool:
         """True if the breaker is currently OPEN (read-only status check)."""
         with self._lock:
-            return 0.0 < self._open_until and time.monotonic() < self._open_until
+            return 0.0 < self._open_until and time.monotonic() < self._open_until  # noqa: SIM300
 
     def record_success(self) -> None:
         with self._lock:
@@ -947,12 +947,12 @@ def get_relationships(graph, point_ids: list[str]) -> dict[str, list[dict]]:
             related_kind = row[5] or ""
             related_content = row[6] or ""
             n_idx = row[7] if len(row) > 7 else None
-            other_idx = row[8] if len(row) > 8 else None
+            other_idx = row[8] if len(row) > 8 else None  # noqa: F841
 
             # Determine direction: idx=0 = source, idx>0 = target.
             # Our point is source → relationship is outgoing.
             # Our point is target + other is source → relationship is incoming.
-            if n_idx is not None and n_idx == 0:
+            if n_idx is not None and n_idx == 0:  # noqa: SIM108
                 direction = "outgoing"
             else:
                 direction = "incoming"
@@ -1196,11 +1196,11 @@ def get_relationships_bounded(
             criticals: list[dict] = []
             support: list[dict] = []
 
-            for (et, n_idx, op_id, mechanism, predicate, op_created) in point_ops.get(pid, []):
+            for (et, n_idx, op_id, mechanism, predicate, op_created) in point_ops.get(pid, []):  # noqa: B007
                 for other_id, ep in op_endpoints.get(op_id, {}).items():
                     if other_id == pid:
                         continue  # self-peer exclusion
-                    et2, other_idx, kind, status, alpha, beta, has_ep, created = ep
+                    et2, other_idx, kind, status, alpha, beta, has_ep, created = ep  # noqa: RUF059
                     variance = _beta_variance(alpha, beta)
                     contested = has_ep and variance > CONTESTED_VARIANCE_THRESHOLD
                     role = "source" if (n_idx is not None and n_idx == 0) else "target"

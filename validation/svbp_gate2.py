@@ -7,10 +7,10 @@ SVGD), this runs proper belief propagation with message passing.
 Usage:
     python -m tortoise.validation.svbp_gate2
 """
-import sys, os
+import sys, os  # noqa: E401, I001
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-import jax.numpy as jnp
+import jax.numpy as jnp  # noqa: I001
 import jax
 import numpy as np
 import numpyro
@@ -55,7 +55,7 @@ def main():
     print("SVBP Gate 2: Factor-Graph SVBP vs HMC")
     print("=" * 72)
     print(f"  Graph: {N_CLAIMS} claims, {len(NAND_PAIRS)} NAND, {len(IMPL_PAIRS)} IMPL")
-    print(f"  SVBP: 25 particles, 15 SVGD steps/factor, damping=0.5")
+    print(f"  SVBP: 25 particles, 15 SVGD steps/factor, damping=0.5")  # noqa: F541
 
     # ── Build factor list ─────────────────────────────────────────
     factors = []
@@ -127,10 +127,10 @@ def main():
         is_impl = any(i in [p[0], p[1]] for p in IMPL_PAIRS)
         has_evid = EVIDENCE_ALPHA[i] > 1.0
         ctype = ""
-        if is_nand: ctype += "NAND"
-        if is_impl: ctype += "IMPL" if not ctype else "+IMPL"
-        if has_evid: ctype += "+evid" if ctype else "evid"
-        if not ctype: ctype = "free"
+        if is_nand: ctype += "NAND"  # noqa: E701
+        if is_impl: ctype += "IMPL" if not ctype else "+IMPL"  # noqa: E701
+        if has_evid: ctype += "+evid" if ctype else "evid"  # noqa: E701
+        if not ctype: ctype = "free"  # noqa: E701
 
         print(f"{CLAIM_NAMES[i]:<6} {ctype:<10} {hmc_mean:>10.4f} {hmc_std:>8.4f} "
               f"{svbp_mean:>10.4f} {svbp_std:>8.4f} {w2:>8.4f}")

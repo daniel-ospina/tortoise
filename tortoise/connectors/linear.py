@@ -3,7 +3,7 @@
 Polls Linear's GraphQL API for issues and cycles, maps to EventRecorded events.
 Requires: LINEAR_API_KEY env var. Zero Python deps outside stdlib.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import json
 import logging
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
 
 _LINEAR_API = "https://api.linear.app/graphql"
@@ -210,7 +210,7 @@ class LinearConnector:
         team_key = team.get("key", "")
 
         starts = cycle.get("startsAt", "")
-        ends = cycle.get("endsAt", "")
+        ends = cycle.get("endsAt", "")  # noqa: F841
         completed = cycle.get("completedAt")
 
         return {

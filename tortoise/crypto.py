@@ -7,7 +7,7 @@ failure would corrupt tokens.
 """
 from __future__ import annotations
 
-import base64
+import base64  # noqa: F401
 import os
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -28,7 +28,7 @@ def _get_key() -> bytes:
     try:
         return raw.encode() if isinstance(raw, str) else raw
     except Exception as e:
-        raise RuntimeError(f"Invalid TORTOISE_ENCRYPTION_KEY: {e}")
+        raise RuntimeError(f"Invalid TORTOISE_ENCRYPTION_KEY: {e}")  # noqa: B904
 
 
 def encrypt_token(token: str) -> str:
@@ -47,6 +47,6 @@ def decrypt_token(encrypted: str) -> str:
     try:
         return f.decrypt(encrypted.encode("utf-8")).decode("utf-8")
     except InvalidToken as e:
-        raise ValueError(f"Decryption failed — token tampered or wrong key: {e}")
+        raise ValueError(f"Decryption failed — token tampered or wrong key: {e}")  # noqa: B904
     except Exception as e:
-        raise ValueError(f"Decryption failed: {e}")
+        raise ValueError(f"Decryption failed: {e}")  # noqa: B904

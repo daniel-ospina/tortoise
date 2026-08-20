@@ -13,8 +13,8 @@ profile.json and never re-interpreted post-hoc).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Mapping, Protocol, Sequence
+from dataclasses import dataclass, field  # noqa: F401
+from typing import Mapping, Protocol, Sequence  # noqa: UP035
 
 #: Factual top-K used for the recall match (plan §2 W2).
 TOP_K = 5

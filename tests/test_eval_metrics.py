@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 import math
-import os
+import os  # noqa: F401
 import re
 import sys
 from pathlib import Path
@@ -32,7 +32,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from tests.eval import metrics as eval_metrics  # noqa: E402
+from tests.eval import metrics as eval_metrics  # noqa: E402, I001
 from tests.eval.metrics import (  # noqa: E402
     BAND_N_ACCEPT,
     DECISIONS_FP_BAND,
@@ -104,8 +104,8 @@ def _window(
     pred_labels = build(pred_spec)
     if texts is None:
         all_idx = sorted(
-            {l.edu_index for l in (gold_labels or [])}
-            | {l.edu_index for l in (pred_labels or [])}
+            {l.edu_index for l in (gold_labels or [])}  # noqa: E741
+            | {l.edu_index for l in (pred_labels or [])}  # noqa: E741
         )
         texts = {i: f"{_CONTENT[i % len(_CONTENT)]} in {window_id}" for i in all_idx}
     edus = [texts[i] for i in range(max(texts, default=-1) + 1)]
@@ -866,10 +866,10 @@ def test_band_semantics_applied_to_report():
 def test_r1r3_constants_match_thresholds_yaml():
     """The in-code R1∧R3 band cannot drift from the reconciled yaml row."""
     row = yaml.safe_load(THRESHOLDS_PATH.read_text())["standards"]["r1r3_decisions_fp"]
-    assert DECISIONS_FP_BAND == row["target"]
-    assert DECISIONS_FP_BAND == row["block"]
-    assert BAND_N_ACCEPT == row["n_accept"]
-    assert BAND_N_ACCEPT == row["n_block"]
+    assert DECISIONS_FP_BAND == row["target"]  # noqa: SIM300
+    assert DECISIONS_FP_BAND == row["block"]  # noqa: SIM300
+    assert BAND_N_ACCEPT == row["n_accept"]  # noqa: SIM300
+    assert BAND_N_ACCEPT == row["n_block"]  # noqa: SIM300
     assert row["direction"] == "max"
 
 
@@ -882,7 +882,7 @@ def _window_from_0323(drop_indices: set[int] | None = None) -> Window:
         _label(i, "claim", kind="claim") for i in seed["points_keep"] if i not in drop
     ]
     labels += [_label(i, "none") for i in seed["drop"]]
-    by_idx = {l.edu_index: l for l in labels}
+    by_idx = {l.edu_index: l for l in labels}  # noqa: E741
     for op in seed.get("operators", []):
         src = by_idx.get(op["src"])
         if src is not None:
@@ -930,12 +930,12 @@ def test_gold_standard_seed_feeds_metrics():
     assert len(gold_labels) == 30
     # The is_claim flags are authoritative: 23 claims / 7 non-claims (the seed's
     # own stats block says 24/6 — stale; the flags win).
-    assert sum(1 for l in gold_labels if l.class_ == "claim") == 23
-    assert sum(1 for l in gold_labels if l.class_ == "none") == 7
+    assert sum(1 for l in gold_labels if l.class_ == "claim") == 23  # noqa: E741
+    assert sum(1 for l in gold_labels if l.class_ == "none") == 7  # noqa: E741
 
     # Pred loses 5 of the 23 claims (extraction loss) → metrics fire.
     pred_labels, dropped = [], 0
-    for l in gold_labels:
+    for l in gold_labels:  # noqa: E741
         if l.class_ == "claim" and dropped < 5:
             pred_labels.append(_label(l.edu_index, "none"))
             dropped += 1
@@ -999,7 +999,7 @@ def test_compute_metrics_validation():
     with pytest.raises(ValueError):
         compute_metrics([g0, g1, g0], [p0, p1, p1])
     # Unknown class (built directly — the fixture builder needs a real class).
-    bad_win = Window("s1", "v2", ["edu"], None)
+    bad_win = Window("s1", "v2", ["edu"], None)  # noqa: F841
     bad_gold = Window("s1", "v2", ["edu"], [_label(0, "decision")])
     bad_pred = Window("s1", "v2", ["edu"], [Label(0, "bogus-class")])
     with pytest.raises(ValueError):

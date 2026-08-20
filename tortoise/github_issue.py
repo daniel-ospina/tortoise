@@ -44,7 +44,7 @@ def _request(method: str, url: str, token: str, payload: dict | None = None,
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as e:
         detail = ""
-        try:
+        try:  # noqa: SIM105
             detail = e.read().decode("utf-8", "replace")[:300]
         except Exception:
             pass

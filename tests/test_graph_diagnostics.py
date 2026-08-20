@@ -26,7 +26,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
+import pytest  # noqa: F401
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 # Repo convention (#129): repo-local graph scripts live in ``graph-scripts/``;
@@ -77,7 +77,7 @@ class TestGraphDiagnosticsScript:
 
         # pinned F5 values (cross-check the script's fixture against the
         # shared F5 builder constants — catches drift on either side)
-        from tests.epic903_fixtures import (  # noqa: PLC0415
+        from tests.epic903_fixtures import (  # noqa: PLC0415, RUF100
             F5_FAN_OUT,
             F5_N_CLAIMS,
             F5_N_EDGES,

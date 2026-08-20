@@ -220,7 +220,7 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    db, default_graph = _connect_falkordb(args.uri)
+    db, default_graph = _connect_falkordb(args.uri)  # noqa: RUF059
 
     # Resolve which labels to embed — all entity types with embedding support.
     labels = list(LABEL_CONFIG)

@@ -9,14 +9,14 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.api import EventAPI          # noqa: E402
-from tortoise.domain_loader import (       # noqa: E402
-    known_kinds, register_kind, kind_is_known, load_manifest, known_kinds,
+from tortoise.api import EventAPI  # noqa: E402, I001, RUF100
+from tortoise.domain_loader import (  # noqa: E402, RUF100
+    known_kinds, register_kind, kind_is_known, load_manifest, known_kinds,  # noqa: F401, F811
 )
-from tortoise.extractor import (           # noqa: E402
-    LLMExtractor, MockModel, _SemanticStage, _document_sections,
+from tortoise.extractor import (  # noqa: E402, RUF100
+    LLMExtractor, MockModel, _SemanticStage, _document_sections,  # noqa: F401
 )
-from tortoise.log import EventLog          # noqa: E402
+from tortoise.log import EventLog  # noqa: E402, RUF100
 
 
 def _tmp(name):
@@ -113,8 +113,8 @@ def test_semantic_extract_entities():
 
     result = ext.extract_entities(text, "strategy.md", api)
     events = log.read_all()
-    subjects = [e for e in events if e["type"] == "SubjectAdded"]
-    objects = [e for e in events if e["type"] == "ObjectRegistered"]
+    subjects = [e for e in events if e["type"] == "SubjectAdded"]  # noqa: F841
+    objects = [e for e in events if e["type"] == "ObjectRegistered"]  # noqa: F841
 
     # MockModel now produces subjects from "X Team" patterns and objects from other caps
     assert result["subjects"] >= 1, f"expected >=1 subjects, got {result['subjects']}"
@@ -128,7 +128,7 @@ def test_semantic_extract_entities():
 def test_semantic_extract_no_doc():
     """extract_entities on non-document returns empty."""
     ext = LLMExtractor(MockModel("cheap"), MockModel("reason"))
-    api, log = _api()
+    api, log = _api()  # noqa: RUF059
     text = "Alice: Hello world, this is just a conversation with enough text content."
     result = ext.extract_entities(text, "chat.txt", api)
     assert result["subjects"] == 0
@@ -147,7 +147,7 @@ def test_semantic_extract_dedup():
         "## Project\n"
         "The Organisation Design Team decided to use FalkorDB for Tortoise."
     )
-    result = ext.extract_entities(text, "doc.md", api)
+    result = ext.extract_entities(text, "doc.md", api)  # noqa: F841
     events = log.read_all()
     subjects = [e for e in events if e["type"] == "SubjectAdded"]
     # Same entity name across sections should dedup
@@ -184,7 +184,7 @@ def test_projection_subject_object():
     SubjectAdded/ObjectRegistered events are logged but not materialized
     as graph nodes. This test verifies the log events exist.
     """
-    import tempfile, os
+    import tempfile, os  # noqa: E401, I001
     from tortoise.projection import FalkorProjection
     from tortoise.log import EventLog
 
@@ -230,7 +230,7 @@ def test_semantic_extract_skip_on_failure():
             raise RuntimeError("LLM unavailable")
 
     ext = LLMExtractor(FailingModel(), MockModel("reason"))
-    api, log = _api()
+    api, log = _api()  # noqa: RUF059
     text = (
         "## Section One\n"
         "This has more than twenty characters of content here yes it does.\n\n"
@@ -249,7 +249,7 @@ def test_semantic_extract_skip_on_failure():
 
 def test_load_manifest_yaml():
     """load_manifest loads a YAML file and registers kind values."""
-    import tempfile, os, yaml
+    import tempfile, os, yaml  # noqa: E401, I001
 
     manifest = {
         "version": 1,
@@ -271,7 +271,7 @@ def test_load_manifest_yaml():
         tmp_path = f.name
 
     try:
-        from tortoise.domain_loader import load_manifest, known_kinds
+        from tortoise.domain_loader import load_manifest, known_kinds  # noqa: F401, I001
         result = load_manifest(tmp_path)
         assert "test-domain" in result
         config = result["test-domain"]

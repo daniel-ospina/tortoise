@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
-import sys  # noqa: E402
+import sys  # noqa: E402, I001
 sys.path.insert(0, str(REPO_ROOT))
 
 from tests.eval.retrieval.run import STRATEGIES, run_eval, write_outputs  # noqa: E402
@@ -24,7 +24,7 @@ from tests.eval.retrieval.run import STRATEGIES, run_eval, write_outputs  # noqa
 
 def _has_embedded() -> bool:
     try:
-        import redislite.falkordb_client  # noqa: F401
+        import redislite.falkordb_client  # noqa: F401, I001
         from tortoise.projection import FalkorProjection  # noqa: F401
         return True
     except Exception:

@@ -30,7 +30,7 @@ Scope (deliberately narrow — the safety boundary):
 - A client that fails the gating (or a send failure) falls through to the
   normal close (never skip close — the #1005 hygiene contract).
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import os
 
@@ -92,7 +92,7 @@ def atexit_fast_close(client) -> bool:
     # (no shutdown). The last of this server's clients does the shutdown.
     try:
         if client._connection_count() > 1:
-            try:
+            try:  # noqa: SIM105
                 client.connection_pool.disconnect()
             except Exception:
                 pass
@@ -117,7 +117,7 @@ def atexit_fast_close(client) -> bool:
         # left to close.
         client._tortoise_fast_closed = True
         _neutralize_redislite_cleanup(client)
-        try:
+        try:  # noqa: SIM105
             client.connection_pool.disconnect()
         except Exception:
             pass
@@ -132,7 +132,7 @@ def atexit_fast_close(client) -> bool:
     # whole cleanup block skip.
     client._tortoise_fast_closed = True
     _neutralize_redislite_cleanup(client)
-    try:
+    try:  # noqa: SIM105
         client.connection_pool.disconnect()
     except Exception:
         pass
@@ -147,7 +147,7 @@ def _neutralize_redislite_cleanup(client) -> None:
     would otherwise cost ~3-10s per server at interpreter exit. The server
     is already dead (NOSAVE) — this only prevents the redundant slow path.
     """
-    try:
+    try:  # noqa: SIM105
         client.pidfile = None
     except Exception:
         pass
@@ -170,7 +170,7 @@ def _neutralize_redislite_cleanup(client) -> None:
 # alive for the process lifetime, and closes via that client. The captured
 # weakref IS the "registry entry"; the pinned client is the liveness anchor.
 
-import weakref as _weakref
+import weakref as _weakref  # noqa: E402
 
 
 def register_atexit_close(obj) -> None:
@@ -264,7 +264,7 @@ def _gc_close(db_ref) -> None:
     if count > 1:
         # Other clients (this process or another) share the server — drop
         # our connection only; the last owner's close/GC/exit shuts it down.
-        try:
+        try:  # noqa: SIM105
             client.connection_pool.disconnect()
         except Exception:
             pass
@@ -274,7 +274,7 @@ def _gc_close(db_ref) -> None:
             return
     except Exception:
         pass  # probe/gating failure -> fall through to the normal close
-    try:
+    try:  # noqa: SIM105
         client._cleanup()
     except Exception:
         pass

@@ -17,7 +17,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from battery.arms.base import AgentContext, ArmAdapter, ArmUnavailable, Memory
+from battery.arms.base import AgentContext, ArmAdapter, ArmUnavailable, Memory  # noqa: F401
 from battery.config.corpus import Scenario
 from battery.runner.setup import scenario_namespace
 
@@ -81,7 +81,7 @@ class A4TortoiseArm:
                         id=str(rid), content=str(rcontent or ""),
                         kind="claim", confidence=None))
             return out
-        except Exception as e:  # noqa: BLE001 — projection failure → arm down
+        except Exception as e:  # noqa: BLE001, RUF100
             raise ArmUnavailable(f"a4 graph read: {e}") from e
 
     # ── record ──────────────────────────────────────────────────────────
@@ -98,9 +98,9 @@ class A4TortoiseArm:
         g = self._scenario_graph(context.scenario)
         try:
             import hashlib as _hashlib
-            import time as _time
+            import time as _time  # noqa: F401
             from datetime import datetime, timezone
-            now = datetime.now(timezone.utc).isoformat()
+            now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
             # Write directly through the projection graph (single-writer —
             # never open a second SDK on the same store).
             point_id = "ev-" + _hashlib.sha256(
@@ -144,7 +144,7 @@ class A4TortoiseArm:
                     "MERGE (o)-[:IMPL]->(t)",
                     params={"oid": op_id, "tid": target})
             self.decide_cycles += 1  # one Challenge/Deepen cycle per record
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001, RUF100
             raise ArmUnavailable(f"a4 graph write: {e}") from e
 
     def isolation_namespace(self) -> str:
@@ -152,9 +152,9 @@ class A4TortoiseArm:
 
     def close(self) -> None:
         if self._proj is not None:
-            try:
+            try:  # noqa: SIM105
                 self._proj.close()
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001, RUF100
                 pass
 
 # Resolver-compatible alias (runner `arm_id_to_cls` convention).

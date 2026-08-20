@@ -80,7 +80,7 @@ def wipe(proj) -> None:
         # leak loudly.
         graphs = [getattr(proj, "_graph_name", "test")]
     for g in graphs:
-        try:
+        try:  # noqa: SIM105
             proj.db.select_graph(g).query("MATCH (n) DETACH DELETE n")
         except Exception:
             pass

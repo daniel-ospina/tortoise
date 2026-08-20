@@ -19,7 +19,7 @@ os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest
+import pytest  # noqa: I001
 from fastapi.testclient import TestClient
 
 import tortoise.hosted_api as ha_mod
@@ -86,13 +86,13 @@ def _seed_owner_membership(fake, team_id: str, user_id: str):
 
 class TestDashboardKeyLoginFlag:
     def test_team_info_exposes_dashboard_key_login_default_true(self, client, fake):
-        key, team_id = _provision_anon(client, fake)
+        key, team_id = _provision_anon(client, fake)  # noqa: RUF059
         r = client.get("/v1/team", headers={"Authorization": f"Bearer {key}"})
         assert r.status_code == 200, r.text
         assert r.json()["dashboard_key_login"] is True
 
     def test_toggle_dashboard_login_session_owner(self, client, fake, monkeypatch):
-        key, team_id = _provision_anon(client, fake)
+        key, team_id = _provision_anon(client, fake)  # noqa: RUF059
         user_id = f"user-{uuid.uuid4().hex[:8]}"
         _patch_session_user(monkeypatch, user_id)
         # claim the team first so it's not anon (toggle is for claimed owners);
@@ -112,7 +112,7 @@ class TestDashboardKeyLoginFlag:
         assert r2.json()["dashboard_key_login"] is False
 
     def test_toggle_dashboard_login_rejects_non_owner(self, client, fake, monkeypatch):
-        key, team_id = _provision_anon(client, fake)
+        key, team_id = _provision_anon(client, fake)  # noqa: RUF059
         user_id = f"user-{uuid.uuid4().hex[:8]}"
         _patch_session_user(monkeypatch, user_id)
         # NO membership seeded → _require_owner_admin 403s
@@ -209,7 +209,7 @@ class TestDashboardLoginGate:
         (200, never 500) and logs the WARNING tripwire. Pins the contract the
         plan's surface map states (a revert to the raw combined query would
         500 here with no other test catching it)."""
-        key, team_id = _provision_anon(client, fake)
+        key, team_id = _provision_anon(client, fake)  # noqa: RUF059
         user_id = f"user-{uuid.uuid4().hex[:8]}"
         _patch_session_user(monkeypatch, user_id)
         from tortoise.auth import lookup_hash
@@ -242,7 +242,7 @@ class TestClaimEmail:
         assert is_anon_team(fake, team_id) is False
 
     def test_claim_email_rejects_claimed_team(self, client, fake, monkeypatch):
-        key, team_id = _provision_anon(client, fake)
+        key, team_id = _provision_anon(client, fake)  # noqa: RUF059
         user_id = f"user-{uuid.uuid4().hex[:8]}"
         from tortoise.auth import lookup_hash
         sc.claim_membership(fake, lookup_hash=lookup_hash(key),
@@ -253,7 +253,7 @@ class TestClaimEmail:
         assert r.status_code == 409, r.text
 
     def test_claim_email_rejects_weak_password(self, client, fake):
-        key, team_id = _provision_anon(client, fake)
+        key, team_id = _provision_anon(client, fake)  # noqa: RUF059
         r = client.post("/v1/claim/email", json={
             "api_key": key, "email": "x@example.com", "password": "123",
         })
@@ -268,7 +268,7 @@ class TestCrossTeamMintProtection:
     def test_session_cannot_mint_key_for_other_team(self, client, fake, monkeypatch):
         # two anon teams
         keyA, teamA = _provision_anon(client, fake)
-        keyB, teamB = _provision_anon(client, fake)
+        keyB, teamB = _provision_anon(client, fake)  # noqa: RUF059
         user_id = f"user-{uuid.uuid4().hex[:8]}"
         _patch_session_user(monkeypatch, user_id)
         # user owns ONLY team A (claim links the real anon owner row)
@@ -290,7 +290,7 @@ class TestCrossTeamMintProtection:
         assert r2.status_code == 200, r2.text
 
     def test_session_cannot_toggle_dashboard_login_for_other_team(self, client, fake, monkeypatch):
-        keyA, teamA = _provision_anon(client, fake)
+        keyA, teamA = _provision_anon(client, fake)  # noqa: RUF059
         _, teamB = _provision_anon(client, fake)
         user_id = f"user-{uuid.uuid4().hex[:8]}"
         _patch_session_user(monkeypatch, user_id)

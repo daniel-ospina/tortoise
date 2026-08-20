@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 def _timestamp() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")  # noqa: UP017
 
 
 def backup(db_path: str, events_path: str = "events.jsonl",
@@ -80,7 +80,7 @@ def restore(backup_dir: str, db_path: str,
     import json as _json
     _db_name = "tortoise.db"
     if manifest_file.exists():
-        try:
+        try:  # noqa: SIM105
             _db_name = _json.loads(manifest_file.read_text()).get("db", "tortoise.db")
         except Exception:
             pass
@@ -126,7 +126,7 @@ def restore(backup_dir: str, db_path: str,
 
     # Restore into FalkorDB if requested
     if into_falkor:
-        from tortoise.projection import FalkorProjection
+        from tortoise.projection import FalkorProjection  # noqa: I001
         from tortoise.log import EventLog
         # RDB-first: open the snapshot directly — it holds the full graph
         # incl. SDK-created points that never made it into events.jsonl.

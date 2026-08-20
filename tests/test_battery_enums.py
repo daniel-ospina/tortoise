@@ -1,7 +1,7 @@
 """Task 1 tests — enums + exceptions + exit-code mapping (contract surface)."""
 from __future__ import annotations
 
-import pytest
+import pytest  # noqa: F401
 
 from battery.enums import EpOutcome, ExitCode, ModelCallOutcome, Tier
 from battery.exceptions import (

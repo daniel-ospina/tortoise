@@ -3,11 +3,11 @@
 Postgres-dependent tests are marked with @pytest.mark.postgres and
 skipped when TEST_AUDIT_DB_URI is not set.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import json
 import os
-from pathlib import Path
+from pathlib import Path  # noqa: F401
 from unittest import mock
 
 import pytest
@@ -170,7 +170,7 @@ class TestAuditLoggerMockPostgres:
         """E2E-9: the anon-* actor family (agent signups) lands as TEXT too."""
         logger, conn = self._logger_with_fake_pg(monkeypatch, tmp_path)
         logger.append("team-2", "anon-8f3a1c", "agent_signup")
-        sql, params = self._insert_params(conn)
+        sql, params = self._insert_params(conn)  # noqa: RUF059
         assert params["actor_user_id"] == "anon-8f3a1c"
         logger.close()
 

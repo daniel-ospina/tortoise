@@ -1,6 +1,6 @@
 """Issue #6703 — Pros/cons of belief propagation approaches: BFS vs PageRank vs Embedding vs LLM."""
 # Historical — uses embedded tortoise.db. Do not run against production Docker.
-import sys, os
+import sys, os  # noqa: E401, I001
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from tortoise.api import EventAPI, provenance
@@ -11,7 +11,7 @@ log = EventLog('bp-pros-cons.jsonl')
 proj = FalkorProjection()
 api = EventAPI(log, initiated_by="user", agent_id="research-agent", projection=proj)
 
-pv = lambda quote: provenance("bp-pros-cons-research", (0,0), quote, speaker="research-agent", extracted_by="manual@1.0")
+pv = lambda quote: provenance("bp-pros-cons-research", (0,0), quote, speaker="research-agent", extracted_by="manual@1.0")  # noqa: E731
 ctxt = "pros-cons"
 
 api._emit("ingest_begin", source_id="bp-pros-cons-cycle5", extractor_version="manual@1.0")
@@ -447,4 +447,4 @@ api.add_operator("NAND", [p28, p23], ctxt,
 
 api._emit("ingest_end", source_id="bp-pros-cons-cycle5")
 
-print(f"Log: bp-pros-cons.jsonl → tortoise.db")
+print(f"Log: bp-pros-cons.jsonl → tortoise.db")  # noqa: F541

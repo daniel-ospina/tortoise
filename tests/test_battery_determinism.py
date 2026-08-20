@@ -48,7 +48,7 @@ class TestDeterminism:
         from battery.config.corpus import load_corpus
         expected = len(load_corpus(CONFIG / "corpus.yaml"))
         assert len(arts1) == len(arts2) == expected
-        for p1, p2 in zip(arts1, arts2):
+        for p1, p2 in zip(arts1, arts2):  # noqa: B905
             a1 = json.loads(p1.read_text())
             a2 = json.loads(p2.read_text())
             assert a1["run_id"] == a2["run_id"]

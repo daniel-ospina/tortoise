@@ -25,7 +25,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest
+import pytest  # noqa: F401, I001
 
 from tests.epic903_fixtures import (
     FIXED_SEED,
@@ -149,7 +149,7 @@ class TestDe2e2StaleFirstScheduler:
         """Repeated budget=2 passes drain the whole F2 graph (all 13 claims)
         within a bounded number of passes."""
         f = self._setup()
-        proj = f.sdk._get_proj()
+        proj = f.sdk._get_proj()  # noqa: F841
         all_claims = set(_all_claim_ids(f))
         covered: set[str] = set()
         passes = 0
@@ -236,7 +236,7 @@ class TestBudgetBoundaries:
         f = f2_staleness_regions()
         f.sdk._dirty_roots.clear()
         random.seed(FIXED_SEED)
-        proj = f.sdk._get_proj()
+        proj = f.sdk._get_proj()  # noqa: F841
         r = f.sdk._get_dreamer().dream_window(budget=13)
         assert r["batches"] == 1, "budget ≥ graph → single pass"
         assert set(_all_claim_ids(f)) <= set(r["affected_claims"])

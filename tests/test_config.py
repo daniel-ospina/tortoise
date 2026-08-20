@@ -1,9 +1,9 @@
 """Config resolution tests (plan Task 6) — TORTOISE_DB_PATH precedence."""
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import os
-import sys
-from unittest import mock
+import sys  # noqa: F401
+from unittest import mock  # noqa: F401
 
 import pytest
 
@@ -136,11 +136,11 @@ def test_mcp_server_uses_db_path_env(monkeypatch):
     """Set only TORTOISE_DB_PATH -> mcp_server connects to that path
     (non-docker fallback wired to resolve_db_path)."""
     # Simulate mcp_server's module-level resolution logic
-    from tortoise.config import resolve_db_path, is_docker_uri
+    from tortoise.config import resolve_db_path, is_docker_uri  # noqa: I001
     monkeypatch.setenv("TORTOISE_DB_PATH", "/mcp-canonical.db")
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     uri = os.environ.get("TORTOISE_DB_URI", "")
-    if is_docker_uri(uri):
+    if is_docker_uri(uri):  # noqa: SIM108
         path = None
     else:
         path = resolve_db_path()
@@ -163,7 +163,7 @@ def test_resolve_db_path_explicit_uri_rejected():
     """#715 P2 conf 75: a supported URI passed as the explicit path must
     raise a clear error (route via FalkorProjection.from_uri), never be
     mangled into a "path" that silently misses the real target."""
-    from tortoise.config import RELATIVE_PATH_ERROR
+    from tortoise.config import RELATIVE_PATH_ERROR  # noqa: F401
     for uri in ("docker://:pw@host:6379/tortoise",
                 "redis://:pw@host:6379/tortoise",
                 "rediss://:pw@host:6379/tortoise"):
@@ -220,9 +220,9 @@ class TestGetSdkEnvPrecedence:
 
     def test_docker_uri_routes_to_from_uri(self, monkeypatch):
         """Set TORTOISE_DB_URI=docker://... → _get_sdk() calls from_uri."""
-        import tortoise.mcp_server as mcp_mod
-        from unittest import mock
-        from tortoise.sdk import TortoiseSDK
+        import tortoise.mcp_server as mcp_mod  # noqa: I001
+        from unittest import mock  # noqa: F811
+        from tortoise.sdk import TortoiseSDK  # noqa: F401
 
         monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise")
 
@@ -242,8 +242,8 @@ class TestGetSdkEnvPrecedence:
         poisoned docker-URI SDK cached — the next call retries instead of
         returning the dead instance (TortoiseSDK() is lazy, so the cache was
         previously committed before the eager from_uri probe raised)."""
-        import tortoise.mcp_server as mcp_mod
-        from unittest import mock
+        import tortoise.mcp_server as mcp_mod  # noqa: I001
+        from unittest import mock  # noqa: F811
 
         monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise")
 
@@ -269,8 +269,8 @@ class TestGetSdkEnvPrecedence:
     def test_file_path_uri_routes_to_resolve_db_path(self, monkeypatch, tmp_path):
         """Set TORTOISE_DB_URI=/some/path (non-docker) → _get_sdk() uses
         resolve_db_path and passes it as db_path to TortoiseSDK."""
-        import tortoise.mcp_server as mcp_mod
-        from unittest import mock
+        import tortoise.mcp_server as mcp_mod  # noqa: I001
+        from unittest import mock  # noqa: F811
 
         db_path = str(tmp_path / "embedded.db")
         monkeypatch.setenv("TORTOISE_DB_URI", db_path)
@@ -287,8 +287,8 @@ class TestGetSdkEnvPrecedence:
     def test_no_env_falls_through_to_default_path(self, monkeypatch):
         """Neither TORTOISE_DB_URI nor TORTOISE_DB_PATH set → _get_sdk()
         calls resolve_db_path() with no arg (default ~/.tortoise/tortoise.db)."""
-        import tortoise.mcp_server as mcp_mod
-        from unittest import mock
+        import tortoise.mcp_server as mcp_mod  # noqa: I001
+        from unittest import mock  # noqa: F811
         from tortoise.config import DEFAULT_DB_PATH
 
         with mock.patch("tortoise.sdk.TortoiseSDK._get_proj",

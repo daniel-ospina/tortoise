@@ -42,7 +42,7 @@ if os.environ.get("TORTOISE_AUDIT_DSN") and not _HAS_PSYCOPG2:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
 
 _SCHEMA_DDL = """
@@ -131,7 +131,7 @@ class AuditLogger:
     def close(self) -> None:
         """Close the Postgres connection if open."""
         if self._conn is not None:
-            try:
+            try:  # noqa: SIM105
                 self._conn.close()
             except Exception:
                 pass
@@ -156,7 +156,7 @@ class AuditLogger:
 
         try:
             if self._conn is not None:
-                try:
+                try:  # noqa: SIM105
                     self._conn.close()
                 except Exception:
                     pass
@@ -182,7 +182,7 @@ class AuditLogger:
 
     def _try_pg_insert(self, event: dict) -> bool:
         """Attempt Postgres INSERT. Returns True on success."""
-        if self._conn is None:
+        if self._conn is None:  # noqa: SIM102
             if not self._connect():
                 return False
 
@@ -204,7 +204,7 @@ class AuditLogger:
         except Exception as e:
             _logger.warning("AuditLogger: Postgres INSERT failed: %s", e)
             # Connection may be dead — reset for reconnect on next append
-            try:
+            try:  # noqa: SIM105
                 self._conn.close()
             except Exception:
                 pass

@@ -482,7 +482,7 @@ class PackRegistry:
                                     f"relation '{pred}': {direction} '{kind_val}' "
                                     f"has empty namespace or kind"
                                 )
-                            elif ref_ns == ns:
+                            elif ref_ns == ns:  # noqa: SIM102
                                 # Self-reference — must be in this pack's kinds
                                 if ref_kind not in all_pack_kinds:
                                     errors.append(
@@ -1024,7 +1024,7 @@ class PackRegistry:
         all_canonical.extend(CORE_ENTITY_TYPES)
         for parent in all_canonical:
             subs = self.get_subclasses(parent)
-            expansions[parent] = [parent] + subs
+            expansions[parent] = [parent] + subs  # noqa: RUF005
 
         # Pack kinds: each maps to [self] initially (all 5 categories)
         for p in self.packs.values():
@@ -1038,7 +1038,7 @@ class PackRegistry:
         # Apply subclassOf: children also expand to parent
         for p in self.packs.values():
             ns = p.namespace
-            for child, parent in p.kind_subclasses.items():
+            for child, parent in p.kind_subclasses.items():  # noqa: B007
                 full_child = f"{ns}:{child}"
                 if full_child not in expansions:
                     expansions[full_child] = [full_child]
@@ -1050,7 +1050,7 @@ class PackRegistry:
                 full_kind = f"{ns}:{kind}"
                 for target in targets:
                     # Add target to this kind's expansion
-                    if full_kind in expansions:
+                    if full_kind in expansions:  # noqa: SIM102
                         if target not in expansions[full_kind]:
                             expansions[full_kind].append(target)
                     # Add this kind to target's expansion (bidirectional)
@@ -1190,12 +1190,12 @@ if __name__ == "__main__":
 
     # ── Error path tests ──
     errors = registry._validate({"name": "MissingNamespace"})
-    assert errors, f"Expected errors for missing namespace, got none"
+    assert errors, f"Expected errors for missing namespace, got none"  # noqa: F541
     print("  ✓ missing namespace detected")
 
     errors = registry._validate({"namespace": "bad:ns", "name": "X",
                                  "ontology": {"extends": "core"}})
-    assert errors, f"Expected errors for colon in namespace"
+    assert errors, f"Expected errors for colon in namespace"  # noqa: F541
     print("  ✓ namespace colon rejected")
 
     errors = registry._validate({"namespace": "x", "name": "X",

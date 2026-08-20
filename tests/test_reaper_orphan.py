@@ -15,13 +15,13 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path  # noqa: F401
 
 import pytest
 
 from tortoise.embedded_reaper import (
     _classify,
-    _real_gettempdir,
+    _real_gettempdir,  # noqa: F401
     discover,
     phase1_probe,
 )
@@ -92,7 +92,7 @@ def _fabricate_path_based_dir(tmp_path, pid, sub="redislite_orphan"):
     pidfile.write_text(str(pid))
     dbdir = str(tmp_path / "user-data-dir")  # non-ephemeral user dir
     (sock_dir / "redis.config").write_text(
-        "dbfilename 'leak.db'\n"
+        "dbfilename 'leak.db'\n"  # noqa: UP031
         "dir '%s'\n"
         "pidfile '%s'\n"
         "unixsocket '%s'\n" % (dbdir, pidfile, socket_path))

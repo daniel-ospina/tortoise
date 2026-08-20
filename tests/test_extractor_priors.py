@@ -18,7 +18,7 @@ Tests:
   4. test_no_evidence_fallback — no evidence → Beta(1,1) uniform
 """
 
-import math
+import math  # noqa: F401
 import os
 import shutil
 import sys

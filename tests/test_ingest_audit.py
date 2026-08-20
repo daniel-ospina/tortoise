@@ -224,7 +224,7 @@ def test_audit_post_rebuild_completeness(tmp_path):
     """A13 indicator 2: completeness across rebuild_all — the pre-wipe
     snapshot's batch_id enforcement links are restored (projection pass-1b
     tail, A10), so the audit returns the SAME stamped set after a rebuild."""
-    events_dir = tmp_path / "events"; events_dir.mkdir()
+    events_dir = tmp_path / "events"; events_dir.mkdir()  # noqa: E702
     events = str(events_dir / "events.jsonl")
     sdk = TortoiseSDK(os.path.join(str(tmp_path), "audit.db"),
                       event_log_path=events)
@@ -266,7 +266,7 @@ def test_audit_batch_discovery(sdk):
 def test_audit_mcp_mirror(sdk, monkeypatch):
     """A13 MCP mirror: tortoise_list_batch / tortoise_list_batches route to
     the SDK through the in-process handler layer (stdio transport)."""
-    import tortoise.mcp_server as mcp_mod
+    import tortoise.mcp_server as mcp_mod  # noqa: I001
     from tortoise.mcp_auth import (_current_team_id, _current_team_limits,
                                    _transport_mode)
     _transport_mode.set("stdio")

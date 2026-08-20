@@ -39,7 +39,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.sdk import TortoiseSDK
+from tortoise.sdk import TortoiseSDK  # noqa: I001
 
 
 # Legacy composite index (older FalkorDB build) whose boolean-false
@@ -148,13 +148,13 @@ def main():
     # on non-embedded only — embedded drops it on open (bool type-table
     # degradation, see _ensure_indexes).
     for prop in _CANONICAL_POINT_PROPS:
-        try:
+        try:  # noqa: SIM105
             proj.g.query(f"CREATE INDEX FOR (n:Point) ON (n.{prop})")
         except Exception:
             pass  # already indexed — expected
     if not getattr(proj, "_is_embedded", False):
         for prop in _NON_EMBEDDED_ONLY_PROPS:
-            try:
+            try:  # noqa: SIM105
                 proj.g.query(f"CREATE INDEX FOR (n:Point) ON (n.{prop})")
             except Exception:
                 pass  # already indexed — expected

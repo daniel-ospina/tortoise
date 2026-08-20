@@ -13,7 +13,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest
+import pytest  # noqa: I001
 
 from tortoise.embeddings import search_points
 from tortoise.sdk import TortoiseSDK
@@ -302,8 +302,8 @@ def test_sdk_fts_query_vector_scores_populated():
     This is the O/I/T vector indicator — if scores.vector is None when
     vector participated, the indicator can't verify fusion.
     """
-    from unittest import mock
-    from tortoise.search_engine import SearchResult, SearchScores
+    from unittest import mock  # noqa: I001
+    from tortoise.search_engine import SearchResult, SearchScores  # noqa: F401
 
     sdk = _new_sdk()
     pid = sdk.create_point("statement", "quantum physics research")["id"]

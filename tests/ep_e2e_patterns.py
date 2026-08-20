@@ -126,7 +126,7 @@ def test_convergent():
         "Claim: The treatment is effective for the target population")
 
     # Create BOTH operators
-    op_a = sdk.create_operator("IMPL", source_a["id"], [claim["id"]])
+    op_a = sdk.create_operator("IMPL", source_a["id"], [claim["id"]])  # noqa: F841
     op_b = sdk.create_operator("IMPL", source_b["id"], [claim["id"]])
 
     # Run EP with both sources
@@ -157,15 +157,15 @@ def test_convergent():
     if drop < 0:
         issues.append(f"Confidence INCREASED after removing a source ({claim_both['mean']:.4f} → {claim_a_only['mean']:.4f})")
     if drop == 0:
-        issues.append(f"No drop after removing source B — both sources should contribute")
+        issues.append(f"No drop after removing source B — both sources should contribute")  # noqa: F541
     if claim_a_only["mean"] < 0.5:
         issues.append(f"Claim with single T0 source dropped below 50%: {claim_a_only['mean']:.4f}")
 
     print(f"\n  Drop from removing B: {drop:+.4f} ({'expected' if 0 < drop < 0.3 else 'unexpected magnitude'})")
     if claim_both["mean"] > claim_a_only["mean"]:
-        print(f"  Two sources > one source: ✅ (both contribute)")
+        print(f"  Two sources > one source: ✅ (both contribute)")  # noqa: F541
     else:
-        print(f"  Two sources ≤ one source: ❌")
+        print(f"  Two sources ≤ one source: ❌")  # noqa: F541
 
     if issues:
         print(f"  ⚠️  ISSUES ({len(issues)}):")
@@ -237,7 +237,7 @@ def test_undercutter():
     op_weight_annotated = compute_operator_weight(sdk._get_proj(), op["id"])
     print(f"  Operator weight (annotated): {op_weight_annotated:.4f}")
 
-    result_annotated = sdk.compute_confidence()
+    result_annotated = sdk.compute_confidence()  # noqa: F841
     claim_annotated = sdk.get_confidence(claim["id"])
     print(f"  Claim (after annotation): {fmt(claim_annotated)}")
 
@@ -252,8 +252,8 @@ def test_undercutter():
         )
     if abs(claim_after["mean"] - claim_annotated["mean"]) < 1e-6:
         issues.append(
-            f"Annotation had NO effect on claim confidence. "
-            f"GAP: annotation dimensions are archived (annotation_factor=1.0 hardcoded)"
+            f"Annotation had NO effect on claim confidence. "  # noqa: F541
+            f"GAP: annotation dimensions are archived (annotation_factor=1.0 hardcoded)"  # noqa: F541
         )
 
     if issues:
@@ -363,14 +363,14 @@ def test_linked_premises():
         "Conclusion: The approach is sound and should be adopted")
 
     # Operators: premises → bottleneck
-    op_a = sdk.create_operator("IMPL", prem_a["id"], [bottleneck["id"]])
-    op_b = sdk.create_operator("IMPL", prem_b["id"], [bottleneck["id"]])
+    op_a = sdk.create_operator("IMPL", prem_a["id"], [bottleneck["id"]])  # noqa: F841
+    op_b = sdk.create_operator("IMPL", prem_b["id"], [bottleneck["id"]])  # noqa: F841
     op_c = sdk.create_operator("IMPL", prem_c["id"], [bottleneck["id"]])
 
     # Operator: bottleneck → conclusion
-    op_btl = sdk.create_operator("IMPL", bottleneck["id"], [conclusion["id"]])
+    op_btl = sdk.create_operator("IMPL", bottleneck["id"], [conclusion["id"]])  # noqa: F841
 
-    print(f"\n  Premises: A, B, C (T2 credibility)")
+    print(f"\n  Premises: A, B, C (T2 credibility)")  # noqa: F541
     print(f"  Bottleneck: {bottleneck['id'][:12]}...")
     print(f"  Conclusion: {conclusion['id'][:12]}...")
 
@@ -427,7 +427,7 @@ def test_linked_premises():
     if drop_btl > 0:
         print(f"  Partial drop (not collapse): ✅ (bottleneck drop={drop_btl:+.4f})")
     else:
-        print(f"  No partial drop: ❌")
+        print(f"  No partial drop: ❌")  # noqa: F541
 
     if issues:
         print(f"  ⚠️  ISSUES ({len(issues)}):")
@@ -487,7 +487,7 @@ if __name__ == "__main__":
         print("  🎉 ALL TESTS PASSED — EP confidence values make common sense")
     else:
         print(f"  ⚠️  {total_issues} TOTAL ISSUES across {sum(1 for v in all_issues.values() if v)} scenarios")
-        print(f"\n  Issues are either:")
-        print(f"    1. EP behavior that doesn't match common-sense expectations")
-        print(f"    2. Gaps in the SDK (mitigation/annotation not wired to EP weights)")
+        print(f"\n  Issues are either:")  # noqa: F541
+        print(f"    1. EP behavior that doesn't match common-sense expectations")  # noqa: F541
+        print(f"    2. Gaps in the SDK (mitigation/annotation not wired to EP weights)")  # noqa: F541
     print(f"{'=' * 70}\n")

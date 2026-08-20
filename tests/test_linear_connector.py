@@ -1,7 +1,7 @@
 """Tests for Linear connector — issue/cycle → EventRecorded mapping."""
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
-import pytest
+import pytest  # noqa: F401
 from tortoise.connectors.linear import LinearConnector, _now_iso
 
 
@@ -229,8 +229,8 @@ def test_query_tolerates_malformed_errors_payload(caplog):
     """#331 (review r5): a malformed GraphQL errors payload (null, string,
     non-dict entries) must be surfaced without crashing the connector —
     the error-reporting path itself must not become a crash vector."""
-    import json as _json
-    import urllib.request
+    import json as _json  # noqa: I001
+    import urllib.request  # noqa: F401
     import unittest.mock as mock
 
     lc = LinearConnector(config={"api_key": "lin_api_test"})
@@ -240,7 +240,7 @@ def test_query_tolerates_malformed_errors_payload(caplog):
         resp.read.return_value = body
         cm = resp.__enter__.return_value
         cm.read.return_value = body
-        with mock.patch("urllib.request.urlopen", return_value=resp):
+        with mock.patch("urllib.request.urlopen", return_value=resp):  # noqa: SIM117
             with caplog.at_level("WARNING", logger="tortoise.connectors.linear"):
                 assert lc._query("query X { x }") == {}
     assert any("GraphQL" in r.message for r in caplog.records), \
@@ -249,13 +249,13 @@ def test_query_tolerates_malformed_errors_payload(caplog):
 
 def test_query_logs_http_errors(caplog):
     """#331: HTTP errors must be LOGGED, not silently swallowed as 'no data'."""
-    import json as _json
+    import json as _json  # noqa: F401, I001
     import urllib.error
     import urllib.request
     import unittest.mock as mock
 
     lc = LinearConnector(config={"api_key": "lin_api_test"})
-    with mock.patch(
+    with mock.patch(  # noqa: SIM117
         "urllib.request.urlopen",
         side_effect=urllib.error.URLError("connection refused"),
     ):
@@ -269,8 +269,8 @@ def test_query_logs_http_errors(caplog):
 
 def test_query_logs_graphql_errors(caplog):
     """#331: GraphQL-level errors must be logged, not silently dropped."""
-    import json as _json
-    import urllib.request
+    import json as _json  # noqa: I001
+    import urllib.request  # noqa: F401
     import unittest.mock as mock
 
     lc = LinearConnector(config={"api_key": "lin_api_test"})
@@ -280,7 +280,7 @@ def test_query_logs_graphql_errors(caplog):
     ).encode()
     cm = resp.__enter__.return_value
     cm.read.return_value = resp.read.return_value
-    with mock.patch("urllib.request.urlopen", return_value=resp):
+    with mock.patch("urllib.request.urlopen", return_value=resp):  # noqa: SIM117
         with caplog.at_level("WARNING", logger="tortoise.connectors.linear"):
             result = lc._query("query X { x }")
     assert result == {}

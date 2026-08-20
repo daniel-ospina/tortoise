@@ -59,7 +59,7 @@ def test_same_path_reuse():
     db2 = FalkorDB(DB_PATH)  # same path -> must reuse
     time.sleep(1)
     n2 = count_servers(sock)
-    db1.close(); db2.close()
+    db1.close(); db2.close()  # noqa: E702
     ok = n1 == 1 and n2 == 1
     print(f"[same-path] 2 connections same path -> {n2} server(s) "
           f"(expect 1: {'PASS' if ok else 'FAIL'})")
@@ -83,7 +83,7 @@ def test_cross_process_reuse():
     subprocess.run([sys.executable, "-c", code2], timeout=30)
     time.sleep(1)
     n2 = count_servers(sock)
-    proc.terminate(); proc.wait(timeout=10)
+    proc.terminate(); proc.wait(timeout=10)  # noqa: E702
     ok = n1 == 1 and n2 == 1
     print(f"[cross-proc] 2 processes same path -> {n2} server(s) "
           f"(expect 1: {'PASS' if ok else 'FAIL'})")
@@ -99,7 +99,7 @@ def test_no_path_leak():
     time.sleep(1)
     after = count_all_redislite_servers()
     leaked = after - before
-    db1.close(); db2.close()
+    db1.close(); db2.close()  # noqa: E702
     ok = leaked >= 2
     print(f"[no-path] {before}->{after} servers (+{leaked}) for 2 no-path "
           f"connections (expect +2: {'PASS' if ok else 'FAIL'})")
@@ -113,7 +113,7 @@ def test_stale_pid_recovery():
     settings_file = DB_PATH + ".settings"
     with open(settings_file) as fh:
         settings = json.load(fh)
-    pid = int(open(settings["pidfile"]).read().strip())
+    pid = int(open(settings["pidfile"]).read().strip())  # noqa: SIM115
     os.kill(pid, signal.SIGKILL)
     time.sleep(1)
     sock = settings.get("unixsocket", "")

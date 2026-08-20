@@ -12,7 +12,7 @@ run date) so numbers are honestly contextualized (no "#1" claims).
 from __future__ import annotations
 
 import json
-import os
+import os  # noqa: F401
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -46,8 +46,8 @@ def _percentile(xs: list[float], q: float) -> float:
     xs = sorted(xs)
     import math
     k = (len(xs) - 1) * q
-    lo = int(math.floor(k))
-    hi = int(math.ceil(k))
+    lo = int(math.floor(k))  # noqa: RUF046
+    hi = int(math.ceil(k))  # noqa: RUF046
     if lo == hi:
         return xs[lo]
     return xs[lo] + (xs[hi] - xs[lo]) * (k - lo)
@@ -60,7 +60,7 @@ def git_sha() -> str:
             timeout=5, cwd=Path(__file__).resolve().parent.parent.parent,
         )
         return out.stdout.strip() or "unknown"
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001, RUF100
         return "unknown"
 
 
@@ -92,7 +92,7 @@ def build_report(
 
     # ── accuracy ──
     labels = [o["label"] for o in outcomes]
-    overall = _mean([1.0 if l else 0.0 for l in labels])
+    overall = _mean([1.0 if l else 0.0 for l in labels])  # noqa: E741
 
     by_category: dict[str, list[bool]] = {}
     by_type: dict[str, list[bool]] = {}
@@ -105,13 +105,13 @@ def build_report(
         if "_abs" in q["question_id"]:
             abstention_labels.append(o["label"])
 
-    per_category = {c: {"accuracy": _mean([1.0 if l else 0.0 for l in ls]),
+    per_category = {c: {"accuracy": _mean([1.0 if l else 0.0 for l in ls]),  # noqa: E741
                         "n": len(ls)} for c, ls in sorted(by_category.items())}
-    per_type = {t: {"accuracy": _mean([1.0 if l else 0.0 for l in ls]),
+    per_type = {t: {"accuracy": _mean([1.0 if l else 0.0 for l in ls]),  # noqa: E741
                     "n": len(ls)} for t, ls in sorted(by_type.items())}
     # task-averaged accuracy = mean of the per-raw-type means (official
     # print_qa_metrics.py definition).
-    task_averaged = (_mean([1.0 if l else 0.0 for l in labels])
+    task_averaged = (_mean([1.0 if l else 0.0 for l in labels])  # noqa: E741
                      if len(by_type) <= 1 else
                      _mean([v["accuracy"] for v in per_type.values()]))
 
@@ -153,7 +153,7 @@ def build_report(
         "accuracy": {
             "overall": overall,
             "task_averaged": task_averaged,
-            "abstention": _mean([1.0 if l else 0.0 for l in abstention_labels]),
+            "abstention": _mean([1.0 if l else 0.0 for l in abstention_labels]),  # noqa: E741
             "abstention_n": len(abstention_labels),
             "per_category": per_category,
             "per_type": per_type,
@@ -214,7 +214,7 @@ def build_report(
             "dataset_source": dataset_id,
             "split": split,
             "git_sha": git_sha(),
-            "run_at_utc": datetime.now(timezone.utc).isoformat(),
+            "run_at_utc": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
         },
         "failures": failures or [],
         "n_failed": len(failures or []),
@@ -233,6 +233,6 @@ def save_report(report: dict[str, Any], path: Path | str) -> Path:
 
 def default_report_path(split: str, *, output_dir: str | None = None) -> Path:
     """Default report path: output dir (or CWD) + timestamped filename."""
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")  # noqa: UP017
     base = Path(output_dir) if output_dir else Path.cwd()
     return base / f"longmemeval_{split}_{stamp}.report.json"

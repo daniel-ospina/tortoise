@@ -5,7 +5,7 @@ Composes with concurrency.locked_append and events.EventCodec.
 Event types: cardCreated, stepStarted, stepCompleted, gatePassed, gateBlocked.
 Registered via PM domain extension (packs/project-management/manifest.yaml).
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import hashlib
 import json
@@ -135,7 +135,7 @@ def recover(
 # ── self-check ────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    import sys, tempfile, os, shutil
+    import sys, tempfile, os, shutil  # noqa: E401, I001
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from .events import register_event_type
 

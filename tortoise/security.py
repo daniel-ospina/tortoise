@@ -226,7 +226,7 @@ def ingest_dir_is_safe(directory: str, base: str | None) -> bool:
     parts = Path(directory).parts
     if ".." in parts:
         return False
-    if base is not None and resolve_under_base(directory, base) is None:
+    if base is not None and resolve_under_base(directory, base) is None:  # noqa: SIM103
         return False
     return True
 

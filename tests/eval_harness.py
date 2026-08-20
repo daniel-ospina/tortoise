@@ -1,7 +1,7 @@
 """Evaluation harness: precision/recall/F1 for LLM claim extraction across models."""
-import sys, json, time, os
+import sys, json, time, os  # noqa: E401, I001
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from model_adapters import OpenRouterModel, MODELS
+from model_adapters import OpenRouterModel, MODELS  # noqa: F401, I001
 
 # Load gold standard
 with open(os.path.join(os.path.dirname(__file__), 'gold_standard.json')) as f:
@@ -41,7 +41,7 @@ def evaluate_model(model_name, model_factory):
         text = raw.strip()
         if text.startswith('```'):
             text = text.split('```', 2)[1]
-            if text.startswith('json'): text = text[4:]
+            if text.startswith('json'): text = text[4:]  # noqa: E701
         result = json.loads(text)
         claims = result.get('claims', {})
     except (json.JSONDecodeError, KeyError) as e:

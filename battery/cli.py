@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import Callable
+from typing import Callable  # noqa: UP035
 
 from battery.arms.base import ArmUnavailable
 from battery.enums import ExitCode, Tier
@@ -31,7 +31,7 @@ from battery.runner.run import RunConfig, run_battery
 
 _DEFAULT_CONFIG = "battery/config"
 _DEFAULT_OUT = "battery-out"
-from pathlib import Path as _Path
+from pathlib import Path as _Path  # noqa: E402
 
 
 class _ArgparseExit(RuntimeError):
@@ -150,7 +150,7 @@ def _default_probe_pairs(rubric_id: str) -> list[tuple[str, str]]:
 
 def _cmd_parity(args: argparse.Namespace) -> ExitCode:
     """battery parity — run the parity leg (issue #1414; E2E-4.1)."""
-    from battery.parity.runner import (
+    from battery.parity.runner import (  # noqa: I001
         BaselineMissingError,
         PINNED_VERSIONS,
         VersionMismatchError,

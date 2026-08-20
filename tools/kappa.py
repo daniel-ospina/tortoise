@@ -62,15 +62,15 @@ import sys
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any  # noqa: F401
 
 # Make the tools package importable when run directly (python tools/kappa.py).
 _REPO_ROOT = str(Path(__file__).resolve().parent.parent)
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from tools import min_signal
-from tools.judge_harness import CLASS_VOCAB, Label, LabeledWindow, RelationLabel
+from tools import min_signal  # noqa: E402
+from tools.judge_harness import CLASS_VOCAB, Label, LabeledWindow, RelationLabel  # noqa: E402
 
 # Gate bands (plan DE2E-1 assertions)
 KAPPA_GREEN = 0.60

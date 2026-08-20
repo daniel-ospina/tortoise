@@ -24,7 +24,7 @@ Run:
   RUN_LEGAL_E2E=1 BASE_URL=http://127.0.0.1:8788 \
     python -m pytest tests/e2e/test_signup_form_safety_e2e.py -v
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import json
 import os

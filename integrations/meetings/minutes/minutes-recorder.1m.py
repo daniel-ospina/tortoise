@@ -9,7 +9,7 @@
 # Install: copy to ~/Library/Application Support/SwiftBar/plugins/
 #          chmod +x minutes-recorder.1m.py
 
-import subprocess
+import subprocess  # noqa: F401, I001
 import os
 import json
 from pathlib import Path
@@ -32,7 +32,7 @@ def get_recording_status():
                     return True, title, started
                 except OSError:
                     pass
-        except (json.JSONDecodeError, IOError):
+        except (json.JSONDecodeError, IOError):  # noqa: UP024
             pass
     return False, None, None
 
@@ -51,7 +51,7 @@ def main():
     
     if recording:
         # Show red dot + meeting title
-        print(f"🔴 REC | size=12")
+        print(f"🔴 REC | size=12")  # noqa: F541
         print("---")
         print(f"Recording: {title}")
         if started:

@@ -10,14 +10,14 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.api import EventAPI, provenance          # noqa: E402
-from tortoise.extractor import (                        # noqa: E402
+from tortoise.api import EventAPI, provenance  # noqa: E402, F401, I001, RUF100
+from tortoise.extractor import (  # noqa: E402, RUF100
     _document_sections, _has_cue, _is_claim, _json, _overlap,
     _PUNC, _REFUTE_PHRASES, _REFUTE_SINGLE_RE,
     _SUPPORT_PHRASES, _SUPPORT_SINGLE_RE,
     _utterances, LLMExtractor, MockExtractor, MockModel,
 )
-from tortoise.log import EventLog                       # noqa: E402
+from tortoise.log import EventLog  # noqa: E402, RUF100
 
 
 def _tmp(name):
@@ -323,7 +323,7 @@ def test_json_preamble():
 def test_json_invalid():
     try:
         _json("no json here at all")
-        assert False, "should raise"
+        assert False, "should raise"  # noqa: B011
     except ValueError:
         pass
     print("PASS test_json_invalid")
@@ -413,7 +413,7 @@ def test_mock_extractor_multi_source_embedding():
     MockExtractor().run(text, "test.txt", api, multi_source=True)
     events = log.read_all()
     ops = [e for e in events if e["type"] == "OperatorAdded"]
-    assert len(ops) >= 1, f"expected operators from embedding path"
+    assert len(ops) >= 1, f"expected operators from embedding path"  # noqa: F541
     print("PASS test_mock_extractor_multi_source_embedding")
 
 

@@ -15,7 +15,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.cross_lens import (  # noqa: E402
+from tortoise.cross_lens import (  # noqa: E402, I001, RUF100
     DEFAULT_THRESHOLD,
     NEAR_DUPLICATE_THRESHOLD,
     find_cross_lens_matches,
@@ -213,10 +213,10 @@ def test_singleton_reused_across_calls():
     fake = MagicMock()
     fake.encode.return_value = np.array([[1.0, 0.0], [0.9, 0.1]])
     orig_get = EmbeddingModel.get
-    EmbeddingModel.get = lambda: fake  # noqa: E731 — bypass threaded load for test
+    EmbeddingModel.get = lambda: fake  # noqa: E731, RUF100
     try:
         v1, d1 = _encode(["a"])
-        v2, d2 = _encode(["b"])
+        v2, d2 = _encode(["b"])  # noqa: RUF059
     finally:
         EmbeddingModel.get = orig_get
         EmbeddingModel._reset()
@@ -264,7 +264,7 @@ def test_search_points_tfidf_legacy_fit_semantics():
     got = [(r["id"], r["similarity"]) for r in res]
     assert [g[0] for g in got] == [e[0] for e in expected], \
         f"ranking drifted from legacy semantics: {[g[0] for g in got]} vs {[e[0] for e in expected]}"
-    for (gid, gsim), (eid, esim) in zip(got, expected):
+    for (gid, gsim), (eid, esim) in zip(got, expected):  # noqa: B905
         assert gid == eid and abs(gsim - esim) < 1e-9, \
             f"{gid}: {gsim} != {esim}"
     print("PASS test_search_points_tfidf_legacy_fit_semantics")

@@ -97,7 +97,7 @@ def local_db(tmp_path, monkeypatch, capsys):
     db = tmp_path / "t.db"
     monkeypatch.setenv("TORTOISE_DB_PATH", str(db))
 
-    import argparse
+    import argparse  # noqa: I001
     from tortoise.sdk import TortoiseSDK as RealSDK
 
     # Capture the SDK handle _cmd_key_create opens (the live-server owner)
@@ -117,7 +117,7 @@ def local_db(tmp_path, monkeypatch, capsys):
     rc = _cmd_key_create(args)
     assert rc == 0
     out = capsys.readouterr()
-    match = [l for l in out.out.splitlines() if "Created API key:" in l]
+    match = [l for l in out.out.splitlines() if "Created API key:" in l]  # noqa: E741
     assert match, out.out
     key = match[0].split(":", 1)[1].strip()
     assert captured.get("sdk") is not None, "CLI SDK handle not captured"
@@ -184,7 +184,7 @@ def _patch_serve_runtime(monkeypatch, tmp_path):
     the REAL main() → _cmd_serve_http path all the way to the uvicorn call
     without binding a socket or starting a server. Returns a calls dict that
     captures the create_http_app kwargs and the uvicorn.run kwargs."""
-    import tortoise.mcp_server as mcp_mod
+    import tortoise.mcp_server as mcp_mod  # noqa: I001
     import uvicorn
 
     calls = {"create_http_app": None, "uvicorn": None}
@@ -276,7 +276,7 @@ def test_serve_http_namespace_note_all_modes_tilde_expansion(monkeypatch, capsys
     and a tilde-form TORTOISE_DB_PATH (~/.tortoise/tortoise.db, the quickstart's
     documented form) must be expanduser'd so the exists-check fires and the
     diagnostic prints the EXPANDED path instead of a shell-unescaped '~'."""
-    import tortoise.mcp_server as mcp_mod
+    import tortoise.mcp_server as mcp_mod  # noqa: I001
     import uvicorn
 
     from tortoise.__main__ import main
@@ -289,7 +289,7 @@ def test_serve_http_namespace_note_all_modes_tilde_expansion(monkeypatch, capsys
     db_file.write_text("")  # must exist so the note fires (tilde path must resolve)
     try:
         monkeypatch.setenv("TORTOISE_DB_PATH", f"~/{db_file.name}")
-        rc = main(["serve", "--http"] + auth_args + ["--port", "8123"])
+        rc = main(["serve", "--http"] + auth_args + ["--port", "8123"])  # noqa: RUF005
         assert rc == 0
         out = capsys.readouterr().out
         assert namespace in out, \
@@ -565,7 +565,7 @@ def test_serve_http_none_nonloopback_refused_without_override(monkeypatch, tmp_p
     warning-only path could expose full MCP access (P2 security). mybox.local
     exercises the unresolvable-hostname branch of _is_loopback_bind;
     ::ffff:192.168.1.50 the IPv4-mapped non-loopback half of the mapping."""
-    import tortoise.mcp_server as mcp_mod
+    import tortoise.mcp_server as mcp_mod  # noqa: I001
     import uvicorn
 
     from tortoise.__main__ import main
@@ -638,7 +638,7 @@ def test_serve_http_static_hostname_bind_seeds_guard(monkeypatch, tmp_path, caps
 def test_serve_http_static_missing_key_error_path(monkeypatch, tmp_path, capsys):
     """--auth static without --api-key / TORTOISE_API_KEY → exit 1 with a
     clear message, and create_http_app must never be called."""
-    import tortoise.mcp_server as mcp_mod
+    import tortoise.mcp_server as mcp_mod  # noqa: I001
 
     from tortoise.__main__ import main
 
@@ -660,7 +660,7 @@ def test_serve_http_api_key_requires_static_auth(monkeypatch, tmp_path, capsys):
     """--api-key with non-static auth (tenant default) → exit 1 with a clean
     error pointing at --auth static — the key must never be silently ignored
     (#719 P2)."""
-    import tortoise.mcp_server as mcp_mod
+    import tortoise.mcp_server as mcp_mod  # noqa: I001
 
     from tortoise.__main__ import main
 
@@ -692,7 +692,7 @@ def test_local_http_roundtrip_lands_in_team_graph(local_db, monkeypatch):
     orphaned namespace); Origin header accepted."""
     from fastapi.testclient import TestClient
 
-    db, key, env, _cli_sdk = local_db
+    db, key, env, _cli_sdk = local_db  # noqa: RUF059
     # env mutation restored even on failure (monkeypatch = pytest try/finally)
     monkeypatch.setenv("TORTOISE_DB_PATH", str(db))
 
@@ -757,7 +757,7 @@ def test_key_create_wildcard_bind_prints_lan_note(local_db, bind, port):
     the printed wildcard URL is unusable for clients, and the note used to
     fire only on full defaults (suppressed exactly when needed most).
     Wildcard + non-default port must also show it."""
-    db, key, env, cli_sdk = local_db
+    db, key, env, cli_sdk = local_db  # noqa: RUF059
     env["TORTOISE_DB_PATH"] = str(db)
     # #1102: the subprocess opens the SAME embedded DB — close the fixture's
     # live handle first or the #942 single-writer probe (EmbeddedStoreBusy)
@@ -778,7 +778,7 @@ def test_key_create_wildcard_bind_prints_lan_note(local_db, bind, port):
 def test_key_create_default_bind_still_prints_mirror_hint(local_db):
     """The defaults case keeps the mirror hint (pass --bind/--port to match
     a custom serve setup) — regression guard for the elif branch."""
-    db, key, env, cli_sdk = local_db
+    db, key, env, cli_sdk = local_db  # noqa: RUF059
     env["TORTOISE_DB_PATH"] = str(db)
     # #1102: same single-writer constraint as the wildcard-bind test — close
     # the fixture's live handle before the subprocess.

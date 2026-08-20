@@ -61,7 +61,7 @@ def locked_append(path: Path, record: dict[str, Any],
 
 
 def atomic_claim(card_dir: Path, card_id: str, claim_data: dict[str, Any],
-                 suffix: str = ".card") -> Optional[Path]:
+                 suffix: str = ".card") -> Optional[Path]:  # noqa: UP045
     """Atomically claim a card using O_EXCL (no TOCTOU window).
 
     Uses open(target, 'x') for atomic create-or-fail. If the target already
@@ -110,4 +110,4 @@ if __name__ == "__main__":
     assert claimed2 is None
 
     print("✅ concurrency")
-    import shutil; shutil.rmtree(d)
+    import shutil; shutil.rmtree(d)  # noqa: E702, I001

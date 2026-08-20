@@ -20,7 +20,7 @@ records persist by rubric id (the run_artifact contract). Mid-stream rubric
 changes re-trigger the gate; episodes scored under a stale rubric are
 flagged (E2E-5.2 drift).
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 from dataclasses import dataclass
 
@@ -28,7 +28,7 @@ import hashlib
 import math
 import random
 from pathlib import Path
-from typing import Sequence
+from typing import Sequence  # noqa: UP035
 
 from battery.exceptions import JudgeGateBlocked
 from battery.judge.client import JudgeClient, build_abba_prompts
@@ -59,7 +59,7 @@ class ValidationRecord:
 
 def _cohens_kappa(labels_a: Sequence[str], labels_b: Sequence[str]) -> float:
     """Cohen's κ over the intersection of labeled items (mirrors tools/kappa)."""
-    pairs = [(a, b) for a, b in zip(labels_a, labels_b) if a and b]
+    pairs = [(a, b) for a, b in zip(labels_a, labels_b) if a and b]  # noqa: B905
     if len(pairs) < 2:
         return 0.0
     n = len(pairs)

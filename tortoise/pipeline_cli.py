@@ -15,7 +15,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any  # noqa: F401
 
 import yaml
 
@@ -84,7 +84,7 @@ def cmd_status(name: str) -> None:
     print(f"  Trigger: {cfg.get('trigger', 'manual')}")
     em = cfg.get("entity_mapping", {})
     if em:
-        print(f"  Entity mappings:")
+        print(f"  Entity mappings:")  # noqa: F541
         if em.get("repo_to_team"):
             for repo, team in em["repo_to_team"].items():
                 print(f"    repo {repo} → team {team}")
@@ -127,7 +127,7 @@ def cmd_run(name: str) -> None:
             print(f"  Got {len(events)} events")
             if hasattr(connector, "ingest"):
                 # Create projection and ingest
-                from tortoise.projection import FalkorProjection
+                from tortoise.projection import FalkorProjection  # noqa: I001
                 from tortoise.config import resolve_db_path, is_db_uri
                 # #715 P2 conf 75: route a supported TORTOISE_DB_URI through
                 # from_uri — resolve_db_path() alone would silently pick the
@@ -143,7 +143,7 @@ def cmd_run(name: str) -> None:
                 try:
                     import sys as _s
                     _s.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "operations" / "coordination"))
-                    from mission_registry import MissionRegistry
+                    from mission_registry import MissionRegistry  # noqa: I001
                     from coordinator import CoordinatorDaemon
                     reg = MissionRegistry()
                     d = CoordinatorDaemon(reg)

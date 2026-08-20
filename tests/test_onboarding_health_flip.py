@@ -29,7 +29,7 @@ os.environ.setdefault("TORTOISE_ENCRYPTION_KEY", "I2n-E3K857hF9ENLgrOZ8YBPkEB4tu
 os.environ.setdefault("GITHUB_CLIENT_ID", "test-client-id")
 os.environ.setdefault("GITHUB_CLIENT_SECRET", "test-client-secret")
 
-from tortoise.hosted_api import app
+from tortoise.hosted_api import app  # noqa: I001
 
 from tests.fake_control_plane import ErrorControlPlane, FakeControlPlane
 from tests.test_supabase_control import FREE_TEAM, TOKEN, _key_row
@@ -109,7 +109,7 @@ def _registry_client():
 
 class TestOnboardingStateFlip:
     def test_read_returns_defaults_for_empty_state(self, supabase_client):
-        tc, fake = supabase_client
+        tc, fake = supabase_client  # noqa: RUF059
         r = tc.get("/v1/onboarding/state")
         assert r.status_code == 200, r.text
         assert r.json()["onboarding"] == {

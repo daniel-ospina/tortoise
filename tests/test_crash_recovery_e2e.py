@@ -7,8 +7,8 @@ restart → scan_incomplete → recover → verify recovered cards are consisten
 """
 from __future__ import annotations
 
-import json
-import os
+import json  # noqa: F401
+import os  # noqa: F401
 import sys
 import tempfile
 from pathlib import Path
@@ -18,7 +18,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 try:
-    from shared_state.events import register_event_type
+    from shared_state.events import register_event_type  # noqa: I001
     from shared_state.event_log import (
         append_event,
         replay_events,
@@ -39,7 +39,7 @@ def _register_card_types():
         "card_created", "step_started", "step_completed",
         "card_completed", "card_failed", "checkpoint",
     ):
-        try:
+        try:  # noqa: SIM105
             register_event_type(t)
         except ValueError:
             pass  # already registered

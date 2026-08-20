@@ -29,10 +29,10 @@ from datetime import datetime, timedelta, timezone
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
-import pytest
+import pytest  # noqa: I001
 from fastapi.testclient import TestClient
 
-from tortoise.auth import hash_api_key, verify_api_key
+from tortoise.auth import hash_api_key, verify_api_key  # noqa: F401
 from tortoise.hosted_api import app, get_current_user
 from tortoise.sdk import TortoiseSDK
 
@@ -137,15 +137,15 @@ def _count_active_keys(reg, team_id: str) -> int:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
 
 def _hours_ago(n: float) -> str:
-    return (datetime.now(timezone.utc) - timedelta(hours=n)).isoformat()
+    return (datetime.now(timezone.utc) - timedelta(hours=n)).isoformat()  # noqa: UP017
 
 
 def _hours_ahead(n: float) -> str:
-    return (datetime.now(timezone.utc) + timedelta(hours=n)).isoformat()
+    return (datetime.now(timezone.utc) + timedelta(hours=n)).isoformat()  # noqa: UP017
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -186,7 +186,7 @@ class TestBootstrapMint:
         r = client.post("/v1/session/key", json={"purpose": "bootstrap"})
         assert r.status_code == 200
         expires = datetime.fromisoformat(r.json()["expires_at"])
-        delta = expires - datetime.now(timezone.utc)
+        delta = expires - datetime.now(timezone.utc)  # noqa: UP017
         # 24h ± small clock skew between the mint's `now` and ours
         assert timedelta(hours=23, minutes=55) < delta <= timedelta(hours=24, minutes=1)
 

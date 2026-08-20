@@ -56,7 +56,7 @@ class TestCorpusSchema:
 
     def test_type_violation_rejected(self, tmp_path):
         p = _write_corpus(tmp_path, [{"id": "x", "tier": "nonsense", "family": "f"}])
-        with pytest.raises(Exception):
+        with pytest.raises(Exception):  # noqa: B017
             load_corpus(p)
 
     def test_optional_fields_ok(self, tmp_path):

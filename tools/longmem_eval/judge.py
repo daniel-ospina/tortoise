@@ -16,7 +16,7 @@ The judge model is configured via env, never hardcoded:
 
 Abstention questions (``_abs`` in question_id) use the unanswerable-template.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import json
 import logging

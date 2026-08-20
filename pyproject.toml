@@ -73,6 +73,78 @@ include = ["tortoise*", "benchmarks*", "battery*"]
 # GitHub connector; TORTOISE_ROUTING_CONFIG overrides it).
 tortoise = ["config/routing.yaml"]
 
+# --- Lint baseline (#1503) --------------------------------------------------
+# The shared agent-infra python-ci lint (ci.yml `agent-infra-ci` job, #303)
+# can now run the FULL ruff + mypy pass. Both tools are configured here so
+# the rule surface is pinned (version-stable) and the ~19k-violation gap
+# (ruff + mypy, measured pre-config) is recorded as a baseline instead of
+# blocking CI.
+#
+# Measured 2026-08-20 with ruff 0.16.3 + mypy 2.3.1 on origin/main:
+#   ruff  — 3,753 violations across 534 files (select below, line-length 100)
+#   mypy  — 406 errors in 58 files (123 checked, per-code counts in
+#           docs/lint-baseline-1503.md)
+#
+# The baseline makes the full pass run green WITHOUT a code refactor:
+#   ruff — the 3,753 existing violations are recorded as per-line `# noqa`
+#          directives (ruff check . --add-noqa); the rule surface stays ACTIVE
+#          for new code.
+#   mypy — the 406 existing errors are recorded as a config baseline
+#          (disable_error_code) since mypy has no noqa-equivalent.
+# Cleanup = fix a violation and delete its `# noqa` directive (ruff) / remove
+# a code from disable_error_code (mypy), then re-measure (tracked in the
+# follow-up issue; counts live in docs/lint-baseline-1503.md).
+
+[tool.ruff]
+# line-length 100 matches the codebase's actual distribution (812 tortoise/
+# lines > 100 vs 1,830 > 88) and mirrors the historical tooling (flake8 config
+# used max-line-length 100).
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# Explicit, version-stable select: ruff 0.16 expanded its DEFAULT surface to
+# 413 rules (up from the classic E4/E7/E9/F 59) — relying on the default would
+# drift the baseline with every ruff bump. These 7 categories are the
+# long-standing stable core (E, F, B, UP, I, SIM, RUF).
+select = ["E", "F", "B", "UP", "I", "SIM", "RUF"]
+# Deferred style rules (not part of the baseline — never enforced):
+#   E501     line-too-long — redundant with `ruff format`'s line-length
+#            handling; the codebase has 812 lines > 100 that are untouched.
+#   RUF001/2/3  ambiguous-unicode — noisy on this repo's multi-language
+#            comment/string surface (Latin-1 quotes); low signal.
+ignore = ["E501", "RUF001", "RUF002", "RUF003"]
+
+[tool.mypy]
+python_version = "3.12"
+# Agent-infra python-ci convention (templates/.github/workflows/python-ci.yml):
+# mypy <pkg> --ignore-missing-imports --check-untyped-defs — moved into the
+# config so the caller's typecheck-command stays a bare `mypy tortoise/`.
+ignore_missing_imports = true
+check_untyped_defs = true
+# Baseline (#1503): every error code present in the 406-error first pass is
+# disabled so the full typecheck runs green. Per-code counts + cleanup order
+# are documented in docs/lint-baseline-1503.md.
+disable_error_code = [
+    "attr-defined",      # 120
+    "arg-type",          #  99
+    "assignment",        #  50
+    "name-defined",      #  31
+    "return-value",      #  18
+    "union-attr",        #  16
+    "var-annotated",     #  15
+    "index",             #  13
+    "operator",          #   9
+    "no-redef",          #   9
+    "misc",              #   8
+    "dict-item",         #   6
+    "call-arg",          #   6
+    "list-item",         #   2
+    "call-overload",     #   2
+    "override",          #   1
+    "func-returns-value",#   1
+]
+
 [tool.pytest.ini_options]
 markers = [
     "bench: issue #316 benchmark harness tests (benchmarks/ + tests/bench/)",

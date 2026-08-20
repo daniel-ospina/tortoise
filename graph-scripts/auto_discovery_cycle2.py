@@ -1,6 +1,6 @@
 """Cycle 2 — Gap Analysis: query the graph for weak points."""
 # Historical — uses embedded tortoise.db. Do not run against production Docker.
-import sys, os
+import sys, os  # noqa: E401, I001
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from tortoise.api import EventAPI, provenance
@@ -11,7 +11,7 @@ log = EventLog('auto-discovery-cycle2.jsonl')
 proj = FalkorProjection()
 api = EventAPI(log, initiated_by="user", agent_id="research-agent", projection=proj)
 
-pv = lambda quote: provenance("auto-discovery", (0,0), quote, speaker="research-agent", extracted_by="manual@1.0")
+pv = lambda quote: provenance("auto-discovery", (0,0), quote, speaker="research-agent", extracted_by="manual@1.0")  # noqa: E731
 
 api._emit("ingest_begin", source_id="gap-analysis", extractor_version="manual@1.0")
 
@@ -56,7 +56,7 @@ for row in only_nand:
 grounding = proj.compute_grounding(lam=0.6)
 # Find lowest-grounded points
 low_grounded = sorted(grounding.items(), key=lambda x: x[1])[:5]
-print(f"\n=== Lowest Grounding Scores ===")
+print(f"\n=== Lowest Grounding Scores ===")  # noqa: F541
 for pid, g in low_grounded:
     r = proj.query("MATCH (p:Point {id:$id}) RETURN p.content", params={"id": pid}).result_set
     content = r[0][0][:100] if r else "?"
@@ -131,4 +131,4 @@ api.add_operator("IMPL", [g4, g6], "auto-discovery",
     pv("Dual-mode UX gap relates to 'dreaming' mode — both lack concrete evidence"))
 
 api._emit("ingest_end", source_id="gap-analysis")
-print(f"\nCycle 2 complete: 6 gap points + 4 IMPL edges filed")
+print(f"\nCycle 2 complete: 6 gap points + 4 IMPL edges filed")  # noqa: F541

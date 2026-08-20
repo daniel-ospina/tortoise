@@ -247,7 +247,7 @@ class TestSubprocessSmoke:
     def test_python_m_selfhost_real_http(self, tmp_path):
         """T1.4 subprocess smoke: `python -m tortoise.selfhost` on an
         ephemeral port serves /health + MCP initialize over real HTTP."""
-        import socket
+        import socket  # noqa: I001
         import subprocess
         import sys
         import time

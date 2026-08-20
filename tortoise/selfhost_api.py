@@ -153,9 +153,9 @@ async def create_point(body: CreatePointRequest):
             tags=body.tags,
             dedup=body.dedup,
         )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001, F841, RUF100
         _logger.exception("selfhost create_point failed")
-        raise HTTPException(status_code=500, detail="Internal error")
+        raise HTTPException(status_code=500, detail="Internal error")  # noqa: B904
     return _point_out(result)
 
 
@@ -186,9 +186,9 @@ async def list_points(
     )
     try:
         rows = proj.g.query(query, params=params).result_set
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001, F841, RUF100
         _logger.exception("selfhost list_points failed")
-        raise HTTPException(status_code=500, detail="Internal error")
+        raise HTTPException(status_code=500, detail="Internal error")  # noqa: B904
     results = []
     for r in rows:
         d = dict(r[0])
@@ -218,7 +218,7 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100)):
         # remote FalkorDB AND embedded eval (code-review P1, #525).
         results = sdk.tortoise_fts_query(query=q, limit=limit)
         return [_point_out(r) if isinstance(r, dict) else r for r in results]
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001, F841, RUF100
         _logger.exception("selfhost search failed")
         # Defensive CONTAINS fallback (FTS genuinely unavailable).
         try:
@@ -230,7 +230,7 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100)):
             )
             rows = proj.g.query(query, params={"q": q, "limit": limit}).result_set
             return [_point_out(dict(r[0])) for r in rows]
-        except Exception as e2:  # noqa: BLE001
+        except Exception as e2:  # noqa: BLE001, RUF100
             _logger.exception("selfhost search fallback failed")
             raise HTTPException(status_code=500, detail="Internal error") from e2
 
@@ -263,7 +263,7 @@ async def topic_summary(
             include_relationships=include_relationships,
         )
         return result
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001, RUF100
         _logger.exception("selfhost topic summary failed")
         raise HTTPException(status_code=500, detail="Internal error") from e
 
@@ -288,6 +288,6 @@ async def dream(full: bool = False, mode: str | None = None,
         else:
             result = sdk.dream(dirty_only=True)
         return {"status": "ok", "result": result}
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001, F841, RUF100
         _logger.exception("selfhost dream failed")
-        raise HTTPException(status_code=500, detail="Internal error")
+        raise HTTPException(status_code=500, detail="Internal error")  # noqa: B904

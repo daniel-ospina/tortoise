@@ -8,8 +8,8 @@ RELATIVE_PATH_ERROR constant; mcp_server error surface.
 from __future__ import annotations
 
 import os
-import subprocess
-import sys
+import subprocess  # noqa: F401
+import sys  # noqa: F401
 import tempfile
 
 import pytest
@@ -38,7 +38,7 @@ def test_absolute_path_passes():
     proj = FalkorProjection(path)
     proj.close()
     for suffix in (".db", ".db.settings"):
-        try:
+        try:  # noqa: SIM105
             os.remove(path + suffix)
         except OSError:
             pass
@@ -58,7 +58,7 @@ def test_escape_hatch_allows_absolute_only():
     proj = FalkorProjection(path, allow_nonstandard_path=True)
     proj.close()
     for suffix in (".db", ".db.settings"):
-        try:
+        try:  # noqa: SIM105
             os.remove(path + suffix)
         except OSError:
             pass
@@ -73,7 +73,7 @@ def test_escape_hatch_env_var(monkeypatch):
     proj = FalkorProjection(path)  # absolute, allowed via env
     proj.close()
     for suffix in (".db", ".db.settings"):
-        try:
+        try:  # noqa: SIM105
             os.remove(path + suffix)
         except OSError:
             pass

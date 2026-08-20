@@ -12,7 +12,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.embeddings import find_cross_source_matches  # noqa: E402
+from tortoise.embeddings import find_cross_source_matches  # noqa: E402, I001, RUF100
 
 
 # ── helpers ──────────────────────────────────────────────────────────
@@ -234,7 +234,7 @@ def test_speaker_name_variation():
 def test_sentence_transformers_path():
     """Force the sentence_transformers import to succeed via mock —
     covers lines 30-31 that the TF-IDF fallback skips."""
-    import numpy as np
+    import numpy as np  # noqa: I001
     from unittest.mock import MagicMock
 
     mock_st = MagicMock()

@@ -3,7 +3,7 @@
 Runnable without pytest:  .venv/bin/python tests/test_ingest.py
 (also works under pytest if installed).
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import os
 import sys
@@ -17,10 +17,10 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.extractor import MockModel                                                  # noqa: E402
-from tortoise.ingest import build_model, main                                             # noqa: E402
-from tortoise.models import OllamaModel, OpenAICompatModel                                # noqa: E402
-from tortoise.projection import FalkorProjection                                          # noqa: E402
+from tortoise.extractor import MockModel  # noqa: E402, I001, RUF100
+from tortoise.ingest import build_model, main  # noqa: E402, RUF100
+from tortoise.models import OllamaModel, OpenAICompatModel  # noqa: E402, RUF100
+from tortoise.projection import FalkorProjection  # noqa: E402, RUF100
 
 # ── Live-FalkorDB availability (mirrors tests/test_hnsw_vector_index.py) ──
 # #125 capture/upgrade tests connect to docker://localhost:16379 (live
@@ -252,7 +252,7 @@ def test_main_force():
     with patch("sys.argv", args):
         _run_main(None)
 
-    with patch("sys.argv", args + ["--force"]):
+    with patch("sys.argv", args + ["--force"]):  # noqa: RUF005
         second_output = _run_main(None, capture=True)
 
     assert "ingesting" in second_output, f"expected ingesting, got: {second_output!r}"
@@ -320,10 +320,10 @@ def test_main_bad_model():
 
 def test_resolve_domain_from_path():
     """resolve_domain_from_path finds longest-prefix match from manifest."""
-    from tortoise.domain_loader import resolve_domain_from_path
+    from tortoise.domain_loader import resolve_domain_from_path  # noqa: I001
     # Use a temp manifest so tests don't depend on the production mapping
-    import yaml, tempfile
-    manifest = tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False)
+    import yaml, tempfile  # noqa: E401
+    manifest = tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False)  # noqa: SIM115
     yaml.dump({
         'version': 2,
         'directory_map': {
@@ -358,7 +358,7 @@ def test_resolve_domain_from_path():
 
 def test_ingest_auto_detects_domain_from_path():
     """When frontmatter has no domain, the file path is checked against directory_map."""
-    import yaml, tempfile
+    import yaml, tempfile  # noqa: E401, I001
     # Document with frontmatter but no domain field
     doc_md = """---
 title: Research Brief
@@ -377,7 +377,7 @@ Content here.
     t.write_text(doc_md, encoding="utf-8")
 
     # Write a test manifest that maps the tmpdir prefix
-    manifest = tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False)
+    manifest = tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', delete=False)  # noqa: SIM115
     yaml.dump({
         'version': 2,
         'directory_map': {docs_epics_dir + '/': 'capability'},
@@ -391,7 +391,7 @@ Content here.
 
     try:
         # monkey-patch the manifest path used by ingest
-        import tortoise.ingest as ingest_mod
+        import tortoise.ingest as ingest_mod  # noqa: F401, I001
         import tortoise.domain_loader as dl_mod
         orig_load = dl_mod.load_manifest
         def _patched_load(path=None):
@@ -519,7 +519,7 @@ if __name__ == "__main__":
 def test_capture_metadata_creates_document_no_points():
     """#125: --capture-metadata creates Document + sessionCaptured Event,
     ZERO Points, and does NOT block a later full extraction (no begin_ingest)."""
-    import json
+    import json  # noqa: F401
     uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_ingest125")
     db = uri  # live DB URI
     if not _require_live_falkor():
@@ -614,7 +614,7 @@ def test_full_ingest_unaffected_and_not_blocked_by_capture():
 def test_capture_defaults_doc_status_captured():
     """#133 P0: --capture-metadata with NO doc_status in frontmatter
     must default the Document to doc_status='captured' (not 'draft')."""
-    import json
+    import json  # noqa: F401
     uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_133")
     db = uri
     if not _require_live_falkor():
@@ -649,7 +649,7 @@ def test_capture_defaults_doc_status_captured():
 def test_needs_extraction_flag_surfaces_and_drives_upgrade_all():
     """#133: needs_extraction frontmatter → Document property → --upgrade-all
     discovers and upgrades the Document (e2e bridge)."""
-    import json
+    import json  # noqa: F401
     uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_133")
     db = uri
     if not _require_live_falkor():
@@ -684,7 +684,7 @@ def test_needs_extraction_flag_surfaces_and_drives_upgrade_all():
 def test_upgrade_on_already_extracted_is_noop():
     """#133: --upgrade on a Document already doc_status='extracted' → no-op
     'doc already extracted, skipped' (idempotency)."""
-    import json
+    import json  # noqa: F401
     uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_133")
     db = uri
     if not _require_live_falkor():
@@ -734,7 +734,7 @@ def test_upgrade_all_without_transcript_does_not_crash(monkeypatch, tmp_path):
     #329: embedded DB (pre-created file so ingest uses the embedded path)
     + TORTOISE_INGEST_BASE_DIR set to the corpus root so the operator's own
     file re-upgrades (fail-closed default would skip it)."""
-    import json
+    import json  # noqa: F401, I001
     from tortoise.projection import FalkorProjection
     db = _tmp("db_133_ua.db")
     # Create a real embedded DB at the path so ingest uses the embedded branch
@@ -781,7 +781,7 @@ def test_upgrade_all_without_transcript_does_not_crash(monkeypatch, tmp_path):
 def test_upgrade_all_fail_closed_outside_base(monkeypatch, tmp_path):
     """#329: upgrade-all with a sourcePath OUTSIDE the base is skipped
     (fail-closed) — a tenant-set /etc/passwd-style path is never read."""
-    import json
+    import json  # noqa: F401, I001
     from tortoise.projection import FalkorProjection
     db = _tmp("db_133_fc.db")
     _seed = FalkorProjection(db)
@@ -866,7 +866,7 @@ def _legacy_ingest_session(tmp_path, monkeypatch, content: str,
     and return (sdk, report). Env mutations (TORTOISE_INDEX_NO_NETWORK etc.)
     applied via monkeypatch.setenv — restored after the test."""
     from tortoise.sdk import TortoiseSDK
-    corpus = tmp_path / "corpus"; corpus.mkdir()
+    corpus = tmp_path / "corpus"; corpus.mkdir()  # noqa: E702
     (corpus / "s.md").write_text(content)
     for k, v in (env or {}).items():
         monkeypatch.setenv(k, v)
@@ -897,7 +897,7 @@ def test_sc4_indexed_session_keeps_issue_object_edges(tmp_path, monkeypatch):
     INSTANTIATES-edge preservation term. The legacy ingest branch must not
     regress during the W3 window."""
     from tortoise.sdk import TortoiseSDK
-    corpus = tmp_path / "corpus"; corpus.mkdir()
+    corpus = tmp_path / "corpus"; corpus.mkdir()  # noqa: E702
     (corpus / "s.md").write_text(SESSION_WITH_ISSUES)
     sdk = TortoiseSDK(os.path.join(str(tmp_path), "sc4.db"))
     try:
@@ -922,13 +922,13 @@ def test_sc4_no_network_legacy_branch_still_embeds(tmp_path, monkeypatch):
     call boundary only — never inside the shared _session_embedding; an
     implementation short-circuiting inside the shared function changes FROZEN
     legacy behavior and fails this leg)."""
-    from tortoise.sdk import TortoiseSDK
+    from tortoise.sdk import TortoiseSDK  # noqa: I001
     import tortoise.session_indexer as si_mod
-    corpus = tmp_path / "corpus"; corpus.mkdir()
+    corpus = tmp_path / "corpus"; corpus.mkdir()  # noqa: E702
     (corpus / "s.md").write_text("---\nsessionId: sc4-2\ntitle: N\n---\nBody")
     monkeypatch.setenv("TORTOISE_INDEX_NO_NETWORK", "1")
     calls = {"n": 0}
-    orig = si_mod.compute_session_embedding
+    orig = si_mod.compute_session_embedding  # noqa: F841
 
     def _spy(*a, **k):
         # spy the INNER network-calling function (session_indexer.py:453):
@@ -961,7 +961,7 @@ def test_sc4_no_network_legacy_branch_still_embeds(tmp_path, monkeypatch):
 def test_sc4_deprecation_markers_present():
     """T9 indicator: SDK docstring deprecation markers on the two frozen
     legacy surfaces record the W3 divergence."""
-    from tortoise.sdk import TortoiseSDK
+    from tortoise.sdk import TortoiseSDK  # noqa: I001
     import inspect
     for method_name in ("ingest_corpus", "index_sessions"):
         doc = inspect.getdoc(getattr(TortoiseSDK, method_name)) or ""

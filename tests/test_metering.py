@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
-import tempfile
+import tempfile  # noqa: F401
 
 import pytest
 
@@ -15,7 +15,7 @@ from tortoise.metering import (
     _current_period,
     _ops_allowance,
     _reset_thresholds_for_tests,
-    _thresholds_fired,
+    _thresholds_fired,  # noqa: F401
     get_current_usage,
     record_write_ops,
 )
@@ -57,7 +57,7 @@ def reg_sdk(monkeypatch, tmp_path):
 
 class TestRecordWriteOps:
     def test_increment_creates_record(self, reg_sdk):
-        sdk, tid = reg_sdk
+        sdk, tid = reg_sdk  # noqa: RUF059
         result = record_write_ops(tid, tier="pro")
         assert result is not None
         assert result["write_ops"] == 1
@@ -66,14 +66,14 @@ class TestRecordWriteOps:
         assert result["ops_allowance"] == 50000  # from pricing.json
 
     def test_multiple_increments_accumulate(self, reg_sdk):
-        sdk, tid = reg_sdk
+        sdk, tid = reg_sdk  # noqa: RUF059
         record_write_ops(tid, tier="pro")
         record_write_ops(tid, tier="pro")
         result = record_write_ops(tid, tier="pro")
         assert result["write_ops"] == 3
 
     def test_increment_n_greater_than_one(self, reg_sdk):
-        sdk, tid = reg_sdk
+        sdk, tid = reg_sdk  # noqa: RUF059
         result = record_write_ops(tid, tier="pro", n=5)
         assert result["write_ops"] == 5
 
@@ -108,7 +108,7 @@ class TestRecordWriteOps:
 
     def test_non_fatal_on_db_error(self, reg_sdk, monkeypatch):
         """Metering failures are logged, never raised."""
-        sdk, tid = reg_sdk
+        sdk, tid = reg_sdk  # noqa: RUF059
         # Break ALL future registry SDK connections by patching _reg_sdk
         import tortoise.metering as metering_mod
         def _bad_reg():
@@ -124,7 +124,7 @@ class TestRecordWriteOps:
 class TestThresholdEvents:
     def test_80_percent_warning(self, reg_sdk, caplog):
         """Crossing 80% of allowed ops emits a WARNING log once."""
-        sdk, tid = reg_sdk
+        sdk, tid = reg_sdk  # noqa: RUF059
         _reset_thresholds_for_tests()
         allowance = 50000  # pro tier
         eighty_pct = int(allowance * 0.80)
@@ -144,7 +144,7 @@ class TestThresholdEvents:
 
     def test_100_percent_error(self, reg_sdk, caplog):
         """Crossing 100% of allowed ops emits an ERROR log once."""
-        sdk, tid = reg_sdk
+        sdk, tid = reg_sdk  # noqa: RUF059
         _reset_thresholds_for_tests()
         allowance = 50000  # pro tier
 
@@ -161,7 +161,7 @@ class TestThresholdEvents:
 
     def test_threshold_fires_once_per_period(self, reg_sdk, caplog):
         """Threshold events fire only once per (team, period, pct)."""
-        sdk, tid = reg_sdk
+        sdk, tid = reg_sdk  # noqa: RUF059
         _reset_thresholds_for_tests()
 
         # Cross 80% one op at a time from allowance-1 — should fire once
@@ -225,7 +225,7 @@ class TestGetCurrentUsage:
         sdk.close()
 
     def test_usage_reflects_accumulated_ops(self, reg_sdk):
-        sdk, tid = reg_sdk
+        sdk, tid = reg_sdk  # noqa: RUF059
         record_write_ops(tid, tier="pro", n=42)
         usage = get_current_usage(tid)
         assert usage["write_ops_used"] == 42
@@ -234,8 +234,8 @@ class TestGetCurrentUsage:
 
     def test_overage_cost_computed(self, reg_sdk):
         """When usage exceeds allowance, overage_cost_usd is computed."""
-        sdk, tid = reg_sdk
-        allowance = 50000  # pro
+        sdk, tid = reg_sdk  # noqa: RUF059
+        allowance = 50000  # pro  # noqa: F841
         # Use 55k ops → 5k overage → 1 block of 10k → $5
         record_write_ops(tid, tier="pro", n=55000)
         usage = get_current_usage(tid)
@@ -244,14 +244,14 @@ class TestGetCurrentUsage:
 
     def test_overage_rounds_up_to_nearest_block(self, reg_sdk):
         """Overage is ceiling'd to nearest 10k block."""
-        sdk, tid = reg_sdk
+        sdk, tid = reg_sdk  # noqa: RUF059
         # Use 50001 → 1 op over → 1 block → $5
         record_write_ops(tid, tier="pro", n=50001)
         usage = get_current_usage(tid)
         assert usage["overage_cost_usd"] == 5.0
 
     def test_no_overage_when_under_allowance(self, reg_sdk):
-        sdk, tid = reg_sdk
+        sdk, tid = reg_sdk  # noqa: RUF059
         record_write_ops(tid, tier="pro", n=100)
         usage = get_current_usage(tid)
         assert usage["overage_cost_usd"] is None
@@ -282,7 +282,7 @@ class TestGetCurrentUsageSupabaseDegrade:
     registry path) instead of raising (which 500'd /v1/team)."""
 
     def test_erroring_cp_returns_zero_usage_dict(self, monkeypatch, caplog):
-        from tortoise.supabase_control import is_supabase_enabled
+        from tortoise.supabase_control import is_supabase_enabled  # noqa: I001
         from tests.fake_control_plane import ErrorControlPlane
 
         # Force the Supabase branch

@@ -35,7 +35,7 @@ except ModuleNotFoundError:  # pragma: no cover - dep-missing environment
     # ImportError at construction instead.
     _OriginalFalkorDB = None  # type: ignore[assignment]
 
-from tortoise.config import RELATIVE_PATH_ERROR
+from tortoise.config import RELATIVE_PATH_ERROR  # noqa: I001
 # #1371: eager import registers the batch atexit flush (module-import time,
 # before any client construction) so LIFO ordering runs it LAST.
 from tortoise.embedded_lifecycle import atexit_fast_close
@@ -97,7 +97,7 @@ if _OriginalFalkorDB is not None:
             if getattr(self, "_t_closed", False):
                 return
             self._t_closed = True
-            try:
+            try:  # noqa: SIM105
                 self.close()
             except Exception:
                 pass  # teardown context: never raise

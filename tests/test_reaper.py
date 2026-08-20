@@ -11,7 +11,7 @@ import os
 import shutil
 import socket
 import subprocess
-import sys
+import sys  # noqa: F401
 import tempfile
 import threading
 import time
@@ -65,7 +65,7 @@ def _clean_redislite_residue():
     try:
         after_pids, after_dirs = _snapshot()
         for pid in after_pids - before_pids:
-            try:
+            try:  # noqa: SIM105
                 os.kill(pid, 15)  # SIGTERM
             except (ProcessLookupError, PermissionError):
                 pass
@@ -181,7 +181,7 @@ def test_boot_cooldown_protects_fresh_servers():
     db, sock = _make_no_path_server()
     try:
         found = discover()
-        match = [s for s in found if s["socket_path"] == sock][0]
+        match = [s for s in found if s["socket_path"] == sock][0]  # noqa: RUF015
         assert match["classification"] == "protected"
     finally:
         db.close()
@@ -193,7 +193,7 @@ def test_min_uptime_env_override(monkeypatch):
     db, sock = _make_no_path_server()
     try:
         found = discover()
-        match = [s for s in found if s["socket_path"] == sock][0]
+        match = [s for s in found if s["socket_path"] == sock][0]  # noqa: RUF015
         assert match["classification"] == "candidate"
     finally:
         db.close()
@@ -220,7 +220,7 @@ def test_discover_protects_path_based_server_under_tempdir():
     finally:
         proj.close()
         for suffix in (".db", ".db.settings"):
-            try:
+            try:  # noqa: SIM105
                 os.remove(path + suffix)
             except OSError:
                 pass
@@ -281,7 +281,7 @@ def test_discover_skips_permission_denied_dir_continues_sweep(tmp_path, monkeypa
     (denied / "redis.socket").write_text("")
     os.chmod(denied, 0o000)
     try:
-        db, sock = _make_no_path_server()
+        db, sock = _make_no_path_server()  # noqa: RUF059
         try:
             monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
             with monkeypatch_tempdir(tmp_path):
@@ -303,7 +303,7 @@ def test_discover_skips_corrupt_settings_continues_sweep(tmp_path, caplog):
     bad.mkdir()
     (bad / "redis.socket").write_text("")
     (bad / "bad.db.settings").write_bytes(b"\x00\x01binary-garbage")
-    db, sock = _make_no_path_server()
+    db, sock = _make_no_path_server()  # noqa: RUF059
     try:
         with monkeypatch_tempdir(tmp_path):
             found = discover()
@@ -323,7 +323,7 @@ def test_discover_handles_symlinked_tempdir(tmp_path, monkeypatch):
     real.mkdir()
     link = tmp_path / "link"
     link.symlink_to(real, target_is_directory=True)
-    db, sock = _make_no_path_server()
+    db, sock = _make_no_path_server()  # noqa: RUF059
     try:
         monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
         # create a fake orphan under the symlinked dir
@@ -377,7 +377,7 @@ def _force_raw_resp_fallback(monkeypatch):
 def test_client_list_raw_resp_fallback_probe_is_non_destructive(monkeypatch):
     """Regression #849: with redis-cli absent, _client_list falls back to raw
     RESP over a plain socket and must NOT kill the server it probes."""
-    import redis as _redis
+    import redis as _redis  # noqa: I001
     from tortoise.embedded_reaper import _client_list
     _force_raw_resp_fallback(monkeypatch)
     db, sock = _make_no_path_server()
@@ -407,7 +407,7 @@ def test_client_list_raw_resp_fallback_never_uses_redislite_client(monkeypatch):
     is the last client (_connection_count() <= 1), killing the orphan.
     Deterministic on all platforms/versions (the kill itself is timing- and
     version-dependent)."""
-    import redislite.falkordb_client as _fc
+    import redislite.falkordb_client as _fc  # noqa: I001
     from tortoise.embedded_reaper import _client_list
     db, sock = _make_no_path_server()
     _force_raw_resp_fallback(monkeypatch)
@@ -536,14 +536,14 @@ def _spawn_orphan(monkeypatch=None):
     if not line.startswith("READY "):
         proc.kill()
         proc.wait()
-        raise AssertionError("orphan spawn failed: %r" % line)
+        raise AssertionError("orphan spawn failed: %r" % line)  # noqa: UP031
     sock = line.split(None, 1)[1]
     time.sleep(1)
     proc.kill()
     proc.wait()
     time.sleep(1)
     if not os.path.exists(sock):
-        raise AssertionError("orphan socket vanished: %s" % sock)
+        raise AssertionError("orphan socket vanished: %s" % sock)  # noqa: UP031
     return os.path.realpath(sock)
 
 
@@ -553,7 +553,7 @@ def test_reap_kills_idle_orphan(monkeypatch):
     monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
     sock = _spawn_orphan()
     found = discover()
-    match = [s for s in found if s["socket_path"] == sock][0]
+    match = [s for s in found if s["socket_path"] == sock][0]  # noqa: RUF015
     assert match["classification"] == "candidate"
     pid = match["pid"]
     reap([match], dry_run=False)
@@ -563,7 +563,7 @@ def test_reap_kills_idle_orphan(monkeypatch):
 
 def test_reap_skips_orphan_with_active_client(monkeypatch):
     """Orphan with a LIVE client (redis-py connected) -> reap() must NOT kill."""
-    import redis as _redis
+    import redis as _redis  # noqa: I001
     from tortoise.embedded_reaper import discover, reap
     monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
     sock = _spawn_orphan()
@@ -572,7 +572,7 @@ def test_reap_skips_orphan_with_active_client(monkeypatch):
     time.sleep(3)  # age the connection so CLIENT LIST sees it as a real client (age >= 2s)
     try:
         found = discover()
-        match = [s for s in found if s["socket_path"] == sock][0]
+        match = [s for s in found if s["socket_path"] == sock][0]  # noqa: RUF015
         pid = match["pid"]
         reap([match], dry_run=False)
         time.sleep(1)
@@ -588,7 +588,7 @@ def test_reap_skips_orphan_with_active_client(monkeypatch):
 
 def test_reap_skips_path_based_server(monkeypatch):
     """Path-based server (protected) -> reap() never kills it."""
-    from tortoise.projection import FalkorProjection
+    from tortoise.projection import FalkorProjection  # noqa: I001
     from tortoise.embedded_reaper import discover, reap
     path = os.path.join(tempfile.gettempdir(), f"reaper-protected-{os.getpid()}.db")
     proj = FalkorProjection(path)
@@ -608,7 +608,7 @@ def test_reap_skips_path_based_server(monkeypatch):
     finally:
         proj.close()
         for suffix in (".db", ".db.settings"):
-            try:
+            try:  # noqa: SIM105
                 os.remove(path + suffix)
             except OSError:
                 pass
@@ -620,7 +620,7 @@ def test_reap_removes_tempdir_after_kill(monkeypatch):
     sock = _spawn_orphan()
     from tortoise.embedded_reaper import discover, reap
     found = discover()
-    match = [s for s in found if s["socket_path"] == sock][0]
+    match = [s for s in found if s["socket_path"] == sock][0]  # noqa: RUF015
     dbdir = match["dbdir"]
     reap([match], dry_run=False)
     time.sleep(1)
@@ -633,7 +633,7 @@ def test_reap_dry_run_does_not_kill(monkeypatch):
     sock = _spawn_orphan()
     from tortoise.embedded_reaper import discover, reap
     found = discover()
-    match = [s for s in found if s["socket_path"] == sock][0]
+    match = [s for s in found if s["socket_path"] == sock][0]  # noqa: RUF015
     pid = match["pid"]
     reap([match], dry_run=True)
     time.sleep(1)
@@ -643,7 +643,7 @@ def test_reap_dry_run_does_not_kill(monkeypatch):
 def test_reap_fails_closed_when_client_probe_unknown(monkeypatch):
     """Regression #849: if CLIENT LIST state is unknown (probe failure),
     reap() must skip the server — never kill on unknown client state."""
-    from tortoise.embedded_reaper import _active_client_count, reap
+    from tortoise.embedded_reaper import _active_client_count, reap  # noqa: F401
     db, sock = _make_no_path_server()
     try:
         # Build the candidate record directly (discover() is racy under
@@ -708,7 +708,7 @@ def test_phase1_reclassifies_live_respawned_server(monkeypatch):
     sock = _spawn_orphan()
     from tortoise.embedded_reaper import discover, phase1_probe
     found = discover()
-    match = [s for s in found if s["socket_path"] == sock][0]
+    match = [s for s in found if s["socket_path"] == sock][0]  # noqa: RUF015
     live_pid = match["pid"]
     match["pid"] = 999999  # simulate stale registry pid
     updated = phase1_probe(match)
@@ -744,14 +744,14 @@ def _run_cli(*args, timeout=30):
 
 def test_cli_defaults_to_dry_run(monkeypatch):
     """CLI with no args defaults to dry-run (no processes killed)."""
-    import subprocess as sp
-    import sys as _sys
+    import subprocess as sp  # noqa: F401, I001
+    import sys as _sys  # noqa: F401
     from tortoise.embedded_reaper import discover, reap
     monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
     sock = _spawn_orphan()
     # capture the orphan pid directly from the socket's pidfile
     dbdir = os.path.dirname(sock)
-    pid = int(open(os.path.join(dbdir, "redis.pid")).read().strip())
+    pid = int(open(os.path.join(dbdir, "redis.pid")).read().strip())  # noqa: SIM115
     try:
         rc, out, err = _run_cli()
         assert rc == 0
@@ -770,7 +770,7 @@ def test_cli_no_dry_run_kills(monkeypatch):
     monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
     sock = _spawn_orphan()
     try:
-        rc, out, err = _run_cli("--no-dry-run")
+        rc, out, err = _run_cli("--no-dry-run")  # noqa: RUF059
         assert rc == 0
         from tortoise.embedded_reaper import discover
         found = discover()
@@ -790,7 +790,7 @@ def test_cli_json_output(monkeypatch):
     sock = _spawn_orphan()
     try:
         import json as _json
-        rc, out, err = _run_cli("--json")
+        rc, out, err = _run_cli("--json")  # noqa: RUF059
         assert rc == 0
         data = _json.loads(out)
         assert isinstance(data, list)
@@ -807,7 +807,7 @@ def test_cli_batch_size_limits_kills(monkeypatch):
     monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
     socks = [_spawn_orphan() for _ in range(2)]
     try:
-        rc, out, err = _run_cli("--no-dry-run", "--batch-size", "1")
+        rc, out, err = _run_cli("--no-dry-run", "--batch-size", "1")  # noqa: RUF059
         assert rc == 0
         from tortoise.embedded_reaper import discover
         found = discover()
@@ -916,7 +916,7 @@ def test_classify_dir_marks_dir_missing(tmp_path, monkeypatch):
     gone_dir = tmp_path / "gone"
     registry_file = socket_dir / "x.settings"
     registry_file.write_text(
-        '{"dir": "%s", "dbfilename": "redis.db"}' % str(gone_dir))
+        '{"dir": "%s", "dbfilename": "redis.db"}' % str(gone_dir))  # noqa: UP031
     record = _classify_dir(str(socket_dir), str(socket_dir / "redis.socket"))
     assert record is not None
     assert record["dir_missing"] is True
@@ -953,7 +953,7 @@ def test_reap_only_safe_reaps_detached_orphan(monkeypatch):
     monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
     sock = _spawn_orphan()
     found = discover()
-    match = [s for s in found if s["socket_path"] == sock][0]
+    match = [s for s in found if s["socket_path"] == sock][0]  # noqa: RUF015
     assert match["classification"] == "candidate"
     pid = match["pid"]
     # The orphan's spawning subprocess was SIGKILLed, so it is reparented
@@ -968,7 +968,7 @@ def test_reap_only_safe_protects_live_parented_server(monkeypatch):
     LIVE process (e.g. a concurrent suite's in-process fixture server at
     0-client between tests) — the detached criterion is parent-exact.
     """
-    from tortoise.embedded_reaper import reap
+    from tortoise.embedded_reaper import reap  # noqa: I001
     import os as _os
     live_parent = _os.getpid()  # this pytest process is alive
     kept = []
@@ -989,7 +989,7 @@ def test_reap_only_safe_protects_live_parented_server(monkeypatch):
 def test_active_suite_tokens_lists_markers(monkeypatch, tmp_path):
     """active_suite_tokens() returns non-hidden marker filenames only, and
     skips stale markers whose pid is dead (#1005 review P2)."""
-    from tortoise.embedded_reaper import ACTIVE_SUITES_DIR, active_suite_tokens
+    from tortoise.embedded_reaper import ACTIVE_SUITES_DIR, active_suite_tokens  # noqa: F401
     marker_dir = tmp_path / "active_suites"
     marker_dir.mkdir(parents=True)
     (marker_dir / "1234-abc").write_text(f"pid={os.getpid()}\n")
@@ -1025,7 +1025,7 @@ def test_sweep_stale_index_pid_files_removes_dead_holder(tmp_path):
 def test_sweep_stale_index_pid_files_skips_live_holder(tmp_path):
     """A lock held by a live process (flock taken) is NEVER removed — the
     force_release TOCTOU guard refuses while the flock is contended."""
-    from tortoise.index_lock import SessionIndexLock
+    from tortoise.index_lock import SessionIndexLock  # noqa: I001
     from tortoise.embedded_reaper import sweep_stale_index_pid_files
     lock_dir = tmp_path / "locks"
     lock_dir.mkdir()
@@ -1251,7 +1251,7 @@ def test_discover_classifies_dead_pid_dir_stale_socket():
     """Indicator (a): a dead-pid leftover dir -> 'stale_socket', NOT the
     phantom 'candidate' (reap() can never act on dead-pid candidates)."""
     from tortoise.embedded_reaper import discover
-    with _stale_dir_env() as (dbdir, sock):
+    with _stale_dir_env() as (dbdir, sock):  # noqa: RUF059
         found = discover()
         matches = [s for s in found if str(dbdir) in s.get("dbdir", "")]
         assert matches, "dead-pid dir not discovered"
@@ -1491,7 +1491,7 @@ def test_reap_stale_socket_rejects_quarantine_dir():
     """Re-entry guard: a dbdir already containing the quarantine suffix is
     never re-renamed (discover pass 2 also skips them — plan-review P1)."""
     from tortoise.embedded_reaper import reap
-    with _stale_dir_env() as (dbdir, sock):
+    with _stale_dir_env() as (dbdir, sock):  # noqa: RUF059
         _backdate_dir(dbdir)
         q = str(dbdir) + ".reaper-stale-999"
         os.rename(dbdir, q)
@@ -1638,7 +1638,7 @@ def test_discover_skips_quarantine_dirs():
     Without the skip, a guard-7-preserved LIVE server in a quarantine dir
     would classify 'candidate' next sweep and be killed."""
     from tortoise.embedded_reaper import discover
-    with _stale_dir_env() as (dbdir, sock):
+    with _stale_dir_env() as (dbdir, sock):  # noqa: RUF059
         _backdate_dir(dbdir)
         dbdir_real = os.path.realpath(str(dbdir))
         q = dbdir_real + ".reaper-stale-777"
@@ -1664,7 +1664,7 @@ def test_phase1_probe_missing_socket_undetermined():
 def test_reap_phase1_stale_socket_end_to_end():
     """discover() -> phase1_probe -> reap() removes a dead-pid leftover dir."""
     from tortoise.embedded_reaper import discover, phase1_probe, reap
-    with _stale_dir_env() as (dbdir, sock):
+    with _stale_dir_env() as (dbdir, sock):  # noqa: RUF059
         _backdate_dir(dbdir)
         dbdir_real = os.path.realpath(str(dbdir))
         found = discover()
@@ -1698,7 +1698,7 @@ def test_run_sweep_live_quarantine_not_killed():
     """Plan-review P1 pin: a guard-7 live quarantine dir must NOT be killed
     or deleted by a full _run_sweep — the quarantine is reaper-owned."""
     from tortoise.embedded_reaper import _run_sweep
-    with _stale_dir_env() as (dbdir, sock):
+    with _stale_dir_env() as (dbdir, sock):  # noqa: RUF059
         _backdate_dir(dbdir)
         q = os.path.realpath(str(dbdir)) + ".reaper-stale-888"
         os.rename(dbdir, q)
@@ -1726,7 +1726,7 @@ def test_run_sweep_pass1_live_server_in_quarantine_not_killed(monkeypatch):
     — safety depends on reap()'s CLIENT LIST failing closed on the moved
     socket (FileNotFoundError). Pins the interplay so a future
     retry-widening can't convert it into a wrongful kill."""
-    from tortoise.embedded_reaper import _run_sweep, _classify_dir
+    from tortoise.embedded_reaper import _run_sweep, _classify_dir  # noqa: I001
     with _stale_dir_env() as (dbdir, sock):
         _backdate_dir(dbdir)
         q = os.path.realpath(str(dbdir)) + ".reaper-stale-900"
@@ -1764,7 +1764,7 @@ def test_run_sweep_combined_quarantine_and_pid_files(monkeypatch):
     """One _run_sweep performs BOTH the quarantine sweep and the index-pid
     sweep; both classes appear in acted (regression guard)."""
     from tortoise.embedded_reaper import _run_sweep
-    with _stale_dir_env() as (dbdir, sock):
+    with _stale_dir_env() as (dbdir, sock):  # noqa: RUF059
         _backdate_dir(dbdir)
         q = os.path.realpath(str(dbdir)) + ".reaper-stale-999"
         os.rename(dbdir, q)  # dead quarantine -> removed
@@ -1817,7 +1817,7 @@ def test_cli_json_emits_stale_socket_shape(monkeypatch):
 def test_sweep_quarantine_dirs_dry_run_reports_without_mutating():
     """Quarantine dry-run reports would-remove without touching the dir."""
     from tortoise.embedded_reaper import _sweep_quarantine_dirs
-    with _stale_dir_env() as (dbdir, sock):
+    with _stale_dir_env() as (dbdir, sock):  # noqa: RUF059
         q = os.path.realpath(str(dbdir)) + ".reaper-stale-123"
         os.rename(dbdir, q)
         _mark_quarantine(q)
@@ -1830,7 +1830,7 @@ def test_sweep_quarantine_dirs_dry_run_reports_without_mutating():
 def test_sweep_quarantine_dirs_removes_dead_leftover():
     """Partial-rmtree / respawn leftovers under *.reaper-stale-* converge."""
     from tortoise.embedded_reaper import _sweep_quarantine_dirs
-    with _stale_dir_env() as (dbdir, sock):
+    with _stale_dir_env() as (dbdir, sock):  # noqa: RUF059
         q = os.path.realpath(str(dbdir)) + ".reaper-stale-123"
         os.rename(dbdir, q)  # simulate a quarantine from a prior sweep
         _mark_quarantine(q)
@@ -1842,7 +1842,7 @@ def test_sweep_quarantine_dirs_removes_dead_leftover():
 def test_sweep_quarantine_dirs_keeps_live_leftover():
     """A quarantine whose socket is live is WARNed and kept (forensic)."""
     from tortoise.embedded_reaper import _sweep_quarantine_dirs
-    with _stale_dir_env() as (dbdir, sock):
+    with _stale_dir_env() as (dbdir, sock):  # noqa: RUF059
         q = os.path.realpath(str(dbdir)) + ".reaper-stale-456"
         os.rename(dbdir, q)
         _mark_quarantine(q)
@@ -1864,7 +1864,7 @@ def test_sweep_quarantine_dirs_skips_symlink():
     """Symlinked *.reaper-stale-* entries are never probed or removed
     (mirror discover pass 2; cycle-2 P2-4)."""
     from tortoise.embedded_reaper import _sweep_quarantine_dirs
-    with _stale_dir_env() as (dbdir, sock):
+    with _stale_dir_env() as (dbdir, sock):  # noqa: RUF059
         link = dbdir.parent / "redislite_x.reaper-stale-999"
         link.symlink_to(dbdir, target_is_directory=True)
         removed = _sweep_quarantine_dirs(dry_run=False)
@@ -1877,7 +1877,7 @@ def test_sweep_quarantine_dirs_removes_socketless_partial():
     """A partial-rmtree quarantine that lost its socket (SIGALRM interrupt)
     converges: rmtree'd once its dir mtime passes the age gate."""
     from tortoise.embedded_reaper import _sweep_quarantine_dirs
-    with _stale_dir_env() as (dbdir, sock):
+    with _stale_dir_env() as (dbdir, sock):  # noqa: RUF059
         q = os.path.realpath(str(dbdir)) + ".reaper-stale-654"
         os.rename(dbdir, q)
         _mark_quarantine(q)
@@ -1958,13 +1958,13 @@ class _DelayedRespServer:
         except OSError:
             pass  # client closed first — the hold produced the timeout
         finally:
-            try:
+            try:  # noqa: SIM105
                 conn.close()
             except OSError:
                 pass
 
     def __exit__(self, *exc):
-        try:
+        try:  # noqa: SIM105
             self._srv.close()
         except OSError:
             pass

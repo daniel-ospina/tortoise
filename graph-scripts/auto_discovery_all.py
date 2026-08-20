@@ -1,6 +1,6 @@
 """Fixed: all 4 cycles in one script with none of the same bugs."""
 # Historical — uses embedded tortoise.db. Do not run against production Docker.
-import sys, os
+import sys, os  # noqa: E401, I001
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from tortoise.api import EventAPI, provenance
@@ -11,7 +11,7 @@ from tortoise.projection import FalkorProjection
 log1 = EventLog('auto-discovery-cycle1.jsonl')
 proj = FalkorProjection()
 api = EventAPI(log1, initiated_by="user", agent_id="research-agent", projection=proj)
-pv = lambda quote: provenance("auto-discovery", (0,0), quote, speaker="research-agent", extracted_by="manual@1.0")
+pv = lambda quote: provenance("auto-discovery", (0,0), quote, speaker="research-agent", extracted_by="manual@1.0")  # noqa: E731
 
 api._emit("ingest_begin", source_id="auto-discovery-research", extractor_version="manual@1.0")
 
@@ -139,13 +139,13 @@ api4._emit("ingest_end", source_id="converged-topology")
 print("Cycle 4: 1 synthesis point + 3 IMPL")
 
 # ── Final topology stats ─────────────────────────────────────────────────
-from tortoise.log import EventLog as EL
+from tortoise.log import EventLog as EL  # noqa: E402, I001
 all_events = []
 for logfile in ['auto-discovery-cycle1.jsonl', 'auto-discovery-cycle2.jsonl',
                 'auto-discovery-cycle3.jsonl', 'auto-discovery-cycle4.jsonl']:
     all_events.extend(EL(logfile).read_all())
 
-from tortoise.projection import fold
+from tortoise.projection import fold  # noqa: E402, I001
 points = fold(all_events)
 ad_points = {k: v for k, v in points.items() if v.get('context') == 'auto-discovery'}
 stats = [p for p in ad_points.values() if p.get('operator')]

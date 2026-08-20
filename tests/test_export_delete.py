@@ -26,7 +26,7 @@ os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 # test_hosted_api); the rate-limit test re-enables the sensitive limiter.
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
-import tortoise.hosted_api as ha_mod
+import tortoise.hosted_api as ha_mod  # noqa: I001
 from tortoise.hosted_api import app, get_current_user
 from tortoise.sdk import TortoiseSDK
 
@@ -254,7 +254,7 @@ class TestExportSupabase:
     def test_export_deleted_team_410(self, sb_client, as_user):
         tc, fake, _ = sb_client
         _seed_supabase_team(
-            fake, deleted_at=datetime.now(timezone.utc).isoformat())
+            fake, deleted_at=datetime.now(timezone.utc).isoformat())  # noqa: UP017
         as_user()
         r = tc.get(f"/v1/teams/{TEAM_ID}/export")
         assert r.status_code == 410
@@ -264,7 +264,7 @@ class TestExportSupabase:
         schedule (no info disclosure — security review, PR #873)."""
         tc, fake, _ = sb_client
         _seed_supabase_team(
-            fake, role="member", deleted_at=datetime.now(timezone.utc).isoformat())
+            fake, role="member", deleted_at=datetime.now(timezone.utc).isoformat())  # noqa: UP017
         as_user()
         r = tc.get(f"/v1/teams/{TEAM_ID}/export")
         assert r.status_code == 403
@@ -407,7 +407,7 @@ class TestDeleteSupabase:
         """Idempotent replay is owner-gated too — a non-owner probing a
         delete-pending team gets 403, never the deletion schedule."""
         tc, fake, _ = sb_client
-        _seed_supabase_team(fake, deleted_at=datetime.now(timezone.utc).isoformat())
+        _seed_supabase_team(fake, deleted_at=datetime.now(timezone.utc).isoformat())  # noqa: UP017
         as_user()
         # owner replay still works (removed-owner state accepted)
         r = tc.delete(f"/v1/teams/{TEAM_ID}")
@@ -482,7 +482,7 @@ class TestExportDeleteRegistry:
 
     def test_export_deleted_team_410_registry(self, reg_client, as_user):
         tc, db_path = reg_client
-        _seed_registry(db_path, deleted_at=datetime.now(timezone.utc).isoformat())
+        _seed_registry(db_path, deleted_at=datetime.now(timezone.utc).isoformat())  # noqa: UP017
         as_user(user_id="u-owner")
         r = tc.get("/v1/teams/reg-team-1/export")
         assert r.status_code == 410
@@ -562,11 +562,11 @@ class TestExportDeleteRegistry:
 class TestPurge:
     def test_purge_hard_deletes_past_grace_registry(self, reg_client,
                                                     capture_audit, monkeypatch):
-        tc, db_path = reg_client
-        past = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
+        tc, db_path = reg_client  # noqa: RUF059
+        past = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()  # noqa: UP017
         _seed_registry(db_path, team_id="reg-old", deleted_at=past)
         _seed_registry(db_path, team_id="reg-recent",
-                       deleted_at=datetime.now(timezone.utc).isoformat())
+                       deleted_at=datetime.now(timezone.utc).isoformat())  # noqa: UP017
         # wiring check: the graph drop is invoked for the purged team only
         dropped: list[str] = []
         monkeypatch.setattr(ha_mod, "_drop_team_graph",
@@ -590,8 +590,8 @@ class TestPurge:
         promised hard_delete_after (code-review P1, PR #873): env shrinks
         to 1h but the team was promised 24h 10h ago → NOT purged."""
         monkeypatch.setenv("TORTOISE_TEAM_DELETE_GRACE_HOURS", "1")
-        tc, db_path = reg_client
-        ten_hours = (datetime.now(timezone.utc) - timedelta(hours=10)).isoformat()
+        tc, db_path = reg_client  # noqa: RUF059
+        ten_hours = (datetime.now(timezone.utc) - timedelta(hours=10)).isoformat()  # noqa: UP017
         _seed_registry(db_path, team_id="reg-promised", deleted_at=ten_hours)
         sdk = TortoiseSDK(db_path, namespace="registry")
         sdk._get_registry().query(
@@ -607,9 +607,9 @@ class TestPurge:
 
     def test_purge_deletes_rows_past_grace_supabase(self, sb_client,
                                                     capture_audit):
-        tc, fake, _ = sb_client
-        past = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
-        recent = datetime.now(timezone.utc).isoformat()
+        tc, fake, _ = sb_client  # noqa: RUF059
+        past = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()  # noqa: UP017
+        recent = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         fake.seed("teams", [
             dict(FREE_TEAM, deleted_at=past),
             dict(FREE_TEAM, id="team-recent", deleted_at=recent),
@@ -647,8 +647,8 @@ class TestPurge:
         skips the team, the teams row survives as the retry anchor
         (control-plane rows untouched, no purge audit event), and the
         next sweep retries the drop to completion."""
-        tc, fake, _ = sb_client
-        past = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
+        tc, fake, _ = sb_client  # noqa: RUF059
+        past = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()  # noqa: UP017
         fake.seed("teams", [dict(FREE_TEAM, deleted_at=past),
                              dict(FREE_TEAM, id="team-other",
                                   deleted_at=past)])

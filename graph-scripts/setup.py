@@ -16,7 +16,7 @@ import shutil
 import socket
 import subprocess
 import sys
-import textwrap
+import textwrap  # noqa: F401
 import time
 from pathlib import Path
 
@@ -110,13 +110,13 @@ def _run_output(cmd: list[str]) -> str:
 # ── lock ────────────────────────────────────────────────────────────────
 
 def _acquire():
-    lock = open(LOCKFILE, "w")
+    lock = open(LOCKFILE, "w")  # noqa: SIM115
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         lock.write(str(os.getpid()))
         lock.flush()
         return lock
-    except (IOError, OSError):
+    except (IOError, OSError):  # noqa: UP024
         print(f"{RED}\u2717{RESET} Another setup instance is running ({LOCKFILE})")
         sys.exit(1)
 
@@ -450,7 +450,7 @@ def _detect_ollama_models() -> list[str]:
 def _pick_default_provider(keys: dict[str, str]) -> tuple[str, str] | None:
     """Return (provider, default_model) for the first found API key."""
     for env_var, (provider, model) in _OLLAMA_PROVIDERS.items():
-        if env_var in keys and keys[env_var]:
+        if env_var in keys and keys[env_var]:  # noqa: RUF019
             return provider, model
     return None
 
@@ -842,7 +842,7 @@ def step11b() -> None:
     global _PRODUCT_NAME
 
     print(f"\n  Product name: {BOLD}{_PRODUCT_NAME}{RESET}")
-    resp = input(f"  Press enter to confirm, or type a new name, or 'skip': ").strip()
+    resp = input(f"  Press enter to confirm, or type a new name, or 'skip': ").strip()  # noqa: F541
     if resp.lower() == "skip":
         _PRODUCT_NAME = ""
         print(f"  {YELLOW}Skipped — organize later with 'tortoise pipeline config'{RESET}")
@@ -857,13 +857,13 @@ def step11c() -> None:
     """Pipeline activation — pre-selected defaults."""
     global _PIPELINES
 
-    print(f"\n  Keep your knowledge graph updated automatically:")
-    print(f"    [1] GitHub issues/PRs pipeline (recommended)")
-    print(f"    [2] Docs pipeline (auto-tags new docs)")
-    print(f"    [3] Both")
-    print(f"    [4] Skip — I'll set up later")
+    print(f"\n  Keep your knowledge graph updated automatically:")  # noqa: F541
+    print(f"    [1] GitHub issues/PRs pipeline (recommended)")  # noqa: F541
+    print(f"    [2] Docs pipeline (auto-tags new docs)")  # noqa: F541
+    print(f"    [3] Both")  # noqa: F541
+    print(f"    [4] Skip — I'll set up later")  # noqa: F541
 
-    resp = input(f"  Choose [1-4] (default 3): ").strip()
+    resp = input(f"  Choose [1-4] (default 3): ").strip()  # noqa: F541
     if resp == "1":
         _PIPELINES = ["github_issues"]
     elif resp == "2":
@@ -894,7 +894,7 @@ def step11d() -> None:
         print(f"    {YELLOW}⚠{RESET}  No pipelines enabled")
     print(f"    {YELLOW}⚠{RESET}  No teams declared — working in solo mode")
 
-    resp = input(f"\n  Press enter to confirm, or 'back' to redo: ").strip()
+    resp = input(f"\n  Press enter to confirm, or 'back' to redo: ").strip()  # noqa: F541
     if resp.lower() == "back":
         print("  Re-running pipeline setup...")
         step11c()
@@ -995,7 +995,7 @@ def step11e() -> None:
         print(f"  {GREEN}Graph seeded ✓{RESET}")
     except Exception as e:
         print(f"  {YELLOW}⚠ Graph seeding skipped: {e}{RESET}")
-        print(f"    Run 'tortoise pipeline run' to populate the graph later.")
+        print(f"    Run 'tortoise pipeline run' to populate the graph later.")  # noqa: F541
 
 
 def step11() -> None:
@@ -1051,7 +1051,7 @@ def main() -> None:
         print(f"\n{BOLD}{'=' * 60}{RESET}")
         print(f"  {GREEN}Setup complete!{RESET} 🐢")
         print(f"  Mode: {MODE}")
-        print(f"  Run:  .venv/bin/python -m tortoise --help")
+        print(f"  Run:  .venv/bin/python -m tortoise --help")  # noqa: F541
         print(f"{BOLD}{'=' * 60}{RESET}\n")
 
     finally:

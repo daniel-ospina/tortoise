@@ -4,7 +4,7 @@ from __future__ import annotations
 import importlib
 import os
 
-import pytest
+import pytest  # noqa: F401
 
 # TORTOISE_SECRET_PEPPER is mandatory since #67 — set before import
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")

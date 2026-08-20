@@ -28,10 +28,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))  # repo root
 
-from tests.model_adapters import MODELS  # noqa: E402
-from tortoise import extractor_v2 as v2  # noqa: E402
-from tortoise.extractor_v2 import _complete, _parse_json  # noqa: E402
-from tortoise.value_extractor import summarize  # noqa: E402
+from tests.model_adapters import MODELS  # noqa: E402, RUF100
+from tortoise import extractor_v2 as v2  # noqa: E402, RUF100
+from tortoise.extractor_v2 import _complete, _parse_json  # noqa: E402, RUF100
+from tortoise.value_extractor import summarize  # noqa: E402, RUF100
 
 DEFAULT_TRANSCRIPT = Path(__file__).resolve().parents[3] / \
     "tests/eval/w-1272/w-design-bounded.txt"
@@ -135,7 +135,7 @@ def _judge_loss(model, a: dict, b: dict) -> dict:
     except Exception:  # judge failure degrades to text metric (loss = missing)
         return {}
     out = {}
-    for k, it in items:
+    for k, it in items:  # noqa: B007
         out[it] = d.get(it, "missing")
     return out
 
@@ -197,11 +197,11 @@ def main() -> None:
     i = 0
     while i < len(args):
         if args[i] == "--runs" and i + 1 < len(args):
-            runs = int(args[i + 1]); i += 2
+            runs = int(args[i + 1]); i += 2  # noqa: E702
         elif args[i] == "--chunk-size" and i + 1 < len(args):
-            chunk_size = int(args[i + 1]); i += 2
+            chunk_size = int(args[i + 1]); i += 2  # noqa: E702
         elif args[i] == "--no-judge":
-            judge = False; i += 1
+            judge = False; i += 1  # noqa: E702
         else:
             print(f"[run_parity_v2] unknown arg: {args[i]}", file=sys.stderr)
             sys.exit(2)

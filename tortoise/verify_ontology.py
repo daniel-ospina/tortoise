@@ -12,8 +12,8 @@ Usage:
 
 Exit codes: 0 = pass, 1 = contract mismatch, 2 = missing infrastructure, 3 = doc failures
 """
-from __future__ import annotations
-import argparse, re, sys
+from __future__ import annotations  # noqa: I001
+import argparse, re, sys  # noqa: E401
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent.parent

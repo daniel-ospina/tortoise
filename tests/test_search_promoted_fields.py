@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 import sys
-import tempfile
+import tempfile  # noqa: F401
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -123,7 +123,7 @@ def test_expand_relationships_missing_point(sdk):
 
 def test_expand_mcp_tool(sdk, monkeypatch):
     """MCP surface routes to the SDK method and returns the full payload (isolated DB)."""
-    from tortoise.mcp_auth import _transport_mode
+    from tortoise.mcp_auth import _transport_mode  # noqa: I001
     from tortoise.mcp_server import tortoise_expand_relationships
     from tortoise import mcp_server as mcp_mod
     assert callable(tortoise_expand_relationships)

@@ -183,7 +183,7 @@ class AuditResult:
         return len(self.issues)
 
     @classmethod
-    def from_dict(cls, d: dict) -> "AuditResult":
+    def from_dict(cls, d: dict) -> "AuditResult":  # noqa: UP037
         """Rebuild an AuditResult from to_dict() output (CLI human-mode path)."""
         issues: list[AuditIssue] = []
         check_counts: dict[str, int] = {}
@@ -319,7 +319,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                     "(extractedFrom)"),
             # Point-level sourceKind is legacy — tier the SOURCE node instead
             # (#398); see the missing_sourceKind_source check (7).
-            fix=("wire provenance + tier the source: create_source(url, kind, "
+            fix=("wire provenance + tier the source: create_source(url, kind, "  # noqa: UP031
                  "tier=...) then MATCH (ev:Point {id:'%s'}), (s:Source "
                  "{url:'...'}) CREATE (ev)-[:extractedFrom]->(s)" % ev_id),
             legacy=True,
@@ -445,7 +445,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
     for src_id, tgt_id, tgt_content in rows5:
         low = (tgt_content or "").lower()
         hit = next(
-            (kw for kw, pat in zip(CONTRADICTION_KEYWORDS, patterns5) if pat.search(low)),
+            (kw for kw, pat in zip(CONTRADICTION_KEYWORDS, patterns5) if pat.search(low)),  # noqa: B905
             None,
         )
         if hit is None:

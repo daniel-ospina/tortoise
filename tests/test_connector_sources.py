@@ -30,7 +30,7 @@ def fresh_sdk():
     try:
         yield sdk
     finally:
-        try:
+        try:  # noqa: SIM105
             sdk.close()
         except Exception:
             pass

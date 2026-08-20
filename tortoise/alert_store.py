@@ -31,7 +31,7 @@ import hashlib
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any, Callable  # noqa: UP035
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +79,7 @@ class AlertStore:
         self._push = push_telegram
         self._repo = repo
         self._assignee = assignee
-        self._now = now or (lambda: datetime.now(timezone.utc))
+        self._now = now or (lambda: datetime.now(timezone.utc))  # noqa: UP017
 
     def _clock(self) -> datetime:
         """Current time — evaluated per call so time-based suppression expires

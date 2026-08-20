@@ -29,9 +29,9 @@ import json
 import logging
 import resource
 import threading
-import time
+import time  # noqa: F401
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any, Callable  # noqa: UP035
 
 from .alert_store import AlertStore
 
@@ -72,7 +72,7 @@ def _newest_backup_ts(storage, team_id: str) -> datetime | None:
         ts = parts[2].split("_", 1)[0]  # strip the {rnd} suffix (review P1-1)
         for fmt in ("%Y%m%dT%H%M%S%fZ", "%Y%m%dT%H%M%SZ"):
             try:
-                parsed = datetime.strptime(ts, fmt).replace(tzinfo=timezone.utc)
+                parsed = datetime.strptime(ts, fmt).replace(tzinfo=timezone.utc)  # noqa: UP017
                 if newest is None or parsed > newest:
                     newest = parsed
                 break
@@ -180,7 +180,7 @@ class BackupWatcher:
         self._grace_min = grace_min
         self._simulate_enabled = simulate_enabled
         self._kill_switch_off = kill_switch_off or (lambda: False)
-        self._now = now or (lambda: datetime.now(timezone.utc))
+        self._now = now or (lambda: datetime.now(timezone.utc))  # noqa: UP017
         self._known_good: bool = False
         self._known_newest: dict[str, datetime] = {}
         self._known_state_teams: list[str] = []

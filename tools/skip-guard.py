@@ -83,7 +83,7 @@ def main(argv: list[str]) -> int:
         return 2
     log_path = argv[1]
     try:
-        log_text = open(log_path, encoding="utf-8", errors="replace").read()
+        log_text = open(log_path, encoding="utf-8", errors="replace").read()  # noqa: SIM115
     except OSError:
         # No log (pytest never wrote one / step cancelled) — nothing to fail on.
         return 0

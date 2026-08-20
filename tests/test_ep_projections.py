@@ -11,12 +11,12 @@ Tests:
      when TortoiseEP should warn about clipping.
 """
 
-import sys, os
+import sys, os  # noqa: E401, I001
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-import numpy as np
-import pytest
-from scipy.special import digamma, polygamma, beta as beta_func, roots_legendre
+import numpy as np  # noqa: I001
+import pytest  # noqa: F401
+from scipy.special import digamma, polygamma, beta as beta_func, roots_legendre  # noqa: F401
 from scipy.optimize import fsolve
 from scipy.stats import beta as beta_dist
 
@@ -210,8 +210,8 @@ def test_message_clipping_impact():
 
     # α=10 (weak evidence): no clamping effect at all
     r_10 = results[10]
-    assert r_10['mean_diff'] == 0.0, f"α=10 should have no clamping effect"
-    assert r_10['var_ratio'] == 1.0, f"α=10 variance unchanged by clamping"
+    assert r_10['mean_diff'] == 0.0, f"α=10 should have no clamping effect"  # noqa: F541
+    assert r_10['var_ratio'] == 1.0, f"α=10 variance unchanged by clamping"  # noqa: F541
 
     # α=1000: right at the boundary (nat = 999, clamped = 999 → no effect)
     # Actually nat = α-1 = 999, clamped max is 1000, so no change
@@ -235,7 +235,7 @@ def test_message_clipping_impact():
     mom_a, mom_b = tilted_moments(*cav_a, *cav_b, 2.0, phi_impl, n_quad=16)
 
     new_alpha_a, new_beta_a = moments_to_beta(*mom_a)
-    new_alpha_b, new_beta_b = moments_to_beta(*mom_b)
+    new_alpha_b, new_beta_b = moments_to_beta(*mom_b)  # noqa: RUF059
 
     # Message = natural(tilted) - natural(cavity)
     new_nat_a = _nat_from_beta(new_alpha_a, new_beta_a)
@@ -260,12 +260,12 @@ def test_message_clipping_impact():
     )
 
     # ── Report ─────────────────────────────────────────────────────
-    print(f"\n  Clipping impact for one-sided evidence Beta(α, 1):")
+    print(f"\n  Clipping impact for one-sided evidence Beta(α, 1):")  # noqa: F541
     print(f"  {'α':>8s}  {'mean_diff':>12s}  {'var_ratio':>12s}  {'clamped_β':>18s}")
     for alpha in evidence_strengths:
         r = results[alpha]
         print(f"  {alpha:8d}  {r['mean_diff']:12.6e}  {r['var_ratio']:12.2f}  "
-              f"{str(r['clamped_beta']):>18s}")
+              f"{str(r['clamped_beta']):>18s}")  # noqa: RUF010
 
     # Threshold: clipping first activates at α=1002 (nat=1001 > 1000)
     threshold_alpha = 1002
@@ -296,7 +296,7 @@ def test_beta_projection_moments_vs_mle():
     n_cases = 20
 
     results = []
-    for case_idx in range(n_cases):
+    for case_idx in range(n_cases):  # noqa: B007
         # Random cavity params
         # ponytail: uniform over reasonable range, covers all regimes
         alpha_a = float(rng.uniform(0.5, 10.0))
@@ -310,13 +310,13 @@ def test_beta_projection_moments_vs_mle():
         phi_fn = phi_nand if op_type == 'NAND' else phi_impl
 
         # ── Moment-Beta (method-of-moments) ────────────────────────
-        mom_a, mom_b = tilted_moments(
+        mom_a, mom_b = tilted_moments(  # noqa: RUF059
             alpha_a, beta_a, alpha_b, beta_b, weight, phi_fn, n_quad=16
         )
         mom_alpha_a, mom_beta_a = moments_to_beta(*mom_a)
 
         # ── MLE-Beta (M-projection) ────────────────────────────────
-        log_mom_a, log_mom_b = tilted_log_moments(
+        log_mom_a, log_mom_b = tilted_log_moments(  # noqa: RUF059
             alpha_a, beta_a, alpha_b, beta_b, weight, phi_fn, n_quad=16
         )
         mle_alpha_a, mle_beta_a = _mle_beta(*log_mom_a)
@@ -370,7 +370,7 @@ def test_beta_projection_kl_loss():
     n_cases = 20
 
     results = []
-    for case_idx in range(n_cases):
+    for case_idx in range(n_cases):  # noqa: B007
         alpha_a = float(rng.uniform(0.5, 10.0))
         beta_a = float(rng.uniform(0.5, 10.0))
         alpha_b = float(rng.uniform(0.5, 10.0))
@@ -434,7 +434,7 @@ def test_beta_projection_kl_loss():
     print(f"  Max  KL reduction:                 {max_reduction:.6f} nats")
     print(f"  Cases with < 0.001 nat reduction:  {small_count}/{n_cases}")
     print(f"  All reductions < 0.01:              {'✓' if max_reduction < 0.01 else '✗'}")
-    print(f"  MLE ≤ moments in all cases:         ✓")
+    print(f"  MLE ≤ moments in all cases:         ✓")  # noqa: F541
 
 
 
@@ -458,8 +458,8 @@ def test_clipping_recommendation():
     # But α=1001, β=1 → nat (1000, 0) → at boundary
     #    α=1002, β=1 → nat (1001, 0) → clipped
 
-    safe_total = 1001.0  # α+β ≤ 1001 guarantees no clipping
-    clip_threshold = 1002.0  # α > 1001 or β > 1001 can trigger clipping
+    safe_total = 1001.0  # α+β ≤ 1001 guarantees no clipping  # noqa: F841
+    clip_threshold = 1002.0  # α > 1001 or β > 1001 can trigger clipping  # noqa: F841
 
     # Verify: α=1001, β=1 → α+β=1002 > 1001 but nat=(1000,0) → no clip
     # α=1002, β=1 → α+β=1003, nat=(1001,0) → clipped
@@ -472,7 +472,7 @@ def test_clipping_recommendation():
     for alpha, beta_val in test_cases_safe:
         nat1, nat2 = _nat_from_beta(alpha, beta_val)
         cnat1, cnat2 = _clamp_nat(nat1, nat2)
-        nats = sorted([nat1, nat2, cnat1, cnat2])
+        nats = sorted([nat1, nat2, cnat1, cnat2])  # noqa: F841
         # With α+β ≤ 1002, α-1 ≤ 1001 and β-1 ≤ 1001, but clamp is 1000
         # α=1002, β=1 → total=1003 but α-1=1001 > 1000 → clips
         # So safe: α+β ≤ 1002? Let's check: α=1001, β=1 → α-1=1000, ok. α=1002, β=1 → α-1=1001, clips.
@@ -498,26 +498,26 @@ def test_clipping_recommendation():
             )
 
     # ── Report ─────────────────────────────────────────────────────
-    print(f"\n  Clipping recommendations:")
-    print(f"  Safe threshold: max(α, β) ≤ 1001  → never clips")
-    print(f"  Warning zone:   max(α, β) > 1001  → natural params clamped")
-    print(f"  Safe α+β:       ≤ 2002            → at worst one param clips slightly")
-    print(f"  Mean diff stays < 0.05 even at α=100000 (var ratio ~10⁶)")
-    print(f"  Factor updates: message itself rarely exceeds ±1000")
-    print(f"  ")
-    print(f"  Recommendation 1: Log WARNING when any posterior exceeds")
-    print(f"    α > 1001 or β > 1001 — 'evidence saturated; further")
-    print(f"    factor updates may be clipped (effect on mean < 0.1%).'")
-    print(f"  ")
-    print(f"  Recommendation 2: Safe α+β < 1001 never triggers clipping.")
-    print(f"  Recommendation 3: Clipping impact on mean is negligible")
-    print(f"    (< 0.05 even at α=100000). Primary effect is variance")
-    print(f"    inflation, not mean shift.")
-    print(f"  ")
-    print(f"  Recommendation 4: When both method-of-moments and MLE")
-    print(f"    produce nearly identical Betas (W₂ < 0.02, KL gap < 0.01),")
-    print(f"    method-of-moments is the right EP choice: it's cheaper")
-    print(f"    and preserves E[c] and E[c²] exactly at the factor level.")
+    print(f"\n  Clipping recommendations:")  # noqa: F541
+    print(f"  Safe threshold: max(α, β) ≤ 1001  → never clips")  # noqa: F541
+    print(f"  Warning zone:   max(α, β) > 1001  → natural params clamped")  # noqa: F541
+    print(f"  Safe α+β:       ≤ 2002            → at worst one param clips slightly")  # noqa: F541
+    print(f"  Mean diff stays < 0.05 even at α=100000 (var ratio ~10⁶)")  # noqa: F541
+    print(f"  Factor updates: message itself rarely exceeds ±1000")  # noqa: F541
+    print(f"  ")  # noqa: F541
+    print(f"  Recommendation 1: Log WARNING when any posterior exceeds")  # noqa: F541
+    print(f"    α > 1001 or β > 1001 — 'evidence saturated; further")  # noqa: F541
+    print(f"    factor updates may be clipped (effect on mean < 0.1%).'")  # noqa: F541
+    print(f"  ")  # noqa: F541
+    print(f"  Recommendation 2: Safe α+β < 1001 never triggers clipping.")  # noqa: F541
+    print(f"  Recommendation 3: Clipping impact on mean is negligible")  # noqa: F541
+    print(f"    (< 0.05 even at α=100000). Primary effect is variance")  # noqa: F541
+    print(f"    inflation, not mean shift.")  # noqa: F541
+    print(f"  ")  # noqa: F541
+    print(f"  Recommendation 4: When both method-of-moments and MLE")  # noqa: F541
+    print(f"    produce nearly identical Betas (W₂ < 0.02, KL gap < 0.01),")  # noqa: F541
+    print(f"    method-of-moments is the right EP choice: it's cheaper")  # noqa: F541
+    print(f"    and preserves E[c] and E[c²] exactly at the factor level.")  # noqa: F541
 
 
 
@@ -544,7 +544,7 @@ if __name__ == "__main__":
         print(f"{'=' * 70}")
         try:
             fn()
-            print(f"  ✓ PASS")
+            print(f"  ✓ PASS")  # noqa: F541
             passed += 1
         except AssertionError as e:
             print(f"  ✗ FAIL — {e}")

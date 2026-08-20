@@ -39,10 +39,10 @@ import hashlib
 import ipaddress
 import json
 import os
-import re
+import re  # noqa: F401
 import secrets
 from datetime import datetime, timedelta, timezone
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse  # noqa: F401
 
 # ── Protocol constants ──────────────────────────────────────────────────────
 
@@ -85,7 +85,7 @@ class OAuthError(Exception):
 # ── Small helpers ───────────────────────────────────────────────────────────
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(timezone.utc)  # noqa: UP017
 
 
 def _now_iso() -> str:
@@ -118,7 +118,7 @@ def _parse_ts(value) -> datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=timezone.utc)  # noqa: UP017
     return parsed
 
 
@@ -160,7 +160,7 @@ def _valid_redirect_uri(uri: str) -> bool:
         return False
     if parsed.scheme == "https" and parsed.hostname:
         return True
-    if parsed.scheme == "http" and parsed.hostname and _is_loopback(parsed.hostname):
+    if parsed.scheme == "http" and parsed.hostname and _is_loopback(parsed.hostname):  # noqa: SIM103
         return True
     return False
 
@@ -476,7 +476,7 @@ def _assert_team_usable(cp, team_id: str) -> None:
 def _quota_fields(team_row: dict) -> dict:
     """Quota shape shared with resolve_api_key so REST/MCP limits match
     (#329): preserve None (unlimited, Team tier), fall back to pricing."""
-    from tortoise.pricing import tier_limits
+    from tortoise.pricing import tier_limits  # noqa: I001
     from tortoise.quota import DEFAULT_MAX_SESSIONS
     from tortoise.quota import derived_tier
     tier = derived_tier({**team_row, "id": team_row.get("id")})

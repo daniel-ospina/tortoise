@@ -18,7 +18,7 @@ import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest
+import pytest  # noqa: I001
 
 from tortoise.projection import FalkorProjection
 from tortoise.analyze import _bfs_select_operators
@@ -74,13 +74,13 @@ def test_proj():
         proj = FalkorProjection(path=uri if uri else tempfile.mktemp(suffix=".db"))
 
     # Clear test data
-    try:
+    try:  # noqa: SIM105
         proj.g.query("MATCH (n:Point) DETACH DELETE n")
     except Exception:
         pass
 
     yield proj
-    try:
+    try:  # noqa: SIM105
         proj.g.query("MATCH (n:Point) DETACH DELETE n")
     except Exception:
         pass
@@ -145,7 +145,7 @@ class TestParitySampleMatches:
         ctx = f"test-direct-{uuid.uuid4().hex[:8]}"
         p1 = _make_point(test_proj, ctx, "Point 1")
         p2 = _make_point(test_proj, ctx, "Point 2")
-        p3 = _make_point(test_proj, ctx, "Point 3")  # no-op anchor
+        p3 = _make_point(test_proj, ctx, "Point 3")  # no-op anchor  # noqa: F841
 
         # Create operator connecting p1 → p2
         op_id = _make_operator(test_proj, p1, [p2], op_type="IMPL")

@@ -54,7 +54,7 @@ REPO_ROOT = str(Path(__file__).resolve().parent.parent.parent.parent)
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from benchmarks.synthetic_corpus import (  # noqa: E402
+from benchmarks.synthetic_corpus import (  # noqa: E402, I001
     build_topic_oracle,
     corpus_fingerprint_from_graph,
     generate_oracle_points,
@@ -64,7 +64,7 @@ from benchmarks.synthetic_corpus import (  # noqa: E402
     verify_indexes,
 )
 from tests.eval.retrieval import bootstrap  # noqa: E402
-from tests.eval.retrieval.judge import Pool, build_pool  # noqa: E402
+from tests.eval.retrieval.judge import Pool, build_pool  # noqa: E402, F401
 from tests.eval.retrieval.metrics import (  # noqa: E402
     METRICS, aggregate, compute_metrics,
 )
@@ -113,7 +113,7 @@ def _host_specs() -> dict:
 
 def _capture_provenance(proj, is_embedded: bool, extras: dict) -> dict:
     prov = {
-        "timestamp_utc": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        "timestamp_utc": _dt.datetime.now(_dt.timezone.utc).isoformat(),  # noqa: UP017
         "git_sha": _git_sha(),
         "host": _host_specs(),
         "db_mode": "embedded-falkordblite" if is_embedded else "docker-falkordb",
@@ -216,7 +216,7 @@ def retrieve_per_strategy(
     Returns {strategy: [(point_id, score)]} for fts/vector/structural/
     tfidf/fused[/fused_rerank]/fused@{20,60,100}, ranked best-first.
     """
-    from tortoise.search_engine import (
+    from tortoise.search_engine import (  # noqa: I001
         classify_query, degradation_chain, fallback_tfidf,
     )
 
@@ -503,7 +503,7 @@ def run_eval(args) -> dict:
     try:
         return _run_with_sdk(args, sdk)
     finally:
-        try:
+        try:  # noqa: SIM105
             sdk.close()
         except Exception:
             pass
@@ -564,13 +564,13 @@ def _run_with_sdk(args, sdk) -> dict:
                     "issue": "1144",
                     "name": "authored retrieval queries over the real internal "
                             "graph domain (anchor slice)",
-                    "n_queries": len(AUTHORED_QUERIES),
+                    "n_queries": len(AUTHORED_QUERIES),  # noqa: F821
                     "labels": (
                         "subjective — judged by two cross-vendor LLM judges + "
                         "owner adjudication (judge.py); no logs required"
                     ),
                 },
-                "queries": AUTHORED_QUERIES,
+                "queries": AUTHORED_QUERIES,  # noqa: F821
             }, indent=2) + "\n"
         )
         oracle_set = load_oracle_queries()
@@ -823,7 +823,7 @@ def _run_with_sdk(args, sdk) -> dict:
 
 def write_outputs(report: dict, out_path: str | None) -> str:
     if out_path is None:
-        ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")  # noqa: UP017
         out_path = str(Path(__file__).resolve().parent / "reports"
                        / f"{ts}-retrieval-eval.json")
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
@@ -846,8 +846,8 @@ def _markdown_summary(report: dict) -> str:
         c = rv.get("ndcg@10_delta_points", {})
         rv_line = (f"rerank verdict nDCG@10 delta: mean={c.get('mean')} "
                    f"CI[{c.get('lower')},{c.get('upper')}] (n={c.get('n')})")
-        return "\n".join(lines + ["", gate_line, rv_line])
-    return "\n".join(lines + ["", gate_line])
+        return "\n".join(lines + ["", gate_line, rv_line])  # noqa: RUF005
+    return "\n".join(lines + ["", gate_line])  # noqa: RUF005
 
 
 def main(argv: list[str] | None = None) -> int:

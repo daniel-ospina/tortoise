@@ -7,18 +7,18 @@ alignment.
 """
 from __future__ import annotations
 
-import json
-import os
+import json  # noqa: F401
+import os  # noqa: F401
 import sys
 from pathlib import Path
 
-import pytest
+import pytest  # noqa: F401
 
 TOOLS = Path(__file__).resolve().parent.parent / "tools"
 sys.path.insert(0, str(TOOLS))
 sys.path.insert(0, str(TOOLS.parent))
 
-import calibration_harness as ch  # noqa: E402
+import calibration_harness as ch  # noqa: E402, I001
 import probe_extractor as pe  # noqa: E402
 
 
@@ -35,7 +35,7 @@ class TestReferenceMask:
 
     def test_masks_versions(self):
         assert "v3.7" not in pe._mask_references("ontology v3.7")
-        assert "[REF]" == pe._mask_references("v3.7")
+        assert "[REF]" == pe._mask_references("v3.7")  # noqa: SIM300
 
     def test_keeps_normal_text(self):
         t = "the state-centric model stores state, points and events"
@@ -45,7 +45,7 @@ class TestReferenceMask:
         tr = "0: user: see PR #999 and issue 1013\n1: assistant: ok\n"
         edus = pe.parse_transcript(tr)
         assert "[REF]" in edus[0]["text"]  # user EDU masked
-        assert "ok" == edus[1]["text"]     # assistant EDU untouched
+        assert "ok" == edus[1]["text"]     # assistant EDU untouched  # noqa: SIM300
 
 
 # ── Distribution guards ─────────────────────────────────────────────────────
@@ -185,7 +185,7 @@ class TestOntologyAlignment:
             d = _y.safe_load(mf.read_text())
             if d.get("namespace"):
                 ns_files[d["namespace"]] = mf
-        for ns, pack in reg.packs.items():
+        for ns, pack in reg.packs.items():  # noqa: B007
             raw = _y.safe_load(ns_files[ns].read_text())
             ont = raw.get("ontology", {})
             for k in ont.get("objectKinds", []) + ont.get("pointKinds", []):

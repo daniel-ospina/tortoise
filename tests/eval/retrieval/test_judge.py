@@ -1,5 +1,5 @@
 """Judge harness + adjudication tests (#1144) — mock models, no LLM calls."""
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import json
 
@@ -117,7 +117,7 @@ def test_parse_judge_response_bad_grade_is_error():
     raw = json.dumps({"query_id": "aq001", "verdicts": [
         {"id": "p0", "grade": 5}, {"id": "p1", "grade": 0}, {"id": "p2", "grade": 2},
     ]})
-    with pytest.raises(JudgeError, match="0|1|2"):
+    with pytest.raises(JudgeError, match="0|1|2"):  # noqa: RUF043
         parse_judge_response(raw, "aq001", ["p0", "p1", "p2"])
 
 

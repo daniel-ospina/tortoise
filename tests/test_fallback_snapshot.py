@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import os
 import sys
-import tempfile
+import tempfile  # noqa: F401
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest
+import pytest  # noqa: I001
 
 from tortoise.sdk import TortoiseSDK
 from tortoise import fallback_snapshot as fs

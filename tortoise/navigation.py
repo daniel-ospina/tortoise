@@ -3,7 +3,7 @@
 entityProfile: BFS from entity, categorize connected nodes by type.
 tortoise_traverse: multi-hop traversal following ALL relationship types.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import re
 from typing import Any

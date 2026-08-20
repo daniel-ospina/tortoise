@@ -24,7 +24,7 @@ _SCRIPT = _REPO_ROOT / "graph-scripts" / "remove_context_migration.py"
 sys.path.insert(0, str(_REPO_ROOT))
 
 # Import functions under test via importlib (graph-scripts has a dash in name)
-import importlib.util as _importlib_util
+import importlib.util as _importlib_util  # noqa: E402
 
 _spec = _importlib_util.spec_from_file_location(
     "remove_context_migration", str(_SCRIPT)
@@ -37,7 +37,7 @@ _dry_run = _migration._dry_run
 _run_removal = _migration._run_removal
 _verify_zero = _migration._verify_zero
 _check_phase2_flag = _migration._check_phase2_flag
-from tortoise.sdk import TortoiseSDK
+from tortoise.sdk import TortoiseSDK  # noqa: E402, I001
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
@@ -69,7 +69,7 @@ def graph_with_context(sdk):
     yield proj, ids
     # Cleanup
     for pid in ids:
-        try:
+        try:  # noqa: SIM105
             proj.g.query("MATCH (n:Point {id: $id}) DETACH DELETE n", params={"id": pid})
         except Exception:
             pass
@@ -106,7 +106,7 @@ class TestDryRun:
 
     def test_dry_run_no_removal(self, graph_with_context):
         """--dry-run counts nodes but does NOT remove context."""
-        proj, ids = graph_with_context
+        proj, ids = graph_with_context  # noqa: RUF059
 
         # Verify context exists
         before = proj.g.query(
@@ -159,7 +159,7 @@ class TestRemoval:
             assert _verify_zero(proj) is True
         finally:
             for pid in ids:
-                try:
+                try:  # noqa: SIM105
                     proj.g.query("MATCH (n:Point {id: $id}) DETACH DELETE n", params={"id": pid})
                 except Exception:
                     pass
@@ -175,7 +175,7 @@ class TestRemoval:
             pid = f"test-rmctx-idem-{i}-{_uuid.uuid4().hex[:6]}"
             proj.g.query(
                 "CREATE (n:Point {id: $id}) SET n.content = $content, n.context = $ctx",
-                params={"id": pid, "content": f"Idem {i}", "ctx": f"idem-domain"},
+                params={"id": pid, "content": f"Idem {i}", "ctx": f"idem-domain"},  # noqa: F541
             )
             ids.append(pid)
 
@@ -193,7 +193,7 @@ class TestRemoval:
             assert summary2["remaining"] == 0
         finally:
             for pid in ids:
-                try:
+                try:  # noqa: SIM105
                     proj.g.query("MATCH (n:Point {id: $id}) DETACH DELETE n", params={"id": pid})
                 except Exception:
                     pass
@@ -294,7 +294,7 @@ class TestGuard99:
         — it must execute. Verify via a real SDK on the conftest graph: set a
         context property directly, then REMOVE it through the guarded path.
         """
-        import os as _os
+        import os as _os  # noqa: F401, I001
         from tortoise.sdk import TortoiseSDK
         sdk = TortoiseSDK()
         try:
@@ -315,7 +315,7 @@ class TestGuard99:
             assert "context" not in node or node.get("context") is None, \
                 "REMOVE did not remove the context property"
         finally:
-            try:
+            try:  # noqa: SIM105
                 sdk.close()
             except Exception:
                 pass
@@ -326,7 +326,7 @@ class TestGuard99:
         Uses embedded mode (no live DB needed) with _is_embedded flipped to
         False to exercise the server-mode guard path.
         """
-        import tempfile as _tf
+        import tempfile as _tf  # noqa: I001
         import pytest
         from tortoise.projection import FalkorProjection
         db_path = os.path.join(_tf.mkdtemp(prefix="tortoise_guard_"), "g.db")

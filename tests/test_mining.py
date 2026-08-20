@@ -12,21 +12,21 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest
+import pytest  # noqa: I001
 
-from tortoise.api import EventAPI          # noqa: E402
-from tortoise.log import EventLog          # noqa: E402
-from tortoise.mining import ConversationMiner   # noqa: E402
-from tortoise.mining import (              # noqa: E402
+from tortoise.api import EventAPI  # noqa: E402, RUF100
+from tortoise.log import EventLog  # noqa: E402, RUF100
+from tortoise.mining import ConversationMiner  # noqa: E402, RUF100
+from tortoise.mining import (  # noqa: E402, RUF100
     EpSafeCommit,
     quarantine_batch,
     list_quarantined,
     batch_status,
-    BATCH_STATUS_ACTIVE,
+    BATCH_STATUS_ACTIVE,  # noqa: F401
     BATCH_STATUS_COMMITTED,
     BATCH_STATUS_QUARANTINED,
 )
-from tortoise.sdk import TortoiseSDK       # noqa: E402
+from tortoise.sdk import TortoiseSDK  # noqa: E402, RUF100
 
 
 def _tmp(name):
@@ -232,7 +232,7 @@ def test_mine_events_have_required_fields():
         "Alice: But Postgres graph queries are slow for our use case.\n"
     )
 
-    result = miner.mine(transcript, "test_fields", api)
+    result = miner.mine(transcript, "test_fields", api)  # noqa: F841
     events = log.read_all()
     recorded = [e for e in events if e["type"] == "EventRecorded"]
 
@@ -258,7 +258,7 @@ def test_mine_derives_decisions():
         "Bob: We should commit to the Q3 timeline.\n"
     )
 
-    result = miner.mine(transcript, "test_decisions", api)
+    result = miner.mine(transcript, "test_decisions", api)  # noqa: F841
     events = log.read_all()
     recorded = [e for e in events if e["type"] == "EventRecorded"]
     kinds = [e["event"]["eventKind"] for e in recorded]
@@ -278,7 +278,7 @@ def test_mine_derives_friction():
         "Alice: But React has the larger ecosystem.\n"
     )
 
-    result = miner.mine(transcript, "test_friction", api)
+    result = miner.mine(transcript, "test_friction", api)  # noqa: F841
     events = log.read_all()
     recorded = [e for e in events if e["type"] == "EventRecorded"]
     kinds = [e["event"]["eventKind"] for e in recorded]
@@ -302,7 +302,7 @@ def test_mine_friction_from_conflict_language_without_nand():
     # emits NAND when two points are in tension — a lone claim has none).
     transcript = "Alice: This approach does not agree with our findings.\n"
 
-    result = miner.mine(transcript, "test_friction_lang", api)
+    result = miner.mine(transcript, "test_friction_lang", api)  # noqa: F841
     events = log.read_all()
     recorded = [e for e in events if e["type"] == "EventRecorded"]
     kinds = [e["event"]["eventKind"] for e in recorded]
@@ -319,7 +319,7 @@ def test_mine_sparse_transcript():
         "Alice: We should think about the problem more carefully.\n"
     )
 
-    result = miner.mine(transcript, "test_sparse", api)
+    result = miner.mine(transcript, "test_sparse", api)  # noqa: F841
     events = log.read_all()
     recorded = [e for e in events if e["type"] == "EventRecorded"]
 
@@ -338,7 +338,7 @@ def test_mine_preserves_point_content():
         "Bob: I agree because it uses the Redis protocol which is battle-tested.\n"
     )
 
-    result = miner.mine(transcript, "test_prov", api)
+    result = miner.mine(transcript, "test_prov", api)  # noqa: F841
     events = log.read_all()
     points = [e for e in events if e["type"] == "PointAdded"]
 
@@ -664,8 +664,8 @@ class TestW3PipelineWiring:
         import tortoise.mining as mining
         sdk = mining_sdk
         proj = sdk._get_proj()
-        from tortoise.log import EventLog
-        import tempfile, os
+        from tortoise.log import EventLog  # noqa: I001
+        import tempfile, os  # noqa: E401
         log = EventLog(os.path.join(tempfile.mkdtemp(), "e.jsonl"))
         from tortoise.api import EventAPI
         api = EventAPI(log, initiated_by="extractor", agent_id="t",
@@ -688,9 +688,9 @@ class TestW3PipelineWiring:
 
     def test_mine_without_projection_not_gated(self, mining_sdk):
         """Standalone log mode (no projection) skips the gate and says so."""
-        import tortoise.mining as mining
+        import tortoise.mining as mining  # noqa: I001
         from tortoise.log import EventLog
-        import tempfile, os
+        import tempfile, os  # noqa: E401
         log = EventLog(os.path.join(tempfile.mkdtemp(), "e.jsonl"))
         from tortoise.api import EventAPI
         api = EventAPI(log, initiated_by="extractor", agent_id="t")  # no projection
@@ -704,10 +704,10 @@ class TestW3PipelineWiring:
         wipe+rebuild_all — BOTH the :Batch marker AND the Point.batch_id
         enforcement links (the mining path writes batch_id as a raw graph
         write, not through the event stream — #1025 review P1)."""
-        import tortoise.mining as mining
+        import tortoise.mining as mining  # noqa: I001
         from tortoise.log import EventLog
         from tortoise.api import EventAPI
-        import os
+        import os  # noqa: F401
         sdk = mining_sdk
         proj = sdk._get_proj()
         log = EventLog(str(tmp_path / "events.jsonl"))

@@ -5,14 +5,14 @@ import json
 import sys
 from pathlib import Path
 
-import pytest
+import pytest  # noqa: F401
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tortoise.value_extractor import (  # noqa: E402
+from tortoise.value_extractor import (  # noqa: E402, I001, RUF100
     compile_value_brief, validate_summary, check_guards, _mask_refs,
 )
-from tortoise.sdk import _summary_to_payload, _stream_to_payload  # noqa: E402
+from tortoise.sdk import _summary_to_payload, _stream_to_payload  # noqa: E402, RUF100
 
 
 class TestValueBrief:
@@ -80,7 +80,7 @@ class TestSummaryToPayload:
         assert p["schema_version"] == "1"
 
     def test_replay_safe_id(self):
-        from tortoise.sdk import _post_commit  # noqa: F401 (importable)
+        from tortoise.sdk import _post_commit  # noqa: F401, I001
         from tortoise.commit_schema import compute_client_commit_id
         s = {"session": {"summary": "S"}, "state": [], "decisions": [],
              "logic": [], "issues": []}
@@ -126,9 +126,9 @@ class TestStreamToPayload:
         # Operators reference the RE-DERIVED ids, not the LLM's fake ones.
         pt0 = p["points"][0]["id"]
         ev0 = p["events"][0]["id"]
-        impl = [o for o in p["operators"] if o["op_type"] == "IMPL"][0]
+        impl = [o for o in p["operators"] if o["op_type"] == "IMPL"][0]  # noqa: RUF015
         assert impl["src"] == pt0 and impl["dst"] == ev0
-        mit = [o for o in p["operators"] if o["op_type"] == "MITIGATES"][0]
+        mit = [o for o in p["operators"] if o["op_type"] == "MITIGATES"][0]  # noqa: RUF015
         assert mit["target"]["src"] == pt0 and mit["target"]["dst"] == ev0
 
     def test_points_enriched_neutral_prior_draft(self):
@@ -236,7 +236,7 @@ class TestCommitSessionRoundTrip:
     model produces a Layer-1-valid payload (construct path committable)."""
     def test_round_trip_validates_v1(self):
         """v1 path (TORTOISE_EXTRACTOR=v1) keeps the legacy behavior."""
-        from tortoise.sdk import TortoiseSDK
+        from tortoise.sdk import TortoiseSDK  # noqa: I001
         from tortoise.commit_schema import validate_payload_dict
         sdk = object.__new__(TortoiseSDK)  # no graph init needed (summary path)
         out = sdk.commit_session(
@@ -255,7 +255,7 @@ class TestCommitSessionRoundTrip:
         S1/S2/S4, S3 degrades (embedded backend), payload is Layer-1 valid
         and carries the story_arc + v2 observability keys."""
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
-        from tortoise.sdk import TortoiseSDK
+        from tortoise.sdk import TortoiseSDK  # noqa: I001
         from tortoise.commit_schema import validate_payload_dict
         sdk = object.__new__(TortoiseSDK)
         out = sdk.commit_session(
@@ -290,7 +290,7 @@ class TestCommitSessionRoundTrip:
         Layer-1 errors and is NEVER POSTed (fail-closed at the gate) — the
         _post_commit recorder proves no call was made."""
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
-        from tortoise.sdk import TortoiseSDK
+        from tortoise.sdk import TortoiseSDK  # noqa: I001
         import tortoise.sdk as sdk_mod
         import tortoise.extractor_v2 as ev2
         sdk = object.__new__(TortoiseSDK)
@@ -336,7 +336,7 @@ class TestCommitSessionRoundTrip:
         """#1350: TORTOISE_EXTRACTOR=v1 routes to the legacy path — the
         reversibility seam for operators."""
         monkeypatch.setenv("TORTOISE_EXTRACTOR", "v1")
-        from tortoise.sdk import TortoiseSDK
+        from tortoise.sdk import TortoiseSDK  # noqa: I001
         from tortoise.commit_schema import validate_payload_dict
         sdk = object.__new__(TortoiseSDK)
         out = sdk.commit_session(
@@ -351,7 +351,7 @@ class TestCommitSessionRoundTrip:
     def test_error_path_payload_still_valid(self):
         """Even with extraction errors, the returned payload must be
         Layer-1-valid and carry a real client_commit_id (T5)."""
-        from tortoise.sdk import TortoiseSDK
+        from tortoise.sdk import TortoiseSDK  # noqa: I001
         from tortoise.commit_schema import validate_payload_dict
         sdk = object.__new__(TortoiseSDK)  # no graph init needed (summary path)
         bad = MockModel(summary={
@@ -486,7 +486,7 @@ class TestClosedVocab:
     fail-closed mode; warn mode captures as proposal."""
 
     def test_core_kinds_accepted_bare_and_namespaced(self):
-        from tortoise.value_extractor import validate_summary, _object_kind_vocab
+        from tortoise.value_extractor import validate_summary, _object_kind_vocab  # noqa: F401, I001
         vocab = _object_kind_vocab()
         for kind in ("Project", "WorkItem", "document", "tag", "user",
                      "skill", "tool", "agent", "workflow", "agreement",
@@ -521,7 +521,7 @@ class TestClosedVocab:
         # Phase B: warn mode lets a non-vocab window produce a payload.
         # (The POST is intentionally unmocked here — the error path returns
         # the payload, which is what the calibration loop consumes.)
-        from tortoise.sdk import TortoiseSDK
+        from tortoise.sdk import TortoiseSDK  # noqa: I001
         from tortoise.commit_schema import validate_payload_dict
         sdk = object.__new__(TortoiseSDK)
         out = sdk.commit_session(
@@ -542,7 +542,7 @@ class TestModelAdapterBounds:
     """T13 (#1272): the production BYOK adapter sends explicit bounds."""
 
     def test_adapter_body_has_bounds(self, monkeypatch):
-        from tortoise.sdk import _model_adapter
+        from tortoise.sdk import _model_adapter  # noqa: I001
         import requests as _requests
         captured = {}
 
@@ -571,7 +571,7 @@ class TestModelAdapterBounds:
         needs (capped adapters truncate and silently lose chunks). Mirrors
         tests/model_adapters.py's OpenRouterModel(max_tokens=None) semantics
         without importing the test module from production."""
-        from tortoise.sdk import _model_adapter
+        from tortoise.sdk import _model_adapter  # noqa: I001
         import requests as _requests
         captured = {}
 
@@ -612,7 +612,7 @@ class TestR1R3Discriminator:
 
     def test_r1r3_present_in_user_prompt_flow(self):
         # The gate text is part of the system prompt used for every session.
-        from tortoise.value_extractor import SUMMARY_SYSTEM, _user_prompt
+        from tortoise.value_extractor import SUMMARY_SYSTEM, _user_prompt  # noqa: F401
         joined = SUMMARY_SYSTEM
         assert "COMMISSIVE" in joined or "commissive" in joined
         assert "agentivity" in joined
@@ -646,7 +646,7 @@ class TestReviewFixes:
     def test_unmapped_operator_dropped_not_commit_killer(self):
         """P2-3: an operator referencing a fabricated id is dropped, and the
         remaining stream still produces a valid payload."""
-        from tortoise.sdk import _stream_to_payload
+        from tortoise.sdk import _stream_to_payload  # noqa: I001
         from tortoise.ids import content_hash
         pt = f"pt_{content_hash('real point')[:62]}"
         ev = f"ev_{content_hash('real event')[:62]}"

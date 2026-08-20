@@ -176,7 +176,7 @@ def _queryOntology(db: Any, ontology: str, cypher: str, params: dict | None = No
     Connection/auth errors propagate to dispatch error handling.
     """
     g = db.select_graph(ontology)
-    if params:
+    if params:  # noqa: SIM108
         rows = g.query(cypher, params=params).result_set
     else:
         rows = g.query(cypher).result_set
@@ -389,7 +389,7 @@ class DomainRouter:
     """
 
     def __init__(self, manifest_path: str | None = None,
-                 domains: dict[str, "DomainRoutingConfig"] | None = None):
+                 domains: dict[str, "DomainRoutingConfig"] | None = None):  # noqa: F821, UP037
         # Base routing tables (always present)
         self._write_routing: dict[str, list[str]] = dict(ROUTING_TABLE_WRITE)
         self._read_routing: dict[str, list[str]] = dict(ROUTING_TABLE_READ)
@@ -408,7 +408,7 @@ class DomainRouter:
         for key, cfg in (domains or {}).items():
             self.register_domain(key, cfg)
 
-    def register_domain(self, key: str, cfg: "DomainRoutingConfig") -> None:
+    def register_domain(self, key: str, cfg: "DomainRoutingConfig") -> None:  # noqa: F821, UP037
         """Register a domain ontology's routing configuration.
 
         Merges domain event types, query patterns, Cypher templates,

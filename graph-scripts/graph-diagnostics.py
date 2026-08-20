@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
+import os  # noqa: F401
 import sys
 from collections import Counter, defaultdict, deque
 from pathlib import Path
@@ -55,7 +55,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from tortoise.analyze import _bfs_select_operators  # noqa: E402
+from tortoise.analyze import _bfs_select_operators  # noqa: E402, I001
 from tortoise.exceptions import EmbeddedStoreBusyError  # noqa: E402
 from tortoise.sdk import TortoiseSDK  # noqa: E402
 
@@ -376,7 +376,7 @@ def _positive_int(value: str) -> int:
     try:
         n = int(value)
     except ValueError:
-        raise argparse.ArgumentTypeError(f"{value!r} is not an integer")
+        raise argparse.ArgumentTypeError(f"{value!r} is not an integer")  # noqa: B904
     if n <= 0:
         raise argparse.ArgumentTypeError(f"{value!r} must be >= 1")
     return n
@@ -409,11 +409,11 @@ def main(argv: list[str] | None = None) -> int:
             if _count_claims(proj.g) + _count_operators(proj.g) == 0:
                 raise LookupError("graph is empty (0 Points)")
             source = f"live graph ({sdk._db_uri or sdk._db_path})"
-        except Exception as exc:  # noqa: BLE001 — targeted fallback below
+        except Exception as exc:  # noqa: BLE001, RUF100
             if sdk is not None:
-                try:
+                try:  # noqa: SIM105
                     sdk.close()
-                except Exception:  # noqa: BLE001
+                except Exception:  # noqa: BLE001, RUF100
                     pass
                 sdk = None
             if args.db_path:
@@ -443,9 +443,9 @@ def main(argv: list[str] | None = None) -> int:
             print(report)
     finally:
         if sdk is not None:
-            try:
+            try:  # noqa: SIM105
                 sdk.close()
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001, RUF100
                 pass
 
     return 0 if all(c["pass"] for c in checks) else 1

@@ -28,7 +28,7 @@ _SCHEMA_ATTR = "_tortoise_event_schema"
 
 
 def _iso_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
 
 def ensure_event_schema(proj) -> None:
@@ -45,18 +45,18 @@ def ensure_event_schema(proj) -> None:
     try:
         # Exact-match index first — the constraint requires it (Pattern Research).
         g.query("CREATE INDEX FOR (n:GraphEvent) ON (n.event_id)")
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001, RUF100
         logger.debug("event_store: event_id index may already exist")
     try:
         g.query(
             "GRAPH.CONSTRAINT CREATE tortoise_ge_uid UNIQUE NODE GraphEvent "
             "PROPERTIES 1 event_id"
         )
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001, RUF100
         logger.debug("event_store: unique constraint may already exist")
     try:
         g.query("CREATE INDEX FOR (n:GraphEvent) ON (n.seq)")
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001, RUF100
         logger.debug("event_store: seq index may already exist")
     setattr(proj, _SCHEMA_ATTR, True)
 
@@ -109,7 +109,7 @@ def append_event(proj, seq: int, type_: str, payload: dict, event_id: str,
             },
         )
         return True
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001, RUF100
         # Belt-and-suspenders: if the store's unique constraint fired (or any
         # other write error), never crash the mutation — the read path dedups.
         logger.warning("event_store: append failed for event_id %r — skipped", event_id)
@@ -162,7 +162,7 @@ def purge_expired(proj, retention_days: int = 30) -> int:
     """
     from datetime import timedelta
 
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=int(retention_days))).isoformat()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=int(retention_days))).isoformat()  # noqa: UP017
     rows = proj.g.query(
         "MATCH (n:GraphEvent) WHERE n.ts < $cutoff "
         "WITH n LIMIT 10000 DETACH DELETE n RETURN count(*)",
@@ -200,12 +200,12 @@ def _refresh_first_seq(proj) -> None:
     (every cursor below the next write is then expired). Lets events_poll
     return 410 even when the graph has been fully purged.
     """
-    try:
+    try:  # noqa: SIM105
         proj.g.query(
             "MATCH (m:GraphEventMeta) "
             "OPTIONAL MATCH (e:GraphEvent) "
             "WITH m, min(e.seq) AS mn "
             "SET m.first_seq = coalesce(mn, m.last_seq + 1)"
         )
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001, RUF100
         pass  # best-effort watermark

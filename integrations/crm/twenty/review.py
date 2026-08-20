@@ -67,7 +67,7 @@ def resolve():
     for item in unresolved:
         print(f"Speaker: {item['speaker_name']}")
         print(f"  Meeting: {item['meeting_id']}")
-        print(f"  Options: [e] provide email  [n] provide name  [s] skip  [q] quit")
+        print(f"  Options: [e] provide email  [n] provide name  [s] skip  [q] quit")  # noqa: F541
         choice = input("  > ").strip().lower()
 
         if choice == 'q':

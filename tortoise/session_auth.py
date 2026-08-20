@@ -199,7 +199,7 @@ def _decode_header(token: str) -> dict:
     try:
         header = json.loads(_b64url_decode(parts[0]))
     except Exception:
-        raise HTTPException(status_code=401, detail="Invalid session token")
+        raise HTTPException(status_code=401, detail="Invalid session token")  # noqa: B904
     if not isinstance(header, dict):
         # Non-dict header segments (valid JSON: [1,2], 123, "x") must 401,
         # never AttributeError → 500.

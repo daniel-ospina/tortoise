@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest
+import pytest  # noqa: I001
 from tortoise.projection import FalkorProjection
 
 EXPECTED_RANGE_EMBEDDED = {
@@ -58,7 +58,7 @@ def _range_indexes(proj):
         # return a flat per-field list (one row per field) — normalize both
         # to {field: [types]}, pairing fields with types positionally.
         types = (dict(types) if isinstance(types, dict)
-                 else ({f: [t] for f, t in zip(fields, types)}
+                 else ({f: [t] for f, t in zip(fields, types)}  # noqa: B905
                        if isinstance(types, (list, tuple))
                        else {f: [types] for f in fields}))
         # Merge per label (3.x emits one row per field) so the result is
@@ -93,7 +93,7 @@ def _probe_falkordb(candidates: list[str | None]) -> tuple[bool, str | None]:
             continue
         finally:
             if _proj is not None:
-                try:
+                try:  # noqa: SIM105
                     _proj.close()
                 except Exception:
                     pass
@@ -171,7 +171,7 @@ def test_get_entity_parity_all_types(sdk):
     proj = sdk._get_proj()
     proj.g.query("CREATE (src:Source {url:'http://parity', id:'http://parity'})")
     # Point by id
-    pid = [p["id"] for p in sdk.query(kind="statement")
+    pid = [p["id"] for p in sdk.query(kind="statement")  # noqa: RUF015
            if p["content"] == "hello world"][0]
     ent = sdk.get_entity(pid)
     assert ent and ent.get("pointKind") == "statement"
@@ -218,7 +218,7 @@ def test_get_entity_stub_source_by_url(sdk):
 
 def test_update_delete_entity_parity(sdk):
     sdk.create_point("statement", "upd del test")
-    pid = [p["id"] for p in sdk.query(kind="statement")
+    pid = [p["id"] for p in sdk.query(kind="statement")  # noqa: RUF015
            if p["content"] == "upd del test"][0]
     e = sdk.update_entity(pid, note="hi")
     assert e.get("note") == "hi"
@@ -238,7 +238,7 @@ def test_create_edge_hetero(sdk):
     sdk.create_point("statement", "edge test")
     sdk.create_subject("carol", "role")
     proj = sdk._get_proj()
-    pid = [p["id"] for p in sdk.query(kind="statement")
+    pid = [p["id"] for p in sdk.query(kind="statement")  # noqa: RUF015
            if p["content"] == "edge test"][0]
     sid = proj.g.query("MATCH (s:Subject {name:'carol'}) RETURN s.id").result_set[0][0]
     assert proj.create_edge(pid, sid, "authoredBy") is True
@@ -264,7 +264,7 @@ def test_create_about_edge_parity(sdk):
     sdk.create_point("statement", "about alice")
     sdk.create_subject("alice", "person")
     proj = sdk._get_proj()
-    pid = [p["id"] for p in sdk.query(kind="statement")
+    pid = [p["id"] for p in sdk.query(kind="statement")  # noqa: RUF015
            if p["content"] == "about alice"][0]
     sid = proj.g.query("MATCH (s:Subject {name:'alice'}) RETURN s.id").result_set[0][0]
     assert proj.create_about_edge(pid, sid, "aboutSubject") is True

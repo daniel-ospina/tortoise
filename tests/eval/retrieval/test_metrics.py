@@ -1,5 +1,5 @@
 """Unit tests for the #1144 retrieval metrics math (pure, no graph)."""
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import math
 

@@ -23,7 +23,7 @@ import sys
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(_HERE))
 
-from tortoise.projection import FalkorProjection
+from tortoise.projection import FalkorProjection  # noqa: E402
 
 # ── about* edges to follow (ONTOLOGY v2.5→v3.0 migration path) ──
 # Point → Entity: aboutSubject → Subject, aboutObject → Object, aboutEvent → Event,
@@ -107,7 +107,7 @@ def backfill(db_uri: str, dry_run: bool = False, limit: int = 0) -> dict:
 
         if not found_entity:
             stats["sources_without_entity"] += 1
-            print(f"    ⚠ No entities found (no about* edges from extracted Points)")
+            print(f"    ⚠ No entities found (no about* edges from extracted Points)")  # noqa: F541
 
     proj.close()
     return stats

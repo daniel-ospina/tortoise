@@ -5,7 +5,7 @@ Single-file spike. Hardcoded doc paths. No argparse.
 Exits: 0 = gate passed, 1 = gate failed, 2 = extraction error.
 """
 
-import datetime, json, math, os, re, sys, time
+import datetime, json, math, os, re, sys, time  # noqa: E401, I001
 from pathlib import Path
 
 from openai import OpenAI
@@ -186,7 +186,7 @@ def measure_precision(extracted: dict, ground_truth: dict) -> dict:
     total_gt = len(gt_normalized)
 
     # edge cases
-    if tp + fp == 0:
+    if tp + fp == 0:  # noqa: SIM108
         precision = 1.0 if total_gt == 0 else 0.0
     else:
         precision = tp / (tp + fp)
@@ -279,7 +279,7 @@ def main() -> int:
             continue
 
         # Plan §4.1: wrap in ExtractionOutput schema for audit trail
-        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()  # noqa: UP017
         extraction_output = {
             "sourceFile": rel_path,
             "extractedAt": now,

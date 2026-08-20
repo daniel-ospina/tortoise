@@ -4,8 +4,8 @@
 HISTORICAL ONE-SHOT — queries the removed context field (see #49);
 connection now env-based (TORTOISE_DB_URI).
 """
-from falkordb import FalkorDB
-import json, os, sys
+from falkordb import FalkorDB  # noqa: I001
+import json, os, sys  # noqa: E401, F401
 
 
 def _parse_uri(uri: str) -> dict:
@@ -58,7 +58,7 @@ def audit_context(context):
                 print(f"       content: {content[:120]}")
                 print(f"       context: {ctx}")
     else:
-        print(f"\n  ✅ superseded_no_edge: none")
+        print(f"\n  ✅ superseded_no_edge: none")  # noqa: F541
 
     # ── 2. superseded_active_edges (MEDIUM) ──
     if superseded:
@@ -71,9 +71,9 @@ def audit_context(context):
         if active_count:
             print(f"\n  ⚠️  MEDIUM: superseded_active_edges — {active_count} superseded points with active edges")
         else:
-            print(f"  ✅ superseded_active_edges: none")
+            print(f"  ✅ superseded_active_edges: none")  # noqa: F541
     else:
-        print(f"  ✅ superseded_active_edges: N/A (no superseded points)")
+        print(f"  ✅ superseded_active_edges: N/A (no superseded points)")  # noqa: F541
 
     # ── 3. impl_instead_of_nand (HIGH) ──
     # Find NAND edges and check if endpoints have source_rationale suggesting contradiction
@@ -81,7 +81,7 @@ def audit_context(context):
     # Check if any IMPL connects to things that semantically should be NAND
     impl_issues = []
     for row in r:
-        op_id, op_type, target_id, target_content, op_content = row
+        op_id, op_type, target_id, target_content, op_content = row  # noqa: RUF059
         # Heuristic: if target context contains 'contradiction', 'counter', 'nand', or 'adversarial'
         tc = (target_content or '').lower()
         if any(w in tc for w in ['contradict', 'counter', 'nand', 'adversarial', 'opposing']):
@@ -92,7 +92,7 @@ def audit_context(context):
             print(f"    {op_id} -[{ot}]-> {tid}")
             print(f"       target: {tc}")
     else:
-        print(f"  ✅ impl_instead_of_nand: none")
+        print(f"  ✅ impl_instead_of_nand: none")  # noqa: F541
 
     # ── 4. missing_sourceKind (MEDIUM) ──
     r = q(f"MATCH (n:Point) WHERE {cf} AND n.is_operator = false AND n.sourceKind IS NULL AND n.pointKind IS NOT NULL RETURN count(n)")
@@ -106,7 +106,7 @@ def audit_context(context):
         for row in r:
             print(f"    {row[0]} — {(row[1] or '')[:100]}")
     else:
-        print(f"  ✅ missing_sourceKind: none")
+        print(f"  ✅ missing_sourceKind: none")  # noqa: F541
 
     # ── 5. missing_sourceDate (LOW) ──
     r = q(f"MATCH (n:Point) WHERE {cf} AND n.sourceKind IS NOT NULL AND n.sourceDate IS NULL RETURN count(n)")
@@ -114,11 +114,11 @@ def audit_context(context):
     if missing_sd > 0:
         print(f"\n  ⚠️  LOW: missing_sourceDate — {missing_sd} graded evidence points without date")
     else:
-        print(f"  ✅ missing_sourceDate: none")
+        print(f"  ✅ missing_sourceDate: none")  # noqa: F541
 
     # ── 6. mitigation_recommended (MEDIUM) ──
     r = q(f"MATCH (n:Point)-[:mitigates]->(m:Point) WHERE {cf.replace('n.', 'n.')} RETURN count(n)")
-    has_mitigations = r[0][0] if r else 0
+    has_mitigations = r[0][0] if r else 0  # noqa: F841
     # Count low-relevance operators without mitigations
     r = q(f"MATCH (n:Point) WHERE {cf} AND (n.context CONTAINS 'low-relevance' OR n.context CONTAINS 'weak') AND n.is_operator = true RETURN n.id, n.content, n.context LIMIT 10")
     low_rel = list(r)
@@ -131,10 +131,10 @@ def audit_context(context):
         unmitigated = len(low_rel) - mitigated
         if unmitigated > 0:
             print(f"\n  ⚠️  MEDIUM: mitigation_recommended — {unmitigated}/{len(low_rel)} low-relevance operators unmitigated")
-            for lid, content, ctx in low_rel[:3]:
+            for lid, content, ctx in low_rel[:3]:  # noqa: B007
                 print(f"    {lid} — {(content or '')[:120]}")
         else:
-            print(f"  ✅ mitigation_recommended: all mitigated")
+            print(f"  ✅ mitigation_recommended: all mitigated")  # noqa: F541
     else:
         # Check across broader context — any operators with low confidence
         r = q(f"MATCH (n:Point) WHERE {cf} AND n.is_operator = true AND (n.confidence < '0.4' OR n.confidence IS NULL) AND n.op_type = 'IMPL' RETURN n.id, n.confidence, n.content LIMIT 10")
@@ -144,7 +144,7 @@ def audit_context(context):
             for lid, conf, content in low_conf[:3]:
                 print(f"    {lid} conf={conf} — {(content or '')[:120]}")
         else:
-            print(f"  ✅ mitigation_recommended: none")
+            print(f"  ✅ mitigation_recommended: none")  # noqa: F541
 
     # ── Summary stats ──
     r = q(f"MATCH (n:Point) WHERE {cf} RETURN count(n)")
@@ -159,7 +159,7 @@ if __name__ == '__main__':
         audit_context(ctx)
     
     print(f"\n{'='*60}")
-    print(f"  CROSS-CONTEXT SUMMARY")
+    print(f"  CROSS-CONTEXT SUMMARY")  # noqa: F541
     print(f"{'='*60}")
     
     # Global stats

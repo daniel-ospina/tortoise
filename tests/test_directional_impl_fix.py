@@ -10,7 +10,7 @@ Validates:
 
 MUST run against a live FalkorDB. Uses fresh isolated namespaces.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import os
 import sys
@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # contamination pattern), because pytest imports all modules before running
 # any test.
 
-from tortoise.sdk import TortoiseSDK
+from tortoise.sdk import TortoiseSDK  # noqa: I001
 from tortoise.ep import TortoiseEP
 from tortoise.weights import compute_operator_weight
 
@@ -185,7 +185,7 @@ def test_two_sources_higher_than_one():
     w_a = compute_operator_weight(proj, op_a["id"])
     w_b = compute_operator_weight(proj, op_b["id"])
     print(f"  Operator weights: op_a={w_a:.4f}, op_b={w_b:.4f}")
-    print(f"  Edge density penalty check: both should be ~1.0 (removed)")
+    print(f"  Edge density penalty check: both should be ~1.0 (removed)")  # noqa: F541
     assert abs(w_a - 1.0) < 0.01, f"op_a weight {w_a:.4f} — density penalty should be removed!"
     assert abs(w_b - 1.0) < 0.01, f"op_b weight {w_b:.4f} — density penalty should be removed!"
 
@@ -195,7 +195,7 @@ def test_two_sources_higher_than_one():
     src_a_both = result_both[source_a["id"]]
     src_b_both = result_both[source_b["id"]]
 
-    print(f"\n  Both sources present:")
+    print(f"\n  Both sources present:")  # noqa: F541
     print(f"    Source A:  mean={src_a_both['mean']:.4f}  (α={src_a_both['alpha']:.2f}, β={src_a_both['beta']:.2f})")
     print(f"    Source B:  mean={src_b_both['mean']:.4f}  (α={src_b_both['alpha']:.2f}, β={src_b_both['beta']:.2f})")
     print(f"    Claim:     mean={claim_both['mean']:.4f}  (α={claim_both['alpha']:.2f}, β={claim_both['beta']:.2f})")
@@ -205,7 +205,7 @@ def test_two_sources_higher_than_one():
     result_a_only = run_ep_directed(sdk)
     claim_a = result_a_only[claim["id"]]
 
-    print(f"\n  Source A only:")
+    print(f"\n  Source A only:")  # noqa: F541
     print(f"    Claim:     mean={claim_a['mean']:.4f}  (α={claim_a['alpha']:.2f}, β={claim_a['beta']:.2f})")
 
     drop = claim_both["mean"] - claim_a["mean"]
@@ -237,7 +237,7 @@ def test_two_sources_higher_than_one():
     cl = make_point(sdk2, "Claim")
     sdk2.set_point_baseline(s_a["id"], *TIER_MAP["T0"])
     sdk2.set_point_baseline(s_b["id"], *TIER_MAP["T0"])
-    op1 = make_operator(sdk2, s_a["id"], cl["id"], "IMPL")
+    op1 = make_operator(sdk2, s_a["id"], cl["id"], "IMPL")  # noqa: F841
     op2 = make_operator(sdk2, s_b["id"], cl["id"], "IMPL")
 
     result_undirected_both = run_ep_directed(sdk2)
@@ -372,8 +372,8 @@ def test_nand_bidirectional():
         sdk.set_point_baseline(defeater["id"], *TIER_MAP["T0"])
 
         impl_direction = "unidirectional" if directed else "bidirectional"
-        op_impl = make_operator(sdk, source["id"], claim["id"], "IMPL", direction=impl_direction)
-        op_nand = make_operator(sdk, defeater["id"], claim["id"], "NAND")
+        op_impl = make_operator(sdk, source["id"], claim["id"], "IMPL", direction=impl_direction)  # noqa: F841
+        op_nand = make_operator(sdk, defeater["id"], claim["id"], "NAND")  # noqa: F841
 
         result = run_ep_directed(sdk)
         sc = result[source["id"]]
@@ -444,7 +444,7 @@ def test_source_isolation():
     source = make_point(sdk, "T0 Source: evidence")
     claim = make_point(sdk, "Claim: conclusion")
     sdk.set_point_baseline(source["id"], *TIER_MAP["T0"])
-    op = make_operator(sdk, source["id"], claim["id"], "IMPL", direction="unidirectional")
+    op = make_operator(sdk, source["id"], claim["id"], "IMPL", direction="unidirectional")  # noqa: F841
 
     result = run_ep_directed(sdk)
     sc = result[source["id"]]
@@ -466,7 +466,7 @@ def test_source_isolation():
     s2 = make_point(sdk2, "T0 Source: evidence")
     c2 = make_point(sdk2, "Claim: conclusion")
     sdk2.set_point_baseline(s2["id"], *TIER_MAP["T0"])
-    op2 = make_operator(sdk2, s2["id"], c2["id"], "IMPL", direction="bidirectional")
+    op2 = make_operator(sdk2, s2["id"], c2["id"], "IMPL", direction="bidirectional")  # noqa: F841
 
     result2 = run_ep_directed(sdk2)
     sc2 = result2[s2["id"]]
@@ -476,7 +476,7 @@ def test_source_isolation():
     print(f"  Claim:  mean={cc2['mean']:.4f}")
 
     sdk2.close()
-    print(f"  ℹ️  Undirected source may differ from T0 prior due to back-coupling")
+    print(f"  ℹ️  Undirected source may differ from T0 prior due to back-coupling")  # noqa: F541
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -525,7 +525,7 @@ def test_edge_density_penalty_removed():
 
         sdk.close()
 
-    print(f"\n  ✅ All operator weights are ~1.0 — edge density penalty confirmed removed")
+    print(f"\n  ✅ All operator weights are ~1.0 — edge density penalty confirmed removed")  # noqa: F541
 
 
 # ═══════════════════════════════════════════════════════════════════

@@ -1,16 +1,16 @@
 """Tests for #122: Event provenance model — uses/produces, wasDerivedFrom,
 recency modulation, compute_reputation."""
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import os
 import sys
 import tempfile
-import time
-from datetime import datetime, timezone, timedelta
+import time  # noqa: F401
+from datetime import datetime, timezone, timedelta  # noqa: F401
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest
+import pytest  # noqa: I001
 from tortoise.sdk import TortoiseSDK
 
 TEST_DB = os.environ.get("TEST_DB_PATH", "/tmp/tortoise_test_122.db")
@@ -305,7 +305,7 @@ class TestRecencyModulation:
         # Create a simple claim + operator
         p = sdk.create_point("statement", "test claim")
         sdk.set_point_baseline(p["id"], 1, 1)  # #344: neutral baseline (gate active)
-        op = sdk.create_operator("IMPL", p["id"], [p["id"]])
+        op = sdk.create_operator("IMPL", p["id"], [p["id"]])  # noqa: F841
         # Should not raise — recency_decay is accepted
         result = sdk.compute_confidence(recency_decay=0.95)
         assert "iterations" in result
@@ -323,9 +323,9 @@ class TestRecencyModulation:
         It is NOT zone-dependent — it fails if naive timestamps are
         interpreted as local time, even in UTC CI.
         """
-        import calendar
+        import calendar  # noqa: I001
         import pytest
-        from datetime import datetime, timezone
+        from datetime import datetime, timezone  # noqa: F811
 
         url = "https://doi.org/10.9999/tz-naive"
         ingested_naive = "2024-01-01T00:00:00"
@@ -349,7 +349,7 @@ class TestRecencyModulation:
         pt = sdk.get_point(p["id"])
 
         # Compute expected decay: T1 = (5, 1), alpha' = 1 + (5-1)*decay
-        now_ts = datetime.now(timezone.utc).timestamp()
+        now_ts = datetime.now(timezone.utc).timestamp()  # noqa: UP017
         years = max(0, (now_ts - expected_ts) / (365.25 * 86400))
         expected_decay = recency_decay ** years
         expected_alpha = 1.0 + (5.0 - 1.0) * expected_decay
@@ -777,7 +777,7 @@ class TestNegativePaths:
     def test_supersede_point_same_id(self, sdk):
         """supersede_point with old==new → ValueError (#432: successor must differ)."""
         pt = sdk.create_point("statement", "self-superseding point")
-        with pytest.raises(ValueError, match="same|differ"):
+        with pytest.raises(ValueError, match="same|differ"):  # noqa: RUF043
             sdk.supersede_point(pt["id"], pt["id"])
 
     # ── compute_reputation with all-superseded claims ─────────────────

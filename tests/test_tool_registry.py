@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest
+import pytest  # noqa: F401
 from fastmcp import FastMCP
 from fastmcp.tools import FunctionTool
 from mcp.types import ToolAnnotations
@@ -62,7 +62,7 @@ class TestRegistryEquivalence:
         (Falsifiable after the literal was replaced by the derived set in #454 —
         the old literal-vs-derived comparison became tautological.)
         """
-        from tortoise.tool_registry import TOOL_REGISTRY
+        from tortoise.tool_registry import TOOL_REGISTRY  # noqa: I001
         from tortoise.mcp_auth import HTTP_ALLOWED
 
         derived = frozenset(t.name for t in TOOL_REGISTRY if t.http_policy)
@@ -164,7 +164,7 @@ class TestCurationGroups:
 
     def test_groups_reachable_via_helpers(self):
         """tools_by_group / tool_groups expose the corrected groups (#523)."""
-        from tortoise.tool_registry import tools_by_group, tool_groups
+        from tortoise.tool_registry import tools_by_group, tool_groups  # noqa: I001
         memory = {t.name for t in tools_by_group("memory")}
         assert "tortoise_retract_point" in memory
         groups = tool_groups()
@@ -211,7 +211,7 @@ class TestFastMCPAdapter:
     def test_adapter_registers_all_tools(self):
         """Every registry entry becomes a registered MCP tool."""
         async def _check():
-            from tortoise.tool_registry import TOOL_REGISTRY, FastMCPAdapter
+            from tortoise.tool_registry import TOOL_REGISTRY, FastMCPAdapter  # noqa: I001
             from fastmcp import FastMCP
 
             mcp = FastMCP("test_adapter")
@@ -241,7 +241,7 @@ class TestFastMCPAdapter:
     def test_adapter_preserves_annotations(self):
         """ToolAnnotations from registry appear on registered tools."""
         async def _check():
-            from tortoise.tool_registry import TOOL_REGISTRY, FastMCPAdapter
+            from tortoise.tool_registry import TOOL_REGISTRY, FastMCPAdapter  # noqa: I001
             from fastmcp import FastMCP
 
             mcp = FastMCP("test_annotations")
@@ -273,7 +273,7 @@ class TestFastMCPAdapter:
     def test_adapter_excluded_tool_still_registered(self):
         """Excluded tools (http_policy=False) are still registered in MCP."""
         async def _check():
-            from tortoise.tool_registry import TOOL_REGISTRY, FastMCPAdapter
+            from tortoise.tool_registry import TOOL_REGISTRY, FastMCPAdapter  # noqa: I001
             from fastmcp import FastMCP
 
             mcp = FastMCP("test_excluded")
@@ -304,7 +304,7 @@ class TestFastAPIRouterAdapter:
 
     def test_adapter_registers_all_rest_routes(self):
         """Every registry entry with rest_spec becomes a route."""
-        from tortoise.tool_registry import TOOL_REGISTRY, FastAPIRouterAdapter
+        from tortoise.tool_registry import TOOL_REGISTRY, FastAPIRouterAdapter  # noqa: I001
         from fastapi import APIRouter
 
         router = APIRouter()

@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
-from build_window_transcript import _SECRET_PATTERNS, _check_secrets, load_session, sanitize  # noqa: E402
+from build_window_transcript import _SECRET_PATTERNS, _check_secrets, load_session, sanitize  # noqa: E402, I001, RUF100
 
 
 def _write_events(tmp_path: Path, records: list[dict]) -> Path:
@@ -40,7 +40,7 @@ def test_load_session_duplicate_hard_fails(tmp_path):
             _record("s-dup"),
         ],
     )
-    with pytest.raises(SystemExit, match="found 2 times .*lines 1, 3.*ambiguous"):
+    with pytest.raises(SystemExit, match="found 2 times .*lines 1, 3.*ambiguous"):  # noqa: RUF043
         load_session(path, "s-dup")
 
 

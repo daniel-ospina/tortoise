@@ -16,7 +16,7 @@ Tests:
   4. test_quadrature_recommendation — data-justified n_quad thresholds
 """
 
-import numpy as np
+import numpy as np  # noqa: I001
 import pytest
 from scipy.integrate import dblquad
 from scipy.stats import beta as beta_dist
@@ -207,7 +207,7 @@ def test_quadrature_convergence_rate():
 
     factor_per_4 = np.exp(-4 * lam)
 
-    print(f"\n  Convergence for w=100, Beta(2,5)×Beta(3,4):")
+    print(f"\n  Convergence for w=100, Beta(2,5)×Beta(3,4):")  # noqa: F541
     print(f"  Fitted λ = {lam:.4f} (R² = {r_sq:.4f})")
     print(f"  Error reduction per +4 pts: {1/factor_per_4:.0f}×")
     for n in n_vals:

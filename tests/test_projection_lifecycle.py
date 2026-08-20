@@ -82,7 +82,7 @@ def test_finalize_cleans_on_gc():
 def test_atexit_cleanup_fires_on_process_exit():
     """A subprocess that opens FalkorProjection WITHOUT `with` and exits
     normally must NOT leave an orphaned redis-server (atexit fires)."""
-    from tortoise.projection import FalkorProjection
+    from tortoise.projection import FalkorProjection  # noqa: F401
     path = _tmp_db("atexit.db")
     dbname = os.path.basename(path)
     code = f"""
@@ -117,14 +117,14 @@ print("ALIVE" if ("redis-server" in out and {dbname!r} in out) else "DEAD")
     # the specific socket for this db should be gone
     out = subprocess.run(["ps", "-ww", "-eo", "args"], capture_output=True,
                          text=True).stdout
-    leftovers = [l for l in out.splitlines()
+    leftovers = [l for l in out.splitlines()  # noqa: E741
                  if "redis-server" in l and dbname in l]
     assert not leftovers, f"orphan redis-server left: {leftovers}"
 
 
 def test_no_per_instance_signal_handlers():
     """Creating 100 instances must not grow signal-handler count."""
-    import signal
+    import signal  # noqa: I001
     from tortoise.projection import FalkorProjection
     before = signal.getsignal(signal.SIGTERM)
     # 20 instances is ample: per-instance handler registration grows the

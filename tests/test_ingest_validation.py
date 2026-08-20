@@ -102,7 +102,7 @@ class TestPhase1Phase2Parity:
             "event entity missing eventKind": {"entities": [{"type": "event", "name": "e"}]},
             "document entity missing documentKind": {"entities": [{"type": "document", "name": "d"}]},
         }
-        for name, bundle in cases.items():
+        for name, bundle in cases.items():  # noqa: B007
             self._assert_both_phases(sdk, bundle)
 
     def test_kind_vocabulary_class(self, sdk):
@@ -122,7 +122,7 @@ class TestPhase1Phase2Parity:
                             "kind": "statement", "content": "a"}],
             },
         }
-        for name, bundle in cases.items():
+        for name, bundle in cases.items():  # noqa: B007
             self._assert_both_phases(sdk, bundle)
 
     def test_nonstring_fields_classes(self, sdk):
@@ -146,7 +146,7 @@ class TestPhase1Phase2Parity:
                 "connections": [
                     {"from": "p1", "to": "p2", "operator": "IMPL"}]},
         }
-        for name, bundle in cases.items():
+        for name, bundle in cases.items():  # noqa: B007
             self._assert_both_phases(sdk, bundle)
 
     def test_connection_contract_classes(self, sdk):
@@ -174,7 +174,7 @@ class TestPhase1Phase2Parity:
             "multi-item to on plain IMPL": _points_pair() | {"connections": [
                 {"from": "pA", "to": ["pB", "pA"], "operator": "IMPL"}]},
         }
-        for name, bundle in cases.items():
+        for name, bundle in cases.items():  # noqa: B007
             self._assert_both_phases(sdk, bundle)
 
     def test_field_validity_classes(self, sdk):
@@ -203,7 +203,7 @@ class TestPhase1Phase2Parity:
                 {"from": "pA", "to": "pB", "operator": "IMPL", "reify": True,
                  "confidence": 0.5}]},
         }
-        for name, bundle in cases.items():
+        for name, bundle in cases.items():  # noqa: B007
             self._assert_both_phases(sdk, bundle)
 
     def test_duplicate_classes(self, sdk):
@@ -245,7 +245,7 @@ class TestPhase1Phase2Parity:
                  "direction": "bidirectional"},
                 {"from": "pB", "to": "pA", "operator": "IMPL"}]},
         }
-        for name, bundle in cases.items():
+        for name, bundle in cases.items():  # noqa: B007
             self._assert_both_phases(sdk, bundle)
 
     def test_gated_live_and_batch_guard_classes(self, sdk):
@@ -262,11 +262,11 @@ class TestPhase1Phase2Parity:
             "quote over cap": {"points": [
                 {"kind": "statement", "content": "a", "quote": "x" * 201}]},
         }
-        for name, bundle in cases.items():
+        for name, bundle in cases.items():  # noqa: B007
             self._assert_both_phases(sdk, bundle)
 
     def test_endpoint_classes_need_pre_seeded_graph(self, sdk):
-        existing = sdk.create_point("statement", "pre-existing point",
+        existing = sdk.create_point("statement", "pre-existing point",  # noqa: F841
                                     status="live")
         terminal = sdk.create_point("statement", "terminal point",
                                     status="superseded")
@@ -304,7 +304,7 @@ class TestPhase1Phase2Parity:
                             "content": "terminal point"}],
                 "connections": [{"from": "p1", "to": "pT", "operator": "IMPL"}]},
         }
-        for name, bundle in cases.items():
+        for name, bundle in cases.items():  # noqa: B007
             self._assert_both_phases(sdk, bundle)
 
     def test_gated_operator_connections_accepted_under_parity(self, sdk):

@@ -3,10 +3,10 @@
 One ToolDefinition per SDK operation. Both MCP and REST surfaces derive their
 registrations from this registry. HTTP_ALLOWED is derived — zero manual sync.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
-from dataclasses import dataclass, replace, field
-from typing import Any, Callable, Optional
+from dataclasses import dataclass, replace, field  # noqa: F401
+from typing import Any, Callable, Optional  # noqa: UP035
 
 from mcp.types import ToolAnnotations
 
@@ -29,8 +29,8 @@ class ToolDefinition:
     annotations: ToolAnnotations  # readOnlyHint, destructiveHint, idempotentHint
     http_policy: bool            # True = exposed on HTTP surfaces
     sdk_method: str              # Attribute name on TortoiseSDK, e.g. "create_point"
-    handler_override: Optional[Callable] = None  # For raw-Cypher REST ops
-    rest_spec: Optional[RestSpec] = None         # For SDK-backed REST ops
+    handler_override: Optional[Callable] = None  # For raw-Cypher REST ops  # noqa: UP045
+    rest_spec: Optional[RestSpec] = None         # For SDK-backed REST ops  # noqa: UP045
     group: str = "memory"        # Curation group (#523): memory|reasoning|graph|sessions|sources|journal|admin|onboarding
 
 

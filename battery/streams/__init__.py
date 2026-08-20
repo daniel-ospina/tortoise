@@ -20,7 +20,7 @@ ALL_STREAMS: tuple[Stream, ...] = (
     L5DecisionDriftStream(), L6DistillationStream(),
 )
 
-__all__ = [
+__all__ = [  # noqa: RUF022
     "ALL_STREAMS", "Stream", "StreamResult", "L1InterdependentStream",
     "L2PseudoEvolutionStream", "L3QualityTrajectoryStream",
     "L4CrossSessionStream", "L5DecisionDriftStream", "L6DistillationStream",

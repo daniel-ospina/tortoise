@@ -218,7 +218,7 @@ def ensure_tenant_packs(sdk: TortoiseSDK, *, starter: list[str] | tuple[str, ...
     catalog = _resolve_catalog()
     g = _target_graph(sdk, graph_name)
     lock_graph = _resolved_graph_name(sdk, graph_name)
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
     activated: list[dict] = []
     for ns in _starter_namespaces(starter):
         meta = catalog.get(ns)
@@ -240,7 +240,7 @@ def ensure_tenant_packs(sdk: TortoiseSDK, *, starter: list[str] | tuple[str, ...
                 namespace=ns, version=meta["version"], status="active",
                 source="starter", installed_at=now,
             ).to_dict())
-        except Exception as e:  # noqa: BLE001 — best-effort by design
+        except Exception as e:  # noqa: BLE001, RUF100
             log.warning(
                 "pack_state: activation of %r failed — skipped (best-effort, "
                 "self-heals on next introspection): %s", ns, e)

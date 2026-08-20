@@ -13,7 +13,7 @@ Pure static text assertions: no browser, no network. Source files, not bundles,
 so regex anchoring to declaration patterns is reliable.
 """
 
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import re
 import pytest

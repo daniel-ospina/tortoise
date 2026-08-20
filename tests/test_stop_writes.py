@@ -3,7 +3,7 @@
 Runs on the conftest isolated graph. Verifies that context is no longer accepted
 — create_point(context=X) now raises TypeError.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import uuid
 
@@ -15,7 +15,7 @@ from tortoise.sdk import TortoiseSDK
 def sdk():
     s = TortoiseSDK()
     yield s
-    try:
+    try:  # noqa: SIM105
         s.close()
     except Exception:
         pass

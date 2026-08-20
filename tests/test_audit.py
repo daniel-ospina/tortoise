@@ -18,7 +18,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest
+import pytest  # noqa: I001
 
 from tortoise.sdk import TortoiseSDK
 from tests._embedded import skip_if_no_falkor

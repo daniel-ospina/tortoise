@@ -83,7 +83,7 @@ def trace_convergent_ep():
 
     # Now delete opB and re-run
     sdk.delete_point(op_b["id"])
-    print(f"\n  ── After removing opB ──")
+    print(f"\n  ── After removing opB ──")  # noqa: F541
     result2 = sdk.compute_confidence()
     claim_c2 = sdk.get_confidence(claim["id"])
     print(f"  EP: {result2['iterations']} iters, converged={result2['converged']}")
@@ -131,10 +131,10 @@ def trace_bottleneck():
 
     total_prem_weight = sum(compute_operator_weight(proj, o) for o in [op_a["id"], op_b["id"], op_c["id"]])
     print(f"\n  Total premise→bottleneck effective weight: {total_prem_weight:.4f}")
-    print(f"  Each T2 premise prior: Beta(3,1) → mean 0.7500")
-    print(f"  Bottleneck starts at Beta(1,1) → mean 0.5000")
-    print(f"  With w=0.5 per edge, each message is φ=exp(0.5*cp*cb)")
-    print(f"  Expected: bottleneck should accumulate ABOVE 0.75 with 3 T2 sources")
+    print(f"  Each T2 premise prior: Beta(3,1) → mean 0.7500")  # noqa: F541
+    print(f"  Bottleneck starts at Beta(1,1) → mean 0.5000")  # noqa: F541
+    print(f"  With w=0.5 per edge, each message is φ=exp(0.5*cp*cb)")  # noqa: F541
+    print(f"  Expected: bottleneck should accumulate ABOVE 0.75 with 3 T2 sources")  # noqa: F541
 
     result = sdk.compute_confidence()
     print(f"\n  EP result: {result['iterations']} iters")
@@ -165,10 +165,10 @@ def test_single_source_baseline():
     w = compute_operator_weight(proj, op["id"])
     print(f"  Operator weight: {w:.4f} (claim has 1 edge)")
 
-    result = sdk.compute_confidence()
+    result = sdk.compute_confidence()  # noqa: F841
     print(f"\n  Source: {sdk.get_confidence(src['id'])['mean']:.4f}")
     print(f"  Claim:  {sdk.get_confidence(claim['id'])['mean']:.4f}")
-    print(f"\n  This is the reference: single T0 source → claim at ~78%")
+    print(f"\n  This is the reference: single T0 source → claim at ~78%")  # noqa: F541
 
     sdk.close()
 
@@ -208,14 +208,14 @@ def test_chain_trace():
     w2 = compute_operator_weight(proj, op2["id"])
     print(f"\n  op1 (src→mid) weight: {w1:.4f}")
     print(f"  op2 (mid→con) weight: {w2:.4f}")
-    print(f"\n  ⚠️  op1 is PENALIZED because middle has 2 edges (from op1+op2)")
-    print(f"  op2 is NOT penalized because conclusion has only 1 edge")
+    print(f"\n  ⚠️  op1 is PENALIZED because middle has 2 edges (from op1+op2)")  # noqa: F541
+    print(f"  op2 is NOT penalized because conclusion has only 1 edge")  # noqa: F541
     print(f"  So: middle gets a WEAK message from source (w={w1:.4f})")
     print(f"  And: conclusion gets a STRONG message from middle (w={w2:.4f})")
-    print(f"  Net: conclusion can end up HIGHER than middle — attenuation reversed!")
+    print(f"  Net: conclusion can end up HIGHER than middle — attenuation reversed!")  # noqa: F541
 
-    result = sdk.compute_confidence()
-    print(f"\n  Results:")
+    result = sdk.compute_confidence()  # noqa: F841
+    print(f"\n  Results:")  # noqa: F541
     print(f"  Source:     {sdk.get_confidence(src['id'])['mean']:.4f}")
     print(f"  Middle:     {sdk.get_confidence(mid['id'])['mean']:.4f}")
     print(f"  Conclusion: {sdk.get_confidence(con['id'])['mean']:.4f}")

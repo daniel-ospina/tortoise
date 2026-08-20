@@ -12,10 +12,10 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.api import EventAPI, provenance          # noqa: E402
-from tortoise.idempotency import document_key          # noqa: E402
-from tortoise.log import EventLog                       # noqa: E402
-from tortoise.projection import fold                    # noqa: E402
+from tortoise.api import EventAPI, provenance  # noqa: E402, I001, RUF100
+from tortoise.idempotency import document_key  # noqa: E402, RUF100
+from tortoise.log import EventLog  # noqa: E402, RUF100
+from tortoise.projection import fold  # noqa: E402, RUF100
 
 
 # ── helpers (same pattern as test_m1.py) ──────────────────────────────
@@ -165,7 +165,7 @@ def test_normal_context_does_not_trigger_grounding():
 
 def test_resolution_event_no_projection_safe():
     """resolution-event with no projection attached must not crash."""
-    api, log = _api(projection=None)
+    api, log = _api(projection=None)  # noqa: RUF059
     prov = provenance("doc.txt", [0, 1], "x", extracted_by="test@0")
     pid = api.add_point("z", prov, pointKind="resolution-event")
     assert pid and isinstance(pid, str)
@@ -215,7 +215,7 @@ def test_add_operator_invalid_type():
     prov = provenance("doc.txt", [0, 1], "x", extracted_by="test@0")
     try:
         api.add_operator("XOR", ["a"], prov)
-        assert False, "should have raised"
+        assert False, "should have raised"  # noqa: B011
     except ValueError as e:
         assert "XOR" in str(e)
     print("PASS test_add_operator_invalid_type")
@@ -324,7 +324,7 @@ def test_merge_points_no_corrects():
     """merge_points with corrects=None works fine."""
     api, log = _api()
     a, b, _op = _build(api)
-    ev = api.merge_points(keep_id=a, merge_ids=[b])
+    ev = api.merge_points(keep_id=a, merge_ids=[b])  # noqa: F841
     merged = [e for e in log.read_all() if e["type"] == "PointsMerged"]
     assert merged[0]["corrects"] is None
     assert b not in fold(log.read_all())
@@ -496,7 +496,7 @@ def test_add_operator_rejects_non_string_inputs():
     for bad in ([1, 2], [None], [b"bytes"], [{"no_id": 1}], 42, None):
         try:
             api.add_operator("IMPL", bad, prov)
-            assert False, f"should have raised TypeError for {bad!r}"
+            assert False, f"should have raised TypeError for {bad!r}"  # noqa: B011
         except TypeError:
             pass
     print("PASS test_add_operator_rejects_non_string_inputs")
@@ -510,7 +510,7 @@ def test_add_operator_rejects_non_string_op_type():
     for bad in (None, 123, b"NAND", ["NAND"]):
         try:
             api.add_operator(bad, ["a"], prov)
-            assert False, f"should have raised ValueError for {bad!r}"
+            assert False, f"should have raised ValueError for {bad!r}"  # noqa: B011
         except ValueError as e:
             assert "gate" in str(e)
     print("PASS test_add_operator_rejects_non_string_op_type")
@@ -521,7 +521,7 @@ def test_add_operator_single_string_input_not_char_split():
     api, log = _api()
     prov = provenance("doc.txt", [0, 1], "x", extracted_by="test@0")
     a = api.add_point("point a", prov)
-    b = api.add_point("point b", prov)
+    b = api.add_point("point b", prov)  # noqa: F841
     api.add_operator("IMPL", a, prov)  # bare string, not [a]
     events = [e for e in log.read_all() if e["type"] == "OperatorAdded"]
     assert len(events) == 1

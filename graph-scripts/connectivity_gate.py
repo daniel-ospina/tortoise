@@ -143,7 +143,7 @@ def graph_stats(proj) -> dict:
             "ORDER BY c DESC"
         ).result_set
         by_label = {str(r[0]): int(r[1]) for r in rows}
-    except Exception as exc:  # noqa: BLE001 — label query is best-effort
+    except Exception as exc:  # noqa: BLE001, RUF100
         by_label = {"__error__": str(exc)}
     return {
         "nodes": int(nodes or 0),
@@ -180,7 +180,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         out = {
             "tool": "334-connectivity-gate",
-            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "generated_at": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
             "target": target,
             "ok": None,
             "stats": None,
@@ -197,7 +197,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         proj = connect_projection(cfg)
         stats = graph_stats(proj)
-    except Exception as exc:  # noqa: BLE001 — unreachable must fail the gate
+    except Exception as exc:  # noqa: BLE001, RUF100
         if args.json:
             out["ok"] = False
             out["error"] = str(exc)

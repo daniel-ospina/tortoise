@@ -126,7 +126,7 @@ def build_artifact(
         "algorithm": ALGORITHM if encrypted else None,
         "key_fingerprint": key_fingerprint(key) if encrypted else None,
         "exporter_version": EXPORTER_VERSION,
-        "exported_at": exported_at or datetime.now(timezone.utc).isoformat(),
+        "exported_at": exported_at or datetime.now(timezone.utc).isoformat(),  # noqa: UP017
         "source_surface": source_surface,
         "blob_sha256": hashlib.sha256(blob).hexdigest(),
         "blob_b64": base64.b64encode(blob).decode("ascii"),
@@ -184,7 +184,7 @@ def open_payload(artifact: dict, key: bytes | None = None) -> dict:
     ``ValueError``) → payload_sha256 vs canonical plaintext.
     """
     blob = verify_blob(artifact)
-    if artifact.get("encrypted"):
+    if artifact.get("encrypted"):  # noqa: SIM108
         plaintext = decrypt_backup(blob, key=key)
     else:
         plaintext = blob

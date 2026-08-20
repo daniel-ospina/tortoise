@@ -52,7 +52,7 @@ import re
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Callable  # noqa: UP035
 
 # ── The rubric (spec-classification-model.md §1-2) ──────────────────────────
 
@@ -376,7 +376,7 @@ def label_window(
 def _default_model_factory(model_name: str):
     """Resolve a model by name via tests/model_adapters.py (lazy import)."""
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from tests.model_adapters import MODELS  # noqa: PLC0415 (lazy: keeps unit tests LLM-free)
+    from tests.model_adapters import MODELS  # noqa: PLC0415, RUF100
 
     try:
         factory = MODELS[model_name]
@@ -401,7 +401,7 @@ def main(argv: list[str] | None = None, *, model_factory: Callable[[str], object
         # Pre-scan: --list-models must work standalone (--transcript is required
         # for a labeling run only).
         sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-        from tests.model_adapters import MODELS  # noqa: PLC0415
+        from tests.model_adapters import MODELS  # noqa: PLC0415, RUF100
 
         for name in sorted(MODELS):
             print(name)

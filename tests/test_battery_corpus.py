@@ -21,7 +21,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from battery.config import schema  # noqa: E402
+from battery.config import schema  # noqa: E402, RUF100
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 GOLD_STORE_REL = "battery/config/.gold_store/golds.json"
@@ -40,7 +40,7 @@ def test_enum_schema() -> None:
     assert schema.SPLITS == ("train", "wave-1", "wave-2", "wave-3", "held_out")
     assert schema.CONTRADICTION_K == 5
     assert sum(schema.PACK_COUNTS.values()) == 134
-    assert schema.ATTACK_DISTRIBUTION == {t: 2 for t in schema.ATTACK_TYPES}
+    assert schema.ATTACK_DISTRIBUTION == {t: 2 for t in schema.ATTACK_TYPES}  # noqa: SIM300
     assert len(schema.FAMILY_REP_NAMES) == 6
     assert schema.HELD_OUT_FAMILY == "compliance-assessment"
 
@@ -424,7 +424,7 @@ def test_validators_reject_mutations() -> None:
             sc, all_ids or {sc["id"]}, all_ct or set(), complete_splits=set())
 
     # k pin
-    sc = _valid_contradiction(); sc["planted_contradictions"][0]["k"] = 6
+    sc = _valid_contradiction(); sc["planted_contradictions"][0]["k"] = 6  # noqa: E702
     assert errs(sc), "k=6 must be rejected"
     # counter pre-appearing
     sc = _valid_contradiction()
@@ -440,13 +440,13 @@ def test_validators_reject_mutations() -> None:
     sc["gold"]["expected"] = "the queue layer is"
     assert errs(sc), "gold colliding with the prompt must be rejected"
     # loopy triangle invalid
-    sc = _valid_loopy(); sc["graph_script"]["nodes"] = sc["graph_script"]["nodes"][:2]
+    sc = _valid_loopy(); sc["graph_script"]["nodes"] = sc["graph_script"]["nodes"][:2]  # noqa: E702
     assert errs(sc), "loopy triangle with 2 nodes must be rejected"
     # sybil counts
-    sc = _valid_sybil(); sc["hostile"]["sybil_sources"][0]["count"] = 5
+    sc = _valid_sybil(); sc["hostile"]["sybil_sources"][0]["count"] = 5  # noqa: E702
     assert errs(sc), "sybil count ≠ 100 must be rejected"
     # echo ring < 3
-    sc = _valid_echo(); sc["hostile"]["echo_ring"] = sc["hostile"]["echo_ring"][:2]
+    sc = _valid_echo(); sc["hostile"]["echo_ring"] = sc["hostile"]["echo_ring"][:2]  # noqa: E702
     assert errs(sc), "echo ring < 3 must be rejected"
     # flapping same-valence
     sc = _valid_flapping()
@@ -458,16 +458,16 @@ def test_validators_reject_mutations() -> None:
                    gold="integrate feedback")
     assert errs(sc), "feedback with 4 iterations must be rejected"
     # valence invalid
-    sc = _valid_calibration(); sc["evidence_tiers"][0]["valence"] = "maybe"
+    sc = _valid_calibration(); sc["evidence_tiers"][0]["valence"] = "maybe"  # noqa: E702
     assert errs(sc), "invalid valence must be rejected"
     # anchoring turn out of bounds
-    sc = _valid_anchoring(); sc["hostile"]["anchoring_turn"] = 99
+    sc = _valid_anchoring(); sc["hostile"]["anchoring_turn"] = 99  # noqa: E702
     assert errs(sc), "anchoring_turn out of bounds must be rejected"
     # retraction k off-by-one
-    sc = _valid_retraction(); sc["retraction"]["k"] = len(sc["prompt"]["turns"]) + 1
+    sc = _valid_retraction(); sc["retraction"]["k"] = len(sc["prompt"]["turns"]) + 1  # noqa: E702
     assert errs(sc), "retraction k > len(turns) must be rejected"
     # calibration evidence discloses outcome
-    sc = _valid_calibration(); sc["evidence_tiers"][0]["claim"] = sc["gold"]["expected"]
+    sc = _valid_calibration(); sc["evidence_tiers"][0]["claim"] = sc["gold"]["expected"]  # noqa: E702
     assert errs(sc), "calibration evidence stating the outcome must be rejected"
     # R4 empty defeat-condition list
     sc = _scenario(family="R4", gold=[])
@@ -485,10 +485,10 @@ def test_validators_reject_mutations() -> None:
                    variant_of="d-999", delta="harder")
     assert errs(sc, all_ids={"wv-001"}), "variant_of to a nonexistent id must be rejected"
     # attack_type missing for adversarial
-    sc = _valid_poisoned(); del sc["attack_type"]
+    sc = _valid_poisoned(); del sc["attack_type"]  # noqa: E702
     assert errs(sc), "adversarial without attack_type must be rejected"
     # wrong family for pack
-    sc = _valid_contradiction(); sc["family"] = "R2"
+    sc = _valid_contradiction(); sc["family"] = "R2"  # noqa: E702
     assert errs(sc), "contradiction with family R2 must be rejected"
 
 
@@ -496,7 +496,7 @@ def test_load_yaml_dupreject(tmp_path) -> None:
     p = tmp_path / "dup.yaml"
     p.write_text(
         "scenarios:\n  - id: a\n    id: b\n    tier: probe\n", encoding="utf-8")
-    with pytest.raises(Exception):
+    with pytest.raises(Exception):  # noqa: B017
         validate.load_yaml_dupreject(p)
 
 
@@ -504,9 +504,9 @@ def test_load_yaml_dupreject(tmp_path) -> None:
 # Task 4 — builder determinism + invariant refusals
 # ---------------------------------------------------------------------------
 
-import copy
-import os
-import subprocess as sp
+import copy  # noqa: E402, I001
+import os  # noqa: E402
+import subprocess as sp  # noqa: E402
 import yaml  # noqa: E402
 
 from battery.config import build_corpus  # noqa: E402
@@ -735,16 +735,16 @@ def test_sealing_no_gold_in_corpus_json(sealed_corpus) -> None:
     corpus, _, _ = sealed_corpus
     for sc in corpus.scenarios:
         cl.assert_no_gold(sc)  # recursive — any gold key at any depth raises
-    text = json.dumps(corpus.manifest) + json.dumps(corpus.scenarios)
+    text = json.dumps(corpus.manifest) + json.dumps(corpus.scenarios)  # noqa: F841
     for sc in corpus.scenarios:
         if sc["task_type"] == "contradiction":
-            for pair in sc["planted_contradictions"]:
+            for pair in sc["planted_contradictions"]:  # noqa: B007
                 # gold plaintext values must never appear anywhere in corpus.json
                 pass  # gold content is in the gitignored store only; checked below
 
 
 def test_load_corpus_reader_safe(sealed_corpus) -> None:
-    corpus, store, _ = sealed_corpus
+    corpus, store, _ = sealed_corpus  # noqa: RUF059
     # committed artifact loads gold-free and verify_seal passes
     committed = cl.load_corpus(COMMITTED_CORPUS_JSON)
     for sc in committed.scenarios:

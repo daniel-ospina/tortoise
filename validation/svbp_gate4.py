@@ -8,10 +8,10 @@ Validates SVBP wired into the Tortoise EventAPI:
 Usage:
     python -m validation.svbp_gate4
 """
-import sys, os
+import sys, os  # noqa: E401, I001
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-import tempfile, time
+import tempfile, time  # noqa: E401, I001
 import jax.numpy as jnp
 import jax
 import numpy as np
@@ -35,7 +35,7 @@ def main():
     api = EventAPI(log, initiated_by="user", agent_id="gate4", projection=proj)
     api.current_run = "gate4"
     api._emit("ingest_begin", source_id="gate4", extractor_version="manual@1.0")
-    prov = lambda q: provenance("gate4", (0, 0), q, speaker="test", extracted_by="manual@1.0")
+    prov = lambda q: provenance("gate4", (0, 0), q, speaker="test", extracted_by="manual@1.0")  # noqa: E731
 
     # ── Test 1: Build graph → get confidence ──────────────────────
     print()
@@ -77,7 +77,7 @@ def main():
 
     # Add a new operator
     t0 = time.time()
-    new_op = api.add_operator("IMPL", [cids[4], cids[6]], "test", prov("IMPL E-G"))
+    new_op = api.add_operator("IMPL", [cids[4], cids[6]], "test", prov("IMPL E-G"))  # noqa: F841
     elapsed_add = time.time() - t0
     print(f"  add_operator + SVBP update: {elapsed_add:.1f}s")
 

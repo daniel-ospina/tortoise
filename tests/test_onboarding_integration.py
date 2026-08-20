@@ -18,7 +18,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tortoise.hosted_api import app
-from tortoise.sdk import TortoiseSDK
+from tortoise.sdk import TortoiseSDK  # noqa: F401
 
 
 @pytest.fixture
@@ -71,7 +71,7 @@ class TestOnboardingJourney:
         r1 = client.post("/v1/register", json={"email": "a@b.com", "password": "password123"})
         assert r1.status_code == 200
         assert "api_key" in r1.json()
-        key1 = r1.json()["api_key"]
+        key1 = r1.json()["api_key"]  # noqa: F841
         r2 = client.post("/v1/register", json={"email": "a@b.com", "password": "password123"})
         # 409 with already_registered message, no new key leaked
         assert r2.status_code == 409

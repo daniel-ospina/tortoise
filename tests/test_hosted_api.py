@@ -23,7 +23,7 @@ os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 # Tests opt out; production keeps the limit (RATE_LIMIT_DISABLED=1).
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
-from tortoise.hosted_api import (
+from tortoise.hosted_api import (  # noqa: I001
     app,
     get_current_team,
     get_current_user,
@@ -274,7 +274,7 @@ class TestLastUsedAtTracking:
 
     def test_last_used_at_set_on_successful_auth(self):
         """#685: get_current_team updates key.last_used_at on valid auth."""
-        import asyncio
+        import asyncio  # noqa: I001
         from unittest.mock import MagicMock
         from tortoise.auth import hash_api_key
         from tortoise.hosted_api import _make_sdk, get_current_team
@@ -329,7 +329,7 @@ class TestLastUsedAtTracking:
                     "last_used_at should be set after successful auth"
                 last_used = datetime.fromisoformat(row[0][0])
                 assert last_used.tzinfo is not None, "last_used_at must be timezone-aware"
-                age = datetime.now(timezone.utc) - last_used
+                age = datetime.now(timezone.utc) - last_used  # noqa: UP017
                 assert age.total_seconds() < 30, \
                     f"last_used_at should be recent, got {row[0][0]}"
             finally:
@@ -618,7 +618,7 @@ class TestDreamEndpoint:
 class TestSessionCapture:
     """POST /v1/sessions — capture an agent session."""
 
-    SIMPLE_CONVERSATION = [
+    SIMPLE_CONVERSATION = [  # noqa: RUF012
         {"role": "user", "content": "Hello, can you help me?"},
         {"role": "assistant", "content": "Of course! What do you need?"},
     ]
@@ -870,12 +870,12 @@ class TestSessionDetail:
         ``other-team-999`` is invisible to the endpoint which resolves
         ``TEST_TEAM_ID`` (``test-team-001``).
         """
-        from datetime import datetime, timezone
+        from datetime import datetime, timezone  # noqa: I001
         from tortoise.hosted_api import _make_sdk
 
         sdk_b = _make_sdk(namespace="other-team-999")
         proj_b = sdk_b._get_proj()
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
         # Create a session + turn point in other-team's graph
         proj_b.g.query(
@@ -902,12 +902,12 @@ class TestSessionDetail:
 
     def test_detail_role_parsing_no_brackets(self, client):
         """Content without [role] prefix → role 'unknown'."""
-        from datetime import datetime, timezone
+        from datetime import datetime, timezone  # noqa: I001
         from tortoise.hosted_api import _make_sdk
 
         sdk = _make_sdk(namespace=TEST_TEAM_ID)
         proj = sdk._get_proj()
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
         # Create a session with a turn point that has no [role] prefix
         proj.g.query(
@@ -1013,7 +1013,7 @@ def internal_client():
     Combines the client fixture's team auth bypass with
     FASTAPI_INTERNAL_KEY set so _check_internal passes.
     """
-    import tortoise.hosted_api as ha_mod
+    import tortoise.hosted_api as ha_mod  # noqa: F401
 
     old_key = os.environ.get("FASTAPI_INTERNAL_KEY", "")
     os.environ["FASTAPI_INTERNAL_KEY"] = _INTERNAL_KEY
@@ -1036,7 +1036,7 @@ def internal_client():
 class TestInternalProvision:
     """POST /internal/provision — tenant provisioning."""
 
-    INTERNAL_HEADERS = {"Authorization": f"Bearer {_INTERNAL_KEY}"}
+    INTERNAL_HEADERS = {"Authorization": f"Bearer {_INTERNAL_KEY}"}  # noqa: RUF012
 
     def test_provision_valid_returns_200(self, internal_client):
         payload = {
@@ -1075,7 +1075,7 @@ class TestInternalProvision:
 class TestInternalDemo:
     """POST /v1/internal/demo — demo graph seeding."""
 
-    INTERNAL_HEADERS = {"Authorization": f"Bearer {_INTERNAL_KEY}"}
+    INTERNAL_HEADERS = {"Authorization": f"Bearer {_INTERNAL_KEY}"}  # noqa: RUF012
 
     def test_demo_valid_returns_200(self, internal_client):
         r = internal_client.post(
@@ -1440,7 +1440,7 @@ class TestBackupEndpoints:
     @pytest.fixture
     def pro_client(self, client, monkeypatch):
         """Client with Pro tier + in-memory backup storage + env key."""
-        import base64 as _b64
+        import base64 as _b64  # noqa: I001
         from tortoise import hosted_api as _ha
         from tortoise.hosted_backup import MemoryStorage as _MS
 
@@ -1705,7 +1705,7 @@ class TestQuotaFailClosed:
     def test_quota_check_error_returns_500(self, client, monkeypatch):
         """When enforce_team_limit raises QuotaCheckError, the endpoint
         returns 500 with a descriptive detail — fail-closed, never silent."""
-        from tortoise.quota import QuotaCheckError
+        from tortoise.quota import QuotaCheckError  # noqa: I001
         import tortoise.quota as quota_mod
 
         def _fail_count(_limits, _resource, sdk=None):
@@ -1723,7 +1723,7 @@ class TestQuotaFailClosed:
     def test_quota_exceeded_returns_402(self, client, monkeypatch):
         """When enforce_team_limit raises QuotaExceededError, the endpoint
         returns 402 (payment required) — normal over-limit behavior."""
-        from tortoise.quota import QuotaExceededError
+        from tortoise.quota import QuotaExceededError  # noqa: I001
         import tortoise.quota as quota_mod
 
         def _fail_exceeded(_limits, _resource, sdk=None):
@@ -2148,7 +2148,7 @@ class TestInviteEndpointsRegistry:
         assert r.status_code == 402
 
     def test_list_and_rescind_registry_path(self, registry_env, session_user):
-        tc, sdk = registry_env
+        tc, sdk = registry_env  # noqa: RUF059
         session_user("user-1")
         r = tc.post("/v1/invites", json={
             "team_id": "team-inv-001", "email": "bob@example.com",

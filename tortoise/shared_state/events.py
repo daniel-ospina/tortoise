@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import threading
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional  # noqa: UP035
 
 Upcaster = Callable[[dict[str, Any]], dict[str, Any]]
 """An upcaster transforms an event dict from version N to N+1."""
@@ -28,7 +28,7 @@ def event_types() -> dict[str, int]:
     return {name: len(chain) + 1 for name, chain in _event_types.items()}
 
 
-def register_event_type(name: str, upcasters: Optional[list[Upcaster]] = None
+def register_event_type(name: str, upcasters: Optional[list[Upcaster]] = None  # noqa: UP045
                         ) -> None:
     """Register an event type with its upcaster chain.
 
@@ -48,8 +48,8 @@ class EventCodec:
     @staticmethod
     def encode(type_name: str, payload: dict[str, Any],
                *,
-               timestamp: Optional[float] = None,
-               event_id: Optional[str] = None,
+               timestamp: Optional[float] = None,  # noqa: UP045
+               event_id: Optional[str] = None,  # noqa: UP045
                **extra_fields) -> dict[str, Any]:
         """Build an event dict for writing.
 
@@ -109,7 +109,7 @@ class EventCodec:
 
 # --- self-check ---
 if __name__ == "__main__":
-    import tempfile, os, time
+    import tempfile, os, time  # noqa: E401, F401, I001
 
     # Register a type
     register_event_type("card_started")
@@ -176,7 +176,7 @@ CLAIM_EVENT_TYPES = (
 def register_claim_event_types() -> None:
     """Register the #432 claim event types (idempotent)."""
     for name in CLAIM_EVENT_TYPES:
-        try:
+        try:  # noqa: SIM105
             register_event_type(name)
         except ValueError:
             pass  # already registered (idempotent)

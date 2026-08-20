@@ -104,7 +104,7 @@ def check_registry_empty(db_path: str | None = None, db_uri: str | None = None) 
         failures.append(f"registry query failed ({e}) — DB unreachable")
     finally:
         if proj is not None:
-            try:
+            try:  # noqa: SIM105
                 proj.close()
             except Exception:
                 pass

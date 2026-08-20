@@ -10,7 +10,7 @@ from __future__ import annotations
 import gc
 import os
 import re
-import sys
+import sys  # noqa: F401
 import time
 from pathlib import Path
 
@@ -18,7 +18,7 @@ import pytest
 
 pytest.importorskip("redislite")
 
-import tortoise
+import tortoise  # noqa: F401
 from tortoise import FalkorDB
 
 
@@ -32,7 +32,7 @@ def _count_redis_servers() -> int:
         )
     except (subprocess.TimeoutExpired, OSError):
         return -1
-    return len([l for l in out.stdout.splitlines() if l.strip().isdigit()])
+    return len([l for l in out.stdout.splitlines() if l.strip().isdigit()])  # noqa: E741
 
 # Files that legitimately construct FalkorDB / FalkorProjection / Redislite
 # directly (reaper internals, guard tests, concurrency tests, repro scripts,
@@ -159,10 +159,10 @@ def test_falkordb_atexit_closes_server_on_process_exit(tmp_path):
     assertion when other test suites are running concurrently (their server
     churn makes the global count noisy) — the check is only meaningful on a
     quiet machine."""
-    import subprocess
+    import subprocess  # noqa: I001
     import sys as _sys
     from tortoise.embedded_reaper import active_suite_tokens
-    script = (
+    script = (  # noqa: UP031
         "import sys; sys.path.insert(0, %r); "
         "from tortoise import FalkorDB; "
         "import tempfile, os; "
@@ -276,7 +276,7 @@ def test_explicit_close_then_gc_safe(monkeypatch, tmp_path):
     """#1475: explicit close() is unaffected; a later GC of the (already
     closed) projection is a safe no-op — exactly one close call, no crash,
     server stays dead."""
-    from tortoise.projection import FalkorProjection
+    from tortoise.projection import FalkorProjection  # noqa: I001
     from tortoise import FalkorDB as TFalkorDB
     calls = []
     orig_close = TFalkorDB.close

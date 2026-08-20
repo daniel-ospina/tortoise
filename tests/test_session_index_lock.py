@@ -276,7 +276,7 @@ def test_acquire_inode_guard_detects_replaced_path(lock_dir):
         assert c.acquire() == "held"
         assert "replaced" not in (c.detail or "")
     finally:
-        try:
+        try:  # noqa: SIM105
             fcntl.flock(fd_c, fcntl.LOCK_UN)
         except OSError:
             pass

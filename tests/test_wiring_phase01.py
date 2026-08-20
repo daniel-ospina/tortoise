@@ -31,13 +31,13 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "graph-scripts"))
 
-import pytest
+import pytest  # noqa: E402, I001
 
-import baseline_scan
-import connectivity_gate
-import rdb_snapshot_restore
+import baseline_scan  # noqa: E402
+import connectivity_gate  # noqa: E402
+import rdb_snapshot_restore  # noqa: E402
 
-from tortoise.sdk import TortoiseSDK
+from tortoise.sdk import TortoiseSDK  # noqa: E402
 
 
 @pytest.fixture
@@ -284,7 +284,7 @@ class TestConnectivityGate:
             connectivity_gate.classify_target("bolt://localhost:7687/tt", None)
 
     def test_graph_stats_read_only(self, sdk):
-        a, b = _seed_clean_graph(sdk)
+        a, b = _seed_clean_graph(sdk)  # noqa: RUF059
         stats = connectivity_gate.graph_stats(_proj(sdk))
         assert stats["nodes"] >= 4  # 3 points + 1 source
         assert stats["edges"] >= 2  # IMPL + INPUT

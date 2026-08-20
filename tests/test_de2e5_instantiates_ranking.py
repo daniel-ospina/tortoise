@@ -12,8 +12,8 @@ Epic plan §7 DE2E-5:
 """
 from __future__ import annotations
 
-import os
-import tempfile
+import os  # noqa: F401
+import tempfile  # noqa: F401
 
 import pytest
 
@@ -110,7 +110,7 @@ class TestDe2e5:
         artifact = sdk.create_entity("document", "doc-1",
                                      documentKind="plan", objectKind="document")
         artifact_id = artifact["node"]["id"]
-        res = sdk.file_human_approval(approver_id="alice",
+        res = sdk.file_human_approval(approver_id="alice",  # noqa: F841
                                       artifact_id=artifact_id,
                                       point_ids=[claim["id"]])
         rows = proj.g.query(
@@ -189,7 +189,7 @@ class TestDe2e5:
     def test_mining_path_no_instantiates(self, sdk):
         """DE2E-5 'both paths': mining (mine_conversation) writes zero
         INSTANTIATES edges."""
-        import os as _os
+        import os as _os  # noqa: I001
         import tempfile as _tf
         from tortoise.api import EventAPI
         from tortoise.log import EventLog
@@ -210,7 +210,7 @@ class TestDe2e5:
     def test_security_whitelist_has_no_instantiates(self):
         """The security edge whitelist must not contain INSTANTIATES."""
         import tortoise.security as sec
-        source = open(sec.__file__).read()
+        source = open(sec.__file__).read()  # noqa: SIM115
         assert "INSTANTIATES" not in source, (
             "security whitelist must be INSTANTIATES-free"
         )

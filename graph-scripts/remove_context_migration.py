@@ -29,15 +29,15 @@ Gate summary
 
 Post-migration: verifies ``MATCH (n:Point) WHERE n.context IS NOT NULL`` returns 0.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import argparse
 import ast
-import json
+import json  # noqa: F401
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone  # noqa: F401
 from pathlib import Path
 
 
@@ -141,7 +141,7 @@ class _ContextRefVisitor(ast.NodeVisitor):
         """Check dataclass/attrs fields and methods."""
         # Check for dataclass field named 'context' in assignment targets
         for item in node.body:
-            if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
+            if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):  # noqa: SIM102
                 if item.target.id == "context":
                     self.violations.append(
                         f"{self.rel_path}:{self._lineno(item)}: "
@@ -301,7 +301,7 @@ def _run_removal(proj) -> dict:
     ).result_set[0][0]
 
     # The migration — one Cypher query
-    result = proj.g.query(
+    result = proj.g.query(  # noqa: F841
         "MATCH (n:Point) WHERE n.context IS NOT NULL REMOVE n.context"
     )
 

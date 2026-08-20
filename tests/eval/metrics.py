@@ -86,7 +86,7 @@ from tests.eval.types import (  # noqa: E402
     WINDOW_TYPES,
     Label,
     MetricsReport,
-    RelationLabel,
+    RelationLabel,  # noqa: F401
     Window,
 )
 from tools import kappa as _tools_kappa  # noqa: E402
@@ -388,7 +388,7 @@ def compute_metrics(
     atomicity_denom, atomicity_ok = 0, 0
     citation_denom, citation_ok = 0, 0
     kind_denom, kind_ok = 0, 0
-    for wid, gw in gold_by_id.items():
+    for wid, gw in gold_by_id.items():  # noqa: B007
         p_by_g = pair_map_by_window[wid]
         for g in gold_labels[wid]:
             p = p_by_g.get(id(g))
@@ -469,7 +469,7 @@ def compute_metrics(
             f"{sorted(unknown_me)}"
         )
     min_signal: dict[str, dict] = {}
-    for wid, pw in pred_by_id.items():
+    for wid, pw in pred_by_id.items():  # noqa: B007
         wt = wt_of.get(wid, "operational")
         if wt not in WINDOW_TYPES:
             raise ValueError(
@@ -489,7 +489,7 @@ def compute_metrics(
 
     # 9. Process routing (R3) — gold process items never hit the graph.
     process_denom, process_ok = 0, 0
-    for wid, gw in gold_by_id.items():
+    for wid, gw in gold_by_id.items():  # noqa: B007
         p_by_g = pair_map_by_window[wid]
         for g in gold_labels[wid]:
             if g.class_ != "process":
@@ -620,8 +620,8 @@ def _expected_calibration_error(
         conf = max(0.0, min(1.0, conf))  # out-of-range → clamped to [0, 1]
         if wid not in gold_labels or wid not in pred_labels:
             continue
-        g = next((l for l in gold_labels[wid] if l.edu_index == idx), None)
-        p = next((l for l in pred_labels[wid] if l.edu_index == idx), None)
+        g = next((l for l in gold_labels[wid] if l.edu_index == idx), None)  # noqa: E741
+        p = next((l for l in pred_labels[wid] if l.edu_index == idx), None)  # noqa: E741
         if g is None or p is None:
             continue
         b = min(9, max(0, int(conf * 10)))

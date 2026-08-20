@@ -37,7 +37,7 @@ from battery.runner.setup import (
     scenario_namespace,
 )
 
-__all__ = [
+__all__ = [  # noqa: RUF022
     "Aggregate", "CallTimeout", "EpisodeResult", "EpisodeTracker",
     "HARNESS_METRIC_IDS", "HarnessScorer", "MetricValue", "ModelCallFailed",
     "OutcomeRecordingCaller", "RateLimited", "RoundTripCounter", "RunConfig",

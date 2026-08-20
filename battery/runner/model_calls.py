@@ -13,8 +13,8 @@ epic's critical bug-pattern flag). Retry table (scope DD8):
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
-from typing import Callable, Protocol
+from dataclasses import dataclass, field  # noqa: F401
+from typing import Callable, Protocol  # noqa: UP035
 
 from battery.enums import ModelCallOutcome
 

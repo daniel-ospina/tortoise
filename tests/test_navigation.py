@@ -9,13 +9,13 @@ from unittest.mock import MagicMock
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from tortoise.navigation import entityProfile, tortoise_traverse
+from tortoise.navigation import entityProfile, tortoise_traverse  # noqa: I001
 from tortoise.memory_orchestrator import (
     _entityAnchoredCypher,
     crossOntologyQuery,
-    dispatch,
-    routeRead,
-    translateNL,
+    dispatch,  # noqa: F401
+    routeRead,  # noqa: F401
+    translateNL,  # noqa: F401
 )
 
 
@@ -87,7 +87,7 @@ def test_entity_profile_single_hop():
     """One hop from entity finds connected points and documents."""
     root = _node("root-1", ["Point"], {"content": "root point", "pointKind": "claim"})
     child_p = _node("pt-2", ["Point"], {"content": "connected point", "confidence": 0.8})
-    child_d = _node("doc-1", ["Document"], {"title": "connected doc"})
+    child_d = _node("doc-1", ["Document"], {"title": "connected doc"})  # noqa: F841
 
     # Query 0: root lookup. Query 1: BFS from root-1 (one child per direction)
     db = _mock_db({

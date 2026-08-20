@@ -121,7 +121,7 @@ class _FakeHttpxClient:
     the requests the module under test actually made.
     """
 
-    _instances: list["_FakeHttpxClient"] = []
+    _instances: list["_FakeHttpxClient"] = []  # noqa: RUF012, UP037
 
     def __init__(self, **kwargs):
         self.requests: list[tuple] = []
@@ -164,7 +164,7 @@ class TestSignatureVerification:
 
     def test_signature_expired_timestamp(self, signed_payload):
         raw, header, secret = signed_payload({"type": "x"}, ts=int(time.time()) - 3600)
-        with pytest.raises(BillingError, match="expired|timestamp"):
+        with pytest.raises(BillingError, match="expired|timestamp"):  # noqa: RUF043
             StripeClient(secret_key="sk_test_x").verify_webhook_signature(raw, header, secret)
 
     def test_signature_multiple_v1_accepted(self, signed_payload):
@@ -195,7 +195,7 @@ class TestPriceCatalog:
     def test_catalog_rejects_missing_interval(self):
         bad = json.loads(json.dumps(VALID_CATALOG))
         del bad["solo"]["annual"]
-        with pytest.raises(BillingError, match="annual|missing"):
+        with pytest.raises(BillingError, match="annual|missing"):  # noqa: RUF043
             PriceCatalog(json.dumps(bad))
 
     def test_catalog_rejects_wrong_annual_discount(self):
@@ -407,7 +407,7 @@ def billing_client(monkeypatch, tmp_path):
     monkeypatched per-test — the fixture itself only wires env + app + a
     registry SDK (same DB) for direct mirror assertions.
     """
-    import os
+    import os  # noqa: I001
     from fastapi.testclient import TestClient
     from tortoise.hosted_api import app
     from tortoise.sdk import TortoiseSDK
@@ -638,7 +638,7 @@ class TestWebhook:
 
     @staticmethod
     def _verify(event):
-        from tortoise import billing as bl
+        from tortoise import billing as bl  # noqa: F401
 
         def fake_verify(self, payload, sig_header):
             return event
@@ -744,7 +744,7 @@ class TestWebhook:
                                 "cancel_at_period_end": True}}}))
         r = self._post(billing_client["client"], {})
         assert r.status_code == 200
-        tier, status, *_ = self._mirror(billing_client)
+        tier, status, *_ = self._mirror(billing_client)  # noqa: RUF059
         assert tier == "pro", "cancel_at_period_end must keep tier until period end"
 
     def test_webhook_subscription_updated_canceled_reverts(self, monkeypatch, billing_client):
@@ -785,7 +785,7 @@ class TestWebhook:
                             lambda self, sid: {"items": [{"price": {"id": "price_UNKNOWN"}}]})
         r = self._post(billing_client["client"], {})
         assert r.status_code == 200
-        tier, status, *_ = self._mirror(billing_client)
+        tier, status, *_ = self._mirror(billing_client)  # noqa: RUF059
         assert tier == "pro", "unknown price must NOT downgrade an active sub"
         assert notified, "ops notification must fire on unknown price"
 
@@ -842,7 +842,7 @@ class TestWebhook:
 
     def test_webhook_failure_log_redacts_secret(self, monkeypatch, billing_client, caplog):
         """review fix 9: no secret value leaks into webhook error logs."""
-        import logging
+        import logging  # noqa: I001
         from tortoise import billing as bl
         monkeypatch.setattr(bl.StripeClient, "verify_webhook_signature",
                             lambda self, p, s: (_ for _ in ()).throw(
@@ -914,7 +914,7 @@ class TestBootReconcile:
     def test_boot_reconcile_hanging_stripe_never_blocks_boot(self, monkeypatch, billing_client):
         """review fix 3: the reconcile thread is daemon + budgeted — lifespan
         yields immediately even if Stripe hangs."""
-        import threading
+        import threading  # noqa: I001
         import time
         import tortoise.hosted_api as ha
         from tortoise import billing as bl
@@ -933,13 +933,13 @@ class TestBootReconcile:
                             lambda: [{"team_id": team_id, "name": "x"}])
 
         started = time.monotonic()
-        threads_before = threading.active_count()
+        threads_before = threading.active_count()  # noqa: F841
         # invoke the boot-reconcile closure directly (as the lifespan does)
         def _run():
-            from tortoise.hosted_api import _lifespan
+            from tortoise.hosted_api import _lifespan  # noqa: I001
             import asyncio
             # simulate lifespan startup: create the thread, don't await it
-            ha_threads = [t for t in threading.enumerate() if t.name == "billing-reconcile"]
+            ha_threads = [t for t in threading.enumerate() if t.name == "billing-reconcile"]  # noqa: F841
             # Call the internal closure via a fresh lifespan run in a thread.
             async def _lifespan_quick():
                 async with _lifespan(None):

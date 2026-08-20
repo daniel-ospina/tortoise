@@ -12,19 +12,19 @@ Tests 4 relation-stage prompt variants:
 
 Usage: .venv/bin/python tests/aries_extraction.py [--variant V2] [--dry-run] [--n 10]
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
-import csv, json, os, random, re, sys, time
+import csv, json, os, random, re, sys, time  # noqa: E401, F401
 from collections import defaultdict
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass  # noqa: F401
+from typing import Optional  # noqa: F401
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.api import EventAPI, provenance
+from tortoise.api import EventAPI, provenance  # noqa: I001
 from tortoise.extractor import (
-    LLMExtractor, _PointStage, _RelationStage, _overlap, _json,
-    _POINTS_SYS, _RELATIONS_SYS,
+    LLMExtractor, _PointStage, _RelationStage, _overlap, _json,  # noqa: F401
+    _POINTS_SYS, _RELATIONS_SYS,  # noqa: F401
 )
 from tortoise.idempotency import document_key
 from tortoise.log import EventLog
@@ -88,7 +88,7 @@ def aries_to_transcript(argument: str) -> str:
     """Convert ARIES [SEP]-separated text to tortoise Speaker: text format."""
     segments = argument.split(" '[SEP]' ")
     lines = []
-    for i, seg in enumerate(segments):
+    for i, seg in enumerate(segments):  # noqa: B007
         seg = seg.strip()
         if seg:
             lines.append(f"S: {seg}")
@@ -158,7 +158,7 @@ class VariantExtractor:
             segs = segs[:max_utterances]
         context = f"conversation:{source_id}"
 
-        point_model = self.points.model
+        point_model = self.points.model  # noqa: F841
         # Override relation model's complete to use variant prompt
         rel_model = self.relations.model
         orig_complete = rel_model.complete
@@ -284,7 +284,7 @@ def run_variant(variant_name: str, relation_prompt: str,
     items = list(text_groups.items())
 
     def process_one(item):
-        text_key, aries_pairs = item
+        text_key, aries_pairs = item  # noqa: RUF059
         full_text = aries_pairs[0]["argument"]
         transcript = aries_to_transcript(full_text)
         if dry_run:

@@ -9,7 +9,7 @@ import os
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
-import pytest
+import pytest  # noqa: F401
 
 
 def _client_for_env(monkeypatch, tmp_path, **env):

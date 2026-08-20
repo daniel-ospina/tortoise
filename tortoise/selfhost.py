@@ -106,14 +106,14 @@ app.add_middleware(
 app.mount("/mcp", mcp_http_app)
 
 # Self-host REST surface (#525) — registry-aligned /v1 endpoints.
-from tortoise.selfhost_api import router as _rest_router
+from tortoise.selfhost_api import router as _rest_router  # noqa: E402
 
 app.include_router(_rest_router)
 
 # Rate limit the REST surface (code-review P2, #525): /mcp has its own limiter
 # inside the sub-app; /v1/* needs the same protection (brute-force throttle on
 # static keys). Reuse the MCP token-bucket middleware on the parent app.
-from tortoise.mcp_auth import MCPRateLimitMiddleware
+from tortoise.mcp_auth import MCPRateLimitMiddleware  # noqa: E402
 
 # Scope to /v1 only (code-review P2, #525): /mcp metadata GET, /health, and
 # /docs must never be throttled (healthcheck false-negatives / host-protection
@@ -136,7 +136,7 @@ async def health():
     Probes TortoiseSDK(namespace="selfhost") — the SAME connection the MCP
     tools resolve (mirrors /health/ready).
     """
-    import asyncio
+    import asyncio  # noqa: I001
     from tortoise.monitoring import probe_db  # lazy — liveness stays cheap
 
     def _probe() -> dict:
@@ -148,7 +148,7 @@ async def health():
     try:
         # to_thread: a hung probe must not stall the event loop.
         db = await asyncio.to_thread(_probe)
-    except Exception as exc:  # noqa: BLE001 — liveness never crashes
+    except Exception as exc:  # noqa: BLE001, RUF100
         db = {"ok": False, "latency_ms": 0.0, "error": str(exc)[:200]}
     return JSONResponse(
         {"status": "ok" if db["ok"] else "degraded",
@@ -172,7 +172,7 @@ async def health_ready():
         sdk = TortoiseSDK(namespace="selfhost")
         sdk._get_proj()  # touch the DB (hosted_api release_command pattern)
         return JSONResponse({"status": "ready"})
-    except Exception as exc:  # noqa: BLE001 — readiness reports, never raises
+    except Exception as exc:  # noqa: BLE001, RUF100
         _logger.warning("health/ready failed: %s", exc)
         return JSONResponse({"status": "not_ready"}, status_code=503)
 

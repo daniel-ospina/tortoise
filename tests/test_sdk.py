@@ -11,9 +11,9 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest
+import pytest  # noqa: I001
 
-from tortoise.domain_loader import known_kinds, register_kind
+from tortoise.domain_loader import known_kinds, register_kind  # noqa: F401
 from tortoise.sdk import TortoiseSDK
 
 
@@ -574,7 +574,7 @@ class TestListTags:
         assert sdk.list_tags() == []
 
     def test_single_tag(self, sdk):
-        p = sdk.create_point("statement", "tagged content", tags=["alpha"])
+        p = sdk.create_point("statement", "tagged content", tags=["alpha"])  # noqa: F841
         tags = sdk.list_tags()
         assert len(tags) == 1
         assert tags[0]["name"] == "alpha"
@@ -757,7 +757,7 @@ class TestUpdatePointTags:
         """Removing a tag from one point leaves the Tag intact if another
         point still uses it (GC only deletes truly orphaned Tags)."""
         a = sdk.create_point("statement", "a", tags=["shared"])
-        b = sdk.create_point("statement", "b", tags=["shared"])
+        b = sdk.create_point("statement", "b", tags=["shared"])  # noqa: F841
         sdk.update_point(a["id"], tags=[])
         tags = sdk.list_tags()
         assert len(tags) == 1
@@ -1034,7 +1034,7 @@ class TestListDrafts:
         p = _make_point(sdk, status="draft", dedup_candidate=True,
                         dedup_method="hash", dedup_similarity=1.0,
                         dedup_target_id="t-1")
-        d = [x for x in sdk.list_drafts() if x["id"] == p["id"]][0]
+        d = [x for x in sdk.list_drafts() if x["id"] == p["id"]][0]  # noqa: RUF015
         assert d["dedup_context"] == {"dedup_method": "hash",
                                       "dedup_similarity": 1.0,
                                       "dedup_target_id": "t-1"}
@@ -1071,7 +1071,7 @@ def test_de2e8_contradiction_propagates_after_promotion(sdk):
     evidence = {r[0]: (r[1], r[2]) for r in rows}
     ep = TortoiseEP(proj, damping=0.5, n_quad=12, max_iter=50, tol=1e-3,
                     evidence=evidence)
-    iters, converged = ep.run([op["id"]], max_hops=2)
+    iters, converged = ep.run([op["id"]], max_hops=2)  # noqa: RUF059
     assert converged
     for pid in (a["id"], b["id"]):
         r = proj.g.query(
@@ -1104,7 +1104,7 @@ def test_r16_skips_unset_status_operator(sdk):
     """Unset-status (legacy, pre-#780) operator nodes are LIVE under the
     canonical read model — R16 must NOT promote them or emit spurious
     OperatorPromoted events (review #944)."""
-    import tempfile
+    import tempfile  # noqa: I001
     import json
     tmp = tempfile.mkdtemp()
     sdk2 = TortoiseSDK(db_path=os.path.join(tmp, "t.db"),
@@ -1124,8 +1124,8 @@ def test_r16_skips_unset_status_operator(sdk):
     res2 = sdk2.promote_point(b["id"])
     assert res2["operator_nodes_promoted"] == []
     assert sdk2.get_point(op["id"]).get("status") is None
-    lines = open(os.path.join(tmp, "events.jsonl")).read().splitlines()
-    types = [json.loads(l).get("type") for l in lines]
+    lines = open(os.path.join(tmp, "events.jsonl")).read().splitlines()  # noqa: SIM115
+    types = [json.loads(l).get("type") for l in lines]  # noqa: E741
     assert "OperatorPromoted" not in types, (
         "no spurious OperatorPromoted for a live-by-projection operator"
     )
@@ -1135,7 +1135,7 @@ def test_r16_skips_unset_status_operator(sdk):
 def test_promotion_survives_rebuild(sdk, tmp_path):
     """Rebuild parity (#548, review #944): promoted Points and R16-promoted
     operators must still be live after wipe+rebuild_all from the JSONL log."""
-    import json
+    import json  # noqa: F401
     event_log = tmp_path / "events.jsonl"
     sdk2 = TortoiseSDK(db_path=str(tmp_path / "t.db"),
                        event_log_path=str(event_log))

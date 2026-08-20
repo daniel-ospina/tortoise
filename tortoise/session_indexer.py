@@ -13,17 +13,17 @@ Usage:
     python -m tortoise.session_indexer --model ollama:llama3.2:3b <file_path>
     python -m tortoise.session_indexer --dir <directory> --batch
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import json
 import os
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any  # noqa: F401
 
 from .file_indexer import (
-    _FM_RE,              # canonical home — back-compat alias (was defined here)
+    _FM_RE,              # canonical home — back-compat alias (was defined here)  # noqa: F401
     compute_file_hash,   # canonical home — back-compat alias (was defined here)
     derive_session_id,
     parse_frontmatter,
@@ -61,7 +61,7 @@ _STOPWORDS = frozenset({
     'all','some','any','each','every','more','most','here','there','now',
     'up','out','one','two','go','get','see','know','think','say','make',
     'use','take','come','look','need','let','find','want','work','well',
-    'ok','okay','yeah','yes','right','good','great','done','got','going',
+    'ok','okay','yeah','yes','right','good','great','done','got','going',  # noqa: B033
     'new','old','first','last','next','still','even','way','thing','much',
     'many','back','into','over','after','before','between','through',
     'user','assistant','agent','session','file','data','time','run',
@@ -87,7 +87,7 @@ def _build_idf(corpus_paths: list[str] | None = None, force: bool = False) -> di
         return _idf_model
     
     import math
-    from pathlib import Path
+    from pathlib import Path  # noqa: F401
     
     if corpus_paths is None:
         corpus_paths = [str(p) for p in session_corpus_dir().glob("*.md")]
@@ -144,7 +144,7 @@ def _graph_entity_keywords(content: str) -> list[str]:
         if not uri:
             return []
         if _graph_db is None:
-            from falkordb import FalkorDB
+            from falkordb import FalkorDB  # noqa: I001
             from urllib.parse import urlparse
             parsed = urlparse(uri)
             host = parsed.hostname or 'localhost'
@@ -420,7 +420,7 @@ def extract_metadata(content: str, llm_model: str | None = "gpt-5-mini") -> dict
     # Tier 2: LLM extraction
     if llm_model:
         result = extract_metadata_with_llm(content, llm_model)
-        if result:
+        if result:  # noqa: SIM102
             # Validate
             if "keywords" in result and len(result.get("keywords", [])) > 0:
                 return result

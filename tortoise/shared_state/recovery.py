@@ -63,7 +63,7 @@ def dedup_events(events: list[dict]) -> list[dict]:
 
 
 def find_last_checkpoint(log_path: Path
-                         ) -> Optional[dict]:
+                         ) -> Optional[dict]:  # noqa: UP045
     """Find the last gatePassed event in the event log.
 
     This is the recovery point: replay from here after a crash.
@@ -71,7 +71,7 @@ def find_last_checkpoint(log_path: Path
     """
     if not log_path.exists():
         return None
-    last: Optional[dict] = None
+    last: Optional[dict] = None  # noqa: UP045
     with open(log_path) as f:
         for line in f:
             line = line.strip()
@@ -88,7 +88,7 @@ def find_last_checkpoint(log_path: Path
 
 # --- self-check ---
 if __name__ == "__main__":
-    import tempfile, os
+    import tempfile, os  # noqa: E401, F401, I001
 
     d = Path(tempfile.mkdtemp())
     cards = d / "cards"
@@ -126,4 +126,4 @@ if __name__ == "__main__":
     assert cp["gate"] == "review"
 
     print("✅ recovery")
-    import shutil; shutil.rmtree(d)
+    import shutil; shutil.rmtree(d)  # noqa: E702, I001

@@ -2,9 +2,9 @@
 
 Verifies run_structural_query handles operator/source entity types correctly.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
-import sys, os
+import sys, os  # noqa: E401
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tortoise.search_engine import run_structural_query

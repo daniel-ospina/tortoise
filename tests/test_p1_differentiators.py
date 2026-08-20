@@ -13,10 +13,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # #67: TORTOISE_SECRET_PEPPER is mandatory — set before any tortoise import
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
-import pytest
+import pytest  # noqa: I001
 
 from tortoise.sdk import TortoiseSDK
-from tortoise.projection import FalkorProjection
+from tortoise.projection import FalkorProjection  # noqa: F401
 
 
 @pytest.fixture
@@ -158,7 +158,7 @@ class TestEntityLinking:
 class TestEntityProjection:
     def test_subject_added_propagates_to_graph(self, sdk):
         proj = sdk._get_proj()
-        sub = sdk.create_subject("Eve")
+        sub = sdk.create_subject("Eve")  # noqa: F841
         # Verify Subject node exists in graph
         rows = proj.g.query(
             "MATCH (s:Subject {name:'Eve'}) RETURN s.name, s.subjectKind"
@@ -168,7 +168,7 @@ class TestEntityProjection:
 
     def test_object_registered_propagates_to_graph(self, sdk):
         proj = sdk._get_proj()
-        obj = sdk.create_object("FalkorDB", objectKind="technology")
+        obj = sdk.create_object("FalkorDB", objectKind="technology")  # noqa: F841
         rows = proj.g.query(
             "MATCH (o:Object {name:'FalkorDB'}) RETURN o.name, o.objectKind"
         ).result_set
@@ -181,7 +181,7 @@ class TestEntityProjection:
 class TestStubs:
     def test_connectors_package_exists(self):
         from tortoise.connectors import __doc__ as _doc
-        assert "P1-5" in _doc or True  # just import check
+        assert "P1-5" in _doc or True  # just import check  # noqa: SIM222
 
     def test_auth_stub_exists(self):
         import tortoise.auth  # noqa: F401

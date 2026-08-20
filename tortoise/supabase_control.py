@@ -189,7 +189,7 @@ class SupabaseControlPlane:
             "Prefer": "return=minimal",
         }
         try:
-            import httpx
+            import httpx  # noqa: F401
             resp = self._http.post(url, params={"select": "*"},
                                    headers=headers, json=body or {})
         except RuntimeError:
@@ -256,7 +256,7 @@ class SupabaseControlPlane:
             "Authorization": f"Bearer {self._key}",
         }
         try:
-            import httpx
+            import httpx  # noqa: F401
             # NOTE: do NOT use `with self._http as client:` here — for a
             # client constructed OUTSIDE the context manager, __exit__ CLOSES
             # it (httpx 0.28.1: "Cannot reopen a client instance, once it has
@@ -381,7 +381,7 @@ def _parse_ts(value) -> datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=timezone.utc)  # noqa: UP017
     return parsed
 
 
@@ -477,7 +477,7 @@ def resolve_api_key(cp, token: str) -> dict | None:
     from tortoise.auth import lookup_hash
     from tortoise.quota import DEFAULT_MAX_SESSIONS
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)  # noqa: UP017
     h = lookup_hash(token)
     team_id = key_id = created_via = created_by = key_prefix = None
 
@@ -495,7 +495,7 @@ def resolve_api_key(cp, token: str) -> dict | None:
                             "created_by", "expires_at", "revoked_at"]
     try:
         rows = cp.query(
-            "api_keys", select=_API_KEY_BASE_SELECT + ["enabled"],
+            "api_keys", select=_API_KEY_BASE_SELECT + ["enabled"],  # noqa: RUF005
             filters=[("lookup_hash", "eq", h)],
         )
     except Exception as e:
@@ -610,7 +610,7 @@ def update_last_used(cp, key_id: str) -> None:
             "api_keys",
             method="PATCH",
             filters=[("id", "eq", key_id)],
-            json_body={"last_used_at": datetime.now(timezone.utc).isoformat()},
+            json_body={"last_used_at": datetime.now(timezone.utc).isoformat()},  # noqa: UP017
         )
     except Exception:
         _logger.debug("update_last_used failed for key %s (best-effort)", key_id)
@@ -660,7 +660,7 @@ def team_by_id(cp, team_id: str) -> dict | None:
     """
     return _teams_row_fail_soft(
         cp, team_id,
-        select=["id", "name", "tier", "email", "graph_name", "max_users",
+        select=["id", "name", "tier", "email", "graph_name", "max_users",  # noqa: RUF005
                 "max_teams", "max_graphs", "ops_allowance", "graph_size_cap",
                 "backup_enabled", "backup_latest_at", "backup_restored_at",
                 "created_at", "deleted_at", "grace_hours"]
@@ -691,7 +691,7 @@ def active_api_keys(cp, team_id: str, *, created_via: str | None = None,
                 "expires_at", "revoked_at"],
         filters=filters,
     )
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)  # noqa: UP017
     return [
         r for r in rows
         if (exp := _parse_ts(r.get("expires_at"))) is None or exp > now
@@ -710,7 +710,7 @@ def revoke_api_key(cp, key_id: str, now: str | None = None) -> None:
         "api_keys",
         method="PATCH",
         filters=[("id", "eq", key_id)],
-        json_body={"revoked_at": now or datetime.now(timezone.utc).isoformat()},
+        json_body={"revoked_at": now or datetime.now(timezone.utc).isoformat()},  # noqa: UP017
     )
 
 def set_api_key_enabled(cp, key_id: str, enabled: bool) -> None:
@@ -775,7 +775,7 @@ def invitation_mint(cp, team_id: str, email: str, role: str,
     Role: 0008 CHECK closes the enum to 'admin' | 'member' (owner is not
     invitable — single-owner model, D7 #574).
     """
-    import uuid
+    import uuid  # noqa: I001
     from datetime import datetime, timedelta
     from tortoise.auth import lookup_hash as _lookup_hash
 
@@ -800,7 +800,7 @@ def invitation_mint(cp, team_id: str, email: str, role: str,
 
     token = str(uuid.uuid4())
     iid = uuid.uuid4().hex[:26]
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)  # noqa: UP017
     expires_at = (now + timedelta(days=expires_days)).isoformat()
     try:
         cp.query(
@@ -853,10 +853,10 @@ def invitation_accept(cp, token: str, user_id: str,
     resurrected in place (registry MERGE semantics) rather than INSERTed —
     uq_member_team (user_id, team_id) would reject a duplicate row.
     """
-    import uuid
+    import uuid  # noqa: I001
     from tortoise.auth import lookup_hash as _lookup_hash
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)  # noqa: UP017
     h = _lookup_hash(token)
     rows = cp.query(
         "invitations",
@@ -973,7 +973,7 @@ def invitation_accept(cp, token: str, user_id: str,
         # can retry instead of burning the invite permanently. Best-effort:
         # if THIS rollback also fails, the original error propagates (500) and
         # the invite stays consumed — an operator can re-mint.
-        try:
+        try:  # noqa: SIM105
             cp.query(
                 "invitations",
                 method="PATCH",
@@ -994,7 +994,7 @@ def invitation_info_by_token(cp, token: str) -> dict | None:
     matched via its lookup_hash (O(1) index, same as accept). Only display-safe
     fields are returned: never the lookup_hash or the invitee email.
     """
-    from datetime import datetime
+    from datetime import datetime  # noqa: F401, I001
     from tortoise.auth import lookup_hash as _lookup_hash
 
     rows = cp.query(
@@ -1195,7 +1195,7 @@ def store_github_credentials(cp, team_id: str, *, token_enc: str, org: str) -> N
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
 
 def soft_delete_team(cp, team_id: str, now: str | None = None,
@@ -1326,7 +1326,7 @@ def provision_team(cp, **params: object) -> None:
     team_id = params.get("p_team_id")
     if team_id:
         try:
-            from tortoise.pack_state import ensure_tenant_packs
+            from tortoise.pack_state import ensure_tenant_packs  # noqa: I001
             from tortoise import hosted_api as _ha
             ensure_tenant_packs(_ha._make_sdk(namespace=team_id))
         except Exception:
@@ -1645,7 +1645,7 @@ def webhook_event_marker(cp, event_id: str, etype: str) -> bool:
         method="POST",
         json_body={
             "event_id": event_id,
-            "first_seen": datetime.now(timezone.utc).isoformat(),
+            "first_seen": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
             "type": etype,
         },
     )

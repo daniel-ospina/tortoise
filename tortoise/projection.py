@@ -12,8 +12,8 @@ All implementations, entity handlers, and edge handlers live in
 the package submodules (entities.py, edges.py, grounding.py,
 propagation.py) — never modify this shim.
 """
-import sys as _sys
-import importlib as _importlib
+import sys as _sys  # noqa: E402, I001
+import importlib as _importlib  # noqa: E402
 
 # Remove this shim from sys.modules temporarily so importlib finds
 # the canonical package at tortoise/projection/__init__.py

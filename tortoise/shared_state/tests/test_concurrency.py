@@ -7,10 +7,10 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
-import time
+import time  # noqa: F401
 from pathlib import Path
 
-import pytest
+import pytest  # noqa: F401
 
 # #331: parents[2] = repo root tortoise/ dir -- parents[1] is
 # tortoise/shared_state, where `shared_state` is not importable

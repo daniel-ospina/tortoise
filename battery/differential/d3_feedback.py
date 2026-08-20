@@ -12,7 +12,7 @@ Mechanics pinned in the #1412 clarity fix: feedback format
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field  # noqa: F401
 from typing import Any
 
 

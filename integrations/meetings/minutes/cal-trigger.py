@@ -12,11 +12,11 @@ Install:
   cp com.minutes.cal-trigger.plist ~/Library/LaunchAgents/
   launchctl load ~/Library/LaunchAgents/com.minutes.cal-trigger.plist
 """
-import subprocess
+import subprocess  # noqa: I001
 import time
 import os
 import json
-import sys
+import sys  # noqa: F401
 from datetime import datetime, timedelta
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -100,7 +100,7 @@ def load_state():
         try:
             with open(STATE_FILE) as f:
                 return json.load(f)
-        except (json.JSONDecodeError, IOError):
+        except (json.JSONDecodeError, IOError):  # noqa: UP024
             pass
     return {"recording_pid": None, "current_event_uid": None, "started_at": None}
 

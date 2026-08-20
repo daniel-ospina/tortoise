@@ -19,7 +19,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from urllib.error import HTTPError, URLError
+from urllib.error import HTTPError, URLError  # noqa: I001
 from http.client import IncompleteRead
 
 from tortoise.__main__ import main

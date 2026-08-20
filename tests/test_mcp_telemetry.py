@@ -24,7 +24,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from fastmcp.tools import FunctionTool
+from fastmcp.tools import FunctionTool  # noqa: I001
 from tortoise.mcp_auth import _current_team_id, _transport_mode
 
 TEST_TOOLS = [
@@ -74,7 +74,7 @@ def test_tools():
                                                 description=f"telemetry test: {name}"))
     yield
     for name in fns:
-        try:
+        try:  # noqa: SIM105
             mcp.local_provider.remove_tool(name)
         except Exception:
             pass
@@ -143,7 +143,7 @@ class TestStatusCategories:
     async def test_validation_error_status(self, test_tools, captured_events):
         """Wrong argument type → pydantic failure → validation_error."""
         from tortoise.mcp_server import mcp
-        with pytest.raises(Exception):
+        with pytest.raises(Exception):  # noqa: B017
             await mcp.call_tool("_telemetry_echo", {"message": 123})
         ev = captured_events[0]
         assert ev["status"] == "validation_error"
@@ -168,7 +168,7 @@ class TestStatusCategories:
     async def test_exec_error_status(self, test_tools, captured_events):
         """Raised tool body error → exec_error with the CAUSE class name."""
         from tortoise.mcp_server import mcp
-        with pytest.raises(Exception):
+        with pytest.raises(Exception):  # noqa: B017
             await mcp.call_tool("_telemetry_boom")
         ev = captured_events[0]
         assert ev["status"] == "exec_error"
@@ -179,7 +179,7 @@ class TestClassification:
     """Requirement 3 (unit): validation vs exec vs auth classification."""
 
     def test_pydantic_validation_error_direct(self):
-        from tortoise.mcp_server import _classify_mcp_call_error
+        from tortoise.mcp_server import _classify_mcp_call_error  # noqa: I001
         from pydantic import ValidationError
         try:
             from pydantic import BaseModel
@@ -193,7 +193,7 @@ class TestClassification:
         assert kind == "missing:query"
 
     def test_fastmcp_validation_error_wrapping_pydantic(self):
-        from tortoise.mcp_server import _classify_mcp_call_error
+        from tortoise.mcp_server import _classify_mcp_call_error  # noqa: I001
         from fastmcp.exceptions import ValidationError as FmValidationError
         from pydantic import ValidationError
         try:
@@ -210,7 +210,7 @@ class TestClassification:
         assert kind == "missing:query"
 
     def test_exec_error_unwraps_fastmcp_wrapper(self):
-        from tortoise.mcp_server import _classify_mcp_call_error
+        from tortoise.mcp_server import _classify_mcp_call_error  # noqa: I001
         from fastmcp.exceptions import ToolError
         status, kind = _classify_mcp_call_error(ToolError("boom"))
         assert status == "exec_error"
@@ -223,14 +223,14 @@ class TestClassification:
         assert kind == "RuntimeError"  # cause class wins
 
     def test_auth_error(self):
-        from tortoise.mcp_server import _classify_mcp_call_error
+        from tortoise.mcp_server import _classify_mcp_call_error  # noqa: I001
         from fastmcp.exceptions import AuthorizationError
         status, kind = _classify_mcp_call_error(AuthorizationError("nope"))
         assert status == "auth_error"
         assert kind == "AuthorizationError"
 
     def test_not_found_is_exec_error(self):
-        from tortoise.mcp_server import _classify_mcp_call_error
+        from tortoise.mcp_server import _classify_mcp_call_error  # noqa: I001
         from fastmcp.exceptions import NotFoundError
         status, kind = _classify_mcp_call_error(NotFoundError("no tool"))
         assert status == "exec_error"
@@ -264,7 +264,7 @@ class TestFailSafe:
 
     async def test_writer_failure_is_swallowed(self, monkeypatch, tmp_path):
         """_track_analytics_event raising must not propagate from the emitter."""
-        from tortoise import mcp_server, hosted_api
+        from tortoise import mcp_server, hosted_api  # noqa: I001
 
         def _broken(team_id, event_name, properties=None):
             raise RuntimeError("supabase down")
@@ -288,7 +288,7 @@ class TestRealWritePath:
 
     async def test_event_lands_via_track_analytics_event(self, monkeypatch,
                                                          tmp_path):
-        from tortoise import mcp_server, hosted_api
+        from tortoise import mcp_server, hosted_api  # noqa: I001
         # Force the local JSONL fallback (no Supabase configured).
         monkeypatch.delenv("SUPABASE_URL", raising=False)
         monkeypatch.delenv("SUPABASE_SERVICE_KEY", raising=False)

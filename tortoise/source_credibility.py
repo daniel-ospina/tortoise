@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import math
 from datetime import datetime, timezone
-from typing import Iterable
+from typing import Iterable  # noqa: UP035
 
 # ── Tier model (validated — experiment doc §1.1, test_ep_sources.py TIER_MAP) ──
 TIER_PRIORS: dict[str, tuple[float, float]] = {
@@ -139,7 +139,7 @@ def _parse_timestamp(value: str | None) -> datetime | None:
     try:
         dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)  # naive → UTC (#153)
+            dt = dt.replace(tzinfo=timezone.utc)  # naive → UTC (#153)  # noqa: UP017
         return dt
     except (ValueError, TypeError):
         return None
@@ -164,7 +164,7 @@ def decay_factor(
     ts = _parse_timestamp(source_date) or _parse_timestamp(ingested_at)
     if ts is None:
         return 1.0
-    now_ts = (now or datetime.now(timezone.utc)).timestamp()
+    now_ts = (now or datetime.now(timezone.utc)).timestamp()  # noqa: UP017
     years = max(0.0, (now_ts - ts.timestamp()) / (365.25 * 86400.0))
     return float(recency_decay ** years)
 
@@ -212,7 +212,7 @@ def aggregate_prior(
         # adding ancient sources cannot lower a tier's decay)
         most_recent = max(tier_dates[tier]) if tier_dates[tier] else None
         if tier != "T0" and most_recent is not None:
-            now_ts = (now or datetime.now(timezone.utc)).timestamp()
+            now_ts = (now or datetime.now(timezone.utc)).timestamp()  # noqa: UP017
             years = max(0.0, (now_ts - most_recent.timestamp()) / (365.25 * 86400.0))
             decay_t = float(recency_decay ** years)
         else:

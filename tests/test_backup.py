@@ -1,12 +1,12 @@
 """Tests for backup — backup/restore round-trip."""
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import json
 import os
 import tempfile
 from pathlib import Path
 
-import pytest
+import pytest  # noqa: F401
 from tortoise.backup import backup, restore
 
 
@@ -80,7 +80,7 @@ def test_restore_rdb_first_when_snapshot_present(monkeypatch):
                 class _G:
                     def query(self, cypher, params=None):
                         class _R:
-                            result_set = [[5]]
+                            result_set = [[5]]  # noqa: RUF012
                         return _R()
                 self.g = _G()
             def close(self):
@@ -114,7 +114,7 @@ def test_restore_jsonl_fallback_when_rdb_empty(monkeypatch):
                 class _G:
                     def query(self, cypher, params=None):
                         class _R:
-                            result_set = [[0]]
+                            result_set = [[0]]  # noqa: RUF012
                         return _R()
                 self.g = _G()
             def apply(self, ev):

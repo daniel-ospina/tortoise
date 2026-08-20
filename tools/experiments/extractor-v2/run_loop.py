@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Optimization loop: cleaner prompt (from file) -> solar clean -> flash S1.
 Reports cost + the cleaner's compression ratio + flash output."""
-from __future__ import annotations
-import json, sys, time
+from __future__ import annotations  # noqa: I001
+import json, sys, time  # noqa: E401
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from tests.model_adapters import MODELS
@@ -31,19 +31,19 @@ def _complete(model, system, user):
     import threading
     box = {}
     def _run(): box["resp"] = model.complete(system=system, user=user)
-    t = threading.Thread(target=_run, daemon=True); t.start()
+    t = threading.Thread(target=_run, daemon=True); t.start()  # noqa: E702
     t.join(timeout=600)
-    if t.is_alive(): raise TimeoutError("600s")
+    if t.is_alive(): raise TimeoutError("600s")  # noqa: E701
     return box.get("resp")
 
 def _parse_json(raw):
     import re
     m = re.search(r"\{.*\}", raw or "", re.S)
-    if not m: raise ValueError("no JSON")
+    if not m: raise ValueError("no JSON")  # noqa: E701
     block = m.group(0)
     for cut in (None,-1,-2,-3,-5,-10):
-        try: return json.loads(block if cut is None else block[:cut])
-        except json.JSONDecodeError: continue
+        try: return json.loads(block if cut is None else block[:cut])  # noqa: E701
+        except json.JSONDecodeError: continue  # noqa: E701
     raise ValueError("unparseable")
 
 def main():
@@ -52,8 +52,8 @@ def main():
     CLEAN_SYSTEM = Path(prompt_file).read_text()
     transcript = (Path(__file__).resolve().parents[3] / "tests/eval/w-1272/w-design-bounded.txt").read_text()
     raw_tokens = len(transcript) // 4
-    solar = MODELS["solar-pro4"](); solar.max_tokens = 8000; solar.temperature = 0.0
-    flash = MODELS["deepseek-flash"](); flash.max_tokens = 8000; flash.temperature = 0.0
+    solar = MODELS["solar-pro4"](); solar.max_tokens = 8000; solar.temperature = 0.0  # noqa: E702
+    flash = MODELS["deepseek-flash"](); flash.max_tokens = 8000; flash.temperature = 0.0  # noqa: E702
 
     t0 = time.time()
     raw_clean = None

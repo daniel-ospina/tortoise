@@ -6,7 +6,7 @@ FalkorDBLite SQLite concurrent-write crashes (#6761).
 
 See: tortoise/research/reflection-agentic-systems/ep-implementation-plan.md
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import logging
 import math
@@ -572,7 +572,7 @@ class TortoiseEP:
                 # Cache mode: only when a stale entry exists (don't create a
                 # zero entry for a never-messaged source). Graph mode: the
                 # MATCH…SET is a no-op when no edge exists, so write always.
-                if not bidirectional and c == input_ids[0]:
+                if not bidirectional and c == input_ids[0]:  # noqa: SIM102
                     if cache is None or saved.get((op_id, c, op_type)) is not None:
                         self._write_message(op_id, c, 0.0, 0.0, op_type)
                 continue
@@ -599,7 +599,7 @@ class TortoiseEP:
         else:
             total_eta1, total_eta2 = 0.0, 0.0
         if hasattr(self, '_msg_cache'):
-            for (oid, cid, rel), (ma, mb) in self._msg_cache.items():
+            for (oid, cid, rel), (ma, mb) in self._msg_cache.items():  # noqa: B007
                 if cid == claim_id:
                     total_eta1 += ma
                     total_eta2 += mb
@@ -607,7 +607,7 @@ class TortoiseEP:
             # claim's OWN outgoing direct edges also bears on its posterior
             # (it is the factor's message to the source endpoint).
             if hasattr(self, '_back_cache'):
-                for (src, tgt, rel), (ma, mb) in self._back_cache.items():
+                for (src, tgt, rel), (ma, mb) in self._back_cache.items():  # noqa: B007
                     if src == claim_id:
                         total_eta1 += ma
                         total_eta2 += mb
@@ -925,7 +925,7 @@ class TortoiseEP:
         if not affected_claims:
             return factors
 
-        from .weights import compute_operator_weight, NAND_BASE_WEIGHT
+        from .weights import compute_operator_weight, NAND_BASE_WEIGHT  # noqa: I001
 
         # Batch 1: all operators connected to any affected claim. An operator
         # is a Point with is_operator=true OR an op_type (legacy nodes — the
@@ -1037,7 +1037,7 @@ class TortoiseEP:
             full_inputs = op_inputs.get(op_id, [])
             if not include_draft:
                 input_ids = [
-                    cid for cid, live in zip(full_inputs, op_input_live[op_id])
+                    cid for cid, live in zip(full_inputs, op_input_live[op_id])  # noqa: B905
                     if live
                 ]
                 stripped = len(full_inputs) - len(input_ids)
@@ -1067,7 +1067,7 @@ class TortoiseEP:
                             op_id, stripped, len(full_inputs),
                             ", ".join(
                                 f"{cid.split('-')[-1]}={s or 'live'}"
-                                for cid, s in zip(full_inputs, op_input_status[op_id])
+                                for cid, s in zip(full_inputs, op_input_status[op_id])  # noqa: B905
                             ),
                         )
                         continue

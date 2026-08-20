@@ -7,7 +7,7 @@ forked onboarding flow per harness — the exact failure epic #529 prevents.
 """
 from __future__ import annotations
 
-import os
+import os  # noqa: F401
 import re
 import subprocess
 import sys

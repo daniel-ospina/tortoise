@@ -256,7 +256,7 @@ def seed_operator_edges(graph, rng: random.Random, n_edges_per_op: int = 200,
 
     pairs: list[dict] = []
     remaining = max_total
-    for op_idx, op_id in enumerate(op_ids):
+    for op_idx, op_id in enumerate(op_ids):  # noqa: B007
         if remaining <= 0:
             break
         if topic_correlated and oracle is not None:
@@ -687,7 +687,7 @@ def load_query_mix(path: str) -> dict:
         return json.load(f)
 
 
-__all__ = [
+__all__ = [  # noqa: RUF022
     "EMBEDDING_DIM", "KIND_WEIGHTS", "TOKENS", "CorpusFingerprint",
     "generate_points", "seed_corpus", "seed_operator_edges", "verify_indexes",
     "corpus_fingerprint_from_graph", "default_corpus_path", "load_query_mix",

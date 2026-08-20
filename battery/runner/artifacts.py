@@ -38,7 +38,7 @@ def build_run_artifact(
     model: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble a schema-v1.0 run artifact (all top-level keys present)."""
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
     return {
         "schema_version": SCHEMA_VERSION,
         "run_id": run_id(seed, arm, scenario.id),

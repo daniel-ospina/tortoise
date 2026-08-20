@@ -89,7 +89,7 @@ def _call_with_backoff(fn, *, what: str, retries: int,
     for attempt in range(1, retries + 2):
         try:
             return fn()
-        except Exception as e:  # noqa: BLE001 — transient LLM/provider errors
+        except Exception as e:  # noqa: BLE001, RUF100
             if attempt > retries:
                 raise
             wait = min(base ** attempt, cap) * (0.5 + random.random() / 2)
@@ -125,7 +125,7 @@ def _save_checkpoint(path: str | None, outcomes: list[dict],
     tmp.write_text(json.dumps({
         "outcomes": outcomes,
         "failures": failures,
-        "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "updated_at_utc": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
     }, indent=2), encoding="utf-8")
     os.replace(tmp, p)
 
@@ -238,7 +238,7 @@ def run_evaluation(
             with _lock:
                 outcomes.append(outcome)
                 done[qid] = outcome
-        except Exception as e:  # noqa: BLE001 — per-question isolation (P2)
+        except Exception as e:  # noqa: BLE001, RUF100
             print(f"[longmem_eval] question {qid} FAILED (non-fatal, "
                   f"continuing): {e!r}", file=sys.stderr)
             with _lock:
@@ -246,7 +246,7 @@ def run_evaluation(
                     "question_id": qid,
                     "question_type": question.get("question_type", ""),
                     "error": repr(e),
-                    "failed_at_utc": datetime.now(timezone.utc).isoformat(),
+                    "failed_at_utc": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
                 })
         with _lock:
             _save_checkpoint(checkpoint, list(done.values()), failures)
@@ -364,7 +364,7 @@ def _print_summary(report: dict[str, Any]) -> None:
               f"recall may be raw-transcript-only (see report outcomes)")
     print(f"context tokens mean:     {ret['context_tokens_mean']}")
     lat = report["latency_ms"]
-    print(f"latency (ms) retrieval/reader/judge/total:")
+    print(f"latency (ms) retrieval/reader/judge/total:")  # noqa: F541
     for key in ("retrieval", "reader", "judge", "total_per_question"):
         d = lat.get(key, {})
         print(f"  {key:<20} {d}")
@@ -470,7 +470,7 @@ def run_main(argv: list[str] | None = None) -> dict[str, Any]:
         else:
             extractor_model = MODELS["deepseek-flash"]()
 
-    outcomes, report = run_evaluation(
+    outcomes, report = run_evaluation(  # noqa: RUF059
         instances, reader=reader, judge=judge, ks=ks, top_k=top_k,
         work_dir=args.work_dir, split=args.split,
         checkpoint=args.checkpoint, max_retries=args.max_retries,

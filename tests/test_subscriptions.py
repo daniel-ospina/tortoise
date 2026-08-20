@@ -10,7 +10,7 @@ import pytest
 
 def test_poll_after_cursor_roundtrip(sdk_factory, tmp_path):
     sdk = sdk_factory(tmp_path)
-    p1 = sdk.create_point("statement", "first")
+    p1 = sdk.create_point("statement", "first")  # noqa: F841
     p2 = sdk.create_point("statement", "second")
     r1 = sdk.events_poll(after=None)
     assert [e["type"] for e in r1["events"]] == ["PointAdded", "PointAdded"]
@@ -65,7 +65,7 @@ def test_expired_cursor_raises_valueerror(sdk_factory, tmp_path):
     """plan-review P2: SDK raises a structured ValueError; _safe → MCP error,
     REST maps to 410. Purge triggered via direct Cypher DELETE (Task 5 must
     not depend on Task 7's purge helper)."""
-    from tortoise import event_store
+    from tortoise import event_store  # noqa: F401
     sdk = sdk_factory(tmp_path)
     sdk.create_point("statement", "will-purge")
     old_cursor = sdk.events_poll()["next_cursor"]

@@ -47,7 +47,7 @@ register_kind("event")
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
 
 def _session_transcript(session: list[dict]) -> str:
@@ -174,7 +174,7 @@ def ingest_haystack(sdk: TortoiseSDK, question: dict) -> dict:
                     "MERGE (e)-[:aboutSession]->(s)",
                     params={"eid": event_id, "sid": f"lme:{qid}:s{si}"},
                 )
-    except Exception as e:  # noqa: BLE001 — non-fatal, mirrors hosted behavior
+    except Exception as e:  # noqa: BLE001, RUF100
         logger.warning("lmeHaystackCaptured event write failed (non-fatal): %s", e)
 
     return {

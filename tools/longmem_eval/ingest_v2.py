@@ -32,7 +32,7 @@ from tortoise.sdk import TortoiseSDK
 
 logger = logging.getLogger(__name__)
 
-from .ingest import SESSION_TRANSCRIPT_KIND, _point_exists, _session_transcript  # noqa: E402
+from .ingest import SESSION_TRANSCRIPT_KIND, _point_exists, _session_transcript  # noqa: E402, I001
 
 
 _STOPWORDS = {"the", "a", "an", "is", "are", "was", "were", "to", "of",
@@ -90,7 +90,7 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
                               lme_question_id=qid, lme_session_index=si,
                               is_episodic=True)
             stats["entities"] += 1
-        except Exception as ex:  # noqa: BLE001 — best-effort in the eval
+        except Exception as ex:  # noqa: BLE001, RUF100
             logger.warning("v2 ingest entity %r failed: %s", name, ex)
 
     # ── points (the search surface) ──
@@ -119,7 +119,7 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
             stats["points"] += 1
             if is_evidence:
                 stats["evidence_points"] += 1
-        except Exception as ex:  # noqa: BLE001
+        except Exception as ex:  # noqa: BLE001, RUF100
             logger.warning("v2 ingest point %r failed: %s", pid, ex)
 
     # ── events (decision/occurrence — the timeline) ──
@@ -135,7 +135,7 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
                 is_episodic=True,
             )
             stats["events"] += 1
-        except Exception as ex:  # noqa: BLE001
+        except Exception as ex:  # noqa: BLE001, RUF100
             logger.warning("v2 ingest event failed: %s", ex)
 
     # ── operators (IMPL/NAND edges; MITIGATES recorded, not written) ──
@@ -163,7 +163,7 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
                                 direction="unidirectional",
                                 promote_source=False)
             stats["operators"] += 1
-        except Exception as ex:  # noqa: BLE001
+        except Exception as ex:  # noqa: BLE001, RUF100
             logger.warning("v2 ingest operator %s->%s failed: %s",
                            src, dst, ex)
 
@@ -226,7 +226,7 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
         try:
             out = extract_session_v2(model, turns, sdk=sdk,
                                      session_id=s_node)
-        except Exception as ex:  # noqa: BLE001 — one bad session must not
+        except Exception as ex:  # noqa: BLE001, RUF100
             stats["errors"].append(f"s{si}: {type(ex).__name__}: {ex}")  # kill the run
             continue
         payload = out.get("payload") or {}
@@ -258,4 +258,4 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
 
 def _now_iso() -> str:
     from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat()  # noqa: UP017

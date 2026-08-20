@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest
+import pytest  # noqa: I001
 
 from tests.epic903_fixtures import (
     FIXED_SEED,
@@ -89,10 +89,10 @@ class TestDe2e1FullPassFreshness:
             assert before[f.isolated_claim] is None, "isolated claim starts unstamped"
             assert any(v is not None for v in before.values()), "F2 regions pre-stamped"
 
-            t0 = datetime.now(timezone.utc)
+            t0 = datetime.now(timezone.utc)  # noqa: UP017
             random.seed(FIXED_SEED)
             result = f.sdk.dream(full=True)
-            t1 = datetime.now(timezone.utc)
+            t1 = datetime.now(timezone.utc)  # noqa: UP017
 
             assert result["converged_all"] is True
             assert result["total_affected"] == 12, (
@@ -216,10 +216,10 @@ class TestDe2e3OperatorLessWrite:
             p = _make_claim(sdk, "fresh isolated claim")
             assert p["id"] in sdk._dirty_roots, "fresh claim is a dirty root"
 
-            t0 = datetime.now(timezone.utc)
+            t0 = datetime.now(timezone.utc)  # noqa: UP017
             random.seed(FIXED_SEED)
             result = sdk.dream(dirty_only=True)
-            t1 = datetime.now(timezone.utc)
+            t1 = datetime.now(timezone.utc)  # noqa: UP017
 
             assert result["converged"] is True
             assert p["id"] in result["affected_claims"], (
@@ -285,7 +285,7 @@ class TestDe2e4FreshnessLifecycle:
                 "MATCH (n:Point {id:$id}) SET n.status = 'draft', "
                 "n.updatedAt = $now",
                 params={"id": a["id"], "now":
-                        datetime.now(timezone.utc).isoformat()},
+                        datetime.now(timezone.utc).isoformat()},  # noqa: UP017
             )
 
             # Promote back → must call _mark_dirty (the fix): a re-enters
@@ -515,7 +515,7 @@ class TestLastDreamedAtIndex:
         embedded hermetic runner creates the plain index instead (see
         test_index_idempotent_at_init_embedded). Mirrors the test_indexes.py
         probe pattern."""
-        from tests.test_indexes import FALKORDB_AVAILABLE, _current_uri
+        from tests.test_indexes import FALKORDB_AVAILABLE, _current_uri  # noqa: I001
         from urllib.parse import urlparse
 
         if not FALKORDB_AVAILABLE:

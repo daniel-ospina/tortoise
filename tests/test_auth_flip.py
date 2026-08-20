@@ -26,8 +26,8 @@ from starlette.routing import Mount
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
-from tortoise.auth import lookup_hash
-from tortoise.hosted_api import app, get_current_team, get_current_user
+from tortoise.auth import lookup_hash  # noqa: I001
+from tortoise.hosted_api import app, get_current_team, get_current_user  # noqa: F401
 from tortoise.mcp_server import create_http_app
 
 from tests.fake_control_plane import ErrorControlPlane, FakeControlPlane
@@ -352,7 +352,7 @@ class TestInvitesEndpointFlip:
             "role": "member"})
         token = r.json()["token"]
         from datetime import datetime, timedelta, timezone
-        past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+        past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()  # noqa: UP017
         fake.tables["invitations"][0]["expires_at"] = past
         as_user("user-2", "bob@example.com")
         r = tc.post("/v1/invites/accept", json={"token": token})

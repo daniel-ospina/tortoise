@@ -22,10 +22,10 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tests._embedded import wipe  # noqa: E402
+from tests._embedded import wipe  # noqa: E402, I001, RUF100
 
-from tortoise.api import EventAPI, provenance          # noqa: E402
-from tortoise.log import EventLog                       # noqa: E402
+from tortoise.api import EventAPI, provenance  # noqa: E402, RUF100
+from tortoise.log import EventLog  # noqa: E402, RUF100
 
 
 def _fresh(shared_proj):

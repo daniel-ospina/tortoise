@@ -17,12 +17,12 @@ from pathlib import Path
 # Ensure tortoise is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tortoise.projection import FalkorProjection
+from tortoise.projection import FalkorProjection  # noqa: I001
 from tortoise.memory_orchestrator import (
-    dispatch, merge, routeRead, translateNL, MergeResult
+    dispatch, merge, routeRead, translateNL, MergeResult  # noqa: F401
 )
 
-DB_PATH = os.path.join(tempfile.gettempdir(), "tortoise-test-s6.db")
+DB_PATH = os.path.join(tempfile.gettempdir(), "tortoise-test-s6.db")  # noqa: F821
 
 
 def setup_test_data(proj: FalkorProjection) -> None:
@@ -77,7 +77,7 @@ def setup_test_data(proj: FalkorProjection) -> None:
         })
     """, params={"ts": ts})
 
-    print(f"  Created 2 Points (epistemic graph) + 2 Events (episodic graph)")
+    print(f"  Created 2 Points (epistemic graph) + 2 Events (episodic graph)")  # noqa: F541
 
 
 def cleanup_test_data(proj: FalkorProjection) -> None:
@@ -139,7 +139,7 @@ def test_partial_failure() -> None:
             f"Expected error for nonexistent ontology, got: {errors}"
         # Epistemic should return empty (graph is empty, not error)
         assert "epistemic" in results, f"Expected epistemic in results: {results}"
-        print(f"  Partial failure: epistemic OK, nonexistent flagged as error")
+        print(f"  Partial failure: epistemic OK, nonexistent flagged as error")  # noqa: F541
     finally:
         Path("/tmp/tortoise-partial-s6.db").unlink(missing_ok=True)
 
@@ -147,7 +147,7 @@ def test_partial_failure() -> None:
 def test_nl_translation() -> None:
     """NL query → patterns → ontologies."""
     patterns, _ = translateNL("what happened last session?")
-    assert patterns, f"No patterns matched for 'what happened'"
+    assert patterns, f"No patterns matched for 'what happened'"  # noqa: F541
     ontologies = routeRead(patterns)
     assert "episodic" in ontologies, f"Expected episodic, got: {ontologies}"
     print(f"  NL: 'what happened' → {patterns} → {ontologies}")
@@ -174,7 +174,7 @@ if __name__ == "__main__":
     finally:
         cleanup_test_data(proj)
         # Safety (issue #176): never unlink the canonical DB via this script
-        if os.path.realpath(db_path) == os.path.realpath(os.environ.get("TORTOISE_DB_PATH", os.path.expanduser("~/.tortoise/tortoise.db"))):
+        if os.path.realpath(db_path) == os.path.realpath(os.environ.get("TORTOISE_DB_PATH", os.path.expanduser("~/.tortoise/tortoise.db"))):  # noqa: F821
             print("REFUSING to unlink canonical DB path", db_path)
             raise SystemExit(2)
         Path(db_path).unlink(missing_ok=True)

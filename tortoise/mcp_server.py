@@ -1,5 +1,5 @@
 """TORT-MCP-001: MCP server wrapping TortoiseSDK. Stdio transport, ~10 tools."""
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import asyncio
 import json
@@ -283,7 +283,7 @@ def _get_sdk():
 
     _db_uri = os.environ.get("TORTOISE_DB_URI", "")
     if _db_uri.startswith(("docker://", "redis://", "rediss://")):
-        from tortoise.projection import FalkorProjection
+        from tortoise.projection import FalkorProjection  # noqa: I001
         import time as _time
         # Retry Docker connection 3x with backoff; exit on exhaustion (#25 P3a, #32).
         # _sdk is cached ONLY on success — assigning before the retry loop left a
@@ -379,7 +379,7 @@ def _analyze_llm_budget_available() -> bool:
     Beyond budget the tool degrades to keyword-only classification (no paid
     outbound call). Stdio (no team context) is not budgeted.
     """
-    import time as _t
+    import time as _t  # noqa: I001
     from tortoise.mcp_auth import _current_team_id
     from tortoise.quota import MAX_ANALYZE_LLM_PER_MIN
     team_id = _current_team_id.get()
@@ -2263,10 +2263,10 @@ def tortoise_mine_conversations(transcript: str | None = None,
         return {"error": "transcript= and source_id= are required "
                          "(or corpus_dir= for a batch)"}
     try:
-        from tortoise.api import EventAPI
+        from tortoise.api import EventAPI  # noqa: I001
         from tortoise.log import EventLog
         from tortoise.mining import mine_conversation
-        import tempfile, os
+        import tempfile, os  # noqa: E401
         log = sdk._get_event_log()
         if log is None:
             log = EventLog(os.path.join(
@@ -2336,7 +2336,7 @@ def tortoise_belief_timeline(topic: str, limit: int = 50) -> dict:
 # Function bodies remain module-level callables; the adapter wraps each
 # via FunctionTool.from_function() and registers them on the shared mcp.
 # Must execute AFTER all tool function definitions (at module bottom).
-from tortoise.tool_registry import TOOL_REGISTRY, GROUP_BY_NAME, FastMCPAdapter
+from tortoise.tool_registry import TOOL_REGISTRY, GROUP_BY_NAME, FastMCPAdapter  # noqa: E402, I001
 
 _adapter = FastMCPAdapter(mcp)
 _adapter.register_all(TOOL_REGISTRY, {
@@ -2452,7 +2452,7 @@ def tortoise_onboarding_github_connect(org: str | None = None) -> dict:
     team_id = _current_team_id.get()
     if team_id is None:
         return {"error": "No team context (HTTP mode required)"}
-    import secrets
+    import secrets  # noqa: I001
     from urllib.parse import urlencode
     import os as _os
     client_id = _os.environ.get("GITHUB_CLIENT_ID")
@@ -2465,7 +2465,7 @@ def tortoise_onboarding_github_connect(org: str | None = None) -> dict:
     state = secrets.token_urlsafe(24)
     # Store CSRF state so the callback can validate it (P2 review fix) —
     # must be visible to the REST callback handler in the same process.
-    import time as _time
+    import time as _time  # noqa: I001
     from tortoise.hosted_api import _GITHUB_STATES
     _GITHUB_STATES[state] = {"team_id": team_id, "org": org or team_id,
                              "created_at": _time.time()}
@@ -2513,7 +2513,7 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
     team_id = _current_team_id.get()
     if team_id is None:
         return {"error": "No team context (HTTP mode required)"}
-    import secrets as _secrets
+    import secrets as _secrets  # noqa: I001
     import asyncio as _asyncio
     from tortoise.hosted_api import _INDEX_JOBS, _github_token_enc, _run_indexing
     try:
@@ -2569,7 +2569,7 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
     is registered on the shared module-level mcp instance — safe for stdio
     (route unused) and coexists with the POST/DELETE streamable-http route.
     """
-    from starlette.middleware import Middleware
+    from starlette.middleware import Middleware  # noqa: I001
     from starlette.responses import JSONResponse
     from tortoise.mcp_auth import (MCPRateLimitMiddleware,
                                    SecurityHeadersMiddleware,
@@ -2626,7 +2626,7 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
                 # Epic #888: onboarding tools retire from the steady-state
                 # surface once this team's onboarding is complete (fail-open
                 # — state read errors keep them visible).
-                if onboarding_done and t.name in _ONBOARDING_TOOL_NAMES:
+                if onboarding_done and t.name in _ONBOARDING_TOOL_NAMES:  # noqa: SIM103
                     return False
                 return True
 

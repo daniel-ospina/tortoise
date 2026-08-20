@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import pytest
+import pytest  # noqa: F401
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -17,7 +17,7 @@ from battery.report.assemble import (
 )
 from battery.report.calibrate import cal_table_hash, print_deltas
 from battery.report.classify import classify_cell
-from battery.report.verdict import VERDICTS, decide_verdict
+from battery.report.verdict import VERDICTS, decide_verdict  # noqa: F401
 
 FAMILIES = ("R1", "R2", "R3", "R4", "R5",
             "L1", "L2", "L3", "L4", "L5", "L6",
@@ -107,7 +107,7 @@ class TestCalibration:
     def test_print_only(self, tmp_path):
         rows = (("surfaced-rate", "a4", 0.90),)
         lines = print_deltas(rows, {"surfaced-rate": {"a4": 0.92}})
-        assert any("+0.020" in l for l in lines)
+        assert any("+0.020" in l for l in lines)  # noqa: E741
         # print-only: nothing written
         assert not list(tmp_path.iterdir())
 

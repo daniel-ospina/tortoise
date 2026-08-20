@@ -24,7 +24,7 @@ from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-from tortoise.projection import FalkorProjection  # noqa: E402
+from tortoise.projection import FalkorProjection  # noqa: E402, RUF100
 
 MIGRATE = (
     "MATCH (e:Event)-[r:INSTANTIATES]->(o:Object) "
@@ -100,7 +100,7 @@ def main() -> int:
                 print(f"[live]    {gname}: {before} → {after} INSTANTIATES edge(s)")
             finally:
                 proj.close()
-        except Exception as exc:  # noqa: BLE001 — per-graph isolation
+        except Exception as exc:  # noqa: BLE001, RUF100
             print(f"[ERROR]   {gname}: {exc!r} (remaining graphs untouched)", file=sys.stderr)
 
     if args.dry_run:

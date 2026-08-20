@@ -69,7 +69,7 @@ def fresh_sdk():
         try:
             yield sdk
         finally:
-            try:
+            try:  # noqa: SIM105
                 sdk.close()
             except Exception:
                 pass
@@ -585,7 +585,7 @@ class TestSituation10_ChainResponse:
 
 
 class TestEdgeCaseInvariants:
-    CONFIGS = [{"T4": 1}, {"T0": 1}, {"T4": 10}, {"T0": 1, "T4": 1}]
+    CONFIGS = [{"T4": 1}, {"T0": 1}, {"T4": 10}, {"T0": 1, "T4": 1}]  # noqa: RUF012
 
     def test_convergence_under_50(self):
         for cfg in self.CONFIGS:
@@ -655,7 +655,7 @@ class TestSituation9_Mitigation_Audit:
         compute_operator_weight (weights.py:9) — w *= 2.0 when an operator
         targets another operator. The issue's pc*0.5 mitigation model is
         fictional (old suite). This pins the MECHANIC (not NAND direction)."""
-        import tempfile
+        import tempfile  # noqa: I001
         import tortoise.weights as weights_mod
 
         with tempfile.TemporaryDirectory(prefix="tt_341_") as td:

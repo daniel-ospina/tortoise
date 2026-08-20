@@ -1,11 +1,11 @@
 """Tests for tortoise.search_engine — RRF fusion, classifier, degradation."""
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest
+import pytest  # noqa: I001
 from tortoise.search_engine import (
     classify_query, rrf_fusion, SearchResult, SearchScores,
     EpBreakdown, EpEvidence, annotate_ep_batch,

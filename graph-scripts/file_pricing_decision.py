@@ -4,10 +4,10 @@ Run after verifying FalkorDB is up and TORTOISE_DB_URI is set:
   cd "$(dirname "$0")/.."
   python3 scripts/file_pricing_decision.py
 """
-import os, sys
+import os, sys  # noqa: E401, I001
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.sdk import TortoiseSDK
+from tortoise.sdk import TortoiseSDK  # noqa: I001
 from tortoise.projection import FalkorProjection
 
 uri = os.environ.get("TORTOISE_DB_URI", "")

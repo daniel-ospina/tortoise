@@ -36,7 +36,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest
+import pytest  # noqa: I001
 from tortoise.sdk import TortoiseSDK
 from tortoise.analyze import _bfs_select_operators, DIRECT_EDGE_TRAVERSAL
 
@@ -52,7 +52,7 @@ def _fresh_sdk():
     """Fresh isolated embedded FalkorDBLite (shared-session daemon, wiped)."""
     db_path = os.path.join(tempfile.mkdtemp(prefix="tortoise_a9_"), "test.db")
     sdk = TortoiseSDK(db_path)
-    try:
+    try:  # noqa: SIM105
         sdk._get_proj().g.query("MATCH (n) DETACH DELETE n")
     except Exception:
         pass
@@ -111,11 +111,11 @@ def test_a9_factor_anchor_uniqueness_bidirectional_cycle():
         p2 = _live(sdk, "B")
         # bidirectional IMPL: both endpoints can discover the edge
         sdk.create_direct_edge("IMPL", p1["id"], p2["id"], direction="bidirectional")
-        ops_a, anchors_a = _select(sdk._get_proj(), [p1["id"]], max_hops=1)
-        ops_b, anchors_b = _select(sdk._get_proj(), [p2["id"]], max_hops=1)
+        ops_a, anchors_a = _select(sdk._get_proj(), [p1["id"]], max_hops=1)  # noqa: RUF059
+        ops_b, anchors_b = _select(sdk._get_proj(), [p2["id"]], max_hops=1)  # noqa: RUF059
         assert anchors_a == anchors_b == {(p1["id"], p2["id"], "IMPL")}
         # combined: still ONE anchor per edge
-        ops_both, anchors_both = _select(
+        ops_both, anchors_both = _select(  # noqa: RUF059
             sdk._get_proj(), [p1["id"], p2["id"]], max_hops=1)
         assert len(anchors_both) == 1, anchors_both
         assert (p1["id"], p2["id"], "IMPL") in anchors_both
@@ -135,16 +135,16 @@ def test_a9_direction_respect_unidirectional_impl_no_back_traversal():
         sdk.create_direct_edge("IMPL", src["id"], tgt["id"],
                                direction="unidirectional")
         # from the SOURCE: forward traversal finds the edge
-        ops_s, anchors_s = _select(sdk._get_proj(), [src["id"]], max_hops=1)
+        ops_s, anchors_s = _select(sdk._get_proj(), [src["id"]], max_hops=1)  # noqa: RUF059
         assert anchors_s == {(src["id"], tgt["id"], "IMPL")}, anchors_s
         # from the TARGET: NO back-traversal (the edge is unidirectional)
-        ops_t, anchors_t = _select(sdk._get_proj(), [tgt["id"]], max_hops=1)
+        ops_t, anchors_t = _select(sdk._get_proj(), [tgt["id"]], max_hops=1)  # noqa: RUF059
         assert anchors_t == set(), \
             f"unidirectional IMPL must not back-traverse: {anchors_t}"
         # bidirectional IMPL from the TARGET DOES back-traverse
         sdk.create_direct_edge("IMPL", src["id"], tgt["id"],
                                direction="bidirectional")
-        ops_b, anchors_b = _select(sdk._get_proj(), [tgt["id"]], max_hops=1)
+        ops_b, anchors_b = _select(sdk._get_proj(), [tgt["id"]], max_hops=1)  # noqa: RUF059
         assert (src["id"], tgt["id"], "IMPL") in anchors_b, anchors_b
     finally:
         sdk.close()
@@ -194,7 +194,7 @@ def test_a9_nand_always_bidirectional():
         tgt = _live(sdk, "Target")
         sdk.create_direct_edge("NAND", src["id"], tgt["id"],
                                direction="unidirectional")
-        ops, anchors = _select(sdk._get_proj(), [tgt["id"]], max_hops=1)
+        ops, anchors = _select(sdk._get_proj(), [tgt["id"]], max_hops=1)  # noqa: RUF059
         assert anchors == {(src["id"], tgt["id"], "NAND")}, anchors
     finally:
         sdk.close()

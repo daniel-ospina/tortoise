@@ -18,7 +18,7 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from tortoise.extractor import LLMExtractor, MockModel
+from tortoise.extractor import LLMExtractor, MockModel  # noqa: I001
 from tortoise.api import EventAPI
 from tortoise.projection import FalkorProjection
 from tortoise.ep import TortoiseEP
@@ -182,7 +182,7 @@ class TestE2EExtractionEP:
             if not nand_pairs:
                 pytest.skip("No NAND operators in extracted graph")
 
-            for op_id, claim_ids in nand_pairs.items():
+            for op_id, claim_ids in nand_pairs.items():  # noqa: B007
                 if len(claim_ids) < 2:
                     continue
                 for i in range(len(claim_ids)):
@@ -215,7 +215,7 @@ class TestE2EExtractionEP:
             if not impl_pairs:
                 pytest.skip("No IMPL operators in extracted graph")
 
-            for op_id, claim_ids in impl_pairs.items():
+            for op_id, claim_ids in impl_pairs.items():  # noqa: B007
                 if len(claim_ids) < 2:
                     continue
                 for i in range(len(claim_ids)):

@@ -11,7 +11,7 @@ contract.
 Negatives: export without auth → 401; export with a tt_ key (non-session) →
 401; export by a non-member JWT → 403; export of a deleted team → 410.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import os
 import uuid
@@ -89,7 +89,7 @@ def test_export_requires_session_auth_401(api, tenant_factory):
 
 def test_export_foreign_owner_403(api, session_jwt, tenant_factory):
     """A valid session user who is NOT a member of the team gets 403."""
-    other_user, other_tok = session_jwt()  # fresh user, no memberships
+    other_user, other_tok = session_jwt()  # fresh user, no memberships  # noqa: RUF059
     t = tenant_factory("export-foreign")
     r = api.get(f"/v1/teams/{t['team_id']}/export",
                 headers={"Authorization": f"Bearer {other_tok}"})

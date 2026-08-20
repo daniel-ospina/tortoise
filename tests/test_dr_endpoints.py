@@ -195,7 +195,7 @@ class TestDrDrill:
         # Produce a real archive for team_x via the sweep pipeline.
         r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
         assert r.json()["status"] == "backed_up"
-        manifest = [
+        manifest = [  # noqa: RUF015
             k for k in mem_storage.list("backups/team_x/") if k.endswith("manifest.json")
         ][0]
         backup_key = manifest.replace("/manifest.json", "/dump.enc")
@@ -228,7 +228,7 @@ class TestDrDrill:
     def test_drill_cooldown(self, client, dr_env, mem_storage):
         _seed_team("team_x", nodes=1)
         client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
-        manifest = [
+        manifest = [  # noqa: RUF015
             k for k in mem_storage.list("backups/team_x/") if k.endswith("manifest.json")
         ][0]
         backup_key = manifest.replace("/manifest.json", "/dump.enc")

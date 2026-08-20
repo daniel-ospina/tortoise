@@ -10,12 +10,12 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.api import EventAPI                       # noqa: E402
-from tortoise.extractor import LLMExtractor, MockModel  # noqa: E402
-from tortoise.idempotency import document_key           # noqa: E402
-from tortoise.log import EventLog                        # noqa: E402
-from tortoise.models import OllamaModel, OpenAICompatModel  # noqa: E402
-from tortoise.projection import fold, split              # noqa: E402
+from tortoise.api import EventAPI  # noqa: E402, I001, RUF100
+from tortoise.extractor import LLMExtractor, MockModel  # noqa: E402, RUF100
+from tortoise.idempotency import document_key  # noqa: E402, RUF100
+from tortoise.log import EventLog  # noqa: E402, RUF100
+from tortoise.models import OllamaModel, OpenAICompatModel  # noqa: E402, RUF100
+from tortoise.projection import fold, split  # noqa: E402, RUF100
 
 SAMPLE = os.path.join(os.path.dirname(__file__), "sample_transcript.txt")
 
@@ -25,7 +25,7 @@ def _tmp(name):
 
 
 def test_llm_extractor_end_to_end():
-    text = open(SAMPLE, encoding="utf-8").read()
+    text = open(SAMPLE, encoding="utf-8").read()  # noqa: SIM115
     log = EventLog(_tmp("events.jsonl"))
     ext = LLMExtractor(MockModel("cheap"), MockModel("reason"))
     api = EventAPI(log, initiated_by="extractor", agent_id=ext.version)
@@ -57,7 +57,7 @@ def test_llm_extractor_end_to_end():
 
 
 def test_reingest_same_version_skips():
-    text = open(SAMPLE, encoding="utf-8").read()
+    text = open(SAMPLE, encoding="utf-8").read()  # noqa: SIM115
     log = EventLog(_tmp("events.jsonl"))
     ext = LLMExtractor(MockModel("cheap"), MockModel("reason"))
     api = EventAPI(log, initiated_by="extractor")
@@ -113,7 +113,7 @@ def test_overlap_guard_rejects_mismap():
     assert _overlap("penguins waddle across ice",
                     "We should raise the burn rate slowly") < 0.5
 
-    text = open(SAMPLE, encoding="utf-8").read()
+    text = open(SAMPLE, encoding="utf-8").read()  # noqa: SIM115
     log = EventLog(_tmp("events.jsonl"))
     LLMExtractor(_MismapModel(), MockModel("r")).run(text, "s",
         EventAPI(log, initiated_by="extractor"))

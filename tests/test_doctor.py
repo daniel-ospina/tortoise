@@ -369,7 +369,7 @@ class TestDoctorSessionExtraction:
     def test_no_provider_local_warns(self, clean_llm_env, capsys):
         """No key + not hosted → ⚠️ warning (capture fails closed; rc not
         driven by this check). Embedded DB so the only possible ❌ is mine."""
-        monkeypatch, db_path = clean_llm_env
+        monkeypatch, db_path = clean_llm_env  # noqa: RUF059
         rc = _run_doctor(["--path", db_path])
         out = capsys.readouterr().out
 
@@ -462,7 +462,7 @@ class TestDoctorSessionExtraction:
         line = self._extraction_line(out)
         assert "✅" in line  # config is valid — extractor builds
         assert "deepseek-chat" in line
-        shape = next(l for l in out.splitlines() if "OpenRouter model" in l)
+        shape = next(l for l in out.splitlines() if "OpenRouter model" in l)  # noqa: E741
         assert "⚠️" in shape
         assert "<family>/<model>" in shape
         assert "404" in shape  # actionable: the failure mode is a route 404
@@ -480,7 +480,7 @@ class TestDoctorSessionExtraction:
         line = self._extraction_line(out)
         assert "✅" in line
         assert "deepseek/deepseek-chat" in line
-        assert not any("OpenRouter model" in l for l in out.splitlines())
+        assert not any("OpenRouter model" in l for l in out.splitlines())  # noqa: E741
         assert rc in (0, 1)
 
     def test_non_openrouter_provider_never_shape_warns(self, clean_llm_env, capsys):
@@ -496,7 +496,7 @@ class TestDoctorSessionExtraction:
         line = self._extraction_line(out)
         assert "✅" in line
         assert "deepseek-chat" in line
-        assert not any("OpenRouter model" in l for l in out.splitlines())
+        assert not any("OpenRouter model" in l for l in out.splitlines())  # noqa: E741
         assert rc in (0, 1)
 
     def test_openrouter_default_model_no_warning(self, clean_llm_env, capsys):
@@ -510,7 +510,7 @@ class TestDoctorSessionExtraction:
         line = self._extraction_line(out)
         assert "✅" in line
         assert "deepseek/deepseek-chat" in line
-        assert not any("OpenRouter model" in l for l in out.splitlines())
+        assert not any("OpenRouter model" in l for l in out.splitlines())  # noqa: E741
         assert rc in (0, 1)
 
 

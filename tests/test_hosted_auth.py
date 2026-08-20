@@ -13,7 +13,7 @@ import importlib
 import os
 import re
 import tempfile
-from pathlib import Path
+from pathlib import Path  # noqa: F401
 
 import pytest
 
@@ -21,7 +21,7 @@ import pytest
 # Set a test pepper before importing tortoise.auth.
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
-import tortoise.auth as auth_mod
+import tortoise.auth as auth_mod  # noqa: I001
 from tortoise.sdk import TortoiseSDK
 
 

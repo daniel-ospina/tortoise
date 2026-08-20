@@ -20,4 +20,4 @@ def content_hash(text: str) -> str:
 def now_iso() -> str:
     """Current UTC time as ISO 8601 string."""
     from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat()  # noqa: UP017

@@ -11,17 +11,17 @@ import os
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
-import pytest
+import pytest  # noqa: I001
 from fastapi.testclient import TestClient
 
-from tortoise.hosted_api import app, _make_sdk
+from tortoise.hosted_api import app, _make_sdk  # noqa: F401
 from tortoise.sdk import TortoiseSDK
 
 
 @pytest.fixture
 def client(tmp_path):
     """TestClient with a temp embedded DB + registry."""
-    db_path = str(tmp_path / "onboarding.db")
+    db_path = str(tmp_path / "onboarding.db")  # noqa: F841
     # Patch TortoiseSDK to use the temp DB (mirrors test_hosted_api.py)
     orig_init = TortoiseSDK.__init__
 
@@ -53,7 +53,7 @@ def client(tmp_path):
 @pytest.fixture
 def unauth_client(tmp_path):
     """TestClient WITHOUT the auth override — real 401s."""
-    db_path = str(tmp_path / "unauth.db")
+    db_path = str(tmp_path / "unauth.db")  # noqa: F841
     orig_init = TortoiseSDK.__init__
 
     def _patched(self, db_path_arg=None, *, namespace=None, db_path=None, **kw):

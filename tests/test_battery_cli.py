@@ -1,10 +1,10 @@
 """Task 7 tests — CLI subcommand surface + exit-code contract (0/1/2/3/4/5)."""
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
-import json
+import json  # noqa: F401
 from pathlib import Path
 
-import pytest
+import pytest  # noqa: F401
 import yaml
 
 from battery.cli import main, _parser

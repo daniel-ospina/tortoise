@@ -9,7 +9,7 @@ and the extract_session_v2 orchestrator (mock model, no LLM).
 from __future__ import annotations
 
 import json
-import os
+import os  # noqa: F401
 import sys
 from pathlib import Path
 
@@ -17,7 +17,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tortoise import extractor_v2 as v2  # noqa: E402
+from tortoise import extractor_v2 as v2  # noqa: E402, RUF100
 
 
 class MockModel:

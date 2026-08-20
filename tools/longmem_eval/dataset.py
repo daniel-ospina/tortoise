@@ -83,7 +83,7 @@ def _download(url: str, dest: Path, *, timeout: int = 120) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(dest.name + ".part")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: SIM117
             with open(tmp, "wb") as f:
                 while True:
                     chunk = resp.read(1 << 20)

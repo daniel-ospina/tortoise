@@ -86,7 +86,7 @@ class TestModeWiring:
 
     def test_selfhost_forwards_mode_and_budget(self):
         """selfhost /dream forwards mode/budget transparently (no #329)."""
-        import inspect
+        import inspect  # noqa: I001
         from tortoise.selfhost_api import dream as selfhost_dream
         sig = inspect.signature(selfhost_dream)
         assert "mode" in sig.parameters, (

@@ -62,7 +62,7 @@ def _freeze_clock(monkeypatch, fixed: datetime | None = None) -> None:
     """Pin the module's clock so date-sensitive tests are run-date independent."""
     from tortoise import hosted_backup as hb
 
-    fixed = fixed or datetime(2026, 8, 7, 12, 0, 0, tzinfo=timezone.utc)
+    fixed = fixed or datetime(2026, 8, 7, 12, 0, 0, tzinfo=timezone.utc)  # noqa: UP017
 
     class _FixedDatetime(datetime):
         @classmethod
@@ -125,13 +125,13 @@ def test_decrypt_tamper_detected():
     key = _make_key()
     blob = bytearray(encrypt_backup(b"secret", key=key))
     blob[-1] ^= 0xFF
-    with pytest.raises(ValueError, match="tampered|wrong key"):
+    with pytest.raises(ValueError, match="tampered|wrong key"):  # noqa: RUF043
         decrypt_backup(bytes(blob), key=key)
 
 
 def test_decrypt_wrong_key():
     blob = encrypt_backup(b"secret", key=_make_key())
-    with pytest.raises(ValueError, match="tampered|wrong key"):
+    with pytest.raises(ValueError, match="tampered|wrong key"):  # noqa: RUF043
         decrypt_backup(blob, key=_make_key())
 
 
@@ -142,7 +142,7 @@ def test_decrypt_bad_magic():
 
 def test_decrypt_truncated_blob():
     blob = encrypt_backup(b"x", key=_make_key())
-    with pytest.raises(ValueError, match="bad magic|truncated"):
+    with pytest.raises(ValueError, match="bad magic|truncated"):  # noqa: RUF043
         decrypt_backup(blob[:4], key=_make_key())
 
 
@@ -221,7 +221,7 @@ def test_dump_restore_rich_props_multilabel_isolated_node():
         assert props[0][0]["tags"] == ["a", "b"]
         # null prop round-trips faithfully (sentinel distinguishes absent vs None)
         _MISSING = object()
-        src_note = [n for n in dump["nodes"] if n["props"].get("id") == "r1"][0]["props"].get("note", _MISSING)
+        src_note = [n for n in dump["nodes"] if n["props"].get("id") == "r1"][0]["props"].get("note", _MISSING)  # noqa: RUF015
         assert props[0][0].get("note", _MISSING) == src_note
         proj2.close()
 
@@ -323,7 +323,7 @@ def test_create_backup_list_and_restore_swap(monkeypatch):
         assert any(k.endswith("dump.enc") for k in objs)
         assert any(k.endswith("manifest.json") for k in objs)
         # sha256 matches the stored blob (not just key presence)
-        dump_key = [k for k in objs if k.endswith("dump.enc")][0]
+        dump_key = [k for k in objs if k.endswith("dump.enc")][0]  # noqa: RUF015
         assert manifest["sha256"] == hashlib.sha256(store.download(dump_key)).hexdigest()
         # registry stamped
         row = registry.query(
@@ -417,7 +417,7 @@ def test_empty_graph_full_pipeline(monkeypatch):
         store = MemoryStorage()
         manifest = create_backup(proj, registry, store, team_id="team_e", graph_name="tortoise")
         assert manifest["node_count"] == 0
-        dump_key = [k for k in store.list("backups/team_e/") if k.endswith("dump.enc")][0]
+        dump_key = [k for k in store.list("backups/team_e/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         result = restore_backup(
             proj.db, registry, store, dump_key,
             team_id="team_e", graph_name="tortoise",
@@ -439,7 +439,7 @@ def test_restore_empty_backup_over_live_rejected(monkeypatch):
         store = MemoryStorage()
         # empty backup first
         create_backup(proj, registry, store, team_id="team_e", graph_name="tortoise")
-        dump_key = [k for k in store.list("backups/team_e/") if k.endswith("dump.enc")][0]
+        dump_key = [k for k in store.list("backups/team_e/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         # then seed live data
         _seed(proj.g)
         proj.g.query("CREATE (x:Point {id:'pt-x', content:'marker'})")
@@ -466,7 +466,7 @@ def test_restore_rejects_layer1_key_prefix_guard(monkeypatch):
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
         create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
-        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]
+        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         # manifest claims team_y (so the MANIFEST guard would PASS for team_y);
         # the key lives under backups/team_x/ — only the key-prefix guard fires
         manifest_key = dump_key.replace("/dump.enc", "/manifest.json")
@@ -494,7 +494,7 @@ def test_restore_rejects_cross_graph(monkeypatch):
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
         create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
-        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]
+        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         proj.g.query("CREATE (x:Point {id:'pt-x', content:'marker'})")
 
         with pytest.raises(ValueError, match="cross-graph"):
@@ -518,7 +518,7 @@ def test_restore_rejects_manifest_missing_sha256(monkeypatch):
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
         create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
-        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]
+        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         manifest_key = dump_key.replace("/dump.enc", "/manifest.json")
         manifest = json.loads(store.download(manifest_key))
         del manifest["sha256"]
@@ -544,7 +544,7 @@ def test_restore_rejects_cross_team_backup(monkeypatch):
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
         create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
-        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]
+        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         proj.g.query("CREATE (x:Point {id:'pt-x', content:'marker'})")
 
         with pytest.raises(ValueError, match="cross-team"):
@@ -569,7 +569,7 @@ def test_restore_rejects_manifest_team_mismatch(monkeypatch):
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
         create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
-        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]
+        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         # rewrite manifest under the same key to claim a DIFFERENT team
         manifest_key = dump_key.replace("/dump.enc", "/manifest.json")
         manifest = json.loads(store.download(manifest_key))
@@ -596,7 +596,7 @@ def test_restore_rejects_unreadable_manifest(monkeypatch):
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
         create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
-        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]
+        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         manifest_key = dump_key.replace("/dump.enc", "/manifest.json")
         store.upload(manifest_key, b"{not json")
         proj.g.query("CREATE (x:Point {id:'pt-x', content:'marker'})")
@@ -621,7 +621,7 @@ def test_restore_verify_count_mismatch_keeps_live_graph(monkeypatch):
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
         create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
-        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]
+        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         manifest_key = dump_key.replace("/dump.enc", "/manifest.json")
 
         # Forge: decrypt → bump node_count in the PAYLOAD only (the AES-GCM-
@@ -662,7 +662,7 @@ def test_restore_integrity_failure_keeps_live_graph(monkeypatch):
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
         create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
-        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]
+        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
 
         # corrupt the stored blob → sha256 mismatch
         corrupt = bytearray(store.download(dump_key))
@@ -692,7 +692,7 @@ def test_restore_copy_failure_leaves_temp_intact(monkeypatch):
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
         create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
-        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]
+        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
 
         def _boom_copy(self, clone):
             if clone == "tortoise":  # only the temp→live promotion fails
@@ -728,7 +728,7 @@ def test_restore_verify_edge_count_mismatch(monkeypatch):
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
         create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
-        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]
+        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         manifest_key = dump_key.replace("/dump.enc", "/manifest.json")
 
         payload = json.loads(decrypt_backup(store.download(dump_key)))
@@ -761,7 +761,7 @@ def test_restore_rejects_non_dump_payload(monkeypatch):
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
         create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
-        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]
+        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         manifest_key = dump_key.replace("/dump.enc", "/manifest.json")
 
         # replace with a validly-encrypted but non-dump payload
@@ -811,7 +811,7 @@ def test_restore_rejects_manifest_missing_team_id(monkeypatch):
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
         create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
-        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]
+        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         manifest_key = dump_key.replace("/dump.enc", "/manifest.json")
         manifest = json.loads(store.download(manifest_key))
         del manifest["team_id"]
@@ -829,7 +829,7 @@ def test_restore_rejects_manifest_missing_team_id(monkeypatch):
 
 def test_restore_registry_stamp_failure_is_best_effort(monkeypatch):
     """Restore succeeds even when the registry stamp fails (best-effort)."""
-    from falkordb import Graph
+    from falkordb import Graph  # noqa: F401
 
     _set_env_key(monkeypatch)
     with tempfile.TemporaryDirectory() as tmp:
@@ -837,8 +837,8 @@ def test_restore_registry_stamp_failure_is_best_effort(monkeypatch):
         _seed(proj.g)
         registry = proj.db.select_graph("registry_tortoise")
         store = MemoryStorage()
-        manifest = create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
-        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]
+        manifest = create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")  # noqa: F841
+        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
 
         class RegistryDown:
             def query(self, *a, **k):
@@ -871,7 +871,7 @@ def test_create_backup_distinct_ids_within_second(monkeypatch):
         @classmethod
         def now(cls, tz=None):
             _TickDatetime._n += 1
-            return datetime(2026, 8, 7, 12, 0, 0, microsecond=_TickDatetime._n * 1000, tzinfo=timezone.utc)
+            return datetime(2026, 8, 7, 12, 0, 0, microsecond=_TickDatetime._n * 1000, tzinfo=timezone.utc)  # noqa: UP017
 
     monkeypatch.setattr(hb, "datetime", _TickDatetime)
     with tempfile.TemporaryDirectory() as tmp:
@@ -901,7 +901,7 @@ def test_restore_payload_missing_counts_rejected(monkeypatch):
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
         create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
-        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]
+        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         manifest_key = dump_key.replace("/dump.enc", "/manifest.json")
 
         payload = json.loads(decrypt_backup(store.download(dump_key)))
@@ -934,7 +934,7 @@ def test_restore_payload_graph_name_guard(monkeypatch):
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
         create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
-        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]
+        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         manifest_key = dump_key.replace("/dump.enc", "/manifest.json")
 
         payload = json.loads(decrypt_backup(store.download(dump_key)))
@@ -965,7 +965,7 @@ def test_restore_staging_cleaned_on_validation_failure(monkeypatch):
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
         create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
-        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]
+        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         manifest_key = dump_key.replace("/dump.enc", "/manifest.json")
 
         payload = json.loads(decrypt_backup(store.download(dump_key)))
@@ -1028,7 +1028,7 @@ def test_prune_skips_foreign_backup_id(monkeypatch):
         "backup_id": foreign_bid,
         "team_id": "team_b",
         "graph_name": "tortoise",
-        "created_at": (datetime.now(timezone.utc) - timedelta(days=40)).isoformat(),
+        "created_at": (datetime.now(timezone.utc) - timedelta(days=40)).isoformat(),  # noqa: UP017
         "node_count": 1, "edge_count": 0, "sha256": "0" * 64, "format": DUMP_FORMAT,
     }
     store.upload(f"backups/{team_a}/forged/manifest.json", json.dumps(forged).encode())
@@ -1050,7 +1050,7 @@ def test_restore_rejects_non_dict_manifest(monkeypatch):
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
         create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
-        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]
+        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         manifest_key = dump_key.replace("/dump.enc", "/manifest.json")
         store.upload(manifest_key, b'[1,2,3]')
         proj.g.query("CREATE (x:Point {id:'pt-x', content:'marker'})")
@@ -1074,7 +1074,7 @@ def test_restore_wrong_key_keeps_live_graph(monkeypatch):
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
         create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
-        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]
+        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         proj.g.query("CREATE (x:Point {id:'pt-x', content:'marker'})")
 
         wrong_key = os.urandom(32)
@@ -1137,7 +1137,7 @@ def test_restore_live_delete_failure_leaves_recovery_copy(monkeypatch):
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
         create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
-        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]
+        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
 
         real_delete = Graph.delete
 
@@ -1173,7 +1173,7 @@ def test_restore_into_missing_live_graph(monkeypatch):
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
         create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
-        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]
+        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         # simulate the DR incident: the live graph is gone
         proj.g.delete()
 
@@ -1265,7 +1265,7 @@ def test_restore_live_check_fail_closed_when_list_graphs_fails(monkeypatch):
         registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
         store = MemoryStorage()
         create_backup(proj, registry, store, team_id="team_x", graph_name="tortoise")
-        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]
+        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
 
         real_query = Graph.query
         real_list = type(proj.db).list_graphs
@@ -1299,7 +1299,7 @@ def test_restore_rejects_non_dump_key():
         proj = _make_proj(tmp)
         registry = proj.db.select_graph("registry_tortoise")
         store = MemoryStorage()
-        with pytest.raises(ValueError, match="dump.enc"):
+        with pytest.raises(ValueError, match="dump.enc"):  # noqa: RUF043
             restore_backup(
                 proj.db, registry, store, "backups/team_x/x/manifest.json",
                 team_id="team_x", graph_name="tortoise",
@@ -1346,7 +1346,7 @@ def test_r2storage_download_missing_key_normalized(monkeypatch):
     """R2Storage.download normalizes botocore NoSuchKey → KeyError so the
     pipeline maps it to a clean ValueError (Backup object not found)."""
     pytest.importorskip("botocore.exceptions")
-    store, fake = _r2_with_fake_boto3(monkeypatch)
+    store, fake = _r2_with_fake_boto3(monkeypatch)  # noqa: RUF059
     with pytest.raises(KeyError):
         store.download("backups/nope/dump.enc")
 
@@ -1416,7 +1416,7 @@ class _FakeS3:
                     "GetObject",
                 )
             except ImportError:
-                raise KeyError(Key)
+                raise KeyError(Key)  # noqa: B904
         return {"Body": io.BytesIO(self.objects[Key])}
 
     def delete_object(self, Bucket, Key):
@@ -1495,9 +1495,9 @@ def _seed_old_backups(store: MemoryStorage, team_id: str, days_ago: list[int]) -
     data), with a -1h margin so the `.days` floor never flips the boundary
     (day-7 → age 7.04d, day-6 → age 6.04d).
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)  # noqa: UP017
     ids: dict[int, str] = {}
-    for i, d in enumerate(days_ago):
+    for i, d in enumerate(days_ago):  # noqa: B007
         created = now - timedelta(days=d) - timedelta(hours=1)
         backup_id = f"{team_id}/{created.strftime('%Y%m%dT%H%M%SZ')}"
         ids[d] = backup_id
@@ -1537,10 +1537,10 @@ def test_prune_retention_keeps_daily_and_weekly():
 def test_prune_keeps_newest_backup_of_each_week():
     """Weekly-anchor rule: when an older ISO week has 2 backups, only the
     newest survives."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)  # noqa: UP017
     monday_anchor = (now.date() - timedelta(days=now.date().weekday() + 21))  # 3 weeks back
-    friday = datetime.combine(monday_anchor + timedelta(days=4), datetime.min.time(), tzinfo=timezone.utc)
-    sunday = datetime.combine(monday_anchor + timedelta(days=6), datetime.min.time(), tzinfo=timezone.utc)
+    friday = datetime.combine(monday_anchor + timedelta(days=4), datetime.min.time(), tzinfo=timezone.utc)  # noqa: UP017
+    sunday = datetime.combine(monday_anchor + timedelta(days=6), datetime.min.time(), tzinfo=timezone.utc)  # noqa: UP017
     assert friday.isocalendar()[:2] == sunday.isocalendar()[:2]  # same ISO week
 
     store = MemoryStorage()
@@ -1615,7 +1615,7 @@ def test_prune_zero_windows_deletes_all():
 def test_prune_fewer_than_window_keeps_all():
     store = MemoryStorage()
     team_id = "team_s"
-    ids = _seed_old_backups(store, team_id, [0, 1, 2])
+    ids = _seed_old_backups(store, team_id, [0, 1, 2])  # noqa: F841
     assert prune_backups(store, team_id, keep_daily=7, keep_weekly=4) == []
     assert len([k for k in store.list(f"backups/{team_id}/") if k.endswith("manifest.json")]) == 3
 
@@ -1652,7 +1652,7 @@ def test_prune_weekly_cap_drops_oldest_weeks(monkeypatch):
     _freeze_clock(monkeypatch)  # run-date independent (daily/weekly boundary)
     store = MemoryStorage()
     team_id = "team_r"
-    now = hb.datetime.now(timezone.utc)  # SAME clock prune_backups will use
+    now = hb.datetime.now(timezone.utc)  # SAME clock prune_backups will use  # noqa: UP017
     monday_anchor = now.date() - timedelta(days=now.date().weekday() + 21)
     weeks = [
         ("w1a", monday_anchor + timedelta(days=4)),  # Fri (older W1 copy)
@@ -1668,7 +1668,7 @@ def test_prune_weekly_cap_drops_oldest_weeks(monkeypatch):
             f"backups/{bid}/manifest.json",
             json.dumps({
                 "backup_id": bid, "team_id": team_id, "graph_name": "tortoise",
-                "created_at": datetime.combine(created, datetime.min.time(), tzinfo=timezone.utc).isoformat(),
+                "created_at": datetime.combine(created, datetime.min.time(), tzinfo=timezone.utc).isoformat(),  # noqa: UP017
                 "node_count": 10, "edge_count": 3, "sha256": "0" * 64, "format": DUMP_FORMAT,
             }).encode(),
         )
@@ -1694,7 +1694,7 @@ def test_registry_team_node_absent(monkeypatch):
         store = MemoryStorage()
         manifest = create_backup(proj, registry, store, team_id="team_ghost", graph_name="tortoise")
         assert manifest["node_count"] == 6
-        dump_key = [k for k in store.list("backups/team_ghost/") if k.endswith("dump.enc")][0]
+        dump_key = [k for k in store.list("backups/team_ghost/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         result = restore_backup(
             proj.db, registry, store, dump_key,
             team_id="team_ghost", graph_name="tortoise",
@@ -1748,7 +1748,7 @@ def test_prune_keep_hourly_bounded_semantics(monkeypatch):
 
     store = MemoryStorage()
     team_id = "team_hourly"
-    fixed = datetime(2026, 8, 7, 12, 0, 0, tzinfo=timezone.utc)
+    fixed = datetime(2026, 8, 7, 12, 0, 0, tzinfo=timezone.utc)  # noqa: UP017
 
     # (hours_ago, minutes_ago). NEGATIVE minutes = created AFTER the hour mark,
     # keeping both backups inside the SAME (day, hour) bucket — that is what
@@ -1884,7 +1884,7 @@ def test_r2_create_if_not_exists_fallback_head(monkeypatch):
 # plane (PostgREST PATCH on the teams row, post-#669). The Supabase side is
 # driven through the in-memory FakeControlPlane — zero network.
 
-from tests.fake_control_plane import ErrorControlPlane, FakeControlPlane
+from tests.fake_control_plane import ErrorControlPlane, FakeControlPlane  # noqa: E402, F401
 
 
 def test_backup_seam_dialect_detection():
@@ -1980,8 +1980,8 @@ def test_restore_backup_stamps_supabase_teams_row(monkeypatch):
              "backup_enabled": True},
         ])
         store = MemoryStorage()
-        manifest = create_backup(proj, cp, store, team_id="team_x", graph_name="tortoise")
-        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]
+        manifest = create_backup(proj, cp, store, team_id="team_x", graph_name="tortoise")  # noqa: F841
+        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         result = restore_backup(
             proj.db, cp, store, dump_key, team_id="team_x", graph_name="tortoise",
         )
@@ -2008,11 +2008,11 @@ def test_restore_supabase_stamp_blip_best_effort(monkeypatch):
                 return super().query(table, *args, **kwargs)
 
         store = MemoryStorage()
-        manifest = create_backup(
+        manifest = create_backup(  # noqa: F841
             proj, StampBlip().seed("teams", [{"id": "team_x"}]), store,
             team_id="team_x", graph_name="tortoise",
         )
-        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]
+        dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         result = restore_backup(
             proj.db, StampBlip().seed("teams", [{"id": "team_x"}]), store, dump_key,
             team_id="team_x", graph_name="tortoise",

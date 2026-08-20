@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
-from typing import Any
+import time  # noqa: F401
+from typing import Any  # noqa: F401
 
 import httpx
 
@@ -105,7 +105,7 @@ class GitHubIndexer:
         for repo_name in repos:
             try:
                 items = await self._fetch_items(client, repo_name)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001, RUF100
                 errors.append(f"{repo_name}: {e}")
                 continue
             for item in items:
@@ -121,7 +121,7 @@ class GitHubIndexer:
                     sdk.create_point(kind="observation", content=content,
                                      authoredBy="github-indexer", props=props)
                     points_created += 1
-                except Exception as e:  # noqa: BLE001
+                except Exception as e:  # noqa: BLE001, RUF100
                     errors.append(f"{repo_name}#{item.get('number')}: {e}")
                 total_fetched += 1
         await self._close()

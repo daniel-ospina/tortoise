@@ -208,7 +208,7 @@ class TestPayloadLocalRules:
             [_mk_point(1, "product-strategy:useCase"),
              _mk_point(2, "product-strategy:userJourney")],
             [_impl_op(1, 2)])
-        result, payload = validate_payload_dict(raw)
+        result, payload = validate_payload_dict(raw)  # noqa: RUF059
         assert result.ok is True  # warn-first: the write proceeds
         assert len(result.warnings) == 1
         w = result.warnings[0]
@@ -262,7 +262,7 @@ class TestPayloadLocalRules:
         assert Layer1Result(ok=True).warnings == []
 
     def test_validate_domain_rules_skips_unknown_domain(self):
-        from tortoise.commit_schema import validate_domain_rules
+        from tortoise.commit_schema import validate_domain_rules  # noqa: I001
         from tortoise.commit_schema import CommitPayload
         payload = CommitPayload.model_validate(_raw_payload([_mk_point(1, "decision")]))
         assert validate_domain_rules(payload, domain=None) == []
@@ -283,7 +283,7 @@ class TestPhaseB:
 
     def test_severity_resolves_from_manifest(self, monkeypatch):
         """A synthetic block chain → warnings stamped block (Phase B fires)."""
-        from tortoise import domain_validators as dv
+        from tortoise import domain_validators as dv  # noqa: I001
         from tortoise.commit_schema import (
             CommitPayload, validate_domain_rules,
         )
@@ -479,7 +479,7 @@ class TestGraphValidators:
         assert any(v["ref"] == draft_id for v in drafts)
 
     def test_dangling_refs_fire(self, graph_sdk):
-        ids = _seed_chain_violations(graph_sdk)
+        ids = _seed_chain_violations(graph_sdk)  # noqa: F841
         res = graph_sdk.validate_domain("product-strategy")
         rules = {v["rule"] for v in res["violations"]}
         assert {"dangling_use_case_ref", "dangling_jtbd_ref",
@@ -493,7 +493,7 @@ class TestGraphValidators:
         assert not any(v["rule"] == "orphan_use_case" for v in wired_v)
 
     def test_actionable_fields(self, graph_sdk):
-        ids = _seed_chain_violations(graph_sdk)
+        ids = _seed_chain_violations(graph_sdk)  # noqa: F841
         res = graph_sdk.validate_domain("product-strategy")
         assert res["violations"], "expected seeded violations"
         for v in res["violations"]:
@@ -588,7 +588,7 @@ class TestValidateCLI:
         Simulates a fresh process: empty packs dir + empty validator registry
         + the validators module evicted from sys.modules so the import inside
         _cmd_validate re-executes and re-registers."""
-        import sys
+        import sys  # noqa: I001
         import tortoise.domain_loader as dl
         empty_packs = tmp_path / "empty-packs"
         empty_packs.mkdir()
@@ -627,7 +627,7 @@ class TestValidateCLI:
                                        graph_sdk._db_path)) == 3
 
     def test_json_output_contract(self, graph_sdk, capsys):
-        import json
+        import json  # noqa: I001
         from tortoise.__main__ import _cmd_validate
         _seed_chain_violations(graph_sdk)
         rc = _cmd_validate(_cli_args("product-strategy", graph_sdk._db_path,
@@ -646,7 +646,7 @@ class TestValidateCLI:
 @pytest.fixture(autouse=True)
 def _transport_context():
     """MCP tools require an initialized transport mode (#236 auth gate)."""
-    from tortoise.mcp_auth import (
+    from tortoise.mcp_auth import (  # noqa: I001
         _current_team_id, _current_team_limits, _transport_mode,
     )
     _transport_mode.set("stdio")
@@ -712,7 +712,7 @@ def _patch_tortoise_sdk_init(db_path: str):
 
 @pytest.fixture
 def commit_client():
-    from fastapi.testclient import TestClient
+    from fastapi.testclient import TestClient  # noqa: I001
     from tortoise.hosted_api import app, get_current_team
 
     os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
@@ -760,7 +760,7 @@ class TestCommitEndpointWarnings:
     def test_block_severity_rejects_422(self, commit_client, monkeypatch):
         """Phase B (wired-but-inactive in prod): block-severity warning → 422."""
         import tortoise.commit_schema as cs
-        from tortoise import hosted_api as ha
+        from tortoise import hosted_api as ha  # noqa: F401
 
         def _blocking(payload, domain=None):
             return [{"rule": "synthetic_block", "kind": "useCase",

@@ -14,7 +14,7 @@ import yaml
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest
+import pytest  # noqa: I001
 from tortoise.pack_registry import PackRegistry
 
 
@@ -382,9 +382,9 @@ class TestListRelations:
 
     def test_includes_cardinality_when_present(self, query_registry):
         relations = query_registry.list_relations()
-        addr = [r for r in relations if r["predicate"] == "addresses"][0]
+        addr = [r for r in relations if r["predicate"] == "addresses"][0]  # noqa: RUF015
         assert addr["cardinality"] == "one_to_many"
-        comp = [r for r in relations if r["predicate"] == "competesWith"][0]
+        comp = [r for r in relations if r["predicate"] == "competesWith"][0]  # noqa: RUF015
         assert "cardinality" not in comp
 
 

@@ -1,5 +1,5 @@
 """Coverage gap fillers for __main__ guards + edge cases."""
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import os
 import sys

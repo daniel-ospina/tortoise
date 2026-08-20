@@ -17,7 +17,7 @@ import unittest.mock as mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest
+import pytest  # noqa: I001
 from tortoise.search_engine import (
     fallback_tfidf,
     degradation_chain,
@@ -83,7 +83,7 @@ def _probe_falkordb(candidates: list[str | None]) -> tuple[bool, str | None]:
             continue
         finally:
             if _proj is not None:
-                try:
+                try:  # noqa: SIM105
                     _proj.close()
                 except Exception:
                     pass
@@ -163,7 +163,7 @@ class StrategyControlledGraph:
     First matching substring wins.
     """
 
-    def __init__(self, cypher_map: dict[str, tuple] = None):
+    def __init__(self, cypher_map: dict[str, tuple] = None):  # noqa: RUF013
         self._map = cypher_map or {}
         self.query_calls: list[tuple[str, dict, dict]] = []
 
@@ -366,7 +366,7 @@ class TestDegradationChain:
     ordering issues.
     """
 
-    STRATEGIES_ALL = {"fts": True, "vector": True, "structural": True}
+    STRATEGIES_ALL = {"fts": True, "vector": True, "structural": True}  # noqa: RUF012
     QUERY_VEC = [0.1] * 384
 
     def test_one_strategy_succeeds_others_return_empty(self):
@@ -932,7 +932,7 @@ class TestRunFtsQuery:
         """entity_type='subject' → Subject + id field."""
         graph = SimpleMockGraph(result_set=[("sub-1", 0.8)])
 
-        result = run_fts_query(graph, "test", entity_type="subject")
+        result = run_fts_query(graph, "test", entity_type="subject")  # noqa: F841
 
         cypher = graph.query_calls[0][0]
         assert "node.id" in cypher
@@ -1435,7 +1435,7 @@ def test_backfill_document_search_text():
 @pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="FalkorDB not available")
 def test_document_fts_search_by_topic():
     """#125: Document FTS on _searchText returns sessions matching a topic."""
-    from tortoise.projection import FalkorProjection
+    from tortoise.projection import FalkorProjection  # noqa: I001
     import tortoise.search_engine as se
     proj = FalkorProjection.from_uri(_current_uri())
     proj.g.query("MATCH (n) DETACH DELETE n")
@@ -1481,7 +1481,7 @@ class TestAnnotateEpContestation:
         """annotate_ep_batch computes the TRUE EP posterior variance from
         persisted ep_alpha/ep_beta (not the structural nand-ratio) and flags
         contested claims — but only when EP actually ran."""
-        from tortoise.search_engine import annotate_ep_batch, _beta_variance
+        from tortoise.search_engine import annotate_ep_batch, _beta_variance  # noqa: I001
         graph = SimpleMockGraph(result_set=[
             # heavily contested: α=β=2 → v = 4/(16·5) = 0.05 > 0.04
             ("c1", 2, 2, 0.5, 2.0, 2.0, True),
@@ -1508,7 +1508,7 @@ class TestAnnotateEpContestation:
     def test_search_result_dict_exposes_variance_and_contested(self):
         """SearchResult.to_dict() surfaces ep.variance + ep.contested so
         agents get a first-class 'this claim is contested' flag."""
-        from tortoise.search_engine import SearchResult, SearchScores, EpBreakdown, EpEvidence
+        from tortoise.search_engine import SearchResult, SearchScores, EpBreakdown, EpEvidence  # noqa: I001
         r = SearchResult(
             id="p1", content="x", point_kind="statement",
             scores=SearchScores(rrf=0.03),

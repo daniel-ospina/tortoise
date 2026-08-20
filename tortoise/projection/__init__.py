@@ -10,7 +10,7 @@ Backends behind the `Projection` protocol:
   - FalkorProjection   — FalkorDB (Docker/server by default, embedded via path=);
                          same openCypher graph so portable between modes
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import re
 import os
@@ -61,7 +61,7 @@ def _is_bulk_wipe(cypher: str) -> bool:
         return False
     # Real WHERE clause (property/param/CONTAINS/IN reference) => targeted
     m = re.search(r"WHERE\s+(.+) ", cypher + " ", re.IGNORECASE)
-    if m and _WHERE_REAL_RE.search(m.group(1)):
+    if m and _WHERE_REAL_RE.search(m.group(1)):  # noqa: SIM103
         return False
     return True
 
@@ -94,9 +94,9 @@ class _GuardedGraph:
     def __getattr__(self, name):
         return getattr(self._g, name)
 
-from tortoise.config import RELATIVE_PATH_ERROR, SUPPORTED_URI_SCHEMES
-from tortoise.live import _live_only
-from tortoise.embedded_lifecycle import (
+from tortoise.config import RELATIVE_PATH_ERROR, SUPPORTED_URI_SCHEMES  # noqa: E402, I001
+from tortoise.live import _live_only  # noqa: E402
+from tortoise.embedded_lifecycle import (  # noqa: E402
     atexit_fast_close,  # #1371: registers the batch flush
     register_atexit_close,
     register_gc_close,
@@ -108,10 +108,10 @@ from tortoise.embedded_lifecycle import (
 _SUPPORTED_URI_SCHEMES = SUPPORTED_URI_SCHEMES
 
 # ── Mixins ────────────────────────────────────────────────────────────────
-from tortoise.projection.entities import _EntityHandlers
-from tortoise.projection.edges import _EdgeHandlers
-from tortoise.projection.grounding import _GroundingMixin
-from tortoise.projection.propagation import _PropagationMixin
+from tortoise.projection.entities import _EntityHandlers  # noqa: E402, I001
+from tortoise.projection.edges import _EdgeHandlers  # noqa: E402
+from tortoise.projection.grounding import _GroundingMixin  # noqa: E402
+from tortoise.projection.propagation import _PropagationMixin  # noqa: E402
 
 # #244: Event FTS index migration (subject-only → subject+name) is tracked by a
 # persisted DB marker (Meta node 'event_fts_v2'), not a process-local flag — a
@@ -122,7 +122,7 @@ from tortoise.projection.propagation import _PropagationMixin
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
 
 def remove_stale_aof(db_path: str | os.PathLike) -> None:
@@ -544,7 +544,7 @@ class FalkorProjection(
                 f"See operations/skills/tortoise-rebuild/SKILL.md")
 
     @classmethod
-    def from_uri(cls, uri: str, graph_name: str | None = None) -> "FalkorProjection":
+    def from_uri(cls, uri: str, graph_name: str | None = None) -> "FalkorProjection":  # noqa: UP037
         """Parse a connection URI into a projection.
 
         Supported schemes (all treated as docker://):
@@ -707,7 +707,7 @@ class FalkorProjection(
         These are injected as synthetic PointAdded/OperatorAdded events before
         the JSONL replay so the two-pass logic handles them identically.
         """
-        import os
+        import os  # noqa: I001
         from tortoise.log import EventLog
 
         # ── #548: snapshot existing graph BEFORE wiping ──────────────
@@ -1321,7 +1321,7 @@ class FalkorProjection(
                         for _perm in _it.permutations(_fields, _n):
                             if "is_operator" not in _perm:
                                 continue
-                            try:
+                            try:  # noqa: SIM105
                                 self.g.query(
                                     "DROP INDEX ON :Point("
                                     + ", ".join(_perm) + ")"
@@ -1510,7 +1510,7 @@ class FalkorProjection(
             return
         self.close()
 
-    def __enter__(self) -> "FalkorProjection":
+    def __enter__(self) -> "FalkorProjection":  # noqa: UP037
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
@@ -1519,7 +1519,7 @@ class FalkorProjection(
     def _revise_point(self, ev: dict, set_updated_at: bool = False) -> None:
         """Apply PointRevised event — update content, context, and re-compute embedding."""
         new_content = ev.get("new_content")
-        new_context = ev.get("new_context")
+        new_context = ev.get("new_context")  # noqa: F841
         # #331 (review r3): NO event_id fallback — parity with _apply_one
         # (fold is the single source of truth, module contract).
         # #331 (review r4): str-only ids.

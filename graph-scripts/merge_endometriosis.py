@@ -96,5 +96,5 @@ labels = dst.query(
     "MATCH (n) RETURN labels(n)[0] as label, count(n) as cnt ORDER BY cnt DESC"
 ).result_set
 print("\nFinal labels:")
-for l, c in labels[:15]:
+for l, c in labels[:15]:  # noqa: E741
     print(f"  {l}: {c}")

@@ -34,7 +34,7 @@ class L4CrossSessionStream:
         return StreamResult(
             self.stream_id, self.metric, rate, rate >= threshold,
             threshold,
-            trajectory=tuple(float(l) for l in latencies),
+            trajectory=tuple(float(l) for l in latencies),  # noqa: E741
             evidence=(f"surfaced={rate:.2f} n={len(sessions)}",))
 
     def latency_trend(self, sessions: list[dict[str, Any]]) -> bool:

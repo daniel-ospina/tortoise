@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import probe_extractor as pe  # noqa: E402
+import probe_extractor as pe  # noqa: E402, RUF100
 
 TANDEM_APPEND = """
 REMINDER - EXTRACTION AND RELATIONS IN TANDEM (the most important rule):
@@ -324,10 +324,10 @@ def report_experiments(filters: dict | None = None) -> None:
     print(hdr)
     print("-" * len(hdr))
     for r in rows:
-        print(f"{r.get('ts','')[:16]:<17} {str(r.get('window','')):<11} "
-              f"{str(r.get('method','')):<16} {str(r.get('model','')):<9} "
+        print(f"{r.get('ts','')[:16]:<17} {str(r.get('window','')):<11} "  # noqa: RUF010
+              f"{str(r.get('method','')):<16} {str(r.get('model','')):<9} "  # noqa: RUF010
               f"{r.get('relations',0):>4} {r.get('decEv',0):>5} {r.get('mitigates',0):>4} "
-              f"{r.get('minted',0):>5} {r.get('duration_s',0):>6.0f} {str(r.get('status','')):<12}")
+              f"{r.get('minted',0):>5} {r.get('duration_s',0):>6.0f} {str(r.get('status','')):<12}")  # noqa: RUF010
 
 
 def main() -> int:
@@ -367,7 +367,7 @@ def main() -> int:
             for model_name in args.models:
                 stream = None
                 _last_err = ""
-                for attempt in range(3):
+                for attempt in range(3):  # noqa: B007
                     try:
                         model = MODELS[model_name]()
                         model.max_tokens = 32000

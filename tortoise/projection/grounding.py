@@ -25,11 +25,11 @@ class _GroundingMixin:
 
         # 2. Build sparse symmetric adjacency from :IMPL and :NAND edges
         try:
-            from scipy.sparse import coo_matrix
+            from scipy.sparse import coo_matrix  # noqa: I001
             from scipy.sparse.linalg import spsolve
             from scipy.sparse import eye as speye
         except ImportError:
-            raise ImportError(
+            raise ImportError(  # noqa: B904
                 "scipy required for compute_grounding; install with: pip install scipy"
             )
         rows_list, cols_list = [], []
@@ -80,8 +80,8 @@ class _GroundingMixin:
 
     def stale_points(self, days: int = 30, limit: int = 50) -> list[dict]:
         """Find Points not updated in N days (older createdAt as fallback)."""
-        from datetime import datetime, timezone, timedelta
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        from datetime import datetime, timezone, timedelta  # noqa: I001
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()  # noqa: UP017
         rows = self.g.query(
             "MATCH (n:Point) "
             "WHERE n.is_operator = false "

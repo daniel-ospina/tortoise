@@ -17,12 +17,12 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.api import EventAPI              # noqa: E402
-from tortoise.extractor import entity_stage_fixture   # noqa: E402
-from tortoise.log import EventLog              # noqa: E402
-from tortoise.mining import mine_conversation  # noqa: E402
-from tortoise.projection import FalkorProjection  # noqa: E402
-from tortoise.sdk import TortoiseSDK           # noqa: E402
+from tortoise.api import EventAPI  # noqa: E402, I001, RUF100
+from tortoise.extractor import entity_stage_fixture  # noqa: E402, RUF100
+from tortoise.log import EventLog  # noqa: E402, RUF100
+from tortoise.mining import mine_conversation  # noqa: E402, RUF100
+from tortoise.projection import FalkorProjection  # noqa: E402, RUF100
+from tortoise.sdk import TortoiseSDK  # noqa: E402, RUF100
 
 
 def _tmp(name):

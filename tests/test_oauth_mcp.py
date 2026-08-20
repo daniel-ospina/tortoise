@@ -31,15 +31,15 @@ from starlette.routing import Mount
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
-from tortoise.hosted_api import app, verify_session_jwt  # noqa: E402
-from tortoise.mcp_server import create_http_app  # noqa: E402
-from tortoise.oauth import (  # noqa: E402
+from tortoise.hosted_api import app, verify_session_jwt  # noqa: E402, F401, I001, RUF100
+from tortoise.mcp_server import create_http_app  # noqa: E402, RUF100
+from tortoise.oauth import (  # noqa: E402, RUF100
     ACCESS_TOKEN_PREFIX,
     mcp_resource_url,
     team_resource_url,
 )
 
-from tests.fake_control_plane import FakeControlPlane  # noqa: E402
+from tests.fake_control_plane import FakeControlPlane  # noqa: E402, RUF100
 
 TEST_BASE = "http://testserver"  # TestClient's request.base_url
 
@@ -328,7 +328,7 @@ class TestDynamicClientRegistration:
 
     def test_register_fails_closed_in_registry_mode(self, monkeypatch):
         """D3: OAuth is hosted-only — DCR 503s without the Supabase plane."""
-        cp = FakeControlPlane()
+        cp = FakeControlPlane()  # noqa: F841
         monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
         monkeypatch.delenv("SUPABASE_URL", raising=False)
         monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
@@ -352,7 +352,7 @@ class TestAuthorizePage:
     def test_authorize_renders_consent_html(self, api_client):
         tc, _ = api_client
         reg = _register_client(tc)
-        verifier, challenge = _pkce()
+        verifier, challenge = _pkce()  # noqa: RUF059
         r = tc.get("/oauth/authorize", params={
             "client_id": reg["client_id"], "redirect_uri": REDIRECT,
             "response_type": "code", "code_challenge": challenge,
@@ -370,7 +370,7 @@ class TestAuthorizePage:
         tc, _ = api_client
         reg = _register_client(
             tc, client_name='</script><script>window.pwned=1</script>')
-        verifier, challenge = _pkce()
+        verifier, challenge = _pkce()  # noqa: RUF059
         evil_state = '</script><script>window.pwned=1</script>'
         r = tc.get("/oauth/authorize", params={
             "client_id": reg["client_id"], "redirect_uri": REDIRECT,
@@ -413,7 +413,7 @@ class TestAuthorizePage:
         """Open-redirect guard: an unknown client's error is NOT redirected
         to an unregistered redirect_uri — it returns JSON instead."""
         tc, _ = api_client
-        verifier, challenge = _pkce()
+        verifier, challenge = _pkce()  # noqa: RUF059
         r = tc.get("/oauth/authorize", params={
             "client_id": "ct_nope", "redirect_uri": "https://evil.example/cb",
             "response_type": "code", "code_challenge": challenge,
@@ -600,7 +600,7 @@ class TestCodeExchange:
         assert r.json()["error"] == "invalid_client"
 
     def test_confidential_client_secret_required(self, api_client, session_user):
-        tc, cp = api_client
+        tc, cp = api_client  # noqa: RUF059
         session_user("user-1")
         reg = _register_client(tc, token_endpoint_auth_method="client_secret_post")
         verifier, challenge = _pkce()
@@ -619,7 +619,7 @@ class TestCodeExchange:
 
     def test_confidential_client_exchange_success(self, api_client, session_user):
         """client_secret_post: the correct secret completes the exchange."""
-        tc, cp = api_client
+        tc, cp = api_client  # noqa: RUF059
         session_user("user-1")
         reg = _register_client(tc, token_endpoint_auth_method="client_secret_post")
         verifier, challenge = _pkce()
@@ -683,7 +683,7 @@ class TestRfc8707Mapping:
         assert r.json()["error"] == "invalid_resource"
 
     def test_resource_for_non_member_team_rejected(self, api_client, session_user):
-        tc, cp = api_client
+        tc, cp = api_client  # noqa: RUF059
         session_user("user-1")
         resource = team_resource_url(TEST_BASE, "team-team-001")  # not a member
         r = tc.post("/oauth/consent", json={
@@ -708,7 +708,7 @@ class TestRfc8707Mapping:
         assert r.json()["error"] == "invalid_grant"
 
     def test_unknown_resource_rejected(self, api_client, session_user):
-        tc, cp = api_client
+        tc, cp = api_client  # noqa: RUF059
         session_user("user-1")
         r = tc.post("/oauth/consent", json={
             "client_id": _register_client(tc)["client_id"],
@@ -767,7 +767,7 @@ class TestRefreshRotation:
         assert r3.json()["error"] == "invalid_grant"
 
         # and the old access token was revoked
-        old_row = [t for t in cp.tables["oauth_access_tokens"]
+        old_row = [t for t in cp.tables["oauth_access_tokens"]  # noqa: RUF015
                    if t["token_hash"] == hashlib.sha256(
                        old_access.encode()).hexdigest()][0]
         assert old_row["revoked_at"] is not None
@@ -792,9 +792,9 @@ class TestRefreshRotation:
         r = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
                       verifier=flow["verifier"])
         assert r.status_code == 200, r.text
-        prev = [t for t in cp.tables["oauth_refresh_tokens"]
+        prev = [t for t in cp.tables["oauth_refresh_tokens"]  # noqa: RUF015
                 if t["revoked_at"] is None][0]
-        prev_access = [t for t in cp.tables["oauth_access_tokens"]
+        prev_access = [t for t in cp.tables["oauth_access_tokens"]  # noqa: RUF015
                        if t["revoked_at"] is None][0]
         args = dict(client_id=flow["client_id"], user_id="user-1",
                     team_id="team-free-001", scope="mcp", resource=None)
@@ -992,7 +992,7 @@ class TestMcpBoundary:
             assert rr.status_code == 401
 
     def test_bogus_oauth_token_401(self, api_client):
-        tc, cp = api_client
+        tc, cp = api_client  # noqa: RUF059
         mcp_tc = self._mcp(cp)
         mcp_tc.headers.update(_mcp_headers("oat_" + "x" * 40))
         with mcp_tc:
@@ -1003,7 +1003,7 @@ class TestMcpBoundary:
     def test_tt_key_still_works_alongside_oauth(self, api_client):
         """D3: the tt_ fallback path is byte-identical alongside oat_."""
         from tests.test_supabase_control import TOKEN, _key_row
-        tc, cp = api_client
+        tc, cp = api_client  # noqa: RUF059
         cp.seed("api_keys", [_key_row()])
         mcp_tc = self._mcp(cp)
         mcp_tc.headers.update(_mcp_headers(TOKEN))

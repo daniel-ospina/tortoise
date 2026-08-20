@@ -153,7 +153,7 @@ def main() -> int:
         print()
 
         # ── Build audit document ────────────────────────────────────
-        timestamp = datetime.now(timezone.utc).isoformat()
+        timestamp = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         audit_doc = {
             "$schema": "tortoise/audit/context-removal-v1",
             "migration": "#49 Phase 2 — REMOVE context field",
@@ -193,7 +193,7 @@ def main() -> int:
         if args.dry_run:
             print(f"\nDRY RUN: Would write {len(json.dumps(audit_doc, indent=2))} bytes to {output_path}")
             print("\nFirst 3 context entries would be:")
-            for i, (ctx_val, ids) in enumerate(list(ctx_map.items())[:3]):
+            for i, (ctx_val, ids) in enumerate(list(ctx_map.items())[:3]):  # noqa: B007
                 print(f"  {ctx_val}: {len(ids)} points")
         else:
             os.makedirs(os.path.dirname(output_path), exist_ok=True)

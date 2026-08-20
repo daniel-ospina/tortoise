@@ -5,7 +5,7 @@ propagate_shock, rebuild_all, edge_stats, and internal helpers).
 Runnable without pytest:  .venv/bin/python tests/test_projection.py
 (also works under pytest if installed).
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import json
 import os
@@ -18,12 +18,12 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.api import EventAPI, provenance          # noqa: E402
-from tortoise.log import EventLog                       # noqa: E402
-from tortoise.projection import (                        # noqa: E402
+from tortoise.api import EventAPI, provenance  # noqa: E402, I001, RUF100
+from tortoise.log import EventLog  # noqa: E402, RUF100
+from tortoise.projection import (  # noqa: E402, RUF100
     _apply_one, fold, split,
     InMemoryProjection, FalkorProjection, Projection,
-)                                                       # noqa: E402
+)  # noqa: E402, RUF100
 
 # ------------------------------------------------------------------ helpers
 
@@ -579,12 +579,12 @@ def test_falkor_rebuild_then_apply():
         return
     """Incremental apply after rebuild matches full fold."""
     api, log = _api()
-    a, b, op = _build(api)
+    a, b, op = _build(api)  # noqa: RUF059
     proj = _shared_proj()
     try:
         proj.rebuild(log)
         # Apply a new event incrementally
-        c = api.add_point("third statement", provenance("doc.txt", [20, 30], "extra"))
+        c = api.add_point("third statement", provenance("doc.txt", [20, 30], "extra"))  # noqa: F841
         proj.apply(log.read_all()[-1])  # the newly appended event
         n = proj.query("MATCH (n:Point) RETURN count(n)").result_set[0][0]
         assert n == 4
@@ -959,12 +959,12 @@ def test_falkor_rebuild_all_with_retractions():
         log_path = os.path.join(d, "events.jsonl")
         log_path_abs = os.path.abspath(log_path)
         api.log = EventLog(log_path_abs)
-        a, b, op = _build(api, source="doc.txt")
+        a, b, op = _build(api, source="doc.txt")  # noqa: RUF059
         api.retract_point(b, corrects=op)
 
         proj = FalkorProjection(_tmp("g_retract.db"), graph_name="test")
         try:
-            result = proj.rebuild_all(d)
+            result = proj.rebuild_all(d)  # noqa: F841
             # b was retracted — leaves a tombstone (#689)
             node_count = proj.query("MATCH (n:Point) RETURN count(n)").result_set[0][0]
             assert node_count == 3  # a + op + b tombstone
@@ -1928,7 +1928,7 @@ def test_stub_creation_bounded_at_cap():
     The cap is read from the instance attr ``_max_autocreated_stubs`` — the
     old env-var (TORTOISE_MAX_AUTOCREATED_STUBS) was never wired in code.
     """
-    import tempfile, os
+    import tempfile, os  # noqa: E401, I001
     from tortoise.projection import FalkorProjection
 
     db = os.path.join(tempfile.mkdtemp(prefix="tortoise_stubcap_"), "test.db")
@@ -2102,8 +2102,8 @@ def test_falkor_rebuild_all_with_sdk_points():
 
             # Verify operator edges survived
             edge_count = proj.g.query(
-                f"MATCH (n:Point {{id:$oid}})-[r]->(m:Point {{id:$tid}}) "
-                f"RETURN count(r)",
+                f"MATCH (n:Point {{id:$oid}})-[r]->(m:Point {{id:$tid}}) "  # noqa: F541
+                f"RETURN count(r)",  # noqa: F541
                 params={"oid": op["id"], "tid": p1["id"]},
             ).result_set[0][0]
             assert edge_count >= 1, "Operator edge not recreated after rebuild"
@@ -2185,8 +2185,8 @@ def test_falkor_rebuild_all_snapshot_preserves_sdk_points():
 
             # Operator edges should be recreated
             edge_rows = proj.g.query(
-                f"MATCH (n:Point {{id:$oid}})-[r]->(m:Point {{id:$tid}}) "
-                f"RETURN type(r)",
+                f"MATCH (n:Point {{id:$oid}})-[r]->(m:Point {{id:$tid}}) "  # noqa: F541
+                f"RETURN type(r)",  # noqa: F541
                 params={"oid": op["id"], "tid": p1["id"]},
             ).result_set
             assert len(edge_rows) >= 1, (
@@ -2425,8 +2425,8 @@ def test_retract_tombstone_excluded_from_vector_search():
         import struct
         emb_keep = [0.1] * 384
         emb_ret = [0.2] * 384
-        emb_keep_bytes = struct.pack(f"<{len(emb_keep)}f", *emb_keep)
-        emb_ret_bytes = struct.pack(f"<{len(emb_ret)}f", *emb_ret)
+        emb_keep_bytes = struct.pack(f"<{len(emb_keep)}f", *emb_keep)  # noqa: F841
+        emb_ret_bytes = struct.pack(f"<{len(emb_ret)}f", *emb_ret)  # noqa: F841
         proj.apply({"type": "PointAdded",
                      "point": {"id": "p_keep", "content": "keep me",
                                "pointKind": "statement"}})

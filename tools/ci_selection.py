@@ -125,7 +125,7 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
             if any(c.startswith(p) for p in pats):
                 matched.add(surface)
                 found = True
-        if not found:
+        if not found:  # noqa: SIM102
             if c.startswith("tortoise/") or c.startswith("tests/") or \
                c.startswith("graph-scripts/") or c.startswith("config/") or \
                c.startswith("validation/") or c.startswith("packs/"):
@@ -249,7 +249,7 @@ def push_legs(manifest: dict) -> dict:
     """
     slow = set(manifest.get("slow_files", []))
     classified = set()
-    for s, files in manifest["surfaces"].items():
+    for s, files in manifest["surfaces"].items():  # noqa: B007
         classified.update(files)
     classified.update(manifest.get("tier1", []))
     classified.update(slow)
@@ -261,7 +261,7 @@ def push_legs(manifest: dict) -> dict:
     # within the #1266 ±3 tolerance (all-bench-in-half-b caused 135 vs 139).
     for i, f in enumerate(manifest.get("push_extra", [])):
         (half_a if i % 2 == 0 else half_b).append(f.replace(".py", ""))
-    strip = lambda xs: sorted(x.replace(".py", "") for x in xs)
+    strip = lambda xs: sorted(x.replace(".py", "") for x in xs)  # noqa: E731
     return {"half_a": strip(half_a), "half_b": strip(half_b),
             "slow": strip(slow), "env_broken": sorted(ENV_BROKEN_FILES)}
 
@@ -282,7 +282,7 @@ def leg_coverage_issues(manifest: dict) -> list[str]:
     if slow & ENV_BROKEN_FILES:
         issues.append(f"slow/env-broken overlap: {sorted(slow & ENV_BROKEN_FILES)}")
     classified = set()
-    for s, files in manifest["surfaces"].items():
+    for s, files in manifest["surfaces"].items():  # noqa: B007
         classified.update(files)
     classified.update(manifest.get("tier1", []))
     classified.update(slow)
@@ -301,7 +301,7 @@ def workflow_matrix_issues(workflow_path: str, manifest: dict) -> list[str]:
     import yaml
     issues = []
     try:
-        wf = yaml.safe_load(open(workflow_path))
+        wf = yaml.safe_load(open(workflow_path))  # noqa: SIM115
     except Exception as exc:
         return [f"cannot parse workflow {workflow_path}: {exc}"]
     inc = wf.get("jobs", {}).get("test", {}).get("strategy", {}).get("matrix", {}).get("include", [])
@@ -437,7 +437,7 @@ def duration_issues(manifest: dict) -> list[str]:
     durations = manifest.get("durations", {})
     slow = set(manifest.get("slow_files", []))
     classified = set()
-    for s, files in manifest["surfaces"].items():
+    for s, files in manifest["surfaces"].items():  # noqa: B007
         classified.update(files)
     classified.update(manifest.get("tier1", []))
     for name in durations:
@@ -534,9 +534,9 @@ def main() -> int:
         print(json.dumps(result))
         return 0
 
-    changed = [l.strip() for l in args.changed_files.splitlines() if l.strip()]
+    changed = [l.strip() for l in args.changed_files.splitlines() if l.strip()]  # noqa: E741
     if args.changed_files == "-":
-        changed = [l.strip() for l in sys.stdin.read().splitlines() if l.strip()]
+        changed = [l.strip() for l in sys.stdin.read().splitlines() if l.strip()]  # noqa: E741
     result = select(changed, args.event, manifest)
 
     # Audit artifact (scope v5 decision 1): replayable selection record.

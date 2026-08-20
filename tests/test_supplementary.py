@@ -8,9 +8,9 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.log import EventLog                             # noqa: E402
-from tortoise.projection import FalkorProjection               # noqa: E402
-from tortoise.models import OpenAICompatModel, OllamaModel     # noqa: E402
+from tortoise.log import EventLog  # noqa: E402, I001, RUF100
+from tortoise.projection import FalkorProjection  # noqa: E402, RUF100
+from tortoise.models import OpenAICompatModel, OllamaModel  # noqa: E402, RUF100
 
 
 def _tmp(name):
@@ -36,7 +36,7 @@ def test_rebuild_all_with_merges():
         # Create a JSONL with PointAdded, then PointsMerged
         log_path = os.path.join(d, "events.jsonl")
         log = EventLog(log_path)
-        from tortoise.ids import ulid, now_iso
+        from tortoise.ids import ulid, now_iso  # noqa: I001
 
         pid1 = ulid()
         pid2 = ulid()
@@ -89,7 +89,7 @@ def test_compute_grounding_no_scipy():
         builtins.__import__ = _fake
         try:
             proj.compute_grounding()
-            assert False, "should have raised"
+            assert False, "should have raised"  # noqa: B011
         except ImportError as e:
             assert "scipy" in str(e)
         finally:
@@ -103,14 +103,14 @@ def test_compute_grounding_no_scipy():
 
 def test_openai_complete_mocked():
     """OpenAICompatModel.complete with mocked HTTP."""
-    import urllib.request
-    import io
+    import urllib.request  # noqa: I001
+    import io  # noqa: F401
 
     model = OpenAICompatModel(id="test", base_url="http://localhost:9999",
                               api_key_env=None)
 
     # Build the request but mock the HTTP call
-    body = json.dumps(model.build_request("sys", "usr")).encode()
+    body = json.dumps(model.build_request("sys", "usr")).encode()  # noqa: F841
 
     class FakeResponse:
         def read(self):

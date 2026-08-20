@@ -43,7 +43,7 @@ def _initialize_payload():
 
 def _mounted_test_client(app):
     """Wrap the MCP app in a Starlette Mount at /mcp (mirrors test_mcp_http)."""
-    from contextlib import asynccontextmanager
+    from contextlib import asynccontextmanager  # noqa: I001
     from starlette.applications import Starlette
     from starlette.routing import Mount
     from starlette.testclient import TestClient
@@ -77,7 +77,7 @@ def make_client():
 
     yield _make
     for tc in created:
-        try:
+        try:  # noqa: SIM105
             tc.__exit__(None, None, None)
         except Exception:
             pass

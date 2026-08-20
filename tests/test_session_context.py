@@ -61,7 +61,7 @@ class TestSessionContext:
         proj = sdk._get_proj()
         # Write confidence to graph directly (EP requires operator chains)
         p = sdk.create_point("statement", "a test claim")
-        now = _dt.datetime.now(_dt.timezone.utc).isoformat()
+        now = _dt.datetime.now(_dt.timezone.utc).isoformat()  # noqa: UP017
         proj.g.query(
             "MATCH (n:Point {id:$id}) SET n.confidence = 0.85, n.updatedAt = $now",
             params={"id": p["id"], "now": now},

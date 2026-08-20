@@ -135,7 +135,7 @@ def resolve_container(uri: str, container: str | None) -> str:
     if r.returncode != 0:
         raise RuntimeError(
             "docker CLI unavailable or daemon not running — the docker-aware "
-            f"RDB path needs local Docker. bolt:// fallback: managed "
+            f"RDB path needs local Docker. bolt:// fallback: managed "  # noqa: F541
             "FalkorDB Cloud console snapshot, or backup.py JSONL (NOT a real "
             "restore — scoping P1-2)."
         )
@@ -162,7 +162,7 @@ def _container_rdb_info(container: str) -> dict:
     def _cfg(key: str) -> str:
         r = _docker(["exec", container, "redis-cli", "CONFIG", "GET", key],
                     timeout=15)
-        lines = [l.strip() for l in r.stdout.strip().splitlines() if l.strip()]
+        lines = [l.strip() for l in r.stdout.strip().splitlines() if l.strip()]  # noqa: E741
         return lines[-1] if lines else ""
     return {"dir": _cfg("dir"), "dbfilename": _cfg("dbfilename")}
 
@@ -178,7 +178,7 @@ def _appendonly_state(container: str) -> dict:
     """
     r = _docker(["exec", container, "redis-cli", "CONFIG", "GET",
                  "appendonly"], timeout=15)
-    lines = [l.strip() for l in r.stdout.strip().splitlines() if l.strip()]
+    lines = [l.strip() for l in r.stdout.strip().splitlines() if l.strip()]  # noqa: E741
     val = lines[-1].lower() if lines else ""
     return {"aof_enabled": val == "yes", "value": val or ""}
 
@@ -208,16 +208,16 @@ def snapshot(uri: str, out_dir: str, container: str | None,
     Returns {"ok": bool, "rdb": str, "meta": str, ...}. Side effects: BGSAVE,
     docker cp (unless dry_run).
     """
-    cfg = parse_uri(uri)
+    cfg = parse_uri(uri)  # noqa: F841
     os.makedirs(out_dir, exist_ok=True)
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")  # noqa: UP017
 
     if dry_run:
         return {"ok": True, "dry_run": True,
                 "would": [
                     f"record graph stats sidecar (BEFORE BGSAVE) -> "
                     f"{out_dir}/pre-migration-{ts}.meta.json",
-                    f"docker exec <container> redis-cli BGSAVE",
+                    f"docker exec <container> redis-cli BGSAVE",  # noqa: F541
                     f"docker cp <container>:<rdb-dir>/<dbfilename> "
                     f"{out_dir}/pre-migration-{ts}.rdb",
                 ]}
@@ -287,20 +287,20 @@ def restore(uri: str, rdb_file: str, container: str | None,
     if not os.path.isfile(rdb_file):
         return {"ok": False, "error": f"RDB file not found: {rdb_file}"}
 
-    cfg = parse_uri(uri)
+    cfg = parse_uri(uri)  # noqa: F841
     cname = resolve_container(uri, container)
 
     # Expected state from the snapshot sidecar (verification handshake)
     meta = {}
     meta_path = f"{rdb_file}.meta.json"
     if os.path.isfile(meta_path):
-        with open(meta_path, "r", encoding="utf-8") as fh:
+        with open(meta_path, "r", encoding="utf-8") as fh:  # noqa: UP015
             meta = json.load(fh)
 
     if dry_run:
         return {"ok": True, "dry_run": True, "would": [
-            f"verify appendonly is off (CONFIG GET appendonly) — refuse if "
-            f"yes (Redis loads the AOF over the placed RDB)",
+            f"verify appendonly is off (CONFIG GET appendonly) — refuse if "  # noqa: F541
+            f"yes (Redis loads the AOF over the placed RDB)",  # noqa: F541
             f"docker stop {cname}",
             f"docker cp {rdb_file} {cname}:<rdb-dir>/<dbfilename>",
             f"docker start {cname}",
@@ -347,7 +347,7 @@ def restore(uri: str, rdb_file: str, container: str | None,
         if r.returncode != 0:
             return {"ok": False,
                     "error": f"docker start {cname} failed: {r.stderr.strip()}"}
-    except Exception as exc:  # noqa: BLE001 — restart on any mid-restore failure
+    except Exception as exc:  # noqa: BLE001, RUF100
         _docker(["start", cname], timeout=60)  # best-effort recovery
         return {"ok": False, "error": f"restore failed mid-sequence: {exc}"}
 
@@ -358,7 +358,7 @@ def restore(uri: str, rdb_file: str, container: str | None,
         try:
             after = graph_stats_for(uri)
             break
-        except Exception:  # noqa: BLE001 — poll until deadline
+        except Exception:  # noqa: BLE001, RUF100
             time.sleep(_CONNECT_POLL_S)
     if after is None:
         return {"ok": False,
@@ -437,7 +437,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             result = restore(cfg["uri"], args.rdb, args.container,
                              yes=args.yes, dry_run=args.dry_run)
-    except Exception as exc:  # noqa: BLE001 — operational failures exit 1
+    except Exception as exc:  # noqa: BLE001, RUF100
         print(f"[rdb-snapshot-restore] FAIL: {exc}", file=sys.stderr)
         return 1
 

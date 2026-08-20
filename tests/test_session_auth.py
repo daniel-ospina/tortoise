@@ -16,14 +16,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import binascii
+import binascii  # noqa: F401
 import json
 import os
 import time
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
-import warnings
+import warnings  # noqa: I001
 
 import pytest
 from fastapi import HTTPException
@@ -96,7 +96,7 @@ class FetchStub:
 
 
 def ec_jwks_bytes(kid: str = "kid-1") -> bytes:
-    priv, pub = u.make_ec_keypair()
+    priv, pub = u.make_ec_keypair()  # noqa: RUF059
     return json.dumps(u.build_ec_jwks(pub, kid)).encode()
 
 
@@ -254,12 +254,12 @@ class TestNegativeMatrix:
                 }
             ]
         }
-        priv, pub = u.make_ec_keypair()
+        priv, pub = u.make_ec_keypair()  # noqa: RUF059
         token = u.mint_es256_token(priv, "kid-1", base_payload(), iss=FIXED_ISSUER)
         _require_401(monkeypatch, token, jwks)
 
     def test_es256_token_vs_rsa_jwk(self, monkeypatch):
-        priv, pub = u.make_ec_keypair()
+        priv, pub = u.make_ec_keypair()  # noqa: RUF059
         _, rsa_pub = u.make_rsa_keypair()
         token = u.mint_es256_token(priv, "kid-1", base_payload(), iss=FIXED_ISSUER)
         _require_401(monkeypatch, token, u.build_rsa_jwks(rsa_pub, "kid-1"))
@@ -271,7 +271,7 @@ class TestNegativeMatrix:
         _require_401(monkeypatch, token, u.build_ec_jwks(ec_pub, "kid-1"))
 
     def test_alg_none_and_unknown(self, monkeypatch):
-        priv, pub = u.make_ec_keypair()
+        priv, pub = u.make_ec_keypair()  # noqa: RUF059
         warm_cache(monkeypatch, u.build_ec_jwks(pub, "kid-1"))
         for alg in ("none", "HS256", "RS512"):
             header = {"alg": alg, "typ": "JWT", "kid": "kid-1"}
@@ -285,7 +285,7 @@ class TestNegativeMatrix:
     def test_alg_absent_header(self, monkeypatch):
         # Warm cache so the token actually reaches jwt.decode (the alg-absent
         # → InvalidAlgorithmError path), and pin fetch-count == 1.
-        priv, pub = u.make_ec_keypair()
+        priv, pub = u.make_ec_keypair()  # noqa: RUF059
         stub = warm_cache(monkeypatch, u.build_ec_jwks(pub, "kid-1"))
         stub.count = 0
         token = u.build_token_raw(
@@ -300,7 +300,7 @@ class TestNegativeMatrix:
         assert stub.count == 0
 
     def test_b64_false_header(self, monkeypatch):
-        priv, pub = u.make_ec_keypair()
+        priv, pub = u.make_ec_keypair()  # noqa: RUF059
         warm_cache(monkeypatch, u.build_ec_jwks(pub, "kid-1"))
         token = u.build_token_raw(
             {"alg": "ES256", "kid": "kid-1", "b64": False}, base_payload(), "AAAA"
@@ -310,7 +310,7 @@ class TestNegativeMatrix:
         assert ei.value.status_code == 401
 
     def test_crit_header(self, monkeypatch):
-        priv, pub = u.make_ec_keypair()
+        priv, pub = u.make_ec_keypair()  # noqa: RUF059
         warm_cache(monkeypatch, u.build_ec_jwks(pub, "kid-1"))
         token = u.build_token_raw(
             {"alg": "ES256", "kid": "kid-1", "crit": ["exp"]}, base_payload(), "AAAA"
@@ -510,7 +510,7 @@ class TestNegativeMatrix:
         _require_401(monkeypatch, "not-a-jwt", {"keys": []})
 
     def test_non_dict_segments(self, monkeypatch):
-        priv, pub = u.make_ec_keypair()
+        priv, pub = u.make_ec_keypair()  # noqa: RUF059
         warm_cache(monkeypatch, u.build_ec_jwks(pub, "kid-1"))
         # header segments decoding to [1,2], 123, "x" — valid JSON, non-dict
         for encoded in ("WzEsMl0", "MTIz", "Ingi"):
@@ -520,7 +520,7 @@ class TestNegativeMatrix:
             assert ei.value.status_code == 401
 
     def test_no_kid_zero_fetch(self, monkeypatch):
-        priv, pub = u.make_ec_keypair()
+        priv, pub = u.make_ec_keypair()  # noqa: RUF059
         stub = FetchStub(body=ec_jwks_bytes())
         monkeypatch.setattr(sa, "_fetch_jwks", stub)
         token = u.build_token_raw({"alg": "ES256", "typ": "JWT"}, base_payload(), "AAAA")
@@ -545,7 +545,7 @@ class TestNegativeMatrix:
         # The #1460 incident class: KeyError('n') on a malformed RSA JWK must
         # 401, never 500.
         jwks = {"keys": [{"kty": "RSA", "kid": "kid-1", "alg": "RS256"}]}  # missing n/e
-        priv, pub = u.make_ec_keypair()
+        priv, pub = u.make_ec_keypair()  # noqa: RUF059
         token = u.mint_es256_token(priv, "kid-1", base_payload(), iss=FIXED_ISSUER)
         _require_401(monkeypatch, token, jwks)
 
@@ -599,7 +599,7 @@ class TestNegativeMatrix:
                 }
             ]
         }
-        priv, pub = u.make_ec_keypair()
+        priv, pub = u.make_ec_keypair()  # noqa: RUF059
         token = u.mint_es256_token(priv, "kid-384", base_payload(), iss=FIXED_ISSUER)
         _require_401(monkeypatch, token, p384_jwks)
 
@@ -614,7 +614,7 @@ class TestNegativeMatrix:
         # decode-boundary fail-closed path (401, never 500). The RecursionError
         # arm of the catch tuple is unreachable-defensive on CPython (C-json
         # trips it only at ~10k nesting, >16KB guard) — not pinned here.
-        priv, pub = u.make_ec_keypair()
+        priv, pub = u.make_ec_keypair()  # noqa: RUF059
         warm_cache(monkeypatch, u.build_ec_jwks(pub, "kid-1"))
         nested = "x"
         for _ in range(1200):
@@ -644,7 +644,7 @@ class TestCacheHardening:
     def test_fetch_failure_cold_returns_503(self, monkeypatch):
         stub = FetchStub(error=OSError("jwks down"))
         monkeypatch.setattr(sa, "_fetch_jwks", stub)
-        priv, pub = u.make_ec_keypair()
+        priv, pub = u.make_ec_keypair()  # noqa: RUF059
         tok = u.mint_es256_token(priv, "kid-1", base_payload(), iss=FIXED_ISSUER)
         with pytest.raises(HTTPException) as ei:
             verify_ok(tok)
@@ -656,7 +656,7 @@ class TestCacheHardening:
         stub = FetchStub(error=OSError("down"))
         monkeypatch.setattr(sa, "_fetch_jwks", stub)
         monkeypatch.setattr(sa, "_COOLDOWN_S", 30.0)
-        priv, pub = u.make_ec_keypair()
+        priv, pub = u.make_ec_keypair()  # noqa: RUF059
         tok = u.mint_es256_token(priv, "kid-1", base_payload(), iss=FIXED_ISSUER)
         with pytest.raises(HTTPException) as ei:
             verify_ok(tok)  # first: fetch fails → 503, cooldown armed
@@ -667,7 +667,7 @@ class TestCacheHardening:
         assert stub.count == 1
 
     def test_first_fetch_200_empty_401(self, monkeypatch):
-        priv, pub = u.make_ec_keypair()
+        priv, pub = u.make_ec_keypair()  # noqa: RUF059
         tok = u.mint_es256_token(priv, "kid-1", base_payload(), iss=FIXED_ISSUER)
         _require_401(monkeypatch, tok, {"keys": []})
 
@@ -770,7 +770,7 @@ class TestCacheHardening:
                 }
             ]
         }
-        priv, pub = u.make_ec_keypair()
+        priv, pub = u.make_ec_keypair()  # noqa: RUF059
         stub = warm_cache(monkeypatch, jwks)
         tok = u.mint_es256_token(priv, "kid-1", base_payload(), iss=FIXED_ISSUER)
         fetch_count_before = stub.count
@@ -783,7 +783,7 @@ class TestCacheHardening:
 
     def test_malformed_key_entry_fails_closed(self, monkeypatch):
         jwks = {"keys": ["not-a-dict"]}
-        priv, pub = u.make_ec_keypair()
+        priv, pub = u.make_ec_keypair()  # noqa: RUF059
         stub = seed_keys(monkeypatch, jwks)
         tok = u.mint_es256_token(priv, "kid-1", base_payload(), iss=FIXED_ISSUER)
         with pytest.raises(HTTPException) as ei:
@@ -792,7 +792,7 @@ class TestCacheHardening:
         assert stub.count >= 1
 
     def test_oversized_jwks_body(self, monkeypatch):
-        priv, pub = u.make_ec_keypair()
+        priv, pub = u.make_ec_keypair()  # noqa: RUF059
         stub = FetchStub(body=b"x" * 70000)  # > 64KB
         monkeypatch.setattr(sa, "_fetch_jwks", stub)
         tok = u.mint_es256_token(priv, "kid-1", base_payload(), iss=FIXED_ISSUER)
@@ -801,7 +801,7 @@ class TestCacheHardening:
         assert ei.value.status_code == 503  # cold, no last-good
 
     def test_garbage_200_bodies(self, monkeypatch):
-        priv, pub = u.make_ec_keypair()
+        priv, pub = u.make_ec_keypair()  # noqa: RUF059
         tok = u.mint_es256_token(priv, "kid-1", base_payload(), iss=FIXED_ISSUER)
         for body in (b"<html>error</html>", b"[]", b'{"keys": null}'):
             stub = FetchStub(body=body)

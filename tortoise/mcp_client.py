@@ -73,7 +73,7 @@ def status() -> dict[str, Any]:
 
     try:
         return _run(_probe())
-    except Exception as exc:  # noqa: BLE001 — probe reports, never raises
+    except Exception as exc:  # noqa: BLE001, RUF100
         _logger.debug("tortoise unavailable: %s", exc)
         return {"status": "tortoise_unavailable", "url": _mcp_url(), "error": str(exc)}
 

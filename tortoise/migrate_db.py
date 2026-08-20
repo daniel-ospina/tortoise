@@ -41,7 +41,7 @@ class MigrateLock:
 
     def acquire(self) -> bool:
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        self._fh = open(self.path, "a")
+        self._fh = open(self.path, "a")  # noqa: SIM115
         try:
             fcntl.flock(self._fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self._fh.seek(0)
@@ -56,7 +56,7 @@ class MigrateLock:
 
     def release(self) -> None:
         if self._fh:
-            try:
+            try:  # noqa: SIM105
                 fcntl.flock(self._fh, fcntl.LOCK_UN)
             except OSError:
                 pass
@@ -179,7 +179,7 @@ def migrate(force: bool = False) -> dict:
             remove_stale_aof(target)
             shutil.copy2(backup_path, target)
         else:
-            from tortoise.projection import remove_stale_aof, FalkorProjection
+            from tortoise.projection import remove_stale_aof, FalkorProjection  # noqa: I001
             remove_stale_aof(target)
             proj = FalkorProjection(target, allow_nonstandard_path=True)
             try:

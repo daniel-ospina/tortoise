@@ -11,8 +11,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.sdk import TortoiseSDK                    # noqa: E402
-from tortoise.domain_loader import known_kinds, register_kind, kind_is_known  # noqa: E402
+from tortoise.sdk import TortoiseSDK  # noqa: E402, I001, RUF100
+from tortoise.domain_loader import known_kinds, register_kind, kind_is_known  # noqa: E402, F401, RUF100
 
 
 def test_known_kind_accepted():
@@ -69,7 +69,7 @@ def test_register_kind_suppresses_warning():
 
 # ── helper ───────────────────────────────────────────────────
 
-from contextlib import contextmanager
+from contextlib import contextmanager  # noqa: E402, I001
 
 @contextmanager
 def _log_capture(logger: logging.Logger):

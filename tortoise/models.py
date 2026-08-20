@@ -29,7 +29,7 @@ _UNSET = object()
 class OpenAICompatModel:
     def __init__(self, *, id: str, base_url: str, api_key_env: str | None = "OPENAI_API_KEY",
                  temperature: float = 0.0, timeout: int = 60,
-                 response_format: dict | None | object = _UNSET,
+                 response_format: dict | None | object = _UNSET,  # noqa: RUF036
                  max_tokens: int | None = None):
         # api_key_env=None → no Authorization header.
         self.id = id

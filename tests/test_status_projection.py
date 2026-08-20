@@ -9,7 +9,7 @@
 """
 from __future__ import annotations
 
-import json
+import json  # noqa: F401
 import os
 import sys
 import tempfile
@@ -19,7 +19,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tortoise.sdk import TortoiseSDK  # noqa: E402
+from tortoise.sdk import TortoiseSDK  # noqa: E402, RUF100
 
 
 def _fresh_sdk() -> TortoiseSDK:
@@ -30,7 +30,7 @@ def _fresh_sdk() -> TortoiseSDK:
 
 class TestPayloadContract:
     def test_supersessions_optional_and_additive(self):
-        from tortoise.commit_schema import (
+        from tortoise.commit_schema import (  # noqa: I001
             validate_payload_dict, compute_client_commit_id)
         base = {
             "schema_version": "1", "session_id": "s1",
@@ -57,7 +57,7 @@ class TestPayloadContract:
         assert l1b.ok, "new-shape payload with supersessions must validate"
 
     def test_supersession_record_requires_fields(self):
-        from tortoise.commit_schema import SupersessionRecord
+        from tortoise.commit_schema import SupersessionRecord  # noqa: I001
         from pydantic import ValidationError
         with pytest.raises(ValidationError):
             SupersessionRecord(superseded="", supersedes_by="b")
@@ -77,8 +77,8 @@ class TestPayloadContract:
         """#1350 compat guard: a pre-#1350 client computed its id over a
         canonical WITHOUT the supersessions key — the new recompute must
         omit the key when empty so old commits still validate (no 422)."""
-        import hashlib
-        import json
+        import hashlib  # noqa: I001
+        import json  # noqa: F811
         from tortoise.commit_schema import validate_payload_dict, canonical_payload
         # the pre-#1350 canonical (keys before supersessions existed)
         pre_change = json.dumps({

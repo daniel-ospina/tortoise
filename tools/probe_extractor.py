@@ -12,7 +12,7 @@ SYSTEM's output directly and the loop calibrates the rubric.
 This is the bootstrap probe: the rubric prompt here is the lineage of the
 future value_brief + value_extractor prompts.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import argparse
 import json
@@ -39,7 +39,7 @@ def _compile_vocab(packs_dir: _Path) -> dict:
         if d.get("namespace"):
             ns_to_file[d["namespace"]] = mf
     vocab: dict[str, dict] = {}
-    for ns, pack in sorted(reg.packs.items()):
+    for ns, pack in sorted(reg.packs.items()):  # noqa: B007
         ont = {}
         raw = yaml.safe_load(ns_to_file[ns].read_text()) or {}
         kind_defs = (raw.get("ontology") or {}).get("kindDefs") or {}
@@ -177,7 +177,7 @@ Relations are NOT an optional section — they are extracted TOGETHER with the i
 """
 
 
-import re as _re
+import re as _re  # noqa: E402
 
 _REF_RE = _re.compile(
     r"\b(?:PR|docs PR|issue|epic)?\s*#\d{2,6}\b|"
@@ -258,7 +258,7 @@ def _parse_json_block(response: str) -> dict:
     raise ValueError("model returned unparseable JSON block")
 
 
-def extract_stream(model, edus: list[dict], system: str = None,
+def extract_stream(model, edus: list[dict], system: str = None,  # noqa: RUF013
                    chunk_size: int = 6) -> dict:
     """Extract in CHUNKS (window segmentation): full-window outputs exceed
     provider output limits (measured truncation at ~18.6K chars). Each chunk
@@ -351,7 +351,7 @@ def main() -> int:
     args = ap.parse_args()
 
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from tests.model_adapters import MODELS  # noqa: PLC0415
+    from tests.model_adapters import MODELS  # noqa: PLC0415, RUF100
 
     edus = parse_transcript(Path(args.transcript).read_text())
     model = MODELS[args.model]()

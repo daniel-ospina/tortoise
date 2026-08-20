@@ -59,7 +59,7 @@ def _run(tmp_path, **kw) -> tuple[ExitCode, Path, dict]:
 
 class TestRunArtifacts:
     def test_per_scenario_artifacts_and_run_id(self, tmp_path):
-        code, attempt, summary = _run(tmp_path, mock=True, seed=7)
+        code, attempt, summary = _run(tmp_path, mock=True, seed=7)  # noqa: RUF059
         assert code is ExitCode.OK
         names = [a.name for a in attempt.glob("*.json")
                  if a.name != "summary.json"]

@@ -19,12 +19,12 @@ import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest
+import pytest  # noqa: I001
 
 from tortoise.query_suggestions import (
     levenshtein,
     suggest_kind,
-    compute_suggestion,
+    compute_suggestion,  # noqa: F401
     query_with_suggestions,
 )
 from tortoise.sdk import TortoiseSDK
@@ -62,7 +62,7 @@ class TestLevenshtein:
 class TestSuggestKind:
     """suggest_kind: Levenshtein-based "did you mean?"."""
 
-    KNOWN = [
+    KNOWN = [  # noqa: RUF012
         "statement", "decision", "vision", "strategy", "plan",
         "goal", "observation", "hypothesis", "target",
     ]
@@ -79,7 +79,7 @@ class TestSuggestKind:
 
     def test_suggest_kind_multiple_matches(self):
         """'descision' → ['decision'] (sort by distance, then alpha)."""
-        result = suggest_kind("descision", self.KNOWN)
+        result = suggest_kind("descision", self.KNOWN)  # noqa: F841
         # decision is distance 1 (insert 'i' → 'deci...' vs 'deci...' — actually
         # 'descision' vs 'decision': d-e-s vs d-e-c, lots of edits
         # Let's use a simpler test

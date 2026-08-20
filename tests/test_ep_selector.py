@@ -23,7 +23,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest
+import pytest  # noqa: I001
 from tortoise.sdk import TortoiseSDK
 from tortoise.analyze import _bfs_select_operators
 
@@ -53,7 +53,7 @@ def _fresh_sdk():
     sdk = TortoiseSDK(db_path)
     # Wipe before use (shared DB — hermeticity comes from the wipe, not a
     # fresh path). Scoped to the test's own graph (embedded = whole file).
-    try:
+    try:  # noqa: SIM105
         sdk._get_proj().g.query("MATCH (n) DETACH DELETE n")
     except Exception:
         pass
@@ -104,7 +104,7 @@ def build_synthetic_subgraph(sdk: TortoiseSDK) -> dict:
 
     Returns dict with keys: options, criteria, findings, operators, all_point_ids.
     """
-    ctx = SYNTHETIC_CONTEXT
+    ctx = SYNTHETIC_CONTEXT  # noqa: F841
 
     # ── Option claims ──
     opt_a = _make_option(sdk, "Option A: JSON config")
@@ -254,7 +254,7 @@ def test_parity_anchors_equals_context():
         # The BFS-selected operator set must produce confidences for the anchor
         # claims (the points the selector was seeded from).
         new_conf = result_new["confidences"]
-        anchor_ids = graph["all_point_ids"]
+        anchor_ids = graph["all_point_ids"]  # noqa: F841
         computed = set(new_conf.keys())
         # Every anchor that participates in EP should have a computed confidence.
         # (Some anchors may be evidence leaves — still computed as claims.)
@@ -280,7 +280,7 @@ def test_bfs_direction_incoming():
     """direction="incoming" collects operators targeting the anchor."""
     sdk = _fresh_sdk()
     try:
-        ctx = "test-incoming"
+        ctx = "test-incoming"  # noqa: F841
         opt = _make_option(sdk, "Target option")
         finding = _make_finding(sdk, "Supporting finding")
         sdk.set_point_baseline(finding["id"], 8.0, 2.0)
@@ -308,7 +308,7 @@ def test_bfs_direction_outgoing_from_operator():
     and operators targeting those points at max_hops=2."""
     sdk = _fresh_sdk()
     try:
-        ctx = "test-outgoing"
+        ctx = "test-outgoing"  # noqa: F841
         opt = _make_option(sdk, "Target option")
         finding = _make_finding(sdk, "Supporting finding")
         sdk.set_point_baseline(finding["id"], 8.0, 2.0)
@@ -324,7 +324,7 @@ def test_bfs_direction_outgoing_from_operator():
         # operators targeting them.
         # For a simpler test: run with max_hops=1 + direction="both"
         # and verify direction="outgoing" contributes points.
-        ops_outgoing, _ = _bfs_select_operators(proj, [op_id], max_hops=2,
+        ops_outgoing, _ = _bfs_select_operators(proj, [op_id], max_hops=2,  # noqa: RUF059
                                               direction="outgoing")
         # At hop 1: outgoing from op → opt enters frontier
         # At hop 2: incoming from opt → op is found as targeting opt
@@ -369,7 +369,7 @@ def test_bfs_nand_bidirectional():
     """
     sdk = _fresh_sdk()
     try:
-        ctx = "test-nand-bidi"
+        ctx = "test-nand-bidi"  # noqa: F841
         opt_a = _make_option(sdk, "Option A")
         opt_b = _make_option(sdk, "Option B")
 
@@ -408,7 +408,7 @@ def test_bfs_nand_bidirectional():
         # NAND bidirectional means we do BOTH incoming and outgoing from op.
         # Incoming: no operators targeting op. Outgoing: op targets opt_b.
         # So we collect 0 operators at hop 1 (only points, no new operators).
-        ops_from_op, _ = _bfs_select_operators(proj, [op_id], max_hops=1,
+        ops_from_op, _ = _bfs_select_operators(proj, [op_id], max_hops=1,  # noqa: RUF059
                                              direction="incoming")
         # With NAND bidirectional + direction="incoming" from operator,
         # we traverse outgoing too, finding opt_b. But opt_b is a point,
@@ -454,7 +454,7 @@ def test_rel_filter_excludes_nand():
     """rel_filter="IMPL" excludes NAND operators from the result."""
     sdk = _fresh_sdk()
     try:
-        ctx = "test-relfilter"
+        ctx = "test-relfilter"  # noqa: F841
         opt = _make_option(sdk, "Option X")
         f_good = _make_finding(sdk, "Good evidence")
         f_bad = _make_finding(sdk, "Bad evidence against")
@@ -501,7 +501,7 @@ def test_max_nodes_cap_warns_and_truncates(caplog):
     """BFS selector warns and truncates when >200 operators would be collected."""
     sdk = _fresh_sdk()
     try:
-        ctx = "test-maxcap"
+        ctx = "test-maxcap"  # noqa: F841
         opt = _make_option(sdk, "Central option")
 
         # Create 250 operators all targeting the same option.
@@ -539,20 +539,20 @@ def test_anchors_precedence_over_context():
     """When both anchors and context are provided, anchors wins (precedence rule)."""
     sdk = _fresh_sdk()
     try:
-        ctx_anchors = "test-anchors-ctx"
-        ctx_context = "test-context-different"
+        ctx_anchors = "test-anchors-ctx"  # noqa: F841
+        ctx_context = "test-context-different"  # noqa: F841
 
         # Build graph in anchors context
         opt = _make_option(sdk, "Option in anchors ctx")
         finding = _make_finding(sdk, "Finding in anchors ctx")
         sdk.set_point_baseline(finding["id"], 8.0, 2.0)
-        op_good = sdk.create_operator("IMPL", finding["id"], [opt["id"]])
+        op_good = sdk.create_operator("IMPL", finding["id"], [opt["id"]])  # noqa: F841
 
         # Build separate graph in context ctx (should be excluded when anchors used)
         opt_other = _make_option(sdk, "Option in other ctx")
         finding_other = _make_finding(sdk, "Finding in other ctx")
         sdk.set_point_baseline(finding_other["id"], 1.0, 9.0)  # very weak
-        op_other = sdk.create_operator("IMPL", finding_other["id"], [opt_other["id"]])
+        op_other = sdk.create_operator("IMPL", finding_other["id"], [opt_other["id"]])  # noqa: F841
 
         # With anchors pointing to the first graph only
         anchor_ids = [opt["id"], finding["id"]]

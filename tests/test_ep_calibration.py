@@ -6,7 +6,7 @@ historical "overshoot" failure mode (91% → 12%) is confirmed fixed.
 
 Tests use the embedded DB (no Docker needed).
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import pytest
 
@@ -199,8 +199,8 @@ class TestNANDCalibrationAtRealWeights:
         conf_a = result["confidences"].get(claim_a_id, {}).get("mean")
         conf_b = result["confidences"].get(claim_b_id, {}).get("mean")
 
-        assert conf_a is not None, f"Claim A missing from confidences"
-        assert conf_b is not None, f"Claim B missing from confidences"
+        assert conf_a is not None, f"Claim A missing from confidences"  # noqa: F541
+        assert conf_b is not None, f"Claim B missing from confidences"  # noqa: F541
 
         assert conf_a > self.CONFIDENCE_FLOOR, (
             f"Claim A collapsed: {conf_a:.4f} ≤ {self.CONFIDENCE_FLOOR} "
@@ -260,7 +260,7 @@ class TestTiltedMomentsNANDConvergence:
         mean drops from 0.909 to ~0.903. Expected — the NAND penalty is
         subtle, not catastrophic.
         """
-        from tortoise.quadrature import tilted_moments, moments_to_beta
+        from tortoise.quadrature import tilted_moments, moments_to_beta  # noqa: I001
 
         # T0 priors for both claims
         alpha_a, beta_a = 10.0, 1.0  # mean ≈ 0.909
@@ -294,7 +294,7 @@ class TestTiltedMomentsNANDConvergence:
         Reference-weight math pin (production is w=8.0/10.0 per #855):
         at w=2.0 the pull is stronger (~0.895), but nowhere near collapse.
         """
-        from tortoise.quadrature import tilted_moments, moments_to_beta
+        from tortoise.quadrature import tilted_moments, moments_to_beta  # noqa: I001
 
         alpha_a, beta_a = 10.0, 1.0
         alpha_b, beta_b = 10.0, 1.0
@@ -318,7 +318,7 @@ class TestTiltedMomentsNANDConvergence:
 
     def test_tilted_mean_monotonic_decay(self):
         """Stronger weight → lower tilted mean (monotonic in w)."""
-        from tortoise.quadrature import tilted_moments, moments_to_beta
+        from tortoise.quadrature import tilted_moments, moments_to_beta  # noqa: I001
 
         alpha_a, beta_a = 10.0, 1.0
         alpha_b, beta_b = 10.0, 1.0

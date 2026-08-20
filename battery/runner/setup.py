@@ -23,8 +23,8 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from pathlib import Path  # noqa: F401
+from typing import Any, Callable, Iterable, Sequence  # noqa: F401, UP035
 
 from battery.config.corpus import Scenario
 
@@ -101,7 +101,7 @@ def derive_scenario_graph(scenario: Scenario) -> ScenarioGraph:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
 
 class RoundTripCounter:
@@ -145,7 +145,7 @@ def batch_setup(proj, scenarios: Sequence[Scenario], *,
     SDK's ValueError class — the negative path fails identically.
     """
     if embedding_fn is None:
-        from tortoise.embeddings import compute_embedding as embedding_fn  # call-time import (monkeypatch seam)
+        from tortoise.embeddings import compute_embedding as embedding_fn  # call-time import (monkeypatch seam)  # noqa: I001
     rounds: dict[str, int] = {}
     for scenario in scenarios:
         graph = derive_scenario_graph(scenario)
@@ -169,7 +169,7 @@ def batch_setup(proj, scenarios: Sequence[Scenario], *,
         for p in graph.points:
             try:
                 embedding = embedding_fn(p["content"])
-            except Exception:  # noqa: BLE001 — mirror create_point's graceful None
+            except Exception:  # noqa: BLE001, RUF100
                 embedding = None
             props = {k: v for k, v in p.items() if k not in ("id", "kind", "content")}
             point_rows.append({
@@ -178,13 +178,13 @@ def batch_setup(proj, scenarios: Sequence[Scenario], *,
                 "content_hash": _content_hash(p["content"]),
             })
         g.query(
-            f"UNWIND $rows AS r "
-            f"MERGE (n:Point {{id: r.id}}) "
-            f"ON CREATE SET n += {{content: r.content, pointKind: r.kind, "
-            f"is_operator: false, status: 'draft', createdAt: r.now, "
-            f"updatedAt: r.now, content_hash: r.content_hash}}, "
-            f"n += r.props "
-            f"SET n.embedding = vecf32(r.embedding)",
+            f"UNWIND $rows AS r "  # noqa: F541
+            f"MERGE (n:Point {{id: r.id}}) "  # noqa: F541
+            f"ON CREATE SET n += {{content: r.content, pointKind: r.kind, "  # noqa: F541
+            f"is_operator: false, status: 'draft', createdAt: r.now, "  # noqa: F541
+            f"updatedAt: r.now, content_hash: r.content_hash}}, "  # noqa: F541
+            f"n += r.props "  # noqa: F541
+            f"SET n.embedding = vecf32(r.embedding)",  # noqa: F541
             params={"rows": point_rows},
         )
         # Query 2 — operators (MERGE nodes; guarded edge MERGE; promote
@@ -198,17 +198,17 @@ def batch_setup(proj, scenarios: Sequence[Scenario], *,
             })
         if op_rows:
             g.query(
-                f"UNWIND $rows AS r "
-                f"MERGE (o:Point {{id: r.id}}) "
-                f"ON CREATE SET o.is_operator = true, o.op_type = r.op_type, "
-                f"o.direction = r.direction, o.label = r.label "
-                f"WITH o, r UNWIND r.inputs AS inp "
-                f"MATCH (s) WHERE (s:Point OR s:Event) AND s.id = inp.id "
-                f"MERGE (o)-[:NAND {{idx: inp.idx}}]->(s) "
-                f"WITH DISTINCT o, r "
-                f"MATCH (src:Point {{id: r.source_id}}) "
-                f"WHERE src.status IS NULL OR src.status = 'draft' "
-                f"SET src.status = 'live'",
+                f"UNWIND $rows AS r "  # noqa: F541
+                f"MERGE (o:Point {{id: r.id}}) "  # noqa: F541
+                f"ON CREATE SET o.is_operator = true, o.op_type = r.op_type, "  # noqa: F541
+                f"o.direction = r.direction, o.label = r.label "  # noqa: F541
+                f"WITH o, r UNWIND r.inputs AS inp "  # noqa: F541
+                f"MATCH (s) WHERE (s:Point OR s:Event) AND s.id = inp.id "  # noqa: F541
+                f"MERGE (o)-[:NAND {{idx: inp.idx}}]->(s) "  # noqa: F541
+                f"WITH DISTINCT o, r "  # noqa: F541
+                f"MATCH (src:Point {{id: r.source_id}}) "  # noqa: F541
+                f"WHERE src.status IS NULL OR src.status = 'draft' "  # noqa: F541
+                f"SET src.status = 'live'",  # noqa: F541
                 params={"rows": op_rows},
             )
         rounds[scenario.id] = 2

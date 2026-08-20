@@ -30,11 +30,11 @@ message norms are L1 = |η1|+|η2|) — AFTER the #326 fix:
   - reversed input order → per-claim messages identical (diff ~1e-15 —
                               clean-state accumulation, #326)
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import types
 
-import pytest
+import pytest  # noqa: F401
 
 from tortoise.ep import TortoiseEP
 

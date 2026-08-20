@@ -14,7 +14,7 @@ from tortoise.backup_watcher import (
 )
 from tortoise.hosted_backup import MemoryStorage
 
-FIXED = datetime(2026, 8, 8, 12, 0, 0, tzinfo=timezone.utc)
+FIXED = datetime(2026, 8, 8, 12, 0, 0, tzinfo=timezone.utc)  # noqa: UP017
 
 
 def _ts(hours_ago: float) -> datetime:
@@ -163,7 +163,7 @@ def test_watcher_opens_stale_incident_and_resolves():
     w = _watcher(storage, ch)
     status = w.poll()
     assert status["per_team"]["team_a"] == "stale"
-    assert len(ch.issues) == 1 and "[DR] STALE" in list(ch.issues.values())[0]
+    assert len(ch.issues) == 1 and "[DR] STALE" in list(ch.issues.values())[0]  # noqa: RUF015
     assert any("STALE" in t for t in ch.telegram)
 
     # New backup → next poll resolves.
