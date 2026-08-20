@@ -317,6 +317,68 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+def _pid_descends_from_live_suite(pid: int) -> bool:
+    """#1557: True when *pid* is (or descends from) a LIVE active-suite
+    pytest process — i.e. it is a test-owned redislite server, NOT an orphan.
+
+    redislite servers daemonize (ppid=1), so ``_is_detached`` is True for
+    ALL of them — it cannot distinguish a live in-process test server from a
+    genuine orphan. The active-suite markers (ACTIVE_SUITES_DIR) record the
+    live pytest PIDs; a server whose ancestor chain reaches one of those is
+    test-owned and must be protected under only_safe. A true orphan (spawning
+    subprocess SIGKILLed) has a dead parent chain and never reaches a live
+    suite pid.
+
+    Fail-open (returns False on uncertainty): the caller's liveness-first
+    gate still protects live-pid servers via the dead-pid skip; this only
+    ADDS protection for the test-server case.
+    """
+    # Live suite pids = marker files whose recorded pid is alive (the
+    # conftest writes "pid=<os.getpid()>"). Reuse the marker dir directly.
+    suite_pids: set[int] = set()
+    try:
+        entries = os.listdir(ACTIVE_SUITES_DIR)
+    except OSError:
+        return False
+    for e in entries:
+        if e.startswith("."):
+            continue
+        try:
+            text = Path(ACTIVE_SUITES_DIR, e).read_text()
+            m = re.search(r"pid=(\d+)", text)
+            if not m:
+                continue
+            sp = int(m.group(1))
+            if _pid_alive(sp):
+                suite_pids.add(sp)
+        except (OSError, ValueError):
+            continue
+    if not suite_pids:
+        return False
+    cur = pid
+    for _ in range(64):  # bounded ancestor walk (cycle guard)
+        if cur in suite_pids:
+            return True
+        if not _pid_alive(cur):
+            return False
+        try:
+            import subprocess as _sp
+            r = _sp.run(["ps", "-o", "ppid=", "-p", str(cur)],
+                        capture_output=True, text=True, timeout=5)
+        except (_sp.TimeoutExpired, OSError):
+            return False
+        raw = r.stdout.strip()
+        if not raw:
+            return False
+        try:
+            cur = int(raw)
+        except ValueError:
+            return False
+        if cur == 0:
+            return False
+    return False
+
+
 def _registry_owner_alive(registry: dict | None) -> bool | None:
     """Liveness of the registry-recorded owning process (issue #1427).
 
@@ -1175,6 +1237,21 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
                               or _is_detached(record.get("pid") or 0)):
             logger.info(
                 "concurrent-suite guard: skipping live ephemeral candidate %s",
+                record.get("socket_path"))
+            continue
+
+        # #1557: in only_safe mode a LIVE-pid server that descends from a
+        # live pytest suite is a TEST-OWNED server, never an orphan — protect
+        # it (redislite daemonizes to ppid=1 so _is_detached is True for ALL
+        # servers; the suite-ancestry check is the real discriminator). The
+        # dir_missing + live-pid case is a test-tempdir lifecycle race, not
+        # an orphan. Genuine orphans (spawning tree killed) have no live
+        # suite ancestor and are still reaped below.
+        if only_safe and record.get("pid") and _pid_alive(record["pid"]) \
+                and _pid_descends_from_live_suite(record["pid"]):
+            logger.info(
+                "concurrent-suite guard: test-owned live server protected "
+                "under only_safe, skipping %s",
                 record.get("socket_path"))
             continue
 
