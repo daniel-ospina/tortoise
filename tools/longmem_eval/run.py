@@ -831,11 +831,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--output", default=None,
                    help="report JSON path (default "
                         "longmemeval_<split>_<ts>.report.json in CWD)")
+    p.add_argument("--load-timeout", type=float, default=None,
+                   help="EmbeddingModel load timeout override (seconds) — the "
+                        "burn first-load on a contended machine can exceed the "
+                        "30s default (bge-small measured ~57s)")
     p.add_argument("--no-download", action="store_true",
                    help="fail instead of downloading the dataset")
     return p
-    p.add_argument("--load-timeout", type=float, default=None,
-                help="EmbeddingModel load timeout override (seconds) — the burn first-load on a contended machine can exceed the 30s default (bge-small measured ~57s)")
 
 
 def run_main(argv: list[str] | None = None) -> dict[str, Any]:
