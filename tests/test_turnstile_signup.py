@@ -69,19 +69,31 @@ def _dispatch_post(captcha_result, gotrue_result):
 
     Returns (fake, captured) where captured["siteverify"] /
     captured["gotrue"] hold the (url, kwargs) of each call.
+
+    #1512: bare httpx.Response(200, json=...) objects have no `request`
+    attribute, so the endpoint's `resp.raise_for_status()` raises
+    "Cannot call raise_for_status as the request instance has not been set"
+    — the exception is swallowed by _verify_turnstile's fail-closed catch,
+    CAPTCHA is rejected, and every valid-token test 400s. Attach a minimal
+    request so raise_for_status() is a no-op on 2xx.
     """
     captured = {}
+
+    def _with_request(resp: httpx.Response, url: str) -> httpx.Response:
+        req = httpx.Request("POST", url)
+        resp.request = req
+        return resp
 
     def _post(url, **kwargs):
         if url == _SITEVERIFY_URL:
             captured["siteverify"] = (url, kwargs)
             if isinstance(captcha_result, Exception):
                 raise captcha_result
-            return captcha_result
+            return _with_request(captcha_result, url)
         captured["gotrue"] = (url, kwargs)
         if isinstance(gotrue_result, Exception):
             raise gotrue_result
-        return gotrue_result
+        return _with_request(gotrue_result, url)
 
     return _post, captured
 
