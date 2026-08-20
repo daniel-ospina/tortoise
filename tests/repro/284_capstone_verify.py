@@ -23,9 +23,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from tortoise.sdk import TortoiseSDK
-from tortoise.pack_registry import PackRegistry
-from tortoise.search_engine import get_relationships
+from tortoise.sdk import TortoiseSDK  # noqa: E402, I001
+from tortoise.pack_registry import PackRegistry  # noqa: E402
+from tortoise.search_engine import get_relationships  # noqa: E402
 
 RESULTS: list[tuple[str, str]] = []  # (check_name, PASS|FAIL detail)
 
@@ -216,7 +216,7 @@ def main() -> int:
         return 0 if passed == len(RESULTS) else 1
     finally:
         if sdk is not None:
-            try:
+            try:  # noqa: SIM105
                 sdk.close()
             except Exception:
                 pass

@@ -4,7 +4,7 @@ Tests whether bidirectional EP messaging on directed IMPL edges causes
 false cascades where an invalidated sub-argument (A) incorrectly reduces
 confidence in an unrelated sub-argument (B) that shares only a conclusion.
 """
-import os
+import os  # noqa: I001
 import pytest
 from tortoise.sdk import TortoiseSDK
 
@@ -303,7 +303,7 @@ class TestE019DirectionalCascade:
         r5 = self.measure_drop(sdk3, a_id3, b_id3, c2_id3, shared_ids3,
                                 "T4")
 
-        sdk.close(); sdk2.close(); sdk3.close()
+        sdk.close(); sdk2.close(); sdk3.close()  # noqa: E702
 
         assert r0["c2_drop"] > r1["c2_drop"], \
             f"Isolated ({r0['c2_drop']:.4f}) <= 1-anchor ({r1['c2_drop']:.4f})"
@@ -372,12 +372,12 @@ def test_rerun_stability_immutable_baselines():
     with posteriors, so each re-run re-hydrated the previous posterior as the
     new prior → confidence eroded monotonically (0.309→0.191→0.132…)."""
     sdk = fresh_sdk()
-    a = make_point(sdk, "A"); c1 = make_point(sdk, "C1")
+    a = make_point(sdk, "A"); c1 = make_point(sdk, "C1")  # noqa: E702
     make_operator(sdk, a["id"], c1["id"], "IMPL")
     sdk.set_point_baseline(a["id"], *TIER_MAP["T0"])
-    r1 = run_ep(sdk); c1_run1 = get_conf(r1, c1["id"])
-    r2 = run_ep(sdk); c1_run2 = get_conf(r2, c1["id"])
-    r3 = run_ep(sdk); c1_run3 = get_conf(r3, c1["id"])
+    r1 = run_ep(sdk); c1_run1 = get_conf(r1, c1["id"])  # noqa: E702
+    r2 = run_ep(sdk); c1_run2 = get_conf(r2, c1["id"])  # noqa: E702
+    r3 = run_ep(sdk); c1_run3 = get_conf(r3, c1["id"])  # noqa: E702
     sdk.close()
     assert abs(c1_run2 - c1_run1) < 1e-3, f"re-run drift: {c1_run1:.4f} -> {c1_run2:.4f}"
     assert abs(c1_run3 - c1_run2) < 1e-3, f"re-run drift: {c1_run2:.4f} -> {c1_run3:.4f}"
@@ -387,10 +387,10 @@ def test_baseline_prior_preserved_posterior_observable():
     priors, but the EP posterior is observable via posterior_alpha/beta and
     n.confidence (compute_confidence reflects the attack, not the prior)."""
     sdk = fresh_sdk()
-    a = make_point(sdk, "A"); c1 = make_point(sdk, "C1")
+    a = make_point(sdk, "A"); c1 = make_point(sdk, "C1")  # noqa: E702
     make_operator(sdk, a["id"], c1["id"], "IMPL")
     sdk.set_point_baseline(a["id"], *TIER_MAP["T0"])  # 10/1 → prior mean 0.9091
-    nand = make_point(sdk, "NAND"); sdk.set_point_baseline(nand["id"], 10, 1)
+    nand = make_point(sdk, "NAND"); sdk.set_point_baseline(nand["id"], 10, 1)  # noqa: E702
     make_operator(sdk, nand["id"], a["id"], "NAND")
     proj = sdk._get_proj()
     rows = proj.g.query("MATCH (o:Point) WHERE o.is_operator = true RETURN o.id").result_set
@@ -437,14 +437,14 @@ def test_cascade_magnitude_and_nary_conservation_regression():
     # C1 shares A's evidence — when A is contradicted, C1 must drop
     # measurably (the cascade). C2 is the control (should stay isolated).
     sdk = fresh_sdk()
-    a = make_point(sdk, "A"); b = make_point(sdk, "B")
-    c1 = make_point(sdk, "C1"); c2 = make_point(sdk, "C2")
+    a = make_point(sdk, "A"); b = make_point(sdk, "B")  # noqa: E702
+    c1 = make_point(sdk, "C1"); c2 = make_point(sdk, "C2")  # noqa: E702
     make_operator(sdk, a["id"], c1["id"], "IMPL")
     make_operator(sdk, b["id"], c1["id"], "IMPL")
     make_operator(sdk, b["id"], c2["id"], "IMPL")
     for pt in (a, b):
         sdk.set_point_baseline(pt["id"], *TIER_MAP["T4"])
-    nand = make_point(sdk, "NAND"); sdk.set_point_baseline(nand["id"], *TIER_MAP["T0"])
+    nand = make_point(sdk, "NAND"); sdk.set_point_baseline(nand["id"], *TIER_MAP["T0"])  # noqa: E702
     make_operator(sdk, nand["id"], a["id"], "NAND")
 
     r = run_ep(sdk)
@@ -478,7 +478,7 @@ def test_cascade_magnitude_and_nary_conservation_regression():
     # Verify the n-ary conservation at w=8.0: a 4-input NAND must conserve
     # total pull vs binary pair at same weight. Uses the same pattern as
     # test_ep_nary_falsification.test_nary_nand_weight_not_overcounted.
-    import types
+    import types  # noqa: I001
     from tortoise.ep import TortoiseEP
 
     def _make_ep_local(nodes):

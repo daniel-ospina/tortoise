@@ -9,7 +9,7 @@ Phase 4: Multi-model reviewer loop until zero discrepancies
 Also tracks: which reviewer/model catches which type of gap
 → becomes anecdotally useful extraction strategy reference.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import json
 from pathlib import Path

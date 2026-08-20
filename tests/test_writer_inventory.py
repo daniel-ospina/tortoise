@@ -31,11 +31,11 @@ os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 os.environ.setdefault("FASTAPI_INTERNAL_KEY", "test-internal-shared-secret-xyz")
 
-from tortoise.auth import lookup_hash
+from tortoise.auth import lookup_hash  # noqa: I001
 from tortoise.hosted_api import app, get_current_team, get_current_user
 
 from tests.fake_control_plane import ErrorControlPlane, FakeControlPlane
-from tests.test_supabase_control import FREE_TEAM, TOKEN, _key_row, _membership_row
+from tests.test_supabase_control import FREE_TEAM, TOKEN, _key_row, _membership_row  # noqa: F401
 
 _INTERNAL_HEADERS = {"Authorization": "Bearer test-internal-shared-secret-xyz"}
 
@@ -198,7 +198,7 @@ class TestCreateApiKey:
         assert r2.status_code == 200, r2.text
 
     def test_never_touches_registry(self, team_client, spy):
-        tc, fake, _ = team_client
+        tc, fake, _ = team_client  # noqa: RUF059
         r = tc.post("/v1/team/keys")
         assert r.status_code == 200, r.text
         spy.assert_clean()
@@ -215,7 +215,7 @@ class TestCreateApiKey:
     def test_quota_counts_api_keys_from_supabase(self, team_client):
         """#765 quota paths: the api_keys cap counts api_keys ROWS, not
         registry nodes (free tier max_api_keys=2 → 3rd key is a 402)."""
-        tc, fake, _ = team_client
+        tc, fake, _ = team_client  # noqa: RUF059
         assert tc.post("/v1/team/keys").status_code == 200
         assert tc.post("/v1/team/keys").status_code == 200
         r = tc.post("/v1/team/keys")
@@ -243,7 +243,7 @@ class TestListApiKeys:
                     "revoked_at"} <= set(k) for k in keys)
 
     def test_never_touches_registry(self, team_client, spy):
-        tc, fake, _ = team_client
+        tc, fake, _ = team_client  # noqa: RUF059
         r = tc.get("/v1/team/keys")
         assert r.status_code == 200
         spy.assert_clean()
@@ -353,7 +353,7 @@ class TestAgentSignup:
         identity is fresh per request) and has been REMOVED. The per-IP
         signup limiter (2/24h) is the compensating control; the 3rd mint
         from one IP 429s in Supabase mode too (mode-independent store)."""
-        tc, fake, _ = client
+        tc, fake, _ = client  # noqa: RUF059
         monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
         for _ in range(2):
             r = tc.post("/v1/agent/signup", json={"identity": "anon-client-chosen"})
@@ -369,7 +369,7 @@ class TestAgentSignup:
         tc, fake, _ = client
         r = tc.post("/v1/agent/signup", json={})
         assert r.status_code == 200, r.text
-        fn, p = next(c for c in fake.rpc_calls if c[0] == "provision_team")
+        fn, p = next(c for c in fake.rpc_calls if c[0] == "provision_team")  # noqa: RUF059
         lim = tier_limits("free")
         assert p["p_max_users"] == lim["max_users_per_team"]
         assert p["p_max_graphs"] == lim["max_graphs_per_team"]
@@ -496,7 +496,7 @@ class TestCreateTeam:
         their own team."""
         from datetime import datetime, timedelta, timezone
         tc, fake, _ = user_client
-        since = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
+        since = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()  # noqa: UP017
         # 3 MEMBER rows (invite accepts) — must NOT trigger the owner limit
         fake.seed("team_memberships", [
             {"id": f"mem-inv-{i}", "user_id": "user-1",
@@ -510,7 +510,7 @@ class TestCreateTeam:
     def test_rate_limit_3_per_hour(self, user_client):
         tc, fake, _ = user_client
         from datetime import datetime, timedelta, timezone
-        since = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
+        since = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()  # noqa: UP017
         fake.seed("team_memberships", [
             _owner_membership(id=f"m{i}", team_id=f"team-{i}",
                               created_at=since)
@@ -522,7 +522,7 @@ class TestCreateTeam:
     def test_rate_limit_ignores_old_rows(self, user_client):
         from datetime import datetime, timedelta, timezone
         tc, fake, _ = user_client
-        old = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat()
+        old = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat()  # noqa: UP017
         fake.seed("team_memberships", [
             _owner_membership(id="m-old", team_id="team-old", created_at=old),
         ])
@@ -631,8 +631,8 @@ class TestReconcile:
     def test_sweeps_expired_bootstrap_keys(self, client):
         tc, fake, _ = client
         from datetime import datetime, timedelta, timezone
-        past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-        future = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+        past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()  # noqa: UP017
+        future = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()  # noqa: UP017
         fake.seed("api_keys", [
             _key_row(id="expired-boot", created_via="bootstrap",
                      expires_at=past),
@@ -847,12 +847,12 @@ class TestBackupEndpointsSupabaseGraphName:
     def pro_backup_client(self, client, monkeypatch):
         """Supabase-mode client, Pro tier, in-memory backup storage, and a
         teams row whose graph_name differs from the team_{id} convention."""
-        import base64 as _b64
+        import base64 as _b64  # noqa: I001
         import tortoise.hosted_api as ha_mod
         from tortoise import pricing as _pricing
         from tortoise.hosted_backup import MemoryStorage
 
-        tc, fake, spy = client
+        tc, fake, spy = client  # noqa: RUF059
         monkeypatch.setenv(
             "TORTOISE_BACKUP_KEY", _b64.b64encode(os.urandom(32)).decode()
         )
@@ -877,7 +877,7 @@ class TestBackupEndpointsSupabaseGraphName:
 
     def test_backup_create_uses_teams_graph_name(self, pro_backup_client):
         """POST /backups names the archive per teams.graph_name, not team_{id}."""
-        tc, fake, _ = pro_backup_client
+        tc, fake, _ = pro_backup_client  # noqa: RUF059
         r = tc.post("/backups")
         assert r.status_code == 201, r.text
         manifest = r.json()
@@ -890,7 +890,7 @@ class TestBackupEndpointsSupabaseGraphName:
         """Round trip: the restore resolves the SAME teams.graph_name, so the
         backup it just created passes the cross-graph isolation check (the
         old team_{id} hardcode rejected it with a 400 cross-graph error)."""
-        tc, fake, _ = pro_backup_client
+        tc, fake, _ = pro_backup_client  # noqa: RUF059
         r = tc.post("/backups")
         assert r.status_code == 201, r.text
         manifest = r.json()
@@ -911,7 +911,7 @@ class TestBackupEndpointsSupabaseGraphName:
         fix binds the dump to the resolved graph, so the data IS captured)."""
         import tortoise.hosted_api as ha_mod
 
-        tc, fake, _ = pro_backup_client
+        tc, fake, _ = pro_backup_client  # noqa: RUF059
         # Seed the REAL (SDK-created) live graph — named team_myapp per
         # teams.graph_name, NOT team_{id} (#768).
         sdk = ha_mod._make_sdk(namespace="team-pro-924")
@@ -949,7 +949,7 @@ class TestBackupEndpointsSupabaseGraphName:
     def test_backup_create_fail_closed_when_team_vanished(self, pro_backup_client):
         """A team missing from teams (or without graph_name) 503s — never a
         backup of a guessed/wrong graph."""
-        tc, fake, _ = pro_backup_client
+        tc, fake, _ = pro_backup_client  # noqa: RUF059
         app.dependency_overrides[get_current_team] = lambda: dict(
             TEST_TEAM, team_id="team-ghost", tier="pro")
         try:

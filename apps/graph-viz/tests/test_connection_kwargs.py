@@ -7,8 +7,8 @@ ACL-auth self-hosted) without regressing the password-less local dev path.
 from __future__ import annotations
 
 import importlib.util
-import os
-import sys
+import os  # noqa: F401
+import sys  # noqa: F401
 from pathlib import Path
 
 import pytest

@@ -23,7 +23,7 @@ uncertainty comes from the paired bootstrap module (bootstrap.py).
 from __future__ import annotations
 
 import math
-from typing import Mapping, Sequence
+from typing import Mapping, Sequence  # noqa: UP035
 
 GRADE_RELEVANT = 2
 GRADE_PARTIAL = 1

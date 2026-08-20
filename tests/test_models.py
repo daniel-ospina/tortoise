@@ -9,7 +9,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.models import OpenAICompatModel, OllamaModel  # noqa: E402
+from tortoise.models import OpenAICompatModel, OllamaModel  # noqa: E402, I001, RUF100
 
 # ---------------------------------------------------------------------------
 # OpenAICompatModel

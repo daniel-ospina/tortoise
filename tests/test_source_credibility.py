@@ -151,21 +151,21 @@ class TestDecay:
         assert decay_factor("2000-01-01T00:00:00+00:00", None, tier="T0") == 1.0
 
     def test_source_date_preferred_over_ingested(self):
-        now = datetime(2024, 6, 1, tzinfo=timezone.utc)
+        now = datetime(2024, 6, 1, tzinfo=timezone.utc)  # noqa: UP017
         old_evidence = decay_factor("2020-01-01T00:00:00+00:00", "2024-05-01T00:00:00+00:00", now=now)
         recent_evidence = decay_factor("2024-05-01T00:00:00+00:00", "2020-01-01T00:00:00+00:00", now=now)
         assert old_evidence < recent_evidence
 
     def test_timezone_naive_interpreted_utc(self):
         """Naive timestamps are UTC (#153) — matches test_event_provenance."""
-        now = datetime(2024, 1, 2, tzinfo=timezone.utc)
+        now = datetime(2024, 1, 2, tzinfo=timezone.utc)  # noqa: UP017
         naive = decay_factor("2024-01-01T00:00:00", None, now=now, recency_decay=0.5)
         aware = decay_factor("2024-01-01T00:00:00+00:00", None, now=now, recency_decay=0.5)
         assert naive == pytest.approx(aware, rel=1e-12)
 
     def test_formula_matches_legacy(self):
         """alpha' = 1 + (alpha-1)*decay — exact #122 formula at N=1."""
-        now = datetime(2024, 1, 2, tzinfo=timezone.utc)
+        now = datetime(2024, 1, 2, tzinfo=timezone.utc)  # noqa: UP017
         a, _b = aggregate_prior(
             [("T1", "2024-01-01T00:00:00+00:00", None, 1.0)],
             recency_decay=0.95, now=now,
@@ -246,7 +246,7 @@ class TestAssessmentFactor:
     def test_factor_bounds_never_invert(self):
         """Clamped [0.1, 2.0] — pc_eff >= 0, prior never inverts."""
         for reps, scores in [([1.0] * 10, [0.0] * 10), ([1.0] * 10, [1.0] * 10)]:
-            f = assessment_factor(list(zip(reps, scores)))
+            f = assessment_factor(list(zip(reps, scores)))  # noqa: B905
             assert FACTOR_MIN <= f <= FACTOR_MAX
 
 
@@ -263,7 +263,7 @@ class TestDeriveReliability:
         assert comp["reason"] is None
 
     def test_tiered_with_decay(self):
-        now = datetime(2024, 1, 2, tzinfo=timezone.utc)
+        now = datetime(2024, 1, 2, tzinfo=timezone.utc)  # noqa: UP017
         rel, comp = derive_reliability(
             tier="T1", source_date="2024-01-01T00:00:00+00:00", ingested_at=None,
             recency_decay=0.95, now=now,
@@ -301,9 +301,9 @@ class TestDeriveReliability:
 # Baseline provenance marker + recompute gate (Task 2 — embedded SDK)
 # ═══════════════════════════════════════════════════════════════════════
 
-import tempfile
+import tempfile  # noqa: E402
 
-from tortoise.sdk import TortoiseSDK
+from tortoise.sdk import TortoiseSDK  # noqa: E402
 
 
 @pytest.fixture
@@ -384,7 +384,7 @@ class TestBaselineProvenance:
     def test_new_point_inherits_immediately_within_interval(self, sdk):
         """A point created from a tiered source inherits NOW (no hour-long neutral window)."""
         url = "https://newpoint.example"
-        p1 = sdk.create_point("statement", "first", extractedFrom=url)  # materializes Source
+        p1 = sdk.create_point("statement", "first", extractedFrom=url)  # materializes Source  # noqa: F841
         _set_source_tier_raw(sdk, url, "T0")
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=3600)
         # Second point created AFTER the first compute — must inherit immediately

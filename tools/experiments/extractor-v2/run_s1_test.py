@@ -2,15 +2,15 @@
 """S1 flash story-summary test — show the owner the raw output."""
 from __future__ import annotations
 
-import json
+import json  # noqa: F401
 import sys
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from tortoise.value_extractor import compile_value_brief  # noqa: E402
-from tests.model_adapters import MODELS  # noqa: E402
+from tortoise.value_extractor import compile_value_brief  # noqa: E402, I001, RUF100
+from tests.model_adapters import MODELS  # noqa: E402, RUF100
 
 # Subjects + points + events the current compile_value_brief lacks (owner: master list)
 CORE_SUBJECTS = {
@@ -84,7 +84,7 @@ def _master_list() -> str:
 
 def main() -> None:
     transcript = (Path(__file__).resolve().parents[3] / "tests/eval/w-1272/w-design-bounded.txt").read_text()
-    edus = [l.strip() for l in transcript.splitlines()
+    edus = [l.strip() for l in transcript.splitlines()  # noqa: E741
             if l.strip() and not l.startswith("#")]
     print(f"=== window: {len(edus)} EDUs ===", flush=True)
 

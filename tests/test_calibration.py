@@ -4,7 +4,7 @@ Runs on the embedded falkordblite fixture (no Docker needed, AGENTS.md) —
 migrated in #398; the stale live-FalkorDB skip probe was removed as part of
 #344 so the fail-closed default-flip tests actually execute.
 """
-import os
+import os  # noqa: I001
 
 import pytest
 from tortoise.sdk import TortoiseSDK
@@ -153,7 +153,7 @@ def test_calibrate_summary_source_hint(sdk):
     """Uncalibrated Point with Source → suggestion mentions Source."""
     # Create a Source node via _link_source (creates Source + extractedFrom edge)
     src_url = "https://example.com/blog-post"
-    p = sdk.create_point("statement", "Claim from blog", extractedFrom=src_url)
+    p = sdk.create_point("statement", "Claim from blog", extractedFrom=src_url)  # noqa: F841
     
     summary = sdk.calibrate_summary()
     uncal = [s for s in summary if not s["calibrated"]]
@@ -274,7 +274,7 @@ def test_baseline_set_flag(sdk):
 def test_non_evidence_kinds_ignored_by_gate(sdk):
     """Diary/checkpoint points with no baseline shouldn't block EP."""
     sdk.create_point("diary", "Today's note")
-    p = sdk.create_point("statement", "A claim", credibility="medium")
+    p = sdk.create_point("statement", "A claim", credibility="medium")  # noqa: F841
     
     # Gate should pass — diary is not an evidence kind
     result = sdk.compute_confidence(require_calibration=True)
@@ -290,7 +290,7 @@ def test_dream_require_calibration_raises(sdk):
     # so the point must be live for the gate to see it.
     sdk.create_point("statement", "Uncalibrated claim", status="live")
 
-    with pytest.raises(CalibrationError, match="dream.*uncalibrated"):
+    with pytest.raises(CalibrationError, match="dream.*uncalibrated"):  # noqa: RUF043
         sdk.dream(require_calibration=True)
 
 
@@ -318,7 +318,7 @@ def test_get_confidence_require_calibration_raises(sdk):
     CalibrationError (#1157) — the per-claim read is an EP surface."""
     p = sdk.create_point("statement", "Uncalibrated claim", status="live")
 
-    with pytest.raises(CalibrationError, match="get_confidence.*uncalibrated"):
+    with pytest.raises(CalibrationError, match="get_confidence.*uncalibrated"):  # noqa: RUF043
         sdk.get_confidence(p["id"], require_calibration=True)
 
 

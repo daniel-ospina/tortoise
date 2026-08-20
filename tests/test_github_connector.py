@@ -1,13 +1,13 @@
 """Tests for GitHub connector — issue/PR mapping + webhook + polling."""
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import json
 import subprocess as sp
 
-import pytest
+import pytest  # noqa: F401
 from tortoise.connectors.github import GitHubConnector, _verify_sig
 
-from tests._embedded import wipe  # noqa: E402
+from tests._embedded import wipe  # noqa: E402, RUF100
 
 
 # ── Issue mapping ─────────────────────────────────────────────────
@@ -166,7 +166,7 @@ def test_webhook_unknown_event_returns_none():
 def test_verify_sig_valid():
     secret = b"mysecret"
     body = b'{"test":true}'
-    import hmac, hashlib
+    import hmac, hashlib  # noqa: E401, I001
     sig = hmac.new(secret, body, hashlib.sha256).hexdigest()
     assert _verify_sig(secret, f"sha256={sig}", body)
 
@@ -329,11 +329,11 @@ def test_webhook_processing_error_returns_500():
         )
         try:
             urllib.request.urlopen(req, timeout=5)
-            assert False, "expected HTTP 500"
+            assert False, "expected HTTP 500"  # noqa: B011
         except urllib.error.HTTPError as e:
             assert e.code == 500
         except urllib.error.URLError:
-            assert False, "handler must respond with 500, not drop the connection"
+            assert False, "handler must respond with 500, not drop the connection"  # noqa: B011
     finally:
         gh.stop_webhook()
 

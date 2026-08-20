@@ -45,7 +45,7 @@ import re
 from datetime import date as _date_type
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable  # noqa: UP035
 from urllib.parse import quote
 
 from .source_credibility import SOURCE_KIND_DEFAULTS, register_source_kind_default
@@ -159,7 +159,7 @@ def normalize_source_date(value: Any) -> str | None:
             except ValueError:
                 return None
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)  # naive ⇒ UTC
+        dt = dt.replace(tzinfo=timezone.utc)  # naive ⇒ UTC  # noqa: UP017
     return dt.isoformat()
 
 

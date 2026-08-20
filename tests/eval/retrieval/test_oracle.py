@@ -7,7 +7,7 @@ token is in every point and P@K ≈ 1.0 for all strategies).
 """
 from __future__ import annotations
 
-import random
+import random  # noqa: F401
 from collections import Counter
 from pathlib import Path
 
@@ -27,7 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
 def _has_embedded() -> bool:
     try:
-        import redislite.falkordb_client  # noqa: F401
+        import redislite.falkordb_client  # noqa: F401, I001
         from tortoise.projection import FalkorProjection  # noqa: F401
         return True
     except Exception:
@@ -60,7 +60,7 @@ def test_oracle_partition_properties():
                or any(tok in o.bridges.values() for _ in [0])
                for tok in TOKENS)
     # Every token in token_to_topics is findable.
-    for tok, owners in o.token_to_topics.items():
+    for tok, owners in o.token_to_topics.items():  # noqa: B007
         assert 1 <= len(owners) <= 2
     # NEAR = the two bridge-sharing neighbors (circular).
     for k in o.core:
@@ -69,7 +69,7 @@ def test_oracle_partition_properties():
     for k, b in o.bridges.items():
         assert set(o.token_to_topics[b]) == {k, (k + 1) % 24}
     # Centroids are unit-norm 384-d.
-    for k, c in o.centroids.items():
+    for k, c in o.centroids.items():  # noqa: B007
         assert len(c) == 384
         assert abs(sum(x * x for x in c) ** 0.5 - 1.0) < 1e-6
 
@@ -156,7 +156,7 @@ def test_hidden_topic_never_written_to_graph(tmp_path):
     points, _counts = generate_oracle_points(300, o)
     assert all("topic" in p for p in points), "test precondition: topic is hidden in-memory"
 
-    from tortoise.sdk import TortoiseSDK
+    from tortoise.sdk import TortoiseSDK  # noqa: I001
     from benchmarks.synthetic_corpus import seed_corpus
 
     db = str(tmp_path / "oracle-leak.db")
@@ -192,7 +192,7 @@ def test_hidden_topic_never_written_to_graph(tmp_path):
         ).result_set
         assert stored[0][0] == points[0]["content"]
     finally:
-        try:
+        try:  # noqa: SIM105
             sdk.close()
         except Exception:
             pass
@@ -269,7 +269,7 @@ def test_tfidf_retrieves_near_topic_distractors_for_hard_queries(tmp_path):
     near-topic distractor into its top-50 for EVERY hard query — the
     bridge/near-core tokens pull real distractors into the ranking (they
     are not separable by token overlap in practice)."""
-    from tortoise.sdk import TortoiseSDK
+    from tortoise.sdk import TortoiseSDK  # noqa: I001
     from benchmarks.synthetic_corpus import seed_corpus
     from tests.eval.retrieval.run import retrieve_per_strategy
 
@@ -308,7 +308,7 @@ def test_tfidf_retrieves_near_topic_distractors_for_hard_queries(tmp_path):
                 "bridge tokens are not creating real distractors"
             )
     finally:
-        try:
+        try:  # noqa: SIM105
             sdk.close()
         except Exception:
             pass
@@ -317,7 +317,7 @@ def test_tfidf_retrieves_near_topic_distractors_for_hard_queries(tmp_path):
 # ── The distinguishing property (embedded, the required test) ──────────────
 
 def _run_strategies_on_mix(corpus_size: int, db_path: str) -> dict:
-    from tortoise.sdk import TortoiseSDK
+    from tortoise.sdk import TortoiseSDK  # noqa: I001
 
     from benchmarks.synthetic_corpus import seed_corpus
     from tests.eval.retrieval.run import retrieve_per_strategy
@@ -362,7 +362,7 @@ def _run_strategies_on_mix(corpus_size: int, db_path: str) -> dict:
             "tfidf_ndcg": sum(ndcg["tfidf"]) / len(ndcg["tfidf"]),
         }
     finally:
-        try:
+        try:  # noqa: SIM105
             sdk.close()
         except Exception:
             pass
@@ -402,7 +402,7 @@ def test_hard_tier_punishes_token_match_more_than_easy(tmp_path):
     db = str(tmp_path / "oracle-tier.db")
     o = build_topic_oracle(42)
     points, _counts = generate_oracle_points(600, o)
-    from tortoise.sdk import TortoiseSDK
+    from tortoise.sdk import TortoiseSDK  # noqa: I001
     from benchmarks.synthetic_corpus import seed_corpus
     from tests.eval.retrieval.run import retrieve_per_strategy
 
@@ -439,7 +439,7 @@ def test_hard_tier_punishes_token_match_more_than_easy(tmp_path):
             )
         assert sum(easy_p5) / len(easy_p5) > sum(hard_p5) / len(hard_p5)
     finally:
-        try:
+        try:  # noqa: SIM105
             sdk.close()
         except Exception:
             pass

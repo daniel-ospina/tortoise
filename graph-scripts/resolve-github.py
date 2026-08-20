@@ -15,16 +15,16 @@ import argparse
 import json
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone  # noqa: F401
 from pathlib import Path
 
 # Allow running from repo root or scripts/ dir
 _tortoise_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_tortoise_root))
 
-from tortoise.api import EventAPI, provenance
-from tortoise.log import EventLog
-from tortoise.projection import FalkorProjection
+from tortoise.api import EventAPI, provenance  # noqa: E402
+from tortoise.log import EventLog  # noqa: E402
+from tortoise.projection import FalkorProjection  # noqa: E402
 
 
 def fetch_closed_issues(limit: int = 20, since: str | None = None

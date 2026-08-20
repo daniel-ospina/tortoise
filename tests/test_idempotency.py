@@ -11,7 +11,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.idempotency import (  # noqa: E402
+from tortoise.idempotency import (  # noqa: E402, I001, RUF100
     IngestKey,
     IngestResult,
     document_key,
@@ -66,7 +66,7 @@ def test_ingestkey_equality():
     a = IngestKey("document", "abc")
     b = IngestKey("document", "abc")
     assert a == b
-    assert not (a != b)
+    assert not (a != b)  # noqa: SIM202
     # different kind
     c = IngestKey("stream", "abc")
     assert a != c

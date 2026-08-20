@@ -29,10 +29,10 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.ranking import (  # noqa: E402
+from tortoise.ranking import (  # noqa: E402, I001, RUF100
     GapsRanker, SubgraphExpander, NEUTRAL_CONFIDENCE,
 )
-from tortoise.sdk import TortoiseSDK  # noqa: E402
+from tortoise.sdk import TortoiseSDK  # noqa: E402, RUF100
 
 
 # ── Unit: GapsRanker math (no DB) ─────────────────────────────────────────
@@ -137,7 +137,7 @@ def _use_shared_embedded_db(shared_embedded_db):
 def _fresh_sdk():
     db_path = os.path.join(tempfile.mkdtemp(prefix="tortoise_recall_gaps_"), "test.db")
     sdk = TortoiseSDK(db_path)
-    try:
+    try:  # noqa: SIM105
         sdk._get_proj().g.query("MATCH (n) DETACH DELETE n")
     except Exception:
         pass
@@ -477,7 +477,7 @@ def test_subgraph_max_nodes_truncation():
     exhaustive-until-crash (UC3 completeness with a safety valve)."""
     sdk = _fresh_sdk()
     try:
-        proj = sdk._get_proj()
+        proj = sdk._get_proj()  # noqa: F841
         hub = sdk.create_point("statement", "hub claim")
         for i in range(8):
             leaf = sdk.create_point("statement", f"leaf claim {i}")
@@ -497,7 +497,7 @@ def test_subgraph_max_nodes_truncation():
 
 @pytest.fixture(autouse=True)
 def _transport_context():
-    from tortoise.mcp_auth import (
+    from tortoise.mcp_auth import (  # noqa: I001
         _current_team_id, _current_team_limits, _transport_mode,
     )
     _transport_mode.set("stdio")

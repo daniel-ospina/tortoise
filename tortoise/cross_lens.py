@@ -22,7 +22,7 @@ the LLM relation verifier — never operators by themselves.
 from __future__ import annotations
 
 import logging
-from typing import Callable
+from typing import Callable  # noqa: UP035
 
 import numpy as np
 
@@ -95,10 +95,10 @@ def find_cross_lens_matches(
         # (patched builtins.__import__ raising on "embeddings") able to trip the
         # extractor's fallback even when tortoise.cross_lens is already cached
         # in sys.modules.
-        from tortoise.embeddings import _encode  # noqa: PLC0415
+        from tortoise.embeddings import _encode  # noqa: PLC0415, RUF100
         vectors, degraded = _encode(texts)
 
-    from tortoise.embeddings import cosine_similarity_matrix  # noqa: PLC0415
+    from tortoise.embeddings import cosine_similarity_matrix  # noqa: PLC0415, RUF100
     sim = cosine_similarity_matrix(vectors)
     if degraded:
         logger.info("cross-lens matching degraded to TF-IDF (%d points)", len(ids))

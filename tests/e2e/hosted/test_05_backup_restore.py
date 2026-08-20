@@ -11,7 +11,7 @@ Negatives: free tenant → 402 gate; restore without confirm → 400; restore of
 an unknown/cross-team key → 400. Skips in remote mode (memory storage is a
 local-only seam).
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import uuid
 

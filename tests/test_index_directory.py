@@ -15,7 +15,7 @@ Harness conventions (§7): fresh embedded DB per test via
 TortoiseSDK(tempdir/t.db, namespace="e2e-900"); no network; graph assertions
 via raw Cypher on sdk._get_proj().g.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import errno
 import hashlib
@@ -661,7 +661,7 @@ def test_duplicate_session_id_primary_election(corpus, lock_dir):
     (sub / "s1.md").write_text(SESSION_FIXTURE)  # same sessionId as corpus/s1.md
     sdk = _sdk()
     try:
-        r = sdk.index_directory(str(corpus), extract_metadata=False)
+        r = sdk.index_directory(str(corpus), extract_metadata=False)  # noqa: F841
         g = sdk._get_proj().g
         # exactly ONE Event for the sessionId — owned by the FIRST SORTED
         # rel-path ("dup/s1.md" < "s1.md", W4 primary election pin)
@@ -821,7 +821,7 @@ def test_e2e2_meeting_fallback_tiers(tmp_path):
     """E2E-2 fallback variant (parametrized): title-only + filename date →
     filename-date tier; title-only with no date anywhere → meeting_<slug>."""
     # (i) title + filename date (no frontmatter date)
-    c = tmp_path / "c1"; c.mkdir()
+    c = tmp_path / "c1"; c.mkdir()  # noqa: E702
     (c / "meeting-2026-08-05.md").write_text(
         "---\nfileType: meeting\ntitle: \"Team Sync\"\n---\nBody")
     sdk = _sdk()
@@ -835,7 +835,7 @@ def test_e2e2_meeting_fallback_tiers(tmp_path):
     finally:
         sdk.close()
     # (ii) title-only, no date anywhere → meeting_<title-slug>
-    c2 = tmp_path / "c2"; c2.mkdir()
+    c2 = tmp_path / "c2"; c2.mkdir()  # noqa: E702
     (c2 / "any.md").write_text(
         "---\nfileType: meeting\ntitle: \"Standup Review\"\n---\nBody")
     sdk = _sdk()
@@ -869,7 +869,7 @@ def test_e2e2_date_format_stability(tmp_path, date_line, expected_id,
     tier (implementation: sourceDate NULL — the cycle-26 'ingestedAt
     fallback' prose is NOT implemented for the meeting path; assert the
     implemented contract)."""
-    c = tmp_path / "corpus"; c.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
     (c / "m.md").write_text(
         f"---\nfileType: meeting\ntitle: \"Team Sync\"\n{date_line}\n---\nBody")
     sdk = _sdk()
@@ -993,8 +993,8 @@ def test_e2e12_collision_families(tmp_path):
     (d) non-ASCII title; → every pair yields DISTINCT eventIds via the
     deterministic suffix; zero silent property overwrite; collided ids
     stable across re-run (all skipped)."""
-    c = tmp_path / "corpus"; c.mkdir()
-    a = c / "a"; b = c / "b"; a.mkdir(); b.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
+    a = c / "a"; b = c / "b"; a.mkdir(); b.mkdir()  # noqa: E702
     # (a)+(b): same date+title in different dirs → suffix
     (a / "m1.md").write_text(
         "---\nfileType: meeting\ntitle: Sync\ndate: 2026-08-05\n---\nBody A")
@@ -1038,15 +1038,15 @@ def test_e2e12_relocation_whole_corpus_move(tmp_path):
     dir with the SAME basename (parent change only) → re-run → all skipped,
     ONE Source/Event per file (realpath-relativized stored form is
     form-invariant), sweep == 0, no suffix forks."""
-    parent = tmp_path / "p1"; parent.mkdir()
-    c = parent / "corpus"; c.mkdir()
+    parent = tmp_path / "p1"; parent.mkdir()  # noqa: E702
+    c = parent / "corpus"; c.mkdir()  # noqa: E702
     (c / "m1.md").write_text(
         "---\nfileType: meeting\ntitle: Sync\ndate: 2026-08-05\n---\nA")
     (c / "s1.md").write_text("---\nsessionId: r1\ntitle: S\n---\nBody")
     sdk = _sdk()
     try:
         sdk.index_directory(str(c), extract_metadata=False)
-        newp = tmp_path / "p2"; newp.mkdir()
+        newp = tmp_path / "p2"; newp.mkdir()  # noqa: E702
         os.rename(str(c), str(newp / "corpus"))
         r2 = sdk.index_directory(str(newp / "corpus"), extract_metadata=False)
         assert r2["skipped"] == 2 and r2["indexed"] == 0
@@ -1064,8 +1064,8 @@ def test_e2e12_relocation_per_file_move(tmp_path):
     different subdir → the fork arithmetic: count(Event) == file-count +
     moved-count (the guard's source_file reuse rule cannot find the moved
     file's old Event → a suffixed fork)."""
-    c = tmp_path / "corpus"; c.mkdir()
-    sub = c / "sub"; sub.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
+    sub = c / "sub"; sub.mkdir()  # noqa: E702
     (c / "m1.md").write_text(
         "---\nfileType: meeting\ntitle: Sync\ndate: 2026-08-05\n---\nA")
     sdk = _sdk()
@@ -1093,7 +1093,7 @@ def test_e2e13_special_char_filenames_round_trip(tmp_path):
     'my corpus#1' (space + fragment char in the AUTHORITY) — every url
     percent-encoded; parse-based round-trip; kind-scoped structural leg;
     recall_subgraph resolves the ENCODED url; REQUIRED sweep clean."""
-    from urllib.parse import urlsplit, unquote
+    from urllib.parse import urlsplit, unquote  # noqa: I001
     c = tmp_path / "my corpus#1"
     c.mkdir()
     (c / "my notes.md").write_text("---\nsessionId: sp1\ntitle: Notes\n---\nBody")
@@ -1150,8 +1150,8 @@ def test_e2e14_first_writer_variant(tmp_path, monkeypatch, lock_dir):
     context) → creates the Event normally (first-writer-wins); a later sweep
     treats the existing Event as election input and does not fork."""
     monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", str(tmp_path))
-    c = tmp_path / "corpus"; c.mkdir()
-    sub = c / "sub"; sub.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
+    sub = c / "sub"; sub.mkdir()  # noqa: E702
     b = sub / "b.md"
     b.write_text("---\nsessionId: dup1\ntitle: B\n---\nBody B")
     sdk = _sdk()
@@ -1165,7 +1165,7 @@ def test_e2e14_first_writer_variant(tmp_path, monkeypatch, lock_dir):
         # a later sweep treats the existing Event as election input (the
         # first sorted path owns it) and does NOT fork a second Event
         (c / "a.md").write_text("---\nsessionId: dup1\ntitle: A\n---\nBody A")
-        r2 = sdk.index_directory(str(c), extract_metadata=False)
+        r2 = sdk.index_directory(str(c), extract_metadata=False)  # noqa: F841
         assert g.query("MATCH (e:Event {eventId:'session_dup1'}) RETURN count(e)"
                        ).result_set[0][0] == 1
     finally:
@@ -1178,8 +1178,8 @@ def test_e2e14_stem_collision_leg(tmp_path, lock_dir):
     'file_a' → primary-election discipline extended to DERIVED eventIds:
     ONE Event session_file_a, props from the FIRST sorted rel-path
     (x/a.md), 2 Sources, 1 edge, non-primary warned, re-run all-skipped."""
-    c = tmp_path / "corpus"; c.mkdir()
-    x = c / "x"; y = c / "y"; x.mkdir(); y.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
+    x = c / "x"; y = c / "y"; x.mkdir(); y.mkdir()  # noqa: E702
     (x / "a.md").write_text("---\nfileType: agentSession\ntitle: XA\n---\nBody X")
     (y / "a.md").write_text("---\nfileType: agentSession\ntitle: YA\n---\nBody Y")
     sdk = _sdk()
@@ -1222,8 +1222,8 @@ def test_e2e14_session_move_variant(tmp_path, lock_dir):
     the NEW Source created and the OLD Source RETAINED with its edge
     (additive-preserve): count(references) == 2; hash-pair sweep clean for
     a content-unchanged move."""
-    c = tmp_path / "corpus"; c.mkdir()
-    sub = c / "archive"; sub.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
+    sub = c / "archive"; sub.mkdir()  # noqa: E702
     sess = c / "sess.md"
     sess.write_text("---\nsessionId: mv1\ntitle: MV\n---\nBody")
     sdk = _sdk()
@@ -1252,7 +1252,7 @@ def test_e2e14_primary_flip_variant(tmp_path, lock_dir):
     a.md) → re-run → the NEW file becomes primary: Event props come from
     0-new.md, NO Event fork, the old primary becomes election-suppressed,
     no repair loop (re-run all-skipped)."""
-    c = tmp_path / "corpus"; c.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
     (c / "a.md").write_text("---\nsessionId: dup1\ntitle: A\n---\nBody A")
     (c / "b.md").write_text("---\nsessionId: dup1\ntitle: B\n---\nBody B")
     sdk = _sdk()
@@ -1264,7 +1264,7 @@ def test_e2e14_primary_flip_variant(tmp_path, lock_dir):
         assert sf1 == "a.md"
         (c / "0-new.md").write_text(
             "---\nsessionId: dup1\ntitle: New\n---\nBody New")
-        r2 = sdk.index_directory(str(c), extract_metadata=False)
+        r2 = sdk.index_directory(str(c), extract_metadata=False)  # noqa: F841
         sf2 = g.query("MATCH (e:Event {eventId:'session_dup1'}) RETURN e.source_file"
                       ).result_set[0][0]
         assert sf2 == "0-new.md"             # primary flipped
@@ -1284,7 +1284,7 @@ def test_e2e14_issues_prs_fixture_leg(tmp_path, lock_dir):
     INSTANTIATES naming maps to the implemented aboutObject label — a
     plan-text/merged-T3 naming delta); §4.1's session tier set includes
     issues/prs (whitelist membership)."""
-    c = tmp_path / "corpus"; c.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
     (c / "s.md").write_text(
         "---\nsessionId: ip1\ntitle: Issues\nissues: [repo#1]\n"
         "prs: [repo#2]\n---\nBody with issue references")
@@ -1301,7 +1301,7 @@ def test_e2e14_issues_prs_fixture_leg(tmp_path, lock_dir):
             "MATCH (e:Event {eventId:'session_ip1'})-[:aboutObject]->(o:Object) "
             "RETURN count(o)").result_set[0][0]
         assert n >= 2, f"expected issue/PR Object edges, got {n}"
-        _required_sweep(g) == 0
+        _required_sweep(g) == 0  # noqa: B015
     finally:
         sdk.close()
 
@@ -1316,7 +1316,7 @@ def test_e2e7_crlf_immunity(tmp_path):
     """E2E-7 CRLF immunity (I7): rewrite lf.md IN PLACE with CRLF bytes →
     the file reports skipped, count(Source) unchanged, version UNCHANGED
     (text-mode universal-newlines canonical hash; OQ-4)."""
-    c = tmp_path / "corpus"; c.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
     f = c / "lf.md"
     f.write_text("---\nsessionId: lf1\ntitle: LF\n---\nLine one\nLine two")
     sdk = _sdk()
@@ -1341,7 +1341,7 @@ def test_e2e7_crlf_immunity(tmp_path):
 def test_e2e7_binary_non_utf8(tmp_path):
     """E2E-7(b): binary.md (invalid UTF-8) → failed bucket, retryable:false,
     cause-class decode; the run completes; other files still processed."""
-    c = tmp_path / "corpus"; c.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
     (c / "binary.md").write_bytes(b"\xff\xfe\x00binary")
     (c / "good.md").write_text("---\nsessionId: g2\ntitle: Good\n---\nBody")
     sdk = _sdk()
@@ -1363,7 +1363,7 @@ def test_e2e7_broken_frontmatter_degraded(tmp_path):
     malformed frontmatter (W1 row 769) but the merged T3 implementation
     degrades SILENTLY (no errors[] entry) — the test asserts the implemented
     contract; the delta is recorded for the review gate."""
-    c = tmp_path / "corpus"; c.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
     (c / "broken.md").write_text("---\n: bad: [unclosed\n---\nbody text")
     (c / "good.md").write_text("---\nsessionId: g3\ntitle: Good\n---\nBody")
     sdk = _sdk()
@@ -1387,7 +1387,7 @@ def test_e2e7_oserror_family(tmp_path):
     can clear); dir.md → failed structural (IsADirectoryError); broken-link
     and loop-link → failed structural; run COMPLETES with correct counts;
     REQUIRED-set sweep clean (a failed open never becomes a Source)."""
-    c = tmp_path / "corpus"; c.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
     (c / "lf.md").write_text("---\nsessionId: lf2\ntitle: LF\n---\nBody")
     noperm = c / "noperm.md"
     noperm.write_text("---\nsessionId: np\ntitle: NP\n---\nBody")
@@ -1426,8 +1426,8 @@ def test_e2e7_linkdir_inside_outside(tmp_path, monkeypatch):
     dir-alias pair); an outside-root dir symlink is NEVER descended (the
     cycle-26 resolved-target escape check fires BEFORE descent — plan delta:
     the older 'every contained .md file failed' prose predates that fix)."""
-    c = tmp_path / "corpus"; c.mkdir()
-    real = c / "real"; real.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
+    real = c / "real"; real.mkdir()  # noqa: E702
     (real / "inner.md").write_text("---\nsessionId: li\ntitle: LI\n---\nBody")
     (c / "linkdir-inside").symlink_to(real, target_is_directory=True)
     sdk = _sdk()
@@ -1442,8 +1442,8 @@ def test_e2e7_linkdir_inside_outside(tmp_path, monkeypatch):
     finally:
         sdk.close()
     # outside-root dir symlink → never descended (zero files enumerated)
-    c2 = tmp_path / "corpus2"; c2.mkdir()
-    out = tmp_path / "outside"; out.mkdir()
+    c2 = tmp_path / "corpus2"; c2.mkdir()  # noqa: E702
+    out = tmp_path / "outside"; out.mkdir()  # noqa: E702
     (out / "leak.md").write_text("---\nsessionId: lo\ntitle: LO\n---\nBody")
     monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", str(c2))
     (c2 / "linkdir-outside").symlink_to(out, target_is_directory=True)
@@ -1464,10 +1464,10 @@ def test_e2e7_hardlinks_in_out_combo(tmp_path):
     hardlink-out → failed escape, retryable:false, NEVER READ (stat-only
     rejection — the in-walk count < st_nlink unreconciled class); combo-link
     (symlink → outside-root hardlink entry) also fails escape."""
-    c = tmp_path / "corpus"; c.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
     (c / "lf.md").write_text("---\nsessionId: h1\ntitle: H\n---\nBody")
     os.link(c / "lf.md", c / "hardlink-in.md")
-    outside = tmp_path / "outside"; outside.mkdir()
+    outside = tmp_path / "outside"; outside.mkdir()  # noqa: E702
     (outside / "out.md").write_text("---\nsessionId: ho\ntitle: HO\n---\nBody")
     os.link(outside / "out.md", c / "hardlink-out.md")
     (c / "combo-link.md").symlink_to(c / "hardlink-out.md")
@@ -1502,7 +1502,7 @@ def test_e2e7_malicious_frontmatter(tmp_path):
     drops sanitizer-hostile keys BEFORE _sanitize_props — per-file isolation
     on a correct implementation); the meeting's whitelisted non-contract
     extras land in content_metadata (non-vacuous absorption)."""
-    c = tmp_path / "corpus"; c.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
     (c / "evil-doc.md").write_text(
         "---\ntitle: Evil\ntype: strategyDoc\nsource_path: /etc/passwd\n"
         "source_url: corpus://evil/fork\nevilKey: x\nx_custom: y\n---\nbody")
@@ -1528,8 +1528,8 @@ def test_e2e7_corpus_root_symlink_v1(tmp_path, monkeypatch):
     """E2E-7(v1): corpus root = an IN-BASE symlink whose target resolves
     OUTSIDE TORTOISE_INGEST_BASE_DIR → ValueError BEFORE any walk or write
     (zero files indexed; realpath-vs-realpath resolved-target discipline)."""
-    base = tmp_path / "base"; base.mkdir()
-    outside = tmp_path / "outside"; outside.mkdir()
+    base = tmp_path / "base"; base.mkdir()  # noqa: E702
+    outside = tmp_path / "outside"; outside.mkdir()  # noqa: E702
     (outside / "s.md").write_text("---\nsessionId: v1\ntitle: V\n---\nBody")
     linkroot = base / "corpus"
     linkroot.symlink_to(outside, target_is_directory=True)
@@ -1547,8 +1547,8 @@ def test_e2e7_corpus_root_symlink_v1(tmp_path, monkeypatch):
 def test_e2e7_corpus_root_symlink_v2(tmp_path, monkeypatch):
     """E2E-7(v2): corpus root = a symlink resolving INSIDE the base →
     indexes normally with REALPATH-derived urls."""
-    base = tmp_path / "base"; base.mkdir()
-    real = base / "realcorpus"; real.mkdir()
+    base = tmp_path / "base"; base.mkdir()  # noqa: E702
+    real = base / "realcorpus"; real.mkdir()  # noqa: E702
     (real / "s.md").write_text("---\nsessionId: v2\ntitle: V\n---\nBody")
     linkroot = base / "corpus"
     linkroot.symlink_to(real, target_is_directory=True)
@@ -1572,7 +1572,7 @@ def test_e2e7_undecodable_filename_seam(tmp_path, monkeypatch):
     on a surrogate filename → per-file failed{retryable:false} cause-class
     filename, the run COMPLETES, zero abort (the shared per-file guard at
     the entry point, never inside the pure function)."""
-    import tortoise.sdk as sdkmod
+    import tortoise.sdk as sdkmod  # noqa: F401
     from tortoise import file_indexer
     orig = file_indexer.derive_source_url
 
@@ -1583,7 +1583,7 @@ def test_e2e7_undecodable_filename_seam(tmp_path, monkeypatch):
         return orig(path, root, corpus_name)
 
     monkeypatch.setattr(file_indexer, "derive_source_url", _raise_unicode)
-    c = tmp_path / "corpus"; c.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
     (c / "good.md").write_text("---\nsessionId: x1\ntitle: Good\n---\nBody")
     (c / "surrogate.md").write_text(
         "---\nsessionId: x2\ntitle: Surrogate\n---\nBody")
@@ -1611,9 +1611,9 @@ def test_e2e7_walk_time_oserror(tmp_path):
     """E2E-7(y): an unreadable SUBDIRECTORY (chmod 000) → per-directory
     errors[] entry (structural, naming the dir), NEVER silent, NEVER an
     abort; the run completes with honest counters."""
-    c = tmp_path / "corpus"; c.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
     (c / "top.md").write_text("---\nsessionId: t1\ntitle: T\n---\nBody")
-    blocked = c / "blocked"; blocked.mkdir()
+    blocked = c / "blocked"; blocked.mkdir()  # noqa: E702
     (blocked / "inner.md").write_text("---\nsessionId: i1\ntitle: I\n---\nBody")
     blocked.chmod(0)
     try:
@@ -1639,7 +1639,7 @@ def test_e2e7_summary_arithmetic_and_message_content(tmp_path):
     file_count == indexed+updated+skipped+failed (+ ignored excluded);
     every poison errors[] entry names the rel-path, carries a cause-class
     substring from the pinned enumeration, and retryable matches the row."""
-    c = tmp_path / "corpus"; c.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
     (c / "s1.md").write_text("---\nsessionId: sa\ntitle: S\n---\nBody")
     (c / "binary.md").write_bytes(b"\xff\xfe\x00binary")
     big = c / "big.md"
@@ -1820,7 +1820,7 @@ def test_e2e9_symlink_pair_concurrency(corpus, lock_dir):
     1 edge, counters honest."""
     db = _db()
     corpus_sdk = TortoiseSDK(db, namespace="e2e-900")
-    try:
+    try:  # noqa: SIM105
         corpus_sdk.close()
     except Exception:
         pass
@@ -1860,7 +1860,7 @@ def test_e2e9_cross_process_embedded_overlap(tmp_path):
     import threading as _threading
     import time as _time
     db = os.path.join(str(tmp_path), "t.db")
-    corpus = tmp_path / "corpus"; corpus.mkdir()
+    corpus = tmp_path / "corpus"; corpus.mkdir()  # noqa: E702
     for i in range(4):
         (corpus / f"s{i}.md").write_text(
             f"---\nsessionId: c{i}\ntitle: C{i}\n---\nBody {i}")
@@ -2099,7 +2099,7 @@ def test_e2e10_lock_held_skip_heals(corpus, lock_dir):
         assert g.query("MATCH (e:Event {eventId:'session_abc123'}) RETURN count(e)"
                        ).result_set[0][0] == 1
     finally:
-        try:
+        try:  # noqa: SIM105
             lock.release()
         except Exception:
             pass
@@ -2114,7 +2114,7 @@ def test_e2e10_checkpoint_resume_crash(tmp_path, lock_dir, monkeypatch):
     read-counter asserts the stat-based fast-skip), 50 indexed, zero
     duplicate urls; final graph state identical to a crash-free run."""
     import tortoise.sdk as sdkmod
-    corpus = tmp_path / "corpus"; corpus.mkdir()
+    corpus = tmp_path / "corpus"; corpus.mkdir()  # noqa: E702
     for i in range(150):
         # zero-padded names: sorted walk order == numeric order (e000 < e001
         # < ... < e149) so the crash at e100 is EXACTLY file 101 — the plan's
@@ -2215,7 +2215,7 @@ def test_e2e11_llm_raises_after_n(tmp_path, monkeypatch):
     COMPLETES (no abort); all 6 count indexed, none failed; REQUIRED sweep
     clean."""
     import tortoise.session_indexer as si
-    corpus = tmp_path / "corpus"; corpus.mkdir()
+    corpus = tmp_path / "corpus"; corpus.mkdir()  # noqa: E702
     for i in range(6):
         (corpus / f"s{i}.md").write_text(
             f"---\nsessionId: f{i}\ntitle: F{i}\n---\nBody with keyword{i} {i}")
@@ -2253,12 +2253,12 @@ def test_e2e11_embedding_raise_and_heal(tmp_path, monkeypatch):
     non-null on every unchanged file, the run reports updated (carve-out,
     no version bump); run 3 → skipped."""
     import tortoise.sdk as sdkmod
-    corpus = tmp_path / "corpus"; corpus.mkdir()
+    corpus = tmp_path / "corpus"; corpus.mkdir()  # noqa: E702
     for i in range(3):
         (corpus / f"s{i}.md").write_text(
             f"---\nsessionId: h{i}\ntitle: H{i}\n---\nBody {i}")
     sdk = _sdk()
-    orig = sdkmod.TortoiseSDK._session_embedding
+    orig = sdkmod.TortoiseSDK._session_embedding  # noqa: F841
     try:
         def _outage(self, *a, **k):
             raise RuntimeError("embedding outage")
@@ -2302,7 +2302,7 @@ def test_e2e11_persistence_and_backoff(tmp_path, monkeypatch):
     every unit (updated, non-null, no version bump) and the following run
     reports skipped — convergence intact."""
     import tortoise.sdk as sdkmod
-    corpus = tmp_path / "corpus"; corpus.mkdir()
+    corpus = tmp_path / "corpus"; corpus.mkdir()  # noqa: E702
     for i in range(2):
         (corpus / f"s{i}.md").write_text(
             f"---\nsessionId: p{i}\ntitle: P{i}\n---\nBody {i}")
@@ -2384,7 +2384,7 @@ def test_e2e11_mocked_embedding_success_leg(tmp_path, monkeypatch):
     extract_metadata=False → e.embedding PRESERVED (omission, never
     SET-None); FRESH-UNIT control leg: a NEW unit under False stays NULL."""
     import tortoise.sdk as sdkmod
-    corpus = tmp_path / "corpus"; corpus.mkdir()
+    corpus = tmp_path / "corpus"; corpus.mkdir()  # noqa: E702
     (corpus / "s0.md").write_text("---\nsessionId: e0\ntitle: E0\n---\nBody 0")
     sdk = _sdk()
     vec = [0.3] * 384
@@ -2424,8 +2424,8 @@ def _make_scale_corpus(tmp_path, n_sessions=40, n_meetings=20, n_docs=20):
     pair), docs, nested subdirs — the E2E-18 scale shape at a CI-friendly
     size (the plan's ~300-file corpus is represented here by the density of
     the probe classes; the arithmetic is identical)."""
-    c = tmp_path / "corpus"; c.mkdir()
-    sub = c / "nested"; sub.mkdir()
+    c = tmp_path / "corpus"; c.mkdir()  # noqa: E702
+    sub = c / "nested"; sub.mkdir()  # noqa: E702
     for i in range(n_sessions):
         d = sub if i % 2 else c
         (d / f"sess-{i:03d}.md").write_text(
@@ -2457,7 +2457,7 @@ def test_e2e18_scale_poison_counters(tmp_path):
     pinned buckets; a non-md file is ignored (never failed, never counted in
     file_count); indexed+updated+skipped+failed == file_count; by_kind
     totals exact; REQUIRED sweep clean."""
-    import tortoise.sdk as sdkmod
+    import tortoise.sdk as sdkmod  # noqa: F401
     corpus = _make_scale_corpus(tmp_path)
     # 5 poison files at known sorted positions + 1 non-md
     (corpus / "a-binary.md").write_bytes(b"\xff\xfe\x00binary")
@@ -2542,7 +2542,7 @@ def test_e2e18_hard_crash_sigkill_resume(tmp_path):
     all skipped; journal-integrity leg: EventLog.read_all() succeeds
     (line-tolerant) AND rebuild_all recovers to the crash-free structural
     state."""
-    import subprocess as _sp
+    import subprocess as _sp  # noqa: I001
     import sys as _sys
     import signal as _signal
     import json as _json
@@ -2552,7 +2552,7 @@ def test_e2e18_hard_crash_sigkill_resume(tmp_path):
     corpus = _make_scale_corpus(tmp_path, n_sessions=12, n_meetings=6,
                                 n_docs=6)
     db = os.path.join(str(tmp_path), "child.db")
-    log_dir = tmp_path / "events"; log_dir.mkdir()
+    log_dir = tmp_path / "events"; log_dir.mkdir()  # noqa: E702
     log_path = str(log_dir / "events.jsonl")
     env = dict(os.environ)
     env["TORTOISE_INDEX_LOCK_DIR"] = str(tmp_path / "locks")
@@ -2585,7 +2585,7 @@ def test_e2e18_hard_crash_sigkill_resume(tmp_path):
         f"child never completed: {out_lines[-3:]}"
     _time.sleep(0.5)
     # kill the child's process group (the child + any same-group children)
-    try:
+    try:  # noqa: SIM105
         os.killpg(p.pid, _signal.SIGKILL)
     except ProcessLookupError:
         pass
@@ -2595,14 +2595,14 @@ def test_e2e18_hard_crash_sigkill_resume(tmp_path):
     daemon_pid = None
     if os.path.exists(reg):
         try:
-            settings = _json.loads(open(reg).read())
+            settings = _json.loads(open(reg).read())  # noqa: SIM115
             pf = settings.get("pidfile")
             if pf and os.path.exists(pf):
-                daemon_pid = int(open(pf).read().strip())
+                daemon_pid = int(open(pf).read().strip())  # noqa: SIM115
         except Exception:
             daemon_pid = None
     if daemon_pid:
-        try:
+        try:  # noqa: SIM105
             os.kill(daemon_pid, _signal.SIGKILL)
         except ProcessLookupError:
             pass
@@ -2662,13 +2662,13 @@ def test_e2e19_embedded_db_write_failure(tmp_path, monkeypatch):
     file_count and aborted_reason names the DB-failure class; pre-K files
     persist; a re-run converges to complete state, zero duplicate urls."""
     import tortoise.sdk as sdkmod
-    corpus = tmp_path / "corpus"; corpus.mkdir()
+    corpus = tmp_path / "corpus"; corpus.mkdir()  # noqa: E702
     for i in range(8):
         (corpus / f"s{i}.md").write_text(
             f"---\nsessionId: db{i}\ntitle: D{i}\n---\nBody {i}")
     sdk = _sdk()
     orig = sdkmod.TortoiseSDK._index_source_merge
-    fail_from = {"n": 0}
+    fail_from = {"n": 0}  # noqa: F841
 
     def _raise_enospc(self, url, *a, **k):
         if "s5.md" in url or "s6.md" in url or "s7.md" in url:
@@ -2705,7 +2705,7 @@ def test_e2e19_checkpoint_write_failure(tmp_path, monkeypatch):
     (degrade to no-checkpoint semantics, never crashes); the next resume
     behaves per §5.3 g1/g2 (no-checkpoint fallback → full honest re-run)."""
     import tortoise.sdk as sdkmod
-    corpus = tmp_path / "corpus"; corpus.mkdir()
+    corpus = tmp_path / "corpus"; corpus.mkdir()  # noqa: E702
     for i in range(3):
         (corpus / f"s{i}.md").write_text(
             f"---\nsessionId: cp{i}\ntitle: C{i}\n---\nBody {i}")
@@ -2714,8 +2714,8 @@ def test_e2e19_checkpoint_write_failure(tmp_path, monkeypatch):
     # E2E-19(c): make the ATOMIC RENAME inside _index_save_progress fail —
     # the method's OWN internal try/except (the degrade-to-no-checkpoint
     # disposition) must catch it; the run completes, never crashes.
-    import tortoise.sdk as sdkmod
-    import builtins
+    import tortoise.sdk as sdkmod  # noqa: F401, F811, I001
+    import builtins  # noqa: F401
     real_replace = os.replace
     def _fail_replace(src, dst):
         if str(dst).endswith("progress.json"):

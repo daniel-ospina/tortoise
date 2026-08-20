@@ -14,7 +14,7 @@ Plus a live integration test against a running FalkorDB server
 """
 from __future__ import annotations
 
-import os
+import os  # noqa: F401
 import sys
 from pathlib import Path
 
@@ -22,9 +22,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tortoise.projection import FalkorProjection  # noqa: E402
-from tortoise.projection import _reset_falkordb_version_cache  # noqa: E402
-from tortoise.search_engine import degradation_chain, run_vector_query  # noqa: E402
+from tortoise.projection import FalkorProjection  # noqa: E402, I001, RUF100
+from tortoise.projection import _reset_falkordb_version_cache  # noqa: E402, RUF100
+from tortoise.search_engine import degradation_chain, run_vector_query  # noqa: E402, RUF100
 
 DIM = 384  # matches projection's vector index dimension
 
@@ -419,7 +419,7 @@ class TestLiveServerCompat:
             fts = [r for r in idx if r[0] == "Point" and "FULLTEXT" in str(r)]
             assert fts, f"Point FULLTEXT index missing: {idx[:3]}"
         finally:
-            try:
+            try:  # noqa: SIM105
                 g.query(
                     f"MATCH (n:Point) WHERE n.id STARTS WITH '{prefix}' DETACH DELETE n")
             except Exception:

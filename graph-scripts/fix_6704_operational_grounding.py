@@ -9,12 +9,12 @@ Three fixes:
 
 Idempotent: safe to re-run — skips resolution events if already present.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import sys
 sys.path.insert(0, '/Users/home/eldato/negation-game-explorations/tortoise')
 
-from tortoise.log import EventLog
+from tortoise.log import EventLog  # noqa: I001
 from tortoise.api import EventAPI, provenance
 from tortoise.projection import FalkorProjection
 
@@ -139,7 +139,7 @@ if existing_recreated == 0:
 
     api.add_operator("IMPL", [ID_MAP["915"], ID_MAP["915"]], ctx_wire, PROV,
                      content="IMPL(lifecycle, lifecycle) — lifecycle → gap in Tortoise approach")
-    print(f"  IMPL(lifecycle): self-loop gap marker")
+    print(f"  IMPL(lifecycle): self-loop gap marker")  # noqa: F541
 else:
     print("  Re-created operators already exist. Skipping.")
 

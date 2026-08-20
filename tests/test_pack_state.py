@@ -12,7 +12,7 @@ Runs on embedded FalkorDBLite (no Docker needed) — per-test fresh DB paths.
 from __future__ import annotations
 
 import os
-import subprocess
+import subprocess  # noqa: F401
 import sys
 import tempfile
 import threading
@@ -22,7 +22,7 @@ os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 os.environ.setdefault("FASTAPI_INTERNAL_KEY", "test-internal-shared-secret-xyz")
 
-import pytest
+import pytest  # noqa: I001
 
 from tortoise.pack_state import (
     DEFAULT_STARTER_PACKS, ensure_tenant_packs, get_tenant_packs,
@@ -95,7 +95,7 @@ class TestEnsureTenantPacks:
             try:
                 barrier.wait(timeout=30)
                 ensure_tenant_packs(sdk)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001, RUF100
                 errors.append(e)
 
         threads = [threading.Thread(target=_ensure) for _ in range(n)]
@@ -116,7 +116,7 @@ class TestEnsureTenantPacks:
         """Env typo → skipped, never fails provisioning, never ghosts installs."""
         monkeypatch.setenv("TORTOISE_STARTER_PACKS", "dev,bogus-pack,marketing")
         sdk = TortoiseSDK(db_path=str(tmp_path / "a.db"), namespace="team-a")
-        activated = ensure_tenant_packs(sdk)
+        activated = ensure_tenant_packs(sdk)  # noqa: F841
         namespaces = sorted(r[0] for r in _read_installs(sdk))
         assert namespaces == ["dev", "marketing"]
         assert "bogus-pack" not in namespaces
@@ -234,7 +234,7 @@ class _RaceSeam:
     def query(self, cypher, params=None, timeout=None):
         if "PackInstall" not in cypher or "MERGE" not in cypher:
             return self._g.query(cypher, params=params, timeout=timeout)
-        try:
+        try:  # noqa: SIM105
             self._enter.wait(timeout=1)      # both threads park before the read
         except threading.BrokenBarrierError:
             pass
@@ -242,7 +242,7 @@ class _RaceSeam:
             "MATCH (p:PackInstall {namespace: $ns}) RETURN p.namespace",
             params={"ns": params["ns"]},
         ).result_set
-        try:
+        try:  # noqa: SIM105
             self._write_gate.wait(timeout=1)  # both park before the write
         except threading.BrokenBarrierError:
             pass
@@ -262,7 +262,7 @@ def _run_race_pair(sdk, join_timeout=60) -> list[Exception]:
     def _ensure():
         try:
             ensure_tenant_packs(sdk, starter=["dev"])
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001, RUF100
             errors.append(e)
 
     threads = [threading.Thread(target=_ensure) for _ in range(2)]
@@ -315,7 +315,7 @@ class TestPackInstallLockSerialization:
         produces EXACTLY the #1307 duplicate. Proves the seam is a faithful
         repro; without it, the green test below would pass vacuously even if
         the seam forced no interleaving at all."""
-        from contextlib import nullcontext
+        from contextlib import nullcontext  # noqa: I001
         import tortoise.pack_state as ps
         if getattr(ps, "_pack_install_lock", None) is not None:
             monkeypatch.setattr(ps, "_pack_install_lock",
@@ -377,7 +377,7 @@ def _patch_tortoise_sdk_init(db_path: str):
 def registry_client(monkeypatch):
     """TestClient in REGISTRY control-plane mode (selfhost) with a temp
     embedded DB — for /internal/provision (disabled under Supabase mode)."""
-    from fastapi.testclient import TestClient
+    from fastapi.testclient import TestClient  # noqa: I001
     from tortoise.hosted_api import app
     monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
     monkeypatch.delenv("SUPABASE_URL", raising=False)
@@ -398,8 +398,8 @@ def registry_client(monkeypatch):
 def supabase_client(monkeypatch):
     """TestClient in SUPABASE control-plane mode with a FakeControlPlane
     (zero network) + a temp embedded DB — mirrors test_writer_inventory."""
-    from fastapi.testclient import TestClient
-    from tortoise.hosted_api import app, get_current_team, get_current_user
+    from fastapi.testclient import TestClient  # noqa: I001
+    from tortoise.hosted_api import app, get_current_team, get_current_user  # noqa: F401
     from tests.fake_control_plane import FakeControlPlane
     from tests.test_supabase_control import FREE_TEAM
 
@@ -490,7 +490,7 @@ class TestProvisioningHooks:
 
 class TestGetV1Packs:
     def test_requires_auth(self, supabase_client):
-        from tortoise.hosted_api import app, get_current_team
+        from tortoise.hosted_api import app, get_current_team  # noqa: F401
         tc, _, _ = supabase_client
         r = tc.get("/v1/packs")
         # get_current_team 401s first (no Authorization header)
@@ -572,7 +572,7 @@ class TestMcpPacksList:
     def test_handler_scoped_to_team(self, tmp_path, monkeypatch):
         """Unit-level: the handler reads the team SDK via the contextvar
         seam and returns the team's packs (threadpool-safe pattern)."""
-        from tortoise import mcp_auth
+        from tortoise import mcp_auth  # noqa: I001
         import tortoise.mcp_server as ms
         db = str(tmp_path / "mcp.db")
         sdk = TortoiseSDK(db_path=db, namespace="mcp-team")
@@ -590,7 +590,7 @@ class TestMcpPacksList:
         assert [p["namespace"] for p in packs] == ["dev", "pm"]
 
     def test_handler_fails_closed_on_none_team_http(self, monkeypatch):
-        from tortoise import mcp_auth
+        from tortoise import mcp_auth  # noqa: I001
         import tortoise.mcp_server as ms
         token = mcp_auth._transport_mode.set("http")
         t2 = mcp_auth._current_team_id.set(None)
@@ -604,7 +604,7 @@ class TestMcpPacksList:
     def test_http_surface_registered_and_scoped(self, tmp_path, monkeypatch):
         """AC3: packs_list over the HTTP MCP surface returns the tenant-
         scoped set (http_policy=True → in HTTP_ALLOWED)."""
-        from tortoise import mcp_auth
+        from tortoise import mcp_auth  # noqa: I001
         import tortoise.mcp_server as ms
         from tortoise.mcp_server import create_http_app
         from starlette.applications import Starlette
@@ -671,7 +671,7 @@ class TestBackfillScript:
         Runs the script IN-PROCESS (embedded FalkorDBLite is single-writer —
         a subprocess would hit EmbeddedStoreBusyError on the same DB).
         """
-        import tortoise.hosted_api as ha_mod
+        import tortoise.hosted_api as ha_mod  # noqa: I001
         from fastapi.testclient import TestClient
         from tortoise.hosted_api import app
 

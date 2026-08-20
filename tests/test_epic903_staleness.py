@@ -65,7 +65,7 @@ def _post_mutation_oracle(ids: dict[str, str]) -> dict[str, float]:
     from tests.epic903_fixtures import _build_f4_graph, fresh_sdk
     clone, _ = fresh_sdk(prefix="tortoise_epic903_f4truth_")
     try:
-        clone_ids, clone_ops = _build_f4_graph(clone)
+        clone_ids, clone_ops = _build_f4_graph(clone)  # noqa: RUF059
         clone.set_point_baseline(clone_ids["r1"], 1.0, 8.0)  # same mutation
         random.seed(FIXED_SEED)
         clone.dream(mode="full", warm_start=False)
@@ -123,7 +123,7 @@ class TestDe2e9StalenessError:
                 coverages.append(_coverage(sdk, f.ids))
             # Assert: error shrinks below ERROR_EPS once coverage ≥ target
             # (threshold, not monotonicity).
-            best = min((e for e, c in zip(errors, coverages)
+            best = min((e for e, c in zip(errors, coverages)  # noqa: B905
                         if c >= COVERAGE_TARGET), default=None)
             assert best is not None, (
                 f"coverage never reached {COVERAGE_TARGET}: {coverages}")

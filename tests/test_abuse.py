@@ -30,7 +30,7 @@ os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tortoise import abuse
+from tortoise import abuse  # noqa: I001
 from tortoise.abuse import (AbuseEngine, MemoryAbuseStore, ReadVelocityTracker,
                             SignupVelocityTracker, check_new_country,
                             clear_suspended, is_suspended_signal,
@@ -38,7 +38,7 @@ from tortoise.abuse import (AbuseEngine, MemoryAbuseStore, ReadVelocityTracker,
 from tests.fake_control_plane import FakeControlPlane
 
 
-T0 = datetime(2026, 8, 11, 12, 0, 0, tzinfo=timezone.utc)
+T0 = datetime(2026, 8, 11, 12, 0, 0, tzinfo=timezone.utc)  # noqa: UP017
 
 
 @pytest.fixture(autouse=True)
@@ -363,7 +363,7 @@ class TestReadVelocity:
     def test_window_expiry(self, monkeypatch, notified):
         tr = ReadVelocityTracker()
         now = time.time()
-        for i in range(100):
+        for i in range(100):  # noqa: B007
             tr.record_read("key1", "t1", now=now)
         # all 100 age out after the 300s window
         assert tr.record_read("key1", "t1", now=now + 301) is None
@@ -372,7 +372,7 @@ class TestReadVelocity:
         monkeypatch.setenv("TORTOISE_ABUSE_DISABLED", "1")
         tr = ReadVelocityTracker()
         now = time.time()
-        for i in range(200):
+        for i in range(200):  # noqa: B007
             assert tr.record_read("key1", "t1", now=now) is None
 
 

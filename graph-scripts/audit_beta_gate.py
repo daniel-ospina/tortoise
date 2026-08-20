@@ -39,7 +39,7 @@ def _q(proj, cypher: str, **params) -> list:
 
 def _redact_uri(uri: str) -> str:
     """Strip credentials from a connection URI before display (#1200 review)."""
-    from urllib.parse import urlunsplit, urlsplit
+    from urllib.parse import urlunsplit, urlsplit  # noqa: I001
     parts = urlsplit(uri)
     netloc = parts.hostname or ""
     if parts.port:
@@ -266,12 +266,12 @@ def main() -> int:
         proj = sdk._get_proj()
         db_target = sdk._db_path or sdk._db_uri or "<unknown>"
         out = run_check(sdk, proj)
-    except Exception as e:  # noqa: BLE001 — gate must distinguish error from P1 fail
+    except Exception as e:  # noqa: BLE001, RUF100
         print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
         return 2
     finally:
         if sdk is not None:
-            try:
+            try:  # noqa: SIM105
                 sdk.close()
             except Exception:
                 pass

@@ -6,7 +6,7 @@ arms/; research brief: A0 is the no-memory control arm).
 """
 from __future__ import annotations
 
-from battery.arms.base import AgentContext, ArmAdapter, Memory
+from battery.arms.base import AgentContext, ArmAdapter, Memory  # noqa: F401
 from battery.config.corpus import Scenario
 
 

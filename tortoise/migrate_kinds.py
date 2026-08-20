@@ -125,7 +125,7 @@ if __name__ == "__main__":
 
     dry_run = "--dry-run" in sys.argv
 
-    from tortoise.config import resolve_db_path, is_docker_uri
+    from tortoise.config import resolve_db_path, is_docker_uri  # noqa: I001
     uri = os.environ.get("TORTOISE_DB_URI")
     if not uri:
         # Embedded migration against canonical path (issue #176)

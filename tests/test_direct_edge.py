@@ -147,7 +147,7 @@ class TestCreateDirectEdge:
         pa, pb = _two_points(s2)
         s2.create_direct_edge("IMPL", pa, pb, batch_id="b1", label="v1")
         s2.create_direct_edge("IMPL", pa, pb, batch_id="b1", label="v2")  # dedup hit
-        lines = [json.loads(l) for l in open(log_path)
+        lines = [json.loads(l) for l in open(log_path)  # noqa: E741, SIM115
                  if "DirectEdgeCreated" in l]
         assert len(lines) == 2, "every write emits a descriptor"
         # the LAST descriptor carries the FINAL attrs (last-writer-wins replay)
@@ -199,7 +199,7 @@ class TestSupersedeDirectEdges:
         pc = s2.create_point("statement", "C")["id"]
         s2.create_direct_edge("IMPL", pa, pb, batch_id="b1")
         s2.supersede_point(pa, pc)
-        lines = [json.loads(l) for l in open(log_path)
+        lines = [json.loads(l) for l in open(log_path)  # noqa: E741, SIM115
                  if "DirectEdgeRepoint" in l]
         assert len(lines) == 1
         # Flat descriptor shape (matches DirectEdgeCreated).

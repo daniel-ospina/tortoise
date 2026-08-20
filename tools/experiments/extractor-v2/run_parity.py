@@ -19,7 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from tests.model_adapters import MODELS  # noqa: E402
+from tests.model_adapters import MODELS  # noqa: E402, RUF100
 
 P1_SYSTEM = """You are the RECALL extractor for an epistemic memory system.
 
@@ -109,7 +109,7 @@ def _parse_json(raw: str) -> dict:
 
 def _summarize_p3(model, input_text: str, *, chunk_size: int = 12) -> dict:
     """P3: the SUMMARY_SYSTEM-style selection pass. Chunked for long inputs."""
-    from tortoise.value_extractor import SUMMARY_SYSTEM, _parse_json as vp
+    from tortoise.value_extractor import SUMMARY_SYSTEM, _parse_json as vp  # noqa: F401, I001
     edus = [{"index": i, "role": "assistant", "text": line.strip()}
             for i, line in enumerate(input_text.splitlines())
             if line.strip() and not line.startswith("#")]

@@ -7,12 +7,12 @@ Modules:
   recovery    — crash recovery: scan incomplete cards on startup, event ID dedup
 """
 
-from .monitoring import GoldenSignals, collect_signals
+from .monitoring import GoldenSignals, collect_signals  # noqa: I001
 from .concurrency import locked_append, atomic_claim
 from .events import EventCodec, event_types, register_event_type
 from .recovery import scan_incomplete_cards, dedup_events, find_last_checkpoint
 
-__all__ = [
+__all__ = [  # noqa: RUF022
     "GoldenSignals", "collect_signals",
     "locked_append", "atomic_claim",
     "EventCodec", "event_types", "register_event_type",

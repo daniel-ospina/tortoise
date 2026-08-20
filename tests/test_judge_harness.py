@@ -12,14 +12,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import pytest
+import pytest  # noqa: I001
 
 from tools.judge_harness import (
     RUBRIC_SYSTEM,
     Edu,
-    Label,
+    Label,  # noqa: F401
     LabelParseError,
-    LabeledWindow,
+    LabeledWindow,  # noqa: F401
     TranscriptError,
     build_user_prompt,
     label_window,
@@ -127,7 +127,7 @@ def test_parse_labels_valid():
     labels = parse_labels(
         json.dumps({"labels": labels_for([0, 1, 2], "decision")}), edus
     )
-    assert [l.edu_index for l in labels] == [0, 1, 2]
+    assert [l.edu_index for l in labels] == [0, 1, 2]  # noqa: E741
     assert labels[0].class_ == "decision"
     assert labels[0].atomicity is True
     assert labels[0].kind is None and labels[0].source_ref is None
@@ -137,7 +137,7 @@ def test_parse_labels_valid():
 def test_parse_labels_strips_markdown_fences():
     edus = parse_transcript(TRANSCRIPT)
     raw = "```json\n" + json.dumps({"labels": labels_for([0])}) + "\n```"
-    assert [l.edu_index for l in parse_labels(raw, edus)] == [0]
+    assert [l.edu_index for l in parse_labels(raw, edus)] == [0]  # noqa: E741
 
 
 def test_parse_labels_relations_roundtrip():

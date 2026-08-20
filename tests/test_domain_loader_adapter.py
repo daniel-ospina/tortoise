@@ -17,17 +17,17 @@ from __future__ import annotations
 
 import os
 import sys
-import tempfile
+import tempfile  # noqa: F401
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest
+import pytest  # noqa: I001
 
 from tortoise import domain_loader
-from tortoise.domain_loader import (                       # noqa: E402
+from tortoise.domain_loader import (  # noqa: E402, RUF100
     known_kinds, kind_is_known, domain_kinds, domain_kind_semantics, register_kind,
 )
-from tortoise.extractor import (                           # noqa: E402
+from tortoise.extractor import (  # noqa: E402, RUF100
     _build_pointkind_prompt, _DocumentPointStage, MockModel,
 )
 

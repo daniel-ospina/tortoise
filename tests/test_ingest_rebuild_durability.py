@@ -47,7 +47,7 @@ def test_a10_operator_direction_label_survive_rebuild(a10):
     the pre-rebuild values for a LABELED AND a UNIDIRECTIONAL operator (the
     A10 replay-SET extension — previously the fixed SET list dropped them →
     direction=NULL + label=NULL)."""
-    db, events, sdk = a10
+    db, events, sdk = a10  # noqa: RUF059
     pa = sdk.create_point("statement", "A")["id"]
     pb = sdk.create_point("statement", "B")["id"]
     pc = sdk.create_point("statement", "C")["id"]
@@ -76,7 +76,7 @@ def test_a10_post_rebuild_resubmission_exactly_once(a10):
     builders dedup-hit their own run-1 operators (a duplicate = the exactly-once
     P1 class the cycle-17 clause correction closed, reopened by rebuild prop
     loss)."""
-    db, events, sdk = a10
+    db, events, sdk = a10  # noqa: RUF059
     bundle_l = {
         "points": [
             {"ref": "pA", "kind": "statement", "content": "A supports B"},
@@ -112,7 +112,7 @@ def test_a10_post_rebuild_ep_direction_semantics_preserved(a10):
     """E2E-6.4 (ii) cycle-23: a UNIDIRECTIONAL operator does not silently flip
     to bidirectional after rebuild — the direction the EP factor-extraction
     reads (ep.py coalesce(r.direction,'bidirectional')) is preserved."""
-    db, events, sdk = a10
+    db, events, sdk = a10  # noqa: RUF059
     pa = sdk.create_point("statement", "A")["id"]
     pb = sdk.create_point("statement", "B")["id"]
     op = sdk.create_operator("NAND", pa, [pb], direction="unidirectional")["id"]
@@ -132,7 +132,7 @@ def test_a10_content_kind_fallback_dedups_hash_less_sibling(a10):
     WITHOUT content_hash (the dedup key) — the content-hash MATCH misses, but
     the CONTENT+KIND FALLBACK SCAN (hash-less sibling detection) makes the
     retry dedup to EXACTLY ONE point (same id, never a permanent duplicate)."""
-    db, events, sdk = a10
+    db, events, sdk = a10  # noqa: RUF059
     g = sdk._get_proj().g
     # simulate the crash partial: a live hash-less Point (content + kind set)
     content = "crash-partial-content"
@@ -154,7 +154,7 @@ def test_a10_post_rebuild_fallback_dedups_unpatched_resubmission(a10):
     content_hash NULL — an UNPATCHED resubmission dedups via the fallback
     (exactly-once; the hash-less sibling exists post-rebuild is asserted
     FIRST, so a synthesis regression cannot pass the leg vacuously)."""
-    db, events, sdk = a10
+    db, events, sdk = a10  # noqa: RUF059
     g = sdk._get_proj().g
     content = "post-rebuild-partial"
     g.query(

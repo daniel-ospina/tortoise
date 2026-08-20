@@ -8,7 +8,7 @@ never hardcoded (plan E2E-1.1 behavioral-boundary discipline).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field  # noqa: F401
 from typing import Any, Protocol
 
 

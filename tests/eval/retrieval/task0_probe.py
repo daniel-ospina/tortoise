@@ -34,7 +34,7 @@ REPO_ROOT = str(Path(__file__).resolve().parent.parent.parent.parent)
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from benchmarks.synthetic_corpus import (  # noqa: E402
+from benchmarks.synthetic_corpus import (  # noqa: E402, I001
     build_topic_oracle,
     generate_oracle_points,
     oracle_grades_for_query,
@@ -42,7 +42,7 @@ from benchmarks.synthetic_corpus import (  # noqa: E402
     seed_operator_edges,
 )
 from tests.eval.retrieval.metrics import (  # noqa: E402
-    ndcg_at_k, precision_at_k, recall_at_k,
+    ndcg_at_k, precision_at_k, recall_at_k,  # noqa: F401
 )
 from tests.eval.retrieval.queries import load_oracle_queries  # noqa: E402
 
@@ -63,22 +63,22 @@ def _run_probe(args) -> dict:
     try:
         return _probe(sdk, args)
     finally:
-        try:
+        try:  # noqa: SIM105
             sdk.close()
         except Exception:
             pass
 
 
 def _probe(sdk, args) -> dict:
-    from tests.eval.retrieval.run import retrieve_per_strategy, _query_vecs
+    from tests.eval.retrieval.run import retrieve_per_strategy, _query_vecs  # noqa: I001
 
     proj = sdk._get_proj()
     is_embedded = getattr(proj, "_is_embedded", True)
 
     # Seed the SAME corpus as the committed baseline (seed 42).
     oracle = build_topic_oracle(args.seed)
-    points, topic_counts = generate_oracle_points(args.corpus_size, oracle, seed=args.seed)
-    seeded = seed_corpus(proj.g, points)
+    points, topic_counts = generate_oracle_points(args.corpus_size, oracle, seed=args.seed)  # noqa: RUF059
+    seeded = seed_corpus(proj.g, points)  # noqa: F841
     seed_operator_edges(proj.g, random.Random(args.seed), n_edges_per_op=200)
 
     live_ids_by_topic = {k: [] for k in oracle.core}
@@ -89,7 +89,7 @@ def _probe(sdk, args) -> dict:
 
     oracle_set = load_oracle_queries()
     queries = oracle_set["queries"]
-    vecs, use_model = _query_vecs(oracle, queries, args.seed)
+    vecs, use_model = _query_vecs(oracle, queries, args.seed)  # noqa: RUF059
     tfidf_points = []
 
     # Populate the tfidf snapshot like run.py does (point content only).

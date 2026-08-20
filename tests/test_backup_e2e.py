@@ -14,11 +14,11 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
+import pytest  # noqa: F401
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tortoise.backup import backup, restore
+from tortoise.backup import backup, restore  # noqa: I001
 from tortoise.log import EventLog
 from tortoise.projection import FalkorProjection
 

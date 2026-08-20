@@ -18,10 +18,10 @@ import unicodedata
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest
+import pytest  # noqa: I001
 
 from tortoise.canonical import (
-    canonical_bundle,
+    canonical_bundle,  # noqa: F401
     canonical_json,
     canonicalize,
     derive_batch_id,

@@ -5,7 +5,7 @@ Covers the DE2E-4 grounding snapshot contract (mean over ``confidence`` of
 live non-operator Points, #780 live-only semantics) and the DE2E-7 local
 ``calibration_passed()`` marker contract.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import pytest
 
@@ -79,7 +79,7 @@ def test_mean_grounding_snapshot_matches_mean(sdk):
     assert snap["mean"] == pytest.approx(0.6)
     assert snap["mean"] == pytest.approx(mean_grounding(proj))
     assert set(snap["points"]) == {a["id"], b["id"]}
-    assert "sampled_at" in snap and snap["sampled_at"]
+    assert "sampled_at" in snap and snap["sampled_at"]  # noqa: RUF019
 
 
 def test_mean_grounding_null_confidence_imputed_zero_five(sdk):
@@ -266,10 +266,10 @@ def test_record_calibration_enforces_gate_targets(sdk):
     marker. Measured metrics are REQUIRED (review round 2): a call with no
     precision/mean_grounding_delta (e.g. notes only) is refused too.
     Boundary values (0.70 / 0.02) still pass."""
-    with pytest.raises(ValueError, match="0.70"):
+    with pytest.raises(ValueError, match="0.70"):  # noqa: RUF043
         sdk.record_calibration(precision=0.50, sample_size=50,
                                mean_grounding_delta=0.01)
-    with pytest.raises(ValueError, match="0.02"):
+    with pytest.raises(ValueError, match="0.02"):  # noqa: RUF043
         sdk.record_calibration(precision=0.73, sample_size=50,
                                mean_grounding_delta=0.05)
     assert sdk.calibration_passed() is False  # refused writes leave no marker

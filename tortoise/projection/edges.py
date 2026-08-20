@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
 
 # Canonical structural-edge predicate vocabulary (ONTOLOGY §3.2/§3.3 + #391).

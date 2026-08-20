@@ -15,15 +15,15 @@ prod creds).
 """
 from __future__ import annotations
 
-import importlib.util
+import importlib.util  # noqa: F401
 import json
 import os
 import subprocess
 import sys
-import tempfile
+import tempfile  # noqa: F401
 from pathlib import Path
 
-import pytest
+import pytest  # noqa: F401
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = REPO_ROOT / ".github" / "scripts"
@@ -186,7 +186,7 @@ class TestVerifyCutoverScript:
 class TestDeleteRegistry:
     def test_plan_refuses_non_registry_graphs(self):
         """A registry set containing a team_* (knowledge) graph is refused."""
-        to_delete, absent, refused = delete_registry.plan_delete(
+        to_delete, absent, refused = delete_registry.plan_delete(  # noqa: RUF059
             all_graphs=["registry_control_plane", "team_team_x", "tortoise"],
             registry_set=frozenset({"registry_control_plane", "team_team_x"}),
         )
@@ -276,8 +276,8 @@ class TestWebhookSupabaseBranch:
     resolve + write via the seam (teams row)."""
 
     def test_team_id_for_stripe_customer_via_seam(self, monkeypatch):
-        from tortoise.supabase_control import (
-            SupabaseControlPlane, team_id_for_stripe_customer,
+        from tortoise.supabase_control import (  # noqa: I001
+            SupabaseControlPlane, team_id_for_stripe_customer,  # noqa: F401
         )
         from tests.fake_control_plane import FakeControlPlane
 
@@ -289,7 +289,7 @@ class TestWebhookSupabaseBranch:
         assert team_id_for_stripe_customer(fake, "cus_nope") is None
 
     def test_update_team_billing_writes_known_columns_only(self):
-        from tortoise.supabase_control import update_team_billing
+        from tortoise.supabase_control import update_team_billing  # noqa: I001
         from tests.fake_control_plane import FakeControlPlane
 
         fake = FakeControlPlane({"teams": [{"id": "team-1"}]})
@@ -317,9 +317,9 @@ class TestWebhookSupabaseBranch:
     def test_webhook_endpoint_supabase_mode_never_touches_registry(self, monkeypatch):
         """E2E-level: a verified webhook event in Supabase mode writes the
         teams row via the seam and NEVER calls _get_registry()."""
-        import importlib
+        import importlib  # noqa: F401, I001
         import tortoise.hosted_api as ha
-        from tortoise.billing import StripeClient
+        from tortoise.billing import StripeClient  # noqa: F401
         from tests.fake_control_plane import FakeControlPlane
 
         # Enable Supabase mode with a fake control plane.
@@ -342,7 +342,7 @@ class TestWebhookSupabaseBranch:
         monkeypatch.setattr(ha, "_make_sdk", _spy_make_sdk)
 
         # Signature-verified event: sign a real payload with the test secret.
-        import time as _time
+        import time as _time  # noqa: I001
         import hmac as _hmac
         import hashlib as _hashlib
         monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_test")
@@ -410,7 +410,7 @@ class TestWebhookSupabaseBranch:
         from fastapi.testclient import TestClient
 
         def _signed():
-            import time as _t, hmac as _h, hashlib as _hl
+            import time as _t, hmac as _h, hashlib as _hl  # noqa: E401, I001
             payload = {
                 "id": "evt_test_2",
                 "type": "customer.subscription.deleted",
@@ -441,7 +441,7 @@ class TestWebhookSupabaseBranch:
         """Re-review P1 (PR #878): apply_limits' Supabase branch must raise
         quota caps on upgrade — update_team_billing's whitelist carries the
         0006 quota columns."""
-        from tortoise.billing import apply_limits
+        from tortoise.billing import apply_limits  # noqa: I001
         from tests.fake_control_plane import FakeControlPlane
         import tortoise.supabase_control as sc
 

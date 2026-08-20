@@ -13,7 +13,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest
+import pytest  # noqa: I001
 from tortoise.sdk import TortoiseSDK, _coerce_props
 from tortoise.projection import _validate_uri_scheme, _SUPPORTED_URI_SCHEMES
 
@@ -220,7 +220,7 @@ class TestEntityPropsPersisted:
 
     def test_idempotent_create_object_id_resolves_via_get_entity(self, sdk):
         """#452: get_entity on second-returned id returns the node, not {}."""
-        first = sdk.create_object("Resolve Test", "widget", color="blue")
+        first = sdk.create_object("Resolve Test", "widget", color="blue")  # noqa: F841
         second = sdk.create_object("Resolve Test", "widget", color="red")
         fetched = sdk.get_entity(second["id"])
         assert fetched, f"get_entity({second['id']!r}) returned empty dict"
@@ -419,7 +419,7 @@ class TestNoConnectAtImport:
 
     def test_import_does_not_construct_tortoisesdk(self, monkeypatch):
         """Monkeypatch TortoiseSDK, import mcp_server fresh, assert no call."""
-        import importlib
+        import importlib  # noqa: F401, I001
         import tortoise.sdk
 
         called = False
@@ -438,7 +438,7 @@ class TestNoConnectAtImport:
         sys.modules.pop("tortoise.mcp_server", None)
 
         try:
-            import tortoise.mcp_server as fresh  # noqa: F811
+            import tortoise.mcp_server as fresh  # noqa: F401, F811, RUF100
             assert not called, (
                 "TortoiseSDK() must NOT be called at import time. "
                 "SDK construction is deferred to _get_sdk() on first use (#451)."

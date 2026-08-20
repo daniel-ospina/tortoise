@@ -1,12 +1,12 @@
 """Tests for tortoise_analyze."""
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
-import sys, os
+import sys, os  # noqa: E401
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from tortoise.analyze import classify, analyze, TEMPLATES, _format_chain
+from tortoise.analyze import classify, analyze, TEMPLATES, _format_chain  # noqa: I001
 
-from tests._embedded import wipe  # noqa: E402
+from tests._embedded import wipe  # noqa: E402, RUF100
 
 def test_classify_disagreement():
     result = classify("where is the disagreement?")
@@ -64,7 +64,7 @@ def test_classify_unknown():
 
 def test_all_templates_exist():
     assert len(TEMPLATES) == 8
-    for name, tmpl in TEMPLATES.items():
+    for name, tmpl in TEMPLATES.items():  # noqa: B007
         assert "cypher" in tmpl
         assert "triggers" in tmpl
         assert "format" in tmpl
@@ -255,7 +255,7 @@ def test_llm_classify_empty_key_treated_unset(monkeypatch):
 
 def test_llm_classify_provider_down_returns_none(monkeypatch):
     """Provider outage → graceful keyword fallback, no crash, no cross-provider call."""
-    from tortoise import analyze as _a
+    from tortoise import analyze as _a  # noqa: I001
     import urllib.request as _ur
     def boom(*a, **kw):
         raise _ur.URLError("provider down")

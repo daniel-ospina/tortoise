@@ -12,9 +12,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tools.ci_selection import (
-    load_manifest, select, integrity, slow_file_issues,
-    unlisted_tests, register_tests, register, classify_test_file,
+from tools.ci_selection import (  # noqa: I001
+    load_manifest, select, integrity, slow_file_issues,  # noqa: F401
+    unlisted_tests, register_tests, register, classify_test_file,  # noqa: F401
 )
 
 
@@ -320,7 +320,7 @@ def test_real_workflow_halves_are_consistent():
     # (space-joined matrix_* outputs) —
     # the #1266 discipline runs against the derivation. Verify the derived
     # halves carry every fast file exactly once and tilt is bounded.
-    from tools.ci_selection import (TESTS_DIR, push_legs,
+    from tools.ci_selection import (TESTS_DIR, push_legs,  # noqa: I001
                                     workflow_halves_issues)
     legs = push_legs(load_manifest())
     halves = {"a": set(legs["half_a"]), "b": set(legs["half_b"])}
@@ -331,12 +331,12 @@ def test_real_workflow_halves_are_consistent():
 
 def test_push_legs_partitions_every_classified_file():
     """#1472: every classified file lands in exactly one push leg."""
-    from tools.ci_selection import push_legs, ENV_BROKEN_FILES
+    from tools.ci_selection import push_legs, ENV_BROKEN_FILES  # noqa: I001
     m = load_manifest()
     legs = push_legs(m)
-    slow = {f.replace(".py", "") for f in m["slow_files"]}
+    slow = {f.replace(".py", "") for f in m["slow_files"]}  # noqa: F841
     classified = set()
-    for s, files in m["surfaces"].items():
+    for s, files in m["surfaces"].items():  # noqa: B007
         classified.update(files)
     classified.update(m["tier1"])
     classified.update(m["slow_files"])
@@ -351,7 +351,7 @@ def test_push_legs_partitions_every_classified_file():
 
 def test_integrity_no_matrix_drift():
     """#1472: integrity must pass with the derived matrix (no hardcoded lists)."""
-    from tools.ci_selection import leg_coverage_issues, workflow_matrix_issues, REPO
+    from tools.ci_selection import leg_coverage_issues, workflow_matrix_issues, REPO  # noqa: I001
     m = load_manifest()
     assert leg_coverage_issues(m) == []
     wf = REPO / ".github" / "workflows" / "python-ci.yml"
@@ -395,7 +395,7 @@ def test_split_default_weight_for_unmeasured():
 
 
 def test_split_rejects_non_list():
-    from tools.ci_selection import split_fast_gate
+    from tools.ci_selection import split_fast_gate  # noqa: I001
     import pytest as _pytest
     with _pytest.raises(ValueError):
         split_fast_gate("ALL", {})

@@ -87,7 +87,7 @@ def test_joint_one_graph_both_writers_share_source(tmp_path, sdk):
                          "s.sourceKind, s.version, s.id, s.title, "
                          "s._searchText",
                     {"u": url})[0]
-    content_hash, kind, version, sid, title, search_text = before
+    content_hash, kind, version, sid, title, search_text = before  # noqa: RUF059
     assert content_hash and kind == "agentSession" and version == 1
     assert title and search_text, "the index path sets title/_searchText"
     # the index path's references edge (Source → AgentSession Event)
@@ -139,7 +139,7 @@ def test_joint_sweep_zero_point_mutation(tmp_path, sdk):
     are IDENTICAL before and after (the sweep touches only Sources/Events)."""
     c = _corpus(tmp_path)
     # ingest a bundle with points + a plain IMPL direct edge
-    res = sdk.ingest({
+    res = sdk.ingest({  # noqa: F841
         "points": [
             {"ref": "p1", "kind": "statement", "content": "A implies B."},
             {"ref": "p2", "kind": "statement", "content": "B."},
@@ -148,7 +148,7 @@ def test_joint_sweep_zero_point_mutation(tmp_path, sdk):
         "connections": [{"ref": "c1", "from": "p1", "to": "p2",
                          "operator": "IMPL"}],
     })
-    g = sdk._get_proj().g
+    g = sdk._get_proj().g  # noqa: F841
     points_before = _count(sdk, "MATCH (n:Point) RETURN count(n)")
     edges_before = _count(sdk, "MATCH ()-[r:IMPL|NAND]->() RETURN count(r)")
     ops_before = _count(sdk, "MATCH (o:Point {is_operator:true}) "
@@ -216,7 +216,7 @@ def test_joint_stub_source_exception_class(tmp_path, sdk):
                   {"u": corpus_url})[0][0] == ""
     # the sweep COMPLETES the stub (option 2 — the conditional merge writes
     # the real hash when the stored one differs/NULL)
-    r = sdk.index_directory(str(c), extract_metadata=False)
+    r = sdk.index_directory(str(c), extract_metadata=False)  # noqa: F841
     completed = _query(sdk, "MATCH (s:Source {url:$u}) RETURN s.contentHash",
                        {"u": corpus_url})[0][0]
     assert completed and completed != "", \

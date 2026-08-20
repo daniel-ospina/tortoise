@@ -8,7 +8,7 @@ Tier-3 verdict (spec §R2) and reported via decide_cycles.
 """
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any, Callable  # noqa: F401, UP035
 
 from battery.probes.base import ProbeResult
 

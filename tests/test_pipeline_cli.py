@@ -9,9 +9,9 @@ from __future__ import annotations
 import os
 import sys
 import types
-from unittest import mock
+from unittest import mock  # noqa: F401
 
-import pytest
+import pytest  # noqa: F401
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 

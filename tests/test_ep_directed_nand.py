@@ -13,7 +13,7 @@ The symmetric phi_nand potential was measured to behave as an "agreement
 coupling" in some configurations (a strong attacker could RAISE a target);
 directed attacks opt out of that coupling.
 """
-import pytest
+import pytest  # noqa: I001
 
 from tortoise.sdk import TortoiseSDK
 from tortoise.ep import TortoiseEP

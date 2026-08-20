@@ -1,7 +1,7 @@
 """Session continuity — vibecoder wedge prototype.
 Auto-capture findings during a session, auto-retrieve on next session start.
 Zero config. The agent IS the interface."""
-from tortoise.sdk import TortoiseSDK
+from tortoise.sdk import TortoiseSDK  # noqa: I001
 from tortoise.exceptions import CalibrationError
 from datetime import datetime
 
@@ -76,7 +76,7 @@ class SessionContinuity:
 # Demo script
 if __name__ == "__main__":
     # Demo — requires TORTOISE_DB_URI or pass db_path explicitly
-    import os, sys
+    import os, sys  # noqa: E401, F401, I001
     from tortoise.config import resolve_db_path, is_db_uri
     _uri = os.environ.get("TORTOISE_DB_URI", "")
     if is_db_uri(_uri):

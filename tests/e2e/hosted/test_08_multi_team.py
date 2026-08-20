@@ -9,7 +9,7 @@ cross-team key revocation 403s).
 Negatives: non-owner member management → 403; foreign-team key revoke → 403;
 duplicate invite → 409; garbage invite token → 400.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import uuid
 
@@ -29,7 +29,7 @@ def _create_team(api, jwt_headers, name_suffix):
 
 def test_multi_team_ownership_and_listing(api, session_jwt):
     """One session user creates two teams; GET /v1/teams lists both."""
-    user_id, tok = session_jwt()
+    user_id, tok = session_jwt()  # noqa: RUF059
     h = {"Authorization": f"Bearer {tok}"}
     t1 = _create_team(api, h, "alpha")
     t2 = _create_team(api, h, "beta")
@@ -75,7 +75,7 @@ def test_invite_accept_flow_with_rbac(api, session_jwt):
 
 
 def test_duplicate_invite_409_and_bad_token_400(api, session_jwt):
-    owner_id, owner_tok = session_jwt()
+    owner_id, owner_tok = session_jwt()  # noqa: RUF059
     ho = {"Authorization": f"Bearer {owner_tok}"}
     team = _create_team(api, ho, "dupinvite")
     team_id = team.get("id") or team.get("team_id")

@@ -3,7 +3,7 @@
 #7395: Auth-gated — requires Bearer token when TORTOISE_API_KEY is set.
 Binds 127.0.0.1 by default (not 0.0.0.0).
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import time
 import json
@@ -78,7 +78,7 @@ def probe_db(sdk) -> dict:
         ok, error = True, None
     except concurrent.futures.TimeoutError:
         ok, error = False, f"probe timeout after {PROBE_TIMEOUT}s"
-    except Exception as e:  # noqa: BLE001 — probe reports, never raises
+    except Exception as e:  # noqa: BLE001, RUF100
         ok, error = False, str(e)[:200]
     finally:
         # wait=False: the worker thread may still be blocked on a dead
@@ -130,7 +130,7 @@ def metrics() -> dict:
 class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         # Auth gate (#7395): require valid Bearer token in prod mode
-        from tortoise.auth import require_auth, is_dev_mode  # lazy — #67
+        from tortoise.auth import require_auth, is_dev_mode  # lazy — #67  # noqa: I001
         if not is_dev_mode():
             headers = {k.lower(): v for k, v in self.headers.items()}
             if not require_auth(headers):

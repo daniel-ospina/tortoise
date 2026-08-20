@@ -23,13 +23,13 @@ Design notes (from the scoping doc):
 - aboutObject / PRODUCES edges may be absent on older graphs; the queries
   are OPTIONAL MATCH so the boost degrades to 0.4·confidence gracefully.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import logging
 import math
 from datetime import datetime, timezone
 
-from .search_engine import _beta_variance, CONTESTED_VARIANCE_THRESHOLD  # noqa: E402
+from .search_engine import _beta_variance, CONTESTED_VARIANCE_THRESHOLD  # noqa: E402, RUF100
 
 logger = logging.getLogger(__name__)
 
@@ -69,10 +69,10 @@ def _parse_iso(value) -> datetime | None:
         return None
     if isinstance(value, datetime):
         dt = value
-        return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+        return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)  # noqa: UP017
     try:
         dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+        return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)  # noqa: UP017
     except (ValueError, TypeError):
         return None
 
@@ -141,7 +141,7 @@ class GraphRanker:
 
         norm_sims = _min_max_normalize(similarities)
         annotated: list[dict] = []
-        for r, norm_sim in zip(results, norm_sims):
+        for r, norm_sim in zip(results, norm_sims):  # noqa: B905
             sig = signals.get(r.get("id"), {})
             graph_boost = self.graph_boost(r, sig)
             recency = self.recency_boost(r, sig)
@@ -207,7 +207,7 @@ class GraphRanker:
         dt = _parse_iso(ts)
         if dt is None:
             return 1.0  # unknown age — neutral, no demotion
-        age_days = max(0.0, (datetime.now(timezone.utc) - dt).total_seconds() / 86400.0)
+        age_days = max(0.0, (datetime.now(timezone.utc) - dt).total_seconds() / 86400.0)  # noqa: UP017
         return round(recency_decay(age_days, self.recency_half_life_days), 4)
 
     # ── Graph queries ─────────────────────────────────────────────────────
@@ -407,7 +407,7 @@ class StateRanker:
 
         # 2. confidence + centrality per result (graph signal or embedded).
         ann: list[dict] = []
-        for r, norm_r in zip(results, norm_rel):
+        for r, norm_r in zip(results, norm_rel):  # noqa: B905
             sig = signals.get(r.get("id"), {})
             confidence, source = self._confidence_of(r, sig)
             degree = int(sig.get("degree", 0))
@@ -436,7 +436,7 @@ class StateRanker:
             norm_deg = _min_max_normalize(degrees)
         else:
             norm_deg = [0.0] * len(degrees)
-        for a, nd in zip(ann, norm_deg):
+        for a, nd in zip(ann, norm_deg):  # noqa: B905
             a["recall_ranking"]["centrality_norm"] = round(nd, 6)
             base = a["recall_ranking"]["base_score"]
             a["recall_ranking"]["final_score"] = round(

@@ -285,7 +285,7 @@ class TestEmailSignupClaim:
 
     @pytest.fixture(autouse=True)
     def _supabase_claim_env(self, monkeypatch):
-        from tests.fake_control_plane import FakeControlPlane
+        from tests.fake_control_plane import FakeControlPlane  # noqa: I001
         import tortoise.supabase_control as sc
         import tortoise.hosted_api as ha_mod
 
@@ -305,7 +305,7 @@ class TestEmailSignupClaim:
     def test_reg_claim_email_overwrite_a_to_b(self, client, monkeypatch):
         """reg- claim email overwrite A→B: stored reg email replaced by the
         verified OAuth email inside the claim txn."""
-        import uuid as _uuid
+        import uuid as _uuid  # noqa: I001
         from tortoise.auth import lookup_hash as _lh, hash_api_key as _hash
         import tortoise.supabase_control as sc
         fake = sc.get_control_plane()

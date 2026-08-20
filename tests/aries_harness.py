@@ -15,12 +15,12 @@ Metrics per variant:
 
 Usage: .venv/bin/python tests/aries_harness.py [--variant V0] [--dry-run]
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
-import csv, json, os, random, re, sys, time, urllib.request
+import csv, json, os, random, re, sys, time, urllib.request  # noqa: E401, F401
 from collections import defaultdict
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass  # noqa: F401
+from typing import Optional  # noqa: F401
 
 DATA = "/tmp/aries-benchmark/data/data_full.csv"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -163,7 +163,7 @@ def call_openrouter(system: str, user: str, model: str = MODEL,
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 data = json.loads(r.read())
             return data["choices"][0]["message"]["content"]
-        except Exception as e:
+        except Exception as e:  # noqa: F841
             if attempt < max_retries:
                 time.sleep(2 ** attempt)
             else:
@@ -249,7 +249,7 @@ def run_variant(variant_name: str, system_prompt: str,
     items = list(text_groups.items())
 
     def process_one(item):
-        text_key, aries_pairs = item
+        text_key, aries_pairs = item  # noqa: RUF059
         full_text = aries_pairs[0]["argument"]
         clean_text = full_text.replace(" '[SEP]' ", "\n")
         if dry_run:

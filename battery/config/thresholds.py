@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any  # noqa: F401
 
 import yaml
 
@@ -47,7 +47,7 @@ def load_thresholds(path: str | Path) -> ThresholdsConfig:
     try:
         epsilon = float(epsilon)
     except (TypeError, ValueError):
-        raise ConfigError(
+        raise ConfigError(  # noqa: B904
             "thresholds: determinism.epsilon must be a non-negative number")
     if epsilon < 0:
         raise ConfigError("thresholds: determinism.epsilon must be non-negative")

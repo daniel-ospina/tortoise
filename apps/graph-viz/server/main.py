@@ -10,9 +10,9 @@ To switch graphs, set env vars:
   FALKORDB_HOST, FALKORDB_PORT, FALKORDB_USERNAME, FALKORDB_PASSWORD,
   FALKORDB_SSL (1 for rediss-style TLS), FALKORDB_GRAPH
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
-import random, math, zlib, sys
+import random, math, zlib, sys  # noqa: E401, F401
 from collections import Counter
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -47,7 +47,7 @@ CONTEXT_DEFAULT = "product-strategy"
 kwargs = build_connection_kwargs()
 DB_HOST = kwargs["host"]
 DB_PORT = kwargs["port"]
-import time
+import time  # noqa: E402, I001
 for attempt in range(1, 31):  # retry for ~30s
     try:
         _db = FalkorDB(**kwargs)
@@ -57,9 +57,9 @@ for attempt in range(1, 31):  # retry for ~30s
         break
     except Exception as e:
         if attempt == 30:
-            print(f"❌ FalkorDB unreachable after 30s. Is it running? docker compose up -d", flush=True)
+            print(f"❌ FalkorDB unreachable after 30s. Is it running? docker compose up -d", flush=True)  # noqa: F541
             print(f"   Trying {DB_HOST}:{DB_PORT} — {e}", flush=True)
-            import sys; sys.exit(1)
+            import sys; sys.exit(1)  # noqa: E702, I001
         print(f"Waiting for FalkorDB ({DB_HOST}:{DB_PORT})... attempt {attempt}/30", flush=True)
         time.sleep(1)
 
@@ -78,11 +78,11 @@ def _build_cache():
 
     try:
         _total_nodes = _g.query("MATCH (n:Point) RETURN count(n)").result_set[0][0]
-    except:
+    except:  # noqa: E722
         _total_nodes = 0
     try:
         _total_edges = _g.query("MATCH ()-[r:RELATION]->() RETURN count(r)").result_set[0][0]
-    except:
+    except:  # noqa: E722
         _total_edges = 0
 
     # Compute global degree centrality
@@ -94,7 +94,7 @@ def _build_cache():
         ).result_set
         for row in results:
             degree[row[0]] = row[1]
-    except:
+    except:  # noqa: E722
         pass
 
     if degree:
@@ -110,7 +110,7 @@ def _build_cache():
             "MATCH (a:Point)-[r:RELATION {type:'NAND'}]->(b:Point) RETURN a.id, b.id LIMIT 2000"
         ).result_set
         _global_mit_count = max(5, len(nand_raw) // 15)
-    except:
+    except:  # noqa: E722
         _global_mit_count = 0
 
     _cache_built = True
@@ -137,7 +137,7 @@ def _query_graph(limit=200, only_ids=None):
     else:
         try:
             nodes_raw = _g.query(
-                "MATCH (n:Point) OPTIONAL MATCH (n)-[r:RELATION]-() "
+                "MATCH (n:Point) OPTIONAL MATCH (n)-[r:RELATION]-() "  # noqa: UP031
                 "RETURN n.id, n.content, n.context, count(r) as deg ORDER BY deg DESC LIMIT %d" % limit
             ).result_set
             top_ids = [r[0] for r in nodes_raw]
@@ -214,7 +214,7 @@ def get_neighborhood(node_id: str, depth: int = 1):
             neighbors = _g.query(
                 f"MATCH (a:Point)-[r:RELATION]-(b:Point) WHERE a.id IN [{ids_str}] RETURN DISTINCT b.id"
             ).result_set
-        except:
+        except:  # noqa: E722
             neighbors = []
         new_ids = {r[0] for r in neighbors} - visited
         visited |= new_ids
@@ -231,9 +231,9 @@ def get_neighborhood(node_id: str, depth: int = 1):
 def search_nodes(q: str, limit: int = 20):
     try:
         results = _g.query(
-            "MATCH (n:Point) WHERE n.content CONTAINS '%s' RETURN n.id, n.content LIMIT %d" % (q.replace("'", "\\'"), limit)
+            "MATCH (n:Point) WHERE n.content CONTAINS '%s' RETURN n.id, n.content LIMIT %d" % (q.replace("'", "\\'"), limit)  # noqa: UP031
         ).result_set
-    except:
+    except:  # noqa: E722
         results = []
     return {"results": [{"id": r[0], "content": (r[1] or "")[:200]} for r in results]}
 
@@ -244,7 +244,7 @@ def add_point(body: PointCreate):
     pid = f"user-{uuid.uuid4().hex[:12]}"
     c = body.content.replace("'", "\\'")[:500]
     ctx = (body.context or "").replace("'", "\\'")[:200]
-    _g.query("CREATE (:Point {id:'%s', content:'%s', context:'%s'})" % (pid, c, ctx))
+    _g.query("CREATE (:Point {id:'%s', content:'%s', context:'%s'})" % (pid, c, ctx))  # noqa: UP031
     global _total_nodes
     _total_nodes += 1
     return {"id": pid}
@@ -253,7 +253,7 @@ def add_point(body: PointCreate):
 @app.delete("/api/points/{point_id}")
 def delete_point(point_id: str):
     if point_id.startswith("user-"):
-        _g.query("MATCH (n:Point {id:'%s'}) DETACH DELETE n" % point_id)
+        _g.query("MATCH (n:Point {id:'%s'}) DETACH DELETE n" % point_id)  # noqa: UP031
         global _total_nodes
         _total_nodes -= 1
         return {"deleted": point_id}
@@ -264,7 +264,7 @@ def delete_point(point_id: str):
 def add_edge(body: EdgeCreate):
     import uuid
     eid = f"user-edge-{uuid.uuid4().hex[:12]}"
-    q = "MATCH (a:Point {id:'%s'}), (b:Point {id:'%s'}) CREATE (a)-[:RELATION {type:'%s', id:'%s'}]->(b)" % (
+    q = "MATCH (a:Point {id:'%s'}), (b:Point {id:'%s'}) CREATE (a)-[:RELATION {type:'%s', id:'%s'}]->(b)" % (  # noqa: UP031
         body.source, body.target, body.type, eid)
     _g.query(q)
     global _total_edges
@@ -275,7 +275,7 @@ def add_edge(body: EdgeCreate):
 @app.delete("/api/edges/{edge_id}")
 def delete_edge(edge_id: str):
     if edge_id.startswith("user-edge-"):
-        _g.query("MATCH ()-[r:RELATION {id:'%s'}]->() DELETE r" % edge_id)
+        _g.query("MATCH ()-[r:RELATION {id:'%s'}]->() DELETE r" % edge_id)  # noqa: UP031
         global _total_edges
         _total_edges -= 1
         return {"deleted": edge_id}
@@ -286,7 +286,7 @@ def delete_edge(edge_id: str):
 def get_sources():
     try:
         raw = _g.query("MATCH (n:Point) WHERE n.context IS NOT NULL RETURN n.context, count(*) ORDER BY count(*) DESC LIMIT 50").result_set
-    except:
+    except:  # noqa: E722
         raw = []
     return {"sources": [{"name": (r[0] or "")[:80], "count": r[1], "enabled": True} for r in raw]}
 
@@ -409,7 +409,7 @@ def get_ontology_types(context: str = "all"):
 
     return {
         "context": context,
-        "contexts": ["core"] + _PACK_CONTEXTS + ["tenant"],
+        "contexts": ["core"] + _PACK_CONTEXTS + ["tenant"],  # noqa: RUF005
         "types": types,
         "total": len(types),
     }
@@ -459,8 +459,8 @@ def health():
 # after a new user signs up via OAuth or email/password.
 # Authenticated via Supabase service role key.
 
-import sys as _sys
-from pathlib import Path as _Path
+import sys as _sys  # noqa: E402, I001
+from pathlib import Path as _Path  # noqa: E402
 _TORTOISE_ROOT = _Path(__file__).resolve().parent.parent.parent.parent
 if str(_TORTOISE_ROOT) not in _sys.path:
     _sys.path.insert(0, str(_TORTOISE_ROOT))
@@ -528,7 +528,7 @@ def provision_tenant(body: ProvisionRequest, authorization: str | None = None):
     if not SUPABASE_SERVICE_ROLE_KEY:
         raise HTTPException(500, "SUPABASE_SERVICE_ROLE_KEY not configured")
     auth_header = authorization or ""
-    if auth_header.startswith("Bearer "):
+    if auth_header.startswith("Bearer "):  # noqa: SIM108
         token = auth_header[7:]
     else:
         token = ""
@@ -554,10 +554,10 @@ def provision_tenant(body: ProvisionRequest, authorization: str | None = None):
             graph_name=result["graph_name"],
         )
     except ValueError as e:
-        raise HTTPException(409, str(e))
+        raise HTTPException(409, str(e))  # noqa: B904
     except Exception as e:
         print(f"Provisioning failed for {team_name}: {e}", flush=True)
-        raise HTTPException(500, f"Provisioning failed: {e}")
+        raise HTTPException(500, f"Provisioning failed: {e}")  # noqa: B904
 
 
 static_dir = _Path(__file__).resolve().parent.parent / "dist"

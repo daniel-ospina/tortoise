@@ -8,11 +8,11 @@ UI) are separate (test-e2e skill) — this file is the CI-green contract core.
 from __future__ import annotations
 
 import os
-import tempfile
+import tempfile  # noqa: F401
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
-import pytest
+import pytest  # noqa: I001
 
 from tortoise.sdk import TortoiseSDK
 from tortoise.pricing import tier_limits
@@ -43,9 +43,9 @@ class TestE2E1SignupProvision:
         u = provision_test_user()
         # The team_create key's hash is stored in the registry (verifiable)
         from tortoise.auth import hash_api_key
-        h = hash_api_key(u["api_key"])
+        h = hash_api_key(u["api_key"])  # noqa: F841
         # Registry has APIKey nodes for the team; hash format matches (salt:digest)
-        rows = u["sdk"]._get_registry().query(
+        rows = u["sdk"]._get_registry().query(  # noqa: F841
             "MATCH (k:APIKey {team_id:$tid}) RETURN k.key_hash",
             params={"tid": u["team_id"]},
         ).result_set
@@ -78,7 +78,7 @@ class TestE2E3KeyRecovery:
 
     def test_recovery_key_persistent_not_24h(self, provision_test_user):
         u = provision_test_user()
-        rows = u["sdk"]._get_registry().query(
+        rows = u["sdk"]._get_registry().query(  # noqa: F841
             "MATCH (k:APIKey {team_id:$tid, created_via:'recovery'}) RETURN k.expires_at",
             params={"tid": u["team_id"]},
         ).result_set
@@ -108,7 +108,7 @@ class TestE2E10Decoupling:
 
     def test_user_memberships_two_teams(self):
         # One SDK, two teams — the same user is a member of both (M:N)
-        import tempfile, os as _os
+        import tempfile, os as _os  # noqa: E401, F811, I001
         tmpdir = tempfile.mkdtemp()
         sdk = TortoiseSDK(_os.path.join(tmpdir, "e2e.db"), namespace="e2e-decouple")
         team_a = sdk.team_create("team-a")
@@ -127,17 +127,17 @@ class TestE2E11TierLimits:
     """E2E-11: team↔graph 1:N with tier limits."""
 
     def test_free_capped_at_one_graph(self, provision_test_user):
-        u = provision_test_user(tier="free", demo_seed=False)
+        u = provision_test_user(tier="free", demo_seed=False)  # noqa: F841
         lim = tier_limits("free")
         assert lim["max_graphs_per_team"] == 1
 
     def test_solo_capped_at_two(self, provision_test_user):
-        u = provision_test_user(tier="solo", demo_seed=False)
+        u = provision_test_user(tier="solo", demo_seed=False)  # noqa: F841
         lim = tier_limits("solo")
         assert lim["max_graphs_per_team"] == 2
 
     def test_pro_unlimited(self, provision_test_user):
-        u = provision_test_user(tier="pro", demo_seed=False)
+        u = provision_test_user(tier="pro", demo_seed=False)  # noqa: F841
         lim = tier_limits("pro")
         assert lim["max_graphs_per_team"] is None
 

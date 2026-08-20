@@ -192,7 +192,7 @@ def render_md(run: dict, steps: dict, files: dict, counts: dict, killed: bool,
     # back-to-back subprocess invocations in the determinism test otherwise
     # straddle a second boundary and flake).
     now = (os.environ.get("CI_TIMING_NOW")
-           or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+           or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))  # noqa: UP017
     lines = [FRONT_MATTER,
              "# CI Timing Measurement Artifact",
              "",
@@ -206,7 +206,7 @@ def render_md(run: dict, steps: dict, files: dict, counts: dict, killed: bool,
              f"- created_at: `{run.get('created_at') or '-'}`",
              f"- conclusion: `{run.get('conclusion') or '-'}`",
              f"- sample_time: `{now}`",
-             f"- selection: latest completed `event=push&branch=main` run, `exclude_pull_requests=true`, cancelled skipped",
+             f"- selection: latest completed `event=push&branch=main` run, `exclude_pull_requests=true`, cancelled skipped",  # noqa: F541
              f"- schema_version: `{SCHEMA_VERSION}`",
              "",
              "## Step timings (Jobs API — real run)",
@@ -320,7 +320,7 @@ def main() -> int:
                             "counts": parsed["counts"]})
 
     now = (os.environ.get("CI_TIMING_NOW")
-           or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+           or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))  # noqa: UP017
     row = {
         "sample_time": now,
         "run_id": run_id or None,
@@ -335,7 +335,7 @@ def main() -> int:
         "steps_max_job_ms": max((sum(s["duration_ms"] for s in job) for job in steps.values()), default=0),
         "failed_tests": sorted(failed_tests),
     }
-    history = [row] + load_history(json_path)
+    history = [row] + load_history(json_path)  # noqa: RUF005
     history = history[: args.max_history]
 
     flakes = candidate_flakes(history)

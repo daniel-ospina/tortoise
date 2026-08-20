@@ -19,7 +19,7 @@ per-commit adjudication state + billing; Session counters carry the budget
 numerator (value_nodes_held lives on the Session, NOT on the record — no
 held_point_ids[] on :CommitRecord).
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import time
 from typing import Any

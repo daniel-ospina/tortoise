@@ -1,4 +1,4 @@
-from typing import Protocol, runtime_checkable, Any
+from typing import Protocol, runtime_checkable, Any  # noqa: I001
 
 
 @runtime_checkable

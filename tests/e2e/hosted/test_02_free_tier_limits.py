@@ -7,14 +7,14 @@ e2e_small node cap (max_graph_nodes=8) both fail closed with 402.
 
 Negatives: 3rd API key → 402; point writes past the e2e_small cap → 402.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import json
 import uuid
 
 import pytest
 
-from conftest import (PRICE_IDS, PRICING_FIXTURE, bump_team_tier,
+from conftest import (PRICE_IDS, PRICING_FIXTURE, bump_team_tier,  # noqa: F401
                       is_remote_mode, skip_unless_hosted_e2e)
 
 skip_unless_hosted_e2e()

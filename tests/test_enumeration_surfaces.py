@@ -108,7 +108,7 @@ class TestListPointKinds:
 
         result = sdk.list_pointkinds()
         # Only "statement" should appear (2 points), not the operator
-        by_kind = {r["kind"]: r for r in result}
+        by_kind = {r["kind"]: r for r in result}  # noqa: F841
         # The operator's pointKind is typically "statement" (default for operators)
         # but it's excluded by the is_operator=false filter. So we should see
         # "statement" with count 3 (2 real points + 1 operator with "statement" kind)
@@ -342,7 +342,7 @@ class TestMCPWrappers:
 
     def test_tortoise_list_namespaces_shape(self, sdk):
         """MCP tool function returns correct shape."""
-        from tortoise.mcp_server import tortoise_list_namespaces
+        from tortoise.mcp_server import tortoise_list_namespaces  # noqa: I001
 
         import tortoise.mcp_server as mcp_mod
         orig_sdk = mcp_mod.sdk

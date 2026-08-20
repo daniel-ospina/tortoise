@@ -37,7 +37,7 @@ def sdk():
 @pytest.fixture(autouse=True)
 def _transport_context():
     """MCP tools require an initialized transport mode (#236 auth gate)."""
-    from tortoise.mcp_auth import (
+    from tortoise.mcp_auth import (  # noqa: I001
         _current_team_id, _current_team_limits, _transport_mode,
     )
     _transport_mode.set("stdio")
@@ -93,7 +93,7 @@ def _seed_graph(sdk: TortoiseSDK) -> dict:
 
 class TestOverviewSections:
     def test_section_taxonomy_matches_legacy(self, sdk, mcp_sdk):
-        from tortoise.mcp_server import (
+        from tortoise.mcp_server import (  # noqa: I001
             tortoise_overview, tortoise_taxonomy,
         )
         _seed_graph(sdk)
@@ -101,7 +101,7 @@ class TestOverviewSections:
         assert isinstance(tortoise_overview(section="taxonomy"), dict)
 
     def test_section_structure_matches_legacy(self, sdk, mcp_sdk):
-        from tortoise.mcp_server import (
+        from tortoise.mcp_server import (  # noqa: I001
             tortoise_overview, tortoise_summarize_structure,
         )
         _seed_graph(sdk)
@@ -110,7 +110,7 @@ class TestOverviewSections:
         assert set(result) >= {"gate0_jtbds", "gate1_use_cases", "total"}
 
     def test_section_structure_check_matches_legacy(self, sdk, mcp_sdk):
-        from tortoise.mcp_server import (
+        from tortoise.mcp_server import (  # noqa: I001
             tortoise_check_structure, tortoise_overview,
         )
         _seed_graph(sdk)
@@ -118,7 +118,7 @@ class TestOverviewSections:
         assert isinstance(tortoise_overview(section="structure_check"), list)
 
     def test_section_pointkinds_matches_legacy(self, sdk, mcp_sdk):
-        from tortoise.mcp_server import (
+        from tortoise.mcp_server import (  # noqa: I001
             tortoise_list_pointkinds, tortoise_overview,
         )
         _seed_graph(sdk)
@@ -144,7 +144,7 @@ class TestOverviewSections:
         assert "https://w3.example.com/doc" in urls
 
     def test_section_namespaces_matches_legacy(self, sdk, mcp_sdk):
-        from tortoise.mcp_server import (
+        from tortoise.mcp_server import (  # noqa: I001
             tortoise_list_namespaces, tortoise_overview,
         )
         result = tortoise_overview(section="namespaces")
@@ -361,7 +361,7 @@ class TestGet:
 
 class TestLegacyAliases:
     def test_list_zoo_still_works(self, sdk, mcp_sdk):
-        from tortoise.mcp_server import (
+        from tortoise.mcp_server import (  # noqa: I001
             tortoise_list_graphs, tortoise_list_namespaces, tortoise_list_pointkinds,
             tortoise_list_sources, tortoise_list_tags, tortoise_list_topics,
         )
@@ -374,7 +374,7 @@ class TestLegacyAliases:
         assert isinstance(tortoise_list_topics(seed["p1"]["id"]), dict)
 
     def test_status_health_taxonomy_still_work(self, sdk, mcp_sdk):
-        from tortoise.mcp_server import (
+        from tortoise.mcp_server import (  # noqa: I001
             tortoise_health, tortoise_status, tortoise_taxonomy,
         )
         assert isinstance(tortoise_status(), dict)
@@ -382,7 +382,7 @@ class TestLegacyAliases:
         assert isinstance(tortoise_taxonomy(), dict)
 
     def test_structure_tools_still_work(self, sdk, mcp_sdk):
-        from tortoise.mcp_server import (
+        from tortoise.mcp_server import (  # noqa: I001
             tortoise_check_structure, tortoise_stale, tortoise_summarize_structure,
         )
         _seed_graph(sdk)
@@ -391,7 +391,7 @@ class TestLegacyAliases:
         assert isinstance(tortoise_stale(), dict)
 
     def test_get_zoo_still_works(self, sdk, mcp_sdk):
-        from tortoise.mcp_server import (
+        from tortoise.mcp_server import (  # noqa: I001
             tortoise_get_entity, tortoise_get_events, tortoise_get_governance,
             tortoise_get_operator, tortoise_get_point, tortoise_get_session,
         )

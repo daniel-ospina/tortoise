@@ -3,8 +3,8 @@
 Tests that isolated points (0 edges) get has_ep=False + confidence_mean=0.5,
 while points with NAND edges get has_ep=True + confidence_mean < 0.5.
 """
-import os
-import sys
+import os  # noqa: F401, I001
+import sys  # noqa: F401
 
 import pytest
 from tortoise.sdk import TortoiseSDK

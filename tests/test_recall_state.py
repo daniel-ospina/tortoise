@@ -24,11 +24,11 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.ranking import (  # noqa: E402
+from tortoise.ranking import (  # noqa: E402, I001, RUF100
     StateRanker, NEUTRAL_CONFIDENCE,
-    DEFAULT_RELEVANCE_EXP, DEFAULT_CONFIDENCE_EXP, DEFAULT_CENTRALITY_WEIGHT,
+    DEFAULT_RELEVANCE_EXP, DEFAULT_CONFIDENCE_EXP, DEFAULT_CENTRALITY_WEIGHT,  # noqa: F401
 )
-from tortoise.sdk import TortoiseSDK  # noqa: E402
+from tortoise.sdk import TortoiseSDK  # noqa: E402, RUF100
 
 
 # ── Unit: StateRanker math (no DB) ─────────────────────────────────────────
@@ -183,7 +183,7 @@ def _use_shared_embedded_db(shared_embedded_db):
 def _fresh_sdk():
     db_path = os.path.join(tempfile.mkdtemp(prefix="tortoise_recall_state_"), "test.db")
     sdk = TortoiseSDK(db_path)
-    try:
+    try:  # noqa: SIM105
         sdk._get_proj().g.query("MATCH (n) DETACH DELETE n")
     except Exception:
         pass
@@ -488,7 +488,7 @@ def test_recall_state_default_rrf_and_graph_paths_untouched():
 @pytest.fixture(autouse=True)
 def _transport_context():
     """MCP tools require an initialized transport mode (#236 auth gate)."""
-    from tortoise.mcp_auth import (
+    from tortoise.mcp_auth import (  # noqa: I001
         _current_team_id, _current_team_limits, _transport_mode,
     )
     _transport_mode.set("stdio")

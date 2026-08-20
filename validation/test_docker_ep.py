@@ -1,8 +1,8 @@
 """End-to-end: EP on Docker FalkorDB personal instance (port 16379)."""
-import sys, os
+import sys, os  # noqa: E401, I001
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from tortoise.projection import FalkorProjection
+from tortoise.projection import FalkorProjection  # noqa: I001
 from tortoise.ep import TortoiseEP
 
 
@@ -76,7 +76,7 @@ def test_docker_ep_vs_bfs():
         ep.run(op_ids, max_hops=3)
 
         # Compare
-        print(f"  Comparing EP vs BFS confidence:")
+        print(f"  Comparing EP vs BFS confidence:")  # noqa: F541
         for cid, bfs_conf in bfs_confs.items():
             ep_conf = ep.compute_confidence(cid)
             print(f"    {cid}: BFS={bfs_conf:.4f} → EP={ep_conf['mean']:.4f} "

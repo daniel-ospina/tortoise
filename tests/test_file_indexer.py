@@ -9,10 +9,10 @@ date normalization, CRLF-immunity; the S6 sourceKind registry surface
 the S3 import-flip alias regression net (``_FM_RE`` / ``compute_file_hash``
 back-compat aliases in session_indexer/ingest — zero behavior change).
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
-import os
-from pathlib import Path
+import os  # noqa: F401
+from pathlib import Path  # noqa: F401
 
 import pytest
 
@@ -170,7 +170,7 @@ class TestHash:
         # this even though pure-ASCII fixtures can't discriminate (the #330
         # hash-stale divergence class).
         p = tmp_path / "non-ascii.md"
-        p.write_bytes("t\xedtulo\r\nl\xednea 2\r\n".encode("utf-8"))
+        p.write_bytes("t\xedtulo\r\nl\xednea 2\r\n".encode("utf-8"))  # noqa: UP012
         assert compute_file_hash(str(p)) == (
             "61810ec213a9f72b18744b65b917a5f3ca2d3a175192cefb1a307c91a32d4a10"
         )

@@ -141,7 +141,7 @@ class EventLog:
             )
         idx = payload.get("i")
         if not isinstance(idx, int):
-            raise ValueError(f"Invalid cursor payload: missing index")
+            raise ValueError(f"Invalid cursor payload: missing index")  # noqa: F541
         return idx
 
     def _read_all_indexed(self) -> list[dict]:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-import pytest
+import pytest  # noqa: F401
 
 from tortoise.alert_store import AlertStore
 from tortoise.hosted_backup import MemoryStorage
@@ -64,7 +64,7 @@ def test_open_once_files_issue_and_pushes():
     store = _store(ch)
     assert store.open_incident("STALE", "team_x") is True
     assert len(ch.issues) == 1
-    assert "[DR] STALE" in list(ch.issues.values())[0]
+    assert "[DR] STALE" in list(ch.issues.values())[0]  # noqa: RUF015
     assert len(ch.telegram) == 1
     assert "STALE" in ch.telegram[0]
 
@@ -86,7 +86,7 @@ def test_resolve_closes_and_delete_to_resolve():
     ch = _FakeChannels()
     store = _store(ch)
     store.open_incident("STALE", "team_x")
-    first = list(ch.issues)[0]
+    first = list(ch.issues)[0]  # noqa: RUF015
     assert store.resolve_incident("STALE", "team_x") is True
     assert ch.closed == [first]
     assert len(ch.telegram) == 2  # open + resolved
@@ -164,7 +164,7 @@ def test_telegram_failure_does_not_block_github_issue():
     assert store.open_incident("STALE", "team_x") is True
     # Issue was filed.
     assert len(ch.issues) == 1
-    assert "[DR] STALE" in list(ch.issues.values())[0]
+    assert "[DR] STALE" in list(ch.issues.values())[0]  # noqa: RUF015
     # Telegram was NOT pushed (parked instead).
     assert ch.telegram == []
     assert len(store._storage.list("ops/pending-push/")) == 1
@@ -222,7 +222,7 @@ def test_resolved_telegram_carries_issue_number():
     ch = _FakeChannels()
     store = _store(ch)
     store.open_incident("STALE", "team_x")
-    issue_num = list(ch.issues)[0]
+    issue_num = list(ch.issues)[0]  # noqa: RUF015
     ch.telegram.clear()  # clear the open message
     store.resolve_incident("STALE", "team_x")
     assert len(ch.telegram) == 1
@@ -269,7 +269,7 @@ def test_telegram_and_github_independent_resolve():
     store2.open_incident("STALE")
     ch2.telegram.clear()
     # Simulate GitHub close failure by monkeypatching the close callable.
-    original_close = ch2.close_issue
+    original_close = ch2.close_issue  # noqa: F841
     def failing_close(number, comment=None):
         raise RuntimeError("github api down")
     ch2.close_issue = failing_close
@@ -290,7 +290,7 @@ def test_stale_pending_push_discarded_on_ttl():
     ch = _FakeChannels()
     storage = MemoryStorage()
     # park a push at 25h ago
-    old_ts = datetime.now(timezone.utc) - timedelta(hours=25)
+    old_ts = datetime.now(timezone.utc) - timedelta(hours=25)  # noqa: UP017
     import hashlib
     digest = hashlib.sha256(b"ops/alerts/STALE/_.json").hexdigest()[:16]
     storage.upload(
@@ -323,7 +323,7 @@ def test_resolved_incident_pending_push_not_fired():
         json.dumps({
             "key": "ops/alerts/STALE/team_x.json",
             "text": "orphan push",
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
         }).encode(),
     )
     store = _store(ch, storage)

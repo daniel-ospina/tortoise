@@ -20,7 +20,7 @@ from battery.differential.d4_adversarial import (
     evaluate_adversarial,
 )
 
-__all__ = [
+__all__ = [  # noqa: RUF022
     "ATTACK_TYPES", "AdversarialResult", "FeedbackItem", "FeedbackLoopResult",
     "METRIC_FAMILIES", "SpreadResult", "SweepMatrix", "build_matrix",
     "compute_spread", "evaluate_adversarial", "evaluate_loop",

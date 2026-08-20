@@ -8,7 +8,7 @@ not exercised (skip-guarded by absence of GITHUB_CLIENT_SECRET on the server).
 Negatives: connect on the bare server (no client id) → 503; callback with an
 unknown state → 404; index/github without a connection → 400.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import json
 import urllib.error

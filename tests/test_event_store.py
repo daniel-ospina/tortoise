@@ -171,7 +171,7 @@ def test_seq_is_monotonic_under_concurrency_live_falkor():
     visibly everywhere else. Deliberately does NOT use sdk_factory (it mints
     isolated embedded files — the vacuous pattern this test replaces).
     """
-    import os
+    import os  # noqa: I001
     import threading
 
     from _live_utils import _skip_unless_live_uri
@@ -216,12 +216,12 @@ def test_seq_is_monotonic_under_concurrency_live_falkor():
 
 def test_purge_expired_removes_old_events(sdk_factory, tmp_path):
     """Task 7: events older than retention_days are purged (ts cutoff)."""
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta, timezone  # noqa: I001
     from tortoise import event_store
     sdk = sdk_factory(tmp_path)
     proj = sdk._get_proj()
     event_store.ensure_event_schema(proj)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)  # noqa: UP017
     old = (now - timedelta(days=31)).isoformat()
     fresh = (now - timedelta(days=1)).isoformat()
     event_store.append_event(proj, 1, "PointAdded", {"id": "a"}, "ev-old", ts=old)
@@ -248,11 +248,11 @@ def test_purge_overflow_caps_per_team(sdk_factory, tmp_path):
 
 def test_purged_seq_cursor_expires(sdk_factory, tmp_path):
     """Task 7: after purge, a cursor pointing at a purged seq → expired (410)."""
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta, timezone  # noqa: I001
     from tortoise import event_store
     sdk = sdk_factory(tmp_path)
     proj = sdk._get_proj()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)  # noqa: UP017
     event_store.ensure_event_schema(proj)
     event_store.next_seq(proj)  # creates GraphEventMeta (first_seq=1)
     # 1. a FRESH event is pollable → cursor points at seq 1

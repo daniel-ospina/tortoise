@@ -41,7 +41,7 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable, Literal
+from typing import Any, Iterable, Literal  # noqa: UP035
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -62,7 +62,7 @@ from .source_credibility import SOURCE_KIND_DEFAULTS
 
 _logger = logging.getLogger(__name__)
 
-__all__ = [
+__all__ = [  # noqa: RUF022
     # constants
     "BUDGET_SOFT", "BUDGET_HARD", "BUDGET_CEILING",
     "REQUIRED_FIELDS", "VALID_COMMIT_STATUSES",
@@ -427,7 +427,7 @@ class CommitPayload(BaseModel):
         try:
             datetime.fromisoformat(v)
         except ValueError:
-            raise ValueError("captured_at must be an ISO 8601 timestamp")
+            raise ValueError("captured_at must be an ISO 8601 timestamp")  # noqa: B904
         return v
 
 
@@ -1068,7 +1068,7 @@ class GraphState:
     value_nodes_held: int = 0  # held count lives on the Session (telemetry)
 
     @classmethod
-    def empty(cls) -> "GraphState":
+    def empty(cls) -> "GraphState":  # noqa: UP037
         return cls()
 
 

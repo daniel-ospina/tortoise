@@ -120,7 +120,7 @@ class EventAPI:
         # P1 #49: check pointKind, not context (context is deprecated).
         # ponytail: duck-typed; add a proper protocol if more backends gain grounding.
         pk = p.get("pointKind") or fields.get("pointKind")
-        if pk == "resolution-event" and self.projection is not None:
+        if pk == "resolution-event" and self.projection is not None:  # noqa: SIM102
             if hasattr(self.projection, "compute_grounding"):
                 self.projection.compute_grounding()
         return p["id"]

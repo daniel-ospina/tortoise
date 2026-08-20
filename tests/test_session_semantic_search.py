@@ -26,8 +26,8 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.embeddings import EmbeddingModel   # noqa: E402
-from tortoise.sdk import TortoiseSDK             # noqa: E402
+from tortoise.embeddings import EmbeddingModel  # noqa: E402, I001, RUF100
+from tortoise.sdk import TortoiseSDK  # noqa: E402, RUF100
 
 
 @pytest.fixture(autouse=True)
@@ -41,7 +41,7 @@ def _fresh_sdk():
     db_path = os.path.join(_tf.mkdtemp(prefix="tortoise_semsess_"), "test.db")
     sdk = TortoiseSDK(db_path)
     # Wipe before use — hermeticity comes from the wipe, not a fresh path.
-    try:
+    try:  # noqa: SIM105
         sdk._get_proj().g.query("MATCH (n) DETACH DELETE n")
     except Exception:
         pass

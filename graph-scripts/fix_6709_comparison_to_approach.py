@@ -8,12 +8,12 @@ This script adds IMPL edges from each comparison Point to the specific approach 
 
 Idempotent: checks for existing IMPL edges before creating new ones.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import sys
 sys.path.insert(0, '/Users/home/eldato/negation-game-explorations/tortoise')
 
-from tortoise.log import EventLog
+from tortoise.log import EventLog  # noqa: I001
 from tortoise.api import EventAPI, provenance
 from tortoise.projection import FalkorProjection
 

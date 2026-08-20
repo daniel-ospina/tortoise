@@ -20,7 +20,7 @@ def _slope(waves: list[float]) -> float:
     xs = list(range(n))
     mx = sum(xs) / n
     my = sum(waves) / n
-    num = sum((x - mx) * (y - my) for x, y in zip(xs, waves))
+    num = sum((x - mx) * (y - my) for x, y in zip(xs, waves))  # noqa: B905
     den = sum((x - mx) ** 2 for x in xs)
     return num / den if den else 0.0
 

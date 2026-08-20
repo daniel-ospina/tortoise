@@ -26,7 +26,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import random  # noqa: E402
+import random  # noqa: E402, RUF100
 
 
 def _build_graph(proj, n_ops: int, claims_per_zone: int = 20,
@@ -126,7 +126,7 @@ def main() -> int:
         if "--operators" in sys.argv else 1800
     connect = "--connected" in sys.argv
 
-    from tortoise.projection import FalkorProjection
+    from tortoise.projection import FalkorProjection  # noqa: I001
     from tortoise.ep import TortoiseEP
 
     td = tempfile.mkdtemp(prefix="tortoise_395_profile_")
@@ -205,10 +205,10 @@ def main() -> int:
     # Scaled full run on a 300-op / 1.5k-claim subgraph for a per-iteration
     # cost number.
     sub_ops = [f"op-{i:05d}" for i in range(300)]
-    sub_claims = [f"claim-{i:05d}" for i in range(1500)]
+    sub_claims = [f"claim-{i:05d}" for i in range(1500)]  # noqa: F841
     ep_sub = TortoiseEP(proj, max_iter=1)
     t0 = time.perf_counter()
-    it_sub, conv_sub = ep_sub.run(sub_ops, max_hops=None)
+    it_sub, conv_sub = ep_sub.run(sub_ops, max_hops=None)  # noqa: RUF059
     t_sub = (time.perf_counter() - t0) * 1000
     print(f"[EP-loop] scaled full run (300 ops → {len(ep_sub._last_affected)}"
           f" claims, max_iter=1): {t_sub:.0f} ms — per-iteration ≈ "
@@ -267,7 +267,7 @@ def main() -> int:
     if t_full is not None:
         print(f"  full EP (1-iter):     {t_full:7.0f} ms (infeasible at 50 iters)")
     else:
-        print(f"  full EP (1,800 ops):  INFEASIBLE on embedded (#7288-class)")
+        print(f"  full EP (1,800 ops):  INFEASIBLE on embedded (#7288-class)")  # noqa: F541
     print(f"  scaled full EP (1-iter, 300 ops): {t_sub:7.0f} ms")
     print(f"  local EP (50-iter≈): {t_local / max(it_local, 1) * 50:7.0f} ms")
     print(f"  write-back UNWIND:   {t_unwind:7.1f} ms (per-claim: {t_per_claim:.0f} ms)")

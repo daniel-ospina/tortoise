@@ -87,7 +87,7 @@ class Dreamer:
         self._last_flush_skipped = False
         try:
             self._last_run_ep_version = self._sdk._ep_epoch()
-        except Exception:  # noqa: BLE001 — best-effort, 0 never clears flags
+        except Exception:  # noqa: BLE001, RUF100
             self._last_run_ep_version = 0
 
     # ── Incremental ────────────────────────────────────────────────
@@ -175,7 +175,7 @@ class Dreamer:
                     return {"iterations": 0, "converged": True,
                             "affected_claims": sorted(stamped)}
                 return {"iterations": 0, "converged": True, "affected_claims": []}
-            ep = self._sdk._get_ep()
+            ep = self._sdk._get_ep()  # noqa: F841
             # #330: dream must honour the SDK's persistent evidence (baselines)
             # — hydrate graph-persisted baselines and pass a copy to ep.run.
             # run() is call-scoped, so the copy cannot leak into later runs.
@@ -244,7 +244,7 @@ class Dreamer:
         # AND stamp is set (failed runs keep old stamps — retention, W4).
         affected = set(ep._last_affected)
         from datetime import datetime, timezone
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         stamp_now = stamp and converged
         params_list = [
             {"id": cid, "c": ep.compute_confidence(cid)["mean"]}
@@ -335,7 +335,7 @@ class Dreamer:
         with self._lock:
             self._snapshot_ep_epoch()
             proj = self._sdk._get_proj()
-            from .analyze import (_bfs_select_operators,
+            from .analyze import (_bfs_select_operators,  # noqa: I001
                                   _stale_first_claims,
                                   _stale_first_count_stamped)
             # All-null graph (nothing ever dreamed): window = whole graph —
@@ -436,7 +436,7 @@ class Dreamer:
         stamped claim ids.
         """
         from datetime import datetime, timezone
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         if claim_ids is None:
             rows = proj.g.query(
                 "MATCH (n:Point) "

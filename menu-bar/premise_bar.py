@@ -12,7 +12,7 @@ Install:
 Config:
   ~/.config/premise/services.json
 """
-import json
+import json  # noqa: I001
 import os
 import subprocess
 import time
@@ -142,15 +142,15 @@ def stop_service(service):
 
 
 
-import os, sys, signal
+import os, sys, signal  # noqa: E401, E402, F401, I001
 
 # Dedup: only allow one instance
 PID_FILE = os.path.expanduser("~/.premise-bar.pid")
 if os.path.exists(PID_FILE):
     try:
-        old_pid = int(open(PID_FILE).read().strip())
+        old_pid = int(open(PID_FILE).read().strip())  # noqa: SIM115
         os.kill(old_pid, signal.SIGTERM)
-        import time; time.sleep(0.5)
+        import time; time.sleep(0.5)  # noqa: E702, I001
     except (OSError, ValueError):
         pass
 with open(PID_FILE, "w") as f:
@@ -183,7 +183,7 @@ class PremiseBar(rumps.App):
             
             # Remove old menu item if exists
             if sid in self.menu_items:
-                try:
+                try:  # noqa: SIM105
                     del self.menu[self.menu_items[sid].title]
                 except KeyError:
                     pass
@@ -219,7 +219,7 @@ class PremiseBar(rumps.App):
         self.menu.add(rumps.MenuItem("⚙️  Edit Config", callback=self.edit_config))
         
         # Update title
-        self.title = "⬡" if all_running else "⬡"
+        self.title = "⬡" if all_running else "⬡"  # noqa: RUF034
         if running_count < len(self.services):
             self.title = f"⬡ {running_count}/{len(self.services)}"
 
@@ -256,8 +256,8 @@ class PremiseBar(rumps.App):
                         svc.get("description", ""),
                         "Restart", "Stop"
                     )
-                    if response == 1: response = 2
-                    elif response == 2: response = 3
+                    if response == 1: response = 2  # noqa: E701
+                    elif response == 2: response = 3  # noqa: E701
                 else:
                     # External, no local control
                     rumps.alert(
@@ -300,7 +300,7 @@ class PremiseBar(rumps.App):
                     )
                     if response == 1:
                         url = svc.get("url")
-                        if url: subprocess.Popen(["open", url])
+                        if url: subprocess.Popen(["open", url])  # noqa: E701
                         return
                 if response == 1:
                     launch_service(svc)

@@ -27,7 +27,7 @@ chain violations).
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any  # noqa: F401
 
 from .domain_loader import (
     SURFACE_GRAPH,
@@ -320,7 +320,7 @@ def _drift_warnings(domain: str) -> list[dict]:
         return []
     registered = {s["chain_id"] for s in domain_validators(domain)}
     out: list[dict] = []
-    for chain_id, cspec in spec.items():
+    for chain_id, cspec in spec.items():  # noqa: B007
         if chain_id not in registered:
             out.append({
                 "rule": "drift_unregistered_chain",

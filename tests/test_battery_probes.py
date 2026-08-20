@@ -6,7 +6,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import pytest
+import pytest  # noqa: F401
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -116,7 +116,7 @@ class TestR5:
 def test_load_probe_thresholds_cal_table():
     """The [cal]-locked lookup resolves the hyphenated cal-table key and
     hard-fails on a missing row (no silent default)."""
-    import sys
+    import sys  # noqa: F401, I001
     from pathlib import Path
     from battery.config.thresholds import load_thresholds
     from battery.probes.base import load_probe_thresholds

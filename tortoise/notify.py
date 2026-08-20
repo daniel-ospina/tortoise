@@ -19,13 +19,13 @@ single managed sender identity shared with the transactional invite sender
 distinct billing sender is desired (the pre-#1136 hardcoded
 billing@premiselabs.co).
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import logging
 import os
 
 import httpx
-from tortoise.telegram_push import send_message as telegram_send  # noqa: E402 — #673 sender location
+from tortoise.telegram_push import send_message as telegram_send  # noqa: E402, RUF100
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +123,7 @@ def notify_billing_event(kind: str, team: dict, details: dict | None = None) -> 
             subject = f"Tortoise Billing — {kind}"
             body = _email_text(kind, team, details).replace("\n", "<br>")
             _send_resend(api_key, to, subject, f"<pre>{body}</pre>")
-        except Exception as e:  # noqa: BLE001 — best-effort, never raise
+        except Exception as e:  # noqa: BLE001, RUF100
             logger.warning("billing notify: resend failed (%s)", redact_safe(e))
 
     bot_token = _env("TELEGRAM_BOT_TOKEN")
@@ -131,7 +131,7 @@ def notify_billing_event(kind: str, team: dict, details: dict | None = None) -> 
     if not _skip_channel("telegram", bot_token) and not _skip_channel("telegram-chat", chat_id):
         try:
             telegram_send(bot_token, chat_id, _telegram_text(kind, team, details))
-        except Exception as e:  # noqa: BLE001 — best-effort, never raise
+        except Exception as e:  # noqa: BLE001, RUF100
             logger.warning("billing notify: telegram failed (%s)", redact_safe(e))
 
 
@@ -177,7 +177,7 @@ def notify_abuse(kind: str, team: dict, details: dict | None = None) -> None:
             subject = f"Tortoise Security — {kind}"
             body = _abuse_email_text(kind, team, details).replace("\n", "<br>")
             _send_resend(api_key, to, subject, f"<pre>{body}</pre>")
-        except Exception as e:  # noqa: BLE001 — best-effort, never raise
+        except Exception as e:  # noqa: BLE001, RUF100
             logger.warning("abuse notify: resend failed (%s)", redact_safe(e))
 
     bot_token = _env("TELEGRAM_BOT_TOKEN")
@@ -195,7 +195,7 @@ def notify_abuse(kind: str, team: dict, details: dict | None = None) -> None:
             if details.get("ip"):
                 parts.append(f"IP: {details['ip']}")
             telegram_send(bot_token, chat_id, "\n".join(parts))
-        except Exception as e:  # noqa: BLE001 — best-effort, never raise
+        except Exception as e:  # noqa: BLE001, RUF100
             logger.warning("abuse notify: telegram failed (%s)", redact_safe(e))
 
     if kind == "abuse_suspended":
@@ -212,7 +212,7 @@ def notify_abuse(kind: str, team: dict, details: dict | None = None) -> None:
                     "abuse_suspended", team.get("team_id") or "_",
                     {"detail": (f"Auto-suspended: {details.get('rule', '?')} "
                                 f"count={details.get('count', '?')}")})
-        except Exception as e:  # noqa: BLE001 — best-effort, never raise
+        except Exception as e:  # noqa: BLE001, RUF100
             logger.warning("abuse notify: alert_store incident failed (%s)",
                            redact_safe(e))
 

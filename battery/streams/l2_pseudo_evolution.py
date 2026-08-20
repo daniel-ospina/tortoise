@@ -34,7 +34,7 @@ class L2PseudoEvolutionStream:
             rep = int(s.get("rep", 1))
             families.setdefault(fam, {})[rep] = float(s.get("tokens", 0))
         reductions: list[float] = []
-        for fam, reps in families.items():
+        for fam, reps in families.items():  # noqa: B007
             if 1 in reps and 3 in reps and reps[1] > 0:
                 reductions.append(1 - reps[3] / reps[1])
         if not reductions:

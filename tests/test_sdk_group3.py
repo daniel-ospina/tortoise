@@ -130,7 +130,7 @@ class TestCheckpoint:
         """#880 regression: sentence_transformers installed + model missing under
         HF_HUB_OFFLINE raises LocalEntryNotFoundError (an OSError, NOT ImportError).
         """
-        import logging
+        import logging  # noqa: I001
         import tempfile
         import pytest
         from tortoise.embeddings import EmbeddingModel
@@ -372,7 +372,7 @@ More content.
         assert r2["skipped"] == 1, f"resumed files should be skipped, got {r2}"
         assert r2["updated"] == 0
         # Progress file still tracks the completed file
-        data = _json.load(open(prog))
+        data = _json.load(open(prog))  # noqa: SIM115
         assert str(p) in data["completed_files"]
 
 
@@ -519,7 +519,7 @@ class TestConnectIssueObjectsAboutObject:
     def test_connect_issue_objects_hash_fallback_and_bare_string(self, sdk):
         ev = sdk.create_event("AgentSession", eventKind="AgentSession", session_id="s1")
         import hashlib
-        expected_id = f"issue_{hashlib.sha256('no ids here'.encode()).hexdigest()[:8]}"
+        expected_id = f"issue_{hashlib.sha256('no ids here'.encode()).hexdigest()[:8]}"  # noqa: UP012
         meta = {
             "issues": [{"title": "no ids here"}],        # neither id nor number → hash fallback
             "prs": ["just-a-string-pr"],                 # bare string item

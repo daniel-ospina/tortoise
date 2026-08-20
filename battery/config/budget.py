@@ -55,6 +55,6 @@ def load_budget(path: str | Path) -> BudgetConfig:
     return BudgetConfig(max_episodes=max_episodes, max_estimated_cost_usd=max_cost)
 
 
-def estimate_cost(arm: "ArmConfig", n_episodes: int) -> float:
+def estimate_cost(arm: "ArmConfig", n_episodes: int) -> float:  # noqa: F821, UP037
     """Scope DD12 formula: n_episodes × expected_tokens × price_per_1k."""
     return arm.estimated_cost_usd(n_episodes)

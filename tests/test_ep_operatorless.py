@@ -29,7 +29,7 @@ Measured (embedded FalkorDBLite, damping=0.5, n_quad=12, tol=1e-3):
   - fan-out: a source with TWO bidirectional direct IMPL edges to strong
     targets accumulates both back-messages (per-edge r.back_msg_* slots)
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import pytest
 

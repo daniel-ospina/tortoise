@@ -729,7 +729,7 @@ class TestCliSecurityAndIndex:
         """#715 P2 conf 60: the inline `index github` path resolves the DB
         target through the shared guard — a bad FALKORDB_PORT with no --db
         surfaces as a clean CLI error, never a ValueError traceback."""
-        import sys as _sys
+        import sys as _sys  # noqa: I001
         from tortoise import __main__ as m
 
         # The extraction pipeline does not exist in the real env — stub the
@@ -832,7 +832,7 @@ def test_index_sessions_constructor_failure_clean_error(monkeypatch, capsys, tmp
     """Round-11: TortoiseSDK() constructor raise (FLY_APP_NAME production
     guard with empty URI) must produce a clean CLI error — no raw traceback,
     exit 1 — same contract as unreachable-graph."""
-    import os
+    import os  # noqa: F401, I001
     import sys as _sys
     import tortoise.__main__ as m
     monkeypatch.setenv("FLY_APP_NAME", "dummy")

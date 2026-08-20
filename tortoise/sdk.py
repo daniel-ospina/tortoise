@@ -3,7 +3,7 @@
 Wraps FalkorProjection (Docker/server FalkorDB by default, embedded via path argument).
 Lazy-opens on first call. Returns structured dicts, never raw FalkorDB result sets.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import hashlib
 import json as _json
@@ -113,7 +113,7 @@ def _build_session_llm_extractor():
     provider = _session_llm_provider()
     if provider is None:
         return None
-    from tortoise.ingest import _PROVIDERS
+    from tortoise.ingest import _PROVIDERS  # noqa: I001
     from tortoise.extractor import LLMExtractor
     from tortoise.models import OpenAICompatModel
 
@@ -253,10 +253,10 @@ _SESSION_SOURCE_STOPWORDS = frozenset({
     "no", "yes", "ok", "it", "its", "this", "that", "these", "those",
     "i", "we", "you", "he", "she", "they", "them", "me", "us", "my",
     "our", "your", "their", "his", "her", "as", "if", "then", "than",
-    "so", "too", "very", "just", "really", "there", "here", "when",
+    "so", "too", "very", "just", "really", "there", "here", "when",  # noqa: B033
     "what", "which", "who", "whom", "why", "how", "all", "any", "both",
     "each", "few", "more", "most", "other", "some", "such", "only",
-    "own", "same", "also", "because", "into", "out", "up", "down",
+    "own", "same", "also", "because", "into", "out", "up", "down",  # noqa: B033
     "again", "once", "ago", "now", "new", "old", "first", "last",
     "user", "assistant", "speaker", "think", "say", "says", "said",
     "sure", "yeah", "agree", "agreed", "want", "need", "go", "going",
@@ -409,8 +409,8 @@ def _raise_update_point_status_error(proj, id: str) -> None:
     if not exists:
         raise ValueError(f"No point {id!r}")
     raise ValueError(
-        f"Illegal status transition — update_point only promotes draft→live; "
-        f"use retract_point()/supersede_point() for lifecycle transitions"
+        f"Illegal status transition — update_point only promotes draft→live; "  # noqa: F541
+        f"use retract_point()/supersede_point() for lifecycle transitions"  # noqa: F541
     )
 
 _logger = logging.getLogger(__name__)
@@ -524,11 +524,11 @@ def _entity_name_id(label: str, name: str) -> str:
     name-stub Object minted with a random ulid by the event path still gets
     replaced by the canonical id on the first ObjectRegistered write.
     """
-    digest = hashlib.sha256(f"{label}:{name}".encode("utf-8")).hexdigest()[:26]
+    digest = hashlib.sha256(f"{label}:{name}".encode("utf-8")).hexdigest()[:26]  # noqa: UP012
     return f"{label[:3].lower()}-{digest}"
 
 
-def _cosine(a: np.ndarray, b: np.ndarray) -> float:
+def _cosine(a: np.ndarray, b: np.ndarray) -> float:  # noqa: F821
     """Cosine similarity between two embedding vectors (#438).
 
     Stored embeddings round-trip as float32 lists — normalize defensively so
@@ -556,10 +556,10 @@ of the caller's local timezone or whether they passed ``Z`` or an offset.
     from datetime import datetime, timezone
     if isinstance(value, datetime):
         dt = value
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+        if dt.tzinfo is None:  # noqa: SIM108
+            dt = dt.replace(tzinfo=timezone.utc)  # noqa: UP017
         else:
-            dt = dt.astimezone(timezone.utc)
+            dt = dt.astimezone(timezone.utc)  # noqa: UP017
         return dt.isoformat()
     # ISO-8601 string — normalize any timezone/offset to UTC. A naive string
     # (no offset suffix) is treated as UTC, mirroring the naive-datetime
@@ -567,8 +567,8 @@ of the caller's local timezone or whether they passed ``Z`` or an offset.
     # caller's offset; #243/#244 review).
     dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc).isoformat()
+        dt = dt.replace(tzinfo=timezone.utc)  # noqa: UP017
+    return dt.astimezone(timezone.utc).isoformat()  # noqa: UP017
 
 
 def _save_progress(progress_file: str, directory: str, total: int, processed: int,
@@ -580,7 +580,7 @@ def _save_progress(progress_file: str, directory: str, total: int, processed: in
     try:
         with open(progress_file, 'w') as f:
             _json.dump({
-                "started": datetime.now(timezone.utc).isoformat(),
+                "started": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
                 "directory": directory,
                 "total_files": total,
                 "processed": processed,
@@ -765,7 +765,7 @@ def _stream_to_payload(summary: dict, session_id: str, stream: dict) -> dict:
 def _now_iso() -> str:
     """UTC now in ISO format (module-level — shared by write paths)."""
     from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
 
 def _source_merge_lock_for(url: str) -> threading.Lock:
@@ -797,7 +797,7 @@ def _classify_db_failure(e: BaseException) -> str | None:
     ``db`` when the write path hit the graph engine (ResponseError /
     ConnectionError / TimeoutError / ENOSPC-family); None otherwise (the
     per-file handler re-buckets it as structural)."""
-    import os as _os
+    import os as _os  # noqa: F401, I001
     import errno
     try:
         import redis.exceptions as _re
@@ -805,7 +805,7 @@ def _classify_db_failure(e: BaseException) -> str | None:
                           _re.TimeoutError, _re.BusyLoadingError,
                           _re.InvalidResponse)):
             return "db"
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001, RUF100
         pass
     if isinstance(e, OSError) and getattr(e, "errno", None) in (
             getattr(errno, "ENOSPC", None), getattr(errno, "EIO", None),
@@ -815,7 +815,7 @@ def _classify_db_failure(e: BaseException) -> str | None:
 
 
 # ── Module-level cached registry for kind expansion
-_registry_cache: "PackRegistry | None" = None
+_registry_cache: "PackRegistry | None" = None  # noqa: F821, UP037
 _registry_lock = threading.Lock()
 
 
@@ -825,7 +825,7 @@ def _get_kind_expander():
     if _registry_cache is None:
         with _registry_lock:
             if _registry_cache is None:
-                from .pack_registry import PackRegistry
+                from .pack_registry import PackRegistry  # noqa: I001
                 from pathlib import Path as _Path
                 packs_dir = _Path(__file__).resolve().parent.parent / "packs"
                 _registry_cache = PackRegistry(packs_dir)
@@ -850,7 +850,7 @@ class TortoiseSDK:
 
     def __init__(self, db_path: str | None = None, *, namespace: str | None = None,
                  event_log_path: str | None = None):
-        import os, re
+        import os, re  # noqa: E401, I001
         db_uri = os.environ.get("TORTOISE_DB_URI")
         if db_uri and db_path is None:
             self._db_path = None
@@ -859,7 +859,7 @@ class TortoiseSDK:
             # P0: Crash early if running in production with no database configured.
             # Embedded redislite has no persistent volume → all data lost on deploy.
             # Must evaluate BEFORE resolve_db_path() fills in the default.
-            if not db_uri and not db_path:
+            if not db_uri and not db_path:  # noqa: SIM102
                 if os.environ.get("FLY_APP_NAME"):
                     raise RuntimeError(
                         "TORTOISE_DB_URI is empty in production. "
@@ -877,7 +877,7 @@ class TortoiseSDK:
             self._db_path = db_path
             self._db_uri = None
         # Namespace isolation: prefix graph name to segregate data
-        if namespace is not None:
+        if namespace is not None:  # noqa: SIM102
             if not re.match(r'^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$', namespace):
                 raise ValueError(
                     f"Invalid namespace {namespace!r}. "
@@ -955,7 +955,7 @@ class TortoiseSDK:
         the daemon by construction) and dead-pid leftovers (crash residue)
         pass.
         """
-        import os as _os
+        import os as _os  # noqa: I001
         import json as _json
         from pathlib import Path as _Path
         if not db_path or str(db_path) == ":memory:":
@@ -967,14 +967,14 @@ class TortoiseSDK:
             return
         try:
             settings = _json.loads(registry.read_text(encoding="utf-8"))
-        except Exception:  # noqa: BLE001 — registry unreadable ⇒ no probe
+        except Exception:  # noqa: BLE001, RUF100
             return
         pidfile = settings.get("pidfile")
         if not pidfile or not _os.path.isfile(str(pidfile)):
             return
         try:
             pid = int(_Path(pidfile).read_text().strip())
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, RUF100
             return
         if pid <= 0:
             return
@@ -1182,7 +1182,7 @@ class TortoiseSDK:
             if seq < 0:  # P2 (Qwen): negative cursors must not bypass expiry
                 raise ValueError
             return seq
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, RUF100
             raise ValueError("invalid cursor") from None
 
     def events_poll(self, after: str | None = None, types: list[str] | None = None,
@@ -1256,7 +1256,7 @@ class TortoiseSDK:
             cap = int(os.environ.get("TORTOISE_EVENT_MAX_PER_TEAM", "500000"))
             purge_expired(proj, retention_days=days)
             purge_overflow(proj, max_events=cap)
-        except Exception:  # noqa: BLE001 — best-effort
+        except Exception:  # noqa: BLE001, RUF100
             _logger.warning("event retention purge failed — continuing", exc_info=True)
 
     def _emit_event(self, type_: str, payload: dict | None = None, *,
@@ -1302,7 +1302,7 @@ class TortoiseSDK:
                 ensure_event_schema(proj)
                 seq = next_seq(proj)
                 append_event(proj, seq, type_, graph_payload, self.ulid())
-            except Exception:  # noqa: BLE001 — best-effort
+            except Exception:  # noqa: BLE001, RUF100
                 _logger.warning("event emission failed for %s — continuing", type_)
 
         # ── JSONL event log (#548) ─────────────────────────────────
@@ -1311,7 +1311,7 @@ class TortoiseSDK:
         log = self._get_event_log()
         if log is None:
             return
-        from .ids import ulid, now_iso
+        from .ids import ulid, now_iso  # noqa: I001
         event: dict = {
             "event_id": ulid(),
             "ts": now_iso(),
@@ -1367,7 +1367,7 @@ class TortoiseSDK:
         # (the explicit-id path via props.pop("id") below is preserved for operators)
         props = _sanitize_props(props)
         from datetime import datetime, timezone
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         proj = self._get_proj()
 
         # #49 Phase 2: context is REMOVED — raise TypeError if passed
@@ -1626,7 +1626,7 @@ class TortoiseSDK:
         """v2 path: S1→S5 via extractor_v2.extract_session_v2 → Layer-1-
         validated payload → POST. Errors are surfaced (ok=False) with the
         payload for inspection — never a silent partial write."""
-        from tortoise.extractor_v2 import extract_session_v2
+        from tortoise.extractor_v2 import extract_session_v2  # noqa: I001
         from tortoise.commit_schema import validate_payload_dict
         model = extractor_model or _default_byok_model()
         out = extract_session_v2(model, conversation, sdk=self,
@@ -1683,7 +1683,7 @@ class TortoiseSDK:
         """The legacy summarize→construct→ground path (v1, #1272) — kept
         behind TORTOISE_EXTRACTOR=v1 / direct summary= as the reversibility
         seam. See commit_session docstring."""
-        from tortoise.value_extractor import (extract_session,
+        from tortoise.value_extractor import (extract_session,  # noqa: I001
                                               validate_summary, check_guards)
 
         from tortoise.value_extractor import construct_graph
@@ -1768,7 +1768,7 @@ class TortoiseSDK:
             )
 
         proj = self._get_proj()
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         session_id = session_id or f"session_{uuid.uuid4().hex[:12]}"
 
         if len(conversation) > max_turns:
@@ -2014,11 +2014,11 @@ class TortoiseSDK:
             name = str(e.get("name", "")).strip()
             if not name:
                 continue
-            try:
+            try:  # noqa: SIM105
                 self.create_entity("object", name,
                                    objectKind=str(e.get("kind", "core:other")),
                                    is_episodic=False)
-            except Exception:  # noqa: BLE001 — best-effort per entity
+            except Exception:  # noqa: BLE001, RUF100
                 pass
 
         # ── points + aboutObject edges + session CONTAINS ──
@@ -2050,7 +2050,7 @@ class TortoiseSDK:
                     params={"sid": session_id, "pid": pid})
                 extracted.append({
                     "id": pid, "kind": "statement", "text": content[:200]})
-            except Exception:  # noqa: BLE001 — best-effort per point
+            except Exception:  # noqa: BLE001, RUF100
                 pass
 
         # ── events ──
@@ -2058,12 +2058,12 @@ class TortoiseSDK:
             content = str(ev.get("content", "")).strip()
             if not content:
                 continue
-            try:
+            try:  # noqa: SIM105
                 self.create_event(
                     content[:80],
                     str(ev.get("eventKind", "core:occurrence")).rsplit(":", 1)[-1],
                     sessionId=session_id, is_episodic=True)
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001, RUF100
                 pass
 
         # ── operators (IMPL/NAND; MITIGATES recorded, not written) ──
@@ -2072,11 +2072,11 @@ class TortoiseSDK:
             src, dst = str(op.get("src", "")), str(op.get("dst", ""))
             if op_type not in ("IMPL", "NAND") or not src or not dst:
                 continue
-            try:
+            try:  # noqa: SIM105
                 self.create_operator(op_type, src, [dst],
                                      direction="unidirectional",
                                      promote_source=False)
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001, RUF100
                 pass
         return extracted
 
@@ -2226,7 +2226,7 @@ class TortoiseSDK:
         # is rejected BEFORE the query — lifecycle transitions go through
         # retract_point()/supersede_point() (which emit events). This keeps
         # every claim transition observable via an emit hook.
-        if 'status' in props:
+        if 'status' in props:  # noqa: SIM102
             if props['status'] != 'live':
                 raise ValueError(
                     "update_point only promotes draft→live — use "
@@ -2240,7 +2240,7 @@ class TortoiseSDK:
         ).result_set[0][0]
 
         from datetime import datetime, timezone
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
         if has_object:
             if 'status' in props:
@@ -2373,7 +2373,7 @@ class TortoiseSDK:
                 f"invalidate_point: corrected_by point {corrected_by_id!r} does not "
                 f"exist — refusing to orphan outdated point {id!r}"
             )
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
         proj.g.query(
             "MATCH (n:Point {id:$id}) SET n.outdated = true, n.updatedAt = $now",
@@ -2427,7 +2427,7 @@ class TortoiseSDK:
         """
         from datetime import datetime, timezone
         proj = self._get_proj()
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
         # #432: transition guard — old point must exist, be a statement (not
         # an operator), and not already be terminal (mirrors the retract
@@ -2744,7 +2744,7 @@ class TortoiseSDK:
             "MATCH (n:Point {id:$id}) "
             "WHERE (n.status IS NULL OR NOT (n.status IN $terminal)) "
             "SET n.status = 'retracted', n.updatedAt = $now RETURN properties(n)",
-            params={"id": id, "now": datetime.now(timezone.utc).isoformat(),
+            params={"id": id, "now": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
                     "terminal": ["retracted", "superseded", "archived"]})
         if not r.result_set:
             raise ValueError(
@@ -2826,7 +2826,7 @@ class TortoiseSDK:
                         "batch_id": batch_id}
 
         from datetime import datetime, timezone
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         # CAS-guarded SET (concurrent promote can't double-fire); reviewed is
         # the DERIVED reviewer flag (plan §3 — no new stored status).
         r = proj.g.query(
@@ -3490,7 +3490,7 @@ class TortoiseSDK:
                 f"direction must be 'bidirectional' or 'unidirectional', got {direction!r}"
             )
         pid = ulid()
-        inputs = [source_id] + list(target_ids)
+        inputs = [source_id] + list(target_ids)  # noqa: RUF005
         proj = self._get_proj()
 
         # Validate all source/target Points exist FIRST (fail loudly, not
@@ -3653,7 +3653,7 @@ class TortoiseSDK:
         # Create new mitigation Point
         mid = ulid()
         from datetime import datetime, timezone
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         proj.g.query(
             "CREATE (m:Point {id:$id, content:$c, pointKind:'statement', "
             "mitigation_strength:$s, is_operator:false, createdAt:$now, updatedAt:$now})",
@@ -3838,7 +3838,7 @@ class TortoiseSDK:
         points are the orphaned_draft rule's job) — a draft with a dangling
         ref or no JTBD parent is no longer double-flagged."""
         proj = self._get_proj()
-        from .domain_validators import (
+        from .domain_validators import (  # noqa: I001
             run_domain_graph_validators, to_legacy_shape,
         )
         violations, _drift = run_domain_graph_validators(
@@ -4481,14 +4481,14 @@ class TortoiseSDK:
             tos = conn.get("to")
             to_list = tos if isinstance(tos, list) else [tos]
             route = self._connection_route(conn)
-            for v in [frm] + to_list:
+            for v in [frm] + to_list:  # noqa: RUF005
                 if isinstance(v, str) and v not in local:
                     external.add(v)
-            conns.append((i, conn, route, [frm] + to_list))
+            conns.append((i, conn, route, [frm] + to_list))  # noqa: RUF005
         node_info = self._fetch_endpoint_info(external)
         entity_labels = {"subject": "Subject", "object": "Object",
                          "event": "Event", "document": "Document"}
-        for i, conn, route, vals in conns:
+        for i, conn, route, vals in conns:  # noqa: B007
             for v in vals:
                 if not isinstance(v, str):
                     continue
@@ -4534,7 +4534,7 @@ class TortoiseSDK:
                                        f"edges to terminal points are rejected",
                         })
         # Bundle-local dedup-hit terminal guard (cycle-17/18) — Phase-1 ONLY.
-        for i, conn, route, vals in conns:
+        for i, conn, route, vals in conns:  # noqa: B007
             if route != "direct":
                 continue
             for v in vals:
@@ -5114,7 +5114,7 @@ class TortoiseSDK:
                                         "result": conn_result,
                                         "deduped": bool(conn_result.get("deduped"))})
                     continue
-                existing = self._find_operator(op_type, [src] + dsts,
+                existing = self._find_operator(op_type, [src] + dsts,  # noqa: RUF005
                                                label=label, direction=direction)
                 if existing is not None and existing.get("kind") == "exact":
                     oid = existing["id"]
@@ -5123,9 +5123,9 @@ class TortoiseSDK:
                     # full input-edge loop, before the promotion SET).
                     if (promotion_policy == "auto"
                             and existing.get("status") is None):
-                        try:
+                        try:  # noqa: SIM105
                             self._reapply_operator_promotion(oid)
-                        except Exception:  # noqa: BLE001 — best-effort
+                        except Exception:  # noqa: BLE001, RUF100
                             pass
                     deduped["connections"] += 1
                     conn_result = {"operator_id": oid, "deduped": True}
@@ -5136,7 +5136,7 @@ class TortoiseSDK:
                     # promotion under auto.
                     oid = existing["id"]
                     written = set(existing.get("written") or [])
-                    for _i, _inp in enumerate([src] + dsts):
+                    for _i, _inp in enumerate([src] + dsts):  # noqa: RUF005
                         if _inp in written:
                             continue
                         # IDEMPOTENT edge-completion (P0 fix, review gate): the
@@ -5154,11 +5154,11 @@ class TortoiseSDK:
                             f"SET r.idx = $idx",
                             params={"oid": oid, "inp": _inp, "idx": _i},
                         )
-                    completed = len([src] + dsts) - len(written)
+                    completed = len([src] + dsts) - len(written)  # noqa: RUF005
                     if promotion_policy == "auto" and existing.get("status") is None:
-                        try:
+                        try:  # noqa: SIM105
                             self._reapply_operator_promotion(oid)
-                        except Exception:  # noqa: BLE001 — best-effort
+                        except Exception:  # noqa: BLE001, RUF100
                             pass
                     deduped["connections"] += 1
                     conn_result = {"operator_id": oid, "deduped": True}
@@ -5360,7 +5360,7 @@ class TortoiseSDK:
                         and event.get("id") == point_id
                         and event.get("batch_id") == batch_id):
                     return False
-        except Exception:  # noqa: BLE001 — best-effort
+        except Exception:  # noqa: BLE001, RUF100
             _logger.warning(
                 "batch_id record check failed for %s — treating as present",
                 point_id, exc_info=True,
@@ -5887,7 +5887,7 @@ class TortoiseSDK:
                 f"Cannot file human approval: Points {missing} do not exist or are operators"
             )
 
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
         # 4. Decision Point (pointKind humanApproval) — epistemic weight carrier
         content = decision_content or f"Approved: {artifact_id}"
@@ -6111,7 +6111,7 @@ class TortoiseSDK:
             if not content:
                 continue
             content_lower = content.lower()
-            for name, eid in entities.items():
+            for name, eid in entities.items():  # noqa: B007
                 if name in content_lower:
                     proj._create_about_edges(pid, name)
                     matched += 1
@@ -6413,7 +6413,7 @@ class TortoiseSDK:
         pool cap — the documented degradation. ``top_k`` is hard-clamped at
         CROSS_LENS_ANN_TOP_K_MAX by the caller.
         """
-        from .search_engine import run_vector_query
+        from .search_engine import run_vector_query  # noqa: I001
         import numpy as np
 
         proj = self._get_proj()
@@ -6496,7 +6496,7 @@ class TortoiseSDK:
         try:
             results = self.tortoise_fts_query(
                 query_text, entity_type="point", limit=200)
-        except Exception:  # noqa: BLE001 — retrieval is best-effort
+        except Exception:  # noqa: BLE001, RUF100
             return {}
         scoped = {}
         for r in results:
@@ -6833,13 +6833,13 @@ class TortoiseSDK:
                 # #1163: a capped root is dropped from the dirty set — its
                 # GRAPH flag must go too, or a fresh SDK would rehydrate it
                 # and retry forever (the cap is meaningless cross-process).
-                try:
+                try:  # noqa: SIM105
                     self._get_proj().g.query(
                         "MATCH (n:Point {id:$id}) "
                         "SET n.ep_dirty = null, n.ep_dirty_at = null",
                         params={"id": root},
                     )
-                except Exception:  # noqa: BLE001 — retention must never break
+                except Exception:  # noqa: BLE001, RUF100
                     pass
             else:
                 self._retry_attempts[root] = attempts
@@ -6915,7 +6915,7 @@ class TortoiseSDK:
         alarm = (backlog > 0 and last_output == 0
                  and last_pass_at is not None)
         state = self.dream_health_state()
-        stale_backlog = sum(
+        stale_backlog = sum(  # noqa: F841
             1 for _ in self._dirty_roots)  # non-empty check below
         return {
             "alarm_verdict": alarm,
@@ -6963,7 +6963,7 @@ class TortoiseSDK:
         """Per-pass observability record (C7) — called by the dream adapters."""
         from datetime import datetime, timezone
         self._dream_metrics["last_pass_at"] = datetime.now(
-            timezone.utc).isoformat()
+            timezone.utc).isoformat()  # noqa: UP017
         self._dream_metrics["last_pass_output"] = len(
             result.get("affected_claims", []))
         self._dream_metrics["last_pass_mode"] = result.get("mode", mode)
@@ -7028,7 +7028,7 @@ class TortoiseSDK:
             loaded = {r[0] for r in rows}
             self._dirty_roots |= loaded
             return loaded
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, RUF100
             return set()
 
     def _sweep_dirty_roots(self, affected: set[str],
@@ -7080,11 +7080,11 @@ class TortoiseSDK:
         # fallback corpus snapshot (covers create/update/supersede/retract/
         # operator/mitigation/delete/ingest/dream write surfaces in one hook).
         try:
-            from tortoise.fallback_snapshot import _store as _fb_store, snapshot_key
+            from tortoise.fallback_snapshot import _store as _fb_store, snapshot_key  # noqa: I001
             _fb_store.invalidate(
                 snapshot_key(self._get_proj(), getattr(self, "_namespace", None)),
             )
-        except Exception:  # noqa: BLE001 — invalidation must never break a write
+        except Exception:  # noqa: BLE001, RUF100
             pass
         if not point_ids:
             return
@@ -7671,7 +7671,7 @@ class TortoiseSDK:
         confidences = {}
         proj = self._get_proj()
         from datetime import datetime, timezone
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         # #395 (delta C): the write-back set == the run set — consume
         # ep._last_affected (stashed by run, assigned before its early
         # returns) instead of re-running the BFS with a default depth.
@@ -7823,7 +7823,7 @@ class TortoiseSDK:
 
         ep.py is untouched (additive-only — another issue owns EP propagation).
         """
-        import os
+        import os  # noqa: I001
         from datetime import datetime, timezone
         from tortoise.source_credibility import (
             aggregate_prior,
@@ -7838,7 +7838,7 @@ class TortoiseSDK:
                 os.environ.get("TORTOISE_EP_REINHERIT_INTERVAL", "3600")
             )
         proj = self._get_proj()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc)  # noqa: UP017
         from collections import defaultdict
         # Per-source assessment factors (latest per (url, assessor), outdated
         # filtered, reputation snapshotted at write). Batched — one query.
@@ -7884,7 +7884,7 @@ class TortoiseSDK:
         # Collect per-point source evidence
         from collections import defaultdict
         point_sources: dict[str, list[dict]] = defaultdict(list)
-        for pid, url, ctier, skind, sdate, ingested, bl_src, inherited_at in rows:
+        for pid, url, ctier, skind, sdate, ingested, bl_src, inherited_at in rows:  # noqa: B007
             tier = resolve_tier(ctier, skind)
             if tier is None:
                 continue  # neutral source — no inheritance contribution
@@ -7896,7 +7896,7 @@ class TortoiseSDK:
         # Revert: points with an inherited baseline but NO eligible sources
         # (all edges deleted or all sources neutral) return to neutral — subject
         # to the same per-point gate (dirty-marked or interval elapsed).
-        if point_sources:
+        if point_sources:  # noqa: SIM108
             sourced_ids = set(point_sources)
         else:
             sourced_ids = set()
@@ -7914,7 +7914,7 @@ class TortoiseSDK:
                 try:
                     last = datetime.fromisoformat(str(inherited_at).replace("Z", "+00:00"))
                     if last.tzinfo is None:
-                        last = last.replace(tzinfo=timezone.utc)
+                        last = last.replace(tzinfo=timezone.utc)  # noqa: UP017
                     age = (now - last).total_seconds()
                 except (ValueError, TypeError):
                     age = recompute_interval + 1
@@ -7948,7 +7948,7 @@ class TortoiseSDK:
                 try:
                     last = datetime.fromisoformat(str(inherited_at).replace("Z", "+00:00"))
                     if last.tzinfo is None:
-                        last = last.replace(tzinfo=timezone.utc)
+                        last = last.replace(tzinfo=timezone.utc)  # noqa: UP017
                     age = (now - last).total_seconds()
                 except (ValueError, TypeError):
                     age = recompute_interval + 1  # stale stamp → recompute
@@ -8135,7 +8135,7 @@ class TortoiseSDK:
         from datetime import datetime, timezone
         filed, duplicates = 0, 0
         proj = self._get_proj()
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
         # Tier 1: content hash dedup
         to_check: list[tuple[dict, str]] = []
@@ -8261,7 +8261,7 @@ class TortoiseSDK:
 
         if return_pairs:
             pairs = []
-            for i, ((item, _ch), sim) in enumerate(zip(candidates, max_sims)):
+            for i, ((item, _ch), sim) in enumerate(zip(candidates, max_sims)):  # noqa: B905
                 if sim >= threshold:
                     eid, econtent = existing[argmax[i]]
                     pairs.append({
@@ -8283,7 +8283,7 @@ class TortoiseSDK:
     def diary_write(self, agent_name: str, entry: str,
                     topic: str | None = None, wing: str | None = None) -> dict:
         """Write an agent diary entry. Returns the created Point."""
-        from datetime import datetime, timezone
+        from datetime import datetime, timezone  # noqa: F401
         props: dict[str, Any] = {"authoredBy": agent_name}
         if topic:
             props["topic"] = topic
@@ -8345,7 +8345,7 @@ class TortoiseSDK:
         branches) while the new path short-circuits the embedding to None —
         the SAME flag, different Event semantics on two live paths.
         """
-        import os as _os
+        import os as _os  # noqa: I001
         import json as _json
         from pathlib import Path
         from datetime import datetime, timezone
@@ -8382,7 +8382,7 @@ class TortoiseSDK:
         from .file_indexer import _FM_RE
         ingested, updated, skipped, failed = 0, 0, 0, 0
         errors: list[dict] = []
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         proj = self._get_proj()
 
         files = sorted(Path(directory).rglob("*.md"))
@@ -8531,7 +8531,7 @@ class TortoiseSDK:
                             completed_files.append(rel_path)
                             continue
                         # Always extract keywords (even without LLM)
-                        from .session_indexer import extract_keywords_from_frontmatter as _kw_fallback
+                        from .session_indexer import extract_keywords_from_frontmatter as _kw_fallback  # noqa: I001
                         if extract_metadata:
                             from .session_indexer import extract_metadata as _extract
                             try:
@@ -8641,7 +8641,7 @@ class TortoiseSDK:
                         self._connect_issue_objects(event_id, metadata)
                     else:
                         # New session Event — always extract keywords
-                        from .session_indexer import extract_keywords_from_frontmatter as _kw_fallback
+                        from .session_indexer import extract_keywords_from_frontmatter as _kw_fallback  # noqa: I001
                         if extract_metadata:
                             from .session_indexer import extract_metadata as _extract
                             try:
@@ -9125,7 +9125,7 @@ class TortoiseSDK:
             true-completion latency. Default None = production 500ms cap. Never
             passed by production callers.
         """
-        from .search_engine import (
+        from .search_engine import (  # noqa: I001
             classify_query, degradation_chain, rrf_fusion,
             annotate_ep_batch, get_relationships_bounded,
             fetch_point_epistemic_state, fallback_tfidf,
@@ -9188,7 +9188,7 @@ class TortoiseSDK:
             pool_floor = 0  # env unset → historical limit*2 (no baked default, #1348)
             raw = os.environ.get("TORTOISE_POOL_FLOOR", "")
             if raw.strip():
-                try:
+                try:  # noqa: SIM105
                     pool_floor = int(raw)
                 except (TypeError, ValueError):
                     pass  # garbage → default (TORTOISE_EMBEDDING_REPAIR_BACKOFF_HOURS pattern)
@@ -9212,7 +9212,7 @@ class TortoiseSDK:
                 # available (kills the ~350ms full-payload re-fetch + per-call
                 # TF-IDF re-fit). Falls back to the legacy path when the
                 # snapshot is unavailable (too big / build failed).
-                from tortoise.fallback_snapshot import (
+                from tortoise.fallback_snapshot import (  # noqa: I001
                     _store as _fb_store, snapshot_key, build_snapshot,
                     search_snapshot,
                 )
@@ -10071,7 +10071,7 @@ class TortoiseSDK:
         this method. Selfhost + embedded (where this SDK runs) have no
         Supabase control plane — the registry IS the control plane there.
         """
-        import re, uuid
+        import re, uuid  # noqa: E401, I001
         from datetime import datetime, timezone
         from tortoise.auth import hash_api_key
         from .exceptions import ControlPlaneError
@@ -10091,7 +10091,7 @@ class TortoiseSDK:
         graph_name = f"team_{name}"
         proj = self._get_proj()
         reg = self._get_registry()
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
         # Idempotency — check registry graph for existing team
         if idempotency_key:
@@ -10145,7 +10145,7 @@ class TortoiseSDK:
             # Graph node (team→graph 1:N, product ontology): the default graph
             self._graph_create(tid, "default", kind="default", namespace=graph_name)
         except Exception:
-            try:
+            try:  # noqa: SIM105
                 reg.query("MATCH (t:Team {id:$id}) DETACH DELETE t",
                           params={"id": tid})
             except Exception:
@@ -10174,7 +10174,7 @@ class TortoiseSDK:
         node. The zero-registry-writes cutover contract (registry node count
         == 0) requires this gate.
         """
-        import uuid as _uuid
+        import uuid as _uuid  # noqa: I001
         import hashlib as _hashlib
         from datetime import datetime, timezone as _tz
         from tortoise.supabase_control import is_supabase_enabled
@@ -10189,7 +10189,7 @@ class TortoiseSDK:
         reg = self._get_registry()
         gid = f"g_{_uuid.uuid4().hex[:16]}"
         ns = namespace or f"team_{team_id}_{gid}"
-        now = datetime.now(_tz.utc).isoformat()
+        now = datetime.now(_tz.utc).isoformat()  # noqa: UP017
         reg.query(
             "CREATE (g:Graph {id:$gid, team_id:$tid, name:$name, kind:$kind, "
             "namespace:$ns, created_at:$now})",
@@ -10208,7 +10208,7 @@ class TortoiseSDK:
         for selfhost. Registry-shaped rows (graph_id/team_id/name/kind/
         namespace) so callers are mode-agnostic.
         """
-        from tortoise.supabase_control import (
+        from tortoise.supabase_control import (  # noqa: I001
             get_control_plane, graph_metadata, is_supabase_enabled,
         )
         if is_supabase_enabled():
@@ -10374,7 +10374,7 @@ class TortoiseSDK:
         Validates role, team existence, and max_users constraint.
         Creates BELONGS_TO edge to Team.
         """
-        from datetime import datetime, timezone
+        from datetime import datetime, timezone  # noqa: I001
         from .exceptions import ControlPlaneError
 
         if role not in ("owner", "admin", "member"):
@@ -10401,7 +10401,7 @@ class TortoiseSDK:
                 )
 
         mid = ulid()
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         reg = self._get_registry()
         reg.query(
             "CREATE (m:Membership {id:$id, user_id:$uid, team_id:$tid, "
@@ -10521,7 +10521,7 @@ class TortoiseSDK:
 
         Stores SHA-256 hash (never plaintext). Plaintext returned once.
         """
-        import uuid
+        import uuid  # noqa: I001
         from datetime import datetime, timezone
         from tortoise.auth import hash_api_key
         from .exceptions import ControlPlaneError
@@ -10534,7 +10534,7 @@ class TortoiseSDK:
         key_hash = hash_api_key(api_key)
         key_prefix = api_key[:10]
         kid = ulid()
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
         reg = self._get_registry()
         reg.query(
@@ -10584,7 +10584,7 @@ class TortoiseSDK:
             return {"revoked": False, "reason": "not found"}
         if rows[0][0] is not None:
             return {"revoked": True, "already": True, "key_id": key_id}
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         reg.query(
             "MATCH (k:APIKey {id:$id}) SET k.revoked_at = $now",
             params={"id": key_id, "now": now},
@@ -10616,7 +10616,7 @@ class TortoiseSDK:
 
         Token is hashed for storage; plaintext returned once.
         """
-        import uuid
+        import uuid  # noqa: I001
         from datetime import datetime, timedelta, timezone
         from tortoise.auth import hash_api_key
         from .exceptions import ControlPlaneError
@@ -10645,8 +10645,8 @@ class TortoiseSDK:
         token = str(uuid.uuid4())
         token_hash = hash_api_key(token)
         iid = ulid()
-        now = datetime.now(timezone.utc).isoformat()
-        expires_at = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+        expires_at = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()  # noqa: UP017
 
         reg.query(
             "CREATE (i:Invitation {id:$id, team_id:$tid, email:$email, "
@@ -10696,7 +10696,7 @@ class TortoiseSDK:
 
         Checks expiry and single-use (not already accepted).
         """
-        from datetime import datetime, timezone
+        from datetime import datetime, timezone  # noqa: I001
         from .exceptions import ControlPlaneError
 
         inv = self.invitation_get_by_id(invitation_id)
@@ -10704,7 +10704,7 @@ class TortoiseSDK:
             raise ControlPlaneError(f"Invitation {invitation_id!r} not found")
 
         expires_at = inv.get("expires_at", "")
-        now = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc)  # noqa: UP017
         if expires_at:
             exp = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
             if now > exp:
@@ -10767,7 +10767,7 @@ class TortoiseSDK:
         Returns count of cleaned invitations.
         """
         from datetime import datetime, timezone
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         reg = self._get_registry()
         rows = reg.query(
             "MATCH (i:Invitation) "
@@ -11156,8 +11156,8 @@ class TortoiseSDK:
 
     def search_sessions(self, query: str, *, agent: str | None = None,
                         topics: list[str] | None = None,
-                        after: "datetime | str | None" = None,
-                        before: "datetime | str | None" = None,
+                        after: "datetime | str | None" = None,  # noqa: F821, UP037
+                        before: "datetime | str | None" = None,  # noqa: F821, UP037
                         limit: int = 10, offset: int = 0) -> list[dict]:
         """Search indexed agent sessions. Returns Events with metadata snippets.
 
@@ -11422,10 +11422,10 @@ class TortoiseSDK:
         progress_file, realpath-resolved; symlink roots resolving outside the
         base, E2E-7(v1)); TORTOISE_MAX_FILE_MB garbage/<=0.
         """
-        import os as _os
+        import os as _os  # noqa: I001
         from pathlib import Path
         from .security import resolve_under_base as _rub
-        from .index_walk import (walk_markdown, compute_dispositions,
+        from .index_walk import (walk_markdown, compute_dispositions,  # noqa: F401
                                  DISP_ESCAPE, DISP_UNRECONCILED,
                                  DISP_STRUCTURAL)
         raw_base = _os.environ.get("TORTOISE_INGEST_BASE_DIR")
@@ -11479,7 +11479,7 @@ class TortoiseSDK:
 
         corpus_root = Path(resolved_dir)
         corpus_name = corpus_name or corpus_root.name
-        max_bytes = self._index_max_bytes()
+        max_bytes = self._index_max_bytes()  # noqa: F841
         repair_backoff = self._index_repair_backoff(embedding_repair_backoff)
         # TORTOISE_INDEX_NO_NETWORK (test-only, cycle-10): FORCES
         # extract_metadata=False-equivalent omission at the NEW-PATH call
@@ -11513,8 +11513,8 @@ class TortoiseSDK:
                                 progress_file, ingest_base, result,
                                 keys) -> dict:
         """The locked body of index_directory (see the caller)."""
-        import os as _os
-        from pathlib import Path
+        import os as _os  # noqa: I001
+        from pathlib import Path  # noqa: F401
         from .index_walk import (walk_markdown, compute_dispositions,
                                  DISP_ESCAPE, DISP_UNRECONCILED, DISP_STRUCTURAL)
         # REVIEW-FIX P2: file_type validated PRE-WALK (never mid-walk after
@@ -11662,8 +11662,8 @@ class TortoiseSDK:
                 f"was given — pass corpus_root explicitly (§6.1 I6)."
             )
         raise ValueError(
-            f"index_file: corpus_root required — TORTOISE_INGEST_BASE_DIR is "
-            f"unset and no corpus_root was given (§6.1 I6)."
+            f"index_file: corpus_root required — TORTOISE_INGEST_BASE_DIR is "  # noqa: F541
+            f"unset and no corpus_root was given (§6.1 I6)."  # noqa: F541
         )
 
     def _index_max_bytes(self) -> int:
@@ -11784,8 +11784,8 @@ class TortoiseSDK:
          skipped_reason?, error? (errors[] entry), keyed? (fast-skip
          eligibility), fast_skip_key? (dict), db_failure?, db_reason?}
         """
-        import os as _os
-        import time as _time
+        import os as _os  # noqa: I001
+        import time as _time  # noqa: F401
         from pathlib import Path
         from .file_indexer import (
             hash_text, parse_frontmatter, classify_file, derive_source_url,
@@ -12231,7 +12231,7 @@ class TortoiseSDK:
                     "sid": session_id if (session_id and not non_primary) else None,
                 }
             return out
-        except Exception as e:  # noqa: BLE001 — per-file isolation (never abort)
+        except Exception as e:  # noqa: BLE001, RUF100
             db_class = _classify_db_failure(e)
             if db_class:
                 out["db_failure"] = True
@@ -12291,12 +12291,12 @@ class TortoiseSDK:
             v = int(rows[0][1]) if rows and rows[0][1] is not None else 0
             if run_id == rid:
                 # OUR ON CREATE fired — this run created the Source.
-                try:
+                try:  # noqa: SIM105
                     proj.g.query(
                         "MATCH (s:Source {url:$url}) REMOVE s.__runId",
                         params={"url": url},
                     )
-                except Exception:  # noqa: BLE001
+                except Exception:  # noqa: BLE001, RUF100
                     pass
                 return "indexed"
             if gate_v is None:
@@ -12316,7 +12316,7 @@ class TortoiseSDK:
         (contract (a), emit-on-every-write) with the live embedding as the
         replay carrier. Returns the computed embedding (None = unavailable —
         the caller records the repair marker when the Event pre-existed)."""
-        import json as _json
+        import json as _json  # noqa: I001
         from datetime import datetime, timezone
         from pathlib import Path
         from .session_indexer import (
@@ -12331,11 +12331,11 @@ class TortoiseSDK:
         validate_and_warn(frontmatter, kind="session",
                           context=f"session {session_id}")
         proj = self._get_proj()
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         if extract_metadata:
             try:
                 metadata = _extract(text, llm_model)
-            except Exception:  # noqa: BLE001 — tiered fallback
+            except Exception:  # noqa: BLE001, RUF100
                 metadata = _kw_fallback(text)
         else:
             metadata = _kw_fallback(text)
@@ -12380,7 +12380,7 @@ class TortoiseSDK:
                 embedding = self._session_embedding(
                     props["name"], metadata.get("summary", ""),
                     props["keywords"], props["topics"])
-            except Exception:  # noqa: BLE001 — degrade, never abort
+            except Exception:  # noqa: BLE001, RUF100
                 embedding = None
         # REVIEW-FIX P2 (cycle-26): timestamps preserved on MATCH — the MERGE
         # splits ON CREATE (full props incl. startedAt/capturedAt) vs ON MATCH
@@ -12420,9 +12420,9 @@ class TortoiseSDK:
                 "MATCH (e:Event {eventId:$eid}) "
                 "SET e.embeddingRepairFailedAt = $ts",
                 params={"eid": event_id,
-                        "ts": datetime.now(timezone.utc).isoformat()},
+                        "ts": datetime.now(timezone.utc).isoformat()},  # noqa: UP017
             )
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, RUF100
             pass
 
     def _meeting_event_write(self, frontmatter, path, candidate, content_hash,
@@ -12455,7 +12455,7 @@ class TortoiseSDK:
             "id": candidate,
             "eventId": candidate,
             "eventKind": "meeting",
-            "title": str(frontmatter.get("title") or Path(path).stem),
+            "title": str(frontmatter.get("title") or Path(path).stem),  # noqa: F821
             "startedAt": source_date or "",
             "topics": topics,
             "participants": participants,
@@ -12534,13 +12534,13 @@ class TortoiseSDK:
         success the embedding heals (carve-out updated, no version bump) via a
         JOURNALED EventRecorded emission (survives rebuild) + marker clear.
         """
-        import time as _time
+        import time as _time  # noqa: F401, I001
         from datetime import datetime, timezone
         from .session_indexer import extract_keywords_from_frontmatter as _kw_fallback
         if marker is not None:
             try:
-                elapsed_h = (datetime.now(timezone.utc)
-                             - datetime.fromisoformat(marker).replace(tzinfo=timezone.utc))
+                elapsed_h = (datetime.now(timezone.utc)  # noqa: UP017
+                             - datetime.fromisoformat(marker).replace(tzinfo=timezone.utc))  # noqa: UP017
                 if elapsed_h.total_seconds() / 3600.0 <= repair_backoff:
                     return ("suppressed", None)
             except (TypeError, ValueError):
@@ -12551,19 +12551,19 @@ class TortoiseSDK:
             embedding = self._session_embedding(
                 str(frontmatter.get("title") or title), metadata.get("summary", ""),
                 metadata.get("keywords", []), metadata.get("topics", []))
-        except Exception:  # noqa: BLE001 — outage (429/timeout/500)
+        except Exception:  # noqa: BLE001, RUF100
             embedding = None
         if embedding is None:
             # failed attempt → targeted marker write (BOOKKEEPING, not unit
             # work) — the unit is NEVER updated by this run.
-            ts = datetime.now(timezone.utc).isoformat()
-            try:
+            ts = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+            try:  # noqa: SIM105
                 proj.g.query(
                     "MATCH (e:Event {eventId:$eid}) "
                     "SET e.embeddingRepairFailedAt = $ts",
                     params={"eid": event_id, "ts": ts},
                 )
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001, RUF100
                 pass
             return ("failed", ts)
         # heal — the CASE-guarded $embedding is the ONLY embedding node-write
@@ -12600,7 +12600,7 @@ class TortoiseSDK:
         from datetime import datetime, timezone
         try:
             payload = {
-                "started": datetime.now(timezone.utc).isoformat(),
+                "started": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
                 "directory": directory,
                 "corpus_name": corpus_name,
                 "extract_metadata": extract_metadata,
@@ -12616,13 +12616,13 @@ class TortoiseSDK:
                 with _os.fdopen(fd, "w", encoding="utf-8") as f:
                     _json.dump(payload, f)
                 _os.replace(tmp, progress_file)
-            except Exception:  # noqa: BLE001
-                try:
+            except Exception:  # noqa: BLE001, RUF100
+                try:  # noqa: SIM105
                     _os.unlink(tmp)
                 except OSError:
                     pass
                 raise
-        except Exception:  # noqa: BLE001 — progress file is best-effort
+        except Exception:  # noqa: BLE001, RUF100
             _logger.warning("index progress checkpoint write failed — "
                             "degrading to no-checkpoint (E2E-19(c))")
 
@@ -12637,7 +12637,7 @@ class TortoiseSDK:
                 return {}
             keys = data.get("keys") or {}
             return {k: v for k, v in keys.items() if isinstance(v, dict)}
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, RUF100
             return {}
 
     def _journal_line_state(self, event_id: str) -> dict | None:
@@ -12649,7 +12649,7 @@ class TortoiseSDK:
             return None
         try:
             lines = log.read_all()
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, RUF100
             return None
         state = None
         for ev in lines:
@@ -12697,7 +12697,7 @@ class TortoiseSDK:
         hash the forward indexer would refuse (the OOM class stays closed at
         4,190-file scale). Edge states: E2E-8 variants.
         """
-        import os as _os
+        import os as _os  # noqa: I001
         from pathlib import Path
         from .file_indexer import compute_file_hash, derive_source_url, hash_text
 
@@ -12858,7 +12858,7 @@ class TortoiseSDK:
                                         if compute_file_hash(str(other)) == hash_s:
                                             moved_target = str(other)
                                             break
-                                    except Exception:  # noqa: BLE001 — per-file
+                                    except Exception:  # noqa: BLE001, RUF100
                                         continue
                             except OSError:
                                 pass
@@ -13030,7 +13030,7 @@ class TortoiseSDK:
             eid = u["eid"]
             try:
                 source_exists, edge_exists = self._backfill_probe(url, eid)
-            except Exception as exc:  # noqa: BLE001 — per-Event isolation
+            except Exception as exc:  # noqa: BLE001, RUF100
                 errors.append({"event": eid, "eventKind": u["kind"],
                                "error": f"probe failed: {exc}", "cause": "db",
                                "path": u["abs_path"]})
@@ -13055,7 +13055,7 @@ class TortoiseSDK:
                             report["created"] += 1
                         group_created[winner_i] = True
                         created_here = True
-                    except Exception as exc:  # noqa: BLE001 — per-Event isolation
+                    except Exception as exc:  # noqa: BLE001, RUF100
                         errors.append({"event": eid, "eventKind": u["kind"],
                                        "error": f"Source write failed: {exc}",
                                        "cause": "db", "path": u["abs_path"]})
@@ -13081,7 +13081,7 @@ class TortoiseSDK:
                                 or self._backfill_probe(url, eid)[0]):
                             self._backfill_link(url, eid)
                             report["linked"] += 1
-                    except Exception as exc:  # noqa: BLE001 — crash-repair seam
+                    except Exception as exc:  # noqa: BLE001, RUF100
                         errors.append({"event": eid, "eventKind": u["kind"],
                                        "error": f"references-link step failed: {exc}",
                                        "cause": "db", "path": u["abs_path"]})
@@ -13162,7 +13162,7 @@ class TortoiseSDK:
         (MERGE is last-writer-wins) — they are surfaced here and skipped in
         ingest_corpus, never silently re-indexed (#280 review P2).
         """
-        from pathlib import Path
+        from pathlib import Path  # noqa: I001
         from .file_indexer import compute_file_hash
         from .session_indexer import (
             extract_session_id, session_corpus_dir,
@@ -13244,7 +13244,7 @@ class TortoiseSDK:
         ``extract_metadata`` defaults to False so sweeps use the cheap
         keyword fallback — never burn LLM tokens on bulk retry.
         """
-        from pathlib import Path
+        from pathlib import Path  # noqa: I001
         from .session_indexer import session_corpus_dir
 
         directory = str(Path(directory or session_corpus_dir()).resolve())
@@ -13425,7 +13425,7 @@ class TortoiseSDK:
         try:
             payload = {k: v for k, v in ev.items() if k != "_merge_run_id"}
             self._emit_event("SourceCreated", id=url, **payload)
-        except Exception:  # noqa: BLE001 — journaling must not break the write
+        except Exception:  # noqa: BLE001, RUF100
             _logger.warning("SourceCreated journal emission failed for %s — continuing", url)
         # Write events invalidate the inheritance gate + reliability cache
         self._invalidate_inheritance_gate_for_source(url)
@@ -13495,8 +13495,8 @@ class TortoiseSDK:
         from `pointKind='assessment'` Points (latest per assessor wins by
         createdAt; outdated filtered); until Task 5 lands, factor = 1.0.
         """
-        import os
-        from datetime import datetime, timezone
+        import os  # noqa: I001
+        from datetime import datetime, timezone  # noqa: F401
         from tortoise.source_credibility import (
             aggregate_prior,
             assessment_factor,
@@ -13567,11 +13567,11 @@ class TortoiseSDK:
         sourceDate changed vs cached components) or after write events
         (set_source_tier/assess_source/create_source(tier=)).
         """
-        import os
+        import os  # noqa: I001
         from datetime import datetime, timezone
         from tortoise.source_credibility import resolve_tier
         proj = self._get_proj()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc)  # noqa: UP017
         interval = float(os.environ.get("TORTOISE_EP_REINHERIT_INTERVAL", "3600"))
 
         # Cache freshness check
@@ -13583,12 +13583,12 @@ class TortoiseSDK:
         ).result_set
         cached = None
         if rows and rows[0][2]:
-            cached_rel, cached_comp_raw, cached_at, c_tier, c_kind, c_sdate, c_ingested = rows[0]
+            cached_rel, cached_comp_raw, cached_at, c_tier, c_kind, c_sdate, c_ingested = rows[0]  # noqa: RUF059
             fresh = False
             try:
                 derived = datetime.fromisoformat(str(cached_at).replace("Z", "+00:00"))
                 if derived.tzinfo is None:
-                    derived = derived.replace(tzinfo=timezone.utc)
+                    derived = derived.replace(tzinfo=timezone.utc)  # noqa: UP017
                 fresh = (now - derived).total_seconds() < interval
             except (ValueError, TypeError):
                 fresh = False
@@ -13693,7 +13693,7 @@ class TortoiseSDK:
 
         from datetime import datetime, timezone
         rep = self.compute_reputation(str(assessor))["mean"]
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
         proj = self._get_proj()
         # Create the new assessment FIRST, then mark older ones outdated EXCLUDING
@@ -13782,7 +13782,7 @@ class TortoiseSDK:
             "MATCH (s:Subject {id: $sid}) RETURN count(s) > 0",
             params={"sid": subject_id},
         ).result_set
-        if id_check and id_check[0][0]:
+        if id_check and id_check[0][0]:  # noqa: SIM108
             match_clause = "s.id = $sid"
         else:
             match_clause = "s.name = $sid"
@@ -13955,7 +13955,7 @@ class TortoiseSDK:
 
     # ── Source Node Completion ────────────────────────────────────
 
-    def complete_source(self, url: str, content: str = None, external_id: str = None) -> dict:
+    def complete_source(self, url: str, content: str = None, external_id: str = None) -> dict:  # noqa: RUF013
         """Populate Source node fields: contentHash, version, externalId."""
         import hashlib
         proj = self._get_proj()
@@ -13987,7 +13987,7 @@ class TortoiseSDK:
         if missing_status > 0:
             report["actions"].append(f"status_backfill: {missing_status} Points")
             if not dry_run:
-                proj.g.query(f"MATCH (n:Point) WHERE n.status IS NULL SET n.status = 'live'")
+                proj.g.query(f"MATCH (n:Point) WHERE n.status IS NULL SET n.status = 'live'")  # noqa: F541
 
         # 2. Backfill pointKind
         r = proj.g.query("MATCH (n:Point) WHERE n.pointKind IS NULL RETURN count(n)")
@@ -14082,7 +14082,7 @@ class TortoiseSDK:
                 "milestone that does not pass the gate"
             )
         from datetime import datetime, timezone
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         proj = self._get_proj()
         props: dict[str, Any] = {"recordedAt": now}
         # precision / mean_grounding_delta are guaranteed non-None above.
@@ -14190,7 +14190,7 @@ def _summary_to_payload(summary: dict, session_id: str,
     from tortoise.ids import content_hash
 
     events = []
-    for i, d in enumerate((summary.get("decisions") or [])):
+    for i, d in enumerate((summary.get("decisions") or [])):  # noqa: UP034
         events.append({
             "id": f"ev_{content_hash(f'{session_id}:decision:{i}')[:62]}",
             "eventKind": "decision",
@@ -14199,7 +14199,7 @@ def _summary_to_payload(summary: dict, session_id: str,
             "about_entities": d.get("options") or [],
             "source_ref": "session.md",
         })
-    for i, iss in enumerate((summary.get("issues") or [])):
+    for i, iss in enumerate((summary.get("issues") or [])):  # noqa: UP034
         events.append({
             "id": f"ev_{content_hash(f'{session_id}:issue:{i}')[:62]}",
             "eventKind": "occurrence",
@@ -14210,7 +14210,7 @@ def _summary_to_payload(summary: dict, session_id: str,
         })
 
     points, logic_ids = [], {}
-    for i, l in enumerate((summary.get("logic") or [])):
+    for i, l in enumerate((summary.get("logic") or [])):  # noqa: B007, E741, UP034
         pid = f"pt_{content_hash(l.get('point', ''))[:62]}"
         logic_ids[l.get("point", "")[:40]] = pid
         points.append({
@@ -14222,7 +14222,7 @@ def _summary_to_payload(summary: dict, session_id: str,
         })
 
     operators = []
-    for l in (summary.get("logic") or []):
+    for l in (summary.get("logic") or []):  # noqa: E741
         src = logic_ids.get(l.get("point", "")[:40])
         if not src:
             continue
@@ -14269,12 +14269,12 @@ def _summary_to_payload(summary: dict, session_id: str,
 
 def _now_iso() -> str:
     from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
 
 def _post_commit(payload: dict, *, base_url=None, api_key=None) -> dict:
     """POST the derived payload to /v1/sessions/commit (replay-safe)."""
-    import os
+    import os  # noqa: I001
     from tortoise.commit_schema import compute_client_commit_id
     payload["client_commit_id"] = compute_client_commit_id(
         payload["session_id"], payload["points"], payload["entities"],

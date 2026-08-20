@@ -30,7 +30,7 @@ def _transport_context():
     run in stdio mode: dev-mode auth (TORTOISE_API_KEY unset) and no team
     context (quota skipped). Restore after each test.
     """
-    from tortoise.mcp_auth import (
+    from tortoise.mcp_auth import (  # noqa: I001
         _current_team_id, _current_team_limits, _transport_mode,
     )
     _transport_mode.set("stdio")
@@ -108,7 +108,7 @@ class TestSafeWrapper:
         assert result == 7
 
     def test_safe_records_monitoring_error(self):
-        from tortoise.mcp_server import _safe
+        from tortoise.mcp_server import _safe  # noqa: I001
         from tortoise import monitoring as mon
 
         # Get initial error count
@@ -176,14 +176,14 @@ class TestQueryConsolidation:
     def test_pagination_params_route_to_paginated_query(self, query_sdk):
         from tortoise.mcp_server import tortoise_query
         result = tortoise_query(kind="statement", offset=5, limit=10)
-        name, kind, skip, limit, kwargs = query_sdk.calls[-1]
+        name, kind, skip, limit, kwargs = query_sdk.calls[-1]  # noqa: RUF059
         assert (name, kind, skip, limit) == ("paginated_query", "statement", 5, 10)
         assert result == {"results": [], "total": 5, "hasMore": False}
 
     def test_page_1_maps_to_offset_0(self, query_sdk):
         from tortoise.mcp_server import tortoise_query
         tortoise_query(kind="statement", page=1, limit=10)
-        name, kind, skip, limit, kwargs = query_sdk.calls[-1]
+        name, kind, skip, limit, kwargs = query_sdk.calls[-1]  # noqa: RUF059
         assert (name, kind, skip, limit) == ("paginated_query", "statement", 0, 10)
 
     def test_page_is_1_based_and_overrides_offset(self, query_sdk):
@@ -195,7 +195,7 @@ class TestQueryConsolidation:
         assert (name, skip, limit) == ("paginated_query", 10, 10)
         # zero offset must not bypass the page override either
         tortoise_query(kind="statement", page=3, offset=0, limit=10)
-        name, kind, skip, limit, kwargs = query_sdk.calls[-1]
+        name, kind, skip, limit, kwargs = query_sdk.calls[-1]  # noqa: RUF059
         assert (name, skip, limit) == ("paginated_query", 20, 10)
 
     def test_tag_filter_uses_tag_path(self, query_sdk):
@@ -254,7 +254,7 @@ class TestQueryConsolidation:
     def test_include_retracted_passthrough(self, query_sdk):
         from tortoise.mcp_server import tortoise_query
         tortoise_query(kind="statement", include_retracted=True, offset=0, limit=5)
-        name, kind, skip, limit, kwargs = query_sdk.calls[-1]
+        name, kind, skip, limit, kwargs = query_sdk.calls[-1]  # noqa: RUF059
         assert kwargs.get("include_retracted") is True
 
     def test_filters_include_retracted_key_does_not_typeerror(self, query_sdk):
@@ -264,7 +264,7 @@ class TestQueryConsolidation:
         from tortoise.mcp_server import tortoise_query
         result = tortoise_query(kind="statement", filters={"include_retracted": True})
         assert result == query_sdk.points
-        name, kind, kwargs = query_sdk.calls[-1]
+        name, kind, kwargs = query_sdk.calls[-1]  # noqa: RUF059
         assert kwargs.get("include_retracted") is True  # filters value honored
 
     def test_explicit_include_retracted_wins_over_filters(self, query_sdk):
@@ -272,7 +272,7 @@ class TestQueryConsolidation:
         from tortoise.mcp_server import tortoise_query
         tortoise_query(kind="statement", include_retracted=True,
                        filters={"include_retracted": False})
-        name, kind, kwargs = query_sdk.calls[-1]
+        name, kind, kwargs = query_sdk.calls[-1]  # noqa: RUF059
         assert kwargs.get("include_retracted") is True
 
     def test_malformed_json_filters_does_not_raise(self, query_sdk):
@@ -286,7 +286,7 @@ class TestQueryConsolidation:
         except TypeError:
             pass  # pre-existing malformed-filters behavior, not P1-1
         except AttributeError as e:  # pragma: no cover
-            raise AssertionError(f"P1-1 regression: {e}")
+            raise AssertionError(f"P1-1 regression: {e}")  # noqa: B904
 
     @pytest.mark.parametrize("kwargs,msg", [
         ({"page": 0}, "page"),
@@ -343,7 +343,7 @@ class TestDeprecatedAliases:
         """Default call (skip=0, limit=20) → paginated dict, same as before."""
         from tortoise.mcp_server import tortoise_paginated_query
         result = tortoise_paginated_query()
-        name, kind, skip, limit, kwargs = query_sdk.calls[-1]
+        name, kind, skip, limit, kwargs = query_sdk.calls[-1]  # noqa: RUF059
         assert (name, skip, limit) == ("paginated_query", 0, 20)
         assert "results" in result and "total" in result and "hasMore" in result
 
@@ -374,7 +374,7 @@ class TestToolFunctions:
 
     def test_all_core_tools_registered(self):
         """Verify the key tools agents use are importable and callable."""
-        from tortoise.mcp_server import (
+        from tortoise.mcp_server import (  # noqa: I001
             tortoise_create_point,
             tortoise_query,
             tortoise_search,
@@ -457,7 +457,7 @@ class TestToolIntegration:
         tortoise_delete_point(point_id)
 
     def test_query_returns_list(self):
-        from tortoise.mcp_server import (tortoise_create_point,
+        from tortoise.mcp_server import (tortoise_create_point,  # noqa: I001
                                          tortoise_delete_point, tortoise_query)
         # Seed an observation point first: on an empty graph the tool returns
         # the empty-result suggestion dict instead of a list, so the assertion
@@ -507,7 +507,7 @@ class TestToolIntegration:
                 assert key in result, f"Missing key: {key}"
 
     def test_diary_write_and_read(self):
-        from tortoise.mcp_server import tortoise_diary_write, tortoise_diary_read
+        from tortoise.mcp_server import tortoise_diary_write, tortoise_diary_read  # noqa: I001
 
         write_result = tortoise_diary_write(
             agent_name="test-agent",
@@ -535,7 +535,7 @@ class TestToolIntegration:
     # ── New tools (issue #7310) ──────────────────────────────
 
     def test_annotate_operator(self):
-        from tortoise.mcp_server import tortoise_create_point, tortoise_create_operator
+        from tortoise.mcp_server import tortoise_create_point, tortoise_create_operator  # noqa: I001
         from tortoise.mcp_server import tortoise_annotate_operator
 
         a = tortoise_create_point("statement", "Claim A")
@@ -548,7 +548,7 @@ class TestToolIntegration:
         assert result.get("annotator_bias") == 0.1 or "error" in result
 
     def test_get_operator(self):
-        from tortoise.mcp_server import tortoise_create_point, tortoise_create_operator
+        from tortoise.mcp_server import tortoise_create_point, tortoise_create_operator  # noqa: I001
         from tortoise.mcp_server import tortoise_get_operator
 
         a = tortoise_create_point("statement", "Claim A")
@@ -571,7 +571,7 @@ class TestToolIntegration:
         assert "error" in result
 
     def test_mitigate_operator(self):
-        from tortoise.mcp_server import tortoise_create_point, tortoise_create_operator
+        from tortoise.mcp_server import tortoise_create_point, tortoise_create_operator  # noqa: I001
         from tortoise.mcp_server import tortoise_mitigate_operator
 
         a = tortoise_create_point("statement", "Claim A")
@@ -584,7 +584,7 @@ class TestToolIntegration:
         assert result.get("mitigation_strength") == 0.3 or "error" in result
 
     def test_mitigate_operator_idempotent(self):
-        from tortoise.mcp_server import tortoise_create_point, tortoise_create_operator
+        from tortoise.mcp_server import tortoise_create_point, tortoise_create_operator  # noqa: I001
         from tortoise.mcp_server import tortoise_mitigate_operator
 
         a = tortoise_create_point("statement", "Claim A")
@@ -657,7 +657,7 @@ class TestAnalyzeLlmBudget:
         # embedded env (no Docker) so the team SDK resolves
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         monkeypatch.setenv("TORTOISE_DB_PATH", "/tmp/tortoise_analyze_budget.db")
-        import tempfile as _tf, os as _os
+        import tempfile as _tf, os as _os  # noqa: E401, I001
         monkeypatch.setenv("TORTOISE_DB_PATH", _os.path.join(_tf.mkdtemp(), "budget.db"))
 
         # Team context (HTTP) → budget accounting
@@ -709,7 +709,7 @@ class TestEventsTools:
         assert rt.annotations.destructiveHint is True
 
     def test_events_poll_returns_same_shape_as_sdk(self, monkeypatch, tmp_path):
-        import os
+        import os  # noqa: I001
         from tortoise.mcp_server import tortoise_events_poll, _transport_mode
         from tortoise.sdk import TortoiseSDK
 
@@ -726,7 +726,7 @@ class TestEventsTools:
         assert result["next_cursor"]
 
     def test_events_poll_unknown_type_error(self, monkeypatch, tmp_path):
-        import os
+        import os  # noqa: I001
         from tortoise.mcp_server import tortoise_events_poll, _transport_mode
         from tortoise.sdk import TortoiseSDK
 
@@ -740,7 +740,7 @@ class TestEventsTools:
         assert result.get("error")  # _safe structured error, not a crash
 
     def test_retract_point_returns_sdk_result(self, monkeypatch, tmp_path):
-        import os
+        import os  # noqa: I001
         from tortoise.mcp_server import tortoise_retract_point, _transport_mode
         from tortoise.sdk import TortoiseSDK
 
@@ -832,7 +832,7 @@ class TestIngestPromotionPolicy:
             assert "not allowed under promotion_policy 'gated'" in res["error"]
 
     def _sdk_backed_ingest(self, request, monkeypatch, tmp_path, *, reify=False, **kw):
-        import os
+        import os  # noqa: I001
         from tortoise.sdk import TortoiseSDK
         sdk = TortoiseSDK(os.path.join(str(tmp_path), "ing.db"))
         request.addfinalizer(sdk.close)  # match repo teardown convention

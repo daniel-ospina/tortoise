@@ -52,7 +52,7 @@ class TestDe2e6aEquivalenceHardGate:
             claim_ids = set(f.claims.values())
             # Reference: from-scratch full pass (default warm_start=False).
             r_ref = _dream_full_clean(f.sdk)
-            ref_conf = _confidences(f.sdk, claim_ids)
+            ref_conf = _confidences(f.sdk, claim_ids)  # noqa: F841
             assert r_ref["converged_all"] is True
 
             # Mutate evidence: change a premise baseline (topology unchanged).

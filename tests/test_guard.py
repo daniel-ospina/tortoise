@@ -16,7 +16,7 @@ pytest.importorskip("redislite")
 def test_tortoise_reexport_raises_on_relative():
     """`import tortoise; from tortoise import FalkorDB; FalkorDB('relative.db')`
     raises RuntimeError (guards code importing tortoise's re-export)."""
-    import tortoise
+    import tortoise  # noqa: F401
     from tortoise import FalkorDB
     with pytest.raises(RuntimeError):
         FalkorDB("relative.db")
@@ -24,14 +24,14 @@ def test_tortoise_reexport_raises_on_relative():
 
 def test_absolute_path_passes_through_wrapper():
     """Absolute path passes through the guarded re-export."""
-    import tempfile
+    import tempfile  # noqa: I001
     import os
     from tortoise import FalkorDB
     path = os.path.join(tempfile.mkdtemp(), "guard-abs.db")
     db = FalkorDB(path)
     db.close()
     for suffix in (".db", ".db.settings"):
-        try:
+        try:  # noqa: SIM105
             os.remove(path + suffix)
         except OSError:
             pass
@@ -47,14 +47,14 @@ def test_no_arg_passes_through_wrapper():
 def test_projection_still_works_with_guard_active():
     """FalkorProjection('/tmp/test.db') still works — the wrapper does NOT
     break the projection module (Task 7's own hard-reject handles paths)."""
-    import tempfile
+    import tempfile  # noqa: I001
     import os
     from tortoise.projection import FalkorProjection
     path = os.path.join(tempfile.mkdtemp(), "guard-proj.db")
     proj = FalkorProjection(path)
     proj.close()
     for suffix in (".db", ".db.settings"):
-        try:
+        try:  # noqa: SIM105
             os.remove(path + suffix)
         except OSError:
             pass
@@ -65,7 +65,7 @@ def test_direct_redislite_import_before_tortoise_bypasses():
     unwrapped original — documented bypass (pre-commit grep covers it)."""
     import redislite.falkordb_client as rfc
     OriginalFalkorDB = rfc.FalkorDB
-    import tortoise  # guard activates, but local ref is already unwrapped
+    import tortoise  # guard activates, but local ref is already unwrapped  # noqa: F401, I001
     # The original does NOT raise on relative paths (it spawns a server) —
     # but we must NOT create a server in a test. Instead assert the class
     # identity: the pre-import reference is NOT tortoise's guarded subclass.
@@ -76,7 +76,7 @@ def test_direct_redislite_import_before_tortoise_bypasses():
 def test_redislite_redis_direct_import_bypasses():
     """redislite.Redis() (parent class) also bypasses the wrapper — locks in
     the documented limitation (pre-commit grep covers it). Must NOT raise."""
-    import redislite
+    import redislite  # noqa: I001
     import tortoise  # noqa: F401 — guard active
     # Just verify import works and Redis is importable; do NOT instantiate
     # (it would spawn a server). The guard must not have patched redislite.
@@ -86,8 +86,8 @@ def test_redislite_redis_direct_import_bypasses():
 def test_guard_is_subclass_not_monkeypatch():
     """The guard subclasses FalkorDB and re-exports; it does NOT monkeypatch
     the redislite module globally (non-tortoise users unaffected)."""
-    import redislite.falkordb_client as rfc
-    import tortoise
+    import redislite.falkordb_client as rfc  # noqa: I001
+    import tortoise  # noqa: F401
     from tortoise import FalkorDB as Guarded
     assert issubclass(Guarded, rfc.FalkorDB)
     # redislite module untouched
@@ -105,7 +105,7 @@ def test_placeholder_branch_raises_clear_import_error():
     guidance. Reload once more after the patch to restore the guarded
     subclass, so no test pollution leaks into the rest of the suite.
     """
-    import importlib
+    import importlib  # noqa: I001
     import sys
     from unittest import mock
 

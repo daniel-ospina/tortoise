@@ -7,7 +7,7 @@ beats Mem0 but not Zep, the 'unique' claim is weak"). Mock contract
 returns the latest VALID fact per entity. Real mode: HTTP seam, ArmUnavailable
 on failure.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import os
 import urllib.request
@@ -15,7 +15,7 @@ import urllib.error
 import json
 
 from battery.arms.base import (
-    AgentContext, ArmAdapter, ArmUnavailable, Memory)
+    AgentContext, ArmAdapter, ArmUnavailable, Memory)  # noqa: F401
 from battery.arms.vendors import ZepMockStore, to_memories
 from battery.config.corpus import Scenario
 

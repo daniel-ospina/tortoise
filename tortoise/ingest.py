@@ -14,7 +14,7 @@ ollama tags). Providers:
 
 Idempotent: re-running the same file at the same extractor version is a no-op.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import argparse
 import os
@@ -44,7 +44,7 @@ _PROVIDERS = {
 # NOTE: this module's ``_parse_frontmatter`` is the deliberate line-by-line
 # parser (no PyYAML dependency) — a DIFFERENT function from
 # file_indexer.parse_frontmatter; only the boundary regex is shared.
-from .file_indexer import _FM_RE
+from .file_indexer import _FM_RE  # noqa: E402
 
 
 def _parse_frontmatter(text: str) -> dict:
@@ -175,7 +175,7 @@ def _do_upgrade(transcript, text, source_id, proj, api, args):
     print(f"upgrading {source_id} (doc_status={current_status}) …")
 
     # 3. Re-run full extraction (the same path as normal full ingest)
-    from .extractor import extract_from_document
+    from .extractor import extract_from_document  # noqa: I001
     from .ids import ulid
     from .domain_loader import resolve_domain_from_path
 
@@ -324,7 +324,7 @@ def _do_upgrade_all(proj, api, args):
         print(f"  upgrading {doc_id} (doc_status={status}, needs_extraction={needs_ext}) …")
 
         # Emit DocumentCreated for metadata (idempotent via MERGE)
-        from .extractor import extract_from_document
+        from .extractor import extract_from_document  # noqa: I001
         from .ids import ulid
         from .domain_loader import resolve_domain_from_path
 
@@ -370,7 +370,7 @@ def _do_upgrade_all(proj, api, args):
             if stats.get("failed_sections"):
                 print(f"    warning: {len(stats['failed_sections'])} sections failed extraction")
         else:
-            print(f"    warning: not a Document (no ## headers) — extraction skipped")
+            print(f"    warning: not a Document (no ## headers) — extraction skipped")  # noqa: F541
             skipped += 1
             continue
 
@@ -401,7 +401,7 @@ def build_model(spec: str, *, reasoning: bool = False):
         return OllamaModel(id=model, think=reasoning)
     if provider not in _PROVIDERS:
         raise SystemExit(f"unknown provider {provider!r}; choose from "
-                         f"{sorted(_PROVIDERS) + ['ollama', 'mock']}")
+                         f"{sorted(_PROVIDERS) + ['ollama', 'mock']}")  # noqa: RUF005
     base_url, api_key_env = _PROVIDERS[provider]
     return OpenAICompatModel(id=model, base_url=base_url, api_key_env=api_key_env)
 

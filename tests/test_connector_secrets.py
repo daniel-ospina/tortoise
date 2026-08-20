@@ -4,13 +4,13 @@ Validates that all three connectors read secrets from environment variables,
 degrade gracefully when env vars are absent, and that the connector loader
 strips and warns about plaintext secrets in YAML config.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import logging
 import os
 import tempfile
 
-import pytest
+import pytest  # noqa: F401
 
 from tortoise.connectors.slack import SlackConnector
 from tortoise.connectors.github import GitHubConnector

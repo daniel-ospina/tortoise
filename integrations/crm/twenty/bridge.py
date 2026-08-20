@@ -92,7 +92,7 @@ def _api(method: str, path: str, params: dict | None = None, json_data: dict | N
     return {"error": "max_retries"}
 
 
-def find_person_by_email(email: str) -> Optional[dict]:
+def find_person_by_email(email: str) -> Optional[dict]:  # noqa: UP045
     """Find a Twenty contact by email. Returns contact dict or None."""
     result = _api("GET", "/people", params={"filter": f"email[eq]={email}"})
     contacts = result.get("data", {}).get("contacts", {}).get("edges", [])
@@ -116,7 +116,7 @@ def create_opportunity(person_id: str, name: str) -> dict:
     })
 
 
-def find_company_by_domain(domain: str) -> Optional[dict]:
+def find_company_by_domain(domain: str) -> Optional[dict]:  # noqa: UP045
     """Find a Twenty company by domain."""
     result = _api("GET", "/companies", params={"filter": f"domain[eq]={domain}"})
     companies = result.get("data", {}).get("companies", {}).get("edges", [])
@@ -130,7 +130,7 @@ def create_company(name: str, domain: str = "") -> dict:
     return _api("POST", "/companies", json_data={"name": name, "domain": domain})
 
 
-def find_note_by_external_id(external_id: str) -> Optional[dict]:
+def find_note_by_external_id(external_id: str) -> Optional[dict]:  # noqa: UP045
     """Check if a note with this external_id already exists (idempotency)."""
     result = _api("GET", "/notes", params={"filter": f"externalId[eq]={external_id}"})
     notes = result.get("data", {}).get("notes", {}).get("edges", [])
@@ -155,7 +155,7 @@ def _lock_queue(queue_path: Path):
     """Acquire exclusive lock on review queue file."""
     queue_path.parent.mkdir(parents=True, exist_ok=True)
     queue_path.touch(exist_ok=True)
-    fd = open(queue_path, "r+")
+    fd = open(queue_path, "r+")  # noqa: SIM115
     fcntl.flock(fd, fcntl.LOCK_EX)
     return fd
 
@@ -325,7 +325,7 @@ def push_to_tortoise(frontmatter: dict) -> dict:
         return {"status": "error", "reason": "tortoise_push_failed"}
 
 
-def get_calendar_attendees(meeting_date: str = None) -> list:
+def get_calendar_attendees(meeting_date: str = None) -> list:  # noqa: RUF013
     """Get attendees from the most recent cal-trigger state file."""
     if not os.path.exists(CAL_STATE_FILE):
         return []
@@ -333,7 +333,7 @@ def get_calendar_attendees(meeting_date: str = None) -> list:
         with open(CAL_STATE_FILE) as f:
             state = json.load(f)
         return state.get("attendees", [])
-    except (json.JSONDecodeError, IOError):
+    except (json.JSONDecodeError, IOError):  # noqa: UP024
         return []
 
 
@@ -386,7 +386,7 @@ def process_meeting(md_path: str) -> dict:
                 new_person = find_person_by_email(email)
                 if new_person and "error" not in new_person:
                     create_opportunity(new_person["id"], f"{name} — First call {frontmatter.get('date','')[:10]}")
-                log(f"Auto-created contact: {name} <{email}>") if 'log' in dir() else None
+                log(f"Auto-created contact: {name} <{email}>") if 'log' in dir() else None  # noqa: F821
 
     # Match speakers to contacts
     person_ids = []

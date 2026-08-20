@@ -15,16 +15,16 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tortoise.sdk import TortoiseSDK  # noqa: E402
-from tortoise.models import OpenAICompatModel  # noqa: E402
+from tortoise.sdk import TortoiseSDK  # noqa: E402, I001, RUF100
+from tortoise.models import OpenAICompatModel  # noqa: E402, RUF100
 
-from tools.longmem_eval.ingest import ingest_haystack  # noqa: E402
-from tools.longmem_eval.judge import (  # noqa: E402
+from tools.longmem_eval.ingest import ingest_haystack  # noqa: E402, RUF100
+from tools.longmem_eval.judge import (  # noqa: E402, RUF100
     LLMJudge, MockJudge, OfficialJudgeModel, _parse_judge_response,
     get_anscheck_prompt, is_abstention,
 )
-from tools.longmem_eval.reader import MockReader, build_reader  # noqa: E402
-from tools.longmem_eval.retrieve import (  # noqa: E402
+from tools.longmem_eval.reader import MockReader, build_reader  # noqa: E402, RUF100
+from tools.longmem_eval.retrieve import (  # noqa: E402, RUF100
     _annotate_hits, render_context, retrieve_for_question,
 )
 from tools.longmem_eval.run import (  # noqa: E402
@@ -642,7 +642,7 @@ def test_checkpoint_resume_skips_completed_questions(tmp_path):
 def test_download_is_atomic_and_validated(monkeypatch, tmp_path):
     """Interrupted downloads must never poison the cache: temp .part file +
     JSON validation + atomic rename into place."""
-    from tools.longmem_eval import dataset as ds
+    from tools.longmem_eval import dataset as ds  # noqa: I001
     import urllib.error
     import urllib.request
 
@@ -688,7 +688,7 @@ def test_download_is_atomic_and_validated(monkeypatch, tmp_path):
 def test_download_creates_missing_cache_dir(monkeypatch, tmp_path):
     """#1360: a fresh (non-existent) cache dir must be auto-created — first-
     run downloads previously crashed with FileNotFoundError writing the .part."""
-    from tools.longmem_eval import dataset as ds
+    from tools.longmem_eval import dataset as ds  # noqa: I001
     import urllib.request
 
     class _FakeResp:
@@ -749,7 +749,7 @@ def test_dataset_download_gated_on_network(monkeypatch, tmp_path):
     monkeypatch.setenv("TORTOISE_LME_CACHE_DIR", str(tmp_path / "cache"))
     from tools.longmem_eval import dataset as ds
 
-    with pytest.raises(Exception):
+    with pytest.raises(Exception):  # noqa: B017
         ds.load_dataset("s", limit=1, download=False)  # no cache → fails
 
 

@@ -21,7 +21,7 @@ import argparse
 import os
 import subprocess
 import sys
-import time
+import time  # noqa: F401
 from datetime import datetime, timezone
 
 # Allow running from any directory
@@ -55,12 +55,12 @@ def trigger_bgsave(host: str = "localhost", port: int = 16379,
         db = FalkorDB(host=host, port=port, password=password or None,
                       socket_connect_timeout=5, socket_timeout=120)
         result = db.connection.execute_command("BGSAVE")
-        ts = datetime.now(timezone.utc).isoformat()
+        ts = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         return {"ok": True, "message": f"BGSAVE triggered: {result}",
                 "timestamp": ts}
     except Exception as e:
         return {"ok": False, "message": f"BGSAVE failed: {e}",
-                "timestamp": datetime.now(timezone.utc).isoformat()}
+                "timestamp": datetime.now(timezone.utc).isoformat()}  # noqa: UP017
 
 
 def check_rdb(host: str = "localhost", port: int = 16379,
@@ -92,7 +92,7 @@ def check_rdb(host: str = "localhost", port: int = 16379,
 
         # LASTSAVE
         lastsave = db.connection.execute_command("LASTSAVE")
-        lastsave_utc = datetime.fromtimestamp(lastsave, tz=timezone.utc).isoformat() if lastsave else "unknown"
+        lastsave_utc = datetime.fromtimestamp(lastsave, tz=timezone.utc).isoformat() if lastsave else "unknown"  # noqa: UP017
 
         return {
             "ok": True,
@@ -117,7 +117,7 @@ def check_rdb_via_docker(container: str = "falkordb-personal",
             capture_output=True, text=True, timeout=10,
         )
         # Output is alternating key/value lines
-        lines = [l.strip() for l in r.stdout.strip().splitlines() if l.strip()]
+        lines = [l.strip() for l in r.stdout.strip().splitlines() if l.strip()]  # noqa: E741
         rdb_dir = lines[-1] if lines else "unknown"
 
         # CONFIG GET dbfilename
@@ -126,8 +126,8 @@ def check_rdb_via_docker(container: str = "falkordb-personal",
              "CONFIG", "GET", "dbfilename"],
             capture_output=True, text=True, timeout=10,
         )
-        lines = [l.strip() for l in r.stdout.strip().splitlines() if l.strip()]
-        rdb_fn = lines[-1] if lines else "unknown"
+        lines = [l.strip() for l in r.stdout.strip().splitlines() if l.strip()]  # noqa: E741
+        rdb_fn = lines[-1] if lines else "unknown"  # noqa: F841
 
         # DBSIZE
         r = subprocess.run(
@@ -142,7 +142,7 @@ def check_rdb_via_docker(container: str = "falkordb-personal",
             capture_output=True, text=True, timeout=10,
         )
         lastsave = int(r.stdout.strip()) if r.stdout.strip().isdigit() else 0
-        lastsave_utc = datetime.fromtimestamp(lastsave, tz=timezone.utc).isoformat() if lastsave else "unknown"
+        lastsave_utc = datetime.fromtimestamp(lastsave, tz=timezone.utc).isoformat() if lastsave else "unknown"  # noqa: UP017
 
         # Verify RDB file exists on disk
         r = subprocess.run(
@@ -150,7 +150,7 @@ def check_rdb_via_docker(container: str = "falkordb-personal",
              "CONFIG", "GET", "dbfilename"],
             capture_output=True, text=True, timeout=10,
         )
-        lines = [l.strip() for l in r.stdout.strip().splitlines() if l.strip()]
+        lines = [l.strip() for l in r.stdout.strip().splitlines() if l.strip()]  # noqa: E741
         rdb_name = lines[-1] if lines else "dump.rdb"
 
         r = subprocess.run(
@@ -247,7 +247,7 @@ def main() -> int:
         print("Would:")
         print(f"  1. Trigger BGSAVE on {cfg['host']}:{cfg['port']}")
         print(f"  2. Verify RDB via docker exec {args.container}")
-        print(f"  3. Print restore procedure")
+        print(f"  3. Print restore procedure")  # noqa: F541
         if args.copy_rdb:
             print(f"  4. Copy RDB to {args.copy_rdb}")
         print()
@@ -262,7 +262,7 @@ def main() -> int:
     print("=" * 60)
     print("PRE-MIGRATION SAFETY SNAPSHOT")
     print("=" * 60)
-    print(f"  Time: {datetime.now(timezone.utc).isoformat()}")
+    print(f"  Time: {datetime.now(timezone.utc).isoformat()}")  # noqa: UP017
     print(f"  URI:  {uri}")
     print(f"  Host: {cfg['host']}:{cfg['port']}")
     print(f"  Graph: {cfg['graph']}")
@@ -328,8 +328,8 @@ def main() -> int:
     print(RESTORE_PROCEDURE.format(
         rdb_dir=rdb.get("dir", "/var/lib/falkordb/data"),
         rdb_filename=rdb.get("dbfilename", "dump.rdb"),
-        timestamp=rdb.get("lastsave_utc", datetime.now(timezone.utc).isoformat()),
-        backup_dir=datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
+        timestamp=rdb.get("lastsave_utc", datetime.now(timezone.utc).isoformat()),  # noqa: UP017
+        backup_dir=datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),  # noqa: UP017
     ))
 
     print("\nSnapshot check complete. RDB should be safe before REMOVE migration.")

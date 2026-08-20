@@ -266,7 +266,7 @@ class TestAgentSignupClaim:
 
     @pytest.fixture(autouse=True)
     def _supabase_claim_env(self, monkeypatch):
-        from tests.fake_control_plane import FakeControlPlane
+        from tests.fake_control_plane import FakeControlPlane  # noqa: I001
         import tortoise.supabase_control as sc
         import tortoise.hosted_api as ha_mod
 
@@ -333,11 +333,11 @@ class TestAgentSignupClaim:
         """reg- identity teams (email set at mint) get the email overwritten
         with the verified OAuth email on claim (P1-FIX-B, unconditional)."""
         r = client.post("/v1/agent/signup", json={})
-        key = r.json()["key"]
+        key = r.json()["key"]  # noqa: F841
         import tortoise.supabase_control as sc
         fake = sc.get_control_plane()
         # simulate a reg- mint: provision a SECOND team with email set
-        import uuid as _uuid
+        import uuid as _uuid  # noqa: I001
         from tortoise.auth import lookup_hash as _lh, hash_api_key as _hash
         team_id = f"team-reg-{_uuid.uuid4().hex[:10]}"
         api_key = f"tt_{_uuid.uuid4().hex}"
@@ -381,14 +381,14 @@ class TestIpv6Normalization:
         127.0.0.1 are the same bucket (2 mints then 429 on the 3rd)."""
         monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
         import tortoise.hosted_api as ha_mod
-        from tortoise.hosted_api import _check_signup_ip_rate_limit, app
+        from tortoise.hosted_api import _check_signup_ip_rate_limit, app  # noqa: F401
         ha_mod._SIGNUP_BUCKETS.clear()
 
         class _Req:
             client = type("C", (), {"host": "127.0.0.1"})()
             state = type("S", (), {"client_ip": "::ffff:7f00:1"})()
 
-        import pytest, asyncio
+        import pytest, asyncio  # noqa: E401, I001
         async def _run():
             await _check_signup_ip_rate_limit(_Req())
             await _check_signup_ip_rate_limit(_Req())  # 2nd mint (same bucket)
@@ -402,7 +402,7 @@ class TestIpv6Normalization:
     def test_retain_feed_task_replacement_keeps_ref(self, monkeypatch):
         """Regression for the review P3 GC race: a same-key replacement task
         must keep its only strong reference when the FIRST task completes."""
-        import asyncio
+        import asyncio  # noqa: I001
         import tortoise.hosted_api as ha_mod
         from tortoise.hosted_api import _retain_feed_task
 

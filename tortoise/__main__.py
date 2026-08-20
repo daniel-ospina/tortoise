@@ -1,5 +1,5 @@
 """CLI entry point: python -m tortoise <command>"""
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import argparse
 import sys
@@ -15,7 +15,7 @@ def _cmd_rebuild(args):
         print(f"Done: {counts['nodes']} nodes, {counts['edges']} edges from {counts['events']} events")
     except ImportError as e:
         print(f"FalkorDB unavailable ({e}). Use InMemory rebuild:", file=sys.stderr)
-        from tortoise.log import EventLog
+        from tortoise.log import EventLog  # noqa: I001
         from tortoise.projection import fold
         import os
         events = []
@@ -32,7 +32,7 @@ def _cmd_rebuild(args):
         print(f"Done: {len(points)} total ({statements} statements, {ops} operators) [in-memory, no DB]")
 
 def _cmd_demo(args):
-    from pathlib import Path
+    from pathlib import Path  # noqa: I001
     from tempfile import NamedTemporaryFile
     from tortoise.log import EventLog
     from tortoise.api import EventAPI
@@ -70,7 +70,7 @@ def _cmd_demo(args):
 
     # Print statements in order of utterance (by span start)
     ordered = sorted(points.items(), key=lambda kv: kv[1]["provenance"]["span"][0])
-    for pid, p in ordered:
+    for pid, p in ordered:  # noqa: B007
         prov = p["provenance"]
         print(f"\n  [{prov['speaker']}] {prov['quote']}")
 
@@ -91,9 +91,9 @@ def _cmd_demo(args):
 
 def _cmd_mine_conversation(args):
     """Mine conversation transcript → Events + Points (GAP-15 / #7003)."""
-    import json
+    import json  # noqa: F401
     from pathlib import Path
-    from tempfile import NamedTemporaryFile
+    from tempfile import NamedTemporaryFile  # noqa: F401
 
     from tortoise.api import EventAPI
     from tortoise.log import EventLog
@@ -161,7 +161,7 @@ def _cmd_mine_conversation(args):
 
     if len(event_entries) < 3:
         print(f"\u26a0\ufe0f  GATE FAILED: {len(event_entries)} events < 3 minimum")
-        print(f"   Per plan WF4: <3 events/session → permanently descoped.")
+        print(f"   Per plan WF4: <3 events/session → permanently descoped.")  # noqa: F541
         return 1  # non-zero so scripts can detect a descoped session (#1198)
     else:
         print(f"\u2705  GATE PASSED: {len(event_entries)} events")
@@ -179,7 +179,7 @@ def _cmd_mine_conversation(args):
 
 def _cmd_reconcile(args):
     """Replay unprojected EventRecorded entries from JSONL into FalkorDB."""
-    import json, sys
+    import json, sys  # noqa: E401, F401, I001
     from pathlib import Path
 
     from tortoise.config import is_docker_uri
@@ -233,8 +233,8 @@ def _cmd_reconcile(args):
 
 def _cmd_init(args):
     """Auto-detect FalkorDB and create default graph — onboarding."""
-    import json as _json
-    import os, tempfile
+    import json as _json  # noqa: I001
+    import os, tempfile  # noqa: E401
     from pathlib import Path
 
     # ── Cloud mode (--api-key) ──────────────────────────────────
@@ -294,7 +294,7 @@ def _cmd_init(args):
                     print("Already connected to Tortoise Cloud with this API key.")
                 return 0
             if not json_mode:
-                print(f"⚠️  Existing .tortoise config found — overwriting.")
+                print(f"⚠️  Existing .tortoise config found — overwriting.")  # noqa: F541
         config = {
             "api_key": args.api_key,
             "api_url": os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co"),
@@ -306,7 +306,7 @@ def _cmd_init(args):
         # 5xx/429/408 → transient server error → retry once, then warn + save;
         # non-JSON 200 → unvalidated (captive portal/proxy) → hard fail;
         # network errors → warn + save (cannot validate offline).
-        from urllib.request import Request, urlopen
+        from urllib.request import Request, urlopen  # noqa: I001
         from urllib.error import URLError, HTTPError
         from http.client import HTTPException as _HTTPException
         from json import JSONDecodeError as _JSONDecodeError
@@ -341,7 +341,7 @@ def _cmd_init(args):
                     if e.code in (401, 403):
                         # Only these mean the key itself was rejected.
                         body = ""
-                        try:
+                        try:  # noqa: SIM105
                             body = e.read().decode()
                         except Exception:
                             pass
@@ -354,14 +354,14 @@ def _cmd_init(args):
                             fail = ("key_rejected", f"API rejected the key ({e.code}): {body.strip() or e.reason}", e.code)
                         if not json_mode:
                             print(f"❌ {fail[1]}", file=sys.stderr)
-                            print(f"   Config NOT saved. Double-check the key or run:", file=sys.stderr)
-                            print(f"   tortoise init --api-key tt_<key>", file=sys.stderr)
+                            print(f"   Config NOT saved. Double-check the key or run:", file=sys.stderr)  # noqa: F541
+                            print(f"   tortoise init --api-key tt_<key>", file=sys.stderr)  # noqa: F541
                         break
                     if e.code == 404:
                         fail = ("bad_url", f"API URL appears misconfigured — got 404 from {base_url}/v1/team.", 404)
                         if not json_mode:
                             print(f"❌ {fail[1]}", file=sys.stderr)
-                            print(f"   Check TORTOISE_API_URL. Config NOT saved.", file=sys.stderr)
+                            print(f"   Check TORTOISE_API_URL. Config NOT saved.", file=sys.stderr)  # noqa: F541
                         break
                     if e.code in (408, 429) or 500 <= e.code <= 599:
                         # Transient server-side failure — a valid key may be fine.
@@ -371,12 +371,12 @@ def _cmd_init(args):
                         fail = ("transient", f"Tortoise Cloud returned {e.code} while validating the key (transient error).", e.code)
                         if not json_mode:
                             print(f"⚠️  {fail[1]}")
-                            print(f"   Saving config anyway — verify with: tortoise team info")
+                            print(f"   Saving config anyway — verify with: tortoise team info")  # noqa: F541
                         break
                     fail = ("transient", f"Unexpected status {e.code} from Tortoise Cloud while validating the key.", e.code)
                     if not json_mode:
                         print(f"⚠️  {fail[1]}")
-                        print(f"   Saving config anyway — verify with: tortoise team info")
+                        print(f"   Saving config anyway — verify with: tortoise team info")  # noqa: F541
                     break
         except _JSONDecodeError:
             # 200 with a non-JSON body (captive portal / proxy) — unvalidated.
@@ -384,15 +384,15 @@ def _cmd_init(args):
                     "Tortoise Cloud returned a non-JSON response — key NOT validated "
                     "(possible captive portal or proxy intercepting the request).", 200)
             if not json_mode:
-                print(f"❌ Tortoise Cloud returned a non-JSON response — key NOT validated.", file=sys.stderr)
-                print(f"   (Possible captive portal or proxy intercepting the request.)", file=sys.stderr)
-                print(f"   Config NOT saved. Check your network / TORTOISE_API_URL and retry.", file=sys.stderr)
+                print(f"❌ Tortoise Cloud returned a non-JSON response — key NOT validated.", file=sys.stderr)  # noqa: F541
+                print(f"   (Possible captive portal or proxy intercepting the request.)", file=sys.stderr)  # noqa: F541
+                print(f"   Config NOT saved. Check your network / TORTOISE_API_URL and retry.", file=sys.stderr)  # noqa: F541
         except (URLError, _HTTPException, ValueError) as e:
             reason = getattr(e, "reason", e)
             fail = ("offline", f"Could not reach {base_url} to validate the key ({reason}).", None)
             if not json_mode:
                 print(f"⚠️  {fail[1]}")
-                print(f"   Saving config anyway — verify with: tortoise team info")
+                print(f"   Saving config anyway — verify with: tortoise team info")  # noqa: F541
 
         if fail and fail[0] in ("key_rejected", "bad_url", "captive_portal"):
             # Hard-fail kinds: config is NOT saved (existing #707 behavior).
@@ -498,17 +498,17 @@ def _cmd_init(args):
             from tortoise.projection import FalkorProjection
             _proj = FalkorProjection.from_uri(target)
             _proj.g.query("RETURN 1")
-            print(f"  ✅ FalkorDB reachable via TORTOISE_DB_URI")
+            print(f"  ✅ FalkorDB reachable via TORTOISE_DB_URI")  # noqa: F541
             graph_ready = True
             uri_mode = True
         except ImportError:
-            print(f"  ❌ falkordb not installed — required for URI mode")
-            print(f"     pip install falkordb")
+            print(f"  ❌ falkordb not installed — required for URI mode")  # noqa: F541
+            print(f"     pip install falkordb")  # noqa: F541
             return 1
         except Exception as e:
             err = str(e).lower()
             if "auth" in err or "password" in err:
-                print(f"  ❌ FalkorDB auth failed — check TORTOISE_DB_URI credentials")
+                print(f"  ❌ FalkorDB auth failed — check TORTOISE_DB_URI credentials")  # noqa: F541
             else:
                 print(f"  ❌ FalkorDB unreachable ({e})")
             print("     Fix TORTOISE_DB_URI, or unset it to use embedded mode.")
@@ -526,9 +526,9 @@ def _cmd_init(args):
             # Reachable when falkordblite is actually missing: tortoise/__init__
             # no longer crashes at import time (issue #716). falkordb Docker
             # mode is handled earlier, so this fires only for the embedded gap.
-            print(f"  ❌ Embedded mode unavailable — falkordblite not installed.")
-            print(f"     pip install falkordb        # for Docker mode (FalkorProjection)")
-            print(f"     pip install falkordblite    # for embedded mode (FalkorProjection)")
+            print(f"  ❌ Embedded mode unavailable — falkordblite not installed.")  # noqa: F541
+            print(f"     pip install falkordb        # for Docker mode (FalkorProjection)")  # noqa: F541
+            print(f"     pip install falkordblite    # for embedded mode (FalkorProjection)")  # noqa: F541
             return 1
         except Exception as e:
             print(f"  ❌ Embedded mode init failed: {e}")
@@ -586,7 +586,7 @@ def _cmd_init(args):
     # Mock for unset attrs, which must NOT disable the block.
     if getattr(args, 'no_index', False) is not True:
         import subprocess as _sp
-        import sys as _sys
+        import sys as _sys  # noqa: F401
         result = _sp.run(
             ["git", "rev-parse", "--show-toplevel"],
             capture_output=True, text=True, timeout=5,
@@ -598,7 +598,7 @@ def _cmd_init(args):
             if md_count > 0:
                 if auto_index:
                     print(f"\nFound {md_count} markdown files in this repo. Auto-indexing…")
-                    log_f = open(str(Path(tempfile.gettempdir()) / "tortoise-init-index.log"), 'w')
+                    log_f = open(str(Path(tempfile.gettempdir()) / "tortoise-init-index.log"), 'w')  # noqa: SIM115
                     # #715: pass the resolved DB target to the child — env
                     # for password-bearing URIs (never leak in argv), --db
                     # otherwise (index's --db resolves identically, conf 60).
@@ -615,7 +615,7 @@ def _cmd_init(args):
                     yn = input(f"Found {md_count} markdown files in this repo. Index them into Tortoise? [Y/n]: ").strip().lower()
                     if yn != "n":
                         print("Launching indexer in background…")
-                        log_f = open(str(Path(tempfile.gettempdir()) / "tortoise-init-index.log"), 'a')
+                        log_f = open(str(Path(tempfile.gettempdir()) / "tortoise-init-index.log"), 'a')  # noqa: SIM115
                         # #715: same as the --yes path — carry the resolved
                         # DB target so the child indexes the DB init wrote to.
                         child_cmd, child_env = _index_github_child_cmd(
@@ -636,7 +636,7 @@ def _cmd_signup(args) -> int:
     of Mem0's 4-command key mint and Hindsight's npx self-install. Saves
     the config to .tortoise so `tortoise create-point` etc. work immediately.
     """
-    import json, os, sys, uuid
+    import json, os, sys, uuid  # noqa: E401, I001
     from pathlib import Path
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
@@ -644,7 +644,7 @@ def _cmd_signup(args) -> int:
     api_url = os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
     device_id = f"anon-{uuid.uuid4().hex[:12]}"
 
-    print(f"Signing up for a free hosted team (anonymous, no email)…")
+    print(f"Signing up for a free hosted team (anonymous, no email)…")  # noqa: F541
     try:
         req = Request(
             f"{api_url}/v1/agent/signup",
@@ -695,23 +695,23 @@ def _cmd_signup(args) -> int:
         print()
         print("🔐 Claim your team (optional but recommended):")
         print(f"   1. Open {dashboard}")
-        print(f"   2. Sign in with GitHub or Google")
-        print(f"   3. Paste this key when prompted:")
+        print(f"   2. Sign in with GitHub or Google")  # noqa: F541
+        print(f"   3. Paste this key when prompted:")  # noqa: F541
         print(f"      {data['key']}")
         print("   Your verified identity attaches to THIS team — same key,"
               " same graph, memories intact.")
-    print(f"   Next: tortoise create-point \"hello world\" --kind statement")
+    print(f"   Next: tortoise create-point \"hello world\" --kind statement")  # noqa: F541
     return 0
 
 
 def _cmd_team_info(args) -> int:
     """Show team info from Tortoise Cloud API."""
-    import json, sys
+    import json, sys  # noqa: E401, I001
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
 
     # Read config
-    config, api_key, api_url = _read_config()
+    config, api_key, api_url = _read_config()  # noqa: RUF059
     if api_key is None:
         return 1
 
@@ -949,7 +949,7 @@ def _write_mcp_config_file(api_key: str, api_url: str, harness: str, force: bool
     status = sys.stderr if status_to_stderr else sys.stdout
     # The written config references $TORTOISE_API_KEY (page #529 env form) —
     # make sure the var is set in the shell that will launch the agent.
-    print(f"ℹ️  This config reads $TORTOISE_API_KEY — export it first:", file=status)
+    print(f"ℹ️  This config reads $TORTOISE_API_KEY — export it first:", file=status)  # noqa: F541
     print(f"   export TORTOISE_API_KEY={api_key}", file=status)
     target.write_text(_json.dumps(data, indent=2) + "\n")
     os.chmod(target, 0o600)
@@ -960,7 +960,7 @@ def _write_mcp_config_file(api_key: str, api_url: str, harness: str, force: bool
 
 def _cmd_team_keys_list(args) -> int:
     """List team API keys (GET /v1/team/keys). Hashes only — no plaintext."""
-    import json as _json
+    import json as _json  # noqa: I001
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
 
@@ -1010,14 +1010,14 @@ def _cmd_team_keys_list(args) -> int:
     for k in keys:
         status = "revoked" if k.get("revoked_at") else "active"
         last = k.get("last_used_at") or "never"
-        print(f"  {str(k.get('id') or ''):<14}{str(k.get('key_prefix') or ''):<14}"
-              f"{str(k.get('created_at') or ''):<26}{str(last):<26}{status}")
+        print(f"  {str(k.get('id') or ''):<14}{str(k.get('key_prefix') or ''):<14}"  # noqa: RUF010
+              f"{str(k.get('created_at') or ''):<26}{str(last):<26}{status}")  # noqa: RUF010
     return 0
 
 
 def _cmd_team_keys_create(args) -> int:
     """Mint a new team API key (POST /v1/team/keys). Key shown exactly once."""
-    import json as _json
+    import json as _json  # noqa: I001
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
 
@@ -1078,19 +1078,19 @@ def _cmd_team_keys_create(args) -> int:
     print(f"Created new API key: {data.get('key')}")
     print(f"  Key prefix:  {data.get('key_prefix')}")
     print(f"  Key ID:      {data.get('id')}")
-    print(f"  ⚠️  Store this key — it won't be shown again.")
-    print(f"  ⚠️  This key has full access to your team's graph.")
+    print(f"  ⚠️  Store this key — it won't be shown again.")  # noqa: F541
+    print(f"  ⚠️  This key has full access to your team's graph.")  # noqa: F541
     return 0
 
 
 def _cmd_team_keys_revoke(args) -> int:
     """Revoke a team API key (DELETE /v1/team/keys/{id}). Soft delete."""
-    import json as _json
+    import json as _json  # noqa: I001
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
 
     json_mode = getattr(args, "json", False)
-    config, api_key, api_url = _read_config(json_mode=json_mode)
+    config, api_key, api_url = _read_config(json_mode=json_mode)  # noqa: RUF059
     if api_key is None:
         return 1
 
@@ -1158,7 +1158,7 @@ def _cmd_team_keys_revoke(args) -> int:
 
 def _cmd_create_point(args) -> int:
     """Create a Point via Tortoise Cloud API."""
-    import json as _json, os, sys as _sys
+    import json as _json, os, sys as _sys  # noqa: E401, I001
     from pathlib import Path
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
@@ -1225,7 +1225,7 @@ def _cmd_context(args) -> int:
     Hosted mode (\".tortoise\" config): calls the hosted API.
     Local mode (embedded/Docker): uses TortoiseSDK.session_context().
     """
-    import json as _json, os as _os, sys as _sys
+    import json as _json, os as _os, sys as _sys  # noqa: E401, I001
     from pathlib import Path
 
     config_path = Path.cwd() / ".tortoise"
@@ -1242,7 +1242,7 @@ def _cmd_context(args) -> int:
 
     if api_key:
         # ── Hosted: query the API ──
-        from urllib.request import Request, urlopen
+        from urllib.request import Request, urlopen  # noqa: I001
         from urllib.error import URLError, HTTPError
         try:
             req = Request(
@@ -1307,10 +1307,10 @@ def _cmd_context(args) -> int:
 
 def _cmd_session(args) -> int:
     """Manage Tortoise Cloud sessions."""
-    import json, os, sys
+    import json, os, sys  # noqa: E401, I001
     from pathlib import Path
-    from urllib.request import Request, urlopen
-    from urllib.error import URLError, HTTPError
+    from urllib.request import Request, urlopen  # noqa: F401
+    from urllib.error import URLError, HTTPError  # noqa: F401
 
     # Read config
     config_path = Path.cwd() / ".tortoise"
@@ -1392,7 +1392,7 @@ def _parse_transcript(text: str) -> list:
 
 def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
     """Read transcript, parse into turns, POST to /v1/sessions."""
-    import json as _json, sys as _sys
+    import json as _json, sys as _sys  # noqa: E401, I001
     from pathlib import Path
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
@@ -1444,7 +1444,7 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
 
 def _cmd_session_list(api_key: str, api_url: str) -> int:
     """GET /v1/sessions — list all sessions."""
-    import json as _json, sys as _sys
+    import json as _json, sys as _sys  # noqa: E401, I001
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
 
@@ -1474,13 +1474,13 @@ def _cmd_session_list(api_key: str, api_url: str) -> int:
         sid = s.get("id", s.get("session_id", "?"))
         turns = s.get("turns", s.get("turn_count", "?"))
         created = s.get("created_at", s.get("created", ""))[:19]
-        print(f"{sid:<36} {str(turns):<6} {created}")
+        print(f"{sid:<36} {str(turns):<6} {created}")  # noqa: RUF010
     return 0
 
 
 def _cmd_session_view(args, api_key: str, api_url: str) -> int:
     """GET /v1/sessions/<id> — view session details."""
-    import json as _json, sys as _sys
+    import json as _json, sys as _sys  # noqa: E401, I001
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
 
@@ -1531,7 +1531,7 @@ def _resolve_db_target(explicit: str | None = None) -> str:
     mode). Raises ValueError for invalid input (e.g. a relative --path, or an
     invalid FALKORDB_PORT) via resolve_db_path's _abs guard.
     """
-    import os
+    import os  # noqa: I001
     from tortoise.config import resolve_db_path, is_db_uri
 
     if explicit:
@@ -1555,13 +1555,13 @@ def _resolve_db_target(explicit: str | None = None) -> str:
         try:
             port = int(port_raw)
         except (ValueError, TypeError):
-            raise ValueError(
+            raise ValueError(  # noqa: B904
                 f"Invalid FALKORDB_PORT={port_raw!r} — must be an integer")
         password = os.environ.get("FALKORDB_PASSWORD") or ""
         legacy_uri = f"docker://:{password}@{host}:{port}/tortoise"
         # #715 P2 conf 95: never print the password — a terminal/log line
         # must not leak the credential (masked display only).
-        if password:
+        if password:  # noqa: SIM108
             display_uri = f"docker://:***@{host}:{port}/tortoise"
         else:
             display_uri = legacy_uri
@@ -1872,7 +1872,7 @@ def _cmd_export(args) -> int:
     Exit codes: 0 ok · 1 pre-walk or graph-unavailable failure.
     Stdout: ONE JSON line (machine contract) unless --no-json.
     """
-    import base64 as _b64
+    import base64 as _b64  # noqa: I001
     import json as _json
     import os as _os
     from datetime import datetime, timezone as _tz
@@ -1939,7 +1939,7 @@ def _cmd_export(args) -> int:
         return 1
 
     if args.output is None:
-        args.output = f"graph-{datetime.now(_tz.utc).strftime('%Y-%m-%d')}.tortoise"
+        args.output = f"graph-{datetime.now(_tz.utc).strftime('%Y-%m-%d')}.tortoise"  # noqa: UP017
     out = Path(args.output)
     try:
         out.write_bytes(artifact_bytes(artifact))
@@ -2003,8 +2003,8 @@ def _cmd_validate(args) -> int:
               "(e.g. 'tortoise validate --domain product-strategy')",
               file=_sys.stderr)
         return 2
-    from tortoise.domain_loader import (
-        SURFACE_GRAPH, domain_chain_spec, domain_validators, known_domains,
+    from tortoise.domain_loader import (  # noqa: I001
+        SURFACE_GRAPH, domain_chain_spec, domain_validators, known_domains,  # noqa: F401
     )
     # Import the production validators module BEFORE the guard: its import-time
     # registrations populate the registry the guard reads. Without this, a
@@ -2038,7 +2038,7 @@ def _cmd_validate(args) -> int:
         return 3
     finally:
         if proj is not None:
-            try:
+            try:  # noqa: SIM105
                 proj.close()
             except Exception:
                 pass
@@ -2058,7 +2058,7 @@ def _cmd_validate(args) -> int:
         for cid, cspec in chains.items():
             print(f"  chain {cid}: {', '.join(cspec['steps'])}"
                   f" (enforcement: {cspec['enforcement']})")
-        for i, v in enumerate(violations, 1):
+        for i, v in enumerate(violations, 1):  # noqa: B007
             print(f"  ✗ [{v.get('rule', '?')}] ({v.get('kind', '?')}) "
                   f"ref={v.get('ref', '?')}: {v.get('message', '?')}")
             fix = v.get("fix")
@@ -2090,7 +2090,7 @@ def _cmd_audit(args) -> int:
     (ValueError), EmbeddedStoreBusyError, and unreachable URI hosts all
     print a single actionable line.
     """
-    import json as _json
+    import json as _json  # noqa: I001
     import os as _os
 
     from tortoise.audit import AuditResult, print_audit
@@ -2447,7 +2447,7 @@ def _cmd_index_github(args):
     (keyed by content hash via idempotency.document_key).
     """
     import atexit
-    import os
+    import os  # noqa: F401
     import subprocess
     import sys
     import tempfile
@@ -2561,13 +2561,13 @@ def _cmd_index_github(args):
     # Idempotency: track content hashes to avoid re-indexing
     # ponytail: simple JSON file — no DB, no config. Add FalkorDB-backed
     # dedup if per-file tracking across repos becomes necessary.
-    from tortoise.idempotency import document_key as doc_key_fn
+    from tortoise.idempotency import document_key as doc_key_fn  # noqa: I001
     import json as _json
     hash_file = Path.home() / ".tortoise" / "indexed_hashes.json"
     hash_file.parent.mkdir(parents=True, exist_ok=True)
     indexed_hashes: set[str] = set()
     if hash_file.exists():
-        try:
+        try:  # noqa: SIM105
             indexed_hashes = set(_json.loads(hash_file.read_text()))
         except Exception:
             pass
@@ -2605,7 +2605,7 @@ def _cmd_index_github(args):
                 indexed += 1
                 indexed_hashes.add(content_hash)
                 # Persist incrementally — avoid duplicate Points on crash
-                try:
+                try:  # noqa: SIM105
                     hash_file.write_text(_json.dumps(sorted(indexed_hashes)))
                 except Exception:
                     pass
@@ -2621,7 +2621,7 @@ def _cmd_index_github(args):
         proj.close()
 
     # Persist indexed hashes for cross-run idempotency
-    try:
+    try:  # noqa: SIM105
         hash_file.write_text(_json.dumps(sorted(indexed_hashes)))
     except Exception:
         pass
@@ -2630,7 +2630,7 @@ def _cmd_index_github(args):
     print(f"Done: {indexed} indexed, {skipped} skipped, {errors} errors")
     if indexed > 0:
         print(f"  Log: {log_path}")
-        print(f"  Graph: query with tortoise_suggest_entry_points()")
+        print(f"  Graph: query with tortoise_suggest_entry_points()")  # noqa: F541
 
     # Cleanup (only if we cloned)
     if tmpdir:
@@ -2819,7 +2819,7 @@ def _cmd_doctor(args):
     hosted = bool(_os.environ.get("FLY_APP_NAME"))
     mock_seam = _os.environ.get("TORTOISE_SESSION_LLM_MOCK", "").strip().lower() == "1"
     try:
-        from tortoise.sdk import (
+        from tortoise.sdk import (  # noqa: I001
             _SESSION_LLM_DEFAULT_MODELS,
             _build_session_llm_extractor,
             _session_llm_model_shape_warning,
@@ -2919,7 +2919,7 @@ def _cmd_doctor(args):
 
 def _cmd_list_kinds(args) -> int:
     """List all pointKinds present in the graph with counts."""
-    import sys as _sys
+    import sys as _sys  # noqa: I001
     from tortoise.sdk import TortoiseSDK
 
     # #715 P2 conf 75: no hardcoded docker://localhost default — resolve the
@@ -2951,7 +2951,7 @@ def _cmd_list_kinds(args) -> int:
 
 def _cmd_list_sources(args) -> int:
     """List all Sources with point counts."""
-    import sys as _sys
+    import sys as _sys  # noqa: I001
     from tortoise.sdk import TortoiseSDK
 
     # #715 P2 conf 75: no hardcoded docker://localhost default — resolve the
@@ -3093,7 +3093,7 @@ def _cmd_index_directory(args) -> int:
     and targets whose PARENT dir is missing/unwritable; a NONEXISTENT
     TARGET FILE is valid — the nohup'd child creates it).
     """
-    import os as _os
+    import os as _os  # noqa: I001
     import sys as _sys
     import json as _json
     from pathlib import Path as _Path
@@ -3134,7 +3134,7 @@ def _cmd_index_directory(args) -> int:
                   f"{_redirect!r} (fail-safe)", file=_sys.stderr)
             return 1
         try:
-            _f = open(_redirect, "w", encoding="utf-8")  # TRUNCATE-ON-OPEN
+            _f = open(_redirect, "w", encoding="utf-8")  # TRUNCATE-ON-OPEN  # noqa: SIM115
         except OSError as _e:
             print(f"TORTOISE_INDEX_CHILD_STDERR cannot open target "
                   f"{_redirect!r}: {_e} (fail-safe)", file=_sys.stderr)
@@ -3193,7 +3193,7 @@ def _cmd_index_directory(args) -> int:
         # store is held). URI targets route through from_uri (no embedded
         # probe); embedded paths are probed at the resolved path.
         from tortoise.config import is_db_uri as _is_uri
-        if _is_uri(target):
+        if _is_uri(target):  # noqa: SIM108
             sdk = TortoiseSDK()
         else:
             sdk = TortoiseSDK(db_path=target)
@@ -3270,7 +3270,7 @@ def _cmd_decide(args) -> int:
         Uses mitigate_operator with strength in [0.10, 0.50] range.
       - Never NAND an option/criterion point for bad fit — express fit on the operator.
     """
-    import json as _json
+    import json as _json  # noqa: I001
     import sys as _sys
     from pathlib import Path
     from tortoise.sdk import TortoiseSDK
@@ -3463,7 +3463,7 @@ def _cmd_decide(args) -> int:
         if sdk._proj:
             sdk._proj.close()
 
-    print(f"\nDone. Decision comparison filed.")
+    print(f"\nDone. Decision comparison filed.")  # noqa: F541
     return 0
 
 
@@ -3619,7 +3619,7 @@ def _cmd_serve_http(args) -> int:
       none             — no auth, localhost-bound eval only; a non-loopback
                          --bind is REFUSED unless --allow-insecure-no-auth
     """
-    import os
+    import os  # noqa: I001
     import sys
 
     from tortoise.sdk import TortoiseSDK
@@ -3727,7 +3727,7 @@ def _cmd_serve_http(args) -> int:
                 note = " — add more with --allowed-hosts"
             print(f"    Host guard allows: {', '.join(allowed_hosts)}{note}")
 
-    import uvicorn
+    import uvicorn  # noqa: I001
     from fastapi import FastAPI
     from contextlib import asynccontextmanager
 
@@ -3803,7 +3803,7 @@ def _cmd_key_create(args) -> int:
 
     # Seed the team_{team_id} graph the tools actually resolve (hosted parity).
     try:
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         team_graph = sdk._get_proj().db.select_graph(f"team_{team_id}")
         team_graph.query(
             "CREATE (:TeamMeta {name: $name, created: $now})",
@@ -3837,7 +3837,7 @@ def _cmd_key_create(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    import os as _os
+    import os as _os  # noqa: I001
     from tortoise.config import SUPPORTED_URI_SCHEMES
 
     uri_schemes_hint = ", ".join(f"{s}://" for s in SUPPORTED_URI_SCHEMES)
@@ -3976,7 +3976,7 @@ def main(argv: list[str] | None = None) -> int:
     # tortoise team <subcommand>
     team = sp.add_parser("team", help="Team management (Tortoise Cloud)")
     team_sp = team.add_subparsers(dest="team_cmd")
-    team_info_p = team_sp.add_parser("info", help="Show team info and usage")
+    team_info_p = team_sp.add_parser("info", help="Show team info and usage")  # noqa: F841
     # tortoise team keys {list,create,revoke} (#304)
     team_keys = team_sp.add_parser("keys", help="Manage API keys")
     team_keys_sp = team_keys.add_subparsers(dest="team_keys_cmd")
@@ -4037,15 +4037,15 @@ def main(argv: list[str] | None = None) -> int:
     session_sp = session.add_subparsers(dest="session_cmd")
     session_capture = session_sp.add_parser("capture", help="Capture a session from a transcript file")
     session_capture.add_argument("--file", required=True, help="Path to transcript file")
-    session_list = session_sp.add_parser("list", help="List all sessions")
+    session_list = session_sp.add_parser("list", help="List all sessions")  # noqa: F841
     session_view = session_sp.add_parser("view", help="View a specific session")
     session_view.add_argument("id", help="Session ID")
     # tortoise list-kinds
-    lk = sp.add_parser("list-kinds", help="List all pointKinds present in the graph with counts")
+    lk = sp.add_parser("list-kinds", help="List all pointKinds present in the graph with counts")  # noqa: F841
     # tortoise context — memory digest for agent session-start hooks
-    ctx = sp.add_parser("context", help="Print memory digest for agent session-start injection")
+    ctx = sp.add_parser("context", help="Print memory digest for agent session-start injection")  # noqa: F841
     # tortoise list-sources
-    ls = sp.add_parser("list-sources", help="List all Sources with point counts")
+    ls = sp.add_parser("list-sources", help="List all Sources with point counts")  # noqa: F841
     # tortoise decide --input <json|yaml>
     dc = sp.add_parser("decide", help="Compare options via EP belief propagation")
     dc.add_argument("--input", "-i", help="Path to JSON or YAML input file with options/criteria/findings/edges")

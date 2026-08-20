@@ -18,7 +18,7 @@ Classification thresholds (documented, testable):
 - disputed pair: NAND-connected pair where BOTH have variance > 0.02
       (competing evidence destabilizing both sides)
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import logging
 from dataclasses import dataclass, field, asdict

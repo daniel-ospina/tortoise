@@ -5,7 +5,7 @@ session/user/organizational). Real mode (MEM0_API_KEY set): thin HTTP seam
 — the adapter still routes through the same retrieve/record contract and
 raises ArmUnavailable on API failure (never partial memories).
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import os
 import urllib.request
@@ -13,7 +13,7 @@ import urllib.error
 import json
 
 from battery.arms.base import (
-    AgentContext, ArmAdapter, ArmUnavailable, Memory)
+    AgentContext, ArmAdapter, ArmUnavailable, Memory)  # noqa: F401
 from battery.arms.vendors import Mem0MockStore, to_memories
 from battery.config.corpus import Scenario
 

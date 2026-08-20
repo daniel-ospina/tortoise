@@ -4,9 +4,9 @@ Single MCP tool: tortoise_analyze(question) → natural language answer.
 Template Cypher + LLM for intent classification and result synthesis.
 No LLM-Cypher generation (rejected: 61% accuracy, 40% silent errors).
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
-import json, os, re
+import json, os, re  # noqa: E401
 from typing import Any
 
 from .live import _live_only
@@ -456,7 +456,7 @@ directions ALWAYS; IMPL edges traversed both directions ONLY when the
                 continue
 
             # NAND is always bidirectional; IMPL respects direction flag
-            if rel == "NAND":
+            if rel == "NAND":  # noqa: SIM114
                 dirs = ("incoming", "outgoing")
             elif direction == "both":
                 dirs = ("incoming", "outgoing")
@@ -701,7 +701,7 @@ def analyze(question: str, proj=None, *,
     # whole analyze surface; security: redacted, no raw internals)
     formatter = tmpl.get("format")
     try:
-        if formatter:
+        if formatter:  # noqa: SIM108
             answer = formatter(rows)
         else:
             answer = f"Found {len(rows)} results."
@@ -798,7 +798,7 @@ def grounding_snapshot(proj=None) -> dict:
         "count": len(points),
         "mean": mean,
         "points": points,
-        "sampled_at": datetime.now(timezone.utc).isoformat(),
+        "sampled_at": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
     }
 
 

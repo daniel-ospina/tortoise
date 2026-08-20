@@ -332,7 +332,7 @@ def _registry_owner_alive(registry: dict | None) -> bool | None:
         pid = int(Path(registry["pidfile"]).read_text().strip())
     except (OSError, ValueError, TypeError):
         return None
-    if not _pid_alive(pid):
+    if not _pid_alive(pid):  # noqa: SIM103
         return False
     return True
 
@@ -479,7 +479,7 @@ def _probe_socket(socket_path: str, timeout: float = PROBE_TIMEOUT) -> str:
             return "dead"
         except FileNotFoundError:
             return "missing"
-        except socket.timeout:
+        except socket.timeout:  # noqa: UP041
             return "undetermined"
         except OSError:
             return "undetermined"
@@ -510,7 +510,7 @@ def _probe_socket_any(socket_path: str,
     try:
         return _probe_socket(link, timeout=timeout)
     finally:
-        try:
+        try:  # noqa: SIM105
             os.unlink(link)
         except OSError:
             pass
@@ -592,20 +592,20 @@ def _raw_resp_probe_once(socket_path: str) -> tuple[list[dict] | None, str]:
             return None, "refused"
         except FileNotFoundError:
             return None, "missing"
-        except socket.timeout:
+        except socket.timeout:  # noqa: UP041
             return None, "timeout"  # connect-phase timeout — retryable too
         except OSError:
             return None, "error"
         try:
             s.sendall(b"*2\r\n$6\r\nCLIENT\r\n$4\r\nLIST\r\n")
             raw = _read_resp_reply(s)
-        except socket.timeout:
+        except socket.timeout:  # noqa: UP041
             return None, "timeout"  # read-phase timeout — the retry target
         except OSError:
             return None, "error"
     finally:
         if s is not None:
-            try:
+            try:  # noqa: SIM105
                 s.close()
             except OSError:
                 pass
@@ -794,7 +794,7 @@ def discover(jobs: int = 1, max_tempdir_entries: int = 5000) -> list[dict]:
     jobs>1 parallelizes per-dir classification. Fail-closed semantics are
     per-record and unchanged under parallelism.
     """
-    results = []
+    results = []  # noqa: F841
     tmpdir = _real_gettempdir()
 
     # Pass 1: live servers (authoritative pid comes from pgrep).
@@ -1068,7 +1068,7 @@ def _cooldown_check(registry: dict | None,
 
 def _dir_has_db_file(dbdir: str) -> bool:
     try:
-        for p in Path(dbdir).glob("*.db"):
+        for p in Path(dbdir).glob("*.db"):  # noqa: B007
             return True
     except OSError:
         pass
@@ -1395,7 +1395,7 @@ def _kill(pid: int, sigterm_timeout: float) -> None:
         if not _pid_alive(pid):
             return
         time.sleep(0.2)
-    try:
+    try:  # noqa: SIM105
         os.kill(pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
@@ -1427,7 +1427,7 @@ class _ReaperLock:
     def acquire(self) -> bool:
         import fcntl
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        self._fh = open(self.path, "a")
+        self._fh = open(self.path, "a")  # noqa: SIM115
         try:
             fcntl.flock(self._fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self._fh.seek(0)
@@ -1443,7 +1443,7 @@ class _ReaperLock:
     def release(self) -> None:
         import fcntl
         if self._fh:
-            try:
+            try:  # noqa: SIM105
                 fcntl.flock(self._fh, fcntl.LOCK_UN)
             except OSError:
                 pass

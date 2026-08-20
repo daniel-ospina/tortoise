@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 
-from battery.arms.base import AgentContext, ArmAdapter, Memory
+from battery.arms.base import AgentContext, ArmAdapter, Memory  # noqa: F401
 from battery.config.corpus import Scenario
 
 

@@ -13,7 +13,7 @@ Repo-local by design: `scripts/` is an agent-infra symlink; this lives in
 """
 from __future__ import annotations
 
-import re
+import re  # noqa: F401
 import sys
 from pathlib import Path
 

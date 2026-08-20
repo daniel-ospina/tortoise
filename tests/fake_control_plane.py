@@ -34,7 +34,7 @@ class FakeControlPlane:
         # absent column). Default None → behavior identical to before.
         self.missing_columns: dict[str, set[str]] | None = missing_columns
 
-    def seed(self, table: str, rows: list[dict]) -> "FakeControlPlane":
+    def seed(self, table: str, rows: list[dict]) -> "FakeControlPlane":  # noqa: UP037
         self.tables.setdefault(table, []).extend(rows)
         return self
 
@@ -60,11 +60,11 @@ class FakeControlPlane:
             for t in self.tables.get("teams", []):
                 if t.get("id") == tid and t.get("suspended_at") is None:
                     from datetime import datetime, timezone
-                    t["suspended_at"] = datetime.now(timezone.utc).isoformat()
+                    t["suspended_at"] = datetime.now(timezone.utc).isoformat()  # noqa: UP017
             from datetime import datetime, timezone
             self.tables.setdefault("abuse_events", []).append(
                 {"team_id": tid, "event_type": "suspend", "weight": 1,
-                 "created_at": datetime.now(timezone.utc).isoformat()})
+                 "created_at": datetime.now(timezone.utc).isoformat()})  # noqa: UP017
             return None
         if fn == "abuse_unsuspend":
             tid = (body or {}).get("p_team_id")
@@ -73,7 +73,7 @@ class FakeControlPlane:
                     t["suspended_at"] = None
                     t["flagged_at"] = None
             from datetime import datetime, timezone
-            now_iso = datetime.now(timezone.utc).isoformat()
+            now_iso = datetime.now(timezone.utc).isoformat()  # noqa: UP017
             events = self.tables.setdefault("abuse_events", [])
             events.append({"team_id": tid, "event_type": "unsuspend",
                            "weight": 1, "created_at": now_iso})
@@ -133,7 +133,7 @@ class FakeControlPlane:
             from datetime import datetime, timezone
             exp = key.get("expires_at")
             if exp is not None and isinstance(exp, str) \
-                    and exp <= datetime.now(timezone.utc).isoformat():
+                    and exp <= datetime.now(timezone.utc).isoformat():  # noqa: UP017
                 raise RuntimeError("claim_membership:key_expired")
             team_id = key["team_id"]
             mem_rows = self.tables.setdefault("team_memberships", [])
@@ -289,7 +289,7 @@ class FakeControlPlane:
         self.tables.setdefault("abuse_events", []).append(
             {"team_id": team_id, "event_type": "key_create", "weight": 1,
              "key_id": key_id,
-             "created_at": datetime.now(timezone.utc).isoformat()})
+             "created_at": datetime.now(timezone.utc).isoformat()})  # noqa: UP017
 
     def query(self, table: str, *, select: list[str] | None = None,
               filters: list[tuple[str, str, object]] | None = None,
@@ -313,7 +313,7 @@ class FakeControlPlane:
             if table == "abuse_events" and row.get("created_at") is None:
                 # mirror the DB column default now() — window gt-filters need it
                 from datetime import datetime, timezone
-                row["created_at"] = datetime.now(timezone.utc).isoformat()
+                row["created_at"] = datetime.now(timezone.utc).isoformat()  # noqa: UP017
             self.tables.setdefault(table, []).append(row)
             if table == "api_keys":
                 # migration 0015 trigger emulation (#308)

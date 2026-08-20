@@ -115,7 +115,7 @@ class TestGuardAcceptsCleanLog:
             / "python-ci.yml"
         text = workflow.read_text()
         fast_run = [
-            l for l in text.splitlines()
+            l for l in text.splitlines()  # noqa: E741
             if "timeout -s INT -k 10 45m" in l and "-m pytest" in l
         ]
         assert fast_run, "fast-suite pytest invocation not found"

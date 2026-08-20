@@ -15,7 +15,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest
+import pytest  # noqa: I001
 from tortoise.sdk import TortoiseSDK
 
 
@@ -65,7 +65,7 @@ class TestFileHumanApproval:
         assert r[0][0] == "humanApproval"
 
         # Provenance edges: approver performs, uses artifact, produces decision
-        for rel, tail, head in [
+        for rel, tail, head in [  # noqa: B007
             ("performs", subj["id"], result["event_id"]),
             ("uses", result["event_id"], doc["id"]),
             ("produces", result["event_id"], result["decision_point_id"]),
@@ -104,15 +104,15 @@ class TestFileHumanApproval:
 
     def test_dependent_claims_strengthen_after_approval(self, sdk):
         """EP with Beta(10,1) evidence prior raises dependent claim confidence."""
-        subj, doc, c1, c2, result = _setup_approval(sdk)
-        proj = sdk._get_proj()
+        subj, doc, c1, c2, result = _setup_approval(sdk)  # noqa: RUF059
+        proj = sdk._get_proj()  # noqa: F841
         for c in (c1, c2):
             p = sdk.get_point(c["id"])
             assert p["confidence"] > 0.5, f"claim {c['id']} not strengthened: {p['confidence']}"
 
     def test_confidence_delta_reported(self, sdk):
         """Return value maps each approved claim to its confidence delta."""
-        subj, doc, c1, c2, result = _setup_approval(sdk)
+        subj, doc, c1, c2, result = _setup_approval(sdk)  # noqa: RUF059
         assert set(result["confidence_delta"].keys()) == {c1["id"], c2["id"]}
         assert result["confidence_delta"][c1["id"]] > 0
         assert result["confidence_delta"][c2["id"]] > 0
@@ -134,7 +134,7 @@ class TestFileHumanApproval:
 
     def test_revocation_via_supersede(self, sdk):
         """Approval decision Point can be superseded (revocation path)."""
-        subj, doc, c1, c2, result = _setup_approval(sdk)
+        subj, doc, c1, c2, result = _setup_approval(sdk)  # noqa: RUF059
         # Supersede the decision Point with a retraction (#547: new_id must be
         # an existing Point — create the retraction point first).
         revoke = sdk.create_point("statement", "Approval revoked: CP-001")
@@ -149,7 +149,7 @@ class TestFileHumanApproval:
 class TestGroundingSeeding:
     def test_human_approval_seeds_grounding(self, sdk):
         """Approval Point is a grounding seed (a_i = 1.0)."""
-        subj, doc, c1, c2, result = _setup_approval(sdk)
+        subj, doc, c1, c2, result = _setup_approval(sdk)  # noqa: RUF059
         proj = sdk._get_proj()
         if hasattr(proj, "compute_grounding"):
             g = proj.compute_grounding()
@@ -171,7 +171,7 @@ class TestGroundingSeeding:
 class TestReputationExclusion:
     def test_reputation_not_inflated_by_own_approval(self, sdk):
         """compute_reputation excludes humanApproval events from outcomes."""
-        subj, doc, c1, c2, result = _setup_approval(sdk)
+        subj, doc, c1, c2, result = _setup_approval(sdk)  # noqa: RUF059
         # An approval alone must not inflate the approver's reputation.
         # Beta reputation starts at (1,1) → mean 0.5; an approval-induced
         # IMPL counted as success would push it > 0.5.

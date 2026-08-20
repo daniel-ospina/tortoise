@@ -104,7 +104,7 @@ class TestDe2e3:
         assert sdk.get_point(d1["id"])["status"] == "draft"
 
     def test_variant_b_reject(self, sdk, tmp_path):
-        d1 = _decision(sdk, status="live")
+        d1 = _decision(sdk, status="live")  # noqa: F841
         _mine(sdk, tmp=str(tmp_path))
         cand = sdk.list_dedup_candidates(candidate_type="content")[0]
         res = sdk.approve_merge(cand["id"], action="reject")
@@ -140,7 +140,7 @@ class TestDe2e3:
     def test_corpus_rerun_idempotent(self, sdk, tmp_path):
         """Re-running the corpus adds no new candidates and no new
         DedupeRecorded (mined-marker skip)."""
-        d1 = _decision(sdk, status="live")
+        d1 = _decision(sdk, status="live")  # noqa: F841
         corpus = tmp_path / "corpus"
         corpus.mkdir()
         (corpus / "s.md").write_text(
@@ -148,7 +148,7 @@ class TestDe2e3:
         r1 = sdk.mine_corpus(str(corpus), extract_entities=False)
         assert r1["dedup_hits"] >= 1, r1
         before = len(sdk.list_dedup_candidates(candidate_type="content"))
-        r2 = sdk.mine_corpus(str(corpus), extract_entities=False)
+        r2 = sdk.mine_corpus(str(corpus), extract_entities=False)  # noqa: F841
         after = len(sdk.list_dedup_candidates(candidate_type="content"))
         assert after == before, f"re-run must not add candidates ({before}→{after})"
 

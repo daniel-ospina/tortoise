@@ -112,10 +112,10 @@ def load_config(env: dict[str, str] | None = None) -> BackupConfig:
     if env is not None:
         prev = os.environ
         try:
-            os.environ = {**os.environ, **{k: v for k, v in env.items() if v is not None}}
+            os.environ = {**os.environ, **{k: v for k, v in env.items() if v is not None}}  # noqa: B003
             return _load_from_env()
         finally:
-            os.environ = prev
+            os.environ = prev  # noqa: B003
     return _load_from_env()
 
 

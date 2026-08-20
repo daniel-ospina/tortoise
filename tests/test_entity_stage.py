@@ -14,8 +14,8 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.api import EventAPI          # noqa: E402
-from tortoise.extractor import (           # noqa: E402
+from tortoise.api import EventAPI  # noqa: E402, I001, RUF100
+from tortoise.extractor import (  # noqa: E402, RUF100
     LLMExtractor,
     MockModel,
     EntityStage,
@@ -24,7 +24,7 @@ from tortoise.extractor import (           # noqa: E402
     extract_conversation_entities,
     _rule_fallback_entities,
 )
-from tortoise.log import EventLog          # noqa: E402
+from tortoise.log import EventLog  # noqa: E402, RUF100
 
 
 def _tmp(name):
@@ -142,8 +142,8 @@ def test_de2e_n7_unknown_object_kind_normalized_to_other():
 def test_de2e_n12_conversation_and_s7_extract_entities_coexist():
     """Both APIs exist on LLMExtractor with distinct contracts (no clash)."""
     ext = LLMExtractor(MockModel("cheap"), MockModel("reason"))
-    assert callable(getattr(ext, "extract_entities"))
-    assert callable(getattr(ext, "extract_conversation_entities"))
+    assert callable(getattr(ext, "extract_entities"))  # noqa: B009
+    assert callable(getattr(ext, "extract_conversation_entities"))  # noqa: B009
     # S7 returns {subjects, objects, entities}; Phase-2 returns a list of dicts
     api, _ = _api()
     s7 = ext.extract_entities(

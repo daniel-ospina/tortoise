@@ -28,7 +28,7 @@ def _transport_context(monkeypatch):
     Same pattern as tests/test_index_mcp.py::_transport_context — stdio
     mode, dev auth, no team context; restore after each test.
     """
-    from tortoise.mcp_auth import (
+    from tortoise.mcp_auth import (  # noqa: I001
         _current_team_id, _current_team_limits, _transport_mode,
     )
     monkeypatch.delenv("TORTOISE_API_KEY", raising=False)

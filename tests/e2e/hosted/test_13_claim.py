@@ -26,15 +26,15 @@ from __future__ import annotations
 import base64
 import json
 import os
-import shutil
+import shutil  # noqa: F401
 import signal
 import socket
 import subprocess
 import sys
-import tempfile
+import tempfile  # noqa: F401
 import threading
 import time
-import uuid
+import uuid  # noqa: F401
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -92,7 +92,7 @@ class _SupabaseMockHandler(BaseHTTPRequestHandler):
     cp: FakeControlPlane = FakeControlPlane()
     email_confirmed: bool = True
 
-    def do_GET(self):  # noqa: N802
+    def do_GET(self):  # noqa: N802, RUF100
         url = urlparse(self.path)
         if url.path == "/auth/v1/.well-known/jwks.json":
             self._send(200, self.jwks_doc)
@@ -109,7 +109,7 @@ class _SupabaseMockHandler(BaseHTTPRequestHandler):
             return
         self._send(404, b"{}")
 
-    def do_POST(self):  # noqa: N802
+    def do_POST(self):  # noqa: N802, RUF100
         url = urlparse(self.path)
         if url.path.startswith("/rest/v1/rpc/"):
             self._handle_rpc(url)
@@ -157,7 +157,7 @@ class _SupabaseMockHandler(BaseHTTPRequestHandler):
         try:
             rows = self.cp.query(table, select=select, filters=filters)
             self._send(200, json.dumps(rows).encode())
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001, RUF100
             self._send(500, json.dumps({"message": str(e)}).encode())
 
     def _handle_rest_post(self, url):
@@ -214,7 +214,7 @@ def claim_server(tmp_path_factory):
         env.setdefault(var, "")
 
     log_path = Path(db_path).parent / "claim-uvicorn.log"
-    fh = open(log_path, "wb")
+    fh = open(log_path, "wb")  # noqa: SIM115
     proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "tortoise.hosted_api:app",
          "--host", "127.0.0.1", "--port", str(port), "--log-level", "warning"],
@@ -235,7 +235,7 @@ def claim_server(tmp_path_factory):
                                             timeout=2) as r:
                     if r.status == 200:
                         return
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001, RUF100
                 pass
             time.sleep(0.25)
         raise RuntimeError("claim server not ready")
@@ -252,10 +252,10 @@ def claim_server(tmp_path_factory):
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
         proc.wait(timeout=10)
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001, RUF100
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, RUF100
             proc.kill()
     mock_srv.shutdown()
     fh.close()
@@ -279,7 +279,7 @@ def _post(base, path, *, headers=None, body=None):
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
             return r.status, json.loads(r.read() or b"{}")
-    except urllib.error.HTTPError as e:  # noqa: F821
+    except urllib.error.HTTPError as e:  # noqa: F821, RUF100
         return e.code, json.loads(e.read() or b"{}")
 
 
@@ -289,7 +289,7 @@ def _get(base, path, *, headers=None):
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
             return r.status, json.loads(r.read() or b"{}")
-    except urllib.error.HTTPError as e:  # noqa: F821
+    except urllib.error.HTTPError as e:  # noqa: F821, RUF100
         return e.code, json.loads(e.read() or b"{}")
 
 
@@ -394,7 +394,7 @@ class TestClaimE2E:
                              body={"api_key": "tt_x"})
         assert status == 403, body
         # email_confirmed_at conjunct fail-closed
-        claim_server["cp"]  # noqa: B018
+        claim_server["cp"]  # noqa: B018, RUF100
         _SupabaseMockHandler.email_confirmed = False
         try:
             jwt2 = claim_server["keys"].mint(claim_server["mock_url"], "user-pass2",

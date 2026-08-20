@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any  # noqa: F401
 
 import yaml
 
@@ -218,7 +218,7 @@ def _validate_loopy(scenario: dict, errors: list[str]) -> None:
     # NAND triangle = 3 edges on 3 nodes (odd cycle).
     if len(edges) != 3:
         errors.append(f"{scenario['id']}: NAND triangle must have exactly 3 edges")
-    if not {tuple(sorted(e)) for e in edges} == {tuple(sorted(e)) for e in (edges[:3] + edges[:1])}:
+    if not {tuple(sorted(e)) for e in edges} == {tuple(sorted(e)) for e in (edges[:3] + edges[:1])}:  # noqa: SIM201
         # Fallback: verify a 3-cycle exists via pairs (cheap check below).
         pass
     expected = (scenario.get(GOLD_KEY) or {}).get("expected")
@@ -333,7 +333,7 @@ def _validate_evidence_tiers(scenario: dict, errors: list[str]) -> None:
     if not tiers:
         errors.append(f"{scenario['id']}: calibration needs evidence_tiers")
         return
-    for i, item in enumerate(tiers):
+    for i, item in enumerate(tiers):  # noqa: B007
         if item.get("tier") not in schema.EVIDENCE_TIERS:
             errors.append(f"{scenario['id']}: evidence tier {item.get('tier')!r} invalid")
         if item.get("valence") not in schema.VALENCES:

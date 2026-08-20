@@ -1,10 +1,10 @@
 """Tests for tortoise.security shared security primitives (#329)."""
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import re
 import glob
-import os
-from pathlib import Path
+import os  # noqa: F401
+from pathlib import Path  # noqa: F401
 
 import pytest
 
@@ -79,7 +79,7 @@ class TestValidateRelType:
         for f in glob.glob("tortoise/**/*.py", recursive=True):
             if "__pycache__" in f or f.endswith(("security.py", "sdk.py")):
                 continue  # docstrings document the concept with examples
-            txt += open(f).read() + "\n"
+            txt += open(f).read() + "\n"  # noqa: SIM115
         inventory = set(re.findall(r"\-\[:([A-Za-z_]+)", txt))
         missing = inventory - KNOWN_REL_TYPES
         assert not missing, f"Edge types used in code but missing from KNOWN_REL_TYPES: {missing}"

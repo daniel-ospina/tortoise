@@ -5,12 +5,12 @@
 Fires 4 architectural questions, maps trade-offs, tags confidence,
 connects with IMPL (supports) and NAND (contradicts).
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import sys
 sys.path.insert(0, '/Users/home/eldato/negation-game-explorations/tortoise')
 
-from tortoise.log import EventLog
+from tortoise.log import EventLog  # noqa: I001
 from tortoise.api import EventAPI, provenance
 from tortoise.projection import FalkorProjection
 from tortoise.config import resolve_db_path

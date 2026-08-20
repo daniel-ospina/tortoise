@@ -9,9 +9,9 @@ from unittest.mock import MagicMock
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from tortoise.memory_orchestrator import (
+from tortoise.memory_orchestrator import (  # noqa: I001
     DomainRouter,
-    MergeResult,
+    MergeResult,  # noqa: F401
     OrchestratorError,
     crossDomainQuery,
     crossOntologyQuery,
@@ -267,7 +267,7 @@ def test_dispatch_all_fail():
     db.select_graph = lambda name: MagicMock(query=MagicMock(side_effect=Exception("boom")))
     try:
         dispatch(["episodic", "epistemic"], db, timeout=5.0)
-        assert False, "Should have raised OrchestratorError"
+        assert False, "Should have raised OrchestratorError"  # noqa: B011
     except OrchestratorError as e:
         assert len(e.failures) == 2
         assert "episodic" in e.failures
@@ -312,7 +312,7 @@ def test_dispatch_no_cypher_template():
     db = MagicMock()
     try:
         dispatch(["unknownOntology"], db, timeout=5.0)
-        assert False, "Should have raised OrchestratorError"
+        assert False, "Should have raised OrchestratorError"  # noqa: B011
     except OrchestratorError as e:
         assert "no Cypher template" in e.failures["unknownOntology"]
     print("✓ dispatch no Cypher template → OrchestratorError")
@@ -339,7 +339,7 @@ def test_dispatch_empty_ontologies():
 
 def test_parse_node_object():
     """_parseNode handles FalkorDB Node objects."""
-    from falkordb import Node
+    from falkordb import Node  # noqa: I001
     from tortoise.memory_orchestrator import _parseNode
     node = Node(node_id=42, labels=["Event"], properties={"content": "hello"})
     result = _parseNode(node)
@@ -454,7 +454,7 @@ def test_domain_router_route_read_priority_order():
     router = _make_router()
     # product-strategy has priority 5, base ontologies have priority 10 (default)
     # "PointAdded" triggers both epistemic (base) and product-strategy
-    patterns, _ = translateNL("what events about product strategy?")
+    patterns, _ = translateNL("what events about product strategy?")  # noqa: RUF059
     # Just test that productStrategy routes to product-strategy first
     result = router.routeRead(["productStrategy", "whatHappened"])
     assert result[0] == "product-strategy"  # priority 5 < 10
@@ -631,7 +631,7 @@ def test_dispatch_enforces_deadline():
     """#331: dispatch must return at ~timeout even when an ontology query
     hangs. Pre-fix the executor context-manager exit blocked on
     shutdown(wait=True) until the hung query finished (timeout was fake)."""
-    import time
+    import time  # noqa: I001
     from types import SimpleNamespace
     from tortoise.memory_orchestrator import dispatch
 
@@ -666,8 +666,8 @@ def test_parse_node_malformed_inputs_no_crash():
     for bad in (None, [], [1], [1, []], [1, ["L"], "junk"], "junk", 42):
         try:
             result = _parseNode(bad)
-        except Exception as e:  # noqa: BLE001
-            assert False, f"_parseNode({bad!r}) raised {type(e).__name__}: {e}"
+        except Exception as e:  # noqa: BLE001, RUF100
+            assert False, f"_parseNode({bad!r}) raised {type(e).__name__}: {e}"  # noqa: B011
         assert isinstance(result, dict), f"_parseNode({bad!r}) -> {result!r}"
     print("✓ _parseNode malformed inputs")
 

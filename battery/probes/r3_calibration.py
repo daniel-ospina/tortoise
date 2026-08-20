@@ -17,7 +17,7 @@ def brier(confidences: list[float], outcomes: list[int]) -> float:
     """Mean squared error of the stated confidence vs the binary outcome."""
     if not confidences or len(confidences) != len(outcomes):
         return 1.0
-    return sum((c - o) ** 2 for c, o in zip(confidences, outcomes)) / len(
+    return sum((c - o) ** 2 for c, o in zip(confidences, outcomes)) / len(  # noqa: B905
         confidences)
 
 

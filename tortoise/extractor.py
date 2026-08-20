@@ -148,7 +148,7 @@ def _document_sections(transcript: str):
         if preamble:
             results.append(("preamble", preamble, [0, first_start]))
 
-    for i, (title, start, body_start) in enumerate(sections):
+    for i, (title, start, body_start) in enumerate(sections):  # noqa: B007
         content_start = body_start
         if content_start < len(clean) and clean[content_start] == '\n':
             content_start += 1
@@ -189,7 +189,7 @@ def _is_claim(text: str) -> bool:
                                'key turning point', 'structural', 'fundamental')):
         return True
     # Percentage/fact with implied stance: need context AND a stance word
-    if any(c.isdigit() for c in t) and '%' in t and len(t) > 60:
+    if any(c.isdigit() for c in t) and '%' in t and len(t) > 60:  # noqa: SIM102
         if any(w in low for w in ('fail', 'unchanged', 'rate', 'increase', 'decrease', 'drop', 'rise', 'fall')):
             return True
     return False
@@ -639,7 +639,7 @@ class MockModel:
         if "extract_points_from_section" in system:
             # Document mode: return points from section body
             body = payload.get("section_body", "")
-            title = payload.get("section_title", "")
+            title = payload.get("section_title", "")  # noqa: F841
             pts = []
             # ponytail: extract sentences as mock points with keyword-based pointKind
             for sent in _SENT.finditer(body):
@@ -722,7 +722,7 @@ class _PointStage:
         cleaned: dict[int, str] = {}
         if isinstance(raw, dict):
             for k, v in raw.items():
-                try:
+                try:  # noqa: SIM105
                     cleaned[int(k)] = str(v)
                 except (ValueError, TypeError):
                     pass
@@ -730,7 +730,7 @@ class _PointStage:
             for i, item in enumerate(raw):
                 if isinstance(item, dict) and "content" in item:
                     idx = item.get("src", item.get("i", i))
-                    try:
+                    try:  # noqa: SIM105
                         cleaned[int(idx)] = str(item["content"])
                     except (ValueError, TypeError):
                         pass
@@ -1021,9 +1021,9 @@ class LLMExtractor:
         point_kinds = None
         if domain:
             try:
-                from tortoise.domain_loader import domain_kinds, domain_kind_semantics
+                from tortoise.domain_loader import domain_kinds, domain_kind_semantics  # noqa: I001
                 semantics = domain_kind_semantics(domain, "pointKind")
-                if semantics:
+                if semantics:  # noqa: SIM108
                     point_kinds = semantics  # pack kind semantics
                 else:
                     point_kinds = domain_kinds(domain, "pointKind")
@@ -1093,7 +1093,7 @@ class LLMExtractor:
                     continue
                 seen_pairs.add(pair)
 
-                try:
+                try:  # noqa: SIM105
                     api.add_operator(
                         r["op_type"],
                         [all_point_ids[pair[0]], all_point_ids[pair[1]]],
@@ -1161,7 +1161,7 @@ class LLMExtractor:
         subject_kinds = None
         object_kinds = None
         try:
-            from tortoise.domain_loader import known_kinds, domain_kinds
+            from tortoise.domain_loader import known_kinds, domain_kinds  # noqa: I001
             if domain:
                 subject_kinds = domain_kinds(domain, "subjectKind")
                 object_kinds = domain_kinds(domain, "objectKind")
@@ -1183,7 +1183,7 @@ class LLMExtractor:
         all_entity_names: set[str] = set()
         n_subjects, n_objects = 0, 0
 
-        for title, body, span in sections:
+        for title, body, span in sections:  # noqa: B007
             try:
                 entities = stage.run(title, body, context)
             except Exception:

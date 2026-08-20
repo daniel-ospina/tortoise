@@ -11,7 +11,7 @@ Method:
 Usage:
     python -m tortoise.validation.svbp_gate1
 """
-import jax.numpy as jnp
+import jax.numpy as jnp  # noqa: I001
 import jax
 import jax.random as jrandom
 import numpy as np
@@ -83,7 +83,7 @@ def rbf_kernel(x, h):
         K: (n, n) kernel matrix.
         grad_K: (n, n, d) — gradient w.r.t. first argument.
     """
-    n, d = x.shape
+    n, d = x.shape  # noqa: RUF059
     diff = x[:, None, :] - x[None, :, :]  # (n, n, d)
     sqdist = jnp.sum(diff ** 2, axis=-1)  # (n, n)
     K = jnp.exp(-sqdist / (2 * h * h + 1e-8))
@@ -109,7 +109,7 @@ def svgd_update(x, grad_log_p, h):
 
     Returns: updated x.
     """
-    n, d = x.shape
+    n, d = x.shape  # noqa: RUF059
     K, grad_K = rbf_kernel(x, h)  # K: (n,n), grad_K: (n,n,d)
 
     # Stein gradient: sum over j for each i
@@ -220,7 +220,7 @@ def count_modes(samples):
     if len(peaks) < 2:
         return 1
     # Check if peaks are well-separated (>0.2 apart) with a valley
-    p1, p2 = sorted(peaks[:2], key=lambda p: hist[int(p * 30)] if 0 <= int(p * 30) < 30 else 0, reverse=True)
+    p1, p2 = sorted(peaks[:2], key=lambda p: hist[int(p * 30)] if 0 <= int(p * 30) < 30 else 0, reverse=True)  # noqa: RUF059
     lo, hi = min(peaks[0], peaks[1]), max(peaks[0], peaks[1])
     if hi - lo < 0.15:
         return 1
@@ -244,16 +244,16 @@ def main():
     print("SVBP Gate 1: NAND Ridge Microbenchmark")
     print("=" * 72)
     print(f"  Graph: {N_CLAIMS} claims, {len(NAND_PAIRS)} NAND, {len(IMPL_PAIRS)} IMPL")
-    print(f"  HMC: NUTS, 2 chains, 500 warmup + 500 samples")
-    print(f"  SVGD: 50 particles, RBF kernel, 1000 iterations, lr=0.005")
-    print(f"  Evidence: A(α=4,β=1), B(α=2,β=1) — active via numpyro.factor")
+    print(f"  HMC: NUTS, 2 chains, 500 warmup + 500 samples")  # noqa: F541
+    print(f"  SVGD: 50 particles, RBF kernel, 1000 iterations, lr=0.005")  # noqa: F541
+    print(f"  Evidence: A(α=4,β=1), B(α=2,β=1) — active via numpyro.factor")  # noqa: F541
     print()
 
     # ── HMC ground truth ──────────────────────────────────────────
     print("Running HMC (NUTS)...")
     c_hmc = run_hmc(num_warmup=500, num_samples=500, num_chains=1, seed=42)
     # HMC returns (samples, claims) for 1 chain, (chains, samples, claims) for >1
-    if c_hmc.ndim == 3:
+    if c_hmc.ndim == 3:  # noqa: SIM108
         c_hmc_flat = c_hmc.reshape(-1, N_CLAIMS)
     else:
         c_hmc_flat = c_hmc
@@ -339,7 +339,7 @@ def main():
 
         w2_pass = "✓" if w2 < 0.05 else "✗"
         if w2 >= 0.05:
-            all_pass = False
+            all_pass = False  # noqa: F841
 
         mode_str = f"{n_modes}"
         mode_results[i] = {"n_modes": n_modes}
@@ -364,8 +364,8 @@ def main():
 
         # Check if HMC shows bimodality in 2D
         # Simple approach: k-means with k=2 on 2D data
-        pair_np = np.array(pair_data)
-        svgd_np = np.array(svgd_pair)
+        pair_np = np.array(pair_data)  # noqa: F841
+        svgd_np = np.array(svgd_pair)  # noqa: F841
 
         # Use simple quantile split to detect camps
         # If particles separate, half should have a high, b low; other half a low, b high
@@ -398,9 +398,9 @@ def main():
         print(f"    HMC reference: camp frac = {hmc_camp_score:.2f}")
 
         if has_camps:
-            print(f"    → Particles FORM CAMPS. NAND ridge does not cause stagnation.")
+            print(f"    → Particles FORM CAMPS. NAND ridge does not cause stagnation.")  # noqa: F541
         else:
-            print(f"    → Particles DO NOT form distinct camps. Ridge stagnation possible.")
+            print(f"    → Particles DO NOT form distinct camps. Ridge stagnation possible.")  # noqa: F541
             # ponytail: check if the problem is bimodal at all
             if hmc_camp_score > 0.30:
                 print(f"    ⚠️ HMC shows camps ({hmc_camp_score:.2f}) but SVGD does not → SVGD needs tuning")

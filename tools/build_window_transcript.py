@@ -22,7 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import sys
+import sys  # noqa: F401
 from pathlib import Path
 
 _WS = re.compile(r"\s+")

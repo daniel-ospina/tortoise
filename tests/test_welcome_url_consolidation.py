@@ -5,7 +5,7 @@
 - Billing success/cancel/portal DEFAULTS must follow TORTOISE_DASHBOARD_URL
   (the dashboard host), matching __main__.py's claim-flow convention.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import pytest
 

@@ -1,7 +1,7 @@
 """Tests for deployment — health check."""
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
-import pytest
+import pytest  # noqa: F401
 from tortoise.deployment import health
 
 

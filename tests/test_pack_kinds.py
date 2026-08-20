@@ -4,7 +4,7 @@ Also covers manifest v3 (epic #909, research-r6 §3): kindDefs, chains,
 relations[].extractable, extraction config, per-pack load isolation, and
 the core-entity expansion fix (§6.2a).
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import os
 import shutil
@@ -15,7 +15,7 @@ import yaml
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest
+import pytest  # noqa: I001
 from tortoise.pack_registry import PackManifest, PackRegistry
 
 
@@ -404,12 +404,12 @@ class TestV3KindDefsSemantics:
     def test_relation_extractable_default_false(self, v3_registry):
         """R6 §3.3: relations are non-extractable unless a pack opts in."""
         pack = v3_registry.get_pack("product-strategy")
-        contains = [r for r in pack.relations if r["predicate"] == "contains"][0]
+        contains = [r for r in pack.relations if r["predicate"] == "contains"][0]  # noqa: RUF015
         assert not pack.relation_is_extractable(contains)
 
     def test_relation_extractable_true(self, v3_registry):
         pack = v3_registry.get_pack("product-strategy")
-        addresses = [r for r in pack.relations if r["predicate"] == "addresses"][0]
+        addresses = [r for r in pack.relations if r["predicate"] == "addresses"][0]  # noqa: RUF015
         assert pack.relation_is_extractable(addresses)
 
     def test_enforcement_kinddef_wins_over_extraction_kinds(self, v3_registry):

@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.render import _wrap, render  # noqa: E402
+from tortoise.render import _wrap, render  # noqa: E402, RUF100
 
 
 # ── helpers ────────────────────────────────────────────────────────────────

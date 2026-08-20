@@ -7,7 +7,7 @@ supersede-only exemption (R-14), replay duplicate detection, and the
 :CommitRecord store (MERGE serialization point — concurrency test is
 skip-guarded on live FalkorDB, DE2E-7 negative case a).
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import pytest
 
@@ -305,7 +305,7 @@ class TestLayer1Semantic:
             {"src": pt0, "dst": pt1, "op_type": "IMPL"},
         ]
         # target not emitted → semantic violation
-        result, _ = _check(_raw_payload(n_points=2, operators=base_ops + [
+        result, _ = _check(_raw_payload(n_points=2, operators=base_ops + [  # noqa: RUF005
             {"src": pt0, "dst": pt1, "op_type": "MITIGATES",
              "target": {"src": pt1, "dst": pt0, "op_type": "IMPL"},
              "strength": 0.3}]))
@@ -313,7 +313,7 @@ class TestLayer1Semantic:
         assert result.errors["operators[1].target"]
 
         # target not IMPL → pydantic Literal (shape)
-        result, _ = _check(_raw_payload(n_points=2, operators=base_ops + [
+        result, _ = _check(_raw_payload(n_points=2, operators=base_ops + [  # noqa: RUF005
             {"src": pt0, "dst": pt1, "op_type": "MITIGATES",
              "target": {"src": pt0, "dst": pt1, "op_type": "NAND"},
              "strength": 0.3}]))
@@ -321,7 +321,7 @@ class TestLayer1Semantic:
         assert result.errors["operators[1].target.op_type"]
 
         # strength out of range [0.10, 0.50] → shape (pydantic ge/le)
-        result, _ = _check(_raw_payload(n_points=2, operators=base_ops + [
+        result, _ = _check(_raw_payload(n_points=2, operators=base_ops + [  # noqa: RUF005
             {"src": pt0, "dst": pt1, "op_type": "MITIGATES",
              "target": {"src": pt0, "dst": pt1, "op_type": "IMPL"},
              "strength": 0.05}]))
@@ -329,14 +329,14 @@ class TestLayer1Semantic:
         assert result.errors["operators[1].strength"]
 
         # strength missing → semantic
-        result, _ = _check(_raw_payload(n_points=2, operators=base_ops + [
+        result, _ = _check(_raw_payload(n_points=2, operators=base_ops + [  # noqa: RUF005
             {"src": pt0, "dst": pt1, "op_type": "MITIGATES",
              "target": {"src": pt0, "dst": pt1, "op_type": "IMPL"}}]))
         assert not result.ok
         assert result.errors["operators[1].strength"]
 
         # target missing → semantic
-        result, _ = _check(_raw_payload(n_points=2, operators=base_ops + [
+        result, _ = _check(_raw_payload(n_points=2, operators=base_ops + [  # noqa: RUF005
             {"src": pt0, "dst": pt1, "op_type": "MITIGATES",
              "strength": 0.3}]))
         assert not result.ok
@@ -902,7 +902,7 @@ class TestL1Replay:
 @pytest.fixture
 def store_sdk(tmp_path, monkeypatch):
     """Embedded tenant SDK on a fresh temp DB (conftest convention)."""
-    import os
+    import os  # noqa: F401
 
     from tortoise.sdk import TortoiseSDK
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
@@ -974,7 +974,7 @@ class TestConcurrency:
         from _live_utils import _skip_unless_live_uri
         _skip_unless_live_uri()
 
-        import os
+        import os  # noqa: F401
         from concurrent.futures import ThreadPoolExecutor
 
         from tortoise.commit_idempotency import CommitRecordStore
@@ -986,7 +986,7 @@ class TestConcurrency:
             cid = "concurrent-cid"
 
             def hammer(_):
-                record, created = store.acquire(
+                record, created = store.acquire(  # noqa: RUF059
                     cid, session_id="s1", status="fully_written",
                     write_ops_billed=1)
                 return created
@@ -1012,7 +1012,7 @@ class TestEventsPayload:
             "content": "the run hung", "confidence": 0.9,
             "about_entities": [], "source_ref": "session.md",
         }]
-        res, payload = _check(raw)
+        res, payload = _check(raw)  # noqa: RUF059
         assert res.ok, res.errors
 
     def test_events_bad_kind_rejected(self):
@@ -1090,7 +1090,7 @@ class TestEventOperatorEndpoints:
             {"src": PT0, "dst": EV64, "op_type": "IMPL"},
             {"src": PT1, "dst": EV64, "op_type": "IMPL",
              "target": {"src": PT0, "dst": EV64, "op_type": "IMPL"},
-             "op_type": "MITIGATES", "strength": 0.3}],
+             "op_type": "MITIGATES", "strength": 0.3}],  # noqa: F601
             n_points=2)
         res, _ = _check(raw)
         assert res.ok, res.errors

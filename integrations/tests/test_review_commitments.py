@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """Tests for review.py and commitments.py."""
-import json
+import json  # noqa: F401
 import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch  # noqa: F401
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "crm", "twenty"))
-import review
+import review  # noqa: I001
 import commitments
 
 
@@ -17,7 +17,7 @@ class TestReviewQueue(unittest.TestCase):
     """Test review queue operations."""
 
     def setUp(self):
-        self.tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+        self.tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)  # noqa: SIM115
         self.tmp.close()
         self.orig_path = review.REVIEW_QUEUE_PATH
 

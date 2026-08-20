@@ -11,10 +11,10 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.api import EventAPI, provenance          # noqa: E402
-from tortoise.idempotency import document_key          # noqa: E402
-from tortoise.log import EventLog                       # noqa: E402
-from tortoise.projection import (                        # noqa: E402
+from tortoise.api import EventAPI, provenance  # noqa: E402, I001, RUF100
+from tortoise.idempotency import document_key  # noqa: E402, RUF100
+from tortoise.log import EventLog  # noqa: E402, RUF100
+from tortoise.projection import (  # noqa: E402, RUF100
     FalkorProjection, InMemoryProjection, fold, split,
 )
 
@@ -95,7 +95,7 @@ def test_full_mutation_set():
 
 def test_falkor_roundtrip():
     api, log = _api()
-    a, b, op = _build(api)
+    a, b, op = _build(api)  # noqa: RUF059
     proj = FalkorProjection(_tmp("g.db"), graph_name="t")
     try:
         proj.rebuild(log)

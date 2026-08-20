@@ -33,12 +33,12 @@ os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest
+import pytest  # noqa: I001
 from fastapi.testclient import TestClient
 
 import tortoise.hosted_api as ha_mod
 import tortoise.supabase_control as sc
-from tortoise.auth import lookup_hash
+from tortoise.auth import lookup_hash  # noqa: F401
 from tortoise.hosted_api import app
 from tests.fake_control_plane import FakeControlPlane
 
@@ -167,7 +167,7 @@ class TestClaimEndpoint:
         """A password login on a github-LINKED account legitimately passes:
         providers accumulates on linking (app_metadata survives refresh).
         This is the intended semantics (documented in the plan)."""
-        key, team_id = _provision_anon(client, fake)
+        key, team_id = _provision_anon(client, fake)  # noqa: RUF059
         # providers accumulate: email (password) + github (linked earlier)
         _patch_verify(monkeypatch, _jwt("user-x", email="a@b.co",
                                         providers=["email", "github"]))
@@ -188,7 +188,7 @@ class TestClaimEndpoint:
         """amr is NEVER the invariant source: a fresh/refreshed PASSWORD token
         (amr without github/google) must NOT claim even when amr is present —
         app_metadata.providers is the only assertion (cycle-3 refinement)."""
-        key, team_id = _provision_anon(client, fake)
+        key, team_id = _provision_anon(client, fake)  # noqa: RUF059
         _patch_verify(monkeypatch, _jwt("user-x", email="a@b.co",
                                         providers=["email"], amr=amr,
                                         include_amr=True))
@@ -202,7 +202,7 @@ class TestClaimEndpoint:
     def test_amr_less_github_token_passes(self, client, fake, monkeypatch):
         """An amr-LESS github token still passes: app_metadata survives token
         refresh; amr is optional and refresh-mutated (never consulted)."""
-        key, team_id = _provision_anon(client, fake)
+        key, team_id = _provision_anon(client, fake)  # noqa: RUF059
         _patch_verify(monkeypatch, _jwt("user-x", email="a@b.co",
                                         providers=["github"]))
         r = client.post(
@@ -278,7 +278,7 @@ class TestClaimEndpoint:
                                                monkeypatch):
         """Indicator 5: first-claim-wins — a different user's claim on the
         same key → 409."""
-        key, team_id = _provision_anon(client, fake)
+        key, team_id = _provision_anon(client, fake)  # noqa: RUF059
         _patch_verify(monkeypatch, _jwt("user-a", email="a@example.com",
                                         providers=["github"]))
         r = client.post(
@@ -302,7 +302,7 @@ class TestClaimEndpoint:
         pre-check passes because is_anon_team flips, but the RPC returns
         idempotent success — here we exercise the RPC-level idempotency by
         calling claim_membership directly after the first claim)."""
-        key, team_id = _provision_anon(client, fake)
+        key, team_id = _provision_anon(client, fake)  # noqa: RUF059
         _patch_verify(monkeypatch, _jwt("user-a", email="a@example.com",
                                         providers=["github"]))
         r = client.post(
@@ -327,7 +327,7 @@ class TestClaimEndpoint:
         key, team_id = _provision_anon(client, fake)
         # a second anon team the attacker "points at" via the body
         r = client.post("/v1/agent/signup", json={})
-        victim_key = r.json()["key"]
+        victim_key = r.json()["key"]  # noqa: F841
         victim_team = r.json()["team_id"]
         _patch_verify(monkeypatch, _jwt("user-a", email="a@example.com",
                                         providers=["github"]))
@@ -469,7 +469,7 @@ class TestClaimStatusEndpoint:
                                               monkeypatch):
         """P1-2: the query-string api_key form is NOT accepted (access-log
         leak of the graph credential) — header only."""
-        key, team_id = _provision_anon(client, fake)
+        key, team_id = _provision_anon(client, fake)  # noqa: RUF059
         _patch_verify(monkeypatch, _jwt("user-a", email="a@example.com",
                                         providers=["github"]))
         r = client.get(
@@ -482,7 +482,7 @@ class TestClaimStatusEndpoint:
 
     def test_claimed_key_reports_claimed_by_me(self, client, fake,
                                                monkeypatch):
-        key, team_id = _provision_anon(client, fake)
+        key, team_id = _provision_anon(client, fake)  # noqa: RUF059
         _patch_verify(monkeypatch, _jwt("user-a", email="a@example.com",
                                         providers=["github"]))
         r = client.post(
@@ -587,7 +587,7 @@ class TestAnonCeiling:
         tier until claimed — the predicate is membership-based, never the
         teams.email proxy (solution-verify P2 / parity fixture class 3)."""
         # reg- path: /v1/register with an email
-        import json as _json
+        import json as _json  # noqa: F401
         reg_email = f"reg-{uuid.uuid4().hex[:8]}@example.com"
         r = client.post("/v1/register", json={"email": reg_email,
                                               "password": "password123"})

@@ -5,12 +5,12 @@ fallback). Reuses the repo's model-adapter pattern (tools/judge_harness.py
 → tests/model_adapters.py OpenRouterModel) so validation runs are hermetic
 when no model key is present (mock judge) and real when configured.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import json
 
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable  # noqa: UP035
 import os
 import random
 
@@ -65,7 +65,7 @@ class JudgeClient:
                 out = self._real_call(prompt, temperature)
             else:
                 out = self._mock_judge(prompt)
-        except Exception as e:  # noqa: BLE001 — model failure → arm down
+        except Exception as e:  # noqa: BLE001, RUF100
             raise ArmUnavailable(f"judge model call failed: {e}") from e
         verdict = str(out.get("verdict", ""))
         conf = float(out.get("confidence", 0.5))

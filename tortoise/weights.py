@@ -3,7 +3,7 @@
 Derives w from graph structure: mitigation status, edge density,
 context tags, and optionally post-convergence message strengths.
 """
-import math
+import math  # noqa: F401, I001
 
 
 # NAND operators carry a dedicated base weight (#855). The generic base of
@@ -31,7 +31,7 @@ def compute_operator_weight(proj, op_id: str, use_dynamic: bool = False) -> floa
     ).result_set
     if not rows:
         return 1.0
-    op_type, bias, precision, consistency, directness = rows[0]
+    op_type, bias, precision, consistency, directness = rows[0]  # noqa: RUF059
     w = 1.0
 
     # NAND base weight (#855): see NAND_BASE_WEIGHT above.

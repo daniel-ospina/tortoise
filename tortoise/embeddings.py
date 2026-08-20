@@ -40,7 +40,7 @@ class EmbeddingModel:
 
     Embeddings are OPTIONAL — point creation and search must never depend on them.
     """
-    _instance: "EmbeddingModel | None" = None
+    _instance: "EmbeddingModel | None" = None  # noqa: UP037
     _model = None
     _lock = threading.Lock()
     _LOAD_TIMEOUT_S = 30.0  # generous for cold I/O (model is 90MB on disk; pre-warmed at startup in hosted)
@@ -48,7 +48,7 @@ class EmbeddingModel:
     _last_failed_at: float | None = None
 
     @classmethod
-    def get(cls, load_timeout: float | None = None) -> "EmbeddingModel | None":
+    def get(cls, load_timeout: float | None = None) -> "EmbeddingModel | None":  # noqa: UP037
         """Get or create the singleton. Returns None if model unavailable.
 
         Loads the model in a worker thread with a hard timeout. In the hosted
@@ -110,7 +110,7 @@ class EmbeddingModel:
                 # Designed zero-dependency path — INFO, no traceback noise.
                 logger.info("sentence-transformers not installed — embeddings degrade")
                 result["model"] = None
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001, RUF100
                 # #880: a load failure (e.g. LocalEntryNotFoundError when the
                 # model is missing under HF_HUB_OFFLINE) is a real degrade —
                 # warn with traceback so it stays observable (#330 contract).
@@ -182,7 +182,7 @@ def _encode(texts: list[str]) -> tuple[np.ndarray, bool]:
             vecs = model.encode(texts, show_progress_bar=False)
             if vecs is not None and len(vecs) > 0:
                 return np.asarray(vecs, dtype=np.float64), False
-        except Exception:  # noqa: BLE001 — model failures degrade, never raise
+        except Exception:  # noqa: BLE001, RUF100
             logger.warning("embedding encode failed — TF-IDF fallback", exc_info=True)
     try:
         from sklearn.feature_extraction.text import TfidfVectorizer  # lazy: [embeddings] extra
@@ -269,10 +269,10 @@ def search_points(
     model = EmbeddingModel.get()
     if model is not None:
         try:
-            vecs = np.asarray(model.encode([query] + texts, show_progress_bar=False),
+            vecs = np.asarray(model.encode([query] + texts, show_progress_bar=False),  # noqa: RUF005
                               dtype=np.float64)
             query_vec, doc_vecs = vecs[0], vecs[1:]
-        except Exception:  # noqa: BLE001 — model failures degrade, never raise
+        except Exception:  # noqa: BLE001, RUF100
             model = None
     if model is None:
         try:

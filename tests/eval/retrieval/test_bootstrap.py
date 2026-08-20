@@ -1,5 +1,5 @@
 """Paired bootstrap CI + gate semantics tests (#1144)."""
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import random
 

@@ -7,7 +7,7 @@ import pytest
 
 os.environ.setdefault("TORTOISE_ENCRYPTION_KEY", "I2n-E3K857hF9ENLgrOZ8YBPkEB4tu4jyrb1aJMUtnI=")
 
-from tortoise.crypto import encrypt_token, decrypt_token
+from tortoise.crypto import encrypt_token, decrypt_token  # noqa: I001
 
 
 class TestCrypto:

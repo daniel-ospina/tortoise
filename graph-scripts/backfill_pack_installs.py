@@ -34,7 +34,7 @@ import sys
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(_HERE))
 
-from tortoise.pack_state import (  # noqa: E402
+from tortoise.pack_state import (  # noqa: E402, I001
     DEFAULT_STARTER_PACKS, ensure_tenant_packs,
 )
 
@@ -56,7 +56,7 @@ def _iter_teams() -> list[dict]:
             )
             return [{"team_id": r["id"], "graph_name": r.get("graph_name")}
                     for r in rows if r.get("id")]
-    except Exception as e:  # noqa: BLE001 — best-effort enumeration
+    except Exception as e:  # noqa: BLE001, RUF100
         print(f"⚠️  Supabase team enumeration failed ({e}) — trying registry mode")
     from tortoise.sdk import TortoiseSDK
     sdk = TortoiseSDK()
@@ -112,7 +112,7 @@ def main() -> int:
                 print(f"✔ team {team_id} -> graph {graph_name}: "
                       f"{len(activated)} pack(s) active")
                 n_activated += len(activated)
-            except Exception as e:  # noqa: BLE001 — one bad team never aborts
+            except Exception as e:  # noqa: BLE001, RUF100
                 print(f"✖ team {team_id} -> graph {graph_name}: FAILED ({e})")
         else:
             print(f"· team {team_id} -> graph {graph_name}: "

@@ -64,7 +64,7 @@ def capture(event: str, distinct_id: str, properties: dict | None = None) -> Non
     """
     if posthog.disabled:
         return
-    try:
+    try:  # noqa: SIM105
         posthog.capture(
             distinct_id=distinct_id,
             event=event,

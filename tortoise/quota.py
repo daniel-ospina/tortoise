@@ -162,7 +162,7 @@ def derived_tier(team_row: dict) -> str:
     if not team_id:
         return tier
     try:
-        from tortoise.supabase_control import (
+        from tortoise.supabase_control import (  # noqa: I001
             get_control_plane, is_anon_team, is_supabase_enabled,
         )
         if not is_supabase_enabled():
@@ -192,7 +192,7 @@ def resolve_team_limits(team_id: str) -> dict:
     """
     if not team_id:
         raise QuotaCheckError("resolve_team_limits requires a team_id")
-    from tortoise.supabase_control import (
+    from tortoise.supabase_control import (  # noqa: I001
         get_control_plane, is_supabase_enabled,
     )
     if is_supabase_enabled():
@@ -303,7 +303,7 @@ def _count_resource(team_id: str, resource: str, sdk=None) -> int:
             #             (no graphs table in the plan data model — custom
             #             graphs are not tracked in Supabase mode).
             # Selfhost (registry mode) keeps the registry count.
-            from tortoise.supabase_control import (
+            from tortoise.supabase_control import (  # noqa: I001
                 get_control_plane, graph_metadata, is_supabase_enabled,
             )
             if is_supabase_enabled():

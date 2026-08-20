@@ -1,10 +1,10 @@
 """Tests for monitoring — health checks, Prometheus metrics, cost tracking."""
 from __future__ import annotations
 
-import json
+import json  # noqa: F401
 from unittest.mock import MagicMock
 
-import pytest
+import pytest  # noqa: F401
 
 from tortoise import monitoring
 

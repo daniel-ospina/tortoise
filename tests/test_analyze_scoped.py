@@ -7,7 +7,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.sdk import TortoiseSDK  # noqa: E402
+from tortoise.sdk import TortoiseSDK  # noqa: E402, RUF100
 
 
 def _tmp_db() -> str:
@@ -43,7 +43,7 @@ def test_entity_scoped_only_sees_subgraph():
     """Scoped analysis on entity A only returns results from A's subgraph (A+B, not C)."""
     db_path = _tmp_db()
     sdk = TortoiseSDK(db_path)
-    a_id, b_id, c_id = _seed_small_graph(sdk)
+    a_id, b_id, c_id = _seed_small_graph(sdk)  # noqa: RUF059
 
     from tortoise.analyze import analyze
 
@@ -63,7 +63,7 @@ def test_entity_scoped_sees_neighbors():
     """Scoped analysis including neighbors (A+B) sees the disagreement."""
     db_path = _tmp_db()
     sdk = TortoiseSDK(db_path)
-    a_id, b_id, c_id = _seed_small_graph(sdk)
+    a_id, b_id, c_id = _seed_small_graph(sdk)  # noqa: RUF059
 
     from tortoise.analyze import analyze
 

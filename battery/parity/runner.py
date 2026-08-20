@@ -13,8 +13,8 @@ stale answer is never returned.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass, field  # noqa: F401
+from pathlib import Path  # noqa: F401
 
 #: Pinned dataset versions (locked at implementation — the runner refuses
 #: to run on mismatch; plan E2E-4.1).
@@ -125,7 +125,7 @@ def score_staleness(probe: StalenessProbe,
     answers (no distinctive match) FAIL closed.
     """
     import re
-    norm = lambda t: set(re.findall(r"[a-z0-9/_-]+", t.lower()))
+    norm = lambda t: set(re.findall(r"[a-z0-9/_-]+", t.lower()))  # noqa: E731
     old_tokens = norm(probe.old_claim)
     cur_tokens = norm(probe.current_claim)
     stale_unique = old_tokens - cur_tokens
@@ -133,6 +133,6 @@ def score_staleness(probe: StalenessProbe,
     answer = norm(retrieved_answer)
     if stale_unique and answer & stale_unique:
         return False  # answered from the superseded state
-    if current_unique and answer & current_unique:
+    if current_unique and answer & current_unique:  # noqa: SIM103
         return True
     return False  # ambiguous — fail closed

@@ -11,7 +11,7 @@ back via sigmoid for factor evaluation.
 Usage:
     python -m tortoise.validation.hmc_model
 """
-import jax
+import jax  # noqa: I001
 import jax.numpy as jnp
 import jax.random as jrandom
 import numpyro
@@ -110,7 +110,7 @@ def summarize(mcmc):
     # R-hat and effective sample size
     summary = numpyro.diagnostics.summary(samples, prob=0.9)
     for i in range(N_CLAIMS):
-        key = f'logit_c[{i}]' if f'logit_c[{i}]' in summary else f'logit_c'
+        key = f'logit_c[{i}]' if f'logit_c[{i}]' in summary else f'logit_c'  # noqa: F541
         if key in summary:
             stats = summary[key]
             r_hat = float(stats['r_hat']) if hasattr(stats['r_hat'], '__float__') else stats['r_hat']

@@ -140,7 +140,7 @@ def test_exit_still_calls_close_once_with_flag_set():
 def test_atexit_seams_registered():
     """The three atexit seams route through _atexit_close — the fast path
     is registration-seam-only (never inside close/__exit__)."""
-    from tortoise import FalkorDB
+    from tortoise import FalkorDB  # noqa: I001
     from tortoise.sdk import TortoiseSDK
     from tortoise.projection import FalkorProjection
 

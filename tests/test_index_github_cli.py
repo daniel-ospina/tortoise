@@ -5,7 +5,7 @@ Verifies that _cmd_index_github works with the modern extractor API
 """
 from __future__ import annotations
 
-import os
+import os  # noqa: F401
 import sys
 import tempfile
 from pathlib import Path

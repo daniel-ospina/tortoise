@@ -4,7 +4,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import pytest
+import pytest  # noqa: F401
 
 # #331: parents[2] = repo root tortoise/ dir -- parents[1] is
 # tortoise/shared_state, where `shared_state` is not importable
@@ -41,7 +41,7 @@ class TestGoldenSignals:
 
     def test_saturation(self):
         gs = GoldenSignals(max_samples=5)
-        for i in range(5):
+        for i in range(5):  # noqa: B007
             gs.record(1.0)
         assert gs.saturation == 1.0
 

@@ -1,7 +1,7 @@
 """Tests for the GitHub indexer + indexing endpoints (#499)."""
 from __future__ import annotations
 
-import json
+import json  # noqa: F401
 import os
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
@@ -23,7 +23,7 @@ class MockGitHubTransport(httpx.AsyncBaseTransport):
         self.requests.append(request.url.path)
         # Return based on path pattern
         if "/repos" in request.url.path and "issues" not in request.url.path:
-            body = [{"full_name": "acme/repo1", "html_url": f"https://github.com/acme/repo1"}]
+            body = [{"full_name": "acme/repo1", "html_url": f"https://github.com/acme/repo1"}]  # noqa: F541
             return httpx.Response(200, json=body, request=request)
         if "issues" in request.url.path:
             body = [{
@@ -43,7 +43,7 @@ class TestGitHubIndexer:
 
     @pytest.mark.asyncio
     async def test_index_creates_points(self):
-        indexer, client = self._make_indexer()
+        indexer, client = self._make_indexer()  # noqa: RUF059
 
         class FakeSDK:
             def __init__(self):
@@ -61,7 +61,7 @@ class TestGitHubIndexer:
 
     @pytest.mark.asyncio
     async def test_index_dedup_by_github_url(self):
-        indexer, client = self._make_indexer()
+        indexer, client = self._make_indexer()  # noqa: RUF059
 
         class FakeSDK:
             def __init__(self):
@@ -83,7 +83,7 @@ class TestGitHubIndexer:
 
     @pytest.mark.asyncio
     async def test_truncates_large_bodies(self):
-        indexer, client = self._make_indexer()
+        indexer, client = self._make_indexer()  # noqa: RUF059
 
         class FakeSDK:
             def __init__(self):

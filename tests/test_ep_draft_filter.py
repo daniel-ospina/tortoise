@@ -48,7 +48,7 @@ def make_leak_graph(sdk: TortoiseSDK):
     """s (live, strong) IMPL l (live, neutral) via live operator O1;
     live operator O2 (leak) wired l IMPL d where d is DRAFT."""
     s = sdk.create_point("statement", "strong source", status="live")
-    l = sdk.create_point("statement", "live claim", status="live")
+    l = sdk.create_point("statement", "live claim", status="live")  # noqa: E741
     d = sdk.create_point("statement", "draft leak target")  # status: draft
     set_evidence(sdk, s["id"], 8.0, 1.0)
     set_evidence(sdk, l["id"], 1.0, 1.0)
@@ -305,7 +305,7 @@ def test_create_operator_draft_status_survives_event_payload(sdk, tmp_path):
         sdk2._get_event_log(), "load"
     ) else None
     if log is None:
-        lines = open(str(tmp_path / "events.jsonl")).read().splitlines()
+        lines = open(str(tmp_path / "events.jsonl")).read().splitlines()  # noqa: SIM115
         log = json.loads(lines[-1]) if lines else None
     assert log is not None, "OperatorAdded event must be written to the JSONL log"
     assert log.get("type") == "OperatorAdded", f"last event is {log.get('type')}"

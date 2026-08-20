@@ -10,12 +10,12 @@ Four findings, all empirically verified:
   F3: EP variance is NARROWER → REDUCES GMM separation (factor ~0.96)
   F4: Constructed ground truth needs better no-camp baseline
 """
-import sys, os
+import sys, os  # noqa: E401, I001
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-import pytest
+import pytest  # noqa: I001
 import numpy as np
 pytest.importorskip("sklearn")  # GMM tests need scikit-learn — skip module when absent
-from sklearn.mixture import GaussianMixture
+from sklearn.mixture import GaussianMixture  # noqa: I001
 from tortoise.quadrature import tilted_moments, moments_to_beta, phi_nand
 
 
@@ -26,7 +26,7 @@ def test_finding1_ep_marginal_detectable():
     With a uniform cavity Beta(1,1)×Beta(1,1) at w=3.0, the tilted
     marginal is detectably non-unimodal — GMM finds two components.
     """
-    mom_a, mom_b = tilted_moments(1, 1, 1, 1, 3.0, phi_nand, n_quad=12)
+    mom_a, mom_b = tilted_moments(1, 1, 1, 1, 3.0, phi_nand, n_quad=12)  # noqa: RUF059
     alpha_a, beta_a = moments_to_beta(*mom_a)
     # GMM separation: 100 trials
     seps = []
@@ -57,7 +57,7 @@ def test_finding2_all_asymmetry_detectable():
                 detections += 1
         rate = detections / 50
         assert rate > 0.80, f"asym={asym}: detection rate {rate:.2f} should be >0.80"
-    print(f"  F2: GMM detects camps at ALL asymmetry levels (≥80% rate)")
+    print(f"  F2: GMM detects camps at ALL asymmetry levels (≥80% rate)")  # noqa: F541
 
 
 def test_finding3_ep_variance_reduces_separation():

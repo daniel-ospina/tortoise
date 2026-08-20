@@ -15,7 +15,7 @@ Architecture (from plan WF4):
   Event derivation (meeting, decision, friction) → JSONL append → projection.apply()
   → EntityStage (Objects + aboutObject/aboutEvent wiring)
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import logging
 import re
@@ -30,7 +30,7 @@ from .extractor import (
     extract_conversation_entities,
     _canonical_name,
 )
-from .ids import ulid, now_iso, content_hash
+from .ids import ulid, now_iso, content_hash  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +71,7 @@ def _default_grounding_fn():
     try:
         from tortoise.analyze import mean_grounding  # type: ignore[attr-defined]
         return mean_grounding
-    except Exception:  # noqa: BLE001 — #779 not merged yet
+    except Exception:  # noqa: BLE001, RUF100
         return None
 
 
@@ -182,7 +182,7 @@ def list_quarantined(proj) -> list[dict]:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
 
 # Cue-word patterns for eventKind derivation
@@ -343,7 +343,7 @@ class ConversationMiner:
         batch_status = "not_gated"
         batch_reason = "no projection — W-3 gate skipped (standalone log mode)"
         if api.projection is not None:
-            from tortoise.analyze import grounding_snapshot
+            from tortoise.analyze import grounding_snapshot  # noqa: I001
             # EpSafeCommit/quarantine_batch are module-level (defined below);
             # reference via module for clarity at the call site.
             from . import mining as _mining
@@ -949,7 +949,7 @@ def mine_corpus(
     ``event_log_path`` routes mining events to the given JSONL log (default:
     the SDK's configured event log, or a fallback next to the DB path).
     """
-    import os as _os
+    import os as _os  # noqa: I001
     import hashlib as _hashlib
     from tortoise.sdk import TortoiseSDK
 
@@ -1009,7 +1009,7 @@ def mine_corpus_with_sdk(
     Returns {sessions, ingested, updated, skipped, failed, entities, objects,
     dedup_hits, drafts, errors:[{file, error, retryable}]}.
     """
-    import os as _os
+    import os as _os  # noqa: I001
     import hashlib as _hashlib
     from pathlib import Path
 
@@ -1349,7 +1349,7 @@ class EpSafeCommit:
             after = grounding_after if grounding_after is not None \
                 else self._grounding_fn()
             drift = abs(after - grounding_before)
-        except Exception as exc:  # noqa: BLE001 — fail closed on runtime error
+        except Exception as exc:  # noqa: BLE001, RUF100
             return {
                 "status": "fail",
                 "note": f"grounding computation error: {exc}",

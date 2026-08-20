@@ -364,8 +364,8 @@ def register_domain_validator(
     *,
     chain_id: str | None = None,
     surface: str = SURFACE_GRAPH,
-    fn: Callable[[Any], list[dict]] | None = None,
-) -> Callable[[Any], list[dict]] | None:
+    fn: Callable[[Any], list[dict]] | None = None,  # noqa: F821
+) -> Callable[[Any], list[dict]] | None:  # noqa: F821
     """Register a per-domain validation function (issue #405).
 
     ``surface`` selects when the function runs (graph-global on-demand vs
@@ -394,7 +394,7 @@ def domain_validator(
     *,
     chain_id: str | None = None,
     surface: str = SURFACE_GRAPH,
-) -> Callable:
+) -> Callable:  # noqa: F821
     """Decorator form of register_domain_validator.
 
     Usage:
@@ -403,7 +403,7 @@ def domain_validator(
         def validate_chain_integrity(graph) -> list[dict]: ...
     """
 
-    def deco(fn: Callable[[Any], list[dict]]) -> Callable[[Any], list[dict]]:
+    def deco(fn: Callable[[Any], list[dict]]) -> Callable[[Any], list[dict]]:  # noqa: F821
         register_domain_validator(domain, chain_id=chain_id, surface=surface, fn=fn)
         return fn
 

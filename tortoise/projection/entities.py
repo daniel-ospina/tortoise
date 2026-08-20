@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
 
 # #388: connector sourceKinds eligible for choke-point Source materialization in
@@ -38,7 +38,7 @@ def _build_search_text(title, summary=None, topics=None) -> str:
     Concatenates title + summary + topics (None-safe). Always includes title
     so every Document has a search floor.
     """
-    parts = [title, summary] + list(topics or [])
+    parts = [title, summary] + list(topics or [])  # noqa: RUF005
     return " ".join(filter(None, parts))
 
 
@@ -472,7 +472,7 @@ class _EntityHandlers:
                 self._create_about_edges(did, ent)
 
     def _upsert_event(self, event: dict, *, guard: bool = False,
-                      guard_source_file: str | None = None) -> "tuple[str, bool] | None":
+                      guard_source_file: str | None = None) -> "tuple[str, bool] | None":  # noqa: UP037
         """MERGE Event node with all ONTOLOGY §3.1 properties.
 
         Handles both nested ({type:EventRecorded, event:{eventId:...}}) and
@@ -799,7 +799,7 @@ class _EntityHandlers:
             )
 
     def _event_guarded_merge(self, inner: dict, candidate: str, props: dict,
-                             sf: str | None) -> "tuple[str, bool]":
+                             sf: str | None) -> "tuple[str, bool]":  # noqa: UP037
         """The meeting-scoped source_file-aware guard (§4.2 cycle-12/13/17/18).
 
         THREE-statement construction (dialect-supported — no ``ON MATCH
@@ -883,7 +883,7 @@ class _EntityHandlers:
         # MERGE above is a no-op and no props were written anywhere).
         return (candidate, True)
 
-    def _upsert_source(self, ev: dict, *, merge_run_id: str | None = None) -> "QueryResult | None":
+    def _upsert_source(self, ev: dict, *, merge_run_id: str | None = None) -> "QueryResult | None":  # noqa: F821, UP037
         """MERGE Source node for layered provenance (Ontology v2.1).
 
         Source properties: url (permalink), sourceType, contentHash, title,

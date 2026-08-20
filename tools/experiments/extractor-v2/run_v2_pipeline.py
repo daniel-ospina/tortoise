@@ -34,8 +34,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))  # repo root
 
-from tests.model_adapters import MODELS  # noqa: E402
-from tortoise import extractor_v2 as v2  # noqa: E402
+from tests.model_adapters import MODELS  # noqa: E402, RUF100
+from tortoise import extractor_v2 as v2  # noqa: E402, RUF100
 
 DEFAULT_TRANSCRIPT = Path(__file__).resolve().parents[3] / \
     "tests/eval/w-1272/w-design-bounded.txt"
@@ -45,7 +45,7 @@ DEFAULT_OUT = Path(__file__).resolve().parent / "v2-run-outputs"
 def _load_transcript(path: Path) -> list[dict]:
     """The harness transcript format: '<index>: <role>: <text>' per line."""
     edus = []
-    for i, line in enumerate(path.read_text().splitlines()):
+    for i, line in enumerate(path.read_text().splitlines()):  # noqa: B007
         line = line.strip()
         if not line:
             continue
@@ -77,11 +77,11 @@ def main() -> None:
     i = 0
     while i < len(args):
         if args[i] == "--out" and i + 1 < len(args):
-            out_dir = Path(args[i + 1]); i += 2
+            out_dir = Path(args[i + 1]); i += 2  # noqa: E702
         elif args[i] == "--chunk-size" and i + 1 < len(args):
-            chunk_size = int(args[i + 1]); i += 2
+            chunk_size = int(args[i + 1]); i += 2  # noqa: E702
         elif args[i] == "--dry":
-            dry = True; i += 1
+            dry = True; i += 1  # noqa: E702
         else:
             print(f"[run_v2_pipeline] unknown arg: {args[i]}", file=sys.stderr)
             sys.exit(2)
@@ -105,7 +105,7 @@ def main() -> None:
           f"max_tokens {flash.max_tokens})")
 
     if dry:
-        story = v2.compile_stories([v2.S1_TMPL[:80]] * 0) or "…"
+        story = v2.compile_stories([v2.S1_TMPL[:80]] * 0) or "…"  # noqa: F841
         s2 = v2.render_s2_prompt()
         s4 = v2.render_s4_prompt("…", {}, {"entities": [], "points": [],
                                            "events": [], "operators": []})

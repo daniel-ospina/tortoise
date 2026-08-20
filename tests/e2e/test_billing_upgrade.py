@@ -8,7 +8,7 @@ re-tested here.
 
 Skips cleanly (no error) when STRIPE_TEST_* keys are absent.
 """
-import json
+import json  # noqa: F401
 import os
 
 import pytest
@@ -25,7 +25,7 @@ def _skip_guard():
 def test_upgrade_checkout_live_leg():
     """Register → real Checkout session → 200 + checkout_url + customer persisted."""
     _skip_guard()
-    import tempfile
+    import tempfile  # noqa: I001
     from fastapi.testclient import TestClient
     from tortoise.hosted_api import app
     from tortoise.sdk import TortoiseSDK

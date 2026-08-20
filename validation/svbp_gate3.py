@@ -8,13 +8,13 @@ Validates:
 Usage:
     python -m validation.svbp_gate3
 """
-import sys, os
+import sys, os  # noqa: E401, I001
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-import time
+import time  # noqa: I001
 import jax.numpy as jnp
 import jax
-import numpy as np
+import numpy as np  # noqa: F401
 
 from tortoise.svbp import TortoiseSVBP
 
@@ -56,7 +56,7 @@ def main():
     print("SVBP Gate 3: Smart Particle Storage")
     print("=" * 72)
     print(f"  Graph: {N_CLAIMS} claims, {len(NAND_PAIRS)} NAND, {len(IMPL_PAIRS)} IMPL")
-    print(f"  SVBP: 25 particles, 15 steps/factor, compress after 5 iters")
+    print(f"  SVBP: 25 particles, 15 steps/factor, compress after 5 iters")  # noqa: F541
 
     factors = build_factors()
     evidence = {"c0": (4.0, 1.0), "c1": (2.0, 1.0)}  # same as Gates 1-2
@@ -74,7 +74,7 @@ def main():
     print(f"  Stats: {svbp1.stats}")
 
     # Capture full posteriors as reference
-    ref_means = [svbp1.compute_confidence(f"c{i}")["mean"] for i in range(N_CLAIMS)]
+    ref_means = [svbp1.compute_confidence(f"c{i}")["mean"] for i in range(N_CLAIMS)]  # noqa: F841
 
     # ── Test 2: Compress → verify summaries ───────────────────────
     print()
@@ -109,7 +109,7 @@ def main():
     print()
     print("--- Test 3: Add new operator → warm-start convergence ---")
     # Add a new NAND operator between previously-free IMPL claims
-    new_factors = factors + [("NAND_new", "NAND", ["c4", "c5"], 3.0)]
+    new_factors = factors + [("NAND_new", "NAND", ["c4", "c5"], 3.0)]  # noqa: RUF005
 
     svbp2 = TortoiseSVBP(n_particles=25, n_svgd_steps=15, svgd_lr=0.01,
                          damping=0.5, max_iter=30, tol=5e-3,
@@ -118,14 +118,14 @@ def main():
     # First cold-start on original graph (no compression)
     svbp2.run(factors, evidence=evidence)
     svbp2.compress_all()  # compress before adding new operator
-    compressed_means = [svbp2.compute_confidence(f"c{i}")["mean"] for i in range(N_CLAIMS)]
+    compressed_means = [svbp2.compute_confidence(f"c{i}")["mean"] for i in range(N_CLAIMS)]  # noqa: F841
 
     # Now warm-start with the new operator
     t0 = time.time()
     n_ws, c_ws = svbp2.run(new_factors, evidence=evidence, warm_start=True)
     elapsed_ws = time.time() - t0
     print(f"  Warm-start converged: {c_ws} in {n_ws} iters ({elapsed_ws:.1f}s)")
-    warm_means = [svbp2.compute_confidence(f"c{i}")["mean"] for i in range(N_CLAIMS)]
+    warm_means = [svbp2.compute_confidence(f"c{i}")["mean"] for i in range(N_CLAIMS)]  # noqa: F841
 
     # Cold start with new operator for comparison (same iter budget)
     svbp3 = TortoiseSVBP(n_particles=25, n_svgd_steps=15, svgd_lr=0.01,
@@ -134,7 +134,7 @@ def main():
     n_cold, c_cold = svbp3.run(new_factors, evidence=evidence)
     elapsed_cold = time.time() - t0
     print(f"  Cold-start converged: {c_cold} in {n_cold} iters ({elapsed_cold:.1f}s)")
-    cold_means = [svbp3.compute_confidence(f"c{i}")["mean"] for i in range(N_CLAIMS)]
+    cold_means = [svbp3.compute_confidence(f"c{i}")["mean"] for i in range(N_CLAIMS)]  # noqa: F841
 
     # Compare warm-start vs cold start
     w2_warm_vs_cold = []

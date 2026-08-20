@@ -7,7 +7,7 @@ internals (isolation contract).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field  # noqa: F401
 from typing import Protocol
 
 from battery.config.corpus import Scenario

@@ -4,7 +4,7 @@ state; negative-path validation parity; idempotency; scale)."""
 from __future__ import annotations
 
 import os
-import tempfile
+import tempfile  # noqa: F401
 from pathlib import Path
 
 import pytest
@@ -94,7 +94,7 @@ class TestBatchSetup:
                 == sum(len(v["inputs"]) for v in after["operators"].values()))
 
     def test_negative_path_missing_endpoint(self, fresh_db):
-        proj = fresh_db._get_proj()
+        proj = fresh_db._get_proj()  # noqa: F841
         scenarios = _scenarios()
         graph = derive_scenario_graph(scenarios[0])
         # corrupt: add an operator referencing a nonexistent point

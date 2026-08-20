@@ -6,7 +6,7 @@ Maps issues/PRs → 4-entity chain per ONTOLOGY_v2.5 §1.1:
   + Subject (naturalPerson for author/assignees)
 PM domain extension kinds: pm:issue, pm:card, pm:cardCreated, pm:cardCompleted.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import json
 import hmac
@@ -16,14 +16,14 @@ import os
 import subprocess
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from typing import Any, Callable
+from typing import Any, Callable  # noqa: UP035
 
 logger = logging.getLogger(__name__)
 
 
 def _now_iso() -> str:
     from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
 
 def _extract_label_prefix(labels: list[str], prefix: str) -> str | None:
@@ -110,8 +110,8 @@ class GitHubConnector:
         for label in labels:
             if label in label_map:
                 cfg = label_map[label]
-                if cfg.get("team"): team = cfg["team"]
-                if cfg.get("role"): role = cfg["role"]
+                if cfg.get("team"): team = cfg["team"]  # noqa: E701
+                if cfg.get("role"): role = cfg["role"]  # noqa: E701
         if not team:
             team = default_team
         if not team and fallback != "skip":
@@ -199,12 +199,12 @@ class GitHubConnector:
         created_at = issue.get("createdAt", "")
         closed_at = issue.get("closedAt", "")
         url = issue.get("url", "")
-        labels = [l.get("name", "") for l in (issue.get("labels") or [])]
+        labels = [l.get("name", "") for l in (issue.get("labels") or [])]  # noqa: E741
         complexity = _extract_label_prefix(labels, "complexity:") or "standard"
         ux_rating = _extract_label_prefix(labels, "ux:") or ""
         assignees = [a.get("login", "") for a in (issue.get("assignees") or [])]
         author = (issue.get("author") or {}).get("login", "")  # P0: handle null author
-        milestone = (issue.get("milestone") or {}).get("title", "")
+        milestone = (issue.get("milestone") or {}).get("title", "")  # noqa: F841
 
         entity_id = f"github-issue-{self.repo}-{number}"
 
@@ -264,7 +264,7 @@ class GitHubConnector:
         # Subjects — people involved (ONTOLOGY_v2.5 §1.1 subjectKind)
         subjects = []
         seen = set()
-        for login in [author] + assignees:
+        for login in [author] + assignees:  # noqa: RUF005
             if login and login not in seen:
                 seen.add(login)
                 subjects.append({
@@ -394,7 +394,7 @@ class GitHubConnector:
         if self._server is not None:
             if self._thread is not None and self._thread.is_alive():
                 return self.webhook_port
-            try:
+            try:  # noqa: SIM105
                 self._server.server_close()
             except OSError:
                 pass
@@ -475,7 +475,7 @@ class GitHubConnector:
         state = issue.get("state", "")
         created_at = issue.get("createdAt", "")
         closed_at = issue.get("closedAt", "")
-        url = issue.get("url", "")
+        url = issue.get("url", "")  # noqa: F841
 
         return {
             "type": "EventRecorded",
@@ -517,7 +517,7 @@ class GitHubConnector:
         closed_at = pr.get("closedAt", "")
 
         kind = "github.pr.merged" if merged_at else f"github.pr.{state}"
-        url = pr.get("url", "")
+        url = pr.get("url", "")  # noqa: F841
 
         return {
             "type": "EventRecorded",

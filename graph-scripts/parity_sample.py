@@ -28,12 +28,12 @@ import os
 import random
 import sys
 import time
-from collections import defaultdict
+from collections import defaultdict  # noqa: F401
 
 # Allow running from any directory
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.analyze import _bfs_select_operators
+from tortoise.analyze import _bfs_select_operators  # noqa: I001
 
 
 # ── Lightweight graph wrapper (avoids FalkorProjection index creation) ─

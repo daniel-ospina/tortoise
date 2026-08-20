@@ -1,7 +1,7 @@
 """Model adapters for Tortoise LLMExtractor — wraps different backends into the complete(system, user) interface."""
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
-import os, json, requests
+import os, json, requests  # noqa: E401
 
 class OpenRouterModel:
     """Adapter for OpenRouter API — supports any model on the platform."""
@@ -74,7 +74,7 @@ MODELS = {
     'claude-opus-5': lambda: OpenRouterModel('anthropic/claude-opus-5', max_tokens=12000, temperature=0.0),
 }
 
-import requests, json
+import requests, json  # noqa: E401, E402, F401, F811, I001
 
 class OllamaModel:
     """Adapter for local Ollama models."""

@@ -23,18 +23,18 @@ import re
 import sys
 from pathlib import Path
 
-import pytest
+import pytest  # noqa: F401
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tortoise.sdk import TortoiseSDK  # noqa: E402
+from tortoise.sdk import TortoiseSDK  # noqa: E402, F401, I001, RUF100
 
-from tools.longmem_eval.judge import MockJudge  # noqa: E402
-from tools.longmem_eval.reader import (  # noqa: E402
+from tools.longmem_eval.judge import MockJudge  # noqa: E402, RUF100
+from tools.longmem_eval.reader import (  # noqa: E402, RUF100
     LLMReader, MockReader, _SYSTEM_PROMPT,
 )
-from tools.longmem_eval.retrieve import render_context  # noqa: E402
-from tools.longmem_eval.run import run_evaluation  # noqa: E402
+from tools.longmem_eval.retrieve import render_context  # noqa: E402, RUF100
+from tools.longmem_eval.run import run_evaluation  # noqa: E402, RUF100
 
 MINI = Path(__file__).parent / "fixtures" / "longmemeval_mini.json"
 

@@ -336,7 +336,7 @@ def test_session_indexer_cli_lock_error_exits_zero(monkeypatch, tmp_path, capsys
     """Review follow-up P3: the single-file index CLI surfaces a lock-path
     OSError as {"status": "error"} and returns (exit 0) — never a traceback,
     preserving the hook exit-0 contract."""
-    import json as _json
+    import json as _json  # noqa: I001
     import sys as _sys
     import tortoise.session_indexer as si
 

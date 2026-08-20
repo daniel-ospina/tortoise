@@ -10,12 +10,12 @@ Three IMPL edges:
 
 Idempotent: safe to re-run — checks for existing wiring before creating.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import sys
 sys.path.insert(0, '/Users/home/eldato/negation-game-explorations/tortoise')
 
-from tortoise.log import EventLog
+from tortoise.log import EventLog  # noqa: I001
 from tortoise.api import EventAPI, provenance
 from tortoise.projection import FalkorProjection
 

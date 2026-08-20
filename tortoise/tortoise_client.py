@@ -69,7 +69,7 @@ _UNAVAILABLE_MESSAGE = (
 )
 
 
-def _get_sdk() -> "TortoiseSDK":
+def _get_sdk() -> "TortoiseSDK":  # noqa: F821, UP037
     """Lazy-import TortoiseSDK. Returns None if unavailable."""
     try:
         from tortoise.sdk import TortoiseSDK

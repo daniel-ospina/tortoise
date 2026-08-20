@@ -86,7 +86,7 @@ def test_lookup_hash_parity_with_ts_mirror():
     identical digests — run the node parity test (skips if node is absent)."""
     node = shutil.which("node")
     if node is None:
-        pytest.skip("node not available — TS↔Python parity test skipped")
+        pytest.skip("node not available — TS↔Python parity test skipped")  # noqa: F821
     parity = _REPO_ROOT / "supabase" / "tests" / "lookup_parity.test.mjs"
     result = subprocess.run(
         [node, str(parity)],

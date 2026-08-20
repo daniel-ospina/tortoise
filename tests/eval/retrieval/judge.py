@@ -31,7 +31,7 @@ import random
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Callable  # noqa: F401, UP035
 
 _REPO_ROOT = str(Path(__file__).resolve().parent.parent.parent.parent)
 if _REPO_ROOT not in sys.path:
@@ -107,7 +107,7 @@ class Pool:
     strategies: list[str] = field(default_factory=list)
 
     @classmethod
-    def from_dict(cls, data: dict) -> "Pool":
+    def from_dict(cls, data: dict) -> "Pool":  # noqa: UP037
         if data.get("schema_version") != POOL_SCHEMA_VERSION:
             raise JudgeError(
                 f"unsupported pool schema_version {data.get('schema_version')!r}"
@@ -492,7 +492,7 @@ def run_judges(
 
 def _model_factory(model_name: str):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
-    from tests.model_adapters import MODELS  # noqa: PLC0415
+    from tests.model_adapters import MODELS  # noqa: PLC0415, RUF100
 
     try:
         return MODELS[model_name]()
@@ -561,7 +561,7 @@ def main(argv: list[str] | None = None) -> int:
                 pool, model_a, model_b, judge_names=(a_name, b_name),
                 max_points_per_query=args.max_points_per_query,
             )
-        except (JudgeError, Exception) as exc:  # noqa: BLE001
+        except (JudgeError, Exception) as exc:  # noqa: BLE001, RUF100
             print(f"judge: error: {exc}", file=sys.stderr)
             return 1
         out_dir = Path(args.out_dir)

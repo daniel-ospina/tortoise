@@ -4,8 +4,8 @@
 HISTORICAL ONE-SHOT — queries the removed context field (see #49);
 connection now env-based (TORTOISE_DB_URI).
 """
-from falkordb import FalkorDB
-from collections import defaultdict
+from falkordb import FalkorDB  # noqa: I001
+from collections import defaultdict  # noqa: F401
 import os
 
 
@@ -88,12 +88,12 @@ def audit_context(context):
                 orphan_count += 1
         if orphan_count:
             print(f"\n  🔴 HIGH: superseded_no_edge — {orphan_count}/{len(superseded)} orphaned")
-            for sid, content, ctx in superseded[:5]:
+            for sid, content, ctx in superseded[:5]:  # noqa: B007
                 print(f"    {sid}: {(content or '')[:100]}")
         else:
             print(f"  ✅ superseded_no_edge: all {len(superseded)} have replacement edges")
     else:
-        print(f"  ✅ superseded_no_edge: no superseded points")
+        print(f"  ✅ superseded_no_edge: no superseded points")  # noqa: F541
     
     # ── CHECK 2: superseded_active_edges (MEDIUM) ──
     if superseded:
@@ -105,14 +105,14 @@ def audit_context(context):
         if active:
             print(f"  🟡 MEDIUM: superseded_active_edges — {active} superseded points with active edges")
         else:
-            print(f"  ✅ superseded_active_edges: clean")
+            print(f"  ✅ superseded_active_edges: clean")  # noqa: F541
     
     # ── CHECK 3: impl_instead_of_nand (HIGH) ──
     # Check IMPL edges where target has contradiction/counter/adversarial in context or content
     r = q(f"MATCH (n:Point)-[:IMPL]->(m:Point) WHERE {id_filter.replace('n.', 'n.')} AND n.is_operator = true RETURN n.id, n.op_type, m.id, m.content, m.context, n.content LIMIT 200")
     suspicious = []
     for row in r:
-        op_id, op_type, tgt_id, tgt_content, tgt_ctx, op_content = row
+        op_id, op_type, tgt_id, tgt_content, tgt_ctx, op_content = row  # noqa: RUF059
         tc = ((tgt_content or '') + (tgt_ctx or '')).lower()
         oc = ((op_content or '') + '').lower()
         # Signs of contradiction
@@ -127,7 +127,7 @@ def audit_context(context):
             print(f"       target context: {tctx}")
             print(f"       target content: {tc}")
     else:
-        print(f"  ✅ impl_instead_of_nand: clean")
+        print(f"  ✅ impl_instead_of_nand: clean")  # noqa: F541
     
     # ── CHECK 4: missing_sourceKind (MEDIUM) on evidence points ──
     r = q(f"MATCH (n:Point) WHERE {id_filter} AND n.is_operator = false AND n.sourceKind IS NULL AND n.pointKind IS NOT NULL RETURN n.id, n.pointKind, n.content LIMIT 20")
@@ -137,7 +137,7 @@ def audit_context(context):
         for pid, pk, content in missing_sk[:5]:
             print(f"    {pid} ({pk}): {(content or '')[:100]}")
     else:
-        print(f"  ✅ missing_sourceKind: all evidence points have sourceKind")
+        print(f"  ✅ missing_sourceKind: all evidence points have sourceKind")  # noqa: F541
     
     # Also check: operators shouldn't need sourceKind, but let's check if any have it (good) or all lack it (expected)
     r = q(f"MATCH (n:Point) WHERE {id_filter} AND n.is_operator = true AND n.sourceKind IS NOT NULL RETURN count(n)")
@@ -151,7 +151,7 @@ def audit_context(context):
     if missing_sd:
         print(f"\n  ⚪ LOW: missing_sourceDate — {missing_sd} graded points without date (time decay disabled)")
     else:
-        print(f"  ✅ missing_sourceDate: all graded points have dates")
+        print(f"  ✅ missing_sourceDate: all graded points have dates")  # noqa: F541
     
     # ── CHECK 6: mitigation_recommended (MEDIUM) ──
     # Find operators with low confidence that lack mitigation
@@ -168,7 +168,7 @@ def audit_context(context):
         for lid, conf, content in unmitigated[:5]:
             print(f"    {lid} conf={conf}: {(content or '')[:120]}")
     else:
-        print(f"  ✅ mitigation_recommended: all low-confidence operators mitigated or none found")
+        print(f"  ✅ mitigation_recommended: all low-confidence operators mitigated or none found")  # noqa: F541
     
     # ── CHECK 7: Edge connectivity quality ──
     r = q(f"MATCH (n:Point) WHERE {id_filter} RETURN count(n)")
@@ -178,14 +178,14 @@ def audit_context(context):
     if isolated > 0:
         print(f"\n  💡 Isolated points (no edges): {isolated}/{total}")
         if isolated == total:
-            print(f"    ⚠️  ALL points in this context are isolated — no wiring at all!")
+            print(f"    ⚠️  ALL points in this context are isolated — no wiring at all!")  # noqa: F541
     
     # ── CHECK 8: NAND edge health ──
     r = q(f"MATCH (n:Point)-[:NAND]->(m:Point) WHERE {id_filter.replace('n.', 'n.')} RETURN n.id, m.id, n.content, m.content LIMIT 20")
     nand_edges = list(r)
     if nand_edges:
         print(f"\n  📊 NAND edges in subgraph: {len(nand_edges)}")
-        for src, tgt, sc, tc in nand_edges[:3]:
+        for src, tgt, sc, tc in nand_edges[:3]:  # noqa: B007
             print(f"    {src} -[NAND]-> {tgt}")
     
     # ── CHECK 9: Confidence distribution ──
@@ -205,7 +205,7 @@ if __name__ == '__main__':
     
     # ── GLOBAL SUMMARY ──
     print(f"\n{'='*70}")
-    print(f"  GLOBAL CROSS-CONTEXT SUMMARY")
+    print(f"  GLOBAL CROSS-CONTEXT SUMMARY")  # noqa: F541
     print(f"{'='*70}")
     
     r = q("MATCH (n:Point) RETURN count(n)")
@@ -241,13 +241,13 @@ if __name__ == '__main__':
     print(f"  With pointKind: {with_pk}/{total_pts}")
     print(f"  Operator avg confidence: {avg_conf:.2f} (n={conf_count})" if avg_conf else "  Operator confidence: N/A")
     
-    print(f"\n  🔴 HIGH severity:")
+    print(f"\n  🔴 HIGH severity:")  # noqa: F541
     print(f"     superseded_no_edge: {superseded_count} superseded points, {0} orphaned (no :SUPERSEDES edges exist at all)")
-    print(f"     impl_instead_of_nand: checked per-context above")
+    print(f"     impl_instead_of_nand: checked per-context above")  # noqa: F541
     
-    print(f"\n  🟡 MEDIUM severity:")
+    print(f"\n  🟡 MEDIUM severity:")  # noqa: F541
     print(f"     missing_sourceKind: {total_pts - with_sk} points lack sourceKind")
-    print(f"     Most are operators (expected), but evidence points need tiers")
+    print(f"     Most are operators (expected), but evidence points need tiers")  # noqa: F541
     
-    print(f"\n  ⚪ LOW severity:")
+    print(f"\n  ⚪ LOW severity:")  # noqa: F541
     print(f"     missing_sourceDate: {with_sk - with_sd} graded points lack sourceDate")

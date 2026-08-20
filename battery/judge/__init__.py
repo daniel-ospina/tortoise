@@ -5,7 +5,7 @@ Rubrics must pass the validation battery (AB+BA position bias, Cohen's κ
 (E2E-5.1); rubric changes mid-stream re-trigger the gate and stale-rubric
 episodes are flagged (E2E-5.2). Validation records persist by rubric id.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 from battery.judge.client import JudgeCall, JudgeClient
 from battery.judge.gate import (
@@ -17,7 +17,7 @@ from battery.judge.gate import (
     validate_rubric,
 )
 
-__all__ = [
+__all__ = [  # noqa: RUF022
     "JudgeCall", "JudgeClient", "KAPPA_MIN", "POSITION_BIAS_P",
     "RubricRegistry", "STRESS_ITEMS", "ValidationRecord", "validate_rubric",
 ]

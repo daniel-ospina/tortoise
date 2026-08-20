@@ -132,7 +132,7 @@ def _q(proj, cypher: str, params: dict | None = None) -> list:
 
 def _samples(rows, keys: tuple[str, ...], limit: int = SAMPLE_LIMIT) -> list[dict]:
     """Convert result rows to a list of sample dicts (bounded)."""
-    return [dict(zip(keys, row)) for row in rows[:limit]]
+    return [dict(zip(keys, row)) for row in rows[:limit]]  # noqa: B905
 
 
 def _count_and_samples(proj, count_cypher: str, sample_cypher: str,
@@ -161,7 +161,7 @@ def _graph_stats(proj) -> dict:
         rows = _q(proj, "MATCH (n) UNWIND labels(n) AS l RETURN l, count(*) "
                         "ORDER BY count(*) DESC")
         by_label = {str(r[0]): int(r[1]) for r in rows}
-    except Exception as exc:  # noqa: BLE001 — best-effort label enumeration
+    except Exception as exc:  # noqa: BLE001, RUF100
         by_label = {"__error__": str(exc)}
     return {"nodes": int(nodes or 0), "edges": int(edges or 0), "by_label": by_label}
 
@@ -314,7 +314,7 @@ def _source_tier_neutral(proj) -> dict:
     the NEUTRAL population is an exact Cypher COUNT + bounded samples — the
     Source population is never fully materialized into Python (conf-75).
     """
-    from tortoise.source_credibility import SOURCE_KIND_DEFAULTS, _TIER_FORM
+    from tortoise.source_credibility import SOURCE_KIND_DEFAULTS, _TIER_FORM  # noqa: I001
     # sourceKind values that resolve NON-neutral: the tier-form strings
     # themselves (T0-T4, resolve_tier's first check) + registered kinds whose
     # registry default is a tier. Everything else (unknown kinds, explicitly
@@ -457,7 +457,7 @@ def scan_graph(proj) -> dict:
         "tool": "334-wiring-baseline-scan",
         "issue": "334",
         "phase": "0/1 pre-migration (read-only)",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
         "read_only": True,
         "graph_stats": _graph_stats(proj),
         "status_distribution": _status_distribution(proj),
@@ -502,7 +502,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         proj = connect_projection(cfg)
-    except Exception as exc:  # noqa: BLE001 — unreachable must fail loudly
+    except Exception as exc:  # noqa: BLE001, RUF100
         print(f"[baseline-scan] FAIL: endpoint unreachable: {exc}",
               file=sys.stderr)
         return 1

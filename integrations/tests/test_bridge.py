@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Tests for bridge.py — Meeting Intelligence Pipeline integration."""
-import json
+import json  # noqa: I001
 import os
 import sys
 import tempfile
 import unittest
-from pathlib import Path
-from unittest.mock import patch, MagicMock
+from pathlib import Path  # noqa: F401
+from unittest.mock import patch, MagicMock  # noqa: F401
 
 # Add bridge to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "crm", "twenty"))
@@ -55,7 +55,7 @@ content_hash: "abc123def456"
             path = f.name
 
         try:
-            with patch.object(bridge, "find_note_by_external_id", return_value=None):
+            with patch.object(bridge, "find_note_by_external_id", return_value=None):  # noqa: SIM117
                 with patch.object(bridge, "find_person_by_email", return_value={"id": "person-1", "name": "Alex Chen"}):
                     with patch.object(bridge, "create_note", return_value={"id": "note-1"}):
                         with patch.object(bridge, "push_to_tortoise", return_value={"status": "skipped"}):
@@ -124,7 +124,7 @@ class TestBridgeContactMatching(unittest.TestCase):
             path = f.name
 
         try:
-            with patch.object(bridge, "find_note_by_external_id", return_value=None):
+            with patch.object(bridge, "find_note_by_external_id", return_value=None):  # noqa: SIM117
                 with patch.object(bridge, "find_person_by_email", return_value=None):
                     with patch.object(bridge, "create_person", return_value={"id": "new-1"}) as mock_create:
                         with patch.object(bridge, "create_opportunity", return_value={"id": "opp-1"}):
@@ -145,7 +145,7 @@ class TestBridgeContactMatching(unittest.TestCase):
             path = f.name
 
         try:
-            with patch.object(bridge, "find_note_by_external_id", return_value=None):
+            with patch.object(bridge, "find_note_by_external_id", return_value=None):  # noqa: SIM117
                 with patch.object(bridge, "find_person_by_email", return_value=None):
                     with patch.object(bridge, "get_calendar_attendees", return_value=[]):
                         result = bridge.process_meeting(path)

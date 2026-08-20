@@ -6,10 +6,10 @@ the backup engine), canonical-sha256 byte stability, tamper/wrong-key
 fail-closed, --no-encrypt loud warning, ephemeral-key-printed-once, exit
 codes, and the export → restore round-trip into a fresh DB.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import base64
-import hashlib
+import hashlib  # noqa: F401
 import json
 import os
 import subprocess
@@ -135,7 +135,7 @@ def test_canonical_sha256_byte_stable():
     }
     assert canonical_json_bytes(dump_a) == canonical_json_bytes(dump_b)
     art_a = build_artifact(dump_a, key=_make_key())
-    art_b = build_artifact(dump_b, key=_make_key())
+    art_b = build_artifact(dump_b, key=_make_key())  # noqa: F841
     # payload_sha256 lives in the (encrypted) inner envelope — decrypt to check
     from tortoise.export import build_inner_envelope
     assert build_inner_envelope(dump_a)["payload_sha256"] == \
@@ -197,7 +197,7 @@ def test_wrong_key_fails_closed():
          "node_count": 0, "edge_count": 0, "nodes": [], "edges": []},
         key=_make_key(),
     )
-    with pytest.raises(ValueError, match="decryption failed|wrong"):
+    with pytest.raises(ValueError, match="decryption failed|wrong"):  # noqa: RUF043
         open_payload(parse_artifact(artifact_bytes(artifact)), key=_make_key())
 
 

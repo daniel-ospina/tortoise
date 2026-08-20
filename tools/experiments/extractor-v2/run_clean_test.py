@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
-from tests.model_adapters import MODELS  # noqa: E402
+from tests.model_adapters import MODELS  # noqa: E402, RUF100
 
 CLEAN_SYSTEM = """You are the SIGNAL CLEANER for an epistemic memory system.
 
@@ -104,8 +104,8 @@ def _tokens(model) -> dict:
 
 def main() -> None:
     transcript = (Path(__file__).resolve().parents[3] / "tests/eval/w-1272/w-design-bounded.txt").read_text()
-    solar = MODELS["solar-pro4"](); solar.max_tokens = 8000; solar.temperature = 0.0
-    flash = MODELS["deepseek-flash"](); flash.max_tokens = 8000; flash.temperature = 0.0
+    solar = MODELS["solar-pro4"](); solar.max_tokens = 8000; solar.temperature = 0.0  # noqa: E702
+    flash = MODELS["deepseek-flash"](); flash.max_tokens = 8000; flash.temperature = 0.0  # noqa: E702
 
     print("=== PATH A: flash S1 DIRECT on raw ===", flush=True)
     t0 = time.time()

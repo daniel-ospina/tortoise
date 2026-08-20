@@ -262,7 +262,7 @@ class TestModeIsomorphism:
         # every bundle-created Point carries it — the 2 plain points (the
         # bundle's plain IMPL routes to an OPERATOR-LESS DIRECT EDGE since
         # A3 #1053 — the edge carries the batch_id on the EDGE, §5.3)
-        for g, r in ((g1, r_bulk), (g2, r_gran)):
+        for g, r in ((g1, r_bulk), (g2, r_gran)):  # noqa: B007
             stamped = _count(
                 g,
                 "MATCH (n:Point {batch_id:$b}) RETURN count(n)",
@@ -355,7 +355,7 @@ class TestGranularInvalidItem:
     violations, zero mutations (Phase 1 is mode-invariant, §5.2); the
     failure shape is the bulk shape (no results key)."""
 
-    INVALID_BUNDLE = {
+    INVALID_BUNDLE = {  # noqa: RUF012
         "points": [
             {"ref": "p1", "kind": "claim", "content": "A."},
             {"ref": "p2", "kind": "claim", "content": "B."},
@@ -392,10 +392,10 @@ class TestGranularInvalidItem:
     def test_mcp_failure_shape_no_results_key(self):
         # MCP surface: the failure response is the bulk failure shape —
         # {error, code: ERR_BUNDLE_INVALID, violations}, NO results key.
-        import tortoise.mcp_server as mcp_mod
+        import tortoise.mcp_server as mcp_mod  # noqa: I001
         from tortoise.mcp_auth import (_current_team_id, _current_team_limits,
                                        _transport_mode)
-        from tortoise.sdk import TortoiseSDK
+        from tortoise.sdk import TortoiseSDK  # noqa: F401
         _transport_mode.set("stdio")
         _current_team_id.set(None)
         _current_team_limits.set(None)
@@ -413,7 +413,7 @@ class TestGranularInvalidItem:
             mcp_mod._get_team_sdk = _orig_get_team_sdk
             db.close()
         assert res["code"] == mcp_mod.ERR_BUNDLE_INVALID == -32008
-        assert "violations" in res and res["violations"]
+        assert "violations" in res and res["violations"]  # noqa: RUF019
         assert "results" not in res
 
 
@@ -439,7 +439,7 @@ class TestGranularResultsKeyForKey:
     def _mcp_sdk(self):
         """A temp SDK wired into the in-process MCP layer (stdio transport,
         no team context — quota skipped). Returns (db, cleanup)."""
-        import tortoise.mcp_server as mcp_mod
+        import tortoise.mcp_server as mcp_mod  # noqa: I001
         from tortoise.mcp_auth import (_current_team_id, _current_team_limits,
                                        _transport_mode)
         _transport_mode.set("stdio")
@@ -718,7 +718,7 @@ class TestEmptyBundle:
     empty ids (+ empty results under granular); re-ingest of the SAME empty
     bundle → IDENTICAL batch_id."""
 
-    EMPTY = {"points": [], "entities": [], "sources": [], "connections": []}
+    EMPTY = {"points": [], "entities": [], "sources": [], "connections": []}  # noqa: RUF012
 
     def test_empty_bundle_all_modes_all_policies(self):
         for granularity in ("bulk", "granular"):

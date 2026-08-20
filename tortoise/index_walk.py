@@ -33,7 +33,7 @@ import os
 import stat
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Callable  # noqa: F401, UP035
 
 # Skipped/failed dispositions computed pre-write (the per-file handler
 # consults them; ``None`` = process normally).
@@ -256,7 +256,7 @@ def compute_dispositions(files: list[tuple[Path, os.stat_result | None]],
             disp.by_path[later] = DISP_SYMLINK_DUPLICATE
 
     # Inode alias reconciliation (regular files, non-symlink only).
-    for (dev, ino), paths in by_inode.items():
+    for (dev, ino), paths in by_inode.items():  # noqa: B007
         first_st = next(
             (st for p, st in files if str(p) == paths[0] and st is not None), None
         )
@@ -320,7 +320,7 @@ def mount_source_for(directory: str | Path) -> str | None:
     """
     try:
         entries = _mount_table()
-    except Exception:  # noqa: BLE001 — undeterminable host ⇒ None (warn-not-fail)
+    except Exception:  # noqa: BLE001, RUF100
         return None
     real = os.path.realpath(str(directory))
     best: tuple[int, str] | None = None
@@ -385,7 +385,7 @@ def _unquote_mountinfo(value: str) -> str:
     # mountinfo escapes spaces/octal — decode for path prefix matching.
     try:
         return bytes(value, "utf-8").decode("unicode_escape")
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001, RUF100
         return value
 
 
@@ -401,7 +401,7 @@ def _getmntinfo_table() -> list[tuple[str, str]]:
     try:
         import ctypes
         import ctypes.util
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001, RUF100
         return []
     libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc", use_errno=True)
     if not hasattr(libc, "getmntinfo"):
@@ -521,7 +521,7 @@ def mount_source_for_file(file_path: str | Path, root: str | Path,
     try:
         parent_dev = os.lstat(str(current.parent)).st_dev
     except OSError:
-        try:
+        try:  # noqa: SIM105
             parent_dev = os.lstat(str(current)).st_dev
         except OSError:
             pass

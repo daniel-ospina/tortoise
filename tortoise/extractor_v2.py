@@ -132,7 +132,7 @@ def build_master_list() -> dict:
     brief = compile_value_brief()
     objects = {k: _desc(brief, k) for k in CORE_OBJECT_KEYS}
     pack_kinds = {}
-    for k, v in brief.items():
+    for k, v in brief.items():  # noqa: B007
         if k == "memory_granularity":
             continue
         if not k.startswith(PACK_NS):
@@ -490,7 +490,7 @@ def resolve_backend_mode() -> str:
     """'real' when a supported TORTOISE_DB_URI (docker:// / redis:// /
     rediss://) or a hosted API URL is configured; 'embedded' otherwise
     (FalkorDBLite — the test/eval-only store S3 must NOT read)."""
-    import os
+    import os  # noqa: I001
     from tortoise.config import is_db_uri
     uri = os.environ.get("TORTOISE_DB_URI")
     if uri and is_db_uri(uri):
@@ -1410,7 +1410,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     payload = {
         "schema_version": "1", "session_id": session_id,
         "client_commit_id": "",
-        "captured_at": datetime.now(timezone.utc).isoformat(),
+        "captured_at": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
         "extractor": {"version": extractor_version, "mode": "byok",
                       "calibration_version": "v2"},
         "summary": (summary or "")[:2000],
@@ -1576,7 +1576,7 @@ def _complete(model, system: str, user: str, deadline_s: int = 600) -> str:
     def _run():
         try:
             box["resp"] = model.complete(system=system, user=user)
-        except BaseException as e:  # noqa: BLE001 — must propagate to caller
+        except BaseException as e:  # noqa: BLE001, RUF100
             box["exc"] = e
 
     t = threading.Thread(target=_run, daemon=True)
@@ -1602,7 +1602,7 @@ def _parse_json(response: str) -> dict:
     raise ValueError("unparseable JSON")
 
 
-__all__ = [
+__all__ = [  # noqa: RUF022
     "build_master_list", "master_kind_forms",
     "run_s1", "chunk_transcript", "compile_stories",
     "run_s2", "render_s2_prompt",

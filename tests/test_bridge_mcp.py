@@ -36,7 +36,7 @@ def daemon_url(monkeypatch, tmp_path):
     """
     monkeypatch.setenv("TORTOISE_DB_URI", "")
     monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "daemon.db"))
-    import uvicorn
+    import uvicorn  # noqa: I001
     from contextlib import asynccontextmanager
     from starlette.applications import Starlette
     from starlette.routing import Mount

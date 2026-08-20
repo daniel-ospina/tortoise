@@ -36,7 +36,7 @@ import os
 import re
 import secrets
 from datetime import datetime, timezone
-from typing import Callable, Protocol
+from typing import Callable, Protocol  # noqa: UP035
 
 logger = logging.getLogger(__name__)
 
@@ -99,16 +99,16 @@ def _alternate_backup_key(key: bytes | None) -> bytes | None:
     # key is None (env fallback) — try the stream key as the alternate.
     return cfg.registry_stream_key or None
 
-    if not raw:
+    if not raw:  # noqa: F821
         raise RuntimeError(
             "TORTOISE_BACKUP_KEY not set — required for hosted backups. Generate with: "
             "python -c \"import base64,secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())\""
         )
     try:
-        key = base64.b64decode(raw.strip(), validate=True)  # tolerate trailing newline
+        key = base64.b64decode(raw.strip(), validate=True)  # tolerate trailing newline  # noqa: F821
     except Exception as e:
         raise RuntimeError(
-            f"TORTOISE_BACKUP_KEY must be base64-encoded (got {raw[:8]!r}...): {e}"
+            f"TORTOISE_BACKUP_KEY must be base64-encoded (got {raw[:8]!r}...): {e}"  # noqa: F821
         ) from e
     if len(key) != _AES_KEY_SIZE:
         raise RuntimeError(
@@ -166,7 +166,7 @@ def dump_graph(g, graph_name: str | None = None) -> dict:
     for internal_id, labels, props in rows:
         nodes.append({
             "dump_id": int(internal_id),
-            "labels": [str(l) for l in (labels or [])],
+            "labels": [str(l) for l in (labels or [])],  # noqa: E741
             "props": dict(props or {}),
         })
     edges = []
@@ -180,7 +180,7 @@ def dump_graph(g, graph_name: str | None = None) -> dict:
         })
     return {
         "format": DUMP_FORMAT,
-        "dumped_at": datetime.now(timezone.utc).isoformat(),
+        "dumped_at": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
         "graph_name": graph_name,
         "node_count": len(nodes),
         "edge_count": len(edges),
@@ -207,7 +207,7 @@ def restore_graph(g, dump: dict) -> dict:
         if "dump_id" not in n:
             raise ValueError("Dump node missing dump_id")
         labels = n.get("labels") or []
-        safe_labels = ":".join(_sanitize_label(l) for l in labels)
+        safe_labels = ":".join(_sanitize_label(l) for l in labels)  # noqa: E741
         props = dict(n.get("props") or {})
         if _DUMP_ID_PROP in props:
             raise ValueError(
@@ -470,7 +470,7 @@ def _is_supabase_source(source) -> bool:
     try:
         import inspect
         first = next(iter(inspect.signature(source.query).parameters.values()))
-    except Exception:  # noqa: BLE001 — un-inspectable → not PostgREST
+    except Exception:  # noqa: BLE001, RUF100
         return False
     return first.name == "table"
 
@@ -502,7 +502,7 @@ def _stamp_backup_restored(source, team_id: str, ts: str | None = None) -> None:
     Same dialect split as ``_stamp_backup_latest``. Drills never reach it
     (restore_backup's ``drill`` flag skips the end-stamp entirely).
     """
-    ts = ts or datetime.now(timezone.utc).isoformat()
+    ts = ts or datetime.now(timezone.utc).isoformat()  # noqa: UP017
     if _is_supabase_source(source):
         source.query(
             "teams", method="PATCH", filters=[("id", "eq", team_id)],
@@ -535,7 +535,7 @@ def create_backup(
     dump = dump_graph(proj.g, graph_name=graph_name)
     payload = json.dumps(dump).encode("utf-8")
     blob = encrypt_backup(payload, key=key)
-    ts = datetime.now(timezone.utc)
+    ts = datetime.now(timezone.utc)  # noqa: UP017
     # Millisecond + random suffix — two backups for the same team within one
     # millisecond must not collide on the same object key (silent overwrite).
     backup_id = (
@@ -562,7 +562,7 @@ def create_backup(
         # Partial-upload orphan: the blob is already durable but has no manifest
         # (never listed, never pruned, unrestorable). Roll it back so a failed
         # backup leaves no garbage.
-        try:
+        try:  # noqa: SIM105
             storage.delete(f"backups/{backup_id}/dump.enc")
         except Exception:
             pass
@@ -633,7 +633,7 @@ def _restore_into_temp_verify_swap(
             "with count verification disabled"
         )
 
-    ts = datetime.now(timezone.utc)
+    ts = datetime.now(timezone.utc)  # noqa: UP017
     # Millisecond + random suffix — two restores of the same graph within one
     # millisecond must not share a staging graph (a retry racing the original
     # would contaminate counts).
@@ -646,7 +646,7 @@ def _restore_into_temp_verify_swap(
     except Exception:
         # validation failure (unsafe label, dangling edge, malformed edge) —
         # drop the staging graph; the live graph was never touched
-        try:
+        try:  # noqa: SIM105
             temp_g.delete()
         except Exception:
             pass
@@ -658,7 +658,7 @@ def _restore_into_temp_verify_swap(
         # Partial restore — drop the staging graph (unlike the copy-failure
         # path below, this temp graph is a failed partial restore, not a
         # verified recovery copy). Live graph untouched.
-        try:
+        try:  # noqa: SIM105
             temp_g.delete()
         except Exception:
             pass
@@ -667,7 +667,7 @@ def _restore_into_temp_verify_swap(
             f"expected {expected_nodes} — live graph untouched"
         )
     if counts["edges"] != expected_edges:
-        try:
+        try:  # noqa: SIM105
             temp_g.delete()
         except Exception:
             pass
@@ -695,16 +695,16 @@ def _restore_into_temp_verify_swap(
         except Exception:
             graph_present = True  # cannot confirm absence → treat as present
         if graph_present:
-            try:
+            try:  # noqa: SIM105
                 temp_g.delete()
             except Exception:
                 pass
-            raise RestoreVerificationError(
+            raise RestoreVerificationError(  # noqa: B904
                 "Cannot verify live graph state before restore — aborting (fail closed)"
             )
         live_nodes = 0  # confirmed absent (dropped graph) — nothing to protect
     if live_nodes > 0 and expected_nodes == 0:
-        try:
+        try:  # noqa: SIM105
             temp_g.delete()
         except Exception:
             pass
@@ -760,7 +760,7 @@ def _restore_into_temp_verify_swap(
 
     return {
         "restored": counts,
-        "restored_at": datetime.now(timezone.utc).isoformat(),
+        "restored_at": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
     }
 
 
@@ -903,7 +903,7 @@ def prune_backups(
     stale manifest cannot trigger deletion of another (newer) backup's objects.
     """
     _validate_team_id(team_id)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)  # noqa: UP017
     deleted: list[str] = []
     kept_weekly: set[tuple[int, int]] = set()
     kept_hour_buckets: set[tuple[int, int, int, int]] = set()
@@ -937,7 +937,7 @@ def prune_backups(
         try:
             created = datetime.fromisoformat(str(created_at))
             if created.tzinfo is None:
-                created = created.replace(tzinfo=timezone.utc)  # naive → assume UTC
+                created = created.replace(tzinfo=timezone.utc)  # naive → assume UTC  # noqa: UP017
         except (ValueError, TypeError):
             # corrupt/naive-mismatch timestamps are deleted — a bad date must
             # never abort pruning of the team's other backups

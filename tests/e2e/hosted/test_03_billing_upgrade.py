@@ -12,7 +12,7 @@ Negatives: tampered signature → 400; unknown price via webhook → 200 + tier
 preserved (review-fix-7 semantics); checkout unknown price → 400; checkout on
 the unconfigured bare server → 503; webhook on the bare server → 500.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import json
 import uuid
@@ -20,7 +20,7 @@ import uuid
 import pytest
 
 from conftest import (
-    WEBHOOK_SECRET,
+    WEBHOOK_SECRET,  # noqa: F401
     bump_team_tier,
     is_remote_mode,
     sign_stripe_event,
@@ -79,7 +79,7 @@ def test_webhook_replay_idempotent(api, tenant_factory):
 
 
 def test_tampered_signature_rejected_400(api, tenant_factory):
-    t = tenant_factory("tampersig")
+    t = tenant_factory("tampersig")  # noqa: F841
     event = {"id": "evt_tamper", "type": "customer.subscription.updated",
              "data": {"object": {"customer": "cus_x", "status": "active",
                                  "items": [{"price": {"id": "price_e2e_pro_monthly"}}]}}}

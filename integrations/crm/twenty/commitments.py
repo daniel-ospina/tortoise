@@ -8,7 +8,7 @@ Usage:
     python3 commitments.py --done <id>        # Mark commitment as done
     python3 commitments.py --cancel <id>      # Mark commitment as cancelled
 """
-import os
+import os  # noqa: I001
 import re
 import sys
 from pathlib import Path
@@ -64,7 +64,7 @@ def load_all_commitments() -> list:
     return all_commits
 
 
-def list_commitments(person: str = None):
+def list_commitments(person: str = None):  # noqa: RUF013
     commits = load_all_commitments()
 
     open_commits = [c for c in commits if c["status"] == "open"]
@@ -128,7 +128,7 @@ def update_commitment(commit_id: str, new_status: str):
     new_text = pattern.sub(rf"\g<1>{new_status}", text)
 
     if new_text == text:
-        print(f"❌ Could not find commitment in file to update")
+        print(f"❌ Could not find commitment in file to update")  # noqa: F541
         return
 
     source_path.write_text(new_text)
@@ -136,7 +136,7 @@ def update_commitment(commit_id: str, new_status: str):
     status_emoji = "✅" if new_status == "done" else "❌"
     print(f"{status_emoji} Commitment marked as {new_status}: {target['text'][:60]}")
     print(f"   File updated: {source_path.name}")
-    print(f"   Bridge will sync to Twenty + Tortoise on next run.")
+    print(f"   Bridge will sync to Twenty + Tortoise on next run.")  # noqa: F541
 
 
 if __name__ == "__main__":

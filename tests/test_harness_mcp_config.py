@@ -23,7 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.__main__ import _harness_mcp_config, _harness_stdio_config, _print_harness_instructions
+from tortoise.__main__ import _harness_mcp_config, _harness_stdio_config, _print_harness_instructions  # noqa: I001
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 # #984 contract (merged to main): the hosted endpoint always carries the
@@ -223,13 +223,13 @@ class TestPrintHarnessInstructions:
             out = self._capture(harness)
             # The json.dumps'd .mcp.json block parses (multi-line pretty print).
             lines = out.splitlines()
-            start = next((i for i, l in enumerate(lines) if l.strip().startswith("{")), None)
+            start = next((i for i, l in enumerate(lines) if l.strip().startswith("{")), None)  # noqa: E741
             if start is None:
                 continue  # codex prints a shell command, not JSON
-            block = "\n".join(lines[start:])
+            block = "\n".join(lines[start:])  # noqa: F841
             # Cut at the first line that closes the top-level object.
             depth, end = 0, None
-            for i, l in enumerate(lines[start:], start):
+            for i, l in enumerate(lines[start:], start):  # noqa: E741
                 depth += l.count("{") - l.count("}")
                 if depth == 0:
                     end = i

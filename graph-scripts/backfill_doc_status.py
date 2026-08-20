@@ -55,8 +55,8 @@ def main() -> int:
     if uri.startswith("docker://"):
         rest = uri[len("docker://"):]
         _, hostport = rest.split("@", 1)
-        host, _, portpath = hostport.rpartition(":")
-        port, _, graph_from_path = portpath.partition("/")
+        host, _, portpath = hostport.rpartition(":")  # noqa: RUF059
+        port, _, graph_from_path = portpath.partition("/")  # noqa: RUF059
         graph_name = graph_from_path or args.graph
     else:
         print(f"Unsupported URI scheme: {uri}")

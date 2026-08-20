@@ -69,19 +69,19 @@ def _count_redis_servers(path=None):
     out = subprocess.run(["ps", "-eo", "pid,args"], capture_output=True,
                          text=True).stdout
     if path is None:
-        return sum(1 for l in out.splitlines()
+        return sum(1 for l in out.splitlines()  # noqa: E741
                    if "redislite/bin/redis-server" in l)
     # Map each server's socket tempdir -> check its redis.config for the path.
     # Use realpath on BOTH sides (macOS /var -> /private/var symlink).
-    import glob as _glob
+    import glob as _glob  # noqa: F401
     tmp = os.path.realpath(tempfile.gettempdir())
     want_dir = os.path.realpath(os.path.dirname(path))
     want_name = os.path.basename(path)
     n = 0
-    for root, dirs, files in os.walk(tmp):
+    for root, dirs, files in os.walk(tmp):  # noqa: B007
         if "redis.socket" in files and "redis.config" in files:
             try:
-                cfg = open(os.path.join(root, "redis.config")).read()
+                cfg = open(os.path.join(root, "redis.config")).read()  # noqa: SIM115
             except OSError:
                 continue
             cfg_dir = None
@@ -134,7 +134,7 @@ def test_concurrent_writers_live_falkor_no_lost_writes():
     one file) must not exist on the durable path. CI's test-concurrency-falkor
     job sets TORTOISE_DB_URI; elsewhere this skips visibly.
     """
-    from _live_utils import _skip_unless_live_uri
+    from _live_utils import _skip_unless_live_uri  # noqa: I001
     from tortoise.projection import FalkorProjection
 
     _skip_unless_live_uri()
@@ -208,7 +208,7 @@ def _kill_pid(pid: int) -> None:
     deadline = time.time() + 10
     while time.time() < deadline and _pid_alive(pid):
         time.sleep(0.1)
-    try:
+    try:  # noqa: SIM105
         os.kill(pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
         pass
@@ -471,7 +471,7 @@ def test_chaos_kills_only_idle_of_20(monkeypatch):
     idle, leaves 10 with clients. #1365: scoped to the test's OWN 20 spawns
     (delta-asserted) — never ambient candidates; teardown kills tracked pids
     directly (the old global pkill is gone)."""
-    from tortoise.embedded_reaper import discover, reap, _pgrep_redis_servers
+    from tortoise.embedded_reaper import discover, reap, _pgrep_redis_servers  # noqa: I001
     import subprocess as _sp
     monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
     tmpdir = _make_flat_tmpdir()
@@ -515,7 +515,7 @@ def test_chaos_kills_only_idle_of_20(monkeypatch):
         clients.append(c)
     time.sleep(3)  # age connections so CLIENT LIST sees them
     # Reap: should skip the 10 with clients
-    acted = reap(candidates, dry_run=False)
+    acted = reap(candidates, dry_run=False)  # noqa: F841
     time.sleep(1)
     # The 10 with clients must still be alive
     alive_with_client = 0
@@ -573,7 +573,7 @@ def test_chaos_reaper_sigkill_mid_sweep_second_run_cleans(monkeypatch):
         [sys.executable, "-m", "tortoise.embedded_reaper", "--no-dry-run",
          "--batch-size", "5"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
-    import select
+    import select  # noqa: I001
     import re
     killed_own = None
     deadline = time.time() + 30
@@ -602,7 +602,7 @@ def test_chaos_reaper_sigkill_mid_sweep_second_run_cleans(monkeypatch):
 def test_chaos_singleton_lock_released_on_sigkill(monkeypatch):
     """SIGKILL reaper while holding lock -> fcntl auto-releases -> second
     reaper acquires and sweeps (chaos-context variant)."""
-    from tortoise.embedded_reaper import _ReaperLock
+    from tortoise.embedded_reaper import _ReaperLock  # noqa: F401
     monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
     # Hold the lock in a subprocess, SIGKILL it
     env = dict(os.environ)
@@ -618,7 +618,7 @@ def test_chaos_singleton_lock_released_on_sigkill(monkeypatch):
     holder.wait()
     time.sleep(0.5)
     # Second reaper should acquire the lock (auto-released) and run
-    rc, out, err = _run_reaper_cli()
+    rc, out, err = _run_reaper_cli()  # noqa: RUF059
     assert "already running" not in err.lower(), "lock not released on SIGKILL"
     assert rc == 0
 
@@ -680,7 +680,7 @@ def _wait_aof_settled(proj, max_wait_s=10.0):
                 d = {str(k): str(v) for k, v in info.items()}
             else:
                 text = info if isinstance(info, str) else info.decode()
-                d = dict(l.split(":") for l in text.splitlines() if ":" in l)
+                d = dict(l.split(":") for l in text.splitlines() if ":" in l)  # noqa: E741
             if (d.get("aof_enabled") == "1"
                     and d.get("aof_rewrite_in_progress") == "0"
                     and d.get("aof_pending_bio_fsync") == "0"
@@ -689,7 +689,7 @@ def _wait_aof_settled(proj, max_wait_s=10.0):
         except Exception:
             pass
         time.sleep(0.2)
-    raise AssertionError("AOF did not settle within %ss" % max_wait_s)
+    raise AssertionError("AOF did not settle within %ss" % max_wait_s)  # noqa: UP031
 
 
 def _wait_server_exit(pid, max_wait_s=10.0):
@@ -700,7 +700,7 @@ def _wait_server_exit(pid, max_wait_s=10.0):
         except ProcessLookupError:
             return
         time.sleep(0.1)
-    raise AssertionError("server pid %s did not exit within %ss" % (pid, max_wait_s))
+    raise AssertionError("server pid %s did not exit within %ss" % (pid, max_wait_s))  # noqa: UP031
 
 
 def test_kill9_server_durability_fresh_db(monkeypatch):
@@ -785,8 +785,8 @@ def test_jsonl_recovery_after_total_graph_loss(monkeypatch):
     monkeypatch.setenv("TORTOISE_DB_PATH", canonical)
     monkeypatch.setenv("TORTOISE_EMBEDDED_AOF", "1")  # #915: exercise the AOF durability path
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
-    from tortoise.sdk import TortoiseSDK
-    from tortoise.consistency import recover_from_log
+    from tortoise.sdk import TortoiseSDK  # noqa: I001
+    from tortoise.consistency import recover_from_log  # noqa: F401
     from tortoise.projection import FalkorProjection
 
     events_path = os.path.join(os.path.dirname(canonical), "events.jsonl")
@@ -839,9 +839,9 @@ def test_restore_removes_stale_aof(monkeypatch):
     monkeypatch.setenv("TORTOISE_DB_PATH", canonical)
     monkeypatch.setenv("TORTOISE_EMBEDDED_AOF", "1")  # #915: exercise the AOF durability path
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
-    from tortoise.projection import FalkorProjection
+    from tortoise.projection import FalkorProjection  # noqa: I001
     from tortoise.backup import restore
-    import tortoise.backup as backup_mod
+    import tortoise.backup as backup_mod  # noqa: F401
 
     # Build a live AOF session at the target path (the "stale" state)
     proj = FalkorProjection()
@@ -875,8 +875,8 @@ def test_restore_removes_stale_aof(monkeypatch):
         with open(os.path.join(bdir, "manifest.json"), "w") as fh:
             fh.write('{"db": "tortoise.db", "events": "events.jsonl"}')
         # Fake a snapshot RDB in the backup (restore copies it to target)
-        open(os.path.join(bdir, "tortoise.db"), "wb").write(b"RDB")
-        res = restore(str(bdir), canonical, events_path=os.path.join(
+        open(os.path.join(bdir, "tortoise.db"), "wb").write(b"RDB")  # noqa: SIM115
+        res = restore(str(bdir), canonical, events_path=os.path.join(  # noqa: F841
             os.path.dirname(canonical), "events.jsonl"), into_falkor=False)
         assert calls, "restore() must call remove_stale_aof on the target path"
         assert str(canonical) in calls, f"remove_stale_aof called on {calls}"

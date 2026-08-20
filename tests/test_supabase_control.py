@@ -17,7 +17,7 @@ import pytest
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
-from tortoise.auth import lookup_hash
+from tortoise.auth import lookup_hash  # noqa: I001
 from tortoise.supabase_control import (
     ClaimError,
     InvitationError,
@@ -161,12 +161,12 @@ class TestResolveApiKey:
 
     def test_expired_key_rejects(self, fake):
         """#742: expired keys must NOT authenticate."""
-        past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()  # noqa: UP017
         fake.seed("api_keys", [_key_row(expires_at=past)])
         assert resolve_api_key(fake, TOKEN) is None
 
     def test_unexpired_key_passes(self, fake):
-        future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()  # noqa: UP017
         fake.seed("api_keys", [_key_row(expires_at=future)])
         assert resolve_api_key(fake, TOKEN) is not None
 
@@ -278,7 +278,7 @@ class TestResolveApiKeyFailSoft:
         suspended_at/flagged_at on the second attempt (discarding it would
         bypass enforcement with REAL data present)."""
         fake.tables["teams"][0]["suspended_at"] = \
-            datetime.now(timezone.utc).isoformat()
+            datetime.now(timezone.utc).isoformat()  # noqa: UP017
         fake.missing_columns = {"teams": {"dashboard_key_login"}}
         fake.seed("api_keys", [_key_row()])
         team = resolve_api_key(fake, TOKEN)
@@ -310,7 +310,7 @@ class TestResolveApiKeyFailSoft:
         + the fatal-path tripwire (symmetric with the teams ladder)."""
         fake.missing_columns = {"api_keys": {"revoked_at"}}
         fake.seed("api_keys", [_key_row()])
-        with caplog.at_level("WARNING", logger="tortoise.supabase_control"):
+        with caplog.at_level("WARNING", logger="tortoise.supabase_control"):  # noqa: SIM117
             with pytest.raises(RuntimeError):
                 resolve_api_key(fake, TOKEN)
         assert any("api_keys base-only read failed" in r.message
@@ -368,7 +368,7 @@ class TestResolveApiKeyFailSoft:
         this field)."""
         fake.seed("api_keys", [_key_row()])
         fake.tables["teams"][0]["suspended_at"] = \
-            datetime.now(timezone.utc).isoformat()
+            datetime.now(timezone.utc).isoformat()  # noqa: UP017
         team = resolve_api_key(fake, TOKEN)
         assert team is not None
         assert team["suspended_at"] is not None
@@ -379,7 +379,7 @@ class TestResolveApiKeyFailSoft:
         future latch/cache in the degrade path must not stick)."""
         fake.seed("api_keys", [_key_row()])
         fake.tables["teams"][0]["suspended_at"] = \
-            datetime.now(timezone.utc).isoformat()
+            datetime.now(timezone.utc).isoformat()  # noqa: UP017
         fake.missing_columns = {"teams": {"suspended_at", "flagged_at"}}
         assert resolve_api_key(fake, TOKEN)["suspended_at"] is None  # degraded
         fake.missing_columns = None
@@ -411,7 +411,7 @@ class TestResolveApiKeyFailSoft:
         stays in the base set) → RuntimeError + the fatal-path WARNING."""
         fake.missing_columns = {"teams": {"ops_allowance"}}
         fake.seed("api_keys", [_key_row()])
-        with caplog.at_level("WARNING", logger="tortoise.supabase_control"):
+        with caplog.at_level("WARNING", logger="tortoise.supabase_control"):  # noqa: SIM117
             with pytest.raises(RuntimeError):
                 resolve_api_key(fake, TOKEN)
         assert any("base-only read failed" in r.message for r in caplog.records)
@@ -447,7 +447,7 @@ class TestTeamByID:
         """#1096 (code-review fix): team_by_id's tiered retry — a
         20260813000005-ONLY drift keeps real 0015 suspension state."""
         fake.tables["teams"][0]["suspended_at"] = \
-            datetime.now(timezone.utc).isoformat()
+            datetime.now(timezone.utc).isoformat()  # noqa: UP017
         fake.missing_columns = {"teams": {"dashboard_key_login"}}
         team = team_by_id(fake, "team-free-001")
         assert team is not None
@@ -460,7 +460,7 @@ class TestTeamByID:
         invitation_accept/export_team 410 guards keep firing. The caplog
         WARNING proves the retry (not just the select) fired."""
         fake.tables["teams"][0]["deleted_at"] = \
-            datetime.now(timezone.utc).isoformat()
+            datetime.now(timezone.utc).isoformat()  # noqa: UP017
         fake.missing_columns = {"teams": {"suspended_at", "flagged_at"}}
         with caplog.at_level("WARNING", logger="tortoise.supabase_control"):
             team = team_by_id(fake, "team-free-001")
@@ -477,7 +477,7 @@ class TestTeamByID:
         fake = FakeControlPlane(
             {"api_keys": [], "team_memberships": [], "teams": [dict(FREE_TEAM)]},
             missing_columns={"teams": {"deleted_at", "grace_hours"}})
-        with caplog.at_level("WARNING", logger="tortoise.supabase_control"):
+        with caplog.at_level("WARNING", logger="tortoise.supabase_control"):  # noqa: SIM117
             with pytest.raises(RuntimeError):
                 team_by_id(fake, "team-free-001")
         assert any("base-only read failed" in r.message for r in caplog.records)
@@ -496,7 +496,7 @@ class TestTeamByID:
         inv = invitation_mint(fake, "team-free-001", "bob@example.com",
                               "member", "owner-1")
         fake.tables["teams"][0]["deleted_at"] = \
-            datetime.now(timezone.utc).isoformat()
+            datetime.now(timezone.utc).isoformat()  # noqa: UP017
         fake.missing_columns = {"teams": {"suspended_at", "flagged_at"}}
         with pytest.raises(InvitationError) as ei:
             invitation_accept(fake, inv["token"], "user-2")
@@ -588,7 +588,7 @@ class TestSessionHelpers:
         assert team_by_id(fake, "missing") is None
 
     def test_active_api_keys_excludes_expired(self, fake):
-        past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()  # noqa: UP017
         fake.seed("api_keys", [
             _key_row(id="k1", expires_at=past, created_via="bootstrap"),
             _key_row(id="k2", expires_at=None, created_via="recovery"),
@@ -656,7 +656,7 @@ class TestInvitationSeam:
         assert row["invited_by"] == "owner-1"
         # 7-day expiry (default)
         exp = datetime.fromisoformat(row["expires_at"])
-        now = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc)  # noqa: UP017
         assert timedelta(days=6) < exp - now < timedelta(days=8)
 
     def test_mint_rejects_duplicate_pending(self, fake):
@@ -721,7 +721,7 @@ class TestInvitationSeam:
         """E2E-3: expiry enforced (expires_at <= now → rejected)."""
         inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
                               "owner-1")
-        past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+        past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()  # noqa: UP017
         fake.tables["invitations"][0]["expires_at"] = past
         with pytest.raises(InvitationError, match="expired"):
             invitation_accept(fake, inv["token"], "user-2")
@@ -1291,8 +1291,8 @@ class TestTask8Helpers:
         assert fake.tables["team_memberships"][0]["role"] == "admin"
 
     def test_expired_bootstrap_keys(self, fake):
-        past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-        future = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+        past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()  # noqa: UP017
+        future = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()  # noqa: UP017
         fake.seed("api_keys", [
             _key_row(id="e1", created_via="bootstrap", expires_at=past),
             _key_row(id="e2", created_via="bootstrap", expires_at=past,
@@ -1301,7 +1301,7 @@ class TestTask8Helpers:
             _key_row(id="e4", created_via="bootstrap", expires_at=None),
             _key_row(id="e5", created_via="bootstrap", expires_at=future),
         ])
-        got = expired_bootstrap_keys(fake, datetime.now(timezone.utc).isoformat())
+        got = expired_bootstrap_keys(fake, datetime.now(timezone.utc).isoformat())  # noqa: UP017
         assert [r["id"] for r in got] == ["e1"]
 
     def test_graph_metadata_derives_default(self, fake):
@@ -1455,14 +1455,14 @@ class TestMeteringSeam:
     had zero direct tests)."""
 
     def test_metering_get_absent_is_zero(self):
-        from tortoise.supabase_control import metering_get
+        from tortoise.supabase_control import metering_get  # noqa: I001
         from tests.fake_control_plane import FakeControlPlane
 
         fake = FakeControlPlane({"metering_records": []})
         assert metering_get(fake, "team-1", "2026-08") == 0
 
     def test_metering_increment_creates_and_reads_back(self):
-        from tortoise.supabase_control import metering_get, metering_increment
+        from tortoise.supabase_control import metering_get, metering_increment  # noqa: I001
         from tests.fake_control_plane import FakeControlPlane
 
         fake = FakeControlPlane({"metering_records": []})
@@ -1476,7 +1476,7 @@ class TestMeteringSeam:
 
     def test_metering_rpc_called_with_args(self):
         """The atomic increment goes through the RPC path (not GET-PATCH)."""
-        from tortoise.supabase_control import metering_increment
+        from tortoise.supabase_control import metering_increment  # noqa: I001
         from tests.fake_control_plane import FakeControlPlane
 
         class _Spy(FakeControlPlane):
@@ -1515,7 +1515,7 @@ class TestMeteringSeam:
 
     def test_metering_increment_passes_nodes_written(self):
         """#953: a non-zero nodes_written flows through to the RPC body."""
-        from tortoise.supabase_control import metering_increment
+        from tortoise.supabase_control import metering_increment  # noqa: I001
         from tests.fake_control_plane import FakeControlPlane
 
         class _Spy(FakeControlPlane):
@@ -1541,7 +1541,7 @@ class TestMeteringSeam:
         counter is correct server-side; only the current total is unknown.
         A raising read-back would make record_write_ops return None and a
         caller retry would double-count."""
-        from tortoise.supabase_control import metering_increment
+        from tortoise.supabase_control import metering_increment  # noqa: I001
         from tests.fake_control_plane import FakeControlPlane
 
         class _ReadbackFails(FakeControlPlane):
@@ -1572,7 +1572,7 @@ class TestMeteringSeam:
         """#925: the RPC call itself is NOT best-effort — if the atomic
         write genuinely failed, metering_increment raises (record_write_ops
         turns that into a logged None; nobody retries a failed write)."""
-        import pytest
+        import pytest  # noqa: I001
         from tortoise.supabase_control import metering_increment
         from tests.fake_control_plane import ErrorControlPlane
 

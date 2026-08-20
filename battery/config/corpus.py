@@ -14,9 +14,9 @@ the episode/agent context (sealed-gold boundary, scope DD2).
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field  # noqa: F401
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable  # noqa: UP035
 
 import yaml
 
@@ -209,7 +209,7 @@ def load_corpus(path: str | Path, *, gold_base: str | Path | None = None,
     """Load + validate the corpus. Raises EmptyCorpus on zero scenarios and
     GoldVerificationError on gold mismatch/missing (exit-1 class at dispatch).
     """
-    from battery.exceptions import ConfigError  # noqa: PLC0415 (import guard)
+    from battery.exceptions import ConfigError  # noqa: PLC0415, RUF100
     p = Path(path)
     if not p.is_file():
         raise ConfigError(f"corpus file not found: {p}")

@@ -52,8 +52,8 @@ def test_specials_are_spread_not_front_loaded():
     special_positions = [i for i, q in enumerate(picks) if _is_special_query(q)]
     assert len(special_positions) == len(_special_ids("e2e"))  # every special placed
     # Evenly spread: spacing between consecutive specials ~ n/len(specials) = 6.
-    gaps = [b - a for a, b in zip(special_positions, special_positions[1:])]
-    assert 3 <= min(gaps) and max(gaps) <= 10
+    gaps = [b - a for a, b in zip(special_positions, special_positions[1:])]  # noqa: B905, RUF007
+    assert 3 <= min(gaps) and max(gaps) <= 10  # noqa: SIM300
     # At least one special sits beyond the warmup-max region (20 iters) so the
     # measured window sees a special without relying on cycle wrap-around.
     assert special_positions[-1] > 20

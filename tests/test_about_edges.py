@@ -14,7 +14,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest
+import pytest  # noqa: I001
 from tortoise.sdk import TortoiseSDK
 
 
@@ -64,7 +64,7 @@ class TestBackfillAboutEntities:
 
     def test_backfill_creates_about_event(self, sdk):
         """Point mentioning an Event name → aboutEvent edge."""
-        ev = sdk.create_event("sprint-42-retro", "meeting")
+        ev = sdk.create_event("sprint-42-retro", "meeting")  # noqa: F841
         sdk.create_point("statement", "sprint-42-retro covered deploy issues")
         result = sdk.backfill_about_entities()
         assert result["scanned"] >= 1
@@ -78,7 +78,7 @@ class TestBackfillAboutEntities:
 
     def test_backfill_creates_about_document(self, sdk):
         """Point mentioning a Document title → aboutDocument edge."""
-        doc = sdk.create_document("design-doc-42", "architecture")
+        doc = sdk.create_document("design-doc-42", "architecture")  # noqa: F841
         sdk.create_point("statement", "design-doc-42 proposes a new pipeline")
         result = sdk.backfill_about_entities()
         assert result["scanned"] >= 1

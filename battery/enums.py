@@ -19,7 +19,7 @@ class Tier(enum.Enum):
     DIFFERENTIAL = "differential"
 
     @classmethod
-    def from_flag(cls, value: int | str) -> "Tier":
+    def from_flag(cls, value: int | str) -> "Tier":  # noqa: UP037
         return {1: cls.PROBE, 2: cls.STREAM, 3: cls.DIFFERENTIAL}[int(value)]
 
 

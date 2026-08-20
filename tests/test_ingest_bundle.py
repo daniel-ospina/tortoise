@@ -542,7 +542,7 @@ class TestReingest:
     def test_reingest_after_extra_writes_keeps_dedup(self, sdk):
         # Re-ingest must not clobber unrelated graph state
         sdk.create_point("claim", "unrelated point")
-        res = sdk.ingest(_full_bundle())
+        res = sdk.ingest(_full_bundle())  # noqa: F841
         res2 = sdk.ingest(_full_bundle())
         assert res2["created"]["points"] == 0
         assert _point_count(sdk) == 3  # 2 bundle + 1 unrelated
@@ -702,7 +702,7 @@ class TestReificationRule:
             "entities": [{"ref": "author", "type": "subject", "name": "Author"}],
             "connections": [{"from": "pA", "to": "author", "relation": "authoredBy"}],
         }
-        res = sdk.ingest(bundle)
+        res = sdk.ingest(bundle)  # noqa: F841
         # structural edge exists, NO operator node created for it
         assert _edge_count(sdk, "authoredBy") == 1
         assert _operator_count(sdk, "IMPL") == 0
@@ -722,7 +722,7 @@ class TestReificationRule:
             ],
             "connections": [{"from": "pA", "to": "pB", "operator": "NAND"}],
         }
-        res = sdk.ingest(bundle)
+        res = sdk.ingest(bundle)  # noqa: F841
         assert _edge_count(sdk, "NAND") == 1
         assert _operator_count(sdk, "NAND") == 0
         # direction-absent NAND = unidirectional on the edge (extraction default)
@@ -1161,7 +1161,7 @@ class TestA3OperatorDedupRicherReturn:
             "connections": [{"from": "pA", "to": "pB", "operator": "NAND",
                               "reify": True}],
         }
-        first = sdk.ingest(bundle)
+        first = sdk.ingest(bundle)  # noqa: F841
         second = sdk.ingest(bundle)
         assert _operator_count(sdk, "NAND") == 1
         assert second["deduped"]["connections"] == 1
@@ -1210,7 +1210,7 @@ class TestA3OperatorDedupRicherReturn:
             "connections": [{"from": pa, "to": pb, "operator": "IMPL",
                               "reify": True}],
         }
-        res = sdk.ingest(bundle)
+        res = sdk.ingest(bundle)  # noqa: F841
         assert _operator_count(sdk, "IMPL") == 2  # strict miss → new operator
         # the labeled partial stays as residue (never absorbed by a no-label
         # retry — the semantic-theft class stays closed)

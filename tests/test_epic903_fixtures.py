@@ -23,7 +23,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest
+import pytest  # noqa: F401, I001
 
 from tests.epic903_fixtures import (
     EP_MAX_ITER,
@@ -44,7 +44,7 @@ from tests.epic903_fixtures import (
     fresh_sdk,
     _make_claim,
 )
-from tortoise.sdk import TortoiseSDK
+from tortoise.sdk import TortoiseSDK  # noqa: F401
 
 
 # ── F1 — EP-parity corpus ───────────────────────────────────────────
@@ -326,9 +326,9 @@ class TestF4FrozenTruth:
         corpus converges to a fixed point, calibrated |Δ| = 0.0)."""
         f = f4_frozen_truth(seed=FIXED_SEED)
         try:
-            clone_sdk, clone_db = fresh_sdk(prefix="tortoise_epic903_f4_check_")
+            clone_sdk, clone_db = fresh_sdk(prefix="tortoise_epic903_f4_check_")  # noqa: RUF059
             try:
-                from tests.epic903_fixtures import _build_f4_graph  # noqa: PLC0415
+                from tests.epic903_fixtures import _build_f4_graph  # noqa: PLC0415, RUF100
                 clone_ids, clone_ops = _build_f4_graph(clone_sdk)
                 random.seed(FIXED_SEED)
                 clone_sdk.compute_confidence(factors=clone_ops,

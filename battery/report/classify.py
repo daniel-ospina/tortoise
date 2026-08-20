@@ -12,7 +12,7 @@ sufficient — competitors could replicate the primitive).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field  # noqa: F401
 
 #: Metric families whose axis is customer-visible (verdict load-bearing).
 LOAD_BEARING_FAMILIES: frozenset[str] = frozenset({

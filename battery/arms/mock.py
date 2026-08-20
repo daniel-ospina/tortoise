@@ -13,10 +13,10 @@ simulates them for harness tests).
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass, field
-from typing import Sequence
+from dataclasses import dataclass, field  # noqa: F401
+from typing import Sequence  # noqa: UP035
 
-from battery.arms.base import AgentContext, ArmAdapter, ArmUnavailable, Memory
+from battery.arms.base import AgentContext, ArmAdapter, ArmUnavailable, Memory  # noqa: F401
 from battery.config.corpus import Scenario
 from battery.enums import ModelCallOutcome
 
@@ -86,7 +86,7 @@ class MockArm:
         # Deterministic trajectory from the episode seed: 1-3 turns, tokens
         # derived from the seed, re_derivations 0 or 1.
         rng = random.Random(context.episode_seed)
-        n_turns = 1 + rng.randrange(3)
+        n_turns = 1 + rng.randrange(3)  # noqa: F841
         memories = [m for m in self._memory.values()][:2]
         return memories
 

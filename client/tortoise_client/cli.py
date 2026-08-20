@@ -35,7 +35,7 @@ def _cmd_status(_args: argparse.Namespace) -> int:
 def _cmd_list_tools(_args: argparse.Namespace) -> int:
     try:
         tools = list_tools()
-    except Exception as exc:  # noqa: BLE001 — CLI reports, never raises
+    except Exception as exc:  # noqa: BLE001, RUF100
         print(f"tortoise unavailable: {exc}", file=sys.stderr)
         return _EXIT_ERR
     for name in tools:
@@ -53,7 +53,7 @@ def _cmd_call(args: argparse.Namespace) -> int:
             return _EXIT_ERR
     try:
         result = call_tool(args.tool, arguments)
-    except Exception as exc:  # noqa: BLE001 — CLI reports, never raises
+    except Exception as exc:  # noqa: BLE001, RUF100
         print(f"call failed: {exc}", file=sys.stderr)
         return _EXIT_ERR
     if getattr(result, "is_error", None):

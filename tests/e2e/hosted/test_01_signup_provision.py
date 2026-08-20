@@ -7,7 +7,7 @@ authenticates /v1/team; the first Point round-trips through the data plane.
 
 Negatives: duplicate email (409), short password (422), malformed email (422).
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import uuid
 

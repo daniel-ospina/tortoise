@@ -1,6 +1,6 @@
 """Task 4 tests — episode execution, model-call outcomes + retry table,
 scorer seam, aggregation (E2E-1.5 half)."""
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import pytest
 
@@ -25,7 +25,7 @@ from battery.runner.scorers import (
     merge_results,
 )
 from battery.arms.mock import InjectionPolicy, MockArm
-from battery.arms.base import AgentContext
+from battery.arms.base import AgentContext  # noqa: F401
 
 CONFIG = __import__("pathlib").Path(__file__).parent.parent / "battery" / "config"
 GOLDS = CONFIG.parent / "golds"

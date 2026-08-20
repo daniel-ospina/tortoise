@@ -261,7 +261,7 @@ def test_e2e6_server_mode_fts_text_disambiguation(tmp_path):
             "agentSession": 2, "meeting_summary": 1, "document": 1}
         assert _required_sweep(g) == 0
     finally:
-        try:
+        try:  # noqa: SIM105
             sdk._get_proj().g.query("CALL db.idx.fulltext.dropIndex('Source')")
         except Exception:
             pass

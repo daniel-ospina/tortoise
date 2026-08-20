@@ -25,12 +25,12 @@ from __future__ import annotations
 
 import os
 import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone  # noqa: F401
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
-import pytest
+import pytest  # noqa: I001
 from fastapi.testclient import TestClient
 
 from tortoise.auth import verify_api_key
@@ -321,7 +321,7 @@ class TestInviteAccept:
             "expires_at:'2020-01-01T00:00:00+00:00', accepted_at:null, "
             "status:'pending'})",
             params={"th": hash_api_key(token),
-                    "ca": datetime.now(timezone.utc).isoformat()},
+                    "ca": datetime.now(timezone.utc).isoformat()},  # noqa: UP017
         )
         _as_user("user-bob", "bob@example.com")
         r = client.post("/v1/invites/accept", json={"token": token})

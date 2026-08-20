@@ -8,7 +8,7 @@ only, never re-inferred at report time (determinism, plan §5).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field  # noqa: F401
 from typing import Any, Protocol
 
 

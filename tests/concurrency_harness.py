@@ -112,11 +112,11 @@ def barrier_index_runs(corpus: str, db_path: str, n_runs: int = 2,
             if not reuse_holds:
                 return
             results[i] = sdk.index_directory(corpus, **index_kwargs)
-        except BaseException as e:  # noqa: BLE001 — surfaced after the join
+        except BaseException as e:  # noqa: BLE001, RUF100
             errors.append(e)
-            try:
+            try:  # noqa: SIM105
                 barrier.wait(timeout=60)
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001, RUF100
                 pass
         finally:
             sdk.close()

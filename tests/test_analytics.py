@@ -6,7 +6,7 @@ R19: telemetry never degrades the API. Covers:
 - first_api_call deduped per team (fires exactly once per process)
 - tenant_provisioned / api_key_created wrappers carry the #528 props
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import pytest
 

@@ -19,12 +19,12 @@ byte-identical across processes (determinism contract).
 
 Run: ``uv run python -m battery.config.build_corpus [--out DIR] [--check]``
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import argparse
 import hashlib
 import json
-import shutil
+import shutil  # noqa: F401
 import sys
 import tempfile
 from pathlib import Path

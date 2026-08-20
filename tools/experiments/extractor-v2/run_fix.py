@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Fixed pipeline: solar clean (v6, with durable_memo) -> regex gate -> flash.
 Shows FULL outputs inline."""
-from __future__ import annotations
-import json, re, sys, time
+from __future__ import annotations  # noqa: I001
+import json, re, sys, time  # noqa: E401
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from tests.model_adapters import MODELS
@@ -91,24 +91,24 @@ def _complete(model, system, user):
     import threading
     box = {}
     def _run(): box["resp"] = model.complete(system=system, user=user)
-    t = threading.Thread(target=_run, daemon=True); t.start()
+    t = threading.Thread(target=_run, daemon=True); t.start()  # noqa: E702
     t.join(timeout=600)
-    if t.is_alive(): raise TimeoutError("600s")
+    if t.is_alive(): raise TimeoutError("600s")  # noqa: E701
     return box.get("resp")
 
 def _parse_json(raw):
     m = re.search(r"\{.*\}", raw or "", re.S)
-    if not m: raise ValueError("no JSON")
+    if not m: raise ValueError("no JSON")  # noqa: E701
     block = m.group(0)
     for cut in (None,-1,-2,-3,-5,-10):
-        try: return json.loads(block if cut is None else block[:cut])
-        except json.JSONDecodeError: continue
+        try: return json.loads(block if cut is None else block[:cut])  # noqa: E701
+        except json.JSONDecodeError: continue  # noqa: E701
     raise ValueError("unparseable")
 
 def main():
     transcript = (Path(__file__).resolve().parents[3] / "tests/eval/w-1272/w-design-bounded.txt").read_text()
-    solar = MODELS["solar-pro4"](); solar.max_tokens = 8000; solar.temperature = 0.0
-    flash = MODELS["deepseek-flash"](); flash.max_tokens = 8000; flash.temperature = 0.0
+    solar = MODELS["solar-pro4"](); solar.max_tokens = 8000; solar.temperature = 0.0  # noqa: E702
+    flash = MODELS["deepseek-flash"](); flash.max_tokens = 8000; flash.temperature = 0.0  # noqa: E702
     CLEANER_TMPL = (Path(__file__).resolve().parent / "cleaner-v7.md").read_text()
     from tortoise.value_extractor import compile_value_brief
     _g = compile_value_brief().get("memory_granularity", {})
@@ -129,7 +129,7 @@ def main():
                 continue
             break
         except Exception:
-            if attempt == 2: raise
+            if attempt == 2: raise  # noqa: E701
             continue
     print(f"  solar: {time.time()-t0:.0f}s, cleaned={len(clean_text)} chars, "
           f"gate_hits={hits or 'CLEAN'}", flush=True)

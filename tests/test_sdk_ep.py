@@ -197,7 +197,7 @@ class TestEvidenceLeak:
         ep.run([op["id"]], evidence={c["id"]: (2.0, 8.0)})
         third = ep.compute_confidence(b["id"])
         assert abs(third["alpha"] - second["alpha"]) < 1e-3 and abs(third["beta"] - second["beta"]) < 1e-3, (
-            f"unrelated run evidence disturbed b's constructor-evidence posterior"
+            f"unrelated run evidence disturbed b's constructor-evidence posterior"  # noqa: F541
         )
 
 
@@ -293,5 +293,5 @@ class TestZeroTotalGuard:
             )
         result = sdk.compute_confidence()
         assert result["iterations"] >= 0
-        for cid, conf in result["confidences"].items():
+        for cid, conf in result["confidences"].items():  # noqa: B007
             assert 0 <= conf["mean"] <= 1, f"mean {conf['mean']} out of range"

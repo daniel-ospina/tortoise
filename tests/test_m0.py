@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.m0 import main  # noqa: E402
+from tortoise.m0 import main  # noqa: E402, RUF100
 
 
 def _tmp_dir() -> str:

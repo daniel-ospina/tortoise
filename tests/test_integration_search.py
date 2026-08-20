@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 # ── FalkorDB availability check ────────────────────────────────────────────
 # Try env URI, then common local defaults (docker://localhost:6379, :16379)
-import os as _os
+import os as _os  # noqa: I001
 FALKORDB_AVAILABLE = False
 _uri_candidates = [
     _os.environ.get("TORTOISE_DB_URI"),
@@ -106,7 +106,7 @@ def _create_test_points(sdk):
         "IMPL", feature["id"], [customer_seg["id"]],
     )
     # Label the addresses operator so traversal_path can find it
-    try:
+    try:  # noqa: SIM105
         sdk.update_point(op_addresses["id"], {"label": "addresses"})
     except Exception:
         pass
@@ -236,7 +236,7 @@ class TestChainVerificationWithPacks:
         finally:
             _cleanup_sdk(sdk, *ids.values())
             for oid in operator_ids:
-                try:
+                try:  # noqa: SIM105
                     sdk.delete_point(oid)
                 except Exception:
                     pass
@@ -378,7 +378,7 @@ class TestMigrationScript:
         assert len(MIGRATIONS) > 0
         for entry in MIGRATIONS:
             assert len(entry) == 3, f"Expected (old, new, entity_type), got: {entry}"
-            old, new, entity_type = entry
+            old, new, entity_type = entry  # noqa: RUF059
             assert ":" in new, f"{new} must be pack-prefixed"
             ns, kind = new.split(":", 1)
             assert ns, f"namespace missing in {new}"
@@ -417,7 +417,7 @@ class TestMCPSurface:
         finally:
             _cleanup_sdk(sdk_obj, *ids.values())
             for oid in op_ids:
-                try:
+                try:  # noqa: SIM105
                     sdk_obj.delete_point(oid)
                 except Exception:
                     pass
@@ -455,7 +455,7 @@ class TestMCPSurface:
         finally:
             _cleanup_sdk(sdk_obj, *ids.values())
             for oid in op_ids:
-                try:
+                try:  # noqa: SIM105
                     sdk_obj.delete_point(oid)
                 except Exception:
                     pass
@@ -480,7 +480,7 @@ class TestMCPSurface:
         finally:
             _cleanup_sdk(sdk_obj, *ids.values())
             for oid in op_ids:
-                try:
+                try:  # noqa: SIM105
                     sdk_obj.delete_point(oid)
                 except Exception:
                     pass
@@ -529,7 +529,7 @@ class TestMCPSurface:
         finally:
             _cleanup_sdk(sdk_obj, *ids.values())
             for oid in op_ids:
-                try:
+                try:  # noqa: SIM105
                     sdk_obj.delete_point(oid)
                 except Exception:
                     pass

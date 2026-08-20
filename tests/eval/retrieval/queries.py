@@ -159,7 +159,7 @@ def _new_queries_for(
             if tier == "easy":
                 toks = rng.sample(core, 3)
             elif tier == "medium":
-                toks = rng.sample(core, 2) + [bridge]
+                toks = rng.sample(core, 2) + [bridge]  # noqa: RUF005
             else:
                 nbr = oracle.near(k)[1]  # the +1 neighbor
                 nbr_core = oracle.core[nbr]

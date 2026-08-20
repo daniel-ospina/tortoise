@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Single-flash S1 with the memory_granularity bar (uncapped model)."""
-from __future__ import annotations
-import sys, time
+from __future__ import annotations  # noqa: I001
+import sys, time  # noqa: E401
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-from tortoise.value_extractor import compile_value_brief
+from tortoise.value_extractor import compile_value_brief  # noqa: I001
 from tests.model_adapters import MODELS
 
 S1_TMPL = """You are the STORY SUMMARIZER for the company/product epistemic memory.
@@ -47,9 +47,9 @@ def _complete(model, system, user):
     import threading
     box = {}
     def _run(): box["resp"] = model.complete(system=system, user=user)
-    t = threading.Thread(target=_run, daemon=True); t.start()
+    t = threading.Thread(target=_run, daemon=True); t.start()  # noqa: E702
     t.join(timeout=600)
-    if t.is_alive(): raise TimeoutError("600s")
+    if t.is_alive(): raise TimeoutError("600s")  # noqa: E701
     return box.get("resp")
 
 def main():

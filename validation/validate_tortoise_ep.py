@@ -10,9 +10,9 @@ Usage:
 
 Requires: pip install jax jaxlib numpyro falkordblite (all in tortoise .venv)
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
-import itertools
+import itertools  # noqa: F401
 import math
 import os
 import random
@@ -26,20 +26,20 @@ _syspath = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _syspath not in sys.path:
     sys.path.insert(0, _syspath)
 
-import jax
-import jax.numpy as jnp
-import jax.random as jrandom
-import numpy as np
-import numpyro
-from numpyro.infer import MCMC, NUTS
+import jax  # noqa: E402, I001
+import jax.numpy as jnp  # noqa: E402
+import jax.random as jrandom  # noqa: E402
+import numpy as np  # noqa: E402
+import numpyro  # noqa: E402
+from numpyro.infer import MCMC, NUTS  # noqa: E402
 
-from tortoise.api import EventAPI, provenance
-from tortoise.ep import TortoiseEP
-from tortoise.log import EventLog
-from tortoise.projection import FalkorProjection
+from tortoise.api import EventAPI, provenance  # noqa: E402
+from tortoise.ep import TortoiseEP  # noqa: E402
+from tortoise.log import EventLog  # noqa: E402
+from tortoise.projection import FalkorProjection  # noqa: E402
 
-from hmc_model import (
-    NAND_PAIRS, IMPL_PAIRS, NAND_WEIGHT, IMPL_WEIGHT,
+from hmc_model import (  # noqa: E402
+    NAND_PAIRS, IMPL_PAIRS, NAND_WEIGHT, IMPL_WEIGHT,  # noqa: F401
     EVIDENCE_ALPHA, EVIDENCE_BETA, N_CLAIMS, tortoise_model,
 )
 
@@ -272,7 +272,7 @@ def test_tortoise_ep_nand_strong():
     proj, claim_ids, op_ids, tmpdir = _build_nand_strong_graph()
     try:
         ep = TortoiseEP(proj, damping=0.5, n_quad=8, max_iter=80, tol=1e-3)
-        n_iter, converged = ep.run(op_ids, max_hops=3)
+        n_iter, converged = ep.run(op_ids, max_hops=3)  # noqa: RUF059
 
         # Collect confidences
         confs = []
@@ -346,7 +346,7 @@ def test_tortoise_ep_latency():
 
     Assert < 1s (quadrature-based EP should be fast).
     """
-    proj, claim_ids, op_ids, tmpdir = _build_10claim_graph()
+    proj, claim_ids, op_ids, tmpdir = _build_10claim_graph()  # noqa: RUF059
     try:
         ep = TortoiseEP(proj, damping=0.5, n_quad=8, max_iter=50, tol=1e-3)
 
@@ -354,7 +354,7 @@ def test_tortoise_ep_latency():
         n_iter, converged = ep.run(op_ids, max_hops=3)
         elapsed = time.perf_counter() - t0
 
-        assert converged, f"EP did not converge (needed for latency test)"
+        assert converged, f"EP did not converge (needed for latency test)"  # noqa: F541
         assert elapsed < 1.0, \
             f"TortoiseEP.run() took {elapsed:.3f}s, exceeding 1s budget"
         print(f"  (10-claim EP: {n_iter} iters, {elapsed*1000:.1f}ms)")
@@ -438,7 +438,7 @@ def test_tortoise_ep_complex_graph():
     Assert W₂ < 0.20 for the 5 HMC-validated claims.
     Assert all 20 posteriors are valid (no NaN, means in [0.01, 0.99]).
     """
-    import itertools
+    import itertools  # noqa: F401, F811
 
     tmpdir = tempfile.mkdtemp(prefix="tortoise_ep_complex_")
     db_path = os.path.join(tmpdir, "falkor.db")
@@ -515,14 +515,14 @@ def test_tortoise_ep_complex_graph():
         # ── HMC on a 5-claim subset (claims 10-14: IMPL chain with evidence on c10) ──
         # Build NumPyro model for just those 5 claims
         hmc_claim_indices = [10, 11, 12, 13, 14]
-        hmc_claim_ids = [claim_ids[i] for i in hmc_claim_indices]
+        hmc_claim_ids = [claim_ids[i] for i in hmc_claim_indices]  # noqa: F841
 
         # Map global idx → local idx (0..4)
-        local_map = {g: l for l, g in enumerate(hmc_claim_indices)}
+        local_map = {g: l for l, g in enumerate(hmc_claim_indices)}  # noqa: E741
 
         # Subset operators: only those connecting within the 5-claim subset
         sub_impl_pairs = [(10, 11), (11, 12), (12, 13), (13, 14)]
-        sub_nand_pairs = []  # no NAND in this subset
+        sub_nand_pairs = []  # no NAND in this subset  # noqa: F841
         sub_n = len(hmc_claim_indices)
 
         # Subset evidence
@@ -588,7 +588,7 @@ def test_tortoise_ep_dense_nand():
     reasonable. Verify not all collapse to 0 — at least 2 claims
     have mean > 0.3.
     """
-    import itertools
+    import itertools  # noqa: F811
 
     tmpdir = tempfile.mkdtemp(prefix="tortoise_ep_dense_nand_")
     db_path = os.path.join(tmpdir, "falkor.db")
@@ -730,7 +730,7 @@ def test_tortoise_ep_random_graphs():
     random evidence). Run TortoiseEP. Assert: all 10 complete
     without NaN, all posteriors in [0.01, 0.99].
     """
-    import itertools
+    import itertools  # noqa: F811
 
     rng = random.Random(42)
     graphs: list[tuple[list[str], list[str], FalkorProjection, str]] = []
@@ -813,7 +813,7 @@ def test_tortoise_ep_random_graphs():
             os.rmdir(tmpdir)
 
     assert not failures, f"{len(failures)} random graph failures:\n" + "\n".join(failures)
-    print(f"  (fuzz: all 10 random graphs passed)")
+    print(f"  (fuzz: all 10 random graphs passed)")  # noqa: F541
 
 
 # ═══════════════════════════════════════════════════════════════════

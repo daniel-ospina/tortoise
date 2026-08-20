@@ -106,11 +106,11 @@ def is_suspended_signal(team_id: str) -> bool:
 
 
 def _utcnow(now: datetime | None = None) -> datetime:
-    return now or datetime.now(timezone.utc)
+    return now or datetime.now(timezone.utc)  # noqa: UP017
 
 
 def _ensure_aware(ts: datetime) -> datetime:
-    return ts if ts.tzinfo is not None else ts.replace(tzinfo=timezone.utc)
+    return ts if ts.tzinfo is not None else ts.replace(tzinfo=timezone.utc)  # noqa: UP017
 
 
 def _parse_ts(value) -> datetime | None:

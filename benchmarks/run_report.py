@@ -92,7 +92,7 @@ def _host_specs() -> dict:
         "machine": platform.machine(),
     }
     if sys.platform != "darwin":
-        try:
+        try:  # noqa: SIM105
             specs["mem_bytes"] = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
         except (ValueError, OSError, AttributeError):
             pass
@@ -101,7 +101,7 @@ def _host_specs() -> dict:
 
 def capture_provenance(proj, is_embedded: bool, extras: dict) -> dict:
     prov: dict = {
-        "timestamp_utc": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        "timestamp_utc": _dt.datetime.now(_dt.timezone.utc).isoformat(),  # noqa: UP017
         "git_sha": _git_sha(),
         "host": _host_specs(),
         "db_mode": "embedded-falkordblite" if is_embedded else "docker-falkordb",
@@ -275,7 +275,7 @@ def _make_arm(arm_name: str, ctx: dict):
                 count = len(rows)
             else:
                 raise ValueError(f"unknown arm {arm_name}")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001, RUF100
             err = str(e)
         return (time.perf_counter() - t0) * 1000, count, err
 
@@ -297,7 +297,7 @@ def _sdk_e2e(sdk, qi: dict, elevated: int | None, *, pool_size: int | None = Non
             _elevated_timeout_ms=int(elevated) if elevated is not None else None,
         )
         count = len(rows)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001, RUF100
         err = str(e)
     return (time.perf_counter() - t0) * 1000, count, err
 
@@ -466,7 +466,7 @@ def write_outputs(report: dict, out_path: str | None) -> dict:
     if out_path:
         json_path = Path(out_path)
     else:
-        stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")  # noqa: UP017
         json_path = out_dir / f"{stamp}-report.json"
     json_path.write_text(json.dumps(report, indent=2, default=str))
     md_path = json_path.with_suffix(".md")
@@ -492,7 +492,7 @@ def run_benchmark(args) -> dict:
     try:
         return _run_with_sdk(args, sdk)
     finally:
-        try:
+        try:  # noqa: SIM105
             sdk.close()
         except Exception:
             pass
@@ -505,7 +505,7 @@ def _run_with_sdk(args, sdk) -> dict:
     # 2. Corpus (seed unless --no-seed-corpus).
     seeded = 0
     if not args.no_seed_corpus:
-        points, fp = generate_points(args.corpus_size, seed=args.seed)
+        points, fp = generate_points(args.corpus_size, seed=args.seed)  # noqa: RUF059
         seeded = seed_corpus(proj.g, points)
         rng = random.Random(args.seed)
         edges = seed_operator_edges(proj.g, rng, n_edges_per_op=200)
@@ -569,8 +569,8 @@ def _run_with_sdk(args, sdk) -> dict:
     # on failure every arm is INVALIDATED (not comparable).
     preflight_reason: str | None = None
     try:
-        proj.g.query("RETURN 1").result_set
-    except Exception as e:  # noqa: BLE001
+        proj.g.query("RETURN 1").result_set  # noqa: B018
+    except Exception as e:  # noqa: BLE001, RUF100
         preflight_reason = f"DB connection pre-flight failed: {e}"
         if not args.quiet:
             print(f"[preflight] {preflight_reason} — invalidating all arms")
@@ -586,7 +586,7 @@ def _run_with_sdk(args, sdk) -> dict:
     pool_floor = 0
     raw_floor = os.environ.get("TORTOISE_POOL_FLOOR", "")
     if raw_floor.strip():
-        try:
+        try:  # noqa: SIM105
             pool_floor = int(raw_floor)
         except (TypeError, ValueError):
             pass

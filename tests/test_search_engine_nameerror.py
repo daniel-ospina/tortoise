@@ -37,7 +37,7 @@ class TestSearchNameError:
         # badformat has no colon — should trigger the "Invalid format" warning
         # but NOT a NameError
         try:
-            results = sdk.tortoise_fts_query(
+            results = sdk.tortoise_fts_query(  # noqa: F841
                 query="test",
                 relationship_filter="badformat",
             )
@@ -52,7 +52,7 @@ class TestSearchNameError:
     def test_relationship_filter_no_predicate_no_nameerror(self, sdk):
         """relationship_filter with colon but empty predicate should not crash."""
         try:
-            results = sdk.tortoise_fts_query(
+            results = sdk.tortoise_fts_query(  # noqa: F841
                 query="test",
                 relationship_filter=":target",
             )
@@ -66,7 +66,7 @@ class TestSearchNameError:
     def test_relationship_filter_no_target_no_nameerror(self, sdk):
         """relationship_filter with colon but empty target should not crash."""
         try:
-            results = sdk.tortoise_fts_query(
+            results = sdk.tortoise_fts_query(  # noqa: F841
                 query="test",
                 relationship_filter="predicate:",
             )
@@ -80,7 +80,7 @@ class TestSearchNameError:
     def test_ascii_arrow_traversal_path_no_nameerror(self, sdk):
         """ASCII '->' in traversal_path should log a warning, not crash."""
         try:
-            results = sdk.tortoise_fts_query(
+            results = sdk.tortoise_fts_query(  # noqa: F841
                 query="test",
                 traversal_path="Product->Feature",
             )
@@ -94,7 +94,7 @@ class TestSearchNameError:
     def test_traversal_path_no_nameerror(self, sdk):
         """Unicode 'Product→Feature' traversal_path (no matching pack relation)."""
         try:
-            results = sdk.tortoise_fts_query(
+            results = sdk.tortoise_fts_query(  # noqa: F841
                 query="test",
                 traversal_path="Product→Feature",
             )

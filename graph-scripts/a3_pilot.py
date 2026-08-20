@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """A3 Conversation Mining Pilot — GAP-15 gate check."""
-import re, sys, json
+import re, sys, json  # noqa: E401, F401, I001
 from pathlib import Path
 
 KEYWORDS = re.compile(r'\b(decision|agreed|let.s|plan|decide)\b', re.IGNORECASE)

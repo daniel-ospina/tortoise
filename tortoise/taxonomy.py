@@ -5,7 +5,7 @@ One Cypher query per tool. No mutations.
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any  # noqa: F401
 
 
 def taxonomy(proj) -> dict[str, int]:

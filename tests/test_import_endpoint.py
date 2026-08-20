@@ -45,20 +45,20 @@ _import_deep = pytest.mark.skip(
            "deep import path covered by #1390 subprocess E2E"
 )
 
-from fastapi.testclient import TestClient
+from fastapi.testclient import TestClient  # noqa: E402, I001
 
-import tortoise.hosted_api as ha_mod
-from tortoise.hosted_backup import (
+import tortoise.hosted_api as ha_mod  # noqa: E402
+from tortoise.hosted_backup import (  # noqa: E402
     DUMP_FORMAT,
-    RestoreVerificationError,
+    RestoreVerificationError,  # noqa: F401
     _restore_into_temp_verify_swap,
     encrypt_backup,
 )
-from tortoise.hosted_api import app, get_current_user
-from tortoise.projection import FalkorProjection
+from tortoise.hosted_api import app, get_current_user  # noqa: E402
+from tortoise.projection import FalkorProjection  # noqa: E402
 
-from tests.fake_control_plane import FakeControlPlane
-from tests.test_supabase_control import (
+from tests.fake_control_plane import FakeControlPlane  # noqa: E402
+from tests.test_supabase_control import (  # noqa: E402
     FREE_TEAM, _key_row, _membership_row,
 )
 
@@ -298,7 +298,7 @@ class TestImportAuth:
 
     def test_import_deleted_team_410(self, sb_client, as_user):
         tc, fake, _ = sb_client
-        _seed_team(fake, deleted_at=datetime.now(timezone.utc).isoformat())
+        _seed_team(fake, deleted_at=datetime.now(timezone.utc).isoformat())  # noqa: UP017
         as_user()
         r = _post_import(tc, b"x", os.urandom(32))
         assert r.status_code == 410
@@ -307,7 +307,7 @@ class TestImportAuth:
         """Non-owner probing a deleted team gets 403, not the deletion schedule."""
         tc, fake, _ = sb_client
         _seed_team(fake, role="member",
-                   deleted_at=datetime.now(timezone.utc).isoformat())
+                   deleted_at=datetime.now(timezone.utc).isoformat())  # noqa: UP017
         as_user()
         assert _post_import(tc, b"x", os.urandom(32)).status_code == 403
 
@@ -618,7 +618,7 @@ class TestImportCliArtifactForm:
         — same quarantine semantics as the wire form."""
         from tortoise.export import artifact_bytes, build_artifact
 
-        tc, fake, db_path = sb_client
+        tc, fake, db_path = sb_client  # noqa: RUF059
         _seed_team(fake)
         as_user()
         key = os.urandom(32)
@@ -658,7 +658,7 @@ class TestImportIdempotencyAndSwapSafety:
 
     def test_import_ledger_stamped(self, sb_client, as_user):
         """Successful import stamps last_import_sha256 on the Team row."""
-        tc, fake, db_path = sb_client
+        tc, fake, db_path = sb_client  # noqa: RUF059
         _seed_team(fake)
         as_user()
         key = os.urandom(32)
@@ -707,7 +707,7 @@ class TestImportIdempotencyAndSwapSafety:
             def _failing_select(name):
                 g = real_select(name)
                 if name == "crash_live":
-                    orig = g.delete
+                    orig = g.delete  # noqa: F841
 
                     def _boom(*a, **k):
                         raise RuntimeError("simulated crash in live delete")

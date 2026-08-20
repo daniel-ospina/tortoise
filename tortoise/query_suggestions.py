@@ -99,7 +99,7 @@ def _collect_known_kinds() -> list[str]:
     suggest_kind can match against either representation.
     """
     try:
-        from .pack_registry import (
+        from .pack_registry import (  # noqa: I001
             PackRegistry,
             CANONICAL_POINT_KINDS,
             CANONICAL_OBJECT_KINDS,

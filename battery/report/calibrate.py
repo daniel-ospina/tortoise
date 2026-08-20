@@ -7,9 +7,9 @@ for artifact provenance. The "never silently tunes" discipline.
 """
 from __future__ import annotations
 
-import hashlib
-from pathlib import Path
-from typing import Any
+import hashlib  # noqa: F401
+from pathlib import Path  # noqa: F401
+from typing import Any  # noqa: F401
 
 
 def cal_table_hash(cal_rows: tuple[tuple[str, str, float], ...]) -> str:

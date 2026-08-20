@@ -88,7 +88,7 @@ _logger = logging.getLogger(__name__)
 
 def _current_period() -> str:
     """Calendar month as ``"YYYY-MM"`` in UTC."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)  # noqa: UP017
     return f"{now.year}-{now.month:02d}"
 
 
@@ -164,10 +164,10 @@ def record_write_ops(team_id: str, tier: str | None = None, n: int = 1,
     if not team_id:
         return None
     period = _current_period()
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = datetime.now(timezone.utc).isoformat()  # noqa: UP017
     try:
         if _supabase_mode():
-            from tortoise.supabase_control import (
+            from tortoise.supabase_control import (  # noqa: I001
                 get_control_plane, metering_increment,
             )
             write_ops = metering_increment(
@@ -289,7 +289,7 @@ def get_current_usage(team_id: str) -> dict:
     period = _current_period()
     ops_used = 0
     if _supabase_mode():
-        from tortoise.supabase_control import (
+        from tortoise.supabase_control import (  # noqa: I001
             get_control_plane, metering_get, team_tier,
         )
         try:

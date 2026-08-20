@@ -13,12 +13,12 @@ Architecture mirrors tortoise/ep.py:
 
 ponytail: particles live in-memory per claim. No FalkorDB storage yet.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import jax.numpy as jnp
 import jax
 import jax.random as jrandom
-import numpy as np
+import numpy as np  # noqa: F401
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -30,7 +30,7 @@ def sigmoid(x):
 
 @jax.jit
 def rbf_kernel(x, h):
-    n, d = x.shape
+    n, d = x.shape  # noqa: RUF059
     diff = x[:, None, :] - x[None, :, :]
     sqdist = jnp.sum(diff ** 2, axis=-1)
     K = jnp.exp(-sqdist / (2 * h * h + 1e-8))
@@ -47,7 +47,7 @@ def median_heuristic(x):
 
 @jax.jit
 def svgd_update(x, grad_log_p, h):
-    n, d = x.shape
+    n, d = x.shape  # noqa: RUF059
     K, grad_K = rbf_kernel(x, h)
     term1 = jnp.dot(K, grad_log_p) / n
     term2 = jnp.sum(grad_K, axis=0) / n
@@ -347,7 +347,7 @@ class TortoiseSVBP:
         # Start from evidence prior (natural params)
         ev_alpha, ev_beta = self.evidence_prior.get(claim_id, (1.0, 1.0))
         total_eta1, total_eta2 = self._natural_from_beta(ev_alpha, ev_beta)
-        for (op_id, cid, rel_type), (ma, mb) in self.messages.items():
+        for (op_id, cid, rel_type), (ma, mb) in self.messages.items():  # noqa: B007
             if cid == claim_id:
                 total_eta1 += ma
                 total_eta2 += mb
@@ -424,7 +424,7 @@ class TortoiseSVBP:
                 self._update_factor(op_id, op_type, input_ids, weight)
 
             # Gate 3: compress stale claims
-            for op_id, op_type, input_ids, weight in factors:
+            for op_id, op_type, input_ids, weight in factors:  # noqa: B007
                 for cid in input_ids:
                     self._maybe_compress(cid)
 

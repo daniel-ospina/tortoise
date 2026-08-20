@@ -3,10 +3,10 @@
 
 Run: python -m validation.compare_algorithms
 """
-import sys, os, time, random
+import sys, os, time, random  # noqa: E401, I001
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-import jax.numpy as jnp
+import jax.numpy as jnp  # noqa: I001
 import jax
 import numpy as np
 from tortoise.svbp import TortoiseSVBP, sigmoid
@@ -48,7 +48,7 @@ class InMemoryEP:
                 self.posteriors[cid] = (a, b)
         for _ in range(n_iter):
             for op_id, op_type, inputs, weight in impl_factors:
-                if len(inputs) != 2: continue
+                if len(inputs) != 2: continue  # noqa: E701
                 id_a, id_b = inputs
                 post_a = self.posteriors.get(id_a, (1.0, 1.0))
                 post_b = self.posteriors.get(id_b, (1.0, 1.0))
@@ -76,7 +76,7 @@ class InMemoryEP:
                     ea, eb = evidence.get(cid, (1.0, 1.0)) if evidence else (1.0, 1.0)
                     e1, e2 = self._nat(ea, eb)
                     for (_, c, _), (m1, m2) in self.messages.items():
-                        if c == cid: e1 += m1; e2 += m2
+                        if c == cid: e1 += m1; e2 += m2  # noqa: E701, E702
                     self.posteriors[cid] = self._beta(e1, e2)
 
     def conf(self, cid):

@@ -8,7 +8,7 @@ Covers:
 
 Runs with: python3 -m pytest tests/test_embeddings_filters.py -v
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import sys
 import os
@@ -29,7 +29,7 @@ class TestComputeEmbeddingFailures:
 
     def test_model_get_returns_none(self):
         """EmbeddingModel.get() returns None → compute_embedding returns None (lines 54-56)."""
-        from tortoise.embeddings import compute_embedding, EmbeddingModel
+        from tortoise.embeddings import compute_embedding, EmbeddingModel  # noqa: I001
 
         with patch.object(EmbeddingModel, "get", return_value=None):
             result = compute_embedding("hello world")
@@ -37,7 +37,7 @@ class TestComputeEmbeddingFailures:
 
     def test_content_truncation_to_max_tokens(self):
         """Content longer than max_tokens is truncated before encoding (lines 60-61)."""
-        from tortoise.embeddings import compute_embedding, EmbeddingModel
+        from tortoise.embeddings import compute_embedding, EmbeddingModel  # noqa: I001
 
         fake_model = MagicMock()
         fake_model.encode.return_value = np.array([[0.1] * 384], dtype=np.float64)
@@ -57,7 +57,7 @@ class TestComputeEmbeddingFailures:
 
     def test_encode_returns_none(self):
         """model.encode returns None → compute_embedding returns None (lines 64-65)."""
-        from tortoise.embeddings import compute_embedding, EmbeddingModel
+        from tortoise.embeddings import compute_embedding, EmbeddingModel  # noqa: I001
 
         fake_model = MagicMock()
         fake_model.encode.return_value = None
@@ -68,7 +68,7 @@ class TestComputeEmbeddingFailures:
 
     def test_encode_returns_empty_array(self):
         """model.encode returns empty array → compute_embedding returns None (line 65)."""
-        from tortoise.embeddings import compute_embedding, EmbeddingModel
+        from tortoise.embeddings import compute_embedding, EmbeddingModel  # noqa: I001
 
         fake_model = MagicMock()
         fake_model.encode.return_value = np.array([], dtype=np.float64)
@@ -79,7 +79,7 @@ class TestComputeEmbeddingFailures:
 
     def test_encode_exception_returns_none(self):
         """model.encode raises → compute_embedding returns None (lines 67-68)."""
-        from tortoise.embeddings import compute_embedding, EmbeddingModel
+        from tortoise.embeddings import compute_embedding, EmbeddingModel  # noqa: I001
 
         fake_model = MagicMock()
         fake_model.encode.side_effect = RuntimeError("CUDA out of memory")

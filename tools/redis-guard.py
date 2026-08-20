@@ -16,7 +16,7 @@ Usage:
     python scripts/redis-guard.py            # scan repo, exit 1 on violations
     python scripts/redis-guard.py <files...> # scan specific files
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import re
 import sys

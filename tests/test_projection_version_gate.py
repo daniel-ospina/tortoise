@@ -11,14 +11,14 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.projection import _apply_one, FalkorProjection  # noqa: E402
+from tortoise.projection import _apply_one, FalkorProjection  # noqa: E402, F401, I001, RUF100
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
 
 
-from tests._embedded import skip_if_no_falkor as _skip_if_no_falkor  # noqa: E402
-from tests._embedded import wipe  # noqa: E402
+from tests._embedded import skip_if_no_falkor as _skip_if_no_falkor  # noqa: E402, RUF100
+from tests._embedded import wipe  # noqa: E402, RUF100
 
 
 # ═══════════════════════════════════════════════════════════════════════════

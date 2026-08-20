@@ -235,11 +235,11 @@ def test_backfill_references_idempotent():
 
         # Run again — should find no new work (all Sources already have references)
         # This is the idempotent MERGE check: re-running doesn't create duplicates
-        r2 = _run_backfill_on_proj(proj)
+        r2 = _run_backfill_on_proj(proj)  # noqa: F841
         # After first run, all Sources with extractable entities have references.
         # sources_processed may be lower on second run since Sources that gained
         # references on run 1 are now filtered out.
-        refs_after = proj.g.query(
+        refs_after = proj.g.query(  # noqa: F841
             "MATCH ()-[r:references]->() RETURN count(r)"
         ).result_set[0][0]
         # The bf_doc→bf-subj reference should still be exactly 1 (no duplicate)

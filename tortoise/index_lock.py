@@ -187,7 +187,7 @@ class SessionIndexLock:
             # root-owned/group-owned dir the user can write but not chmod must
             # NOT turn every acquire into a retryable error / silent loss of
             # auto-reindexing; dirs we create already get 0700 via makedirs).
-            try:
+            try:  # noqa: SIM105
                 os.chmod(self.path.parent, 0o700)
             except OSError:
                 pass
@@ -197,7 +197,7 @@ class SessionIndexLock:
                 "a+b", buffering=0)
             # Review follow-up: the lock file itself is private (pid +
             # timestamp observability content stays owner-only).
-            try:
+            try:  # noqa: SIM105
                 os.fchmod(self._fh.fileno(), 0o600)
             except OSError:
                 pass
@@ -269,11 +269,11 @@ class SessionIndexLock:
                 # swapped/symlinked path. Best-effort — if removal fails the
                 # file is a stale record the reaper sweep collects later.
                 if self._fh_matches_path():
-                    try:
+                    try:  # noqa: SIM105
                         self.path.unlink(missing_ok=True)
                     except OSError:
                         pass
-                try:
+                try:  # noqa: SIM105
                     fcntl.flock(self._fh, fcntl.LOCK_UN)
                 except OSError:
                     pass
@@ -363,11 +363,11 @@ class SessionIndexLock:
             except OSError:
                 return False
         finally:
-            try:
+            try:  # noqa: SIM105
                 fcntl.flock(fd, fcntl.LOCK_UN)
             except OSError:
                 pass
-            try:
+            try:  # noqa: SIM105
                 os.close(fd)
             except OSError:
                 pass
@@ -413,7 +413,7 @@ class SessionIndexLock:
 
     def _close_fh(self) -> None:
         if self._fh:
-            try:
+            try:  # noqa: SIM105
                 self._fh.close()
             except OSError:
                 pass
@@ -421,7 +421,7 @@ class SessionIndexLock:
 
     # ── context manager ────────────────────────────────────────────
 
-    def __enter__(self) -> "SessionIndexLock":
+    def __enter__(self) -> "SessionIndexLock":  # noqa: UP037
         self.acquire()
         return self
 

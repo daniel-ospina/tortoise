@@ -118,7 +118,7 @@ def _reset_budget_if_new_period() -> None:
     # equal the day counter and the monthly guard dead (#1138 review-fix).
     global _send_counts_day, _send_counts_month
     global _send_counts_day_period, _send_counts_month_period
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)  # noqa: UP017
     day = now.strftime("%Y-%m-%d")
     month = now.strftime("%Y-%m")
     if day != _send_counts_day_period:
@@ -228,7 +228,7 @@ async def _send_resend(to: str, subject: str, html_body: str, text_body: str,
         "text": text_body,
     }
 
-    async with _send_semaphore:
+    async with _send_semaphore:  # noqa: SIM117
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(RESEND_URL, headers=headers, json=payload)
             resp.raise_for_status()
@@ -259,12 +259,12 @@ async def _send_invite_attempt(invitee_email: str, team_name: str, role: str,
             try:
                 if callable(on_sent):
                     on_sent(message_id)
-            except Exception:  # noqa: BLE001 — stamping failure must not crash the send task
+            except Exception:  # noqa: BLE001, RUF100
                 logger.warning("email notify: on_sent callback failed for invite %s", invitation_id)
             logger.info("email notify: invite email accepted by provider (invite %s, msg %s)",
                         invitation_id, message_id)
             return
-        except Exception as e:  # noqa: BLE001 — never raise out of the task
+        except Exception as e:  # noqa: BLE001, RUF100
             last_err = e
             if attempt == 0 and _is_transient(e):
                 await asyncio.sleep(0.5)
@@ -311,6 +311,6 @@ async def drain_pending_sends(timeout: float = 2.0) -> None:
     """Await in-flight best-effort sends (shutdown). Never raises."""
     if not _pending_email_tasks:
         return
-    done, pending = await asyncio.wait(_pending_email_tasks, timeout=timeout)
+    done, pending = await asyncio.wait(_pending_email_tasks, timeout=timeout)  # noqa: RUF059
     for t in pending:
         t.cancel()

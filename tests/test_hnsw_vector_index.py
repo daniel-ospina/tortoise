@@ -211,7 +211,7 @@ class TestHnswAutoUpdate:
         )
         _ensure_vector_index(g, "Document")
         hits = g.query(
-            f"CALL db.idx.vector.queryNodes('Document', 'embedding', 5, vecf32($vec)) "
+            f"CALL db.idx.vector.queryNodes('Document', 'embedding', 5, vecf32($vec)) "  # noqa: F541
             "YIELD node, score RETURN node.id",
             params={"vec": _vec([(0, 0.9)])},
         ).result_set
@@ -228,7 +228,7 @@ class TestHnswAutoUpdate:
                 params={"id": "hnsw247_pre", "vec": _vec([(0, 1.0)])},
             )
             hits2 = g.query(
-                f"CALL db.idx.vector.queryNodes('Document', 'embedding', 5, vecf32($vec)) "
+                f"CALL db.idx.vector.queryNodes('Document', 'embedding', 5, vecf32($vec)) "  # noqa: F541
                 "YIELD node, score RETURN node.id",
                 params={"vec": _vec([(0, 0.9)])},
             ).result_set

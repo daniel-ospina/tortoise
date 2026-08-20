@@ -114,7 +114,7 @@ def build_snapshot(proj) -> dict | None:
              "status": r[3] or "", "outdated": bool(r[4])}
             for r in rows
         ]
-    except Exception as e:  # noqa: BLE001 — degraded path never crashes
+    except Exception as e:  # noqa: BLE001, RUF100
         logger.warning("Fallback snapshot build query failed: %s", e)
         return None
 
@@ -130,7 +130,7 @@ def build_snapshot(proj) -> dict | None:
                 model.encode(texts, show_progress_bar=False), dtype=np.float64,
             )
             model_id = getattr(model, "model_id", "embedding-model")
-    except Exception as e:  # noqa: BLE001 — fall back to sklearn
+    except Exception as e:  # noqa: BLE001, RUF100
         logger.info("Fallback snapshot model encoding unavailable: %s", e)
 
     if doc_vecs is None:
@@ -141,7 +141,7 @@ def build_snapshot(proj) -> dict | None:
             # dense 50k × vocab array is an OOM risk; csr stays lean).
             doc_vecs = tv.fit_transform(texts)
             vectorizer = tv
-        except Exception as e:  # noqa: BLE001 — vectors optional; scorer falls back
+        except Exception as e:  # noqa: BLE001, RUF100
             logger.info("Fallback snapshot vectorization unavailable (sklearn): %s", e)
 
     return {
@@ -189,7 +189,7 @@ def search_snapshot(
     exclusion unless ``include_terminal`` (#1391), and ``exclude_status``
     compose. When no cached vectors exist, delegates to the legacy scorer.
     """
-    import numpy as np
+    import numpy as np  # noqa: I001
 
     from tortoise.embeddings import search_points
     from tortoise.search_engine import (
@@ -220,7 +220,7 @@ def search_snapshot(
 
     try:
         query_vec = _encode_query(query, snap)
-    except Exception:  # noqa: BLE001 — degraded path never crashes (#1375 R2)
+    except Exception:  # noqa: BLE001, RUF100
         query_vec = None
     scored: list[dict] = []
     vectors_failed = False
@@ -246,7 +246,7 @@ def search_snapshot(
                 for i in order
                 if sims[i] >= threshold
             ][:limit]
-        except Exception:  # noqa: BLE001 — transient vector failure → legacy
+        except Exception:  # noqa: BLE001, RUF100
             vectors_failed = True
     if (not scored and query_vec is None) or vectors_failed:
         # Cached vectors unavailable/failed — legacy in-memory scorer (same inputs).

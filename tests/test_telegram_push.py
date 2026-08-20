@@ -1,6 +1,6 @@
 """Tests for tortoise/telegram_push.py — standalone Telegram push module."""
 
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import httpx
 import pytest
@@ -47,7 +47,7 @@ def test_send_message_api_error(monkeypatch):
         return FakeResponse()
 
     monkeypatch.setattr("tortoise.telegram_push.httpx.post", mock_post)
-    with pytest.raises(TelegramPushError, match="ok=false.*chat not found"):
+    with pytest.raises(TelegramPushError, match="ok=false.*chat not found"):  # noqa: RUF043
         send_message("tok", "bad", "hi")
 
 

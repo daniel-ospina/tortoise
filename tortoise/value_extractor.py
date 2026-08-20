@@ -20,7 +20,7 @@ from pathlib import Path
 def compile_value_brief(packs_dir: Path | str | None = None) -> dict:
     """The closed vocabulary + kind semantics from the installed packs.
     The same source the prompts and the enforcer validate against."""
-    from tortoise.pack_registry import PackRegistry
+    from tortoise.pack_registry import PackRegistry  # noqa: I001
     import yaml
     packs_dir = Path(packs_dir) if packs_dir else \
         Path(__file__).resolve().parent.parent / "packs"
@@ -210,7 +210,7 @@ def validate_summary(summary: dict, vocab: dict | None = None,
             else:
                 # warn mode: proposal note, not an error (Phase B).
                 pass
-    for l in summary.get("logic", []) or []:
+    for l in summary.get("logic", []) or []:  # noqa: E741
         if not l.get("point"):
             errors.append("logic: missing point")
         if not l.get("sources"):

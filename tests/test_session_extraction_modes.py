@@ -141,7 +141,7 @@ def test_analyze_keys_subset_of_session_keys():
     builds None → mid-capture failure. A naive subset-vs-union check is
     tautological (_llm_provider_keys() unions analyze in by construction);
     the real invariant is: every analyze key must be an INGEST provider key."""
-    from tortoise.ingest import _PROVIDERS
+    from tortoise.ingest import _PROVIDERS  # noqa: I001
     from tortoise.analyze import _LLM_PROVIDERS
 
     ingest_keys = {key_env for _url, key_env in _PROVIDERS.values() if key_env}
@@ -197,7 +197,7 @@ def client(monkeypatch):
     TORTOISE_SESSION_LLM_MOCK=1 installs the offline MockModel extractor so
     the LLM path runs with zero network.
     """
-    from fastapi.testclient import TestClient
+    from fastapi.testclient import TestClient  # noqa: I001
     from tortoise.hosted_api import app, get_current_team
 
     with tempfile.TemporaryDirectory() as tmpdir:

@@ -18,11 +18,11 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.api import EventAPI                    # noqa: E402
-from tortoise.extractor import LLMExtractor          # noqa: E402
-from tortoise.ingest import build_model              # noqa: E402
-from tortoise.log import EventLog                     # noqa: E402
-from tortoise.projection import fold, split           # noqa: E402
+from tortoise.api import EventAPI  # noqa: E402, I001, RUF100
+from tortoise.extractor import LLMExtractor  # noqa: E402, RUF100
+from tortoise.ingest import build_model  # noqa: E402, RUF100
+from tortoise.log import EventLog  # noqa: E402, RUF100
+from tortoise.projection import fold, split  # noqa: E402, RUF100
 
 
 def _prf(pred: set, gold: set):
@@ -40,7 +40,7 @@ def main():
     ap.add_argument("--relation-model", default="openrouter:deepseek/deepseek-v4-flash")
     args = ap.parse_args()
 
-    gold = json.load(open(args.gold, encoding="utf-8"))
+    gold = json.load(open(args.gold, encoding="utf-8"))  # noqa: SIM115
     transcript = "Transcript\n" + "\n".join(f"S: {u}" for u in gold["utterances"]) + "\n"
 
     log = EventLog("/tmp/bench.jsonl")
@@ -53,7 +53,7 @@ def main():
     pts = fold(log.read_all())
     order = sorted(pts.values(), key=lambda p: p["created_at"])
     idx = {p["id"]: i for i, p in enumerate(order)}
-    stmts, ops = split(pts)
+    stmts, ops = split(pts)  # noqa: RUF059
 
     # points: extractor keeps every utterance → predicted_keep = all indices
     pred_keep = set(range(len(gold["utterances"])))

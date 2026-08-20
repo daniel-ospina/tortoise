@@ -96,7 +96,7 @@ def resolve_scorer(spec: str) -> Scorer:
             mod = importlib.import_module(cand)
             scorer = getattr(mod, attr)
             return scorer() if callable(scorer) and not isinstance(scorer, type) else scorer
-        except Exception as e:  # noqa: BLE001 — resolution failures → ConfigError
+        except Exception as e:  # noqa: BLE001, RUF100
             last_err = e
     raise ConfigError(
         f"cannot resolve scorer {spec!r} (tried {candidates}): {last_err}")

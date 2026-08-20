@@ -109,13 +109,13 @@ def test_kappa_middle_band_fixture_computed():
     a_labels, b_labels = [], []
     for i in range(2000):
         if i < 1211:
-            a_labels.append(L(i, "decision")); b_labels.append(L(i, "decision"))
+            a_labels.append(L(i, "decision")); b_labels.append(L(i, "decision"))  # noqa: E702
         elif i < 1622:
-            a_labels.append(L(i, "event")); b_labels.append(L(i, "event"))
+            a_labels.append(L(i, "event")); b_labels.append(L(i, "event"))  # noqa: E702
         elif i < 1811:
-            a_labels.append(L(i, "decision")); b_labels.append(L(i, "event"))
+            a_labels.append(L(i, "decision")); b_labels.append(L(i, "event"))  # noqa: E702
         else:
-            a_labels.append(L(i, "event")); b_labels.append(L(i, "decision"))
+            a_labels.append(L(i, "event")); b_labels.append(L(i, "decision"))  # noqa: E702
     k = kp.kappa(a_labels, b_labels)
     assert k == pytest.approx(0.55, abs=1e-9)
     assert 0.50 <= k < 0.60  # the middle band

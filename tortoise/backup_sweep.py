@@ -39,7 +39,7 @@ import os
 from contextlib import nullcontext
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any, Callable  # noqa: UP035
 
 from .backup_config import BackupConfig
 from .hosted_backup import _is_supabase_source, create_backup, prune_backups
@@ -436,7 +436,7 @@ def run_backup_sweep(
     AND backup_enabled) are enumerated (#655). A 0-eligible-teams result files
     a deduplicated NO_ELIGIBLE_TEAMS incident — the chronic-no-op alarm.
     """
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(timezone.utc)  # noqa: UP017
 
     if team_ids is None:
         if config.team_sweep_enabled:

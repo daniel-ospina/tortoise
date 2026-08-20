@@ -52,7 +52,7 @@ class RelationLabel:
         edge_src: int,
         edge_dst: int,
         strength: float,
-    ) -> "RelationLabel":
+    ) -> "RelationLabel":  # noqa: UP037
         """Canonical MITIGATES edge: Z (source) MITIGATES [X→A] (edge_src→edge_dst)."""
         return cls(
             type="MITIGATES",

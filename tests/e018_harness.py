@@ -1,5 +1,5 @@
 """E018: 3×6×2 factorial with 2 reps = 72 runs. Claim extraction across strategies, prompts, and models."""
-import sys, json, time, os, itertools, random
+import sys, json, time, os, itertools, random  # noqa: E401, F401, I001
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from model_adapters import OpenRouterModel
 
@@ -74,15 +74,15 @@ def compute_metrics(claims_dict):
         idx = str(i)
         pred = claims_dict.get(idx, None)
         if pred is None:
-            if u['is_claim']: fn += 1
-            else: tn += 1
+            if u['is_claim']: fn += 1  # noqa: E701
+            else: tn += 1  # noqa: E701
             continue
-        if isinstance(pred, str): pred = pred.lower() in ('true', 'yes', 'claim')
+        if isinstance(pred, str): pred = pred.lower() in ('true', 'yes', 'claim')  # noqa: E701
         actual = u['is_claim']
-        if pred and actual: tp += 1
-        elif pred and not actual: fp += 1
-        elif not pred and actual: fn += 1
-        else: tn += 1
+        if pred and actual: tp += 1  # noqa: E701
+        elif pred and not actual: fp += 1  # noqa: E701
+        elif not pred and actual: fn += 1  # noqa: E701
+        else: tn += 1  # noqa: E701
     p = tp/(tp+fp) if (tp+fp)>0 else 0
     r = tp/(tp+fn) if (tp+fn)>0 else 0
     f1 = 2*p*r/(p+r) if (p+r)>0 else 0
@@ -96,15 +96,15 @@ def run_single_pass(model_id, prompt_key, prompt_text, max_tokens, seed):
     t0 = time.time()
     raw = model.complete(system=prompt_text, user=payload)
     elapsed = time.time() - t0
-    if not raw: return None, elapsed
+    if not raw: return None, elapsed  # noqa: E701
     
     text = raw.strip()
     s, e = text.find('{'), text.rfind('}')
-    if s >= 0 and e > s: text = text[s:e+1]
+    if s >= 0 and e > s: text = text[s:e+1]  # noqa: E701
     try:
         result = json.loads(text)
         claims = result.get('claims', {})
-    except:
+    except:  # noqa: E722
         return None, elapsed
     
     metrics = compute_metrics(claims)
@@ -115,7 +115,7 @@ def run_reviewer(model_id, prompt_key, prompt_text, max_tokens, seed):
     """Two calls: extract → review → correct."""
     # Pass 1: extract
     metrics1, t1 = run_single_pass(model_id, prompt_key, prompt_text, max_tokens, seed)
-    if metrics1 is None: return None, t1
+    if metrics1 is None: return None, t1  # noqa: E701
     
     # Pass 2: review — feed extraction back and ask for corrections
     model = OpenRouterModel(model_id, max_tokens=max_tokens)
@@ -133,15 +133,15 @@ def run_reviewer(model_id, prompt_key, prompt_text, max_tokens, seed):
     t0 = time.time()
     raw2 = model.complete(system=review_prompt, user=payload2)
     elapsed2 = time.time() - t0 + t1
-    if not raw2: return metrics1, elapsed2  # fallback to pass 1
+    if not raw2: return metrics1, elapsed2  # fallback to pass 1  # noqa: E701
     
     text2 = raw2.strip()
     s2, e2 = text2.find('{'), text2.rfind('}')
-    if s2 >= 0 and e2 > s2: text2 = text2[s2:e2+1]
+    if s2 >= 0 and e2 > s2: text2 = text2[s2:e2+1]  # noqa: E701
     try:
         result2 = json.loads(text2)
         claims2 = result2.get('claims', {})
-    except:
+    except:  # noqa: E722
         return metrics1, elapsed2
     
     metrics2 = compute_metrics(claims2)
@@ -157,24 +157,24 @@ def run_debatecv(model_id, prompt_key, prompt_text, max_tokens, seed):
     payload = json.dumps({"utterances": utterances, "seed": seed})
     t0 = time.time()
     raw1 = model.complete(system=pro_prompt, user=payload)
-    if not raw1: return None, time.time()-t0
+    if not raw1: return None, time.time()-t0  # noqa: E701
     text1 = raw1.strip()
     s1, e1 = text1.find('{'), text1.rfind('}')
-    if s1 >= 0 and e1 > s1: text1 = text1[s1:e1+1]
-    try: claims_pro = json.loads(text1).get('claims', {})
-    except: return None, time.time()-t0
+    if s1 >= 0 and e1 > s1: text1 = text1[s1:e1+1]  # noqa: E701
+    try: claims_pro = json.loads(text1).get('claims', {})  # noqa: E701
+    except: return None, time.time()-t0  # noqa: E701, E722
     
     # Pass 2: Be strict — classify as non-claim if borderline
     anti_prompt = prompt_text + "\n\nWhen in doubt, classify as FALSE (not a claim). Err on the side of exclusion."
     payload2 = json.dumps({"utterances": utterances, "seed": seed + 1000})
-    t1 = time.time()
+    t1 = time.time()  # noqa: F841
     raw2 = model.complete(system=anti_prompt, user=payload2)
-    if not raw2: return None, time.time()-t0
+    if not raw2: return None, time.time()-t0  # noqa: E701
     text2 = raw2.strip()
     s2, e2 = text2.find('{'), text2.rfind('}')
-    if s2 >= 0 and e2 > s2: text2 = text2[s2:e2+1]
-    try: claims_anti = json.loads(text2).get('claims', {})
-    except: return None, time.time()-t0
+    if s2 >= 0 and e2 > s2: text2 = text2[s2:e2+1]  # noqa: E701
+    try: claims_anti = json.loads(text2).get('claims', {})  # noqa: E701
+    except: return None, time.time()-t0  # noqa: E701, E722
     
     # Pass 3: Synthesis — resolve disagreements
     disagreements = []
@@ -192,7 +192,7 @@ def run_debatecv(model_id, prompt_key, prompt_text, max_tokens, seed):
         f'Return ONLY: {{"claims": {{"{disagreements[0] if disagreements else 0}": true, ...}}}} for the DISPUTED indices only.'
     )
     payload3 = json.dumps({"utterances": {str(i): utterances[str(i)] for i in disagreements}, "seed": seed + 2000})
-    t2 = time.time()
+    t2 = time.time()  # noqa: F841
     raw3 = model.complete(system=synth_prompt, user=payload3)
     elapsed = time.time() - t0
     
@@ -206,7 +206,7 @@ def run_debatecv(model_id, prompt_key, prompt_text, max_tokens, seed):
                 resolved = json.loads(text3[s3:e3+1]).get('claims', {})
                 for k, v in resolved.items():
                     final_claims[k] = v
-            except: pass
+            except: pass  # noqa: E701, E722
     
     metrics = compute_metrics(final_claims)
     metrics['tokens'] = "3-calls"

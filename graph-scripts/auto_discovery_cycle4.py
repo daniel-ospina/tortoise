@@ -1,6 +1,6 @@
 """Cycle 4 — Decision: Clarify topology, find converged recommendation."""
 # Historical — uses embedded tortoise.db. Do not run against production Docker.
-import sys, os
+import sys, os  # noqa: E401, I001
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from tortoise.api import EventAPI, provenance
@@ -11,7 +11,7 @@ log = EventLog('auto-discovery-cycle4.jsonl')
 proj = FalkorProjection()
 api = EventAPI(log, initiated_by="user", agent_id="research-agent", projection=proj)
 
-pv = lambda quote: provenance("auto-discovery", (0,0), quote, speaker="research-agent", extracted_by="manual@1.0")
+pv = lambda quote: provenance("auto-discovery", (0,0), quote, speaker="research-agent", extracted_by="manual@1.0")  # noqa: E731
 
 api._emit("ingest_begin", source_id="converged-topology", extractor_version="manual@1.0")
 
@@ -69,12 +69,12 @@ ad_points = proj.query(
     "MATCH (p:Point) WHERE p.context = 'auto-discovery' AND p.is_operator = false "
     "RETURN p.id, p.content ORDER BY p.content"
 ).result_set
-scores = [(g.get(pid, 0), pid, content[:80]) for pid, content in ad_points]
+scores = [(g.get(pid, 0), pid, content[:80]) for pid, content in ad_points]  # noqa: F821
 # Still 0 because no resolution events are connected to auto-discovery context.
 # Grounding propagates from resolution events; research findings need resolution events to get non-zero.
 nonzero = [(s, p, c) for s, p, c in scores if s > 0]
 print(f"  Non-zero: {len(nonzero)}/{len(scores)}")
-for s, p, c in nonzero:
+for s, p, c in nonzero:  # noqa: B007
     print(f"  [{s:.4f}] {c}")
 
 # ── SYNTHESIS POINT ──────────────────────────────────────────────────────
@@ -101,4 +101,4 @@ api.add_operator("IMPL", [synthesis, synthesis], "auto-discovery",
     pv("Synthesis self-referential — converged from all prior IMPL chains"))
 
 api._emit("ingest_end", source_id="converged-topology")
-print(f"\nCycle 4 complete: synthesis point + topology analysis")
+print(f"\nCycle 4 complete: synthesis point + topology analysis")  # noqa: F541

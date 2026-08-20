@@ -13,7 +13,7 @@ by the selfhost daemon → 401 (keys are not portable across surfaces); the
 migration destination rejects duplicate emails → 409. Skips in remote mode
 (local selfhost server only).
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import os
 import shutil
@@ -73,7 +73,7 @@ def _boot_selfhost(tmpdir: str):
         [sys.executable, "-m", "uvicorn", "tortoise.selfhost:app",
          "--host", "127.0.0.1", "--port", str(port), "--log-level", "warning"],
         env=env, cwd=str(REPO_ROOT),
-        stdout=open(log_path, "wb"), stderr=subprocess.STDOUT,
+        stdout=open(log_path, "wb"), stderr=subprocess.STDOUT,  # noqa: SIM115
         start_new_session=True)
     base = f"http://127.0.0.1:{port}"
     deadline = time.time() + 60
@@ -86,7 +86,7 @@ def _boot_selfhost(tmpdir: str):
                 with urllib.request.urlopen(f"{base}/health", timeout=2) as r:
                     if r.status == 200:
                         return base, proc
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001, RUF100
                 time.sleep(0.25)
         raise RuntimeError("selfhost not ready in 60s")
     except Exception:
@@ -111,7 +111,7 @@ def selfhost_server():
         try:
             base, proc = _boot_selfhost(tmpdir)
             break
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001, RUF100
             last_exc = e  # _boot_selfhost kills its own proc on failure
     if base is None:
         raise RuntimeError(f"selfhost failed to boot after 3 attempts: {last_exc}")

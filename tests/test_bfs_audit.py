@@ -7,7 +7,7 @@ Run with: python3 -m pytest tests/test_bfs_audit.py -v
 """
 
 import subprocess
-import sys
+import sys  # noqa: F401
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -21,7 +21,7 @@ def _grep(pattern: str, *dirs: str) -> list[str]:
             capture_output=True, text=True, timeout=15,
         )
         lines = result.stdout.strip().split("\n")
-        return [l for l in lines if l.strip()]
+        return [l for l in lines if l.strip()]  # noqa: E741
     except subprocess.TimeoutExpired:
         return []
 
@@ -33,7 +33,7 @@ def test_no_propagate_shock_callers():
     # All references to propagate_shock (the word)
     all_refs = _grep("propagate_shock", "tortoise/", "graph-scripts/", "validation/", "tests/")
     filtered = [
-        l for l in all_refs
+        l for l in all_refs  # noqa: E741
         if "__pycache__" not in l and "test_bfs_audit.py" not in l and "test_e2e_extraction_ep.py" not in l
     ]
 
@@ -47,7 +47,7 @@ def test_no_propagate_shock_callers():
 
     for line in filtered:
         path_part = line.split(":")[0]
-        full_path = ROOT / path_part
+        full_path = ROOT / path_part  # noqa: F841
 
         # #378: projection.py was split into the projection/ package — the
         # deprecated definition now lives in projection/propagation.py.
@@ -67,7 +67,7 @@ def test_no_propagate_shock_callers():
 
     # The only "production" reference is a comment: no actual call
     assert len(callers["production_code"]) == 0, (
-        f"PRODUCTION CODE CALLS propagate_shock:\n" + "\n".join(callers["production_code"])
+        f"PRODUCTION CODE CALLS propagate_shock:\n" + "\n".join(callers["production_code"])  # noqa: F541
     )
     assert len(callers["definition (deprecated)"]) == 1, (
         "Expected exactly 1 deprecated definition in projection.py"
@@ -86,7 +86,7 @@ def test_no_propagate_shock_callers():
 def test_no_confidence_readers():
     """Assert: only EP writes n.confidence; SDK reads it (field read, not BFS-dependent)."""
     all_refs = _grep("n\\.confidence", "tortoise/", "graph-scripts/", "validation/", "tests/")
-    filtered = [l for l in all_refs if "__pycache__" not in l and "test_bfs_audit.py" not in l and "test_e2e_extraction_ep.py" not in l]
+    filtered = [l for l in all_refs if "__pycache__" not in l and "test_bfs_audit.py" not in l and "test_e2e_extraction_ep.py" not in l]  # noqa: E741
 
     writers: list[str] = []       # SET n.confidence = ...
     readers: list[str] = []       # RETURN n.confidence (read-only)
@@ -104,7 +104,7 @@ def test_no_confidence_readers():
             readers.append(line)
         elif "validation/" in path_part:
             readers.append(line)  # validation/test_docker_ep.py — EP test, not BFS
-        elif "/graph-scripts/" in path_part:
+        elif "/graph-scripts/" in path_part:  # noqa: SIM114
             readers.append(line)
         elif "/tests/" in path_part:
             readers.append(line)

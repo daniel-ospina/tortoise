@@ -26,13 +26,13 @@ def test_bad_relative_path_rejected():
 
 def test_good_absolute_path_accepted():
     """Fixture with absolute path -> hook ACCEPTS (rc=0)."""
-    rc, out = _run_guard(REPO / "tests/fixtures/redis-guard/good_absolute_path.py")
+    rc, out = _run_guard(REPO / "tests/fixtures/redis-guard/good_absolute_path.py")  # noqa: RUF059
     assert rc == 0
 
 
 def test_real_test_dir_import_allowed():
     """Real test files (allowlisted) with direct redislite imports pass."""
-    rc, out = _run_guard(REPO / "tests" / "test_guard.py")
+    rc, out = _run_guard(REPO / "tests" / "test_guard.py")  # noqa: RUF059
     assert rc == 0
 
 

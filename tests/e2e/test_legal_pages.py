@@ -280,7 +280,7 @@ class _BalanceParser(HTMLParser):
     """Stack-tracking parser: fails on mismatched closes, non-empty stack at
     EOF, or premature </html>/</body>. Void elements never push."""
 
-    VOID = {"meta", "link", "br", "img", "input", "hr", "source"}
+    VOID = {"meta", "link", "br", "img", "input", "hr", "source"}  # noqa: RUF012
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -1018,7 +1018,7 @@ def test_crawl_external_links_resolve(page: Page) -> None:
                     last = None
                     break
                 last = f"{url} → {r.status}"
-            except Exception as exc:  # noqa: BLE001 — crawl must report any failure
+            except Exception as exc:  # noqa: BLE001, RUF100
                 last = f"{url} → {type(exc).__name__}: {exc}"
             time.sleep(1)
         if last:

@@ -33,7 +33,7 @@ import os
 import re
 import time
 
-__all__ = [
+__all__ = [  # noqa: RUF022
     "BillingError", "BillingConfigError", "StripeAPIError",
     "PriceCatalog", "StripeClient",
     "effective_tier", "apply_limits", "subscription_plan",
@@ -116,7 +116,7 @@ class PriceCatalog:
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as e:
-            raise BillingConfigError(f"STRIPE_PRICE_IDS is not valid JSON: {_scrub_secrets(str(e))}")
+            raise BillingConfigError(f"STRIPE_PRICE_IDS is not valid JSON: {_scrub_secrets(str(e))}")  # noqa: B904
         if not isinstance(data, dict) or not data:
             raise BillingConfigError("STRIPE_PRICE_IDS must be a JSON object of tier → intervals")
 
@@ -139,7 +139,7 @@ class PriceCatalog:
                 raise BillingError(f"tier {tier!r} missing interval(s) in STRIPE_PRICE_IDS: {sorted(missing)}")
             entry = {}
             for interval in ("monthly", "annual"):
-                price_id, amount_usd = self._parse_entry(tier, interval, intervals[interval])
+                price_id, amount_usd = self._parse_entry(tier, interval, intervals[interval])  # noqa: RUF059
                 if not price_id.startswith("price_"):
                     raise BillingError(
                         f"STRIPE_PRICE_IDS[{tier!r}][{interval!r}] id {price_id!r} must start with 'price_'"
@@ -264,7 +264,7 @@ class StripeClient:
                     resp = client.post(url, data=params or {}, headers=headers)
                 else:
                     resp = client.get(url, params=params or {}, headers=headers)
-        except Exception as e:  # noqa: BLE001 — httpx errors of every kind
+        except Exception as e:  # noqa: BLE001, RUF100
             raise StripeAPIError(f"stripe {method} {path} failed: {redact_error(e)}") from e
         if resp.status_code >= 400:
             raise StripeAPIError(
@@ -272,7 +272,7 @@ class StripeClient:
             )
         try:
             return resp.json()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001, RUF100
             raise StripeAPIError(f"stripe {method} {path} returned non-JSON: {redact_error(e)}") from e
 
     # ── Stripe resources ────────────────────────────────────────────
@@ -359,7 +359,7 @@ class StripeClient:
         try:
             timestamp = int(ts)
         except (TypeError, ValueError):
-            raise BillingError("malformed Stripe-Signature timestamp")
+            raise BillingError("malformed Stripe-Signature timestamp")  # noqa: B904
         if abs(int(time.time()) - timestamp) > tolerance_s:
             raise BillingError(
                 f"webhook timestamp outside {tolerance_s}s tolerance — rejecting stale event"
@@ -373,7 +373,7 @@ class StripeClient:
                 try:
                     return json.loads(payload)
                 except (ValueError, TypeError) as e:
-                    raise BillingError(f"webhook payload is not valid JSON: {e.__class__.__name__}")
+                    raise BillingError(f"webhook payload is not valid JSON: {e.__class__.__name__}")  # noqa: B904
         raise BillingError("webhook signature verification failed")
 
 
@@ -420,7 +420,7 @@ def apply_limits(sdk, team_id: str, tier: str) -> None:
 
     lim = tier_limits(tier)
     try:
-        from tortoise.supabase_control import (
+        from tortoise.supabase_control import (  # noqa: I001
             get_control_plane, is_supabase_enabled, update_team_billing,
         )
         if is_supabase_enabled():

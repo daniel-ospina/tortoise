@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import os
 import sys
-import tempfile
+import tempfile  # noqa: F401
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -375,8 +375,8 @@ def test_get_relationships_regression_full_content(sdk):
 
 # ── Task 5: dense-corpus fuzz — preservation + payload budget (#1353 D3/D4) ──
 
-import random
-from collections import defaultdict
+import random  # noqa: E402
+from collections import defaultdict  # noqa: E402
 
 
 def test_fuzz_critical_classes_always_survive(sdk, seed=42):
@@ -399,7 +399,7 @@ def test_fuzz_critical_classes_always_survive(sdk, seed=42):
     supersedes_out: dict[str, str] = {}             # new → old
 
     # 6 IMPL ops, ~10 endpoints each
-    for oi in range(6):
+    for oi in range(6):  # noqa: B007
         src = ids[rng.randrange(len(ids))]
         tgts = rng.sample([i for i in ids if i != src], 10)
         op = sdk.create_operator("IMPL", src, tgts)
@@ -503,7 +503,7 @@ def test_fuzz_critical_classes_always_survive(sdk, seed=42):
 
 # ── Task 2: fetch_point_epistemic_state + SearchResult promoted fields ───
 
-from tortoise.search_engine import fetch_point_epistemic_state, SearchResult, SearchScores
+from tortoise.search_engine import fetch_point_epistemic_state, SearchResult, SearchScores  # noqa: E402, I001
 
 
 def test_fetch_state_basic(sdk):

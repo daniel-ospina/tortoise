@@ -308,7 +308,7 @@ class TestTeamKeysRevoke:
         monkeypatch.chdir(tmp_path)
         with mock.patch("builtins.input") as inp, \
              mock.patch("urllib.request.urlopen", return_value=_ok_response(
-                 b'{"revoked": true, "key_id": "kid1", "revoked_at": "2026-08-11T10:05:00Z"}')) as urlopen:
+                 b'{"revoked": true, "key_id": "kid1", "revoked_at": "2026-08-11T10:05:00Z"}')) as urlopen:  # noqa: F841
             rc = main(["team", "keys", "revoke", "kid1", "--json"])
         assert rc == 0
         assert not inp.called

@@ -7,10 +7,10 @@ Integration test that builds a graph with:
 
 Verifies that topic_summarize correctly classifies each zone.
 """
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
-import os
-import sys
+import os  # noqa: F401
+import sys  # noqa: F401
 
 import pytest
 from tortoise.sdk import TortoiseSDK
@@ -389,7 +389,7 @@ class TestTopicSummarizationRetractedExclusion:
     def test_retracted_points_excluded_from_seeds(self, sdk):
         """Points with status='retracted' are not returned in topic neighborhood."""
         # Create a live point and a retracted point on the same topic
-        live = sdk.create_point("statement", "Pricing should be value-based retracted_test")
+        live = sdk.create_point("statement", "Pricing should be value-based retracted_test")  # noqa: F841
         retracted = sdk.create_point("statement", "Pricing should be cost-plus retracted_test")
         rid = retracted["id"]
 

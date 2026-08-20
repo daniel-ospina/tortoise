@@ -84,7 +84,7 @@ def _transport_context(monkeypatch):
     unset) and no team context (quota skipped). Restore after each test —
     the same pattern as tests/test_mcp_server.py::_transport_context.
     """
-    from tortoise.mcp_auth import (
+    from tortoise.mcp_auth import (  # noqa: I001
         _current_team_id, _current_team_limits, _transport_mode,
     )
     monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
@@ -257,7 +257,7 @@ class TestE2E17Dispatch:
             rb = ms.tortoise_index_files(str(root_b), extract_metadata=False)
             g = sdk._get_proj().g
             urls = [r[0] for r in g.query("MATCH (s:Source) RETURN s.url").result_set]
-            assert urls == [f"corpus://corpus/s1.md"], f"collision arm: {urls}"
+            assert urls == [f"corpus://corpus/s1.md"], f"collision arm: {urls}"  # noqa: F541
             # 1N Sources — the same-basename fork collapsed onto one url set
             assert _count(g, "MATCH (s:Source) RETURN count(s)") == 1
             assert _count(g, "MATCH (e:Event) RETURN count(e)") == 1
@@ -379,7 +379,7 @@ class TestE2E17HttpRefusal:
         assert "tortoise_index_files" not in names, (
             "filesystem-walk tool must not be discoverable over tenant HTTP")
 
-        r, body = self._mcp_post(tc, {
+        r, body = self._mcp_post(tc, {  # noqa: RUF059
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
             "params": {"name": "tortoise_index_files",
                        "arguments": {"directory": str(Path("/tmp"))}},

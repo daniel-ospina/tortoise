@@ -32,7 +32,7 @@ def fresh_sdk():
     try:
         yield sdk
     finally:
-        try:
+        try:  # noqa: SIM105
             sdk.close()
         except Exception:
             pass
@@ -232,7 +232,7 @@ class TestNANDRealPath:
                 # the NAND operator degenerate and silently excluded from EP.
                 b = sdk.create_point("statement", "contradiction target", status="live")
                 sdk.set_point_baseline(b["id"], 1, 1)  # #344: neutral baseline (gate active)
-                op = sdk.create_operator("NAND", a, [b["id"]])
+                op = sdk.create_operator("NAND", a, [b["id"]])  # noqa: F841
                 sdk._apply_source_inheritance(recency_decay=1.0)
                 result = sdk.compute_confidence()
                 conf_a = result["confidences"][a]["mean"]
@@ -276,7 +276,7 @@ class TestReliabilityAPI:
         with fresh_sdk() as sdk:
             url = "https://tiered.example"
             sdk.create_point("statement", "tiered claim", extractedFrom=url)
-            now = datetime.now(timezone.utc).isoformat()
+            now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
             sdk._get_proj().g.query(
                 "MATCH (s:Source {url:$url}) SET s.credibilityTier = 'T1', s.sourceDate = $ts, "
                 "s.ingestedAt = $ts",
@@ -348,7 +348,7 @@ class TestReliabilityAPI:
             assert r["components"]["reason"] == "untiered; assessment-only"
             # EP unaffected: untiered sources never feed EP — point stays neutral
             sdk._apply_source_inheritance(recency_decay=1.0)
-            from tortoise.sdk import TortoiseSDK as _S
+            from tortoise.sdk import TortoiseSDK as _S  # noqa: F401
             pts = sdk._get_proj().g.query(
                 "MATCH (p:Point) WHERE p.pointKind = 'statement' RETURN p.id"
             ).result_set
@@ -359,14 +359,14 @@ class TestReliabilityAPI:
 
 def _give_reputation(sdk, agent: str) -> None:
     """Give an agent a strong track record (rep > 0.5) via event outcomes."""
-    sdk._get_proj().g.query(
+    sdk._get_proj().g.query(  # noqa: B018
         "CREATE (s:Subject {id:$aid, name:$aid, subjectKind:'naturalPerson'}) "
         "CREATE (e:Event {eventId: $eid, eventKind:'review'}) "
         "CREATE (s)-[:performs]->(e) RETURN e.eventId",
         params={"aid": agent, "eid": f"e_{agent}"},
     ).result_set
     p_claim = sdk.create_point("statement", f"{agent}'s correct claim")
-    sdk._get_proj().g.query(
+    sdk._get_proj().g.query(  # noqa: B018
         "MATCH (e:Event {eventId:$eid}), (n:Point {id:$id}) CREATE (e)-[:IMPL]->(n)",
         params={"eid": f"e_{agent}", "id": p_claim["id"]},
     ).result_set
@@ -465,14 +465,14 @@ class TestAssessSource:
             sdk.assess_source(url, "growing-agent", 0.1, "assessment before reputation")
             r_before = sdk.get_source_reliability(url)
             # Raise the assessor's reputation
-            sdk._get_proj().g.query(
+            sdk._get_proj().g.query(  # noqa: B018
                 "CREATE (s:Subject {id:'growing-agent', name:'growing-agent', "
                 "subjectKind:'naturalPerson'}) "
                 "CREATE (e:Event {eventId:'e2', eventKind:'review'}) "
                 "CREATE (s)-[:performs]->(e) RETURN e.eventId"
             ).result_set
             p_claim = sdk.create_point("statement", "growing agent's claim")
-            sdk._get_proj().g.query(
+            sdk._get_proj().g.query(  # noqa: B018
                 "MATCH (e:Event {eventId:'e2'}), (n:Point {id:$id}) CREATE (e)-[:IMPL]->(n)",
                 params={"id": p_claim["id"]},
             ).result_set
@@ -507,7 +507,7 @@ class TestAssessSource:
 class TestSourceTierAPI:
     def test_create_source_with_tier_dual_write(self):
         with fresh_sdk() as sdk:
-            r = sdk.create_source("https://kind.example", "github_issue", tier="T2")
+            r = sdk.create_source("https://kind.example", "github_issue", tier="T2")  # noqa: F841
             rows = sdk._get_proj().g.query(
                 "MATCH (s:Source {url:$url}) RETURN s.sourceKind, s.credibilityTier",
                 params={"url": "https://kind.example"},
@@ -528,7 +528,7 @@ class TestSourceTierAPI:
     def test_url_collision_preserves_existing_sourcekind(self):
         """A Source auto-created by _link_source keeps its sourceKind; tier lands on credibilityTier."""
         with fresh_sdk() as sdk:
-            p = sdk.create_point("statement", "from link", extractedFrom="https://collide.example")
+            p = sdk.create_point("statement", "from link", extractedFrom="https://collide.example")  # noqa: F841
             # Auto-created Source has sourceKind='document'
             sdk.create_source("https://collide.example", "T0", tier="T0")
             rows = sdk._get_proj().g.query(
@@ -555,13 +555,13 @@ class TestSourceTierAPI:
         with fresh_sdk() as sdk:
             url = "https://retier.example"
             p = sdk.create_point("statement", "claim", extractedFrom=url)
-            now = datetime.now(timezone.utc).isoformat()
+            now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
             sdk._get_proj().g.query(
                 "MATCH (s:Source {url:$url}) SET s.credibilityTier = 'T2', s.sourceDate = $ts, "
                 "s.ingestedAt = $ts",
                 params={"url": url, "ts": now},
             )
-            r1 = sdk.get_source_reliability(url)
+            r1 = sdk.get_source_reliability(url)  # noqa: F841
             sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=3600)
             alpha_before = sdk.get_point(p["id"]).get("ep_alpha")  # 3.0
             # Re-tier to T0 via the sanctioned writer
@@ -617,7 +617,7 @@ class TestSourceTierAPI:
 class TestMCPRegistration:
     def test_new_tools_registered_and_http_allowed(self):
         """New MCP tools are registered and present in the HTTP allowlist."""
-        import asyncio
+        import asyncio  # noqa: I001
         from tortoise.mcp_server import mcp
         from tortoise.mcp_auth import HTTP_ALLOWED
 
@@ -655,7 +655,7 @@ class TestReviewGateFixes:
 
     def test_multi_source_reliability_aggregation(self):
         """get_source_reliability on multi-source point asserts the aggregation formula."""
-        import math as _math
+        import math as _math  # noqa: F401
         with fresh_sdk() as sdk:
             url = "https://multi-rel.example"
             p = sdk.create_point("statement", "multi", extractedFrom=url)
@@ -743,12 +743,12 @@ class TestReviewGateFixes:
             assert r2["score"] == 1.0
 
     def test_set_source_tier_missing_source_raises(self):
-        with fresh_sdk() as sdk:
+        with fresh_sdk() as sdk:  # noqa: SIM117
             with pytest.raises(ValueError):
                 sdk.set_source_tier("https://nope.example", "T1")
 
     def test_create_source_invalid_tier_raises(self):
-        with fresh_sdk() as sdk:
+        with fresh_sdk() as sdk:  # noqa: SIM117
             with pytest.raises(ValueError):
                 sdk.create_source("https://bad-tier.example", "document", tier="T9")
 
@@ -790,7 +790,7 @@ class TestMCPAnnotationsContract:
         A regression adding readOnlyHint would silently auto-approve a
         cache-writing tool (plan Task 6 acceptance).
         """
-        import asyncio
+        import asyncio  # noqa: I001
         from tortoise.mcp_server import mcp
 
         async def _get():
@@ -807,7 +807,7 @@ class TestMCPAnnotationsContract:
         )
 
     def test_assess_and_set_tier_are_destructive_hint(self):
-        import asyncio
+        import asyncio  # noqa: I001
         from tortoise.mcp_server import mcp
 
         async def _get():

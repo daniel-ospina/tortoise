@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Sequence  # noqa: UP035
 
 ALPHA = 0.10                       # 90% CI
 DEFAULT_N_RESAMPLES = 2000

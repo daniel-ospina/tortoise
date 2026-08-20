@@ -40,7 +40,7 @@ import math
 import statistics
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Callable, Literal
+from typing import Callable, Literal  # noqa: UP035
 
 # ── Pre-registered numbers (scoping §Plan / issue body — do NOT drift) ──────
 
@@ -326,7 +326,7 @@ def run_arm(
                 stats=summarize(samples_list), warmup_iters=warmup_iters,
                 invalidated=True, invalidated_reason=error,
             )
-        if breaker_is_open is not None and breaker_names:
+        if breaker_is_open is not None and breaker_names:  # noqa: SIM102
             if any(breaker_is_open(b) for b in breaker_names):
                 breaker_tripped = True
                 # First-class failure: short-circuit sampled from an OPEN
@@ -351,7 +351,7 @@ def _time_fn(fn) -> tuple[float, int, str | None]:
     try:
         elapsed, count, error = fn()
         return elapsed, count, error
-    except Exception as e:  # noqa: BLE001 — classify at the arm boundary
+    except Exception as e:  # noqa: BLE001, RUF100
         return (time.perf_counter() - t0) * 1000.0, 0, str(e)
 
 

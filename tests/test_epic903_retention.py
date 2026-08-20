@@ -7,7 +7,7 @@ calibration gate; live claims; F3 = calibrated fails-to-converge fixture).
 from __future__ import annotations
 
 import random
-from datetime import datetime, timezone
+from datetime import datetime, timezone  # noqa: F401
 
 from tests.epic903_fixtures import FIXED_SEED, f2_staleness_regions, f3_nonconvergent
 
@@ -149,7 +149,7 @@ class TestDe2e12dCrashInterplay:
             proj = f.sdk._get_proj()
             proj.g.query(
                 "MATCH (n:Point) SET n.ep_dirty = null, n.ep_dirty_at = null")
-            null = [c for c in f.regions if c.name == "null"][0]
+            null = [c for c in f.regions if c.name == "null"][0]  # noqa: RUF015
             # Null-stamp claims must be null (never dreamed → crash window).
             for cid in null.claims:
                 assert _read_stamp(proj, cid) is None

@@ -60,7 +60,7 @@ def _fresh_sdk():
         sdk._get_proj().g.query("MATCH (n) DETACH DELETE n")
         yield sdk
     finally:
-        try:
+        try:  # noqa: SIM105
             sdk.close()
         except Exception:
             pass
@@ -242,7 +242,7 @@ def test_tolerance_exact_zero_factor_identical():
             _build_deterministic(proj, points, ops)
             ep = TortoiseEP(proj)
             seeds = ["op01", "op12", "op23", "op34"] if full else ["c1", "c2"]
-            iterations, converged = _seeded(
+            iterations, converged = _seeded(  # noqa: RUF059
                 42, lambda: ep.run(seeds, max_hops=None))
             assert converged is True
             assert ep._last_affected == {"c0", "c1", "c2", "c3", "c4"}
@@ -396,7 +396,7 @@ def test_vector_c_nand_boundary():
     tolerance of the full run (Sumer/Acar/Ihler boundary-exponential regime)."""
     from tortoise.ep import TortoiseEP
     with _fresh_sdk() as sdk:
-        ep, ids = _build_vector_fixture(sdk, "c")
+        ep, ids = _build_vector_fixture(sdk, "c")  # noqa: RUF059
         z = ids["z"]
         # Baseline the two ends so EP is well-posed.
         sdk.set_point_baseline(z[0], 8.0, 1.0)
@@ -729,7 +729,7 @@ def test_module_rng_still_drives_shuffle():
             proj = sdk._get_proj()
             _build_deterministic(proj, WEAK_CHAIN_POINTS, WEAK_CHAIN_OPS)
             ep = TortoiseEP(proj)
-            _seeded(seed, lambda: ep.run(["c1", "c2"], max_hops=None))
+            _seeded(seed, lambda: ep.run(["c1", "c2"], max_hops=None))  # noqa: B023
             results[seed] = _mean(ep, "c2")
     # Different seeds may give slightly different fixed points on this weak-
     # potential chain (unique fixed point → should match within tol); the

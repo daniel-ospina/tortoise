@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.log import EventLog  # noqa: E402
+from tortoise.log import EventLog  # noqa: E402, RUF100
 
 
 def _tmp(name):
@@ -40,7 +40,7 @@ def test_append_writes_valid_jsonl():
     p = _tmp("events.jsonl")
     log = EventLog(p)
     log.append({"type": "PointAdded", "content": "hello"})
-    with open(p, "r", encoding="utf-8") as f:
+    with open(p, "r", encoding="utf-8") as f:  # noqa: UP015
         line = f.readline().strip()
     parsed = json.loads(line)
     assert parsed == {"type": "PointAdded", "content": "hello"}
@@ -52,10 +52,10 @@ def test_multiple_appends_multiple_lines():
     log = EventLog(p)
     for i in range(3):
         log.append({"n": i})
-    with open(p, "r", encoding="utf-8") as f:
-        lines = [l.strip() for l in f if l.strip()]
+    with open(p, "r", encoding="utf-8") as f:  # noqa: UP015
+        lines = [l.strip() for l in f if l.strip()]  # noqa: E741
     assert len(lines) == 3
-    assert [json.loads(l)["n"] for l in lines] == [0, 1, 2]
+    assert [json.loads(l)["n"] for l in lines] == [0, 1, 2]  # noqa: E741
     print("PASS test_multiple_appends_multiple_lines")
 
 
@@ -99,7 +99,7 @@ def test_append_non_serializable_raises():
     log = EventLog(_tmp("events.jsonl"))
     try:
         log.append({"bad": {1, 2, 3}})  # set is not JSON-serializable
-        assert False, "should have raised"
+        assert False, "should have raised"  # noqa: B011
     except TypeError:
         pass
     print("PASS test_append_non_serializable_raises")
@@ -190,7 +190,7 @@ def test_invalid_cursor_raises():
     for bad in ("not-base64!", "", "   ", "eyJ2IjoyfQ=="):  # v=2 unsupported
         try:
             log.read_after(bad)
-            assert False, f"should have raised for {bad!r}"
+            assert False, f"should have raised for {bad!r}"  # noqa: B011
         except ValueError:
             pass
     print("PASS test_invalid_cursor_raises")

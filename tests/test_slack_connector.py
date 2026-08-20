@@ -1,8 +1,8 @@
 """Tests for Slack connector — message/thread → EventRecorded mapping + webhook sig."""
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 
 import json
-import pytest
+import pytest  # noqa: F401
 from tortoise.connectors.slack import SlackConnector, _ts_to_iso, _verify_slack_sig
 
 
@@ -150,7 +150,7 @@ def test_poll_empty_config_returns_empty():
 # ── Webhook signature ────────────────────────────────────────────
 
 def test_verify_slack_sig_valid():
-    import hmac, hashlib, time
+    import hmac, hashlib, time  # noqa: E401, I001
     secret = b"slacksecret"
     timestamp = str(int(time.time()))
     body = b'{"event":{"type":"message"}}'
@@ -269,11 +269,11 @@ def test_webhook_processing_error_returns_500():
         )
         try:
             urllib.request.urlopen(req, timeout=5)
-            assert False, "expected HTTP 500"
+            assert False, "expected HTTP 500"  # noqa: B011
         except urllib.error.HTTPError as e:
             assert e.code == 500
         except urllib.error.URLError:
-            assert False, "handler must respond with 500, not drop the connection"
+            assert False, "handler must respond with 500, not drop the connection"  # noqa: B011
     finally:
         sc.stop_webhook()
 
@@ -297,10 +297,10 @@ def test_webhook_non_dict_payload_returns_400():
         )
         try:
             urllib.request.urlopen(req, timeout=5)
-            assert False, "expected HTTP 400"
+            assert False, "expected HTTP 400"  # noqa: B011
         except urllib.error.HTTPError as e:
             assert e.code == 400
         except urllib.error.URLError:
-            assert False, "handler must respond with 400, not drop the connection"
+            assert False, "handler must respond with 400, not drop the connection"  # noqa: B011
     finally:
         sc.stop_webhook()

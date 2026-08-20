@@ -9,9 +9,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from battery.recall.matcher import (
-    FactualProbe,
-    RecallResult,
+from battery.recall.matcher import (  # noqa: I001
+    FactualProbe,  # noqa: F401
+    RecallResult,  # noqa: F401
     match_recall,
     default_probes,
 )

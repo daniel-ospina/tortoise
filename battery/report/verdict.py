@@ -64,7 +64,7 @@ def decide_verdict(classifications,
                    ) -> Verdict:
     """Apply the pre-committed 4-branch verdict rule (E2E-3.2)."""
     # INCONCLUSIVE branch first: recall matching failed.
-    if matched_recall:
+    if matched_recall:  # noqa: SIM102
         if (matched_recall.get("trigger_fired")
                 and float(matched_recall.get("subset_pct", 1.0)) < 0.5):
             return Verdict(outcome="INCONCLUSIVE",
