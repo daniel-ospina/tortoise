@@ -1,4 +1,5 @@
 """Tests for mcp_server — MCP tool registration, _safe wrapper, and tool behavior."""
+import os
 import sys
 from pathlib import Path
 
@@ -934,7 +935,7 @@ class TestStdioEntrypointToolRegistration:
     with "Can't connect to Tortoise"). Spawns the real entrypoint as a
     subprocess and asserts tools/list returns the full registry."""
 
-    def test_stdio_entrypoint_serves_full_registry(self):
+    def test_stdio_entrypoint_serves_full_registry(self, tmp_path):
         import json
         import os
         import select
@@ -948,6 +949,13 @@ class TestStdioEntrypointToolRegistration:
         # #942 test-only escape hatch: tools/list needs no DB; avoid a
         # hard error from main()'s missing-config guard.
         env["TORTOISE_ALLOW_EMBEDDED"] = "1"
+        # Isolate the subprocess's embedded DB: tools/list probes the default
+        # ~/.tortoise/tortoise.db path, which collides with the running pytest
+        # session's own embedded servers (_probe_embedded_busy →
+        # EmbeddedStoreBusyError → subprocess dies → JSONDecodeError on empty
+        # stdout). A per-test tmp_path (auto-cleaned by pytest) avoids the
+        # ambient default entirely.
+        env["TORTOISE_DB_PATH"] = str(tmp_path / "tortoise.db")
         repo_root = Path(__file__).resolve().parents[1]
 
         proc = subprocess.Popen(

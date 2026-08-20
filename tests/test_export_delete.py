@@ -152,8 +152,16 @@ def _seed_supabase_team(fake, *, role: str = "owner", deleted_at: str | None = N
 
 
 def _seed_graph(db_path: str, team_id: str = TEAM_ID, *,
-                n_points: int = 2, n_events: int = 1) -> None:
-    """Seed the team's FalkorDB graph: points + a Tag + a TAGGED edge + events."""
+                n_points: int = 2, n_events: int = 1) -> TortoiseSDK:
+    """Seed the team's FalkorDB graph: points + a Tag + a TAGGED edge + events.
+
+    Returns the SDK — the caller MUST keep the returned reference alive until
+    the export/read that follows: with TORTOISE_FAST_ATEXIT=1 (tests/conftest)
+    and the #1475 close-on-GC finalizer, the seed SDK going out of scope fires
+    SHUTDOWN NOSAVE on the server, so a later read on the same path either
+    reconnects to a dead socket or a fresh empty DB (redis.socket
+    ConnectionError / 0 nodes — the test-isolation flake class).
+    """
     sdk = TortoiseSDK(db_path, namespace=team_id)
     g = sdk._get_proj().g
     for i in range(n_points):
@@ -172,6 +180,7 @@ def _seed_graph(db_path: str, team_id: str = TEAM_ID, *,
             params={"s": i + 1, "ts": "2026-08-01T00:00:00Z",
                     "eid": f"ev-{i}", "p": '{"id":"pt-0"}'},
         )
+    return sdk  # caller keeps this alive until the export reads the graph
 
 
 def _seed_registry(db_path: str, team_id: str = "reg-team-1", *,
@@ -265,7 +274,7 @@ class TestExportSupabase:
         monkeypatch.setattr(ha_mod, "_EXPORT_MAX_EVENTS", 3)
         tc, fake, db_path = sb_client
         _seed_supabase_team(fake)
-        _seed_graph(db_path, n_events=5)
+        seed_sdk = _seed_graph(db_path, n_events=5)
         as_user()
         r = tc.get(f"/v1/teams/{TEAM_ID}/export")
         assert r.status_code == 200, r.text
@@ -280,7 +289,7 @@ class TestExportSupabase:
     def test_export_happy_path(self, sb_client, as_user):
         tc, fake, db_path = sb_client
         _seed_supabase_team(fake)
-        _seed_graph(db_path)
+        seed_sdk = _seed_graph(db_path)
         as_user()
         r = tc.get(f"/v1/teams/{TEAM_ID}/export")
         assert r.status_code == 200, r.text
@@ -320,7 +329,7 @@ class TestExportSupabase:
     def test_export_audited(self, sb_client, as_user, capture_audit):
         tc, fake, db_path = sb_client
         _seed_supabase_team(fake)
-        _seed_graph(db_path)
+        seed_sdk = _seed_graph(db_path)
         as_user()
         r = tc.get(f"/v1/teams/{TEAM_ID}/export")
         assert r.status_code == 200
@@ -435,7 +444,7 @@ class TestExportDeleteRegistry:
     def test_export_happy_path_registry(self, reg_client, as_user):
         tc, db_path = reg_client
         _seed_registry(db_path)
-        _seed_graph(db_path, team_id="reg-team-1")
+        seed_sdk = _seed_graph(db_path, team_id="reg-team-1")
         as_user(user_id="u-owner")
         r = tc.get("/v1/teams/reg-team-1/export")
         assert r.status_code == 200, r.text
@@ -465,7 +474,7 @@ class TestExportDeleteRegistry:
             "CREATE (m:Membership {id:'m-2', user_id:'u-owner', "
             "team_id:'reg-named', role:'owner', status:'active'})"
         )
-        _seed_graph(db_path, team_id="Acme", n_points=1, n_events=0)
+        seed_sdk = _seed_graph(db_path, team_id="Acme", n_points=1, n_events=0)
         as_user(user_id="u-owner")
         r = tc.get("/v1/teams/reg-named/export")
         assert r.status_code == 200, r.text

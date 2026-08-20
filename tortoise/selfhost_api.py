@@ -76,8 +76,57 @@ def _require_key(authorization: str | None = Header(default=None)) -> None:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
+# #1475: per-request SDKs are closed-on-GC, which would shut down the
+# embedded redislite server between requests (create → list → dead socket).
+# Pin ONE SDK per embedded DB path as the server's liveness anchor (mirrors
+# hosted_api._FALLBACK_KEEPALIVE); fresh per-request SDKs share the pinned
+# server via the same path. Keyed by the resolved DB path (which must be
+# threaded into the request SDK too — see _sdk) because selfhost tests
+# reload the module per-test with a fresh path; a single "selfhost" key
+# would pin the FIRST test's server and orphan every later one.
+_SELFHOST_KEEPALIVE: dict[str, "TortoiseSDK"] = {}
+
+
+def _resolve_embedded_db_path() -> str:
+    """Resolve the embedded DB path, mirroring hosted_api._make_sdk:
+    TORTOISE_DB_PATH, else /data/tortoise.db with a tempdir fallback when
+    /data is not writable (test env / bare daemon run). The anchor AND the
+    per-request SDK must agree on this path or the anchor pins a stray
+    server while requests close-on-GC the real one (the #1475 regression
+    silently persists)."""
+    db_path = os.environ.get("TORTOISE_DB_PATH", "/data/tortoise.db")
+    try:
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    except OSError:
+        import tempfile
+        db_path = os.path.join(tempfile.gettempdir(), "tortoise.db")
+    return db_path
+
+
 def _sdk():
     from tortoise.sdk import TortoiseSDK
+    if not os.environ.get("TORTOISE_DB_URI"):
+        # Embedded mode: hold the server alive across requests (see above).
+        db_path = _resolve_embedded_db_path()
+        anchor = _SELFHOST_KEEPALIVE.get(db_path)
+        if anchor is None:
+            anchor = TortoiseSDK(db_path=db_path, namespace="selfhost")
+            try:
+                anchor._get_proj()  # eager: hold the connection so the server survives
+            except Exception:
+                pass
+            _SELFHOST_KEEPALIVE.setdefault(db_path, anchor)
+        elif anchor._proj is None:
+            # Self-heal (mirrors hosted_api): anchor stored unconnected
+            # (transient failure) — retry once so keepalive is not off
+            # permanently for this path.
+            try:
+                anchor._get_proj()
+            except Exception:
+                pass
+        # Thread the SAME resolved path into the request SDK so anchor and
+        # request share one server (path mismatch would defeat keepalive).
+        return TortoiseSDK(db_path=db_path, namespace="selfhost")
     return TortoiseSDK(namespace="selfhost")
 
 

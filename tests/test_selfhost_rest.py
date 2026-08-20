@@ -24,7 +24,13 @@ def _client_for_env(monkeypatch, tmp_path, **env):
     import importlib
 
     from tortoise import selfhost
+    from tortoise import selfhost_api as _sha
 
+    # #1512: the anchor dict is module-level and survives importlib.reload
+    # (reload only re-executes selfhost, not its cached selfhost_api import) —
+    # clear it so each test's fresh TORTOISE_DB_PATH gets its own anchor and
+    # prior tests' pinned servers are released at session end (not leaked).
+    _sha._SELFHOST_KEEPALIVE.clear()
     importlib.reload(selfhost)
     return TestClient(selfhost.app)
 
