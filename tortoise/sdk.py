@@ -492,6 +492,26 @@ def _is_ulid(s: str) -> bool:
     return bool(_ULID_RE.match(s) or _CROCKFORD_ULID_RE.match(s))
 
 
+# #1516: entity ids minted by _entity_name_id / create_entity are PREFIXED
+# (label[:3] + '-' + sha256[:26], e.g. ``sub-<hex26>`` / ``obj-<hex26>``).
+# These are IDs, not names — a guard that only recognizes bare ULIDs treats
+# them as names and runs the stub-creating keyword fallback.
+_ENTITY_ID_RE = re.compile(r"^[a-z]{2,3}-[0-9a-f]{26}$")
+
+
+def _is_entity_id(s: str) -> bool:
+    """Return True if *s* is an entity id: the prefixed _entity_name_id format
+    OR a bare ULID. Used by the about* wiring guards (create_entity event
+    branch) so ID-valued aboutSubject/aboutObject/aboutPoint/aboutDocument
+    props never hit the name-resolution fallback.
+
+    Boundary: a NAME shaped exactly like ``[a-z]{2,3}-<26 lowercase hex>``
+    (e.g. ``ab-0123456789abcdef0123456789``) is classified as an id and skips
+    name resolution — vanishingly rare for human names and consistent with
+    the pre-existing bare-ULID/Crockford behavior."""
+    return bool(_is_ulid(s) or _ENTITY_ID_RE.match(s))
+
+
 def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -10988,19 +11008,19 @@ class TortoiseSDK:
             if about_subject:
                 proj.create_about_edge(eid, about_subject, "aboutSubject")
                 # Only name-resolve if it looks like a plain name, not an ID
-                if isinstance(about_subject, str) and not _is_ulid(about_subject):
+                if isinstance(about_subject, str) and not _is_entity_id(about_subject):
                     proj._create_about_edges(eid, about_subject)
             if about_object:
                 proj.create_about_edge(eid, about_object, "aboutObject")
-                if isinstance(about_object, str) and not _is_ulid(about_object):
+                if isinstance(about_object, str) and not _is_entity_id(about_object):
                     proj._create_about_edges(eid, about_object)
             if about_point:
                 proj.create_about_edge(eid, about_point, "aboutPoint")
-                if isinstance(about_point, str) and not _is_ulid(about_point):
+                if isinstance(about_point, str) and not _is_entity_id(about_point):
                     proj._create_about_edges(eid, about_point)
             if about_document:
                 proj.create_about_edge(eid, about_document, "aboutDocument")
-                if isinstance(about_document, str) and not _is_ulid(about_document):
+                if isinstance(about_document, str) and not _is_entity_id(about_document):
                     proj._create_about_edges(eid, about_document)
         elif t == "document":
             documentKind = props.pop("documentKind", None)
