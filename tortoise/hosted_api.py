@@ -2484,8 +2484,14 @@ async def session_login(request: Request):
                     "message": "This key cannot be used to sign in. Mint a new "
                                "key in the dashboard or use GitHub/Google."})
 
-    # GoTrue user fetch (404 → ACCOUNT_MISSING).
-    gotrue = _gotrue_admin_get_user(target)
+    # GoTrue user fetch (404 → ACCOUNT_MISSING; transport → 502). The GET-leg
+    # raises RuntimeError on transport failure (never a raw 500 — code-review
+    # P1: an unhandled httpx exception surfaced as a 500, which the client
+    # maps to the misleading "Invalid API key").
+    try:
+        gotrue = _gotrue_admin_get_user(target)
+    except RuntimeError:
+        raise HTTPException(status_code=502, detail="Auth service unavailable")
     if gotrue is None:
         raise HTTPException(
             status_code=403,
@@ -2501,7 +2507,8 @@ async def session_login(request: Request):
             detail={"error_code": "ACCOUNT_MISSING",
                     "message": "Your account could not be found. Contact support."})
 
-    # Mint — retryable consumed/expired token → 503 (NOT the lockout bucket).
+    # Mint — retryable consumed/expired token → 503 (NOT the lockout bucket);
+    # transport/5xx → 502. A non-RuntimeError must never escape (defensive).
     try:
         session = _gotrue_admin_mint_session(email)
     except RuntimeError as exc:
@@ -2510,6 +2517,19 @@ async def session_login(request: Request):
             raise HTTPException(status_code=503,
                                 detail="Session login timed out — try again.")
         raise HTTPException(status_code=502, detail="Auth service unavailable")
+    except Exception:
+        raise HTTPException(status_code=502, detail="Auth service unavailable")
+
+    # Session-identity backstop (security review): the minted session must
+    # belong to the key's creator — a GoTrue anomaly (email reassignment race,
+    # admin tampering) must never return a session for a different user.
+    minted_user = str((session or {}).get("user", {}).get("id") or "")
+    if minted_user != target:
+        raise HTTPException(
+            status_code=403,
+            detail={"error_code": "KEY_NOT_USER_MINTED",
+                    "message": "This key cannot be used to sign in. Mint a new "
+                               "key in the dashboard or use GitHub/Google."})
 
     # Post-verify membership backstop (TOCTOU: creator removed mid-mint).
     if membership_for_user_team(cp, target, team_id) is None:
@@ -2865,16 +2885,22 @@ def _gotrue_admin_get_user(user_id: str) -> tuple[int, dict] | None:
 
     Returns (status_code, json_body) of the GoTrue response, or None on 404
     (the account is missing/ghosted — the caller maps that to ACCOUNT_MISSING).
-    Raises on transport errors (the caller maps those to 502).
+    Raises RuntimeError on transport errors (the caller maps those to 502) —
+    a raw httpx exception must NEVER escape the endpoint (VGATE/code-review:
+    unhandled ConnectError/Timeout surfaced as a 500, which the client maps
+    to the misleading "Invalid API key").
     """
     import httpx
     url = os.environ.get("SUPABASE_URL", "").rstrip("/")
     key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_SERVICE_KEY")
-    resp = httpx.get(
-        f"{url}/auth/v1/admin/users/{user_id}",
-        headers={"Authorization": f"Bearer {key}", "apikey": key},
-        timeout=15.0,
-    )
+    try:
+        resp = httpx.get(
+            f"{url}/auth/v1/admin/users/{user_id}",
+            headers={"Authorization": f"Bearer {key}", "apikey": key},
+            timeout=15.0,
+        )
+    except (httpx.HTTPError, httpx.TimeoutException):
+        raise RuntimeError("auth-service transport failure")
     if resp.status_code == 404:
         return None
     try:
@@ -2895,20 +2921,23 @@ def _gotrue_admin_mint_session(email: str) -> dict:
     _gotrue_admin_get_user FIRST — generate_link on a missing email would
     silently auto-create a phantom unconfirmed user).
 
-    Raises RuntimeError on a consumed/expired token (retryable) and on
-    transport errors (the caller maps 502/503).
+    Raises RuntimeError on a consumed/expired token (retryable), on transport
+    errors, and on non-JSON bodies (the caller maps 502/503).
     """
     import httpx
     url = os.environ.get("SUPABASE_URL", "").rstrip("/")
     key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_SERVICE_KEY")
     headers = {"Authorization": f"Bearer {key}", "apikey": key,
                "Content-Type": "application/json"}
-    link_resp = httpx.post(
-        f"{url}/auth/v1/admin/generate_link",
-        json={"type": "magiclink", "email": email},
-        headers=headers,
-        timeout=15.0,
-    )
+    try:
+        link_resp = httpx.post(
+            f"{url}/auth/v1/admin/generate_link",
+            json={"type": "magiclink", "email": email},
+            headers=headers,
+            timeout=15.0,
+        )
+    except (httpx.HTTPError, httpx.TimeoutException):
+        raise RuntimeError("auth-service transport failure")
     if link_resp.status_code >= 400:
         raise RuntimeError(f"session-link issuance failed (HTTP {link_resp.status_code})")
     try:
@@ -2918,12 +2947,15 @@ def _gotrue_admin_mint_session(email: str) -> dict:
     token_hash = link_body.get("hashed_token")
     if not token_hash:
         raise RuntimeError("session-link issuance returned no hashed_token")
-    verify_resp = httpx.post(
-        f"{url}/auth/v1/verify",
-        json={"token_hash": token_hash, "type": "magiclink"},
-        headers=headers,
-        timeout=15.0,
-    )
+    try:
+        verify_resp = httpx.post(
+            f"{url}/auth/v1/verify",
+            json={"token_hash": token_hash, "type": "magiclink"},
+            headers=headers,
+            timeout=15.0,
+        )
+    except (httpx.HTTPError, httpx.TimeoutException):
+        raise RuntimeError("auth-service transport failure")
     if verify_resp.status_code >= 400:
         # Single-use token consumed by a concurrent/retried exchange — the
         # caller treats this as retryable (re-issue), NOT a fatal error.
@@ -2938,10 +2970,14 @@ def _gotrue_admin_mint_session(email: str) -> dict:
     # AccessTokenResponse only ships expires_in, and the client stores this
     # JSON DIRECTLY in the parent-domain cookie (no supabase-js round trip to
     # compute it) — inject it so readValidSession (strict: missing/past
-    # expires_at = invalid) accepts the stored session.
+    # expires_at = invalid) accepts the stored session. Defensive: a
+    # non-numeric expires_in must not 500 the endpoint.
     expires_in = session.get("expires_in")
     if session and expires_in and not session.get("expires_at"):
-        session["expires_at"] = int(time.time()) + int(expires_in)
+        try:
+            session["expires_at"] = int(time.time()) + int(expires_in)
+        except (TypeError, ValueError):
+            session["expires_at"] = int(time.time()) + 3600  # GoTrue default
     return session
 
 

@@ -84,9 +84,12 @@ function App() {
   // #1280 (P0, mirrored from fix/1280): banner state MUST live inside the
   // component — a module-top-level useState crashes the whole bundle.
   const [banner, setBanner] = React.useState('')
-  // #1148-ux: last auth method (login card "Last used" pills)
+  // #1148-ux: last auth method (login card "Last used" pills). The state
+  // reads the legacy app-origin key; the shared helper (called on mount
+  // below) performs the one-time migration to the parent-domain cookie so
+  // the pill shows on /auth even before the user signs in again (#1511).
   const [lastAuthMethod, setLastAuthMethod] = React.useState(() => {
-    try { return localStorage.getItem(LAST_AUTH_METHOD) || '' } catch { return '' }
+    try { return window.getLastAuthMethod ? window.getLastAuthMethod() : (localStorage.getItem(LAST_AUTH_METHOD) || '') } catch { return '' }
   })
   const [apiKey, setApiKey] = React.useState(() => localStorage.getItem(KEY_STORAGE) || '')
   // #1148-ux review: combined login/signup card
@@ -94,8 +97,22 @@ function App() {
   const [authEmail, setAuthEmail] = React.useState('')
   const [authPassword, setAuthPassword] = React.useState('')
   const [authBusy, setAuthBusy] = React.useState(false)
-  const [authShowApiKey, setAuthShowApiKey] = React.useState(false) // #1148-ux: API-key login revealed on click
+  
+// #1511 (code-review P1): claim-intent is IN-FLIGHT ONLY — either the
+// ?claim=1 route (the ANON funnel lands here before the key is pasted) or
+// a claim key accompanied by the 1h tt_claim_pending marker (an OAuth
+// claim in flight). A BARE stale claim key or a BARE stale marker must
+// not pin a sessionless user on the claim screen, nor misroute a
+// signed-in user to the claim route.
+function claimIntentInFlight() {
+  const claimKey = (() => { try { return sessionStorage.getItem(CLAIM_KEY_STORAGE) || '' } catch { return '' } })()
+  const claimPending = /(?:^|; )tt_claim_pending=/.test(document.cookie)
+  const claimParam = new URLSearchParams(window.location.search).get('claim') === '1'
+  return claimParam || (!!claimKey && claimPending)
+}
+
   const [authed, setAuthed] = React.useState(false)
+  const [authUnavailable, setAuthUnavailable] = React.useState('')
   const [team, setTeam] = React.useState(null)
   const [keys, setKeys] = React.useState([])
   const [sessions, setSessions] = React.useState([])
@@ -475,18 +492,25 @@ function App() {
           }
         }
 
-        if (!supabaseClient) { setChecking(false); return }
+        if (!supabaseClient) {
+          // #1511 (code-review P2): the head gate may pass on a valid cookie
+          // while the auth library failed to load (blocked CDN/vendor script,
+          // offline) — the eternal "Redirecting to the sign-in page…" shell
+          // would never redirect. Surface an actionable error instead.
+          setChecking(false)
+          setAuthUnavailable('Could not load the sign-in library — check your connection and refresh.')
+          return
+        }
         const { data: { session }, error } = await supabaseClient.auth.getSession()
-        if (error || !session || (session.expires_at && session.expires_at * 1000 <= Date.now())) {
-          // #1511: NO valid session → the dashboard never shows auth UI.
-          // Claim-intent (paste tt_ → OAuth → claim; D2) renders the
-          // claim-paste screen; everyone else goes to /auth via the
-          // origin-aware bounceToAuth (Back-proof). The storedKey exemption
-          // is gone — a stored key is a "Last used" hint on /auth, not a
-          // dashboard credential.
-          const claimKey = (() => { try { return sessionStorage.getItem(CLAIM_KEY_STORAGE) || '' } catch { return '' } })()
-          const claimPending = /(?:^|; )tt_claim_pending=/.test(document.cookie)
-          const claimIntent = claimKey || claimPending || new URLSearchParams(window.location.search).get('claim') === '1'
+        if (error || !session || !session.expires_at || session.expires_at * 1000 <= Date.now()) {
+          // #1511: NO strictly-valid session (missing OR past expires_at =
+          // invalid — the presence-over-validity bug class) → the dashboard
+          // never shows auth UI. In-flight claim-intent (paste tt_ → OAuth →
+          // claim; D2) renders the claim-paste screen; everyone else goes to
+          // /auth via the origin-aware bounceToAuth (Back-proof). The
+          // storedKey exemption is gone — a stored key is a "Last used" hint
+          // on /auth, not a dashboard credential.
+          const claimIntent = claimIntentInFlight()
           if (!claimIntent) {
             if (typeof window.bounceToAuth === 'function') window.bounceToAuth()
             else window.location.replace('https://tortoise.premiselabs.co/auth')
@@ -756,12 +780,13 @@ function App() {
   // to an anon team (same key, same graph, memories intact).
   async function claimSignIn(provider) {
     setClaimError('')
-    // #1148-ux review: the user is ALREADY authenticated (key login) — the
-    // claim uses the session key, never a re-paste. Prefer the live ref, then
-    // the stored key.
-    const k = (apiKeyRef.current || localStorage.getItem(KEY_STORAGE) || '').trim()
+    // #1511 (code-review P2): the claim-paste screen REQUIRES the pasted key
+    // — the localStorage fallback may hold a pre-#1511 stored key or another
+    // team's bootstrap key, and running the claim with the wrong credential
+    // 403s with no clue which key was used.
+    const k = (apiKeyRef.current || '').trim()
     if (!k.startsWith('tt_')) {
-      setClaimError('Your API key is missing from this session — sign out and sign back in with your key, then connect a login.')
+      setClaimError('Paste your tt_ API key above, then connect a login to claim your team.')
       return
     }
     if (!supabaseClient) {
@@ -775,6 +800,7 @@ function App() {
     // signup routing) is set alongside — it carries NO credential.
     try { sessionStorage.setItem(CLAIM_KEY_STORAGE, k) } catch { /* best-effort */ }
     setClaimPendingMarker()
+    try { window.setLastAuthMethod(provider); setLastAuthMethod(provider) } catch { /* best-effort */ }
     setClaimBusy(true)
     try {
       const redirectTo = `${window.location.origin}${window.location.pathname}?claim=1`
@@ -806,7 +832,7 @@ function App() {
     // the anonymous membership to it (claim_membership RPC) — same key, same
     // graph. Session key comes from the ref (already authed).
     setClaimError('')
-    const k = (apiKeyRef.current || localStorage.getItem(KEY_STORAGE) || '').trim()
+    const k = (apiKeyRef.current || '').trim()  // #1511: pasted key required
     if (!k.startsWith('tt_') || !claimEmail.includes('@') || claimPassword.length < 6) {
       setClaimError('Enter a valid email and a password of at least 6 characters.')
       return
@@ -1564,9 +1590,7 @@ function App() {
     // /auth instantly. This render is reachable only when claim-intent is in
     // flight (paste tt_ → OAuth → claim; D2) — the claim-paste screen — or
     // the split-second before the redirect lands (the shell).
-    const claimKey = (() => { try { return sessionStorage.getItem(CLAIM_KEY_STORAGE) || '' } catch { return '' } })()
-    const claimPending = /(?:^|; )tt_claim_pending=/.test(document.cookie)
-    const claimIntent = claimKey || claimPending || new URLSearchParams(window.location.search).get('claim') === '1'
+    const claimIntent = claimIntentInFlight()
     if (!claimIntent) {
       // Redirect shell — the mount effect's bounceToAuth() owns the redirect.
       return (
@@ -1574,7 +1598,14 @@ function App() {
           <div className="auth-card">
             <div className="logo">Tortoise</div>
             <h1>Dashboard</h1>
-            <p className="dim">Redirecting to the sign-in page…</p>
+            {authUnavailable ? (
+              <div role="alert">
+                <p className="error">{authUnavailable}</p>
+                <button type="button" className="btn-submit" onClick={() => window.location.reload()}>Refresh</button>
+              </div>
+            ) : (
+              <p className="dim">Redirecting to the sign-in page…</p>
+            )}
           </div>
         </div>
       )
@@ -1646,6 +1677,9 @@ function App() {
               </form>
             )}
             {claimError && <p className="error" role="alert">{claimError}</p>}
+            <p className="dim">
+              <a href="https://tortoise.premiselabs.co/auth">← Back to sign in</a>
+            </p>
           </div>
         </main>
       </div>

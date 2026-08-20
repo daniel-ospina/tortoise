@@ -252,8 +252,16 @@
         // Dashboard origin → the tortoise auth page (relative /auth on the
         // app origin is a dead end).
         target = 'https://tortoise.premiselabs.co/auth';
-      } else {
+      } else if (isPremiselabsHost()) {
+        // Tortoise site (tortoise.premiselabs.co, previews of the site) —
+        // relative /auth is correct.
         target = '/auth';
+      } else {
+        // Any OTHER origin (e.g. a dashboard Pages preview) — a relative
+        // /auth would resolve against the dashboard SPA and loop forever
+        // (code-review P2-7). Go absolute; the e2e __AUTH_BASE_URL seam
+        // covers localhost, where the local site serves /auth.
+        target = 'https://tortoise.premiselabs.co/auth';
       }
       window.location.replace(target + (search || '') + (hash || ''));
     } catch (e) { /* best-effort */ }

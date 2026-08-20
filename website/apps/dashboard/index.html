@@ -24,8 +24,13 @@
           var claimKey = null;
           try { claimKey = window.sessionStorage.getItem("tt_claim_key"); } catch (e) {}
           var claimPending = /(?:^|; )tt_claim_pending=/.test(document.cookie);
-          var claimIntent = /[?&#]claim=1/.test(window.location.href);
-          if (!hasSession && !claimKey && !claimPending && !claimIntent) {
+          var claimIntent = /[?&#]claim=1/.test(window.location.href) ||
+            // In-flight claim (OAuth return): the key AND the 1h pending marker.
+            // A BARE stale key or a bare stale marker is NOT claim intent —
+            // it must not pin a sessionless user on the claim screen (code-
+            // review P1) or misroute a signed-in user to the claim route.
+            (!!claimKey && claimPending);
+          if (!hasSession && !claimIntent) {
             if (typeof window.bounceToAuth === "function") window.bounceToAuth();
             else window.location.replace("https://tortoise.premiselabs.co/auth");
           }

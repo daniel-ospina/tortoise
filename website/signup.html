@@ -1183,24 +1183,33 @@
       }
       document.getElementById("apikey-modal-error").classList.remove("visible");
       setLoading(true);
+      // #1511 (code-review P2): the buttons STAY disabled + spun across the
+      // exchange await (a double-click/Enter would otherwise fire duplicate
+      // exchanges → duplicate GoTrue mints + 503s and double rate-bucket
+      // consumption). Re-enabled on every non-navigation terminal path.
+      var reenable = function () { setLoading(false); };
       try {
-        setLoading(false);  // re-enable on ANY non-success path (the modal
-        // buttons were disabled + spun by setLoading(true) above)
         const resp = await fetch(SIGNUP_API_URL + "/v1/session/login", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ api_key: key }),
         });
         if (resp.status === 429) {
-          // Login-bucket discipline — a 429 here is NOT fed into the
-          // email-bucket lockout (the exchange never sends email).
-          const err = { code: "over_request_rate_limit_ip" };
-          setLoginRateLimitLockout(err);
-          showApiKeyModalError(loginRateLimitMessage());
+          // The exchange bucket is 5/hr/IP server-side (Retry-After ~1h) —
+          // surface the hour-scale copy, NOT the 60s email-bucket lockout
+          // (which would send the user into a retry-429 loop). The bucket
+          // separation (#863) is kept: this 429 is never fed into the
+          // email-bucket lockout.
+          var retryAfter = 3600;
+          try { retryAfter = parseInt(resp.headers.get("Retry-After") || "", 10) || 3600; } catch (e) {}
+          var mins = Math.max(1, Math.ceil(retryAfter / 60));
+          showApiKeyModalError("Too many sign-in attempts from this network — try again in about " + mins + " minutes.");
+          reenable();
           return;
         }
         if (resp.status === 502 || resp.status === 503) {
           showApiKeyModalError("Sign-in is temporarily unavailable — try again in a moment.");
+          reenable();
           return;
         }
         if (!resp.ok) {
@@ -1217,22 +1226,27 @@
           }
           if (code === "KEY_NOT_USER_MINTED") {
             showApiKeyModalError("This key can't be used to sign in — mint a new key in the dashboard or use GitHub/Google.");
+            reenable();
             return;
           }
           if (code === "ACCOUNT_MISSING") {
             showApiKeyModalError("Your account couldn't be found — contact support.");
+            reenable();
             return;
           }
           if (code === "dashboard_login_disabled") {
             showApiKeyModalError("API-key login is disabled for this team — sign in with GitHub or Google.");
+            reenable();
             return;
           }
           showApiKeyModalError("Invalid API key.");
+          reenable();
           return;
         }
         const session = await resp.json();
         if (typeof window.storeSession !== "function") {
           showApiKeyModalError("Sign-in is temporarily unavailable.");
+          reenable();
           return;
         }
         // Store the session DIRECTLY in the parent-domain cookie (auth.
@@ -1241,6 +1255,7 @@
         // the write didn't take (cookie-blocked browser) → clear error.
         if (!window.storeSession(session)) {
           showApiKeyModalError("Sign-in needs cookies enabled — please enable cookies and try again.");
+          reenable();
           return;
         }
         try { window.setLastAuthMethod("apikey"); } catch (e) {}

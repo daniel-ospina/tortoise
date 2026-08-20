@@ -260,6 +260,52 @@ class TestSessionLogin:
         assert r.status_code == 403
         assert r.json()["detail"]["error_code"] == "KEY_NOT_USER_MINTED"
 
+    def test_gotrue_transport_error_502(self, client, fake, monkeypatch):
+        """Code-review P1: an httpx transport exception from the GoTrue admin
+        calls must map to 502 "Auth service unavailable", never a raw 500
+        (the client would otherwise show the misleading "Invalid API key")."""
+        _seed_team(fake)
+        key = _mint_key(fake, created_by=_OWNER)
+
+        def _boom(*a, **kw):
+            raise httpx.ConnectError("boom")
+
+        monkeypatch.setattr(httpx, "get", _boom)
+        monkeypatch.setattr(httpx, "post", _boom)
+        r = _exchange(client, key)
+        assert r.status_code == 502, r.text
+        assert "unavailable" in r.json()["detail"]
+
+    def test_mint_session_identity_backstop_403(self, client, fake, monkeypatch):
+        """Security review: a GoTrue /verify session for a DIFFERENT user.id
+        than the mint target must be rejected (KEY_NOT_USER_MINTED) — never
+        stored in the parent-domain cookie."""
+        _seed_team(fake)
+        key = _mint_key(fake, created_by=_OWNER)
+
+        def _get(url, **kwargs):
+            return httpx.Response(200, json={"id": _OWNER, "email": "owner@example.com"},
+                                  request=httpx.Request("GET", url))
+
+        def _post(url, **kwargs):
+            if url.endswith("/auth/v1/admin/generate_link"):
+                return httpx.Response(200, json={"hashed_token": "ht-1"},
+                                      request=httpx.Request("POST", url))
+            if url.endswith("/auth/v1/verify"):
+                # WRONG user — a GoTrue anomaly must not mint the wrong session.
+                return httpx.Response(200, json={
+                    "access_token": "at", "refresh_token": "rt", "expires_in": 3600,
+                    "expires_at": 9999999999, "token_type": "bearer",
+                    "user": {"id": "some-other-user", "email": "other@example.com"}},
+                    request=httpx.Request("POST", url))
+            raise AssertionError(f"unexpected POST {url}")
+
+        monkeypatch.setattr(httpx, "get", _get)
+        monkeypatch.setattr(httpx, "post", _post)
+        r = _exchange(client, key)
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"]["error_code"] == "KEY_NOT_USER_MINTED"
+
     def test_creator_account_missing_403(self, client, fake, monkeypatch):
         _seed_team(fake)
         key = _mint_key(fake, created_by=_OWNER)

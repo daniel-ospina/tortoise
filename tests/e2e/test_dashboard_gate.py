@@ -95,24 +95,59 @@ def test_stored_key_alone_redirects_to_auth(page: Page) -> None:
 
 
 @pytest.mark.parametrize("claim_seed", [
-    "cookie",      # tt_claim_pending parent cookie only
-    "query",       # ?claim=1 only
-    "session",     # tt_claim_key sessionStorage only
+    "query",       # ?claim=1 only (the ANON funnel lands here pre-paste)
+    "in_flight",   # tt_claim_key + tt_claim_pending (an OAuth claim returning)
 ])
 def test_claim_intent_shows_claim_paste(page: Page, claim_seed: str) -> None:
-    """Claim-intent (any of the three exemption forms) renders the claim-paste
-    screen — NOT a redirect to /auth (D2: anon-team account setup)."""
-    if claim_seed == "cookie":
-        page.add_init_script(
-            "document.cookie = 'tt_claim_pending=1; Path=/;';")
-    elif claim_seed == "session":
-        page.add_init_script("sessionStorage.setItem('tt_claim_key', 'tt_claim');")
+    """In-flight claim-intent renders the claim-paste screen — NOT a redirect
+    to /auth (D2: anon-team account setup). Intent is IN-FLIGHT ONLY: the
+    ?claim=1 route, or a claim key accompanied by the 1h tt_claim_pending
+    marker (code-review P1: a BARE stale key/marker must not pin the screen)."""
+    if claim_seed == "in_flight":
+        page.add_init_script("""
+          sessionStorage.setItem('tt_claim_key', 'tt_claim');
+          document.cookie = 'tt_claim_pending=1; Path=/;';
+        """)
     # query seeds via the URL itself
     url = DASHBOARD_URL + ("?claim=1" if claim_seed == "query" else "")
     _wire_auth_intercept(page)
     page.add_init_script("window.__AUTH_BASE_URL = 'https://tortoise.premiselabs.co';")
     page.goto(url, wait_until="domcontentloaded", timeout=30_000)
     expect(page.locator("body")).to_contain_text("Claim your team", timeout=20_000)
+
+
+@pytest.mark.parametrize("stale_seed", [
+    "cookie",    # tt_claim_pending alone (a stale 1h marker, no key in flight)
+    "session",   # tt_claim_key alone (a stale pasted key, no claim in flight)
+])
+def test_stale_claim_markers_redirect_to_auth(page: Page, stale_seed: str) -> None:
+    """#1511 (code-review P1): a BARE stale claim marker or key is NOT
+    claim-intent — it must not pin a sessionless user on the claim screen
+    (which has no other affordances) and must not misroute a signed-in user.
+    Both redirect to /auth like any other no-session visitor."""
+    if stale_seed == "cookie":
+        page.add_init_script(
+            "document.cookie = 'tt_claim_pending=1; Path=/;';")
+    else:
+        page.add_init_script("sessionStorage.setItem('tt_claim_key', 'tt_claim');")
+    _wire_auth_intercept(page)
+    _goto_dashboard(page)
+    expect(page).to_have_url(re.compile(r"^https://tortoise\.premiselabs\.co/auth"), timeout=15_000)
+
+
+def test_claim_paste_has_back_to_signin_escape(page: Page) -> None:
+    """#1511 (code-review P1): the claim-paste screen has a hard escape hatch
+    — 'Back to sign in' links to the /auth page (a trapped sessionless user
+    can always leave)."""
+    page.add_init_script("""
+      sessionStorage.setItem('tt_claim_key', 'tt_claim');
+      document.cookie = 'tt_claim_pending=1; Path=/;';
+    """)
+    _wire_auth_intercept(page)
+    page.add_init_script("window.__AUTH_BASE_URL = 'https://tortoise.premiselabs.co';")
+    page.goto(DASHBOARD_URL, wait_until="domcontentloaded", timeout=30_000)
+    expect(page.locator("body")).to_contain_text("Claim your team", timeout=20_000)
+    expect(page.locator("a[href='https://tortoise.premiselabs.co/auth']")).to_be_visible()
 
 
 def test_logout_redirects_to_auth(page: Page) -> None:

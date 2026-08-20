@@ -217,8 +217,7 @@ bounce helpers — loop-safety by construction across all three pages:
 
 ### 5.6 Test coverage
 
-- `tests/test_session_login.py` (15) — exchange contract, evaluation
-  order, error tree, rate limit, TOCTOU, expires_at injection.
+- `tests/test_session_login.py` (18) — exchange contract, evaluation order, error tree, rate limit, TOCTOU, expires_at injection, transport 502, session-identity backstop, session-attribution.
 - `tests/test_session_login_helpers.py` (6) — mint-target resolution.
 - `tests/e2e/test_session_login_flow.py` — two-origin loop regression
   (exchange → cookie → dashboard renders; no cookie → instant redirect;
