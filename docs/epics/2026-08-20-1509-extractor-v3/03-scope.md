@@ -107,7 +107,7 @@ The cut is governed by TWO principles: **every item either (a) makes the next ru
 **Given:** a conversation containing "my personal best 5K time is 27:12" (user-asserted, stated early in the conversation) and an assistant suggestion that is NOT the fact
 **When:** a knowledge-update / preference question asks for the value
 **Then:** the verbatim value (27:12) is retrievable and evidence-marked
-**And:** the answer reflects the user-asserted fact, not the assistant suggestion (source_role via source-turn)
+**And:** the answer reflects the user-asserted fact, not the assistant suggestion (speaker derived from the source-turn role via `source_turn_id`)
 
 ### E2E-6: Superseded facts surface the new value
 **Given:** two sessions changing the same fact ("gym at 6pm" → "gym at 5pm")
