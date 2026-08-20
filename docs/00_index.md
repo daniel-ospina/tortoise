@@ -11,6 +11,7 @@ ownedBy: epistemic-team
 
 | Area | Path |
 | --- | --- |
+| Auth architecture — standard patterns vs Tortoise (#1498/#1506) | `docs/auth-architecture.md` |
 | Backup/DR runbook | `docs/ops/registry-backup-dr.md` |
 | CI timing measurement artifact (#1477) | `docs/ci-timing.md` |
 | Post-flip verification runbook (#669) | `docs/ops/669-post-flip-verification.md` |

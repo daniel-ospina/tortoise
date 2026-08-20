@@ -1575,21 +1575,17 @@ function App() {
     // #1494: the dashboard hosts NO login/signup screen — every
     // unauthenticated visitor goes to the single auth page (/auth,
     // tortoise host). The only in-app auth is the API-key paste, for users
-    // who arrive with a key in hand (agents / anon bootstrap). The mount
-    // effect redirects to /auth when there is no stored key or claim in
-    // flight; this card is the brief in-between (and the key path).
+    // who arrive with a key in hand (agents / anon bootstrap).
+    // #1498: the head gate in index.html redirects every visitor WITHOUT a
+    // session/key/claim to /auth BEFORE the app renders — this render is
+    // only reachable by key/claim holders (and the split-second before the
+    // replace lands), so it shows ONLY the API-key paste, never a
+    // login/signup screen or a dead-end message.
     return (
       <div className="auth-wrap">
         <div className="auth-card">
           <div className="logo">Tortoise</div>
           <h1>Dashboard</h1>
-          <p className="dim">
-            No active session —{' '}
-            <a href="https://tortoise.premiselabs.co/auth" target="_blank" rel="noreferrer">
-              sign in or create an account
-            </a>
-            .
-          </p>
           <div className={`auth-apikey auth-apikey-prominent${authShowApiKey ? ' has-form' : ''}`}>
             {!authShowApiKey ? (
               <button
