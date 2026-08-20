@@ -92,6 +92,10 @@ function App() {
     try { return window.getLastAuthMethod ? window.getLastAuthMethod() : (localStorage.getItem(LAST_AUTH_METHOD) || '') } catch { return '' }
   })
   const [apiKey, setApiKey] = React.useState(() => localStorage.getItem(KEY_STORAGE) || '')
+  // #1511 (code-review r2, P2): the claim-paste input value IS the apiKey
+  // state — keep the ref (read by claimSignIn/claimEmailPassword) in lockstep
+  // so the credential used matches what's on screen (no pre-fill mismatch).
+  React.useEffect(() => { apiKeyRef.current = apiKey }, [apiKey])
   // #1148-ux review: combined login/signup card
   const [authIsSignup, setAuthIsSignup] = React.useState(false)
   const [authEmail, setAuthEmail] = React.useState('')
@@ -572,14 +576,28 @@ function claimIntentInFlight() {
                 // OAuth redirect + signed-in bounce to the claim route for
                 // the full cookie TTL (up to 1h). Clear on failure/abandon.
                 clearClaimPendingMarker()
+                // #1511 (code-review r2, P2): strip the claim state so a
+                // reload does NOT silently re-run the failed claim — the
+                // error banner (authed shell) shows the message once.
+                try { sessionStorage.removeItem(CLAIM_KEY_STORAGE) } catch { /* best-effort */ }
+                window.history.replaceState({}, '', window.location.pathname)
               }
             } catch (e) {
               setClaimError((e && e.message) || 'Claim failed — try again.')
               clearClaimPendingMarker()
+              try { sessionStorage.removeItem(CLAIM_KEY_STORAGE) } catch { /* best-effort */ }
+              window.history.replaceState({}, '', window.location.pathname)
             }
           } else {
-            setClaimError('Claim interrupted — paste your tt_ key again to continue.')
+            // #1511 (code-review r2, P3): a valid session + ?claim=1 + NO
+            // claim key = stale claim state (the /auth ANON-funnel gate can't
+            // see the app-origin sessionStorage key, so it may bounce a
+            // signed-in visitor here). Proceed silently — clear the markers
+            // and strip the param; the claim-paste screen (pre-session) is
+            // the only place 'Claim interrupted' makes sense.
             clearClaimPendingMarker()
+            try { sessionStorage.removeItem(CLAIM_KEY_STORAGE) } catch { /* best-effort */ }
+            window.history.replaceState({}, '', window.location.pathname)
           }
         }
 
@@ -845,6 +863,12 @@ function claimIntentInFlight() {
         body: JSON.stringify({ api_key: k, email: claimEmail.trim(), password: claimPassword }),
       })
       if (res.ok) {
+        // #1511 (code-review r2, P3 hygiene): a successful email claim must
+        // clear the claim markers — a stale tt_claim_pending would hijack
+        // the next /auth visit's redirect to the claim route.
+        try { sessionStorage.removeItem(CLAIM_KEY_STORAGE) } catch { /* best-effort */ }
+        clearClaimPendingMarker()
+        setClaimKey('')
         // #1148 review P2: sign in with the just-created credentials so the
         // user lands in SESSION mode (not stuck on the claimed-team gate).
         try {
@@ -1827,6 +1851,15 @@ function claimIntentInFlight() {
         <div className="banner" style={{ background: 'var(--surface,#0d1a2d)', borderBottom: '1px solid var(--border,#1e293b)', color: 'var(--green,#4ade80)', padding: '0.6rem 1.5rem', fontSize: 13, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span>{banner}</span>
           <button className="ghost small" onClick={() => setBanner('')} aria-label="Dismiss">✕</button>
+        </div>
+      )}
+      {claimError && (
+        // #1511 (code-review r2, P2): a failed claim with a valid session
+        // lands on the authed shell — the error must be visible, and the
+        // claim state stripped so a reload doesn't silently re-claim.
+        <div className="banner" style={{ background: 'rgba(248,113,113,0.1)', borderBottom: '1px solid rgba(248,113,113,0.3)', color: 'var(--red,#f87171)', padding: '0.6rem 1.5rem', fontSize: 13, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span role="alert">{claimError}</span>
+          <button className="ghost small" onClick={() => { setClaimError(''); try { sessionStorage.removeItem(CLAIM_KEY_STORAGE) } catch { /* best-effort */ } window.history.replaceState({}, '', window.location.pathname) }} aria-label="Dismiss">✕</button>
         </div>
       )}
       <header>

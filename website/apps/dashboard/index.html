@@ -24,7 +24,7 @@
           var claimKey = null;
           try { claimKey = window.sessionStorage.getItem("tt_claim_key"); } catch (e) {}
           var claimPending = /(?:^|; )tt_claim_pending=/.test(document.cookie);
-          var claimIntent = /[?&#]claim=1/.test(window.location.href) ||
+          var claimIntent = new URLSearchParams(window.location.search).get('claim') === '1' ||
             // In-flight claim (OAuth return): the key AND the 1h pending marker.
             // A BARE stale key or a bare stale marker is NOT claim intent —
             // it must not pin a sessionless user on the claim screen (code-

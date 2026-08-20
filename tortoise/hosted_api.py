@@ -2428,6 +2428,12 @@ async def session_login(request: Request):
         body = await request.json()
     except Exception:
         body = {}
+    # Security review r2 (P3): a non-dict JSON body ([1,2,3], "abc", 42)
+    # would raise AttributeError on .get() → raw 500 before the rate-limit
+    # check (unbounded 500 noise from one IP). Coerce — file-wide pattern
+    # fixed here for the new unauthenticated endpoint.
+    if not isinstance(body, dict):
+        body = {}
     token = (body or {}).get("api_key") or ""
     if not token.startswith("tt_"):
         await _audit_auth_failure(request, "invalid_key")

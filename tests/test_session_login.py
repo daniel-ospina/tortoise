@@ -260,6 +260,15 @@ class TestSessionLogin:
         assert r.status_code == 403
         assert r.json()["detail"]["error_code"] == "KEY_NOT_USER_MINTED"
 
+    def test_non_dict_json_body_401_not_500(self, client, fake, monkeypatch):
+        """Security review r2 (P3): a non-dict JSON body ([1,2,3], "abc")
+        must not raise AttributeError → 500 before the rate-limit check."""
+        r = client.post("/v1/session/login", json=[1, 2, 3])
+        assert r.status_code == 401, r.text  # invalid key path (no crash)
+        r2 = client.post("/v1/session/login", content='"abc"',
+                         headers={"Content-Type": "application/json"})
+        assert r2.status_code == 401, r2.text
+
     def test_gotrue_transport_error_502(self, client, fake, monkeypatch):
         """Code-review P1: an httpx transport exception from the GoTrue admin
         calls must map to 502 "Auth service unavailable", never a raw 500
