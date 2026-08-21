@@ -263,7 +263,7 @@ def build_judge(spec: str | None = None, *, mock: bool = False) -> Judge:
             "(set OPENROUTER_API_KEY / DEEPSEEK_API_KEY / OPENAI_API_KEY / "
             "GEMINI_API_KEY — the official judge is gpt-4o via OPENAI_API_KEY — "
             "or pass --mock for the offline mock judge)")
-    base_url, key_env = resolved
+    _resolved_provider, base_url, key_env = resolved
     if provider is not None:
         if provider not in _PROVIDERS:
             raise ValueError(

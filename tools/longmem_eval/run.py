@@ -43,7 +43,7 @@ from tortoise.sdk import TortoiseSDK
 from . import dataset as ds
 from .ingest import ingest_haystack
 from .judge import build_judge, is_abstention
-from .reader import build_reader
+from .reader import build_reader, reader_prompt_constants
 from .report import build_report, default_report_path, save_report
 from .retrieve import retrieve_for_question
 
@@ -162,6 +162,9 @@ def run_evaluation(
     failures: list[dict[str, Any]] = list(prior_failures)
     import threading
     _lock = threading.Lock()
+    # M5 (#1525): the run's reader prompt constants, recorded verbatim in the
+    # report methodology — cross-cell prompt drift is visible in the report.
+    system_prompt, type_fragments = reader_prompt_constants()
 
     def _run_one(question: dict, i: int) -> None:
         """Per-question pipeline — isolated graph, parallel-safe."""
@@ -268,6 +271,11 @@ def run_evaluation(
     return outcomes, outcomes_to_report(
         outcomes,
         reader_model=reader.model_id,
+        reader_model_spec=getattr(reader, "model_spec", ""),
+        reader_provider=getattr(reader, "provider", None),
+        reader_pinned=getattr(reader, "pinned", None),
+        reader_system_prompt=system_prompt,
+        reader_type_fragments=type_fragments,
         judge_model=judge.model_id,
         ks=ks,
         top_k=top_k,
@@ -288,8 +296,19 @@ def outcomes_to_report(
     dataset_id: str = "xiaowu0162/longmemeval-cleaned",
     ingest_mode: str = "deterministic",
     failures: list[dict[str, Any]] | None = None,
+    reader_model_spec: str = "",
+    reader_provider: str | None = None,
+    reader_pinned: bool | None = None,
+    reader_system_prompt: str = "",
+    reader_type_fragments: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Aggregate outcomes (programmatic entry used by tests too)."""
+    """Aggregate outcomes (programmatic entry used by tests too).
+
+    M5 (#1525): the reader's resolved identity (model_spec/provider/pinned)
+    + the verbatim prompt constants are recorded in the methodology so the
+    report self-describes exactly which reader model/prompt produced its
+    numbers.
+    """
     return build_report(
         outcomes,
         dataset_id=dataset_id,
@@ -300,6 +319,11 @@ def outcomes_to_report(
         # battery's unchanged-check compares these).
         reader_prompt_hash=_sha16(reader_prompt_source()),
         judge_rubric_id_hash=_sha16(JUDGE_RUBRIC_ID),
+        reader_model_spec=reader_model_spec,
+        reader_provider=reader_provider,
+        reader_pinned=reader_pinned,
+        reader_system_prompt=reader_system_prompt,
+        reader_type_fragments=reader_type_fragments,
         extraction_approach=(EXTRACTION_APPROACH_V2 if ingest_mode == "v2"
                             else EXTRACTION_APPROACH),
         ingest_mode=ingest_mode,
@@ -426,7 +450,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--reader-model", default=None,
                    help="reader model spec <provider>:<model> "
                         "(env TORTOISE_LME_READER_MODEL; default "
-                        "openrouter:deepseek/deepseek-chat)")
+                        "openrouter:deepseek/deepseek-v4-flash — the M5 "
+                        "pinned reader, #1525; an override records "
+                        "reader_pinned=false + warns on stderr)")
     p.add_argument("--judge-model", default=None,
                    help="judge model spec (env TORTOISE_LME_JUDGE_MODEL; "
                         "default openai:gpt-4o-2024-08-06 — the official judge)")

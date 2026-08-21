@@ -79,6 +79,11 @@ def build_report(
     failures: list[dict[str, Any]] | None = None,
     reader_prompt_hash: str = "",
     judge_rubric_id_hash: str = "",
+    reader_model_spec: str = "",
+    reader_provider: str | None = None,
+    reader_pinned: bool | None = None,
+    reader_system_prompt: str = "",
+    reader_type_fragments: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     # #1414 (additive to #1144): the methodology-unchanged check for the
     # battery parity leg compares these hashes against the baseline record.
@@ -176,6 +181,14 @@ def build_report(
             "reader_prompt_hash": reader_prompt_hash,
             "judge_rubric_id_hash": judge_rubric_id_hash,
             "reader_model": reader_model,
+            # M5 (#1525): the reader's resolved identity + verbatim prompt
+            # constants — recorded so cross-cell/cross-run reader drift is
+            # visible in the report (additive; reader_model stays for compat).
+            "reader_model_spec": reader_model_spec,
+            "reader_provider": reader_provider,
+            "reader_pinned": reader_pinned,
+            "reader_system_prompt": reader_system_prompt,
+            "reader_type_fragments": reader_type_fragments or {},
             "judge_model": judge_model,
             "ingest_mode": ingest_mode,
             "judge_rule": "official LongMemEval get_anscheck_prompt; "

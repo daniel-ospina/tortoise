@@ -26,7 +26,7 @@ python -m tools.longmem_eval.run --split s --limit 10 # first 10 (sanity)
 | Var | Purpose | Default |
 |---|---|---|
 | `OPENROUTER_API_KEY` / `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` / `GEMINI_API_KEY` | provider keys (existing repo pattern, `tortoise.ingest._PROVIDERS`) | required for non-mock runs |
-| `TORTOISE_LME_READER_MODEL` | reader model spec `<provider>:<model>` or bare | `openrouter:deepseek/deepseek-chat` |
+| `TORTOISE_LME_READER_MODEL` | reader model spec `<provider>:<model>` or bare | `openrouter:deepseek/deepseek-v4-flash` (M5 pinned — #1525) |
 | `TORTOISE_LME_JUDGE_MODEL` | judge model spec | `openai:gpt-4o-2024-08-06` (the official judge model) |
 | `TORTOISE_LME_CACHE_DIR` | dataset cache dir (outside the repo) | `~/.cache/tortoise-longmemeval` |
 
@@ -98,3 +98,26 @@ path via `--data` skips the download. Split S = `longmemeval_s_cleaned.json`
 The full 500-question run is `@pytest.mark.slow` (never in CI); the
 committed mini fixture + `--mock` exercises the entire pipeline offline in
 CI (`tests/test_longmem_runner.py`).
+
+## Reader pinning (M5, #1525)
+
+The reader model + prompt are **pinned constants for the run**: the code
+default (`READER_MODEL` in `tools/longmem_eval/reader.py`) is
+`openrouter:deepseek/deepseek-v4-flash` — the model the V2 runs actually
+used — so a default-config run is a pinned run. The prompt constants
+(`_SYSTEM_PROMPT`, `_TYPE_FRAGMENTS`) live in the same module. Every report
+records the reader's resolved identity + the verbatim prompt in its
+methodology (`reader_model_spec`, `reader_provider`, `reader_pinned`,
+`reader_system_prompt`, `reader_type_fragments`) — cross-cell/cross-run
+reader drift is visible, never silent.
+
+Run cells must **not** override `TORTOISE_LME_READER_MODEL` (or set it
+exactly to `READER_MODEL`); an override is recorded (`reader_pinned=false`)
+and warned on stderr. Verify after each cell:
+
+```bash
+jq '.methodology | {reader_model_spec, reader_pinned, reader_system_prompt, reader_type_fragments}' <report>
+```
+
+shows `reader_pinned: true` and identical values across the three cell
+reports (pilot → 500-Q → confirmation).
