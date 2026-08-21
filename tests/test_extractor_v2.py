@@ -856,6 +856,275 @@ class TestParticipantSlots:
         assert any("must be a list" in w for w in result["warnings"])
 
 
+# ── E3 (issue #1535): atomic points + search_keys + speaker via source-turn ──
+
+class TestE3Contract:
+    def test_output_contract_has_e3_keys(self):
+        for key in ("quote", "search_keys", "source_turn_id"):
+            assert key in v2.OUTPUT_CONTRACT, f"contract missing {key}"
+        # the contract's points block must carry all three STRUCTURALLY (the
+        # schema tokens, not the trailing comments — comment text cannot
+        # satisfy these assertions)
+        pts_block = v2.OUTPUT_CONTRACT.split('"points":', 1)[1]
+        pts_block = pts_block.split('\n  "operators":', 1)[0]
+        assert '"quote": str|null' in pts_block
+        assert '"search_keys": [str, ...]' in pts_block
+        assert '"source_turn_id": int|null}' in pts_block
+
+    def test_source_role_is_never_emitted(self):
+        # review-gate fix (2026-08-20): plan docs patched to remove source_role
+        for src in (v2.OUTPUT_CONTRACT, v2.S2_TMPL, v2.S4_TMPL):
+            assert "source_role" not in src
+
+    def test_atomicity_and_verbatim_value_rules_present(self):
+        for tmpl in (v2.S2_TMPL, v2.S4_TMPL):
+            assert "ATOMIC POINTS" in tmpl or "one claim per point" in tmpl
+            assert "verbatim" in tmpl and "quote" in tmpl
+            assert "USER VS ASSISTANT" in tmpl or "not a user fact" in tmpl
+
+
+class TestE3SourceTranscript:
+    def _edus(self):
+        return [{"index": 0, "role": "user", "text": "my 5K best is 27:12"},
+                {"index": 1, "role": "assistant", "text": "nice time"}]
+
+    def test_transcript_injected_when_edus_present(self):
+        p = v2.render_s2_prompt(edus=self._edus())
+        assert "SOURCE TRANSCRIPT" in p
+        assert "0: user: my 5K best is 27:12" in p
+        assert "1: assistant: nice time" in p
+
+    def test_s4_transcript_injected(self):
+        p = v2.render_s4_prompt("story", {}, {}, edus=self._edus())
+        assert "0: user:" in p
+
+    def test_none_edus_renders_identical(self):
+        base = v2.render_s2_prompt()
+        # the injected BLOCK is absent (the rules text mentions the SOURCE
+        # TRANSCRIPT concept — assert on the block header, not the phrase)
+        assert "SOURCE TRANSCRIPT (turn-indexed" not in base
+
+    def test_cap_omits_block(self, monkeypatch):
+        monkeypatch.setattr(v2, "_SOURCE_TRANSCRIPT_CAP", 10)
+        assert "SOURCE TRANSCRIPT (turn-indexed" not in v2.render_s2_prompt(edus=self._edus())
+
+    def test_cap_boundary_at_length_included(self, monkeypatch):
+        # over-cap omits; AT the cap the block is still included (> cap)
+        edus = self._edus()
+        text = v2._edus_to_text(edus)
+        monkeypatch.setattr(v2, "_SOURCE_TRANSCRIPT_CAP", len(text))
+        assert "SOURCE TRANSCRIPT (turn-indexed" in v2.render_s2_prompt(edus=edus)
+        monkeypatch.setattr(v2, "_SOURCE_TRANSCRIPT_CAP", len(text) - 1)
+        assert "SOURCE TRANSCRIPT (turn-indexed" not in v2.render_s2_prompt(edus=edus)
+
+    def test_over_cap_render_identical_to_none(self, monkeypatch):
+        # P2-4 fix: when the block is omitted (over cap) the render must be
+        # byte-identical to the edus=None render — no stray "\n\n" tail
+        monkeypatch.setattr(v2, "_SOURCE_TRANSCRIPT_CAP", 1)
+        base = v2.render_s2_prompt()
+        assert v2.render_s2_prompt(edus=self._edus()) == base
+        s4 = v2.render_s4_prompt("story", {}, {}, edus=self._edus())
+        assert s4 == v2.render_s4_prompt("story", {}, {})
+
+
+class TestE3Resolution:
+    # The quote anchors on a NON-first turn (index 1) so a degenerate
+    # first-turn-default resolver cannot pass the resolution tests.
+    EDUS = [{"index": 0, "role": "assistant", "text": "maybe try intervals for speed"},
+            {"index": 1, "role": "user", "text": "my 5K best is 27:12"}]
+
+    def _embed(self, **point_kwargs):
+        p = {"content": "the user's 5K best is 27:12", "pointKind": "statement"}
+        p.update(point_kwargs)
+        return {"entities": [], "points": [p], "events": [], "operators": []}
+
+    def test_quote_resolves_to_turn(self):
+        r = v2.execute_embed(self._embed(quote="my 5K best is 27:12"),
+                             {}, session_id="s1", edus=self.EDUS)
+        pt = r["payload"]["points"][0]
+        assert pt["quote"] == "my 5K best is 27:12"
+        assert pt["source_turn_id"] == 1
+        assert pt["search_keys"] == []
+        # atomicity negative control: a single-sentence point does NOT warn
+        assert not any("ONE claim per point" in w for w in r["warnings"])
+
+    def test_conflicting_model_index_deterministic_wins(self):
+        r = v2.execute_embed(self._embed(quote="my 5K best is 27:12",
+                                         source_turn_id=0),
+                             {}, session_id="s1", edus=self.EDUS)
+        assert r["payload"]["points"][0]["source_turn_id"] == 1
+        assert any("source_turn_id" in w for w in r["warnings"])
+
+    def test_agreeing_model_index_no_warning(self):
+        # advisory-confirm case: the model's index agrees with the verbatim
+        # anchor → used, and no contradiction warning fires
+        r = v2.execute_embed(self._embed(quote="maybe try intervals",
+                                         source_turn_id=0),
+                             {}, session_id="s1", edus=self.EDUS)
+        assert r["payload"]["points"][0]["source_turn_id"] == 0
+        assert not any("contradicts" in w for w in r["warnings"])
+
+    def test_out_of_range_model_index_ignored(self):
+        # branch 2's range guard: an out-of-range model index is skipped and
+        # the deterministic anchor wins (silently — nothing to contradict)
+        r = v2.execute_embed(self._embed(quote="my 5K best is 27:12",
+                                         source_turn_id=99),
+                             {}, session_id="s1", edus=self.EDUS)
+        assert r["payload"]["points"][0]["source_turn_id"] == 1
+
+    def test_non_int_model_index_ignored(self):
+        # a string model index is not an int → treated as absent; det wins
+        r = v2.execute_embed(self._embed(quote="my 5K best is 27:12",
+                                         source_turn_id="1"),
+                             {}, session_id="s1", edus=self.EDUS)
+        assert r["payload"]["points"][0]["source_turn_id"] == 1
+
+    def test_boolean_model_index_ignored(self):
+        # isinstance(True, int) is True in Python — a JSON boolean must NOT
+        # be treated as index 1 (type() is int guard; never guess)
+        r = v2.execute_embed(self._embed(quote="my 5K best is 27:12",
+                                         source_turn_id=True),
+                             {}, session_id="s1", edus=self.EDUS)
+        assert r["payload"]["points"][0]["source_turn_id"] == 1
+
+    def test_token_overlap_fallback_resolves(self):
+        # branch 3: quote is a genuine paraphrase — NOT a verbatim substring
+        # of any turn ("speed intervals" appears nowhere verbatim) — with
+        # >= 0.6 token overlap against exactly one turn → that turn wins
+        r = v2.execute_embed(self._embed(quote="speed intervals"),
+                             {}, session_id="s1", edus=self.EDUS)
+        assert r["payload"]["points"][0]["source_turn_id"] == 0
+
+    def test_token_overlap_exactly_threshold_resolves(self):
+        # the >= 0.6 boundary: exactly 0.6 overlap (3 of 5 tokens) resolves
+        edus = [{"index": 0, "role": "user",
+                 "text": "one two three six seven"},
+                {"index": 1, "role": "user", "text": "a b c d e"}]
+        r = v2.execute_embed(self._embed(quote="one two three four five"),
+                             {}, session_id="s1", edus=edus)
+        assert r["payload"]["points"][0]["source_turn_id"] == 0
+
+    def test_token_overlap_tie_earlier_turn_wins(self):
+        # equal max overlap across two turns → the EARLIER index wins (the
+        # `ov > best_ov` first-match determinism contract)
+        edus = [{"index": 0, "role": "user",
+                 "text": "maybe try intervals for speed"},
+                {"index": 1, "role": "user", "text": "intervals speed zzz"}]
+        r = v2.execute_embed(self._embed(quote="speed intervals x"),
+                             {}, session_id="s1", edus=edus)
+        assert r["payload"]["points"][0]["source_turn_id"] == 0
+
+    def test_below_threshold_fallback_is_none(self):
+        # branch 3/4: no verbatim match and overlap < 0.6 everywhere → fail-open
+        r = v2.execute_embed(self._embed(quote="totally unrelated topic"),
+                             {}, session_id="s1", edus=self.EDUS)
+        assert r["payload"]["points"][0]["source_turn_id"] is None
+        assert any("no resolvable source turn" in w for w in r["warnings"])
+
+    def test_duplicate_quote_first_turn_wins(self):
+        # the same quote in two turns resolves to the EARLIER index (the
+        # deterministic first-match contract)
+        edus = [{"index": 0, "role": "user", "text": "my 5K best is 27:12"},
+                {"index": 1, "role": "user", "text": "my 5K best is 27:12 again"}]
+        r = v2.execute_embed(self._embed(quote="my 5K best is 27:12"),
+                             {}, session_id="s1", edus=edus)
+        assert r["payload"]["points"][0]["source_turn_id"] == 0
+
+    def test_no_quote_no_index_is_none(self):
+        r = v2.execute_embed(self._embed(), {}, session_id="s1", edus=self.EDUS)
+        assert r["payload"]["points"][0]["source_turn_id"] is None
+        assert any("no resolvable source turn" in w for w in r["warnings"])
+
+    def test_empty_quote_in_range_model_index_used_with_warning(self):
+        # D4 step 3 (plan): quote absent but the model emitted a plausible
+        # in-range index → use it, with an "unverified" warning (never
+        # silently trust an unanchored index; never guess beyond the turns)
+        r = v2.execute_embed(self._embed(source_turn_id=1),
+                             {}, session_id="s1", edus=self.EDUS)
+        pt = r["payload"]["points"][0]
+        assert pt["source_turn_id"] == 1
+        assert pt["quote"] == ""
+        assert any("unverified" in w for w in r["warnings"])
+
+    def test_empty_quote_out_of_range_index_is_none(self):
+        # D4 step 3 boundary: an out-of-range model index with no quote is
+        # NOT trusted — fail-open None (never guess)
+        r = v2.execute_embed(self._embed(source_turn_id=99),
+                             {}, session_id="s1", edus=self.EDUS)
+        assert r["payload"]["points"][0]["source_turn_id"] is None
+
+    def test_model_index_resolves_by_value_not_position(self):
+        # P2-3: _edus_from_conversation drops empty-content turns while
+        # preserving original indices — list position and index value can
+        # diverge. The model's index must resolve to the TURN with that
+        # index value, not the list slot. Here edus has indices [0, 2] and
+        # len=2, so model_idx=1 is positionally in-range but names NO turn.
+        # A positional lookup would read index-2's text ("my 5K best is
+        # 27:12") and raise a SPURIOUS contradiction warning against the
+        # correct deterministic match (det=2); the by-value fix sees an
+        # empty m_turn and stays silent.
+        edus = [{"index": 0, "role": "user", "text": "hello"},
+                {"index": 2, "role": "user", "text": "my 5K best is 27:12"}]
+        r = v2.execute_embed(self._embed(quote="my 5K best is 27:12",
+                                         source_turn_id=1),
+                             {}, session_id="s1", edus=edus)
+        pt = r["payload"]["points"][0]
+        assert pt["source_turn_id"] == 2
+        assert not any("contradicts" in w for w in r["warnings"])
+
+    def test_agreeing_model_index_by_value_no_warning(self):
+        # P2-3 positive control: the model's index names a turn BY VALUE that
+        # contains the quote → deterministic match, no contradiction warning
+        edus = [{"index": 0, "role": "user", "text": "hello"},
+                {"index": 2, "role": "user", "text": "my 5K best is 27:12"}]
+        r = v2.execute_embed(self._embed(quote="my 5K best is 27:12",
+                                         source_turn_id=2),
+                             {}, session_id="s1", edus=edus)
+        pt = r["payload"]["points"][0]
+        assert pt["source_turn_id"] == 2
+        assert not any("contradicts" in w for w in r["warnings"])
+
+    def test_search_keys_cleaned(self):
+        # dedup + empty-drop are SILENT; the >60 entry exercises the warning
+        # plumbing while the cleaned list stays deterministic
+        r = v2.execute_embed(
+            self._embed(search_keys=["personal best 5K", "27:12", "27:12", "",
+                                     "x" * 61]),
+            {}, session_id="s1", edus=self.EDUS)
+        assert r["payload"]["points"][0]["search_keys"] == ["personal best 5K", "27:12"]
+        assert any("search_keys" in w for w in r["warnings"])
+
+    def test_search_keys_capped_at_four(self):
+        r = v2.execute_embed(
+            self._embed(search_keys=["a", "b", "c", "d", "e"]),
+            {}, session_id="s1", edus=self.EDUS)
+        assert r["payload"]["points"][0]["search_keys"] == ["a", "b", "c", "d"]
+        assert any("capped at 4" in w for w in r["warnings"])
+
+    def test_search_keys_non_list_warns(self):
+        r = v2.execute_embed(self._embed(search_keys="personal best"),
+                             {}, session_id="s1", edus=self.EDUS)
+        assert r["payload"]["points"][0]["search_keys"] == []
+        assert any("must be a list" in w for w in r["warnings"])
+
+    def test_quote_capped_at_200(self):
+        r = v2.execute_embed(self._embed(quote="q" * 250), {}, session_id="s1",
+                             edus=self.EDUS)
+        assert len(r["payload"]["points"][0]["quote"]) == 200
+
+    def test_atomicity_soft_guard_warns_multi_sentence(self):
+        # D1: the executable atomicity guard — a 2-sentence point warns
+        # (atomicity is prompt-enforced + warn-guarded, never hard-blocked)
+        r = v2.execute_embed(
+            self._embed(content="the user's 5K best is 27:12. He trains daily."),
+            {}, session_id="s1", edus=self.EDUS)
+        assert any("ONE claim per point" in w for w in r["warnings"])
+        # never hard-block: the compound point SURVIVES in the payload
+        assert len(r["payload"]["points"]) == 1
+        assert r["payload"]["points"][0]["content"] == \
+            "the user's 5K best is 27:12. He trains daily."
+
+
 # ── The orchestrator (mock model, no LLM) ──────────────────────────────────
 
 class TestOrchestrator:

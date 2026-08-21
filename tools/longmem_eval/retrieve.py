@@ -30,6 +30,7 @@ Reported per question:
 """
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
 
@@ -46,6 +47,22 @@ def _estimate_tokens(text: str) -> int:
     return int(len(text.split()) * 1.1)
 
 
+_ROLE_PREFIX = re.compile(r"^\[(user|assistant|system|tool|unknown)\]\s+",
+                             re.IGNORECASE)
+
+
+def _speaker_for_turns(proj, turn_ids: list[str]) -> dict[str, str]:
+    """One-query speaker lookup for source-turn links (E3 D7). Returns
+    {turn_node_id: speaker} for the turns that exist."""
+    ids = [t for t in turn_ids if t]
+    if not ids:
+        return {}
+    rows = proj.g.query(
+        "MATCH (n:Point) WHERE n.id IN $ids "
+        "RETURN n.id, coalesce(n.speaker, '')", params={"ids": ids}).result_set
+    return {r[0]: r[1] for r in rows}
+
+
 def _annotate_hits(hits: list[dict], props: dict, dates: list[str]) -> list[dict]:
     """Annotate raw search hits with session linkage + promoted state.
 
@@ -55,11 +72,21 @@ def _annotate_hits(hits: list[dict], props: dict, dates: list[str]) -> list[dict
     full retrieval path (Docker/HNSW) carries them when the graph has
     CORRECTS edges; the embedded TF-IDF fallback never decorates, so they
     stay None/[] and ``render_context`` renders byte-identically to today.
+
+    E3 (#1535): the hit's ``speaker`` is derived at read time — its own
+    speaker prop (turn points carry it) or, when the source-turn node was
+    fetched in the same batch, that turn's speaker. Passes ``quote`` /
+    ``search_keys`` / ``source_turn_id`` through for R2's future
+    query-expansion consumer.
     """
     annotated: list[dict] = []
     for h in hits:
         p = props.get(h["id"], {})
         si = p.get("lme_session_index", -1)
+        turn_ref = p.get("source_turn_id") or ""
+        spk = (p.get("speaker") or ""
+               or (props.get(turn_ref, {}).get("speaker") or ""
+                   if turn_ref else ""))
         annotated.append({
             "id": h["id"],
             "content": h["content"],
@@ -68,6 +95,12 @@ def _annotate_hits(hits: list[dict], props: dict, dates: list[str]) -> list[dict
             "lme_session_index": si,
             "session_date": dates[si] if 0 <= si < len(dates) else "",
             "has_answer": p.get("has_answer", False),
+            # E3: quote/search_keys pass through (R2 consumer); source_turn_id
+            # + speaker are the derivation surface the reader decoration uses.
+            "quote": p.get("quote", ""),
+            "search_keys": p.get("search_keys") or [],
+            "source_turn_id": turn_ref,
+            "speaker": spk,
             # #1367: promoted supersession state — pass the search payload's
             # D8 fields through (superseded_by = newest incoming CORRECTS
             # claim; supersedes = outgoing CORRECTS claims). Reused, not
@@ -125,6 +158,19 @@ def render_context(hits: list[dict], *, question_date: str | None = None) -> str
         sdate = h.get("session_date")
         if sdate:
             prefix = f"{prefix} (session date {sdate})"
+        # E3 (#1535): speaker decoration — mirrors the deterministic leg's
+        # "[role] text" turn shape so the reader sees who asserted the fact.
+        # Unknown → byte-identical rendering (backward-compat). Skip when
+        # the content ALREADY carries a role bracket (turn points are
+        # written as "[role] text" AND have the speaker prop — decorating
+        # both would double-attribute, e.g. "[user] [user] ..." on the
+        # deterministic leg's primary recall surface).
+        spk = h.get("speaker") or ""
+        # only the deterministic leg's own role-bracket shape suppresses the
+        # decoration — a non-role bracket prefix ([context], [IMPORTANT])
+        # must not suppress speaker attribution
+        if spk and not _ROLE_PREFIX.match(h.get("content", "")):
+            prefix = f"{prefix} [{spk}]"
         marker = _supersede_marker(h)
         if marker:
             # _supersede_marker already returns self-bracketed groups
@@ -174,6 +220,16 @@ def retrieve_for_question(
     latency_ms = (time.monotonic() - start) * 1000.0
 
     props = point_props_for_hits(sdk._get_proj(), [h["id"] for h in hits])
+
+    # E3 (D7): resolve speaker for source-turn links whose turn node was NOT
+    # itself retrieved — one batch query (the derivation surface E2E-5 builds
+    # on; turn points carry their own speaker prop).
+    turn_ids = [p.get("source_turn_id") for p in props.values()
+                if p.get("source_turn_id")]
+    speaker_by_turn = _speaker_for_turns(sdk._get_proj(), turn_ids)
+    for p in props.values():
+        if not p.get("speaker") and p.get("source_turn_id"):
+            p["speaker"] = speaker_by_turn.get(p["source_turn_id"], "")
 
     # Annotate hits with session/has_answer + promoted supersession state
     # (#1367). SearchResult carries sessionId only when the engine populates

@@ -126,9 +126,10 @@ the token regardless of which subdomain presented it.
    alternative (HttpOnly + server-proxied auth) is a larger refactor.
 2. **The dashboard's post-mount `getSession()` can still refresh the token
    over the network** for genuine session holders near expiry — by design
-   (keeps sessions alive), but it means the "Checking your session…" card
-   still appears briefly for them. Acceptable; the instant gate removed the
-   unauthenticated path entirely.
+   (keeps sessions alive). Since #1567 the app chrome renders immediately
+   for session holders and the mint/loads hydrate in the background (no
+   "Checking your session…" card on the happy path); token-refresh latency
+   only affects data hydration, never first paint.
 3. **Authorization is server-side** (the API validates Bearer tokens) —
    correct per §1.2. The client gates are routing conveniences only.
 4. **Stale legacy localStorage sessions** after a dashboard sign-out are a
