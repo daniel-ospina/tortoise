@@ -2064,10 +2064,15 @@ def test_reap_only_safe_protects_live_pid_dir_present(monkeypatch):
             # kill a live server while a suite is active (dir present, 0
             # clients — the concurrent-suite between-tests case).
             found = discover()
-            match = [s for s in found if s["socket_path"] == sock]
-            if match:
-                match = [phase1_probe(match[0])]
-                reap(match, dry_run=False, only_safe=True)
+            # discover() returns realpath'd socket paths — compare against
+            # the realpath so the match is not vacuous (#1558 review P1).
+            real_sock = os.path.realpath(sock)
+            match = [s for s in found if s["socket_path"] == real_sock]
+            assert match, f"server not discovered: {real_sock}"
+            assert match[0]["classification"] == "candidate", \
+                f"expected candidate, got {match[0]['classification']}"
+            match = [phase1_probe(match[0])]
+            reap(match, dry_run=False, only_safe=True)
             time.sleep(0.5)
             assert _pid_alive_for(server_pid), (
                 "live-pid server killed under only_safe while suite active "
