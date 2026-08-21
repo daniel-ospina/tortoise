@@ -3,7 +3,6 @@
 state; negative-path validation parity; idempotency; scale)."""
 from __future__ import annotations
 
-import os
 import tempfile  # noqa: F401
 from pathlib import Path
 
@@ -40,7 +39,11 @@ def fresh_db(tmp_path):
     from tortoise.sdk import TortoiseSDK
     if skip_if_no_falkor():
         pytest.skip("embedded FalkorDBLite unavailable")
-    os.environ.setdefault("TORTOISE_DB_URI", "")
+    # #1585: do NOT touch TORTOISE_DB_URI here — TortoiseSDK(db_path) ignores
+    # the URI when an explicit path is given (#139 precedence), and the old
+    # setdefault("TORTOISE_DB_URI", "") leaked an empty-but-set URI into the
+    # shared process env, breaking test_search_engine later in the fast matrix
+    # ("Unsupported scheme").
     sdk = TortoiseSDK(str(tmp_path / "battery.db"))
     yield sdk
     sdk.close()
