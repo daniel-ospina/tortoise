@@ -12,6 +12,7 @@ Runs with FalkorDBLite (embedded) — no Docker needed.
 """
 from __future__ import annotations  # noqa: I001
 
+import gc
 import json
 import os
 import shutil
@@ -61,10 +62,19 @@ _FRESH_SDKS: list = []
 def _restore_db_env():
     """Save/restore TORTOISE_DB_URI + TORTOISE_DB_PATH around each test so
     the _fresh_sdk() env writes never leak into sibling test files. Also
-    removes temp DB dirs created by _fresh_sdk (test hygiene)."""
+    removes temp DB dirs created by _fresh_sdk (test hygiene).
+
+    #1562: the client caches ONE SDK per process (module-level singleton) —
+    the cache is closed+reset around EVERY test (setup AND teardown) so a
+    previous test's cached SDK — bound to its temp DB or degraded config —
+    never leaks into the next test, and its embedded server shuts down
+    promptly instead of being pinned until eviction/exit.
+    """
     saved_uri = os.environ.get("TORTOISE_DB_URI")
     saved_path = os.environ.get("TORTOISE_DB_PATH")
+    tortoise_client._close_cached_sdk()  # setup: never serve a prior test's SDK
     yield
+    tortoise_client._close_cached_sdk()  # teardown: close the server promptly
     if saved_uri is None:
         os.environ.pop("TORTOISE_DB_URI", None)
     else:
@@ -553,6 +563,134 @@ class TestGracefulDegradation:
         tortoise_client.main()
         claim = json.loads(capsys.readouterr().out)
         assert claim["confidence"] == 0.0
+
+    def test_cli_multi_command_session_single_sdk_no_unavailable(self, capsys, monkeypatch):
+        """#1562 regression: a multi-command CLI session in ONE process must
+        NEVER return tortoise_unavailable after the first write.
+
+        Pre-fix, _get_sdk() built a FRESH SDK per command; with #1475's
+        close-on-GC finalizer the collected SDK could shut the shared
+        embedded server down (last-client) while the next command connected
+        — the race that flaked test_cli_write_points_healthy_roundtrip under
+        load (KeyError: 'confidence'). The regression DETECTOR is the
+        structural identity pin at the end: pre-fix, every command
+        constructed a new SDK, so `_get_sdk() is first` fails; post-fix one
+        cached SDK serves the whole session. The behavioral asserts are a
+        healthy-session smoke check (all four commands must succeed — never
+        tortoise_unavailable); gc.collect() between commands ensures no
+        leaked per-command SDK accumulates across the session.
+        """
+        _fresh_sdk()
+
+        def run(argv):
+            monkeypatch.setattr(sys, "argv", argv)
+            gc.collect()  # collect any dead per-command SDK (pre-fix shape)
+            tortoise_client.main()
+            return json.loads(capsys.readouterr().out)
+
+        payload = run([
+            "tortoise_client.py", "write-points", "--kind", "strategy",
+            "--points-json", '[{"content": "session cmd 1"}]',
+        ])
+        assert payload["written"] == 1
+        assert "tortoise_unavailable" not in json.dumps(payload)
+
+        payload = run([
+            "tortoise_client.py", "write-points", "--kind", "strategy",
+            "--points-json", "[]",
+        ])
+        assert payload["written"] == 0
+        assert payload["results"] == []
+
+        payload = run([
+            "tortoise_client.py", "write-points", "--kind", "vision",
+            "--points-json", '[{"content": "session cmd 3"}]',
+        ])
+        assert payload["written"] == 1
+        assert payload["results"][0]["pointKind"] == "vision"
+
+        payload = run([
+            "tortoise_client.py", "write-claim", "--content", "session claim",
+            "--kind", "hypothesis", "--confidence", "0.0",
+        ])
+        # Pre-fix this could be {"error": "tortoise_unavailable", ...} → KeyError.
+        assert payload["confidence"] == 0.0
+
+        # Structural pin: the whole session reused ONE cached SDK.
+        first = tortoise_client._get_sdk()
+        assert first is not None
+        assert all(tortoise_client._get_sdk() is first for _ in range(3))
+
+    def test_cached_sdk_self_heals_dead_server(self, monkeypatch):
+        """#1562 self-heal: a cached SDK whose embedded server died (external
+        kill, reaper, long idle) is evicted and rebuilt ONCE on the next call
+        — the cache never pins a dead server forever (mirrors hosted_api's
+        _FALLBACK_KEEPALIVE keepalive pattern). The rebuilt SDK must work.
+        """
+        _fresh_sdk()
+        first = tortoise_client._get_sdk()
+        assert first is not None
+        assert tortoise_client._get_sdk() is first  # cached + reused
+
+        # Kill the server from under the cache: the probe reports dead.
+        proj = first._get_proj()
+        monkeypatch.setattr(proj, "_probe_ok", lambda: False)
+
+        fresh = tortoise_client._get_sdk()
+        assert fresh is not None
+        assert fresh is not first  # evicted + rebuilt, not served dead
+        created = tortoise_client.write_strategy_points([{"content": "healed"}])
+        assert len(created) == 1
+
+    def test_cached_sdk_no_self_heal_on_uri_mode(self):
+        """#1562: self-heal must NOT mask persistent config errors. An
+        unreachable REMOTE DB (URI mode) is not a dead-server condition —
+        the same SDK is served and the contract's _UNAVAILABLE_ERRORS path
+        degrades, exactly as pre-fix (rebuilding could never help and would
+        log-spam every call).
+        """
+        self._clear_db_env()
+        os.environ["TORTOISE_DB_URI"] = "docker://localhost:1"
+        first = tortoise_client._get_sdk()
+        assert first is not None
+        assert tortoise_client._get_sdk() is first  # cached, NEVER rebuilt
+        assert tortoise_client.write_strategy_points([{"content": "x"}]) == []
+        assert tortoise_client._get_sdk() is first
+
+    def test_close_cached_sdk_resets(self):
+        """#1562 reset surface: _close_cached_sdk() drops the cached SDK and
+        the next _get_sdk() rebuilds from the current env — the hook tests
+        and long-running processes use to avoid pinning a server forever."""
+        _fresh_sdk()
+        first = tortoise_client._get_sdk()
+        assert first is not None
+        tortoise_client._close_cached_sdk()
+        assert tortoise_client._SDK_CACHE is None
+        second = tortoise_client._get_sdk()
+        assert second is not None
+        assert second is not first
+
+    def test_cached_sdk_env_drift_rebuilds(self):
+        """#1562: the cache must never serve an SDK bound to a PREVIOUS env
+        DB — TORTOISE_DB_URI/PATH drift (test fixture swap, process
+        re-pointing) evicts and rebuilds (mirrors hosted_api's path-drift
+        check #1502). This is what keeps the singleton safe across tests even
+        without the autouse reset.
+        """
+        _fresh_sdk()
+        embedded = tortoise_client._get_sdk()
+        assert embedded is not None
+        # URI-mode switch: the embedded cache is stale — rebuild.
+        self._clear_db_env()
+        os.environ["TORTOISE_DB_URI"] = "docker://localhost:1"
+        uri_sdk = tortoise_client._get_sdk()
+        assert uri_sdk is not None
+        assert uri_sdk is not embedded
+        # Back to embedded PATH mode: the URI cache is stale — rebuild.
+        _fresh_sdk()
+        embedded2 = tortoise_client._get_sdk()
+        assert embedded2 is not None
+        assert embedded2 is not uri_sdk
 
     def test_cli_queries_healthy_roundtrip(self, capsys, monkeypatch):
         """Healthy-path CLI wiring for the read subcommands: --domain and
