@@ -94,6 +94,7 @@ const AUTH_HOOK_SECRET_ENV = "AUTH_HOOK_SECRET";
 const ALLOWED_ORIGINS = [
   "https://premiselabs.co",
   "https://tortoise.premiselabs.co",
+  "https://app.premiselabs.co",
   "https://premise-labs.pages.dev",
 ];
 const ORIGIN_SUFFIXES = [".premise-labs.pages.dev"];

@@ -174,6 +174,7 @@ def test_edge_function_allowlists_welcome_page_origins():
     src = EDGE_FN.read_text()
     assert "https://tortoise.premiselabs.co" in src
     assert "https://premiselabs.co" in src
+    assert "https://app.premiselabs.co" in src  # #1566: provisioning runs in-app now
     assert ".premise-labs.pages.dev" in src
     # Any-port local dev rule (replaces the 8788-only array — see the
     # divergence note in index.ts): the regex must accept localhost/127.0.0.1

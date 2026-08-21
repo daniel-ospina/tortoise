@@ -962,6 +962,11 @@ you up to 6 yes/no questions and set up your Tortoise memory.
     }
 
     // ── Poll for provisioning ──────────────────────────────────────────────
+    // ⚠️ DEAD SINCE #1566 — provisioning runs in the app (the signed-in
+    // redirect above returns before this pipeline). Do NOT restore this
+    // path: it would recreate the double-provision surface #1082/#1566
+    // guard against. The poll/reveal/mint functions below are kept only so
+    // the page's structure survives for the recovery + no-session flows.
     async function waitForProvisioning() {
       // #863: recovery-mode guard — a PASSWORD_RECOVERY event that arrives
       // after the start branch must still stop the provisioning pipeline.
@@ -978,6 +983,19 @@ you up to 6 yes/no questions and set up your Tortoise memory.
       // provisionViaEdgeFunction mid-password-reset.
       if (recoveryMode) {
         showResetPanel();
+        return;
+      }
+
+      if (session) {
+        // #1566: provisioning moved INTO the app — a signed-in visitor on
+        // this legacy page goes to the app ROOT (the session is in the
+        // parent-domain cookie; first-timers are provisioned there and see
+        // the welcome card, returning users get the dashboard home). A claim
+        // in flight (tt_claim_pending marker) routes to the claim card
+        // (#1566 review P2 — keeps claimStatusGuard reachable).
+        // location.replace: Back must not return.
+        const claimInFlight = /(?:^|; )tt_claim_pending=/.test(document.cookie);
+        window.location.replace(claimInFlight ? "https://app.premiselabs.co/?claim=1" : "https://app.premiselabs.co");
         return;
       }
 

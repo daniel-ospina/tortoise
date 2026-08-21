@@ -95,6 +95,7 @@ async function call(method, headers = {}, rawBody = undefined) {
 }
 
 const PROD = "https://tortoise.premiselabs.co";
+const APP = "https://app.premiselabs.co"; // #1566: provisioning now runs in-app
 const EVIL = "https://evil.example.com";
 const FALLBACK = "https://premiselabs.co"; // ALLOWED_ORIGINS[0]
 const checks = [];
@@ -230,6 +231,9 @@ try {
   check("JWT POST from welcome-page Origin → 201 + acao=PROD (full browser flow)",
     await call("POST", { ...jwtHeaders, origin: PROD }, JSON.stringify({ user_id: USER_ID, email: EMAIL })),
     { status: 201, acao: PROD, vary: true });
+  check("JWT POST from app Origin (#1566) → 201 + acao=APP (in-app provisioning)",
+    await call("POST", { ...jwtHeaders, origin: APP }, JSON.stringify({ user_id: USER_ID, email: EMAIL })),
+    { status: 201, acao: APP, vary: true });
   check("JWT POST from unknown Origin → 403 + fallback acao (origin gate first)",
     await call("POST", { ...jwtHeaders, origin: EVIL }, JSON.stringify({ user_id: USER_ID, email: EMAIL })),
     { status: 403, acao: FALLBACK, vary: true });

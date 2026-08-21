@@ -403,7 +403,11 @@ def compile_stories(stories: list[str]) -> str:
 OUTPUT_CONTRACT = """{
   "entities": [{"name": str, "kind": str, "lifecycle": "created|changed|unchanged|superseded", "supersedes": "existing-id|null", "note": str|null}],
   "events": [{"content": str, "eventKind": str, "about_entities": [str], "startedAt": "YYYY-MM-DD|YYYY-MM-DDThh:mm:ss|null", "slots": {"subject": [{"name": str, "kind": str, "confidence": float}], "object": [{"name": str, "kind": str, "confidence": float}], "event": [{"name": str, "kind": str, "confidence": float}]}}],
-  "points": [{"content": str, "pointKind": "statement", "about_entities": [str], "when": "YYYY-MM-DD|null", "slots": {"subject": [{"name": str, "kind": str, "confidence": float}], "object": [{"name": str, "kind": str, "confidence": float}], "event": [{"name": str, "kind": str, "confidence": float}]}}],
+  "points": [{"content": str, "pointKind": "statement", "about_entities": [str], "when": "YYYY-MM-DD|null",
+              "slots": {"subject": [...], "object": [...], "event": [...]},
+              "quote": str|null,          # verbatim source text, <=200 chars (E3)
+              "search_keys": [str, ...],  # 2-4 aliases + verbatim value tokens (E3)
+              "source_turn_id": int|null}],  # {index}: turn in the SOURCE TRANSCRIPT (E3)
   "operators": [
     {"src": str, "dst": str, "op_type": "IMPL|NAND"},
     {"src": str, "dst": str, "op_type": "MITIGATES", "target_edge": {"src": str, "dst": str, "op_type": "IMPL"}, "strength": 0.1|0.3|0.5}
@@ -411,6 +415,12 @@ OUTPUT_CONTRACT = """{
   "chain_notes": [{"chain": str, "finding": str, "action": "repaired|warned", "note": str}],
   "link_before_create": [{"searched_for": str, "found": bool, "note": str}]
 }"""
+
+
+# E3 (issue #1535): the SOURCE TRANSCRIPT block cap (chars) — protects the
+# S2/S4 input token budget (D3). Over cap the block is omitted; the
+# deterministic quote→turn resolver still anchors from `quote` alone.
+_SOURCE_TRANSCRIPT_CAP = 8000
 
 S2_TMPL = """You are the GRAPH MAPPER for the Tortoise epistemic memory.
 
@@ -516,6 +526,24 @@ But STRIP, DON'T DROP the durable claim they carry:
   "let me verify X").
 What survives is what changes the world model — including how we work.
 
+ATOMIC POINTS (E3): emit ONE claim per point. Split compound statements
+into separate points. The claim's VALUE survives verbatim — never compress
+a concrete value ("27:12", "6pm") into a label ("the value"); the verbatim
+value must be findable in the content or the point's `quote`.
+
+SOURCE ATTRIBUTION (E3): for every point emit `quote` = the EXACT
+conversation text the claim came from (verbatim, <=200 chars) and
+`source_turn_id` = the {index}: marker from the SOURCE TRANSCRIPT that
+asserted it. NEVER emit a speaker/role on the point — speaker is derived
+at read time from the source turn's existing speaker/[role].
+
+SEARCH KEYS (E3): emit 2-4 `search_keys` — paraphrases/synonyms a
+questioner might use, plus the verbatim value tokens ("27:12",
+"five-K time"). The fact is findable when asked with different words.
+
+USER VS ASSISTANT (E3): an assistant suggestion/proposal is NOT a user
+fact — do not emit it as a statement point unless the user confirmed it.
+
 OUTPUT CONTRACT — ONE JSON object and NOTHING else:
 {date_anchor}{output_contract}
 
@@ -523,21 +551,42 @@ Empty arrays are valid — extract-nothing is valid. Print ONLY the JSON object
 (no markdown fences, no commentary)."""
 
 
-def render_s2_prompt(master: dict | None = None,
-                     session_date: str | None = None) -> str:
+def _render_source_transcript(edus: list[dict] | None) -> str:
+    """E3 (D3): turn-indexed SOURCE TRANSCRIPT block for S2/S4 — lets the
+    model cite `source_turn_id` from the {index}: markers instead of
+    guessing. Over the char cap the block is omitted (quote-only resolution
+    still anchors deterministically); edus=None renders byte-identically
+    to today."""
+    if not edus:
+        return ""
+    text = _edus_to_text(edus)
+    if len(text) > _SOURCE_TRANSCRIPT_CAP:
+        return ""  # over budget — quote-only resolution still works (D4)
+    return ("SOURCE TRANSCRIPT (turn-indexed — cite source_turn_id from "
+            "this; the numbers are the {index}: markers):\n" + text)
+
+
+def render_s2_prompt(master: dict | None = None, *,
+                     session_date: str | None = None,
+                     edus: list[dict] | None = None) -> str:
     master = master or build_master_list()
+    transcript = _render_source_transcript(edus)
     return (S2_TMPL
             .replace("{master_list}", _render_master(master))
             .replace("{chains_text}", _render_chains(master))
             .replace("{date_anchor}", _date_anchor(
                 session_date, include_emission_rules=True))
-            .replace("{output_contract}", OUTPUT_CONTRACT))
+            .replace("{output_contract}", OUTPUT_CONTRACT)
+            + (("\n\n" + transcript) if transcript else ""))
 
 
-def run_s2(model, story: str, master: dict | None = None,
-           session_date: str | None = None) -> dict:
+def run_s2(model, story: str, master: dict | None = None, *,
+           session_date: str | None = None,
+           edus: list[dict] | None = None) -> dict:
     """S2: story → embed list (draft prompt v1, owner-in-the-loop pending)."""
-    out = _complete(model, render_s2_prompt(master, session_date),
+    out = _complete(model,
+                    render_s2_prompt(master, session_date=session_date,
+                                     edus=edus),
                     "S1 STORY:\n" + story)
     return _parse_json(out)
 
@@ -776,6 +825,20 @@ Rules:
   (unresolvable refs are dropped at execution). The event slot is event-as-
   content (#1417): an event the content is ABOUT, never a provenance/
   capture event.
+- ATOMIC POINTS (E3): emit ONE claim per point. Split compound statements
+  into separate points. The claim's VALUE survives verbatim — never compress
+  a concrete value ("27:12", "6pm") into a label ("the value"); the verbatim
+  value must be findable in the content or the point's `quote`.
+- SOURCE ATTRIBUTION (E3): for every point emit `quote` = the EXACT
+  conversation text the claim came from (verbatim, <=200 chars) and
+  `source_turn_id` = the {index}: marker from the SOURCE TRANSCRIPT that
+  asserted it. NEVER emit a speaker/role on the point — speaker is derived
+  at read time from the source turn's existing speaker/[role].
+- SEARCH KEYS (E3): emit 2-4 `search_keys` — paraphrases/synonyms a
+  questioner might use, plus the verbatim value tokens ("27:12",
+  "five-K time"). The fact is findable when asked with different words.
+- USER VS ASSISTANT (E3): an assistant suggestion/proposal is NOT a user
+  fact — do not emit it as a statement point unless the user confirmed it.
 - OPERATOR REFERENCING: operator src/dst MUST be the EXACT content of a point
   or event emitted in THIS output (copy verbatim, no paraphrasing). If an
   endpoint has no point yet, CREATE the point first. NEVER use an entity name
@@ -791,9 +854,11 @@ Empty arrays are valid. Print ONLY the JSON object."""
 
 
 def render_s4_prompt(story: str, search: dict, embed_list: dict,
-                     master: dict | None = None,
-                     session_date: str | None = None) -> str:
+                     master: dict | None = None, *,
+                     session_date: str | None = None,
+                     edus: list[dict] | None = None) -> str:
     master = master or build_master_list()
+    transcript = _render_source_transcript(edus)
     return (S4_TMPL
             .replace("{master_list}", _render_master(master))
             .replace("{chains_text}", _render_chains(master))
@@ -802,15 +867,18 @@ def render_s4_prompt(story: str, search: dict, embed_list: dict,
             .replace("{embed_list_json}", json.dumps(embed_list, indent=1))
             .replace("{date_anchor}", _date_anchor(
                 session_date, include_emission_rules=True))
-            .replace("{output_contract}", OUTPUT_CONTRACT))
+            .replace("{output_contract}", OUTPUT_CONTRACT)
+            + (("\n\n" + transcript) if transcript else ""))
 
 
 def run_s4(model, story: str, search: dict, embed_list: dict,
-           master: dict | None = None,
-           session_date: str | None = None) -> dict:
+           master: dict | None = None, *,
+           session_date: str | None = None,
+           edus: list[dict] | None = None) -> dict:
     """S4: complete the embed list (S2 + gaps). Draft prompt v1."""
-    out = _complete(model, render_s4_prompt(story, search, embed_list, master,
-                                            session_date),
+    out = _complete(model,
+                    render_s4_prompt(story, search, embed_list, master,
+                                     session_date=session_date, edus=edus),
                     "Complete the embed list.")
     return _parse_json(out)
 
@@ -1197,6 +1265,86 @@ def derive_supersessions(embed_list: dict, search: dict) -> list[dict]:
     return _supersession_records(refs, search)
 
 
+def _clean_search_keys(raw, warnings: list[str], ctx: str) -> list[str]:
+    """E3: 2-4 search_key aliases + verbatim tokens — sanitize to a deduped
+    list of 1-60-char strings (max 4). LLM output is advisory; malformed
+    entries are dropped, not fatal."""
+    out: list[str] = []
+    if raw is None:
+        return out
+    if not isinstance(raw, list):
+        warnings.append(f"{ctx}: search_keys must be a list — dropped")
+        return out
+    for k in raw:
+        k = str(k).strip()
+        if not k:
+            continue
+        if len(k) > 60:
+            warnings.append(f"{ctx}: search_keys entry >60 chars dropped")
+            continue
+        if k not in out:
+            out.append(k)
+    if len(out) > 4:
+        warnings.append(f"{ctx}: search_keys capped at 4 (had {len(out)})")
+        out = out[:4]
+    return out
+
+
+def _resolve_source_turn(p: dict, edus: list[dict] | None,
+                         *, warnings: list[str]) -> int | None:
+    """E3: the authoritative source-turn index for a point. The verbatim
+    quote is the anchor; the model's source_turn_id is advisory (a wrong
+    model index must never win — mirror of the never-guess discipline)."""
+    if not edus:
+        return None
+    quote = re.sub(r"\s+", " ", str(p.get("quote") or "").strip().lower())
+    model_idx = p.get("source_turn_id")
+
+    def _contains(text: str) -> bool:
+        if not quote:
+            return False
+        return re.sub(r"\s+", " ", str(text).lower()).find(quote) >= 0
+
+    # 1) verbatim anchor — first turn containing the quote
+    det_idx = next((e["index"] for e in edus if _contains(e.get("text", ""))),
+                   None)
+    # 2) model index in range? (type() is int — a JSON boolean `true` is an
+    # int subclass and must NOT be treated as index 1: never guess). Resolved
+    # by INDEX VALUE, not list position — _edus_from_conversation drops
+    # empty-content turns while preserving original indices, so position and
+    # value can diverge.
+    if type(model_idx) is int and 0 <= model_idx < len(edus):
+        m_turn = next((e.get("text", "") for e in edus
+                       if e["index"] == model_idx), "")
+        # Contradiction fires only when the model's named turn EXISTS and
+        # disagrees with the quote anchor (m_turn non-empty guard). An index
+        # that names no turn (dropped empty-content turn) has nothing to
+        # contradict — the deterministic anchor wins silently.
+        if det_idx is not None and m_turn and not _contains(m_turn):
+            warnings.append(f"source_turn_id {model_idx} contradicts the quote's "
+                            f"turn {det_idx} — deterministic match wins")
+        # D4 step 3: quote empty but a plausible index present → use it, but
+        # warn "unverified" (never silently trust an unanchored model index)
+        elif det_idx is None and not quote and m_turn:
+            warnings.append(f"source_turn_id {model_idx} unverified "
+                            "(empty quote) — using it")
+            return model_idx
+    if det_idx is not None:
+        return det_idx
+    # 3) no verbatim match → token-overlap fallback (single best >= 0.6)
+    best, best_ov = None, 0.0
+    for e in edus:
+        ov = _token_overlap(str(e.get("text", "")), str(p.get("quote") or ""))
+        if ov > best_ov:
+            best, best_ov = e["index"], ov
+    if best is not None and best_ov >= 0.6:
+        return best
+    # 4) no anchor at all — fail-open, never guess
+    warnings.append(f"point '{str(p.get('content', ''))[:40]}' has no resolvable "
+                    "source turn (no quote match)")
+    return None
+
+
 _ENTITY_FALLBACK = {"kind": "core:other"}
 _EVENT_FALLBACK = {"kind": "core:occurrence"}
 _POINT_FALLBACK = {"kind": "statement"}
@@ -1206,7 +1354,8 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                   story_arc: str = "", summary: str = "",
                   extractor_version: str = "value@0.5.0+v2",
                   master: dict | None = None,
-                  session_date: str | None = None) -> dict:
+                  session_date: str | None = None,
+                  edus: list[dict] | None = None) -> dict:
     """S5: deterministic embed EXECUTION (not a flash prompt).
 
     Maps the complete embed list to the Layer-1 commit payload in dependency
@@ -1391,12 +1540,26 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 "searched_for": f"point '{content[:60]}'", "found": False,
                 "note": "no match — created"})
         point_ids[n] = pid
+        # E3 (D1/D4): atomicity soft guard + E3 point keys. The verbatim
+        # quote (<=200) is the anchor; search_keys are sanitized aliases;
+        # source_turn_id is resolved DETERMINISTICALLY (the model's index
+        # is advisory — a conflicting model index loses with a warning).
+        sents = _split_sentences(content)
+        if len(sents) > 1:
+            warnings.append(f"point '{content[:60]}' has {len(sents)} sentences — "
+                            "E3 atomicity expects ONE claim per point")
+        quote = str(p.get("quote") or "").strip()[:200]
+        search_keys = _clean_search_keys(p.get("search_keys"), warnings,
+                                         f"point '{content[:60]}'")
+        turn_idx = _resolve_source_turn(p, edus, warnings=warnings)
         pt_entry = {
             "id": pid, "content": content, "pointKind": pkind,
             "reason": reason, "confidence": 0.5, "c_cal": 0.5,
             "about_entities": [str(a) for a in (p.get("about_entities") or [])
                                if isinstance(a, str) and a.strip()],
-            "source_ref": "session.md", "quote": "", "status": "draft",
+            "source_ref": "session.md", "quote": quote, "status": "draft",
+            "search_keys": search_keys,
+            "source_turn_id": turn_idx,
         }
         pt_slots = _clean_slots(p.get("slots"), warnings,
                                 f"point '{content[:60]}'", master)
@@ -1611,7 +1774,7 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     if story:
         try:
             embed_list = run_s2(model, story, master,
-                                session_date=session_date)
+                                session_date=session_date, edus=edus)
         except Exception as e:
             errors.append(f"S2 failed: {type(e).__name__}: {e}")
 
@@ -1624,7 +1787,7 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     if story:
         try:
             s4 = run_s4(model, story, search, embed_list, master,
-                        session_date=session_date)
+                        session_date=session_date, edus=edus)
             if s4 and (s4.get("entities") or s4.get("points") or
                        s4.get("events") or s4.get("operators")):
                 complete_list = s4
@@ -1640,7 +1803,7 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     try:
         result = execute_embed(complete_list, search, session_id=session_id,
                                story_arc=story_arc, master=master,
-                               session_date=session_date)
+                               session_date=session_date, edus=edus)
     except Exception as e:  # S5 must NEVER block the pipeline (design §7.4)
         errors.append(f"S5 failed: {type(e).__name__}: {e}")
         result = {"payload": None, "chain_notes": [], "link_before_create": [],

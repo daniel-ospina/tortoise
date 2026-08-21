@@ -68,7 +68,9 @@ let supabaseClient = null
 try {
   supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
     auth: {
-      flowType: 'pkce',
+      flowType: 'implicit',  // #1566: cross-origin OAuth returns from /auth
+      // carry #access_token (a pkce verifier cannot cross subdomains); the
+      // claim flow's raw key still rides sessionStorage only (#1082).
       storage: supabaseStorage,
       storageKey: COOKIE_NAME,
       persistSession: true,
@@ -133,6 +135,13 @@ function claimIntentInFlight() {
   const [welcomeMode, setWelcomeMode] = React.useState(
     () => window.location.pathname === '/welcome' || window.location.pathname === '/welcome/'
   )
+  // #1566: in-app provisioning (first-timers) — the reveal is atomic (A13),
+  // so the key is displayed here and never elsewhere.
+  const [welcomeProvisioning, setWelcomeProvisioning] = React.useState(false)
+  const [welcomeKey, setWelcomeKey] = React.useState('')
+  const [welcomeTeamName, setWelcomeTeamName] = React.useState('')
+  const [welcomeGraphName, setWelcomeGraphName] = React.useState('')
+  const [welcomeProvisionError, setWelcomeProvisionError] = React.useState('')
 
   // #1147: build the tier-cap notice. The server's 402 detail carries the
   // real limit ('Team api_keys limit reached (N). Upgrade your plan to
@@ -410,6 +419,105 @@ function claimIntentInFlight() {
   // switcher exists exactly for those users. Mint for a concrete team_id, and
   // on a 400 auto-select the first membership and retry instead of silently
   // degrading to the API-key screen.
+  // #1566: in-app first-time provisioning (ported from welcome.html).
+  // The tenant-provision edge function authorizes the app origin; the
+  // membership row + the key are created here. The raw tt_ key NEVER leaves
+  // the app origin (#1082) — it is revealed here exactly once (atomic
+  // reveal+null, A13) and shown in the welcome card.
+  async function provisionInApp(session) {
+    setWelcomeProvisioning(true)
+    setWelcomeProvisionError('')
+    // #1082 double-provision guard (fail-closed, mirrors welcome.html's
+      // claimStatusGuard): a tt_claim_pending marker means a claimable anon
+      // team may exist — never mint a stray team over it.
+      if (/(?:^|; )tt_claim_pending=/.test(document.cookie)) {
+        // #1566 (code-review P2): the guard must NOT dead-end — offer the
+        // claim card (the welcome.html 'Go claim my team' pattern).
+        setWelcomeProvisionError(
+          'You have an anonymous team waiting to be claimed — attach your ' +
+          'GitHub or Google identity to claim it (same key, same graph).')
+        return { routedAway: true }
+      }
+      const userId = (session.user && session.user.id) || ''
+      const meta = (session.user && session.user.user_metadata) || {}
+      const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+      const provisionUrl = isLocal
+        ? 'http://127.0.0.1:54321/functions/v1/tenant-provision'
+        : SUPABASE_URL + '/functions/v1/tenant-provision'
+      const callProvision = () => fetch(provisionUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer ' + session.access_token,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          user_id: userId,
+          email: (session.user && session.user.email) || '',
+          ...(meta.display_name ? { display_name: meta.display_name } : {}),
+        }),
+      })
+      // Attempt 1 + exactly ONE retry (a second mint = a second team).
+      let response = null
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try { response = await callProvision() } catch { response = null }
+        if (response && response.ok) break
+        if (attempt === 0) await new Promise(r => setTimeout(r, 1000))
+      }
+      if (response && response.status === 401) {
+        // #1511 semantic, ported: a 401 from tenant-provision means the
+        // session is stale/invalid — welcome must never render for
+        // unauthenticated users. Clear the session and go to /auth.
+        if (typeof window.clearStoredSession === 'function') window.clearStoredSession()
+        if (typeof window.bounceToAuth === 'function') window.bounceToAuth()
+        else window.location.replace('https://tortoise.premiselabs.co/auth')
+        return { routedAway: true }
+      }
+      if (response && response.ok) {
+        // The function wrote the membership row before answering — re-query
+        // and reveal through the canonical path (atomic reveal+null, A13).
+        try {
+          for (let attempt = 0; attempt < 3; attempt++) {
+            // #1566 (review P2): port the welcome.html poll shape — status
+            // filter + newest row, so placeholder (team_id='') and M:N rows
+            // can't error the poll (PGRST116).
+            const { data, error } = await supabaseClient
+              .from('team_memberships')
+              .select('team_id, team_name, graph_name, status')
+              .eq('user_id', userId)
+              .eq('status', 'active')
+              .order('created_at', { ascending: false })
+              .limit(1)
+              .maybeSingle()
+            if (!error && data && data.status === 'active' && data.team_id) {
+              const { data: key, error: rErr } = await supabaseClient
+                .rpc('reveal_api_key', { p_user_id: userId, p_team_id: data.team_id })
+              if (rErr) return null
+              if (!key || key === 'pending') {
+                // Already consumed (a prior reveal elsewhere) — no re-reveal.
+                return { api_key: '', team_name: data.team_name, graph_name: data.graph_name }
+              }
+              return { api_key: key, team_name: data.team_name, graph_name: data.graph_name }
+            }
+            await new Promise(r => setTimeout(r, 1000))
+          }
+        } catch {
+          // #1566 (code-review P2): a transport error must NOT leave the
+          // provisioning spinner forever — fall through to the error card.
+          return null
+        }
+        // The membership write may have failed despite 201 — the 201 body is
+        // the only other copy of the plaintext.
+        try {
+          const body = await response.json()
+          if (body && body.api_key && body.team_name) {
+            return { api_key: body.api_key, team_name: body.team_name, graph_name: body.graph_name || '' }
+          }
+        } catch { /* fall through */ }
+        return null
+      }
+      return null
+  }
+
   async function mintSessionKey(purpose, teamId) {
     const tok = sessionTokenRef.current
     if (!tok) throw new Error('No session')
@@ -520,8 +628,12 @@ function claimIntentInFlight() {
           // on /auth, not a dashboard credential.
           const claimIntent = claimIntentInFlight()
           if (!claimIntent) {
-            if (typeof window.bounceToAuth === 'function') window.bounceToAuth()
-            else window.location.replace('https://tortoise.premiselabs.co/auth')
+            // #1224/#1566: OAuth state-expiry errors land as ?error=… on the
+            // app origin now — preserve the SEARCH so /auth renders the
+            // banner (never the hash: a live #access_token must not be
+            // re-ingested by the destination).
+            if (typeof window.bounceToAuth === 'function') window.bounceToAuth(window.location.search)
+            else window.location.replace('https://tortoise.premiselabs.co/auth' + window.location.search)
             return
           }
           // Claim-intent: render the claim-paste screen (no session, no team).
@@ -529,6 +641,13 @@ function claimIntentInFlight() {
           setChecking(false); return
         }
         sessionTokenRef.current = session.access_token
+        // #1567: the session is valid — render the app chrome NOW and let the
+        // mint + loads hydrate in the background (the multi-second
+        // "Checking your session…" card is gone for session holders). The
+        // #1559 error paths below setAuthed(false) so the error card still
+        // replaces the chrome on failure.
+        setAuthed(true)
+        setChecking(false)
         // Round-6 (P2): supabase-js auto-refreshes the access token (~1h) into
         // the cookie — keep the ref in sync so JWT-scoped calls never die with
         // a stale token while the dashboard still looks logged in.
@@ -614,16 +733,69 @@ function claimIntentInFlight() {
           })
           if (teamsRes.ok) {
             teamsList = await teamsRes.json()
+          }
+          if (teamsRes.ok && Array.isArray(teamsList)) {
             // Round-12: SIGNED_OUT during this fetch must not resurrect teams
             if (sessionTokenRef.current === session.access_token) setTeams(teamsList)
+          } else {
+            // #1566 (review P1): a 200 with a non-array body is NOT 'no
+            // teams' — it must fail CLOSED, never flip an existing user
+            // into a surprise provisioning/key rotation.
+            // #1566 (code-review P1): a transient API failure is NOT 'no
+            // teams' — fail CLOSED to the error card rather than flipping an
+            // existing user into a surprise provisioning (key rotation).
+            throw new Error('Could not load your teams — try again.')
           }
-        } catch { /* treated as no teams below */ }
+        } catch (e) {
+          // #1566 (review P2): fail CLOSED for any non-array/empty result —
+          // the throw's premise is 'not a valid teams array'.
+          if (!Array.isArray(teamsList) || !teamsList.length) {
+            setAuthed(false)
+            setMountError((e && e.message) || 'Could not load your teams — try again.')
+            setChecking(false)
+            return
+          }
+        }
+
+        // #1566: a first-timer (valid session, NO teams) is provisioned
+        // IN-APP — the team + membership + key are created here (the
+        // tenant-provision edge function authorizes the app origin now) and
+        // the key is revealed in the welcome card. Skip the bootstrap mint
+        // (it 403s 'No team membership' for teamless users).
+        if (!teamsList.length) {
+          if (sessionTokenRef.current === session.access_token) {
+            // The welcome card must render: leave the checking state + mark
+            // authed (the normal completeLogin path never runs for first-timers).
+            setChecking(false)
+            setAuthed(true)
+            setWelcomeMode(true)
+            const provisioned = await provisionInApp(session)
+            if (provisioned && provisioned.routedAway) {
+              // claim in flight / claimable anon team — the claim flow owns it
+              setWelcomeProvisioning(false)
+            } else if (provisioned) {
+              setWelcomeKey(provisioned.api_key)
+              setWelcomeTeamName(provisioned.team_name)
+              setWelcomeGraphName(provisioned.graph_name || '')
+              setWelcomeProvisioning(false)
+            } else {
+              setWelcomeProvisionError('Could not create your team — try again.')
+              setWelcomeProvisioning(false)
+            }
+          }
+          return
+        }
 
         // Reuse a stored key when it still belongs to one of the user's teams
         // (avoids burning the 3-active bootstrap cap on every reload), else
         // mint a bootstrap key for the first membership.
         let key = null
         const storedKey = localStorage.getItem(KEY_STORAGE)
+        // #1567 (review P1): the chrome renders NOW, so a team switch made
+        // during this fetch (the switcher is populated by the teams call
+        // above) must not be clobbered — capture the selection and skip the
+        // writes if it moved.
+        const teamAtStoredKeyCheck = teamIdRef.current
         if (storedKey && teamsList.length) {
           try {
             const tRes = await fetch(`${API_BASE}/v1/team`, {
@@ -631,7 +803,8 @@ function claimIntentInFlight() {
             })
             if (tRes.ok) {
               const t = await tRes.json()
-              if (teamsList.some((x) => x.team_id === t.team_id)) {
+              if (teamsList.some((x) => x.team_id === t.team_id)
+                  && teamIdRef.current === teamAtStoredKeyCheck) {
                 key = storedKey
                 teamKeysRef.current[t.team_id] = storedKey
                 setCurrentTeamId(t.team_id)
@@ -640,11 +813,17 @@ function claimIntentInFlight() {
             }
           } catch { /* fall through to mint */ }
         }
+        let mintedTeamId = null
+        // #1567 (review P2): a switch made while the mint/loads are in
+        // flight owns its own error path — the stale continuation must not
+        // flip the live switched session to the error card.
+        const teamAtMountMint = teamIdRef.current
         if (!key) {
           const firstTeamId = teamsList.length ? teamsList[0].team_id : null
           try {
             const minted = await mintSessionKey('bootstrap', firstTeamId)
             key = minted.key
+            mintedTeamId = minted.teamId || null
             if (minted.teamId) teamKeysRef.current[minted.teamId] = key
           } catch (e) {
             // #308: a suspended team's mint 403s — show the appeal banner.
@@ -655,25 +834,39 @@ function claimIntentInFlight() {
             // "Redirecting to the sign-in page…" shell. Surface an
             // actionable error instead (the Retry button re-runs the mount).
             const msg = (e && e.message) || 'Could not prepare your session.'
+            if (teamIdRef.current !== teamAtMountMint) return  // switched mid-mint
             setMountError(/429|rate limit/i.test(msg)
               ? 'Too many requests from this network — try again in a minute.'
               : msg)
+            setAuthed(false)  // #1567 P0: the error card renders in !authed
             setChecking(false)
             return
           }
         }
         // Round-9: a SIGNED_OUT during the mint must not complete the login
         // with a fresh key on the tab the user just signed out of.
-        if (!sessionTokenRef.current) { setChecking(false); setMountError('Your session ended — sign in again.'); return }
-        if (!key) { setChecking(false); setMountError('Could not prepare your session — try again.'); return }
+        if (!sessionTokenRef.current) { setAuthed(false); setChecking(false); setMountError('Your session ended — sign in again.'); return }
+        if (!key) { setAuthed(false); setChecking(false); setMountError('Could not prepare your session — try again.'); return }
+        // #1567 P1 (verifier gate): the chrome is visible NOW — a team
+        // switch made during the mint (multi-membership: the mint-400
+        // fallback populated the switcher early) must not be clobbered by
+        // this continuation. Bail before any state write if the selection
+        // moved away from the key's owner (teamIdRef is null on a fresh
+        // session — the stored-key path and Round-8 loadTeams own it then).
+        if (mintedTeamId && teamIdRef.current && teamIdRef.current !== mintedTeamId) return
         localStorage.setItem(KEY_STORAGE, key)
         setApiKey(key)
         apiKeyRef.current = key
         setAuthMode('session')
         await completeLogin(key)
       } catch (e) {
-        // #1559: never leave the user on the silent redirect shell.
+        // #1559/#1567 (review P0): never leave the user on the silent
+        // redirect shell — authed was set EARLY, so an escaped throw (e.g.
+        // localStorage blocked in private mode after a successful mint)
+        // would otherwise leave mountError set-but-unrendered (the card is
+        // !authed-gated). Flip authed so the card + Retry render.
         setMountError((e && e.message) || 'Something went wrong loading the dashboard — try again.')
+        setAuthed(false)
         setChecking(false)
       }
     })()
@@ -717,8 +910,13 @@ function claimIntentInFlight() {
 
   async function completeLogin(key) {
     setError('')
+    const teamAtCompleteLogin = teamIdRef.current
     try {
       const t = await api('/v1/team', key ? { headers: { Authorization: `Bearer ${key}` } } : {})
+      // #1567 (review P1): the chrome renders early, so a team switch can
+      // land DURING this await — never land team A's data under team B's
+      // selection (the refreshTeam response-identity guard, applied here).
+      if (t?.team_id && teamIdRef.current && t.team_id !== teamIdRef.current) return
       setTeam(t)
       setAuthed(true)
       loadAlerts(t?.team_id)  // fire-and-forget (#308 R7)
@@ -730,6 +928,7 @@ function claimIntentInFlight() {
       // #1559 (review P2): a /v1/team or load 5xx after a successful mint
       // must NOT leave the silent redirect shell — same class as the mint
       // failure. The error card (mountError) is the only renderable state.
+      if (teamIdRef.current !== teamAtCompleteLogin) return  // switched mid-load
       setMountError((e && /429|rate limit/i.test(e.message))
         ? 'Too many requests from this network — try again in a minute.'
         : (e && e.message) || 'Could not load your dashboard — try again.')
@@ -1844,6 +2043,9 @@ function claimIntentInFlight() {
   // provisioning + key reveal-once; this is the in-dashboard onboarding:
   // chooser + routes to the API Keys tab where the key lives).
   if (welcomeMode && authed) {
+    // #1566: first-timers are provisioned IN-APP — show the provisioning
+    // spinner, then the revealed key (exactly once, A13), or an actionable
+    // error. Returning users (welcomeKey empty) get the ready card.
     return (
       <div className="app">
         <header>
@@ -1858,27 +2060,74 @@ function claimIntentInFlight() {
         </header>
         <main>
           <div className="welcome-card" style={{ maxWidth: 560, margin: '0 auto', padding: '1rem 0' }}>
-            <h1 style={{ fontFamily: 'var(--serif, Georgia, serif)', fontWeight: 400, marginBottom: '0.5rem' }}>
-              Your Tortoise is ready!
-            </h1>
-            <p className="dim" style={{ marginBottom: '1.25rem' }}>
-              Your API key was shown on the welcome page — copy it now if you
-              haven't already. You can also manage keys here anytime.
-            </p>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-              <button
-                className="btn-primary"
-                onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false); setTab('keys') }}
-              >
-                Go to my API keys →
-              </button>
-              <a className="btn-primary" href="https://tortoise.premiselabs.co/docs#mcp" target="_blank" rel="noreferrer">
-                Use Tortoise with MCP — set up my agent →
-              </a>
-              <a className="btn-primary" href="https://tortoise.premiselabs.co/docs#quickstart" target="_blank" rel="noreferrer">
-                Build with Tortoise — SDK quickstart →
-              </a>
-            </div>
+            {welcomeProvisioning ? (
+              <>
+                <h1 style={{ fontFamily: 'var(--serif, Georgia, serif)', fontWeight: 400, marginBottom: '0.5rem' }}>
+                  Provisioning your Tortoise…
+                </h1>
+                <p className="dim">Creating your team and API key — one moment.</p>
+              </>
+            ) : welcomeProvisionError ? (
+              <>
+                <h1 style={{ fontFamily: 'var(--serif, Georgia, serif)', fontWeight: 400, marginBottom: '0.5rem' }}>
+                  We couldn't finish setting up your team
+                </h1>
+                <p className="error" role="alert">{welcomeProvisionError}</p>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                  {/anonymous team waiting/.test(welcomeProvisionError) ? (
+                    // #1566 (code-review P2): the claim-guard must not
+                    // dead-end — the claim card is the escape.
+                    <a className="btn-primary" href="https://app.premiselabs.co/?claim=1">Go claim my team →</a>
+                  ) : (
+                    <button className="btn-primary" onClick={() => window.location.reload()}>Try again</button>
+                  )}
+                  <p className="dim">Still stuck? Contact <a href="mailto:hello@premiselabs.co">hello@premiselabs.co</a>.</p>
+                </div>
+              </>
+            ) : (
+              <>
+                <h1 style={{ fontFamily: 'var(--serif, Georgia, serif)', fontWeight: 400, marginBottom: '0.5rem' }}>
+                  {welcomeKey ? 'Your Tortoise is ready!' : 'Welcome back!'}
+                </h1>
+                {welcomeKey ? (
+                  <>
+                    <p className="dim" style={{ marginBottom: '1rem' }}>
+                      This is the only time this API key is shown — copy it now. The raw key
+                      never leaves this page ({welcomeTeamName ? `team: ${welcomeTeamName}` : ''}).
+                    </p>
+                    <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.25rem' }}>
+                      <code style={{ flex: 1, padding: '0.6rem 0.8rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, overflowWrap: 'anywhere', fontSize: 13 }}>
+                        {welcomeKey}
+                      </code>
+                      <button
+                        className="btn-primary"
+                        onClick={() => { try { navigator.clipboard.writeText(welcomeKey) } catch { /* clipboard blocked */ } }}
+                      >
+                        Copy
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <p className="dim" style={{ marginBottom: '1.25rem' }}>
+                    Your team is set up. You can manage your API key in the dashboard anytime.
+                  </p>
+                )}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                  <button
+                    className="btn-primary"
+                    onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false); setTab('keys') }}
+                  >
+                    Go to my API keys →
+                  </button>
+                  <a className="btn-primary" href="https://tortoise.premiselabs.co/docs#mcp" target="_blank" rel="noreferrer">
+                    Use Tortoise with MCP — set up my agent →
+                  </a>
+                  <a className="btn-primary" href="https://tortoise.premiselabs.co/docs#quickstart" target="_blank" rel="noreferrer">
+                    Build with Tortoise — SDK quickstart →
+                  </a>
+                </div>
+              </>
+            )}
           </div>
         </main>
       </div>

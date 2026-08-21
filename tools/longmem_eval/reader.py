@@ -125,6 +125,8 @@ class Reader(Protocol):
                question_date: str | None = None,
                question_type: str | None = None) -> str: ...
 
+    def ping(self, probe: str) -> str: ...
+
 
 class LLMReader:
     """Reader backed by an OpenAI-compatible chat model.
@@ -161,6 +163,18 @@ class LLMReader:
         )
         raw = self._model.complete(
             system=system_prompt_for(question_type), user=user)
+        return raw.strip()
+
+    def ping(self, probe: str) -> str:
+        """Minimal transport-health probe (M2 #1523 pre-flight).
+
+        One tiny completion through the reader's OWN model (key + endpoint +
+        model health only — prompt/context rendering is exercised on question
+        1). HTTP status errors propagate for classification; preflight.py
+        maps them via the P2 taxonomy.
+        """
+        from .preflight import PROBE_SYSTEM
+        raw = self._model.complete(system=PROBE_SYSTEM, user=probe)
         return raw.strip()
 
 
@@ -201,6 +215,12 @@ class MockReader:
             if str(hit.get("content", "")).strip():
                 return str(hit["content"]).strip()
         return ""
+
+    def ping(self, probe: str) -> str:
+        """Total protocol: pre-flight never pings the mock (mock mode skips
+        the gate entirely), but the interface stays complete (M2 #1523)."""
+        del probe
+        return "mock ping ok"
 
 
 def _resolve_provider(named: str | None = None) -> tuple[str, str, str] | None:
