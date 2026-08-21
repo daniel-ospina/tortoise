@@ -14,6 +14,19 @@
 
 set -euo pipefail
 
+# #1349 T11: reject the benchmark-only probe seam in the hosted image.
+# TORTOISE_EMBEDDER_OVERRIDE is the marker of tools/embedder_probe.py's
+# inject_model — a harness mechanism for candidate-model benchmark runs
+# ONLY. Production must never honor it (a container carrying it is
+# misconfigured by construction; serving a wrong embedder silently would be
+# the #1349 class of incident the swap exists to prevent). Guard FIRST so
+# the error is unambiguous even if the model cache is also missing.
+if [ -n "${TORTOISE_EMBEDDER_OVERRIDE:-}" ]; then
+    echo "tortoise: FATAL — TORTOISE_EMBEDDER_OVERRIDE is set (${TORTOISE_EMBEDDER_OVERRIDE})" >&2
+    echo "tortoise: the embedder probe is benchmark-only and must never reach the hosted image — unset it" >&2
+    exit 1
+fi
+
 # Embedding model cache — pre-downloaded at build time (Dockerfile ENV).
 # Export defensively so it propagates even if the entrypoint is run outside
 # the container image.
@@ -22,10 +35,12 @@ export SENTENCE_TRANSFORMERS_HOME="${SENTENCE_TRANSFORMERS_HOME:-/app/model}"
 
 # Fast-fail if the pre-downloaded model cache is missing (code-review P3, #160)
 # — the build-time bake in Dockerfile.hosted is the ONLY source; a missing
-# cache means a broken image, not a retryable condition.
-if [ ! -d "${HF_HOME}/models--sentence-transformers--all-MiniLM-L6-v2" ]; then
+# cache means a broken image, not a retryable condition. #1349: the bake is
+# org-qualified BAAI/bge-small-en-v1.5 (EMBEDDING_MODEL) — the cache dir must
+# match the model the image bakes.
+if [ ! -d "${HF_HOME}/models--BAAI--bge-small-en-v1.5" ]; then
     echo "tortoise: FATAL — embedding model cache not found at ${HF_HOME}" >&2
-    echo "tortoise: expected ${HF_HOME}/models--sentence-transformers--all-MiniLM-L6-v2" >&2
+    echo "tortoise: expected ${HF_HOME}/models--BAAI--bge-small-en-v1.5" >&2
     exit 1
 fi
 
@@ -35,13 +50,15 @@ fi
 #
 # Previous behavior (fail-fast blocking pre-warm, #160) crashed deploys:
 # EmbeddingModel._LOAD_TIMEOUT_S (30s) is shorter than a cold 2-core/2GB VM
-# needs to import torch + sentence-transformers + load the 90MB model, so
+# needs to import torch + sentence-transformers + load the ~130MB model, so
 # get() returned None, the assert failed, the entrypoint exited 1, uvicorn
 # never started, and the Fly health check timed out (issue #545).
 #
 # Embeddings are OPTIONAL — FTS + structural RRF work without them
 # (embeddings.py docstring). The model cache existence check above still
-# catches a broken image (missing bake) cheaply.
+# catches a broken image (missing bake) cheaply; a present-but-corrupt bake
+# is surfaced by the post-pre-warm model-identity log in hosted_api.py
+# (#1349 T10, non-blocking).
 _IS_SERVER=0
 for _arg in "$@"; do
     if echo "$_arg" | grep -q "uvicorn"; then

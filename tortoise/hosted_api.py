@@ -193,17 +193,54 @@ async def _lifespan(app):
         try:
             import threading
 
+            def _probe_loaded_model_id(model) -> str | None:
+                """Best-effort extraction of the loaded HF model id from a
+                sentence-transformers object (probe state). The presence-only
+                cache FATAL (entrypoint.sh) cannot catch a present-but-corrupt
+                bake, so the post-pre-warm log reports what ACTUALLY loaded
+                (#1349 T10). Returns None when the id cannot be resolved.
+                """
+                if model is None:
+                    return None
+                try:
+                    # ST wraps the HF transformer in module[0] (Transformer);
+                    # its auto_model config records the org-qualified id used
+                    # at load time (e.g. BAAI/bge-small-en-v1.5).
+                    st_module = model[0] if len(model) > 0 else model
+                    config = getattr(getattr(st_module, "auto_model", None), "config", None)
+                    return getattr(config, "_name_or_path", None) or None
+                except Exception:  # noqa: BLE001 — probe is best-effort
+                    return None
+
             def _prewarm_embeddings() -> None:
                 try:
-                    from tortoise.embeddings import EmbeddingModel
+                    from tortoise.embeddings import EMBEDDING_MODEL, EmbeddingModel
                     # Longer window than request paths (30s): cold-start torch
                     # import on a 2-core/2GB VM can exceed 30s (#545). The
                     # thread is daemon + background, so it never blocks bind.
                     model = EmbeddingModel.get(load_timeout=300.0)
-                    _logger.info(
-                        "embeddings: background pre-warm %s",
-                        "ready" if model is not None else "deferred (retries on next call)",
-                    )
+                    loaded_id = _probe_loaded_model_id(model)
+                    if model is not None:
+                        if loaded_id and loaded_id != EMBEDDING_MODEL:
+                            # Degraded signal (#1349 T10, non-blocking): a
+                            # present-but-corrupt/stale bake passes the
+                            # entrypoint presence FATAL and would serve a
+                            # wrong embedder silently — surface it. Embeddings
+                            # are optional, so this is a WARNING, never a
+                            # crash (no #545 cold-start regression).
+                            _logger.warning(
+                                "embeddings: DEGRADED — loaded model %r does not "
+                                "match EMBEDDING_MODEL %r (stale/corrupt bake)",
+                                loaded_id, EMBEDDING_MODEL,
+                            )
+                        _logger.info(
+                            "embeddings: background pre-warm ready (model=%s)",
+                            loaded_id or "unknown",
+                        )
+                    else:
+                        _logger.info(
+                            "embeddings: background pre-warm deferred (retries on next call)",
+                        )
                 except Exception as exc:  # noqa: BLE001 — never crash the app
                     _logger.warning("embeddings: background pre-warm failed: %s", exc)
 

@@ -16,9 +16,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Layer 1: bake the embedding model (90MB) — cached unless the layer inputs
-# change (pyproject.toml here, or any earlier layer: requirements.txt, base
-# image). Source-only changes reuse the cache, making deploys incremental.
+# Layer 1: bake the embedding model (~130MB bge-small, #1349) — cached
+# unless the layer inputs change (pyproject.toml here, or any earlier layer:
+# requirements.txt, base image). Source-only changes reuse the cache, making
+# deploys incremental.
 #
 # DOCUMENTED DRIFT DECISION (#494): the [embeddings]/[backups] extras resolve
 # against the live index at build time (not the lock), and a future extras
@@ -33,12 +34,13 @@ RUN pip install --no-cache-dir '.[embeddings]' '.[backups]' '.[postgres]' \
     # Both HF_HOME and SENTENCE_TRANSFORMERS_HOME must point at /app/model so
     # the build-time download lands EXACTLY where runtime looks: ST uses
     # SENTENCE_TRANSFORMERS_HOME directly as its cache dir
-    # (/app/model/models--sentence-transformers--all-MiniLM-L6-v2), NOT the
-    # HF_HOME/hub path (fix #160-followup — image booted with a missing cache
-    # and entrypoint exited 1).
-    && HF_HOME=/app/model SENTENCE_TRANSFORMERS_HOME=/app/model python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')" \
-    && test -d /app/model/models--sentence-transformers--all-MiniLM-L6-v2 \
-        || (echo 'FATAL: embedding model cache not at /app/model/models--sentence-transformers--all-MiniLM-L6-v2' >&2; exit 1)
+    # (/app/model/models--BAAI--bge-small-en-v1.5), NOT the HF_HOME/hub path
+    # (fix #160-followup — image booted with a missing cache and entrypoint
+    # exited 1). #1349: bake must match tortoise/embeddings.py EMBEDDING_MODEL
+    # (the org-qualified cache dir is models--BAAI--bge-small-en-v1.5).
+    && HF_HOME=/app/model SENTENCE_TRANSFORMERS_HOME=/app/model python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-small-en-v1.5')" \
+    && test -d /app/model/models--BAAI--bge-small-en-v1.5 \
+        || (echo 'FATAL: embedding model cache not at /app/model/models--BAAI--bge-small-en-v1.5' >&2; exit 1)
 
 # Layer 2: source code (fast, no model download — reuses Layer 1 cache)
 # --no-deps: package-only install. Dependencies were already installed
@@ -48,10 +50,10 @@ COPY tortoise/ tortoise/
 COPY product/pricing.json product/pricing.json
 RUN pip install --no-cache-dir -e . --no-deps
 
-# Embedding model cache — all-MiniLM-L6-v2 is pre-downloaded to /app/model at
-# build time (above) so runtime loading is pure local I/O with no HuggingFace
-# network access (the runtime download in 69aefae hung in Fly's sandboxed
-# network and was reverted in 0da50a0).
+# Embedding model cache — BAAI/bge-small-en-v1.5 is pre-downloaded to
+# /app/model at build time (above) so runtime loading is pure local I/O with
+# no HuggingFace network access (the runtime download in 69aefae hung in
+# Fly's sandboxed network and was reverted in 0da50a0).
 ENV HF_HOME=/app/model
 ENV SENTENCE_TRANSFORMERS_HOME=/app/model
 # Offline mode: never phone home for the model at runtime — the cache is
