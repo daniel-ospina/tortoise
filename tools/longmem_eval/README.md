@@ -21,6 +21,32 @@ python -m tools.longmem_eval.run --split s            # 500 questions, LongMemEv
 python -m tools.longmem_eval.run --split s --limit 10 # first 10 (sanity)
 ```
 
+## Dense-leg setup (R3, #1542)
+
+The vector/dense retrieval leg runs **only when sentence-transformers is
+installed** (the `[embeddings]` extra — `all-MiniLM-L6-v2`, the MemDelta-pinned
+384-dim embedder, #399). The eval env must install it once; the R3 pre-flight
+**refuses to start a real (non-`--mock`) run without a working embedder** — a
+dense-less report is never published silently.
+
+```bash
+# eval env (repo root): dev tooling + the embeddings extra
+uv sync --group dev --extra embeddings
+
+# pre-download the ~90MB model (first run downloads it on demand; pre-warm
+# avoids a >30s cold-load during the run's first create_point)
+uv run python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+
+# verify the embedder is usable (R3 pre-flight gate)
+uv run python -c "from tortoise.embeddings import EmbeddingModel; m = EmbeddingModel.get(load_timeout=600); assert m is not None; print('embedder OK')"
+```
+
+Contract: with the embedder present, every `create_point` writes a 384-dim
+`embedding` and the vector strategy runs at query time (`embedding_coverage`
+per question is `1.0`); without it, coverage is a recorded `0.0` and the
+vector leg traces `no_embedder` — observable, never silent. `--mock` runs warn
+and continue offline (CI smoke stays runnable without the extra).
+
 ## Configuration (env-driven, never hardcoded)
 
 | Var | Purpose | Default |

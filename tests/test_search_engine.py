@@ -9,6 +9,7 @@ import pytest  # noqa: I001
 from tortoise.search_engine import (
     classify_query, rrf_fusion, SearchResult, SearchScores,
     EpBreakdown, EpEvidence, annotate_ep_batch, reset_circuit_breakers,
+    run_fts_query, run_vector_query,
 )
 
 # ── Live-FalkorDB availability (mirrors tests/test_hnsw_vector_index.py) ──
@@ -123,6 +124,135 @@ class TestAnnotateEpBatch:
         # Without a real graph, should return empty dict gracefully
         result = annotate_ep_batch(None, ["test-id"])
         assert isinstance(result, dict)
+
+
+# ------------------------------------------------------------------ R3 #1542 D4 leg trace
+
+
+def _trace_sdk(tmp_path):
+    from tortoise.sdk import TortoiseSDK
+    return TortoiseSDK(str(tmp_path / "vectrace.db"))
+
+
+def _embedder_or_skip():
+    """Skip the dense-leg assertions when the embedder/model cache is
+    unavailable (R3 tests run where CI guarantees .[test,embeddings] + the
+    HF model cache; skip-if-no-embedder keeps this module green anywhere)."""
+    from tortoise.embeddings import EmbeddingModel
+    m = EmbeddingModel.get(load_timeout=120)
+    if m is None:
+        pytest.skip("sentence-transformers / all-MiniLM-L6-v2 cache "
+                    "not available — dense-leg assertion skipped")
+    return m
+
+
+def test_vector_trace_no_embeddings_zero_row_guard(tmp_path):
+    """D4 (R3): an empty-embedding graph → run_vector_query records
+    reason='no_embeddings' via the EXPLICIT zero-row guard — the success
+    path returns [] WITHOUT raising, so the exception-only catch never fires
+    for the real empty case (review P1)."""
+    sdk = _trace_sdk(tmp_path)
+    try:
+        # raw projection write — a Point with NO embedding (bypasses
+        # create_point's optional embedding entirely)
+        sdk._get_proj().g.query(
+            "CREATE (p:Point {id:'p1', content:'hello', "
+            "pointKind:'statement'})")
+        trace: list[dict] = []
+        hits = run_vector_query(sdk._get_proj().g, [0.0] * 384, limit=5,
+                                leg_trace=trace)
+        assert hits == []
+        vec = next(e for e in trace if e["leg"] == "vector")
+        assert vec["ran"] is True
+        assert vec["count"] == 0
+        assert vec["reason"] == "no_embeddings"
+    finally:
+        sdk.close()
+
+
+def test_vector_trace_empty_results_when_embedded_but_excluded(tmp_path):
+    """D4 (R3): embedded points present but ALL excluded by the status
+    filter → 0-row result set with embedded points present →
+    reason='empty_results' (NOT no_embeddings — the count guard
+    distinguishes them)."""
+    _embedder_or_skip()
+    sdk = _trace_sdk(tmp_path)
+    try:
+        sdk.create_point("statement", "hello world", id="p1",
+                         status="retracted")
+        trace: list[dict] = []
+        hits = run_vector_query(sdk._get_proj().g, [0.0] * 384, limit=5,
+                                excluded_statuses=("retracted",),
+                                leg_trace=trace)
+        assert hits == []
+        vec = next(e for e in trace if e["leg"] == "vector")
+        assert vec["reason"] == "empty_results"
+        assert vec["ran"] is True
+    finally:
+        sdk.close()
+
+
+def test_vector_trace_ok_on_healthy_graph(tmp_path):
+    """D4 (R3): a healthy embedded graph → run_vector_query records
+    reason='ok' with count == len(hits)."""
+    _embedder_or_skip()
+    sdk = _trace_sdk(tmp_path)
+    try:
+        sdk.create_point("statement", "hello world", id="p1")
+        trace: list[dict] = []
+        hits = run_vector_query(sdk._get_proj().g, [0.0] * 384, limit=5,
+                                leg_trace=trace)
+        assert len(hits) == 1
+        vec = next(e for e in trace if e["leg"] == "vector")
+        assert vec["reason"] == "ok"
+        assert vec["count"] == 1
+    finally:
+        sdk.close()
+
+
+def test_vector_trace_poisoned_plain_list_node(tmp_path):
+    """D4 (R3): a malformed plain-list embedding node poisons the brute-
+    force MATCH (vecf32 throws per-row — 'Type mismatch: expected Null or
+    Vectorf32 but was List') → reason='query_failed' (NOT no_embeddings)."""
+    _embedder_or_skip()
+    sdk = _trace_sdk(tmp_path)
+    try:
+        sdk.create_point("statement", "healthy vecf32 point", id="healthy")
+        sdk._get_proj().g.query(
+            "CREATE (p:Point {id:'poisoned', content:'board game', "
+            "pointKind:'statement', embedding:[0.1, 0.2]})")
+        trace: list[dict] = []
+        hits = run_vector_query(sdk._get_proj().g, [0.0] * 384, limit=5,
+                                leg_trace=trace)
+        assert hits == []
+        vec = next(e for e in trace if e["leg"] == "vector")
+        assert vec["reason"] == "query_failed"
+    finally:
+        sdk.close()
+
+
+def test_fts_trace_index_missing(tmp_path, monkeypatch):
+    """D4 (R3): the PROMOTED FTS index-missing catch — an index-not-found
+    driver error records reason='index_missing' (surface 11's owned
+    negative: 'fts skipped (no index)' is truthful from R3 forward, never
+    conflated with 'fts ran, no results'). Embedded FalkorDBLite's
+    queryNodes returns empty instead of raising, so the driver error is
+    simulated (the promoted catch is the unit under test)."""
+    sdk = _trace_sdk(tmp_path)
+    try:
+        proj = sdk._get_proj()
+        # proj.g is a read-only _GuardedGraph — patch the underlying handle
+        def _raise_index(*a, **kw):
+            raise RuntimeError("index does not exist: Point")
+        monkeypatch.setattr(proj.g._g, "query", _raise_index)
+        trace: list[dict] = []
+        hits = run_fts_query(proj.g, "hello", leg_trace=trace)
+        assert hits == []
+        fts = next(e for e in trace if e["leg"] == "fts")
+        assert fts["reason"] == "index_missing"
+        assert fts["degraded"] is True
+    finally:
+        sdk.close()
 
 
 # ------------------------------------------------------------------ #125 SDK document metadata

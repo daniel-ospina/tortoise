@@ -9363,6 +9363,7 @@ class TortoiseSDK:
         include_terminal: bool = False,
         _elevated_timeout_ms: int | None = None,
         pool_size: int | None = None,
+        leg_trace: list[dict] | None = None,
     ) -> list[dict]:
         """Hybrid search with RRF fusion + EP annotation.
 
@@ -9398,6 +9399,15 @@ class TortoiseSDK:
             collective-cap override into degradation_chain to measure uncensored
             true-completion latency. Default None = production 500ms cap. Never
             passed by production callers.
+        leg_trace (R3 #1542 D4): PRIVATE trace contract — when provided,
+            appends per-leg entries (vector/fts/structural/fallback — the
+            R2 #1541 shared shape {"leg", "ran", "degraded", "reason",
+            "count"}) so the dense leg's contribution is recorded per call,
+            never null (E2E-1 leg-mix precondition). ``no_embedder`` vs
+            ``encode_failed`` are distinguished in the query_vec block; the
+            ``fallback`` entry is appended last on every early-return branch
+            (snapshot TF-IDF path, legacy fallback_tfidf path, non-point
+            return []). Default None = no trace, byte-identical behavior.
         """
         from .search_engine import (  # noqa: I001
             classify_query, degradation_chain, rrf_fusion,
@@ -9405,6 +9415,7 @@ class TortoiseSDK:
             fetch_point_epistemic_state, fallback_tfidf,
             SearchResult, SearchScores,
             filter_by_relationship, filter_by_traversal_predicate,
+            _trace_entry,
         )
 
         if entity_type not in ("point", "event", "subject", "document", "object", "operator", "source"):
@@ -9433,15 +9444,34 @@ class TortoiseSDK:
         expanded_kinds = self._expand_kind(kind) if kind else None
 
         # 2. Get query vector if needed (all core entity types now have embeddings #7845)
+        # R3 (#1542) D4: no_embedder vs encode_failed are distinguished —
+        # both leave query_vec None (the vector strategy is never submitted),
+        # but the trace records WHY: a run can never confuse "no embedder
+        # installed" with "embedder present but broken" (present-but-broken
+        # used to be conflated into query_vec=None silently).
         query_vec = None
+        _vec_reason: str | None = None
         if strategies.get("vector") and query and query.strip():
+            from .embeddings import EmbeddingModel
+            model = None
             try:
-                from .embeddings import EmbeddingModel
                 model = EmbeddingModel.get()
-                if model:
+            except Exception:  # noqa: BLE001, RUF100
+                model = None
+            if model is None:
+                _vec_reason = "no_embedder"
+            else:
+                try:
                     query_vec = model.encode([query])[0].tolist()
-            except Exception:
-                pass  # Graceful — vector strategy will degrade
+                except Exception:  # noqa: BLE001, RUF100
+                    _vec_reason = "encode_failed"
+        if _vec_reason is not None and leg_trace is not None:
+            # Recorded at the source (the strategy is never submitted) —
+            # BEFORE degradation_chain merges its own entries, so the
+            # vector entry always precedes the fts/structural merge.
+            leg_trace.append(_trace_entry(
+                "vector", ran=False, degraded=True,
+                reason=_vec_reason, count=0))
 
         # 3. Run retrieval with degradation
         is_embedded = getattr(proj, '_is_embedded', True)
@@ -9477,6 +9507,7 @@ class TortoiseSDK:
             # lets run_vector_query skip the failing signature attempt.
             vector_index_api=getattr(proj, "_vector_index_api", None),
             excluded_statuses=() if include_terminal else None,
+            leg_trace=leg_trace,
         )
 
         if not raw_results:
@@ -9497,12 +9528,16 @@ class TortoiseSDK:
                     if _snap is not None:
                         _fb_store.put(_key, _snap)
                 if _snap is not None:
-                    return _decorate_fallback_hits(
-                        search_snapshot(
-                            query, _snap, limit=limit, kind=kind,
-                            exclude_status=exclude_status,
-                            include_terminal=include_terminal,
-                        ), graph)
+                    snap_hits = search_snapshot(
+                        query, _snap, limit=limit, kind=kind,
+                        exclude_status=exclude_status,
+                        include_terminal=include_terminal,
+                    )
+                    if leg_trace is not None:
+                        leg_trace.append(_trace_entry(
+                            "fallback", ran=True, degraded=True,
+                            reason="tfidf_snapshot", count=len(snap_hits)))
+                    return _decorate_fallback_hits(snap_hits, graph)
                 points = self.query(kind=kind,
                                     include_retracted=include_terminal)
                 if exclude_status and points:
@@ -9512,8 +9547,16 @@ class TortoiseSDK:
                     # dicts carrying the status property.
                     points = [p for p in points
                               if (p.get("status") or "") not in set(exclude_status)]
-                return _decorate_fallback_hits(
-                    fallback_tfidf(query, points, limit=limit), graph)
+                legacy_hits = fallback_tfidf(query, points, limit=limit)
+                if leg_trace is not None:
+                    leg_trace.append(_trace_entry(
+                        "fallback", ran=True, degraded=True,
+                        reason="tfidf_legacy", count=len(legacy_hits)))
+                return _decorate_fallback_hits(legacy_hits, graph)
+            if leg_trace is not None:
+                leg_trace.append(_trace_entry(
+                    "fallback", ran=True, degraded=True,
+                    reason="no_fallback_applicable", count=0))
             return []
 
         # 4. Fuse via RRF (skip if single strategy or full-scan)

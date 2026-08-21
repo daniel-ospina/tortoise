@@ -182,24 +182,62 @@ def test_sdk_fts_query_pool_size_invalid(sdk=None):
 def test_sdk_fts_query_pool_size_exact_override(sdk=None):
     """pool_size is an EXACT override: str_limit = pool_size regardless of
     limit*2 or the env floor (#1348). Returned list = min(limit, pool)
-    when pool_size < limit (cannot return more than the pool holds)."""
+    when pool_size < limit (cannot return more than the pool holds).
+
+    R3 (#1542) Task 5: pinned to the SPARSE leg — with the embedder present
+    (vector-enabled env) RRF fuses fts+vector, each capped at pool_size, so
+    the union can exceed pool_size (returned = min(limit, union)). These
+    tests assert the #1348 pool-floor contract on the FTS path
+    deterministically; the vector leg owns its own tests (the R3 block in
+    tests/test_longmem_runner.py + test_sdk_fts_query_vector_scores_populated)."""
     if sdk is None:
         sdk = _new_sdk()
-    _env_clear_floor()
-    for i in range(20):
-        sdk.create_point("statement", f"quantum topic number {i}")
-    # pool_size above limit*2: pool is larger than limit → returned = limit (5).
-    results = sdk.tortoise_fts_query("quantum", limit=5, pool_size=12)
-    assert len(results) == 5
-    # pool_size below limit*2 is an EXACT override (lowers): a 4-item pool
-    # can return at most 4 results — NOT limit=5.
-    results = sdk.tortoise_fts_query("quantum", limit=5, pool_size=4)
-    assert len(results) == 4, f"exact pool_size=4 should cap results at 4, got {len(results)}"
+    _orig = _pin_sparse_leg()
+    try:
+        _env_clear_floor()
+        for i in range(20):
+            sdk.create_point("statement", f"quantum topic number {i}")
+        # pool_size above limit*2: pool is larger than limit → returned = limit (5).
+        results = sdk.tortoise_fts_query("quantum", limit=5, pool_size=12)
+        assert len(results) == 5
+        # pool_size below limit*2 is an EXACT override (lowers): a 4-item pool
+        # can return at most 4 results — NOT limit=5.
+        results = sdk.tortoise_fts_query("quantum", limit=5, pool_size=4)
+        assert len(results) == 4, f"exact pool_size=4 should cap results at 4, got {len(results)}"
+    finally:
+        _restore_embedder_get(_orig)
 
 
 def _env_clear_floor():
     """Remove TORTOISE_POOL_FLOOR from the environment (pytest-safe)."""
     os.environ.pop("TORTOISE_POOL_FLOOR", None)
+
+
+def _pin_sparse_leg():
+    """R3 (#1542) Task 5: pin the sparse (TF-IDF/FTS) leg — the tests that
+    assert single-leg pool semantics are deterministic regardless of the
+    dev env's embedder state. With the vector leg active (embedder
+    present), RRF fuses both legs and the returned list can exceed
+    pool_size — the vector leg owns its own tests instead (the R3 block in
+    tests/test_longmem_runner.py + test_sdk_fts_query_vector_scores_populated).
+
+    Manual patch (returns the original to restore via _restore_embedder_get):
+    pytest does NOT inject fixtures into parameters with default values
+    (this module's ``sdk=None`` pattern is direct-run compatible for that
+    reason), so the pin must not depend on the monkeypatch fixture — it
+    works under pytest AND the module's ``python3 tests/test_tortoise_search.py``
+    direct-run path."""
+    from tortoise.embeddings import EmbeddingModel
+    orig = EmbeddingModel.get
+    EmbeddingModel.get = staticmethod(lambda load_timeout=None: None)
+    return orig
+
+
+def _restore_embedder_get(orig) -> None:
+    """Restore EmbeddingModel.get after a manual sparse-leg pin."""
+    if orig is not None:
+        from tortoise.embeddings import EmbeddingModel
+        EmbeddingModel.get = orig
 
 
 def test_sdk_fts_query_env_floor_raises_pool(sdk=None):
@@ -224,20 +262,27 @@ def test_sdk_fts_query_env_floor_raises_pool(sdk=None):
 def test_sdk_fts_query_no_env_default_is_historical(sdk=None):
     """#1348 NO BAKED DEFAULT FLOOR: with TORTOISE_POOL_FLOOR unset, str_limit
     is the historical limit*2 (the depth finding was CEILING-CAPPED — floor is
-    env-only opt-in). pool_size below limit*2 is an EXACT override (lowers)."""
+    env-only opt-in). pool_size below limit*2 is an EXACT override (lowers).
+
+    R3 (#1542) Task 5: pinned to the SPARSE leg (see
+    test_sdk_fts_query_pool_size_exact_override — RRF union vs pool_size)."""
     if sdk is None:
         sdk = _new_sdk()
-    _env_clear_floor()
-    for i in range(20):
-        sdk.create_point("statement", f"quantum topic number {i}")
-    # No env → historical limit*2 semantics (pool 10 at limit=5) — the
-    # returned list is still the caller's limit.
-    results = sdk.tortoise_fts_query("quantum", limit=5)
-    assert len(results) == 5
-    # pool_size exact override below limit*2 LOWERS the pool (exact, not floor)
-    # → at most 4 results from a 4-item pool.
-    results = sdk.tortoise_fts_query("quantum", limit=5, pool_size=4)
-    assert len(results) == 4
+    _orig = _pin_sparse_leg()
+    try:
+        _env_clear_floor()
+        for i in range(20):
+            sdk.create_point("statement", f"quantum topic number {i}")
+        # No env → historical limit*2 semantics (pool 10 at limit=5) — the
+        # returned list is still the caller's limit.
+        results = sdk.tortoise_fts_query("quantum", limit=5)
+        assert len(results) == 5
+        # pool_size exact override below limit*2 LOWERS the pool (exact, not floor)
+        # → at most 4 results from a 4-item pool.
+        results = sdk.tortoise_fts_query("quantum", limit=5, pool_size=4)
+        assert len(results) == 4
+    finally:
+        _restore_embedder_get(_orig)
 
 
 def test_sdk_fts_query_full_scan_exempts_floor(sdk=None):

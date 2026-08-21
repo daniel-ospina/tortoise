@@ -60,7 +60,44 @@ def _trusted_audit() -> dict:
 
 
 def _fresh_sdk(tmp_path) -> TortoiseSDK:
+    Path(tmp_path).mkdir(parents=True, exist_ok=True)
     return TortoiseSDK(str(tmp_path / "lme.db"))
+
+
+@pytest.fixture(autouse=True)
+def _reset_embedding_singleton():
+    """R3 (#1542, Task 5): clear the EmbeddingModel singleton before and
+    after EVERY test in this module — a real model load or a failed load's
+    60s negative cache cannot leak across tests (the module stays
+    order-independent in the vector-enabled eval env, where
+    sentence-transformers is installed)."""
+    from tortoise.embeddings import EmbeddingModel
+    EmbeddingModel._reset()
+    yield
+    EmbeddingModel._reset()
+
+
+def _require_embedder():
+    """Skip when the embedder is unavailable — the R3 tests that ASSERT
+    dense-leg behavior (write-time coverage == 1.0, vector-leg hits) need
+    sentence-transformers + the cached all-MiniLM-L6-v2 model. The
+    embedder-present variants run where CI guarantees them; skip-if-no-
+    embedder keeps the module green on any env."""
+    from tortoise.embeddings import EmbeddingModel
+    m = EmbeddingModel.get(load_timeout=120)
+    if m is None:
+        pytest.skip("sentence-transformers / all-MiniLM-L6-v2 cache "
+                    "not available — dense-leg assertion skipped")
+    return m
+
+
+def _no_embedder(monkeypatch) -> None:
+    """Pin the sparse-leg path: EmbeddingModel.get → None (Task 5). Uses
+    monkeypatch so the classmethod is restored after the test (the autouse
+    fixture only clears singleton state, not the class attribute)."""
+    from tortoise.embeddings import EmbeddingModel
+    monkeypatch.setattr(EmbeddingModel, "get",
+                        staticmethod(lambda load_timeout=None: None))
 
 
 # ── Pipeline end-to-end (mocked reader + judge, embedded DB) ───────────────
@@ -281,6 +318,13 @@ def test_outcomes_to_report_golden_shape():
         "evidence_written": 2,
         "evidence_retrieved@k": {"5": 1, "10": 2, "20": 2},
         "ingest_latency_ms": 12.5,
+        # R3 (#1542) D3/D4: the projected outcome carries the dense-leg
+        # keys with defaults (None / []) — pre-R3 checkpoints render
+        # (flagged as lacking data) instead of KeyError.
+        "points_total": None,
+        "points_embedded": None,
+        "embedding_coverage": None,
+        "legs": [],
     }
     assert report["failures"] == []
     assert report["n_failed"] == 0
@@ -452,10 +496,15 @@ def test_chunk_turns_validation():
 
 # ── Retrieval recall ───────────────────────────────────────────────────────
 
-def test_retrieval_recalls_evidence_session(tmp_path):
+def test_retrieval_recalls_evidence_session(tmp_path, monkeypatch):
     sdk = _fresh_sdk(tmp_path)
     try:
         q = next(x for x in _mini() if x["question_id"] == "mini_ie_user_001")
+        # R3 (#1542) Task 5: pinned to the sparse leg — this test asserts
+        # the TF-IDF path deterministically regardless of the dev env's
+        # embedder state (a vector reorder could drive recall@5 to 0.0, not
+        # a floor; the vector leg owns its own tests).
+        _no_embedder(monkeypatch)
         ingest_haystack(sdk, q)
         ret = retrieve_for_question(sdk, q, ks=(5, 10, 20), top_k=20)
         # Embedded mode degrades to TF-IDF; the evidence session's terms
@@ -471,7 +520,7 @@ def test_retrieval_recalls_evidence_session(tmp_path):
         sdk.close()
 
 
-def test_retrieval_multi_session_evidence(tmp_path):
+def test_retrieval_multi_session_evidence(tmp_path, monkeypatch):
     # #1595: the shared module-level FTS circuit breaker (left OPEN by an
     # earlier test's failed queries under parallel load — #1568 class) would
     # short-circuit retrieval to empty before this test runs; reset so the
@@ -480,6 +529,9 @@ def test_retrieval_multi_session_evidence(tmp_path):
     sdk = _fresh_sdk(tmp_path)
     try:
         q = next(x for x in _mini() if x["question_id"] == "mini_msr_002")
+        # R3 (#1542) Task 5: pinned to the sparse leg (see
+        # test_retrieval_recalls_evidence_session).
+        _no_embedder(monkeypatch)
         ingest_haystack(sdk, q)
         ret = retrieve_for_question(sdk, q, ks=(5,), top_k=20)
         # both evidence sessions are recovered (session-level recall exact);
@@ -1601,7 +1653,7 @@ class TestE3SpeakerDerivation:
                              session_id="s0", is_episodic=True)
             monkeypatch.setattr(
                 rt, "hybrid_search",
-                lambda sdk, query, limit: [{"id": "pt_x",
+                lambda sdk, query, limit, *, leg_trace=None: [{"id": "pt_x",
                                             "content": "my 5K best is 27:12",
                                             "match_source": "fts"}])
             question = {
@@ -1659,7 +1711,7 @@ def test_session_dedup_cap_in_pool(tmp_path, monkeypatch):
                          session_id="sess-b", lme_question_id="dedup_q",
                          lme_session_index=1, is_episodic=True, status="draft")
 
-        def _fake_search(sdk_, query, limit):
+        def _fake_search(sdk_, query, limit, *, leg_trace=None):
             return ([{"id": f"a{ci}", "content": f"chunk {ci}",
                       "match_source": "tfidf"} for ci in range(5)]
                     + [{"id": "b0", "content": "the answer point",
@@ -1744,7 +1796,7 @@ def test_session_crowded_out_still_surfaces(tmp_path, monkeypatch):
                          lme_session_index=1, is_episodic=True, status="draft")
         captured = {}
 
-        def _fake_search(sdk_, query, limit):
+        def _fake_search(sdk_, query, limit, *, leg_trace=None):
             captured["limit"] = limit
             return ([{"id": f"a{i}", "content": f"filler {i}",
                       "match_source": "tfidf"} for i in range(20)]
@@ -1790,7 +1842,7 @@ def test_recall_on_deduped_pool(tmp_path, monkeypatch):
                              lme_question_id="pool_q", lme_session_index=0,
                              is_episodic=True, has_answer=True, status="draft")
 
-        def _fake_search(sdk_, query, limit):
+        def _fake_search(sdk_, query, limit, *, leg_trace=None):
             return [{"id": f"e{ci}", "content": f"evidence chunk {ci}",
                      "match_source": "tfidf"} for ci in range(3)]
 
@@ -2433,13 +2485,22 @@ def test_checkpoint_fingerprint_matching_resumes(tmp_path):
     assert saved["fingerprint"]["dataset_fingerprint"] == "samehash0000000000"
 
 
-def test_checkpoint_two_processes_no_lost_updates(tmp_path):
+def test_checkpoint_two_processes_no_lost_updates(tmp_path, monkeypatch):
     """D8 (M7 #1527, surface 20): two run PROCESSES sharing one checkpoint
     merge their results under the flock — no lost updates (each process runs
     a disjoint half of the mini set; the final checkpoint holds all 5 qids).
-    POSIX-only (flock); uses fork so the child inherits the module state."""
+    POSIX-only (flock); uses fork so the child inherits the module state.
+
+    R3 (#1542) Task 5: the children pin EmbeddingModel.get → None BEFORE
+    forking (fork inherits the monkeypatch) — the vector-enabled eval env
+    has torch installed (sentence-transformers), and forking a process that
+    imports torch/MPSGraph on macOS crashes (objc_initializeAfterForkError).
+    This test exercises checkpoint merging, not retrieval — the dense leg
+    is out of scope by construction.
+    """
     import multiprocessing as mp
     ctx = mp.get_context("fork")
+    _no_embedder(monkeypatch)  # children inherit — no torch load in fork
     cp = str(tmp_path / "shared-state.json")
     instances = _mini()
     half = len(instances) // 2  # 2 (split 2/3)
@@ -2474,18 +2535,21 @@ def test_checkpoint_two_processes_no_lost_updates(tmp_path):
         {q["question_id"] for q in instances}
 
 
-def test_retrieval_leg_mix_and_evidence_counts(tmp_path):
+def test_retrieval_leg_mix_and_evidence_counts(tmp_path, monkeypatch):
     """D2/D4 (M7 #1527, surface 11): retrieve_for_question reports the
-    per-hit match_source aggregation (leg-mix; embedded → tfidf) and the
-    evidence_retrieved@k counts (the turn_recall numerator, persisted)."""
+    per-hit match_source aggregation (leg-mix) and the evidence_retrieved@k
+    counts (the turn_recall numerator, persisted). R3 (#1542) Task 5: pinned
+    to the sparse leg (EmbeddingModel.get → None) so the TF-IDF leg-mix
+    assertion is deterministic in the vector-enabled eval env."""
     q = _mini()[0]  # mini_ie_user_001 — 1 evidence turn in session s1
     sdk = _fresh_sdk(tmp_path)
     try:
+        _no_embedder(monkeypatch)
         ingest_haystack(sdk, q, chunk_turns=2)
         ret = retrieve_for_question(sdk, q, ks=(5, 10, 20), top_k=20)
         lm = ret["match_source_counts"]
         assert sum(lm.values()) == len(ret["context_points"])
-        assert "tfidf" in lm  # embedded mode: the TF-IDF degradation leg
+        assert "tfidf" in lm  # embedded sparse path: the TF-IDF degradation leg
         assert "unknown" not in lm  # match_source is never "" on hits
         for k in (5, 10, 20):
             at_k = ret["match_source_counts@k"][str(k)]
@@ -2750,3 +2814,558 @@ def test_backoff_still_retries_transient(monkeypatch):
 
     assert _call_with_backoff(_flaky, what="test", retries=2) == "ok"
     assert calls["n"] == 3
+# ═══════════════════════════════════════════════════════════════════════════
+# R3 #1542 — dense leg enabled: embedder pre-flight (D2), write-time
+# embedding coverage (D3), vector-leg trace + "legs" (D4), methodology keys
+# (D5), vector-strategy verification in the eval path (Task 5).
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ── D2: embedder pre-flight (never silent None) ───────────────────────────
+
+class _BrokenEncodeModel:
+    """An embedder that loads but fails at encode time (present-but-broken —
+    distinct from a missing embedder)."""
+    model_id = "all-MiniLM-L6-v2"
+
+    def encode(self, texts, batch_size=32, show_progress_bar=False):
+        raise RuntimeError("encode boom")
+
+
+class _WrongDimModel:
+    """An embedder that returns a non-384-dim vector (a swap must be
+    caught, not silently used — #399 calibration is model-specific)."""
+    model_id = "all-MiniLM-L6-v2"
+
+    def encode(self, texts, batch_size=32, show_progress_bar=False):
+        import numpy as np
+        return np.zeros((len(texts), 512))
+
+
+def test_preflight_embedder_missing_real_run_exits(monkeypatch):
+    """D2 (R3): EmbeddingModel.get() → None on a real (non-mock) run →
+    SystemExit containing the exact remediation commands — the dense leg can
+    never silently degrade."""
+    from tools.longmem_eval.run import _preflight_embedder
+    from tortoise.embeddings import EmbeddingModel
+    monkeypatch.setattr(EmbeddingModel, "get",
+                        staticmethod(lambda load_timeout=None: None))
+    with pytest.raises(SystemExit) as ei:
+        _preflight_embedder(mock=False)
+    msg = str(ei.value)
+    assert "--extra embeddings" in msg
+    assert "all-MiniLM-L6-v2" in msg
+
+
+def test_preflight_embedder_missing_mock_warns_and_continues(monkeypatch):
+    """D2 (R3): --mock + missing embedder → warn + continue (status
+    recorded, never a crash) — CI smoke stays runnable offline."""
+    from tools.longmem_eval.run import _preflight_embedder
+    from tortoise.embeddings import EmbeddingModel
+    monkeypatch.setattr(EmbeddingModel, "get",
+                        staticmethod(lambda load_timeout=None: None))
+    status = _preflight_embedder(mock=True)  # must not raise
+    assert status["available"] is False
+    assert status["reason"] == "no_embedder"
+    # the version field is well-formed — str when the extra is installed
+    # (this env), null when absent — never an exception
+    assert isinstance(status["sentence_transformers_version"],
+                      (str, type(None)))
+
+
+def test_preflight_embedder_present_probe_ok():
+    """D2 (R3): embedder present + probe encode OK → the status dict carries
+    model identity, the resolved sentence-transformers version and
+    available=True / reason=None."""
+    from tools.longmem_eval.run import _preflight_embedder
+    _require_embedder()
+    status = _preflight_embedder(mock=True)
+    assert status["available"] is True
+    assert status["reason"] is None
+    assert status["model"] == "all-MiniLM-L6-v2"
+    assert isinstance(status["sentence_transformers_version"], str)
+
+
+def test_preflight_embedder_encode_raises(monkeypatch):
+    """D2 (R3): a present-but-broken embedder (encode raises) →
+    reason='encode_failed'; real runs exit, --mock warns and continues."""
+    from tools.longmem_eval.run import _preflight_embedder
+    from tortoise.embeddings import EmbeddingModel
+    monkeypatch.setattr(EmbeddingModel, "get", staticmethod(
+        lambda load_timeout=None: _BrokenEncodeModel()))
+    with pytest.raises(SystemExit) as ei:
+        _preflight_embedder(mock=False)
+    assert "encode_failed" in str(ei.value)
+    status = _preflight_embedder(mock=True)
+    assert status["available"] is False
+    assert status["reason"] == "encode_failed"
+
+
+def test_preflight_embedder_wrong_dim(monkeypatch):
+    """D2 (R3): a swapped/wrong-dimension model → reason='dim_mismatch' (a
+    run can never publish vector_strategy=enabled with a broken dim)."""
+    from tools.longmem_eval.run import _preflight_embedder
+    from tortoise.embeddings import EmbeddingModel
+    monkeypatch.setattr(EmbeddingModel, "get", staticmethod(
+        lambda load_timeout=None: _WrongDimModel()))
+    status = _preflight_embedder(mock=True)
+    assert status["available"] is False
+    assert status["reason"] == "dim_mismatch"
+
+
+def test_preflight_embedder_mock_uses_short_timeout(monkeypatch):
+    """D2 (R3): --mock probes with the short (30s) load timeout — an offline
+    env without a cached model warns in ~30s, not 10 minutes."""
+    from tools.longmem_eval.run import _preflight_embedder
+    from tortoise.embeddings import EmbeddingModel
+    seen: dict[str, float | None] = {}
+
+    def _fake_get(*, load_timeout=None):
+        seen["load_timeout"] = load_timeout
+        return None
+
+    monkeypatch.setattr(EmbeddingModel, "get", staticmethod(_fake_get))
+    _preflight_embedder(mock=True)
+    assert seen["load_timeout"] == 30.0
+
+
+def test_report_methodology_embedder_keys_always_emitted():
+    """D5 (R3): build_report ALWAYS emits methodology.embedder +
+    methodology.vector_strategy — without embedder_status the not_checked
+    default (a report is never keyless about the dense leg), with it the
+    status flows through and vector_strategy flips to enabled."""
+    from tools.longmem_eval.report import DEFAULT_EMBEDDER_STATUS
+
+    def _outcome(qid):
+        return {
+            "question_id": qid, "question_type": "single-session-user",
+            "label": True, "session_recall@k": {"5": 1.0},
+            "turn_recall@k": {"5": 0.5}, "evidence_recall@k": {"5": 1.0},
+            "chunk_evidence_recall@k": {"5": 0.5}, "n_ingest_errors": 0,
+            "context_tokens": 10, "context_point_count": 1,
+            "retrieval_latency_ms": 1.0, "reader_latency_ms": 1.0,
+            "judge_latency_ms": 1.0, "total_ms": 3.0,
+        }
+
+    base = dict(reader_model="r", judge_model="j", ks=(5,), top_k=5,
+                split="s", dataset_semantics_audit=_trusted_audit())
+    m = outcomes_to_report([_outcome("q-e1")], **base)["methodology"]
+    assert m["embedder"] == DEFAULT_EMBEDDER_STATUS
+    assert m["vector_strategy"] == "unavailable"
+    m2 = outcomes_to_report(
+        [_outcome("q-e2")], **base,
+        embedder_status={"model": "all-MiniLM-L6-v2",
+                         "sentence_transformers_version": "5.7.0",
+                         "available": True, "reason": None})["methodology"]
+    assert m2["embedder"]["available"] is True
+    assert m2["embedder"]["reason"] is None
+    assert m2["vector_strategy"] == "enabled"
+
+
+# ── D3: write-time embedding coverage (observable) ────────────────────────
+
+def test_write_time_embeddings_land_on_points_and_chunks(tmp_path):
+    """D3 (R3): write-time embeddings land on every point + chunk for the
+    question — coverage == 1.0 and min embedding dim == 384 in the fresh
+    graph protocol (the dense leg is observed, not assumed)."""
+    _require_embedder()
+    q = _mini()[0]  # mini_ie_user_001: 6 turn points + 4 raw chunks
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        ingest_haystack(sdk, q, chunk_turns=2)
+        ret = retrieve_for_question(sdk, q, ks=(5,), top_k=20)
+        assert ret["points_total"] == 10
+        assert ret["points_embedded"] == 10
+        assert ret["embedding_coverage"] == 1.0
+        # dim check via get_point (size() is unsupported on vecf32 in
+        # FalkorDBLite — the read-back property is a plain 384-list)
+        dims = [len(p["embedding"]) for p in
+                (sdk.get_point(f"lme:{q['question_id']}:s0:t0"),
+                 sdk.get_point(f"lme:{q['question_id']}:s1:c1"))]
+        assert all(d == 384 for d in dims)
+    finally:
+        sdk.close()
+
+
+def test_write_time_embeddings_absent_without_embedder(tmp_path, monkeypatch):
+    """D3 (R3): without the embedder coverage is 0.0 — observable, never
+    silent — and the trace records the vector leg as no_embedder."""
+    _no_embedder(monkeypatch)
+    q = _mini()[0]
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        ingest_haystack(sdk, q, chunk_turns=2)
+        ret = retrieve_for_question(sdk, q, ks=(5,), top_k=20)
+        assert ret["points_total"] == 10
+        assert ret["points_embedded"] == 0
+        assert ret["embedding_coverage"] == 0.0
+        vec = next(e for e in ret["legs"] if e["leg"] == "vector")
+        assert vec["ran"] is False
+        assert vec["reason"] == "no_embedder"
+    finally:
+        sdk.close()
+
+
+def test_truncated_chunk_still_embedded(tmp_path):
+    """D3 (R3): a >512-word point (compute_embedding truncates to 512 words)
+    still embeds — embedding non-null, coverage stays 1.0 (pins the
+    truncation branch)."""
+    _require_embedder()
+    long_text = " ".join(f"word{i}" for i in range(700))
+    q = {
+        "question_id": "mini_long_001",
+        "question_type": "single-session-user",
+        "question": "what is the fact?",
+        "answer": "word0",
+        "question_date": "2025-06-15",
+        "haystack_session_ids": ["long-s0"],
+        "haystack_dates": ["2025-06-10"],
+        "haystack_sessions": [[
+            {"role": "user", "content": long_text, "has_answer": True}]],
+        "answer_session_ids": ["long-s0"],
+    }
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        ingest_haystack(sdk, q)
+        ret = retrieve_for_question(sdk, q, ks=(5,), top_k=20)
+        assert ret["points_total"] == 2  # turn point + 1 raw chunk
+        assert ret["points_embedded"] == 2
+        assert ret["embedding_coverage"] == 1.0
+    finally:
+        sdk.close()
+
+
+def test_empty_graph_question_shape(tmp_path):
+    """D3/D4 (R3): a question with zero haystack sessions → zero Points →
+    embedding_coverage is None (pinned shape, no crash) and the vector leg
+    records {ran: True, count: 0, reason: 'no_embeddings'} (0-row + zero
+    embedded points per the D4 pinned mapping — NOT empty_results, which is
+    reserved for embedded-points-present-but-no-matches)."""
+    _require_embedder()
+    q = {
+        "question_id": "mini_empty_001",
+        "question_type": "single-session-user",
+        "question": "nothing here",
+        "answer": "",
+        "question_date": "2025-06-15",
+        "haystack_session_ids": [],
+        "haystack_dates": [],
+        "haystack_sessions": [],
+        "answer_session_ids": [],
+    }
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        ingest_haystack(sdk, q)
+        ret = retrieve_for_question(sdk, q, ks=(5,), top_k=20)
+        assert ret["points_total"] == 0
+        assert ret["embedding_coverage"] is None
+        vec = next(e for e in ret["legs"] if e["leg"] == "vector")
+        assert vec["ran"] is True
+        assert vec["count"] == 0
+        assert vec["reason"] == "no_embeddings"
+        assert ret["session_recall@k"]["5"] == 0.0  # recall path no crash
+    finally:
+        sdk.close()
+
+
+def test_checkpoint_resume_old_shape(tmp_path):
+    """D3 (R3): a pre-R3 checkpoint (outcomes WITHOUT the coverage/legs keys)
+    resumes without KeyError — the final report carries embedding_coverage:
+    None / legs: [] defaults (visible, never silent, never a crash)."""
+    cp = tmp_path / "pre-r3-state.json"
+    kwargs = dict(reader=MockReader(), judge=MockJudge(), ks=(5,), top_k=5,
+                  split="s", work_dir=str(tmp_path))
+    run_evaluation(_mini()[:1], checkpoint=str(cp), **kwargs)
+    saved = json.loads(Path(cp).read_text(encoding="utf-8"))
+    for o in saved["outcomes"]:
+        for k in ("points_total", "points_embedded", "embedding_coverage",
+                  "legs"):
+            o.pop(k, None)
+    Path(cp).write_text(json.dumps(saved), encoding="utf-8")
+    outcomes, report = run_evaluation(_mini()[:1], checkpoint=str(cp),
+                                      **kwargs)
+    assert len(outcomes) == 1  # resumed from the pre-R3 checkpoint
+    po = report["outcomes"][0]
+    assert po["points_total"] is None
+    assert po["points_embedded"] is None
+    assert po["embedding_coverage"] is None
+    assert po["legs"] == []
+    # the current run's own pre-flight default is recorded (never keyless)
+    assert report["methodology"]["embedder"]["reason"] == "not_checked"
+
+
+# ── D4: vector-leg trace + "legs" surfacing (E2E-1 never-null) ────────────
+
+def test_tortoise_fts_query_records_no_embedder_and_encode_failed(
+        tmp_path, monkeypatch):
+    """D4 (R3): tortoise_fts_query distinguishes no_embedder (get() → None)
+    from encode_failed (get() returns a model whose encode raises) — the
+    two failure modes were previously conflated into silent query_vec=None."""
+    from tortoise.embeddings import EmbeddingModel
+    q = _mini()[0]
+    # (a) no_embedder
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        ingest_haystack(sdk, q)
+        monkeypatch.setattr(EmbeddingModel, "get",
+                            staticmethod(lambda load_timeout=None: None))
+        trace: list[dict] = []
+        sdk.tortoise_fts_query(q["question"], limit=5, leg_trace=trace)
+        vec = next(e for e in trace if e["leg"] == "vector")
+        assert vec["reason"] == "no_embedder"
+        assert vec["ran"] is False
+    finally:
+        sdk.close()
+    # (b) encode_failed
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        ingest_haystack(sdk, q)
+        monkeypatch.setattr(EmbeddingModel, "get", staticmethod(
+            lambda load_timeout=None: _BrokenEncodeModel()))
+        trace = []
+        sdk.tortoise_fts_query(q["question"], limit=5, leg_trace=trace)
+        vec = next(e for e in trace if e["leg"] == "vector")
+        assert vec["reason"] == "encode_failed"
+        assert vec["ran"] is False
+    finally:
+        sdk.close()
+
+
+def test_poisoned_plain_list_node_fts_still_hits(tmp_path):
+    """D4 (R3): a plain-list embedding node (raw projection write bypassing
+    create_point) → vector trace reason='query_failed' (NOT no_embeddings),
+    and FTS still returns hits — the leg-mix shows the failure, never a
+    silent empty vector leg."""
+    _require_embedder()
+    q = {
+        "question_id": "mini_poison_001",
+        "question_type": "single-session-user",
+        "question": "board game",
+        "answer": "Catan",
+        "question_date": "2025-06-15",
+        "haystack_session_ids": ["poison-s0"],
+        "haystack_dates": ["2025-06-10"],
+        "haystack_sessions": [[
+            {"role": "user", "content": "My favorite board game is Catan.",
+             "has_answer": True}]],
+        "answer_session_ids": ["poison-s0"],
+    }
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        ingest_haystack(sdk, q)
+        sdk._get_proj().g.query(
+            "CREATE (p:Point {id:'poisoned', content:'board game', "
+            "pointKind:'statement', lme_question_id:$q, "
+            "embedding:[0.1, 0.2]})",
+            params={"q": q["question_id"]})
+        ret = retrieve_for_question(sdk, q, ks=(5,), top_k=20)
+        vec = next(e for e in ret["legs"] if e["leg"] == "vector")
+        assert vec["reason"] == "query_failed"
+        fts = next(e for e in ret["legs"] if e["leg"] == "fts")
+        assert fts["reason"] == "ok"
+        assert any(h["id"] == "poisoned" for h in ret["hits"])
+    finally:
+        sdk.close()
+
+
+def test_trace_timeout_on_overrun(tmp_path, monkeypatch):
+    """D4 (R3): a strategy overrunning the 500ms collective deadline is
+    self-recorded as reason='timeout' (never absent), the merge is
+    non-blocking (no join past the deadline), and the outcome's legs are a
+    snapshot — a late append to one outcome cannot rewrite another's."""
+    import time
+    _require_embedder()
+    q = _mini()[0]
+    sdk = _fresh_sdk(tmp_path / "timeout")
+    try:
+        ingest_haystack(sdk, q)
+        proj = sdk._get_proj()
+        real_query = proj.g._g.query  # the guarded wrapper is read-only; patch
+        # the underlying graph handle (all queries funnel through it)
+
+        def _slow_vector_query(*args, **kwargs):
+            cypher = args[0]
+            if "euclideanDistance" in cypher:
+                time.sleep(0.8)
+            return real_query(*args, **kwargs)
+
+        monkeypatch.setattr(proj.g._g, "query", _slow_vector_query)
+        t0 = time.monotonic()
+        trace: list[dict] = []
+        sdk.tortoise_fts_query(q["question"], limit=5, leg_trace=trace)
+        elapsed = time.monotonic() - t0
+        vec = next(e for e in trace if e["leg"] == "vector")
+        assert vec["reason"] == "timeout"  # never absent
+        assert vec["ran"] is True and vec["degraded"] is True
+        # The MERGE is non-blocking — the timeout entry is synthesized at the
+        # deadline, not after the overrunning worker finishes; the call is
+        # bounded by the worker's own duration + overhead (the executor
+        # shutdown joins workers to keep graph access serialized). A join-
+        # past-the-deadline merge would add the full sleep on top.
+        assert elapsed < 1.2, \
+            f"call unacceptably blocked on the overrun worker ({elapsed:.2f}s)"
+        # the retrieve-level legs are snapshotted per outcome
+        ret1 = retrieve_for_question(sdk, q, ks=(5,), top_k=5)
+        assert any(e["leg"] == "vector" for e in ret1["legs"])
+        ret2 = retrieve_for_question(sdk, q, ks=(5,), top_k=5)
+        assert ret2["legs"] is not ret1["legs"]
+        ret1["legs"].append({"leg": "vector", "ran": True,
+                             "degraded": False, "reason": "late", "count": 0})
+        assert all(e["reason"] != "late" for e in ret2["legs"])
+    finally:
+        sdk.close()
+
+
+def test_fallback_entry_all_early_returns(tmp_path, monkeypatch):
+    """D4 (R3): the fallback entry is appended on EVERY early-return branch
+    of tortoise_fts_query — snapshot path (tfidf_snapshot), legacy
+    fallback_tfidf path (tfidf_legacy), and the non-point return []
+    (no_fallback_applicable)."""
+    import tortoise.fallback_snapshot as fb_snap
+    q = _mini()[0]
+    _no_embedder(monkeypatch)  # sparse-leg path: every strategy fails
+    # (a) snapshot path — the cached lean snapshot serves the fallback
+    sdk = _fresh_sdk(tmp_path / "a")
+    try:
+        ingest_haystack(sdk, q)
+        trace: list[dict] = []
+        sdk.tortoise_fts_query(q["question"], limit=5, leg_trace=trace)
+        fb = next(e for e in trace if e["leg"] == "fallback")
+        assert fb["reason"] == "tfidf_snapshot"
+        assert fb["count"] > 0
+    finally:
+        sdk.close()
+    # (b) legacy path — build_snapshot → None forces fallback_tfidf
+    # (distinct graph dir: _fresh_sdk reuses one path, and the snapshot
+    # store is keyed by graph_name — a re-ingested same-path graph would
+    # serve part (a)'s cached snapshot instead of rebuilding)
+    monkeypatch.setattr(fb_snap, "build_snapshot", lambda proj: None)
+    sdk = _fresh_sdk(tmp_path / "b")
+    try:
+        ingest_haystack(sdk, q)
+        trace = []
+        sdk.tortoise_fts_query(q["question"], limit=5, leg_trace=trace)
+        fb = next(e for e in trace if e["leg"] == "fallback")
+        assert fb["reason"] == "tfidf_legacy"
+        assert fb["count"] > 0
+    finally:
+        sdk.close()
+    # (c) non-point entity → no fallback runs → no_fallback_applicable,
+    # appended LAST (never after the fallback entry can come another)
+    sdk = _fresh_sdk(tmp_path / "c")
+    try:
+        trace = []
+        sdk.tortoise_fts_query(q["question"], entity_type="event",
+                               limit=5, leg_trace=trace)
+        fb = next(e for e in trace if e["leg"] == "fallback")
+        assert fb["reason"] == "no_fallback_applicable"
+        assert trace[-1]["leg"] == "fallback"
+    finally:
+        sdk.close()
+
+
+def test_encode_broken_no_contradiction(tmp_path, monkeypatch):
+    """D2/D5 (R3): an embedder whose encode raises → embedding_coverage ==
+    0.0 AND methodology.vector_strategy != 'enabled' — the report never
+    contradicts itself; the trace records encode_failed, not no_embedder."""
+    from tools.longmem_eval.run import _preflight_embedder
+    from tortoise.embeddings import EmbeddingModel
+    monkeypatch.setattr(EmbeddingModel, "get", staticmethod(
+        lambda load_timeout=None: _BrokenEncodeModel()))
+    q = _mini()[0]
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        ingest_haystack(sdk, q)
+        ret = retrieve_for_question(sdk, q, ks=(5,), top_k=20)
+        assert ret["embedding_coverage"] == 0.0
+        vec = next(e for e in ret["legs"] if e["leg"] == "vector")
+        assert vec["reason"] == "encode_failed"
+    finally:
+        sdk.close()
+    status = _preflight_embedder(mock=True)
+    assert status["reason"] == "encode_failed"
+    outcomes, report = run_evaluation(
+        _mini()[:1], reader=MockReader(), judge=MockJudge(), ks=(5,),
+        top_k=5, split="s", work_dir=str(tmp_path), embedder_status=status)
+    assert len(outcomes) == 1
+    assert report["methodology"]["vector_strategy"] != "enabled"
+
+
+def test_legs_recorded_never_null(tmp_path):
+    """D4 (R3, E2E-1): retrieve_for_question returns legs with a vector
+    entry carrying a boolean ran — the leg-mix precondition is recorded per
+    question, never null; the shape rule 'reason never null when degraded'
+    holds for every entry."""
+    _require_embedder()
+    q = _mini()[0]
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        ingest_haystack(sdk, q)
+        ret = retrieve_for_question(sdk, q, ks=(5,), top_k=20)
+        legs = ret["legs"]
+        assert legs  # never null/empty
+        vec = next(e for e in legs if e["leg"] == "vector")
+        assert vec["ran"] is True
+        for e in legs:
+            assert set(e) >= {"leg", "ran", "degraded", "reason", "count"}
+            if e["degraded"]:
+                assert e["reason"] is not None  # shape rule
+    finally:
+        sdk.close()
+
+
+def test_leg_trace_default_none_byte_identical(tmp_path):
+    """D4 (R3): default leg_trace=None → no trace, byte-identical results
+    (hit ids equal with and without the kwarg)."""
+    q = _mini()[0]
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        ingest_haystack(sdk, q)
+        base = sdk.tortoise_fts_query(q["question"], limit=5)
+        trace: list[dict] = []
+        traced = sdk.tortoise_fts_query(q["question"], limit=5,
+                                        leg_trace=trace)
+        assert [h["id"] for h in base] == [h["id"] for h in traced]
+        assert trace  # tracing recorded entries
+    finally:
+        sdk.close()
+
+
+# ── Task 5: sparse-leg tests pinned (env-independent) + vector verified ───
+
+def test_vector_strategy_verified_in_eval_path(tmp_path):
+    """E2E-1 alignment (R3 #1542, Task 5): a paraphrased query with ZERO
+    token overlap with the fact surfaces it via the semantic (vector) leg in
+    the ACTUAL eval path — the dense leg is verified end-to-end, not just
+    unit-tested (skip-if-no-embedder)."""
+    _require_embedder()
+    q = {
+        "question_id": "mini_semantic_elixir_001",
+        "question_type": "single-session-user",
+        "question": "Which programming language does this person prefer "
+                    "for coding?",
+        "answer": "Elixir",
+        "question_date": "2025-06-15",
+        "haystack_session_ids": ["sem-s0"],
+        "haystack_dates": ["2025-06-10"],
+        "haystack_sessions": [[
+            {"role": "user",
+             "content": "I really enjoy building side projects with Elixir "
+                        "these days.",
+             "has_answer": True}]],
+        "answer_session_ids": ["sem-s0"],
+    }
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        ingest_haystack(sdk, q)
+        ret = retrieve_for_question(sdk, q, ks=(5,), top_k=20)
+        # the zero-overlap fact surfaces in top-k via the semantic leg
+        elixir_hits = [h for h in ret["hits"] if "Elixir" in h["content"]]
+        assert elixir_hits, "the Elixir point must surface in top-k"
+        vec = next(e for e in ret["legs"] if e["leg"] == "vector")
+        assert vec["ran"] is True
+        assert vec["count"] > 0
+        # never null: every hit carries a non-empty match_source
+        assert all(h.get("match_source") for h in ret["hits"])
+        assert ret["embedding_coverage"] == 1.0
+    finally:
+        sdk.close()

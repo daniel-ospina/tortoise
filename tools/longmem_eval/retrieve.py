@@ -306,12 +306,18 @@ def render_context(hits: list[dict], *, question_date: str | None = None) -> str
     return text
 
 
-def hybrid_search(sdk: TortoiseSDK, query: str, limit: int) -> list[dict]:
+def hybrid_search(sdk: TortoiseSDK, query: str, limit: int,
+                   *, leg_trace: list[dict] | None = None) -> list[dict]:
     """Hybrid retrieval over the question's ingested graph (points only).
 
     Returns raw hit dicts from ``tortoise_fts_query`` (id, content,
     match_source, scores…) — embedded mode degrades to the in-memory TF-IDF
     fallback automatically.
+
+    ``leg_trace`` (R3 #1542 D4): a list the search records per-leg entries
+    into (vector/fts/structural/fallback — the E2E-1 never-null leg-mix
+    contract); the caller surfaces it as ``"legs"`` in the per-question
+    result. Default None = no trace (byte-identical behavior).
 
     include_terminal=True (E5 #1537, E2E-6): superseded points co-retrieve
     so the reader sees the [SUPERSEDED BY] marker and discounts them; the
@@ -319,7 +325,7 @@ def hybrid_search(sdk: TortoiseSDK, query: str, limit: int) -> list[dict]:
     (#1391) would hide the superseded claim entirely.
     """
     return sdk.tortoise_fts_query(query, entity_type="point", limit=limit,
-                                  include_terminal=True)
+                                  include_terminal=True, leg_trace=leg_trace)
 
 
 def retrieve_for_question(
@@ -352,11 +358,18 @@ def retrieve_for_question(
         if turn.get("has_answer")
     }
 
+    # ── R3 (#1542) D4: per-leg trace (E2E-1 never-null leg-mix). The
+    # retrieval records into ``legs`` at the engine (tortoise_fts_query) and
+    # the result surfaces a SNAPSHOT copy (list(legs)) so late appends — a
+    # cancelled worker thread past the 500ms deadline — can never mutate the
+    # recorded outcome. Default-None callers are byte-identical. ──
+    legs: list[dict] = []
     start = time.monotonic()
     # R1: pool-depth headroom — a monopolizing session's points must not
     # crowd other sessions out BEFORE dedup runs (E2E-1).
     hits = hybrid_search(sdk, question["question"],
-                         limit=max(ks) * DEFAULT_POOL_MULTIPLIER)
+                         limit=max(ks) * DEFAULT_POOL_MULTIPLIER,
+                         leg_trace=legs)
     latency_ms = (time.monotonic() - start) * 1000.0
 
     props = point_props_for_hits(sdk._get_proj(), [h["id"] for h in hits])
@@ -403,6 +416,19 @@ def retrieve_for_question(
         "AND coalesce(p.pointKind, '') = 'session-transcript' "
         "RETURN count(*)", params={"q": qid}).result_set
     chunk_evidence_point_count = ch_rows[0][0] if ch_rows else 0
+
+    # ── R3 (#1542) D3: write-time embedding coverage — the dense leg is
+    # OBSERVABLE per question, never assumed. In the fresh-graph protocol
+    # every Point for the question is written by this ingest, so coverage IS
+    # write-time embedding coverage: 1.0 with the embedder present, 0.0
+    # (recorded, never silent) without; a question with zero points yields
+    # None (pinned shape, no crash). ──
+    cov_rows = sdk._get_proj().g.query(
+        "MATCH (p:Point) WHERE p.lme_question_id = $q "
+        "RETURN count(p), count(p.embedding)",
+        params={"q": qid}).result_set
+    total_pts, embedded_pts = cov_rows[0] if cov_rows else (0, 0)
+    embedding_coverage = (embedded_pts / total_pts) if total_pts else None
 
     # ── recall@k over the DEDUPED pool (session + turn + evidence + chunk) ──
     session_recall: dict[str, float] = {}
@@ -481,6 +507,13 @@ def retrieve_for_question(
         "context_points": context_points,
         "context_tokens": context_tokens,
         "context_point_count": len(context_points),
+        # R3 (#1542) D3: write-time embedding coverage (observable dense leg).
+        "points_total": total_pts,
+        "points_embedded": embedded_pts,
+        "embedding_coverage": embedding_coverage,
+        # R3 (#1542) D4: the per-leg trace (vector/fts/structural/fallback),
+        # snapshotted so a late append cannot mutate the recorded outcome.
+        "legs": list(legs),
         "dedup_stats": {
             "chunks_retrieved": n_chunks_retrieved,
             "chunks_capped": n_chunks_retrieved - n_chunks_pool,

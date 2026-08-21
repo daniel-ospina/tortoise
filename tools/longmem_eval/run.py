@@ -125,6 +125,112 @@ def _resolve_int_knob(env_name: str, default: int, cli_value: int | None) -> int
     return default
 
 
+# R3 (#1542): the MemDelta-pinned embedder (all-MiniLM-L6-v2, 384-dim,
+# #399 calibration). The pre-flight probe asserts this dimension so a swap
+# or a wrong-dimension model is caught before any run, never silently used.
+PINNED_EMBEDDER_MODEL = "all-MiniLM-L6-v2"
+EMBEDDER_PROBE_DIM = 384
+
+
+def _sentence_transformers_version() -> str | None:
+    """Guarded version lookup — None (null) when the extra is absent, never
+    an exception (R3 #1542 D2)."""
+    try:
+        import importlib.metadata
+        return importlib.metadata.version("sentence-transformers")
+    except Exception:  # noqa: BLE001, RUF100
+        return None
+
+
+def _embedder_status(*, available: bool, reason: str | None,
+                     model: str | None = None,
+                     st_version: str | None = None) -> dict:
+    """The embedder pre-flight status dict (R3 #1542 D2/D5): well-formed in
+    every env — when the extra is absent the version field is null, not an
+    exception."""
+    return {
+        "model": model,
+        "sentence_transformers_version": st_version,
+        "available": available,
+        "reason": reason,
+    }
+
+
+def _preflight_embedder(*, mock: bool) -> dict:
+    """R3 (#1542) D2: pre-flight the dense leg — never a silent None.
+
+    Verifies USABILITY, not just loadability: after ``EmbeddingModel.get()``
+    succeeds, runs one probe encode and asserts the 384-dim output. A real
+    (non-mock) run refuses to start when the embedder is missing or broken
+    (SystemExit naming the remediation commands); ``--mock`` warns and
+    continues (the status is still recorded in the report methodology).
+
+    Timeouts are mode-aware: real runs probe with ``load_timeout=600`` (the
+    cold-download window for the first-ever model fetch); ``--mock`` probes
+    with ``load_timeout=30`` so an offline env without a cached model warns
+    and continues in ~30s instead of stalling 10 minutes.
+    """
+    from tortoise.embeddings import EmbeddingModel
+
+    timeout = 30.0 if mock else 600.0
+    try:
+        model = EmbeddingModel.get(load_timeout=timeout)
+    except Exception:  # noqa: BLE001, RUF100
+        model = None
+    st_version = _sentence_transformers_version()
+    if model is None:
+        status = _embedder_status(available=False, reason="no_embedder",
+                                  st_version=st_version)
+        return _finalize_embedder_preflight(status, mock=mock)
+    model_id = getattr(model, "model_id", None) or PINNED_EMBEDDER_MODEL
+    try:
+        vec = model.encode(["probe"])
+        if vec is None or len(vec) == 0:
+            raise ValueError("empty probe encode output")
+        dim = int(vec[0].shape[0] if hasattr(vec[0], "shape")
+                  else len(vec[0]))
+        if dim != EMBEDDER_PROBE_DIM:
+            status = _embedder_status(
+                available=False, reason="dim_mismatch",
+                model=model_id, st_version=st_version)
+            return _finalize_embedder_preflight(status, mock=mock)
+    except Exception:  # noqa: BLE001, RUF100
+        status = _embedder_status(
+            available=False, reason="encode_failed",
+            model=model_id, st_version=st_version)
+        return _finalize_embedder_preflight(status, mock=mock)
+    status = _embedder_status(available=True, reason=None,
+                              model=model_id, st_version=st_version)
+    print(f"[longmem_eval] embedder pre-flight OK: {model_id} "
+          f"(sentence-transformers {st_version or 'n/a'})", file=sys.stderr)
+    return status
+
+
+def _finalize_embedder_preflight(status: dict, *, mock: bool) -> dict:
+    """R3 (#1542) D2 gate: real runs refuse to start with a degraded dense
+    leg (SystemExit with the exact remediation); ``--mock`` warns and
+    continues (CI smoke stays runnable offline)."""
+    reason = status.get("reason")
+    if mock:
+        print("[longmem_eval] WARNING: embedder unavailable "
+              f"(reason={reason}) — the vector/dense leg is DISABLED for "
+              "this mock run; install with: uv sync --group dev "
+              "--extra embeddings", file=sys.stderr)
+        return status
+    raise SystemExit(
+        "[longmem_eval] EMBEDDER PRE-FLIGHT FAILED — the dense (vector) "
+        f"leg cannot run (reason={reason}). Refusing to start: publishing "
+        "a dense-less report is worse than no report.\n"
+        "The eval env must install the pinned embedder (R3 #1542):\n"
+        "  uv sync --group dev --extra embeddings\n"
+        "  uv run python -c \"from sentence_transformers import "
+        "SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')\"\n"
+        "Verify with:\n"
+        "  uv run python -c \"from tortoise.embeddings import "
+        "EmbeddingModel; m = EmbeddingModel.get(load_timeout=600); "
+        "assert m is not None; print('embedder OK')\"")
+
+
 def _call_with_backoff(fn, *, what: str, retries: int,
                        base: float = BACKOFF_BASE_S, cap: float = BACKOFF_CAP_S):
     """Call ``fn`` with exponential-backoff retries (transient LLM errors).
@@ -310,6 +416,11 @@ def run_evaluation(
     extractor_model=None,
     workers: int = 1,
     preflight: dict | None = None,
+    # R3 (#1542) D2: the embedder pre-flight status (from _preflight_embedder
+    # in run_main) — forwarded to the report methodology (D5: embedder +
+    # vector_strategy always emitted; None default keeps programmatic
+    # callers — tests, capstone #1549 — on the not_checked default).
+    embedder_status: dict | None = None,
     chunk_turns: int = DEFAULT_CHUNK_TURNS,
     max_context_tokens: int = DEFAULT_CONTEXT_TOKEN_CAP,
     max_chunks_per_session: int = DEFAULT_MAX_CHUNKS_PER_SESSION,
@@ -483,6 +594,13 @@ def run_evaluation(
                 "evidence_written": evidence_written,
                 "evidence_retrieved@k": ret["evidence_retrieved@k"],
                 "ingest_latency_ms": ingest_latency_ms,
+                # R3 (#1542) D3/D4: write-time embedding coverage + the
+                # per-leg trace (vector/fts/structural/fallback — E2E-1
+                # never-null leg-mix, recorded per question).
+                "points_total": ret["points_total"],
+                "points_embedded": ret["points_embedded"],
+                "embedding_coverage": ret["embedding_coverage"],
+                "legs": ret["legs"],
             }
             with _lock:
                 outcomes.append(outcome)
@@ -542,6 +660,7 @@ def run_evaluation(
         ingest_mode=ingest_mode,
         failures=failures,
         preflight=preflight,
+        embedder_status=embedder_status,
         # R1 (#1540) D7: knob values recorded verbatim in the methodology
         # (the run protocol step-2 gate consumes them).
         r1_knobs={
@@ -577,6 +696,9 @@ def outcomes_to_report(
     reader_system_prompt: str = "",
     reader_type_fragments: dict[str, str] | None = None,
     preflight: dict | None = None,
+    # R3 (#1542) D5: forwarded to build_report — the dense-leg methodology
+    # keys are always emitted (not_checked default when omitted).
+    embedder_status: dict | None = None,
     r1_knobs: dict[str, Any] | None = None,
     # M7 (#1527): publication-gated audit + run-hygiene provenance.
     dataset_semantics_audit: dict[str, Any] | None = None,
@@ -611,7 +733,11 @@ def outcomes_to_report(
                 "valid", "error_classes", "leg_mix", "leg_mix@k",
                 "pool_size", "evidence_written", "evidence_retrieved@k",
                 "ingest_latency_ms",
-            )}
+                # R3 (#1542) D3/D4: dense-leg observability — read via
+                # o.get so a pre-R3 checkpoint resumes with the defaults
+                # (coverage keys → None, legs → []) instead of KeyError.
+                "points_total", "points_embedded", "embedding_coverage",
+            )} | {"legs": list(o.get("legs") or [])}
             for o in outcomes
         ]
     }
@@ -642,6 +768,7 @@ def outcomes_to_report(
         top_k=top_k,
         failures=failures,
         r1_knobs=r1_knobs,
+        embedder_status=embedder_status,
         extra=extra,
         # M7 (#1527): publication-gated audit + run-hygiene provenance.
         dataset_semantics_audit=dataset_semantics_audit,
@@ -875,6 +1002,12 @@ def run_main(argv: list[str] | None = None) -> dict[str, Any]:
         "TORTOISE_LME_MAX_CHUNKS_PER_SESSION",
         DEFAULT_MAX_CHUNKS_PER_SESSION, args.max_chunks_per_session)
 
+    # R3 (#1542) D2: embedder pre-flight — before dataset load (fail before
+    # the ~tens-of-MB download). Real runs refuse to start when the dense
+    # leg can't run; --mock warns and continues. The status flows into the
+    # report methodology (D5: embedder + vector_strategy always emitted).
+    embedder_status = _preflight_embedder(mock=args.mock)
+
     instances = ds.load_dataset(
         args.split, limit=args.limit, data_path=args.data,
         cache=Path(args.cache_dir).expanduser() if args.cache_dir else None,
@@ -941,6 +1074,7 @@ def run_main(argv: list[str] | None = None) -> dict[str, Any]:
             checkpoint=args.checkpoint, max_retries=args.max_retries,
             ingest_mode=args.ingest_mode, extractor_model=extractor_model,
             workers=max(1, args.workers), preflight=preflight,
+            embedder_status=embedder_status,
             chunk_turns=chunk_turns, max_context_tokens=context_cap,
             max_chunks_per_session=max_chunks_per_session,
             dataset_fingerprint=dataset_fingerprint,
