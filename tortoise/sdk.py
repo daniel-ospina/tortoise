@@ -251,6 +251,33 @@ def _session_llm_transcript(conversation: list[dict]) -> tuple[str, int]:
     return "\n".join(lines), n_sentences * 2
 
 
+def _normalize_turn_role(raw) -> str:
+    """Shared turn-role normalization (#1532 D2): None -> 'unknown', truthy
+    non-strings -> str() — never a raw non-string stored as `speaker`
+    (#721) and never None stored as-is (SDK/hosted drift)."""
+    if isinstance(raw, str):
+        return raw
+    return "unknown" if raw is None else str(raw)
+
+
+def _capture_turn_window(conversation: list[dict], cap: int = 5000) -> list[dict]:
+    """Truncate each turn's content to the stored-window cap (#1532 D1).
+
+    Returns a NEW list; the windowed conversation feeds BOTH the turn-store
+    loop and the extraction call so the LLM never sees a phrase with no home
+    in any stored turn (stored-source parity, #721). Content coercion matches
+    the store loop: None -> '', truthy non-strings -> str() (isinstance-first,
+    #721). Idempotent when the caller already truncated."""
+    out: list[dict] = []
+    for turn in conversation:
+        t = dict(turn)
+        raw = t.get("content")
+        content = raw if isinstance(raw, str) else ("" if raw is None else str(raw))
+        t["content"] = content[:cap]
+        out.append(t)
+    return out
+
+
 # #1352: minimal stopword set for the cheap session-Source topic derivation —
 # content-word frequency over the transcript (the metadata extractor's LLM
 # path is not available on the capture path; this is the deterministic
@@ -301,13 +328,26 @@ def _session_source_metadata(transcript: str) -> tuple[str, list[str]]:
     return summary, topics
 
 
+def _session_extraction_estimate(conversation: list[dict], *,
+                                 extractor: str | None = None) -> int:
+    """Pre-write fail-closed estimate of NEW non-episodic nodes a capture
+    will produce. v2 (default, mirrors commit_session's TORTOISE_EXTRACTOR
+    selection): 3 x sentence-cap — points + operators (<= points via Layer-1
+    drop) + a x1 allowance for entities/events, each ~<= points in the S2/S4
+    embed list (#1532 D4). m2: 2 x sentence-cap (points + operators, #822).
+    Turn Points/Session/Event are episodic and never counted (#947)."""
+    import os
+    mode = (extractor or os.environ.get("TORTOISE_EXTRACTOR", "v2")).lower()
+    factor = 3 if mode == "v2" else 2
+    _transcript, est = _session_llm_transcript(conversation)  # est = sents*2
+    return est // 2 * factor
+
+
 def _session_llm_extraction_estimate(conversation: list[dict]) -> int:
-    """Pre-write fail-closed estimate of new non-episodic nodes a capture will
-    produce (points + operators). Hosted 402 gate input — mirrors the removed
-    regex estimate (#947: the points quota counts non-episodic Points only,
-    and turn Points/Session/Event are episodic)."""
-    _transcript, est = _session_llm_transcript(conversation)
-    return est
+    """Deprecated-compat alias for _session_extraction_estimate (#1532 D4):
+    the hosted 402 gate now calls the v2-aware estimator; this name stays for
+    pre-migration callers (removed after the migration completes)."""
+    return _session_extraction_estimate(conversation)
 
 
 def _first_non_draft_status(points: list) -> tuple[int, object] | None:
@@ -1838,13 +1878,21 @@ class TortoiseSDK:
             raise ValueError(
                 f"Session turn cap exceeded: {len(conversation)} > {max_turns}")
 
+        # #1532 D1: compute the shared stored-window conversation ONCE — the
+        # empty/blank gate, the turn-store loop, and the extraction call all
+        # consume the SAME window so the extractors can never see a phrase
+        # with no home in any stored turn (stored-source parity). Coercion +
+        # truncation happen before the first graph write (partial-write guard).
+        windowed = _capture_turn_window(conversation)
+
         # P1 #1529 (D3): empty/blank conversation fails closed BEFORE any write
-        # — whole-conversation transcript emptiness, the SAME signal the
-        # extractors use, so the gate and the extractors cannot disagree, and
+        # — whole-conversation transcript emptiness (of the STORED window, the
+        # exact input the extractors receive), the SAME signal the extractors
+        # use, so the gate and the extractors cannot disagree, and
         # pre-mutation (no Session stub). turns reports the COMMITTED state (0)
         # — nothing lands. (The no-extractor ValueError above precedes this
         # gate — hosted 503-first precedent, #1529 OQ14.)
-        transcript, _est = _session_llm_transcript(conversation)
+        transcript, _est = _session_llm_transcript(windowed)
         if not transcript.strip():
             return {
                 "session_id": session_id,
@@ -1864,28 +1912,23 @@ class TortoiseSDK:
         )
 
         # NOTE: this per-turn loop (episodic turn Points) is duplicated from
-        # tortoise/hosted_api.py POST /v1/sessions. Divergences: the SDK
-        # variant writes a `speaker` property on turn Points (delta 5) while
-        # hosted adds quota/auth bounds; hosted has no speaker tag. SDK
-        # TRUNCATES turn content > 5000 chars silently AND the extraction
-        # transcript is built from the truncated text (stored-source parity —
-        # a phrase past the cut has no home in any stored turn), hosted
-        # rejects > 5000 with 422 (Pydantic field_validator failure) so its
-        # loop always sees <= 5000 chars: extraction inputs align. role=None
-        # normalizes to "unknown" in the SDK, hosted stores None as-is. Keep
-        # the two in sync when touching either. The LLM extraction that
-        # follows the loop is shared via _extract_session_llm (#822).
-        for i, turn in enumerate(conversation):
-            # #721: same isinstance-first pattern as content below — an `or
-            # "unknown"` fallback only fixes falsy roles, but TRUTHY non-string
-            # roles (123, {"a": 1}) would pass raw and be stored as a
-            # non-string `speaker` (contradicting the `speaker | string`
+        # tortoise/hosted_api.py POST /v1/sessions — the shared primitives
+        # #1532 D1/D2 (_capture_turn_window / _normalize_turn_role) keep the
+        # two loops byte-identical for identical input: same stored-window
+        # truncation, same role normalization (None -> "unknown", truthy
+        # non-strings -> str()), same `speaker` property write (delta 5).
+        # Hosted additionally adds quota/auth bounds; the extraction that
+        # follows the loop is shared via _extract_session_llm/_extract_session_v2
+        # (#822). Keep the two in sync when touching either.
+        for i, turn in enumerate(windowed):
+            # #721: _normalize_turn_role is the isinstance-first pattern — an
+            # `or "unknown"` fallback only fixes falsy roles, but TRUTHY
+            # non-string roles (123, {"a": 1}) would pass raw and be stored as
+            # a non-string `speaker` (contradicting the `speaker | string`
             # ontology row) — and a dict role could fail the Cypher write
             # mid-loop, leaving a partial session. Coerce via str() so the
             # speaker property is always a string; only None maps to "unknown".
-            raw_role = turn.get("role")
-            role = raw_role if isinstance(raw_role, str) else (
-                "unknown" if raw_role is None else str(raw_role))
+            role = _normalize_turn_role(turn.get("role"))
             raw = turn.get("content")
             # #721: defensive coercion — check isinstance FIRST so falsy
             # non-strings (0, False, {}, []) are not swallowed to "" by an
@@ -1898,6 +1941,9 @@ class TortoiseSDK:
             # (delta 5), content hash, session-scoped (never conflated across
             # sessions — #490).
             turn_id = f"{session_id}_t{i}"
+            # _capture_turn_window already truncated content to the cap — the
+            # [:cap] here is the idempotent no-op keeping the store loop's own
+            # window definition explicit (#1532 D1).
             turn_text = f"[{role}] {content[:5000]}"
             proj.g.query(
                 "MERGE (t:Point {id:$id}) "
@@ -1928,10 +1974,10 @@ class TortoiseSDK:
         # branch-independent and fails closed on either extractor.
         if os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2":
             extracted, meta = self._extract_session_llm(
-                conversation, session_id, now)
+                windowed, session_id, now)
         else:
             extracted, meta = self._extract_session_v2(
-                conversation, session_id, now)
+                windowed, session_id, now)
 
         # P1 #1529: the fail-closed assembly consumes the shared contract.
         extraction_errors = list(meta.get("errors") or [])
@@ -2279,18 +2325,16 @@ class TortoiseSDK:
             except Exception:  # noqa: BLE001, RUF100
                 pass
 
-        # ── operators (IMPL/NAND; MITIGATES recorded, not written) ──
-        for op in payload.get("operators", []) or []:
-            op_type = str(op.get("op_type", "")).upper()
-            src, dst = str(op.get("src", "")), str(op.get("dst", ""))
-            if op_type not in ("IMPL", "NAND") or not src or not dst:
-                continue
-            try:  # noqa: SIM105
-                self.create_operator(op_type, src, [dst],
-                                     direction="unidirectional",
-                                     promote_source=False)
-            except Exception:  # noqa: BLE001, RUF100
-                pass
+        # ── operators (IMPL/NAND + MITIGATES — shared commit semantics,
+        #    #1532 D3: same artifact + deep-miss drop as the commit path via
+        #    apply_payload_operators) ──
+        ops = payload.get("operators", []) or []
+        if ops:
+            from tortoise.commit_ops import _payload_point_content_by_id, apply_payload_operators
+            apply_payload_operators(
+                proj, self, ops,
+                point_content_by_id=lambda pid: _payload_point_content_by_id(
+                    payload, pid))
         # P1 #1529 (D6): completed-but-empty v2 output (no errors, no points)
         # is an additive warning — nothing extractable is not a failure and
         # never a silent extracted: 0.

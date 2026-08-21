@@ -6,7 +6,8 @@ knob is removed; TORTOISE_SESSION_LLM_MOCK=1 installs the offline MockModel
 on the E2E server) turns conversation sentences into Points.
 
 Negatives: turn cap (MAX_SESSION_TURNS=500) → 400; oversized turn content
-(>5000 chars) → 422; unauthenticated → 401.
+(>5000 chars) → accepted + truncated to the stored window (the old 422 is
+removed — #1532 D1, SDK truncation parity); unauthenticated → 401.
 """
 from __future__ import annotations
 
@@ -64,12 +65,15 @@ def test_session_turn_cap_400(api, tenant_factory):
     assert "cap" in r.text().lower() or "turn" in r.text().lower(), r.text()
 
 
-def test_session_oversized_turn_422(api, tenant_factory):
+def test_session_oversized_turn_truncates(api, tenant_factory):
+    """#1532 D1 (contract change, flagged): oversized turn content (>5000
+    chars) is accepted and truncated to the stored window — the old 422 is
+    removed (SDK truncation parity)."""
     t = tenant_factory("session-big")
     h = {"Authorization": f"Bearer {t['api_key']}"}
     r = api.post("/v1/sessions", headers=h,
                  data={"conversation": [{"role": "user", "content": "x" * 5001}]})
-    assert r.status == 422, f"oversized turn must 422, got {r.status}"
+    assert r.status == 200, f"oversized turn must truncate to 200, got {r.status} {r.text()}"
 
 
 def test_session_unauthenticated_401(api):

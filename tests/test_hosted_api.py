@@ -2686,3 +2686,115 @@ class _FakeRequest:
 
 class _State:
     pass
+
+
+# ── #1532 P4: capture-path parity (speaker / truncation / quota) ──────────
+
+def _stored_turns(sdk):
+    """[(content, speaker)] ordered by turn id — the SDK/hosted stored-turn
+    byte-identity assertion (#1532 D1/D2)."""
+    proj = sdk._get_proj()
+    rows = proj.g.query(
+        "MATCH (t:Point {pointKind:'event'}) "
+        "RETURN t.content, t.speaker ORDER BY t.id").result_set
+    return [(r[0], r[1]) for r in rows]
+
+
+class TestCaptureSpeakerParity:
+    def test_hosted_turns_write_speaker(self, client):
+        """#1532 D2: hosted turn Points carry the `speaker` property (delta 5
+        parity) — previously hosted wrote no speaker tag."""
+        r = client.post("/v1/sessions", json={
+            "session_id": "sp-session",
+            "conversation": [{"role": "user", "content": "I think auth is the top issue."}],
+        })
+        assert r.status_code == 200, r.text[:200]
+        from tortoise.hosted_api import TortoiseSDK as _HASDK
+        rows = _HASDK(namespace=TEST_TEAM_ID)._get_proj().g.query(
+            "MATCH (t:Point {pointKind:'event'}) RETURN t.speaker"
+        ).result_set
+        assert rows and rows[0][0] == "user", rows
+
+    def test_hosted_role_none_normalized(self, client):
+        """#1532 D2: role None stores 'unknown' (SDK normalization) — never
+        None as-is (the old hosted drift)."""
+        r = client.post("/v1/sessions", json={
+            "session_id": "sp-none", "conversation": [{"role": None, "content": "short sentence here."}]})
+        assert r.status_code == 200, r.text[:200]
+        from tortoise.hosted_api import TortoiseSDK as _HASDK
+        rows = _HASDK(namespace=TEST_TEAM_ID)._get_proj().g.query(
+            "MATCH (t:Point {pointKind:'event'}) RETURN t.speaker"
+        ).result_set
+        assert rows and rows[0][0] == "unknown", rows
+
+    def test_hosted_non_string_role_coerced(self, client):
+        """#1532 D2 (#721 class): a truthy non-string role is coerced via
+        str() — never stored raw as a non-string speaker."""
+        r = client.post("/v1/sessions", json={
+            "session_id": "sp-123", "conversation": [{"role": 123, "content": "short sentence here."}]})
+        assert r.status_code == 200, r.text[:200]
+        from tortoise.hosted_api import TortoiseSDK as _HASDK
+        rows = _HASDK(namespace=TEST_TEAM_ID)._get_proj().g.query(
+            "MATCH (t:Point {pointKind:'event'}) RETURN t.speaker"
+        ).result_set
+        assert rows and rows[0][0] == "123", rows
+
+    def test_hosted_over_5000_truncates(self, client):
+        """#1532 D1 (contract change, flagged): hosted accepts >5000-char
+        turns and truncates to the stored window — the old 422 is removed
+        (SDK truncation parity)."""
+        content = "plain filler text. " * 300   # > 5000
+        assert len(content) > 5000
+        r = client.post("/v1/sessions", json={
+            "session_id": "trunc-session",
+            "conversation": [{"role": "user", "content": content}]})
+        assert r.status_code == 200, r.text[:300]
+        from tortoise.hosted_api import TortoiseSDK as _HASDK
+        rows = _HASDK(namespace=TEST_TEAM_ID)._get_proj().g.query(
+            "MATCH (t:Point {pointKind:'event'}) RETURN t.content"
+        ).result_set
+        assert rows and rows[0][0] == "[user] " + content[:5000], rows
+
+
+class TestCaptureStoredTurnParity:
+    def test_sdk_and_hosted_store_identical_turns(self, client, tmp_path):
+        """#1532 D1/D2: identical input -> identical stored turns (content +
+        speaker) on the SDK path and the hosted path — the shared window +
+        role helpers keep the two loops byte-identical."""
+        from tortoise.sdk import TortoiseSDK
+        from tortoise.hosted_api import TortoiseSDK as _HASDK
+        conv = [{"role": "user", "content": "prefix sentence. " + "x" * 6000},
+                {"role": None, "content": "short sentence here."},
+                {"role": 123, "content": "y"}]
+        # hosted capture
+        r = client.post("/v1/sessions", json={
+            "session_id": "byte-same", "conversation": conv})
+        assert r.status_code == 200, r.text[:200]
+        hosted_turns = _stored_turns(_HASDK(namespace=TEST_TEAM_ID))
+        # sdk capture of the same conversation + session_id
+        sdk = TortoiseSDK(db_path=str(tmp_path / "t.db"))
+        sdk.capture_session(conv, session_id="byte-same")
+        sdk_turns = _stored_turns(sdk)
+        assert sdk_turns == hosted_turns, (
+            f"SDK {sdk_turns!r} != hosted {hosted_turns!r}")
+
+
+class TestV2SessionFloodGate:
+    def test_v2_estimate_trips_402_where_m2_would_pass(self, client):
+        """#1532 D4: the v2-shaped gate (x3 — points + operators + entities/
+        events) trips 402 at a density the M2 shape (x2) would admit — the
+        gate must not under-count v2 production. The estimate default IS the
+        v2 shape (capture routes v2 post-P1); 50 turns x 70 sentences = 3500
+        capped sentences: m2=7000 < 10000 (Free max_points) but v2=10500 >
+        10000 -> only the v2 shape trips 402."""
+        dense = ("we should go. " * 70)
+        conversation = [{"role": "user", "content": dense}] * 50
+        r = client.post("/v1/sessions", json={
+            "session_id": "dense-v2-session", "conversation": conversation})
+        assert r.status_code == 402, r.text[:300]
+        # Zero growth: no Session node created (pre-write gate).
+        from tortoise.hosted_api import TortoiseSDK as _HASDK
+        rows = _HASDK(namespace=TEST_TEAM_ID)._get_proj().g.query(
+            "MATCH (s:Session {id:$sid}) RETURN count(s)",
+            params={"sid": "dense-v2-session"}).result_set
+        assert rows[0][0] == 0
