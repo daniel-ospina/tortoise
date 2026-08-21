@@ -149,6 +149,52 @@ def test_claim_paste_has_back_to_signin_escape(page: Page) -> None:
     expect(page.locator("a[href='https://tortoise.premiselabs.co/auth']")).to_be_visible()
 
 
+def test_mint_429_shows_error_card_not_stuck_shell(page: Page) -> None:
+    """#1559: a session-key mint 429 (the live global-IP-bucket bug) must
+    render an actionable error card with a retry — never the silent
+    'Redirecting to the sign-in page…' shell (which does NOT navigate and
+    stranded every new user after OAuth)."""
+    import json as _json
+    import time as _time
+    import urllib.parse as _up
+    sess = {"access_token": "fake.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sig",
+            "refresh_token": "rt", "expires_in": 3600,
+            "expires_at": int(_time.time()) + 3600, "token_type": "bearer",
+            "user": {"id": "u-mint429", "email": "mint429@premise-labs.dev"}}
+    page.context.add_cookies([{"name": "sb-tortoise-auth-token",
+                               "value": _up.quote(_json.dumps(sess)),
+                               "domain": ".premiselabs.co", "path": "/"}])
+    from tests.e2e.test_session_login_flow import AUTH_ORIGIN, DASHBOARD_URL, _proxy_body  # noqa: F401
+
+    def handle(route):
+        url = route.request.url
+        if "api.premiselabs.co" in url:
+            if url.endswith("/v1/session/key"):
+                route.fulfill(status=429, content_type="application/json",
+                              headers={"Retry-After": "60"},
+                              body=_json.dumps({"detail": "Rate limit exceeded."}))
+                return
+            if url.endswith("/v1/teams"):
+                route.fulfill(status=200, content_type="application/json", body="[]")
+                return
+            route.fulfill(status=401, content_type="application/json", body="{}")
+            return
+        if url.startswith(AUTH_HOST):
+            local = AUTH_ORIGIN + url[len(AUTH_HOST):]
+            _proxy_body(route, local, page)
+            return
+        if url.startswith(APP_HOST):
+            local = DASHBOARD_URL.rstrip("/") + url[len(APP_HOST):]
+            _proxy_body(route, local, page)
+            return
+        route.continue_()
+
+    page.route("**/*", handle)
+    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    expect(page.locator("body")).to_contain_text("Too many requests from this network", timeout=20_000)
+    expect(page.locator("body")).not_to_contain_text("Redirecting to the sign-in page")
+
+
 def test_logout_redirects_to_auth(page: Page) -> None:
     """#1511 (VGATE P1): a signed-in user clicking Log out is redirected to
     /auth — the key-only card is gone, so sign-out must land on the login
