@@ -425,7 +425,7 @@ def test_healthy_load_does_not_show_watchdog_error(page: Page) -> None:
 
 def test_mock_email_signup_created_signs_in_and_redirects_url_clean(page: Page) -> None:
     """Success path — the #801 server-first contract (created server-side →
-    direct sign-in → /welcome redirect; the check-your-inbox state is NOT
+    direct sign-in → the app root redirect (#1566); the check-your-inbox state is NOT
     part of the hosted happy path, email_confirm=true server-side). Must
     keep the URL clean and push the x_signup conversion event (#736).
 
@@ -509,8 +509,12 @@ def test_mock_email_signup_created_signs_in_and_redirects_url_clean(page: Page) 
         expect(page.locator("#confirm-email")).to_have_text(email)
     else:
         # Deployed happy path: server-side creation → direct sign-in →
-        # redirect to the welcome page (no check-your-inbox step, #801).
-        page.wait_for_url("**/welcome*", timeout=15_000)
+        # redirect to the app root (no check-your-inbox step, #801/#1566).
+        # #1566: the signup now lands on the app ROOT (first-timers are
+        # provisioned in-app there).
+        # ** (double-star): the browser commits the trailing slash
+        # (https://app.premiselabs.co/) which a single * glob excludes.
+        page.wait_for_url("**://app.premiselabs.co**", timeout=15_000)
     assert "email=" not in page.url and "password=" not in page.url
     assert captured["x_signup"], "x_signup entry missing from dataLayer"
     entry = captured["x_signup"]

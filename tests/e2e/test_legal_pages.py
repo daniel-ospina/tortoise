@@ -791,7 +791,8 @@ def test_mock_email_signup_created_signs_in_and_redirects(page: Page) -> None:
     """Mocked email-path signup — the DEPLOYED #801 server-first contract
     (stale client-side auth/v1/signup assertions fixed in #1190): the submit
     calls api.premiselabs.co/v1/signup/email, a 200 "created" signs the user
-    in directly (auth/v1/token) and redirects to /welcome.html — the
+    in directly (auth/v1/token) and redirects to the app root (in-app
+    provisioning, #1566) — the
     check-your-inbox state is NOT part of the hosted happy path
     (email_confirm=true server-side, #801; that legacy UI is only reached
     via the server-unavailable fallback, covered in the safety suite's
@@ -901,8 +902,11 @@ def test_mock_email_signup_created_signs_in_and_redirects(page: Page) -> None:
         expect(page.locator("#confirm-email")).to_have_text(email)
     else:
         # #801 deployed happy path: created server-side → direct sign-in →
-        # redirect to the welcome page (NO check-your-inbox step).
-        page.wait_for_url("**/welcome*", timeout=15_000)
+        # redirect to the app root (no check-your-inbox step, #801/#1566).
+        # #1566: the signup now lands on the app ROOT (in-app provisioning).
+        # ** (double-star): the browser commits the trailing slash
+        # (https://app.premiselabs.co/) which a single * glob excludes.
+        page.wait_for_url("**://app.premiselabs.co**", timeout=15_000)
 
     # X conversion event (#736 Path A): the dataLayer push fired on success
     # with event=x_signup, the typed email, and a non-empty conversion_id
