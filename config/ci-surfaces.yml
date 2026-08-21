@@ -229,6 +229,7 @@ surfaces:
   - test_remove_context_migration.py
   - test_render.py
   - test_review_connections.py
+  - test_run_protocol.py
   - test_search_engine.py
   - test_search_engine_gaps.py
   - test_search_engine_nameerror.py
