@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tortoise.sdk import TortoiseSDK  # noqa: E402, I001, RUF100
 from tortoise.models import OpenAICompatModel  # noqa: E402, RUF100
+from tortoise.search_engine import reset_circuit_breakers  # noqa: E402
 
 from tools.longmem_eval.ingest import (  # noqa: E402, RUF100
     _session_chunks, _session_transcript, ingest_haystack,
@@ -459,6 +460,11 @@ def test_retrieval_recalls_evidence_session(tmp_path):
 
 
 def test_retrieval_multi_session_evidence(tmp_path):
+    # #1595: the shared module-level FTS circuit breaker (left OPEN by an
+    # earlier test's failed queries under parallel load — #1568 class) would
+    # short-circuit retrieval to empty before this test runs; reset so the
+    # search sees deterministic breaker state.
+    reset_circuit_breakers()
     sdk = _fresh_sdk(tmp_path)
     try:
         q = next(x for x in _mini() if x["question_id"] == "mini_msr_002")
