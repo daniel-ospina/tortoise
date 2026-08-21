@@ -3835,10 +3835,21 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     # #1350: capture runs the v2 5-stage extractor; the M2 two-stage
     # extractor remains behind TORTOISE_SESSION_EXTRACTOR=m2 (same seam as
     # the SDK copy so the two capture loops stay in sync).
+    # #1530 D3 divergence handling: the INNER v2 routing gate is narrower
+    # than this broad outer gate (e.g. an openai-only deploy passes
+    # _llm_provider_available but the adapter cannot consume OPENAI_API_KEY) —
+    # the inner ValueError converts to a clean fail-closed 503, never an
+    # uncaught 500 (the #1468 lesson: outer/inner drift must not 500).
     if os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2":
         extracted = sdk._extract_session_llm(body.conversation, session_id, now)
+        meta = {"provider": None, "route": None, "failover_used": False,
+                "errors": [], "warnings": []}
     else:
-        extracted = sdk._extract_session_v2(body.conversation, session_id, now)
+        try:
+            extracted, meta = sdk._extract_session_v2(
+                body.conversation, session_id, now)
+        except ValueError as e:
+            raise HTTPException(status_code=503, detail=str(e)) from e
 
     # Ontology v3.1 §4.5/§3.2 (#7882): also create an episodic :Event node
     # (eventKind: sessionCaptured) and stamp its eventId onto the extracted
@@ -3893,10 +3904,17 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
 
     # #822: extraction_mode reflects what ACTUALLY ran — the M2 LLM extractor
     # (the regex stopgap #722 reported is gone with the regex loop).
-    effective_mode = "llm"
-    return {"session_id": session_id, "turns": len(body.conversation),
-            "extracted": len(extracted), "points": extracted,
-            "extraction_mode": effective_mode}
+    # #1530 D8: the v2 path reports the resolved route ("llm:<route>", e.g.
+    # "llm:deepseek-direct") + the configured provider — parity with the SDK
+    # capture path by construction (same meta contract).
+    resp = {"session_id": session_id, "turns": len(body.conversation),
+            "extracted": len(extracted), "points": extracted}
+    if meta.get("route"):
+        resp["extraction_mode"] = f"llm:{meta['route']}"
+        resp["extraction_provider"] = meta.get("provider")
+    else:
+        resp["extraction_mode"] = "llm"
+    return resp
 
 
 # ── POST /v1/sessions/commit — epic #909 slice 5b (plan §6.1, W-3, W-7) ────

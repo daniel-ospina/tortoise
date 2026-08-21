@@ -556,6 +556,14 @@ class TestModelAdapterBounds:
             captured["body"] = kwargs.get("json", {})
             return _FakeResp()
 
+        # #1530: exercise the no-key lenient path deterministically (the
+        # dev shell carries real DEEPSEEK/OPENROUTER keys — routing would
+        # pick deepseek-direct and strip the family prefix). With no keys the
+        # adapter degrades to the single OpenRouter adapter (D3), which sends
+        # the family-prefixed id unchanged.
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        monkeypatch.delenv("TORTOISE_EXTRACTOR_PROVIDER", raising=False)
         monkeypatch.setattr(_requests, "post", _fake_post)
         adapter = _model_adapter("deepseek/deepseek-v4-flash")
         out = adapter.complete(system="s", user="u")
@@ -586,6 +594,11 @@ class TestModelAdapterBounds:
             return _FakeResp()
 
         monkeypatch.setattr(_requests, "post", _fake_post)
+        # #1530: no-key lenient path (see test_adapter_body_has_bounds) — the
+        # family-prefixed id must survive on the OpenRouter default route.
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        monkeypatch.delenv("TORTOISE_EXTRACTOR_PROVIDER", raising=False)
         adapter = _model_adapter("deepseek/deepseek-v4-flash",
                                  max_tokens=None, temperature=0.0)
         out = adapter.complete(system="s", user="u")

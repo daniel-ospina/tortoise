@@ -75,8 +75,10 @@ def test_capture_session_shape(sdk):
     assert res["turns"] == 3
     assert res["extracted"] >= 1
     assert all(p["kind"] in ("decision", "statement") for p in res["points"])
-    # #822: extraction_mode reports what actually ran — the M2 LLM extractor.
-    assert res["extraction_mode"] == "llm"
+    # #822/#1530: extraction_mode reports what actually ran — the v2 LLM
+    # extractor via the mock seam reports the resolved route ("llm:mock").
+    assert res["extraction_mode"] == "llm:mock"
+    assert res["extraction_provider"] == "mock"
 
 
 def test_capture_session_turns_are_speaker_tagged(sdk):
@@ -694,3 +696,212 @@ def test_capture_session_v2_extract_model_override_stays_capped(sdk, monkeypatch
     assert captured["max_tokens"] == 4000, (
         "explicit TORTOISE_EXTRACT_MODEL override must keep the bounded default")
     assert res["extracted"] >= 1
+
+
+# ── #1530 P2: provider routing through the capture path (E2E-8) ─────────────
+
+_V2_EMBED_JSON = (
+    "{\"entities\": [{\"name\": \"the strategy\", "
+    "\"kind\": \"core:strategy\", \"lifecycle\": \"created\", "
+    "\"supersedes\": null, \"note\": null}], "
+    "\"events\": [{\"content\": \"we decided on the new strategy\", "
+    "\"eventKind\": \"core:decision\", \"about_entities\": [\"the strategy\"]}], "
+    "\"points\": [{\"content\": \"the new strategy is durable\", "
+    "\"pointKind\": \"statement\", \"about_entities\": [\"the strategy\"]}], "
+    "\"operators\": [], \"chain_notes\": [], \"link_before_create\": []}")
+
+
+class _FakeLLMResp:
+    """Deterministic offline LLM response, keyed on the system prompt like
+    _V2SessionMock (S1 → narrative, S2/S4 → the embed JSON)."""
+    def __init__(self, content: str):
+        self._content = content
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return {"choices": [{"message": {"content": self._content}}],
+                "usage": {}}
+
+
+def _install_fake_provider(monkeypatch, requests_log):
+    """Monkeypatch requests.post with the _V2SessionMock response logic so the
+    real adapters (OpenRouterModel / DeepSeekDirectModel) run fully offline;
+    every request URL is appended to ``requests_log``."""
+    import requests as _requests
+
+    def _fake_post(url, **kwargs):
+        requests_log.append(url)
+        system = ((kwargs.get("json") or {}).get("messages") or [{}])[0].get("content", "")
+        if "STORY SUMMARIZER" in system:
+            content = "The session revealed a new strategy."
+        else:
+            content = _V2_EMBED_JSON
+        return _FakeLLMResp(content)
+
+    monkeypatch.setattr(_requests, "post", _fake_post)
+
+
+def test_capture_session_gate_match_openai_key_alone_rejected(sdk, monkeypatch):
+    """#1530 gate match: OPENAI_API_KEY alone no longer opens the v2 inner
+    gate — the adapter cannot consume it (the #1468 failure class). The gate
+    raises ValueError naming the routing-usable keys."""
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
+    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-only")
+    with pytest.raises(ValueError, match="DEEPSEEK_API_KEY"):
+        sdk.capture_session([{"role": "user", "content": "x"},
+                             {"role": "assistant", "content": "we decided"}])
+
+
+def test_capture_session_gate_match_explicit_provider_with_wrong_key(sdk, monkeypatch):
+    """D2 fail-closed: TORTOISE_EXTRACTOR_PROVIDER=deepseek-direct with only an
+    OPENROUTER key → ValueError (explicit provider names a key that isn't set)."""
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-only")
+    monkeypatch.setenv("TORTOISE_EXTRACTOR_PROVIDER", "deepseek-direct")
+    with pytest.raises(ValueError, match="DEEPSEEK_API_KEY"):
+        sdk.capture_session([{"role": "user", "content": "x"}])
+
+
+def test_capture_session_deepseek_direct_route_recorded(sdk, monkeypatch):
+    """DEEPSEEK_API_KEY alone → the direct adapter is used; the response
+    records the resolved route + provider (#1530 D8)."""
+    from tortoise.model_adapters import _reset_failover_cooldown
+    _reset_failover_cooldown()
+    requests_log = []
+    _install_fake_provider(monkeypatch, requests_log)
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
+    monkeypatch.delenv("TORTOISE_EXTRACT_MODEL", raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-key")
+    res = sdk.capture_session([{"role": "user", "content": "x"},
+                               {"role": "assistant", "content": "we decided"}])
+    assert res["extraction_mode"] == "llm:deepseek-direct"
+    assert res["extraction_provider"] == "deepseek-direct"
+    assert res["extracted"] >= 1
+    # every LLM call went to the DIRECT endpoint (no OR hop)
+    assert requests_log
+    assert all("api.deepseek.com" in u for u in requests_log)
+
+
+def test_capture_session_failover_records_fallback_route(sdk, monkeypatch):
+    """E2E-8 failover variant: the primary (deepseek-direct) fails its first
+    call with ConnectionError → the extraction succeeds via the OpenRouter
+    fallback, the response records the fallback route, and the primary is
+    never re-tried mid-extraction (D5 sticky, no flip-flop)."""
+    import requests as _requests
+
+    from tortoise.model_adapters import DeepSeekDirectModel, _reset_failover_cooldown
+
+    _reset_failover_cooldown()
+    requests_log = []
+    _install_fake_provider(monkeypatch, requests_log)
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
+    monkeypatch.delenv("TORTOISE_EXTRACT_MODEL", raising=False)
+    monkeypatch.delenv("TORTOISE_EXTRACTOR_PROVIDER", raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+
+    calls = {"ds": 0}
+    orig = DeepSeekDirectModel.complete
+
+    def _flaky_ds_complete(self, *, system, user):
+        calls["ds"] += 1
+        if calls["ds"] == 1:
+            raise _requests.ConnectionError("simulated DS collapse (#1350)")
+        return orig(self, system=system, user=user)
+
+    monkeypatch.setattr(DeepSeekDirectModel, "complete", _flaky_ds_complete)
+
+    res = sdk.capture_session([{"role": "user", "content": "x"},
+                               {"role": "assistant", "content": "we decided"}])
+    assert res["extraction_mode"] == "llm:openrouter", \
+        "failover must record the fallback route on the wire"
+    assert res["extraction_provider"] == "deepseek-direct", \
+        "extraction_provider stays the configured primary"
+    assert res["extracted"] >= 1
+    assert calls["ds"] == 1, \
+        "no flip-flop: the primary must never be re-tried after failover"
+    # the rest of the extraction ran on OpenRouter
+    assert any("openrouter.ai" in u for u in requests_log)
+
+
+def test_capture_session_failover_meta_flags(sdk, monkeypatch):
+    """The (extracted, meta) contract surfaces failover_used + errors through
+    _extract_session_v2 (P1 consumes meta — shared contract, D8)."""
+    import requests as _requests
+
+    from tortoise.model_adapters import DeepSeekDirectModel, _reset_failover_cooldown
+
+    _reset_failover_cooldown()
+    requests_log = []
+    _install_fake_provider(monkeypatch, requests_log)
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
+    monkeypatch.delenv("TORTOISE_EXTRACT_MODEL", raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+
+    calls = {"ds": 0}
+    orig = DeepSeekDirectModel.complete
+
+    def _flaky_ds_complete(self, *, system, user):
+        calls["ds"] += 1
+        if calls["ds"] == 1:
+            raise _requests.ConnectionError("simulated DS collapse (#1350)")
+        return orig(self, system=system, user=user)
+
+    monkeypatch.setattr(DeepSeekDirectModel, "complete", _flaky_ds_complete)
+
+    extracted, meta = sdk._extract_session_v2(
+        [{"role": "user", "content": "x"},
+         {"role": "assistant", "content": "we decided"}],
+        session_id="s-meta", now="2026-08-20T00:00:00Z")
+    assert meta["provider"] == "deepseek-direct"
+    assert meta["route"] == "openrouter"
+    assert meta["failover_used"] is True
+    assert isinstance(meta["errors"], list)
+    assert isinstance(meta["warnings"], list)
+    assert len(extracted) >= 1
+
+
+def test_capture_session_fatal_4xx_no_failover(sdk, monkeypatch):
+    """E2E-8 fatal-4xx negative: the primary raises 401 → the extraction
+    fails closed with NO fallback attempt (fatal is never failed over)."""
+    import requests as _requests
+
+    from tortoise.model_adapters import DeepSeekDirectModel, _reset_failover_cooldown
+
+    _reset_failover_cooldown()
+    requests_log = []
+    _install_fake_provider(monkeypatch, requests_log)
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
+    monkeypatch.delenv("TORTOISE_EXTRACT_MODEL", raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+
+    err = _requests.HTTPError("HTTP 401")
+    err.response = type("R", (), {"status_code": 401})()
+
+    def _fatal_ds_complete(self, *, system, user):
+        raise err
+
+    monkeypatch.setattr(DeepSeekDirectModel, "complete", _fatal_ds_complete)
+
+    _, meta = sdk._extract_session_v2(
+        [{"role": "user", "content": "x"},
+         {"role": "assistant", "content": "we decided"}],
+        session_id="s-fatal", now="2026-08-20T00:00:00Z")
+    assert meta["failover_used"] is False, "fatal 4xx must never fail over"
+    assert meta["route"] == "deepseek-direct"
+    assert meta["errors"], "the fatal 401 must be recorded in meta errors"
+    # no OpenRouter call ever happened
+    assert not any("openrouter.ai" in u for u in requests_log)

@@ -1762,7 +1762,9 @@ class TortoiseSDK:
 
         ``conversation`` is a list of {"role", "content"} dicts. Returns
         {"session_id", "turns", "extracted", "points": [...],
-        "extraction_mode"}.
+        "extraction_mode", "extraction_provider"} — the v2 path reports
+        "extraction_mode": "llm:<route>" (e.g. "llm:deepseek-direct") and
+        the configured "extraction_provider" (#1530 D8).
 
         Requires an LLM provider key (OPENROUTER/DEEPSEEK/OPENAI/GEMINI_API_KEY)
         or the TORTOISE_SESSION_LLM_MOCK=1 test seam — raises ValueError
@@ -1855,8 +1857,10 @@ class TortoiseSDK:
         # the M2 two-stage extractor remains behind TORTOISE_SESSION_EXTRACTOR=m2.
         if os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2":
             extracted = self._extract_session_llm(conversation, session_id, now)
+            meta = {"provider": None, "route": None, "failover_used": False,
+                    "errors": [], "warnings": []}
         else:
-            extracted = self._extract_session_v2(conversation, session_id, now)
+            extracted, meta = self._extract_session_v2(conversation, session_id, now)
 
         # Ontology episodic model (v3.1 §4.5/§3.2): Event node + the point's
         # eventId provenance property. #1417: provenance is the point's
@@ -1896,13 +1900,21 @@ class TortoiseSDK:
         # references edge is skipped when no Event landed (event_id None).
         self._materialize_session_source(session_id, event_id, now, conversation)
 
-        return {
+        resp = {
             "session_id": session_id,
             "turns": len(conversation),
             "extracted": len(extracted),
             "points": extracted,
-            "extraction_mode": "llm",
         }
+        # #1530 D8: extraction_mode reflects what ACTUALLY ran — the v2 path
+        # reports the resolved route ("llm:<route>", e.g. "llm:deepseek-direct")
+        # + the configured provider; the M2 path is unchanged ("llm").
+        if meta.get("route"):
+            resp["extraction_mode"] = f"llm:{meta['route']}"
+            resp["extraction_provider"] = meta.get("provider")
+        else:
+            resp["extraction_mode"] = "llm"
+        return resp
 
     def _extract_session_llm(
         self,
@@ -1972,7 +1984,7 @@ class TortoiseSDK:
         conversation: list[dict[str, str]],
         session_id: str,
         now: str,
-    ) -> list[dict]:
+    ) -> tuple[list[dict], dict]:
         """v2 LLM extraction over a conversation (#1350) — the 5-stage
         pipeline for hosted/self-hosted capture, replacing the M2 two-stage
         extractor. Runs extractor_v2.extract_session_v2 (S1 story → S2 map →
@@ -1982,20 +1994,34 @@ class TortoiseSDK:
         content-addressed ids, events via create_event, IMPL/NAND via
         create_operator — then wires session CONTAINS + aboutObject edges.
 
-        Returns the same [{id, kind, text}] contract as _extract_session_llm
-        so the capture loops (hosted + selfhost, which share this) stay
-        unchanged. Fails closed without a provider key — the
-        TORTOISE_SESSION_LLM_MOCK=1 offline seam also satisfies the gate
-        (hosted e2e runs the seam with provider keys scrubbed, #1468).
+        Returns ``(extracted, meta)`` (#1530 D8 — shared contract, P1
+        consumes it): ``extracted`` is the same [{id, kind, text}] contract
+        as _extract_session_llm so the capture loops (hosted + selfhost,
+        which share this) stay unchanged; ``meta`` = {"provider", "route",
+        "failover_used", "errors", "warnings"} carries the provider-routing
+        surface (which adapter ran, whether failover was used, and the v2
+        pipeline's errors/warnings lists for P1's fail-closed surfacing).
+
+        Fails closed without a routing-usable provider key — the inner gate
+        checks exactly what the adapter consumes: DEEPSEEK_API_KEY /
+        OPENROUTER_API_KEY (via resolve_extractor_provider; OPENAI_API_KEY is
+        NOT accepted — the adapter cannot consume it, #1530 gate match) or the
+        TORTOISE_SESSION_LLM_MOCK=1 offline seam (hosted e2e runs the seam
+        with provider keys scrubbed, #1468).
         """
+        # #1530: the inner gate checks exactly what the adapter consumes —
+        # a routing-usable key (DEEPSEEK/OPENROUTER via resolve_extractor_provider)
+        # or the mock seam. resolve_extractor_provider() itself raises ValueError
+        # for an explicit-but-keyless provider (fail closed) — that propagates.
+        from tortoise.model_adapters import resolve_extractor_provider
         if not _session_llm_mock_enabled() \
-                and not os.environ.get("OPENROUTER_API_KEY") \
-                and not os.environ.get("DEEPSEEK_API_KEY") \
-                and not os.environ.get("OPENAI_API_KEY"):
+                and resolve_extractor_provider()[0] is None:
             raise ValueError(
-                "_extract_session_v2 requires an LLM provider key "
-                "(OPENROUTER_API_KEY / DEEPSEEK_API_KEY / OPENAI_API_KEY — "
-                "#1350) or TORTOISE_SESSION_LLM_MOCK=1")
+                "_extract_session_v2 requires a routing-usable LLM provider key "
+                "(DEEPSEEK_API_KEY / OPENROUTER_API_KEY — "
+                "TORTOISE_EXTRACTOR_PROVIDER selects the primary, default "
+                "deepseek-direct when both are set, #1530) or "
+                "TORTOISE_SESSION_LLM_MOCK=1")
         from tortoise.extractor_v2 import extract_session_v2
         if _session_llm_mock_enabled():
             model = _V2SessionMock()
@@ -2091,7 +2117,19 @@ class TortoiseSDK:
                                      promote_source=False)
             except Exception:  # noqa: BLE001, RUF100
                 pass
-        return extracted
+        meta = {
+            # #1530 D8: the routing surface — which adapter ran, whether
+            # failover was used, and the v2 pipeline's errors/warnings for
+            # P1's fail-closed surfacing (shared contract; P1 must not
+            # re-shape it). The mock seam has no real route — reports "mock".
+            "provider": getattr(model, "provider", "mock"),
+            "route": getattr(model, "last_route", None)
+            or getattr(model, "route", "mock"),
+            "failover_used": bool(getattr(model, "failover_used", False)),
+            "errors": out.get("errors") or [],
+            "warnings": out.get("warnings") or [],
+        }
+        return extracted, meta
 
     def _materialize_session_source(
         self,
@@ -14154,7 +14192,7 @@ def _default_byok_model():
 
 
 def _model_adapter(model_id: str, max_tokens: int | None = 4000, temperature: float = 0.0):
-    """BYOK model adapter with explicit bounds (T13 #1272).
+    """BYOK model adapter with explicit bounds (T13 #1272) + provider routing.
 
     The production summary/construct workload needs a real output budget —
     the gate-judge default (500) truncates summaries and silently loses
@@ -14162,30 +14200,19 @@ def _model_adapter(model_id: str, max_tokens: int | None = 4000, temperature: fl
     for determinism); callers may override. max_tokens=None means UNCAPPED —
     the cap is omitted from the request body entirely (#1468): the v2 session
     extractor's flash fallback needs the full output budget (capped
-    4000-token adapters truncate and lose chunks)."""
-    import os
-    key = os.environ.get("OPENROUTER_API_KEY", "")
-    url = os.environ.get("OPENROUTER_BASE_URL",
-                         "https://openrouter.ai/api/v1/chat/completions")
+    4000-token adapters truncate and lose chunks).
 
-    class _Compat:
-        def complete(self, *, system, user):
-            import requests
-            body = {"model": model_id,
-                    "messages": [{"role": "system", "content": system},
-                                 {"role": "user", "content": user}],
-                    "temperature": temperature}
-            if max_tokens is not None:
-                body["max_tokens"] = max_tokens
-            r = requests.post(url, headers={
-                "Authorization": f"Bearer {key}",
-                "Content-Type": "application/json"},
-                json=body,
-                timeout=600)
-            r.raise_for_status()
-            return r.json()["choices"][0]["message"]["content"]
+    #1530: the body delegates to the production router
+    (tortoise.model_adapters.build_extractor_model) — a RoutingModel over the
+    DeepSeek-direct primary / OpenRouter fallback adapters (D7). The signature
+    is unchanged so every call site (summary/construct BYOK, _extract_session_v2,
+    value-extractor tests) routes through one adapter contract. Builds
+    leniently (no-key → single OpenRouter adapter, back-compat); fail-closed
+    is enforced at the pipeline gates (D3)."""
+    from tortoise.model_adapters import build_extractor_model
 
-    return _Compat()
+    return build_extractor_model(model_id, max_tokens=max_tokens,
+                                 temperature=temperature)
 
 
 def _summary_to_payload(summary: dict, session_id: str,

@@ -202,6 +202,8 @@ surfaces:
   - test_migration_consumers.py
   - test_migration_drift_gate.py
   - test_mining.py
+  - test_model_adapters_routing.py
+  - test_model_adapters_taxonomy.py
   - test_monitoring.py
   - test_navigation.py
   - test_notify.py
