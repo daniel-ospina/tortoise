@@ -730,7 +730,9 @@ function claimIntentInFlight() {
       // #1559 (review P2): a /v1/team or load 5xx after a successful mint
       // must NOT leave the silent redirect shell — same class as the mint
       // failure. The error card (mountError) is the only renderable state.
-      setMountError(e && e.message ? e.message : 'Could not load your dashboard — try again.')
+      setMountError((e && /429|rate limit/i.test(e.message))
+        ? 'Too many requests from this network — try again in a minute.'
+        : (e && e.message) || 'Could not load your dashboard — try again.')
     } finally {
       setBusy(false)
       setChecking(false)
