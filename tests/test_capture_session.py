@@ -13,6 +13,7 @@ import pytest
 
 from tortoise.sdk import TortoiseSDK
 
+
 def test_commit_session_threads_session_date(sdk, monkeypatch):
     """T10 (#1533): commit_session threads session_date into
     extract_session_v2 — ISO-now by default (D8: capture time = session

@@ -411,12 +411,18 @@ class TestS5:
              "about_entities": [], "when": None},
             {"content": "junk dated point", "pointKind": "statement",
              "about_entities": [], "when": "next tuesday"},
+            {"content": "over-long dated point", "pointKind": "statement",
+             "about_entities": [], "when": "2026-08-01T10:00:00.000000+05:30 (India Standard Time)"},
         ]
         result = v2.execute_embed(embed, {}, session_id="s1")
         pts = {p["content"]: p for p in result["payload"]["points"]}
         assert pts["we adopted the new strategy on 2026-08-01"]["when"] == "2026-08-01"
         assert "when" not in pts["timeless durable belief"]
         assert "when" not in pts["junk dated point"]
+        # over-long ISO-prefixed values (> commit_schema max_length=40) are
+        # dropped at the gate — they must NOT sink the whole payload at
+        # Layer-1 (code-review fix)
+        assert "when" not in pts["over-long dated point"]
         assert any("not a valid ISO date" in w for w in result["warnings"])
         # undated session → dated payload points still validated when anchored
         undated = v2.execute_embed(embed, {}, session_id="s1")

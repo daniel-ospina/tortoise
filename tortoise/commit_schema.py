@@ -375,8 +375,22 @@ class CommitEvent(BaseModel):
     about_entities: list[str] = Field(default_factory=list)
     source_ref: str = Field(min_length=1)  # REQUIRED — resolves to a Source
     captured_at: str | None = None
-    started_at: str | None = None  # valid time (E1, #1533) — matches captured_at convention
+    started_at: str | None = Field(default=None, max_length=40)  # valid time (E1, #1533) — matches captured_at convention
     slots: ParticipantSlots | None = None  # #1418: typed participant slots
+
+    @field_validator("started_at")
+    @classmethod
+    def _iso_date_prefix(cls, v: str | None) -> str | None:
+        """E1 (#1533): the Event valid-time payload field is an ISO date
+        (YYYY-MM-DD prefix — bare date or full datetime, matching the
+        extractor's _valid_iso_date gate). Junk is rejected at the Layer-1
+        contract so a direct client cannot store garbage as e.startedAt."""
+        if v is None:
+            return None
+        s = v.strip()
+        if not re.match(r"^\d{4}-\d{2}-\d{2}([Tt ].*)?$", s):
+            raise ValueError("started_at must be an ISO date (YYYY-MM-DD...)")
+        return v
 
     @field_validator("id")
     @classmethod

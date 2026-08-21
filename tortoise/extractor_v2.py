@@ -294,9 +294,11 @@ _DATE_ANCHOR_D3 = (
 def _date_anchor(session_date: str | None,
                  *, include_emission_rules: bool = False) -> str:
     """The bounded {date_anchor} prompt block (E1, #1533 — mem0 write-time
-    pattern). Returns "" when the session is undated so undated prompts stay
-    byte-identical to pre-E1; S1 renders the D2 anchor paragraph only, while
-    S2/S4 also render the D3 emission rules for `when`/`startedAt`."""
+    pattern). Returns "" when the session is undated so undated prompts
+    carry no date text (S1 is then byte-identical to pre-E1; S2/S4 still
+    differ from pre-E1 only via the unconditional OUTPUT_CONTRACT
+    ``when``/``startedAt`` fields). S1 renders the D2 anchor paragraph only,
+    while S2/S4 also render the D3 emission rules for `when`/`startedAt`."""
     if not session_date:
         return ""
     block = [_DATE_ANCHOR_D2.format(session_date=session_date)]
@@ -308,9 +310,12 @@ def _date_anchor(session_date: str | None,
 def _valid_iso_date(v: str) -> bool:
     """Deterministic date-acceptance gate (E1, #1533 — S5 normalization):
     accepts the YYYY-MM-DD prefix with an optional T/space tail (a bare date
-    or a full ISO datetime). Anything else ("next tuesday", "null", "") is
-    junk — the caller drops it with a warning."""
-    return bool(re.match(r"^\d{4}-\d{2}-\d{2}([Tt ].*)?$", str(v or "").strip()))
+    or a full ISO datetime), bounded to 40 chars (the commit_schema
+    ``Point.when`` max_length — an over-long value would otherwise pass the
+    gate and sink the WHOLE payload at Layer-1). Anything else ("next
+    tuesday", "null", "") is junk — the caller drops it with a warning."""
+    s = str(v or "").strip()
+    return bool(re.match(r"^\d{4}-\d{2}-\d{2}([Tt ].*)?$", s) and len(s) <= 40)
 
 
 def run_s1(model, transcript: str, *,

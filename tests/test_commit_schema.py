@@ -240,6 +240,34 @@ class TestE1DateFields:
         assert not result.ok
         assert any("when" in k for k in result.errors)
 
+    def test_started_at_rejects_non_iso(self):
+        """Code-review fix: CommitEvent.started_at enforces the ISO date
+        contract at Layer-1 (a direct client cannot store junk as e.startedAt)."""
+        raw = _raw_payload(1)
+        raw["events"] = [{
+            "id": "ev_" + "2" * 62,
+            "eventKind": "decision",
+            "content": "we decided X",
+            "about_entities": ["Alpha"],
+            "source_ref": "session.md",
+            "started_at": "next tuesday",
+        }]
+        result, _ = validate_payload_dict(_finalize(raw))
+        assert not result.ok
+        assert any("started_at" in k for k in result.errors)
+
+        raw2 = _raw_payload(1)
+        raw2["events"] = [{
+            "id": "ev_" + "2" * 62,
+            "eventKind": "decision",
+            "content": "we decided X",
+            "about_entities": ["Alpha"],
+            "source_ref": "session.md",
+            "started_at": "x" * 41,
+        }]
+        result2, _ = validate_payload_dict(_finalize(raw2))
+        assert not result2.ok
+
     def test_undated_payload_validates_byte_identical(self):
         raw = _raw_payload(1)
         result, payload = validate_payload_dict(_finalize(raw))

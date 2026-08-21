@@ -376,6 +376,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `format` | string | — | `dc:format` | ✅ | Storage format (jsonl default, markdown) |
 | `startedAt` / `endedAt` | ISO8601 | — | `prov:startedAtTime` / `schema:startDate` | ✅ | Temporal extent |
 | `capturedAt` | ISO8601 | — | — | ❌ | Transaction time of the capture — bi-temporal complement to `startedAt`/`endedAt` (valid time). Registered #909 §4.3 #2; written by the agentSession capture path (endpoint payload field, slice 5) |
+| `started_at` | ISO date ≤40 | — | `prov:startedAtTime` | ⚠️ | **Payload-level** valid time on extracted-occurrence events (E1, #1533): the extractor emits it from the session-date anchor; graph property stays `startedAt` (coalesce `started_at → captured_at → now` server-side). Registered #1533 E1; the extractor path gates it via `_valid_iso_date` |
 | `subject` | SubjectID | — | `prov:wasAssociatedWith` (inverse) | ✅ | Who performed the event (mirrors `performs` edge) |
 | `object_name` / `object_type` | string | — | `prov:used` | ✅ | What was acted on / produced |
 | `file_hash` | string | — | — | ✅ | SHA-256 of the file's UTF-8 text content (text-mode, universal newlines — CRLF-immune; #330/#900) |
