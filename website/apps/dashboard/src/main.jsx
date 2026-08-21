@@ -724,6 +724,9 @@ function claimIntentInFlight() {
           const teamsRes = await fetch(`${API_BASE}/v1/teams`, {
             headers: { Authorization: `Bearer ${session.access_token}` },
           })
+          if (teamsRes.ok) {
+            teamsList = await teamsRes.json()
+          }
           if (teamsRes.ok && Array.isArray(teamsList)) {
             // Round-12: SIGNED_OUT during this fetch must not resurrect teams
             if (sessionTokenRef.current === session.access_token) setTeams(teamsList)
