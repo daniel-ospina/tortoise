@@ -9,8 +9,8 @@ hardcoded:
     TORTOISE_LME_READER_MODEL   reader model spec: ``<provider>:<model>`` or
                                 bare ``<model>`` resolved against the first
                                 configured provider key
-                                (default: ``openrouter:deepseek/deepseek-chat``,
-                                the repo's cheap-tier session-extraction pick)
+                                (default: ``openrouter:deepseek/deepseek-v4-flash``
+                                — the M5 pinned reader identity, #1525)
     OPENROUTER_API_KEY / DEEPSEEK_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY
                                 provider keys (existing repo pattern)
 
@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from typing import Any, Protocol
 
 from tortoise.ingest import _PROVIDERS
@@ -32,7 +33,11 @@ from .retrieve import render_context
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_READER_MODEL = "openrouter:deepseek/deepseek-chat"
+# Pinned reader identity for the run (M5 #1525). The V2 runs were confounded
+# by reader-model drift between runs (deepseek-chat → deepseek-v4-flash); the
+# pin makes the code default equal what runs use. Any override is recorded
+# (reader_pinned=false) + warned on stderr — never silent.
+READER_MODEL = "openrouter:deepseek/deepseek-v4-flash"
 
 # Provider priority for the READER when multiple keys are set — reuse the
 # session-extraction order (sdk._SESSION_LLM_PROVIDER_PRIORITY).
@@ -85,6 +90,14 @@ _TYPE_FRAGMENTS: dict[str, str] = {
 }
 
 
+def reader_prompt_constants() -> tuple[str, dict[str, str]]:
+    """The run's reader prompt constants (M5): the generic system prompt +
+    type fragments, recorded verbatim in report methodology so prompt drift
+    across run cells is visible in the report. A dict copy keeps future
+    fragment additions (A1 abstention, A2 aggregation — same epic) additive."""
+    return _SYSTEM_PROMPT, dict(_TYPE_FRAGMENTS)
+
+
 def system_prompt_for(question_type: str | None) -> str:
     """The reader system prompt for a question, type-tailored.
 
@@ -104,6 +117,9 @@ DEFAULT_READER_MAX_TOKENS = 500
 
 class Reader(Protocol):
     model_id: str
+    model_spec: str | None = None
+    provider: str | None = None
+    pinned: bool | None = None
 
     def answer(self, *, context_hits: list[dict[str, Any]], question: str,
                question_date: str | None = None,
@@ -111,11 +127,22 @@ class Reader(Protocol):
 
 
 class LLMReader:
-    """Reader backed by an OpenAI-compatible chat model."""
+    """Reader backed by an OpenAI-compatible chat model.
 
-    def __init__(self, model, model_id: str):
+    M5 (#1525): carries its resolved identity — ``model_spec`` (the full
+    ``<provider>:<model>`` spec actually used, post env/CLI resolution),
+    ``provider`` (the resolved endpoint provider — the truth about where the
+    call goes) and ``pinned`` (bool: spec == ``READER_MODEL``) — set by
+    ``build_reader`` and recorded in the report methodology.
+    """
+
+    def __init__(self, model, model_id: str, *, model_spec: str | None = None,
+                 provider: str | None = None, pinned: bool | None = None):
         self._model = model
         self.model_id = model_id
+        self.model_spec = model_spec or model_id
+        self.provider = provider
+        self.pinned = pinned
 
     def answer(self, *, context_hits: list[dict[str, Any]], question: str,
                question_date: str | None = None,
@@ -149,6 +176,12 @@ class MockReader:
     """
 
     model_id = "mock-reader"
+    # M5 (#1525): mock runs aren't model runs — pin is N/A (None); the
+    # methodology records model_spec=model_id + provider="mock" so a mock
+    # report is never mistaken for a pinned real-model report.
+    model_spec = "mock-reader"
+    provider = "mock"
+    pinned = None
 
     def answer(self, *, context_hits: list[dict[str, Any]], question: str,
                question_date: str | None = None,
@@ -170,12 +203,19 @@ class MockReader:
         return ""
 
 
-def _resolve_provider() -> tuple[str, str] | None:
-    """Return (base_url, key_env) of the first configured provider, or None."""
+def _resolve_provider(named: str | None = None) -> tuple[str, str, str] | None:
+    """Return (provider, base_url, key_env) of the endpoint that will serve
+    the reader: the spec's named provider (its key is validated by the
+    caller) when named, else the first configured provider in priority
+    order. Fixes the M5 endpoint-truth gap: the recorded provider must be
+    the endpoint actually used."""
+    if named is not None:
+        base_url, key_env = _PROVIDERS[named]
+        return named, base_url, key_env
     for provider in _PROVIDER_PRIORITY:
         base_url, key_env = _PROVIDERS[provider]
         if os.environ.get(key_env):
-            return base_url, key_env
+            return provider, base_url, key_env
     return None
 
 
@@ -195,24 +235,31 @@ def build_reader(spec: str | None = None, *, mock: bool = False) -> Reader:
     """
     if mock:
         return MockReader()
-    raw_spec = spec or os.environ.get("TORTOISE_LME_READER_MODEL", "").strip() or DEFAULT_READER_MODEL
+    raw_spec = spec or os.environ.get("TORTOISE_LME_READER_MODEL", "").strip() or READER_MODEL
     provider, model_id = _parse_model_spec(raw_spec)
-    resolved = _resolve_provider()
-    if resolved is None:
+    if provider is not None and provider not in _PROVIDERS:
+        raise ValueError(
+            f"unknown provider {provider!r} in {raw_spec!r}; "
+            f"known: {sorted(_PROVIDERS)}")
+    # Fail-closed no-key posture (pre-M5 behavior, locked by tests): NO
+    # configured key at all → RuntimeError, regardless of what the spec
+    # names. A named-provider key that is missing (while some OTHER key is
+    # set) is a ValueError below.
+    if not any(os.environ.get(_PROVIDERS[p][1]) for p in _PROVIDER_PRIORITY):
         raise RuntimeError(
             "no LLM provider key configured for the LongMemEval reader "
             "(set OPENROUTER_API_KEY / DEEPSEEK_API_KEY / OPENAI_API_KEY / "
             "GEMINI_API_KEY, or pass --mock for the offline mock reader)")
-    base_url, key_env = resolved
-    if provider is not None:
-        if provider not in _PROVIDERS:
-            raise ValueError(
-                f"unknown provider {provider!r} in {raw_spec!r}; "
-                f"known: {sorted(_PROVIDERS)}")
-        if not os.environ.get(_PROVIDERS[provider][1]):
-            raise ValueError(
-                f"model spec names provider {provider!r} but its key is not "
-                f"set ({_PROVIDERS[provider][1]})")
+    if provider is not None and not os.environ.get(_PROVIDERS[provider][1]):
+        raise ValueError(
+            f"model spec names provider {provider!r} but its key is not "
+            f"set ({_PROVIDERS[provider][1]})")
+    provider_name, base_url, key_env = _resolve_provider(named=provider)
+    if raw_spec != READER_MODEL:
+        print(f"[longmem_eval] WARNING: reader model spec {raw_spec!r} != "
+              f"pinned READER_MODEL {READER_MODEL!r} — run is NOT pinned "
+              f"(M5 #1525); report records reader_pinned=false",
+              file=sys.stderr)
     from tortoise.models import OpenAICompatModel
 
     # Official reader call shape: temperature 0, bounded max_tokens, NO
@@ -222,4 +269,6 @@ def build_reader(spec: str | None = None, *, mock: bool = False) -> Reader:
         id=model_id, base_url=base_url, api_key_env=key_env,
         response_format=None, max_tokens=DEFAULT_READER_MAX_TOKENS,
     )
-    return LLMReader(model, model_id=model_id)
+    return LLMReader(model, model_id=model_id, model_spec=raw_spec,
+                     provider=provider_name,
+                     pinned=(raw_spec == READER_MODEL))
