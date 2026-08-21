@@ -747,6 +747,10 @@ function claimIntentInFlight() {
     setError('')
     try {
       const t = await api('/v1/team', key ? { headers: { Authorization: `Bearer ${key}` } } : {})
+      // #1567 (review P1): the chrome renders early, so a team switch can
+      // land DURING this await — never land team A's data under team B's
+      // selection (the refreshTeam response-identity guard, applied here).
+      if (t?.team_id && teamIdRef.current && t.team_id !== teamIdRef.current) return
       setTeam(t)
       setAuthed(true)
       loadAlerts(t?.team_id)  // fire-and-forget (#308 R7)
