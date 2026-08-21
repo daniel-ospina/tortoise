@@ -111,6 +111,44 @@ def test_fallback_snapshot_status_and_kind_semantics(sdk):
     assert b["id"] not in ids_ex and a["id"] in ids_ex
 
 
+def test_fallback_snapshot_supersede_decoration(sdk):
+    """E5 Task 5 (#1537): the embedded TF-IDF fallback decorates its hits
+    with the promoted epistemic state (fetch_point_epistemic_state — the D8
+    machinery the full path uses) so [SUPERSEDED BY] renders in embedded
+    mode. A superseded hit (include_terminal=True) carries status + the
+    superseding claim; undecorated hits stay byte-identical."""
+    a = sdk.create_point("statement", "espresso preferred in the morning",
+                         id="ku_old", status="live")
+    b = sdk.create_point("statement", "drip coffee preferred now",
+                         id="ku_new", status="live")
+    sdk.supersede_point("ku_old", "ku_new")
+
+    hits = sdk.tortoise_fts_query("espresso preferred morning drip coffee",
+                                  entity_type="point",
+                                  include_terminal=True, limit=10)
+    old = next((h for h in hits if h["id"] == "ku_old"), None)
+    assert old is not None, "superseded point must co-retrieve"
+    assert old["status"] == "superseded"
+    assert old["superseded_by"]["id"] == "ku_new"
+    assert old.get("supersedes", []) == []  # no outgoing CORRECTS (omit-empty)
+    new = next((h for h in hits if h["id"] == "ku_new"), None)
+    assert new is not None and new["supersedes"][0]["id"] == "ku_old"
+
+
+def test_fallback_snapshot_no_corrects_renders_byte_identical(sdk):
+    """E5 Task 5 negative: a graph with no CORRECTS edges renders
+    byte-identically to today — status/superseded_by/supersedes keys are
+    absent (the to_dict convention), markers stay empty."""
+    sdk.create_point("statement", "plain espresso preference",
+                     id="plain", status="live")
+    hits = sdk.tortoise_fts_query("espresso preference",
+                                  entity_type="point", limit=10)
+    assert hits, "the plain point must surface"
+    h = next(x for x in hits if x["id"] == "plain")
+    assert "superseded_by" not in h
+    assert "supersedes" not in h
+
+
 def test_fallback_snapshot_invalidated_point_absent():
     """outdated=true points (invalidate_point) are excluded at build."""
     # covered structurally: _SNAPSHOT_QUERY has coalesce(n.outdated,false)=false

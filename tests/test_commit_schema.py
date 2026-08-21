@@ -89,10 +89,13 @@ def _raw_payload(n_points: int = 1, *, session_id: str = "s1",
 
 def _finalize(raw: dict) -> dict:
     """Compute the canonical client_commit_id over the (possibly mutated)
-    payload — mirrors the client's serializer (W-3)."""
+    payload — mirrors the client's serializer (W-3). E5 (#1537): supersessions
+    are part of the canonical once non-empty (site-2 shape, DD-4); an empty
+    list leaves the pre-#1350 id untouched."""
     raw["client_commit_id"] = compute_client_commit_id(
         raw["session_id"], raw["points"], raw["entities"], raw["operators"],
-        raw["summary"], raw["story_arc"], raw.get("events", []))
+        raw["summary"], raw["story_arc"], raw.get("events", []),
+        raw.get("supersessions", []))
     return raw
 
 
@@ -782,6 +785,67 @@ class TestCanonicalization:
         from tortoise.ids import content_hash
         assert point_content_id("hello") == f"pt_{content_hash('hello')}"
         assert point_content_id("hello") != point_content_id("world")
+
+
+def _without_supersessions(raw: dict) -> str:
+    """Pre-#1350 call shape — no supersessions arg."""
+    return compute_client_commit_id(
+        raw["session_id"], raw["points"], raw["entities"],
+        raw["operators"], raw["summary"], raw["story_arc"],
+        raw.get("events", []))
+
+
+class TestE5Supersessions:
+    """E5 (#1537) — point-level supersession records ride the EXISTING
+    SupersessionRecord field (pt_ prefix dispatch at the write sites; DD-3):
+    validate_layer1 (site 3) recomputes the client_commit_id over non-empty
+    supersessions, so a payload carrying a point record passes the gate, and
+    an EMPTY list keeps the pre-#1350 id (the additive contract)."""
+
+    def test_validate_layer1_accepts_point_supersessions_commit_id(self):
+        raw = _raw_payload(n_points=1)
+        raw["supersessions"] = [
+            {"superseded": "pt_old", "supersedes_by": "pt_new",
+             "evidence": "fact-value contradiction (later session value "
+                          "change)"}]
+        result, model = _check(raw)
+        assert result.ok, result.errors
+        assert model is not None and len(model.supersessions) == 1
+        assert model.supersessions[0].superseded == "pt_old"
+
+    def test_empty_supersessions_keeps_preexisting_id(self):
+        """Pre-#1350 additive contract: an EMPTY supersessions list must not
+        change the commit id vs the pre-key call shape."""
+        raw = _raw_payload(n_points=1)
+        with_key = compute_client_commit_id(
+            raw["session_id"], raw["points"], raw["entities"],
+            raw["operators"], raw["summary"], raw["story_arc"],
+            raw.get("events", []), raw.get("supersessions", []))
+        without_key = compute_client_commit_id(
+            raw["session_id"], raw["points"], raw["entities"],
+            raw["operators"], raw["summary"], raw["story_arc"],
+            raw.get("events", []))
+        assert with_key == without_key
+
+    def test_point_supersessions_change_the_id(self):
+        """A changed point supersession changes the id (replay-safe) — the
+        canonical includes the record once non-empty."""
+        raw = _raw_payload(n_points=1)
+        a = compute_client_commit_id(
+            raw["session_id"], raw["points"], raw["entities"],
+            raw["operators"], raw["summary"], raw["story_arc"],
+            raw.get("events", []),
+            [{"superseded": "pt_a", "supersedes_by": "pt_b",
+              "evidence": "e"}])
+        b = compute_client_commit_id(
+            raw["session_id"], raw["points"], raw["entities"],
+            raw["operators"], raw["summary"], raw["story_arc"],
+            raw.get("events", []),
+            [{"superseded": "pt_a", "supersedes_by": "pt_c",
+              "evidence": "e"}])
+        assert a != b
+        assert a != _without_supersessions(raw)
+
 
 
 # ── L2 reconciliation + budget (DE2E-7 Sessions A/B/C) ────────────────────

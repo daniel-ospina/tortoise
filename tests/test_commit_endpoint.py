@@ -248,7 +248,8 @@ def _finalize(raw: dict) -> dict:
     if "session_id" in raw:
         raw["client_commit_id"] = compute_client_commit_id(
             raw["session_id"], raw["points"], raw["entities"], raw["operators"],
-            raw["summary"], raw["story_arc"], raw.get("events", []))
+            raw["summary"], raw["story_arc"], raw.get("events", []),
+            raw.get("supersessions", []))
     return raw
 
 
@@ -795,6 +796,114 @@ class TestReplayIdempotency:
         r = _commit(client, raw2)
         assert r.status_code == 200 and r.json()["duplicate"] is False
         assert _session_counter("s1", "value_nodes_created") == before
+
+
+class TestE5PointSupersessions:
+    """E5 (#1537) Task 3 — a payload's pt_* supersession record materializes
+    the EXISTING canonical sdk.supersede() on commit (CORRECTS + outdated +
+    edge transfer); already-terminal old → idempotent skip (no ValueError —
+    supersede_point would raise); missing old → fail-open warning; the entity
+    ObjectSuperseded fold is untouched by point refs."""
+
+    def test_commit_materializes_point_supersession_via_supersede(self, client):
+        old_id = f"pt_{content_hash('gym at 6pm')}"
+        raw1 = _raw_payload(1, points=[
+            {"id": old_id, "content": "gym at 6pm", "pointKind": "decision",
+             "reason": "NEW", "confidence": 0.9, "c_cal": 0.8,
+             "about_entities": ["Alpha"], "source_ref": "session.md",
+             "quote": "", "status": "draft"},
+        ])
+        assert _commit(client, raw1).status_code == 200
+
+        new_id = point_content_id("gym at 5pm")
+        raw2 = _raw_payload(1, session_id="s2", points=[
+            {"id": new_id, "content": "gym at 5pm", "pointKind": "decision",
+             "reason": "REVISES", "confidence": 0.9, "c_cal": 0.8,
+             "about_entities": ["Alpha"], "source_ref": "session.md",
+             "quote": "", "status": "draft"},
+        ], supersessions=[
+            {"superseded": old_id, "supersedes_by": new_id,
+             "evidence": "fact-value contradiction (later session value "
+                          "change)"},
+        ])
+        r2 = _commit(client, raw2)
+        assert r2.status_code == 200, r2.text
+        g = _team_sdk()._get_proj().g
+        rows = g.query(
+            "MATCH (old:Point {id:$old}) RETURN old.status, old.outdated",
+            params={"old": old_id}).result_set
+        assert rows and rows[0][0] == "superseded" and rows[0][1] is True
+        n = g.query(
+            "MATCH (new:Point {id:$new})-[:CORRECTS]->(old:Point {id:$old}) "
+            "RETURN count(old)",
+            params={"new": new_id, "old": old_id}).result_set[0][0]
+        assert n == 1
+
+    def test_commit_point_supersession_replay_and_terminal_skip(self, client):
+        """Re-commit of the same payload is an L1 replay (zero writes); a NEW
+        commit referencing the already-terminal old is an idempotent skip (no
+        ValueError, single CORRECTS edge — the §6b terminal guard)."""
+        old_id = f"pt_{content_hash('gym at 6pm')}"
+        raw1 = _raw_payload(1, points=[
+            {"id": old_id, "content": "gym at 6pm", "pointKind": "decision",
+             "reason": "NEW", "confidence": 0.9, "c_cal": 0.8,
+             "about_entities": ["Alpha"], "source_ref": "session.md",
+             "quote": "", "status": "draft"},
+        ])
+        assert _commit(client, raw1).status_code == 200
+
+        new_id = point_content_id("gym at 5pm")
+        raw2 = _raw_payload(1, session_id="s2", points=[
+            {"id": new_id, "content": "gym at 5pm", "pointKind": "decision",
+             "reason": "REVISES", "confidence": 0.9, "c_cal": 0.8,
+             "about_entities": ["Alpha"], "source_ref": "session.md",
+             "quote": "", "status": "draft"},
+        ], supersessions=[
+            {"superseded": old_id, "supersedes_by": new_id,
+             "evidence": "fact-value contradiction (later session value "
+                          "change)"},
+        ])
+        assert _commit(client, raw2).status_code == 200
+        # exact replay → duplicate, zero writes (L1 idempotency)
+        r3 = _commit(client, dict(raw2))
+        assert r3.status_code == 200 and r3.json()["duplicate"] is True
+        g = _team_sdk()._get_proj().g
+        # a NEW commit superseding INTO the already-terminal old → skip
+        new3 = point_content_id("gym at 4pm")
+        raw3 = _raw_payload(1, session_id="s3", points=[
+            {"id": new3, "content": "gym at 4pm", "pointKind": "decision",
+             "reason": "REVISES", "confidence": 0.9, "c_cal": 0.8,
+             "about_entities": ["Alpha"], "source_ref": "session.md",
+             "quote": "", "status": "draft"},
+        ], supersessions=[
+            {"superseded": old_id, "supersedes_by": new3,
+             "evidence": "fact-value contradiction (later session value "
+                          "change)"},
+        ])
+        r4 = _commit(client, raw3)
+        assert r4.status_code == 200, r4.text
+        n = g.query(
+            "MATCH (:Point {id:$old})<-[:CORRECTS]-(p:Point) RETURN count(p)",
+            params={"old": old_id}).result_set[0][0]
+        assert n == 1, "terminal old must keep exactly one CORRECTS edge"
+
+    def test_commit_point_supersession_missing_old_fail_open(self, client):
+        """Missing old → 200 with a warning (fail-open — mirrors the entity
+        fold's never-guess discipline); the commit still writes."""
+        new_id = point_content_id("gym at 5pm")
+        raw = _raw_payload(1, points=[
+            {"id": new_id, "content": "gym at 5pm", "pointKind": "decision",
+             "reason": "NEW", "confidence": 0.9, "c_cal": 0.8,
+             "about_entities": ["Alpha"], "source_ref": "session.md",
+             "quote": "", "status": "draft"},
+        ], supersessions=[
+            {"superseded": "pt_missing", "supersedes_by": new_id,
+             "evidence": "fact-value contradiction (later session value "
+                          "change)"},
+        ])
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        assert r.json()["duplicate"] is False
 
 
 class TestBudgetDE2E7:

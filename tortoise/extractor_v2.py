@@ -897,9 +897,106 @@ def _norm_kind(k: str) -> str:
     return str(k or "").strip().rsplit(":", 1)[-1].lower()
 
 
+# E5 (#1537) — a single shared content token is never a revision; the
+# length guard ratio is against the LONGER side (max-denominator).
+_MIN_OVERLAP_TOKENS = 2
+
+# E5 fact-value contradiction frame: stopword-stripped shared tokens on the
+# longer side must reach 0.5. A small LOCAL closed-class set (importing the
+# eval's ingest_v2._STOPWORDS into tortoise/ would invert the layering).
+_FRAME_STOPWORDS = frozenset({
+    "a", "an", "the", "and", "or", "but", "if", "then", "else", "of",
+    "to", "in", "on", "at", "for", "with", "from", "by", "about",
+    "is", "are", "was", "were", "be", "been", "being", "do", "does",
+    "did", "it", "this", "that", "these", "those", "i", "we", "you",
+    "he", "she", "they", "me", "my", "our", "your", "their", "not",
+    "no", "yes", "so", "as", "than", "now", "today", "yesterday",
+})
+
+
+def _frame_tokens(content: str) -> set[str]:
+    """Stopword-stripped content tokens — the shared non-value frame."""
+    return {t for t in _norm(content).split() if t not in _FRAME_STOPWORDS}
+
+
+def _fact_value_contradiction(content: str, about_entities: list[str] | None,
+                              existing: dict, *, when: str | None = None) -> bool:
+    """Entity-grounded fact-value contradiction (E5 #1537, DD-2).
+
+    True when the new point contradicts the existing point's VALUE for the
+    same entity while keeping the non-value frame:
+      1. same entity — the new point's about_entities name(s) co-mention in
+         the existing point's content (content proxy; S3 point rows carry
+         {id, content, kind} only — CG-3),
+      2. attribute frame — stopword-stripped token overlap on the LONGER
+         side >= 0.5 (the shared non-value frame),
+      3. value differs — the new content has at least one token the old
+         lacks (identical-value re-assertions are deduped by the exact-match
+         pass before this runs; the value-diff also rejects them directly),
+      4. later date — when BOTH sides carry a date (``when`` = the new
+         point's E1 ISO date; existing.when/createdAt = the old's), the new
+         must be >= the old; absent on either side → session-ingest order
+         supplies the invariant (CG-2).
+    """
+    old_content = str(existing.get("content", "")) or ""
+    old_norm = _norm(old_content)
+    if not old_norm:
+        return False
+    # 1. same entity (content proxy for the aboutObject edge — CG-3)
+    entities = [str(a).strip().lower() for a in (about_entities or [])
+                if isinstance(a, str) and a.strip()]
+    if entities and not any(e in old_norm for e in entities):
+        return False
+    # 2. attribute frame on the LONGER side
+    t_new = _frame_tokens(content)
+    t_old = _frame_tokens(old_content)
+    if not t_new or not t_old:
+        return False
+    shared = t_new & t_old
+    if not shared or len(shared) / max(len(t_new), len(t_old)) < 0.5:
+        return False
+    # 3. value differs — at least one token the old lacks
+    if not (t_new - t_old):
+        return False
+    # 4. later-date guard — dormant when either side is undated (CG-2)
+    old_when = str(existing.get("when") or existing.get("createdAt") or "").strip()
+    if when and old_when:
+        try:
+            if _valid_iso_date(when) and _valid_iso_date(old_when):
+                if when[:10] < old_when[:10]:
+                    return False
+        except (TypeError, ValueError):
+            pass  # junk date → treat as undated (session-order invariant)
+    return True
+
+
 def _token_overlap(a: str, b: str) -> float:
     ta = set(_norm(a).split())
     tb = set(_norm(b).split())
+    if not ta or not tb:
+        return 0.0
+    shared = len(ta & tb)
+    if shared < _MIN_OVERLAP_TOKENS:
+        # a single shared content token is never a revision (floor-2 guard)
+        return 0.0
+    # length-guard: ratio against the LONGER side — a 5-token point sharing
+    # 3 tokens with a 50-token point is 3/50 = 0.06, not 3/5 = 0.6 (the
+    # false-REVISES ≥ 0.6 bug, E5 #1537 / E2E-6 negative)
+    return shared / max(len(ta), len(tb))
+
+
+def _source_turn_overlap(turn: str, quote: str) -> float:
+    """E3 source-turn paraphrase overlap — MIN-denominator.
+
+    The E5 length guard (max-denominator + floor-2) fixes point-to-point
+    REVISES, but the E3 quote→turn fallback needs the short-quote-sensitive
+    ratio: a 2-token quote "speed intervals" paraphrasing a 5-token turn
+    shares 2 tokens and must score 2/2 = 1.0 (≥ 0.6 → resolves), not 2/5 =
+    0.4 (E3 #1535 contract; kept separate so the two semantics don't
+    couple).
+    """
+    ta = set(_norm(turn).split())
+    tb = set(_norm(quote).split())
     if not ta or not tb:
         return 0.0
     return len(ta & tb) / min(len(ta), len(tb))
@@ -1050,15 +1147,29 @@ def _find_existing_entity(entities: list[dict], name: str, kind: str) -> tuple[d
     return None, "none"
 
 
-def _find_point_match(points: list[dict], content: str) -> tuple[str, str]:
+def _find_point_match(points: list[dict], content: str, *,
+                       about_entities: list[str] | None = None,
+                       when: str | None = None) -> tuple[str, str]:
     """(match_kind, existing_id) — 'exact' (same id, dedup), 'revises'
-    (supersedes by correction — new content-addressed id), or ('none', '')."""
+    (supersedes by correction — new content-addressed id), or ('none', '').
+
+    Third pass (E5 #1537): entity-grounded fact-value contradictions that
+    the length-guarded overlap misses ("gym 6pm" → "gym 5pm": 1 shared
+    token) still REVISES when the new point's about_entities co-mention in
+    the existing point's content, the non-value frame overlaps ≥ 0.5, and
+    the value actually differs. ``when`` (E1) is the new point's ISO date —
+    when BOTH sides carry a date the new must be >= the old (CG-2); when
+    either is absent the session-ingest order supplies the invariant.
+    """
     norm = _norm(content)
     for p in points:
         if _norm(p.get("content", "")) == norm:
             return "exact", p.get("id", "")
     for p in points:
         if _token_overlap(p.get("content", ""), content) >= 0.6:
+            return "revises", p.get("id", "")
+    for p in points:
+        if _fact_value_contradiction(content, about_entities, p, when=when):
             return "revises", p.get("id", "")
     return "none", ""
 
@@ -1334,7 +1445,8 @@ def _resolve_source_turn(p: dict, edus: list[dict] | None,
     # 3) no verbatim match → token-overlap fallback (single best >= 0.6)
     best, best_ov = None, 0.0
     for e in edus:
-        ov = _token_overlap(str(e.get("text", "")), str(p.get("quote") or ""))
+        ov = _source_turn_overlap(str(e.get("text", "")),
+                                  str(p.get("quote") or ""))
         if ov > best_ov:
             best, best_ov = e["index"], ov
     if best is not None and best_ov >= 0.6:
@@ -1521,7 +1633,18 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         n = _norm(content)
         if n in point_ids:
             continue
-        match, existing_id = _find_point_match(idx["points"], content)
+        # E1 (#1533) — the point's `when` slot (used by the E5 later-date
+        # guard, CG-2): validate here, once, before the match passes.
+        when = str(p.get("when") or "").strip()
+        when_valid = when if (when and _valid_iso_date(when)) else None
+        if when and not when_valid:
+            warnings.append(
+                f"point when {when!r} is not a valid ISO date — dropped")
+        about_list = [str(a) for a in (p.get("about_entities") or [])
+                      if isinstance(a, str) and a.strip()]
+        match, existing_id = _find_point_match(idx["points"], content,
+                                               about_entities=about_list,
+                                               when=when_valid)
         pid = _content_id("pt", content)
         if match == "exact":
             pid = existing_id or pid
@@ -1534,6 +1657,15 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             link_before_create.append({
                 "searched_for": f"point '{content[:60]}'", "found": True,
                 "note": f"revises existing {existing_id} — supersede by correction"})
+            # E5 (#1537): point-level supersession record riding the EXISTING
+            # payload.supersessions field (pt_ prefix dispatch at the write
+            # sites). Self-supersede guard — never fires for revises (new
+            # content ⇒ new content-addressed id), kept for discipline.
+            if existing_id and existing_id != pid:
+                supersessions.append({
+                    "superseded": existing_id, "supersedes_by": pid,
+                    "evidence": "fact-value contradiction (later session "
+                                "value change)"})
         else:
             reason = "NEW"
             link_before_create.append({
@@ -1555,8 +1687,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         pt_entry = {
             "id": pid, "content": content, "pointKind": pkind,
             "reason": reason, "confidence": 0.5, "c_cal": 0.5,
-            "about_entities": [str(a) for a in (p.get("about_entities") or [])
-                               if isinstance(a, str) and a.strip()],
+            "about_entities": about_list,
             "source_ref": "session.md", "quote": quote, "status": "draft",
             "search_keys": search_keys,
             "source_turn_id": turn_idx,
@@ -1567,16 +1698,8 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                                       f"point '{content[:60]}'")
         if pt_slots:
             pt_entry["slots"] = pt_slots
-        # E1 (#1533) — points carry `when` ONLY when the model anchored one:
-        # no default (timeless beliefs stay un-stamped); junk dropped with a
-        # warning. Undated session ⇒ no key (byte-identical payload).
-        when = str(p.get("when") or "").strip()
-        if when:
-            if _valid_iso_date(when):
-                pt_entry["when"] = when
-            else:
-                warnings.append(
-                    f"point when {when!r} is not a valid ISO date — dropped")
+        if when_valid:
+            pt_entry["when"] = when_valid
         payload_points.append(pt_entry)
 
     # ── operators (dependency order 4) — TWO-PASS ─────────────────────────
@@ -1670,6 +1793,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         "sources": [],
         "entities": payload_entities, "points": payload_points,
         "events": payload_events, "operators": payload_operators,
+        "supersessions": supersessions,
         "telemetry": {
             "extractor": {"version": extractor_version, "mode": "byok",
                           "calibration_version": "v2"},
@@ -1682,12 +1806,17 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             "last_error_code": None, "confidence_histogram": None,
         },
     }
-    # replay-safe client_commit_id (T5 #1272 pattern — complete on both paths)
+    # replay-safe client_commit_id (T5 #1272 pattern — complete on both paths).
+    # E5 (#1537): supersessions are part of the canonical (#1350) — site 1
+    # (execute_embed) must agree with site 2 (_post_commit) and site 3
+    # (validate_layer1), or the hosted path 422s commit_id_mismatch on any
+    # payload with non-empty supersessions. The canonical omits an EMPTY
+    # list, so pre-#1350 payloads keep their id (additive contract).
     from tortoise.commit_schema import compute_client_commit_id
     payload["client_commit_id"] = compute_client_commit_id(
         payload["session_id"], payload["points"], payload["entities"],
         payload["operators"], payload["summary"], payload["story_arc"],
-        payload.get("events", []))
+        payload.get("events", []), payload.get("supersessions", []))
 
     return {
         "payload": payload,
