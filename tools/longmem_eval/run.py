@@ -68,8 +68,11 @@ EXTRACTION_APPROACH_V2 = (
     "(extractor_v2.extract_session_v2 — S1 story chunked+compiled, S2 "
     "map-to-embed, S3 real-backend search, S4 gap review, S5 deterministic "
     "embed) per haystack session; payload written as entities/events/points/"
-    "operators; raw verbatim transcripts retained; evidence-bearing points "
-    "marked has_answer by content overlap (>=0.4)"
+    "operators; raw verbatim transcripts retained; evidence marked by three "
+    "OR'd marks (M6 #1526 — source-session attribution / verbatim quote "
+    "anchor / raw-chunk containment) written to the eval has_answer "
+    "property; evidence_recall@k = N/A (None) when the graph has no "
+    "evidence points"
 )
 
 

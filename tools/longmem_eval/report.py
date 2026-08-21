@@ -119,15 +119,40 @@ def build_report(
     session_recall: dict[str, float] = {}
     turn_recall: dict[str, float] = {}
     evidence_recall: dict[str, float] = {}
+    evidence_recall_n: dict[str, int] = {}
+    evidence_vacuity_rate: dict[str, float] = {}
     for k in ks:
         sr = [o["session_recall@k"].get(str(k), 0.0) for o in outcomes]
-        tr = [o["turn_recall@k"].get(str(k), 0.0) for o in outcomes]
         session_recall[str(k)] = _mean(sr)
-        turn_recall[str(k)] = _mean(tr)
+        # M6 (#1526): N/A (None) outcomes are DROPPED from the turn-level
+        # mean too — a None coerced to 0.0 silently re-drags the vacuity the
+        # epic excludes (bug-pattern flag 4).
+        tr = [o["turn_recall@k"].get(str(k)) for o in outcomes]
+        tr_real = [v for v in tr if v is not None]
+        turn_recall[str(k)] = _mean(tr_real) if tr_real else 0.0
+        # evidence_recall@k: mean over evidence-bearing outcomes ONLY (non-
+        # None values) + the vacuity/coverage accounting (D6).
         er = [(o.get("evidence_recall@k") or {}).get(str(k), None)
               for o in outcomes]
-        if any(v is not None for v in er):
-            evidence_recall[str(k)] = _mean([v or 0.0 for v in er])
+        real = [v for v in er if v is not None]
+        if real:
+            evidence_recall[str(k)] = _mean(real)
+            evidence_recall_n[str(k)] = len(real)
+            evidence_vacuity_rate[str(k)] = round(
+                sum(1.0 for v in real if v == 0.0) / len(real), 4)
+
+    # M6 (D6): evidence_coverage — fraction of evidence-bearing questions
+    # (dataset has >=1 evidence turn) whose ingest wrote evidence points
+    # (the E2E-3 >95% gate metric; computed from the per-outcome ingest
+    # stats, comparable across ingest modes since both legs report
+    # evidence_turns/evidence_points).
+    ev_bearing = [o for o in outcomes
+                  if (o.get("ingest") or {}).get("evidence_turns", 0) > 0]
+    evidence_coverage = (
+        round(sum(1 for o in ev_bearing
+                  if (o.get("ingest") or {}).get("evidence_points", 0) > 0)
+              / len(ev_bearing), 4)
+        if ev_bearing else 0.0)
 
     # ── context tokens ──
     ctx = [o["context_tokens"] for o in outcomes]
@@ -162,6 +187,9 @@ def build_report(
             "session_recall@k": session_recall,
             "turn_recall@k": turn_recall,
             "evidence_recall@k": evidence_recall or None,
+            "evidence_recall_n@k": evidence_recall_n or None,
+            "evidence_vacuity_rate@k": evidence_vacuity_rate or None,
+            "evidence_coverage": evidence_coverage,
             "context_tokens_mean": ctx_mean,
             "context_point_count_mean": round(
                 sum(o["context_point_count"] for o in outcomes) / n, 2) if n else 0,
@@ -205,9 +233,26 @@ def build_report(
                                "recall numbers",
             "recall_definition": "session-level: fraction of answer_session_ids "
                                  "(evidence sessions) in top-k; turn-level: "
-                                 "fraction of has_answer turns in top-k; both "
-                                 "measured over the isolated per-question corpus "
-                                 "(see retrieval_scope)",
+                                 "fraction of evidence-MARKED points (has_answer: "
+                                 "evidence turns + M6 source-session/verbatim/"
+                                 "raw-transcript marks) surfaced in top-k, with "
+                                 "the deterministic evidence-turn-id fallback when "
+                                 "the graph has no marks; evidence_recall@k = "
+                                 "marked has_answer points surfaced / marked points "
+                                 "total, N/A (None) on empty denominators (M6 "
+                                 "#1526 — never forced 0.0); evidence_recall_n@k = "
+                                 "evidence-bearing outcomes in the mean; "
+                                 "evidence_vacuity_rate@k = fraction of "
+                                 "evidence-bearing outcomes with 0.0 while "
+                                 "evidence exists; evidence_coverage = fraction of "
+                                 "evidence-bearing questions with ingest."
+                                 "evidence_points > 0; all measured over the "
+                                 "isolated per-question corpus (see "
+                                 "retrieval_scope)",
+            "vacuity_band": "0/52 vacuous on healthy questions (fixture "
+                            "calibration 2026-08-20)",
+            "vacuity_band_anchor": "fixture calibration 2026-08-20 (0/52 "
+                                   "vacuous); re-anchor at run protocol step 6",
             "token_estimator": "whitespace tokens + 10% markup allowance",
             "k_values": list(ks),
             "top_k_context": top_k,

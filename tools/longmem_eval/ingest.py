@@ -34,6 +34,8 @@ from typing import Any
 from tortoise.domain_loader import register_kind
 from tortoise.sdk import TortoiseSDK
 
+from .evidence import evidence_sessions, mark_for
+
 logger = logging.getLogger(__name__)
 
 # Raw-session transcript points live under this pointKind (open-ended
@@ -90,7 +92,15 @@ def ingest_haystack(sdk: TortoiseSDK, question: dict) -> dict:
     dates: list[str] = question.get("haystack_dates") or []
     ids: list[str] = question.get("haystack_session_ids") or []
     evidence_turns = 0
+    evidence_points = 0
     raw_transcripts = 0
+    # M6: the evidence-session id set + answer-turn contents (shared with
+    # the v2 leg via evidence.py) — the raw transcript mark (c)/(a).
+    ev_sessions = evidence_sessions(question)
+    evidence_turn_contents: list[str] = []
+    for session in sessions:
+        evidence_turn_contents.extend(
+            str(t.get("content") or "") for t in session if t.get("has_answer"))
 
     for si, session in enumerate(sessions):
         sid = ids[si] if si < len(ids) else f"{qid}-s{si}"
@@ -130,6 +140,12 @@ def ingest_haystack(sdk: TortoiseSDK, question: dict) -> dict:
                     has_answer=is_evidence,
                     status="draft",
                 )
+                # M6: evidence_points counts points WRITTEN this run
+                # (create-only, mirroring the v2 leg) — re-ingest is a no-op,
+                # not a recount; evidence_turns stays the dataset-derived
+                # denominator below.
+                if is_evidence:
+                    evidence_points += 1
             if is_evidence:
                 evidence_turns += 1
             sdk._get_proj().g.query(
@@ -139,18 +155,38 @@ def ingest_haystack(sdk: TortoiseSDK, question: dict) -> dict:
             )
 
         # ── Raw verbatim transcript point (the "index raw text too" leg) ──
+        # M6 (#1526): the raw transcript carries the evidence marks like the
+        # v2 leg — mark (c) raw-chunk containment (the answer session's
+        # transcript contains the answer turns verbatim) and mark (a)
+        # source-session attribution (its session_id is an evidence session).
+        # Both legs then produce the same evidence_points accounting (D7) so
+        # evidence_coverage is comparable across ingest modes; evidence-turn
+        # points themselves are unchanged (their own has_answer flag).
         raw_id = f"lme:{qid}:s{si}:raw"
+        raw_text = _session_transcript(session)
+        raw_mark = mark_for({"content": raw_text, "quote": ""},
+                            session_id=sid, evidence_sessions=ev_sessions,
+                            answer_turn_contents=evidence_turn_contents)
         if not _point_exists(sdk._get_proj(), raw_id):
             sdk.create_point(
                 SESSION_TRANSCRIPT_KIND,
-                _session_transcript(session),
+                raw_text,
                 id=raw_id,
                 session_id=sid,
                 lme_question_id=qid,
                 lme_session_index=si,
                 is_episodic=True,
+                has_answer=raw_mark["has_answer"],
                 status="draft",
             )
+            if raw_mark["has_answer"]:
+                evidence_points += 1  # create-only (v2-leg mirror)
+        elif raw_mark["has_answer"]:
+            # Idempotent OR-in: a raw transcript written by a pre-M6 run has
+            # no has_answer prop — never overwrite a True with False.
+            sdk._get_proj().g.query(
+                "MATCH (p:Point {id:$id}) SET p.has_answer = true",
+                params={"id": raw_id})
         raw_transcripts += 1
         sdk._get_proj().g.query(
             "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
@@ -183,6 +219,7 @@ def ingest_haystack(sdk: TortoiseSDK, question: dict) -> dict:
         "turns": sum(len(s) for s in sessions),
         "evidence_turns": evidence_turns,
         "raw_transcripts": raw_transcripts,
+        "evidence_points": evidence_points,
     }
 
 
