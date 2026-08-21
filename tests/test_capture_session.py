@@ -817,7 +817,7 @@ def test_capture_session_failover_records_fallback_route(sdk, monkeypatch):
     calls = {"ds": 0}
     orig = DeepSeekDirectModel.complete
 
-    def _flaky_ds_complete(self, *, system, user):
+    def _flaky_ds_complete(self, *, system, user, max_tokens: int | None = None):
         calls["ds"] += 1
         if calls["ds"] == 1:
             raise _requests.ConnectionError("simulated DS collapse (#1350)")
@@ -857,7 +857,7 @@ def test_capture_session_failover_meta_flags(sdk, monkeypatch):
     calls = {"ds": 0}
     orig = DeepSeekDirectModel.complete
 
-    def _flaky_ds_complete(self, *, system, user):
+    def _flaky_ds_complete(self, *, system, user, max_tokens: int | None = None):
         calls["ds"] += 1
         if calls["ds"] == 1:
             raise _requests.ConnectionError("simulated DS collapse (#1350)")
@@ -896,7 +896,7 @@ def test_capture_session_fatal_4xx_no_failover(sdk, monkeypatch):
     err = _requests.HTTPError("HTTP 401")
     err.response = type("R", (), {"status_code": 401})()
 
-    def _fatal_ds_complete(self, *, system, user):
+    def _fatal_ds_complete(self, *, system, user, max_tokens: int | None = None):
         raise err
 
     monkeypatch.setattr(DeepSeekDirectModel, "complete", _fatal_ds_complete)
