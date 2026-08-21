@@ -634,9 +634,10 @@ class TestSessionCapture:
         assert body["turns"] == 2
         assert "extracted" in body
         assert "points" in body
-        # #822: extraction_mode reflects what actually ran — the M2 LLM
-        # extractor (no more hardcoded "regex" stopgap).
-        assert body["extraction_mode"] == "llm"
+        # #822/#1530: extraction_mode reflects what actually ran — the v2
+        # extractor via the mock seam reports the resolved route ("llm:mock").
+        assert body["extraction_mode"] == "llm:mock"
+        assert body["extraction_provider"] == "mock"
 
     def test_capture_session_with_explicit_id(self, client):
         r = client.post(
@@ -660,7 +661,8 @@ class TestSessionCapture:
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["extracted"] >= 1, body
-        assert body["extraction_mode"] == "llm"
+        assert body["extraction_mode"] == "llm:mock"
+        assert body["extraction_provider"] == "mock"
 
     def test_capture_session_handles_empty_conversation(self, client):
         r = client.post(

@@ -435,8 +435,9 @@ def _build_parser() -> argparse.ArgumentParser:
                         "transcripts retained)")
     p.add_argument("--extractor-model", default=None,
                    help="extractor model spec for --ingest-mode v2 "
-                        "(default deepseek-flash, uncapped — the #1350 owner "
-                        "decision)")
+                        "(default: the production router — TORTOISE_EXTRACTOR_"
+                        "PROVIDER deepseek-direct primary / openrouter fallback, "
+                        "uncapped, #1530)")
     p.add_argument("--workers", type=int, default=1,
                    help="parallel question workers (default 1 = sequential). "
                         "Each question runs in its own isolated graph; the "
@@ -483,21 +484,22 @@ def run_main(argv: list[str] | None = None) -> dict[str, Any]:
 
     extractor_model = None
     if args.ingest_mode == "v2":
-        from tests.model_adapters import MODELS
         if args.extractor_model:
+            # M5 pinning: an explicit --extractor-model stays a registry lookup.
+            from tests.model_adapters import MODELS
             if args.extractor_model not in MODELS:
                 raise SystemExit(f"unknown extractor model {args.extractor_model!r}; "
                                  f"known: {sorted(MODELS)}")
             extractor_model = MODELS[args.extractor_model]()
-        elif os.environ.get("TORTOISE_EXTRACTOR_PROVIDER") == "openrouter":
-            extractor_model = MODELS["deepseek-flash"]()  # forced OpenRouter
-        elif os.environ.get("DEEPSEEK_API_KEY"):
-            # #1350: the extractor's LLM calls were hitting OpenRouter
-            # connection errors under load — the direct DeepSeek API is the
-            # same model (deepseek-v4-flash), different route, no OR hop.
-            extractor_model = MODELS["deepseek-flash-direct"]()
         else:
-            extractor_model = MODELS["deepseek-flash"]()
+            # #1530 D9: the unset case delegates to the production router via
+            # the shim — single source of truth (removed the bespoke env
+            # branch). Same decision surface: TORTOISE_EXTRACTOR_PROVIDER
+            # picks the primary; DEEPSEEK_API_KEY alone → deepseek-direct;
+            # else OpenRouter. Uncapped (the #1350 owner decision).
+            from tests.model_adapters import build_extractor_model
+            extractor_model = build_extractor_model(
+                max_tokens=None, temperature=0.0)
 
     outcomes, report = run_evaluation(  # noqa: RUF059
         instances, reader=reader, judge=judge, ks=ks, top_k=top_k,

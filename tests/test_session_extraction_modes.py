@@ -229,18 +229,21 @@ def test_no_provider_503(monkeypatch, client):
 
 def test_default_llm_with_provider_key_200(monkeypatch, client):
     """Default (no TORTOISE_SESSION_EXTRACTION knob — it is gone) WITH a
-    provider key runs the LLM extractor and reports extraction_mode \"llm\".
+    provider key runs the LLM extractor and reports extraction_mode
+    "llm:<route>".
 
     #722 review P2 inverse: the availability gate's inverse was untested. The
     mock seam makes the full 200 path run; the effective-mode field pins the
-    honest-reporting behavior: extraction_mode says \"llm\" because that is
-    what actually ran (#822 — no more hardcoded \"regex\" stopgap).
+    honest-reporting behavior: extraction_mode says "llm:mock" because the
+    mock route is what actually ran (#822/#1530 — no more hardcoded
+    "regex" stopgap, and the route is recorded on the wire).
     """
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-722")
     r = client.post("/v1/sessions", json={"conversation": []})
     assert r.status_code == 200, r.status_code
     body = r.json()
-    assert body["extraction_mode"] == "llm"
+    assert body["extraction_mode"] == "llm:mock"
+    assert body["extraction_provider"] == "mock"
 
 
 def test_default_llm_extracts_points(monkeypatch, client):
@@ -259,7 +262,7 @@ def test_default_llm_extracts_points(monkeypatch, client):
     })
     assert r.status_code == 200, r.status_code
     body = r.json()
-    assert body["extraction_mode"] == "llm"
+    assert body["extraction_mode"] == "llm:mock"
     assert body["extracted"] >= 1, body  # v2 mock emits one point
     assert all(p["kind"] == "statement" for p in body["points"])
     # Extracted Points are wired to the session (CONTAINS) — same contract as
@@ -274,3 +277,65 @@ def test_default_llm_extracts_points(monkeypatch, client):
     ).result_set
     assert rows[0][0] == body["extracted"], \
         "every extracted LLM Point must be CONTAINS-connected to the session"
+
+
+# ── #1530 P2: gate match + route recording on the hosted path ───────────────
+
+def test_openai_only_key_v2_503_not_500(monkeypatch, client):
+    """#1530 gate match on the hosted path: an openai-only deployment passes
+    the broad outer gate (_llm_provider_available) but the v2 extractor's
+    adapter cannot consume OPENAI_API_KEY — the inner gate's ValueError
+    converts to a clean fail-closed 503, NEVER an uncaught 500 (the #1468
+    divergence lesson)."""
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-only")
+    r = client.post("/v1/sessions", json={"conversation": []})
+    assert r.status_code == 503, r.status_code
+    detail = r.json()["detail"]
+    assert "DEEPSEEK_API_KEY" in detail and "OPENROUTER_API_KEY" in detail
+
+
+def test_hosted_capture_records_deepseek_direct_route(monkeypatch, client):
+    """The hosted capture response records the resolved v2 route + provider
+    (parity with the SDK path by construction, #1530 D8)."""
+    import requests as _requests
+
+    class _FakeResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"choices": [{"message": {"content":
+                "{\"entities\": [{\"name\": \"the strategy\", "
+                "\"kind\": \"core:strategy\", \"lifecycle\": \"created\", "
+                "\"supersedes\": null, \"note\": null}], "
+                "\"events\": [{\"content\": \"we decided on the new strategy\", "
+                "\"eventKind\": \"core:decision\", "
+                "\"about_entities\": [\"the strategy\"]}], "
+                "\"points\": [{\"content\": \"the new strategy is durable\", "
+                "\"pointKind\": \"statement\", "
+                "\"about_entities\": [\"the strategy\"]}], "
+                "\"operators\": [], \"chain_notes\": [], "
+                "\"link_before_create\": []}"}}],
+                "usage": {}}
+
+    def _fake_post(url, **kwargs):
+        return _FakeResp()
+
+    monkeypatch.setattr(_requests, "post", _fake_post)
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
+    monkeypatch.delenv("TORTOISE_EXTRACT_MODEL", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds-key")
+    r = client.post("/v1/sessions", json={"conversation": [
+        {"role": "user", "content": "we decided on the new strategy"},
+    ]})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["extraction_mode"] == "llm:deepseek-direct"
+    assert body["extraction_provider"] == "deepseek-direct"
+    assert body["extracted"] >= 1
