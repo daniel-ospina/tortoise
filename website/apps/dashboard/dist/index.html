@@ -31,13 +31,15 @@
             // review P1) or misroute a signed-in user to the claim route.
             (!!claimKey && claimPending);
           if (!hasSession && !claimIntent) {
-            if (typeof window.bounceToAuth === "function") window.bounceToAuth();
-            else window.location.replace("https://tortoise.premiselabs.co/auth");
+            // #1224/#1566: preserve OAuth error params (they land on this
+            // origin now that signups redirect here) for /auth's banner.
+            if (typeof window.bounceToAuth === "function") window.bounceToAuth(window.location.search);
+            else window.location.replace("https://tortoise.premiselabs.co/auth" + window.location.search);
           }
         } catch (e) { /* best-effort — the app's async check still applies */ }
       })();
     </script>
-    <script type="module" crossorigin src="/assets/index-D7vG6KpM.js"></script>
+    <script type="module" crossorigin src="/assets/index-DkgxJzPI.js"></script>
     <link rel="stylesheet" crossorigin href="/assets/index-COfgJa02.css">
   </head>
   <body>

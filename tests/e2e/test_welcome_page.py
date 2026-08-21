@@ -75,43 +75,20 @@ def test_mcp_endpoint_rejects_unauthenticated(page: Page) -> None:
 # reveal_api_key RPC → success state with harness tabs + artifacts.
 
 
-def test_welcome_callback_session_in_url_reaches_success(page: Page) -> None:
-    """Email-confirmation / OAuth callback simulation (#527): the session
-    arrives via the URL fragment (implicit flow) and supabase-js parses it
-    asynchronously (GET /auth/v1/user round-trip). The page must WAIT for the
-    session (defensive waitForSession) and reach the success state — it must
-    NOT bounce to 'No active session' while the parse is in flight."""
+def test_welcome_signed_in_redirects_to_app(page: Page) -> None:
+    """#1566: provisioning moved INTO the app — a signed-in visitor on the
+    legacy welcome page (email-confirmation / OAuth callback, or a direct
+    visit with a session) is redirected to app.premiselabs.co/welcome, where
+    the dashboard's welcome mode provisions + reveals the key. welcome.html
+    no longer provisions (except recovery mode)."""
     user_id = _fake_user_id()
-
-    def handle(route):
-        url = route.request.url
-        method = route.request.method
-        if "auth/v1/user" in url and method == "GET":
-            route.fulfill(status=200, content_type="application/json", body=json.dumps({
-                "id": user_id, "aud": "authenticated", "role": "authenticated",
-                "email": "e2e@premise-labs.dev",
-                "app_metadata": {"provider": "email"},
-                "user_metadata": {"email": "e2e@premise-labs.dev"},
-            }))
-            return
-        if "team_memberships" in url and method == "GET":
-            route.fulfill(status=200, content_type="application/json", body=json.dumps({
-                "team_id": f"team_{user_id[:8]}", "team_name": "Test Team",
-                "graph_name": f"team_{user_id[:8]}", "status": "active",
-            }))
-            return
-        if "rpc/reveal_api_key" in url and method == "POST":
-            route.fulfill(status=200, content_type="application/json",
-                          body=json.dumps("tt_e2e_mock_api_key_1234567890abcdef"))
-            return
-        route.continue_()
-
-    page.route("**/*", handle)
-    # Implicit-flow callback: session params in the URL fragment.
+    _seed_local_session(page, user_id)
+    page.route("**://app.premiselabs.co/**", lambda r: r.fulfill(
+        status=200, content_type="text/html",
+        body="<html><body>APP-WELCOME</body></html>"))
     page.goto(WELCOME_URL + "#access_token=fake-at&refresh_token=fake-rt&expires_in=3600&token_type=bearer",
               wait_until="domcontentloaded", timeout=30_000)
-    expect(page.locator("#success")).not_to_be_hidden(timeout=15_000)
-    expect(page.locator("#api-key")).to_contain_text("tt_", timeout=15_000)
+    expect(page).to_have_url(re.compile(r"^https://app\.premiselabs\.co/welcome"), timeout=20_000)
 
 
 def _fake_user_id() -> str:
@@ -267,56 +244,6 @@ def test_harness_tabs_switch_config(page: Page) -> None:
     assert "--bearer-token-env-var TORTOISE_API_KEY" in codex_text
 
 
-def test_mcp_config_copy_puts_harness_config_on_clipboard(page: Page) -> None:
-    """Clicking Copy MCP config (Claude tab) must place that harness's Block
-    A on the clipboard — the CLI one-liner post-#529-deploy, the JSON shape
-    before (live-page suite; capstone #969 tightens post-deploy)."""
-    _mock_supabase_success(page)
-    page.goto(WELCOME_URL, wait_until="domcontentloaded", timeout=30_000)
-    expect(page.locator("#success")).not_to_be_hidden(timeout=15_000)
-    page.context.grant_permissions(["clipboard-read", "clipboard-write"],
-                                   origin=_clipboard_origin())
-    # Two-path UI (#1170): the copy buttons live in the collapsed manual-setup
-    # section behind the MCP chooser. Harness tab first, THEN manual setup —
-    # this order also works pre-deploy (the live page before #1189 collapses
-    # manual setup on a harness switch; post-deploy both orders work).
-    _open_mcp_path(page)
-    page.locator(".harness-tab[data-harness=\"claude\"]").click()
-    _open_manual_setup(page)
-    page.locator("#btn-copy-mcp").click()
-    clip = page.evaluate("navigator.clipboard.readText()")
-    assert "https://api.premiselabs.co/mcp" in clip
-    # The copy button lives in the MANUAL setup section (#1170 layout), which
-    # renders the key-less env-var form: .mcp.json with ${TORTOISE_API_KEY}
-    # indirection (never a literal key in the config block).
-    assert "TORTOISE_API_KEY" in clip, f"env-var form missing: {clip[:200]!r}"
-    assert "Bearer ${TORTOISE_API_KEY}" in clip or "Bearer $TORTOISE_API_KEY" in clip
-    config_block, sep, export_line = clip.partition("export TORTOISE_API_KEY=")
-    assert sep, f"env-var form missing the export line: {clip[:200]!r}"
-    # The config block must reference the key only via env-var indirection;
-    # the literal key belongs in the export line and nowhere else (order-robust
-    # partition, not a position-dependent slice).
-    assert "tt_e2e_mock_api_key" not in config_block, \
-        "config block must not embed the literal key"
-    assert "tt_e2e_mock_api_key" in export_line, "export line missing the key"
-
-
-def test_prompt_copy_uses_fetched_markdown(page: Page) -> None:
-    """copyPrompt() fetches the canonical prompt URL and puts its markdown on
-    the clipboard (regression for #540 — previously served HTML)."""
-    _mock_supabase_success(page)
-    page.goto(WELCOME_URL, wait_until="domcontentloaded", timeout=30_000)
-    expect(page.locator("#success")).not_to_be_hidden(timeout=15_000)
-    page.context.grant_permissions(["clipboard-read", "clipboard-write"],
-                                   origin=_clipboard_origin())
-    # Two-path UI (#1170): the onboarding-prompt copy button lives in the
-    # collapsed manual-setup section behind the MCP chooser.
-    _open_mcp_path(page)
-    _open_manual_setup(page)
-    page.locator("#btn-copy-prompt").click()
-    clip = page.evaluate("navigator.clipboard.readText()")
-    assert clip.startswith("# Tortoise Onboarding"), "prompt copy is not the markdown"
-    assert "### Q1" in clip, "prompt missing Q1"
 
 
 def _require_returning_redirect(page: Page) -> None:

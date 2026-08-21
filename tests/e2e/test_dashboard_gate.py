@@ -175,7 +175,10 @@ def test_mint_429_shows_error_card_not_stuck_shell(page: Page) -> None:
                               body=_json.dumps({"detail": "Rate limit exceeded."}))
                 return
             if url.endswith("/v1/teams"):
-                route.fulfill(status=200, content_type="application/json", body="[]")
+                # A RETURNING user (team exists) hits the mint path; a
+                # first-timer would go through the #1566 in-app provisioning.
+                route.fulfill(status=200, content_type="application/json",
+                              body=_json.dumps([{"team_id": "team_m429", "name": "M429"}]))
                 return
             route.fulfill(status=401, content_type="application/json", body="{}")
             return
@@ -193,6 +196,86 @@ def test_mint_429_shows_error_card_not_stuck_shell(page: Page) -> None:
     page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
     expect(page.locator("body")).to_contain_text("Too many requests from this network", timeout=20_000)
     expect(page.locator("body")).not_to_contain_text("Redirecting to the sign-in page")
+
+
+def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
+    """#1566: a first-timer (valid session, NO teams) landing on the app is
+    provisioned IN-APP — tenant-provision → membership poll → reveal — and
+    the key is shown in the welcome card exactly once (A13). A returning
+    visit (key consumed) shows the ready card without re-revealing."""
+    import urllib.parse as _up
+    import time as _time
+    user_id = "u-welcome1566"
+    sess = {"access_token": "fake.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sig",
+            "refresh_token": "rt", "expires_in": 3600,
+            "expires_at": int(_time.time()) + 3600, "token_type": "bearer",
+            "user": {"id": user_id, "email": "welcome1566@premise-labs.dev",
+                     "user_metadata": {"display_name": "Welcome Test"}}}
+    page.context.add_cookies([{"name": "sb-tortoise-auth-token",
+                               "value": _up.quote(json.dumps(sess)),
+                               "domain": ".premiselabs.co", "path": "/"}])
+    reveal_calls = {"n": 0}
+
+    def handle(route):
+        url = route.request.url
+        if "api.premiselabs.co" in url:
+            if url.endswith("/v1/teams"):
+                # First-timer: no teams → the app provisions.
+                route.fulfill(status=200, content_type="application/json", body="[]")
+                return
+            route.fulfill(status=401, content_type="application/json", body="{}")
+            return
+        if "functions/v1/tenant-provision" in url and route.request.method == "POST":
+            route.fulfill(status=201, content_type="application/json",
+                          body=json.dumps({"team_id": "team_w", "team_name": "Welcome Team",
+                                           "api_key": "tt_welcome_key_1234567890abcdef"}))
+            return
+        if "team_memberships" in url and route.request.method == "GET":
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"team_id": "team_w", "team_name": "Welcome Team",
+                                           "graph_name": "team_w", "status": "active"}))
+            return
+        if "rpc/reveal_api_key" in url and route.request.method == "POST":
+            reveal_calls["n"] += 1
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps("tt_welcome_key_1234567890abcdef"))
+            return
+        if url.startswith(AUTH_HOST):
+            from tests.e2e.test_session_login_flow import AUTH_ORIGIN
+            local = AUTH_ORIGIN + url[len(AUTH_HOST):]
+            resp = page.request.get(local)
+            route.fulfill(status=resp.status, content_type="text/html", body=resp.text())
+            return
+        if url.startswith(APP_HOST):
+            from tests.e2e.test_session_login_flow import DASHBOARD_URL
+            local = DASHBOARD_URL.rstrip("/") + url[len(APP_HOST):]
+            ctype = "application/javascript" if local.endswith(".js") else ("text/css" if local.endswith(".css") else "text/html")
+            resp = page.request.get(local)
+            route.fulfill(status=resp.status, content_type=ctype, body=resp.body())
+            return
+        route.continue_()
+
+    page.route("**/*", handle)
+    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    expect(page.locator("body")).to_contain_text("Provisioning your Tortoise", timeout=15_000)
+    expect(page.locator("body")).to_contain_text("tt_welcome_key_1234567890abcdef", timeout=20_000)
+    assert reveal_calls["n"] == 1, f"reveal must fire exactly once, got {reveal_calls['n']}"
+    # The raw key must be displayed (a revealed-once key is never shown again).
+    expect(page.locator("body")).to_contain_text("copy it now", timeout=10_000)
+    # Returning visit: the key is consumed (reveal returns 'pending') → the
+    # ready card, no re-reveal.
+    reveal_calls["n"] = 0
+    def handle_returning(route):
+        url = route.request.url
+        if "rpc/reveal_api_key" in url and route.request.method == "POST":
+            reveal_calls["n"] += 1
+            route.fulfill(status=200, content_type="application/json", body=json.dumps("pending"))
+            return
+        handle(route)
+    page.route("**/*", handle_returning)
+    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    expect(page.locator("body")).to_contain_text("Welcome back", timeout=20_000)
+    assert reveal_calls["n"] == 1, "returning visit reveals once (pending), no re-reveal"
 
 
 def test_logout_redirects_to_auth(page: Page) -> None:

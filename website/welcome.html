@@ -981,6 +981,16 @@ you up to 6 yes/no questions and set up your Tortoise memory.
         return;
       }
 
+      if (session) {
+        // #1566: provisioning moved INTO the app — a signed-in visitor on
+        // this legacy page goes to the app welcome (the session is in the
+        // parent-domain cookie; the app's welcome mode provisions/reveals).
+        // Strip the callback hash so the app's detectSessionInUrl does not
+        // re-ingest a stale fragment. location.replace: Back must not return.
+        window.location.replace("https://app.premiselabs.co/welcome");
+        return;
+      }
+
       if (!session) {
         // Single auth page at /auth — no session here means the visitor
         // hasn't authed yet (or the callback is slow). Send them to the one
