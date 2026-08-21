@@ -231,6 +231,19 @@ def run_cell(
             ],
         },
     )
+    # The cell bypasses retrieval entirely — replace the retrieval-backed
+    # methodology lines (which build_report hardcodes for the main runner) so
+    # the report does not self-contradict. Recall is trivially 1.0 by
+    # construction: every session is in context.
+    report["methodology"]["retrieval"] = (
+        "NONE — option-5 full-context cell: the reader received the ENTIRE "
+        "dated haystack verbatim; no graph, no retrieval leg")
+    report["methodology"]["retrieval_scope"] = (
+        "full-context cell: recall trivially 1.0 by construction (every "
+        "session is in context) — the number measures reader+judge ceiling, "
+        "not retrieval")
+    report["methodology"]["recall_definition"] = (
+        "trivial 1.0 — the cell feeds the whole haystack; no top-k to miss")
     return outcomes, report
 
 
@@ -254,7 +267,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--reader-model", default=None)
     p.add_argument("--judge-model", default=None)
     p.add_argument("--output", default=None,
-                   help="report JSON path (default CWD/full_context_<ts>.report.json)")
+                   help="report JSON path (default: full_context_<ts>.report.json "
+                        "in CWD — timestamped so repeated cell runs don't "
+                        "clobber each other)")
     p.add_argument("--no-download", action="store_true")
     return p
 
@@ -273,7 +288,11 @@ def run_main(argv: list[str] | None = None) -> dict[str, Any]:
         checkpoint=args.checkpoint, max_retries=args.max_retries,
         split=args.split,
     )
-    out = args.output or str(Path.cwd() / "full_context.report.json")
+    if args.output:
+        out = args.output
+    else:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")  # noqa: UP017
+        out = str(Path.cwd() / f"full_context_{stamp}.report.json")
     save_report(report, out)
     acc = report["accuracy"]
     print("\n" + "=" * 64)

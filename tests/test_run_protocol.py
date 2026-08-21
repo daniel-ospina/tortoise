@@ -232,16 +232,36 @@ def test_run_cell_mock_offline(tmp_path):
 
 def test_run_cell_resume_skips_completed(tmp_path):
     """Checkpoint/resume: a second run_cell with the same checkpoint file
-    reuses completed outcomes (no re-judging)."""
+    reuses completed outcomes — the reader/judge must NOT be called again on
+    resumed questions (proved with call counters, not just outcome counts)."""
     cp = str(tmp_path / "fc.checkpoint.json")
-    _, report1 = run_cell(_mini(), reader=MockReader(), judge=MockJudge(),
-                          checkpoint=cp, split="s")
+
+    class CountingReader(MockReader):
+        def __init__(self):
+            self.calls = 0
+
+        def answer(self, **kw):
+            self.calls += 1
+            return super().answer(**kw)
+
+    class CountingJudge(MockJudge):
+        def __init__(self):
+            self.calls = 0
+
+        def judge(self, **kw):
+            self.calls += 1
+            return super().judge(**kw)
+
+    r1, j1 = CountingReader(), CountingJudge()
+    _, report1 = run_cell(_mini(), reader=r1, judge=j1, checkpoint=cp, split="s")
     n1 = report1["n_questions"]
-    # re-running on the same checkpoint: outcomes come from the checkpoint
-    outcomes2, _ = run_cell(_mini(), reader=MockReader(), judge=MockJudge(),
-                            checkpoint=cp, split="s")
+    assert r1.calls == 5 and j1.calls == 5  # first run judged everything
+
+    # resume run: zero new reader/judge calls, same outcome count
+    r2, j2 = CountingReader(), CountingJudge()
+    outcomes2, _ = run_cell(_mini(), reader=r2, judge=j2, checkpoint=cp, split="s")
     assert len(outcomes2) == n1
-    # checkpoint file now exists and records all 5
+    assert r2.calls == 0 and j2.calls == 0  # resume never re-judges
     data = json.loads(Path(cp).read_text(encoding="utf-8"))
     assert len(data["outcomes"]) == 5
 
@@ -265,8 +285,102 @@ def test_full_context_cli_dry_run(tmp_path, capsys):
     """`full-context --dry-run` prints the cell command without executing."""
     state = _fresh_state(tmp_path)
     rp.cmd_full_context(state, argparse_namespace(
-        data=None, limit=50, split="s", mock=True, dry_run=True))
+        data=None, limit=50, split="s", mock=True, dry_run=True,
+        output=None))
     out = capsys.readouterr().out
     assert "tools.longmem_eval.full_context" in out
     assert "--limit 50" in out
+    assert "[dry-run]" in out
+    # default output is timestamped (two cell runs — pilot + 500 — must not
+    # clobber each other's ceiling measurement)
+    assert "full_context_" in out and ".report.json" in out
+
+
+def test_cmd_run_owner_gate_and_ordering(tmp_path):
+    """The `run` path enforces owner gates (8/9) and gate ordering exactly
+    like `gate` does — 03-scope's 'explicit owner decision'."""
+    state = _fresh_state(tmp_path)
+    # owner-gated step without approval → SystemExit
+    with pytest.raises(SystemExit):
+        rp.cmd_run(state, argparse_namespace(
+            step="8", owner_approve=None, dry_run=True, extra=[],
+            expected_direction=None))
+    # approval but earlier gates unmet → SystemExit
+    with pytest.raises(SystemExit):
+        rp.cmd_run(state, argparse_namespace(
+            step="8", owner_approve="owner said yes", dry_run=True, extra=[],
+            expected_direction=None))
+    # gate step via `run` → SystemExit (use `gate` instead)
+    with pytest.raises(SystemExit):
+        rp.cmd_run(state, argparse_namespace(
+            step="1", owner_approve=None, dry_run=True, extra=[],
+            expected_direction=None))
+    # passing gates 1..7 unlocks step 8 dry-run (no TORTOISE_DB_URI yet →
+    # the real-backend guard fires, which is its own test below)
+    for n in range(1, 8):
+        state.pass_gate(n, f"step {n} done")
+    with pytest.raises(SystemExit):
+        rp.cmd_run(state, argparse_namespace(
+            step="8", owner_approve="owner said yes", dry_run=True, extra=[],
+            expected_direction=None))
+
+
+def test_cmd_run_requires_real_backend_env(tmp_path, monkeypatch):
+    """Run steps 3/5/7/8/9 fail closed without TORTOISE_DB_URI — the V3
+    baseline must be a REAL-backend run (E2E-1); the base runner silently
+    degrades to embedded FalkorDBLite otherwise (the exact silent-degradation
+    failure M-series exists to prevent)."""
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    state = _fresh_state(tmp_path)
+    for n in range(1, 8):
+        state.pass_gate(n, f"step {n} done")
+    with pytest.raises(SystemExit, match="TORTOISE_DB_URI"):
+        rp.cmd_run(state, argparse_namespace(
+            step="3", owner_approve=None, dry_run=True, extra=[],
+            expected_direction=None))
+    with pytest.raises(SystemExit, match="TORTOISE_DB_URI"):
+        rp.cmd_run(state, argparse_namespace(
+            step="5", owner_approve=None, dry_run=True, extra=[],
+            expected_direction=None))
+    # with the env set, dry-run prints the command (no execution)
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379")
+    rp.cmd_run(state, argparse_namespace(
+        step="3", owner_approve=None, dry_run=True, extra=[],
+        expected_direction=None))
+
+
+def test_cmd_run_step7_requires_expected_direction(tmp_path, monkeypatch, capsys):
+    """Step 7 via `run` needs the pre-stated expected-delta direction AND
+    the recorded step-3/5 reports before building the confirmation set."""
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379")
+    state = _fresh_state(tmp_path)
+    for n in range(1, 7):
+        state.pass_gate(n, f"step {n} done")
+    # direction missing → SystemExit
+    with pytest.raises(SystemExit):
+        rp.cmd_run(state, argparse_namespace(
+            step="7", owner_approve=None, dry_run=True, extra=[],
+            expected_direction=None))
+    # direction present but no step-3/5 reports → SystemExit
+    with pytest.raises(SystemExit):
+        rp.cmd_run(state, argparse_namespace(
+            step="7", owner_approve=None, dry_run=True, extra=[],
+            expected_direction="up on KU/TR"))
+    # direction + fake reports → command builds (dry-run, no subset write)
+    run_dir = tmp_path / "runs"
+    run_dir.mkdir()
+    state.data["runs"]["3"] = {"report": str(run_dir / "pilot.json")}
+    state.data["runs"]["5"] = {"report": str(run_dir / "base.json")}
+    for p, qids in ((run_dir / "pilot.json", ["q1"]),
+                    (run_dir / "base.json", None)):
+        if qids is not None:
+            p.write_text(json.dumps({"outcomes": [{"question_id": x}
+                                                   for x in qids]}))
+        else:
+            p.write_text(json.dumps({"failures": []}))
+    rp.cmd_run(state, argparse_namespace(
+        step="7", owner_approve=None, dry_run=True, extra=[],
+        expected_direction="up on KU/TR"))
+    out = capsys.readouterr().out
+    assert "--data" in out and "confirm_subset.json" in out
     assert "[dry-run]" in out

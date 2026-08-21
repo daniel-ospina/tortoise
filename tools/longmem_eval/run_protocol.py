@@ -233,14 +233,19 @@ def _default_report(kind: str) -> Path:
 
 
 def build_command(step: Step, extra: list[str], *, state: ProtocolState,
-                  expected_direction: str | None = None) -> list[str]:
+                  expected_direction: str | None = None,
+                  materialize: bool = False) -> list[str]:
     """Build the shell command that executes a run step, using flags that
-    exist on the BASE runner (no M2–M8 dependencies)."""
+    exist on the BASE runner (no M2–M8 dependencies).
+
+    ``materialize`` (default False) controls filesystem side effects: the
+    step-7 confirmation subset is only written (and the runs dir only
+    created) when the command will actually be executed — ``plan`` stays a
+    pure dry-run (no state change, no files)."""
     if step.kind != "run" or not step.runner:
         raise SystemExit(f"step {step.number} is a gate step — no command "
                          f"to run; mark it with `gate {step.number} --pass`")
     run_dir = Path(state.data.get("run_dir", DEFAULT_RUN_DIR))
-    run_dir.mkdir(parents=True, exist_ok=True)
     cp = _default_checkpoint(step.runner)
     out = _default_report(step.runner)
     common = [*extra, "--checkpoint", str(cp), "--output", str(out)]
@@ -255,7 +260,15 @@ def build_command(step: Step, extra: list[str], *, state: ProtocolState,
             raise SystemExit(
                 "step 7 requires --expected-direction '<direction>' stated in "
                 "advance (e.g. 'up on KU/TR, flat elsewhere')")
-        subset = _build_confirmation_subset(state, run_dir)
+        # Read-only validation ALWAYS runs (catches missing reports in
+        # plan/dry-run too); the dataset filter + file write only happen
+        # when the command will actually execute (materialize).
+        _confirmation_qids(state)
+        if materialize:
+            subset = _build_confirmation_subset(state, run_dir)
+        else:
+            run_dir = Path(state.data.get("run_dir", DEFAULT_RUN_DIR))
+            subset = run_dir / "confirm_subset.json"
         return _run_cmd(["--data", str(subset), "--ingest-mode", "v2", *common])
     if step.runner == "bench1k":        # step 8: owner-gated 1k
         return _run_cmd(["--split", "s", "--limit", "1000",
@@ -350,8 +363,8 @@ def cmd_status(state: ProtocolState, args: argparse.Namespace) -> None:
 
 
 def cmd_plan(state: ProtocolState, args: argparse.Namespace) -> None:
-    """Print the exact commands for the pending run steps (dry-run — no
-    execution, no state change)."""
+    """Print the exact commands for the pending run steps (pure dry-run — no
+    execution, no state change, no files created)."""
     for s in STEPS:
         if s.kind != "run":
             continue
@@ -393,7 +406,20 @@ def cmd_run(state: ProtocolState, args: argparse.Namespace) -> None:
         raise SystemExit(f"earlier steps not passed (next pending: "
                          f"{state.next_pending()})")
     cmd = build_command(step, args.extra or [], state=state,
-                        expected_direction=args.expected_direction)
+                        expected_direction=args.expected_direction,
+                        materialize=not args.dry_run)
+    # Real-backend fail-closed guard (E2E-1/E2E-2: the V3 baseline must be a
+    # REAL-backend run — FalkorDB + FTS + embedder). Without TORTOISE_DB_URI
+    # the base runner silently degrades to embedded FalkorDBLite, which would
+    # masquerade as a V3 measurement. Fires on dry-run too so `plan`/`--dry-run`
+    # tell the operator the step cannot run as configured. The smoke step
+    # (mock) is exempt: it is a wiring check, not a measurement.
+    if step.number in (3, 5, 7, 8, 9) and not os.environ.get("TORTOISE_DB_URI"):
+        raise SystemExit(
+            f"step {step.number} requires TORTOISE_DB_URI (real backend: "
+            f"FalkorDB + FTS + embedder) — the base runner degrades to "
+            f"embedded FalkorDBLite without it (E2E-1). Set TORTOISE_DB_URI "
+            f"or run the smoke/--mock wiring check instead.")
     print(f"$ {' '.join(cmd)}")
     if args.dry_run:
         print("[dry-run] not executing")
@@ -407,9 +433,7 @@ def cmd_run(state: ProtocolState, args: argparse.Namespace) -> None:
         command=cmd,
         expected_direction=args.expected_direction if step.runner == "confirm" else None,
     )
-    env = os.environ.copy()
-    env.setdefault("TORTOISE_DB_URI", os.environ.get("TORTOISE_DB_URI", ""))
-    rc = subprocess.run(cmd, env=env)
+    rc = subprocess.run(cmd, env=os.environ.copy())
     if rc.returncode != 0:
         state.fail_gate(step.number, f"run exited {rc.returncode}")
         raise SystemExit(f"run exited {rc.returncode} — fix (M4) and re-run")
@@ -449,7 +473,10 @@ def cmd_full_context(state: ProtocolState, args: argparse.Namespace) -> None:
         extra += ["--split", args.split]
     if args.mock:
         extra.append("--mock")
-    out = DEFAULT_RUN_DIR / "full_context.report.json"
+    # Timestamp the default cell report path — the cell "rides on the pilot
+    # (step 3) AND the 500 (step 5)" (03-scope note): two cell runs must not
+    # clobber each other's ceiling measurement. --output overrides.
+    out = Path(args.output) if args.output else _default_report("full_context")
     cmd = _cell_cmd([*extra, "--output", str(out)])
     print(f"$ {' '.join(cmd)}")
     if args.dry_run:
@@ -511,6 +538,10 @@ def _build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--split", default="s")
     sp.add_argument("--mock", action="store_true")
     sp.add_argument("--dry-run", action="store_true")
+    sp.add_argument("--output", default=None,
+                    help="cell report path (default: timestamped under "
+                         ".longmemeval_cache/runs/ — two cell runs, pilot + "
+                         "500, must not clobber)")
     sp.set_defaults(func=cmd_full_context)
     return p
 
