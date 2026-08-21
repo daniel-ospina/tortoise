@@ -985,9 +985,12 @@ you up to 6 yes/no questions and set up your Tortoise memory.
         // #1566: provisioning moved INTO the app — a signed-in visitor on
         // this legacy page goes to the app ROOT (the session is in the
         // parent-domain cookie; first-timers are provisioned there and see
-        // the welcome card, returning users get the dashboard home).
+        // the welcome card, returning users get the dashboard home). A claim
+        // in flight (tt_claim_pending marker) routes to the claim card
+        // (#1566 review P2 — keeps claimStatusGuard reachable).
         // location.replace: Back must not return.
-        window.location.replace("https://app.premiselabs.co");
+        const claimInFlight = /(?:^|; )tt_claim_pending=/.test(document.cookie);
+        window.location.replace(claimInFlight ? "https://app.premiselabs.co/?claim=1" : "https://app.premiselabs.co");
         return;
       }
 

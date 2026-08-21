@@ -477,10 +477,16 @@ function claimIntentInFlight() {
         // and reveal through the canonical path (atomic reveal+null, A13).
         try {
           for (let attempt = 0; attempt < 3; attempt++) {
+            // #1566 (review P2): port the welcome.html poll shape — status
+            // filter + newest row, so placeholder (team_id='') and M:N rows
+            // can't error the poll (PGRST116).
             const { data, error } = await supabaseClient
               .from('team_memberships')
               .select('team_id, team_name, graph_name, status')
               .eq('user_id', userId)
+              .eq('status', 'active')
+              .order('created_at', { ascending: false })
+              .limit(1)
               .maybeSingle()
             if (!error && data && data.status === 'active' && data.team_id) {
               const { data: key, error: rErr } = await supabaseClient
@@ -718,11 +724,13 @@ function claimIntentInFlight() {
           const teamsRes = await fetch(`${API_BASE}/v1/teams`, {
             headers: { Authorization: `Bearer ${session.access_token}` },
           })
-          if (teamsRes.ok) {
-            teamsList = await teamsRes.json()
+          if (teamsRes.ok && Array.isArray(teamsList)) {
             // Round-12: SIGNED_OUT during this fetch must not resurrect teams
             if (sessionTokenRef.current === session.access_token) setTeams(teamsList)
           } else {
+            // #1566 (review P1): a 200 with a non-array body is NOT 'no
+            // teams' — it must fail CLOSED, never flip an existing user
+            // into a surprise provisioning/key rotation.
             // #1566 (code-review P1): a transient API failure is NOT 'no
             // teams' — fail CLOSED to the error card rather than flipping an
             // existing user into a surprise provisioning (key rotation).
