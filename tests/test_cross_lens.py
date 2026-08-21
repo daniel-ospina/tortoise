@@ -21,6 +21,8 @@ from tortoise.cross_lens import (  # noqa: E402
     find_cross_lens_matches,
 )
 
+pytestmark = pytest.mark.timeout(600)  # real-embedder tests load bge-small (~57s load) — #1349 swap
+
 
 # ── deterministic fake encoder ────────────────────────────────────────
 

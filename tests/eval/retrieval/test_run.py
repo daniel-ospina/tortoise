@@ -35,6 +35,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from tests.eval.retrieval import run as run_module  # noqa: E402
 from tests.eval.retrieval.run import run_eval  # noqa: E402
 from tortoise.embeddings import EMBEDDING_MODEL  # noqa: E402
+pytestmark = pytest.mark.timeout(600)  # real-embedder tests load bge-small (~57s load) — #1349 swap
 
 ARCTIC_S_HF = "snowflake/snowflake-arctic-embed-s"
 MINILM_HF = "sentence-transformers/all-MiniLM-L6-v2"

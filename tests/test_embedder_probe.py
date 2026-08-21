@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools import embedder_probe as probe  # noqa: E402
 from tortoise.embeddings import EmbeddingModel, _encode  # noqa: E402
+pytestmark = pytest.mark.timeout(600)  # real-embedder tests load bge-small (~57s load) — #1349 swap
 
 FAKE_COMMIT = "a" * 40  # recorded resolved revision on fake models
 

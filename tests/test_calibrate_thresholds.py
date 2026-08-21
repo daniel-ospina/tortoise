@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools import calibrate_thresholds as ct  # noqa: E402
 from tools import embedder_probe  # noqa: E402
+pytestmark = pytest.mark.timeout(600)  # real-embedder tests load bge-small (~57s load) — #1349 swap
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "labeled_pairs.jsonl"
 BAND_ORDER = ("noise", "paraphrase", "dedup", "near-dup")
