@@ -2051,14 +2051,15 @@ def test_reap_only_safe_protects_live_pid_dir_present(monkeypatch):
                 proc.kill()
                 raise AssertionError("server did not start")
             sock = proc.stdout.readline().strip().split()[-1]
-            r = sp.run(["ps", "-eo", "pid,ppid,command"], capture_output=True,
-                       text=True)
-            server_pid = None
-            for line in r.stdout.splitlines():
-                if sock in line and "redis-server" in line:
-                    server_pid = int(line.split()[0])
+            # Redislite writes the server pid to redis.pid in the socket's
+            # dir — more robust than ps-scanning (ps truncates long cmdlines
+            # under load, which made "server pid not found" flaky in CI).
+            pidfile = os.path.join(os.path.dirname(sock), "redis.pid")
+            for _ in range(50):
+                if os.path.exists(pidfile):
                     break
-            assert server_pid, "daemonized server pid not found"
+                time.sleep(0.1)
+            server_pid = int(Path(pidfile).read_text().strip())
             assert _pid_alive_for(server_pid), "server should be live"
             # End-to-end: discover + phase1 + reap(only_safe=True) must NOT
             # kill a live server while a suite is active (dir present, 0
@@ -2111,14 +2112,12 @@ def test_reap_only_safe_protects_live_pid_dir_gone(monkeypatch):
                 proc.kill()
                 raise AssertionError("server did not start")
             sock = proc.stdout.readline().strip().split()[-1]
-            r = sp.run(["ps", "-eo", "pid,ppid,command"], capture_output=True,
-                       text=True)
-            server_pid = None
-            for line in r.stdout.splitlines():
-                if sock in line and "redis-server" in line:
-                    server_pid = int(line.split()[0])
+            pidfile = os.path.join(os.path.dirname(sock), "redis.pid")
+            for _ in range(50):
+                if os.path.exists(pidfile):
                     break
-            assert server_pid, "daemonized server pid not found"
+                time.sleep(0.1)
+            server_pid = int(Path(pidfile).read_text().strip())
             assert _pid_alive_for(server_pid), "server should be live"
             record = {"socket_path": sock, "pid": server_pid,
                       "dbdir": "/nonexistent/race-dir", "dir_missing": True,

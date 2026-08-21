@@ -86,13 +86,30 @@ def client():
         finally:
             _restore_tortoise_sdk_init(_orig_init)
             app.dependency_overrides.clear()
+            while _REG_SDKS:
+                try:
+                    _REG_SDKS.pop().close()
+                except Exception:
+                    pass
 
 
 @pytest.fixture
 def reg():
-    """Registry graph handle (same temp DB via the patched __init__)."""
+    """Registry graph handle (same temp DB via the patched __init__).
+
+    Holds the SDK in _REG_SDKS so close-on-GC (#1475) does not shut the
+    shared temp server down before the test uses the handle (#1556).
+    """
     sdk = TortoiseSDK(namespace="registry")
+    _REG_SDKS.append(sdk)
     return sdk._get_registry()
+
+
+# #1556: hold registry SDKs alive — the `reg` fixture returns
+# _get_registry() but the SDK goes out of scope; with #1475 close-on-GC
+# the server is shut down before the test uses the handle (redis.socket
+# ConnectionError flake). Keep the SDK referenced for the test duration.
+_REG_SDKS: list = []
 
 
 def _as_user(user_id: str, email: str):

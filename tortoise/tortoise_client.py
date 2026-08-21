@@ -36,6 +36,7 @@ import json
 import os
 import sqlite3
 import sys
+import threading
 from pathlib import Path
 
 # Ensure premise-labs is on path (sibling project)
@@ -69,14 +70,135 @@ _UNAVAILABLE_MESSAGE = (
 )
 
 
-def _get_sdk() -> "TortoiseSDK":  # noqa: F821, UP037
-    """Lazy-import TortoiseSDK. Returns None if unavailable."""
+# ── #1562: one SDK per process (module-level lazy singleton) ────────────
+#
+# Pre-#1562, _get_sdk() built a FRESH TortoiseSDK() on every call — the CLI's
+# main() dispatcher calls it once per subcommand, so a multi-command session
+# created a new SDK per command and dropped the previous one. With #1475's
+# close-on-GC finalizer, the collected SDK could shut down the shared embedded
+# redislite server (its last-client check saw count==1 — the next command's
+# SDK had not connected yet) while the fresh SDK of the NEXT command was
+# connecting — a race under load that surfaced as ConnectionError →
+# _UNAVAILABLE_ERRORS → {"error": "tortoise_unavailable"} mid-session (flaked
+# test_cli_write_points_healthy_roundtrip with KeyError: 'confidence').
+#
+# The cache pins ONE SDK for the process lifetime: no per-command SDK is ever
+# collected, so the embedded server never dies out from under a later command.
+# A lock serializes check+construct so concurrent contract calls can never both
+# miss the cache and build two SDKs (the loser would be unreferenced → GC'd →
+# the close-on-GC finalizer could shut the server out from under the winner).
+_SDK_CACHE: TortoiseSDK | None = None  # noqa: F821
+_SDK_LOCK = threading.RLock()
+
+
+def _same_db_path(cached: str | None, current: str | None) -> bool:
+    """Path equality with the hosted_api._anchor_usable normalization
+    (:memory: carve-out + abspath compare — #1502). O(1), no probe.
+    """
+    if cached is None or current is None:
+        return False
     try:
-        from tortoise.sdk import TortoiseSDK
-        return TortoiseSDK()  # uses TORTOISE_DB_URI from env
-    except _UNAVAILABLE_ERRORS as e:
-        _log_unavailable(reason=e)
-        return None
+        return (str(cached) == str(current)) or (
+            str(cached) != ":memory:"
+            and os.path.abspath(cached) == os.path.abspath(current)
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def _sdk_matches_env(sdk) -> bool:
+    """True when the cached SDK is still bound to the CURRENT env DB.
+
+    The cache must never serve a stale DB: TORTOISE_DB_URI/PATH can change
+    between calls (tests swap temp DBs per test; long-running processes can
+    re-point). Full drift check, mirroring hosted_api._anchor_usable (#1502):
+    mode (URI vs embedded) AND the bound URI/path must match the current
+    env. URI wins over PATH (SDK precedence: TortoiseSDK reads
+    TORTOISE_DB_URI first). O(1) attribute/path comparison, no probe.
+    """
+    uri = os.environ.get("TORTOISE_DB_URI")
+    if uri:
+        return getattr(sdk, "_db_uri", None) == uri
+    if getattr(sdk, "_db_uri", None) is not None:
+        return False  # URI-mode cache is stale once the URI env is gone
+    path = os.environ.get("TORTOISE_DB_PATH")
+    if path:
+        # Embedded mode: the bound path must match the current PATH env.
+        return _same_db_path(getattr(sdk, "_db_path", None), path)
+    # Neither env var set → embedded default-path mode: compare against the
+    # CURRENT default (HOME-dependent — resolve_db_path may have moved).
+    from tortoise.config import resolve_db_path
+    try:
+        current = resolve_db_path()
+    except Exception:
+        return True  # resolution failure → fall back to mode-only match
+    return _same_db_path(getattr(sdk, "_db_path", None), current)
+
+
+def _sdk_usable(sdk) -> bool:
+    """True when the cached SDK's DB is still alive (self-heal probe).
+
+    URI mode: never self-heal — an unreachable REMOTE DB is a persistent
+    config/infra error; rebuilding cannot help and must not mask it (the
+    contract's _UNAVAILABLE_ERRORS path handles it). Embedded mode: probe
+    the projection — a dead server (external kill, reaper, long idle) is
+    evicted and rebuilt once by _get_sdk. A never-connected SDK (_proj is
+    None) is fine — first use connects (mirrors hosted_api's
+    `elif anchor._proj is None: anchor._get_proj()` keepalive).
+    """
+    if getattr(sdk, "_db_uri", None) is not None:
+        return True
+    proj = getattr(sdk, "_proj", None)
+    if proj is None:
+        return True
+    try:
+        return proj._probe_ok()
+    except Exception:
+        return False
+
+
+def _get_sdk() -> "TortoiseSDK":  # noqa: F821, UP037
+    """Lazy-import TortoiseSDK, cached module-level (#1562). Returns None
+    if unavailable.
+
+    The FIRST call constructs and caches one SDK (env-driven); later calls
+    reuse it across commands. Self-heal: a cached SDK whose embedded server
+    died (external kill, reaper, long idle) is evicted and rebuilt ONCE; a
+    rebuild failure (or a first-call failure) returns None — the
+    graceful-degradation contract is unchanged.
+    """
+    global _SDK_CACHE
+    with _SDK_LOCK:
+        if _SDK_CACHE is not None:
+            if _sdk_matches_env(_SDK_CACHE) and _sdk_usable(_SDK_CACHE):
+                return _SDK_CACHE
+            _close_cached_sdk()  # stale env binding or dead server — evict
+        try:
+            from tortoise.sdk import TortoiseSDK
+            _SDK_CACHE = TortoiseSDK()  # uses TORTOISE_DB_URI from env
+            return _SDK_CACHE
+        except _UNAVAILABLE_ERRORS as e:
+            _log_unavailable(reason=e)
+            _SDK_CACHE = None
+            return None
+
+
+def _close_cached_sdk() -> None:
+    """Close and drop the cached SDK (tests, long-running processes).
+
+    Idempotent; never raises. Embedded close() shuts down the SDK's server
+    (SAVE); URI-mode close disconnects. The next _get_sdk() rebuilds from
+    the current env.
+    """
+    global _SDK_CACHE
+    with _SDK_LOCK:
+        sdk = _SDK_CACHE
+        _SDK_CACHE = None
+        if sdk is not None:
+            try:  # noqa: SIM105
+                sdk.close()
+            except Exception:
+                pass
 
 
 def _check_available() -> bool:

@@ -54,12 +54,23 @@ def client():
                 yield tc
         finally:
             _restore_tortoise_sdk_init(_orig_init)
+            while _REG_SDKS:
+                try:
+                    _REG_SDKS.pop().close()
+                except Exception:
+                    pass
+
+
+# #1556: hold registry SDKs alive — _get_registry() drops the SDK ref;
+# close-on-GC (#1475) shuts the temp server before the test uses it.
+_REG_SDKS: list = []
 
 
 @pytest.fixture
 def reg(client):
     from tortoise.hosted_api import _make_sdk
     sdk = _make_sdk(namespace="registry")
+    _REG_SDKS.append(sdk)
     return sdk._get_registry()
 
 
