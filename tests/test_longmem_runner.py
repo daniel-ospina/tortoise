@@ -27,7 +27,7 @@ from tools.longmem_eval.reader import MockReader, build_reader  # noqa: E402, RU
 from tools.longmem_eval.retrieve import (  # noqa: E402, RUF100
     _annotate_hits, render_context, retrieve_for_question,
 )
-from tools.longmem_eval.run import (  # noqa: E402
+from tools.longmem_eval.run import (
     outcomes_to_report, run_evaluation, run_main,
 )
 
@@ -586,6 +586,12 @@ def test_single_question_failure_does_not_abort_run(tmp_path):
     class _ExplodingReader(MockReader):
         def answer(self, **kw):
             raise RuntimeError("transient provider boom")
+
+    # M2 (#1523) guard: a plain RuntimeError is UNKNOWN-class (transient-safe
+    # per the P2 taxonomy) — the fatal-abort guard must NOT fire for it, so
+    # the run keeps recording failures and continuing.
+    from tortoise.model_adapters import is_fatal
+    assert not is_fatal(RuntimeError("transient provider boom"))
 
     outcomes, report = run_evaluation(
         _mini()[:2], reader=_ExplodingReader(), judge=MockJudge(),
