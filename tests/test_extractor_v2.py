@@ -106,6 +106,44 @@ class TestMasterList:
         m = v2.build_master_list()
         assert m["memory_granularity"], "packs must declare memory_granularity"
 
+    def test_master_list_user_personal_state_section(self):
+        """E2 (#1534): the master list gains the user-personal-state vocabulary
+        — personal bests, schedules, preferences — the operative Tier-A
+        criterion. The VALUE is the fact; retain it verbatim."""
+        m = v2.build_master_list()
+        section = m["user_personal_state"]
+        assert set(section) == {"personal_best", "schedule", "preference"}
+        assert "27:12" in section["personal_best"]          # value = the fact
+        assert ("verbatim" in section["schedule"].lower()
+                or "verbatim" in section["preference"].lower())
+
+    def test_vocabulary_not_a_kind(self):
+        """E2 (D1/D2): the hint vocabulary NEVER becomes a kind —
+        master_kind_forms iterates a fixed section tuple; no vocabulary
+        entry may leak into the closed-kind set."""
+        m = v2.build_master_list()
+        forms = v2.master_kind_forms(m)
+        for cat in m["user_personal_state"]:
+            assert cat not in forms            # hint vocabulary never becomes a kind
+            assert f"core:{cat}" not in forms
+
+    def test_render_master_marks_vocab_as_hint_not_kind(self):
+        """E2 (D2): the rendered master list marks the vocabulary as a
+        classification hint, explicitly NOT kinds."""
+        rendered = v2._render_master(v2.build_master_list())
+        assert "USER-PERSONAL-STATE VOCABULARY" in rendered
+        assert "NOT kinds" in rendered
+
+    def test_granularity_carve_out_surfaces(self):
+        """E2 (D3): the state-value carve-out surfaces in S1's
+        memory_granularity slot AND in the S2/S4 rendered master list —
+        state values are protected from the mechanics-token filter."""
+        # S1's memory_granularity slot carries the carve-out
+        assert "STATE-VALUE CARVE-OUT" in v2._granularity_text()
+        assert "27:12" in v2._granularity_text()
+        # and S2/S4's rendered master list carries it too
+        assert "STATE-VALUE CARVE-OUT" in v2._render_master(v2.build_master_list())
+
 
 # ── Chunker + compiler ─────────────────────────────────────────────────────
 
@@ -183,6 +221,36 @@ class TestS2:
         assert "STRIP, DON'T DROP" in v2.S2_TMPL
         assert "cause-effect" in v2.S2_TMPL
         assert "operational/process lessons" in v2.S4_TMPL
+
+    def test_output_contract_has_tier_and_quote(self):
+        """E2 (D4): the OUTPUT_CONTRACT points carry the tier marker
+        ("A|B") and the verbatim quote field."""
+        assert '"tier": "A|B"' in v2.OUTPUT_CONTRACT
+        assert '"quote"' in v2.OUTPUT_CONTRACT
+
+    def test_s2_prompt_value_filter_carve_out(self):
+        """E2 (D3): S2's VALUE FILTER excludes PROCESS ARTIFACTS only —
+        user-personal-state values are the FACT, not mechanics tokens."""
+        assert "CARVE-OUT" in v2.S2_TMPL
+        assert "not a mechanics token" in v2.S2_TMPL
+        assert "27:12" in v2.S2_TMPL
+
+    def test_s2_prompt_tier_a_classification_rule(self):
+        """E2 (D1/D4): S2's Tier-A rule — statement kind, verbatim content
+        + quote, hint-not-kind / no-per-tier-pipeline language."""
+        assert 'tier:"A"' in v2.S2_TMPL
+        assert "NOT a kind" in v2.S2_TMPL or "not a kind" in v2.S2_TMPL
+        assert "no per-tier" in v2.S2_TMPL or "per-tier pipeline" in v2.S2_TMPL
+        assert 'pointKind stays "statement"' in v2.S2_TMPL
+        assert "verbatim" in v2.S2_TMPL
+
+    def test_s4_prompt_carve_out_and_keep_tier_a(self):
+        """E2 (D5): S4 applies the same carve-out and NEVER drops Tier-A
+        state-value points from the S2 list (merge-not-replace at the
+        prompt layer; E4's deterministic union supersedes this later)."""
+        assert "CARVE-OUT" in v2.S4_TMPL
+        assert "NEVER dropped" in v2.S4_TMPL or "never dropped" in v2.S4_TMPL
+        assert "Tier-A" in v2.S4_TMPL
 
     def test_prompt_supersession_rules(self):
         """#1386: S2/S4 carry the supersession mapping rule + decision-event
@@ -688,6 +756,63 @@ class TestS5:
         assert result["payload"]["operators"] == []
         assert any("MITIGATES target edge not emitted" in w
                    for w in result["warnings"])
+
+    def test_tier_a_point_passes_through_with_quote(self):
+        """E2 (D4/D6): a Tier-A embed point yields a payload point with
+        tier:"A", the verbatim value in content AND quote, pointKind still
+        statement — and counts in stats["tier_a_points"] (surface 17)."""
+        embed = json.loads(json.dumps(S2_FIXTURE))
+        embed["points"] = [{"content": "my personal best 5K time is 27:12",
+                            "pointKind": "statement", "about_entities": [],
+                            "tier": "A",
+                            "quote": "my personal best 5K time is 27:12"}]
+        result = v2.execute_embed(embed, {}, session_id="s1")
+        pt = result["payload"]["points"][0]
+        assert pt["content"] == "my personal best 5K time is 27:12"  # verbatim
+        assert pt["quote"] == "my personal best 5K time is 27:12"    # verbatim
+        assert pt["tier"] == "A"
+        assert pt["pointKind"] == "statement"                        # still a statement
+        assert result["stats"]["tier_a_points"] == 1
+
+    def test_tier_b_absent_by_default(self):
+        """E2 (D1/O3): tier is A-only emission — a Tier-B/no-tier point
+        yields NO tier key (zero-diff payloads for non-Tier-A sessions)."""
+        embed = json.loads(json.dumps(S2_FIXTURE))  # no tier on the point
+        result = v2.execute_embed(embed, {}, session_id="s1")
+        pt = result["payload"]["points"][0]
+        assert "tier" not in pt
+        assert result["stats"]["tier_a_points"] == 0
+
+    def test_tier_a_without_quote_warns(self):
+        """E2 (D4): a Tier-A point with an empty quote warns (fail-loud,
+        never silent) but is still written (S5 never blocks)."""
+        embed = json.loads(json.dumps(S2_FIXTURE))
+        embed["points"] = [{"content": "my personal best 5K time is 27:12",
+                            "pointKind": "statement", "about_entities": [],
+                            "tier": "A"}]          # quote omitted
+        result = v2.execute_embed(embed, {}, session_id="s1")
+        assert any("verbatim quote" in w for w in result["warnings"])  # loud, not silent
+        assert result["payload"]["points"]          # still written — never blocks
+
+    def test_tier_not_minted_kind(self):
+        """E2 (D1): tier is a classification hint, NOT a kind — the
+        minted-kind gate stays clean for a Tier-A point."""
+        embed = json.loads(json.dumps(S2_FIXTURE))
+        embed["points"] = [{"content": "gym at 6pm", "pointKind": "statement",
+                            "about_entities": [], "tier": "A",
+                            "quote": "gym at 6pm"}]
+        assert v2._minted_kind_report(embed) == []  # tier is not a kind
+        result = v2.execute_embed(embed, {}, session_id="s1")
+        assert result["minted_kinds"] == []
+
+    def test_ingest_create_point_calls_pass_tier(self):
+        """E2 (Task 4, P4 parity): BOTH create_point call sites in the
+        hosted commit points-reconcile pass thread `tier` — the marker must
+        behave identically on SDK commit and hosted capture (structural
+        guard; live read-back is gated on a real TORTOISE_DB_URI)."""
+        import tortoise.hosted_api
+        src = Path(tortoise.hosted_api.__file__).read_text()
+        assert src.count("tier=pr.point.tier") >= 2
 
 
 class TestE5FactValueContradiction:
@@ -1378,6 +1503,53 @@ class TestOrchestrator:
         # compiled story dedups the repeated sentence
         assert out["story_arc"].count("We believed X.") == 1
         assert out["payload"] is not None
+
+    def test_verbatim_state_value_survives_pipeline(self, monkeypatch):
+        """E2 (Task 5, E2E-5 unit analog): the KU needle — "my personal
+        best 5K time is 27:12" — survives extraction VERBATIM: value in
+        content + quote, tier:"A", survives the S4 pass (empty gap list →
+        S2 kept), the assistant-suggestion-only negative holds, and the
+        owner invariant is honored (the raw conversation is NEVER mutated
+        by S1–S5 — extraction never replaces verbatim evidence)."""
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+
+        def resp(system, user):
+            if "STORY SUMMARIZER" in system:
+                return ("The user stated a personal best: my personal best 5K "
+                        "time is 27:12. The assistant suggested interval training.")
+            if "GRAPH MAPPER" in system:
+                return json.dumps({
+                    "entities": [], "events": [],
+                    "points": [{
+                        "content": "my personal best 5K time is 27:12",
+                        "pointKind": "statement", "about_entities": [],
+                        "tier": "A",
+                        "quote": "my personal best 5K time is 27:12",
+                    }],
+                    "operators": [], "chain_notes": [], "link_before_create": []})
+            if "GAP REVIEWER" in system:
+                # empty gap list → the pipeline keeps the S2 list (existing
+                # deterministic backstop) — the Tier-A point survives S4
+                return json.dumps({"entities": [], "events": [], "points": [],
+                                   "operators": [], "chain_notes": [],
+                                   "link_before_create": []})
+            raise AssertionError(f"unexpected system prompt: {system[:50]}")
+
+        conv = [{"role": "user", "content": "my personal best 5K time is 27:12"},
+                {"role": "assistant", "content": "consider interval training"}]
+        out = v2.extract_session_v2(MockModel(resp), conv)
+        assert out["errors"] == []
+        pt = next(p for p in out["payload"]["points"])
+        assert "27:12" in pt["content"]                       # value verbatim, not compressed
+        assert "27:12" in pt["quote"]                         # verbatim source retained
+        assert pt["tier"] == "A"
+        # owned negative: the assistant suggestion is NOT a user fact here
+        assert "interval training" not in pt["content"]
+        # owner invariant: extraction NEVER replaces verbatim evidence —
+        # the raw conversation is untouched by S1–S5
+        assert conv == [{"role": "user", "content": "my personal best 5K time is 27:12"},
+                        {"role": "assistant", "content": "consider interval training"}]
 
 
 # ── S3 integration with the real backend (skip-if-unavailable) ─────────────

@@ -1347,3 +1347,23 @@ class TestE3PointFields:
         assert result.ok, result.errors
         result2, _ = _check(_raw_payload(points=[_point(0, search_keys=["x" * 60])]))
         assert result2.ok, result2.errors
+
+    def test_layer1_accepts_tier_marker(self):
+        """E2 (D6): the Tier-A marker is a registered Point field under
+        extra="forbid" — a Tier-A payload validates and round-trips (the
+        classification hint survives the Layer-1 gate)."""
+        raw = _finalize(_raw_payload(points=[_point(0, tier="A")]))
+        result, payload = validate_payload_dict(raw)
+        assert result.ok, result.errors
+        assert payload.points[0].tier == "A"
+
+    def test_tier_not_in_canonical(self):
+        """E2 (D6): tier is a classification hint, NOT part of the content-
+        addressed canonical — a payload with a tier marker keeps the SAME
+        client_commit_id as the identical payload without it (idempotency
+        and parity unaffected; absence = Tier-B default)."""
+        legacy = _finalize(_raw_payload(points=[_point(0)]))
+        with_tier = _finalize(_raw_payload(points=[_point(0, tier="A")]))
+        assert with_tier["client_commit_id"] == legacy["client_commit_id"]
+        canon = canonical_payload("s1", [_point(0, tier="A")], [], [], "s", "a")
+        assert '"tier"' not in canon

@@ -99,6 +99,40 @@ CHAINS = {
 
 PACK_NS = ("product-strategy:", "dev:", "marketing:", "pm:")
 
+# E2 (#1534): the USER-PERSONAL-STATE vocabulary — the operative criterion for
+# the Tier-A classification hint (personal bests, schedules, preferences). The
+# VALUE is the fact; retain it verbatim. This is prompt-guidance ONLY: it is a
+# rendered section of the master list, NEVER part of the closed-kind set
+# (master_kind_forms iterates a fixed section tuple) and NEVER a new kind.
+USER_PERSONAL_STATE = {
+    "personal_best": (
+        "A personal record/achievement VALUE — times, distances, scores, "
+        "quantities ('my personal best 5K time is 27:12'). The VALUE is the "
+        "fact; retain it verbatim."
+    ),
+    "schedule": (
+        "A recurring commitment VALUE — regular times, days, frequencies "
+        "('gym at 6pm', 'standup at 9:30'). The TIME is the fact; retain it verbatim."
+    ),
+    "preference": (
+        "A stated preference/choice VALUE — likes, dislikes, defaults, chosen "
+        "options ('prefers dark mode', 'coffee not tea'). The CHOICE is the "
+        "fact; retain it verbatim."
+    ),
+}
+
+# E2 (D3): the value-filter carve-out — distinguishes MECHANICS TOKENS (drop:
+# ids, hashes, counts as process metrics) from STATE VALUES (keep verbatim:
+# personal bests, schedules, preferences — the value IS the fact). Shared by
+# S1 (_granularity_text), S2 and S4 (via _render_master).
+STATE_VALUE_CARVE_OUT = (
+    "STATE-VALUE CARVE-OUT (applies to every domain above): user-personal-state "
+    "VALUES — personal bests, schedules, preferences — are DURABLE even where "
+    "counts/logistics are ephemeral. Carry the VALUE verbatim ('my personal "
+    "best 5K time is 27:12', not 'the user has a fast 5K'). The value is the "
+    "fact; it is NOT a mechanics token."
+)
+
 CORE_OBJECT_KEYS = (
     "core:Project", "core:WorkItem", "core:document", "core:tag",
     "core:user", "core:skill", "core:tool", "core:agent",
@@ -147,6 +181,10 @@ def build_master_list() -> dict:
         "chains": {name: {"path": list(c["path"]), "note": c["note"]}
                    for name, c in CHAINS.items()},
         "memory_granularity": dict(brief.get("memory_granularity", {})),
+        # E2 (#1534): user-personal-state vocabulary — the Tier-A classification
+        # hint criterion. NOT kinds (master_kind_forms' section tuple excludes
+        # it); rendered into S2/S4 prompt context only.
+        "user_personal_state": dict(USER_PERSONAL_STATE),
     }
     _MASTER_LIST_CACHE = copy.deepcopy(master)
     return master
@@ -199,6 +237,20 @@ def _render_master(master: dict) -> str:
         lines.append("\nMEMORY GRANULARITY (what each domain considers DURABLE "
                      "vs EPHEMERAL — the retention bar)")
         lines += [f"- {ns}: {txt}" for ns, txt in g.items()]
+
+    # E2 (#1534): the user-personal-state vocabulary — the operative criterion
+    # for the Tier-A classification hint. Explicit hint-not-kind guard: the
+    # vocabulary is classification guidance, never entity/event/point kinds.
+    lines.append("\nUSER-PERSONAL-STATE VOCABULARY (Tier-A classification "
+                 "hint — these are NOT kinds: do NOT emit them as "
+                 "entity/event/point kinds. A fact matching one is Tier-A → a "
+                 "statement Point with tier:\"A\", the verbatim value in "
+                 "content, and the verbatim source in quote):")
+    lines += [f"- {cat} — {desc}"
+              for cat, desc in master["user_personal_state"].items()]
+    if g:
+        lines.append("")
+        lines.append(STATE_VALUE_CARVE_OUT)
     return "\n".join(lines)
 
 
@@ -264,9 +316,14 @@ memory-granularity rules above. If a detail won't matter then, drop it."""
 
 
 def _granularity_text() -> str:
+    """The S1 memory-granularity slot. E2 (D3): appends the STATE-VALUE
+    CARVE-OUT so S1's granularity rules protect user-personal-state values
+    from the mechanics-token filter — S1's "RESTATE, DON'T REINVENT" rule
+    then carries the value verbatim into the story."""
     master = build_master_list()
     g = master.get("memory_granularity", {})
-    return "\n".join(f"- {ns}: {txt}" for ns, txt in g.items())
+    out = "\n".join(f"- {ns}: {txt}" for ns, txt in g.items())
+    return f"{out}\n{STATE_VALUE_CARVE_OUT}" if out else STATE_VALUE_CARVE_OUT
 
 
 # ── Session-date anchoring (E1, #1533) ────────────────────────────────────
@@ -405,6 +462,7 @@ OUTPUT_CONTRACT = """{
   "events": [{"content": str, "eventKind": str, "about_entities": [str], "startedAt": "YYYY-MM-DD|YYYY-MM-DDThh:mm:ss|null", "slots": {"subject": [{"name": str, "kind": str, "confidence": float}], "object": [{"name": str, "kind": str, "confidence": float}], "event": [{"name": str, "kind": str, "confidence": float}]}}],
   "points": [{"content": str, "pointKind": "statement", "about_entities": [str], "when": "YYYY-MM-DD|null",
               "slots": {"subject": [...], "object": [...], "event": [...]},
+              "tier": "A|B",            # Tier-A state-value marker (E2); omit = Tier-B
               "quote": str|null,          # verbatim source text, <=200 chars (E3)
               "search_keys": [str, ...],  # 2-4 aliases + verbatim value tokens (E3)
               "source_turn_id": int|null}],  # {index}: turn in the SOURCE TRANSCRIPT (E3)
@@ -525,6 +583,27 @@ But STRIP, DON'T DROP the durable claim they carry:
 - Process chatter with NO durable claim is dropped ("I'll fix both now",
   "let me verify X").
 What survives is what changes the world model — including how we work.
+
+CARVE-OUT — USER-PERSONAL-STATE VALUES ARE NOT MECHANICS TOKENS
+The exclusion list above targets PROCESS ARTIFACTS (issue ids, commit hashes,
+PR numbers, test counts as process metrics, file paths, commands, tool calls).
+A user-personal-state VALUE — a personal-best time ("27:12"), a schedule slot
+("gym at 6pm"), a preference ("coffee not tea") — is the FACT; the value is
+not a mechanics token — keep it VERBATIM: never strip, round, paraphrase, or
+summarize a state value.
+
+TIER-A STATE-VALUE CLASSIFICATION (a classification HINT — not a kind, not a pipeline)
+Some statements are USER-PERSONAL-STATE facts: personal bests, schedules,
+preferences (see the USER-PERSONAL-STATE VOCABULARY in the master list). For
+these, the VALUE is the fact and must survive verbatim:
+- Emit ONE statement Point with tier:"A".
+- content = the fact WITH the exact value ("my personal best 5K time is
+  27:12", NOT "user has a personal best 5K time").
+- quote = the verbatim source sentence carrying the value (copy exactly,
+  <=200 chars, from the story — S1 preserves facts exactly).
+- pointKind stays "statement". tier is a hint only — no special kind, no
+  special retrieval, no per-tier pipeline.
+All other statement Points are tier:"B" (or omit tier).
 
 ATOMIC POINTS (E3): emit ONE claim per point. Split compound statements
 into separate points. The claim's VALUE survives verbatim — never compress
@@ -783,7 +862,9 @@ knowledge about how the environment behaves or how the team works — e.g.
 "backgrounded processes die when the tool returns", "create_point defaults to
 draft mode")? Add them. Do NOT pad with process chatter (the value filter
 applies — same STRICT EXCLUSION as S2: strip the mechanics tokens, keep the
-durable claim).
+durable claim — with the same CARVE-OUT: user-personal-state VALUES (personal
+bests, schedules, preferences) are facts, kept verbatim, never treated as
+mechanics tokens).
 
 MASTER LIST (same closed vocabulary as S2 — no minted kinds)
 {master_list}
@@ -850,6 +931,9 @@ Rules:
 - chain_notes: flag violations, TRY TO REPAIR toward the nearest valid chain
   position, never invent entities.
 - link_before_create: record what you searched / what the graph already had.
+- Tier-A state-value points from the S2 list are NEVER dropped — re-emit
+  them (with corrections if the search shows they exist). The S4 pass
+  COMPLETES the list; it does not replace S2 findings. The value is the fact.
 Empty arrays are valid. Print ONLY the JSON object."""
 
 
@@ -1618,6 +1702,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # ── points (dependency order 3) ───────────────────────────────────────
     payload_points: list[dict] = []
     point_ids: dict[str, str] = {}   # norm content → point id
+    tier_a_points = 0                # E2 (#1534): Tier-A state-value count
     for p in embed_list.get("points", []) or []:
         if not isinstance(p, dict):
             warnings.append(f"non-dict point entry {p!r} skipped")
@@ -1692,6 +1777,18 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             "search_keys": search_keys,
             "source_turn_id": turn_idx,
         }
+        # E2 (#1534): Tier-A state-value marker — classification hint,
+        # A-only emission (absence = Tier-B default → zero-diff payloads for
+        # non-Tier-A sessions). Fail-loud guard: a Tier-A point without a
+        # verbatim quote warns (never silent, never blocking).
+        tier = str(p.get("tier") or "").strip().upper()
+        if tier == "A":
+            if not quote:
+                warnings.append(
+                    f"Tier-A point '{content[:60]}' has no verbatim quote — "
+                    "the state value may not survive; quote required for Tier-A")
+            pt_entry["tier"] = "A"
+            tier_a_points += 1
         pt_slots = _clean_slots(p.get("slots"), warnings,
                                 f"point '{content[:60]}'", master)
         pt_slots = _resolve_slot_refs(pt_slots, emitted_entity_keys, warnings,
@@ -1828,6 +1925,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         "stats": {
             "entities": len(payload_entities), "events": len(payload_events),
             "points": len(payload_points), "operators": len(payload_operators),
+            "tier_a_points": tier_a_points,
             "search_queries": (search or {}).get("queries_run", 0),
             "search_degraded": bool((search or {}).get("degraded")),
             "chain_notes": len(chain_notes),
