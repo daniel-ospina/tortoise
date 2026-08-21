@@ -513,7 +513,8 @@ def _run_with_sdk(args, sdk) -> dict:
     if getattr(args, "model", None) is not None:
         embedder_probe.inject_model(
             args.model,
-            query_prompt=getattr(args, "query_prompt", None))
+            query_prompt=getattr(args, "query_prompt", None),
+            load_timeout=getattr(args, "load_timeout", None))
 
     # 2. Corpus (seed unless --no-seed-corpus).
     seeded = 0
@@ -735,6 +736,10 @@ def main(argv: list[str] | None = None) -> int:
                    "vendor config prompt_name='query') — parity with run.py: "
                    "the in-path E2E-8 encode must carry the vendor prompt "
                    "prefix (it adds tokens to every measured encode)")
+    p.add_argument("--load-timeout", type=float, default=None,
+                   help="EmbeddingModel load timeout override (seconds) — "
+                        "the first model load on a contended machine can exceed "
+                        "the 30s default (bge-small measured ~57s)")
     p.add_argument("--quiet", action="store_true")
     args = p.parse_args(argv)
 
