@@ -521,16 +521,28 @@ function claimIntentInFlight() {
   async function mintSessionKey(purpose, teamId) {
     const tok = sessionTokenRef.current
     if (!tok) throw new Error('No session')
-    const mint = async (tid) => {
+    const mint = async (tid, purposeOverride) => {
       const res = await fetch(`${API_BASE}/v1/session/key`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
-        body: JSON.stringify(tid ? { purpose, team_id: tid } : { purpose }),
+        body: JSON.stringify(tid ? { purpose: purposeOverride || purpose, team_id: tid } : { purpose: purposeOverride || purpose }),
       })
       return res
     }
     let res = await mint(teamId)
     let mintedTeamId = teamId
+    // #1566-fix: the bootstrap mint has a 3-ACTIVE cap (24h keys) — a user
+    // who accumulated keys across incognito windows / retries is dead-ended
+    // with 'Too many active session keys — wait for expiry' until expiry.
+    // The RECOVERY mint is persistent + auto-revokes the oldest key at the
+    // cap, so it is the escape hatch: fall back to it on the bootstrap cap.
+    if (purpose === 'bootstrap' && res.status === 429) {
+      const body = await res.json().catch(() => ({}))
+      const detail = typeof body.detail === 'string' ? body.detail : ''
+      if (/active session keys/i.test(detail)) {
+        res = await mint(mintedTeamId || null, 'recovery')
+      }
+    }
     if (res.status === 400 && !teamId) {
       // Multi-membership: server demands a team_id — auto-select the first
       // team and retry (P1 fallback; never degrade to the key screen).
