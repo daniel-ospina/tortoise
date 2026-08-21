@@ -840,9 +840,12 @@ def test_v2_ingest_writes_payload_with_evidence_marks(tmp_path, monkeypatch):
             params={"id": "pt_beta"}).result_set
         assert beta[0][0] is False and beta[0][1] is False
         assert beta[0][2] is False
-        # evidence-mark negative: a non-overlapping point is NOT marked
-        # (an always-True marking regression would silently inflate recall)
-        assert beta[0][3] is False
+        # has_answer is M6's domain (#1526), not E3's: the fixture's session
+        # carries a has_answer turn, so M6 mark (a) source-session attribution
+        # marks EVERY point from that session — including the non-overlapping
+        # pt_beta (M6 recalibration, OR of 3 marks; the pre-M6 overlap-only
+        # negative is obsolete). E3 does not change evidence marking.
+        assert beta[0][3] is True
         # CONTAINS edges: session → raw + extracted points + turn points
         cnt = proj.g.query(
             "MATCH (s:Session {id:$id})-[:CONTAINS]->(p) RETURN count(*)",
