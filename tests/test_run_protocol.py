@@ -23,11 +23,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tools.longmem_eval import run_protocol as rp  # noqa: E402, I001, RUF100
-from tools.longmem_eval.full_context import (  # noqa: E402
+from tools.longmem_eval.full_context import (
     CELL_EXTRACTION_APPROACH, full_haystack_hits, run_cell,
 )
-from tools.longmem_eval.judge import MockJudge  # noqa: E402
-from tools.longmem_eval.reader import MockReader  # noqa: E402
+from tools.longmem_eval.judge import MockJudge
+from tools.longmem_eval.reader import MockReader
 
 MINI = Path(__file__).parent / "fixtures" / "longmemeval_mini.json"
 
@@ -200,7 +200,7 @@ def test_full_haystack_hits_cover_every_session():
     assert len(hits) == len(question["haystack_sessions"])
     assert {h["lme_session_index"] for h in hits} == set(
         range(len(question["haystack_sessions"])))
-    for h, sdate in zip(hits, question["haystack_dates"]):
+    for h, sdate in zip(hits, question["haystack_dates"], strict=True):
         assert h["session_date"] == sdate
     assert all(h["match_source"] == "full-context" for h in hits)
     # content is the verbatim session (role-prefixed), not empty

@@ -145,21 +145,24 @@ def run_cell(
             context_tokens = _estimate_tokens(context_text)
             t_reader = time.monotonic()
             hypothesis = _call_with_backoff(
-                lambda: reader.answer(
-                    context_hits=hits,
-                    question=question["question"],
-                    question_date=question_date,
-                    question_type=question.get("question_type", "") or None,
+                # Bind loop vars as lambda defaults — the retry closure must
+                # capture THIS question's values (B023-safe; mirrors run.py's
+                # per-question _run_one isolation).
+                lambda q=question, h=hits, qd=question_date: reader.answer(
+                    context_hits=h,
+                    question=q["question"],
+                    question_date=qd,
+                    question_type=q.get("question_type", "") or None,
                 ),
                 what=f"reader for {qid}", retries=max_retries)
             reader_ms = (time.monotonic() - t_reader) * 1000.0
             t_judge = time.monotonic()
             label = _call_with_backoff(
-                lambda: judge.judge(
-                    question_type=question.get("question_type", ""),
-                    question=question["question"],
-                    answer=question.get("answer", ""),
-                    hypothesis=hypothesis,
+                lambda q=question, hyp=hypothesis, qid=qid: judge.judge(
+                    question_type=q.get("question_type", ""),
+                    question=q["question"],
+                    answer=q.get("answer", ""),
+                    hypothesis=hyp,
                     abstention=is_abstention(qid),
                 ),
                 what=f"judge for {qid}", retries=max_retries)
@@ -283,7 +286,7 @@ def run_main(argv: list[str] | None = None) -> dict[str, Any]:
     )
     reader = build_reader(args.reader_model, mock=args.mock)
     judge = build_judge(args.judge_model, mock=args.mock)
-    outcomes, report = run_cell(
+    _, report = run_cell(
         instances, reader=reader, judge=judge,
         checkpoint=args.checkpoint, max_retries=args.max_retries,
         split=args.split,
