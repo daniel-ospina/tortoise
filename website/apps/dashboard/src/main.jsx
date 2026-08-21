@@ -117,6 +117,10 @@ function claimIntentInFlight() {
 
   const [authed, setAuthed] = React.useState(false)
   const [authUnavailable, setAuthUnavailable] = React.useState('')
+  // #1559: a session-key mint failure (e.g. 429 rate limit) must surface an
+  // actionable error — never the silent "Redirecting to the sign-in page…"
+  // shell (which does NOT redirect and left users stuck).
+  const [mountError, setMountError] = React.useState('')
   const [team, setTeam] = React.useState(null)
   const [keys, setKeys] = React.useState([])
   const [sessions, setSessions] = React.useState([])
@@ -643,24 +647,33 @@ function claimIntentInFlight() {
             key = minted.key
             if (minted.teamId) teamKeysRef.current[minted.teamId] = key
           } catch (e) {
-            // #308: a suspended team's mint 403s — show the appeal banner
-            // instead of silently degrading to the API-key screen.
+            // #308: a suspended team's mint 403s — show the appeal banner.
             if (e && e.suspended) setSuspended(e.suspended)
-            // No usable session key — fall back to the API-key screen
+            // #1559: the mint failed (429 rate limit / 5xx) — the dashboard
+            // has NO key-only fallback anymore (deleted in #1511), so a
+            // silent setChecking(false) stranded users on the fake
+            // "Redirecting to the sign-in page…" shell. Surface an
+            // actionable error instead (the Retry button re-runs the mount).
+            const msg = (e && e.message) || 'Could not prepare your session.'
+            setMountError(/429|rate limit/i.test(msg)
+              ? 'Too many requests from this network — try again in a minute.'
+              : msg)
             setChecking(false)
             return
           }
         }
         // Round-9: a SIGNED_OUT during the mint must not complete the login
         // with a fresh key on the tab the user just signed out of.
-        if (!sessionTokenRef.current) { setChecking(false); return }
-        if (!key) { setChecking(false); return }
+        if (!sessionTokenRef.current) { setChecking(false); setMountError('Your session ended — sign in again.'); return }
+        if (!key) { setChecking(false); setMountError('Could not prepare your session — try again.'); return }
         localStorage.setItem(KEY_STORAGE, key)
         setApiKey(key)
         apiKeyRef.current = key
         setAuthMode('session')
         await completeLogin(key)
       } catch (e) {
+        // #1559: never leave the user on the silent redirect shell.
+        setMountError((e && e.message) || 'Something went wrong loading the dashboard — try again.')
         setChecking(false)
       }
     })()
@@ -1616,20 +1629,33 @@ function claimIntentInFlight() {
     // the split-second before the redirect lands (the shell).
     const claimIntent = claimIntentInFlight()
     if (!claimIntent) {
+      // #1559: a mount failure (mint 429/5xx, auth lib blocked) renders a
+      // REAL error card with a retry — never the silent "Redirecting…"
+      // shell (which only ever accompanied an ACTUAL navigation).
+      if (authUnavailable || mountError) {
+        return (
+          <div className="auth-wrap">
+            <div className="auth-card">
+              <div className="logo">Tortoise</div>
+              <h1>Dashboard</h1>
+              <div role="alert">
+                <p className="error">{authUnavailable || mountError}</p>
+                <button type="button" className="btn-submit" onClick={() => window.location.reload()}>Try again</button>
+                <p className="dim" style={{ marginTop: 12 }}>
+                  Still stuck? Contact <a href="mailto:hello@premiselabs.co">hello@premiselabs.co</a>.
+                </p>
+              </div>
+            </div>
+          </div>
+        )
+      }
       // Redirect shell — the mount effect's bounceToAuth() owns the redirect.
       return (
         <div className="auth-wrap">
           <div className="auth-card">
             <div className="logo">Tortoise</div>
             <h1>Dashboard</h1>
-            {authUnavailable ? (
-              <div role="alert">
-                <p className="error">{authUnavailable}</p>
-                <button type="button" className="btn-submit" onClick={() => window.location.reload()}>Refresh</button>
-              </div>
-            ) : (
-              <p className="dim">Redirecting to the sign-in page…</p>
-            )}
+            <p className="dim">Redirecting to the sign-in page…</p>
           </div>
         </div>
       )

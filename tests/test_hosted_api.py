@@ -2367,3 +2367,85 @@ def test_make_sdk_rebinds_stale_anchor(monkeypatch):
             assert sdk2._get_proj() is not None
     finally:
         ha._FALLBACK_KEEPALIVE.pop(ns, None)
+
+
+
+
+class _FakeRequest:
+    """Minimal starlette-like request with a state bag (the middleware only
+    touches request.state / request.url.path / request.headers)."""
+
+    def __init__(self, scope: dict):
+        self.scope = scope
+        self.state = _State()
+        self.state.client_ip = "203.0.113.42"  # what ClientIPMiddleware sets
+        self.client = type("C", (), {"host": scope["client"][0]})()
+
+        class _Headers(dict):
+            def get(self, key, default=None):
+                for k, v in self.items():
+                    if k.lower() == key.lower():
+                        return v
+                return default
+
+        self.headers = _Headers({
+            k.decode(): v.decode() for k, v in scope["headers"]
+        })
+
+    @property
+    def url(self):
+        return type("U", (), {"path": self.scope["path"]})()
+
+
+class _State:
+    pass
+
+class TestRateLimitRealClientIP:
+    """#1559: the per-IP rate-limit fallback must key on the REAL client IP
+    (request.state.client_ip — the Fly-Client-IP when
+    TORTOISE_TRUST_FLY_CLIENT_IP=1), never request.client.host (behind Fly
+    that is the proxy IP — a GLOBAL bucket shared by every session-JWT and
+    unauthenticated request, which 429'd every new user's bootstrap
+    session-key mint at busy moments)."""
+
+    def test_dispatch_keys_on_state_client_ip_not_client_host(self, monkeypatch):
+        import tortoise.hosted_api as ha
+        captured = {}
+
+        async def _noop(scope, receive, send):
+            pass
+
+        mw = ha.RateLimitMiddleware(_noop, max_per_minute=100)
+
+        def _capture(path, auth, client_host):
+            captured["client_host"] = client_host
+            return None  # bypass the bucket
+
+        monkeypatch.setattr(mw, "_bucket_key", _capture)
+        mw._disabled = False  # the test env sets RATE_LIMIT_DISABLED=1
+
+        # A request whose TCP peer is the Fly proxy (client.host) but whose
+        # real client IP arrives in Fly-Client-IP (ClientIPMiddleware sets
+        # state.client_ip from it when TORTOISE_TRUST_FLY_CLIENT_IP=1).
+        scope = {
+            "type": "http", "method": "POST", "path": "/v1/session/key",
+            "headers": [(b"authorization", b"Bearer eyJ.sess"),
+                        (b"fly-client-ip", b"203.0.113.42")],
+            "client": ("fly-proxy-ip", 443), "query_string": b"",
+            "server": ("api.premiselabs.co", 443), "scheme": "https",
+            "http_version": "1.1", "asgi": {"version": "3.0"},
+        }
+
+        async def _call():
+            async def _next(req):
+                return None
+            await mw.dispatch(_FakeRequest(scope), _next)
+
+        async def _main():
+            await _call()
+
+        import asyncio
+        asyncio.run(_main())
+        assert captured["client_host"] == "203.0.113.42", \
+            "bucket key must use the REAL client IP (state.client_ip), not " \
+            f"the proxy peer — got {captured['client_host']!r}"

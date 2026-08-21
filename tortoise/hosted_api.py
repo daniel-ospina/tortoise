@@ -507,8 +507,17 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         auth = request.headers.get("Authorization", "")
         path = request.url.path
-        key_id = self._bucket_key(path, auth,
-                                  request.client.host if request.client else None)
+        # #1559: the per-IP fallback must use the REAL client IP
+        # (request.state.client_ip — set by ClientIPMiddleware from
+        # Fly-Client-IP when TORTOISE_TRUST_FLY_CLIENT_IP=1), NOT
+        # request.client.host — behind Fly that is the PROXY IP, so every
+        # session-JWT/unauthenticated request from every user shared ONE
+        # global bucket and a busy moment 429'd every new user's bootstrap
+        # session-key mint (the stuck "Redirecting to the sign-in page…"
+        # dashboard shell).
+        client_ip = getattr(request.state, "client_ip", None) \
+            or (request.client.host if request.client else None)
+        key_id = self._bucket_key(path, auth, client_ip)
         if key_id is None:
             return await call_next(request)
         limit = self._limit_for(path)
