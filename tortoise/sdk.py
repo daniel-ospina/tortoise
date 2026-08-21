@@ -197,13 +197,16 @@ class _InMemoryEventLog:
 
 
 # #1529 P1 (E3 owner note): whitelist of point properties that pass through
-# the capture response's `props` superset — E3 writes source_turn_id via the
-# v2 payload point dict / the M2 folded statement dict; capture must never
-# drop or overwrite it. Deliberately a WHITELIST (not a blacklist): folded
-# statement dicts carry internal projection state (provenance run_id/source,
-# status, createdAt, operator, speaker) that must never leak into the public
-# capture response. Extend when E3 lands search_keys/when/quote.
-_CAPTURE_PASSTHROUGH_PROPS = frozenset({"source_turn_id"})
+# the capture response's `props` superset — E3 writes source_turn_id /
+# search_keys / when / quote via the v2 payload point dict / the M2 folded
+# statement dict; capture must never drop or overwrite them. Deliberately a
+# WHITELIST (not a blacklist): folded statement dicts carry internal
+# projection state (provenance run_id/source, status, createdAt, operator,
+# speaker) that must never leak into the public capture response. E3 (#1535)
+# landed search_keys/when/quote on the v2 payload — extend here, keep the
+# no-clobber turn-point guard (MERGE SET list excludes these).
+_CAPTURE_PASSTHROUGH_PROPS = frozenset({
+    "source_turn_id", "search_keys", "when", "quote"})
 
 
 def _session_llm_transcript(conversation: list[dict]) -> tuple[str, int]:

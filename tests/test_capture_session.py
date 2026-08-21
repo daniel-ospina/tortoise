@@ -79,11 +79,14 @@ def test_capture_session_shape(sdk):
     # extractor via the mock seam reports the resolved route ("llm:mock").
     assert res["extraction_mode"] == "llm:mock"
     assert res["extraction_provider"] == "mock"
-    # P1 #1529: success responses carry the fail-closed surface — ok=True,
-    # no errors, no warnings (the v2 default path is clean).
+    # P1 #1529: success responses carry the fail-closed surface — ok=True, no
+    # errors. warnings is an ADDITIVE surface: E3 (#1535) now emits a source-
+    # turn resolution warning on the offline mock path (the mock's embed point
+    # has no source_turn_id/quote match) — the response carries it, never
+    # crashes on it (assert list-ness, not emptiness).
     assert res["ok"] is True
     assert res["errors"] == []
-    assert res["warnings"] == []
+    assert isinstance(res["warnings"], list)
 
 
 def test_capture_session_turns_are_speaker_tagged(sdk):
@@ -986,12 +989,15 @@ def test_extract_session_v2_surfaces_warnings_and_zero_points(sdk, monkeypatch):
 
 
 def test_extract_session_v2_passthroughs_source_turn_id(sdk, monkeypatch):
-    """E3 passthrough (v2 carrier): a payload point carrying source_turn_id
-    (E3's fields arrive on payload points) flows through `props` unchanged."""
+    """E3 passthrough (v2 carrier): payload points carrying E3's fields
+    (source_turn_id, search_keys, when, quote — E3 #1535 landed them on the
+    v2 payload) flow through `props` unchanged (whitelisted)."""
     import tortoise.extractor_v2 as ev2
     payload = {"session_id": "sess_p1", "story_arc": "", "entities": [],
                "points": [{"id": "p-v2-1", "content": "we decided X",
-                           "pointKind": "statement", "source_turn_id": "t0"}],
+                           "pointKind": "statement", "source_turn_id": "t0",
+                           "search_keys": ["decide x", "x decision"],
+                           "when": "2026-08-20", "quote": "we decided X"}],
                "operators": [], "events": [], "supersessions": [],
                "client_commit_id": "ccid"}
     monkeypatch.setattr(ev2, "extract_session_v2",
@@ -999,8 +1005,14 @@ def test_extract_session_v2_passthroughs_source_turn_id(sdk, monkeypatch):
     extracted, _meta = sdk._extract_session_v2(
         CONV, "sess_p1", "2026-08-20T00:00:00+00:00")
     assert extracted, "payload point must land"
-    assert any(p.get("props", {}).get("source_turn_id") == "t0"
-               for p in extracted), extracted
+    props = extracted[0].get("props", {})
+    assert props.get("source_turn_id") == "t0", extracted
+    assert props.get("search_keys") == ["decide x", "x decision"], extracted
+    assert props.get("when") == "2026-08-20", extracted
+    assert props.get("quote") == "we decided X", extracted
+    # whitelist discipline: internal payload fields must NOT leak into props
+    assert not any(k in props for k in ("id", "content", "pointKind",
+                                        "about_entities")), props
 
 
 def test_extract_session_v2_counts_point_write_skips(sdk, monkeypatch):

@@ -639,9 +639,11 @@ class TestSessionCapture:
         assert body["extraction_mode"] == "llm:mock"
         assert body["extraction_provider"] == "mock"
         # P1 #1529: success responses carry the fail-closed surface — additive
-        # errors/warnings are empty on a clean capture.
+        # errors/warnings. E3 (#1535) emits a source-turn resolution warning
+        # on the offline mock path, so warnings is an additive LIST (never
+        # crashes the response) — assert list-ness, not emptiness.
         assert body["errors"] == []
-        assert body["warnings"] == []
+        assert isinstance(body["warnings"], list)
 
     def test_capture_session_with_explicit_id(self, client):
         r = client.post(

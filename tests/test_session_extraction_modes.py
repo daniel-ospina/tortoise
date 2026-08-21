@@ -247,7 +247,10 @@ def test_default_llm_with_provider_key_422_on_empty(monkeypatch, client):
     body = r2.json()
     assert body["extraction_mode"] == "llm:mock"
     assert body["extraction_provider"] == "mock"
-    assert body["errors"] == [] and body["warnings"] == []
+    # E3 (#1535) emits a source-turn resolution warning on the offline mock
+    # path — warnings is an additive list; errors must be empty on success.
+    assert body["errors"] == []
+    assert isinstance(body["warnings"], list)
 
 
 def test_default_llm_extracts_points(monkeypatch, client):
