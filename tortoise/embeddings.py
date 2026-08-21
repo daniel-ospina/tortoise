@@ -217,13 +217,18 @@ def cosine_similarity_matrix(vectors: np.ndarray) -> np.ndarray:
 
 def find_cross_source_matches(
     points: dict[str, dict],
-    threshold: float = 0.75,
+    threshold: float = NEAR_DUPLICATE_THRESHOLD,
 ) -> list[dict]:
     """Find points from different speakers that describe the same concept.
 
     Backward-compatible wrapper (speaker-keyed) over the shared encode +
     cosine pipeline (#399). Use find_cross_lens_matches (tortoise/cross_lens.py)
     for lens/source-keyed matching.
+
+    The default keeps the #399 issue-spec near-dup-ONLY semantics: it tracks
+    NEAR_DUPLICATE_THRESHOLD (0.89 for bge-small) so a model swap cannot
+    silently admit loose paraphrases into this conservative wrapper (#1349
+    T14 — was the hand-pinned 0.75 MiniLM literal).
 
     Args:
         points: point_id → {content, speaker, ...} from fold()

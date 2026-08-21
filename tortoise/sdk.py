@@ -487,7 +487,8 @@ def _cosine(a: np.ndarray, b: np.ndarray) -> float:
     """Cosine similarity between two embedding vectors (#438).
 
     Stored embeddings round-trip as float32 lists — normalize defensively so
-    the #399-calibrated cosine threshold (0.40, all-MiniLM-L6-v2) applies to
+    the shared cosine thresholds (tortoise.embeddings DEFAULT_THRESHOLD /
+    NEAR_DUPLICATE_THRESHOLD, bge-small calibration 2026-08-21) apply to
     the exact same metric cross_lens.py thresholds on.
     """
     import numpy as np
@@ -2855,8 +2856,10 @@ class TortoiseSDK:
 
     # Pinned review band (plan §7 preamble): calibration keeps production
     # values within the band; tests assert against the pinned constants.
-    DEDUP_REVIEW_THRESHOLD = 0.60
-    DEDUP_AUTO_MERGE_THRESHOLD = 0.92
+    # #1349 T14: bge-small calibration (2026-08-21) — 0.60->0.84 / 0.92->0.94
+    # (the bge cosine distribution is compressed toward 1.0 vs MiniLM).
+    DEDUP_REVIEW_THRESHOLD = 0.84
+    DEDUP_AUTO_MERGE_THRESHOLD = 0.94
 
     def _dedup_content_candidates(self, point_ids: list[str],
                                   threshold: float = DEDUP_REVIEW_THRESHOLD,
@@ -5809,7 +5812,7 @@ class TortoiseSDK:
         mode: str = "both",
         scope: str | None = None,
         *,
-        similarity_threshold: float = 0.40,
+        similarity_threshold: float = 0.72,
         variance_threshold: float = 0.04,
         add_limit: int = 20,
         prune_limit: int = 50,
@@ -5859,9 +5862,9 @@ class TortoiseSDK:
             mode: "add", "prune" or "both" (default "both").
             scope: optional topic text or Point id — narrows the review.
             similarity_threshold: minimum cosine similarity for mode=add
-                (default 0.40 — the #399-calibrated "semantically related"
-                band for all-MiniLM-L6-v2 is 0.35-0.51; near-duplicates are
-                0.75+, see tortoise/embeddings.py).
+                (default 0.72 — the bge-small DEFAULT_THRESHOLD "semantically
+                related" cross-vocabulary band, see tortoise/embeddings.py;
+                near-duplicates are 0.89+).
             variance_threshold: posterior variance above which a claim is
                 contested (default 0.04 — same signal as search_engine's
                 has_ep-guarded contested flag; deliberately NOT
@@ -5958,9 +5961,9 @@ class TortoiseSDK:
         thin.
 
         Args:
-            threshold: minimum cosine similarity (default 0.40 — the
-                #399-calibrated cross-vocabulary band for all-MiniLM-L6-v2;
-                near-duplicates are 0.75+).
+            threshold: minimum cosine similarity (default 0.72 — the
+                bge-small DEFAULT_THRESHOLD cross-vocabulary band from
+                tortoise/embeddings.py; near-duplicates are 0.89+).
             max_candidates: requested result cap — HARD-clamped to 200 (D4).
             routing: the #901 routing context the caller is mining under
                 ("truth" | "relevance") — echoed per candidate; the surface
@@ -7695,6 +7698,14 @@ class TortoiseSDK:
         Each item: {wing, room, content}. Returns {filed: N, duplicates: M}.
         threshold: cosine similarity for semantic dedup (0.0-1.0).
                    Set to 1.0 to disable semantic dedup (hash-only).
+
+        The 0.95 default is the near-IDENTICAL-text bar (re-filed session
+        notes), deliberately stricter than the paraphrase band: re-validated
+        under bge-small 2026-08-21 (#1349 T14) — the strictest fixture
+        paraphrase ("Deployments must be automated for reliability" ↔
+        "Automating deployments is required for reliability") scores 0.955
+        ≥ 0.95, while looser paraphrases (0.77-0.90) stay below and file
+        as distinct points. Keep in sync with mcp_server.tortoise_checkpoint.
         """
         from datetime import datetime, timezone
         filed, duplicates = 0, 0

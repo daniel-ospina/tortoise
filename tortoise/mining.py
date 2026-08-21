@@ -229,7 +229,7 @@ class ConversationMiner:
         entity_stage=None,
         batch_id: str | None = None,
         content_dedup: bool = True,
-        dedup_threshold: float = 0.60,
+        dedup_threshold: float = 0.84,
         session_date: str | None = None,
         sdk=None,
     ) -> dict:
@@ -903,7 +903,8 @@ def mine_conversation(
     "not_gated" standalone-log state).
     ``content_dedup`` (default True) enables the two-tier content dedup for
     decision Points (W-2, #784); ``dedup_threshold`` defaults to the pinned
-    review band 0.60 (θ from the calibration milestone). Pass ``sdk=`` to
+    review band 0.84 (θ from the bge-small calibration milestone, #1349 T14
+    — was 0.60 under all-MiniLM). Pass ``sdk=`` to
     enable operator wiring (draft-prior alreadyDecided links); without it
     dedup is skipped entirely (a warning is logged).
     """
@@ -969,7 +970,7 @@ def mine_corpus_with_sdk(
     model: Any | None = None,
     event_log_path: str | None = None,
     content_dedup: bool = True,
-    dedup_threshold: float = 0.60,
+    dedup_threshold: float = 0.84,
 ) -> dict:
     """Batch-mine a session corpus (J-1, plan §6.1) through an existing SDK.
 

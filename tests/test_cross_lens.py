@@ -195,8 +195,10 @@ def test_encode_wrong_shape_raises():
 # ── 10. constants ─────────────────────────────────────────────────────
 
 def test_constants():
-    assert DEFAULT_THRESHOLD == 0.40
-    assert NEAR_DUPLICATE_THRESHOLD == 0.75
+    # Single source of truth: cross_lens re-exports the bge-small calibrated
+    # bands from tortoise.embeddings (#1349 T14) — no hand-synced copies.
+    assert DEFAULT_THRESHOLD == 0.72
+    assert NEAR_DUPLICATE_THRESHOLD == 0.89
     print("PASS test_constants")
 
 
@@ -311,11 +313,11 @@ def test_real_embedder_cross_vocab_in_band_and_noise():
         "p3": {"content": "quantum physics research papers", "lens": "lens-a"},
         "p4": {"content": "chocolate chip cookie recipes", "lens": "lens-b"},
     }
-    cands = find_cross_lens_matches(pts)  # default threshold 0.40
+    cands = find_cross_lens_matches(pts)  # default threshold 0.72 (bge-small)
     pair12 = next(c for c in cands if {c["src"], c["dst"]} == {"p1", "p2"})
-    assert pair12["similarity"] >= 0.35  # measured 0.448
+    assert pair12["similarity"] >= 0.72  # measured 0.733 (bge-small, 2026-08-21)
     assert pair12["degraded"] is False
-    assert not any({c["src"], c["dst"]} == {"p3", "p4"} for c in cands)  # 0.121 noise
+    assert not any({c["src"], c["dst"]} == {"p3", "p4"} for c in cands)  # 0.464 noise < 0.72
     print("PASS test_real_embedder_cross_vocab_in_band_and_noise")
 
 
@@ -326,8 +328,11 @@ def test_real_embedder_motivating_pair_below_default():
         "a": {"content": "Cost inversion from fixed to variable", "lens": "contemporary"},
         "b": {"content": "MVP now costs ~$100", "lens": "practitioner"},
     }
-    # 0.291 < 0.40 — recall-only boundary: candidates are recall-oriented,
-    # verification decides. Topical similarity is NOT logical implication.
+    # 0.576 < 0.72 (measured under bge-small, 2026-08-21) — recall-only
+    # boundary: candidates are recall-oriented, verification decides. Topical
+    # similarity is NOT logical implication — the bge compression toward 1.0
+    # narrowed the margin vs MiniLM (0.291), but the default band still
+    # correctly EXCLUDES it.
     assert find_cross_lens_matches(pts) == []
     print("PASS test_real_embedder_motivating_pair_below_default")
 
@@ -340,14 +345,14 @@ def test_real_embedder_near_duplicate_above_near_dup_threshold():
         "b": {"content": "Automating deployments is required for reliability", "lens": "l2"},
     }
     cands = find_cross_lens_matches(pts, threshold=NEAR_DUPLICATE_THRESHOLD)
-    assert len(cands) == 1 and cands[0]["similarity"] >= 0.9  # measured 0.958
+    assert len(cands) == 1 and cands[0]["similarity"] >= 0.9  # measured 0.955 (bge)
     print("PASS test_real_embedder_near_duplicate_above_near_dup_threshold")
 
 
 # ── runner ────────────────────────────────────────────────────────────
 
 _MODEL_CACHE_DIR = os.path.expanduser(
-    "~/.cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2"
+    "~/.cache/huggingface/hub/models--BAAI--bge-small-en-v1.5"
 )
 
 
@@ -360,9 +365,9 @@ def _require_model():
     from tortoise.embeddings import EmbeddingModel
 
     if not os.path.isdir(_MODEL_CACHE_DIR):
-        pytest.skip("all-MiniLM-L6-v2 not cached locally — skipping real-embedder test")
+        pytest.skip("bge-small-en-v1.5 not cached locally — skipping real-embedder test")
     if EmbeddingModel.get() is None:
-        pytest.skip("all-MiniLM-L6-v2 unavailable — model load timed out")
+        pytest.skip("bge-small-en-v1.5 unavailable — model load timed out")
 
 
 def _run_all():
