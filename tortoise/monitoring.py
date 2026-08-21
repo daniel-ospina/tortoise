@@ -62,13 +62,18 @@ def _is_transient_connect_error(exc: BaseException) -> bool:
     single retry may legitimately clear (a DB server mid-startup / momentarily
     unreachable under parallel load).
 
-    OSError covers ConnectionRefusedError and socket errors; the redis client
-    raises its OWN ConnectionError class (redis-py 8.x) that is NOT an OSError
-    subclass, so match the name too. Everything else — redis TimeoutError,
-    auth/response errors, arbitrary RuntimeErrors — is NOT retried: a hung or
+    OSError covers ConnectionRefusedError and socket errors (refused, DNS/
+    gaierror — a startup DNS race is exactly the transient class the retry
+    targets); the redis client raises its OWN ConnectionError class
+    (redis-py 8.x) that is NOT an OSError subclass, so match the name too.
+    Builtin TimeoutError IS an OSError subclass but is NEVER retried (a hung
+    DB stays hung) — excluded FIRST. Everything else — redis TimeoutError,
+    auth/response errors, arbitrary RuntimeErrors — is NOT retried: a
     genuinely broken DB must keep flipping /health to degraded without the
     retry masking it (#1565).
     """
+    if isinstance(exc, TimeoutError):
+        return False
     if isinstance(exc, OSError):
         return True
     return type(exc).__name__ == "ConnectionError"
@@ -112,12 +117,13 @@ def probe_db(sdk) -> dict:
     redis client's own socket_connect_timeout is 5s, far too slow for a
     health poll, so a dead URI would otherwise hang the handler.
 
-    #1565: a single TRANSIENT connect failure (embedded redislite server
-    momentarily starting / momentarily unreachable under parallel load) is
-    retried ONCE with a short delay before declaring degraded — a real outage
-    (NXDOMAIN, stopped FalkorDB) fails the retry identically, so /health still
-    flips to degraded within the same sub-second-to-1.5s window (a hung
-    black-hole DB is a timeout and is NEVER retried).
+    #1565: a single TRANSIENT connection-level failure (embedded redislite
+    # server mid-startup / momentarily unreachable under parallel load —
+    # refused, DNS/gaierror, redis ConnectionError) is retried ONCE with a
+    # short delay before declaring degraded. A persistent outage (stopped
+    # FalkorDB, NXDOMAIN) fails the retry identically and still reports
+    # degraded within the same sub-second window; a hung black-hole DB is a
+    # worker TIMEOUT and is NEVER retried.
 
     Returns ``{"ok": bool, "latency_ms": float, "error": str|None}`` —
     NEVER raises, so /health can report ``status: degraded`` instead of
