@@ -245,6 +245,74 @@ class TestDrDrill:
         assert r2.status_code == 429
 
 
+class TestRegistrySdkRetry:
+    """#1579: _registry_sdk() retries ONCE on a transient embedded-DB CONNECT
+    failure (redis ConnectionError / OSError-family under parallel temp-DB
+    contention) — the drill/sweep/restore handlers must not 500 on a momentary
+    connect blip. A persistent failure or a timeout is never retried past one
+    attempt (a genuinely broken/hung DB must keep failing).
+
+    Mirrors the #1565 probe_db retry semantics (monitoring._is_transient_connect_error)
+    via stub-SDK injection, same style as test_monitoring.py.
+    """
+
+    def test_transient_connect_retries_once_and_recovers(self, monkeypatch):
+        """First connect raises a transient redis ConnectionError → the eager
+        _get_proj() retry must recover and the SDK must be usable.
+
+        The retry-success path returns a fake projection (test_monitoring.py
+        FlakySDK style) — never the real _make_sdk: that would open the shared
+        process-global embedded path and flake with EmbeddedStoreBusyError
+        under ambient daemon state (#1579 review P1)."""
+        import redis.exceptions as redis_exc
+
+        calls = {"n": 0}
+
+        class _FlakySDK:
+            def _get_proj(self):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise redis_exc.ConnectionError("transient connect refused")
+                return object()  # fake projection — retry recovered
+
+        monkeypatch.setattr(ha_mod, "_make_sdk", lambda *, namespace=None: _FlakySDK())
+        sdk = ha_mod._registry_sdk()
+        assert calls["n"] == 2  # exactly ONE retry
+        assert sdk._get_proj() is not None
+
+    def test_persistent_connect_error_raises_after_retry(self, monkeypatch):
+        """A PERSISTENT connect failure (real outage) must still raise after the
+        single retry — the retry never masks a broken DB."""
+        import redis.exceptions as redis_exc
+
+        calls = {"n": 0}
+
+        class _DeadSDK:
+            def _get_proj(self):
+                calls["n"] += 1
+                raise redis_exc.ConnectionError("NXDOMAIN")
+
+        monkeypatch.setattr(ha_mod, "_make_sdk", lambda *, namespace=None: _DeadSDK())
+        with pytest.raises(redis_exc.ConnectionError):
+            ha_mod._registry_sdk()
+        assert calls["n"] == 2  # retried once, then raised
+
+    def test_timeout_is_never_retried(self, monkeypatch):
+        """A timeout (hung DB) is NEVER retried — exactly one attempt, then raise
+        (builtin TimeoutError is an OSError subclass; monitoring excludes it FIRST)."""
+        calls = {"n": 0}
+
+        class _HungSDK:
+            def _get_proj(self):
+                calls["n"] += 1
+                raise TimeoutError("hung connect")
+
+        monkeypatch.setattr(ha_mod, "_make_sdk", lambda *, namespace=None: _HungSDK())
+        with pytest.raises(TimeoutError):
+            ha_mod._registry_sdk()
+        assert calls["n"] == 1  # timeout → no retry
+
+
 class TestReconcile:
     """POST /v1/internal/reconcile — expired-key sweep (#654)."""
 
