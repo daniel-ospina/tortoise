@@ -338,16 +338,17 @@ def _registry_owner_alive(registry: dict | None) -> bool | None:
 
 
 def _is_detached(pid: int) -> bool:
-    """True when the process's direct parent is init (pid 0/1) — its whole
-    spawning tree has exited and it was reparented, so NO live process holds
-    it. Such a server is a dead-end: safe to reap even while OTHER suites run
-    (issue #1115 option A — bounds orphan accumulation under concurrent
-    suites without the global 'last suite standing' wait).
+    """True when the process's direct parent is init (pid 0/1).
+
+    NOTE (#1557): redislite servers ALWAYS daemonize to ppid=1, so this is
+    True for every redislite server — it does NOT indicate an orphan.
+    Consulted only in FULL sweeps (only_safe=False); the only_safe path
+    never kills live-pid servers regardless of detachment. Retained for the
+    full-sweep admission logic (a reparented server with a live pid and an
+    intact dir is the strongest orphan signal the full sweep has).
 
     Fail-closed: any uncertainty (ps timeout/error, pid vanished, unparseable
-    ppid) returns False so the server is protected, never risked. A server
-    whose parent is still alive (in-process fixture server, live test
-    subprocess) is also protected — only fully reparented servers qualify.
+    ppid) returns False so the server is protected, never risked.
     """
     import subprocess as _sp
     try:
@@ -1133,15 +1134,15 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
       STALE_SWEEP_BUDGET; they run in every mode including only_safe (the
       guards ARE the safety) and dry_run (reported, not mutated).
 
-    only_safe=True (issue #1005 concurrency guard): restrict KILLS to
-    dir-gone (dir_missing) candidates — the owning suite's tmp tree was
-    cleaned, so the server cannot belong to a running suite — plus DETACHED
-    candidates (issue #1115): a live ephemeral server whose direct parent
-    is init was reparented after its whole spawning tree exited, so no live
-    process holds it; reaping it cannot disturb a running suite. Live
-    ephemeral servers with 0 clients still owned by a live process are
-    skipped so a concurrent suite's between-tests idle server is never
-    killed. (Unchanged #1005/#1115 behavior for LIVE candidates.)
+    only_safe=True (issue #1005 concurrency guard): NEVER kills a live-pid
+    server — redislite servers daemonize to ppid=1, so _is_detached is True
+    for ALL of them and the reaper cannot distinguish a concurrent suite's
+    live test server from a killed-subprocess orphan (#1557). only_safe runs
+    only the stale_socket removals (dead-pid leftover dirs, guarded rmtree);
+    genuine live orphans converge via the FULL sweep (only_safe=False — the
+    single-suite end sweep / cron) and the stale_socket path. This preserves
+    the #1005 guarantee: a concurrent suite's between-tests idle server is
+    never disturbed.
     """
     acted = []
     killed = 0
@@ -1175,6 +1176,35 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
                               or _is_detached(record.get("pid") or 0)):
             logger.info(
                 "concurrent-suite guard: skipping live ephemeral candidate %s",
+                record.get("socket_path"))
+            continue
+
+        # #1557: in only_safe mode, a live-pid server whose registry owner
+        # is ALIVE (or unknown) is a concurrent suite's server — protect it.
+        # redislite servers daemonize to ppid=1, so _is_detached is True for
+        # ALL of them (the #1115 "spawning tree exited" intent is false for
+        # redislite: a test-owned server is reparented at birth while its
+        # pytest parent is alive). The discriminator is the registry owner
+        # pid (the process that spawned the server): a test server's owner
+        # (pytest) is alive -> protect; a genuine orphan's owner subprocess
+        # was killed -> _registry_owner_alive is False -> still reaped;
+        # unresolvable owner (None) -> fail closed -> protect. This preserves
+        # the #1005 only_safe guarantee (never disturb a concurrent suite's
+        # server) AND keeps reaping true orphans.
+        # #1557 (final): a live-pid server under only_safe is NEVER killed —
+        # redislite daemonizes to ppid=1 (all servers are "detached") and the
+        # registry owner is None for no-path servers, so the reaper cannot
+        # distinguish a concurrent suite's live test server from a
+        # killed-subprocess orphan on pid/registry alone. only_safe's
+        # contract is "never disturb a concurrent suite" (#1005) — err on
+        # protection: skip ANY live-pid server. Genuine orphans are reaped
+        # by the FULL sweep (only_safe=False, the single-suite end sweep)
+        # and by the stale_socket path (dead-pid leftover dirs).
+        if only_safe and record.get("pid") and _pid_alive(record["pid"]):
+            logger.info(
+                "concurrent-suite guard: live-pid server protected under "
+                "only_safe (daemonized, cannot distinguish orphan from "
+                "test server), skipping %s",
                 record.get("socket_path"))
             continue
 
@@ -1690,8 +1720,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--jobs", type=int, default=8,
                         help="Parallel probe workers (default 8)")
     parser.add_argument("--only-safe", action="store_true",
-                        help="Only reap dir-gone/stale records (concurrent-suite "
-                             "safe; issue #1005)")
+                        help="Never kill live-pid servers — stale_socket "
+                             "removals only (concurrent-suite safe, #1005/#1557)")
     parser.add_argument("--json", action="store_true",
                         help="Machine-readable JSON output")
     parser.add_argument("--timeout", type=str, default=None,
