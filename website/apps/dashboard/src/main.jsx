@@ -521,15 +521,33 @@ function claimIntentInFlight() {
   async function mintSessionKey(purpose, teamId) {
     const tok = sessionTokenRef.current
     if (!tok) throw new Error('No session')
-    const mint = async (tid) => {
+    const mint = async (tid, purposeOverride) => {
       const res = await fetch(`${API_BASE}/v1/session/key`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
-        body: JSON.stringify(tid ? { purpose, team_id: tid } : { purpose }),
+        body: JSON.stringify(tid ? { purpose: purposeOverride || purpose, team_id: tid } : { purpose: purposeOverride || purpose }),
       })
       return res
     }
-    let res = await mint(teamId)
+    // #1566-fix: the bootstrap mint has a 3-ACTIVE cap (24h keys) — a user
+    // who accumulated keys across incognito windows / retries is dead-ended
+    // with 'Too many active session keys — wait for expiry' until expiry.
+    // The RECOVERY mint is persistent + auto-revokes the oldest key at the
+    // cap, so it is the escape hatch: fall back to it on the bootstrap cap.
+    // Applied to BOTH the initial mint and the multi-membership 400-retry
+    // (review P2); the parsed body is cached so the caller's !res.ok read
+    // isn't double-consumed (review P2).
+    const maybeRecoveryFallback = async (res, tid) => {
+      if (purpose === 'bootstrap' && res.status === 429) {
+        const body = await res.json().catch(() => null)
+        res._parsedBody = body || {}
+        if (body && typeof body.detail === 'string' && /active session keys/i.test(body.detail)) {
+          return await mint(tid || null, 'recovery')
+        }
+      }
+      return res
+    }
+    let res = await maybeRecoveryFallback(await mint(teamId), teamId)
     let mintedTeamId = teamId
     if (res.status === 400 && !teamId) {
       // Multi-membership: server demands a team_id — auto-select the first
@@ -545,12 +563,12 @@ function claimIntentInFlight() {
         if (list.length) {
           setTeams(list)
           mintedTeamId = list[0].team_id
-          res = await mint(mintedTeamId)
+          res = await maybeRecoveryFallback(await mint(mintedTeamId), mintedTeamId)
         }
       }
     }
     if (!res.ok) {
-      const b = await res.json().catch(() => ({}))
+      const b = res._parsedBody || (await res.json().catch(() => ({})))
       // #308: a suspended team's mint 403s with a dict detail — carry it so
       // the load path renders the suspension banner (primary load path).
       const sus = suspendedFromDetail(b.detail)

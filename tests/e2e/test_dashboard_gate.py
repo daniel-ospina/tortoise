@@ -443,6 +443,83 @@ def test_oauth_callback_fragment_lands_in_dashboard(page: Page) -> None:
     expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
 
 
+def test_bootstrap_cap_falls_back_to_recovery_mint(page: Page) -> None:
+    """#1566-fix: the bootstrap session-key mint has a 3-active cap (24h keys)
+    — a user who accumulated keys across incognito windows is dead-ended with
+    'Too many active session keys — wait for expiry' until expiry. The mount
+    must fall back to the RECOVERY mint (persistent, auto-revokes at cap) so
+    the dashboard still renders."""
+    import urllib.parse as _up
+    import time as _time
+    user_id = "u-cap"
+    sess = {"access_token": "fake.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sig",
+            "refresh_token": "rt", "expires_in": 3600,
+            "expires_at": int(_time.time()) + 3600, "token_type": "bearer",
+            "user": {"id": user_id, "email": "cap@premise-labs.dev"}}
+    page.context.add_cookies([{"name": "sb-tortoise-auth-token",
+                               "value": _up.quote(json.dumps(sess)),
+                               "domain": ".premiselabs.co", "path": "/"}])
+    # The bootstrap mint 429s (cap) — the fallback must retry as recovery.
+    def handle(route):
+        url = route.request.url
+        if "api.premiselabs.co" in url:
+            if url.endswith("/v1/session/key"):
+                body = json.loads(route.request.post_data or "{}")
+                if body.get("purpose") == "bootstrap":
+                    route.fulfill(status=429, content_type="application/json",
+                                  body=json.dumps({"detail": "Too many active session keys — wait for expiry"}))
+                    return
+                if body.get("purpose") != "recovery":
+                    # Mirror the server's 422 for unknown purposes — the
+                    # fallback MUST retry as recovery, not anything else.
+                    route.fulfill(status=422, content_type="application/json",
+                                  body=json.dumps({"detail": "purpose must be 'bootstrap' or 'recovery'"}))
+                    return
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"key": "tt_recovery_key_1234567890abcdef", "team_id": "team_cap"}))
+                return
+            if url.endswith("/v1/teams"):
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps([{"team_id": "team_cap", "name": "Cap"}]))
+                return
+            if url.endswith("/v1/team") or url.endswith("/v1/team/"):
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"team_id": "team_cap", "name": "Cap", "tier": "free"}))
+                return
+            if url.endswith("/v1/team/keys"):
+                route.fulfill(status=200, content_type="application/json", body=json.dumps({"keys": []}))
+                return
+            if url.endswith("/v1/sessions"):
+                route.fulfill(status=200, content_type="application/json", body=json.dumps({"sessions": []}))
+                return
+            if url.endswith("/backups"):
+                route.fulfill(status=200, content_type="application/json", body=json.dumps({"backups": []}))
+                return
+            route.fulfill(status=401, content_type="application/json", body="{}")
+            return
+        if url.startswith(AUTH_HOST):
+            from tests.e2e.test_session_login_flow import AUTH_ORIGIN
+            resp = page.request.get(AUTH_ORIGIN + url[len(AUTH_HOST):])
+            route.fulfill(status=resp.status, content_type="text/html", body=resp.text())
+            return
+        if url.startswith(APP_HOST):
+            from tests.e2e.test_session_login_flow import DASHBOARD_URL
+            local = DASHBOARD_URL.rstrip("/") + url[len(APP_HOST):]
+            ctype = "application/javascript" if local.endswith(".js") else ("text/css" if local.endswith(".css") else "text/html")
+            resp = page.request.get(local)
+            route.fulfill(status=resp.status, content_type=ctype, body=resp.body())
+            return
+        route.continue_()
+
+    page.route("**/*", handle)
+    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    # The dashboard renders (bootstrap 429 → recovery fallback) — the cap
+    # error card must NOT show (with the old code the 429 surfaced the
+    # 'Too many active session keys' error card), and the app chrome is up.
+    expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
+    expect(page.locator("body")).not_to_contain_text("Too many active session keys", timeout=10_000)
+
+
 def test_logout_redirects_to_auth(page: Page) -> None:
     """#1511 (VGATE P1): a signed-in user clicking Log out is redirected to
     /auth — the key-only card is gone, so sign-out must land on the login
