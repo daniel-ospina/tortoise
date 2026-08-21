@@ -52,19 +52,81 @@ class TestProbeDb:
         assert "connection refused" in result["error"]
         assert isinstance(result["latency_ms"], (int, float))
 
+    def test_non_connect_error_not_retried(self):
+        """#1565: a non-connection failure (arbitrary RuntimeError here) is
+        NOT a transient connect race — probe once, report degraded, never
+        retry (the retry exists ONLY for the connect-refused class)."""
+        calls = {"n": 0}
+
+        class BoomSDK:
+            def _get_proj(self):
+                calls["n"] += 1
+                raise RuntimeError("connection refused")
+
+        result = monitoring.probe_db(BoomSDK())
+        assert result["ok"] is False
+        assert calls["n"] == 1
+        assert "connection refused" in result["error"]
+
+    def test_transient_connect_error_retries_once_and_recovers(self):
+        """#1565: ONE retry on a transient ConnectionError (server-startup
+        race under parallel load) must NOT flip /health to degraded — the
+        retry succeeds once the server answers."""
+        import redis.exceptions as redis_exc
+
+        calls = {"n": 0}
+
+        class FlakySDK:
+            def _get_proj(self):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise redis_exc.ConnectionError("transient connect refused")
+                proj = MagicMock()
+                proj.g.query.return_value = MagicMock(result_set=[[1]])
+                return proj
+
+        result = monitoring.probe_db(FlakySDK())
+        assert result["ok"] is True
+        assert calls["n"] == 2
+        assert result["error"] is None
+
+    def test_persistent_connect_error_stays_degraded_after_retry(self):
+        """#1565: a PERSISTENT connect failure (real outage — NXDOMAIN,
+        stopped FalkorDB) must still report degraded after the single retry:
+        the retry never masks an outage."""
+        import redis.exceptions as redis_exc
+
+        calls = {"n": 0}
+
+        class DeadSDK:
+            def _get_proj(self):
+                calls["n"] += 1
+                raise redis_exc.ConnectionError("NXDOMAIN")
+
+        result = monitoring.probe_db(DeadSDK())
+        assert result["ok"] is False
+        assert calls["n"] == 2  # retried once, then still degraded
+        assert "NXDOMAIN" in result["error"]
+
     def test_never_raises_on_hung_connection(self, monkeypatch):
         """A dead socket must not hang the handler — the worker thread is
-        abandoned after the hard timeout and the probe returns degraded."""
+        abandoned after the hard timeout and the probe returns degraded.
+        #1565: a TIMEOUT is never retried (a hung DB would just hang again)
+        — exactly one probe attempt, then degraded."""
         import time
+
+        calls = {"n": 0}
 
         class HungSDK:
             def _get_proj(self):
+                calls["n"] += 1
                 time.sleep(30)  # simulates a blocked connect on a dead URI
                 raise AssertionError("should never get here")
 
         monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.05)
         result = monitoring.probe_db(HungSDK())
         assert result["ok"] is False
+        assert calls["n"] == 1  # timeout → no retry
         assert "timeout" in result["error"]
         assert result["latency_ms"] < 2000
 
