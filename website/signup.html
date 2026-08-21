@@ -26,7 +26,7 @@
         var s = (typeof window.readValidSession === "function") ? window.readValidSession() : null;
         if (!s) return;  // no VALID session → stay on the auth card
         var claim = /(?:^|; )tt_claim_pending=/.test(document.cookie);
-        window.location.replace(claim ? "https://app.premiselabs.co/?claim=1" : window.location.origin + "/welcome.html");
+        window.location.replace(claim ? "https://app.premiselabs.co/?claim=1" : "https://app.premiselabs.co");  // #1566: in-app welcome (root)
       } catch (e) { /* best-effort — the async bounce below still applies */ }
     })();
   </script>
@@ -529,7 +529,7 @@
     // ── Configuration ──────────────────────────────────────────────────────
     const SUPABASE_URL = "https://ybetwichurajbfswfeqa.supabase.co";
     const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InliZXR3aWNodXJhamJmc3dmZXFhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUyNzgzNDYsImV4cCI6MjEwMDg1NDM0Nn0.YHysJAebPualDNDQTU5bnGBUHg5guLe8eBadm0LiEiY";
-    const WELCOME_URL = "/welcome.html";
+    const WELCOME_URL = "https://app.premiselabs.co";  // #1566: OAuth lands on the app ROOT — first-timers get provisioned (welcome mode), returning users get the dashboard home
     // #1082 (PR1): claim-intent routing — when a claim is IN FLIGHT
     // (non-secret tt_claim_pending marker set by the dashboard claim card
     // on app.premiselabs.co — the raw tt_ key never leaves app-origin
@@ -544,7 +544,7 @@
           return DASHBOARD_URL + "/?claim=1";
         }
       } catch (e) { /* fall through to welcome */ }
-      return window.location.origin + WELCOME_URL;
+      return WELCOME_URL;
     }
 
     // #801: server-side signup — the hosted API creates the Supabase auth
@@ -1547,7 +1547,7 @@
           email: email,
           password: password,
           options: {
-            emailRedirectTo: window.location.origin + WELCOME_URL,
+            emailRedirectTo: WELCOME_URL,
           },
         });
 
@@ -1727,7 +1727,9 @@
       document.getElementById("modal-note").textContent = "";
       try {
         const { error } = await supabaseClient.auth.resetPasswordForEmail(email, {
-          redirectTo: window.location.origin + WELCOME_URL,
+          // #1566 (P1-3): the reset panel lives on tortoise/welcome.html —
+          // recoveryMode renders it and never redirects to the app.
+          redirectTo: window.location.origin + "/welcome.html",
         });
         if (error) {
           if (isRateLimitError(error)) {
@@ -1814,7 +1816,7 @@
         const { error } = await supabaseClient.auth.resend({
           type: 'signup',
           email: email,
-          options: { emailRedirectTo: window.location.origin + WELCOME_URL },
+          options: { emailRedirectTo: WELCOME_URL },
         });
         if (error) {
           if (isRateLimitError(error)) {
