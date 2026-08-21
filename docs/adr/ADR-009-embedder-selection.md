@@ -1,6 +1,16 @@
 # ADR-009: Server-Side Embedding Model Selection for Hosted Tortoise
 
-**Status:** Pending evidence (flips to **Accepted** in PR2/T16, on gate PASS)
+**Status:** Accepted (2026-08-21 — gate verdict + user decision; see Evidence Summary)
+  - Statistical verdict: **bge-small +15.7% turn_recall@10 (p=0.0005, BH-FDR clean)**,
+    arctic-xs +10.6% (p=0.0135, BH-FDR clean), arctic-s -8.9% (ns) vs MiniLM control
+    (0.679 ± 0.39, n=138 paired, Docker FalkorDB surface, 0 failures)
+  - HNSW production-surface spot-check: **PASSED** for bge-small (p=3.7e-05, n=150, 0 dropped)
+  - E2E-8 latency: bge-small 345-358ms p95 vs MiniLM control 418-464ms on the
+    contended benchmark laptop — bge-small is 15-25% FASTER than the status quo;
+    both exceed the 300ms absolute band only on this environment. **User decision:
+    proceed with the swap; latency re-validated at T15 on the production-class
+    benchmark box before final acceptance (pre-registered T15 step).**
+  - Verdict disposition: swap APPROVED for bge-small (option 1 per user, 2026-08-21)
 **Date:** 2026-08-17
 **Issue:** #1349
 **Owner:** epistemic-team
@@ -250,6 +260,32 @@ dimension-fixedness (any dim change = full re-embed + index rebuild). The hosted
 local question resolves as a constraint, not a blocker (industry precedent:
 server-side baked; local = self-hosted). Decision record ships in PR1 regardless of
 gate outcome — the swap is conditional, the record is not.
+
+## Evidence Summary (2026-08-21 — T8 burn, Docker FalkorDB surface, n≈138 paired)
+
+| Config | turn_recall@10 | vs MiniLM control (0.679) | one-sided p | BH-FDR | n-adaptive bar | Winner |
+|---|---|---|---|---|---|---|
+| MiniLM (control) | 0.679 | — | — | — | — | — |
+| **bge-small** | **0.786** | **+15.7%** | 0.0005 | ✅ | 8.4% | ✅ |
+| arctic-xs vendor | 0.751 | +10.6% | 0.0135 | ✅ | 9.9% | ✅ |
+| arctic-xs no-prefix | 0.605 | -11.0% | — | — | — | prompt-penalized |
+| arctic-s vendor | 0.619 | -8.9% | 0.97 | ❌ | 10.1% | ❌ |
+| arctic-s no-prefix | 0.366 | -46.1% | — | — | — | prompt-penalized |
+
+- Burn: LongMemEval-S, 150-question subset, vector-only arm, Docker FalkorDB (stable — 0 question
+  failures vs 21-61 in embedded mode under machine contention); per-question outcomes + gate
+  manifest + verdict JSON committed under `docs/research/2026-08-17-1349-embedder-selection/`.
+- HNSW spot-check (production surface): bge-small turn_recall@10 +0.098 (p=3.7e-05), nDCG@10
+  +0.111 (p=0.0), 0 dropped — `hnsw-spotcheck-bge-small.json` committed.
+- Threshold recalibration (bge bands, measured 2026-08-21): DEFAULT 0.40→0.72,
+  NEAR_DUPLICATE 0.75→0.89, DEDUP_REVIEW 0.60→0.84, DEDUP_AUTO_MERGE 0.92→0.94;
+  checkpoint 0.95 re-validated (near-dup anchor 0.9547 ≥ 0.95); applied across
+  embeddings.py, cross_lens.py (single-source import), sdk.py, mining.py, mcp_server.py.
+- Latency: see Status block — bge-small faster than control on the contended box; 300ms
+  band re-validated at T15 on the benchmark box (deployment-class measurement).
+- Non-embedder levers (key-expansion, time-aware query, fusion-fix; TF-IDF hard-tier hybrid):
+  filed UNCONDITIONALLY as a new retrieval-optimization issue per the pre-registration
+  (independent of the PASS verdict).
 
 ## Consequences
 
