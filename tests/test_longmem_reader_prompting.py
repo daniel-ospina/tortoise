@@ -31,7 +31,8 @@ from tortoise.sdk import TortoiseSDK  # noqa: E402, F401, I001, RUF100
 
 from tools.longmem_eval.judge import MockJudge  # noqa: E402, RUF100
 from tools.longmem_eval.reader import (  # noqa: E402, RUF100
-    LLMReader, MockReader, _SYSTEM_PROMPT,
+    LLMReader, MockReader, _SYSTEM_PROMPT, _ABSTRACTION_FRAGMENT,
+    _TYPE_FRAGMENTS, system_prompt_for,
 )
 from tools.longmem_eval.retrieve import render_context  # noqa: E402, RUF100
 from tools.longmem_eval.run import run_evaluation  # noqa: E402, RUF100
@@ -283,3 +284,133 @@ def test_render_context_carries_dates_for_temporal_reader():
     m = _PromptFaithfulModel()
     out = m.complete(system="temporal reasoning", user=text)
     assert out == "3 days ago"
+
+
+# ── 6. A1: partial-knowledge abstention clause (#1546) ────────────────────
+
+_ABS_QUESTION = {
+    "question_id": "pt_abs_001_abs",
+    "question_type": "single-session-user",
+    "question": "What is Ava's favorite color?",
+    "answer": "The user never mentioned a favorite color in the provided history.",
+    "question_date": "2025-06-15",
+    "haystack_session_ids": ["sess-1"],
+    "haystack_dates": ["2025-06-10"],
+    "answer_session_ids": [],
+    "haystack_sessions": [[
+        {"role": "user", "content": "I really like my new bicycle.",
+         "has_answer": False},
+        {"role": "assistant", "content": "Tell me more about it."},
+    ]],
+}
+
+ALL_TYPES = ("single-session-user", "single-session-assistant",
+             "single-session-preference", "multi-session",
+             "temporal-reasoning", "knowledge-update")
+
+
+def test_abstention_clause_present_for_all_question_types():
+    """A1 is universal — abstention questions are indistinguishable by type
+    (the _abs marker lives only in question_id, which never reaches the
+    reader), so every question must carry the clause."""
+    for t in (None, *ALL_TYPES):
+        sys_prompt = system_prompt_for(t)
+        assert "PARTIAL-KNOWLEDGE ABSTENTION" in sys_prompt, t
+        assert "explicitly state" in sys_prompt.lower(), t
+        assert "IS present" in sys_prompt, t
+
+
+def test_abstention_clause_keeps_commit_side_guard():
+    """A1 must not re-license the #1366 hedge: when the exact fact IS
+    present the reader must answer directly, never abstain."""
+    clause = _ABSTRACTION_FRAGMENT
+    assert "do NOT abstain" in clause
+    assert "exact information" in clause
+
+
+def test_abstention_clause_never_keyed_on_abs():
+    """No prompt/fragment text references the _abs convention — the clause
+    is evidence-derived by construction."""
+    all_text = _SYSTEM_PROMPT + _ABSTRACTION_FRAGMENT + \
+        "".join(_TYPE_FRAGMENTS.values())
+    assert "_abs" not in all_text
+    # an abstention question gets the identical universal section as its
+    # non-abstention twin of the same type
+    assert system_prompt_for("single-session-user") == \
+        _SYSTEM_PROMPT + _ABSTRACTION_FRAGMENT
+
+
+class _EvidenceBackedAbstainingModel:
+    """Proves the clause is what unlocks the behavior: WITHOUT the A1 marker
+    in the system prompt this fake commits to the decoy (the pre-A1 failure
+    mode — MockJudge scores it wrong); WITH it, it states the related fact
+    AND the absence (evidence-backed abstention — MockJudge scores it
+    right)."""
+
+    _TURN = re.compile(r"\[user\] (.*?)(?:\[assistant\]|\[session|$)", re.S)
+
+    def complete(self, *, system: str, user: str) -> str:
+        m = self._TURN.search(user)
+        decoy = m.group(1).strip() if m else "some related information"
+        if "PARTIAL-KNOWLEDGE ABSTENTION" in system:
+            return (f"The memory mentions {decoy}, but it does not contain "
+                    "the asked information.")
+        return decoy  # pre-A1: commits to the near-miss decoy
+
+
+def test_clean_abstention_evidence_backed_end_to_end(tmp_path):
+    """A1: the reader abstains cleanly on an absent fact — stating what IS
+    present and that the asked info is absent — judged correct by MockJudge
+    (existing marker: 'does not contain')."""
+    reader = LLMReader(_EvidenceBackedAbstainingModel(), model_id="a1-faithful")
+    outcomes, _ = run_evaluation(
+        [_ABS_QUESTION], reader=reader, judge=MockJudge(), ks=(5,),
+        top_k=20, split="s", work_dir=str(tmp_path),
+    )
+    assert outcomes[0]["label"] is True
+    hyp = outcomes[0]["hypothesis"]
+    assert "bicycle" in hyp            # states what IS present
+    assert "does not contain" in hyp   # … and that the asked info is absent
+
+
+def test_decoy_commit_negative(tmp_path):
+    """Owned negative (E2E-7): related-but-not-target fact in context must
+    NOT be committed to. Without the clause the fake commits the decoy and
+    MockJudge returns False; with the clause it abstains evidence-backed."""
+    class _PreA1Model(_EvidenceBackedAbstainingModel):
+        def complete(self, *, system, user):
+            # strip the A1 marker so the fake takes the pre-A1 branch
+            return super().complete(
+                system=system.replace("PARTIAL-KNOWLEDGE ABSTENTION", "X"),
+                user=user)
+    pre = run_evaluation(
+        [_ABS_QUESTION], reader=LLMReader(_PreA1Model(), model_id="pre-a1"),
+        judge=MockJudge(), ks=(5,), top_k=20, split="s",
+        work_dir=str(tmp_path))
+    assert pre[0][0]["label"] is False          # red: decoy commit is wrong
+    post = run_evaluation(
+        [_ABS_QUESTION], reader=LLMReader(_EvidenceBackedAbstainingModel(),
+                                          model_id="a1-faithful"),
+        judge=MockJudge(), ks=(5,), top_k=20, split="s",
+        work_dir=str(tmp_path))
+    assert post[0][0]["label"] is True          # green: clause present
+
+
+def test_abs_never_crosses_reader_call_site(tmp_path):
+    """E2E-7: the reader call site receives question_type only — no
+    abstention kwarg, no question_id, and the reader-visible context text
+    never contains the _abs marker. (Raw hit session_id provenance may
+    carry the qid under deterministic ingest — that is metadata, not a
+    flag, and is not rendered; the assertion targets prompt text + shape.)"""
+    reader = _RecordingReader()
+    run_evaluation([_ABS_QUESTION], reader=reader, judge=MockJudge(),
+                   ks=(5,), top_k=20, split="s", work_dir=str(tmp_path))
+    call = reader.calls[0]
+    assert set(call) == {"context_hits", "question", "question_date",
+                         "question_type"}
+    assert "abstention" not in call and "question_id" not in call
+    assert call["question_type"] == "single-session-user"  # raw type, never
+    # "abstention"/None-for-abs
+    text = render_context(call["context_hits"],
+                          question_date=call["question_date"])
+    assert "_abs" not in text and "pt_abs_001_abs" not in text

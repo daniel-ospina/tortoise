@@ -18,6 +18,10 @@ The offline mock (``--mock``) returns the first evidence turn (``has_answer``
 stamp) found in the retrieved hits — a deterministic stand-in proving the
 retrieval actually delivered the evidence, with zero network and no keys
 (CI smoke).
+
+A1 (#1546): the universal partial-knowledge abstention clause
+(``_ABSTRACTION_FRAGMENT``) lets the reader derive unanswerability from the
+evidence — the ``_abs`` question_id marker never crosses into the reader path.
 """
 from __future__ import annotations
 
@@ -83,6 +87,31 @@ _PREFERENCE_FRAGMENT = (
     "appears in the context."
 )
 
+# A1 (#1546): the universal partial-knowledge abstention clause — appended
+# to EVERY question's system prompt (abstention questions are
+# indistinguishable by question_type: the _abs marker lives only in the
+# question_id, which never reaches the reader). It lets the reader derive
+# unanswerability from the evidence: state what IS present, explicitly
+# state the asked info is absent, never commit to a near-miss decoy. The
+# commit-side guard keeps the #1366 fix (answer directly when the exact
+# fact IS present — never abstain on present evidence).
+_ABSTRACTION_FRAGMENT = (
+    "\n\nPARTIAL-KNOWLEDGE ABSTENTION: the context can contain related "
+    "information that does NOT actually answer the question. First check "
+    "whether the context contains the EXACT information the question asks "
+    "for. If it does, answer directly and concretely — do NOT abstain, and "
+    "do not let unrelated material weaken your answer. If the exact "
+    "information is absent, do NOT guess, do NOT infer, and do NOT commit "
+    "to the closest matching fact. Instead, state what related information "
+    "IS present (briefly), then explicitly state that the asked information "
+    "is absent. When you must abstain, you are expected to mention the "
+    "related facts found in the memory — this overrides the 'do not mention "
+    "the context' instruction for abstention answers. If the context "
+    "contains nothing related, simply state that the asked information is "
+    "absent. Example: 'The memory mentions <related fact>, but it does not "
+    "contain the asked information.'"
+)
+
 # question_type → the fragment that unlocks correct reasoning for it.
 _TYPE_FRAGMENTS: dict[str, str] = {
     "temporal-reasoning": _TEMPORAL_FRAGMENT,
@@ -103,11 +132,14 @@ def system_prompt_for(question_type: str | None) -> str:
 
     Unknown/absent types get the hardened generic prompt; temporal-reasoning
     and single-session-preference append their reasoning instructions (the
-    weak categories from issue #1366).
+    weak categories from issue #1366). A1 (#1546): the partial-knowledge
+    abstention clause is appended UNIVERSALLY — abstention questions are
+    indistinguishable by question_type (the _abs marker lives only in the
+    question_id, which never reaches the reader), so the reader must derive
+    unanswerability from the evidence, never from a flag.
     """
-    if not question_type:
-        return _SYSTEM_PROMPT
-    return _SYSTEM_PROMPT + _TYPE_FRAGMENTS.get(question_type, "")
+    return (_SYSTEM_PROMPT + _ABSTRACTION_FRAGMENT
+            + _TYPE_FRAGMENTS.get(question_type, ""))
 
 # Official gen.py default generation length for non-CoT runs (the reader's
 # answer prompt is answered at temperature 0, max_tokens 500 — the official
