@@ -509,7 +509,7 @@ def test_mock_email_signup_created_signs_in_and_redirects_url_clean(page: Page) 
         expect(page.locator("#confirm-email")).to_have_text(email)
     else:
         # Deployed happy path: server-side creation → direct sign-in →
-        # redirect to the welcome page (no check-your-inbox step, #801).
+        # redirect to the app root (no check-your-inbox step, #801/#1566).
         # #1566: the signup now lands on the app ROOT (first-timers are
         # provisioned in-app there).
         page.wait_for_url("**://app.premiselabs.co*", timeout=15_000)
