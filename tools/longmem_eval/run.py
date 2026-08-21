@@ -679,7 +679,12 @@ def reader_prompt_source() -> str:
         "temporal-reasoning questions are answerable); points-first "
         "budget-capped context (UX-3 #1540): extracted points render in "
         "rank order, raw turn-granular chunks backfill the remaining "
-        "context_token_cap tokens"
+        "context_token_cap tokens; type-fragments: temporal (date math), "
+        "preference (option commitment), knowledge-update (answer-from-newer, "
+        "date-conditional: current-value → newest/superseding point, "
+        "point-in-time → chain-walk by session date — E5 CORRECTS markers + "
+        "session-date annotations, no parallel mechanism), multi-session "
+        "(aggregation: distinct events, no double-count, reconcile by date)"
     )
 
 def _print_summary(report: dict[str, Any]) -> None:
