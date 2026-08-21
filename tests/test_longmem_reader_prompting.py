@@ -178,16 +178,21 @@ def test_temporal_prompt_preserves_abstention_license():
     # event is absent from the dated context (judge requires markers)
 
 
-def test_other_types_keep_generic_prompt():
+def test_untouched_types_keep_generic_prompt():
+    """A2 (#1547): knowledge-update and multi-session now get their own
+    fragments — the remaining generic types (single-session-user /
+    -assistant) are what prove unknown/untouched types stay generic."""
     r = LLMReader(_RecordingModel(), model_id="fake")
-    r.answer(context_hits=[{"id": "x", "content": "hi", "has_answer": True}],
-             question="q", question_type="knowledge-update")
-    system = r._model.calls[0][0]
-    # the generic hardened prompt (no type-specific fragment for KU)
-    assert "knowledge-update" not in system
-    assert "temporal" not in system.lower()
-    assert "preference" not in system.lower()
-    assert system == _SYSTEM_PROMPT or system.startswith(_SYSTEM_PROMPT)
+    for qt in ("single-session-user", "single-session-assistant"):
+        r.answer(context_hits=[{"id": "x", "content": "hi",
+                                "has_answer": True}],
+                 question="q", question_type=qt)
+        system = r._model.calls[-1][0]
+        # the generic hardened prompt (no type-specific fragment for
+        # untouched types)
+        assert system == _SYSTEM_PROMPT or system.startswith(_SYSTEM_PROMPT)
+        assert "supersed" not in system.lower()
+        assert "aggregate" not in system.lower()
 
 
 # ── 3. Behavior: the improved prompt fixes the hedge (red→green) ──────────

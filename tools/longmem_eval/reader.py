@@ -58,11 +58,17 @@ _SYSTEM_PROMPT = (
     "the context."
 )
 
-# Type-specific instructions appended to the system prompt for the two
+# Type-specific instructions appended to the system prompt for the
 # categories that fail at the READER (issue #1366: preference 43%, temporal
-# 62% — evidence IS retrieved, the reader hedges/miscounts). The generic
-# prompt above already flips the default toward committing; these fragments
-# give the reader the exact reasoning it must perform.
+# 62% — evidence IS retrieved, the reader hedges/miscounts; A2 #1547: KU
+# answers from the superseding point, MSR aggregation needs counting
+# discipline). The generic prompt above already flips the default toward
+# committing; these fragments give the reader the exact reasoning it must
+# perform. A2's two new categories are expressed in ontology terms —
+# subject refs (same subject+attribute across entries), supersession edges
+# (the [SUPERSEDED BY]/[SUPERSES] markers = CORRECTS) and session dates
+# (the (session date YYYY-MM-DD) annotation) — no parallel mechanism, no
+# new fields.
 
 _TEMPORAL_FRAGMENT = (
     "\n\nTEMPORAL REASONING INSTRUCTIONS: this question asks about elapsed "
@@ -85,6 +91,59 @@ _PREFERENCE_FRAGMENT = (
     "(e.g. 'X is fine but I prefer Y' → Y). Answer with that option — do "
     "not hedge, refuse, or say you do not know when the user's preference "
     "appears in the context."
+)
+
+# A2 (#1547): knowledge-update answer-from-newer + the date-conditional
+# rule (review P2). Consumes the reader-visible ontology state that E5
+# (#1537) + #1367/#1353 already render: the [SUPERSEDED BY]/[SUPERSES]
+# markers (CORRECTS edges) and the (session date YYYY-MM-DD) annotations
+# (E1). Current-value questions → newest/superseding point; point-in-time
+# questions → the version whose session date is the latest on/before the
+# asked date (E2E-9 chain-walk), current value rendered as context only.
+# V3 restore = E5's chain-walk — NO parallel mechanism, NO valid_at/
+# invalid_at windows (E6's, post-baseline). The abstention license (A1
+# #1546) stays open for absent versions/dates.
+_KNOWLEDGE_UPDATE_FRAGMENT = (
+    "\n\nKNOWLEDGE-UPDATE INSTRUCTIONS: this question asks about a fact "
+    "that may have changed across sessions. The context can contain several "
+    "versions of the same fact (same subject and attribute — e.g. the gym "
+    "schedule) linked by supersession edges: the replaced version carries a "
+    "'[SUPERSEDED BY: <newer value>]' marker, the newer version carries "
+    "'[SUPERSES: <replaced values>]', and every entry is annotated "
+    "'(session date YYYY-MM-DD)'.\n"
+    "- If the question asks for the CURRENT value (currently / now / these "
+    "days), answer from the NEWEST, superseding version — never from a "
+    "superseded one. Superseded entries are context only.\n"
+    "- If the question asks what the value WAS at a specific date (what "
+    "was … at/on/before <date>, back in <month>), answer from the version "
+    "whose session date is the latest on or before the asked date — walk "
+    "the supersession chain by session date. The current value may be "
+    "mentioned only as context, never as the answer.\n"
+    "- If no version's session date covers the asked date, or the newest "
+    "version is absent, say you do not know rather than guessing."
+)
+
+# A2 (#1547): multi-session aggregation discipline — count distinct events
+# ONCE (same subject+value restated in a later session is the SAME event),
+# no double-count, reconcile conflicts by session date. Consumes the same
+# ontology terms as the KU fragment (session-date annotations + supersession
+# markers when present). The A1 abstention license stays open for absent
+# asked information.
+_MULTI_SESSION_FRAGMENT = (
+    "\n\nMULTI-SESSION REASONING INSTRUCTIONS: this question spans several "
+    "dated sessions in the context. Aggregate across them with counting "
+    "discipline:\n"
+    "- Count each distinct event or decision ONCE. The same fact restated "
+    "in a later session (same subject, same value) is the SAME event — "
+    "never double-count it, and do not count mentions as events.\n"
+    "- Reconcile by date: when entries conflict, the value from the latest "
+    "session date is the current one; earlier entries remain events of "
+    "their time (entries may be linked by supersession — '[SUPERSEDED BY: "
+    "…]' / '[SUPERSES: …]' markers).\n"
+    "- Answer the specific question asked (which/where/when/how many) by "
+    "synthesizing from the distinct events — do not dump every entry.\n"
+    "- If the asked information is absent from the context, say you do not "
+    "know rather than guessing."
 )
 
 # A1 (#1546): the universal partial-knowledge abstention clause — appended
@@ -116,6 +175,8 @@ _ABSTRACTION_FRAGMENT = (
 _TYPE_FRAGMENTS: dict[str, str] = {
     "temporal-reasoning": _TEMPORAL_FRAGMENT,
     "single-session-preference": _PREFERENCE_FRAGMENT,
+    "knowledge-update": _KNOWLEDGE_UPDATE_FRAGMENT,
+    "multi-session": _MULTI_SESSION_FRAGMENT,
 }
 
 
@@ -130,13 +191,14 @@ def reader_prompt_constants() -> tuple[str, dict[str, str]]:
 def system_prompt_for(question_type: str | None) -> str:
     """The reader system prompt for a question, type-tailored.
 
-    Unknown/absent types get the hardened generic prompt; temporal-reasoning
-    and single-session-preference append their reasoning instructions (the
-    weak categories from issue #1366). A1 (#1546): the partial-knowledge
-    abstention clause is appended UNIVERSALLY — abstention questions are
-    indistinguishable by question_type (the _abs marker lives only in the
-    question_id, which never reaches the reader), so the reader must derive
-    unanswerability from the evidence, never from a flag.
+    Unknown/absent types get the hardened generic prompt; temporal-reasoning,
+    single-session-preference (issue #1366), knowledge-update and
+    multi-session (A2 #1547) append their reasoning instructions. A1 (#1546):
+    the partial-knowledge abstention clause is appended UNIVERSALLY —
+    abstention questions are indistinguishable by question_type (the _abs
+    marker lives only in the question_id, which never reaches the reader), so
+    the reader must derive unanswerability from the evidence, never from a
+    flag.
     """
     return (_SYSTEM_PROMPT + _ABSTRACTION_FRAGMENT
             + _TYPE_FRAGMENTS.get(question_type, ""))
