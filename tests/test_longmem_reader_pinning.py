@@ -96,6 +96,7 @@ def test_cross_cell_reader_pin_is_stable(tmp_path):
     a divergent reader is recorded with its real spec — drift visible, never
     silent (the run protocol's cross-cell comparability contract)."""
     import json
+    from tools.longmem_eval.dataset_audit import audit_dataset
     from tools.longmem_eval.judge import MockJudge
     from tools.longmem_eval.reader import MockReader
     from tools.longmem_eval.run import outcomes_to_report, run_evaluation
@@ -117,7 +118,9 @@ def test_cross_cell_reader_pin_is_stable(tmp_path):
         [], reader_model="deepseek/deepseek-chat",
         reader_model_spec="openrouter:deepseek/deepseek-chat",
         reader_provider="openrouter", reader_pinned=False,
-        judge_model="mock-judge", ks=(5,), top_k=20, split="s")
+        judge_model="mock-judge", ks=(5,), top_k=20, split="s",
+        # M7 publication gate (E2E-3 Precondition 2).
+        dataset_semantics_audit=audit_dataset(instances))
     m = drift["methodology"]
     assert m["reader_model_spec"] == "openrouter:deepseek/deepseek-chat"
     assert m["reader_pinned"] is False            # drift recorded, not hidden

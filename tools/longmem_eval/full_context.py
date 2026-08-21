@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from . import dataset as ds
+from .dataset_audit import audit_dataset
 from .judge import build_judge, is_abstention
 from .reader import build_reader
 from .report import build_report, save_report
@@ -222,6 +223,9 @@ def run_cell(
         ks=(5, 10, 20),
         top_k=len(instances[0].get("haystack_sessions") or []) if instances else 20,
         failures=failures,
+        # M7 (#1527) publication gate: the cell report also carries the
+        # dataset recall-semantics audit record.
+        dataset_semantics_audit=audit_dataset(instances),
         extra={
             "cell": "option-5 full-context comparison",
             "outcomes": [

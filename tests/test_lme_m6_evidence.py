@@ -22,6 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tools.longmem_eval import evidence as ev  # noqa: E402, RUF100
+from tools.longmem_eval.dataset_audit import audit_dataset  # noqa: E402, RUF100
 from tools.longmem_eval.evidence import (  # noqa: E402, RUF100
     EVIDENCE_QUOTE_CAP,
     anchor_quote,
@@ -54,6 +55,18 @@ def _healthy52() -> dict:
 
 def _fresh_sdk(tmp_path) -> TortoiseSDK:
     return TortoiseSDK(str(tmp_path / "lme.db"))
+
+
+def _trusted_audit() -> dict:
+    """Minimal trusted audit for direct build_report calls (M7 #1527
+    publication gate — the audit record is a required argument)."""
+    return audit_dataset([{
+        "question_id": "q-audit",
+        "haystack_session_ids": ["s0"],
+        "answer_session_ids": ["s0"],
+        "haystack_sessions": [[
+            {"role": "user", "content": "x", "has_answer": True}]],
+    }])
 
 
 def _outcome(qid: str, *, er=None, tr=None, eturns: int = 0,
@@ -404,7 +417,8 @@ def test_report_vacuity_excludes_na():
     ]
     report = build_report(outcomes, dataset_id="d", split="s",
                           reader_model="r", judge_model="j",
-                          extraction_approach="x", ks=(5, 10, 20), top_k=20)
+                          extraction_approach="x", ks=(5, 10, 20), top_k=20,
+                          dataset_semantics_audit=_trusted_audit())
     ret = report["retrieval"]
     # mean over evidence-bearing (non-None) only: (0.5 + 0.0) / 2
     assert ret["evidence_recall@k"]["5"] == 0.25
@@ -440,7 +454,8 @@ def test_report_evidence_coverage_zero_when_no_evidence():
     outcomes = [_outcome("abs", er=None, eturns=0, epoints=0)]
     report = build_report(outcomes, dataset_id="d", split="s",
                           reader_model="r", judge_model="j",
-                          extraction_approach="x", ks=(5,), top_k=20)
+                          extraction_approach="x", ks=(5,), top_k=20,
+                          dataset_semantics_audit=_trusted_audit())
     assert report["retrieval"]["evidence_coverage"] == 0.0
     assert report["retrieval"]["evidence_recall@k"] is None
 

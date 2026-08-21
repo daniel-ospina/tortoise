@@ -10,13 +10,70 @@ import tempfile
 import time  # noqa: F401
 from pathlib import Path
 
-import pytest  # noqa: F401
+import pytest
 
 # #331: parents[2] = repo root tortoise/ dir -- parents[1] is
 # tortoise/shared_state, where `shared_state` is not importable
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from shared_state.concurrency import atomic_claim, locked_append
+from shared_state.concurrency import (
+    atomic_claim,
+    flock_exclusive,
+    locked_append,
+)
+
+
+class TestFlockExclusive:
+    """flock_exclusive (M7 #1527): the shared exclusive-flock context
+    manager — reentrancy-free EX semantics, timeout, and lock-file
+    creation."""
+
+    def test_yields_fd_and_releases(self):
+        import fcntl
+        import os
+
+        d = Path(tempfile.mkdtemp())
+        lock = d / "x.lock"
+        with flock_exclusive(lock) as fd:
+            assert lock.exists()
+            # the lock IS held while inside (a second non-blocking acquire
+            # from the SAME process would succeed via flock semantics, so
+            # verify by attempting a competing flock in a child-free way:
+            # re-open + LOCK_NB from another fd must BLOCK).
+            other = os.open(lock, os.O_RDWR)
+            try:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                fcntl.flock(other, fcntl.LOCK_UN)
+                os.close(other)
+            assert fd >= 0
+        # after exit the lock is released: a fresh acquire succeeds
+        with flock_exclusive(lock):
+            pass
+
+    def test_creates_parent_dirs(self):
+        d = Path(tempfile.mkdtemp())
+        nested = d / "a" / "b" / "nested.lock"
+        with flock_exclusive(nested):
+            pass
+        assert nested.exists()
+
+    def test_timeout_raises(self):
+        import fcntl
+        import os
+
+        d = Path(tempfile.mkdtemp())
+        lock = d / "held.lock"
+        fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with pytest.raises(TimeoutError), flock_exclusive(
+                    lock, timeout_ms=1.0):
+                pass  # pragma: no cover
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
 
 
 class TestLockedAppend:

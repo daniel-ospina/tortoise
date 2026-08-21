@@ -4,12 +4,44 @@ Zero dependencies. Pessimistic locking (research brief §5: abort costs for AI
 agents are minutes/dollars, not microseconds).
 """
 
+import contextlib
 import fcntl
 import json
 import os
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Optional
+
+
+@contextlib.contextmanager
+def flock_exclusive(path: Path, *, timeout_ms: float = 5000.0) -> Iterator[int]:
+    """Acquire an exclusive advisory flock on ``path`` (created if absent).
+
+    Yields the open fd; releases the lock and closes on exit. Blocks up to
+    ``timeout_ms`` (5ms spin — good enough for <=10 processes); raises
+    ``TimeoutError`` when the lock cannot be acquired in time.
+
+    The single shared flock implementation for this repo (M7 #1527: the eval
+    checkpoint's merge-under-lock reuses it alongside ``locked_append``).
+    POSIX-only (``fcntl``) — macOS/Linux eval env, no Windows story.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"flock timeout on {path}") from None
+                time.sleep(0.005)  # ponytail: 5ms spin
+        yield fd
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def locked_append(path: Path, record: dict[str, Any],
@@ -25,39 +57,30 @@ def locked_append(path: Path, record: dict[str, Any],
     whose abort costs are measured in minutes and dollars.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    deadline = time.monotonic() + timeout_ms / 1000.0
-    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
     try:
-        while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                if time.monotonic() >= deadline:
-                    return False
-                time.sleep(0.005)  # ponytail: 5ms spin — good enough for ≤10 agents
+        with flock_exclusive(path, timeout_ms=timeout_ms) as fd:
+            # Dedup check under lock (no TOCTOU)
+            if dedup_key:
+                os.lseek(fd, 0, os.SEEK_SET)
+                raw = os.read(fd, 4096 * 1024).decode('utf-8', errors='replace')
+                for line in raw.split('\n'):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        ev = json.loads(line)
+                        if ev.get('event_id') == dedup_key:
+                            return True  # already exists, skip
+                    except json.JSONDecodeError:
+                        continue
 
-        # Dedup check under lock (no TOCTOU)
-        if dedup_key:
-            os.lseek(fd, 0, os.SEEK_SET)
-            raw = os.read(fd, 4096 * 1024).decode('utf-8', errors='replace')
-            for line in raw.split('\n'):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    ev = json.loads(line)
-                    if ev.get('event_id') == dedup_key:
-                        return True  # already exists, skip
-                except json.JSONDecodeError:
-                    continue
-        
-        line = json.dumps(record, ensure_ascii=False, default=str) + "\n"
-        os.write(fd, line.encode())
-        return True
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
+            # Append at the end (the dedup scan moved the offset)
+            os.lseek(fd, 0, os.SEEK_END)
+            line = json.dumps(record, ensure_ascii=False, default=str) + "\n"
+            os.write(fd, line.encode())
+            return True
+    except TimeoutError:
+        return False
 
 
 def atomic_claim(card_dir: Path, card_id: str, claim_data: dict[str, Any],
