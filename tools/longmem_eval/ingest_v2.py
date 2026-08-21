@@ -44,6 +44,14 @@ from .evidence import _overlap  # noqa: F401, E402 — back-compat re-export
 from .ingest import SESSION_TRANSCRIPT_KIND, _point_exists, _session_transcript  # noqa: E402
 
 
+def _point_status(proj, pid: str) -> str:
+    """The point's persisted status — '' when the point does not exist."""
+    rows = proj.g.query(
+        "MATCH (p:Point {id:$id}) RETURN p.status",
+        params={"id": pid}).result_set
+    return str(rows[0][0] or "") if rows else ""
+
+
 def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
                    si: int, evidence_turns: list[str],
                    session_date: str | None = None,
@@ -60,6 +68,7 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
     ``stats["evidence_marks"]`` so the report can say WHY evidence exists."""
     stats = {"entities": 0, "points": 0, "events": 0, "operators": 0,
              "evidence_points": 0, "minted_kinds": 0,
+             "supersessions_written": 0,
              "evidence_marks": {"source_session": 0, "verbatim": 0,
                                 "raw_chunk": 0}}
     proj = sdk._get_proj()
@@ -124,6 +133,7 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
                 quote=quote, status="draft",
                 search_keys=p.get("search_keys") or None,
                 source_turn_id=turn_ref,
+                reason=str(p.get("reason") or "NEW"),   # E5: REVISES visible on the node
                 **point_props,
             )
             stats["points"] += 1
@@ -187,6 +197,31 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
             logger.warning("v2 ingest operator %s->%s failed: %s",
                            src, dst, ex)
 
+    # ── supersessions (E5 #1537): materialize point-level records via the
+    # EXISTING canonical supersede() — CORRECTS edge + outdated + edge
+    # transfer. Runs AFTER the points loop so the new point exists (ordering
+    # contract, mirrored from the hosted §6b loop). Unresolvable endpoints /
+    # already-terminal olds are skipped with a warning (idempotent re-ingest;
+    # supersede_point would raise on a terminal old). ──
+    for sr in payload.get("supersessions", []) or []:
+        old_id = str(sr.get("superseded", "") or "").strip()
+        new_id = str(sr.get("supersedes_by", "") or "").strip()
+        if not (old_id.startswith("pt_") and new_id.startswith("pt_")) \
+                or old_id == new_id:
+            continue
+        if not _point_exists(proj, old_id) or not _point_exists(proj, new_id):
+            logger.warning("v2 supersession skip %s→%s: endpoint missing "
+                           "(fail-open)", old_id, new_id)
+            continue
+        if _point_status(proj, old_id) in ("superseded", "retracted",
+                                           "archived"):
+            continue   # idempotent re-ingest — already terminal
+        try:
+            sdk.supersede(old_id, new_id)     # EXISTING canonical unified tool
+            stats["supersessions_written"] += 1
+        except Exception as ex:  # noqa: BLE001, RUF100 — best-effort in the eval
+            logger.warning("v2 supersede %s→%s failed: %s", old_id, new_id, ex)
+
     stats["minted_kinds"] = len(payload.get("minted_kinds", []) or [])
     return stats
 
@@ -205,6 +240,7 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
     stats = {"sessions": 0, "turns": 0, "raw_transcripts": 0, "points": 0,
              "events": 0, "entities": 0, "operators": 0, "evidence_points": 0,
              "evidence_turns": 0, "minted_kinds": 0, "supersessions": 0,
+             "supersessions_written": 0,
              "evidence_marks": {"source_session": 0, "verbatim": 0,
                                 "raw_chunk": 0}, "errors": []}
     # M6: the evidence-session id set (haystack sessions containing >=1
@@ -315,6 +351,7 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
         for k in ("points", "events", "entities", "operators",
                   "evidence_points"):
             stats[k] += written.get(k, 0)
+        stats["supersessions_written"] += written.get("supersessions_written", 0)
         for mk in ("source_session", "verbatim", "raw_chunk"):
             stats["evidence_marks"][mk] = (
                 stats["evidence_marks"].get(mk, 0)

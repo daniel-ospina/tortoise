@@ -846,6 +846,32 @@ def _get_kind_expander():
     return _registry_cache
 
 
+def _decorate_fallback_hits(results: list[dict], graph) -> list[dict]:
+    """Attach promoted epistemic state (D8) to embedded-fallback hits — one
+    batch fetch (#1353, E5 #1537). Additive, mirroring SearchResult.to_dict:
+    keys are set ONLY when the state is non-empty, so a graph with no
+    CORRECTS edges renders byte-identically to today. Decoration must never
+    break retrieval — a graph failure returns the hits undecorated."""
+    if not results:
+        return results
+    try:
+        from tortoise.search_engine import fetch_point_epistemic_state
+        state = fetch_point_epistemic_state(graph, [r["id"] for r in results])
+    except Exception:
+        _logger.warning("embedded fallback decoration failed — returning "
+                        "undecorated hits", exc_info=True)
+        return results
+    for r in results:
+        st = state.get(r["id"]) or {}
+        if st.get("status"):
+            r["status"] = st["status"]
+        if st.get("superseded_by"):
+            r["superseded_by"] = st["superseded_by"]
+        if st.get("supersedes"):
+            r["supersedes"] = st["supersedes"]
+    return results
+
+
 class TortoiseSDK:
     """Layer 1 facade for Tortoise epistemic graph interaction.
 
@@ -9430,11 +9456,12 @@ class TortoiseSDK:
                     if _snap is not None:
                         _fb_store.put(_key, _snap)
                 if _snap is not None:
-                    return search_snapshot(
-                        query, _snap, limit=limit, kind=kind,
-                        exclude_status=exclude_status,
-                        include_terminal=include_terminal,
-                    )
+                    return _decorate_fallback_hits(
+                        search_snapshot(
+                            query, _snap, limit=limit, kind=kind,
+                            exclude_status=exclude_status,
+                            include_terminal=include_terminal,
+                        ), graph)
                 points = self.query(kind=kind,
                                     include_retracted=include_terminal)
                 if exclude_status and points:
@@ -9444,7 +9471,8 @@ class TortoiseSDK:
                     # dicts carrying the status property.
                     points = [p for p in points
                               if (p.get("status") or "") not in set(exclude_status)]
-                return fallback_tfidf(query, points, limit=limit)
+                return _decorate_fallback_hits(
+                    fallback_tfidf(query, points, limit=limit), graph)
             return []
 
         # 4. Fuse via RRF (skip if single strategy or full-scan)

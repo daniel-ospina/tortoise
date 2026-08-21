@@ -528,16 +528,153 @@ def test_annotate_hits_passes_through_supersession_state():
     assert "[SUPERSEDED BY: drip now]" in text
 
 
-def test_retrieve_for_question_surfaces_supersession_annotation(tmp_path):
-    """#1367 integration: a real superseded claim in the eval graph (via the
-    PRODUCTION supersede_point → CORRECTS edge) is (a) carried through
-    retrieve_for_question's annotated hits as superseded_by/supersedes keys
-    and (b) rendered with the SUPERSEDED BY marker when decorated by the
-    production fetch_point_epistemic_state — the exact path the Docker/HNSW
-    eval takes. Embedded CI itself can't decorate (snapshot fallback), so the
-    decoration is applied with the real graph machinery, not a fake."""
-    from tortoise.search_engine import fetch_point_epistemic_state
+def test_ingest_v2_supersession_end_to_end(tmp_path, monkeypatch):
+    """E5 Task 4 (#1537): the v2 eval ingest materializes point-level
+    supersession records via the EXISTING canonical sdk.supersede() — a
+    two-session question ("gym at 6pm" → "gym at 5pm") lands a CORRECTS
+    edge old→new with the old point superseded, and re-ingest is idempotent
+    (no raise, single edge, zero writes). The extractor's S3 is simulated as
+    a REAL backend (search_graph returns the live graph's statement points —
+    embedded mode skips S3 by design) so the REVISES detection sees session
+    0's point; the payload written by session 1 must carry the supersession
+    record (the old bug: _write_payload never saw it)."""
+    import json
 
+    import tortoise.extractor_v2 as ev2
+    from tortoise.ids import content_hash
+    from tools.longmem_eval.ingest_v2 import ingest_haystack_v2
+
+    class _MockModel:
+        """Deterministic adapter — S1 story + per-session S2/S4 fixtures."""
+        def __init__(self, resp):
+            self._resp = resp
+
+        def complete(self, *, system: str, user: str) -> str:
+            return self._resp(system, user)
+
+    def _s2(content: str) -> dict:
+        return {"entities": [{"name": "gym", "kind": "core:plan",
+                              "lifecycle": "created", "supersedes": None,
+                              "note": None}],
+                "events": [], "operators": [],
+                "points": [{"content": content, "pointKind": "statement",
+                            "about_entities": ["gym"], "when": None}]}
+
+    def _resp(system: str, user: str) -> str:
+        if "STORY SUMMARIZER" in system:
+            return "Gym session at 6pm." if "6pm" in user else "Gym session at 5pm."
+        # S2 carries the story in the USER prompt; S4 carries it in the SYSTEM
+        # prompt (the search results may also mention the old content — match
+        # the full story sentence, case+punctuation exact, to disambiguate).
+        blob = user if "GRAPH MAPPER" in system else system
+        is_6pm = "Gym session at 6pm." in blob
+        fixture = _s2("gym at 6pm") if is_6pm else _s2("gym at 5pm")
+        if "GRAPH MAPPER" in system:
+            return json.dumps(fixture)
+        if "GAP REVIEWER" in system:
+            return json.dumps(fixture)  # no gaps
+        raise AssertionError(f"unexpected system prompt: {system[:50]}")
+
+    def _fake_search(sdk, embed_list, story, **kw):
+        """Simulate a real backend: S3 returns the live graph's statement
+        points (the current session's points are written AFTER its search)."""
+        rows = sdk._get_proj().g.query(
+            "MATCH (p:Point {pointKind:'statement'}) RETURN p.id, p.content "
+            "LIMIT 25").result_set
+        return {"mode": "real", "degraded": False, "reason": None,
+                "entities": [], "events": [],
+                "points": [{"id": r[0], "content": r[1], "kind": "statement"}
+                            for r in rows],
+                "queries_run": 1}
+
+    monkeypatch.setattr(ev2, "search_graph", _fake_search)
+
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        question = {
+            "question_id": "q_sup",
+            "haystack_session_ids": ["s0", "s1"],
+            "haystack_dates": ["2026-06-02", "2026-06-16"],
+            "haystack_sessions": [
+                [{"role": "user", "content": "gym at 6pm",
+                  "has_answer": True}],
+                [{"role": "user", "content": "gym at 5pm",
+                  "has_answer": True}],
+            ],
+        }
+        model = _MockModel(_resp)
+        stats = ingest_haystack_v2(sdk, question, model=model)
+        proj = sdk._get_proj()
+        # extractor ids are content-addressed pt_<sha[:62]> (commit_schema's
+        # point_content_id keeps the full sha — the extractor truncates)
+        def _pid(c: str) -> str:
+            return f"pt_{content_hash(c)[:62]}"
+
+        old_id = _pid("gym at 6pm")
+        new_id = _pid("gym at 5pm")
+        # old point exists; CORRECTS edge new→old; old superseded + outdated
+        rows = proj.g.query(
+            "MATCH (old:Point {id:$old}) RETURN old.status, old.outdated",
+            params={"old": old_id}).result_set
+        assert rows and rows[0][0] == "superseded" and rows[0][1] is True
+        n = proj.g.query(
+            "MATCH (new:Point {id:$new})-[:CORRECTS]->(old:Point {id:$old}) "
+            "RETURN count(old)",
+            params={"new": new_id, "old": old_id}).result_set[0][0]
+        assert n == 1
+        assert stats["supersessions_written"] == 1
+        # the REVISES reason is preserved on the new point (observability)
+        rows = proj.g.query(
+            "MATCH (p:Point {id:$id}) RETURN coalesce(p.reason, '')",
+            params={"id": new_id}).result_set
+        assert rows and rows[0][0] == "REVISES"
+
+        # idempotent re-ingest: no raise, no second edge, zero writes
+        stats2 = ingest_haystack_v2(sdk, question, model=_MockModel(_resp))
+        assert stats2["points"] == 0
+        assert stats2["supersessions_written"] == 0
+        n2 = proj.g.query(
+            "MATCH (:Point {id:$old})<-[:CORRECTS]-(p:Point) RETURN count(p)",
+            params={"old": old_id}).result_set[0][0]
+        assert n2 == 1
+    finally:
+        sdk.close()
+
+
+def test_ingest_v2_supersession_missing_endpoint_skips(tmp_path, monkeypatch):
+    """E5 Task 4: a supersession record whose endpoints are missing is
+    skipped with a warning (fail-open) — never a crash or phantom edge."""
+    from tools.longmem_eval.ingest_v2 import _write_payload
+
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        payload = {"entities": [], "events": [], "operators": [],
+                   "points": [{"id": "pt_new", "content": "gym at 5pm",
+                               "pointKind": "statement"}],
+                   "supersessions": [
+                       {"superseded": "pt_missing", "supersedes_by": "pt_new",
+                        "evidence": "fact-value contradiction (later session "
+                                     "value change)"}]}
+        stats = _write_payload(sdk, payload, sid="s1", qid="q", si=0,
+                               evidence_turns=[], turns=[],
+                               ev_sessions=set())
+        assert stats["supersessions_written"] == 0
+        proj = sdk._get_proj()
+        rows = proj.g.query(
+            "MATCH (p:Point {id:'pt_missing'}) RETURN count(p)").result_set
+        assert rows[0][0] == 0
+    finally:
+        sdk.close()
+
+
+def test_retrieve_for_question_surfaces_supersession_annotation(tmp_path):
+    """#1367 + E5 (#1537): a real superseded claim in the eval graph (via
+    the PRODUCTION supersede_point → CORRECTS edge) is (a) co-retrieved —
+    include_terminal=True lets the superseded point survive base retrieval —
+    (b) decorated with superseded_by/supersedes even in EMBEDDED mode (the
+    call-site fetch_point_epistemic_state decoration, E5 Task 5; the old
+    "embedded CI itself can't decorate" caveat is gone by design), and (c)
+    rendered with the SUPERSEDED BY marker end-to-end (E2E-6 read side)."""
     sdk = _fresh_sdk(tmp_path)
     try:
         q = next(x for x in _mini()
@@ -554,23 +691,23 @@ def test_retrieve_for_question_surfaces_supersession_annotation(tmp_path):
             lme_session_index=1, is_episodic=True)
         sdk.supersede_point("ku_old", "ku_new")
 
-        ret = retrieve_for_question(sdk, q, ks=(5,), top_k=20)
+        # co-retrieve with a query matching the OLD claim verbatim — the
+        # superseded point must surface in the hits (embedded mode)
+        q2 = dict(q)
+        q2["question"] = "I used to prefer espresso in the morning"
+        ret = retrieve_for_question(sdk, q2, ks=(5,), top_k=20)
         assert all("superseded_by" in h and "supersedes" in h
                    for h in ret["hits"])
+        old_hits = [h for h in ret["hits"] if h["id"] == "ku_old"]
+        assert old_hits, "superseded point must co-retrieve (E2E-6 read side)"
+        old = old_hits[0]
+        assert old["superseded_by"] \
+            and old["superseded_by"]["id"] == "ku_new"
+        assert old["supersedes"] == []
 
-        # the production decoration (what tortoise_fts_query applies on the
-        # full path) sees the CORRECTS edge — the reader would get the marker
-        state = fetch_point_epistemic_state(sdk._get_proj().g, ["ku_old"])
-        assert state["ku_old"]["superseded_by"]["id"] == "ku_new"
-        assert state["ku_old"]["status"] == "superseded"
-
-        # simulate the full-path hit → annotation → rendering pipeline
-        raw_hit = {"id": "ku_old", "content": "I used to prefer espresso in the morning.",
-                   "match_source": "rrf", "superseded_by": state["ku_old"]["superseded_by"]}
-        props = {"ku_old": {"lme_session_index": 0, "session_id": "s0",
-                             "has_answer": False}}
-        [annotated] = _annotate_hits([raw_hit], props, ["2025-06-02"])
-        text = render_context([annotated], question_date=q.get("question_date"))
+        # the marker renders end-to-end in embedded mode (E5 Task 5
+        # decoration + the #1367 render machinery)
+        text = render_context(ret["hits"], question_date=q.get("question_date"))
         assert "[SUPERSEDED BY: I now prefer drip coffee over espresso.]" in text
         assert "I used to prefer espresso in the morning." in text
     finally:

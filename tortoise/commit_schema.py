@@ -434,11 +434,13 @@ class CommitEvent(BaseModel):
 
 
 class SupersessionRecord(BaseModel):
-    """A client-derived entity supersession (#1350, decision 1a): the
-    extractor observed 'entity B replaces entity A' in the conversation. The
-    server persists it as an ObjectSuperseded event; the projection folds it
-    into Object.status. Additive-optional so old clients' payloads still
-    validate (no migration)."""
+    """A client-derived supersession (#1350, decision 1a): the extractor
+    observed 'B replaces A' in the conversation. The server persists it as
+    an ObjectSuperseded event (projection folds it into Object.status) or,
+    for POINT-level refs (E5 #1537 — ``superseded``/``supersedes_by`` are
+    content-addressed ``pt_<sha>`` ids, dispatched by prefix at the write
+    sites), as a CORRECTS edge via the canonical ``supersede()``. Additive-
+    optional so old clients' payloads still validate (no migration)."""
 
     model_config = ConfigDict(extra="forbid")
 

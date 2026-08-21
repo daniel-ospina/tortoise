@@ -68,10 +68,12 @@ def _annotate_hits(hits: list[dict], props: dict, dates: list[str]) -> list[dict
 
     Extracted from ``retrieve_for_question`` (#1367) so the passthrough of
     the search payload's D8 supersession fields (``superseded_by`` /
-    ``supersedes`` — #1353) is unit-testable. Additive keys: a hit from the
-    full retrieval path (Docker/HNSW) carries them when the graph has
-    CORRECTS edges; the embedded TF-IDF fallback never decorates, so they
-    stay None/[] and ``render_context`` renders byte-identically to today.
+    ``supersedes`` — #1353) is unit-testable. Additive keys: a hit carries
+    them when the graph has CORRECTS edges — the full retrieval path
+    (Docker/HNSW) via SearchResult, and the embedded TF-IDF fallback via the
+    call-site decoration (E5 #1537, fetch_point_epistemic_state batch at
+    tortoise_fts_query). Without CORRECTS state they stay None/[] and
+    ``render_context`` renders byte-identically to today.
 
     E3 (#1535): the hit's ``speaker`` is derived at read time — its own
     speaker prop (turn points carry it) or, when the source-turn node was
@@ -189,8 +191,14 @@ def hybrid_search(sdk: TortoiseSDK, query: str, limit: int) -> list[dict]:
     Returns raw hit dicts from ``tortoise_fts_query`` (id, content,
     match_source, scores…) — embedded mode degrades to the in-memory TF-IDF
     fallback automatically.
+
+    include_terminal=True (E5 #1537, E2E-6): superseded points co-retrieve
+    so the reader sees the [SUPERSEDED BY] marker and discounts them; the
+    marker (A2) is the reader's discount mechanism. Terminal exclusion
+    (#1391) would hide the superseded claim entirely.
     """
-    return sdk.tortoise_fts_query(query, entity_type="point", limit=limit)
+    return sdk.tortoise_fts_query(query, entity_type="point", limit=limit,
+                                  include_terminal=True)
 
 
 def retrieve_for_question(
@@ -236,8 +244,8 @@ def retrieve_for_question(
     # it; fetch is single-query and canonical. session_date comes from the
     # dataset's haystack_dates (surfaced to the reader so temporal questions
     # are answerable — P1 #1144). superseded_by/supersedes pass through from
-    # the search payload's D8 fields (additive; embedded mode never decorates
-    # → None/[] → no markers).
+    # the search payload's D8 fields (additive — E5 #1537 decorates the
+    # embedded fallback too, so markers render in embedded AND full modes).
     annotated = _annotate_hits(hits, props, dates)
 
     # ── recall@k (session-level + turn-level) ──

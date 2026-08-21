@@ -337,6 +337,51 @@ class TestS5:
         assert entity_note["found"] is True
         assert "obj-9" in entity_note["note"]
 
+    def test_payload_carries_supersessions_and_commit_id_agrees(self):
+        """E5 DD-3/DD-4: execute_embed emits payload["supersessions"] with
+        point-level records (pt_ refs) and includes them in client_commit_id
+        — site-1 (execute_embed) == site-2 (_post_commit recompute shape).
+        Today execute_embed omits supersessions from the id → the hosted
+        path 422s (commit_id_mismatch) on any payload with supersessions.
+        """
+        search = {"entities": [], "events": [],
+                  "points": [{"id": "pt_old", "content": "gym at 6pm",
+                              "kind": "statement"}]}
+        embed = {"points": [{"content": "gym at 5pm", "pointKind": "statement",
+                             "about_entities": ["gym"]}]}
+        result = v2.execute_embed(embed, search, session_id="s1")
+        payload = result["payload"]
+        assert payload["supersessions"] == result["supersessions"]
+        from tortoise.commit_schema import compute_client_commit_id
+        recomputed = compute_client_commit_id(
+            payload["session_id"], payload["points"], payload["entities"],
+            payload["operators"], payload["summary"], payload["story_arc"],
+            payload.get("events", []), payload.get("supersessions", []))
+        assert payload["client_commit_id"] == recomputed
+        pts = [s for s in payload["supersessions"]
+               if s["superseded"].startswith("pt_")]
+        assert pts, "point-level supersession record must ride the payload"
+        assert pts[0]["supersedes_by"].startswith("pt_")
+        assert payload["points"][0]["reason"] == "REVISES"
+
+    def test_client_commit_id_empty_supersessions_backward_compat(self):
+        """pre-#1350 id stability: a payload with EMPTY supersessions keeps
+        its pre-#1350 client_commit_id (canonical omits the empty key)."""
+        search = {"entities": [], "events": [],
+                  "points": [{"id": "pt_same", "content": "gym at 6pm",
+                              "kind": "statement"}]}
+        embed = {"points": [{"content": "gym at 6pm", "pointKind": "statement",
+                             "about_entities": []}]}
+        result = v2.execute_embed(embed, search, session_id="s1")
+        payload = result["payload"]
+        from tortoise.commit_schema import compute_client_commit_id
+        no_supersessions = compute_client_commit_id(
+            payload["session_id"], payload["points"], payload["entities"],
+            payload["operators"], payload["summary"], payload["story_arc"],
+            payload.get("events", []))
+        assert payload["client_commit_id"] == no_supersessions
+        assert payload.get("supersessions") == []
+
     def test_point_supersession_revises(self):
         search = {"entities": [], "events": [],
                   "points": [{"id": "pt-old", "content":
@@ -643,6 +688,81 @@ class TestS5:
         assert result["payload"]["operators"] == []
         assert any("MITIGATES target edge not emitted" in w
                    for w in result["warnings"])
+
+
+class TestE5FactValueContradiction:
+    """E5 (#1537) — length-guarded token overlap + fact-value contradiction
+    detection. E2E-6 positives/negatives at the detection level: a 5-token
+    point sharing 3 tokens with a 50-token point is NOT a REVISES (the old
+    min-denominator 3/5=0.6 false-positive); a short-value change that raw
+    overlap misses is caught via the entity-grounded contradiction pass.
+    """
+
+    def test_token_overlap_length_guard_short_vs_long(self):
+        """E2E-6 negative: a 5-token point sharing 3 tokens with a 50-token
+        point is NOT a REVISES. Old min-denominator code: 3/5 = 0.6 → false
+        REVISES (the bug). New max-denominator: 3/50 = 0.06 → none."""
+        short = "gym 6pm schedule changed today"        # 5 tokens
+        long = "gym 6pm schedule " + " ".join(f"word{i}" for i in range(47))  # 3 + 47 = 50
+        assert len(short.split()) == 5 and len(long.split()) == 50
+        assert v2._token_overlap(long, short) < 0.6
+        assert v2._find_point_match([{"id": "pt_long", "content": long}],
+                                    short)[0] == "none"
+
+    def test_token_overlap_short_revision_still_matches(self):
+        """BVA 0.6: a short revision sharing its full frame still REVISES."""
+        assert v2._token_overlap("gym at 6pm", "gym at 5pm") >= 0.6
+        assert v2._find_point_match([{"id": "pt_old", "content": "gym at 6pm"}],
+                                    "gym at 5pm")[0] == "revises"
+
+    def test_token_overlap_single_shared_token_never_revises(self):
+        """floor-2 guard: a single shared content token is never a revision."""
+        assert v2._token_overlap("gym 6pm", "gym membership") == 0.0
+
+    def test_fact_value_contradiction_same_entity_value_change(self):
+        existing = {"id": "pt_old", "content": "gym at 6pm"}
+        assert v2._fact_value_contradiction("gym at 5pm", ["gym"], existing)
+
+    def test_fact_value_contradiction_identical_value_no_supersession(self):
+        """E2E-6 negative — identical-value re-assertion must NOT supersede:
+        the exact-match pass dedups it BEFORE the contradiction pass runs
+        (NOOP link is E2E-11's; reworded-identical values are that lane too
+        — the value-diff guard also rejects it directly)."""
+        existing = {"id": "pt_old", "content": "gym at 6pm"}
+        assert v2._find_point_match([existing], "gym at 6pm",
+                                    about_entities=["gym"])[0] == "exact"
+        assert not v2._fact_value_contradiction("gym at 6pm", ["gym"], existing)
+
+    def test_fact_value_contradiction_different_entity_no(self):
+        existing = {"id": "pt_old", "content": "gym at 6pm"}
+        assert not v2._fact_value_contradiction("yoga at 5pm", ["yoga"], existing)
+
+    def test_find_point_match_contradiction_below_overlap_threshold(self):
+        """short-value change that raw overlap misses ("gym 6pm" →
+        "gym 5pm": 1 shared token) is caught by the contradiction pass."""
+        existing = {"id": "pt_old", "content": "gym 6pm"}
+        assert v2._find_point_match([existing], "gym 5pm",
+                                    about_entities=["gym"])[0] == "revises"
+
+    def test_fact_value_contradiction_older_when_rejected(self):
+        """CG-2 with-date mode: the new point's `when` must be >= the old
+        point's when/createdAt — an older date never supersedes."""
+        existing = {"id": "pt_old", "content": "gym at 6pm",
+                    "when": "2026-06-16"}
+        assert not v2._fact_value_contradiction(
+            "gym at 5pm", ["gym"], existing, when="2026-06-02")
+        assert v2._fact_value_contradiction(
+            "gym at 5pm", ["gym"], existing, when="2026-06-16")
+        assert v2._fact_value_contradiction(
+            "gym at 5pm", ["gym"], existing, when="2026-06-20")
+
+    def test_fact_value_contradiction_undated_session_order(self):
+        """CG-2 without-date mode: when either side carries no date, the
+        session-ingest-order invariant supplies the guard (no rejection)."""
+        existing = {"id": "pt_old", "content": "gym at 6pm"}
+        assert v2._fact_value_contradiction("gym at 5pm", ["gym"], existing)
+        assert v2._fact_value_contradiction(
+            "gym at 5pm", ["gym"], existing, when="")
 
 
 class TestChains:

@@ -4374,11 +4374,34 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: "CommitPayload", plan):
         )
 
     # ── 6b. Supersessions — client-derived records (the deterministic channel
-    # for the Object status fold, #1350). Resolve each superseded ref by id
-    # (fallback name) and emit an ObjectSuperseded event for the projection to
-    # fold into Object.status. Unresolved refs warn and are skipped (fail-open
-    # — mirrors the extractor's never-guess discipline). ──
+    # for the Object status fold, #1350). Point-level records (E5 #1537 —
+    # ``pt_<sha>`` refs, dispatched by prefix) materialize the EXISTING
+    # canonical ``sdk.supersede()``: CORRECTS + outdated + edge transfer.
+    # Entity-level records keep the ObjectSuperseded fold unchanged. Resolve
+    # each superseded ref by id (fallback name) and emit an ObjectSuperseded
+    # event for the projection to fold into Object.status. Unresolved refs
+    # warn and are skipped (fail-open — mirrors the extractor's never-guess
+    # discipline); a supersession write must never fail the commit. ──
     for sr in payload.supersessions:
+        ref = (sr.superseded or "").strip()
+        if ref.startswith("pt_"):   # point-level supersession → CORRECTS via supersede()
+            rows = proj.g.query(
+                "MATCH (p:Point) WHERE p.id = $ref RETURN p.id, p.status LIMIT 1",
+                params={"ref": ref}).result_set
+            if not rows:
+                _logger.warning("point supersession ref %r not found — "
+                                "skipped (fail-open)", ref)
+                continue
+            if (rows[0][1] or "") in ("superseded", "retracted", "archived"):
+                # already terminal — idempotent no-op (supersede_point would
+                # raise ValueError; a re-commit/overlap must not fail)
+                continue
+            try:
+                sdk.supersede(ref, sr.supersedes_by)   # EXISTING canonical unified tool
+            except Exception as e:  # noqa: BLE001 — a supersession write must not fail the commit
+                _logger.warning("point supersede %r → %r failed: %s",
+                                ref, sr.supersedes_by, e)
+            continue
         rows = proj.g.query(
             "MATCH (o:Object) WHERE o.id = $ref OR o.name = $ref "
             "RETURN o.id, o.name LIMIT 1",
