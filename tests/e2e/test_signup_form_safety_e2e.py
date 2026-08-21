@@ -425,7 +425,7 @@ def test_healthy_load_does_not_show_watchdog_error(page: Page) -> None:
 
 def test_mock_email_signup_created_signs_in_and_redirects_url_clean(page: Page) -> None:
     """Success path — the #801 server-first contract (created server-side →
-    direct sign-in → /welcome redirect; the check-your-inbox state is NOT
+    direct sign-in → the app root redirect (#1566); the check-your-inbox state is NOT
     part of the hosted happy path, email_confirm=true server-side). Must
     keep the URL clean and push the x_signup conversion event (#736).
 
