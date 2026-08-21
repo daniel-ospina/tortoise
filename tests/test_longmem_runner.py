@@ -214,10 +214,12 @@ def test_ingestion_creates_session_turn_raw_structure(tmp_path):
             "MATCH (p:Point {pointKind:'session-transcript'}) RETURN count(p)"
         ).result_set
         assert rows[0][0] == 2
-        # evidence turn carries has_answer=true (turn-level recall source)
+        # evidence turn carries has_answer=true (turn-level recall source);
+        # M6 (#1526): the answer session's raw transcript carries mark (c)/
+        # (a) too — 1 evidence turn + 1 marked raw transcript
         rows = proj.g.query(
             "MATCH (p:Point {has_answer:true}) RETURN count(p)").result_set
-        assert rows[0][0] == 1
+        assert rows[0][0] == 2
         # deterministic ids, session linkage
         rows = proj.g.query(
             "MATCH (s:Session {id:'lme:mini_ie_user_001:s1'})-[:CONTAINS]->"
