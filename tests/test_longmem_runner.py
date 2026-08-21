@@ -19,6 +19,8 @@ from tortoise.sdk import TortoiseSDK  # noqa: E402, I001, RUF100
 from tortoise.models import OpenAICompatModel  # noqa: E402, RUF100
 from tortoise.search_engine import reset_circuit_breakers  # noqa: E402
 
+from tortoise import extractor_v2 as v2  # noqa: E402, I001, RUF100
+
 from tools.longmem_eval.ingest import (  # noqa: E402, RUF100
     _session_chunks, _session_transcript, ingest_haystack,
 )
@@ -101,6 +103,16 @@ def test_mini_pipeline_end_to_end_mock(tmp_path):
     assert m["run_at_utc"]
     assert m["k_values"] == [5, 10, 20]
 
+    # M4 (#1524, D5): the integrity block — deterministic mode → valid,
+    # zero invalid_rate, empty census (the E2E-2 offline analog).
+    integ = report["integrity"]
+    assert integ["valid"] is True
+    assert integ["invalid_rate"] == 0.0
+    assert integ["n_valid"] == 5
+    assert integ["n_invalid"] == 0
+    assert integ["n_failed"] == 0
+    assert integ["error_census"] == {}
+
 
 def test_outcomes_to_report_golden_shape():
     """Golden report-shape pin (M1/S22, issue #1522 + M7 #1527 contract
@@ -134,7 +146,7 @@ def test_outcomes_to_report_golden_shape():
         "total_ms": 66.0,
         # M7 outcome instrumentation (persisted in the Layer-1 projection).
         "valid": True,
-        "error_classes": [],
+        "error_classes": {},
         "leg_mix": {"tfidf": 3},
         "leg_mix@k": {"5": {"tfidf": 3}, "10": {"tfidf": 3},
                        "20": {"tfidf": 3}},
@@ -261,7 +273,7 @@ def test_outcomes_to_report_golden_shape():
         "judge_latency_ms": 33.0,
         "total_ms": 66.0,
         "valid": True,
-        "error_classes": [],
+        "error_classes": {},
         "leg_mix": {"tfidf": 3},
         "leg_mix@k": {"5": {"tfidf": 3}, "10": {"tfidf": 3},
                        "20": {"tfidf": 3}},
@@ -2506,7 +2518,7 @@ def test_outcome_instrumentation_fields(tmp_path):
         assert o["evidence_written"] == o["ingest"]["evidence_turns"]
         assert o["ingest_latency_ms"] > 0
         assert o["valid"] is True
-        assert o["error_classes"] == []
+        assert o["error_classes"] == {}  # M4 #1524: census dict (deterministic → empty)
     # the 2-session mini question: 6 turn points + 4 raw chunks (chunk_turns
     # default 2 → ceil(3/2)=2 windows per 3-turn session)
     by_qid = {o["question_id"]: o for o in outcomes}
@@ -2579,3 +2591,162 @@ def test_integrity_prints_before_score(tmp_path, capsys):
     assert "── integrity ──" in out
     assert "error census" in out
     assert out.index("── integrity ──") < out.index("overall accuracy")
+
+
+# ── M4 (#1524): per-question valid flag + error census ─────────────────────
+
+class _HTTPError429(Exception):
+    """Duck-typed 429 (no hard requests import in tests)."""
+
+    def __init__(self):
+        super().__init__("rate limited")
+        self.response = type("R", (), {"status_code": 429})()
+
+
+class _FlakyExtractor:
+    """A v2 extractor model whose S2/S4 always transient-fail (429) — S1
+    narrative is fine, so the session pipeline completes with errors."""
+
+    def __init__(self):
+        self.last_finish_reason = None
+
+    def complete(self, *, system, user, max_tokens=None):
+        if "STORY SUMMARIZER" in system:
+            return "The session revealed a new strategy."
+        raise _HTTPError429()
+
+
+def _no_extractor_sleep(monkeypatch):
+    """Patch ONLY extractor_v2's ``time`` reference (its retry-loop sleep) —
+    never the global time module: redislite's embedded server-start readiness
+    poll needs real ``time.sleep`` (a global patch breaks the graph startup)."""
+    import contextlib
+    import types
+
+    real = v2.time
+    shim = types.ModuleType("extractor_time")
+    for _name in dir(real):
+        if _name.startswith("__"):
+            continue
+        with contextlib.suppress(Exception):  # skip un-copyable attrs
+            setattr(shim, _name, getattr(real, _name))
+    shim.sleep = lambda _seconds: None
+    monkeypatch.setattr(v2, "time", shim)
+
+
+def test_ingest_v2_rolls_census_and_valid(tmp_path, monkeypatch):
+    """M4 (D4): ingest_haystack_v2 rolls each session's extractor
+    error_census into stats['error_census'] and CLASSIFIES session-level
+    exceptions into the same granular vocabulary."""
+    import tortoise.extractor_v2 as ev2
+    from tools.longmem_eval.ingest_v2 import ingest_haystack_v2
+
+    def _fake_extract(model, conversation, **kw):
+        if conversation and conversation[0].get("content") == "boom":
+            raise RuntimeError("session boom")
+        return {"payload": {}, "minted_kinds": [], "supersessions": [],
+                "errors": ["S2 failed: HTTP 429"], "warnings": [],
+                "error_census": {"transient_429_rate_limit": 2}}
+
+    monkeypatch.setattr(ev2, "extract_session_v2", _fake_extract)
+
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        question = {
+            "question_id": "census_q",
+            "haystack_session_ids": ["s0", "s1"],
+            "haystack_dates": ["", ""],
+            "haystack_sessions": [
+                [{"role": "user", "content": "boom"}],
+                [{"role": "user", "content": "fine"}],
+            ],
+        }
+        stats = ingest_haystack_v2(sdk, question, model=object(), chunk_turns=2)
+        # session-level exception → granular class; extractor census rolled up
+        assert stats["error_census"]["transient_unknown"] == 1
+        assert stats["error_census"]["transient_429_rate_limit"] == 2
+        assert len(stats["errors"]) == 2  # boom + S2-failed string
+    finally:
+        sdk.close()
+
+
+def test_outcome_valid_and_error_classes(tmp_path, monkeypatch):
+    """M4 (D4): the per-question outcome carries valid + the granular error
+    census; an extraction-invalid run reports valid=false with the census
+    before the score (E2E-2 offline analog)."""
+    _no_extractor_sleep(monkeypatch)
+    outcomes, report = run_evaluation(
+        _mini()[:1], reader=MockReader(), judge=MockJudge(),
+        ks=(5,), top_k=5, split="s", work_dir=str(tmp_path),
+        ingest_mode="v2", extractor_model=_FlakyExtractor(),
+    )
+    assert len(outcomes) == 1
+    o = outcomes[0]
+    assert o["valid"] is False
+    assert o["error_classes"]["transient_429_rate_limit"] >= 1
+    integ = report["integrity"]
+    assert integ["valid"] is False
+    assert integ["invalid_rate"] == 1.0
+    assert integ["error_census"]["transient_429_rate_limit"] >= 1
+    assert integ["n_failed"] == 0  # completed-but-invalid ≠ question failure
+
+
+def test_checkpoint_roundtrip_preserves_valid(tmp_path, monkeypatch):
+    """M4 (D4): valid + error_classes survive the checkpoint round-trip
+    (JSON-generic save/load — a resumed run reuses them)."""
+    _no_extractor_sleep(monkeypatch)
+    cp = tmp_path / "lme-census.json"
+    run_evaluation(
+        _mini()[:1], reader=MockReader(), judge=MockJudge(),
+        ks=(5,), top_k=5, split="s", work_dir=str(tmp_path),
+        checkpoint=str(cp), ingest_mode="v2",
+        extractor_model=_FlakyExtractor(),
+    )
+    saved = json.loads(cp.read_text(encoding="utf-8"))
+    assert saved["outcomes"][0]["valid"] is False
+    assert saved["outcomes"][0]["error_classes"]["transient_429_rate_limit"] >= 1
+
+
+# ── Task 7 (#1524): _call_with_backoff fatal-class awareness (M2 pin) ──────
+
+def test_backoff_skips_fatal_4xx(monkeypatch):
+    """A fatal-class error (401/402/403 per the P2 taxonomy) is raised
+    immediately by _call_with_backoff — no retry, no backoff sleep. Pinned
+    so the harness's fatal-class awareness cannot regress."""
+    from tools.longmem_eval.run import _call_with_backoff
+
+    sleeps: list[float] = []
+    monkeypatch.setattr("time.sleep", lambda s: sleeps.append(s))
+
+    class _HTTPError(Exception):
+        def __init__(self, status):
+            super().__init__(f"HTTP {status}")
+            self.response = type("R", (), {"status_code": status})()
+
+    calls = {"n": 0}
+
+    def _boom():
+        calls["n"] += 1
+        raise _HTTPError(401)
+
+    with pytest.raises(_HTTPError):
+        _call_with_backoff(_boom, what="test", retries=3)
+    assert calls["n"] == 1
+    assert sleeps == []
+
+
+def test_backoff_still_retries_transient(monkeypatch):
+    """Transient classes keep the backoff path (existing behavior pinned)."""
+    from tools.longmem_eval.run import _call_with_backoff
+
+    monkeypatch.setattr("time.sleep", lambda _: None)
+    calls = {"n": 0}
+
+    def _flaky():
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise _HTTPError429()
+        return "ok"
+
+    assert _call_with_backoff(_flaky, what="test", retries=2) == "ok"
+    assert calls["n"] == 3

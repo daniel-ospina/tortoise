@@ -63,8 +63,12 @@ class OpenRouterModel:
         self.temperature = temperature
         self.thinking_budget = thinking_budget  # for reasoning models
         self.disable_reasoning = disable_reasoning  # send reasoning.effort=none
+        # M3 (#1524, GATE-2): the per-call finish reason — "length" = the
+        # generation hit the cap (truncation detected, not silently lost).
+        self.last_finish_reason: str | None = None
 
-    def complete(self, *, system: str, user: str) -> str:
+    def complete(self, *, system: str, user: str,
+                 max_tokens: int | None = None) -> str:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -77,8 +81,13 @@ class OpenRouterModel:
             ],
             "temperature": self.temperature,
         }
-        if self.max_tokens is not None:
-            body["max_tokens"] = self.max_tokens
+        # Per-call override (M3 #1524): an explicit ``max_tokens`` beats the
+        # constructor value — the v2 extractor's _complete passes its stage
+        # caps here (race-free under --workers>1, unlike mutating
+        # ``self.max_tokens``). None → the constructor default applies.
+        cap = self.max_tokens if max_tokens is None else max_tokens
+        if cap is not None:
+            body["max_tokens"] = cap
         # Enable thinking for reasoning models
         if self.thinking_budget > 0:
             body["reasoning"] = {"max_tokens": self.thinking_budget}
@@ -98,6 +107,7 @@ class OpenRouterModel:
         self.last_cost = data.get('usage', {}).get('total_tokens', 0)  # will be overridden
 
         content = data['choices'][0]['message']['content']
+        self.last_finish_reason = data["choices"][0].get("finish_reason")
         return content
 
 
@@ -117,7 +127,8 @@ class DeepSeekDirectModel(OpenRouterModel):
                          temperature=temperature, **kw)
         self.api_key = os.environ.get(self.key_env, "")
 
-    def complete(self, *, system: str, user: str) -> str:
+    def complete(self, *, system: str, user: str,
+                 max_tokens: int | None = None) -> str:
         body = {
             "model": self.id,
             "messages": [
@@ -126,8 +137,9 @@ class DeepSeekDirectModel(OpenRouterModel):
             ],
             "temperature": self.temperature,
         }
-        if self.max_tokens is not None:
-            body["max_tokens"] = self.max_tokens
+        cap = self.max_tokens if max_tokens is None else max_tokens
+        if cap is not None:
+            body["max_tokens"] = cap
         r = requests.post(
             self.base_url,
             headers={"Authorization": f"Bearer {self.api_key}",
@@ -139,6 +151,7 @@ class DeepSeekDirectModel(OpenRouterModel):
         usage = data.get("usage", {})
         self.last_prompt_tokens = usage.get("prompt_tokens", 0)
         self.last_completion_tokens = usage.get("completion_tokens", 0)
+        self.last_finish_reason = data["choices"][0].get("finish_reason")
         return data["choices"][0]["message"]["content"]
 
 
@@ -361,25 +374,34 @@ class RoutingModel:
         self.failover_used = False
         self.errors: list[str] = []
         self._failed_over = False
+        # M3 (#1524, GATE-2): surfaced from the inner adapter after each call.
+        self.last_finish_reason: str | None = None
 
-    def complete(self, *, system: str, user: str) -> str:
+    def complete(self, *, system: str, user: str,
+                 max_tokens: int | None = None) -> str:
         if self.fallback is not None and (
                 self._failed_over
                 or _primary_in_cooldown(self.primary.provider, self.cooldown_s)):
-            return self._call(self.fallback, system, user, failover=True)
+            return self._call(self.fallback, system, user, failover=True,
+                              max_tokens=max_tokens)
         try:
-            return self._call(self.primary, system, user, failover=False)
+            return self._call(self.primary, system, user, failover=False,
+                              max_tokens=max_tokens)
         except BaseException as e:  # noqa: BLE001, RUF100 — classify first
             self.errors.append(f"{type(e).__name__}: {e}")
             if is_fatal(e) or self.fallback is None:
                 raise
             _note_failure(self.primary.provider, self.cooldown_s)
             self._failed_over = True
-            return self._call(self.fallback, system, user, failover=True)
+            return self._call(self.fallback, system, user, failover=True,
+                              max_tokens=max_tokens)
 
-    def _call(self, adapter, system: str, user: str, *, failover: bool) -> str:
-        out = adapter.complete(system=system, user=user)
+    def _call(self, adapter, system: str, user: str, *, failover: bool,
+              max_tokens: int | None = None) -> str:
+        out = adapter.complete(system=system, user=user,
+                               max_tokens=max_tokens)
         self.last_route = adapter.provider
+        self.last_finish_reason = getattr(adapter, "last_finish_reason", None)
         if failover:
             self.route = adapter.provider
             self.failover_used = True
