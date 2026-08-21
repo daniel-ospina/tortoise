@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tortoise.sdk import TortoiseSDK  # noqa: E402, I001, RUF100
 from tortoise.models import OpenAICompatModel  # noqa: E402, RUF100
-from tortoise.search_engine import reset_circuit_breakers  # noqa: E402
+from tortoise.search_engine import reset_circuit_breakers
 
 from tortoise import extractor_v2 as v2  # noqa: E402, I001, RUF100
 
