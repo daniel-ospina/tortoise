@@ -42,12 +42,16 @@ from tortoise.model_adapters import is_fatal
 from tortoise.sdk import TortoiseSDK
 
 from . import dataset as ds
-from .ingest import ingest_haystack
+from .ingest import DEFAULT_CHUNK_TURNS, ingest_haystack
 from .judge import build_judge, is_abstention
 from .preflight import FatalProviderError, PreflightError, run_preflight
 from .reader import build_reader, reader_prompt_constants
 from .report import build_report, default_report_path, save_report
-from .retrieve import retrieve_for_question
+from .retrieve import (
+    DEFAULT_CONTEXT_TOKEN_CAP,
+    DEFAULT_MAX_CHUNKS_PER_SESSION,
+    retrieve_for_question,
+)
 
 DEFAULT_KS = (5, 10, 20)
 DEFAULT_TOP_K = 20
@@ -57,12 +61,16 @@ BACKOFF_CAP_S = 30.0
 
 # Recorded verbatim in report methodology — published numbers carry their
 # extraction approach (design-locked axis 2: "WITH full methodology").
+# R1 (#1540): raw verbatim evidence is turn-granular raw chunks (the
+# whole-session blob is retired; union of chunks == the full session).
 EXTRACTION_APPROACH = (
     "deterministic session ingestion: episodic turn points (pointKind=event, "
-    "[role] content, has_answer on evidence turns) + raw verbatim session "
-    "transcripts (pointKind=session-transcript) + Session nodes; no LLM "
-    "epistemic extraction in this run (LLM extraction is a documented "
-    "future option)"
+    "[role] content, has_answer on evidence turns) + turn-granular raw "
+    "chunks (pointKind=session-transcript, non-overlapping verbatim windows "
+    "of chunk_turns turns each — the union of chunks == the full session; "
+    "chunks unmarked so the deterministic leg keeps its turn-id evidence "
+    "path, R1 #1540) + Session nodes; no LLM epistemic extraction in this "
+    "run (LLM extraction is a documented future option)"
 )
 
 EXTRACTION_APPROACH_V2 = (
@@ -70,16 +78,47 @@ EXTRACTION_APPROACH_V2 = (
     "(extractor_v2.extract_session_v2 — S1 story chunked+compiled, S2 "
     "map-to-embed, S3 real-backend search, S4 gap review, S5 deterministic "
     "embed) per haystack session; payload written as entities/events/points/"
-    "operators; raw verbatim transcripts retained; evidence marked by three "
-    "OR'd marks (M6 #1526 — source-session attribution / verbatim quote "
-    "anchor / raw-chunk containment) written to the eval has_answer "
-    "property; evidence_recall@k = N/A (None) when the graph has no "
-    "evidence points"
+    "operators; turn-granular raw chunks retained and containment-marked "
+    "(R1 #1540 — written before extraction so verbatim retention survives "
+    "extractor failure); evidence marked by three OR'd marks (M6 #1526 — "
+    "source-session attribution / verbatim quote anchor / raw-chunk "
+    "containment) written to the eval has_answer property; "
+    "evidence_recall@k = N/A (None) when the graph has no evidence points"
 )
 
 
 def _parse_ks(raw: str) -> tuple[int, ...]:
     return tuple(sorted({int(x.strip()) for x in raw.split(",") if x.strip()}))
+
+
+def _positive_int(raw: str) -> int:
+    """argparse ``type=`` guard for the R1 knobs: 0/negative are rejected
+    with a clear message (never a silent run — a 0 cap would empty the
+    context and 0 chunk_turns would delete the verbatim leg)."""
+    value = int(raw)
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be >= 1, got {value}")
+    return value
+
+
+def _resolve_int_knob(env_name: str, default: int, cli_value: int | None) -> int:
+    """Knob resolution (mirrors the ``TORTOISE_LME_READER_MODEL`` pattern —
+    ``spec or env or default``): the CLI flag wins when given, else the env
+    var when set, else the default (CLI > env > default). An invalid env
+    value fails loudly (SystemExit), never silently (R6 #1540)."""
+    if cli_value is not None:
+        return cli_value
+    raw = os.environ.get(env_name)
+    if raw is not None and raw.strip():
+        try:
+            value = int(raw.strip())
+        except ValueError:
+            raise SystemExit(
+                f"{env_name} must be an integer, got {raw!r}") from None
+        if value < 1:
+            raise SystemExit(f"{env_name} must be >= 1, got {value}")
+        return value
+    return default
 
 
 def _call_with_backoff(fn, *, what: str, retries: int,
@@ -157,6 +196,9 @@ def run_evaluation(
     extractor_model=None,
     workers: int = 1,
     preflight: dict | None = None,
+    chunk_turns: int = DEFAULT_CHUNK_TURNS,
+    max_context_tokens: int = DEFAULT_CONTEXT_TOKEN_CAP,
+    max_chunks_per_session: int = DEFAULT_MAX_CHUNKS_PER_SESSION,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Run the full per-question pipeline over ``instances``.
 
@@ -202,15 +244,23 @@ def run_evaluation(
                     if ingest_mode == "v2":
                         from .ingest_v2 import ingest_haystack_v2
                         ingest_stats = ingest_haystack_v2(
-                            sdk, question, extractor_model)
+                            sdk, question, extractor_model,
+                            chunk_turns=chunk_turns)
                     else:
-                        ingest_stats = ingest_haystack(sdk, question)
-                    ret = retrieve_for_question(sdk, question, ks=ks, top_k=top_k)
+                        ingest_stats = ingest_haystack(
+                            sdk, question, chunk_turns=chunk_turns)
+                    ret = retrieve_for_question(
+                        sdk, question, ks=ks, top_k=top_k,
+                        max_context_tokens=max_context_tokens,
+                        max_chunks_per_session=max_chunks_per_session)
 
                     t0 = time.monotonic()
                     hypothesis = _call_with_backoff(
                         lambda: reader.answer(
-                            context_hits=ret["hits"],
+                            # R1 (#1540) D6: the reader consumes EXACTLY the
+                            # budget-capped points-first context the token
+                            # metric reports (was the full uncapped pool).
+                            context_hits=ret["context_points"],
                             question=question["question"],
                             question_date=question.get("question_date", "") or None,
                             question_type=question.get("question_type", "") or None,
@@ -244,6 +294,9 @@ def run_evaluation(
                 "session_recall@k": ret["session_recall@k"],
                 "turn_recall@k": ret["turn_recall@k"],
                 "evidence_recall@k": ret.get("evidence_recall@k"),
+                # R1 (#1540): the M6 raw-chunk containment view, wired
+                # end-to-end (T5's sweep collection has a defined source).
+                "chunk_evidence_recall@k": ret.get("chunk_evidence_recall@k"),
                 "context_tokens": ret["context_tokens"],
                 "context_point_count": ret["context_point_count"],
                 "retrieval_latency_ms": ret["retrieval_latency_ms"],
@@ -305,6 +358,13 @@ def run_evaluation(
         ingest_mode=ingest_mode,
         failures=failures,
         preflight=preflight,
+        # R1 (#1540) D7: knob values recorded verbatim in the methodology
+        # (the run protocol step-2 gate consumes them).
+        r1_knobs={
+            "chunk_turns": chunk_turns,
+            "context_token_cap": max_context_tokens,
+            "max_chunks_per_session": max_chunks_per_session,
+        },
     )
 
 
@@ -325,20 +385,25 @@ def outcomes_to_report(
     reader_system_prompt: str = "",
     reader_type_fragments: dict[str, str] | None = None,
     preflight: dict | None = None,
+    r1_knobs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Aggregate outcomes (programmatic entry used by tests too).
 
     M5 (#1525): the reader's resolved identity (model_spec/provider/pinned)
     + the verbatim prompt constants are recorded in the methodology so the
     report self-describes exactly which reader model/prompt produced its
-    numbers.
+    numbers. R1 (#1540) D7: the granularity/context/dedup knob values are
+    recorded via ``r1_knobs`` so published numbers carry their
+    methodology.
     """
     extra: dict[str, Any] = {
         "outcomes": [
-            {k: o[k] for k in (
+            {k: o.get(k) for k in (
                 "question_id", "question_type", "question_date", "label",
                 "hypothesis", "session_recall@k", "turn_recall@k",
-                "evidence_recall@k", "n_ingest_errors", "context_tokens",
+                "evidence_recall@k",
+                "chunk_evidence_recall@k",  # R1 #1540 D5: containment view
+                "n_ingest_errors", "context_tokens",
                 "retrieval_latency_ms", "reader_latency_ms",
                 "judge_latency_ms", "total_ms",
             )}
@@ -371,6 +436,7 @@ def outcomes_to_report(
         ks=ks,
         top_k=top_k,
         failures=failures,
+        r1_knobs=r1_knobs,
         extra=extra,
     )
 
@@ -388,11 +454,20 @@ JUDGE_RUBRIC_ID = "longmemeval-official"
 def reader_prompt_source() -> str:
     """The reader prompt content the parity module hashes. Mirrors the
     longmem_eval reader prompt; must be kept in sync with
-    battery.parity.runner (the unchanged-check compares both sides)."""
+    battery.parity.runner (the unchanged-check compares both sides).
+
+    R1 (#1540) D6/D7: the reader consumes the budget-capped points-first
+    context (UX decision 3) — the parity hash changes; the #1144 baseline
+    record is refreshed at the next parity run (a run-time action — no
+    committed baseline exists).
+    """
     return (
         "Current Date: {question_date} header + per-session date annotation "
         "on every retrieved chunk (question_date + haystack_dates surfaced — "
-        "temporal-reasoning questions are answerable)"
+        "temporal-reasoning questions are answerable); points-first "
+        "budget-capped context (UX-3 #1540): extracted points render in "
+        "rank order, raw turn-granular chunks backfill the remaining "
+        "context_token_cap tokens"
     )
 
 def _print_summary(report: dict[str, Any]) -> None:
@@ -409,7 +484,10 @@ def _print_summary(report: dict[str, Any]) -> None:
     print("retrieval recall@k (session / turn):")
     for k, v in ret["session_recall@k"].items():
         ev = (ret.get("evidence_recall@k") or {}).get(k)
+        cev = (ret.get("chunk_evidence_recall@k") or {}).get(k)
         suffix = f"   evidence {ev}" if ev is not None else ""
+        if cev is not None:
+            suffix += f"   chunk-evidence {cev}"
         print(f"  k={k:<3} session {v}   turn {ret['turn_recall@k'][k]}{suffix}")
     ingest_errors = sum(o.get("n_ingest_errors", 0)
                         for o in report.get("outcomes", []))
@@ -455,7 +533,19 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--k", default=",".join(map(str, DEFAULT_KS)),
                    help="comma-separated recall@k values (default 5,10,20)")
     p.add_argument("--top-k", type=int, default=DEFAULT_TOP_K,
-                   help="context points handed to the reader (default 20)")
+                   help="max context items handed to the reader (default 20; "
+                        "the token budget --context-cap bounds it further, R1 #1540)")
+    p.add_argument("--chunk-turns", type=_positive_int, default=None,
+                   help="turns per raw-chunk window (env TORTOISE_LME_CHUNK_TURNS; "
+                        "default 2; >= 1; the run protocol step-2 sweep selects "
+                        "the value for the pilot + 500-Q run, R1 #1540)")
+    p.add_argument("--context-cap", type=_positive_int, default=None,
+                   help="reader context token budget (env TORTOISE_LME_CONTEXT_CAP; "
+                        "default 8000 — points first, chunks backfill, R1 #1540)")
+    p.add_argument("--max-chunks-per-session", type=_positive_int, default=None,
+                   help="per-session raw-chunk cap in the retrieval pool "
+                        "(env TORTOISE_LME_MAX_CHUNKS_PER_SESSION; default 2 — "
+                        "E2E-1 session-dedup, R1 #1540)")
     p.add_argument("--mock", action="store_true",
                    help="offline mode: MockReader + MockJudge, no API keys (CI)")
     p.add_argument("--skip-preflight", action="store_true",
@@ -506,6 +596,14 @@ def run_main(argv: list[str] | None = None) -> dict[str, Any]:
     args = _build_parser().parse_args(argv)
     ks = _parse_ks(args.k)
     top_k = args.top_k
+    # R1 (#1540) knobs: env-first, CLI overrides, validated >= 1 (R6).
+    chunk_turns = _resolve_int_knob("TORTOISE_LME_CHUNK_TURNS",
+                                    DEFAULT_CHUNK_TURNS, args.chunk_turns)
+    context_cap = _resolve_int_knob("TORTOISE_LME_CONTEXT_CAP",
+                                    DEFAULT_CONTEXT_TOKEN_CAP, args.context_cap)
+    max_chunks_per_session = _resolve_int_knob(
+        "TORTOISE_LME_MAX_CHUNKS_PER_SESSION",
+        DEFAULT_MAX_CHUNKS_PER_SESSION, args.max_chunks_per_session)
 
     instances = ds.load_dataset(
         args.split, limit=args.limit, data_path=args.data,
@@ -563,6 +661,8 @@ def run_main(argv: list[str] | None = None) -> dict[str, Any]:
             checkpoint=args.checkpoint, max_retries=args.max_retries,
             ingest_mode=args.ingest_mode, extractor_model=extractor_model,
             workers=max(1, args.workers), preflight=preflight,
+            chunk_turns=chunk_turns, max_context_tokens=context_cap,
+            max_chunks_per_session=max_chunks_per_session,
         )
     except FatalProviderError as e:
         print("[longmem_eval] RUN ABORTED — fatal provider error mid-run "

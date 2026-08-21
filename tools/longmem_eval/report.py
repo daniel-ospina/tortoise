@@ -84,6 +84,7 @@ def build_report(
     reader_pinned: bool | None = None,
     reader_system_prompt: str = "",
     reader_type_fragments: dict[str, str] | None = None,
+    r1_knobs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     # #1414 (additive to #1144): the methodology-unchanged check for the
     # battery parity leg compares these hashes against the baseline record.
@@ -126,6 +127,8 @@ def build_report(
     evidence_recall: dict[str, float] = {}
     evidence_recall_n: dict[str, int] = {}
     evidence_vacuity_rate: dict[str, float] = {}
+    chunk_evidence_recall: dict[str, float] = {}
+    chunk_evidence_recall_n: dict[str, int] = {}
     for k in ks:
         sr = [o["session_recall@k"].get(str(k), 0.0) for o in outcomes]
         session_recall[str(k)] = _mean(sr)
@@ -145,6 +148,14 @@ def build_report(
             evidence_recall_n[str(k)] = len(real)
             evidence_vacuity_rate[str(k)] = round(
                 sum(1.0 for v in real if v == 0.0) / len(real), 4)
+        # R1 (#1540) D5: the M6 raw-chunk containment view, aggregated
+        # parallel to evidence_recall@k (the sweep collection source).
+        cer = [(o.get("chunk_evidence_recall@k") or {}).get(str(k), None)
+               for o in outcomes]
+        real_chunks = [v for v in cer if v is not None]
+        if real_chunks:
+            chunk_evidence_recall[str(k)] = _mean(real_chunks)
+            chunk_evidence_recall_n[str(k)] = len(real_chunks)
 
     # M6 (D6): evidence_coverage — fraction of evidence-bearing questions
     # (dataset has >=1 evidence turn) whose ingest wrote evidence points
@@ -195,6 +206,8 @@ def build_report(
             "evidence_recall_n@k": evidence_recall_n or None,
             "evidence_vacuity_rate@k": evidence_vacuity_rate or None,
             "evidence_coverage": evidence_coverage,
+            "chunk_evidence_recall@k": chunk_evidence_recall or None,
+            "chunk_evidence_recall_n@k": chunk_evidence_recall_n or None,
             "context_tokens_mean": ctx_mean,
             "context_point_count_mean": round(
                 sum(o["context_point_count"] for o in outcomes) / n, 2) if n else 0,
@@ -230,11 +243,19 @@ def build_report(
                                      "date annotation on every retrieved chunk "
                                      "(question_date + haystack_dates surfaced — "
                                      "temporal-reasoning questions are "
-                                     "answerable)",
+                                     "answerable); points-first budget-capped "
+                                     "context (UX decision 3, R1 #1540): "
+                                     "extracted points render in rank order, raw "
+                                     "turn-granular chunks backfill the remaining "
+                                     "context_token_cap tokens",
             "extraction_approach": extraction_approach,
             "retrieval": "Tortoise hybrid RRF (FTS+vector+structural, TF-IDF "
-                         "fallback) over graph turn points + raw session "
-                         "transcripts (pointKind session-transcript)",
+                         "fallback) over graph turn points + turn-granular raw "
+                         "chunks (pointKind session-transcript, chunk_turns "
+                         "turns per non-overlapping window; candidates fetched "
+                         "at max(k)*3 depth, deduped per-session to "
+                         "max_chunks_per_session raw chunks in rank order, R1 "
+                         "#1540)",
             "retrieval_scope": "ISOLATED per-question corpus — each question's "
                                "haystack is ingested into a fresh graph and "
                                "recall is measured against that question alone; "
@@ -245,15 +266,22 @@ def build_report(
                                "and is not directly comparable to the paper's "
                                "recall numbers",
             "recall_definition": "session-level: fraction of answer_session_ids "
-                                 "(evidence sessions) in top-k; turn-level: "
-                                 "fraction of evidence-MARKED points (has_answer: "
-                                 "evidence turns + M6 source-session/verbatim/"
-                                 "raw-transcript marks) surfaced in top-k, with "
-                                 "the deterministic evidence-turn-id fallback when "
-                                 "the graph has no marks; evidence_recall@k = "
-                                 "marked has_answer points surfaced / marked points "
-                                 "total, N/A (None) on empty denominators (M6 "
-                                 "#1526 — never forced 0.0); evidence_recall_n@k = "
+                                 "(evidence sessions) in top-k over the DEDUPED "
+                                 "pool (R1 #1540: ret[hits] == the per-session-"
+                                 "deduped pool; max_chunks_per_session raw chunks "
+                                 "per session); turn-level: fraction of has_answer "
+                                 "extracted points (pointKind <> "
+                                 "session-transcript) in top-k — raw chunks are "
+                                 "excluded from the turn/evidence numerator and "
+                                 "denominator (D5, no granularity bias), with the "
+                                 "deterministic evidence-turn-id fallback when the "
+                                 "graph has no marks; evidence_recall@k = marked "
+                                 "extracted points surfaced / marked extracted "
+                                 "points total, N/A (None) on empty denominators "
+                                 "(M6 #1526 — never forced 0.0); chunk containment "
+                                 "is reported separately as chunk_evidence_recall@k "
+                                 "(containment-marked raw chunks surfaced / marked "
+                                 "raw chunks total); evidence_recall_n@k = "
                                  "evidence-bearing outcomes in the mean; "
                                  "evidence_vacuity_rate@k = fraction of "
                                  "evidence-bearing outcomes with 0.0 while "
@@ -273,6 +301,7 @@ def build_report(
             "split": split,
             "git_sha": git_sha(),
             "run_at_utc": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
+            **(r1_knobs or {}),
         },
         "failures": failures or [],
         "n_failed": len(failures or []),

@@ -195,10 +195,13 @@ def test_anchor_quote_floor_and_cap():
 # ── integration: v2 ingest marks three ways (FalkorDBLite) ─────────────────
 
 def test_v2_ingest_marks_three_ways(tmp_path, monkeypatch):
-    """M6 D1/D9: the v2 leg writes has_answer=true via (a) source-session
-    attribution on evidence-session points, (b) verbatim anchor on a quoted
-    foreign-session point, and (c) raw-chunk containment on the answer
-    session's raw transcript; idempotent re-ingest ORs the marks."""
+    """M6 D1/D9 + R1 (#1540): the v2 leg writes has_answer=true via (a)
+    source-session attribution on evidence-session points, (b) verbatim
+    anchor on a quoted foreign-session point, and (c) raw-chunk containment
+    on the answer session's chunk; idempotent re-ingest ORs the marks. The
+    D5 denominator hygiene keeps the raw-chunk containment view OUT of the
+    point-level evidence_marks breakdown (chunk evidence is reported as
+    chunk_evidence_recall@k)."""
     import tortoise.extractor_v2 as ev2
     from tools.longmem_eval.ingest_v2 import ingest_haystack_v2
 
@@ -242,7 +245,8 @@ def test_v2_ingest_marks_three_ways(tmp_path, monkeypatch):
                 [{"role": "user", "content": "what's for lunch"}],
             ],
         }
-        stats = ingest_haystack_v2(sdk, question, model=object())
+        stats = ingest_haystack_v2(sdk, question, model=object(),
+                                   chunk_turns=2)
         proj = sdk._get_proj()
 
         def _has_answer(pid):
@@ -251,20 +255,23 @@ def test_v2_ingest_marks_three_ways(tmp_path, monkeypatch):
                 params={"id": pid}).result_set
             return bool(rows[0][0])
 
-        # (c): the answer session's raw transcript is marked verbatim
-        assert _has_answer("lme:q_m6_v2:s0:raw") is True
-        # non-answer session's raw transcript stays unmarked
-        assert _has_answer("lme:q_m6_v2:s1:raw") is False
+        # (c): the answer session's chunk is marked via raw-chunk containment
+        # (R1 #1540: turn-granular chunks replace the whole-session :raw blob)
+        assert _has_answer("lme:q_m6_v2:s0:c0") is True
+        # non-answer session's chunk stays unmarked
+        assert _has_answer("lme:q_m6_v2:s1:c0") is False
         # (a): points extracted from the evidence session are marked
         assert _has_answer("pt_s0a") is True
         assert _has_answer("pt_s0b") is True  # whole evidence session
         # (b): the foreign-session point with an overlapping quote is marked
         assert _has_answer("pt_s1a") is True
-        # marks OR into the stats with a per-type breakdown
-        assert stats["evidence_points"] == 4  # 3 marked points + 1 raw
+        # marks OR into the stats with a per-type breakdown. D5 (#1540):
+        # evidence_points counts marked EXTRACTED points only — the marked
+        # chunk is excluded (chunk evidence = chunk_evidence_recall@k).
+        assert stats["evidence_points"] == 3  # pt_s0a + pt_s0b + pt_s1a
         assert stats["evidence_marks"]["source_session"] >= 2
         assert stats["evidence_marks"]["verbatim"] >= 1
-        assert stats["evidence_marks"]["raw_chunk"] >= 1
+        assert stats["evidence_marks"]["raw_chunk"] == 0  # D5 hygiene
         # every written point carries its source session (runner leg)
         rows = proj.g.query(
             "MATCH (p:Point {id:'pt_s0a'}) RETURN coalesce(p.session_id, '')"
@@ -272,10 +279,12 @@ def test_v2_ingest_marks_three_ways(tmp_path, monkeypatch):
         assert rows[0][0] == "s0"
 
         # idempotent re-ingest ORs the marks (never False over True)
-        stats2 = ingest_haystack_v2(sdk, question, model=object())
+        stats2 = ingest_haystack_v2(sdk, question, model=object(),
+                                    chunk_turns=2)
         assert stats2["points"] == 0  # all points pre-existed
+        assert stats2["chunks"] == 0  # all chunks pre-existed
         assert _has_answer("pt_s0a") is True
-        assert _has_answer("lme:q_m6_v2:s0:raw") is True
+        assert _has_answer("lme:q_m6_v2:s0:c0") is True
     finally:
         sdk.close()
 
@@ -283,14 +292,15 @@ def test_v2_ingest_marks_three_ways(tmp_path, monkeypatch):
 # ── integration: deterministic leg marks the raw transcript ────────────────
 
 def test_deterministic_ingest_marks_raw_transcript(tmp_path):
-    """M6 Task 3: the deterministic leg's answer-session raw transcript
-    carries has_answer=true (marks (c)/(a) via the shared predicates);
-    evidence-turn points unchanged; stats gains evidence_points."""
+    """M6 Task 3 + R1 (#1540): the deterministic leg's evidence TURN point
+    carries has_answer=true; the raw chunks stay UNMARKED (D3 — the
+    deterministic leg keeps its turn-id evidence path); the :raw blob is
+    retired; stats count marked extracted points only (D5)."""
     sdk = _fresh_sdk(tmp_path)
     try:
         q = next(x for x in _mini() if x["question_id"] == "mini_ie_user_001")
-        stats = ingest_haystack(sdk, q)
-        assert stats["evidence_points"] == 2  # 1 evidence turn + 1 raw mark
+        stats = ingest_haystack(sdk, q, chunk_turns=2)
+        assert stats["evidence_points"] == 1  # the evidence turn only
         assert stats["evidence_turns"] == 1
         proj = sdk._get_proj()
 
@@ -300,20 +310,24 @@ def test_deterministic_ingest_marks_raw_transcript(tmp_path):
                 params={"id": pid}).result_set
             return bool(rows[0][0])
 
-        # answer session mini-s1: raw transcript marked; evidence turn marked
-        assert _has_answer("lme:mini_ie_user_001:s1:raw") is True
+        # answer session mini-s1: evidence turn marked; chunks UNMARKED (D3)
         assert _has_answer("lme:mini_ie_user_001:s1:t2") is True
-        # non-answer session mini-s0: raw transcript unmarked
-        assert _has_answer("lme:mini_ie_user_001:s0:raw") is False
-        # all has_answer points = evidence turn + raw transcript
+        assert _has_answer("lme:mini_ie_user_001:s1:c0") is False
+        assert _has_answer("lme:mini_ie_user_001:s1:c1") is False
+        # the :raw blob id is retired
+        rows = proj.g.query(
+            "MATCH (p:Point {id:$id}) RETURN count(*)",
+            params={"id": "lme:mini_ie_user_001:s1:raw"}).result_set
+        assert rows[0][0] == 0
+        # all has_answer points = the evidence turn only
         rows = proj.g.query(
             "MATCH (p:Point {has_answer:true}) RETURN count(p)").result_set
-        assert rows[0][0] == 2
+        assert rows[0][0] == 1
         # idempotent re-ingest: same count, marks OR'd
-        ingest_haystack(sdk, q)
+        ingest_haystack(sdk, q, chunk_turns=2)
         rows = proj.g.query(
             "MATCH (p:Point {has_answer:true}) RETURN count(p)").result_set
-        assert rows[0][0] == 2
+        assert rows[0][0] == 1
     finally:
         sdk.close()
 

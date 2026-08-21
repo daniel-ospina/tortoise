@@ -29,6 +29,9 @@ python -m tools.longmem_eval.run --split s --limit 10 # first 10 (sanity)
 | `TORTOISE_LME_READER_MODEL` | reader model spec `<provider>:<model>` or bare | `openrouter:deepseek/deepseek-v4-flash` (M5 pinned — #1525) |
 | `TORTOISE_LME_JUDGE_MODEL` | judge model spec | `openai:gpt-4o-2024-08-06` (the official judge model) |
 | `TORTOISE_LME_CACHE_DIR` | dataset cache dir (outside the repo) | `~/.cache/tortoise-longmemeval` |
+| `TORTOISE_LME_CHUNK_TURNS` | turns per raw-chunk window (R1 #1540) | `2` (the run protocol step-2 sweep selects the pilot/500-Q value) |
+| `TORTOISE_LME_CONTEXT_CAP` | reader context token budget — points first, chunks backfill (UX decision 3) | `8000` |
+| `TORTOISE_LME_MAX_CHUNKS_PER_SESSION` | per-session raw-chunk cap in the retrieval pool (E2E-1 session dedup) | `2` |
 
 CLI flags: `--split s|m|oracle`, `--limit N`, `--data <local json/jsonl>`,
 `--k 5,10,20`, `--top-k 20`, `--mock`, `--output <report.json>`,
@@ -36,7 +39,9 @@ CLI flags: `--split s|m|oracle`, `--limit N`, `--data <local json/jsonl>`,
 `--checkpoint <state.json>` (partial-results checkpoint + resume),
 `--max-retries N` (per-question LLM-call retries with exponential backoff;
 questions that still fail are recorded in `report['failures']` and the run
-continues — one transient error never aborts the 500-Q run).
+continues — one transient error never aborts the 500-Q run),
+`--chunk-turns N`, `--context-cap N`, `--max-chunks-per-session N`
+(R1 #1540 knobs — env-first, CLI overrides, all validated ≥ 1).
 
 ## Dataset
 
@@ -50,20 +55,33 @@ path via `--data` skips the download. Split S = `longmemeval_s_cleaned.json`
 
 1. **Ingest** (`tools/longmem_eval/ingest.py`) — deterministic, no LLM keys:
    `:Session` nodes, episodic turn Points (`pointKind=event`, `[role] text`,
-   `has_answer` stamped on evidence turns), and one raw verbatim
-   transcript Point per session (`pointKind=session-transcript` — the "index
-   raw text too" leg that mitigates the competitor-RAG verbatim-recall edge).
-   Idempotent re-runs (MERGE + existence guards).
+   `has_answer` stamped on evidence turns), and **turn-granular raw chunk
+   Points** per session (`pointKind=session-transcript`, ids
+   `lme:{qid}:s{si}:c{ci}` — non-overlapping verbatim windows of
+   `chunk_turns` turns each; the union of chunks == the full session, so
+   verbatim coverage is preserved; the whole-session `:raw` blob is
+   retired). Chunks are written **unmarked** in deterministic mode (D3) and
+   **containment-marked** in v2 mode (D5, written BEFORE extraction so an
+   extractor failure never loses the verbatim leg). Idempotent re-runs
+   (MERGE + existence guards).
 2. **Retrieve** (`retrieve.py`) — production hybrid search
    (`TortoiseSDK.tortoise_fts_query`: RRF fusion of FTS + vector +
    structural with the TF-IDF degradation fallback; embedded/CI degrades
-   automatically, Docker/HNSW uses the full stack). Reports session-level
-   recall@k (fraction of `answer_session_ids` in top-k) and turn-level
-   recall@k (`has_answer` turns), plus the context handed to the reader.
-   Recall is measured over the **isolated per-question corpus** (each
-   question's haystack in its own fresh graph), NOT the official full-corpus
-   indexing — stated explicitly in the report's methodology so numbers are
-   never misread as paper-comparable recall.
+   automatically, Docker/HNSW uses the full stack). Candidates are fetched
+   at `max(k)*3` depth (pool-depth headroom), the pool is deduped per-session
+   to `max_chunks_per_session` raw chunks (E2E-1), and the reader's context
+   is **budget-capped and points-first** (UX decision 3): extracted points
+   render in rank order, raw chunks backfill the remaining
+   `context_token_cap` tokens. Reports session-level recall@k (fraction of
+   `answer_session_ids` in top-k), turn/evidence recall@k (extracted points
+   only — the D5 denominator split), chunk-evidence recall@k (the raw-chunk
+   containment view), and the exact context handed to the reader
+   (`ret["context_points"]`; `context_tokens ==
+   _estimate_tokens(render_context(context_points))`). Recall is measured
+   over the **isolated per-question corpus** (each question's haystack in
+   its own fresh graph), NOT the official full-corpus indexing — stated
+   explicitly in the report's methodology so numbers are never misread as
+   paper-comparable recall.
 3. **Reader** (`reader.py`) — LLM answering from the top-k context via the
    repo's `OpenAICompatModel` provider wiring; `--mock` = deterministic
    evidence-turn reader. The context follows the official gen.py shape:
@@ -98,6 +116,28 @@ path via `--data` skips the download. Split S = `longmemeval_s_cleaned.json`
 The full 500-question run is `@pytest.mark.slow` (never in CI); the
 committed mini fixture + `--mock` exercises the entire pipeline offline in
 CI (`tests/test_longmem_runner.py`).
+
+## Granularity sweep (run protocol step 2, R1 #1540)
+
+The 3-point micro-test that SELECTS the granularity knob before the pilot:
+
+```bash
+# offline smoke (deterministic ingest implied by --mock):
+python -m tools.longmem_eval.sweep_granularity --data tests/fixtures/longmemeval_mini.json \
+    --limit 5 --mock
+
+# real v2 sweep (needs provider keys / --extractor-model):
+python -m tools.longmem_eval.sweep_granularity --split s --limit 20
+```
+
+Runs `chunk_turns ∈ {1, 2, 4}` with all other knobs fixed, prints a
+comparison table (evidence / chunk-evidence / session / turn recall@10,
+context_tokens_mean, context_point_count_mean) and selects the winner per
+D2: **v2 mode** maximizes `evidence_recall@10` subject to
+`context_tokens_mean ≤ context_token_cap`, tie-break → smaller `chunk_turns`;
+the deterministic cell is a context-token/underfill view only. The chosen
+value feeds the pilot and the 500-Q run; the report's methodology records it
+(`chunk_turns` in the methodology).
 
 ## Reader pinning (M5, #1525)
 

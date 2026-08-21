@@ -99,7 +99,8 @@ def build_fixture(checkpoint_path: Path, dataset_path: Path) -> dict:
                 "evidence_points": ing.get("evidence_points", 0),
                 "sessions": ing.get("sessions", 0),
                 "turns": ing.get("turns", 0),
-                "raw_transcripts": ing.get("raw_transcripts", 0),
+                "raw_transcripts": ing.get("chunks",  # R1 #1540: stats key renamed
+                                            ing.get("raw_transcripts", 0)),
                 "entities": ing.get("entities", 0),
                 "events": ing.get("events", 0),
                 "operators": ing.get("operators", 0),

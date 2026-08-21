@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 from .evidence import (EVIDENCE_QUOTE_CAP, anchor_quote, evidence_sessions,  # noqa: E402, I001
                        mark_for)
 from .evidence import _overlap  # noqa: F401, E402 — back-compat re-export
-from .ingest import SESSION_TRANSCRIPT_KIND, _point_exists, _session_transcript  # noqa: E402
+from .ingest import (SESSION_TRANSCRIPT_KIND, _point_exists, _session_chunks)  # noqa: E402
 
 
 def _point_status(proj, pid: str) -> str:
@@ -227,17 +227,20 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
 
 
 def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
-                       model: Any) -> dict:
+                       model: Any, *, chunk_turns: int = 2) -> dict:
     """v2 ingest: each haystack session through extract_session_v2 → the
-    payload written to the eval graph (Session + raw transcript retained).
-    Returns stats for provenance (mirrors ingest_haystack's shape)."""
+    payload written to the eval graph (Session + turn-granular raw chunks
+    retained — the verbatim recall mitigation). Returns stats for
+    provenance (mirrors ingest_haystack's shape). ``chunk_turns`` (R1
+    #1540) is the turns-per-window granularity of the raw chunks (>= 1).
+    """
     from tortoise.extractor_v2 import extract_session_v2
 
     qid = question["question_id"]
     sessions: list[list[dict]] = question.get("haystack_sessions") or []
     dates: list[str] = question.get("haystack_dates") or []
     ids: list[str] = question.get("haystack_session_ids") or []
-    stats = {"sessions": 0, "turns": 0, "raw_transcripts": 0, "points": 0,
+    stats = {"sessions": 0, "turns": 0, "chunks": 0, "points": 0,
              "events": 0, "entities": 0, "operators": 0, "evidence_points": 0,
              "evidence_turns": 0, "minted_kinds": 0, "supersessions": 0,
              "supersessions_written": 0,
@@ -278,7 +281,7 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
             turn_id = f"lme:{qid}:s{si}:t{ti}"
             if not _point_exists(sdk._get_proj(), turn_id):
                 sdk.create_point(
-                    "event", f"[{role}] {str(turn.get('content') or '')}",
+                    "event", f"[{role}] {turn.get('content') or ''!s}",
                     id=turn_id, session_id=sid, lme_question_id=qid,
                     lme_session_index=si, speaker=role,
                     is_episodic=True, status="draft",
@@ -288,41 +291,37 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
                 "MERGE (s)-[:CONTAINS]->(t)",
                 params={"sid": s_node, "tid": turn_id})
 
-        # ── Raw verbatim transcript (retained — verbatim recall mitigation) ──
-        # M6 mark (c)+(a): the answer-session transcript contains the answer
-        # turns verbatim (52/52 on the healthy fixture) — has_answer=true so
-        # the v2 leg is non-vacuous even when the extractor paraphrases
-        # everything (the 402-run would have had marks via (c) alone).
-        raw_id = f"lme:{qid}:s{si}:raw"
-        raw_text = _session_transcript(session)
-        raw_mark = mark_for({"content": raw_text, "quote": ""},
-                            session_id=sid, evidence_sessions=ev_sessions,
-                            answer_turn_contents=all_evidence_turns)
-        if not _point_exists(sdk._get_proj(), raw_id):
-            sdk.create_point(
-                SESSION_TRANSCRIPT_KIND, raw_text,
-                id=raw_id, session_id=sid, lme_question_id=qid,
-                lme_session_index=si, is_episodic=True,
-                has_answer=raw_mark["has_answer"], status="draft",
-            )
-            # create-only (consistent with the extracted-points accounting) —
-            # re-ingest is a no-op, not a recount.
-            if raw_mark["has_answer"]:
-                stats["evidence_points"] += 1
-            if raw_mark["marks"]["raw_chunk"]:
-                stats["evidence_marks"]["raw_chunk"] += 1
-        elif raw_mark["has_answer"]:
-            # Idempotent OR-in: a raw transcript written by a pre-M6 run has
-            # no has_answer prop — never overwrite a True with False.
+        # ── Raw verbatim turn-granular chunks (R1 #1540) + containment
+        # marks (M6, mark c). Written BEFORE extraction so verbatim
+        # retention + marks survive an extractor failure on this session
+        # (fail-closed — the raw evidence leg is never silently lost). ──
+        # v2 chunks ARE marked (D5): a chunk is an evidence chunk iff any
+        # contained turn is an evidence turn (the union of a session's chunks
+        # is the session, so no evidence turn is orphaned).
+        for ci, text, turn_idxs in _session_chunks(session, chunk_turns):
+            chunk_id = f"lme:{qid}:s{si}:c{ci}"
+            contains_evidence = any(
+                bool(turn.get("has_answer"))
+                for ti, turn in enumerate(session) if ti in turn_idxs)
+            if not _point_exists(sdk._get_proj(), chunk_id):
+                sdk.create_point(
+                    SESSION_TRANSCRIPT_KIND, text, id=chunk_id,
+                    session_id=sid, lme_question_id=qid,
+                    lme_session_index=si, lme_chunk_index=ci,
+                    lme_chunk_turns=len(turn_idxs), is_episodic=True,
+                    has_answer=contains_evidence, status="draft",
+                )
+                stats["chunks"] += 1  # written (post-guard) — stats == graph
+            elif contains_evidence:
+                # Idempotent OR-in: never overwrite a True with False.
+                sdk._get_proj().g.query(
+                    "MATCH (p:Point {id:$id}) SET p.has_answer = true",
+                    params={"id": chunk_id})
             sdk._get_proj().g.query(
-                "MATCH (p:Point {id:$id}) SET p.has_answer = true",
-                params={"id": raw_id})
-        stats["raw_transcripts"] += 1
-        sdk._get_proj().g.query(
-            "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
-            "MERGE (s)-[:CONTAINS]->(t)",
-            params={"sid": s_node, "tid": raw_id},
-        )
+                "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
+                "MERGE (s)-[:CONTAINS]->(t)",
+                params={"sid": s_node, "tid": chunk_id},
+            )
 
         # ── The v2 extraction (production pipeline, embedded-safe S3) ──
         turns = [{"role": str(t.get("role") or "unknown"),
