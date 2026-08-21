@@ -116,7 +116,10 @@ def _annotate_hits(hits: list[dict], props: dict, dates: list[str]) -> list[dict
         annotated.append({
             "id": h["id"],
             "content": h["content"],
-            "match_source": h.get("match_source", ""),
+            # M7 (#1527, D2): the leg that produced this hit is never empty —
+            # a missing match_source serializes to "unknown", not "" (E2E-1
+            # "never null" is asserted here, at the hit level).
+            "match_source": h.get("match_source") or "unknown",
             "session_id": p.get("session_id", ""),
             "lme_session_index": si,
             "session_date": dates[si] if 0 <= si < len(dates) else "",
@@ -169,6 +172,21 @@ def _dedup_pool(annotated: list[dict], *,
             seen[key] = seen.get(key, 0) + 1
         pool.append(h)
     return pool
+
+
+def _leg_mix(hits: list[dict]) -> dict[str, int]:
+    """Counter of ``match_source`` over a hit list (M7 #1527, D2).
+
+    Legs are never re-derived — the engine's own ``match_source``
+    (fts/vector/structural/rrf/tfidf) lands on annotated hits (missing →
+    ``unknown``); embedded mode legitimately shows ``{"tfidf": n}``, real
+    mode ``{"rrf": n}`` (+ per-leg when the engine emits it).
+    """
+    counts: dict[str, int] = {}
+    for h in hits:
+        leg = h.get("match_source") or "unknown"
+        counts[leg] = counts.get(leg, 0) + 1
+    return dict(sorted(counts.items()))
 
 
 def _supersede_marker(h: dict) -> str:
@@ -448,6 +466,18 @@ def retrieve_for_question(
         "turn_recall@k": turn_recall,
         "evidence_recall@k": _evidence_recall,
         "chunk_evidence_recall@k": chunk_evidence_recall,
+        # M7 (#1527, D2/D4): leg-mix over what the reader saw (context_points)
+        # + per-k over the deduped pool; evidence_retrieved@k = the turn_recall
+        # numerator (has_answer non-chunk hits in pool[:k]) — persisted so the
+        # report can answer "which leg found what" and "how much evidence was
+        # retrieved" (evidence-written/retrieved accounting).
+        "match_source_counts": _leg_mix(context_points),
+        "match_source_counts@k": {
+            str(k): _leg_mix(pool[:k]) for k in ks},
+        "evidence_retrieved@k": {
+            str(k): sum(1 for h in pool[:k]
+                        if h["has_answer"] and not _is_raw_chunk(h))
+            for k in ks},
         "context_points": context_points,
         "context_tokens": context_tokens,
         "context_point_count": len(context_points),

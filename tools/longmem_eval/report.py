@@ -4,19 +4,32 @@ Aggregates per-question outcomes into the published report shape:
 overall + task-averaged + per-category accuracy (the five paper abilities:
 information extraction, multi-session reasoning, temporal reasoning,
 knowledge updates, abstention), per-type accuracy (the six raw dataset
-types), retrieval recall@k (session- and turn-level), context tokens, and
-latency — together with a full methodology block (dataset id, split, reader
-model, judge model, extraction approach, k values, token estimator, git sha,
-run date) so numbers are honestly contextualized (no "#1" claims).
+types), retrieval recall@k (session- and turn-level; paper-aligned _paper@k
+keys over non-_abs questions, M7), context tokens, latency (incl. the
+isolated ingest write-path cost, M7), an integrity block with the per-
+question error census (M7), leg-mix / pool-size / evidence written-·retrieved
+aggregates (M7) — together with a full methodology block (dataset id, split,
+reader model, judge model, extraction approach, k values, token estimator,
+git sha, python version, workers, dataset fingerprint, the dataset recall-
+semantics audit record, run date) so numbers are honestly contextualized
+(no "#1" claims).
+
+⛔ Publication gate (E2E-3 Precondition 2, M7 #1527): ``dataset_semantics_audit``
+is a REQUIRED build_report argument — no recall number leaves the harness
+without the dataset recall-semantics audit record; a not-trusted verdict
+serializes every recall key to null.
 """
 from __future__ import annotations
 
 import json
 import os  # noqa: F401
 import subprocess
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from .dataset_audit import is_trusted
 
 # question_type → paper category (the five abilities from the LongMemEval
 # paper; abstention is signalled by the ``_abs`` suffix, not a type).
@@ -85,15 +98,52 @@ def build_report(
     reader_system_prompt: str = "",
     reader_type_fragments: dict[str, str] | None = None,
     r1_knobs: dict[str, Any] | None = None,
+    # M7 (#1527): publication-gated inputs — see the docstring.
+    dataset_semantics_audit: dict[str, Any] | None = None,
+    integrity_threshold: float = 0.0,
+    integrity_justification: str | None = None,
+    python_version: str = "",
+    workers: int = 1,
+    dataset_fingerprint: str = "unknown",
 ) -> dict[str, Any]:
-    # #1414 (additive to #1144): the methodology-unchanged check for the
-    # battery parity leg compares these hashes against the baseline record.
     """Aggregate per-question outcomes into the report + provenance dict.
 
     ``outcomes`` must contain only COMPLETED questions (failed questions are
     passed via ``failures`` and reported separately — a transient LLM error
     on one question must not abort the run or skew the aggregates).
+
+    M7 (#1527) contract additions (additive-only; D11):
+      * ``integrity`` — validity + per-question error census (D1/D6): a run
+        with any failed question or ingest-error question is ``valid=false``
+        unless an override threshold (+ recorded justification) admits it;
+        the numbers are always recorded, so no degraded run can masquerade
+        as clean.
+      * ``leg_mix`` (D2) — per-leg ``match_source`` counts over the
+        top_k context the reader saw + per-k over the deduped pool.
+      * ``pool_size`` (D3) — live graph point count per question.
+      * ``evidence`` (D4) — evidence written vs retrieved + vacuity over
+        evidence-bearing questions only (evidence_absent_n excluded).
+      * ``latency_ms.ingest`` (D5) — the isolated write-path cost.
+      * paper-aligned ``retrieval.*_paper@k`` keys (non-_abs only, the
+        official exclusion) alongside the legacy _abs-inclusive keys.
+      * ``methodology`` gains python_version / workers / dataset_fingerprint
+        / dataset_semantics_audit / integrity_threshold — a report always
+        says what code and dataset produced it.
+
+    ⛔ Publication gate (E2E-3 Precondition 2, enforced by construction):
+    ``dataset_semantics_audit`` is REQUIRED — ``ValueError`` without it, and
+    there is no flag to skip it. A not-trusted verdict (live census diverges
+    structurally from the recorded semantics) serializes every recall key to
+    ``null``: the report then contains no recall numbers until re-audited.
     """
+    if dataset_semantics_audit is None:
+        raise ValueError(
+            "build_report requires dataset_semantics_audit (E2E-3 "
+            "Precondition 2): no recall number is published without the "
+            "dataset recall-semantics audit record — run_evaluation "
+            "computes it; programmatic callers must pass "
+            "audit_dataset(instances)")
+    trusted = is_trusted(dataset_semantics_audit)
     n = len(outcomes)
 
     # ── accuracy ──
@@ -170,6 +220,122 @@ def build_report(
               / len(ev_bearing), 4)
         if ev_bearing else 0.0)
 
+    # M7 (D10): paper-aligned aggregates — the same per-question fraction
+    # metric computed over non-_abs questions ONLY (the official
+    # print_retrieval_metrics.py exclusion). Legacy keys keep the
+    # _abs-inclusive definition (back-compat through V3).
+    paper_outcomes = [o for o in outcomes
+                      if "_abs" not in o.get("question_id", "")]
+
+    def _paper_agg(key: str, k: int) -> float | None:
+        vals = [(o.get(key) or {}).get(str(k)) for o in paper_outcomes]
+        real = [v for v in vals if v is not None]
+        return _mean(real) if real else None
+
+    session_recall_paper = {
+        str(k): _paper_agg("session_recall@k", k) for k in ks}
+    turn_recall_paper = {
+        str(k): _paper_agg("turn_recall@k", k) for k in ks}
+    evidence_recall_paper = {
+        str(k): _paper_agg("evidence_recall@k", k) for k in ks}
+
+    # ── M7 (D1): integrity — validity + per-question error census ──
+    # invalid = a failed question OR a completed question with
+    # n_ingest_errors > 0; n_attempted dedups by qid across outcomes+failures.
+    effective_threshold = float(integrity_threshold or 0.0)
+    failure_qids = {f.get("question_id") for f in (failures or [])}
+    attempted_qids = {o["question_id"] for o in outcomes} | failure_qids
+    n_attempted = len(attempted_qids)
+    n_valid = sum(1 for o in outcomes if o.get("valid", True))
+    n_invalid = n_attempted - n_valid
+    invalid_rate = round(n_invalid / n_attempted, 4) if n_attempted else 0.0
+    census_entries: list[str] = []
+    for o in outcomes:
+        census_entries.extend(o.get("error_classes") or [])
+    for f in (failures or []):
+        ec = f.get("error_class")
+        if ec:
+            census_entries.append(ec)
+    error_census = dict(sorted(Counter(census_entries).items()))
+    checks = [
+        "python >= 3.12 guard enforced at run entry",
+        "dataset loaded and recall-semantics audited",
+        "dataset semantics audit present (publication gate)",
+        "checkpoint fingerprint matched (no stale resume)",
+        "per-question error census computed",
+    ]
+    integrity: dict[str, Any] = {
+        "valid": invalid_rate <= effective_threshold,
+        "threshold": effective_threshold,
+        "n_attempted": n_attempted,
+        "n_valid": n_valid,
+        "n_invalid": n_invalid,
+        "invalid_rate": invalid_rate,
+        "error_census": error_census,
+        "checks": checks,
+    }
+    if integrity_justification:
+        integrity["justified"] = True
+        integrity["threshold_violation_justification"] = integrity_justification
+
+    # ── M7 (D2): leg-mix — match_source aggregation, never re-derived ──
+    leg_total: Counter = Counter()
+    leg_shares: dict[str, list[float]] = defaultdict(list)
+    unknown_count = 0
+    n_legmix = 0
+    for o in outcomes:
+        lm = o.get("leg_mix") or {}
+        if not lm:
+            continue
+        n_legmix += 1
+        total = sum(lm.values()) or 1
+        for leg, count in lm.items():
+            leg_total[leg] += count
+            leg_shares[leg].append(count / total)
+        unknown_count += lm.get("unknown", 0)
+    leg_mix = {
+        "total_counts": dict(sorted(leg_total.items())),
+        "mean_share": {
+            leg: round(sum(v) / len(v), 4)
+            for leg, v in sorted(leg_shares.items())},
+        "unknown_count": unknown_count,
+        "n_questions": n_legmix,
+    }
+
+    # ── M7 (D3): pool size — live graph point count per question ──
+    pools = [float(o.get("pool_size") or 0) for o in outcomes]
+    pool_size = (
+        {"mean": round(sum(pools) / n, 2) if n else 0.0,
+         "p50": round(_percentile(pools, 0.50), 2),
+         "p95": round(_percentile(pools, 0.95), 2)}
+        if pools else {})
+
+    # ── M7 (D4): evidence written/retrieved + vacuity over evidence-bearing
+    # questions only (ground-truth-absent abstentions excluded from the
+    # denominator) at the design-locked k (top_k). evidence_written is the
+    # per-outcome D4 number (deterministic → evidence_turns; v2 →
+    # evidence_points); evidence_retrieved@k is the raw hit count (turn_recall
+    # numerator) — independent of M6's N/A-per-question semantics. ──
+    ev_written_outcomes = [o for o in outcomes
+                           if (o.get("evidence_written") or 0) > 0]
+    written_all = [float(o.get("evidence_written") or 0) for o in outcomes]
+    k_key = str(top_k)
+    retrieved_bearing = [
+        float((o.get("evidence_retrieved@k") or {}).get(k_key, 0) or 0)
+        for o in ev_written_outcomes]
+    evidence = {
+        "written_mean": (round(sum(written_all) / len(written_all), 2)
+                         if written_all else 0.0),
+        "retrieved_mean@k": {
+            k_key: (round(sum(retrieved_bearing) / len(retrieved_bearing), 2)
+                    if retrieved_bearing else None)},
+        "evidence_bearing_n": len(ev_written_outcomes),
+        "evidence_absent_n": len(outcomes) - len(ev_written_outcomes),
+        "vacuity_rate": (round(
+            sum(1.0 for v in retrieved_bearing if v == 0.0)
+            / len(retrieved_bearing), 4) if retrieved_bearing else 0.0),
+    }
+
     # ── context tokens ──
     ctx = [o["context_tokens"] for o in outcomes]
     ctx_mean = round(sum(ctx) / n, 1) if n else 0.0
@@ -186,6 +352,12 @@ def build_report(
                 "p50_ms": round(_percentile(xs, 0.50), 2),
                 "p95_ms": round(_percentile(xs, 0.95), 2)} if xs else {}
 
+    # M7 (Gate 2): a not-trusted audit serializes EVERY recall key to null —
+    # the report then contains no recall numbers until the dataset is
+    # re-audited (E2E-3 Precondition 2).
+    def _gated(value):
+        return value if trusted else None
+
     return {
         "benchmark": "LongMemEval",
         "dataset": dataset_id,
@@ -200,14 +372,18 @@ def build_report(
             "per_type": per_type,
         },
         "retrieval": {
-            "session_recall@k": session_recall,
-            "turn_recall@k": turn_recall,
-            "evidence_recall@k": evidence_recall or None,
-            "evidence_recall_n@k": evidence_recall_n or None,
-            "evidence_vacuity_rate@k": evidence_vacuity_rate or None,
+            "session_recall@k": _gated(session_recall),
+            "turn_recall@k": _gated(turn_recall),
+            "evidence_recall@k": _gated(evidence_recall or None),
+            "evidence_recall_n@k": _gated(evidence_recall_n or None),
+            "evidence_vacuity_rate@k": _gated(evidence_vacuity_rate or None),
             "evidence_coverage": evidence_coverage,
-            "chunk_evidence_recall@k": chunk_evidence_recall or None,
-            "chunk_evidence_recall_n@k": chunk_evidence_recall_n or None,
+            "chunk_evidence_recall@k": _gated(chunk_evidence_recall or None),
+            "chunk_evidence_recall_n@k": _gated(chunk_evidence_recall_n or None),
+            # M7 (D10): paper-aligned aggregates over non-_abs only.
+            "session_recall_paper@k": _gated(session_recall_paper),
+            "turn_recall_paper@k": _gated(turn_recall_paper),
+            "evidence_recall_paper@k": _gated(evidence_recall_paper),
             "context_tokens_mean": ctx_mean,
             "context_point_count_mean": round(
                 sum(o["context_point_count"] for o in outcomes) / n, 2) if n else 0,
@@ -216,8 +392,14 @@ def build_report(
             "retrieval": _lat(["retrieval_latency_ms"]),
             "reader": _lat(["reader_latency_ms"]),
             "judge": _lat(["judge_latency_ms"]),
+            "ingest": _lat(["ingest_latency_ms"]),  # M7 (D5): write-path cost
             "total_per_question": _lat(["total_ms"]),
         },
+        # M7 (D1/D2/D3/D4): the self-explanatory-report keys.
+        "integrity": integrity,
+        "leg_mix": leg_mix,
+        "pool_size": pool_size,
+        "evidence": evidence,
         "methodology": {
             "reader_prompt_hash": reader_prompt_hash,
             "judge_rubric_id_hash": judge_rubric_id_hash,
@@ -287,9 +469,21 @@ def build_report(
                                  "evidence-bearing outcomes with 0.0 while "
                                  "evidence exists; evidence_coverage = fraction of "
                                  "evidence-bearing questions with ingest."
-                                 "evidence_points > 0; all measured over the "
-                                 "isolated per-question corpus (see "
-                                 "retrieval_scope)",
+                                 "evidence_points > 0; M7 #1527: paper-aligned "
+                                 "session/turn/evidence_recall_paper@k keys are "
+                                 "the SAME per-question fraction over non-_abs "
+                                 "questions only (official print_retrieval_metrics."
+                                 "py excludes _abs; legacy keys keep the "
+                                 "_abs-inclusive definition); evidence.vacuity_rate "
+                                 "= share of evidence-bearing questions (ingest "
+                                 "evidence_written > 0) with evidence_retrieved@k "
+                                 "== 0 at top_k (evidence-absent abstentions "
+                                 "excluded from the denominator); recall numbers "
+                                 "are published only under the dataset recall-"
+                                 "semantics audit (methodology.dataset_semantics_"
+                                 "audit; a not-trusted verdict serializes recall "
+                                 "to null); all measured over the isolated "
+                                 "per-question corpus (see retrieval_scope)",
             "vacuity_band": "0/52 vacuous on healthy questions (fixture "
                             "calibration 2026-08-20)",
             "vacuity_band_anchor": "fixture calibration 2026-08-20 (0/52 "
@@ -301,6 +495,14 @@ def build_report(
             "split": split,
             "git_sha": git_sha(),
             "run_at_utc": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
+            # M7 (#1527, D7/D9/D10): what code + dataset + audit produced the
+            # report (a report always says); the checkpoint fingerprint fields
+            # are persisted here too.
+            "python_version": python_version,
+            "workers": workers,
+            "dataset_fingerprint": dataset_fingerprint,
+            "integrity_threshold": effective_threshold,
+            "dataset_semantics_audit": dataset_semantics_audit,
             **(r1_knobs or {}),
         },
         "failures": failures or [],

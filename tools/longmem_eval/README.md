@@ -41,7 +41,19 @@ CLI flags: `--split s|m|oracle`, `--limit N`, `--data <local json/jsonl>`,
 questions that still fail are recorded in `report['failures']` and the run
 continues — one transient error never aborts the 500-Q run),
 `--chunk-turns N`, `--context-cap N`, `--max-chunks-per-session N`
-(R1 #1540 knobs — env-first, CLI overrides, all validated ≥ 1).
+(R1 #1540 knobs — env-first, CLI overrides, all validated ≥ 1),
+`--integrity-threshold F` / `--integrity-justification <text>` (M7 #1527:
+override the `integrity.valid` gate — max allowed `invalid_rate`; the
+override is recorded with its justification and a *violated* override still
+yields `valid=false`; default 0.0 = any failed/ingest-error question marks
+the run invalid).
+
+**Run hygiene (M7 #1527):** the runner refuses Python < 3.12 with a clear
+message (pyproject `requires-python >=3.12`); checkpoints carry a code
+fingerprint (git_sha + python + dataset hash + config + prompt hashes) and a
+stale resume — different config, or a pre-fingerprint v1 checkpoint — is
+refused with the differing fields named; concurrent run processes sharing
+one checkpoint merge under an exclusive flock (no lost updates).
 
 ## Dataset
 
@@ -101,10 +113,48 @@ path via `--data` skips the download. Split S = `longmemeval_s_cleaned.json`
 5. **Report** (`report.py`) — overall + task-averaged accuracy, the five
    paper categories (Information Extraction, Multi-Session Reasoning,
    Temporal Reasoning, Knowledge Updates, Abstention) + six raw types,
-   retrieval recall@k, context-token means, latency (retrieval/reader/judge
-   per question, mean/p50/p95), and the methodology provenance (dataset id,
-   split, reader/judge models, judge rule, extraction approach, k values,
-   token estimator, git sha, run timestamp).
+   retrieval recall@k (incl. paper-aligned `_paper@k` keys over non-_abs
+   questions, M7), context-token means, latency (retrieval/reader/judge/
+   **ingest** per question, mean/p50/p95 — M7 isolates the write-path
+   cost), the **integrity block** (valid / invalid_rate / per-question
+   error census — printed BEFORE the score), **leg-mix / pool-size /
+   evidence written-·retrieved aggregates** (M7), and the methodology
+   provenance (dataset id, split, reader/judge models, judge rule,
+   extraction approach, k values, token estimator, git sha, **python
+   version, workers, dataset fingerprint, the dataset recall-semantics
+   audit record**, run timestamp).
+
+## Report contract (M7 #1527)
+
+The report is self-explanatory: every run prints and persists
+
+- **`integrity`** — `valid` (invalid_rate ≤ threshold), `n_attempted` /
+  `n_valid` / `n_invalid`, `invalid_rate` (invalid = failed question OR
+  completed question with ingest errors), `error_census` (site-prefixed
+  P2-aligned error classes: `reader:retries_exhausted`, `judge:fatal`, …),
+  `checks` (python guard, dataset audited, audit present, fingerprint
+  matched, census computed). Printed BEFORE the score.
+- **`leg_mix`** — per-leg `match_source` counts over the top_k context the
+  reader saw (embedded → `tfidf`; real → `rrf`; never empty).
+- **`pool_size`** — live per-question graph point count (mean/p50/p95) =
+  the retrieval-pool denominator.
+- **`evidence`** — `evidence_written` (ingest's evidence turns/points) vs
+  `evidence_retrieved@k` (the turn_recall numerator), with vacuity over
+  **evidence-bearing questions only** (`evidence_written > 0`;
+  evidence-absent abstentions are counted separately, never dragged into
+  the denominator).
+- **`methodology.dataset_semantics_audit`** — the dataset recall-semantics
+  audit (E2E-3 Precondition 2): coverage/consistency/roles/abstentions
+  census + recorded paper divergences + verdict. **Publication gate (no
+  opt-out):** `build_report` raises without it, and a `not-trusted`
+  verdict serializes every recall key to `null` — no `turn_recall` /
+  `evidence_recall` number is published until the dataset is re-audited.
+  Paper-aligned `retrieval.*_paper@k` keys (non-_abs only) are reported
+  alongside the legacy keys.
+
+Per-question outcomes (the Layer-1 payload) carry `valid`, `error_classes`,
+`leg_mix`, `leg_mix@k`, `pool_size`, `evidence_written`,
+`evidence_retrieved@k`, `ingest_latency_ms`.
 
 ## Full run prerequisites
 

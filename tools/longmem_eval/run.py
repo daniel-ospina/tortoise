@@ -28,6 +28,7 @@ pipeline in CI.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -40,13 +41,16 @@ from typing import Any
 
 from tortoise.model_adapters import is_fatal
 from tortoise.sdk import TortoiseSDK
+from tortoise.shared_state.concurrency import flock_exclusive
 
 from . import dataset as ds
+from .dataset_audit import audit_dataset
+from .errors import class_for_ingest_error_text, eval_failure_class
 from .ingest import DEFAULT_CHUNK_TURNS, ingest_haystack
 from .judge import build_judge, is_abstention
 from .preflight import FatalProviderError, PreflightError, run_preflight
 from .reader import build_reader, reader_prompt_constants
-from .report import build_report, default_report_path, save_report
+from .report import build_report, default_report_path, git_sha, save_report
 from .retrieve import (
     DEFAULT_CONTEXT_TOKEN_CAP,
     DEFAULT_MAX_CHUNKS_PER_SESSION,
@@ -150,14 +154,94 @@ def _call_with_backoff(fn, *, what: str, retries: int,
     raise AssertionError("unreachable")  # pragma: no cover
 
 
-def _load_checkpoint(path: str | None) -> tuple[dict[str, dict], list[dict]]:
-    """Load (completed-by-qid, failures) from the checkpoint state file."""
+class CheckpointStaleError(RuntimeError):
+    """Refused-resume: the checkpoint's fingerprint does not match the
+    effective run config (or the checkpoint predates the fingerprint
+    contract). E2E-2 owned negative — stale resume aborts clearly instead of
+    silently reusing results from a different config (M7 #1527, D7)."""
+
+
+def _model_id(model: Any) -> str | None:
+    """A stable fingerprint string for a model object (None → None)."""
+    if model is None:
+        return None
+    mid = getattr(model, "model_id", None)
+    return mid or repr(model)
+
+
+def _build_fingerprint(*, reader_model: str, judge_model: str,
+                       ks: tuple[int, ...], top_k: int, split: str,
+                       ingest_mode: str, extractor_model: Any,
+                       max_retries: int, dataset_fingerprint: str) -> dict:
+    """The effective-run-config fingerprint (M7 #1527, D7 schema).
+
+    ``workers`` is deliberately EXCLUDED (per-question isolation makes
+    results workers-invariant) but recorded in ``methodology.workers``.
+    """
+    return {
+        "git_sha": git_sha(),
+        "python": sys.version.split()[0],
+        "dataset_fingerprint": dataset_fingerprint,
+        "split": split,
+        "ks": list(ks),
+        "top_k": top_k,
+        "ingest_mode": ingest_mode,
+        "extractor_model": _model_id(extractor_model),
+        "reader_model": reader_model,
+        "judge_model": judge_model,
+        "max_retries": max_retries,
+        "reader_prompt_hash": _sha16(reader_prompt_source()),
+        "judge_rubric_id_hash": _sha16(JUDGE_RUBRIC_ID),
+    }
+
+
+def _fingerprint_diffs(expected: dict, actual: dict) -> list[str]:
+    """Field names differing between two fingerprint dicts (sorted)."""
+    return sorted(k for k in set(expected) | set(actual)
+                  if expected.get(k) != actual.get(k))
+
+
+def _dataset_fingerprint(path: Path) -> str:
+    """sha256[:16] of the resolved dataset file (streamed) — "unknown" when
+    unreadable (programmatic/test callers pass "unknown" explicitly)."""
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()[:16]
+    except OSError:
+        return "unknown"
+
+
+def _load_checkpoint(path: str | None,
+                     expected_fingerprint: dict) -> tuple[dict[str, dict], list[dict]]:
+    """Load (completed-by-qid, failures) from the checkpoint state file.
+
+    M7 (#1527, D7): the loaded checkpoint's fingerprint must match the
+    effective run config — a mismatch raises ``CheckpointStaleError`` naming
+    the differing fields (refuse stale resume). A legacy v1 checkpoint
+    (no ``fingerprint`` key) is refused too. The read happens under an
+    exclusive flock (D8) so a reader never sees a mid-merge file.
+    """
     if not path:
         return {}, []
     p = Path(path)
     if not p.is_file():
         return {}, []
-    data = json.loads(p.read_text(encoding="utf-8"))
+    with flock_exclusive(p.with_suffix(p.suffix + ".lock")):
+        data = json.loads(p.read_text(encoding="utf-8"))
+    fp = data.get("fingerprint")
+    if fp is None:
+        raise CheckpointStaleError(
+            f"checkpoint {p} predates the fingerprint contract (no "
+            f"'fingerprint' key) — delete it or re-fingerprint it")
+    diffs = _fingerprint_diffs(expected_fingerprint, fp)
+    if diffs:
+        raise CheckpointStaleError(
+            f"checkpoint {p} is stale: effective run config differs on "
+            f"{sorted(diffs)} — refusing resume (delete the file to re-run "
+            f"the questions)")
     outcomes = {o["question_id"]: o for o in data.get("outcomes", [])}
     failures = list(data.get("failures", []))
     print(f"[longmem_eval] resumed checkpoint {p}: {len(outcomes)} completed, "
@@ -165,20 +249,50 @@ def _load_checkpoint(path: str | None) -> tuple[dict[str, dict], list[dict]]:
     return outcomes, failures
 
 
+def _merge_checkpoint(path: Path, outcomes: list[dict],
+                      failures: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Merge the on-disk checkpoint with the in-memory snapshot (M7 #1527,
+    D8 — cross-process merge-under-lock): outcomes dict-by-qid (the fresh
+    in-memory outcome wins on tie), failures append-only by qid. A missing
+    or corrupt disk file → the in-memory snapshot wins (fresh start)."""
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, ValueError):
+            data = {}
+        disk_out = {o["question_id"]: o for o in data.get("outcomes", [])}
+        disk_fail = {f["question_id"]: f for f in data.get("failures", [])}
+    else:
+        disk_out, disk_fail = {}, {}
+    merged_out = {**disk_out, **{o["question_id"]: o for o in outcomes}}
+    merged_fail = {**disk_fail, **{f["question_id"]: f for f in failures}}
+    return list(merged_out.values()), list(merged_fail.values())
+
+
 def _save_checkpoint(path: str | None, outcomes: list[dict],
-                     failures: list[dict]) -> None:
-    """Atomically persist partial results after each question (resume)."""
+                     failures: list[dict], fingerprint: dict) -> None:
+    """Atomically persist partial results after each question (resume).
+
+    M7 (#1527, D7/D8): writes the code fingerprint; the write happens under
+    an exclusive flock with a re-read-and-merge, so two concurrent run
+    PROCESSES sharing one checkpoint lose nothing (each merge adds its
+    qids). ``os.replace`` keeps the final file atomic.
+    """
     if not path:
         return
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(p.suffix + ".tmp")
-    tmp.write_text(json.dumps({
-        "outcomes": outcomes,
-        "failures": failures,
-        "updated_at_utc": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
-    }, indent=2), encoding="utf-8")
-    os.replace(tmp, p)
+    with flock_exclusive(p.with_suffix(p.suffix + ".lock")):
+        merged_outcomes, merged_failures = _merge_checkpoint(
+            p, outcomes, failures)
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        tmp.write_text(json.dumps({
+            "fingerprint": fingerprint,
+            "outcomes": merged_outcomes,
+            "failures": merged_failures,
+            "updated_at_utc": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
+        }, indent=2), encoding="utf-8")
+        os.replace(tmp, p)
 
 
 def run_evaluation(
@@ -199,6 +313,10 @@ def run_evaluation(
     chunk_turns: int = DEFAULT_CHUNK_TURNS,
     max_context_tokens: int = DEFAULT_CONTEXT_TOKEN_CAP,
     max_chunks_per_session: int = DEFAULT_MAX_CHUNKS_PER_SESSION,
+    # M7 (#1527): run-hygiene inputs.
+    dataset_fingerprint: str = "unknown",
+    integrity_threshold: float = 0.0,
+    integrity_justification: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Run the full per-question pipeline over ``instances``.
 
@@ -211,8 +329,24 @@ def run_evaluation(
     previously-failed questions (delete the state file to re-run them).
 
     Returns (completed-outcomes, report-dict built from them).
+
+    M7 (#1527): computes the dataset recall-semantics audit from the loaded
+    instances (publication gate — the report provably carries it), builds the
+    checkpoint fingerprint from the effective run config (stale resume
+    refused), and instruments every outcome with leg-mix / pool-size /
+    evidence-written-·retrieved / ingest-latency fields.
     """
-    done, prior_failures = _load_checkpoint(checkpoint)
+    # E2E-3 Precondition 2: the audit is computed from the loaded instances
+    # BEFORE anything else — no report can be produced without it.
+    dataset_semantics_audit = audit_dataset(instances)
+    fingerprint = _build_fingerprint(
+        reader_model=reader.model_id,
+        judge_model=judge.model_id,
+        ks=ks, top_k=top_k, split=split, ingest_mode=ingest_mode,
+        extractor_model=extractor_model, max_retries=max_retries,
+        dataset_fingerprint=dataset_fingerprint,
+    )
+    done, prior_failures = _load_checkpoint(checkpoint, fingerprint)
     outcomes: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = list(prior_failures)
     import threading
@@ -237,10 +371,18 @@ def run_evaluation(
                   f"(delete the checkpoint to retry)", file=sys.stderr)
             return
         t_q_start = time.monotonic()
+        # M7 (D6): the failure site for the error census. Covers the non-LLM
+        # graph pipeline (ingest + retrieve) first; reader/judge set it just
+        # before their calls.
+        _stage = "ingest"
         try:
             with tempfile.TemporaryDirectory(dir=work_dir, prefix="lme-") as td:
                 sdk = TortoiseSDK(os.path.join(td, "lme.db"))
                 try:
+                    # M7 (D5): ingest is timed in isolation — the write-path
+                    # cost is a report component (extractor vs retrieve vs
+                    # reader vs judge attribution).
+                    t_ingest = time.monotonic()
                     if ingest_mode == "v2":
                         from .ingest_v2 import ingest_haystack_v2
                         ingest_stats = ingest_haystack_v2(
@@ -249,11 +391,21 @@ def run_evaluation(
                     else:
                         ingest_stats = ingest_haystack(
                             sdk, question, chunk_turns=chunk_turns)
+                    ingest_latency_ms = round(
+                        (time.monotonic() - t_ingest) * 1000.0, 2)
+                    # M7 (D3): the authoritative live graph pool size — the
+                    # retrieval-pool denominator the methodology documents
+                    # (single Cypher, no N+1).
+                    pool_rows = sdk._get_proj().g.query(
+                        "MATCH (p:Point {lme_question_id:$q}) RETURN count(*)",
+                        params={"q": qid}).result_set
+                    pool_size = pool_rows[0][0] if pool_rows else 0
                     ret = retrieve_for_question(
                         sdk, question, ks=ks, top_k=top_k,
                         max_context_tokens=max_context_tokens,
                         max_chunks_per_session=max_chunks_per_session)
 
+                    _stage = "reader"
                     t0 = time.monotonic()
                     hypothesis = _call_with_backoff(
                         lambda: reader.answer(
@@ -268,6 +420,7 @@ def run_evaluation(
                         what=f"reader for {qid}", retries=max_retries)
                     reader_ms = (time.monotonic() - t0) * 1000.0
 
+                    _stage = "judge"
                     t0 = time.monotonic()
                     label = _call_with_backoff(
                         lambda: judge.judge(
@@ -282,6 +435,13 @@ def run_evaluation(
                 finally:
                     sdk.close()
 
+            # M7 (D4): evidence written = the ingest leg's own count
+            # (deterministic → evidence_turns; v2 → evidence_points);
+            # error_classes = ingest-stage classes + (later) the failure class.
+            ingest_errors = ingest_stats.get("errors") or []
+            evidence_written = (
+                ingest_stats.get("evidence_points", 0) if ingest_mode == "v2"
+                else ingest_stats.get("evidence_turns", 0))
             outcome = {
                 "question_id": qid,
                 "question_type": question.get("question_type", ""),
@@ -289,8 +449,8 @@ def run_evaluation(
                 "label": label,
                 "hypothesis": hypothesis,
                 "ingest": ingest_stats,
-                "n_ingest_errors": len(ingest_stats.get("errors", []) or []),
-                "ingest_error_text": (ingest_stats.get("errors") or [None])[0],
+                "n_ingest_errors": len(ingest_errors),
+                "ingest_error_text": (ingest_errors or [None])[0],
                 "session_recall@k": ret["session_recall@k"],
                 "turn_recall@k": ret["turn_recall@k"],
                 "evidence_recall@k": ret.get("evidence_recall@k"),
@@ -303,6 +463,17 @@ def run_evaluation(
                 "reader_latency_ms": round(reader_ms, 2),
                 "judge_latency_ms": round(judge_ms, 2),
                 "total_ms": round((time.monotonic() - t_q_start) * 1000.0, 2),
+                # M7 (#1527, D1–D5): per-question validity + instrumentation
+                # (all persisted in the Layer-1 outcomes projection).
+                "valid": len(ingest_errors) == 0,
+                "error_classes": [class_for_ingest_error_text(str(e))
+                                  for e in ingest_errors],
+                "leg_mix": ret["match_source_counts"],
+                "leg_mix@k": ret["match_source_counts@k"],
+                "pool_size": pool_size,
+                "evidence_written": evidence_written,
+                "evidence_retrieved@k": ret["evidence_retrieved@k"],
+                "ingest_latency_ms": ingest_latency_ms,
             }
             with _lock:
                 outcomes.append(outcome)
@@ -324,10 +495,14 @@ def run_evaluation(
                     "question_id": qid,
                     "question_type": question.get("question_type", ""),
                     "error": repr(e),
+                    # M7 (D6): the P2-aligned eval error class, site-prefixed
+                    # (reader:retries_exhausted / judge:fatal / ingest:…).
+                    "error_class": eval_failure_class(e, site=_stage),
                     "failed_at_utc": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
                 })
         with _lock:
-            _save_checkpoint(checkpoint, list(done.values()), failures)
+            _save_checkpoint(checkpoint, list(done.values()), failures,
+                             fingerprint)
 
     # ── dispatch: sequential (workers=1) or a thread pool ──
     if workers <= 1:
@@ -365,6 +540,14 @@ def run_evaluation(
             "context_token_cap": max_context_tokens,
             "max_chunks_per_session": max_chunks_per_session,
         },
+        # M7 (#1527): publication-gated audit + run-hygiene provenance.
+        dataset_semantics_audit=dataset_semantics_audit,
+        integrity_threshold=integrity_threshold,
+        integrity_justification=integrity_justification,
+        python_version=f"{sys.version_info[0]}.{sys.version_info[1]}."
+              f"{sys.version_info[2]}",
+        workers=workers,
+        dataset_fingerprint=dataset_fingerprint,
     )
 
 
@@ -386,6 +569,13 @@ def outcomes_to_report(
     reader_type_fragments: dict[str, str] | None = None,
     preflight: dict | None = None,
     r1_knobs: dict[str, Any] | None = None,
+    # M7 (#1527): publication-gated audit + run-hygiene provenance.
+    dataset_semantics_audit: dict[str, Any] | None = None,
+    integrity_threshold: float = 0.0,
+    integrity_justification: str | None = None,
+    python_version: str = "",
+    workers: int = 1,
+    dataset_fingerprint: str = "unknown",
 ) -> dict[str, Any]:
     """Aggregate outcomes (programmatic entry used by tests too).
 
@@ -406,6 +596,12 @@ def outcomes_to_report(
                 "n_ingest_errors", "context_tokens",
                 "retrieval_latency_ms", "reader_latency_ms",
                 "judge_latency_ms", "total_ms",
+                # M7 (#1527, D11): the Layer-1 payload projection — validity,
+                # error classes, leg-mix, pool size, evidence written/
+                # retrieved, isolated ingest cost.
+                "valid", "error_classes", "leg_mix", "leg_mix@k",
+                "pool_size", "evidence_written", "evidence_retrieved@k",
+                "ingest_latency_ms",
             )}
             for o in outcomes
         ]
@@ -438,6 +634,13 @@ def outcomes_to_report(
         failures=failures,
         r1_knobs=r1_knobs,
         extra=extra,
+        # M7 (#1527): publication-gated audit + run-hygiene provenance.
+        dataset_semantics_audit=dataset_semantics_audit,
+        integrity_threshold=integrity_threshold,
+        integrity_justification=integrity_justification,
+        python_version=python_version,
+        workers=workers,
+        dataset_fingerprint=dataset_fingerprint,
     )
 
 
@@ -471,9 +674,30 @@ def reader_prompt_source() -> str:
     )
 
 def _print_summary(report: dict[str, Any]) -> None:
-    acc = report["accuracy"]
+    # M4/M7 (#1527): the integrity block + error census print BEFORE the
+    # score — a run's validity is asserted before its numbers are read.
+    integ = report.get("integrity") or {}
     print("\n" + "=" * 64)
     print(f"LongMemEval {report['split']} — {report['n_questions']} questions")
+    print("── integrity ──")
+    print(f"valid: {integ.get('valid')}  (threshold {integ.get('threshold')}; "
+          f"n_attempted {integ.get('n_attempted')}, n_valid "
+          f"{integ.get('n_valid')}, n_invalid {integ.get('n_invalid')}, "
+          f"invalid_rate {integ.get('invalid_rate')})")
+    if integ.get("justified"):
+        print(f"  justified override: "
+              f"{integ.get('threshold_violation_justification')}")
+    census = integ.get("error_census") or {}
+    if census:
+        print("error census:")
+        for cls, count in census.items():
+            print(f"  {cls:<28} {count}")
+    else:
+        print("error census: no errors")
+    for c in integ.get("checks") or []:
+        print(f"  check: {c}")
+    print("── score ──")
+    acc = report["accuracy"]
     print(f"overall accuracy:        {acc['overall']}")
     print(f"task-averaged accuracy:  {acc['task_averaged']}")
     print(f"abstention accuracy:     {acc['abstention']} "
@@ -481,14 +705,18 @@ def _print_summary(report: dict[str, Any]) -> None:
     for cat, v in acc["per_category"].items():
         print(f"  {cat:<28} {v['accuracy']} (n={v['n']})")
     ret = report["retrieval"]
-    print("retrieval recall@k (session / turn):")
-    for k, v in ret["session_recall@k"].items():
-        ev = (ret.get("evidence_recall@k") or {}).get(k)
-        cev = (ret.get("chunk_evidence_recall@k") or {}).get(k)
-        suffix = f"   evidence {ev}" if ev is not None else ""
-        if cev is not None:
-            suffix += f"   chunk-evidence {cev}"
-        print(f"  k={k:<3} session {v}   turn {ret['turn_recall@k'][k]}{suffix}")
+    if ret.get("session_recall@k") is None:
+        print("retrieval recall: NOT PUBLISHED — dataset semantics audit "
+              "verdict not-trusted (see methodology.dataset_semantics_audit)")
+    else:
+        print("retrieval recall@k (session / turn):")
+        for k, v in ret["session_recall@k"].items():
+            ev = (ret.get("evidence_recall@k") or {}).get(k)
+            cev = (ret.get("chunk_evidence_recall@k") or {}).get(k)
+            suffix = f"   evidence {ev}" if ev is not None else ""
+            if cev is not None:
+                suffix += f"   chunk-evidence {cev}"
+            print(f"  k={k:<3} session {v}   turn {ret['turn_recall@k'][k]}{suffix}")
     ingest_errors = sum(o.get("n_ingest_errors", 0)
                         for o in report.get("outcomes", []))
     if ingest_errors:
@@ -496,8 +724,9 @@ def _print_summary(report: dict[str, Any]) -> None:
               f"recall may be raw-transcript-only (see report outcomes)")
     print(f"context tokens mean:     {ret['context_tokens_mean']}")
     lat = report["latency_ms"]
-    print(f"latency (ms) retrieval/reader/judge/total:")  # noqa: F541
-    for key in ("retrieval", "reader", "judge", "total_per_question"):
+    print(f"latency (ms) retrieval/reader/judge/ingest/total:")  # noqa: F541
+    for key in ("retrieval", "reader", "judge", "ingest",
+                "total_per_question"):
         d = lat.get(key, {})
         print(f"  {key:<20} {d}")
     print("methodology: reader={} judge={} extraction={}".format(
@@ -575,6 +804,17 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-retries", type=int, default=DEFAULT_MAX_RETRIES,
                    help="per-question LLM-call retries with exponential backoff "
                         "before the question is recorded as failed (default 3)")
+    p.add_argument("--integrity-threshold", type=float, default=0.0,
+                   help="max allowed invalid_rate for integrity.valid (default "
+                        "0.0 — any failed question or ingest-error question "
+                        "marks the run invalid). An override records "
+                        "integrity.justified; the report always records the "
+                        "numbers + the reason, so a violated override still "
+                        "yields valid=false (E2E-2, M7 #1527 D1)")
+    p.add_argument("--integrity-justification", default=None,
+                   help="free text recorded with a non-default "
+                        "--integrity-threshold (integrity."
+                        "threshold_violation_justification)")
     p.add_argument("--reader-model", default=None,
                    help="reader model spec <provider>:<model> "
                         "(env TORTOISE_LME_READER_MODEL; default "
@@ -592,7 +832,22 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _assert_python_version() -> None:
+    """Refuse a <3.12 eval env fast (M7 #1527, D9). Factored for unit
+    testing (monkeypatch sys.version_info). The guard runs BEFORE dataset
+    load / key checks — pyproject requires-python >=3.12 and the eval graph
+    write path are 3.12-only."""
+    if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+        # (pyproject requires-python already refuses <3.12 at install time;
+        # this refuses a 3.11 env reached via PYTHONPATH / --ignore-requires)
+        raise SystemExit(
+            f"longmem_eval requires Python >= 3.12 (got "
+            f"{sys.version_info[0]}.{sys.version_info[1]}) — pyproject "
+            "requires-python >=3.12; the eval graph write path is 3.12-only")
+
+
 def run_main(argv: list[str] | None = None) -> dict[str, Any]:
+    _assert_python_version()
     args = _build_parser().parse_args(argv)
     ks = _parse_ks(args.k)
     top_k = args.top_k
@@ -610,6 +865,16 @@ def run_main(argv: list[str] | None = None) -> dict[str, Any]:
         cache=Path(args.cache_dir).expanduser() if args.cache_dir else None,
         download=not args.no_download,
     )
+
+    # M7 (D7): the dataset fingerprint hashes the RESOLVED dataset file (the
+    # checkpoint's dataset_fingerprint must match on resume).
+    if args.data:
+        dataset_file = Path(args.data)
+    else:
+        cache_base = (Path(args.cache_dir).expanduser() if args.cache_dir
+                      else ds.cache_dir())
+        dataset_file = cache_base / ds.SPLIT_FILES[args.split]
+    dataset_fingerprint = _dataset_fingerprint(dataset_file)
 
     reader = build_reader(args.reader_model, mock=args.mock)
     judge = build_judge(args.judge_model, mock=args.mock)
@@ -663,6 +928,9 @@ def run_main(argv: list[str] | None = None) -> dict[str, Any]:
             workers=max(1, args.workers), preflight=preflight,
             chunk_turns=chunk_turns, max_context_tokens=context_cap,
             max_chunks_per_session=max_chunks_per_session,
+            dataset_fingerprint=dataset_fingerprint,
+            integrity_threshold=args.integrity_threshold,
+            integrity_justification=args.integrity_justification,
         )
     except FatalProviderError as e:
         print("[longmem_eval] RUN ABORTED — fatal provider error mid-run "
