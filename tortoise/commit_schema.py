@@ -261,6 +261,11 @@ class Point(BaseModel):
     search_keys: list[str] = Field(default_factory=list)  # E3: 2-4 aliases + verbatim tokens
     source_turn_id: int | None = Field(default=None, ge=0)  # E3: 0-based conversation turn index
     status: Literal["live", "draft"] = "draft"
+    tier: Literal["A", "B"] | None = Field(
+        default=None,
+        description="Tier-A state-value marker (approved E2) — classification "
+                    "hint; absence = Tier-B default",
+    )
     slots: ParticipantSlots | None = None  # #1418: typed participant slots
 
     @field_validator("when")
