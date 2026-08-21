@@ -196,6 +196,16 @@ class _InMemoryEventLog:
         return list(self._events)
 
 
+# #1529 P1 (E3 owner note): whitelist of point properties that pass through
+# the capture response's `props` superset — E3 writes source_turn_id via the
+# v2 payload point dict / the M2 folded statement dict; capture must never
+# drop or overwrite it. Deliberately a WHITELIST (not a blacklist): folded
+# statement dicts carry internal projection state (provenance run_id/source,
+# status, createdAt, operator, speaker) that must never leak into the public
+# capture response. Extend when E3 lands search_keys/when/quote.
+_CAPTURE_PASSTHROUGH_PROPS = frozenset({"source_turn_id"})
+
+
 def _session_llm_transcript(conversation: list[dict]) -> tuple[str, int]:
     """Build the LLM-extraction transcript + pre-write estimate for a
     conversation (#822). One ``Speaker: text`` line per turn (the
@@ -1762,13 +1772,22 @@ class TortoiseSDK:
 
         ``conversation`` is a list of {"role", "content"} dicts. Returns
         {"session_id", "turns", "extracted", "points": [...],
-        "extraction_mode", "extraction_provider"} — the v2 path reports
-        "extraction_mode": "llm:<route>" (e.g. "llm:deepseek-direct") and
-        the configured "extraction_provider" (#1530 D8).
+        "extraction_mode", "extraction_provider", "ok", "errors",
+        "warnings"} — the v2 path reports "extraction_mode": "llm:<route>"
+        (e.g. "llm:deepseek-direct") and the configured
+        "extraction_provider" (#1530 D8). P1 #1529 fail-closed contract:
+        "ok" is the success signal (never "extracted" — extracted > 0 can
+        co-occur with ok=False on partial-emission failure), "extraction_mode"
+        is truthful ("llm:<route>" / "llm" on success, "empty" when the
+        conversation has no extractable content — always with ok=False and an
+        errors entry — and "error" when extraction failed), errors/warnings
+        are additive and never clobbered, and an empty/blank conversation is
+        rejected BEFORE any write (no Session stub, turns=0).
 
         Requires an LLM provider key (OPENROUTER/DEEPSEEK/OPENAI/GEMINI_API_KEY)
         or the TORTOISE_SESSION_LLM_MOCK=1 test seam — raises ValueError
-        otherwise (fail-closed, mirroring the hosted 503).
+        otherwise (fail-closed, mirroring the hosted 503; the no-extractor
+        check precedes the empty gate).
         """
         import uuid
         from datetime import datetime, timezone
@@ -1789,6 +1808,25 @@ class TortoiseSDK:
         if len(conversation) > max_turns:
             raise ValueError(
                 f"Session turn cap exceeded: {len(conversation)} > {max_turns}")
+
+        # P1 #1529 (D3): empty/blank conversation fails closed BEFORE any write
+        # — whole-conversation transcript emptiness, the SAME signal the
+        # extractors use, so the gate and the extractors cannot disagree, and
+        # pre-mutation (no Session stub). turns reports the COMMITTED state (0)
+        # — nothing lands. (The no-extractor ValueError above precedes this
+        # gate — hosted 503-first precedent, #1529 OQ14.)
+        transcript, _est = _session_llm_transcript(conversation)
+        if not transcript.strip():
+            return {
+                "session_id": session_id,
+                "turns": 0,
+                "extracted": 0,
+                "points": [],
+                "extraction_mode": "empty",
+                "ok": False,
+                "errors": ["no extractable content — empty or blank conversation"],
+                "warnings": [],
+            }
 
         proj.g.query(
             "MERGE (s:Session {id:$sid}) SET s.created_at=$now, s.turn_count=$tc, "
@@ -1855,12 +1893,20 @@ class TortoiseSDK:
         # the hosted copy so the two stay in sync.
         # #1350: capture runs the v2 5-stage extractor (hosted + selfhost);
         # the M2 two-stage extractor remains behind TORTOISE_SESSION_EXTRACTOR=m2.
+        # P1 #1529 (D5): BOTH branches return the same (extracted, meta)
+        # structured contract — the M2 branch's meta now carries
+        # errors/warnings/mode (no fabricated empty meta) so the assembly is
+        # branch-independent and fails closed on either extractor.
         if os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2":
-            extracted = self._extract_session_llm(conversation, session_id, now)
-            meta = {"provider": None, "route": None, "failover_used": False,
-                    "errors": [], "warnings": []}
+            extracted, meta = self._extract_session_llm(
+                conversation, session_id, now)
         else:
-            extracted, meta = self._extract_session_v2(conversation, session_id, now)
+            extracted, meta = self._extract_session_v2(
+                conversation, session_id, now)
+
+        # P1 #1529: the fail-closed assembly consumes the shared contract.
+        extraction_errors = list(meta.get("errors") or [])
+        extraction_warnings = list(meta.get("warnings") or [])
 
         # Ontology episodic model (v3.1 §4.5/§3.2): Event node + the point's
         # eventId provenance property. #1417: provenance is the point's
@@ -1882,14 +1928,29 @@ class TortoiseSDK:
                     params={"ids": [p["id"] for p in extracted],
                             "eid": event_id},
                 )
+            else:
+                # P1 #1529 (D4): create_event returning no id/eventId silently
+                # skips stamping — surface as an additive warning.
+                _logger.warning(
+                    "capture_session: sessionCaptured Event write returned no "
+                    "id/eventId for session %s — extracted points not stamped",
+                    session_id,
+                )
+                extraction_warnings.append(
+                    "sessionCaptured Event write returned no id/eventId — "
+                    "extracted points not stamped")
         except Exception as e:
             # Non-fatal — mirrors hosted behavior, but surface the failure so
-            # silent event-log loss is visible (#721).
+            # silent event-log loss is visible (#721). P1 #1529 (D4): also
+            # append an additive warnings entry (never indistinguishable from
+            # a clean capture).
             _logger.warning(
                 "capture_session: sessionCaptured Event/EventRecorded write "
                 "failed (non-fatal) for session %s: %s", session_id, e,
                 exc_info=True,
             )
+            extraction_warnings.append(
+                f"sessionCaptured Event write failed: {type(e).__name__}: {e}")
 
         # #1352: the extraction projection auto-created a document-typed Source
         # stub at `session:{id}` (default sourceKind in _link_source) — the
@@ -1898,22 +1959,46 @@ class TortoiseSDK:
         # and wire (Source)-[:references]->(sessionCaptured Event). Always runs:
         # the Source upgrade is independent of the Event write's health; the
         # references edge is skipped when no Event landed (event_id None).
-        self._materialize_session_source(session_id, event_id, now, conversation)
+        # P1 #1529 (D4): a Source materialization failure is non-fatal and
+        # surfaced as an additive warning — never a raw exception after
+        # partial writes.
+        try:
+            self._materialize_session_source(
+                session_id, event_id, now, conversation)
+        except Exception as e:
+            _logger.warning(
+                "capture_session: session Source materialization failed "
+                "(non-fatal) for session %s: %s", session_id, e, exc_info=True,
+            )
+            extraction_warnings.append(
+                f"session Source materialization failed: {type(e).__name__}: {e}")
 
+        # P1 #1529 (D2): truthful extraction_mode + ok/errors/warnings on every
+        # response. "empty" always co-occurs with an error entry; belt-and-
+        # braces: map mode=="empty" → ok=False regardless of the error list.
+        ok = not extraction_errors and meta.get("mode") != "empty"
+        if not ok and meta.get("mode") == "empty":
+            effective_mode = "empty"
+        elif not ok:
+            effective_mode = "error"
+        elif meta.get("route"):
+            effective_mode = f"llm:{meta['route']}"
+        else:
+            effective_mode = "llm"
         resp = {
             "session_id": session_id,
             "turns": len(conversation),
             "extracted": len(extracted),
             "points": extracted,
+            "extraction_mode": effective_mode,
+            "ok": ok,
+            "errors": extraction_errors,
+            "warnings": extraction_warnings,
         }
-        # #1530 D8: extraction_mode reflects what ACTUALLY ran — the v2 path
-        # reports the resolved route ("llm:<route>", e.g. "llm:deepseek-direct")
-        # + the configured provider; the M2 path is unchanged ("llm").
+        # #1530 D8: extraction_provider reports the configured provider when a
+        # route was resolved (the v2 path); the M2 path has no route/provider.
         if meta.get("route"):
-            resp["extraction_mode"] = f"llm:{meta['route']}"
             resp["extraction_provider"] = meta.get("provider")
-        else:
-            resp["extraction_mode"] = "llm"
         return resp
 
     def _extract_session_llm(
@@ -1921,7 +2006,7 @@ class TortoiseSDK:
         conversation: list[dict[str, str]],
         session_id: str,
         now: str,
-    ) -> list[dict]:
+    ) -> tuple[list[dict], dict]:
         """M2 LLM extraction (epic #909) over a conversation (#822).
 
         Runs the two-stage LLMExtractor on the conversation transcript
@@ -1931,13 +2016,22 @@ class TortoiseSDK:
         Every extracted Point is then wired to the session (:CONTAINS edge,
         same as the removed regex loop).
 
-        Returns the ``[{id, kind, text}]`` list the capture contract reports;
-        ``kind`` reflects the stored pointKind (the M2 conversation stage
-        writes untyped Points, reported as ``statement``).
+        Returns ``(extracted, meta)`` — the SAME shared contract as
+        _extract_session_v2 (#1530 D8; #1529 P1 adds the fail-closed surface):
+        ``extracted`` is the [{id, kind, text, props}] list the capture
+        contract reports (``kind`` reflects the stored pointKind; the M2
+        conversation stage writes untyped Points, reported as "statement";
+        ``props`` is the whitelisted _CAPTURE_PASSTHROUGH_PROPS superset so
+        E3 fields pass through); ``meta`` = {"provider", "route",
+        "failover_used", "errors", "warnings", "mode"} — P1 #1529 makes
+        this branch fail closed: extraction-stage exceptions are captured as
+        structured errors (never re-raised — turn points have already
+        landed), "mode" is "empty" | "error" | "llm", and a completed
+        run with zero points is an additive warning, never a silent 0.
 
         Shared by the hosted copy so the two capture_session loops stay in
-        sync — the regex decision/claim loop is removed as a product path and
-        no-key fails closed (the caller gates on _build_session_llm_extractor).
+        sync — the regex decision/claim loop is removed as a product path
+        and no-key fails closed (the caller gates on _build_session_llm_extractor).
         """
         extractor = _build_session_llm_extractor()
         if extractor is None:
@@ -1946,7 +2040,14 @@ class TortoiseSDK:
                 "TORTOISE_SESSION_LLM_MOCK=1 — no extractor available (#822)")
         transcript, _est = _session_llm_transcript(conversation)
         if not transcript.strip():
-            return []
+            # P1 #1529 (D2): the internal defense-in-depth empty guard must be
+            # self-consistent — mode="empty" WITH an error entry, so a caller
+            # mapping empty→ok=False can never compute ok=True on this path.
+            return [], {
+                "provider": None, "route": None, "failover_used": False,
+                "errors": ["no extractable content — empty or blank conversation"],
+                "warnings": [], "mode": "empty",
+            }
 
         from tortoise.api import EventAPI
         from tortoise.projection import fold, split
@@ -1955,29 +2056,50 @@ class TortoiseSDK:
         api = EventAPI(log, initiated_by="extractor", agent_id=extractor.version,
                        projection=self._get_proj())
         source_id = f"session:{session_id}"
+        # P1 #1529 (D4): no extraction-stage exception escapes the seam — a
+        # run() failure is recorded with its class name preserved (P2's fatal-
+        # 4xx classification keys on TypeName), and the fold/wiring still runs
+        # over whatever the run() partially logged (partial emission is
+        # reported, never lost, never a raw exception after partial writes).
+        errors: list[str] = []
         try:
             extractor.run(transcript, source_id, api)
         except Exception as e:
-            raise RuntimeError(
-                f"LLM session extraction failed for session {session_id}: {e}"
-            ) from e
+            errors.append(f"{type(e).__name__}: {e}")
 
-        statements, _operators = split(fold(log.read_all()))
         extracted: list[dict] = []
         proj = self._get_proj()
-        for p in statements:
-            pid = p["id"]
-            proj.g.query(
-                "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
-                "MERGE (s)-[:CONTAINS]->(p)",
-                params={"sid": session_id, "pid": pid},
-            )
-            extracted.append({
-                "id": pid,
-                "kind": p.get("pointKind") or "statement",
-                "text": p.get("content", "")[:200],
-            })
-        return extracted
+        try:
+            statements, _operators = split(fold(log.read_all()))
+            for p in statements:
+                pid = p["id"]
+                proj.g.query(
+                    "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
+                    "MERGE (s)-[:CONTAINS]->(p)",
+                    params={"sid": session_id, "pid": pid},
+                )
+                props = {k: v for k, v in p.items()
+                         if k in _CAPTURE_PASSTHROUGH_PROPS}
+                extracted.append({
+                    "id": pid,
+                    "kind": p.get("pointKind") or "statement",
+                    "text": p.get("content", "")[:200],
+                    "props": props,
+                })
+        except Exception as e:
+            errors.append(f"{type(e).__name__}: {e}")
+
+        warnings: list[str] = []
+        if not errors and not extracted:
+            # P1 #1529 (D6): completed-but-empty output is an additive
+            # warning (nothing extractable ≠ failure), never a silent 0.
+            warnings.append("LLM extraction produced no points")
+        meta = {
+            "provider": None, "route": None, "failover_used": False,
+            "errors": errors, "warnings": warnings,
+            "mode": "error" if errors else "llm",
+        }
+        return extracted, meta
 
     def _extract_session_v2(
         self,
@@ -2046,6 +2168,13 @@ class TortoiseSDK:
         out = extract_session_v2(model, conversation, sdk=self,
                                  session_id=session_id)
         payload = out.get("payload") or {}
+        # P1 #1529 (D1/D4): consult out["errors"]/out["warnings"] — the
+        # issue's "_extract_session_v2 discards out[errors]" checklist item.
+        # The class name is preserved (v2 pipeline errors already carry
+        # "TypeName: message") so P2's fatal-4xx classification can key on it.
+        errors = [e if isinstance(e, str) else f"{type(e).__name__}: {e}"
+                  for e in (out.get("errors") or [])]
+        warnings = list(out.get("warnings") or [])
         proj = self._get_proj()
 
         # ── entities ──
@@ -2062,10 +2191,12 @@ class TortoiseSDK:
 
         # ── points + aboutObject edges + session CONTAINS ──
         extracted: list[dict] = []
+        skipped = 0
         for pt in payload.get("points", []) or []:
             pid = str(pt.get("id", "")).strip()
             content = str(pt.get("content", "")).strip()
             if not pid or not content:
+                skipped += 1
                 continue
             try:
                 self.create_point(
@@ -2087,10 +2218,24 @@ class TortoiseSDK:
                     "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
                     "MERGE (s)-[:CONTAINS]->(p)",
                     params={"sid": session_id, "pid": pid})
+                # P1 #1529 (D8/E3): whitelisted props passthrough — E3's
+                # source_turn_id (arriving on the payload point dict) must
+                # never be dropped or rebuilt into a reduced {id, kind, text}
+                # shape.
+                props = {k: v for k, v in pt.items()
+                         if k in _CAPTURE_PASSTHROUGH_PROPS}
                 extracted.append({
-                    "id": pid, "kind": "statement", "text": content[:200]})
-            except Exception:  # noqa: BLE001, RUF100
-                pass
+                    "id": pid, "kind": "statement", "text": content[:200],
+                    "props": props})
+            except Exception as e:  # noqa: BLE001, RUF100 — P1 #1529: counted
+                # (was a silent `except: pass`) — a per-point write failure
+                # surfaces with its class name + id, never an invisible
+                # partial write.
+                skipped += 1
+                errors.append(
+                    f"{type(e).__name__}: point write failed for {pid}: {e}")
+        if skipped:
+            warnings.append(f"{skipped} extracted point(s) failed to write")
 
         # ── events ──
         for ev in payload.get("events", []) or []:
@@ -2117,17 +2262,25 @@ class TortoiseSDK:
                                      promote_source=False)
             except Exception:  # noqa: BLE001, RUF100
                 pass
+        # P1 #1529 (D6): completed-but-empty v2 output (no errors, no points)
+        # is an additive warning — nothing extractable is not a failure and
+        # never a silent extracted: 0.
+        if not errors and not extracted:
+            warnings.append("LLM extraction produced no points")
         meta = {
             # #1530 D8: the routing surface — which adapter ran, whether
             # failover was used, and the v2 pipeline's errors/warnings for
             # P1's fail-closed surfacing (shared contract; P1 must not
             # re-shape it). The mock seam has no real route — reports "mock".
+            # #1529 P1: meta["mode"] is the truthful branch state the capture
+            # assembly maps onto extraction_mode.
             "provider": getattr(model, "provider", "mock"),
             "route": getattr(model, "last_route", None)
             or getattr(model, "route", "mock"),
             "failover_used": bool(getattr(model, "failover_used", False)),
-            "errors": out.get("errors") or [],
-            "warnings": out.get("warnings") or [],
+            "errors": errors,
+            "warnings": warnings,
+            "mode": "error" if errors else "v2",
         }
         return extracted, meta
 

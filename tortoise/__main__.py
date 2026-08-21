@@ -1436,6 +1436,17 @@ def _cmd_session_capture(args, api_key: str, api_url: str) -> int:
         return 1
 
     session_id = result.get("session_id", result.get("id", "unknown"))
+    # P1 #1529: a status-only consumer must not report success on a failed
+    # capture — extraction failures surface as HTTP 200 + additive body
+    # errors with extraction_mode "error"/"empty" (the turn mutation already
+    # happened; the body is the failure surface). Exit 1 with the errors on
+    # stderr, never "Captured session: …" with extracted: 0.
+    if result.get("extraction_mode") in ("error", "empty") or result.get("errors"):
+        print(
+            f"capture failed: {result.get('errors') or result.get('extraction_mode')}",
+            file=_sys.stderr,
+        )
+        return 1
     print(f"Captured session: {session_id}")
     print(f"  Turns: {len(turns)}")
     print(f"  Source: {transcript_path.stem}")

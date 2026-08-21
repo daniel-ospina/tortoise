@@ -227,23 +227,27 @@ def test_no_provider_503(monkeypatch, client):
     assert "LLM provider key" in r.json()["detail"]
 
 
-def test_default_llm_with_provider_key_200(monkeypatch, client):
-    """Default (no TORTOISE_SESSION_EXTRACTION knob — it is gone) WITH a
-    provider key runs the LLM extractor and reports extraction_mode
-    "llm:<route>".
-
-    #722 review P2 inverse: the availability gate's inverse was untested. The
-    mock seam makes the full 200 path run; the effective-mode field pins the
+def test_default_llm_with_provider_key_422_on_empty(monkeypatch, client):
+    """P1 #1529: an EMPTY conversation is now rejected with 422 before any
+    write (the old "graceful" 200 + extracted:0 is the E2E-8 owned negative
+    — an empty conversation is never ok=True). The mock-seam + NON-empty
+    conversation still yields 200 with a truthful extraction_mode (the seam
+    makes the full 200 path run; the effective-mode field pins the
     honest-reporting behavior: extraction_mode says "llm:mock" because the
-    mock route is what actually ran (#822/#1530 — no more hardcoded
-    "regex" stopgap, and the route is recorded on the wire).
-    """
+    mock route is what actually ran (#822/#1530)."""
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test-722")
     r = client.post("/v1/sessions", json={"conversation": []})
-    assert r.status_code == 200, r.status_code
-    body = r.json()
+    assert r.status_code == 422, r.status_code
+    assert "extractable content" in r.json()["detail"]
+    # non-empty + mock seam → 200 + truthful mode (the empty gate must not
+    # reject a real conversation)
+    r2 = client.post("/v1/sessions", json={
+        "conversation": [{"role": "user", "content": "we decided to ship it"}]})
+    assert r2.status_code == 200, r2.status_code
+    body = r2.json()
     assert body["extraction_mode"] == "llm:mock"
     assert body["extraction_provider"] == "mock"
+    assert body["errors"] == [] and body["warnings"] == []
 
 
 def test_default_llm_extracts_points(monkeypatch, client):
@@ -286,13 +290,16 @@ def test_openai_only_key_v2_503_not_500(monkeypatch, client):
     the broad outer gate (_llm_provider_available) but the v2 extractor's
     adapter cannot consume OPENAI_API_KEY — the inner gate's ValueError
     converts to a clean fail-closed 503, NEVER an uncaught 500 (the #1468
-    divergence lesson)."""
+    divergence lesson). P1 #1529: the request must be NON-empty — the
+    whole-conversation blank gate (422) precedes the inner v2 gate, so an
+    empty body would 422 instead of exercising the provider-mismatch path."""
     monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
     monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-only")
-    r = client.post("/v1/sessions", json={"conversation": []})
+    r = client.post("/v1/sessions", json={"conversation": [
+        {"role": "user", "content": "we decided to ship it"}]})
     assert r.status_code == 503, r.status_code
     detail = r.json()["detail"]
     assert "DEEPSEEK_API_KEY" in detail and "OPENROUTER_API_KEY" in detail
@@ -339,3 +346,104 @@ def test_hosted_capture_records_deepseek_direct_route(monkeypatch, client):
     assert body["extraction_mode"] == "llm:deepseek-direct"
     assert body["extraction_provider"] == "deepseek-direct"
     assert body["extracted"] >= 1
+
+
+# ── P1 (#1529): the CLI consumer (status-only) must not report success on a
+#    failed capture — the hosted API surfaces extraction failures as 200 +
+#    additive body errors (extraction_mode "error"/"empty"), so the body is
+#    the only failure signal a status-only consumer sees.
+
+
+def test_cmd_session_capture_mode_error_exits_1(tmp_path, monkeypatch):
+    """P1: a 200 body with extraction_mode 'error' + errors → exit 1 + stderr —
+    never 'Captured session: …' with extracted: 0."""
+    import json
+
+    from tortoise.__main__ import _cmd_session_capture, _parse_transcript
+
+    f = tmp_path / "transcript.txt"
+    f.write_text("User: we decided to ship it\nAssistant: agreed\n")
+    assert _parse_transcript(f.read_text()), "transcript must parse to turns"
+
+    payload = {"session_id": "s-err", "extraction_mode": "error",
+               "errors": ["RuntimeError: provider returned 500"],
+               "extracted": 0, "warnings": []}
+
+    class _FakeResp:
+        def read(self):
+            return json.dumps(payload).encode()
+
+    class _FakeCtx:
+        def __enter__(self):
+            return _FakeResp()
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout: _FakeCtx())
+    args = type("A", (), {"file": str(f)})()
+    assert _cmd_session_capture(args, "api-key", "http://api") == 1
+
+
+def test_cmd_session_capture_mode_empty_exits_1(tmp_path, monkeypatch):
+    """P1: a 200 body with extraction_mode 'empty' → exit 1 (an empty
+    conversation is a failure on the hosted surface, 422 in-band)."""
+    import json
+
+    from tortoise.__main__ import _cmd_session_capture, _parse_transcript
+
+    f = tmp_path / "transcript.txt"
+    f.write_text("User: we decided to ship it\nAssistant: agreed\n")
+    assert _parse_transcript(f.read_text())
+
+    payload = {"session_id": "s-empty", "extraction_mode": "empty",
+               "errors": ["no extractable content — empty or blank conversation"],
+               "extracted": 0, "warnings": []}
+
+    class _FakeResp:
+        def read(self):
+            return json.dumps(payload).encode()
+
+    class _FakeCtx:
+        def __enter__(self):
+            return _FakeResp()
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout: _FakeCtx())
+    args = type("A", (), {"file": str(f)})()
+    assert _cmd_session_capture(args, "api-key", "http://api") == 1
+
+
+def test_cmd_session_capture_success_still_returns_0(tmp_path, monkeypatch, capsys):
+    """P1 regression: the happy path stays green — a successful capture body
+    (truthful mode, no errors) still prints 'Captured session:' and returns 0."""
+    import json
+
+    from tortoise.__main__ import _cmd_session_capture, _parse_transcript
+
+    f = tmp_path / "transcript.txt"
+    f.write_text("User: we decided to ship it\nAssistant: agreed\n")
+    assert _parse_transcript(f.read_text())
+
+    payload = {"session_id": "s-ok", "extraction_mode": "llm:mock",
+               "extraction_provider": "mock", "extracted": 1,
+               "points": [], "errors": [], "warnings": []}
+
+    class _FakeResp:
+        def read(self):
+            return json.dumps(payload).encode()
+
+    class _FakeCtx:
+        def __enter__(self):
+            return _FakeResp()
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout: _FakeCtx())
+    args = type("A", (), {"file": str(f)})()
+    assert _cmd_session_capture(args, "api-key", "http://api") == 0
+    out = capsys.readouterr().out
+    assert "Captured session: s-ok" in out
