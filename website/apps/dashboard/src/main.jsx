@@ -529,6 +529,13 @@ function claimIntentInFlight() {
           setChecking(false); return
         }
         sessionTokenRef.current = session.access_token
+        // #1567: the session is valid — render the app chrome NOW and let the
+        // mint + loads hydrate in the background (the multi-second
+        // "Checking your session…" card is gone for session holders). The
+        // #1559 error paths below setAuthed(false) so the error card still
+        // replaces the chrome on failure.
+        setAuthed(true)
+        setChecking(false)
         // Round-6 (P2): supabase-js auto-refreshes the access token (~1h) into
         // the cookie — keep the ref in sync so JWT-scoped calls never die with
         // a stale token while the dashboard still looks logged in.
@@ -624,6 +631,11 @@ function claimIntentInFlight() {
         // mint a bootstrap key for the first membership.
         let key = null
         const storedKey = localStorage.getItem(KEY_STORAGE)
+        // #1567 (review P1): the chrome renders NOW, so a team switch made
+        // during this fetch (the switcher is populated by the teams call
+        // above) must not be clobbered — capture the selection and skip the
+        // writes if it moved.
+        const teamAtStoredKeyCheck = teamIdRef.current
         if (storedKey && teamsList.length) {
           try {
             const tRes = await fetch(`${API_BASE}/v1/team`, {
@@ -631,7 +643,8 @@ function claimIntentInFlight() {
             })
             if (tRes.ok) {
               const t = await tRes.json()
-              if (teamsList.some((x) => x.team_id === t.team_id)) {
+              if (teamsList.some((x) => x.team_id === t.team_id)
+                  && teamIdRef.current === teamAtStoredKeyCheck) {
                 key = storedKey
                 teamKeysRef.current[t.team_id] = storedKey
                 setCurrentTeamId(t.team_id)
@@ -640,11 +653,17 @@ function claimIntentInFlight() {
             }
           } catch { /* fall through to mint */ }
         }
+        let mintedTeamId = null
+        // #1567 (review P2): a switch made while the mint/loads are in
+        // flight owns its own error path — the stale continuation must not
+        // flip the live switched session to the error card.
+        const teamAtMountMint = teamIdRef.current
         if (!key) {
           const firstTeamId = teamsList.length ? teamsList[0].team_id : null
           try {
             const minted = await mintSessionKey('bootstrap', firstTeamId)
             key = minted.key
+            mintedTeamId = minted.teamId || null
             if (minted.teamId) teamKeysRef.current[minted.teamId] = key
           } catch (e) {
             // #308: a suspended team's mint 403s — show the appeal banner.
@@ -655,25 +674,39 @@ function claimIntentInFlight() {
             // "Redirecting to the sign-in page…" shell. Surface an
             // actionable error instead (the Retry button re-runs the mount).
             const msg = (e && e.message) || 'Could not prepare your session.'
+            if (teamIdRef.current !== teamAtMountMint) return  // switched mid-mint
             setMountError(/429|rate limit/i.test(msg)
               ? 'Too many requests from this network — try again in a minute.'
               : msg)
+            setAuthed(false)  // #1567 P0: the error card renders in !authed
             setChecking(false)
             return
           }
         }
         // Round-9: a SIGNED_OUT during the mint must not complete the login
         // with a fresh key on the tab the user just signed out of.
-        if (!sessionTokenRef.current) { setChecking(false); setMountError('Your session ended — sign in again.'); return }
-        if (!key) { setChecking(false); setMountError('Could not prepare your session — try again.'); return }
+        if (!sessionTokenRef.current) { setAuthed(false); setChecking(false); setMountError('Your session ended — sign in again.'); return }
+        if (!key) { setAuthed(false); setChecking(false); setMountError('Could not prepare your session — try again.'); return }
+        // #1567 P1 (verifier gate): the chrome is visible NOW — a team
+        // switch made during the mint (multi-membership: the mint-400
+        // fallback populated the switcher early) must not be clobbered by
+        // this continuation. Bail before any state write if the selection
+        // moved away from the key's owner (teamIdRef is null on a fresh
+        // session — the stored-key path and Round-8 loadTeams own it then).
+        if (mintedTeamId && teamIdRef.current && teamIdRef.current !== mintedTeamId) return
         localStorage.setItem(KEY_STORAGE, key)
         setApiKey(key)
         apiKeyRef.current = key
         setAuthMode('session')
         await completeLogin(key)
       } catch (e) {
-        // #1559: never leave the user on the silent redirect shell.
+        // #1559/#1567 (review P0): never leave the user on the silent
+        // redirect shell — authed was set EARLY, so an escaped throw (e.g.
+        // localStorage blocked in private mode after a successful mint)
+        // would otherwise leave mountError set-but-unrendered (the card is
+        // !authed-gated). Flip authed so the card + Retry render.
         setMountError((e && e.message) || 'Something went wrong loading the dashboard — try again.')
+        setAuthed(false)
         setChecking(false)
       }
     })()
@@ -717,8 +750,13 @@ function claimIntentInFlight() {
 
   async function completeLogin(key) {
     setError('')
+    const teamAtCompleteLogin = teamIdRef.current
     try {
       const t = await api('/v1/team', key ? { headers: { Authorization: `Bearer ${key}` } } : {})
+      // #1567 (review P1): the chrome renders early, so a team switch can
+      // land DURING this await — never land team A's data under team B's
+      // selection (the refreshTeam response-identity guard, applied here).
+      if (t?.team_id && teamIdRef.current && t.team_id !== teamIdRef.current) return
       setTeam(t)
       setAuthed(true)
       loadAlerts(t?.team_id)  // fire-and-forget (#308 R7)
@@ -730,6 +768,7 @@ function claimIntentInFlight() {
       // #1559 (review P2): a /v1/team or load 5xx after a successful mint
       // must NOT leave the silent redirect shell — same class as the mint
       // failure. The error card (mountError) is the only renderable state.
+      if (teamIdRef.current !== teamAtCompleteLogin) return  // switched mid-load
       setMountError((e && /429|rate limit/i.test(e.message))
         ? 'Too many requests from this network — try again in a minute.'
         : (e && e.message) || 'Could not load your dashboard — try again.')
