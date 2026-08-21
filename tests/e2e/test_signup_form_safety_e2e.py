@@ -510,7 +510,9 @@ def test_mock_email_signup_created_signs_in_and_redirects_url_clean(page: Page) 
     else:
         # Deployed happy path: server-side creation → direct sign-in →
         # redirect to the welcome page (no check-your-inbox step, #801).
-        page.wait_for_url("**/welcome*", timeout=15_000)
+        # #1566: the signup now lands on the app ROOT (first-timers are
+        # provisioned in-app there).
+        page.wait_for_url("**://app.premiselabs.co*", timeout=15_000)
     assert "email=" not in page.url and "password=" not in page.url
     assert captured["x_signup"], "x_signup entry missing from dataLayer"
     entry = captured["x_signup"]
