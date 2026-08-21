@@ -12,11 +12,17 @@ Per session we write (all deterministic — no LLM keys required):
     pointKind ``event``, content ``[role] text`` — mirrors
     ``TortoiseSDK.capture_session``'s episodic-turn shape, plus a
     ``has_answer`` flag on evidence turns for turn-level recall),
-  * one raw-transcript Point per session (pointKind ``session-transcript``,
-    content = the FULL verbatim session text — indexed raw alongside the
-    graph points because competitor RAGs win on verbatim single-session
-    recall; the #1144 research says mitigate by indexing raw text too),
-  * ``CONTAINS`` edges Session → turns and Session → raw transcript,
+  * turn-granular raw chunk Points (R1 #1540): pointKind
+    ``session-transcript``, ids ``lme:{qid}:s{si}:c{ci}`` — non-overlapping
+    verbatim windows of ``chunk_turns`` turns each, rendered with the same
+    role-prefixed verbatim format. The union of a session's chunks == the
+    full verbatim session text (the owner invariant: extraction never
+    replaces verbatim evidence; the whole-session ``:raw`` blob — the
+    measured 4.4x context bloat — is retired). Chunks are written
+    UNMARKED in deterministic mode (D3 #1540: the deterministic leg keeps
+    its turn-id evidence path), and are indexed raw alongside the graph
+    points because competitor RAGs win on verbatim single-session recall,
+  * ``CONTAINS`` edges Session → turns and Session → chunks,
   * a provenance ``:Event`` (kind ``lmeHaystackCaptured``) linking the
     question's sessions (best-effort, mirrors capture_session's non-fatal
     event write).
@@ -34,9 +40,11 @@ from typing import Any
 from tortoise.domain_loader import register_kind
 from tortoise.sdk import TortoiseSDK
 
-from .evidence import evidence_sessions, mark_for
-
 logger = logging.getLogger(__name__)
+
+#: R1 (#1540): turns per raw-chunk window (the granularity knob; the run
+#: protocol step-2 sweep selects the value for the pilot + 500-Q run).
+DEFAULT_CHUNK_TURNS = 2
 
 # Raw-session transcript points live under this pointKind (open-ended
 # vocabulary — registration suppresses the SDK warning, mirroring the sdk's
@@ -62,6 +70,25 @@ def _session_transcript(session: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _session_chunks(session: list[dict], chunk_turns: int) -> list[tuple[int, str, list[int]]]:
+    """Non-overlapping verbatim turn windows of ``chunk_turns`` turns each.
+
+    Returns ``[(chunk_index, rendered_text, contained_turn_indices)]`` — the
+    union of rendered texts == the full session transcript (owner invariant:
+    raw verbatim evidence is always retained; the whole-session ``:raw`` blob
+    is retired, R1 #1540). ``chunk_turns`` must be >= 1 — 0 would crash
+    ``range(step=0)`` mid-ingest and negative would silently produce zero
+    chunks (the verbatim leg silently deleted)."""
+    if chunk_turns < 1:
+        raise ValueError(f"chunk_turns must be >= 1, got {chunk_turns!r}")
+    windows: list[tuple[int, str, list[int]]] = []
+    for start in range(0, len(session), chunk_turns):
+        window = session[start:start + chunk_turns]
+        windows.append((start // chunk_turns, _session_transcript(window),
+                        list(range(start, start + len(window)))))
+    return windows
+
+
 def _point_exists(proj, pid: str) -> bool:
     """True when a Point with this deterministic id already exists.
 
@@ -80,12 +107,14 @@ def question_node_ids(question: dict) -> dict[str, str]:
     return {"session": f"lme:{qid}:s", "turn": f"lme:{qid}:s", "raw": f"lme:{qid}:s"}
 
 
-def ingest_haystack(sdk: TortoiseSDK, question: dict) -> dict:
+def ingest_haystack(sdk: TortoiseSDK, question: dict, *,
+                    chunk_turns: int = DEFAULT_CHUNK_TURNS) -> dict:
     """Ingest one question's haystack sessions into ``sdk``'s graph.
 
-    Returns a stats dict (sessions, turns, raw_transcripts) for provenance.
+    Returns a stats dict (sessions, turns, chunks) for provenance.
     Idempotent per node (MERGE / explicit deterministic ids) so a re-run over
-    the same fresh graph cannot double-write.
+    the same fresh graph cannot double-write. ``chunk_turns`` (R1 #1540) is
+    the turns-per-window granularity of the raw verbatim chunks (>= 1).
     """
     qid = question["question_id"]
     sessions: list[list[dict]] = question.get("haystack_sessions") or []
@@ -93,14 +122,7 @@ def ingest_haystack(sdk: TortoiseSDK, question: dict) -> dict:
     ids: list[str] = question.get("haystack_session_ids") or []
     evidence_turns = 0
     evidence_points = 0
-    raw_transcripts = 0
-    # M6: the evidence-session id set + answer-turn contents (shared with
-    # the v2 leg via evidence.py) — the raw transcript mark (c)/(a).
-    ev_sessions = evidence_sessions(question)
-    evidence_turn_contents: list[str] = []
-    for session in sessions:
-        evidence_turn_contents.extend(
-            str(t.get("content") or "") for t in session if t.get("has_answer"))
+    chunks = 0
 
     for si, session in enumerate(sessions):
         sid = ids[si] if si < len(ids) else f"{qid}-s{si}"
@@ -154,45 +176,29 @@ def ingest_haystack(sdk: TortoiseSDK, question: dict) -> dict:
                 params={"sid": s_node, "tid": turn_id},
             )
 
-        # ── Raw verbatim transcript point (the "index raw text too" leg) ──
-        # M6 (#1526): the raw transcript carries the evidence marks like the
-        # v2 leg — mark (c) raw-chunk containment (the answer session's
-        # transcript contains the answer turns verbatim) and mark (a)
-        # source-session attribution (its session_id is an evidence session).
-        # Both legs then produce the same evidence_points accounting (D7) so
-        # evidence_coverage is comparable across ingest modes; evidence-turn
-        # points themselves are unchanged (their own has_answer flag).
-        raw_id = f"lme:{qid}:s{si}:raw"
-        raw_text = _session_transcript(session)
-        raw_mark = mark_for({"content": raw_text, "quote": ""},
-                            session_id=sid, evidence_sessions=ev_sessions,
-                            answer_turn_contents=evidence_turn_contents)
-        if not _point_exists(sdk._get_proj(), raw_id):
-            sdk.create_point(
-                SESSION_TRANSCRIPT_KIND,
-                raw_text,
-                id=raw_id,
-                session_id=sid,
-                lme_question_id=qid,
-                lme_session_index=si,
-                is_episodic=True,
-                has_answer=raw_mark["has_answer"],
-                status="draft",
-            )
-            if raw_mark["has_answer"]:
-                evidence_points += 1  # create-only (v2-leg mirror)
-        elif raw_mark["has_answer"]:
-            # Idempotent OR-in: a raw transcript written by a pre-M6 run has
-            # no has_answer prop — never overwrite a True with False.
+        # ── Raw verbatim turn-granular chunks (R1 #1540: replaces the
+        # whole-session blob — the measured 4.4x context bloat; the union of
+        # chunks == the full session, so verbatim coverage is preserved). ──
+        # Deterministic-mode chunks stay UNMARKED (D3): the deterministic leg
+        # keeps its turn-id evidence path (evidence_turn_ids) — marking them
+        # would flip retrieval into the v2 evidence-marks branch and silently
+        # change baseline turn-recall semantics.
+        for ci, text, turn_idxs in _session_chunks(session, chunk_turns):
+            chunk_id = f"lme:{qid}:s{si}:c{ci}"
+            if not _point_exists(sdk._get_proj(), chunk_id):
+                sdk.create_point(
+                    SESSION_TRANSCRIPT_KIND, text, id=chunk_id,
+                    session_id=sid, lme_question_id=qid,
+                    lme_session_index=si, lme_chunk_index=ci,
+                    lme_chunk_turns=len(turn_idxs), is_episodic=True,
+                    status="draft",
+                )
+                chunks += 1  # written (post-guard) — stats == graph state
             sdk._get_proj().g.query(
-                "MATCH (p:Point {id:$id}) SET p.has_answer = true",
-                params={"id": raw_id})
-        raw_transcripts += 1
-        sdk._get_proj().g.query(
-            "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
-            "MERGE (s)-[:CONTAINS]->(t)",
-            params={"sid": s_node, "tid": raw_id},
-        )
+                "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
+                "MERGE (s)-[:CONTAINS]->(t)",
+                params={"sid": s_node, "tid": chunk_id},
+            )
 
     # ── Provenance event (best-effort — mirrors capture_session) ──
     try:
@@ -218,16 +224,19 @@ def ingest_haystack(sdk: TortoiseSDK, question: dict) -> dict:
         "sessions": len(sessions),
         "turns": sum(len(s) for s in sessions),
         "evidence_turns": evidence_turns,
-        "raw_transcripts": raw_transcripts,
+        "chunks": chunks,
         "evidence_points": evidence_points,
     }
 
 
 def point_props_for_hits(proj, point_ids: list[str]) -> dict[str, dict[str, Any]]:
     """Fetch (session_id, has_answer, lme_session_index, quote, search_keys,
-    source_turn_id, speaker) for a list of Point ids in one Cypher query
-    (avoid N+1 on the retrieval path). E3 (#1535): the source-turn link +
-    speaker prop ride along so read-time speaker derivation is query-able."""
+    source_turn_id, speaker, point_kind) for a list of Point ids in one
+    Cypher query (avoid N+1 on the retrieval path). E3 (#1535): the
+    source-turn link + speaker prop ride along so read-time speaker
+    derivation is query-able. R1 (#1540): ``point_kind`` lets retrieval
+    distinguish raw chunks from extracted points (per-session chunk dedup +
+    the D5 evidence denominator split both key on the kind)."""
     if not point_ids:
         return {}
     rows = proj.g.query(
@@ -235,10 +244,12 @@ def point_props_for_hits(proj, point_ids: list[str]) -> dict[str, dict[str, Any]
         "RETURN n.id, coalesce(n.session_id, ''), coalesce(n.has_answer, false), "
         "       coalesce(n.lme_session_index, -1), "
         "       coalesce(n.quote, ''), coalesce(n.search_keys, []), "
-        "       coalesce(n.source_turn_id, ''), coalesce(n.speaker, '')",
+        "       coalesce(n.source_turn_id, ''), coalesce(n.speaker, ''), "
+        "       coalesce(n.pointKind, '')",
         params={"ids": point_ids},
     ).result_set
     return {row[0]: {"session_id": row[1], "has_answer": bool(row[2]),
                      "lme_session_index": row[3], "quote": row[4],
                      "search_keys": row[5], "source_turn_id": row[6],
-                     "speaker": row[7]} for row in rows}
+                     "speaker": row[7], "point_kind": row[8]}
+            for row in rows}

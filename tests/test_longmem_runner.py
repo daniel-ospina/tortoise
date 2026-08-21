@@ -18,14 +18,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tortoise.sdk import TortoiseSDK  # noqa: E402, I001, RUF100
 from tortoise.models import OpenAICompatModel  # noqa: E402, RUF100
 
-from tools.longmem_eval.ingest import ingest_haystack  # noqa: E402, RUF100
+from tools.longmem_eval.ingest import (  # noqa: E402, RUF100
+    _session_chunks, _session_transcript, ingest_haystack,
+)
 from tools.longmem_eval.judge import (  # noqa: E402, RUF100
     LLMJudge, MockJudge, OfficialJudgeModel, _parse_judge_response,
     get_anscheck_prompt, is_abstention,
 )
 from tools.longmem_eval.reader import MockReader, build_reader  # noqa: E402, RUF100
 from tools.longmem_eval.retrieve import (  # noqa: E402, RUF100
-    _annotate_hits, render_context, retrieve_for_question,
+    _annotate_hits, _assemble_context, _dedup_pool, _estimate_tokens,
+    _is_raw_chunk, render_context, retrieve_for_question,
 )
 from tools.longmem_eval.run import (
     outcomes_to_report, run_evaluation, run_main,
@@ -99,6 +102,7 @@ def test_outcomes_to_report_golden_shape():
         "session_recall@k": {"5": 1.0, "10": 1.0, "20": 1.0},
         "turn_recall@k": {"5": 0.5, "10": 0.5, "20": 0.5},
         "evidence_recall@k": {"5": 1.0, "10": 1.0, "20": 1.0},
+        "chunk_evidence_recall@k": {"5": 0.5, "10": 0.5, "20": 0.5},
         "n_ingest_errors": 0,
         "context_tokens": 120,
         "context_point_count": 3,
@@ -114,6 +118,8 @@ def test_outcomes_to_report_golden_shape():
         ks=(5, 10, 20),
         top_k=20,
         split="s",
+        r1_knobs={"chunk_turns": 2, "context_token_cap": 8000,
+                  "max_chunks_per_session": 2},
     )
     # The regression made this None — a real dict is the whole point (E2E-2).
     assert isinstance(report, dict)
@@ -139,6 +145,8 @@ def test_outcomes_to_report_golden_shape():
     assert ret["session_recall@k"] == {"5": 1.0, "10": 1.0, "20": 1.0}
     assert ret["turn_recall@k"] == {"5": 0.5, "10": 0.5, "20": 0.5}
     assert ret["evidence_recall@k"] == {"5": 1.0, "10": 1.0, "20": 1.0}
+    assert ret["chunk_evidence_recall@k"] == {"5": 0.5, "10": 0.5, "20": 0.5}
+    assert ret["chunk_evidence_recall_n@k"] == {"5": 1, "10": 1, "20": 1}
     assert ret["context_tokens_mean"] == 120.0
     assert ret["context_point_count_mean"] == 3.0
 
@@ -153,6 +161,10 @@ def test_outcomes_to_report_golden_shape():
     assert m["judge_model"] == "golden-judge"
     assert m["k_values"] == [5, 10, 20]
     assert m["top_k_context"] == 20
+    # R1 (#1540) D7: knob provenance in the methodology
+    assert m["chunk_turns"] == 2
+    assert m["context_token_cap"] == 8000
+    assert m["max_chunks_per_session"] == 2
     # #1414 parity hashes — produced by reader_prompt_source/JUDGE_RUBRIC_ID.
     assert m["reader_prompt_hash"]
     assert m["judge_rubric_id_hash"]
@@ -168,6 +180,7 @@ def test_outcomes_to_report_golden_shape():
         "session_recall@k": {"5": 1.0, "10": 1.0, "20": 1.0},
         "turn_recall@k": {"5": 0.5, "10": 0.5, "20": 0.5},
         "evidence_recall@k": {"5": 1.0, "10": 1.0, "20": 1.0},
+        "chunk_evidence_recall@k": {"5": 0.5, "10": 0.5, "20": 0.5},
         "n_ingest_errors": 0,
         "context_tokens": 120,
         "retrieval_latency_ms": 11.0,
@@ -195,14 +208,21 @@ def test_cli_smoke(tmp_path):
 # ── Ingestion structure ────────────────────────────────────────────────────
 
 def test_ingestion_creates_session_turn_raw_structure(tmp_path):
+    """R1 (#1540): the whole-session :raw blob is replaced by turn-granular
+    raw chunks — ``lme:{qid}:s{si}:c{ci}`` windows of ``chunk_turns`` turns
+    (union of chunks == the full session)."""
     sdk = _fresh_sdk(tmp_path)
     try:
-        q = _mini()[0]  # mini_ie_user_001: 2 sessions
-        stats = ingest_haystack(sdk, q)
+        q = _mini()[0]  # mini_ie_user_001: 2 sessions × 3 turns
+        stats = ingest_haystack(sdk, q, chunk_turns=2)
         assert stats["sessions"] == 2
         assert stats["turns"] == 6
         assert stats["evidence_turns"] == 1
-        assert stats["raw_transcripts"] == 2
+        # 2 sessions × windows [t0,t1]+[t2] at chunk_turns=2
+        assert stats["chunks"] == 4
+        # evidence_points counts marked extracted (non-chunk) points only
+        # (D5): the deterministic leg's chunks stay UNMARKED (D3).
+        assert stats["evidence_points"] == 1  # the single evidence turn
 
         proj = sdk._get_proj()
         rows = proj.g.query("MATCH (s:Session) RETURN count(s)").result_set
@@ -213,34 +233,127 @@ def test_ingestion_creates_session_turn_raw_structure(tmp_path):
         rows = proj.g.query(
             "MATCH (p:Point {pointKind:'session-transcript'}) RETURN count(p)"
         ).result_set
-        assert rows[0][0] == 2
+        assert rows[0][0] == 4
+        # the :raw id is retired — no point id ends with :raw
+        rows = proj.g.query(
+            "MATCH (p:Point) WHERE p.id CONTAINS ':raw' RETURN count(p)"
+        ).result_set
+        assert rows[0][0] == 0
         # evidence turn carries has_answer=true (turn-level recall source);
-        # M6 (#1526): the answer session's raw transcript carries mark (c)/
-        # (a) too — 1 evidence turn + 1 marked raw transcript
+        # deterministic chunks stay UNMARKED (D3) — 1 marked point total
         rows = proj.g.query(
             "MATCH (p:Point {has_answer:true}) RETURN count(p)").result_set
-        assert rows[0][0] == 2
-        # deterministic ids, session linkage
+        assert rows[0][0] == 1
+        # deterministic ids, session linkage: 3 turns + 2 chunks
         rows = proj.g.query(
             "MATCH (s:Session {id:'lme:mini_ie_user_001:s1'})-[:CONTAINS]->"
             "(t:Point) RETURN count(t)").result_set
-        assert rows[0][0] == 4  # 3 turns + 1 raw transcript
+        assert rows[0][0] == 5
+        # chunk props: lme_chunk_index ∈ {0,1}, lme_chunk_turns = the ACTUAL
+        # window lengths ([2, 1] — the remainder window carries 1)
+        props = {}
+        for ci in (0, 1):
+            rows = proj.g.query(
+                "MATCH (p:Point {id:$id}) RETURN p.lme_chunk_index, "
+                "p.lme_chunk_turns, coalesce(p.has_answer, false)",
+                params={"id": f"lme:mini_ie_user_001:s1:c{ci}"}).result_set
+            assert rows, f"chunk c{ci} missing"
+            idx, turns, marked = rows[0]
+            assert idx == ci
+            props[idx] = turns
+            assert marked is False  # D3: deterministic chunks unmarked
+        assert props == {0: 2, 1: 1}
+        # the evidence turn (s1 t2) is contained in a chunk (c1)
+        rows = proj.g.query(
+            "MATCH (p:Point {id:$id}) RETURN p.content",
+            params={"id": "lme:mini_ie_user_001:s1:c1"}).result_set
+        assert "My favorite board game is Catan" in rows[0][0]
     finally:
         sdk.close()
 
 
 def test_ingestion_idempotent(tmp_path):
+    """Re-ingest over the same fresh graph is a no-op: no double-write, and
+    ``stats["chunks"]`` reports chunks WRITTEN this run (post-guard, V1
+    #1540) — 0 on re-ingest, matching the graph's 0 new chunks (a fresh
+    single ingest reports the full graph state)."""
     sdk = _fresh_sdk(tmp_path)
     try:
-        q = _mini()[1]  # multi-session question
-        ingest_haystack(sdk, q)
-        ingest_haystack(sdk, q)  # re-run same haystack → no double-write
+        q = _mini()[1]  # multi-session question: 2 sessions × 3 turns
+        stats1 = ingest_haystack(sdk, q, chunk_turns=2)
+        assert stats1["chunks"] == 4  # fresh ingest == graph state
+        stats2 = ingest_haystack(sdk, q, chunk_turns=2)
+        assert stats2["chunks"] == 0  # nothing written on re-ingest
         proj = sdk._get_proj()
         rows = proj.g.query("MATCH (p:Point) RETURN count(p)").result_set
-        # 2 sessions × (3 turns + 1 raw transcript)
-        assert rows[0][0] == 8
+        # 2 sessions × (3 turns + 2 chunks)
+        assert rows[0][0] == 10
     finally:
         sdk.close()
+
+
+def test_ingestion_chunk_window_boundaries(tmp_path):
+    """BVA on window boundaries (R1 #1540): 1-turn, exact-multiple,
+    remainder-window and empty sessions."""
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        # 1-turn session at chunk_turns=2 → 1 chunk
+        q1 = {"question_id": "bva1", "haystack_sessions": [
+            [{"role": "user", "content": "a", "has_answer": True}]]}
+        assert ingest_haystack(sdk, q1, chunk_turns=2)["chunks"] == 1
+        # 2-turn session at chunk_turns=2 → 1 chunk (exact multiple)
+        q2 = {"question_id": "bva2", "haystack_sessions": [
+            [{"role": "user", "content": "a"},
+             {"role": "user", "content": "b"}]]}
+        assert ingest_haystack(sdk, q2, chunk_turns=2)["chunks"] == 1
+        # 5-turn session → 3 chunks: [0,1], [2,3], [4]
+        q3 = {"question_id": "bva3", "haystack_sessions": [
+            [{"role": "user", "content": f"t{i}"} for i in range(5)]]}
+        assert ingest_haystack(sdk, q3, chunk_turns=2)["chunks"] == 3
+        # empty session → 0 chunks, no exception
+        q4 = {"question_id": "bva4", "haystack_sessions": [[]]}
+        assert ingest_haystack(sdk, q4, chunk_turns=2)["chunks"] == 0
+    finally:
+        sdk.close()
+
+
+def test_session_chunks_union_equals_full_transcript(tmp_path):
+    """Owner invariant (R1 #1540): the union of a session's chunk contents
+    == the full verbatim session transcript — extraction never replaces
+    verbatim evidence."""
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        q = next(x for x in _mini() if x["question_id"] == "mini_ie_user_001")
+        ingest_haystack(sdk, q, chunk_turns=2)
+        proj = sdk._get_proj()
+        rows = proj.g.query(
+            "MATCH (s:Session {id:$id})-[:CONTAINS]->"
+            "(p:Point {pointKind:'session-transcript'}) RETURN p.id ORDER BY p.id",
+            params={"id": "lme:mini_ie_user_001:s1"}).result_set
+        ids = sorted(r[0] for r in rows)
+        assert ids == ["lme:mini_ie_user_001:s1:c0", "lme:mini_ie_user_001:s1:c1"]
+        texts = []
+        for pid in ids:
+            r = proj.g.query("MATCH (p:Point {id:$id}) RETURN p.content",
+                             params={"id": pid}).result_set
+            texts.append(r[0][0])
+        session = q["haystack_sessions"][1]
+        assert "\n".join(texts) == _session_transcript(session)
+        # the chunker itself is boundary-honest too
+        windows = _session_chunks(session, 2)
+        assert "\n".join(t for _, t, _ in windows) == _session_transcript(session)
+    finally:
+        sdk.close()
+
+
+def test_chunk_turns_validation():
+    """chunk_turns ∈ {0, -1} raises ValueError (a 0/negative value would
+    silently delete the verbatim leg — the owner invariant)."""
+    session = [{"role": "user", "content": "a"}]
+    with pytest.raises(ValueError, match="chunk_turns"):
+        _session_chunks(session, 0)
+    with pytest.raises(ValueError, match="chunk_turns"):
+        _session_chunks(session, -1)
 
 
 # ── Retrieval recall ───────────────────────────────────────────────────────
@@ -541,8 +654,8 @@ def test_ingest_v2_supersession_end_to_end(tmp_path, monkeypatch):
     import json
 
     import tortoise.extractor_v2 as ev2
-    from tortoise.ids import content_hash
     from tools.longmem_eval.ingest_v2 import ingest_haystack_v2
+    from tortoise.ids import content_hash
 
     class _MockModel:
         """Deterministic adapter — S1 story + per-session S2/S4 fixtures."""
@@ -901,9 +1014,10 @@ def test_dataset_download_gated_on_network(monkeypatch, tmp_path):
 # ── #1369: v2 ingest mode (deterministic — monkeypatched extractor) ─────
 
 def test_v2_ingest_writes_payload_with_evidence_marks(tmp_path, monkeypatch):
-    """#1369: ingest_haystack_v2 writes the extractor payload (points with
-    evidence marks by content overlap, entities, events, operators) and
-    retains the Session + raw-transcript legs."""
+    """#1369 + R1 (#1540): ingest_haystack_v2 writes the extractor payload
+    (points with evidence marks by content overlap, entities, events,
+    operators) and retains the Session + turn-granular raw chunks — the
+    answer session's chunk carries the containment mark (M6, mark c)."""
     import tortoise.extractor_v2 as ev2
     from tools.longmem_eval.ingest_v2 import ingest_haystack_v2
 
@@ -940,17 +1054,24 @@ def test_v2_ingest_writes_payload_with_evidence_marks(tmp_path, monkeypatch):
                 {"role": "assistant", "content": "ack"},
             ]],
         }
-        stats = ingest_haystack_v2(sdk, question, model=object())
+        stats = ingest_haystack_v2(sdk, question, model=object(),
+                                   chunk_turns=2)
         assert stats["points"] == 2
         assert stats["operators"] == 1
         assert stats["entities"] == 1
         assert stats["events"] == 1
-        # raw transcript leg retained
+        # R1: the 2-turn session yields one chunk (chunk_turns=2); the
+        # :raw id is retired
+        assert stats["chunks"] == 1
         proj = sdk._get_proj()
         raw_rows = proj.g.query(
             "MATCH (p:Point {id:$id}) RETURN count(*)",
             params={"id": "lme:test_v2_q:s0:raw"}).result_set
-        assert raw_rows[0][0] == 1
+        assert raw_rows[0][0] == 0  # :raw gone
+        chunk_rows = proj.g.query(
+            "MATCH (p:Point {id:$id}) RETURN p.has_answer",
+            params={"id": "lme:test_v2_q:s0:c0"}).result_set
+        assert chunk_rows[0][0] is True  # containment mark (turn 0 is evidence)
         # the evidence-overlapping point carries has_answer
         ev_rows = proj.g.query(
             "MATCH (p:Point {id:$id}) RETURN p.has_answer",
@@ -989,11 +1110,11 @@ def test_v2_ingest_writes_payload_with_evidence_marks(tmp_path, monkeypatch):
         # pt_beta (M6 recalibration, OR of 3 marks; the pre-M6 overlap-only
         # negative is obsolete). E3 does not change evidence marking.
         assert beta[0][3] is True
-        # CONTAINS edges: session → raw + extracted points + turn points
+        # CONTAINS edges: session → chunk + extracted points + turn points
         cnt = proj.g.query(
             "MATCH (s:Session {id:$id})-[:CONTAINS]->(p) RETURN count(*)",
             params={"id": "lme:test_v2_q:s0"}).result_set
-        assert cnt[0][0] == 5  # raw + 2 extracted + 2 turn points
+        assert cnt[0][0] == 5  # 1 chunk + 2 extracted + 2 turn points
     finally:
         sdk.close()
 
@@ -1035,6 +1156,85 @@ def test_v2_ingest_out_of_range_source_turn_drops_link(tmp_path, monkeypatch):
                 "MATCH (p:Point {id:$id}) RETURN coalesce(p.source_turn_id, '')",
                 params={"id": pid}).result_set
             assert rows and rows[0][0] == "", f"{pid} must have no source_turn_id"
+    finally:
+        sdk.close()
+
+
+def test_v2_chunks_marked_by_containment(tmp_path, monkeypatch):
+    """M6/R1: a 4-turn session with evidence in turn 3 → chunk c1 (turns
+    2-3) is containment-marked, chunk c0 (turns 0-1) is not."""
+    import tortoise.extractor_v2 as ev2
+    from tools.longmem_eval.ingest_v2 import ingest_haystack_v2
+
+    def _fake_extract(model, conversation, **kw):
+        return {"payload": {"entities": [], "events": [], "points": [],
+                            "operators": []},
+                "minted_kinds": [], "supersessions": [], "errors": [],
+                "warnings": []}
+
+    monkeypatch.setattr(ev2, "extract_session_v2", _fake_extract)
+
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        question = {
+            "question_id": "containment_q",
+            "haystack_session_ids": ["cs-0"],
+            "haystack_dates": ["2026-08-01"],
+            "haystack_sessions": [[
+                {"role": "user", "content": "filler one"},
+                {"role": "user", "content": "filler two"},
+                {"role": "user", "content": "filler three"},
+                {"role": "user", "content": "the dog is named Rex",
+                 "has_answer": True},
+            ]],
+        }
+        ingest_haystack_v2(sdk, question, model=object(), chunk_turns=2)
+        proj = sdk._get_proj()
+
+        def _mark(pid):
+            rows = proj.g.query(
+                "MATCH (p:Point {id:$id}) RETURN coalesce(p.has_answer, false)",
+                params={"id": pid}).result_set
+            return bool(rows[0][0])
+
+        assert _mark("lme:containment_q:s0:c0") is False  # turns 0-1
+        assert _mark("lme:containment_q:s0:c1") is True   # turns 2-3
+    finally:
+        sdk.close()
+
+
+def test_v2_extractor_failure_retains_chunks(tmp_path, monkeypatch):
+    """The exact "silent evidence-leg emptiness" guard (R8 #1540): chunks +
+    containment marks are written BEFORE extraction, so an extractor
+    failure still retains the verbatim evidence and the session remains
+    retrievable; the error is recorded and the run continues."""
+    import tortoise.extractor_v2 as ev2
+    from tools.longmem_eval.ingest_v2 import ingest_haystack_v2
+
+    def _boom(model, conversation, **kw):
+        raise RuntimeError("extractor crash")
+
+    monkeypatch.setattr(ev2, "extract_session_v2", _boom)
+
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        q = next(x for x in _mini() if x["question_id"] == "mini_ie_user_001")
+        stats = ingest_haystack_v2(sdk, q, model=object(), chunk_turns=2)
+        assert stats["errors"]  # extractor failure recorded
+        proj = sdk._get_proj()
+        # the evidence-session chunk (s1:c1 contains the answer turn) was
+        # still written AND containment-marked
+        rows = proj.g.query(
+            "MATCH (p:Point {id:$id}) RETURN coalesce(p.has_answer, false)",
+            params={"id": "lme:mini_ie_user_001:s1:c1"}).result_set
+        assert rows[0][0] is True
+        # the session still surfaces via its chunks (raw recall floor)
+        ret = retrieve_for_question(sdk, q, ks=(5,), top_k=20)
+        assert ret["session_recall@k"]["5"] >= 0.5
+        # D5: no extracted points → evidence_recall is N/A (None), never
+        # a forced 0.0, while the chunk containment view is real
+        assert ret["evidence_recall@k"]["5"] is None
+        assert isinstance(ret["chunk_evidence_recall@k"]["5"], float)
     finally:
         sdk.close()
 
@@ -1325,3 +1525,704 @@ class TestE3SpeakerDerivation:
             assert "[speaker]" not in ctx
         finally:
             sdk.close()
+
+# ── R1 #1540: per-session chunk dedup + budget-capped context ─────────────
+
+def test_session_dedup_cap_in_pool(tmp_path, monkeypatch):
+    """E2E-1 pool contract (R1 #1540): at most max_chunks_per_session raw
+    chunks per session survive in the pool (rank order); points are never
+    capped; dedup_stats counts the capped chunks."""
+    from tools.longmem_eval import retrieve as rtr
+
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        for ci in range(5):
+            sdk.create_point("session-transcript", f"chunk {ci}", id=f"a{ci}",
+                             session_id="sess-a", lme_question_id="dedup_q",
+                             lme_session_index=0, is_episodic=True,
+                             status="draft")
+        sdk.create_point("statement", "the answer point", id="b0",
+                         session_id="sess-b", lme_question_id="dedup_q",
+                         lme_session_index=1, is_episodic=True, status="draft")
+
+        def _fake_search(sdk_, query, limit):
+            return ([{"id": f"a{ci}", "content": f"chunk {ci}",
+                      "match_source": "tfidf"} for ci in range(5)]
+                    + [{"id": "b0", "content": "the answer point",
+                        "match_source": "tfidf"}])
+
+        monkeypatch.setattr(rtr, "hybrid_search", _fake_search)
+        q = {"question_id": "dedup_q", "question_type": "single-session-user",
+             "question": "what", "answer": "x", "question_date": "2025-06-15",
+             "haystack_session_ids": ["sess-a", "sess-b"],
+             "haystack_dates": ["2025-06-10", "2025-06-12"],
+             "answer_session_ids": ["sess-b"],
+             "haystack_sessions": [
+                 [], [{"role": "user", "content": "the answer point",
+                       "has_answer": True}]]}
+        ret = retrieve_for_question(sdk, q, ks=(5, 10), top_k=20,
+                                    max_chunks_per_session=2)
+        a_chunks = [h for h in ret["hits"]
+                    if _is_raw_chunk(h) and h["session_id"] == "sess-a"]
+        assert len(a_chunks) == 2
+        assert ret["dedup_stats"]["chunks_capped"] == 3
+        # pinned contract: ret["hits"] == the deduped pool
+        assert len(ret["hits"]) == 3
+        assert ret["hits"][-1]["id"] == "b0"  # points never capped
+    finally:
+        sdk.close()
+
+
+def test_dedup_missing_session_index_no_collapse():
+    """Distinct sessions with missing/-1 lme_session_index never collapse
+    into one shared -1 bucket (that would over-dedup different sessions
+    together — D3 #1540)."""
+    hits = [
+        {"id": "a0", "content": "a", "point_kind": "session-transcript",
+         "session_id": "sess-a", "lme_session_index": -1},
+        {"id": "a1", "content": "b", "point_kind": "session-transcript",
+         "session_id": "sess-a", "lme_session_index": -1},
+        {"id": "a2", "content": "c", "point_kind": "session-transcript",
+         "session_id": "sess-a", "lme_session_index": -1},
+        {"id": "b0", "content": "d", "point_kind": "session-transcript",
+         "session_id": "sess-b", "lme_session_index": -1},
+        {"id": "b1", "content": "e", "point_kind": "session-transcript",
+         "session_id": "sess-b", "lme_session_index": -1},
+        {"id": "b2", "content": "f", "point_kind": "session-transcript",
+         "session_id": "sess-b", "lme_session_index": -1},
+    ]
+    pool = _dedup_pool(hits, max_chunks_per_session=2)
+    assert [h["id"] for h in pool] == ["a0", "a1", "b0", "b1"]
+    # missing session_id entirely → bucket by lme_session_index (distinct
+    # indices are distinct buckets, never one shared idx:-1)
+    hits2 = [
+        {"id": "x0", "content": "a", "point_kind": "session-transcript",
+         "session_id": "", "lme_session_index": 0},
+        {"id": "x1", "content": "b", "point_kind": "session-transcript",
+         "session_id": "", "lme_session_index": 0},
+        {"id": "x2", "content": "c", "point_kind": "session-transcript",
+         "session_id": "", "lme_session_index": 0},
+        {"id": "y0", "content": "d", "point_kind": "session-transcript",
+         "session_id": "", "lme_session_index": 1},
+        {"id": "y1", "content": "e", "point_kind": "session-transcript",
+         "session_id": "", "lme_session_index": 1},
+    ]
+    pool2 = _dedup_pool(hits2, max_chunks_per_session=2)
+    assert [h["id"] for h in pool2] == ["x0", "x1", "y0", "y1"]
+
+
+def test_session_crowded_out_still_surfaces(tmp_path, monkeypatch):
+    """Pool-depth headroom (R2 #1540): candidates are fetched at max(ks)*3
+    so a monopolizing session's points cannot crowd other sessions out
+    BEFORE dedup runs — a session ranked beyond the raw top-20 still
+    appears in the pool and its session_recall@k is non-zero at k=25."""
+    from tools.longmem_eval import retrieve as rtr
+
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        for i in range(20):
+            sdk.create_point("event", f"filler {i}", id=f"a{i}",
+                             session_id="crowd-a", lme_question_id="crowd_q",
+                             lme_session_index=0, is_episodic=True,
+                             status="draft")
+        sdk.create_point("event", "the sky is blue", id="b0",
+                         session_id="crowd-b", lme_question_id="crowd_q",
+                         lme_session_index=1, is_episodic=True, status="draft")
+        captured = {}
+
+        def _fake_search(sdk_, query, limit):
+            captured["limit"] = limit
+            return ([{"id": f"a{i}", "content": f"filler {i}",
+                      "match_source": "tfidf"} for i in range(20)]
+                    + [{"id": "b0", "content": "the sky is blue",
+                        "match_source": "tfidf"}])
+
+        monkeypatch.setattr(rtr, "hybrid_search", _fake_search)
+        q = {"question_id": "crowd_q", "question_type": "single-session-user",
+             "question": "what color is the sky", "answer": "blue",
+             "question_date": "2025-06-15",
+             "haystack_session_ids": ["crowd-a", "crowd-b"],
+             "haystack_dates": ["2025-06-10", "2025-06-12"],
+             "answer_session_ids": ["crowd-b"],
+             "haystack_sessions": [
+                 [{"role": "user", "content": f"filler {i}",
+                   "has_answer": False} for i in range(20)],
+                 [{"role": "user", "content": "the sky is blue",
+                   "has_answer": True}]]}
+        ret = retrieve_for_question(sdk, q, ks=(20, 25), top_k=20)
+        assert captured["limit"] == 25 * 3  # max(ks) * 3 depth headroom
+        # B's point (ranked 21st raw) is in the deduped pool — with depth
+        # max(ks)=25 it would have been excluded entirely
+        assert ret["hits"][-1]["id"] == "b0"
+        assert ret["session_recall@k"]["25"] > 0.0
+        assert ret["session_recall@k"]["20"] == 0.0  # honest windowing
+        assert ret["dedup_stats"]["pool_depth_requested"] == 75
+    finally:
+        sdk.close()
+
+
+def test_recall_on_deduped_pool(tmp_path, monkeypatch):
+    """Recall@k is computed on the DEDUPED pool (the retrieval contract): a
+    session's 3rd-ranked evidence chunk is capped away, so
+    chunk_evidence_recall@k honestly reflects only what the reader could
+    see (2 of 3 marked chunks), while session recall stays 1.0."""
+    from tools.longmem_eval import retrieve as rtr
+
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        for ci in range(3):
+            sdk.create_point("session-transcript", f"evidence chunk {ci}",
+                             id=f"e{ci}", session_id="sess-e",
+                             lme_question_id="pool_q", lme_session_index=0,
+                             is_episodic=True, has_answer=True, status="draft")
+
+        def _fake_search(sdk_, query, limit):
+            return [{"id": f"e{ci}", "content": f"evidence chunk {ci}",
+                     "match_source": "tfidf"} for ci in range(3)]
+
+        monkeypatch.setattr(rtr, "hybrid_search", _fake_search)
+        q = {"question_id": "pool_q", "question_type": "single-session-user",
+             "question": "evidence", "answer": "x", "question_date": "2025-06-15",
+             "haystack_session_ids": ["sess-e"], "haystack_dates": ["2025-06-10"],
+             "answer_session_ids": ["sess-e"],
+             "haystack_sessions": [[{"role": "user", "content": "evidence chunk 0",
+                                     "has_answer": True}]]}
+        ret = retrieve_for_question(sdk, q, ks=(5,), top_k=20,
+                                    max_chunks_per_session=2)
+        assert ret["session_recall@k"]["5"] == 1.0  # present via capped chunks
+        assert ret["dedup_stats"]["chunks_capped"] == 1
+        assert ret["chunk_evidence_recall@k"]["5"] == 2 / 3
+        assert ret["evidence_recall@k"]["5"] is None  # no extracted points
+    finally:
+        sdk.close()
+
+
+def test_context_points_first_chunks_backfill():
+    """UX-3 (R1 #1540): all non-session-transcript hits order before raw
+    chunks (rank order within each tier), bounded by top_k then budget."""
+    pool = [
+        {"id": "chunk1", "content": "chunk number one here",
+         "point_kind": "session-transcript", "lme_session_index": 0,
+         "session_date": ""},
+        {"id": "pt1", "content": "point one", "point_kind": "statement",
+         "lme_session_index": 0},
+        {"id": "chunk2", "content": "chunk number two here",
+         "point_kind": "session-transcript", "lme_session_index": 1,
+         "session_date": ""},
+        {"id": "pt2", "content": "point two", "point_kind": "statement",
+         "lme_session_index": 1},
+    ]
+    ctx = _assemble_context(pool, top_k=20, max_context_tokens=10**6)
+    assert [h["id"] for h in ctx] == ["pt1", "pt2", "chunk1", "chunk2"]
+    # top_k bounds the points-first reordered list
+    ctx2 = _assemble_context(pool, top_k=2, max_context_tokens=10**6)
+    assert [h["id"] for h in ctx2] == ["pt1", "pt2"]
+
+
+def test_context_token_budget_enforced():
+    """Cap below the full pool → context_tokens ≤ cap; the truncated tail
+    is chunks, not points (points-first backfill)."""
+    pool = [
+        {"id": "chunk1", "content": "chunk number one here",
+         "point_kind": "session-transcript", "lme_session_index": 0,
+         "session_date": ""},
+        {"id": "pt1", "content": "point one", "point_kind": "statement",
+         "lme_session_index": 0},
+        {"id": "chunk2", "content": "chunk number two here",
+         "point_kind": "session-transcript", "lme_session_index": 1,
+         "session_date": ""},
+        {"id": "pt2", "content": "point two", "point_kind": "statement",
+         "lme_session_index": 1},
+    ]
+    ctx = _assemble_context(pool, top_k=20, max_context_tokens=9)
+    assert _estimate_tokens(render_context(ctx)) <= 9
+    assert [h["id"] for h in ctx] == ["pt1", "pt2"]  # chunks truncated
+    assert all(not _is_raw_chunk(h) for h in ctx)
+
+
+def test_context_points_reader_alignment(tmp_path):
+    """The alignment invariant (R1 #1540): context_tokens ==
+    _estimate_tokens(render_context(context_points, question_date)) exactly
+    — no per-block int drift — with several blocks and the date header."""
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        q = next(x for x in _mini() if x["question_id"] == "mini_ie_user_001")
+        ingest_haystack(sdk, q, chunk_turns=2)
+        ret = retrieve_for_question(sdk, q, ks=(5, 10, 20), top_k=20,
+                                    max_context_tokens=3000)
+        assert ret["context_point_count"] > 0
+        text = render_context(ret["context_points"],
+                              question_date=q.get("question_date") or None)
+        assert ret["context_tokens"] == _estimate_tokens(text)
+        assert ret["context_tokens"] <= 3000
+    finally:
+        sdk.close()
+
+
+def test_context_oversized_hit_skips_not_starves():
+    """Skip-and-continue (R1 #1540): a mid-rank hit whose own cost exceeds
+    the cap is DROPPED; later hits still append (no starvation)."""
+    pool = [
+        {"id": "pt1", "content": "point one", "point_kind": "statement",
+         "lme_session_index": 0},
+        {"id": "huge", "content": " ".join(["word"] * 5000),
+         "point_kind": "statement", "lme_session_index": 0},
+        {"id": "pt2", "content": "point two", "point_kind": "statement",
+         "lme_session_index": 0},
+    ]
+    ctx = _assemble_context(pool, top_k=20, max_context_tokens=100)
+    ids = [h["id"] for h in ctx]
+    assert "huge" not in ids
+    assert "pt1" in ids and "pt2" in ids  # later hits still selected
+    assert len(ctx) == 2
+
+
+def test_evidence_denominator_points_only(tmp_path, monkeypatch):
+    """D5 (R1 #1540): a question with containment-marked chunks but no
+    marked extracted points → evidence_recall@k is N/A (None) while
+    chunk_evidence_recall@k is real and non-vacuous — the denominator split
+    removes the granularity-bias confound."""
+    import tortoise.extractor_v2 as ev2
+    from tools.longmem_eval.ingest_v2 import ingest_haystack_v2
+
+    def _fake(model, conversation, **kw):
+        # the extractor produces NOTHING — only the containment-marked
+        # chunks carry evidence
+        return {"payload": {"entities": [], "events": [], "points": [],
+                            "operators": []},
+                "minted_kinds": [], "supersessions": [], "errors": [],
+                "warnings": []}
+
+    monkeypatch.setattr(ev2, "extract_session_v2", _fake)
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        q = next(x for x in _mini() if x["question_id"] == "mini_ie_user_001")
+        ingest_haystack_v2(sdk, q, model=object(), chunk_turns=2)
+        ret = retrieve_for_question(sdk, q, ks=(5, 10, 20), top_k=20)
+        # no extracted (non-chunk) marked points → N/A, never a forced 0.0
+        assert ret["evidence_recall@k"]["5"] is None
+        # the raw-chunk containment view is real: the evidence chunk (s1:c1
+        # contains "My favorite board game is Catan.") surfaces in top-5
+        assert isinstance(ret["chunk_evidence_recall@k"]["5"], float)
+        assert ret["chunk_evidence_recall@k"]["5"] > 0.0
+    finally:
+        sdk.close()
+
+
+def test_degenerate_knobs_raise():
+    """R6 (R1 #1540): degenerate knob values raise at the function
+    boundary — never a silent run (a 0 chunk cap deletes the raw leg; a 0
+    context cap empties the reader context)."""
+    with pytest.raises(ValueError, match="max_chunks_per_session"):
+        _dedup_pool([], max_chunks_per_session=0)
+    with pytest.raises(ValueError, match="max_context_tokens"):
+        _assemble_context([], top_k=20, max_context_tokens=0)
+
+
+# ── R1 #1540: read-path wiring (D6) + knobs (D7) ──────────────────────────
+
+class _RecordingReader(MockReader):
+    """Captures run_evaluation's reader.answer kwargs."""
+
+    def __init__(self):
+        super().__init__()
+        self.calls: list[dict] = []
+
+    def answer(self, **kw):
+        self.calls.append(dict(kw))
+        return super().answer(**kw)
+
+
+def test_reader_receives_capped_context(tmp_path):
+    """D6 (R1 #1540): the reader consumes EXACTLY the budget-capped
+    points-first context (ret["context_points"]), not the full pool — and
+    the rendered token estimate stays under the cap."""
+    reader = _RecordingReader()
+    q = _mini()[0]
+    run_evaluation(
+        [q], reader=reader, judge=MockJudge(), ks=(5, 10, 20), top_k=20,
+        split="s", work_dir=str(tmp_path), max_context_tokens=3000,
+    )
+    assert len(reader.calls) == 1
+    context_hits = reader.calls[0]["context_hits"]
+    assert context_hits  # evidence reaches the reader
+    text = render_context(context_hits, question_date=q.get("question_date") or None)
+    assert _estimate_tokens(text) <= 3000
+    # points-first: no raw chunk precedes an extracted point
+    first_chunk = next(
+        (i for i, h in enumerate(context_hits) if _is_raw_chunk(h)),
+        len(context_hits))
+    assert all(not _is_raw_chunk(h) for h in context_hits[:first_chunk])
+    # an identical fresh ingest reproduces the retrieval contract (the
+    # pipeline is deterministic: embedded TF-IDF + mocked reader/judge)
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        ingest_haystack(sdk, q, chunk_turns=2)
+        ret = retrieve_for_question(sdk, q, ks=(5, 10, 20), top_k=20,
+                                    max_context_tokens=3000)
+        assert [h["id"] for h in context_hits] == \
+            [h["id"] for h in ret["context_points"]]
+    finally:
+        sdk.close()
+
+
+def test_knob_cli_flags(tmp_path, monkeypatch):
+    """R1 knobs thread through the CLI into ingest + methodology (the
+    report does not carry per-question ingest stats — assert via the
+    captured kwarg + methodology)."""
+    import tools.longmem_eval.run as run_mod
+    from tools.longmem_eval.ingest import ingest_haystack as _orig_ingest
+
+    captured = {}
+
+    def _capture(sdk, question, **kw):
+        captured["chunk_turns"] = kw.get("chunk_turns")
+        return _orig_ingest(sdk, question, **kw)
+
+    monkeypatch.setattr(run_mod, "ingest_haystack", _capture)
+    out = tmp_path / "report.json"
+    report = run_main(["--data", str(MINI), "--limit", "1", "--split", "s",
+                       "--mock", "--chunk-turns", "4", "--context-cap", "5000",
+                       "--max-chunks-per-session", "1", "--output", str(out)])
+    assert captured["chunk_turns"] == 4
+    m = report["methodology"]
+    assert m["chunk_turns"] == 4
+    assert m["context_token_cap"] == 5000
+    assert m["max_chunks_per_session"] == 1
+
+
+def test_knob_env_vars(tmp_path, monkeypatch):
+    """The TORTOISE_LME_* env surface works without CLI flags (mirrors the
+    --reader-model/env pattern)."""
+    monkeypatch.setenv("TORTOISE_LME_CHUNK_TURNS", "3")
+    monkeypatch.setenv("TORTOISE_LME_CONTEXT_CAP", "6000")
+    monkeypatch.setenv("TORTOISE_LME_MAX_CHUNKS_PER_SESSION", "1")
+    report = run_main(["--data", str(MINI), "--limit", "1", "--split", "s",
+                       "--mock"])
+    m = report["methodology"]
+    assert m["chunk_turns"] == 3
+    assert m["context_token_cap"] == 6000
+    assert m["max_chunks_per_session"] == 1
+
+
+def test_knob_cli_validation():
+    """Degenerate knob values are rejected at the CLI (argparse type guard)
+    with a non-zero exit and a clear message — never a silent run."""
+    import subprocess
+    import sys
+
+    base = [sys.executable, "-m", "tools.longmem_eval.run", "--data",
+            str(MINI), "--limit", "1", "--mock"]
+    for flag, bad in (("--chunk-turns", "0"), ("--chunk-turns", "-1"),
+                      ("--max-chunks-per-session", "0"), ("--context-cap", "0")):
+        r = subprocess.run(
+            [*base, flag, bad], capture_output=True, text=True,
+            cwd=str(Path(__file__).parent.parent))
+        assert r.returncode != 0, f"{flag} {bad} must be rejected"
+        assert flag in r.stderr, f"{flag} {bad}: missing clear message"
+
+
+def test_report_methodology_records_r1_knobs():
+    """D7 (R1 #1540): outcomes_to_report methodology carries the three knob
+    values + the updated retrieval/recall_definition/reader_context_format
+    strings."""
+    outcomes = [{
+        "question_id": "q-knob-1",
+        "question_type": "single-session-user",
+        "question_date": "2024-01-15",
+        "label": True,
+        "hypothesis": "h",
+        "session_recall@k": {"5": 1.0, "10": 1.0, "20": 1.0},
+        "turn_recall@k": {"5": 0.5, "10": 0.5, "20": 0.5},
+        "evidence_recall@k": {"5": 1.0, "10": 1.0, "20": 1.0},
+        "chunk_evidence_recall@k": {"5": 0.5, "10": 0.5, "20": 0.5},
+        "n_ingest_errors": 0,
+        "context_tokens": 120,
+        "context_point_count": 3,
+        "retrieval_latency_ms": 11.0,
+        "reader_latency_ms": 22.0,
+        "judge_latency_ms": 33.0,
+        "total_ms": 66.0,
+    }]
+    report = outcomes_to_report(
+        outcomes, reader_model="r", judge_model="j", ks=(5, 10, 20),
+        top_k=20, split="s",
+        r1_knobs={"chunk_turns": 2, "context_token_cap": 8000,
+                  "max_chunks_per_session": 2})
+    m = report["methodology"]
+    assert m["chunk_turns"] == 2
+    assert m["context_token_cap"] == 8000
+    assert m["max_chunks_per_session"] == 2
+    assert "turn-granular raw chunks" in m["retrieval"]
+    assert "DEDUPED" in m["recall_definition"]
+    assert "chunk_evidence_recall@k" in m["recall_definition"]
+    assert "points-first" in m["reader_context_format"]
+    assert "chunk_turns" in m["extraction_approach"]
+
+
+def test_r1_knobs_threaded_dispatch(tmp_path):
+    """The --workers > 1 path with R1 knobs: every question completes
+    exactly once (no duplicates/losses), and the checkpoint written during
+    the run loads back and resumes cleanly."""
+    cp = tmp_path / "state.json"
+    kwargs = dict(reader=MockReader(), judge=MockJudge(), ks=(5,), top_k=5,
+                  split="s", work_dir=str(tmp_path), workers=4,
+                  chunk_turns=1, max_context_tokens=4000,
+                  max_chunks_per_session=1, checkpoint=str(cp))
+    outcomes, report = run_evaluation(_mini()[:2], **kwargs)
+    assert len(outcomes) == 2
+    assert len({o["question_id"] for o in outcomes}) == 2  # no dupes/losses
+    assert report["n_failed"] == 0
+    saved = json.loads(cp.read_text(encoding="utf-8"))
+    assert len(saved["outcomes"]) == 2
+    # resume: completed questions are skipped and continue cleanly (thread
+    # completion order is nondeterministic — compare as sets)
+    outcomes2, _ = run_evaluation(_mini()[:2], **kwargs)
+    assert {o["question_id"] for o in outcomes2} == \
+        {o["question_id"] for o in outcomes}
+    by_qid = {o["question_id"]: o for o in outcomes2}
+    for o in outcomes:
+        assert by_qid[o["question_id"]]["label"] == o["label"]
+
+
+# ── R1 #1540: granularity sweep micro-test (run protocol step 2) ──────────
+
+def test_granularity_sweep_ci(tmp_path, monkeypatch):
+    """Run protocol step 2 (R1 #1540): the 3-point sweep (chunk_turns
+    {1,2,4}) completes in v2 mode with a mocked extractor over the mini
+    fixture, respects the context cap, holds per-session dedup, and selects
+    the same deterministic winner on consecutive runs."""
+    import hashlib
+
+    import tortoise.extractor_v2 as ev2
+    from tools.longmem_eval.sweep_granularity import run_sweep
+
+    def _fake_extract(model, conversation, **kw):
+        # each session's extracted point CONTAINS the session verbatim → the
+        # evidence marks are non-vacuous and the selection metric is
+        # actually knob-responsive (points + chunks compete for the pool)
+        content = " ".join(t["content"] for t in conversation)
+        pid = "pt_" + hashlib.sha256(content.encode()).hexdigest()[:12]
+        return {"payload": {"entities": [], "events": [],
+                            "points": [{"id": pid, "content": content,
+                                        "pointKind": "statement"}],
+                            "operators": []},
+                "minted_kinds": [], "supersessions": [], "errors": [],
+                "warnings": []}
+
+    monkeypatch.setattr(ev2, "extract_session_v2", _fake_extract)
+
+    def _run():
+        return run_sweep(
+            _mini(), chunk_turns_values=(1, 2, 4), context_cap=8000,
+            max_chunks_per_session=2, ingest_mode="v2",
+            reader=MockReader(), judge=MockJudge(),
+            ks=(5, 10, 20), work_dir=str(tmp_path),
+        )
+
+    results, winner = _run()
+    assert [r["chunk_turns"] for r in results] == [1, 2, 4]
+    assert all(r["n_completed"] == 5 for r in results)
+    assert all(r["context_tokens_mean"] <= 8000 for r in results)
+    assert winner is not None
+    assert winner["chunk_turns"] in (1, 2, 4)
+    # determinism: two consecutive runs select the same winner
+    _, winner2 = _run()
+    assert winner2["chunk_turns"] == winner["chunk_turns"]
+    # per-session dedup holds across sweep granularities: on a fresh ingest
+    # at chunk_turns=1 (3 chunks per 3-turn session) the pool keeps ≤ 2
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        q = next(x for x in _mini() if x["question_id"] == "mini_msr_002")
+        ingest_haystack(sdk, q, chunk_turns=1)
+        ret = retrieve_for_question(sdk, q, ks=(5, 10, 20), top_k=20,
+                                    max_chunks_per_session=2)
+        per_session = {}
+        for h in ret["hits"]:
+            if _is_raw_chunk(h):
+                per_session[h["session_id"]] = per_session.get(h["session_id"], 0) + 1
+        assert all(v <= 2 for v in per_session.values())
+    finally:
+        sdk.close()
+
+
+# ── R1 #1540: E2E-1/E2E-10 integration scenarios + robustness ─────────────
+
+def test_e2e1_dedup_cap_assertion(tmp_path):
+    """E2E-1 (R1 #1540): an 8-turn single session cannot monopolize the
+    pool or the context — per-session chunk count ≤ max_chunks_per_session
+    in BOTH ret["hits"] (the pool) and context_points, while the answer
+    session's recall is preserved (crowd-out guard)."""
+    q = {
+        "question_id": "monopoly_q",
+        "question_type": "single-session-user",
+        "question": "What is the name of the cat?",
+        "answer": "Whiskers",
+        "question_date": "2025-06-15",
+        "haystack_session_ids": ["mono-s0", "mono-s1"],
+        "haystack_dates": ["2025-06-10", "2025-06-12"],
+        "answer_session_ids": ["mono-s1"],
+        "haystack_sessions": [
+            [{"role": "user", "content": f"filler topic {i} details",
+              "has_answer": False} for i in range(8)],
+            [{"role": "user", "content": "the cat is named Whiskers",
+              "has_answer": True}],
+        ],
+    }
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        ingest_haystack(sdk, q, chunk_turns=2)  # s0 → 4 chunks
+        ret = retrieve_for_question(sdk, q, ks=(5, 10, 20), top_k=20,
+                                    max_chunks_per_session=2)
+
+        def _chunks_of(hits, sid):
+            return [h for h in hits
+                    if _is_raw_chunk(h) and h["session_id"] == sid]
+
+        assert len(_chunks_of(ret["hits"], "mono-s0")) <= 2
+        assert len(_chunks_of(ret["context_points"], "mono-s0")) <= 2
+        # the answer session still surfaces (pool depth + dedup)
+        assert ret["session_recall@k"]["20"] == 1.0
+        assert ret["session_recall@k"]["5"] >= 0.5
+    finally:
+        sdk.close()
+
+
+def test_e2e10_budget_capped_context_v3_part(tmp_path):
+    """E2E-10 V3 part (R1 #1540): many near-duplicate raw chunks from one
+    session cannot blow the reader's context budget — the context stays ≤
+    cap, points render before chunks, and context_tokens is honest.
+    (Cross-encoder/MMR assertions remain V4-conditional — not asserted.)"""
+    filler = [{"role": "user", "content": f"planning detail number {i} "
+               "about the upcoming trip itinerary", "has_answer": False}
+              for i in range(9)] + [
+        {"role": "user", "content": "the destination is Kyoto",
+         "has_answer": True}]
+    q = {
+        "question_id": "dupe_q",
+        "question_type": "single-session-user",
+        "question": "what is the destination",
+        "answer": "Kyoto",
+        "question_date": "2025-06-15",
+        "haystack_session_ids": ["dupe-s0"],
+        "haystack_dates": ["2025-06-10"],
+        "answer_session_ids": ["dupe-s0"],
+        "haystack_sessions": [filler],
+    }
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        ingest_haystack(sdk, q, chunk_turns=2)  # 5 near-duplicate chunks
+        ret = retrieve_for_question(sdk, q, ks=(5, 10, 20), top_k=20,
+                                    max_context_tokens=2000)
+        assert ret["context_tokens"] <= 2000
+        # points-first ordering
+        first_chunk = next(
+            (i for i, h in enumerate(ret["context_points"]) if _is_raw_chunk(h)),
+            len(ret["context_points"]))
+        assert all(not _is_raw_chunk(h)
+                   for h in ret["context_points"][:first_chunk])
+        # honest token accounting
+        assert ret["context_tokens"] == _estimate_tokens(
+            render_context(ret["context_points"],
+                           question_date=q.get("question_date") or None))
+        # per-session dedup holds even with 5 near-duplicate chunks
+        dupe_chunks = [h for h in ret["hits"] if _is_raw_chunk(h)]
+        assert len(dupe_chunks) <= 2
+        assert ret["dedup_stats"]["chunks_capped"] >= 3
+    finally:
+        sdk.close()
+
+
+def test_context_cap_holds_under_pathological_content(tmp_path):
+    """Estimator-limitation guard (R1 #1540): a long whitespace-free turn
+    (URL/base64 — undercounted by the word-split estimator) cannot silently
+    reproduce the whole-session flood: the estimate-space cap holds, the
+    rendered context is strictly smaller than the full transcript, and the
+    estimator limitation is recorded in the methodology."""
+    # one 8000-char no-whitespace token (ONE estimate "word") + 100 wordy
+    # filler turns (4000 estimate words — the cap would trim them)
+    pathological = "x" * 8000
+    filler = [{"role": "user",
+               "content": " ".join(f"word{i}" for i in range(40)),
+               "has_answer": False} for _ in range(100)]
+    session = [{"role": "user", "content": pathological}, *filler]
+    q = {
+        "question_id": "patho_q",
+        "question_type": "single-session-user",
+        "question": "what is the key fact",
+        "answer": "x",
+        "question_date": "2025-06-15",
+        "haystack_session_ids": ["patho-s0"],
+        "haystack_dates": ["2025-06-10"],
+        "answer_session_ids": ["patho-s0"],
+        "haystack_sessions": [session],
+    }
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        ingest_haystack(sdk, q, chunk_turns=2)
+        ret = retrieve_for_question(sdk, q, ks=(5,), top_k=20,
+                                    max_context_tokens=2000)
+        text = render_context(ret["context_points"],
+                              question_date=q.get("question_date") or None)
+        assert ret["context_tokens"] <= 2000  # estimate-space cap holds
+        full = _session_transcript(session)
+        # the whole-session flood is NOT reproduced (the estimator
+        # undercounts the no-whitespace token — one chunk slips in — but the
+        # wordy tail is trimmed; real length stays bounded)
+        assert len(text) < len(full)
+        assert len(text) < 50_000
+        assert ret["context_point_count"] > 0  # not starved
+        # the estimator limitation is documented in the report methodology
+        report = outcomes_to_report(
+            [{
+                "question_id": "q-p", "question_type": "single-session-user",
+                "question_date": "2025-06-15", "label": True,
+                "hypothesis": "h",
+                "session_recall@k": {"5": 1.0, "10": 1.0, "20": 1.0},
+                "turn_recall@k": {"5": 1.0, "10": 1.0, "20": 1.0},
+                "evidence_recall@k": {"5": 1.0, "10": 1.0, "20": 1.0},
+                "chunk_evidence_recall@k": {"5": 1.0, "10": 1.0, "20": 1.0},
+                "n_ingest_errors": 0, "context_tokens": 100,
+                "context_point_count": 1, "retrieval_latency_ms": 1.0,
+                "reader_latency_ms": 1.0, "judge_latency_ms": 1.0,
+                "total_ms": 1.0,
+            }],
+            reader_model="r", judge_model="j", ks=(5,), top_k=20, split="s")
+        assert "whitespace" in report["methodology"]["token_estimator"]
+    finally:
+        sdk.close()
+
+
+def test_ingest_over_mixed_blob_chunk_graph(tmp_path):
+    """Defensive (R1 #1540): a stale :raw blob under a session is treated
+    as a raw chunk by retrieval (kind-based _is_raw_chunk) — no double
+    representation of the verbatim leg beyond the cap — and new ingest
+    writes chunks without touching it (fresh per-question graphs make this
+    unreachable in production, but stats must reflect written chunks)."""
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        q = next(x for x in _mini() if x["question_id"] == "mini_ie_user_001")
+        proj = sdk._get_proj()
+        # simulate a pre-R1 graph: a stale :raw blob under session s0
+        proj.g.query(
+            "MERGE (s:Session {id:'lme:mini_ie_user_001:s0'}) "
+            "SET s.lme_question_id='mini_ie_user_001', s.lme_session_index=0",
+            params={})
+        sdk.create_point("session-transcript", "stale whole-session blob",
+                         id="lme:mini_ie_user_001:s0:raw",
+                         session_id="mini-s0", lme_question_id="mini_ie_user_001",
+                         lme_session_index=0, is_episodic=True, status="draft")
+        stats = ingest_haystack(sdk, q, chunk_turns=2)
+        assert stats["chunks"] == 4  # fresh chunks written, stats honest
+        rows = proj.g.query(
+            "MATCH (p:Point {id:$id}) RETURN count(*)",
+            params={"id": "lme:mini_ie_user_001:s0:raw"}).result_set
+        assert rows[0][0] == 1  # stale blob untouched (defensive)
+        ret = retrieve_for_question(sdk, q, ks=(5, 10, 20), top_k=20)
+        # the stale blob is deduped WITH the fresh chunks (same session —
+        # kind-based detection, no double representation beyond the cap)
+        s0_chunks = [h for h in ret["hits"]
+                     if _is_raw_chunk(h) and h["session_id"] == "mini-s0"]
+        assert len(s0_chunks) <= 2
+    finally:
+        sdk.close()
