@@ -190,7 +190,7 @@ class _StubAdapter:
         self._exc = exc
         return self
 
-    def complete(self, *, system, user):
+    def complete(self, *, system, user, max_tokens: int | None = None):
         self.calls += 1
         if self._exc is not None:
             raise self._exc
