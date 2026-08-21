@@ -740,8 +740,9 @@ function claimIntentInFlight() {
             throw new Error('Could not load your teams — try again.')
           }
         } catch (e) {
-          // #1566: distinguish 'couldn't check' (fail closed) from 'no teams'.
-          if (!teamsList.length) {
+          // #1566 (review P2): fail CLOSED for any non-array/empty result —
+          // the throw's premise is 'not a valid teams array'.
+          if (!Array.isArray(teamsList) || !teamsList.length) {
             setAuthed(false)
             setMountError((e && e.message) || 'Could not load your teams — try again.')
             setChecking(false)

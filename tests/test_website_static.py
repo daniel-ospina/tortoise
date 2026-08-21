@@ -379,3 +379,17 @@ class TestRenderElementInventory:
         pricing, _ = _mirror_data()
         # The badge markup is <span class="badge" id="annual-badge">-20%</span>
         assert f"-{pricing['display']['annual_discount_pct']}%" in html
+
+
+# ── #1566: welcome.html's provisioning pipeline must stay dead ──
+
+
+def test_welcome_provisioning_pipeline_is_dead_since_1566():
+    """#1566 (review P2): welcome.html's provisioning pipeline must STAY dead
+    — restoring it would recreate the double-provision surface #1082/#1566
+    guard against. The signed-in redirect must precede the pipeline."""
+    src = Path("website/welcome.html").read_text()
+    assert "DEAD SINCE #1566" in src, "dead-pipeline marker missing"
+    prov = src.index("DEAD SINCE #1566")
+    assert prov < src.index("provisionViaEdgeFunction"), \
+        "the pipeline marker must precede the provisioning functions"

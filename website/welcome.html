@@ -962,6 +962,11 @@ you up to 6 yes/no questions and set up your Tortoise memory.
     }
 
     // ── Poll for provisioning ──────────────────────────────────────────────
+    // ⚠️ DEAD SINCE #1566 — provisioning runs in the app (the signed-in
+    // redirect above returns before this pipeline). Do NOT restore this
+    // path: it would recreate the double-provision surface #1082/#1566
+    // guard against. The poll/reveal/mint functions below are kept only so
+    // the page's structure survives for the recovery + no-session flows.
     async function waitForProvisioning() {
       // #863: recovery-mode guard — a PASSWORD_RECOVERY event that arrives
       // after the start branch must still stop the provisioning pipeline.
