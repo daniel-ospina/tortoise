@@ -4146,10 +4146,12 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: "CommitPayload", plan):
             "MERGE (e:Event {eventId:$eid}) "
             "SET e.id=$eid, e.eventKind=$ek, e.name=$name, e.content=$content, "
             "    e.confidence=$conf, e.source_ref=$sref, e.is_episodic=true, "
-            "    e.capturedAt=coalesce(e.capturedAt, $cap), e.updatedAt=$now",
+            "    e.capturedAt=coalesce(e.capturedAt, $cap), "
+            "    e.startedAt=coalesce(e.startedAt, $sat), e.updatedAt=$now",
             params={"eid": ev.id, "ek": ev.eventKind, "name": ev.content[:80],
                     "content": ev.content, "conf": ev.confidence,
                     "sref": ev.source_ref, "cap": ev.captured_at or now,
+                    "sat": ev.started_at or ev.captured_at or now,
                     "now": now},
         )
         proj.g.query(
@@ -4216,6 +4218,11 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: "CommitPayload", plan):
             )
         elif pr.action == "supersede":
             pid = pr.supersede_id
+            point_props: dict = {}
+            # E1 (#1533): the payload `when` slot rides onto the node only
+            # when non-empty — undated points write no `when` prop.
+            if pr.point.when:
+                point_props["when"] = pr.point.when
             sdk.create_point(
                 pr.point.pointKind, pr.point.content, dedup=True, id=pid,
                 status=pr.point.status, confidence=pr.point.confidence,
@@ -4227,10 +4234,13 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: "CommitPayload", plan):
                 # evidence mark needs the point's session on both capture
                 # paths (SDK capture already writes it). Existing field, not
                 # a new point property.
-                session_id=session_id,
+                session_id=session_id, **point_props,
             )
             sdk.supersede_point(pr.existing_id, pid)
         else:
+            point_props = {}
+            if pr.point.when:
+                point_props["when"] = pr.point.when
             sdk.create_point(
                 pr.point.pointKind, pr.point.content, dedup=True, id=pid,
                 status=pr.point.status, confidence=pr.point.confidence,
@@ -4240,7 +4250,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: "CommitPayload", plan):
                 # #1526 (M6 owner validation): see above — session_id on the
                 # committed points so both capture paths (SDK + hosted) carry
                 # the same source-session attribution surface.
-                session_id=session_id,
+                session_id=session_id, **point_props,
             )
         proj.g.query(
             "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "

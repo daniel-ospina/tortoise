@@ -13,6 +13,33 @@ import pytest
 
 from tortoise.sdk import TortoiseSDK
 
+
+def test_commit_session_threads_session_date(sdk, monkeypatch):
+    """T10 (#1533): commit_session threads session_date into
+    extract_session_v2 — ISO-now by default (D8: capture time = session
+    date), explicit value honored."""
+    import tortoise.extractor_v2 as ev2
+
+    received = []
+
+    def _fake_extract(model, conversation, **kw):
+        received.append(kw.get("session_date"))
+        return {"payload": None, "minted_kinds": [], "supersessions": [],
+                "chain_notes": [], "link_before_create": [],
+                "warnings": [], "story_arc": "", "search": {},
+                "stats": {}, "errors": ["no payload produced"]}
+
+    monkeypatch.setattr(ev2, "extract_session_v2", _fake_extract)
+
+    r = sdk.commit_session(CONV)
+    assert r["ok"] is False  # no payload → never reports ok=True
+    assert len(received) == 1
+    assert received[0]  # ISO now by default — non-empty
+    # explicit session_date= is honored verbatim
+    sdk.commit_session(CONV, session_date="2026-08-01")
+    assert received[1] == "2026-08-01"
+
+
 # Legacy predicate name for negative-direction tests (#281). Kept as a
 # constant so no edge-syntax literal appears in source (Task 5 sweep requires
 # zero hits) — same pattern as tests/test_ranking.py.

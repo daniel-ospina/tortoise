@@ -45,8 +45,9 @@ from .ingest import SESSION_TRANSCRIPT_KIND, _point_exists, _session_transcript 
 
 
 def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
-                   si: int, evidence_turns: list[str], turns: list[dict],
-                   ev_sessions: set[str]) -> dict:
+                   si: int, evidence_turns: list[str],
+                   session_date: str | None = None,
+                   turns: list[dict], ev_sessions: set[str]) -> dict:
     """Write a v2 Layer-1 payload into the eval graph. Idempotent per point
     (explicit deterministic ids + _point_exists guard). Returns stats.
 
@@ -102,11 +103,16 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
                     params={"id": pid})
             continue
         try:
+            point_props: dict = {}
+            # E1 (#1533): the payload `when` slot rides onto the node only
+            # when non-empty — undated sessions write no `when` prop.
+            if p.get("when"):
+                point_props["when"] = str(p.get("when"))
             sdk.create_point(
                 "statement", content, id=pid, session_id=sid,
                 lme_question_id=qid, lme_session_index=si,
                 is_episodic=True, has_answer=mark["has_answer"],
-                quote=quote, status="draft",
+                quote=quote, status="draft", **point_props,
             )
             stats["points"] += 1
             if mark["has_answer"]:
@@ -123,11 +129,18 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
         if not content:
             continue
         try:
+            event_props: dict = {}
+            # E1 (#1533): startedAt lands on the node only when non-empty
+            # (payload started_at → model startedAt → session date fallback).
+            started = (ev.get("started_at") or ev.get("startedAt")
+                       or session_date)
+            if started:
+                event_props["startedAt"] = str(started)
             sdk.create_event(
                 content[:80], str(ev.get("eventKind", "core:occurrence"))
                 .rsplit(":", 1)[-1],
                 sessionId=sid, lme_question_id=qid, lme_session_index=si,
-                is_episodic=True,
+                is_episodic=True, **event_props,
             )
             stats["events"] += 1
         except Exception as ex:  # noqa: BLE001, RUF100
@@ -251,7 +264,8 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
                  for t in session]
         try:
             out = extract_session_v2(model, turns, sdk=sdk,
-                                     session_id=s_node)
+                                     session_id=s_node,
+                                     session_date=session_date or None)
         except Exception as ex:  # noqa: BLE001, RUF100
             stats["errors"].append(f"s{si}: {type(ex).__name__}: {ex}")  # kill the run
             continue
@@ -265,7 +279,8 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
         # they skip duplicates, so payload-len double-counts)
         written = _write_payload(sdk, payload, sid=sid, qid=qid, si=si,
                                  evidence_turns=all_evidence_turns,
-                                 turns=turns, ev_sessions=ev_sessions)
+                                 turns=turns, ev_sessions=ev_sessions,
+                                 session_date=session_date or None)
         for k in ("points", "events", "entities", "operators",
                   "evidence_points"):
             stats[k] += written.get(k, 0)

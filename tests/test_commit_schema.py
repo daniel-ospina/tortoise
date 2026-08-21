@@ -209,6 +209,90 @@ class TestLayer1Shape:
         assert payload is not None
 
 
+class TestE1DateFields:
+    """E1 (#1533): additive-optional Point.when + CommitEvent.started_at —
+    dated payloads validate (extra="forbid" would reject them otherwise),
+    undated payloads validate byte-identical (defaults = absent)."""
+
+    def test_dated_payload_validates(self):
+        raw = _raw_payload(1)
+        raw["points"][0]["when"] = "2026-08-01"
+        raw["events"] = [{
+            "id": "ev_" + "1" * 62,
+            "eventKind": "decision",
+            "content": "we decided X",
+            "about_entities": ["Alpha"],
+            "source_ref": "session.md",
+            "captured_at": "2026-08-11T10:00:00Z",
+            "started_at": "2026-08-01",
+        }]
+        result, payload = validate_payload_dict(_finalize(raw))
+        assert result.ok, result.errors
+        assert payload.points[0].when == "2026-08-01"
+        assert payload.events[0].started_at == "2026-08-01"
+
+    def test_dated_payload_rejects_junk_when(self):
+        """max_length=40 caps the when slot — junk (over-long) is 422, not
+        silently stored."""
+        raw = _raw_payload(1)
+        raw["points"][0]["when"] = "x" * 41
+        result, _ = validate_payload_dict(_finalize(raw))
+        assert not result.ok
+        assert any("when" in k for k in result.errors)
+
+    def test_when_rejects_non_iso(self):
+        """Code-review fix: Point.when enforces the ISO date contract at
+        Layer-1 (mirrors CommitEvent.started_at) so a direct client cannot
+        store junk as p.when; "" (undated) still validates."""
+        raw = _raw_payload(1)
+        raw["points"][0]["when"] = "next tuesday"
+        result, _ = validate_payload_dict(_finalize(raw))
+        assert not result.ok
+        assert any("when" in k for k in result.errors)
+        # undated ("") and valid ISO still pass
+        ok, _ = validate_payload_dict(_finalize(_raw_payload(1)))
+        assert ok
+        raw3 = _raw_payload(1)
+        raw3["points"][0]["when"] = "2026-08-01T10:00:00"
+        ok3, _ = validate_payload_dict(_finalize(raw3))
+        assert ok3
+
+    def test_started_at_rejects_non_iso(self):
+        """Code-review fix: CommitEvent.started_at enforces the ISO date
+        contract at Layer-1 (a direct client cannot store junk as e.startedAt)."""
+        raw = _raw_payload(1)
+        raw["events"] = [{
+            "id": "ev_" + "2" * 62,
+            "eventKind": "decision",
+            "content": "we decided X",
+            "about_entities": ["Alpha"],
+            "source_ref": "session.md",
+            "started_at": "next tuesday",
+        }]
+        result, _ = validate_payload_dict(_finalize(raw))
+        assert not result.ok
+        assert any("started_at" in k for k in result.errors)
+
+        raw2 = _raw_payload(1)
+        raw2["events"] = [{
+            "id": "ev_" + "2" * 62,
+            "eventKind": "decision",
+            "content": "we decided X",
+            "about_entities": ["Alpha"],
+            "source_ref": "session.md",
+            "started_at": "x" * 41,
+        }]
+        result2, _ = validate_payload_dict(_finalize(raw2))
+        assert not result2.ok
+
+    def test_undated_payload_validates_byte_identical(self):
+        raw = _raw_payload(1)
+        result, payload = validate_payload_dict(_finalize(raw))
+        assert result.ok
+        assert payload.points[0].when == ""
+        assert payload.events == []
+
+
 class TestLayer1Semantic:
     """Cross-field deterministic checks (plan §4.5 / §6.1 Layer-1 block)."""
 
