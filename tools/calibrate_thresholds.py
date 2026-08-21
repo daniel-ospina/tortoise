@@ -238,6 +238,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="labeled-pairs JSONL (tests/fixtures/labeled_pairs.jsonl)")
     parser.add_argument("--min-samples", type=int, default=DEFAULT_MIN_SAMPLES,
                         help=f"minimum pairs per band (default {DEFAULT_MIN_SAMPLES})")
+    parser.add_argument("--load-timeout", type=float, default=None,
+                   help="EmbeddingModel load timeout override (seconds) — "
+                        "first load on a contended machine can exceed 30s")
     parser.add_argument("--out", default=None,
                         help="write the thresholds JSON to this file")
     args = parser.parse_args(argv)
@@ -249,7 +252,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         pairs = load_pairs(args.pairs)
-        inject_model(args.model)  # HARD-FAILs on load/dim/degrade (embedder_probe)
+        inject_model(args.model, load_timeout=args.load_timeout)  # HARD-FAILs on load/dim/degrade
         report = calibrate(pairs, _encode_with_model, min_samples=args.min_samples,
                            model_name=args.model)
     except (OSError, CalibrationError, EmbedderProbeError) as exc:

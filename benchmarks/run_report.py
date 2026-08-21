@@ -70,6 +70,7 @@ from benchmarks.synthetic_corpus import (  # noqa: E402
 )
 from tools import embedder_probe  # noqa: E402
 from tools.embedder_probe import PROBE_MODELS  # noqa: E402
+from tortoise.embeddings import EMBEDDING_MODEL  # noqa: E402
 
 MIX_PATH = Path(__file__).resolve().parent / "query_mix.json"
 
@@ -102,15 +103,16 @@ def _host_specs() -> dict:
 
 
 def _resolved_embedding_model(use_model: bool, injected: bool) -> str:
-    """Truthful embedding-model identity for provenance (PR1 — the
-    EMBEDDING_MODEL constant does not exist until T9/PR2, which re-points
-    provenance to it). --model active: the probe-recorded candidate hf_id
-    (the probe state IS the swap proof). No injection but a real model
-    loaded: the probe state when present (in a warm in-process re-run the
-    loaded singleton may be a previously-injected candidate — the probe
-    state persists, so reporting its hf_id is truthful), else the default
-    model id (the only model EmbeddingModel._load resolves without the
-    probe). Degraded (no model — synthetic vectors): 'unavailable'."""
+    """Truthful embedding-model identity for provenance.
+
+    --model active: the probe-recorded candidate hf_id (the probe state IS
+    the swap proof). No injection but a real model loaded: the probe state
+    when present (in a warm in-process re-run the loaded singleton may be a
+    previously-injected candidate — the probe state persists, so reporting
+    its hf_id is truthful), else the EMBEDDING_MODEL constant (T9 re-pointed
+    provenance to the constant — the single source of truth for the default
+    embedder). Degraded (no model — synthetic vectors): 'unavailable'.
+    """
     state = embedder_probe.get_state()
     if injected:
         if state is not None:
@@ -119,7 +121,7 @@ def _resolved_embedding_model(use_model: bool, injected: bool) -> str:
     if use_model:
         if state is not None:
             return str(state["hf_id"])
-        return embedder_probe.DEFAULT_MODEL_ID
+        return EMBEDDING_MODEL
     return "unavailable"
 
 

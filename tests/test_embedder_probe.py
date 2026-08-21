@@ -202,7 +202,7 @@ def test_reset_restores_original_state():
         # the restored symbol (proving the default path works again).
         model = EmbeddingModel.get()
         assert isinstance(model, FakeST)
-        assert model.model_name_or_path == "all-MiniLM-L6-v2"
+        assert model.model_name_or_path == probe.DEFAULT_MODEL_ID
     finally:
         _restore_st(prev)
 
@@ -213,15 +213,16 @@ def test_warm_process_swap_is_genuine():
         # Warm the singleton with the DEFAULT model first (no injection).
         warm = EmbeddingModel.get()
         assert isinstance(warm, FakeST)
-        assert warm.model_name_or_path == "all-MiniLM-L6-v2"
+        assert warm.model_name_or_path == probe.DEFAULT_MODEL_ID
         ref = np.asarray(warm.encode([probe._DISCRIMINATOR_TEXT]))[0]
 
-        # Inject a DIFFERENT candidate over the warm singleton.
-        state = probe.inject_model("bge-small")
-        assert state["hf_id"] == "BAAI/bge-small-en-v1.5"
+        # Inject a DIFFERENT candidate (minilm) over the warm bge-small
+        # singleton — the discriminating check must prove a genuine swap.
+        state = probe.inject_model("minilm")
+        assert state["hf_id"] == "sentence-transformers/all-MiniLM-L6-v2"
 
         new_model = EmbeddingModel.get()
-        assert new_model.model_name_or_path == "BAAI/bge-small-en-v1.5"
+        assert new_model.model_name_or_path == "sentence-transformers/all-MiniLM-L6-v2"
         new_vec = np.asarray(new_model.encode([probe._DISCRIMINATOR_TEXT]))[0]
         # Discriminating check: vectors must genuinely differ post-swap.
         assert probe._cosine(new_vec, ref) < probe.WARM_SWAP_COSINE_TOL

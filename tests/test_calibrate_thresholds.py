@@ -155,7 +155,8 @@ def test_cli_writes_report(tmp_path, monkeypatch):
     # (args → load_pairs → calibrate → out) is tested without the HF cache
     # (the sibling real-model tests carry the model-dependent coverage and
     # skip under HF_HUB_OFFLINE; this one must run everywhere).
-    monkeypatch.setattr(ct, "inject_model", lambda name: {"name": name})
+    monkeypatch.setattr(ct, "inject_model",
+                        lambda name, load_timeout=None: {"name": name})
     monkeypatch.setattr(ct, "_encode_with_model", fake_encode)
     out = tmp_path / "thresholds.json"
     rc = ct.main(["--model", "minilm", "--pairs", str(FIXTURE),
@@ -172,7 +173,8 @@ def test_cli_min_samples_flag_threads_through(tmp_path, monkeypatch):
         json.dumps({"content_a": f"a{i}", "content_b": f"b{i}",
                     "band": "near-dup", "label": "NEAR_DUPLICATE"})
         for i in range(40)))
-    monkeypatch.setattr(ct, "inject_model", lambda name: {"name": name})
+    monkeypatch.setattr(ct, "inject_model",
+                        lambda name, load_timeout=None: {"name": name})
     rc = ct.main(["--model", "minilm", "--pairs", str(fixture),
                   "--min-samples", "100"])
     assert rc != 0  # near-dup 40 < 100 → explicit error, exit 1

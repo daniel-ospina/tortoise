@@ -12,7 +12,12 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.embeddings import find_cross_source_matches  # noqa: E402
+from tortoise.embeddings import (  # noqa: E402
+    DEFAULT_THRESHOLD,
+    EMBEDDING_MODEL,
+    NEAR_DUPLICATE_THRESHOLD,
+    find_cross_source_matches,
+)
 
 
 # ── helpers ──────────────────────────────────────────────────────────
@@ -266,7 +271,9 @@ def test_sentence_transformers_path():
         )
         assert len(matches) == 1
         assert matches[0]["similarity"] >= 0.7
-        mock_st.SentenceTransformer.assert_called_once_with("all-MiniLM-L6-v2")
+        # #1349 T9: assert the CONSTANT (single model reference), not a
+        # literal — a model rotation touches exactly one line.
+        mock_st.SentenceTransformer.assert_called_once_with(mod.EMBEDDING_MODEL)
         mock_model.encode.assert_called_once()
     finally:
         # #399 (D9b): clear the singleton — it may hold the MOCK model loaded
@@ -278,6 +285,22 @@ def test_sentence_transformers_path():
         else:
             sys.modules["sentence_transformers"] = original
     print("PASS test_sentence_transformers_path")
+
+
+# ── 13. embedder constants (#1349 T9 swap) ────────────────────────────
+
+def test_embedder_constants():
+    """The active embedder + thresholds are the #1349 bge-small swap values.
+
+    EMBEDDING_MODEL is the single source of truth for the production model
+    id (pinned here so a swap is a one-line, test-verified change); the
+    thresholds are the bge-small calibration bands measured 2026-08-21
+    (tools/calibrate_thresholds --model bge-small).
+    """
+    assert EMBEDDING_MODEL == "BAAI/bge-small-en-v1.5"
+    assert DEFAULT_THRESHOLD == 0.72
+    assert NEAR_DUPLICATE_THRESHOLD == 0.89
+    print("PASS test_embedder_constants")
 
 
 # ── runner ───────────────────────────────────────────────────────────

@@ -7,10 +7,11 @@ The in-repo hard tier (#1144 eval runner) and the E2E-8 latency benchmark
   computes query vectors (spy on inject_model; probe state faked so no model
   download is required); --query-prompt threads through to the injection;
   provenance records embedding_model from the probe state — never the
-  hardcoded "all-MiniLM-L6-v2" literal.
+  default model id (EMBEDDING_MODEL).
 - benchmarks/run_report.py --model injects before the measurement and its
-  provenance reads the probe-recorded model id instead of the :639 literal
-  (the EMBEDDING_MODEL constant does not exist until T9/PR2).
+  provenance reads the probe-recorded model id; not-injected provenance
+  reads the EMBEDDING_MODEL constant (T9 re-pointed it — PR1's
+  :639 DEFAULT_MODEL_ID literal was pre-constant).
 - Real-model integration (all-MiniLM-L6-v2, cached locally) verifies the
   full path end-to-end: the injected model IS what _query_vecs encodes with
   (synthetic_query_vectors False). Skipped under HF_HUB_OFFLINE when not
@@ -33,10 +34,14 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from tests.eval.retrieval import run as run_module  # noqa: E402
 from tests.eval.retrieval.run import run_eval  # noqa: E402
+from tortoise.embeddings import EMBEDDING_MODEL  # noqa: E402
 
 ARCTIC_S_HF = "snowflake/snowflake-arctic-embed-s"
 MINILM_HF = "sentence-transformers/all-MiniLM-L6-v2"
-HARDCODED_LITERAL = "all-MiniLM-L6-v2"
+#: The default model id — injected-candidate provenance must NEVER report it
+#: (re-pointed to the EMBEDDING_MODEL constant by #1349 T9 so the assertion
+#: tracks rotations).
+DEFAULT_LITERAL = EMBEDDING_MODEL
 
 
 def _has_embedded() -> bool:
@@ -139,7 +144,7 @@ def test_model_flag_injects_before_query_vecs_and_records_provenance(tmp_path):
     assert calls == ["inject", "query_vecs"], \
         f"injection must precede query-vector computation, got order {calls}"
     assert report["provenance"]["embedding_model"] == ARCTIC_S_HF
-    assert report["provenance"]["embedding_model"] != HARDCODED_LITERAL
+    assert report["provenance"]["embedding_model"] != DEFAULT_LITERAL
 
 
 def test_query_prompt_threads_to_inject_model():
@@ -196,7 +201,7 @@ def test_real_minilm_injection_end_to_end(tmp_path):
 def test_benchmark_provenance_uses_injected_model_not_literal(tmp_path):
     """After --model arctic-s injection (probe mocked — arctic-s is not
     cached locally), the report's embedding_model equals the injected model
-    id, NOT the hardcoded "all-MiniLM-L6-v2" literal (:639)."""
+    id, NOT the default model id (EMBEDDING_MODEL)."""
     from benchmarks.run_report import run_benchmark
 
     with patch("tools.embedder_probe.inject_model",
@@ -207,7 +212,7 @@ def test_benchmark_provenance_uses_injected_model_not_literal(tmp_path):
             _bench_args(str(tmp_path / "bench-arctic.db"), model="arctic-s"))
 
     assert report["provenance"]["embedding_model"] == ARCTIC_S_HF
-    assert report["provenance"]["embedding_model"] != HARDCODED_LITERAL
+    assert report["provenance"]["embedding_model"] != DEFAULT_LITERAL
 
 
 @pytest.mark.skipif(not _has_embedded(), reason="embedded FalkorDBLite unavailable")
@@ -283,9 +288,10 @@ def test_warm_stale_provenance_reports_probe_state_when_loaded():
         assert run_module._resolved_embedding_model(
             use_model=True, injected=False) == ARCTIC_S_HF
     with patch("tools.embedder_probe.get_state", return_value=None):
-        # No probe state → the only model _load resolves unprefixed: default.
+        # No probe state → the only model _load resolves without the probe:
+        # the EMBEDDING_MODEL constant (#1349 T9 re-points provenance to it).
         assert run_module._resolved_embedding_model(
-            use_model=True, injected=False) == embedder_probe.DEFAULT_MODEL_ID
+            use_model=True, injected=False) == EMBEDDING_MODEL
         # Injected but no state (can't happen — inject HARD-FAILs): unavailable.
         assert run_module._resolved_embedding_model(
             use_model=False, injected=True) == "unavailable"
@@ -306,7 +312,7 @@ def test_benchmark_warm_stale_provenance_reports_probe_state_when_loaded():
             use_model=True, injected=False) == ARCTIC_S_HF
     with patch("tools.embedder_probe.get_state", return_value=None):
         assert _resolved_embedding_model(
-            use_model=True, injected=False) == embedder_probe.DEFAULT_MODEL_ID
+            use_model=True, injected=False) == EMBEDDING_MODEL
         assert _resolved_embedding_model(
             use_model=False, injected=True) == "unavailable"
 
@@ -320,7 +326,7 @@ def test_benchmark_query_prompt_threads_to_inject_model_and_provenance(tmp_path)
 
     calls: list[tuple] = []
 
-    def _fake_inject(name, query_prompt=None):
+    def _fake_inject(name, query_prompt=None, load_timeout=None):
         calls.append((name, query_prompt))
         return _fake_state(name)
 

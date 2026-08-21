@@ -34,7 +34,7 @@ from typing import Any
 
 import numpy as np
 
-from tortoise.embeddings import EmbeddingModel
+from tortoise.embeddings import EMBEDDING_MODEL, EmbeddingModel
 
 #: Short name → HF model id. Revision pins use the ``id@<commit>`` form —
 #: parsed by :func:`_split_pin`; the resolved revision is recorded at load.
@@ -49,8 +49,11 @@ PROBE_MODELS: dict[str, str] = {
     "bge-small": "BAAI/bge-small-en-v1.5",
 }
 
-#: The production literal resolved by EmbeddingModel._load() (embeddings.py).
-DEFAULT_MODEL_ID = "all-MiniLM-L6-v2"
+#: The production default — alias of the embeddings.py EMBEDDING_MODEL
+#: constant (#1349 T9: the constant is the single Python-side model
+#: reference; the probe's warm-singleton baseline must track it or a
+#: stale-singleton swap check compares against the wrong id).
+DEFAULT_MODEL_ID = EMBEDDING_MODEL
 
 #: All candidates are 384-dim; anything else is a HARD FAIL.
 EXPECTED_DIM = 384
