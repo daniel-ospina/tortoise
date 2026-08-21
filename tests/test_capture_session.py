@@ -1483,3 +1483,206 @@ def test_capture_session_recapture_shorter_conversation_pins_state(sdk):
         "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {pointKind:'event'}) "
         "RETURN collect(t.id)", params={"sid": sid}).result_set[0][0]
     assert set(wired) == {f"{sid}_t{i}" for i in range(3)}, wired
+
+
+# ── #1532 P4: capture-path parity (window / role / quota / MITIGATES / id) ──
+
+def test_capture_turn_window_truncates_content(sdk):
+    from tortoise.sdk import _capture_turn_window
+    conv = [{"role": "user", "content": "x" * 6000}]
+    out = _capture_turn_window(conv)
+    assert len(out[0]["content"]) == 5000
+    assert out[0]["content"] == "x" * 5000
+    assert len(conv[0]["content"]) == 6000, "input list is never mutated"
+
+
+def test_capture_turn_window_preserves_short_and_absent(sdk):
+    from tortoise.sdk import _capture_turn_window
+    conv = [{"role": "user", "content": "hi"},
+            {"role": "assistant", "content": None},
+            {"role": "user"}]                      # content key absent
+    out = _capture_turn_window(conv)
+    assert out[0]["content"] == "hi"
+    assert out[1]["content"] == ""                  # None -> "" (store-loop parity)
+    assert out[2]["content"] == ""
+
+
+def test_capture_turn_window_idempotent_when_pre_truncated(sdk):
+    """#1532 D1: running the window over an already-windowed conversation is
+    a no-op — the SDK loop's [:5000] and the extraction call can both apply
+    it without double-truncating."""
+    from tortoise.sdk import _capture_turn_window
+    conv = [{"role": "user", "content": "y" * 5000}]
+    out = _capture_turn_window(conv)
+    assert out[0]["content"] == "y" * 5000
+
+
+def test_normalize_turn_role_matches_sdk_loop(sdk):
+    from tortoise.sdk import _normalize_turn_role
+    assert _normalize_turn_role("user") == "user"
+    assert _normalize_turn_role(None) == "unknown"
+    assert _normalize_turn_role(123) == "123"
+    assert _normalize_turn_role({"a": 1}) == "{'a': 1}"
+    assert _normalize_turn_role(False) == "False"   # falsy non-string, not swallowed
+
+
+def test_capture_extraction_input_is_stored_window(sdk, monkeypatch):
+    """#1532 D1: the extraction call receives the truncated conversation —
+    a phrase past the 5000-char cut must not reach the LLM (v2's
+    _edus_from_conversation uses RAW content, so the capture loop must
+    pre-window before the extraction call)."""
+    from tortoise import sdk as sdk_mod
+    seen: list = []
+    orig = sdk_mod.TortoiseSDK._extract_session_v2
+
+    def spy(self, conversation, session_id, now):
+        seen.append([t["content"] for t in conversation])
+        return orig(self, conversation, session_id, now)
+
+    monkeypatch.setattr(sdk_mod.TortoiseSDK, "_extract_session_v2", spy)
+
+    content = ("plain filler text without triggers. " * 200) + "evidence suggests the fix landed."
+    assert len(content) > 5000
+    sdk.capture_session([{"role": "user", "content": content}])
+    assert seen and all(len(c) <= 5000 for c in seen[0]), \
+        "extraction input must be the stored window"
+
+
+def test_extraction_estimate_v2_shape(sdk):
+    from tortoise.sdk import _session_extraction_estimate
+    conv = [{"role": "user", "content": "one. two. three."}]  # 3 sentences
+    m2 = _session_extraction_estimate(conv, extractor="m2")
+    v2 = _session_extraction_estimate(conv, extractor="v2")
+    assert m2 == 6          # 3 sentences * 2 (points + operators)
+    assert v2 == 9          # 3 * 3 (points + operators + entities/events)
+    assert v2 > m2
+
+
+def test_extraction_estimate_default_is_v2(sdk, monkeypatch):
+    monkeypatch.delenv("TORTOISE_EXTRACTOR", raising=False)
+    from tortoise.sdk import _session_extraction_estimate
+    conv = [{"role": "user", "content": "one. two."}]
+    assert _session_extraction_estimate(conv) == 6  # v2 default (2 sentences * 3)
+
+
+def test_extraction_estimate_legacy_alias(sdk, monkeypatch):
+    """#1532 D4: the deprecated-compat name resolves to the same v2-aware
+    estimator — pre-migration callers keep working."""
+    from tortoise.sdk import _session_extraction_estimate, \
+        _session_llm_extraction_estimate
+    conv = [{"role": "user", "content": "one. two. three."}]
+    assert _session_llm_extraction_estimate(conv) == \
+        _session_extraction_estimate(conv)
+
+
+def test_capture_writes_mitigates_artifact(sdk, monkeypatch):
+    """#1532 D3: capture applies v2 payload MITIGATES -> mitigation artifact
+    identical to the commit path (mitigation Point + IMPL + mitigated_by),
+    with the same content-derived reason."""
+    import tortoise.extractor_v2 as ev2
+    payload = {"session_id": "sess_mit", "story_arc": "", "entities": [],
+               "events": [],
+               "points": [
+                   {"id": "pt_x", "content": "it's cheap",
+                    "pointKind": "statement"},
+                   {"id": "pt_a", "content": "option A",
+                    "pointKind": "statement"},
+                   {"id": "pt_z", "content": "we can raise the price",
+                    "pointKind": "statement"},
+               ],
+               "operators": [
+                   {"src": "pt_x", "dst": "pt_a", "op_type": "IMPL",
+                    "direction": "unidirectional"},
+                   {"src": "pt_z", "dst": "pt_a", "op_type": "MITIGATES",
+                    "target": {"src": "pt_x", "dst": "pt_a",
+                               "op_type": "IMPL"},
+                    "strength": 0.4},
+               ],
+               "supersessions": [], "client_commit_id": "ccid"}
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        lambda *a, **kw: _v2_out(payload=payload))
+    res = sdk.capture_session(
+        [{"role": "user", "content": "we can raise the price."}])
+    assert res["ok"] is True, res["errors"]
+    proj = sdk._get_proj()
+    rows = proj.g.query(
+        "MATCH (op:Point {is_operator:true, op_type:'IMPL'}) "
+        "MATCH (m:Point)-[:IMPL]->(op) "
+        "MATCH (op)-[:mitigated_by]->(m) "
+        "RETURN m.mitigation_strength, m.content",
+    ).result_set
+    assert rows, "capture must write the mitigation artifact"
+    assert rows[0][0] == 0.4
+    assert "raise the price" in rows[0][1], \
+        f"reason must be the mitigating point's content, got {rows[0][1]!r}"
+
+
+def test_capture_mitigates_deep_miss_dropped_not_raised(sdk, monkeypatch):
+    """#1532 D3: a MITIGATES whose target IMPL edge is absent is DROPPED
+    (support-edge-first, DE2E-11 negative) — never raises, never attaches."""
+    import tortoise.extractor_v2 as ev2
+    payload = {"session_id": "sess_mitmiss", "story_arc": "", "entities": [],
+               "events": [],
+               "points": [
+                   {"id": "pt_x", "content": "it's cheap",
+                    "pointKind": "statement"},
+                   {"id": "pt_z", "content": "we can raise the price",
+                    "pointKind": "statement"},
+               ],
+               "operators": [
+                   {"src": "pt_z", "dst": "pt_a", "op_type": "MITIGATES",
+                    "target": {"src": "pt_x", "dst": "pt_a",
+                               "op_type": "IMPL"},
+                    "strength": 0.4},
+               ],
+               "supersessions": [], "client_commit_id": "ccid"}
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        lambda *a, **kw: _v2_out(payload=payload))
+    res = sdk.capture_session(
+        [{"role": "user", "content": "we can raise the price."}])
+    assert res["ok"] is True, \
+        "a deep-miss mitigation must never fail the capture"
+    proj = sdk._get_proj()
+    rows = proj.g.query(
+        "MATCH (m:Point)-[:mitigated_by]->(op:Point) RETURN count(m)",
+    ).result_set
+    assert rows[0][0] == 0, \
+        "no mitigation may attach without its target IMPL edge"
+
+
+def test_client_commit_id_capture_parity(sdk, monkeypatch):
+    """#1532 MECE: capture routes through the SAME supersessions-inclusive
+    computation as commit — assertion, not re-implementation (E5 #1537 owns
+    the functional 3-site agreement; the capture payload is execute_embed's,
+    stamped at site 1 and re-stamped identically at _post_commit site 2)."""
+    from tortoise import extractor_v2 as ev2
+    from tortoise.commit_schema import compute_client_commit_id
+    captured: dict = {}
+    real = ev2.extract_session_v2
+
+    def spy(model, conversation, **kw):
+        out = real(model, conversation, **kw)
+        if out.get("payload"):
+            captured["payload"] = out["payload"]
+        return out
+
+    monkeypatch.setattr(ev2, "extract_session_v2", spy)
+    res = sdk.capture_session([{"role": "user",
+                                "content": "we adopted strategy B, dropping A."}])
+    assert res["ok"] is True, res["errors"]
+    payload = captured.get("payload")
+    assert payload, "capture must produce a Layer-1 payload (v2 wiring)"
+    cid = payload["client_commit_id"]
+    assert cid, "payload must carry a stamped client_commit_id"
+    expected = compute_client_commit_id(
+        payload["session_id"], payload["points"], payload["entities"],
+        payload["operators"], payload["summary"], payload["story_arc"],
+        payload.get("events", []), payload.get("supersessions", []))
+    assert cid == expected, \
+        "capture payload id must equal the shared supersessions-inclusive computation"
+    # Re-stamping through the commit path's _post_commit signature (site 2)
+    # reproduces the same id — capture and commit cannot drift.
+    assert compute_client_commit_id(
+        payload["session_id"], payload["points"], payload["entities"],
+        payload["operators"], payload["summary"], payload["story_arc"],
+        payload.get("events", []), payload.get("supersessions", [])) == cid

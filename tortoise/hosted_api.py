@@ -41,8 +41,10 @@ from collections.abc import Hashable
 
 from tortoise.sdk import (
     TortoiseSDK,
+    _capture_turn_window,      # #1532 D1: shared stored-window truncation
     _content_hash,
-    _session_llm_extraction_estimate,
+    _normalize_turn_role,      # #1532 D2: shared role normalization (None->unknown)
+    _session_extraction_estimate,  # #1532 D4: v2-aware pre-write quota estimate
     _session_llm_transcript,  # P1 #1529: the shared empty/blank conversation gate
 )
 from tortoise.abuse import _int_env  # #1081 signup limiter env knobs (abuse.py:57)
@@ -3652,22 +3654,12 @@ async def toggle_api_key_enabled(
 class SessionRequest(BaseModel):
     conversation: list[dict] = Field(..., max_length=1000)
 
-    @field_validator("conversation")
-    @classmethod
-    def valid_conversation(cls, v: list[dict]) -> list[dict]:
-        for turn in v:
-            content = turn.get("content", "")
-            if not isinstance(content, str):
-                # P1 #1529 (D10): non-str content is coerced in the handler
-                # turn loop; skipping the length check here means None/int/bool
-                # can never crash the validator into a raw 500 (Pydantic v2
-                # propagates non-ValueError exceptions). Dict content (len =
-                # key count) also skips — the ≤5000 rule applies to real text;
-                # the stored form is still truncated at 5000.
-                continue
-            if len(content) > 5000:
-                raise ValueError("each conversation turn content must be ≤ 5000 characters")
-        return v
+    # #1532 D1 (contract change, flagged): hosted previously rejected per-turn
+    # content > 5000 chars with 422 (Pydantic field_validator failure); it now
+    # accepts and truncates to the 5000-char stored window exactly like the SDK
+    # (the shared _capture_turn_window helper in the handler — both paths
+    # produce byte-identical stored turns). Non-str content is coerced in the
+    # handler turn loop (P1 #1529 D10) — no validator-side crash surface.
     session_id: str | None = None
     metadata: dict | None = None
 
@@ -3753,13 +3745,21 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
             detail=f"Session turn cap exceeded: {len(body.conversation)} > {MAX_SESSION_TURNS}.",
         )
 
+    # #1532 D1: compute the shared stored-window conversation ONCE — the
+    # empty/blank gate, the turn-store loop, and the extraction call all
+    # consume the SAME window so the extractors can never see a phrase with no
+    # home in any stored turn (stored-source parity; >5000 turns are accepted
+    # and truncated here — the old 422 is removed, D1 contract change).
+    windowed = _capture_turn_window(body.conversation)
+
     # P1 #1529 (D3): empty/blank conversation fails closed BEFORE any write —
-    # whole-conversation transcript emptiness, the SAME signal the extractors
-    # use, so the gate and the extractors cannot disagree (E2E-8 owned
-    # negative: an empty conversation is never ok=True / a silent extracted:0).
-    # 422 over 400: same family as the existing Pydantic 422 for >5000-char
-    # content; a handler-level check because blankness is transcript-derived.
-    transcript, _est = _session_llm_transcript(body.conversation)
+    # whole-conversation transcript emptiness (of the STORED window, the exact
+    # input the extractors receive), the SAME signal the extractors use, so
+    # the gate and the extractors cannot disagree (E2E-8 owned negative: an
+    # empty conversation is never ok=True / a silent extracted:0).
+    # 422 over 400: same family as the empty-conversation rejection; a
+    # handler-level check because blankness is transcript-derived.
+    transcript, _est = _session_llm_transcript(windowed)
     if not transcript.strip():
         raise HTTPException(
             status_code=422,
@@ -3769,13 +3769,16 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     # Extraction-aware estimate (pre-write, fail-closed count) — review P2,
     # PR #976: the points quota counts NON-episodic Points only, and turn
     # Points/Session/Event are episodic — the estimate is the EXTRACTED set
-    # (M2 LLM points + IMPL/NAND operator nodes, #822):
-    #   est = 2 × Σ_turns min(sentences, MAX_EXTRACTIONS_PER_TURN)
-    # (the ×2 covers the relations stage's operator nodes the old regex loop
-    # never created; sentence count is the M2 point ceiling — one point per
-    # utterance; operators are clamped ≤ points in LLMExtractor.run, #1194,
-    # so the ×2 is a true ceiling).
-    est = _session_llm_extraction_estimate(body.conversation)
+    # (#1532 D4):
+    #   v2 (default): 3 × Σ_turns min(sentences, MAX_EXTRACTIONS_PER_TURN)
+    #     — points + operators (≤ points via Layer-1 drop) + a ×1 allowance
+    #     for entities/events (v2's four non-episodic node classes).
+    #   m2 (TORTOISE_SESSION_EXTRACTOR=m2): 2 × Σ min(sentences, cap) — the
+    #     historical points+operators shape (#822).
+    # (the sentence cap is the M2 point ceiling — one point per utterance;
+    # operators are clamped ≤ points in LLMExtractor.run, #1194, so the ×2 is
+    # a true ceiling; ×3 keeps the v2 gate fail-closed over-count).
+    est = _session_extraction_estimate(windowed)
     from tortoise.quota import count_team_usage
     sdk_team = _make_sdk(namespace=team["team_id"])
     try:
@@ -3817,23 +3820,21 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     extracted = []
 
     # NOTE: this per-turn loop (episodic turn Points) is duplicated from
-    # tortoise/sdk.py capture_session. Divergences: hosted adds quota/auth
-    # bounds + a pre-write estimate; the SDK variant adds a `speaker` property
-    # on turn Points (delta 5) that hosted does not write. Hosted rejects turn
-    # content > 5000 chars with 422 (Pydantic field_validator failure), the
-    # SDK truncates to 5000 and the extraction transcript is built from the
-    # truncated text — extraction inputs align (both see <= 5000 chars);
-    # role=None stays None in hosted, the SDK normalizes it to "unknown".
-    # Keep the two in sync. The LLM extraction that follows the loop is
-    # shared via sdk._extract_session_llm (#822).
-    for i, turn in enumerate(body.conversation):
-        role = turn.get("role", "unknown")
+    # tortoise/sdk.py capture_session — the shared primitives #1532 D1/D2
+    # (_capture_turn_window / _normalize_turn_role) keep the two loops
+    # byte-identical for identical input: same stored-window truncation, same
+    # role normalization (None -> "unknown", truthy non-strings -> str()), and
+    # the same `speaker` property write (delta 5 — hosted previously wrote no
+    # speaker tag). Hosted additionally adds quota/auth bounds + a pre-write
+    # estimate. Keep the two in sync. The LLM extraction that follows the
+    # loop is shared via sdk._extract_session_llm/_extract_session_v2 (#822).
+    for i, turn in enumerate(windowed):
+        role = _normalize_turn_role(turn.get("role"))
         # P1 #1529 (D10, #721 parity): isinstance-first content coercion — a
         # non-string content can NEVER crash the loop into a raw 500 after the
-        # Session MERGE (partial write). The D10 validator guard keeps
-        # None/int/bool out of the validator; dict content passes and is
-        # coerced here. role is NOT coerced (hosted stores non-str roles raw
-        # today — role parity is P4's speaker lane, not a crash risk).
+        # Session MERGE (partial write). The window helper already coerced
+        # None/int/bool/dict content and truncated to the 5000-char cap — this
+        # readback is the idempotent same-shape guard.
         raw_content = turn.get("content", "")
         content = raw_content if isinstance(raw_content, str) else (
             "" if raw_content is None else str(raw_content))
@@ -3851,12 +3852,14 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
         proj.g.query(
             "MERGE (t:Point {id:$id}) "
             "SET t.content=$c, t.pointKind=$k, t.is_operator=false, "
+            "    t.speaker=$speaker, "
             "    t.is_episodic=true, "
             "    t.status=coalesce(t.status, $s), "
             "    t.createdAt=coalesce(t.createdAt, $now), "
             "    t.updatedAt=$now, t.content_hash=$ch",
             params={"id": turn_id, "c": turn_text, "k": "event",
-                    "s": "draft", "now": now, "ch": _content_hash(turn_text)},
+                    "speaker": role, "s": "draft", "now": now,
+                    "ch": _content_hash(turn_text)},
         )
         proj.g.query(
             "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
@@ -3883,7 +3886,7 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
         # are structured, never raised (turn points have already landed).
         try:
             extracted, meta = sdk._extract_session_llm(
-                body.conversation, session_id, now)
+                windowed, session_id, now)
         except ValueError as e:
             # no-key fail-closed (outer 503 gate normally catches this first;
             # belt-and-braces so an inner/outer drift never 500s, #1468).
@@ -3891,7 +3894,7 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     else:
         try:
             extracted, meta = sdk._extract_session_v2(
-                body.conversation, session_id, now)
+                windowed, session_id, now)
         except ValueError as e:
             raise HTTPException(status_code=503, detail=str(e)) from e
 
@@ -4438,51 +4441,22 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: "CommitPayload", plan):
                 params={"pid": pid, "name": name},
             )
 
-    # ── 7. Operators — (src,dst,op_type) MERGE key (PL1, no op_<sha> ids).
-    # IMPL/NAND first (draft extraction operators, promote_source=False — #780
-    # convention); MITIGATES second (targets a same-commit IMPL edge — the
-    # existing mitigate_operator mechanism: mitigation Point + (m)-[:IMPL]->(op)
-    # + (op)-[:mitigated_by]->(m), §4.2). ──
-    target_op_ids: dict[tuple, str] = {}
-    for op_rec in reconcile.operators:
-        op = op_rec.operator
-        if op_rec.action != "new" or op.op_type == "MITIGATES":
-            continue
-        try:
-            result = sdk.create_operator(
-                op.op_type, op.src, [op.dst],
-                direction=op.direction or "unidirectional",
-                promote_source=False,
-            )
-        except ValueError as e:
-            _logger.warning(
-                "commit: operator write skipped (inputs missing?): %s", e)
-            continue
-        target_op_ids[(op.src, op.dst, op.op_type)] = result["id"]
-    for op_rec in reconcile.operators:
-        op = op_rec.operator
-        if op_rec.action != "new" or op.op_type != "MITIGATES":
-            continue
-        t = op.target
-        op_id = target_op_ids.get((t.src, t.dst, t.op_type))
-        if op_id is None:
-            rows = proj.g.query(
-                "MATCH (o:Point {is_operator:true, op_type:'IMPL'}) "
-                "MATCH (o)-[:IMPL {idx:0}]->(s) WHERE (s:Point OR s:Event) AND s.id = $src "
-                "MATCH (o)-[:IMPL {idx:1}]->(d) WHERE (d:Point OR d:Event) AND d.id = $dst "
-                "RETURN o.id LIMIT 1",
-                params={"src": t.src, "dst": t.dst},
-            ).result_set
-            op_id = rows[0][0] if rows else None
-        if op_id is None:
-            # Deep-miss (DE2E-11 negative): the target IMPL edge is absent —
-            # the mitigation must NOT attach (support-edge-first convention).
-            _logger.warning(
-                "commit: MITIGATES target edge (%s,%s,IMPL) not found — "
-                "mitigation dropped", t.src, t.dst)
-            continue
-        reason = _point_content_by_id(payload, op.src) or f"[MITIGATION] {op.src}"
-        sdk.mitigate_operator(op_id, reason=reason, strength=op.strength or 0.5)
+    # ── 7. Operators — shared commit semantics via apply_payload_operators
+    # (#1532 D3; extracted verbatim from this block so the commit and capture
+    # write paths cannot drift): IMPL/NAND first (draft extraction operators,
+    # promote_source=False — #780 convention) via sdk.create_operator;
+    # MITIGATES second (targets a same-commit IMPL edge — the existing
+    # mitigate_operator mechanism: mitigation Point + (m)-[:IMPL]->(op) +
+    # (op)-[:mitigated_by]->(m), §4.2). Same-commit map → Cypher fallback →
+    # deep-miss drop (DE2E-11 negative, support-edge-first) live in the
+    # helper — TestMitigates is the refactor-safety gate. ──
+    from tortoise.commit_ops import apply_payload_operators
+    apply_payload_operators(
+        proj, sdk,
+        [op_rec.operator for op_rec in reconcile.operators
+         if op_rec.action == "new"],
+        point_content_by_id=lambda pid: _point_content_by_id(payload, pid),
+    )
 
 
 @app.post("/v1/sessions/commit")
