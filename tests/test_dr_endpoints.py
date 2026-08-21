@@ -30,6 +30,17 @@ GOOD_ENV = {
 }
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _close_seed_sdks():
+    """Close held seed SDKs at session end (see _SEED_SDKS docstring)."""
+    yield
+    while _SEED_SDKS:
+        try:
+            _SEED_SDKS.pop().close()
+        except Exception:
+            pass
+
+
 @pytest.fixture
 def client():
     """TestClient with the internal key configured + a temp FalkorDBLite DB."""
@@ -76,8 +87,19 @@ def mem_storage(monkeypatch):
     return store
 
 
+# #1587/#1579: hold seed SDKs alive — `_seed_team` creates a registry SDK
+# that goes out of scope at function end; with #1475 close-on-GC the shared
+# embedded server is shut down before the sweep/drill handler opens its own
+# SDK, so the seed's writes are lost ('no_teams' / empty-manifest IndexError
+# flake). Same pattern as _REG_SDKS in test_invites_http.py (#1556).
+_SEED_SDKS: list = []
+
+
 def _seed_team(team_id: str = "team_x", nodes: int = 2) -> None:
-    sdk = TortoiseSDK("/tmp/x.db", namespace="registry")
+    # The path arg is IGNORED under the client fixture's patched __init__
+    # (all current callers use client); the SDK binds to the per-test temp DB.
+    sdk = TortoiseSDK(namespace="registry")
+    _SEED_SDKS.append(sdk)
     reg = sdk._get_registry()
     reg.query("MATCH (t:Team {id:$id}) DELETE t", params={"id": team_id})
     reg.query("CREATE (t:Team {id:$id, tier:'pro'})", params={"id": team_id})
