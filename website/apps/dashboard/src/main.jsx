@@ -529,6 +529,13 @@ function claimIntentInFlight() {
           setChecking(false); return
         }
         sessionTokenRef.current = session.access_token
+        // #1567: the session is valid — render the app chrome NOW and let the
+        // mint + loads hydrate in the background (the multi-second
+        // "Checking your session…" card is gone for session holders). The
+        // #1559 error paths below setAuthed(false) so the error card still
+        // replaces the chrome on failure.
+        setAuthed(true)
+        setChecking(false)
         // Round-6 (P2): supabase-js auto-refreshes the access token (~1h) into
         // the cookie — keep the ref in sync so JWT-scoped calls never die with
         // a stale token while the dashboard still looks logged in.
@@ -640,11 +647,13 @@ function claimIntentInFlight() {
             }
           } catch { /* fall through to mint */ }
         }
+        let mintedTeamId = null
         if (!key) {
           const firstTeamId = teamsList.length ? teamsList[0].team_id : null
           try {
             const minted = await mintSessionKey('bootstrap', firstTeamId)
             key = minted.key
+            mintedTeamId = minted.teamId || null
             if (minted.teamId) teamKeysRef.current[minted.teamId] = key
           } catch (e) {
             // #308: a suspended team's mint 403s — show the appeal banner.
@@ -658,14 +667,22 @@ function claimIntentInFlight() {
             setMountError(/429|rate limit/i.test(msg)
               ? 'Too many requests from this network — try again in a minute.'
               : msg)
+            setAuthed(false)  // #1567 P0: the error card renders in !authed
             setChecking(false)
             return
           }
         }
         // Round-9: a SIGNED_OUT during the mint must not complete the login
         // with a fresh key on the tab the user just signed out of.
-        if (!sessionTokenRef.current) { setChecking(false); setMountError('Your session ended — sign in again.'); return }
-        if (!key) { setChecking(false); setMountError('Could not prepare your session — try again.'); return }
+        if (!sessionTokenRef.current) { setAuthed(false); setChecking(false); setMountError('Your session ended — sign in again.'); return }
+        if (!key) { setAuthed(false); setChecking(false); setMountError('Could not prepare your session — try again.'); return }
+        // #1567 P1 (verifier gate): the chrome is visible NOW — a team
+        // switch made during the mint (multi-membership: the mint-400
+        // fallback populated the switcher early) must not be clobbered by
+        // this continuation. Bail before any state write if the selection
+        // moved away from the key's owner (teamIdRef is null on a fresh
+        // session — the stored-key path and Round-8 loadTeams own it then).
+        if (mintedTeamId && teamIdRef.current && teamIdRef.current !== mintedTeamId) return
         localStorage.setItem(KEY_STORAGE, key)
         setApiKey(key)
         apiKeyRef.current = key
