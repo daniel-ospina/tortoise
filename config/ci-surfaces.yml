@@ -187,6 +187,7 @@ surfaces:
   - test_judge_harness.py
   - test_linear_connector.py
   - test_list_contexts.py
+  - test_longmem_reader_pinning.py
   - test_longmem_reader_prompting.py
   - test_longmem_runner.py
   - test_lookup_hash.py
@@ -227,6 +228,7 @@ surfaces:
   - test_remove_context_migration.py
   - test_render.py
   - test_review_connections.py
+  - test_run_protocol.py
   - test_search_engine.py
   - test_search_engine_gaps.py
   - test_search_engine_nameerror.py
