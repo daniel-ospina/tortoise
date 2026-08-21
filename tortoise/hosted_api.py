@@ -7889,8 +7889,30 @@ async def backups_list(team: dict = Depends(get_current_team)):
 def _registry_sdk() -> TortoiseSDK:
     """Registry-namespaced SDK — Team/Membership nodes live in the canonical
     registry_control_plane graph, reached only via namespace='registry' (the
-    same resolution every other registry op in this file uses)."""
-    return _make_sdk(namespace="registry")
+    same resolution every other registry op in this file uses).
+
+    #1579: the embedded-store CONNECT (FalkorProjection construction inside
+    the first ``_get_proj()``) can transiently fail under parallel-suite
+    temp-DB contention (redis ConnectionError / OSError-family — the same
+    class the #1565 probe_db retry clears). Eager-connect here with ONE
+    retry so drill/sweep/restore handlers never 500 on a momentary connect
+    blip; a persistent failure still raises (a genuinely broken DB must keep
+    failing). Reuses monitoring._is_transient_connect_error — a builtin or
+    redis TimeoutError is NEVER retried (a hung DB stays hung).
+    """
+    from tortoise.monitoring import (
+        _is_transient_connect_error, PROBE_RETRY_DELAY,
+    )
+
+    sdk = _make_sdk(namespace="registry")
+    try:
+        sdk._get_proj()  # eager: surface the connect failure here, retried below
+    except Exception as exc:  # noqa: BLE001
+        if not _is_transient_connect_error(exc):
+            raise
+        time.sleep(PROBE_RETRY_DELAY)
+        sdk._get_proj()  # ONE retry — same SDK; _proj stays None until success
+    return sdk
 
 
 # Per-team restore serialization: the swap (delete live → copy temp) must not
