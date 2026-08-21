@@ -638,6 +638,12 @@ class TestSessionCapture:
         # extractor via the mock seam reports the resolved route ("llm:mock").
         assert body["extraction_mode"] == "llm:mock"
         assert body["extraction_provider"] == "mock"
+        # P1 #1529: success responses carry the fail-closed surface — additive
+        # errors/warnings. E3 (#1535) emits a source-turn resolution warning
+        # on the offline mock path, so warnings is an additive LIST (never
+        # crashes the response) — assert list-ness, not emptiness.
+        assert body["errors"] == []
+        assert isinstance(body["warnings"], list)
 
     def test_capture_session_with_explicit_id(self, client):
         r = client.post(
@@ -664,15 +670,19 @@ class TestSessionCapture:
         assert body["extraction_mode"] == "llm:mock"
         assert body["extraction_provider"] == "mock"
 
-    def test_capture_session_handles_empty_conversation(self, client):
-        r = client.post(
-            "/v1/sessions",
-            json={"conversation": []},
-        )
-        assert r.status_code == 200, r.text
-        body = r.json()
-        assert body["turns"] == 0
-        assert body["extracted"] == 0
+    def test_capture_session_empty_conversation_rejected(self, client):
+        """P1 #1529 (E2E-8 owned negative): an empty conversation is rejected
+        with 422 BEFORE any write — never a "graceful" 200 + extracted:0, and
+        no Session node may be written."""
+        r = client.post("/v1/sessions", json={"conversation": []})
+        assert r.status_code == 422, r.text
+        assert "extractable content" in r.json()["detail"]
+        import tortoise.hosted_api as ha_mod
+        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        sessions = sdk._get_proj().g.query(
+            "MATCH (s:Session) RETURN count(s)").result_set
+        assert sessions[0][0] == 0, \
+            "no Session node may be written for an empty capture"
 
     def test_capture_session_rejects_missing_conversation(self, client):
         r = client.post("/v1/sessions", json={})
@@ -727,9 +737,11 @@ class TestSessionCapture:
     def test_capture_session_turn_points_are_session_scoped(self, client):
         """#490 P2-2: turn Points are the episodic stream OF THIS SESSION —
         identical turns in DIFFERENT sessions must NOT collapse into one
-        Point (only extracted claims dedup across sessions)."""
+        Point (only extracted claims dedup across sessions).
+        P1 #1529: content must be non-blank ("ok" is below the 3-char floor
+        → the whole-conversation blank gate would 422 pre-mutation)."""
         conv = [
-            {"role": "user", "content": "ok"},
+            {"role": "user", "content": "okay"},
         ]
         r1 = client.post("/v1/sessions", json={"conversation": conv})
         r2 = client.post("/v1/sessions", json={"conversation": conv})
@@ -767,6 +779,231 @@ class TestSessionCapture:
             params={"sid": "same-session-490"},
         ).result_set
         assert r[0][0] == 1, f"expected 1 turn Point, got {r[0][0]}"
+
+    # ── P1 (#1529): fail-closed capture at the HTTP layer ─────────────────
+
+    def test_capture_session_blank_conversation_rejected(self, client):
+        """P1: whole-conversation blank → 422. Requires the D10 validator
+        guard (None content would otherwise 500 in Pydantic before the
+        handler)."""
+        for conv in ([{"role": "user", "content": "ok"}],
+                     [{"role": None, "content": None}],
+                     [{"role": "user"}],
+                     [{"role": "user", "content": " " * 5000}],
+                     [{"role": "user", "content": 0}],
+                     [{"role": "user", "content": "ab"}]):
+            r = client.post("/v1/sessions", json={"conversation": conv})
+            assert r.status_code == 422, (conv, r.text)
+
+    def test_capture_session_llm_failure_surfaces_errors(self, client, monkeypatch):
+        """P1: extraction failure (DEFAULT v2 branch) → 200 + additive errors,
+        warnings == [], mode 'error', turn points + Event + agentSession Source
+        still land (documented partial, never a silent extracted:0)."""
+        import tortoise.extractor_v2 as ev2
+
+        def _v2_fail(model, conversation, **kw):
+            return {"session_id": "s", "story_arc": "", "embed_list": {},
+                    "search": {}, "payload": None, "chain_notes": [],
+                    "link_before_create": [], "supersessions": [],
+                    "warnings": [], "minted_kinds": [], "stats": {},
+                    "errors": ["RuntimeError: provider returned 500"]}
+
+        monkeypatch.setattr(ev2, "extract_session_v2", _v2_fail)
+        r = client.post("/v1/sessions", json={
+            "conversation": [{"role": "user", "content": "I think auth is the top issue."}]})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["extraction_mode"] == "error"
+        assert body["extracted"] == 0
+        assert any("provider returned 500" in e for e in body["errors"])
+        assert body["warnings"] == [], "failure carries errors, never warnings"
+        import tortoise.hosted_api as ha_mod
+        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        proj = sdk._get_proj()
+        turns = proj.g.query(
+            "MATCH (t:Point {pointKind:'event'}) RETURN count(t)").result_set
+        assert turns[0][0] == 1, "turn points must still land"
+        events = proj.g.query(
+            "MATCH (e:Event {eventKind:'sessionCaptured'}) RETURN count(e)").result_set
+        assert events[0][0] == 1, "the capture attempt is recorded (hosted Event block)"
+        sources = proj.g.query(
+            "MATCH (s:Source) WHERE s.sourceKind='agentSession' RETURN count(s)").result_set
+        assert sources[0][0] == 1, "the agentSession Source is materialized on failure too"
+
+    def test_capture_session_partial_emission_surfaces_points(self, client, monkeypatch):
+        """P1 (D2 at the HTTP layer, M2 branch): partial emission → 200 + mode
+        'error' + warnings == [] + extracted > 0; partial points wired; Event
+        recorded."""
+        class _Partial:
+            version = "partial@0"
+
+            def run(self, transcript, source_id, api):
+                api.add_point("decision: ship serve first", {"source": source_id})
+                raise RuntimeError("provider rate limited mid-run")
+
+        monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+        monkeypatch.setattr("tortoise.sdk._build_session_llm_extractor",
+                            lambda: _Partial())
+        r = client.post("/v1/sessions", json={
+            "conversation": [{"role": "user", "content": "I think auth is the top issue."}]})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["extraction_mode"] == "error"
+        assert body["extracted"] == len(body["points"]) >= 1
+        assert any("RuntimeError" in e for e in body["errors"])
+        assert body["warnings"] == [], "failure carries errors, never warnings"
+        import tortoise.hosted_api as ha_mod
+        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        proj = sdk._get_proj()
+        wired = proj.g.query(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+            "WHERE p.pointKind IS NULL RETURN count(p)",
+            params={"sid": body["session_id"]}).result_set
+        assert wired[0][0] == body["extracted"], "partial points must be wired"
+        events = proj.g.query(
+            "MATCH (e:Event {eventKind:'sessionCaptured'}) RETURN count(e)").result_set
+        assert events[0][0] == 1, "the capture attempt is recorded on partial failure"
+
+    def test_capture_session_zero_extraction_warns(self, client, monkeypatch):
+        """P1 (D6 at the HTTP layer): completed-but-empty extraction → 200 +
+        additive warning, truthful mode (surface 26 on both surfaces)."""
+        class _EmptyOut:
+            version = "empty-out@0"
+
+            def run(self, transcript, source_id, api):
+                pass
+
+        monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+        monkeypatch.setattr("tortoise.sdk._build_session_llm_extractor",
+                            lambda: _EmptyOut())
+        r = client.post("/v1/sessions", json={
+            "conversation": [{"role": "user", "content": "the weather today is fine"}]})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["extraction_mode"] == "llm"
+        assert body["extracted"] == 0
+        assert any("no points" in w for w in body["warnings"])
+        assert body["errors"] == []
+
+    def test_capture_session_non_string_content_coerced(self, client):
+        """P1 (#721 parity): non-string turn content must NOT crash — neither
+        in the Pydantic validator (D10 guard) nor in the turn loop. Split by
+        the whole-conversation blank gate: single-turn 0 is BLANK → 422;
+        non-blank coerced forms (12345, False, dict-with-words) → 200 +
+        stored. Explicit session ids make graph assertions deterministic."""
+        r = client.post("/v1/sessions", json={
+            "conversation": [{"role": "user", "content": 0}], "session_id": "coerce-s0"})
+        assert r.status_code == 422, r.text
+        assert "extractable content" in r.json()["detail"]
+        cases = [("coerce-s1", {"text": "we decided to ship v2"}),
+                 ("coerce-s2", 12345),
+                 ("coerce-s4", False),
+                 ("coerce-s5", {"text": None}),
+                 ("coerce-s6", [1, 2, 3])]
+        for sid, content in cases:
+            r = client.post("/v1/sessions", json={
+                "conversation": [{"role": "user", "content": content}],
+                "session_id": sid})
+            assert r.status_code == 200, (content, r.text)
+            assert r.json()["turns"] == 1
+        import tortoise.hosted_api as ha_mod
+        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        expected = {"coerce-s1": "[user] {'text': 'we decided to ship v2'}",
+                    "coerce-s2": "[user] 12345",
+                    "coerce-s4": "[user] False",
+                    "coerce-s5": "[user] {'text': None}",
+                    "coerce-s6": "[user] [1, 2, 3]"}
+        for sid, want in expected.items():
+            rows = sdk._get_proj().g.query(
+                "MATCH (t:Point {id:$id}) RETURN t.content",
+                params={"id": f"{sid}_t0"}).result_set
+            assert rows and rows[0][0] == want, (sid, rows)
+
+    def test_capture_session_event_write_failure_warns(self, client, monkeypatch):
+        """P1 (D4 at the HTTP layer): create_event failure is non-fatal (#721)
+        AND surfaces an additive warning — a missing Event is visible, never
+        indistinguishable from a clean capture."""
+        def boom(*args, **kwargs):
+            raise RuntimeError("falkordb down")
+
+        monkeypatch.setattr("tortoise.sdk.TortoiseSDK.create_event", boom)
+        r = client.post("/v1/sessions", json={
+            "conversation": [{"role": "user", "content": "I think auth is the top issue."}]})
+        assert r.status_code == 200, r.text
+        assert any("Event" in w or "event" in w.lower() for w in r.json()["warnings"])
+
+    def test_capture_session_stamping_failure_warns(self, client, monkeypatch):
+        """P1 (D4): the HOSTED duplicated stamping block failing (Event created,
+        points unstamped) surfaces an additive warning under 200. The handler
+        builds its own SDK per request — patch TortoiseSDK._get_proj to the
+        shared test projection so the raw-graph query patch is in the write
+        path (same embedded DB either way)."""
+        import tortoise.hosted_api as ha_mod
+        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        proj = sdk._get_proj()
+        _raw = proj.g._g
+        _real_query = _raw.query  # _GuardedGraph.query is a read-only slot method
+
+        def _boom_stamp(query, **params):
+            if "SET n.eventId=" in query:
+                raise RuntimeError("stamping query failed")
+            return _real_query(query, **params)
+
+        monkeypatch.setattr(_raw, "query", _boom_stamp)
+        monkeypatch.setattr("tortoise.sdk.TortoiseSDK._get_proj",
+                            lambda self: proj)
+        r = client.post("/v1/sessions", json={
+            "conversation": [{"role": "user", "content": "I think auth is the top issue."}]})
+        assert r.status_code == 200, r.text
+        assert any("Event" in w or "event" in w.lower() for w in r.json()["warnings"])
+
+    def test_capture_session_audit_failure_keeps_structured_200(self, client, monkeypatch):
+        """P1 (D4): a post-commit _async_audit failure must not turn a committed
+        capture into a raw 500 (wrap log-only)."""
+        import tortoise.hosted_api as ha_mod
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("audit sink down")
+
+        monkeypatch.setattr(ha_mod, "_async_audit", boom)
+        r = client.post("/v1/sessions", json={
+            "conversation": [{"role": "user", "content": "I think auth is the top issue."}]})
+        assert r.status_code == 200, r.text
+        assert r.json()["extraction_mode"] in ("llm:mock", "llm")
+
+    def test_capture_session_source_materialization_failure_warns(self, client, monkeypatch):
+        """P1 (D4 at the HTTP layer): Source materialization failure is an
+        additive warning, never a 500 after writes. (Hosted has no body `ok`
+        field — the HTTP status is the success signal.)"""
+        import tortoise.sdk as sdk_mod
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("source write failed")
+
+        monkeypatch.setattr(sdk_mod.TortoiseSDK, "_materialize_session_source", boom)
+        r = client.post("/v1/sessions", json={
+            "conversation": [{"role": "user", "content": "I think auth is the top issue."}]})
+        assert r.status_code == 200, r.text
+        assert any("Source" in w for w in r.json()["warnings"])
+
+    def test_capture_session_blank_over_quota_is_422_not_402(self, client, monkeypatch):
+        """P1 ordering lock: the 422 blank gate precedes the quota estimate.
+        max_points=1 + TWO pre-existing non-episodic points (count=2): blank →
+        est=0 → 2+0 > 1 → gate-after-quota yields 402 while gate-first yields
+        422 — the assertion discriminates; non-blank → 2+est > 1 → 402 either
+        order (control)."""
+        from tortoise.hosted_api import app, get_current_team
+        import tortoise.hosted_api as ha_mod
+        app.dependency_overrides[get_current_team] = lambda: {
+            **TEST_TEAM, "max_points": 1}
+        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        sdk.create_point(kind="statement", content="pre-existing non-episodic point 1")
+        sdk.create_point(kind="statement", content="pre-existing non-episodic point 2")
+        r = client.post("/v1/sessions", json={"conversation": []})
+        assert r.status_code == 422, r.text  # blank gate BEFORE quota: 422 wins
+        r2 = client.post("/v1/sessions", json={
+            "conversation": [{"role": "user", "content": "I think auth is the top issue."}]})
+        assert r2.status_code == 402, r.text  # non-blank over quota: 402 still fires
 
 
 class TestSessionList:
@@ -847,22 +1084,6 @@ class TestSessionDetail:
         assert "id" in ep
         assert "content" in ep
         assert "kind" in ep
-
-    def test_detail_no_turns_no_extracted(self, client):
-        """Session with no turns / no extracted points (graceful)."""
-        r = client.post("/v1/sessions", json={
-            "conversation": [],
-            "session_id": "empty-session-detail",
-        })
-        assert r.status_code == 200, r.text
-
-        r = client.get("/v1/sessions/empty-session-detail")
-        assert r.status_code == 200, r.text
-        body = r.json()
-        assert body["turns"] == 0
-        assert body["extracted"] == 0
-        assert body["turn_points"] == []
-        assert body["extracted_points"] == []
 
     def test_detail_cross_team_isolation(self, client):
         """Session from a different namespace is not found (404).

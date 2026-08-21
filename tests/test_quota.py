@@ -284,7 +284,7 @@ class TestSessionsQuota:
             # 40 minimal captures (tiny conversation — no regex extraction)
             for i in range(40):
                 tenant.capture_session(
-                    [{"role": "user", "content": "ok"}],
+                    [{"role": "user", "content": "okay"}],
                     session_id=f"s{i:02d}",
                 )
             # P0 regression: sessions count == 40, NOT the all-nodes count
@@ -318,7 +318,7 @@ class TestSessionsQuota:
         tenant = TortoiseSDK(db, namespace=tid)
         try:
             tenant.capture_session(
-                [{"role": "user", "content": "ok"}], session_id="only_s1")
+                [{"role": "user", "content": "okay"}], session_id="only_s1")
             # ~10 non-Session nodes: turn Point + Event + extracted points
             tenant.create_point("statement", "plain non-episodic point")
             for i in range(8):
@@ -415,7 +415,7 @@ class TestIsEpisodicBackfill:
         try:
             proj = tenant._get_proj()
             tenant.capture_session(
-                [{"role": "user", "content": "ok"}], session_id="new_s1")
+                [{"role": "user", "content": "okay"}], session_id="new_s1")
             # Nothing to backfill — new capture nodes already carry the flag
             # (turn Point, Event, and the session-provenance Source all stamp
             # is_episodic at creation; _link_source stamps session refs, #1486).

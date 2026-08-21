@@ -39,7 +39,12 @@ from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op with
 import hmac
 from collections.abc import Hashable
 
-from tortoise.sdk import TortoiseSDK, _content_hash, _session_llm_extraction_estimate
+from tortoise.sdk import (
+    TortoiseSDK,
+    _content_hash,
+    _session_llm_extraction_estimate,
+    _session_llm_transcript,  # P1 #1529: the shared empty/blank conversation gate
+)
 from tortoise.abuse import _int_env  # #1081 signup limiter env knobs (abuse.py:57)
 from tortoise.mcp_server import create_http_app
 from tortoise.hosted_backup import (
@@ -3652,6 +3657,14 @@ class SessionRequest(BaseModel):
     def valid_conversation(cls, v: list[dict]) -> list[dict]:
         for turn in v:
             content = turn.get("content", "")
+            if not isinstance(content, str):
+                # P1 #1529 (D10): non-str content is coerced in the handler
+                # turn loop; skipping the length check here means None/int/bool
+                # can never crash the validator into a raw 500 (Pydantic v2
+                # propagates non-ValueError exceptions). Dict content (len =
+                # key count) also skips — the ≤5000 rule applies to real text;
+                # the stored form is still truncated at 5000.
+                continue
             if len(content) > 5000:
                 raise ValueError("each conversation turn content must be ≤ 5000 characters")
         return v
@@ -3707,9 +3720,12 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     regex loop was removed as a product path and the no-key case fails
     closed (503). #329 flood gate (historical): the regex amplifier created
     ~160 nodes/turn and Points were unbounded. Bounds (checked in order):
-    provider gate → 503; per-request turn cap → 400; extraction-aware
-    pre-write estimate (M2 points + operators) vs the points quota → 402;
-    per-turn sentence cap in the transcript builder (the M2 point ceiling).
+    provider gate → 503; per-request turn cap → 400; empty/blank
+    conversation gate → 422 (P1 #1529 — pre-mutation, never a silent
+    extracted:0); extraction-aware pre-write estimate (M2 points +
+    operators) vs the points quota → 402; per-turn sentence cap in the
+    transcript builder (the M2 point ceiling). Extraction failures surface
+    as 200 + additive errors/warnings (the turn mutation already happened).
     """
     import uuid
     from datetime import datetime, timedelta, timezone
@@ -3735,6 +3751,19 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
         raise HTTPException(
             status_code=400,
             detail=f"Session turn cap exceeded: {len(body.conversation)} > {MAX_SESSION_TURNS}.",
+        )
+
+    # P1 #1529 (D3): empty/blank conversation fails closed BEFORE any write —
+    # whole-conversation transcript emptiness, the SAME signal the extractors
+    # use, so the gate and the extractors cannot disagree (E2E-8 owned
+    # negative: an empty conversation is never ok=True / a silent extracted:0).
+    # 422 over 400: same family as the existing Pydantic 422 for >5000-char
+    # content; a handler-level check because blankness is transcript-derived.
+    transcript, _est = _session_llm_transcript(body.conversation)
+    if not transcript.strip():
+        raise HTTPException(
+            status_code=422,
+            detail="conversation has no extractable content (empty or blank)",
         )
 
     # Extraction-aware estimate (pre-write, fail-closed count) — review P2,
@@ -3799,7 +3828,15 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     # shared via sdk._extract_session_llm (#822).
     for i, turn in enumerate(body.conversation):
         role = turn.get("role", "unknown")
-        content = turn.get("content", "")
+        # P1 #1529 (D10, #721 parity): isinstance-first content coercion — a
+        # non-string content can NEVER crash the loop into a raw 500 after the
+        # Session MERGE (partial write). The D10 validator guard keeps
+        # None/int/bool out of the validator; dict content passes and is
+        # coerced here. role is NOT coerced (hosted stores non-str roles raw
+        # today — role parity is P4's speaker lane, not a crash risk).
+        raw_content = turn.get("content", "")
+        content = raw_content if isinstance(raw_content, str) else (
+            "" if raw_content is None else str(raw_content))
 
         # #490: turn Points are the episodic turn stream OF THIS SESSION —
         # keyed deterministically by {session_id}_t{i} so re-capturing the
@@ -3841,15 +3878,30 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     # the inner ValueError converts to a clean fail-closed 503, never an
     # uncaught 500 (the #1468 lesson: outer/inner drift must not 500).
     if os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2":
-        extracted = sdk._extract_session_llm(body.conversation, session_id, now)
-        meta = {"provider": None, "route": None, "failover_used": False,
-                "errors": [], "warnings": []}
+        # P1 #1529 (D5): the M2 branch returns the SAME (extracted, meta)
+        # contract as v2 — no fabricated empty meta; extraction-stage failures
+        # are structured, never raised (turn points have already landed).
+        try:
+            extracted, meta = sdk._extract_session_llm(
+                body.conversation, session_id, now)
+        except ValueError as e:
+            # no-key fail-closed (outer 503 gate normally catches this first;
+            # belt-and-braces so an inner/outer drift never 500s, #1468).
+            raise HTTPException(status_code=503, detail=str(e)) from e
     else:
         try:
             extracted, meta = sdk._extract_session_v2(
                 body.conversation, session_id, now)
         except ValueError as e:
             raise HTTPException(status_code=503, detail=str(e)) from e
+
+    # P1 #1529: the fail-closed assembly consumes the shared contract. Hosted
+    # convention: the HTTP status is the ok signal (no body ok field — D2);
+    # extraction failure keeps 200 + additive errors (the mutation already
+    # happened — turn points landed — and E2E-8 permits "non-200 OR additive
+    # warnings"; a non-200 would hide the partial write).
+    extraction_errors = list(meta.get("errors") or [])
+    extraction_warnings = list(meta.get("warnings") or [])
 
     # Ontology v3.1 §4.5/§3.2 (#7882): also create an episodic :Event node
     # (eventKind: sessionCaptured) and stamp its eventId onto the extracted
@@ -3875,10 +3927,20 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
                 params={"ids": [p["id"] for p in extracted],
                         "eid": event_id},
             )
+        else:
+            # P1 #1529 (D4): create_event returning no id/eventId silently
+            # skips stamping — surface as an additive warning.
+            extraction_warnings.append(
+                "sessionCaptured Event write returned no id/eventId — "
+                "extracted points not stamped")
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception(
             "session Event creation failed (non-fatal)")
+        # P1 #1529 (D4): a missing Event is visible, never indistinguishable
+        # from a clean capture.
+        extraction_warnings.append(
+            "sessionCaptured Event write failed (non-fatal)")
 
     # #1352: the extraction projection auto-created a document-typed Source
     # stub at `session:{id}` (default sourceKind in _link_source) — the
@@ -3886,14 +3948,29 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     # typed Source (capture metadata + sessionId + capturedAt + eventId) and
     # wire (Source)-[:references]->(sessionCaptured Event) — parity with the
     # SDK capture path via the shared sdk._materialize_session_source helper.
-    sdk._materialize_session_source(
-        session_id, event_id, now, body.conversation)
+    # P1 #1529 (D4): a Source materialization failure is non-fatal and
+    # surfaced as an additive warning — never a 500 after writes.
+    try:
+        sdk._materialize_session_source(
+            session_id, event_id, now, body.conversation)
+    except Exception:
+        import logging
+        logging.getLogger("tortoise.api").exception(
+            "session Source materialization failed (non-fatal)")
+        extraction_warnings.append(
+            "session Source materialization failed (non-fatal)")
 
-    # Log audit event
-    await _async_audit(
-        request, team["team_id"], "session_capture",
-        resource_type="session", resource_id=session_id,
-    )
+    # Log audit event — P1 #1529 (D4): a committed capture must never 500
+    # over audit bookkeeping (log-only wrap).
+    try:
+        await _async_audit(
+            request, team["team_id"], "session_capture",
+            resource_type="session", resource_id=session_id,
+        )
+    except Exception:
+        import logging
+        logging.getLogger("tortoise.api").exception(
+            "session capture audit write failed (non-fatal)")
     # Metering (#681): best-effort write-op count for overage billing.
     _record_write_op(team)
     # #308 (R1, delta 8): capture_session creates one Point per turn plus the
@@ -3902,18 +3979,22 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     # runs inside the SDK write; recounting here would cost a second query).
     await _abuse_record_points(request, team, len(body.conversation) + len(extracted))
 
-    # #822: extraction_mode reflects what ACTUALLY ran — the M2 LLM extractor
-    # (the regex stopgap #722 reported is gone with the regex loop).
-    # #1530 D8: the v2 path reports the resolved route ("llm:<route>", e.g.
-    # "llm:deepseek-direct") + the configured provider — parity with the SDK
-    # capture path by construction (same meta contract).
-    resp = {"session_id": session_id, "turns": len(body.conversation),
-            "extracted": len(extracted), "points": extracted}
-    if meta.get("route"):
-        resp["extraction_mode"] = f"llm:{meta['route']}"
-        resp["extraction_provider"] = meta.get("provider")
+    # P1 #1529 (D2): truthful extraction_mode on every response — "llm:<route>"
+    # / "llm" on success, "empty" and "error" never claim success (the 422
+    # empty gate makes "empty" unreachable here, but the mapping is defensive).
+    mode = meta.get("mode")
+    if extraction_errors:
+        effective_mode = "error" if mode != "empty" else "empty"
+    elif meta.get("route"):
+        effective_mode = f"llm:{meta['route']}"
     else:
-        resp["extraction_mode"] = "llm"
+        effective_mode = "llm"
+    resp = {"session_id": session_id, "turns": len(body.conversation),
+            "extracted": len(extracted), "points": extracted,
+            "extraction_mode": effective_mode,
+            "errors": extraction_errors, "warnings": extraction_warnings}
+    if meta.get("route"):
+        resp["extraction_provider"] = meta.get("provider")
     return resp
 
 
