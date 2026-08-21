@@ -146,7 +146,10 @@ def test_sdk_document_search_returns_metadata():
 
     from tortoise.projection import FalkorProjection
     reset_circuit_breakers()
-    uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_sdk125")
+    # #1585: treat a set-but-EMPTY TORTOISE_DB_URI as unset (a leaked ""
+    # from an earlier test must not short-circuit to the default-less empty
+    # string and blow up from_uri with "Unsupported scheme").
+    uri = os.environ.get("TORTOISE_DB_URI") or "docker://:@localhost:16379/tortoise_test_sdk125"
     proj = FalkorProjection.from_uri(uri)
     proj.g.query("MATCH (n) DETACH DELETE n")
     proj._ensure_indexes()
