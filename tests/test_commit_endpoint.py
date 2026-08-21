@@ -372,6 +372,79 @@ class TestFourNodeChain:
         ).result_set[0][0]
         assert n >= 1
 
+    def test_commit_writes_e3_point_props(self, client):
+        """E3 (#1535): search_keys / source_turn_id / quote persist on the
+        committed Point node through BOTH the plain and supersede branches
+        (S12 surface)."""
+        raw = _raw_payload(1, points=[_point(
+            0, content="my 5K best is 27:12", quote="my 5K best is 27:12",
+            search_keys=["personal best", "27:12"], source_turn_id=0)])
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        g = _team_sdk()._get_proj().g
+        pid = "pt_0000000000000000000000000000000000000000000000000000000000000000"
+        props = g.query(
+            "MATCH (p:Point {id:$pid}) "
+            "RETURN p.quote, p.search_keys, p.source_turn_id",
+            params={"pid": pid}).result_set
+        assert props, "Point node missing"
+        assert props[0][0] == "my 5K best is 27:12"
+        assert props[0][1] == ["personal best", "27:12"]
+        assert props[0][2] == 0
+
+    def test_supersede_branch_carries_e3_point_props(self, client):
+        """E3: the supersede create_point branch passes the E3 fields too —
+        the superseding point carries its own quote/search_keys/source_turn_id."""
+        sdk = _team_sdk()
+        proj = sdk._get_proj()
+        # seed an existing point so the new content REVISES it (supersede path)
+        old_pid = "pt_0000000000000000000000000000000000000000000000000000000000000000"
+        proj.g.query(
+            "MERGE (p:Point {id:$id}) SET p.pointKind='statement', "
+            "    p.content='the old 5K claim', p.is_operator=false, "
+            "    p.status='live', p.content_hash='seed' ",
+            params={"id": old_pid})
+        raw = _raw_payload(1, points=[_point(
+            0, content="my 5K best is 27:12", quote="my 5K best is 27:12",
+            search_keys=["personal best", "27:12"], source_turn_id=0)])
+        # same point id + same content → dedup; to force the supersede branch
+        # the new content must differ from the stored one. The commit path
+        # supersedes when the payload point REVISES an existing point (the
+        # #953 reconciliation derives supersede from the graph state).
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        # the superseding point is the OLD id (merge path) or a NEW content-
+        # addressed id (supersede path) — either way the E3 props must land
+        # on the node that carries the new content.
+        rows = proj.g.query(
+            "MATCH (p:Point) WHERE p.content = $c "
+            "RETURN p.quote, p.search_keys, p.source_turn_id LIMIT 1",
+            params={"c": "my 5K best is 27:12"}).result_set
+        assert rows, "superseding point missing"
+        assert rows[0][0] == "my 5K best is 27:12"
+        assert rows[0][1] == ["personal best", "27:12"]
+        assert rows[0][2] == 0
+        # pin the supersede branch actually ran: the seeded old node was
+        # superseded (status flips, CORRECTS edge to the new point)
+        old = proj.g.query(
+            "MATCH (p:Point {id:$id}) RETURN p.status",
+            params={"id": old_pid}).result_set
+        assert old and old[0][0] == "superseded", \
+            f"supersede branch did not run (old node status {old[0][0] if old else 'missing'})"
+
+    def test_commit_without_e3_fields_keeps_legacy_shape(self, client):
+        """E3 backward-compat: a commit with NO E3 fields leaves the Point
+        node without search_keys/source_turn_id properties (pre-E3 shape)."""
+        r = _commit(client, _raw_payload(1))
+        assert r.status_code == 200, r.text
+        g = _team_sdk()._get_proj().g
+        pid = "pt_0000000000000000000000000000000000000000000000000000000000000000"
+        rows = g.query(
+            "MATCH (p:Point {id:$pid}) RETURN "
+            "toBoolean(EXISTS(p.search_keys)), toBoolean(EXISTS(p.source_turn_id))",
+            params={"pid": pid}).result_set
+        assert rows and rows[0][0] is False and rows[0][1] is False
+
     def test_session_indexer_discoverability(self, client):
         """DE2E-2 step 4: the committed session MUST be findable through the
         EXISTING session_indexer AgentSession search path (sdk.search_sessions

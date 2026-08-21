@@ -769,7 +769,10 @@ def test_v2_ingest_writes_payload_with_evidence_marks(tmp_path, monkeypatch):
         "events": [{"content": "we decided X", "eventKind": "core:decision"}],
         "points": [
             {"id": "pt_alpha", "content": "the quantum observation is the key fact",
-             "pointKind": "statement"},
+             "pointKind": "statement",
+             "quote": "quantum observation is key",
+             "search_keys": ["quantum observation"],
+             "source_turn_id": 0},
             {"id": "pt_beta", "content": "unrelated mechanics note",
              "pointKind": "statement"},
         ],
@@ -810,11 +813,82 @@ def test_v2_ingest_writes_payload_with_evidence_marks(tmp_path, monkeypatch):
             "MATCH (p:Point {id:$id}) RETURN p.has_answer",
             params={"id": "pt_alpha"}).result_set
         assert ev_rows[0][0] is True
-        # CONTAINS edges: session → raw + extracted points
+        # E3: turn points exist with speaker; the extracted point resolves
+        # the source_turn_id index → turn node id (D6/D8)
+        tr = proj.g.query(
+            "MATCH (p:Point {id:$id}) RETURN p.speaker",
+            params={"id": "lme:test_v2_q:s0:t0"}).result_set
+        assert tr and tr[0][0] == "user"
+        pt_props = proj.g.query(
+            "MATCH (p:Point {id:$id}) RETURN p.quote, p.search_keys, "
+            "p.source_turn_id, coalesce(p.speaker, '')",
+            params={"id": "pt_alpha"}).result_set
+        assert pt_props[0][0] == "quantum observation is key"
+        assert pt_props[0][1] == ["quantum observation"]
+        assert pt_props[0][2] == "lme:test_v2_q:s0:t0"
+        # review-gate fix, graph mirror: speaker is NEVER written on an
+        # extracted point (derived at read time from the source-turn link)
+        assert pt_props[0][3] == ""
+        # pt_beta (no E3 fields) stays pre-E3-shaped — the E3-additive props
+        # (search_keys/source_turn_id) and speaker do NOT exist on the node
+        # (EXISTS, not coalesce: absent ≠ empty; quote='' is always written
+        # by this path — a pre-existing field, not an E3 addition)
+        beta = proj.g.query(
+            "MATCH (p:Point {id:$id}) RETURN "
+            "toBoolean(EXISTS(p.search_keys)), toBoolean(EXISTS(p.source_turn_id)), "
+            "toBoolean(EXISTS(p.speaker)), coalesce(p.has_answer, false)",
+            params={"id": "pt_beta"}).result_set
+        assert beta[0][0] is False and beta[0][1] is False
+        assert beta[0][2] is False
+        # evidence-mark negative: a non-overlapping point is NOT marked
+        # (an always-True marking regression would silently inflate recall)
+        assert beta[0][3] is False
+        # CONTAINS edges: session → raw + extracted points + turn points
         cnt = proj.g.query(
             "MATCH (s:Session {id:$id})-[:CONTAINS]->(p) RETURN count(*)",
             params={"id": "lme:test_v2_q:s0"}).result_set
-        assert cnt[0][0] == 3  # raw + 2 points
+        assert cnt[0][0] == 5  # raw + 2 extracted + 2 turn points
+    finally:
+        sdk.close()
+
+
+def test_v2_ingest_out_of_range_source_turn_drops_link(tmp_path, monkeypatch):
+    """E3: the index→node-id resolution guard (type() is int, bounded to the
+    session's turn count) silently drops a link for out-of-range / non-int /
+    boolean payload source_turn_id — no dangling turn node id is ever written."""
+    import tortoise.extractor_v2 as ev2
+    from tools.longmem_eval.ingest_v2 import ingest_haystack_v2
+
+    payload = {"entities": [], "events": [], "points": [
+        {"id": "pt_bad", "content": "beyond session turns",
+         "pointKind": "statement", "source_turn_id": 5},
+        {"id": "pt_str", "content": "string turn ref",
+         "pointKind": "statement", "source_turn_id": "0"},
+        {"id": "pt_bool", "content": "boolean turn ref",
+         "pointKind": "statement", "source_turn_id": True},
+    ], "operators": []}
+
+    def _fake_extract(model, conversation, **kw):
+        return {"payload": payload, "minted_kinds": [], "supersessions": [],
+                "errors": [], "warnings": []}
+
+    monkeypatch.setattr(ev2, "extract_session_v2", _fake_extract)
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        # 1-turn session: index 5 is beyond the session, "0" is a string,
+        # True is a bool (int subclass) — all must drop the link
+        question = {
+            "question_id": "q_out", "haystack_session_ids": ["sess-1"],
+            "haystack_dates": ["2026-08-01"],
+            "haystack_sessions": [[{"role": "user", "content": "hi"}]],
+        }
+        ingest_haystack_v2(sdk, question, model=object())
+        proj = sdk._get_proj()
+        for pid in ("pt_bad", "pt_str", "pt_bool"):
+            rows = proj.g.query(
+                "MATCH (p:Point {id:$id}) RETURN coalesce(p.source_turn_id, '')",
+                params={"id": pid}).result_set
+            assert rows and rows[0][0] == "", f"{pid} must have no source_turn_id"
     finally:
         sdk.close()
 
@@ -975,3 +1049,133 @@ def test_v2_ingest_cli_flag(tmp_path, monkeypatch):
     o = report["outcomes"][0]
     assert o["n_ingest_errors"] == 0
     assert report["retrieval"]["evidence_recall@k"] is not None
+
+
+# ── E3 (issue #1535): read-time speaker derivation ─────────────────────────
+
+class TestE3SpeakerDerivation:
+    def test_context_renders_speaker_prefix(self):
+        # prefix-renderer behavior: a known speaker decorates between the
+        # session prefix and the content (derivation itself is covered by
+        # test_annotate_hits_resolves_turn_speaker + the retrieve path test)
+        from tools.longmem_eval import retrieve as rt
+        hits = [{"id": "pt_x", "content": "my 5K best is 27:12",
+                 "speaker": "user", "lme_session_index": 0,
+                 "session_date": "", "has_answer": False,
+                 "superseded_by": None, "supersedes": []}]
+        ctx = rt.render_context(hits)
+        assert ctx == "[session 0] [user] my 5K best is 27:12"
+
+    def test_context_unchanged_without_speaker(self):
+        # byte-identical backward-compat: no speaker → EXACT pre-E3 rendering
+        from tools.longmem_eval import retrieve as rt
+        hits = [{"id": "pt_y", "content": "plain fact",
+                 "speaker": None, "lme_session_index": 0,
+                 "session_date": "", "has_answer": False,
+                 "superseded_by": None, "supersedes": []}]
+        assert rt.render_context(hits) == "[session 0] plain fact"
+
+    def test_turn_point_content_no_double_speaker_decoration(self):
+        # P1-1: turn points are written with content "[role] text" AND the
+        # speaker prop — decorating on top would render "[user] [user] ..."
+        # (the deterministic leg's primary recall surface). The role bracket
+        # already carries the attribution; decoration must be skipped.
+        from tools.longmem_eval import retrieve as rt
+        hits = [{"id": "lme:q1:s0:t0",
+                 "content": "[user] my 5K best is 27:12",
+                 "speaker": "user", "lme_session_index": 0,
+                 "session_date": "", "has_answer": False,
+                 "superseded_by": None, "supersedes": []}]
+        assert rt.render_context(hits) == "[session 0] [user] my 5K best is 27:12"
+
+    def test_non_role_bracket_still_decorated(self):
+        # P1-1 guard precision: only a leading ROLE bracket suppresses the
+        # decoration — a session/date-style bracket elsewhere must not
+        content = "[context] the 5K best is 27:12"  # not a role bracket
+        from tools.longmem_eval import retrieve as rt
+        hits = [{"id": "pt_z", "content": content,
+                 "speaker": "user", "lme_session_index": 0,
+                 "session_date": "", "has_answer": False,
+                 "superseded_by": None, "supersedes": []}]
+        ctx = rt.render_context(hits)
+        assert ctx == "[session 0] [user] [context] the 5K best is 27:12"
+
+    def test_annotate_hits_resolves_turn_speaker(self, tmp_path):
+        from tools.longmem_eval import retrieve as rt
+        from tools.longmem_eval.ingest import point_props_for_hits
+        sdk = _fresh_sdk(tmp_path)
+        try:
+            sdk.create_point("statement", "my 5K best is 27:12", id="pt_x",
+                             source_turn_id="lme:q1:s0:t0",
+                             lme_session_index=0, is_episodic=True)
+            sdk.create_point("event", "[user] my 5K best is 27:12",
+                             id="lme:q1:s0:t0", speaker="user",
+                             lme_session_index=0, is_episodic=True)
+            proj = sdk._get_proj()
+            props = point_props_for_hits(proj, ["pt_x", "lme:q1:s0:t0"])
+            assert props["pt_x"]["source_turn_id"] == "lme:q1:s0:t0"
+            annotated = rt._annotate_hits(
+                [{"id": "pt_x", "content": "my 5K best is 27:12",
+                  "match_source": "fts"}], props, [])
+            assert annotated[0]["speaker"] == "user"
+        finally:
+            sdk.close()
+
+    def test_retrieve_for_question_resolves_turn_not_in_batch(self, tmp_path,
+                                                               monkeypatch):
+        """D7's primary derivation surface: the extracted point is retrieved
+        but its turn node is NOT in the hit batch — the _speaker_for_turns
+        batch lookup supplies the speaker. hybrid_search is pinned to return
+        ONLY pt_x so the turn can never be in the batch (the backfill is the
+        only possible speaker source; deleting it fails this test)."""
+        from tools.longmem_eval import retrieve as rt
+        sdk = _fresh_sdk(tmp_path)
+        try:
+            sdk.create_point("statement", "my 5K best is 27:12", id="pt_x",
+                             source_turn_id="lme:q1:s0:t0",
+                             lme_question_id="q1", lme_session_index=0,
+                             session_id="s0", is_episodic=True)
+            sdk.create_point("event", "[user] ack",
+                             id="lme:q1:s0:t0", speaker="user",
+                             lme_question_id="q1", lme_session_index=0,
+                             session_id="s0", is_episodic=True)
+            monkeypatch.setattr(
+                rt, "hybrid_search",
+                lambda sdk, query, limit: [{"id": "pt_x",
+                                            "content": "my 5K best is 27:12",
+                                            "match_source": "fts"}])
+            question = {
+                "question_id": "q1", "question": "what is the 5K best",
+                "answer_session_ids": ["s0"], "haystack_dates": ["2026-08-01"],
+                "haystack_sessions": [[{"role": "user", "content": "my 5K best is 27:12"}]],
+            }
+            out = rt.retrieve_for_question(sdk, question, ks=(5,), top_k=20)
+            assert {h["id"] for h in out["hits"]} == {"pt_x"}
+            assert out["hits"][0]["speaker"] == "user"
+            ctx = rt.render_context(out["hits"])
+            assert "[user] my 5K best is 27:12" in ctx
+        finally:
+            sdk.close()
+
+    def test_missing_turn_node_speaker_empty(self, tmp_path):
+        """A dangling source_turn_id (turn node does not exist) yields empty
+        speaker — byte-identical render, never a crash."""
+        from tools.longmem_eval import retrieve as rt
+        sdk = _fresh_sdk(tmp_path)
+        try:
+            sdk.create_point("statement", "my 5K best is 27:12", id="pt_x",
+                             source_turn_id="lme:q1:s0:t99",
+                             lme_question_id="q1", lme_session_index=0,
+                             session_id="s0", is_episodic=True)
+            question = {
+                "question_id": "q1", "question": "what is the 5K best",
+                "answer_session_ids": ["s0"], "haystack_dates": ["2026-08-01"],
+                "haystack_sessions": [[{"role": "user", "content": "my 5K best is 27:12"}]],
+            }
+            out = rt.retrieve_for_question(sdk, question, ks=(5,), top_k=20)
+            hit = next(h for h in out["hits"] if h["id"] == "pt_x")
+            assert hit["speaker"] == ""
+            ctx = rt.render_context(out["hits"])
+            assert "[speaker]" not in ctx
+        finally:
+            sdk.close()
