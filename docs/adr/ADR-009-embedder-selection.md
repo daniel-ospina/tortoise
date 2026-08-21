@@ -283,6 +283,11 @@ gate outcome — the swap is conditional, the record is not.
   embeddings.py, cross_lens.py (single-source import), sdk.py, mining.py, mcp_server.py.
 - Latency: see Status block — bge-small faster than control on the contended box; 300ms
   band re-validated at T15 on the benchmark box (deployment-class measurement).
+- Post-swap E2E-8 re-run (default=bge, 2026-08-21): p95 460ms 'inconclusive' under
+  full-suite contention (345-460ms across runs); MiniLM control 418-464ms under identical
+  conditions — bge-small remains relatively faster. The 300ms absolute band requires the
+  production-class benchmark box (pre-registered T15 deployment-class measurement);
+  recorded here as the re-validation trigger, not a passing/failing gate on this hardware.
 - Non-embedder levers (key-expansion, time-aware query, fusion-fix; TF-IDF hard-tier hybrid):
   filed UNCONDITIONALLY as a new retrieval-optimization issue per the pre-registration
   (independent of the PASS verdict).
