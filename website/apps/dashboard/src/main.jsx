@@ -631,6 +631,11 @@ function claimIntentInFlight() {
         // mint a bootstrap key for the first membership.
         let key = null
         const storedKey = localStorage.getItem(KEY_STORAGE)
+        // #1567 (review P1): the chrome renders NOW, so a team switch made
+        // during this fetch (the switcher is populated by the teams call
+        // above) must not be clobbered — capture the selection and skip the
+        // writes if it moved.
+        const teamAtStoredKeyCheck = teamIdRef.current
         if (storedKey && teamsList.length) {
           try {
             const tRes = await fetch(`${API_BASE}/v1/team`, {
@@ -638,7 +643,8 @@ function claimIntentInFlight() {
             })
             if (tRes.ok) {
               const t = await tRes.json()
-              if (teamsList.some((x) => x.team_id === t.team_id)) {
+              if (teamsList.some((x) => x.team_id === t.team_id)
+                  && teamIdRef.current === teamAtStoredKeyCheck) {
                 key = storedKey
                 teamKeysRef.current[t.team_id] = storedKey
                 setCurrentTeamId(t.team_id)
@@ -689,8 +695,13 @@ function claimIntentInFlight() {
         setAuthMode('session')
         await completeLogin(key)
       } catch (e) {
-        // #1559: never leave the user on the silent redirect shell.
+        // #1559/#1567 (review P0): never leave the user on the silent
+        // redirect shell — authed was set EARLY, so an escaped throw (e.g.
+        // localStorage blocked in private mode after a successful mint)
+        // would otherwise leave mountError set-but-unrendered (the card is
+        // !authed-gated). Flip authed so the card + Retry render.
         setMountError((e && e.message) || 'Something went wrong loading the dashboard — try again.')
+        setAuthed(false)
         setChecking(false)
       }
     })()
