@@ -23,6 +23,13 @@ _sdk = None  # set by register()
 # within a sub-second-to-1.5s window, never hang the handler.
 PROBE_TIMEOUT = 1.5
 
+# #1565: ONE bounded retry on a TRANSIENT connect failure only (an embedded
+# redislite server momentarily starting / momentarily unreachable under
+# parallel-suite load). The 100ms delay covers a server mid-startup; a REAL
+# outage (NXDOMAIN, stopped FalkorDB) fails the retry identically and still
+# reports degraded ~0.1s later — the retry never masks a persistent failure.
+PROBE_RETRY_DELAY = 0.1
+
 # Prometheus metrics
 REQUEST_COUNT = Counter("tortoise_requests_total", "Total HTTP requests", ["endpoint"])
 REQUEST_LATENCY = Histogram("tortoise_request_latency_seconds", "Request latency")
@@ -50,22 +57,36 @@ def record_cost(team: str, cents: int) -> None:
     TEAM_COST.labels(team=team).inc(cents)
 
 
-def probe_db(sdk) -> dict:
-    """Deep-check graph-DB connectivity through an SDK's projection.
+def _is_transient_connect_error(exc: BaseException) -> bool:
+    """True for a TRANSIENT connection-level probe failure — the one class a
+    single retry may legitimately clear (a DB server mid-startup / momentarily
+    unreachable under parallel load).
 
-    Runs a trivial ``RETURN 1`` on the SAME connection graph-touching
-    endpoints use (the SDK's projection — registry/shared or default graph
-    depending on caller), hard-bounded by a 1.5s worker-thread timeout: the
-    redis client's own socket_connect_timeout is 5s, far too slow for a
-    health poll, so a dead URI would otherwise hang the handler.
+    OSError covers ConnectionRefusedError and socket errors (refused, DNS/
+    gaierror — a startup DNS race is exactly the transient class the retry
+    targets); the redis client raises its OWN ConnectionError class
+    (redis-py 8.x) that is NOT an OSError subclass, so match the name too.
+    Builtin TimeoutError IS an OSError subclass but is NEVER retried (a hung
+    DB stays hung) — excluded FIRST. Everything else — redis TimeoutError,
+    auth/response errors, arbitrary RuntimeErrors — is NOT retried: a
+    genuinely broken DB must keep flipping /health to degraded without the
+    retry masking it (#1565).
+    """
+    if isinstance(exc, TimeoutError):
+        return False
+    if isinstance(exc, OSError):
+        return True
+    return type(exc).__name__ == "ConnectionError"
 
-    Returns ``{"ok": bool, "latency_ms": float, "error": str|None}`` —
-    NEVER raises, so /health can report ``status: degraded`` instead of
-    crashing the process.
+
+def _probe_once(sdk) -> tuple[bool, str | None, bool]:
+    """Execute ONE bounded ``RETURN 1`` probe in a worker thread.
+
+    Returns ``(ok, error, transient)`` — ``transient`` is True only when the
+    failure was a connection-level error that a single retry could clear,
+    never a timeout (a hung DB stays hung).
     """
     import concurrent.futures
-
-    start = time.monotonic()
 
     def _ping() -> None:
         proj = sdk._get_proj()
@@ -75,15 +96,44 @@ def probe_db(sdk) -> dict:
     future = executor.submit(_ping)
     try:
         future.result(timeout=PROBE_TIMEOUT)
-        ok, error = True, None
+        return True, None, False
     except concurrent.futures.TimeoutError:
-        ok, error = False, f"probe timeout after {PROBE_TIMEOUT}s"
+        # NOT retried — a slow/hung DB would just hang again.
+        return False, f"probe timeout after {PROBE_TIMEOUT}s", False
     except Exception as e:  # noqa: BLE001, RUF100
-        ok, error = False, str(e)[:200]
+        return False, str(e)[:200], _is_transient_connect_error(e)
     finally:
         # wait=False: the worker thread may still be blocked on a dead
         # socket — the handler must not wait for it (#1384).
         executor.shutdown(wait=False)
+
+
+def probe_db(sdk) -> dict:
+    """Deep-check graph-DB connectivity through an SDK's projection.
+
+    Runs a trivial ``RETURN 1`` on the SAME connection graph-touching
+    endpoints use (the SDK's projection — registry/shared or default graph
+    depending on caller), hard-bounded by a 1.5s worker-thread timeout: the
+    redis client's own socket_connect_timeout is 5s, far too slow for a
+    health poll, so a dead URI would otherwise hang the handler.
+
+    #1565: a single TRANSIENT connection-level failure (embedded redislite
+    # server mid-startup / momentarily unreachable under parallel load —
+    # refused, DNS/gaierror, redis ConnectionError) is retried ONCE with a
+    # short delay before declaring degraded. A persistent outage (stopped
+    # FalkorDB, NXDOMAIN) fails the retry identically and still reports
+    # degraded within the same sub-second window; a hung black-hole DB is a
+    # worker TIMEOUT and is NEVER retried.
+
+    Returns ``{"ok": bool, "latency_ms": float, "error": str|None}`` —
+    NEVER raises, so /health can report ``status: degraded`` instead of
+    crashing the process.
+    """
+    start = time.monotonic()
+    ok, error, transient = _probe_once(sdk)
+    if not ok and transient:
+        time.sleep(PROBE_RETRY_DELAY)
+        ok, error, _ = _probe_once(sdk)
     return {
         "ok": ok,
         "latency_ms": round((time.monotonic() - start) * 1000, 1),

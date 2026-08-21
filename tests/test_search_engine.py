@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest  # noqa: I001
 from tortoise.search_engine import (
     classify_query, rrf_fusion, SearchResult, SearchScores,
-    EpBreakdown, EpEvidence, annotate_ep_batch,
+    EpBreakdown, EpEvidence, annotate_ep_batch, reset_circuit_breakers,
 )
 
 # ── Live-FalkorDB availability (mirrors tests/test_hnsw_vector_index.py) ──
@@ -131,8 +131,21 @@ class TestAnnotateEpBatch:
 @pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="Live FalkorDB (Docker) not available")
 def test_sdk_document_search_returns_metadata():
     """#125: tortoise_search(entity_type='document') returns capture metadata.
-    #167: includes sourcePath in results."""
+    #167: includes sourcePath in results.
+    #1568: hermetic under parallel-suite load — (1) the module-level search
+    circuit breakers (shared across every test in this pytest process) can be
+    left OPEN by an earlier test's failed queries under load, which would
+    short-circuit FTS/vector BEFORE this test's query runs; reset them so this
+    test sees deterministic breaker state. (2) The search query is retried a
+    couple of times with backoff: under a loaded 2-core runner all strategies
+    can degrade inside the 500ms collective cap on the FIRST call, but the
+    FTS index is synchronous — the document is found as soon as the server
+    answers, so a retry is a legitimate read, never a re-do.
+    """
+    import time
+
     from tortoise.projection import FalkorProjection
+    reset_circuit_breakers()
     uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_sdk125")
     proj = FalkorProjection.from_uri(uri)
     proj.g.query("MATCH (n) DETACH DELETE n")
@@ -146,11 +159,33 @@ def test_sdk_document_search_returns_metadata():
     )
     try:
         from tortoise.sdk import TortoiseSDK
-        sdk = TortoiseSDK()
+        # Construct the SDK with the live URI, NOT the embedded default path:
+        # a URI-based SDK never spawns a redislite server, so this test adds
+        # zero embedded-DB churn to the shared temp-DB topology (#1568). The
+        # projection is replaced immediately below — the SDK's own lazy URI
+        # projection is never created.
+        _old_uri = os.environ.get("TORTOISE_DB_URI")
+        os.environ["TORTOISE_DB_URI"] = uri
+        try:
+            sdk = TortoiseSDK()
+        finally:
+            if _old_uri is None:
+                os.environ.pop("TORTOISE_DB_URI", None)
+            else:
+                os.environ["TORTOISE_DB_URI"] = _old_uri
         sdk._proj = proj
-        results = sdk.tortoise_fts_query("licensing", entity_type="document")
-        doc = next((r for r in results if r.get("id") == "test-sdk-doc"), None)
-        assert doc, f"doc not in results: {results}"
+        # #1568: transient load can starve the first call — retry (idempotent
+        # read) before failing. Bounded: 3 attempts, ~1.5s worst-case added.
+        results = []
+        doc = None
+        for attempt in range(3):
+            results = sdk.tortoise_fts_query("licensing", entity_type="document")
+            doc = next((r for r in results if r.get("id") == "test-sdk-doc"), None)
+            if doc is not None:
+                break
+            if attempt < 2:
+                time.sleep(0.5 * (attempt + 1))
+        assert doc, f"doc not in results after retries: {results}"
         assert doc["topics"] == ["licensing"], doc.get("topics")
         assert doc["summary"] == "Test"
         assert doc["sessionId"] == "s1"
