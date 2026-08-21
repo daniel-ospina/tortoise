@@ -311,6 +311,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `confidence` | float 0..1 | — | — | ⚠️ | EP posterior mean, computed by propagation |
 | `c_cal` | float 0..1 | — | — | ❌ | Calibrated confidence — calibrated counterpart to the EP posterior `confidence` (registered #909 §4.3 #11; written by the calibrated pipeline, slice 5+) |
 | `quote` | string ≤200 | — | — | ⚠️ | Provenance quote — the source text this claim was drawn from; payload-level metadata today (SDK extraction path / EventAPI `provenance()` payloads — extractor.py, api.py), stored Point property per #909 §4.3 #11 (secret-scanned) |
+| `when` | ISO date ≤40 | — | `prov:atTime` | ⚠️ | Occurrence-time anchor — the conversation date a state-change/decision/date-bearing fact is "as of"; "" = undated (registered #1533 E1; written by extractor_v2 S5 from the session-date-anchored prompts; absent on timeless durable beliefs) |
 | `authoredBy` | SubjectID | — | `dc:creator` | ✅ | Who created the claim |
 | `validFrom` / `validTo` | ISO8601 | — | — | ✅ | Temporal validity window |
 | `createdAt` / `updatedAt` | ISO8601 | ✅ | `dc:created` / `dc:modified` | ✅ | Timestamps |
@@ -416,7 +417,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | management | — | — | edge (§3.5) | — | — | — |
 | format | — | — | — | format | format | — |
 | aboutEdges | ✅ | — | ✅ | ✅ | ✅ | — |
-| temporal | validFrom/To | — | — | — | startedAt/endedAt | — |
+| temporal | validFrom/To + when | — | — | — | startedAt/endedAt | — |
 | is_episodic | ✅ | — | ❌ | — | ✅ | ✅ |
 | passes_frequency_gate | — | — | ❌ | ❌ (inherits Object) | — | — |
 

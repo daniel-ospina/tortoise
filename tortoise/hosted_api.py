@@ -4146,10 +4146,12 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: "CommitPayload", plan):
             "MERGE (e:Event {eventId:$eid}) "
             "SET e.id=$eid, e.eventKind=$ek, e.name=$name, e.content=$content, "
             "    e.confidence=$conf, e.source_ref=$sref, e.is_episodic=true, "
-            "    e.capturedAt=coalesce(e.capturedAt, $cap), e.updatedAt=$now",
+            "    e.capturedAt=coalesce(e.capturedAt, $cap), "
+            "    e.startedAt=coalesce(e.startedAt, $sat), e.updatedAt=$now",
             params={"eid": ev.id, "ek": ev.eventKind, "name": ev.content[:80],
                     "content": ev.content, "conf": ev.confidence,
                     "sref": ev.source_ref, "cap": ev.captured_at or now,
+                    "sat": ev.started_at or ev.captured_at or now,
                     "now": now},
         )
         proj.g.query(

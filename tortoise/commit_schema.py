@@ -257,6 +257,7 @@ class Point(BaseModel):
     about_entities: list[str] = Field(default_factory=list)
     source_ref: str = Field(min_length=1)  # REQUIRED — resolves to a Source
     quote: str = Field(default="", max_length=200)
+    when: str = Field(default="", max_length=40)  # "" = undated (E1, #1533)
     status: Literal["live", "draft"] = "draft"
     slots: ParticipantSlots | None = None  # #1418: typed participant slots
 
@@ -374,6 +375,7 @@ class CommitEvent(BaseModel):
     about_entities: list[str] = Field(default_factory=list)
     source_ref: str = Field(min_length=1)  # REQUIRED — resolves to a Source
     captured_at: str | None = None
+    started_at: str | None = None  # valid time (E1, #1533) — matches captured_at convention
     slots: ParticipantSlots | None = None  # #1418: typed participant slots
 
     @field_validator("id")

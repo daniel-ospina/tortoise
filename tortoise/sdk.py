@@ -1581,7 +1581,8 @@ class TortoiseSDK:
                        summary=None, existing_state=None,
                        extractor_model=None, chunk_size=None,
                        base_url=None, api_key=None, mode: str = "fail-closed",
-                       extractor: str | None = None) -> dict:
+                       extractor: str | None = None,
+                       session_date: str | None = None) -> dict:
         """The production commit path (epic #909, issue #1350).
 
         Extractor selection (reversible):
@@ -1606,7 +1607,11 @@ class TortoiseSDK:
         warn).
 
         ``summary`` may be passed directly (already extracted, v1-shaped) to
-        skip extraction — routes to the v1 path. Returns the endpoint
+        skip extraction — routes to the v1 path. ``session_date`` (E1, #1533)
+        is the ISO date the conversation happened on — the S1/S2/S4 date
+        anchor; when None, the v2 path defaults it to the capture time
+        (``datetime.now(timezone.utc).isoformat()``), so production commits
+        get date-anchored extraction by default. Returns the endpoint
         response, or the local extraction result with the payload when the
         endpoint is unreachable."""
         import os
@@ -1619,18 +1624,26 @@ class TortoiseSDK:
                 extractor_model, chunk_size or 6, base_url, api_key, mode)
         return self._commit_session_v2(
             conversation or [], session_id, extractor_model,
-            chunk_size or 50, base_url, api_key)
+            chunk_size or 50, base_url, api_key, session_date)
 
     def _commit_session_v2(self, conversation, session_id, extractor_model,
-                           chunk_size, base_url, api_key) -> dict:
+                           chunk_size, base_url, api_key,
+                           session_date: str | None = None) -> dict:
         """v2 path: S1→S5 via extractor_v2.extract_session_v2 → Layer-1-
         validated payload → POST. Errors are surfaced (ok=False) with the
         payload for inspection — never a silent partial write."""
         from tortoise.extractor_v2 import extract_session_v2  # noqa: I001
         from tortoise.commit_schema import validate_payload_dict
+        from datetime import datetime, timezone
         model = extractor_model or _default_byok_model()
+        # E1 (#1533, D8): capture time is the production session date — an
+        # undated production session is the bug (anchoring is the point of
+        # E1). Explicit session_date= overrides.
+        if not session_date:
+            session_date = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         out = extract_session_v2(model, conversation, sdk=self,
-                                 session_id=session_id, chunk_size=chunk_size)
+                                 session_id=session_id, chunk_size=chunk_size,
+                                 session_date=session_date)
         payload = out.get("payload")
         errors = list(out.get("errors", []) or [])
         if payload is None and not errors:

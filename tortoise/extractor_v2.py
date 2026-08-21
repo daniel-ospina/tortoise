@@ -225,6 +225,8 @@ Apply these per domain. When a fact spans domains, keep it if ANY domain
 considers it durable. When unsure: "is this a decision, a state change, a
 durable belief, or a reason — or is it how the work was done this hour?"
 
+{date_anchor}
+
 Focus on TWO primary layers, in this order:
 1. STATE (primary): subjects and objects and how they changed.
 2. EPISTEMIC (primary): the LOGIC — points that support (IMPL), attack (NAND),
@@ -269,10 +271,55 @@ def _granularity_text() -> str:
     return "\n".join(f"- {ns}: {txt}" for ns, txt in g.items())
 
 
-def run_s1(model, transcript: str) -> str:
+# ── Session-date anchoring (E1, #1533) ────────────────────────────────────
+
+_DATE_ANCHOR_D2 = (
+    "**DATE ANCHOR — today is `{session_date}`.** Anchor every state change, "
+    "decision, and event to this date. Express time with ABSOLUTE ISO dates "
+    "(YYYY-MM-DD); resolve relative expressions (\"yesterday\", \"last week\", "
+    "\"recently\") against today. Never leave relative time in the narrative."
+)
+
+_DATE_ANCHOR_D3 = (
+    "EVENT `startedAt` — every event is a time-bound occurrence/decision: "
+    "use the conversation's stated date when present, else default to the "
+    "session date; `null` only when the session date is unknown.\n"
+    "POINT `when` — emit an ISO date when the point is a state-change, "
+    "decision, or date-bearing fact (\"as of {date}\", \"on {date}\", "
+    "\"since {date}\"); `null` for timeless durable beliefs (operational "
+    "lessons, stable facts) — do NOT stamp every point."
+)
+
+
+def _date_anchor(session_date: str | None,
+                 *, include_emission_rules: bool = False) -> str:
+    """The bounded {date_anchor} prompt block (E1, #1533 — mem0 write-time
+    pattern). Returns "" when the session is undated so undated prompts stay
+    byte-identical to pre-E1; S1 renders the D2 anchor paragraph only, while
+    S2/S4 also render the D3 emission rules for `when`/`startedAt`."""
+    if not session_date:
+        return ""
+    block = [_DATE_ANCHOR_D2.format(session_date=session_date)]
+    if include_emission_rules:
+        block.append(_DATE_ANCHOR_D3.format(date=session_date))
+    return "\n\n".join(block)
+
+
+def _valid_iso_date(v: str) -> bool:
+    """Deterministic date-acceptance gate (E1, #1533 — S5 normalization):
+    accepts the YYYY-MM-DD prefix with an optional T/space tail (a bare date
+    or a full ISO datetime). Anything else ("next tuesday", "null", "") is
+    junk — the caller drops it with a warning."""
+    return bool(re.match(r"^\d{4}-\d{2}-\d{2}([Tt ].*)?$", str(v or "").strip()))
+
+
+def run_s1(model, transcript: str, *,
+           session_date: str | None = None) -> str:
     """S1: story summary for ONE segment. Returns the narrative text
     (the validated single-flash path, uncapped)."""
-    system = S1_TMPL.replace("{memory_granularity}", _granularity_text())
+    system = (S1_TMPL
+              .replace("{memory_granularity}", _granularity_text())
+              .replace("{date_anchor}", _date_anchor(session_date)))
     return _complete(model, system, "CONVERSATION:\n" + transcript)
 
 
@@ -349,8 +396,8 @@ def compile_stories(stories: list[str]) -> str:
 
 OUTPUT_CONTRACT = """{
   "entities": [{"name": str, "kind": str, "lifecycle": "created|changed|unchanged|superseded", "supersedes": "existing-id|null", "note": str|null}],
-  "events": [{"content": str, "eventKind": str, "about_entities": [str], "slots": {"subject": [{"name": str, "kind": str, "confidence": float}], "object": [{"name": str, "kind": str, "confidence": float}], "event": [{"name": str, "kind": str, "confidence": float}]}}],
-  "points": [{"content": str, "pointKind": "statement", "about_entities": [str], "slots": {"subject": [{"name": str, "kind": str, "confidence": float}], "object": [{"name": str, "kind": str, "confidence": float}], "event": [{"name": str, "kind": str, "confidence": float}]}}],
+  "events": [{"content": str, "eventKind": str, "about_entities": [str], "startedAt": "YYYY-MM-DD|YYYY-MM-DDThh:mm:ss|null", "slots": {"subject": [{"name": str, "kind": str, "confidence": float}], "object": [{"name": str, "kind": str, "confidence": float}], "event": [{"name": str, "kind": str, "confidence": float}]}}],
+  "points": [{"content": str, "pointKind": "statement", "about_entities": [str], "when": "YYYY-MM-DD|null", "slots": {"subject": [{"name": str, "kind": str, "confidence": float}], "object": [{"name": str, "kind": str, "confidence": float}], "event": [{"name": str, "kind": str, "confidence": float}]}}],
   "operators": [
     {"src": str, "dst": str, "op_type": "IMPL|NAND"},
     {"src": str, "dst": str, "op_type": "MITIGATES", "target_edge": {"src": str, "dst": str, "op_type": "IMPL"}, "strength": 0.1|0.3|0.5}
@@ -464,23 +511,29 @@ But STRIP, DON'T DROP the durable claim they carry:
 What survives is what changes the world model — including how we work.
 
 OUTPUT CONTRACT — ONE JSON object and NOTHING else:
+{date_anchor}
 {output_contract}
 
 Empty arrays are valid — extract-nothing is valid. Print ONLY the JSON object
 (no markdown fences, no commentary)."""
 
 
-def render_s2_prompt(master: dict | None = None) -> str:
+def render_s2_prompt(master: dict | None = None,
+                     session_date: str | None = None) -> str:
     master = master or build_master_list()
     return (S2_TMPL
             .replace("{master_list}", _render_master(master))
             .replace("{chains_text}", _render_chains(master))
+            .replace("{date_anchor}", _date_anchor(
+                session_date, include_emission_rules=True))
             .replace("{output_contract}", OUTPUT_CONTRACT))
 
 
-def run_s2(model, story: str, master: dict | None = None) -> dict:
+def run_s2(model, story: str, master: dict | None = None,
+           session_date: str | None = None) -> dict:
     """S2: story → embed list (draft prompt v1, owner-in-the-loop pending)."""
-    out = _complete(model, render_s2_prompt(master), "S1 STORY:\n" + story)
+    out = _complete(model, render_s2_prompt(master, session_date),
+                    "S1 STORY:\n" + story)
     return _parse_json(out)
 
 
@@ -694,6 +747,7 @@ S2 EMBED LIST (may be incomplete — that is why you exist)
 {embed_list_json}
 
 OUTPUT — ONE JSON object, the COMPLETE embed list (S2 + gaps), SAME contract:
+{date_anchor}
 {output_contract}
 
 Rules:
@@ -733,7 +787,8 @@ Empty arrays are valid. Print ONLY the JSON object."""
 
 
 def render_s4_prompt(story: str, search: dict, embed_list: dict,
-                     master: dict | None = None) -> str:
+                     master: dict | None = None,
+                     session_date: str | None = None) -> str:
     master = master or build_master_list()
     return (S4_TMPL
             .replace("{master_list}", _render_master(master))
@@ -741,13 +796,17 @@ def render_s4_prompt(story: str, search: dict, embed_list: dict,
             .replace("{story}", story)
             .replace("{search_results}", _render_search_results(search))
             .replace("{embed_list_json}", json.dumps(embed_list, indent=1))
+            .replace("{date_anchor}", _date_anchor(
+                session_date, include_emission_rules=True))
             .replace("{output_contract}", OUTPUT_CONTRACT))
 
 
 def run_s4(model, story: str, search: dict, embed_list: dict,
-           master: dict | None = None) -> dict:
+           master: dict | None = None,
+           session_date: str | None = None) -> dict:
     """S4: complete the embed list (S2 + gaps). Draft prompt v1."""
-    out = _complete(model, render_s4_prompt(story, search, embed_list, master),
+    out = _complete(model, render_s4_prompt(story, search, embed_list, master,
+                                            session_date),
                     "Complete the embed list.")
     return _parse_json(out)
 
@@ -1142,7 +1201,8 @@ _POINT_FALLBACK = {"kind": "statement"}
 def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                   story_arc: str = "", summary: str = "",
                   extractor_version: str = "value@0.5.0+v2",
-                  master: dict | None = None) -> dict:
+                  master: dict | None = None,
+                  session_date: str | None = None) -> dict:
     """S5: deterministic embed EXECUTION (not a flash prompt).
 
     Maps the complete embed list to the Layer-1 commit payload in dependency
@@ -1274,6 +1334,20 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                                       f"event '{content[:60]}'")
         if ev_slots:
             ev_entry["slots"] = ev_slots
+        # E1 (#1533) — events are time-bound: default to the session date when
+        # the model omitted startedAt (dated session ⇒ every event dated);
+        # junk dates are dropped with a warning. Undated session ⇒ no key
+        # (payload stays byte-identical).
+        started_at = str(ev.get("startedAt") or "").strip()
+        if not started_at and session_date:
+            started_at = session_date
+        if started_at:
+            if _valid_iso_date(started_at):
+                ev_entry["started_at"] = started_at
+            else:
+                warnings.append(
+                    f"event startedAt {started_at!r} is not a valid ISO date "
+                    "— dropped")
         payload_events.append(ev_entry)
 
     # ── points (dependency order 3) ───────────────────────────────────────
@@ -1326,6 +1400,16 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                                       f"point '{content[:60]}'")
         if pt_slots:
             pt_entry["slots"] = pt_slots
+        # E1 (#1533) — points carry `when` ONLY when the model anchored one:
+        # no default (timeless beliefs stay un-stamped); junk dropped with a
+        # warning. Undated session ⇒ no key (byte-identical payload).
+        when = str(p.get("when") or "").strip()
+        if when:
+            if _valid_iso_date(when):
+                pt_entry["when"] = when
+            else:
+                warnings.append(
+                    f"point when {when!r} is not a valid ISO date — dropped")
         payload_points.append(pt_entry)
 
     # ── operators (dependency order 4) — TWO-PASS ─────────────────────────
@@ -1466,9 +1550,15 @@ def _edus_from_conversation(conversation: list[dict]) -> list[dict]:
 
 def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                        session_id: str | None = None, chunk_size: int = 50,
-                       master: dict | None = None) -> dict:
+                       master: dict | None = None,
+                       session_date: str | None = None) -> dict:
     """The v2 production entry: conversation → S1 (chunked+compiled) → S2 →
     S3 (real-backend search) → S4 (gap review) → S5 (embed execution).
+
+    ``session_date`` (E1, #1533) is the ISO date/datetime the conversation
+    happened on: it anchors the S1/S2/S4 prompts (DATE ANCHOR block) and
+    drives S5's deterministic ``when``/``startedAt`` normalization. ``None`` /
+    "" → date-blind: prompts and payloads are byte-identical to pre-E1.
 
     Returns {"session_id", "story_arc", "embed_list", "search", "payload",
              "chain_notes", "link_before_create", "warnings", "minted_kinds",
@@ -1500,7 +1590,8 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     failed_chunks = 0
     for chunk in chunks:
         try:
-            chunk_stories.append(run_s1(model, _edus_to_text(chunk)))
+            chunk_stories.append(run_s1(model, _edus_to_text(chunk),
+                                        session_date=session_date))
         except Exception as e:  # per-chunk failure is non-fatal
             failed_chunks += 1
             errors.append(f"S1 chunk failed: {type(e).__name__}: {e}")
@@ -1513,7 +1604,8 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     embed_list: dict = {}
     if story:
         try:
-            embed_list = run_s2(model, story, master)
+            embed_list = run_s2(model, story, master,
+                                session_date=session_date)
         except Exception as e:
             errors.append(f"S2 failed: {type(e).__name__}: {e}")
 
@@ -1525,7 +1617,8 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     s4_warnings: list[str] = []
     if story:
         try:
-            s4 = run_s4(model, story, search, embed_list, master)
+            s4 = run_s4(model, story, search, embed_list, master,
+                        session_date=session_date)
             if s4 and (s4.get("entities") or s4.get("points") or
                        s4.get("events") or s4.get("operators")):
                 complete_list = s4
@@ -1540,7 +1633,8 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
         errors.append("no embed list produced (S2/S4 empty) — nothing to embed")
     try:
         result = execute_embed(complete_list, search, session_id=session_id,
-                               story_arc=story_arc, master=master)
+                               story_arc=story_arc, master=master,
+                               session_date=session_date)
     except Exception as e:  # S5 must NEVER block the pipeline (design §7.4)
         errors.append(f"S5 failed: {type(e).__name__}: {e}")
         result = {"payload": None, "chain_notes": [], "link_before_create": [],

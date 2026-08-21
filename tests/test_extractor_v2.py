@@ -195,6 +195,25 @@ class TestS2:
         assert "SUPERSESSION (state objects/subjects" in v2.S4_TMPL
         assert "never fabricate one for" in v2.S4_TMPL
 
+    def test_prompt_date_anchor_rules(self):
+        """T3 (#1533): OUTPUT_CONTRACT gains the when/startedAt fields and
+        S2/S4 render the D3 emission rules when a session date is present."""
+        assert '"when"' in v2.OUTPUT_CONTRACT
+        assert '"startedAt"' in v2.OUTPUT_CONTRACT
+        assert "YYYY-MM-DD|null" in v2.OUTPUT_CONTRACT
+        assert "{date_anchor}" in v2.S2_TMPL
+        assert "{date_anchor}" in v2.S4_TMPL
+        s2 = v2.render_s2_prompt(session_date="2026-08-01")
+        assert "DATE ANCHOR" in s2
+        assert "EVENT `startedAt`" in s2
+        assert "POINT `when`" in s2
+        assert "default to the session date" in s2
+        s4 = v2.render_s4_prompt("STORY", {}, S2_FIXTURE,
+                                 session_date="2026-08-01")
+        assert "DATE ANCHOR" in s4
+        assert "EVENT `startedAt`" in s4
+        assert "POINT `when`" in s4
+
     def test_minted_kind_report(self):
         bad = json.loads(json.dumps(S2_FIXTURE))
         bad["entities"].append({"name": "worktree", "kind": "worktree",
@@ -351,6 +370,58 @@ class TestS5:
         assert e["kind"] == "core:other"
         assert any("worktree" in w for w in result["warnings"])
         assert any("worktree" in m for m in result["minted_kinds"])
+
+    def test_events_default_to_session_date(self):
+        """T5 (#1533): events in a dated session always get started_at —
+        explicit startedAt preserved, else the session date; junk dropped
+        with a warning; undated sessions write no started_at key."""
+        embed = json.loads(json.dumps(S2_FIXTURE))
+        embed["events"] = [
+            {"content": "we decided X", "eventKind": "core:decision",
+             "about_entities": []},
+            {"content": "we decided Y", "eventKind": "core:decision",
+             "about_entities": [], "startedAt": "2026-07-01"},
+            {"content": "we decided Z", "eventKind": "core:decision",
+             "about_entities": [], "startedAt": "soon"},
+        ]
+        dated = v2.execute_embed(embed, {}, session_id="s1",
+                                 session_date="2026-08-01")
+        evs = {e["content"]: e for e in dated["payload"]["events"]}
+        assert evs["we decided X"]["started_at"] == "2026-08-01"
+        assert evs["we decided Y"]["started_at"] == "2026-07-01"
+        assert "started_at" not in evs["we decided Z"]
+        assert any("not a valid ISO date" in w for w in dated["warnings"])
+        # undated session: no default, explicit startedAt still honored
+        undated = v2.execute_embed(embed, {}, session_id="s1")
+        evs_u = {e["content"]: e for e in undated["payload"]["events"]}
+        assert "started_at" not in evs_u["we decided X"]
+        assert evs_u["we decided Y"]["started_at"] == "2026-07-01"
+        assert "started_at" not in evs_u["we decided Z"]
+
+    def test_points_carry_when(self):
+        """T4 (#1533): points carry `when` ONLY when the model anchored a
+        valid ISO date; junk dropped with a warning; timeless points get no
+        key."""
+        embed = json.loads(json.dumps(S2_FIXTURE))
+        embed["points"] = [
+            {"content": "we adopted the new strategy on 2026-08-01",
+             "pointKind": "statement", "about_entities": [],
+             "when": "2026-08-01"},
+            {"content": "timeless durable belief", "pointKind": "statement",
+             "about_entities": [], "when": None},
+            {"content": "junk dated point", "pointKind": "statement",
+             "about_entities": [], "when": "next tuesday"},
+        ]
+        result = v2.execute_embed(embed, {}, session_id="s1")
+        pts = {p["content"]: p for p in result["payload"]["points"]}
+        assert pts["we adopted the new strategy on 2026-08-01"]["when"] == "2026-08-01"
+        assert "when" not in pts["timeless durable belief"]
+        assert "when" not in pts["junk dated point"]
+        assert any("not a valid ISO date" in w for w in result["warnings"])
+        # undated session → dated payload points still validated when anchored
+        undated = v2.execute_embed(embed, {}, session_id="s1")
+        pts_u = {p["content"]: p for p in undated["payload"]["points"]}
+        assert pts_u["we adopted the new strategy on 2026-08-01"]["when"] == "2026-08-01"
 
     def test_mitigates_strength_clamped(self):
         embed = json.loads(json.dumps(S2_FIXTURE))
@@ -824,6 +895,70 @@ class TestOrchestrator:
         out = v2.extract_session_v2(MockModel([]), [])
         assert out["payload"] is None
         assert any("empty conversation" in w for w in out["warnings"])
+
+    def test_session_date_anchors_s1_prompt(self, monkeypatch):
+        """T1 (#1533): session_date threads into the S1 prompt — the DATE
+        ANCHOR block carries the session date; S2/S4 render it too (with the
+        D3 emission rules)."""
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+
+        def resp(system, user):
+            if "STORY SUMMARIZER" in system:
+                return "We shipped the migration on 2026-08-01."
+            if "GRAPH MAPPER" in system:
+                return json.dumps(S2_FIXTURE)
+            if "GAP REVIEWER" in system:
+                return json.dumps(S2_FIXTURE)
+            raise AssertionError(f"unexpected system prompt: {system[:50]}")
+
+        model = MockModel(resp)
+        conv = [{"role": "user", "content": "we decided X"}]
+        out = v2.extract_session_v2(model, conv, session_date="2026-08-01")
+        assert out["errors"] == []
+        s1 = model.calls[0][0]
+        assert "DATE ANCHOR" in s1
+        assert "today is `2026-08-01`" in s1
+        s2 = next(s for s, _ in model.calls if "GRAPH MAPPER" in s)
+        s4 = next(s for s, _ in model.calls if "GAP REVIEWER" in s)
+        assert "DATE ANCHOR" in s2 and "today is `2026-08-01`" in s2
+        assert "EVENT `startedAt`" in s2
+        assert "DATE ANCHOR" in s4 and "today is `2026-08-01`" in s4
+        assert "POINT `when`" in s4
+
+    def test_undated_rendering_byte_identical(self, monkeypatch):
+        """T2 (#1533): session_date=None/"" keeps prompts byte-identical to
+        pre-E1 — no date text in S1/S2/S4; the anchor renders to "" when
+        undated (the regression guard for the prompt insert)."""
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+
+        def resp(system, user):
+            if "STORY SUMMARIZER" in system:
+                return "We believed X."
+            if "GRAPH MAPPER" in system:
+                return json.dumps(S2_FIXTURE)
+            if "GAP REVIEWER" in system:
+                return json.dumps(S2_FIXTURE)
+            raise AssertionError(f"unexpected system prompt: {system[:50]}")
+
+        conv = [{"role": "user", "content": "we decided X"}]
+        for sd in (None, ""):
+            model = MockModel(resp)
+            out = v2.extract_session_v2(model, conv, session_date=sd)
+            assert out["errors"] == []
+            for system, _ in model.calls:
+                assert "DATE ANCHOR" not in system
+                assert "today is" not in system
+                assert "2026-08-01" not in system
+        # byte-identical rendering at the prompt level
+        assert v2._date_anchor(None) == ""
+        assert v2._date_anchor("") == ""
+        assert v2.render_s2_prompt(session_date=None) == \
+            v2.render_s2_prompt(session_date="")
+        assert v2.render_s4_prompt("STORY", {}, S2_FIXTURE,
+                                   session_date=None) == \
+            v2.render_s4_prompt("STORY", {}, S2_FIXTURE, session_date="")
 
     def test_chunked_compile_pipeline(self, monkeypatch):
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)

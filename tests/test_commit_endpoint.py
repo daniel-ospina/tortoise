@@ -1280,3 +1280,42 @@ class TestReviewTelemetryAndEventEdges:
             params={"ev": ev},
         ).result_set
         assert rows and rows[0][0] == 1, "event→Object edge missing for new entity"
+
+
+# ── E1 (#1533): event startedAt persisted server-side ──────────────────────
+
+class TestE1EventStartedAt:
+    """D6: the derived-commit receiver writes e.startedAt from the payload's
+    started_at (coalesce fallback: captured_at → now for undated events)."""
+
+    def test_event_started_at_written_from_payload(self, client):
+        from tortoise.ids import content_hash
+        ev = f"ev_{content_hash('dated event')[:62]}"
+        raw = _raw_payload(0, session_id="s-e1-dated")
+        raw["events"] = [{"id": ev, "eventKind": "decision",
+                          "content": "dated event", "confidence": 0.5,
+                          "about_entities": ["Alpha"],
+                          "source_ref": "session.md",
+                          "started_at": "2026-08-01"}]
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        rows = _team_sdk()._get_proj().g.query(
+            "MATCH (e:Event {eventId:$eid}) RETURN e.startedAt",
+            params={"eid": ev}).result_set
+        assert rows and rows[0][0] == "2026-08-01"
+
+    def test_undated_event_started_at_coalesces_to_captured_at(self, client):
+        from tortoise.ids import content_hash
+        ev = f"ev_{content_hash('undated event')[:62]}"
+        raw = _raw_payload(0, session_id="s-e1-undated")
+        raw["events"] = [{"id": ev, "eventKind": "decision",
+                          "content": "undated event", "confidence": 0.5,
+                          "about_entities": ["Alpha"],
+                          "source_ref": "session.md"}]
+        r = _commit(client, raw)
+        assert r.status_code == 200, r.text
+        rows = _team_sdk()._get_proj().g.query(
+            "MATCH (e:Event {eventId:$eid}) RETURN e.startedAt",
+            params={"eid": ev}).result_set
+        # coalesce(e.startedAt, ev.captured_at or now) — never null
+        assert rows and rows[0][0]

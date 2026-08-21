@@ -817,6 +817,128 @@ def test_v2_ingest_writes_payload_with_evidence_marks(tmp_path, monkeypatch):
         sdk.close()
 
 
+def test_v2_ingest_writes_when_and_started_at(tmp_path, monkeypatch):
+    """T7 (#1533): a dated haystack session writes Point.when and
+    Event.startedAt onto the graph nodes (the E1 write side) — the
+    call-site threading assert also covers T9 for the dated leg."""
+    import tortoise.extractor_v2 as ev2
+    from tools.longmem_eval.ingest_v2 import ingest_haystack_v2
+
+    payload = {
+        "entities": [],
+        "events": [{"content": "we decided X", "eventKind": "core:decision",
+                     "started_at": "2026-08-01"}],
+        "points": [{"id": "pt_alpha", "content": "the strategy shifted",
+                     "pointKind": "statement", "when": "2026-08-01"}],
+        "operators": [],
+    }
+
+    def _fake_extract(model, conversation, **kw):
+        assert kw.get("session_date") == "2026-08-01"  # T9: threaded
+        return {"payload": payload, "minted_kinds": [], "supersessions": [],
+                "errors": [], "warnings": []}
+
+    monkeypatch.setattr(ev2, "extract_session_v2", _fake_extract)
+
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        question = {
+            "question_id": "test_v2_dates_q",
+            "haystack_session_ids": ["sess-1"],
+            "haystack_dates": ["2026-08-01"],
+            "haystack_sessions": [[{"role": "user", "content": "shifted",
+                                    "has_answer": True}]],
+        }
+        stats = ingest_haystack_v2(sdk, question, model=object())
+        assert stats["points"] == 1
+        assert stats["events"] == 1
+        proj = sdk._get_proj()
+        when_rows = proj.g.query(
+            "MATCH (p:Point {id:$id}) RETURN p.when",
+            params={"id": "pt_alpha"}).result_set
+        assert when_rows[0][0] == "2026-08-01"
+        sat_rows = proj.g.query(
+            "MATCH (e:Event {name:'we decided X'}) RETURN e.startedAt"
+        ).result_set
+        assert sat_rows[0][0] == "2026-08-01"
+    finally:
+        sdk.close()
+
+
+def test_v2_ingest_undated_writes_no_dates(tmp_path, monkeypatch):
+    """T8 (#1533, E2E-4 owned negative): an undated session writes no
+    when/startedAt props onto the graph nodes."""
+    import tortoise.extractor_v2 as ev2
+    from tools.longmem_eval.ingest_v2 import ingest_haystack_v2
+
+    payload = {
+        "entities": [],
+        "events": [{"content": "we decided X", "eventKind": "core:decision"}],
+        "points": [{"id": "pt_alpha", "content": "the strategy shifted",
+                     "pointKind": "statement"}],
+        "operators": [],
+    }
+
+    def _fake_extract(model, conversation, **kw):
+        return {"payload": payload, "minted_kinds": [], "supersessions": [],
+                "errors": [], "warnings": []}
+
+    monkeypatch.setattr(ev2, "extract_session_v2", _fake_extract)
+
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        question = {
+            "question_id": "test_v2_undated_q",
+            "haystack_session_ids": ["sess-1"],
+            "haystack_dates": [],
+            "haystack_sessions": [[{"role": "user", "content": "shifted"}]],
+        }
+        ingest_haystack_v2(sdk, question, model=object())
+        proj = sdk._get_proj()
+        when_rows = proj.g.query(
+            "MATCH (p:Point {id:$id}) RETURN p.when",
+            params={"id": "pt_alpha"}).result_set
+        assert not when_rows[0][0]
+        sat_rows = proj.g.query(
+            "MATCH (e:Event {name:'we decided X'}) RETURN e.startedAt"
+        ).result_set
+        assert not sat_rows[0][0]
+    finally:
+        sdk.close()
+
+
+def test_v2_ingest_threads_session_date(tmp_path, monkeypatch):
+    """T9 (#1533): ingest_haystack_v2 hands the dataset's session date to
+    extract_session_v2; an undated session passes None (no false date)."""
+    import tortoise.extractor_v2 as ev2
+    from tools.longmem_eval.ingest_v2 import ingest_haystack_v2
+
+    received = []
+
+    def _fake_extract(model, conversation, **kw):
+        received.append(kw.get("session_date"))
+        return {"payload": {}, "minted_kinds": [], "supersessions": [],
+                "errors": [], "warnings": []}
+
+    monkeypatch.setattr(ev2, "extract_session_v2", _fake_extract)
+
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        question = {
+            "question_id": "test_v2_thread_q",
+            "haystack_session_ids": ["sess-1", "sess-2"],
+            "haystack_dates": ["2026-08-01"],  # session 0 dated
+            "haystack_sessions": [
+                [{"role": "user", "content": "a"}],
+                [{"role": "user", "content": "b"}],  # session 1 undated
+            ],
+        }
+        ingest_haystack_v2(sdk, question, model=object())
+        assert received == ["2026-08-01", None]
+    finally:
+        sdk.close()
+
+
 def test_v2_ingest_cli_flag(tmp_path, monkeypatch):
     """#1369: --ingest-mode v2 is a valid CLI flag and routes to the v2
     ingestion — the report methodology records ingest_mode=v2 and the
