@@ -294,6 +294,7 @@ surfaces:
     - test_labeled_pairs_schema.py
     - test_calibrate_thresholds.py
     - test_pair_label_runner.py
+    - test_backfill_embeddings_force.py
 tier1:
 - test_cli_serve.py
 - test_config.py
