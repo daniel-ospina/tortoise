@@ -469,6 +469,12 @@ def test_bootstrap_cap_falls_back_to_recovery_mint(page: Page) -> None:
                     route.fulfill(status=429, content_type="application/json",
                                   body=json.dumps({"detail": "Too many active session keys — wait for expiry"}))
                     return
+                if body.get("purpose") != "recovery":
+                    # Mirror the server's 422 for unknown purposes — the
+                    # fallback MUST retry as recovery, not anything else.
+                    route.fulfill(status=422, content_type="application/json",
+                                  body=json.dumps({"detail": "purpose must be 'bootstrap' or 'recovery'"}))
+                    return
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"key": "tt_recovery_key_1234567890abcdef", "team_id": "team_cap"}))
                 return
