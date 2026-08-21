@@ -459,6 +459,15 @@ function claimIntentInFlight() {
         if (response && response.ok) break
         if (attempt === 0) await new Promise(r => setTimeout(r, 1000))
       }
+      if (response && response.status === 401) {
+        // #1511 semantic, ported: a 401 from tenant-provision means the
+        // session is stale/invalid — welcome must never render for
+        // unauthenticated users. Clear the session and go to /auth.
+        if (typeof window.clearStoredSession === 'function') window.clearStoredSession()
+        if (typeof window.bounceToAuth === 'function') window.bounceToAuth()
+        else window.location.replace('https://tortoise.premiselabs.co/auth')
+        return { routedAway: true }
+      }
       if (response && response.ok) {
         // The function wrote the membership row before answering — re-query
         // and reveal through the canonical path (atomic reveal+null, A13).

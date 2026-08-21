@@ -257,7 +257,6 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
 
     page.route("**/*", handle)
     page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
-    expect(page.locator("body")).to_contain_text("Provisioning your Tortoise", timeout=15_000)
     expect(page.locator("body")).to_contain_text("tt_welcome_key_1234567890abcdef", timeout=20_000)
     assert reveal_calls["n"] == 1, f"reveal must fire exactly once, got {reveal_calls['n']}"
     # The raw key must be displayed (a revealed-once key is never shown again).
@@ -276,6 +275,99 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
     page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
     expect(page.locator("body")).to_contain_text("Welcome back", timeout=20_000)
     assert reveal_calls["n"] == 1, "returning visit reveals once (pending), no re-reveal"
+
+
+def test_welcome_mode_provision_failure_shows_error_card(page: Page) -> None:
+    """#1566: an edge-function provisioning failure shows the actionable
+    error card with a retry — never the silent stuck shell (the #1559
+    pattern applied to the welcome mode)."""
+    import urllib.parse as _up
+    import time as _time
+    user_id = "u-wfail"
+    sess = {"access_token": "fake.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sig",
+            "refresh_token": "rt", "expires_in": 3600,
+            "expires_at": int(_time.time()) + 3600, "token_type": "bearer",
+            "user": {"id": user_id, "email": "wfail@premise-labs.dev"}}
+    page.context.add_cookies([{"name": "sb-tortoise-auth-token",
+                               "value": _up.quote(json.dumps(sess)),
+                               "domain": ".premiselabs.co", "path": "/"}])
+
+    def handle(route):
+        url = route.request.url
+        if "api.premiselabs.co" in url:
+            if url.endswith("/v1/teams"):
+                route.fulfill(status=200, content_type="application/json", body="[]")
+                return
+            route.fulfill(status=401, content_type="application/json", body="{}")
+            return
+        if "functions/v1/tenant-provision" in url and route.request.method == "POST":
+            route.fulfill(status=500, content_type="application/json",
+                          body=json.dumps({"error": "boom"}))
+            return
+        if url.startswith(AUTH_HOST):
+            from tests.e2e.test_session_login_flow import AUTH_ORIGIN
+            resp = page.request.get(AUTH_ORIGIN + url[len(AUTH_HOST):])
+            route.fulfill(status=resp.status, content_type="text/html", body=resp.text())
+            return
+        if url.startswith(APP_HOST):
+            from tests.e2e.test_session_login_flow import DASHBOARD_URL
+            local = DASHBOARD_URL.rstrip("/") + url[len(APP_HOST):]
+            ctype = "application/javascript" if local.endswith(".js") else ("text/css" if local.endswith(".css") else "text/html")
+            resp = page.request.get(local)
+            route.fulfill(status=resp.status, content_type=ctype, body=resp.body())
+            return
+        route.continue_()
+
+    page.route("**/*", handle)
+    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    expect(page.locator("body")).to_contain_text("Could not create your team — try again.", timeout=20_000)
+    expect(page.locator("body")).to_contain_text("Try again", timeout=10_000)
+
+
+def test_welcome_mode_provision_401_clears_session_and_redirects(page: Page) -> None:
+    """#1566/#1511 semantic: a 401 from tenant-provision means the session is
+    stale — the app clears it and goes to /auth (never an error card or a
+    stuck state)."""
+    import urllib.parse as _up
+    import time as _time
+    user_id = "u-w401"
+    sess = {"access_token": "fake.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sig",
+            "refresh_token": "rt", "expires_in": 3600,
+            "expires_at": int(_time.time()) + 3600, "token_type": "bearer",
+            "user": {"id": user_id, "email": "w401@premise-labs.dev"}}
+    page.context.add_cookies([{"name": "sb-tortoise-auth-token",
+                               "value": _up.quote(json.dumps(sess)),
+                               "domain": ".premiselabs.co", "path": "/"}])
+
+    def handle(route):
+        url = route.request.url
+        if "api.premiselabs.co" in url:
+            if url.endswith("/v1/teams"):
+                route.fulfill(status=200, content_type="application/json", body="[]")
+                return
+            route.fulfill(status=401, content_type="application/json", body="{}")
+            return
+        if "functions/v1/tenant-provision" in url and route.request.method == "POST":
+            route.fulfill(status=401, content_type="application/json",
+                          body=json.dumps({"error": "Unauthorized"}))
+            return
+        if url.startswith(AUTH_HOST):
+            from tests.e2e.test_session_login_flow import AUTH_ORIGIN
+            resp = page.request.get(AUTH_ORIGIN + url[len(AUTH_HOST):])
+            route.fulfill(status=resp.status, content_type="text/html", body=resp.text())
+            return
+        if url.startswith(APP_HOST):
+            from tests.e2e.test_session_login_flow import DASHBOARD_URL
+            local = DASHBOARD_URL.rstrip("/") + url[len(APP_HOST):]
+            ctype = "application/javascript" if local.endswith(".js") else ("text/css" if local.endswith(".css") else "text/html")
+            resp = page.request.get(local)
+            route.fulfill(status=resp.status, content_type=ctype, body=resp.body())
+            return
+        route.continue_()
+
+    page.route("**/*", handle)
+    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    expect(page).to_have_url(re.compile(rf"^{re.escape(AUTH_HOST)}/auth"), timeout=20_000)
 
 
 def test_logout_redirects_to_auth(page: Page) -> None:
