@@ -727,6 +727,10 @@ function claimIntentInFlight() {
       if (e && e.suspended) setSuspended(e.suspended)  // #308
       setError(e.message === 'Invalid API key' ? 'Invalid API key — check your key and try again.' : e.message)
       setAuthed(false)
+      // #1559 (review P2): a /v1/team or load 5xx after a successful mint
+      // must NOT leave the silent redirect shell — same class as the mint
+      // failure. The error card (mountError) is the only renderable state.
+      setMountError(e && e.message ? e.message : 'Could not load your dashboard — try again.')
     } finally {
       setBusy(false)
       setChecking(false)
@@ -1640,6 +1644,14 @@ function claimIntentInFlight() {
               <h1>Dashboard</h1>
               <div role="alert">
                 <p className="error">{authUnavailable || mountError}</p>
+                {suspended && suspended.appeal_url ? (
+                  // #308: the appeal CTA must be reachable even when the
+                  // team is suspended pre-render (the authed banner is not
+                  // reachable in this state — review P2).
+                  <p className="dim" style={{ marginTop: 12 }}>
+                    <a href={suspended.appeal_url} target="_blank" rel="noreferrer">Appeal the suspension →</a>
+                  </p>
+                ) : null}
                 <button type="button" className="btn-submit" onClick={() => window.location.reload()}>Try again</button>
                 <p className="dim" style={{ marginTop: 12 }}>
                   Still stuck? Contact <a href="mailto:hello@premiselabs.co">hello@premiselabs.co</a>.

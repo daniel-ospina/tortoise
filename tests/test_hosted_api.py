@@ -2375,10 +2375,11 @@ class _FakeRequest:
     """Minimal starlette-like request with a state bag (the middleware only
     touches request.state / request.url.path / request.headers)."""
 
-    def __init__(self, scope: dict):
+    def __init__(self, scope: dict, set_state: bool = True):
         self.scope = scope
         self.state = _State()
-        self.state.client_ip = "203.0.113.42"  # what ClientIPMiddleware sets
+        if set_state:
+            self.state.client_ip = "203.0.113.42"  # what ClientIPMiddleware sets
         self.client = type("C", (), {"host": scope["client"][0]})()
 
         class _Headers(dict):
