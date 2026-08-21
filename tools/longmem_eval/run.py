@@ -407,6 +407,11 @@ def run_evaluation(
 
                     _stage = "reader"
                     t0 = time.monotonic()
+                    # A1 #1546 invariant: the reader receives question_type
+                    # ONLY. The _abs marker (question_id suffix) must never
+                    # cross — abstention is derived by the reader from the
+                    # evidence (rendered hits + dates), via the universal
+                    # partial-knowledge clause in system_prompt_for.
                     hypothesis = _call_with_backoff(
                         lambda: reader.answer(
                             # R1 (#1540) D6: the reader consumes EXACTLY the
