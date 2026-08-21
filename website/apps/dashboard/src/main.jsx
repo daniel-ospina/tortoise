@@ -654,6 +654,10 @@ function claimIntentInFlight() {
           } catch { /* fall through to mint */ }
         }
         let mintedTeamId = null
+        // #1567 (review P2): a switch made while the mint/loads are in
+        // flight owns its own error path — the stale continuation must not
+        // flip the live switched session to the error card.
+        const teamAtMountMint = teamIdRef.current
         if (!key) {
           const firstTeamId = teamsList.length ? teamsList[0].team_id : null
           try {
@@ -670,6 +674,7 @@ function claimIntentInFlight() {
             // "Redirecting to the sign-in page…" shell. Surface an
             // actionable error instead (the Retry button re-runs the mount).
             const msg = (e && e.message) || 'Could not prepare your session.'
+            if (teamIdRef.current !== teamAtMountMint) return  // switched mid-mint
             setMountError(/429|rate limit/i.test(msg)
               ? 'Too many requests from this network — try again in a minute.'
               : msg)
@@ -745,6 +750,7 @@ function claimIntentInFlight() {
 
   async function completeLogin(key) {
     setError('')
+    const teamAtCompleteLogin = teamIdRef.current
     try {
       const t = await api('/v1/team', key ? { headers: { Authorization: `Bearer ${key}` } } : {})
       // #1567 (review P1): the chrome renders early, so a team switch can
@@ -762,6 +768,7 @@ function claimIntentInFlight() {
       // #1559 (review P2): a /v1/team or load 5xx after a successful mint
       // must NOT leave the silent redirect shell — same class as the mint
       // failure. The error card (mountError) is the only renderable state.
+      if (teamIdRef.current !== teamAtCompleteLogin) return  // switched mid-load
       setMountError((e && /429|rate limit/i.test(e.message))
         ? 'Too many requests from this network — try again in a minute.'
         : (e && e.message) || 'Could not load your dashboard — try again.')
