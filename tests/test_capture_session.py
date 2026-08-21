@@ -747,7 +747,6 @@ def test_capture_session_gate_match_openai_key_alone_rejected(sdk, monkeypatch):
     """#1530 gate match: OPENAI_API_KEY alone no longer opens the v2 inner
     gate — the adapter cannot consume it (the #1468 failure class). The gate
     raises ValueError naming the routing-usable keys."""
-    from tortoise import sdk as sdk_module
     monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
     monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
     for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY"):
@@ -775,7 +774,6 @@ def test_capture_session_deepseek_direct_route_recorded(sdk, monkeypatch):
     records the resolved route + provider (#1530 D8)."""
     from tortoise.model_adapters import _reset_failover_cooldown
     _reset_failover_cooldown()
-    import requests as _requests
     requests_log = []
     _install_fake_provider(monkeypatch, requests_log)
     monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
@@ -798,6 +796,7 @@ def test_capture_session_failover_records_fallback_route(sdk, monkeypatch):
     fallback, the response records the fallback route, and the primary is
     never re-tried mid-extraction (D5 sticky, no flip-flop)."""
     import requests as _requests
+
     from tortoise.model_adapters import DeepSeekDirectModel, _reset_failover_cooldown
 
     _reset_failover_cooldown()
@@ -838,6 +837,7 @@ def test_capture_session_failover_meta_flags(sdk, monkeypatch):
     """The (extracted, meta) contract surfaces failover_used + errors through
     _extract_session_v2 (P1 consumes meta — shared contract, D8)."""
     import requests as _requests
+
     from tortoise.model_adapters import DeepSeekDirectModel, _reset_failover_cooldown
 
     _reset_failover_cooldown()
@@ -876,6 +876,7 @@ def test_capture_session_fatal_4xx_no_failover(sdk, monkeypatch):
     """E2E-8 fatal-4xx negative: the primary raises 401 → the extraction
     fails closed with NO fallback attempt (fatal is never failed over)."""
     import requests as _requests
+
     from tortoise.model_adapters import DeepSeekDirectModel, _reset_failover_cooldown
 
     _reset_failover_cooldown()
@@ -895,7 +896,7 @@ def test_capture_session_fatal_4xx_no_failover(sdk, monkeypatch):
 
     monkeypatch.setattr(DeepSeekDirectModel, "complete", _fatal_ds_complete)
 
-    extracted, meta = sdk._extract_session_v2(
+    _, meta = sdk._extract_session_v2(
         [{"role": "user", "content": "x"},
          {"role": "assistant", "content": "we decided"}],
         session_id="s-fatal", now="2026-08-20T00:00:00Z")

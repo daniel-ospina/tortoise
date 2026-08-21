@@ -30,18 +30,17 @@ Taxonomy contract (M2/M3 import these — do not fork):
   ``TRANSIENT_STATUS_CODES``, ``classify_llm_error``, ``is_transient``,
   ``is_fatal``.
 """
-from __future__ import annotations  # noqa: I001
+from __future__ import annotations
 
 import enum
 import errno
-import json
 import os
 import socket
 import threading
 import time
-from urllib import error as urllib_error  # noqa: F401 — classification inputs
+from urllib import error as urllib_error
 
-import requests  # noqa: I001
+import requests
 
 
 class OpenRouterModel:
@@ -233,10 +232,9 @@ def classify_llm_error(exc: BaseException) -> LlmErrorClass:
             return LlmErrorClass.TRANSIENT
         return LlmErrorClass.UNKNOWN
 
-    if (isinstance(exc, (requests.ConnectionError, requests.Timeout))
-            or isinstance(exc, urllib_error.URLError)
-            or isinstance(exc, socket.timeout)
-            or isinstance(exc, TimeoutError)  # covers socket.timeout (3.10+)
+    if (isinstance(exc, (requests.ConnectionError, requests.Timeout,
+                         urllib_error.URLError, socket.timeout,
+                         TimeoutError))  # socket.timeout is TimeoutError (3.10+)
             or _is_network_oserror(exc)):
         return LlmErrorClass.TRANSIENT
     return LlmErrorClass.UNKNOWN

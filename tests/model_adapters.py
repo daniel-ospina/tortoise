@@ -13,9 +13,9 @@ from __future__ import annotations  # noqa: I001
 
 import json  # noqa: F401 — eval scripts rely on the module importing json
 import os  # noqa: F401
-import requests  # noqa: F401
+import requests
 
-from tortoise.model_adapters import (  # noqa: I001, F401
+from tortoise.model_adapters import (  # noqa: F401
     DeepSeekDirectModel,
     MODELS,
     OpenRouterModel,

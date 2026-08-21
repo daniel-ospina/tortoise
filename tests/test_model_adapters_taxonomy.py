@@ -8,7 +8,6 @@ fork; these tests freeze the contract.
 """
 from __future__ import annotations
 
-import socket
 from urllib import error as urllib_error
 
 import pytest
@@ -17,8 +16,8 @@ import requests
 from tortoise.model_adapters import (
     FATAL_CONFIG_STATUS_CODES,
     FATAL_STATUS_CODES,
-    LlmErrorClass,
     TRANSIENT_STATUS_CODES,
+    LlmErrorClass,
     classify_llm_error,
     is_fatal,
     is_transient,
@@ -90,7 +89,7 @@ def test_urllib_urlerror_transient():
 
 
 def test_socket_timeout_transient():
-    assert classify_llm_error(socket.timeout("t")) is LlmErrorClass.TRANSIENT
+    assert classify_llm_error(TimeoutError("t")) is LlmErrorClass.TRANSIENT
 
 
 def test_plain_timeout_error_transient():
