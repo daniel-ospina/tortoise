@@ -225,9 +225,7 @@ Apply these per domain. When a fact spans domains, keep it if ANY domain
 considers it durable. When unsure: "is this a decision, a state change, a
 durable belief, or a reason — or is it how the work was done this hour?"
 
-{date_anchor}
-
-Focus on TWO primary layers, in this order:
+{date_anchor}Focus on TWO primary layers, in this order:
 1. STATE (primary): subjects and objects and how they changed.
 2. EPISTEMIC (primary): the LOGIC — points that support (IMPL), attack (NAND),
    or mitigate the relevance (MITIGATES) between points and objects.
@@ -294,17 +292,20 @@ _DATE_ANCHOR_D3 = (
 def _date_anchor(session_date: str | None,
                  *, include_emission_rules: bool = False) -> str:
     """The bounded {date_anchor} prompt block (E1, #1533 — mem0 write-time
-    pattern). Returns "" when the session is undated so undated prompts
-    carry no date text (S1 is then byte-identical to pre-E1; S2/S4 still
-    differ from pre-E1 only via the unconditional OUTPUT_CONTRACT
-    ``when``/``startedAt`` fields). S1 renders the D2 anchor paragraph only,
-    while S2/S4 also render the D3 emission rules for `when`/`startedAt`."""
+    pattern). Returns "" when the session is undated so the placeholder
+    renders to ZERO bytes — undated S1 prompts are byte-identical to pre-E1
+    (S2/S4 still differ from pre-E1 only via the unconditional OUTPUT_CONTRACT
+    ``when``/``startedAt`` fields). The trailing blank line is part of the
+    block (templates place {date_anchor} flush against the following
+    paragraph), so a dated render is cleanly separated from what follows.
+    S1 renders the D2 anchor paragraph only, while S2/S4 also render the D3
+    emission rules for `when`/`startedAt`."""
     if not session_date:
         return ""
     block = [_DATE_ANCHOR_D2.format(session_date=session_date)]
     if include_emission_rules:
         block.append(_DATE_ANCHOR_D3.format(date=session_date))
-    return "\n\n".join(block)
+    return "\n\n".join(block) + "\n\n"
 
 
 def _valid_iso_date(v: str) -> bool:
@@ -516,8 +517,7 @@ But STRIP, DON'T DROP the durable claim they carry:
 What survives is what changes the world model — including how we work.
 
 OUTPUT CONTRACT — ONE JSON object and NOTHING else:
-{date_anchor}
-{output_contract}
+{date_anchor}{output_contract}
 
 Empty arrays are valid — extract-nothing is valid. Print ONLY the JSON object
 (no markdown fences, no commentary)."""
@@ -752,8 +752,7 @@ S2 EMBED LIST (may be incomplete — that is why you exist)
 {embed_list_json}
 
 OUTPUT — ONE JSON object, the COMPLETE embed list (S2 + gaps), SAME contract:
-{date_anchor}
-{output_contract}
+{date_anchor}{output_contract}
 
 Rules:
 - Re-emit the S2 items you keep, corrected where the search results show they
@@ -1563,7 +1562,9 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     ``session_date`` (E1, #1533) is the ISO date/datetime the conversation
     happened on: it anchors the S1/S2/S4 prompts (DATE ANCHOR block) and
     drives S5's deterministic ``when``/``startedAt`` normalization. ``None`` /
-    "" → date-blind: prompts and payloads are byte-identical to pre-E1.
+    "" → date-blind: undated S1 prompts and all payloads are byte-identical
+    to pre-E1 (S2/S4 prompts differ only via the unconditional OUTPUT_CONTRACT
+    ``when``/``startedAt`` fields).
 
     Returns {"session_id", "story_arc", "embed_list", "search", "payload",
              "chain_notes", "link_before_create", "warnings", "minted_kinds",

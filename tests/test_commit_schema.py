@@ -240,6 +240,23 @@ class TestE1DateFields:
         assert not result.ok
         assert any("when" in k for k in result.errors)
 
+    def test_when_rejects_non_iso(self):
+        """Code-review fix: Point.when enforces the ISO date contract at
+        Layer-1 (mirrors CommitEvent.started_at) so a direct client cannot
+        store junk as p.when; "" (undated) still validates."""
+        raw = _raw_payload(1)
+        raw["points"][0]["when"] = "next tuesday"
+        result, _ = validate_payload_dict(_finalize(raw))
+        assert not result.ok
+        assert any("when" in k for k in result.errors)
+        # undated ("") and valid ISO still pass
+        ok, _ = validate_payload_dict(_finalize(_raw_payload(1)))
+        assert ok
+        raw3 = _raw_payload(1)
+        raw3["points"][0]["when"] = "2026-08-01T10:00:00"
+        ok3, _ = validate_payload_dict(_finalize(raw3))
+        assert ok3
+
     def test_started_at_rejects_non_iso(self):
         """Code-review fix: CommitEvent.started_at enforces the ISO date
         contract at Layer-1 (a direct client cannot store junk as e.startedAt)."""

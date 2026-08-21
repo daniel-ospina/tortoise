@@ -261,6 +261,19 @@ class Point(BaseModel):
     status: Literal["live", "draft"] = "draft"
     slots: ParticipantSlots | None = None  # #1418: typed participant slots
 
+    @field_validator("when")
+    @classmethod
+    def _iso_date_prefix(cls, v: str) -> str:
+        """E1 (#1533): the occurrence-time slot is an ISO date (YYYY-MM-DD
+        prefix — bare date or full datetime, matching the extractor's
+        _valid_iso_date gate); "" = undated. Junk is rejected at the Layer-1
+        contract so a direct client cannot store garbage as p.when."""
+        if not v:
+            return v
+        if not re.match(r"^\d{4}-\d{2}-\d{2}([Tt ].*)?$", v.strip()):
+            raise ValueError("when must be an ISO date (YYYY-MM-DD...) or empty")
+        return v
+
     @field_validator("id")
     @classmethod
     def _content_addressed_id(cls, v: str) -> str:

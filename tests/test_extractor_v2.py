@@ -957,9 +957,18 @@ class TestOrchestrator:
                 assert "DATE ANCHOR" not in system
                 assert "today is" not in system
                 assert "2026-08-01" not in system
-        # byte-identical rendering at the prompt level
+        # byte-identical rendering at the prompt level: the {date_anchor}
+        # placeholder renders to ZERO bytes when undated (S1 exactly equals
+        # the template with the placeholder erased)
         assert v2._date_anchor(None) == ""
         assert v2._date_anchor("") == ""
+        baseline_s1 = (v2.S1_TMPL
+                       .replace("{memory_granularity}", v2._granularity_text())
+                       .replace("{date_anchor}", ""))
+        undated_s1 = (v2.S1_TMPL
+                      .replace("{memory_granularity}", v2._granularity_text())
+                      .replace("{date_anchor}", v2._date_anchor(None)))
+        assert undated_s1 == baseline_s1, "undated S1 must be byte-identical"
         assert v2.render_s2_prompt(session_date=None) == \
             v2.render_s2_prompt(session_date="")
         assert v2.render_s4_prompt("STORY", {}, S2_FIXTURE,
