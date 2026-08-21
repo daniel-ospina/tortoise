@@ -38,11 +38,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from tortoise.model_adapters import is_fatal
 from tortoise.sdk import TortoiseSDK
 
 from . import dataset as ds
 from .ingest import ingest_haystack
 from .judge import build_judge, is_abstention
+from .preflight import FatalProviderError, PreflightError, run_preflight
 from .reader import build_reader, reader_prompt_constants
 from .report import build_report, default_report_path, save_report
 from .retrieve import retrieve_for_question
@@ -93,6 +95,13 @@ def _call_with_backoff(fn, *, what: str, retries: int,
         try:
             return fn()
         except Exception as e:  # noqa: BLE001, RUF100
+            # M2 (#1523, D4): a fatal-class error (401/402/403 or config-4xx
+            # per the P2 taxonomy — tortoise/model_adapters.is_fatal) is
+            # deterministic and permanent — retrying it is pointless. Re-raise
+            # immediately; the caller's per-question guard then aborts the run
+            # (FatalProviderError). Transients keep the existing backoff path.
+            if is_fatal(e):
+                raise
             if attempt > retries:
                 raise
             wait = min(base ** attempt, cap) * (0.5 + random.random() / 2)
@@ -147,6 +156,7 @@ def run_evaluation(
     ingest_mode: str = "deterministic",
     extractor_model=None,
     workers: int = 1,
+    preflight: dict | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Run the full per-question pipeline over ``instances``.
 
@@ -245,6 +255,15 @@ def run_evaluation(
                 outcomes.append(outcome)
                 done[qid] = outcome
         except Exception as e:  # noqa: BLE001, RUF100
+            # M2 (#1523, D4): a fatal-class provider error mid-run means the
+            # key died (billing cap hit, revocation) — continuing would
+            # silently produce garbage questions. Abort the run instead of
+            # recording a per-question failure (E2E-2: no silent degradation).
+            # Transient-exhausted errors still record into ``failures`` and
+            # the run continues (existing behavior — the per-question
+            # isolation semantics are unchanged for transients).
+            if is_fatal(e):
+                raise FatalProviderError(where="run-loop", exc=e, qid=qid) from e
             print(f"[longmem_eval] question {qid} FAILED (non-fatal, "
                   f"continuing): {e!r}", file=sys.stderr)
             with _lock:
@@ -285,6 +304,7 @@ def run_evaluation(
         split=split,
         ingest_mode=ingest_mode,
         failures=failures,
+        preflight=preflight,
     )
 
 
@@ -304,6 +324,7 @@ def outcomes_to_report(
     reader_pinned: bool | None = None,
     reader_system_prompt: str = "",
     reader_type_fragments: dict[str, str] | None = None,
+    preflight: dict | None = None,
 ) -> dict[str, Any]:
     """Aggregate outcomes (programmatic entry used by tests too).
 
@@ -312,6 +333,23 @@ def outcomes_to_report(
     report self-describes exactly which reader model/prompt produced its
     numbers.
     """
+    extra: dict[str, Any] = {
+        "outcomes": [
+            {k: o[k] for k in (
+                "question_id", "question_type", "question_date", "label",
+                "hypothesis", "session_recall@k", "turn_recall@k",
+                "evidence_recall@k", "n_ingest_errors", "context_tokens",
+                "retrieval_latency_ms", "reader_latency_ms",
+                "judge_latency_ms", "total_ms",
+            )}
+            for o in outcomes
+        ]
+    }
+    # M2 (#1523, D6): the pre-flight block rides ``extra["preflight"]`` —
+    # additive (default None keeps every existing caller/test green; M7 owns
+    # the report shape and may promote it into methodology later).
+    if preflight is not None:
+        extra["preflight"] = preflight
     return build_report(
         outcomes,
         dataset_id=dataset_id,
@@ -333,18 +371,7 @@ def outcomes_to_report(
         ks=ks,
         top_k=top_k,
         failures=failures,
-        extra={
-            "outcomes": [
-                {k: o[k] for k in (
-                    "question_id", "question_type", "question_date", "label",
-                    "hypothesis", "session_recall@k", "turn_recall@k",
-                    "evidence_recall@k", "n_ingest_errors", "context_tokens",
-                    "retrieval_latency_ms", "reader_latency_ms",
-                    "judge_latency_ms", "total_ms",
-                )}
-                for o in outcomes
-            ]
-        },
+        extra=extra,
     )
 
 
@@ -402,6 +429,9 @@ def _print_summary(report: dict[str, Any]) -> None:
     if report.get("n_failed", 0):
         print(f"failures: {report['n_failed']} question(s) did not complete — "
               f"see report['failures'] (run resumed from checkpoint)")
+    # M2 (#1523): the gate result is visible in the run's stdout.
+    from .preflight import format_preflight
+    print(format_preflight(report.get("preflight")))
     print("=" * 64)
 
 
@@ -428,6 +458,10 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="context points handed to the reader (default 20)")
     p.add_argument("--mock", action="store_true",
                    help="offline mode: MockReader + MockJudge, no API keys (CI)")
+    p.add_argument("--skip-preflight", action="store_true",
+                   help="bypass the pre-flight API gate (debugging/offline "
+                        "only — the run-protocol gate must be ON for "
+                        "pilot/500 runs)")
     p.add_argument("--ingest-mode", default="deterministic",
                    choices=["deterministic", "v2"],
                    help="ingestion: deterministic (turn points + raw transcripts) "
@@ -501,13 +535,41 @@ def run_main(argv: list[str] | None = None) -> dict[str, Any]:
             extractor_model = build_extractor_model(
                 max_tokens=None, temperature=0.0)
 
-    outcomes, report = run_evaluation(  # noqa: RUF059
-        instances, reader=reader, judge=judge, ks=ks, top_k=top_k,
-        work_dir=args.work_dir, split=args.split,
-        checkpoint=args.checkpoint, max_retries=args.max_retries,
-        ingest_mode=args.ingest_mode, extractor_model=extractor_model,
-        workers=max(1, args.workers),
-    )
+    # M2 (#1523): the pre-flight gate runs AFTER reader/judge/extractor_model
+    # are built and BEFORE anything in the question loop starts. --mock skips
+    # it (no keys/network); --skip-preflight bypasses it for debugging (the
+    # run-protocol gate must be ON for pilot/500 runs).
+    if args.mock or args.skip_preflight:
+        preflight = {
+            "status": "skipped", "mock": args.mock,
+            "reason": "mock" if args.mock else "skip-preflight",
+            "checks": [],
+            "detail": "mock" if args.mock else "skipped via --skip-preflight",
+        }
+    else:
+        try:
+            preflight = run_preflight(
+                reader=reader, judge=judge, extractor_model=extractor_model)
+        except PreflightError as e:
+            print("[longmem_eval] PRE-FLIGHT GATE FAILED — aborting before "
+                  "the run starts (no questions executed):", file=sys.stderr)
+            print(str(e), file=sys.stderr)
+            raise SystemExit(1) from e
+
+    try:
+        outcomes, report = run_evaluation(  # noqa: RUF059
+            instances, reader=reader, judge=judge, ks=ks, top_k=top_k,
+            work_dir=args.work_dir, split=args.split,
+            checkpoint=args.checkpoint, max_retries=args.max_retries,
+            ingest_mode=args.ingest_mode, extractor_model=extractor_model,
+            workers=max(1, args.workers), preflight=preflight,
+        )
+    except FatalProviderError as e:
+        print("[longmem_eval] RUN ABORTED — fatal provider error mid-run "
+              "(a 401/402/403 means the key died; continuing would silently "
+              "degrade the run):", file=sys.stderr)
+        print(str(e), file=sys.stderr)
+        raise SystemExit(1) from e
 
     out = args.output or str(default_report_path(args.split))
     save_report(report, out)

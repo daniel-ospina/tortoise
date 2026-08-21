@@ -143,6 +143,8 @@ class Judge(Protocol):
     def judge(self, *, question_type: str, question: str, answer: str,
               hypothesis: str, abstention: bool) -> bool: ...
 
+    def ping(self, probe: str) -> str: ...
+
 
 class OfficialJudgeModel:
     """Exact official LongMemEval judge call shape (``evaluate_qa.py``).
@@ -200,9 +202,12 @@ class OfficialJudgeModel:
 class LLMJudge:
     """Judge backed by an OpenAI-compatible chat model (official gpt-4o)."""
 
-    def __init__(self, model, model_id: str):
+    def __init__(self, model, model_id: str, *, model_spec: str | None = None):
         self._model = model
         self.model_id = model_id
+        # M2 (#1523): the full <provider>:<model> spec (set by build_judge) —
+        # check_judge_key resolves the expected key env var from it.
+        self.model_spec = model_spec or model_id
 
     def judge(self, *, question_type: str, question: str, answer: str,
               hypothesis: str, abstention: bool) -> bool:
@@ -212,6 +217,18 @@ class LLMJudge:
         # system message, no JSON mode, max_tokens=10 — see OfficialJudgeModel).
         raw = self._model.complete(user=prompt)
         return _parse_judge_response(raw)
+
+    def ping(self, probe: str) -> str:
+        """Minimal transport-health probe (M2 #1523 pre-flight).
+
+        One tiny completion through the judge's dedicated official transport
+        (key + endpoint + model health only). HTTP status errors propagate
+        for classification via the P2 taxonomy; mid-run judge 5xx/timeouts
+        keep being retried by ``_call_with_backoff`` before a question is
+        marked failed (verify-gate fix, never silent).
+        """
+        raw = self._model.complete(user=probe)
+        return raw.strip()
 
 
 class MockJudge:
@@ -227,6 +244,12 @@ class MockJudge:
     """
 
     model_id = "mock-judge"
+
+    def ping(self, probe: str) -> str:
+        """Total protocol: pre-flight never pings the mock (mock mode skips
+        the gate entirely), but the interface stays complete (M2 #1523)."""
+        del probe
+        return "mock ping ok"
 
     _ABSTRACTION_MARKERS = (
         "do not know", "don't know", "not know", "unanswerable",
@@ -277,4 +300,4 @@ def build_judge(spec: str | None = None, *, mock: bool = False) -> Judge:
     # no system message, max_tokens=10) — see OfficialJudgeModel.
     model = OfficialJudgeModel(
         id=model_id, base_url=base_url, api_key_env=key_env)
-    return LLMJudge(model, model_id=model_id)
+    return LLMJudge(model, model_id=model_id, model_spec=raw_spec)
