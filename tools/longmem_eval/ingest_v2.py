@@ -8,10 +8,17 @@ deterministic leg's Session nodes + raw-transcript points are RETAINED
 (#1369 indicator 3 — verbatim recall mitigation) so v2 mode is comparable to
 the deterministic baseline on the same retrieval.
 
-Evidence marking (the extractor's recall contribution): a v2 point whose
-content overlaps an answer turn (``has_answer`` in the dataset, >=0.4 token
-overlap) is written with ``has_answer=True`` — so the runner's turn-recall@k
-measures 'did the extracted point CONTAINING the answer surface in top-k'.
+Evidence marking (the extractor's recall contribution, M6 #1526): the
+miscalibrated ``>=0.4`` content-overlap predicate is REPLACED by three
+independent marks from the shared ``evidence.py`` module — (a) source-session
+attribution (the point's ``session_id`` is an evidence session), (b) verbatim
+anchor (the point's ``quote`` contains/overlaps an answer turn; quotes are
+populated deterministically at ingest via D3 anchoring since the extractor
+emits an empty quote), (c) raw-chunk containment (the session raw transcript
+contains an answer turn verbatim). Marks are OR-combined into the eval
+``has_answer`` property so the runner's evidence-recall@k measures 'did an
+evidence-marked point surface in top-k'.
+
 Combined with the raw-transcript leg (which always matches), this gives the
 extractor-vs-retrieval attribution: an evidence-bearing extracted point in
 the context but a wrong answer = reader failure; evidence content in the
@@ -25,58 +32,34 @@ the structural signal).
 from __future__ import annotations
 
 import logging
-import re
 from typing import Any
 
 from tortoise.sdk import TortoiseSDK
 
 logger = logging.getLogger(__name__)
 
-from .ingest import SESSION_TRANSCRIPT_KIND, _point_exists, _session_transcript  # noqa: E402, I001
-
-
-_STOPWORDS = {"the", "a", "an", "is", "are", "was", "were", "to", "of",
-               "and", "or", "in", "on", "at", "for", "with", "it", "its",
-               "this", "that", "i", "you", "he", "she", "we", "they",
-               "my", "your", "me", "him", "her", "us", "them", "do", "did",
-               "does", "have", "has", "had", "be", "been", "not", "no",
-               "yes", "ok", "okay", "so", "but", "if", "then", "there",
-               "here", "what", "when", "why", "how", "just", "very", "really"}
-
-
-def _tokens(text: str) -> set[str]:
-    return {t for t in re.sub(r"[^a-z0-9 ]", " ", (text or "").lower()).split()
-            if t not in _STOPWORDS and len(t) > 1}
-
-
-def _overlap(a: str, b: str) -> float:
-    """Answer-content coverage: the fraction of the answer turn's content
-    tokens present in the candidate point (stopwords stripped). Directional
-    — a point is evidence only when it substantially contains the answer's
-    meaning, not when it merely shares filler words."""
-    tb = _tokens(b)
-    if not tb:
-        return 0.0
-    ta = _tokens(a)
-    if not ta:
-        return 0.0
-    return len(ta & tb) / len(tb)
-
-
-def _evidence_marked(content: str, evidence_turns: list[str],
-                     threshold: float = 0.4) -> bool:
-    """True when a v2 point contains >= threshold of an answer turn's content
-    tokens (stopword-stripped, >=2 content tokens required)."""
-    return any(_overlap(content, turn) >= threshold
-               and len(_tokens(turn)) >= 2 for turn in evidence_turns)
+from .evidence import (EVIDENCE_QUOTE_CAP, anchor_quote, evidence_sessions,  # noqa: E402, I001
+                       mark_for)
+from .evidence import _overlap  # noqa: F401, E402 — back-compat re-export
+from .ingest import SESSION_TRANSCRIPT_KIND, _point_exists, _session_transcript  # noqa: E402
 
 
 def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
-                   si: int, evidence_turns: list[str]) -> dict:
+                   si: int, evidence_turns: list[str], turns: list[dict],
+                   ev_sessions: set[str]) -> dict:
     """Write a v2 Layer-1 payload into the eval graph. Idempotent per point
-    (explicit deterministic ids + _point_exists guard). Returns stats."""
+    (explicit deterministic ids + _point_exists guard). Returns stats.
+
+    M6 evidence marking: each extracted point gets the OR of the three marks
+    (source-session attribution / verbatim quote anchor / raw-chunk
+    containment) and a D3-deterministically-anchored quote (the extractor
+    emits an empty quote; gate 2: consume a non-empty payload quote
+    instead). The per-mark breakdown is counted in
+    ``stats["evidence_marks"]`` so the report can say WHY evidence exists."""
     stats = {"entities": 0, "points": 0, "events": 0, "operators": 0,
-             "evidence_points": 0, "minted_kinds": 0}
+             "evidence_points": 0, "minted_kinds": 0,
+             "evidence_marks": {"source_session": 0, "verbatim": 0,
+                                "raw_chunk": 0}}
     proj = sdk._get_proj()
 
     # ── entities (objects) ──
@@ -99,12 +82,21 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
         pid = str(p.get("id", "")).strip()
         if not content or not pid:
             continue
-        is_evidence = _evidence_marked(content, evidence_turns)
+        # D3: deterministic quote population — consume a non-empty payload
+        # quote (E3's future wiring, gate 2) capped at EVIDENCE_QUOTE_CAP,
+        # else anchor one from the session turns (extractor emits "").
+        quote = str(p.get("quote") or "")[:EVIDENCE_QUOTE_CAP]
+        if not quote:
+            quote = anchor_quote(content, turns)
+        mark = mark_for({**p, "content": content, "quote": quote},
+                        session_id=sid, evidence_sessions=ev_sessions,
+                        answer_turn_contents=evidence_turns)
         if _point_exists(proj, pid):
             # #1369 review P2: content-addressed collision across sessions —
-            # OR-in this session's evidence marking (first-writer props keep
-            # the session id; the raw-transcript leg mitigates attribution).
-            if is_evidence:
+            # OR-in this session's evidence marking (M6: never overwrite a
+            # True with False on collision; first-writer props keep the
+            # session id; the raw-transcript leg mitigates attribution).
+            if mark["has_answer"]:
                 proj.g.query(
                     "MATCH (p:Point {id:$id}) SET p.has_answer = true",
                     params={"id": pid})
@@ -113,12 +105,15 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
             sdk.create_point(
                 "statement", content, id=pid, session_id=sid,
                 lme_question_id=qid, lme_session_index=si,
-                is_episodic=True, has_answer=is_evidence,
-                status="draft",
+                is_episodic=True, has_answer=mark["has_answer"],
+                quote=quote, status="draft",
             )
             stats["points"] += 1
-            if is_evidence:
+            if mark["has_answer"]:
                 stats["evidence_points"] += 1
+                for mk, fired in mark["marks"].items():
+                    if fired:
+                        stats["evidence_marks"][mk] += 1
         except Exception as ex:  # noqa: BLE001, RUF100
             logger.warning("v2 ingest point %r failed: %s", pid, ex)
 
@@ -184,7 +179,16 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
     ids: list[str] = question.get("haystack_session_ids") or []
     stats = {"sessions": 0, "turns": 0, "raw_transcripts": 0, "points": 0,
              "events": 0, "entities": 0, "operators": 0, "evidence_points": 0,
-             "minted_kinds": 0, "supersessions": 0, "errors": []}
+             "evidence_turns": 0, "minted_kinds": 0, "supersessions": 0,
+             "evidence_marks": {"source_session": 0, "verbatim": 0,
+                                "raw_chunk": 0}, "errors": []}
+    # M6: the evidence-session id set (haystack sessions containing >=1
+    # has_answer turn) + ALL answer-turn contents (question-wide — marks
+    # (b)/(c) match against every answer turn, wherever it lives).
+    ev_sessions = evidence_sessions(question)
+    all_evidence_turns = [
+        str(t.get("content") or "")
+        for session in sessions for t in session if t.get("has_answer")]
 
     for si, session in enumerate(sessions):
         sid = ids[si] if si < len(ids) else f"{qid}-s{si}"
@@ -192,6 +196,7 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
         s_node = f"lme:{qid}:s{si}"
         evidence_turns = [str(t.get("content") or "") for t in session
                           if t.get("has_answer")]
+        stats["evidence_turns"] += len(evidence_turns)
 
         # ── Session node (mirrors the deterministic leg) ──
         sdk._get_proj().g.query(
@@ -205,13 +210,34 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
         stats["sessions"] += 1
 
         # ── Raw verbatim transcript (retained — verbatim recall mitigation) ──
+        # M6 mark (c)+(a): the answer-session transcript contains the answer
+        # turns verbatim (52/52 on the healthy fixture) — has_answer=true so
+        # the v2 leg is non-vacuous even when the extractor paraphrases
+        # everything (the 402-run would have had marks via (c) alone).
         raw_id = f"lme:{qid}:s{si}:raw"
+        raw_text = _session_transcript(session)
+        raw_mark = mark_for({"content": raw_text, "quote": ""},
+                            session_id=sid, evidence_sessions=ev_sessions,
+                            answer_turn_contents=all_evidence_turns)
         if not _point_exists(sdk._get_proj(), raw_id):
             sdk.create_point(
-                SESSION_TRANSCRIPT_KIND, _session_transcript(session),
+                SESSION_TRANSCRIPT_KIND, raw_text,
                 id=raw_id, session_id=sid, lme_question_id=qid,
-                lme_session_index=si, is_episodic=True, status="draft",
+                lme_session_index=si, is_episodic=True,
+                has_answer=raw_mark["has_answer"], status="draft",
             )
+            # create-only (consistent with the extracted-points accounting) —
+            # re-ingest is a no-op, not a recount.
+            if raw_mark["has_answer"]:
+                stats["evidence_points"] += 1
+            if raw_mark["marks"]["raw_chunk"]:
+                stats["evidence_marks"]["raw_chunk"] += 1
+        elif raw_mark["has_answer"]:
+            # Idempotent OR-in: a raw transcript written by a pre-M6 run has
+            # no has_answer prop — never overwrite a True with False.
+            sdk._get_proj().g.query(
+                "MATCH (p:Point {id:$id}) SET p.has_answer = true",
+                params={"id": raw_id})
         stats["raw_transcripts"] += 1
         sdk._get_proj().g.query(
             "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
@@ -238,10 +264,15 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
         # the ACTUAL writes (the _write_payload stats are authoritative —
         # they skip duplicates, so payload-len double-counts)
         written = _write_payload(sdk, payload, sid=sid, qid=qid, si=si,
-                                 evidence_turns=evidence_turns)
+                                 evidence_turns=all_evidence_turns,
+                                 turns=turns, ev_sessions=ev_sessions)
         for k in ("points", "events", "entities", "operators",
                   "evidence_points"):
             stats[k] += written.get(k, 0)
+        for mk in ("source_session", "verbatim", "raw_chunk"):
+            stats["evidence_marks"][mk] = (
+                stats["evidence_marks"].get(mk, 0)
+                + written.get("evidence_marks", {}).get(mk, 0))
 
         # ── Session CONTAINS the extracted points ──
         for p in payload.get("points", []) or []:

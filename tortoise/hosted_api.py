@@ -4222,6 +4222,12 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: "CommitPayload", plan):
                 c_cal=pr.point.c_cal, quote=pr.point.quote,
                 source_ref=pr.point.source_ref,
                 extractedFrom=pr.point.source_ref, is_episodic=False,
+                # #1526 (M6 owner validation): the commit-receiver points were
+                # written WITHOUT session_id — the source-session attribution
+                # evidence mark needs the point's session on both capture
+                # paths (SDK capture already writes it). Existing field, not
+                # a new point property.
+                session_id=session_id,
             )
             sdk.supersede_point(pr.existing_id, pid)
         else:
@@ -4231,6 +4237,10 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: "CommitPayload", plan):
                 c_cal=pr.point.c_cal, quote=pr.point.quote,
                 source_ref=pr.point.source_ref,
                 extractedFrom=pr.point.source_ref, is_episodic=False,
+                # #1526 (M6 owner validation): see above — session_id on the
+                # committed points so both capture paths (SDK + hosted) carry
+                # the same source-session attribution surface.
+                session_id=session_id,
             )
         proj.g.query(
             "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "

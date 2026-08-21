@@ -10,8 +10,19 @@ epistemic turn points and the raw verbatim session transcripts — the
 Reported per question:
   * session-level recall@k  — fraction of ``answer_session_ids`` (evidence
     sessions) that appear among the top-k retrieved points' sessions,
-  * turn-level recall@k      — fraction of evidence turns (``has_answer``)
-    whose turn point appears in the top-k,
+  * turn-level recall@k      — fraction of evidence-MARKED points
+    (``has_answer``: evidence turns on the deterministic leg, plus M6
+    marks — source-session attribution, verbatim quotes, raw-transcript
+    containment) that appear in the top-k; when the graph has no marks but
+    the dataset has evidence turns, falls back to the deterministic
+    evidence-turn ids (honest attribution per leg),
+  * evidence recall@k        — the extractor's recall contribution: marked
+    points (has_answer) surfaced / marked points total (same marked-set
+    accounting as turn-level when marks exist; ``None`` when the graph has
+    zero marks). N/A semantics (M6, #1526): ``None`` when the denominator
+    is EMPTY (no evidence points / no evidence turns) — never a forced 0.0,
+    so "no evidence exists" stays distinguishable from "evidence exists but
+    never surfaces" (#1369),
   * context tokens           — estimated LLM tokens of the top-k context
     handed to the reader (whitespace tokens + 10% markup allowance; the
     estimator is recorded in report provenance),
@@ -185,7 +196,7 @@ def retrieve_for_question(
         "MATCH (p:Point) WHERE p.lme_question_id = $q AND p.has_answer = true "
         "RETURN count(*)", params={"q": qid}).result_set
     evidence_point_count = ev_rows[0][0] if ev_rows else 0
-    _evidence_recall: dict[str, float] = {}
+    _evidence_recall: dict[str, float | None] = {}
     for k in ks:
         top = annotated[:k]
         if answer_sessions:
@@ -200,13 +211,16 @@ def retrieve_for_question(
             turn_recall[str(k)] = len(ev_hits) / evidence_point_count
             _evidence_recall[str(k)] = len(ev_hits) / evidence_point_count
         else:
-            _evidence_recall[str(k)] = 0.0
+            # M6 (#1526) N/A-not-0.0: an empty denominator is None, never a
+            # forced 0.0 — "no evidence exists" must stay distinguishable
+            # from "evidence exists but never surfaces" (#1369).
+            _evidence_recall[str(k)] = None
             if evidence_turn_ids:
                 # deterministic leg: did the evidence TURN surface?
                 top_ids = {h["id"] for h in top}
                 turn_recall[str(k)] = len(evidence_turn_ids & top_ids) / len(evidence_turn_ids)
             else:
-                turn_recall[str(k)] = 0.0
+                turn_recall[str(k)] = None
 
     # ── context handed to the reader (top_k) ──
     context_points = annotated[:top_k]
