@@ -512,7 +512,9 @@ def test_mock_email_signup_created_signs_in_and_redirects_url_clean(page: Page) 
         # redirect to the app root (no check-your-inbox step, #801/#1566).
         # #1566: the signup now lands on the app ROOT (first-timers are
         # provisioned in-app there).
-        page.wait_for_url("**://app.premiselabs.co*", timeout=15_000)
+        # ** (double-star): the browser commits the trailing slash
+        # (https://app.premiselabs.co/) which a single * glob excludes.
+        page.wait_for_url("**://app.premiselabs.co**", timeout=15_000)
     assert "email=" not in page.url and "password=" not in page.url
     assert captured["x_signup"], "x_signup entry missing from dataLayer"
     entry = captured["x_signup"]

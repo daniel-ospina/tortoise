@@ -904,7 +904,9 @@ def test_mock_email_signup_created_signs_in_and_redirects(page: Page) -> None:
         # #801 deployed happy path: created server-side → direct sign-in →
         # redirect to the app root (no check-your-inbox step, #801/#1566).
         # #1566: the signup now lands on the app ROOT (in-app provisioning).
-        page.wait_for_url("**://app.premiselabs.co*", timeout=15_000)
+        # ** (double-star): the browser commits the trailing slash
+        # (https://app.premiselabs.co/) which a single * glob excludes.
+        page.wait_for_url("**://app.premiselabs.co**", timeout=15_000)
 
     # X conversion event (#736 Path A): the dataLayer push fired on success
     # with event=x_signup, the typed email, and a non-empty conversion_id
