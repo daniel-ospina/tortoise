@@ -234,7 +234,7 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
     provenance (mirrors ingest_haystack's shape). ``chunk_turns`` (R1
     #1540) is the turns-per-window granularity of the raw chunks (>= 1).
     """
-    from tortoise.extractor_v2 import extract_session_v2
+    from tortoise.extractor_v2 import _classify_error, extract_session_v2
 
     qid = question["question_id"]
     sessions: list[list[dict]] = question.get("haystack_sessions") or []
@@ -245,7 +245,11 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
              "evidence_turns": 0, "minted_kinds": 0, "supersessions": 0,
              "supersessions_written": 0,
              "evidence_marks": {"source_session": 0, "verbatim": 0,
-                                "raw_chunk": 0}, "errors": []}
+                                "raw_chunk": 0}, "errors": [],
+             # M4 (#1524, D4): the per-question error census — rolled up from
+             # each session's extractor ``error_census`` + the session-level
+             # exception class; feeds outcome ``valid``/``error_classes``.
+             "error_census": {}}
     # M6: the evidence-session id set (haystack sessions containing >=1
     # has_answer turn) + ALL answer-turn contents (question-wide — marks
     # (b)/(c) match against every answer turn, wherever it lives).
@@ -333,12 +337,19 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
                                      session_date=session_date or None)
         except Exception as ex:  # noqa: BLE001, RUF100
             stats["errors"].append(f"s{si}: {type(ex).__name__}: {ex}")  # kill the run
+            # M4 (D4): the session-level exception is CLASSIFIED into the same
+            # granular census vocabulary (S1/S2/S4 failures already ride in
+            # out["error_census"]).
+            _class = _classify_error(ex)
+            stats["error_census"][_class] = stats["error_census"].get(_class, 0) + 1
             continue
         payload = out.get("payload") or {}
         stats["turns"] += len(session)
         stats["minted_kinds"] += len(out.get("minted_kinds", []) or [])
         stats["supersessions"] += len(out.get("supersessions", []) or [])
         stats["errors"].extend(out.get("errors", []) or [])
+        for _class, count in (out.get("error_census") or {}).items():
+            stats["error_census"][_class] = stats["error_census"].get(_class, 0) + count
 
         # the ACTUAL writes (the _write_payload stats are authoritative —
         # they skip duplicates, so payload-len double-counts)

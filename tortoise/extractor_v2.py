@@ -48,9 +48,16 @@ module per design doc §3.
 """
 from __future__ import annotations
 
+import contextlib
+import inspect
 import json
+import os
+import random
 import re
 import time
+import warnings
+import weakref
+from typing import Any
 
 # ── The v2 master list (design doc §3) ─────────────────────────────────────
 
@@ -377,13 +384,17 @@ def _valid_iso_date(v: str) -> bool:
 
 
 def run_s1(model, transcript: str, *,
-           session_date: str | None = None) -> str:
+           session_date: str | None = None,
+           stats: dict | None = None) -> str:
     """S1: story summary for ONE segment. Returns the narrative text
-    (the validated single-flash path, uncapped)."""
+    (the validated single-flash path). Generation is bounded at
+    ``_S1_MAX_TOKENS`` (M3 #1524, D2 — capped output, truncation detected
+    via ``last_finish_reason == "length"``, never silently lost)."""
     system = (S1_TMPL
               .replace("{memory_granularity}", _granularity_text())
               .replace("{date_anchor}", _date_anchor(session_date)))
-    return _complete(model, system, "CONVERSATION:\n" + transcript)
+    return _complete(model, system, "CONVERSATION:\n" + transcript,
+                     max_tokens=_stage_cap(_S1_MAX_TOKENS), stats=stats)
 
 
 # ── The chunker + compiler (design doc §2) ─────────────────────────────────
@@ -661,13 +672,23 @@ def render_s2_prompt(master: dict | None = None, *,
 
 def run_s2(model, story: str, master: dict | None = None, *,
            session_date: str | None = None,
-           edus: list[dict] | None = None) -> dict:
-    """S2: story → embed list (draft prompt v1, owner-in-the-loop pending)."""
+           edus: list[dict] | None = None,
+           stats: dict | None = None) -> dict:
+    """S2: story → embed list (draft prompt v1, owner-in-the-loop pending).
+
+    Output is bounded at ``_S2_S4_MAX_TOKENS`` (M3 #1524, D2); a truncated
+    or unparseable response raises ``_ParseError`` → census ``parse_error``
+    (the tail-cut tolerance of ``_parse_json`` still recovers truncated
+    JSON; the census records the truncation for the fix loop)."""
     out = _complete(model,
                     render_s2_prompt(master, session_date=session_date,
                                      edus=edus),
-                    "S1 STORY:\n" + story)
-    return _parse_json(out)
+                    "S1 STORY:\n" + story,
+                    max_tokens=_stage_cap(_S2_S4_MAX_TOKENS), stats=stats)
+    try:
+        return _parse_json(out)
+    except ValueError as e:
+        raise _ParseError(str(e)) from e
 
 
 # ── S3: SEARCH THE GRAPH (real backend, graceful degradation) ─────────────
@@ -958,13 +979,21 @@ def render_s4_prompt(story: str, search: dict, embed_list: dict,
 def run_s4(model, story: str, search: dict, embed_list: dict,
            master: dict | None = None, *,
            session_date: str | None = None,
-           edus: list[dict] | None = None) -> dict:
-    """S4: complete the embed list (S2 + gaps). Draft prompt v1."""
+           edus: list[dict] | None = None,
+           stats: dict | None = None) -> dict:
+    """S4: complete the embed list (S2 + gaps). Draft prompt v1.
+
+    Output bounded at ``_S2_S4_MAX_TOKENS`` (M3 #1524, D2); unparseable
+    output → ``_ParseError`` → census ``parse_error`` (see ``run_s2``)."""
     out = _complete(model,
                     render_s4_prompt(story, search, embed_list, master,
                                      session_date=session_date, edus=edus),
-                    "Complete the embed list.")
-    return _parse_json(out)
+                    "Complete the embed list.",
+                    max_tokens=_stage_cap(_S2_S4_MAX_TOKENS), stats=stats)
+    try:
+        return _parse_json(out)
+    except ValueError as e:
+        raise _ParseError(str(e)) from e
 
 
 # ── S5: EMBED — deterministic execution → Layer-1 payload ──────────────────
@@ -1969,6 +1998,11 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     import uuid
     session_id = session_id or f"session_{uuid.uuid4().hex[:12]}"
     errors: list[str] = []
+    # M3 (#1524, D3): per-session LLM roll-up + granular error census (class →
+    # count across S1/S2/S4 failures). ``errors`` (strings) stays unchanged —
+    # the additive keys feed the harness's per-question integrity (M4).
+    llm_stats: dict = {"calls": 0, "retries": 0, "truncated": 0}
+    error_census: dict[str, int] = {}
     edus = _edus_from_conversation(conversation)
     if not edus:
         return {"session_id": session_id, "story_arc": "", "embed_list": {},
@@ -1977,20 +2011,28 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 "payload": None, "chain_notes": [], "link_before_create": [],
                 "supersessions": [],
                 "warnings": ["empty conversation — nothing extracted"],
-                "minted_kinds": [], "stats": {}, "errors": errors}
+                "minted_kinds": [], "stats": {"llm": llm_stats},
+                "errors": errors, "error_census": error_census}
 
     t0 = time.time()
     # ── S1: chunked story summary + compile ────────────────────────────────
+    # M3 (#1524, D3): each chunk's per-call stats (attempts/retries/truncated)
+    # roll into ``llm_stats``; a chunk that exhausts retries (or hits a fatal
+    # 4xx) bumps ``error_census`` with its class.
     chunks = chunk_transcript(edus, target=chunk_size)
     chunk_stories: list[str] = []
     failed_chunks = 0
     for chunk in chunks:
+        stage_stats: dict = {}
         try:
             chunk_stories.append(run_s1(model, _edus_to_text(chunk),
-                                        session_date=session_date))
+                                        session_date=session_date,
+                                        stats=stage_stats))
         except Exception as e:  # per-chunk failure is non-fatal
             failed_chunks += 1
             errors.append(f"S1 chunk failed: {type(e).__name__}: {e}")
+            _bump_census(error_census, e)
+        _rollup_llm(llm_stats, stage_stats)
     if failed_chunks:
         errors.append(f"{failed_chunks}/{len(chunks)} S1 chunks failed")
     story = compile_stories(chunk_stories)
@@ -1999,11 +2041,15 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # ── S2: map to embed ───────────────────────────────────────────────────
     embed_list: dict = {}
     if story:
+        stage_stats: dict = {}
         try:
             embed_list = run_s2(model, story, master,
-                                session_date=session_date, edus=edus)
+                                session_date=session_date, edus=edus,
+                                stats=stage_stats)
         except Exception as e:
             errors.append(f"S2 failed: {type(e).__name__}: {e}")
+            _bump_census(error_census, e)
+        _rollup_llm(llm_stats, stage_stats)
 
     # ── S3: search the graph (real backend, graceful degradation) ──────────
     search = search_graph(sdk, embed_list, story)
@@ -2012,9 +2058,11 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     complete_list: dict = embed_list
     s4_warnings: list[str] = []
     if story:
+        stage_stats: dict = {}
         try:
             s4 = run_s4(model, story, search, embed_list, master,
-                        session_date=session_date, edus=edus)
+                        session_date=session_date, edus=edus,
+                        stats=stage_stats)
             if s4 and (s4.get("entities") or s4.get("points") or
                        s4.get("events") or s4.get("operators")):
                 complete_list = s4
@@ -2023,6 +2071,8 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 s4_warnings.append("S4 returned an empty list — kept S2 output")
         except Exception as e:
             errors.append(f"S4 failed: {type(e).__name__}: {e} — kept S2 output")
+            _bump_census(error_census, e)
+        _rollup_llm(llm_stats, stage_stats)
 
     # ── S5: embed execution (deterministic) ────────────────────────────────
     if not complete_list:
@@ -2048,13 +2098,186 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     result["stats"]["elapsed_s"] = round(time.time() - t0, 1)
     result["stats"]["chunks"] = len(chunks)
     result["stats"]["failed_chunks"] = failed_chunks
+    # M3 (#1524, D3): additive integrity surface — the per-session census +
+    # LLM roll-up feed the harness's per-question ``valid`` / ``error_classes``
+    # (M4). The payload telemetry's hardcoded retry_count is wired to the
+    # real value (previously always 0).
+    result["error_census"] = error_census
+    result["stats"]["llm"] = llm_stats
+    if result.get("payload"):
+        result["payload"]["telemetry"]["retry_count"] = llm_stats["retries"]
     return result
 
 
 # ── Shared helpers ─────────────────────────────────────────────────────────
 
-def _complete(model, system: str, user: str, deadline_s: int = 600) -> str:
-    """Wall-clock-bounded completion (no token caps — the model decides).
+# ── M3 (#1524): retry/backoff + classification + bounded generations ──────
+#
+# Retry constants mirror the eval harness's ``_call_with_backoff``
+# (tools/longmem_eval/run.py: BACKOFF_BASE_S=2.0 / BACKOFF_CAP_S=30.0) — one
+# in-repo pattern, not a second invention (D1).
+
+_COMPLETE_RETRIES = 2          # transient retries beyond the first (3 total)
+_BACKOFF_BASE_S = 2.0
+_BACKOFF_CAP_S = 30.0
+
+# Bounded generations (D2): stage caps — S1 narrative is small (1500); the
+# S2/S4 embed JSON must clear the 4000-token truncation floor (8000). The
+# single env override TORTOISE_EXTRACTOR_MAX_TOKENS (int, read at call time)
+# raises BOTH stages without a code change — the retry-then-fix protocol's
+# mechanical lever (D6: ``transient_timeout`` spike → raise the cap).
+_S1_MAX_TOKENS = 1500
+_S2_S4_MAX_TOKENS = 8000
+
+
+def _stage_cap(default: int) -> int:
+    """Stage token cap: TORTOISE_EXTRACTOR_MAX_TOKENS env override (read at
+    call time — the mechanical-fix loop raises caps without a code change) or
+    the stage default. An unparseable override warns loudly and uses the
+    default (fail-open with visibility, never a silent no-op)."""
+    raw = os.environ.get("TORTOISE_EXTRACTOR_MAX_TOKENS", "").strip()
+    if raw:
+        try:
+            return int(raw)
+        except ValueError:
+            warnings.warn(
+                f"invalid TORTOISE_EXTRACTOR_MAX_TOKENS={raw!r} — using "
+                f"stage default {default}", stacklevel=2)
+    return default
+
+
+_CAP_KIND_CACHE: weakref.WeakKeyDictionary[Any, str] = \
+    weakref.WeakKeyDictionary()
+
+
+def _cap_kind(model) -> str:
+    """How this model instance accepts a token cap (D2): 'kwarg' (the
+    ``complete()`` signature accepts ``max_tokens`` — the preferred, race-free
+    path), 'attr' (writable ``max_tokens`` attribute — the documented degraded
+    path), or 'unbounded' (neither — warned + recorded, fail-open with
+    visibility).
+
+    Cached per model INSTANCE (WeakKeyDictionary — the eval shares ONE
+    extractor model across worker threads (``--workers>1``) and per-call
+    kwargs are race-free; the attr fallback mutates shared state and is only
+    safe for a single-model-per-run, GATE-2)."""
+    try:
+        return _CAP_KIND_CACHE[model]
+    except (KeyError, TypeError):  # un-weakref-able → compute each call
+        pass
+    try:
+        sig = inspect.signature(model.complete)
+        kind = ("kwarg" if "max_tokens" in sig.parameters
+                else ("attr" if hasattr(model, "max_tokens")
+                      else "unbounded"))
+    except (TypeError, ValueError):  # signature unavailable
+        kind = "attr" if hasattr(model, "max_tokens") else "unbounded"
+    with contextlib.suppress(TypeError):
+        _CAP_KIND_CACHE[model] = kind
+    return kind
+
+
+def _cap_kwargs(model, max_tokens: int | None, stats: dict | None) -> dict:
+    """Per-call kwargs that enforce ``max_tokens`` on this adapter (D2).
+
+    Preferred: the per-call ``max_tokens`` kwarg (race-free under workers).
+    Fallback: set the writable ``max_tokens`` attribute before the call.
+    Neither → loud warning + ``stats['unbounded_adapter']`` (never a silent
+    no-op). ``max_tokens=0`` is the documented UNCAPPED escape hatch (no
+    kwarg, no mutation)."""
+    if not max_tokens:
+        return {}
+    kind = _cap_kind(model)
+    if kind == "kwarg":
+        return {"max_tokens": max_tokens}
+    if kind == "attr":
+        model.max_tokens = max_tokens
+        return {}
+    warnings.warn(
+        f"model {type(model).__name__} does not accept a max_tokens kwarg "
+        f"and has no writable max_tokens attribute — generation is UNBOUNDED "
+        f"for this call (recorded in stats['unbounded_adapter']); add the "
+        f"kwarg to the adapter (M3 #1524 GATE-2)", stacklevel=3)
+    if stats is not None:
+        stats["unbounded_adapter"] = True
+    return {}
+
+
+def _classify_error(e: BaseException) -> str:
+    """Granular census class for one LLM-call exception (D3 vocabulary).
+
+    Stable keys (the report census + retry-then-fix triage read these):
+    fatal_401_auth / fatal_402_billing / fatal_403_forbidden / fatal_4xx /
+    transient_429_rate_limit / transient_5xx / transient_timeout /
+    transient_network / transient_unknown. ``parse_error`` and ``truncated``
+    are produced by the stage callers, not here.
+
+    Duck-typed (``e.response.status_code``) so the extractor stays free of a
+    hard ``requests`` import — semantically identical to P2's taxonomy table
+    (#1530: 401/402/403 fatal, 429/5xx transient, other 4xx fatal)."""
+    st = getattr(getattr(e, "response", None), "status_code", None)
+    if st is not None:
+        if st == 429:
+            return "transient_429_rate_limit"
+        if 500 <= st < 600:
+            return "transient_5xx"
+        if st == 401:
+            return "fatal_401_auth"
+        if st == 402:
+            return "fatal_402_billing"
+        if st == 403:
+            return "fatal_403_forbidden"
+        if 400 <= st < 500:
+            return "fatal_4xx"
+        return "transient_unknown"
+    name = type(e).__name__
+    if isinstance(e, TimeoutError) or "Timeout" in name:
+        return "transient_timeout"
+    if "Connection" in name or "Network" in name:
+        return "transient_network"
+    return "transient_unknown"
+
+
+def _is_fatal_error(e: BaseException) -> bool:
+    """True → the retry loop raises immediately (zero retries).
+
+    Consumes P2's taxonomy export (``tortoise.model_adapters.is_fatal`` —
+    401/402/403 FATAL + 400/404/other-4xx FATAL_CONFIG are permanent; never
+    retried, MECE fix #1524). The local ``_classify_error`` fallback mirrors
+    the same semantics (the ``fatal_*`` census prefix) so the retry decision
+    can never diverge from the census classes (GATE-1: one taxonomy)."""
+    try:
+        from tortoise.model_adapters import is_fatal
+        return is_fatal(e)
+    except ImportError:  # pragma: no cover — P2 landed; defensive fallback
+        return _classify_error(e).startswith("fatal")
+
+
+class _ParseError(ValueError):
+    """S2/S4 output that fails ``_parse_json`` — census class ``parse_error``
+    (a prompt/OUTPUT_CONTRACT regression, not a provider condition; the D6
+    triage treats a ``parse_error`` spike as a fix-the-prompt, not a
+    retry-harder)."""
+
+
+def _bump_census(error_census: dict[str, int], e: BaseException) -> None:
+    """Record one stage-failure in the per-session census (D3)."""
+    cls = "parse_error" if isinstance(e, _ParseError) else _classify_error(e)
+    error_census[cls] = error_census.get(cls, 0) + 1
+
+
+def _rollup_llm(llm_stats: dict, stage_stats: dict) -> None:
+    """Roll one stage's per-call stats into the per-session LLM roll-up
+    (D3: stats['llm'] = calls / retries / truncated across S1/S2/S4)."""
+    llm_stats["calls"] += stage_stats.get("attempts", 0)
+    llm_stats["retries"] += stage_stats.get("retries", 0)
+    llm_stats["truncated"] += int(bool(stage_stats.get("truncated")))
+
+
+def _call_once(model, system: str, user: str, *, deadline_s: int,
+               max_tokens: int | None, stats: dict | None) -> str:
+    """One wall-clock-bounded completion attempt (M3 D1: each retry attempt
+    gets its OWN deadline — a wedged call cannot stay wedged across retries).
 
     The model call runs in a thread; exceptions are captured and RE-RAISED
     after join (Python threads do not propagate exceptions to the joiner —
@@ -2065,7 +2288,8 @@ def _complete(model, system: str, user: str, deadline_s: int = 600) -> str:
 
     def _run():
         try:
-            box["resp"] = model.complete(system=system, user=user)
+            kwargs = _cap_kwargs(model, max_tokens, stats)
+            box["resp"] = model.complete(system=system, user=user, **kwargs)
         except BaseException as e:  # noqa: BLE001, RUF100
             box["exc"] = e
 
@@ -2077,6 +2301,52 @@ def _complete(model, system: str, user: str, deadline_s: int = 600) -> str:
     if "exc" in box:
         raise box["exc"]
     return box.get("resp")
+
+
+def _complete(model, system: str, user: str, *, deadline_s: int = 600,
+              max_tokens: int | None = None, retries: int = _COMPLETE_RETRIES,
+              backoff_base: float = _BACKOFF_BASE_S,
+              backoff_cap: float = _BACKOFF_CAP_S,
+              stats: dict | None = None) -> str:
+    """Wall-clock-bounded completion with retry/backoff (M3 #1524, D1).
+
+    Transient classes (429/5xx/network/TimeoutError — incl. the per-attempt
+    deadline) are retried with exponential backoff (base 2.0, cap 30.0,
+    jittered ×[0.5, 1.0)) up to ``retries`` (default 2 → 3 attempts); the
+    last exception propagates. Fatal 4xx (401/402/403 + other 4xx, via P2's
+    taxonomy) raise immediately with ZERO retries; unknown classes are
+    treated as transient (the census records them — the retry-then-fix loop
+    tightens the class, not the code).
+
+    ``max_tokens`` bounds the generation (None = caller-applied stage cap;
+    0 = documented uncapped escape hatch). ``stats`` (optional) records
+    attempts / retries / truncated / last_class per call for the per-session
+    LLM roll-up (D3).
+
+    Total worst-case wall clock = attempts × deadline_s (documented — the
+    abandoned daemon thread after a deadline keeps running and the provider
+    keeps billing; accepted, bounded per attempt)."""
+    for attempt in range(1, retries + 2):
+        try:
+            resp = _call_once(model, system, user, deadline_s=deadline_s,
+                              max_tokens=max_tokens, stats=stats)
+            truncated = getattr(model, "last_finish_reason", None) == "length"
+            if stats is not None:
+                stats.update(attempts=attempt, retries=attempt - 1,
+                             last_class=None, truncated=bool(truncated))
+            return resp
+        except BaseException as e:  # noqa: BLE001, RUF100
+            if not isinstance(e, Exception):  # never retry SystemExit/KeyboardInterrupt
+                raise
+            if stats is not None:
+                stats.update(attempts=attempt, retries=attempt - 1,
+                             last_class=_classify_error(e))
+            if _is_fatal_error(e) or attempt > retries:
+                raise
+            wait = min(backoff_base ** attempt, backoff_cap) \
+                * (0.5 + random.random() / 2)
+            time.sleep(wait)
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 def _parse_json(response: str) -> dict:

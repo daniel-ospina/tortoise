@@ -2224,17 +2224,14 @@ class TortoiseSDK:
             model = _V2SessionMock()
         else:
             # _model_adapter (this module) is the in-module BYOK adapter.
-            # Default (no TORTOISE_EXTRACT_MODEL override): an UNCAPPED
-            # output budget — the v2 5-stage extractor needs the full
-            # budget (capped 4000-token adapters truncate and silently lose
-            # chunks). #1468: the default used to be the test-only
-            # tests.model_adapters.MODELS["deepseek-flash"]() (uncapped
-            # OpenRouterModel) — tests/ is absent from the production image →
-            # ModuleNotFoundError → HTTP 500 on POST /v1/sessions. Now built
-            # in-module via _model_adapter(max_tokens=None): same uncapped
-            # semantics, no tests import. An explicit TORTOISE_EXTRACT_MODEL
-            # override keeps the bounded 4000-token default (summary/construct
-            # posture, T13 #1272).
+            # The constructor default stays UNCAPPED (max_tokens=None — the
+            # adapter-level #1468 semantics are unchanged); the output bound
+            # now applies at the _complete seam (M3 #1524): S1 → 1500 / S2,S4
+            # → 8000 tokens per stage, overridable via
+            # TORTOISE_EXTRACTOR_MAX_TOKENS, with truncation DETECTED
+            # (finish_reason=="length" → census) instead of silently lost. An
+            # explicit TORTOISE_EXTRACT_MODEL override keeps the bounded
+            # 4000-token default (summary/construct posture, T13 #1272).
             configured = os.environ.get("TORTOISE_EXTRACT_MODEL", "").strip()
             model = (_model_adapter(configured) if configured
                      else _model_adapter("deepseek/deepseek-v4-flash",
@@ -14397,9 +14394,11 @@ class TortoiseSDK:
 class _V2SessionMock:
     """Deterministic offline v2 extractor stand-in (TORTOISE_SESSION_LLM_MOCK=1,
     #1350). complete() adapts the v2 pipeline's prompts: S1 → narrative text,
-    S2/S4 → the embed-list JSON. Mirrors tests' V2MockModel."""
+    S2/S4 → the embed-list JSON. Mirrors tests' V2MockModel. Accepts the
+    per-call ``max_tokens`` kwarg (M3 #1524 GATE-2 — ignored: deterministic)."""
 
-    def complete(self, *, system: str, user: str) -> str:
+    def complete(self, *, system: str, user: str,
+                 max_tokens: int | None = None) -> str:
         if "STORY SUMMARIZER" in system:
             return "The session revealed a new strategy."
         return ("{\"entities\": [{\"name\": \"the strategy\", "

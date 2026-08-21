@@ -37,8 +37,12 @@ class OllamaModel:
         self.temperature = temperature
         self.last_prompt_tokens = 0
         self.last_completion_tokens = 0
+        # M3 (#1524, GATE-2): per-call finish reason (Ollama done_reason).
+        self.last_finish_reason: str | None = None
 
-    def complete(self, *, system: str, user: str) -> str:
+    def complete(self, *, system: str, user: str,
+                 max_tokens: int | None = None) -> str:
+        cap = self.max_tokens if max_tokens is None else max_tokens
         body = {
             "model": self.id,
             "messages": [
@@ -47,7 +51,7 @@ class OllamaModel:
             ],
             "stream": False,
             "options": {
-                "num_predict": self.max_tokens,
+                "num_predict": cap,
                 "temperature": self.temperature,
             }
         }
@@ -57,6 +61,7 @@ class OllamaModel:
         content = data.get('message', {}).get('content', '')
         self.last_prompt_tokens = data.get('prompt_eval_count', 0)
         self.last_completion_tokens = data.get('eval_count', 0)
+        self.last_finish_reason = data.get('done_reason')
         return content
 
 

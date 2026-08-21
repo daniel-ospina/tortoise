@@ -45,7 +45,7 @@ from tortoise.shared_state.concurrency import flock_exclusive
 
 from . import dataset as ds
 from .dataset_audit import audit_dataset
-from .errors import class_for_ingest_error_text, eval_failure_class
+from .errors import eval_failure_class
 from .ingest import DEFAULT_CHUNK_TURNS, ingest_haystack
 from .judge import build_judge, is_abstention
 from .preflight import FatalProviderError, PreflightError, run_preflight
@@ -469,10 +469,14 @@ def run_evaluation(
                 "judge_latency_ms": round(judge_ms, 2),
                 "total_ms": round((time.monotonic() - t_q_start) * 1000.0, 2),
                 # M7 (#1527, D1–D5): per-question validity + instrumentation
-                # (all persisted in the Layer-1 outcomes projection).
+                # (all persisted in the Layer-1 outcomes projection). M4
+                # (#1524, D4): ``error_classes`` is the ingest CENSUS dict
+                # (class → count, granular extractor vocabulary) — not a flat
+                # per-error list — so the run-level census rolls exact counts.
+                # ``valid`` is extraction integrity only (S15): reader/judge
+                # failures stay in the top-level ``failures`` list.
                 "valid": len(ingest_errors) == 0,
-                "error_classes": [class_for_ingest_error_text(str(e))
-                                  for e in ingest_errors],
+                "error_classes": ingest_stats.get("error_census", {}),
                 "leg_mix": ret["match_source_counts"],
                 "leg_mix@k": ret["match_source_counts@k"],
                 "pool_size": pool_size,
@@ -688,6 +692,7 @@ def _print_summary(report: dict[str, Any]) -> None:
     print(f"valid: {integ.get('valid')}  (threshold {integ.get('threshold')}; "
           f"n_attempted {integ.get('n_attempted')}, n_valid "
           f"{integ.get('n_valid')}, n_invalid {integ.get('n_invalid')}, "
+          f"n_failed {integ.get('n_failed')}, "
           f"invalid_rate {integ.get('invalid_rate')})")
     if integ.get("justified"):
         print(f"  justified override: "

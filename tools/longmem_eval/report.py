@@ -242,6 +242,12 @@ def build_report(
     # ── M7 (D1): integrity — validity + per-question error census ──
     # invalid = a failed question OR a completed question with
     # n_ingest_errors > 0; n_attempted dedups by qid across outcomes+failures.
+    # M4 (#1524, D4/D5): the per-question ``error_classes`` is now the
+    # extractor's granular class→count census (fatal_402_billing /
+    # transient_429_rate_limit / parse_error / truncated / …) — rolled up
+    # here by exact count. ``failures`` keep their site-prefixed eval classes
+    # (errors.py: reader:retries_exhausted / judge:fatal / ingest) so the
+    # census still answers "where did failures come from" at a glance.
     effective_threshold = float(integrity_threshold or 0.0)
     failure_qids = {f.get("question_id") for f in (failures or [])}
     attempted_qids = {o["question_id"] for o in outcomes} | failure_qids
@@ -249,14 +255,19 @@ def build_report(
     n_valid = sum(1 for o in outcomes if o.get("valid", True))
     n_invalid = n_attempted - n_valid
     invalid_rate = round(n_invalid / n_attempted, 4) if n_attempted else 0.0
-    census_entries: list[str] = []
+    census: Counter = Counter()
     for o in outcomes:
-        census_entries.extend(o.get("error_classes") or [])
+        ec = o.get("error_classes") or {}
+        if isinstance(ec, dict):
+            for cls, count in ec.items():
+                census[cls] += int(count or 0)
+        else:  # legacy flat-list shape (defensive back-compat)
+            census.update(ec)
     for f in (failures or []):
-        ec = f.get("error_class")
-        if ec:
-            census_entries.append(ec)
-    error_census = dict(sorted(Counter(census_entries).items()))
+        eclass = f.get("error_class")
+        if eclass:
+            census[eclass] += 1
+    error_census = dict(sorted(census.items()))
     checks = [
         "python >= 3.12 guard enforced at run entry",
         "dataset loaded and recall-semantics audited",
@@ -270,6 +281,7 @@ def build_report(
         "n_attempted": n_attempted,
         "n_valid": n_valid,
         "n_invalid": n_invalid,
+        "n_failed": len(failures or []),  # M4 #1524 (D5): cross-ref
         "invalid_rate": invalid_rate,
         "error_census": error_census,
         "checks": checks,
@@ -277,6 +289,26 @@ def build_report(
     if integrity_justification:
         integrity["justified"] = True
         integrity["threshold_violation_justification"] = integrity_justification
+
+    # ── Retry-then-fix protocol: census → mechanical-fix triage (M4 #1524,
+    # D6 — documented, never gated: integrity.valid is REPORTED, not a
+    # publish gate) ─────────────────────────────────────────────────────────
+    # | Census signal            | Mechanical fix (run-protocol steps 4/6)   |
+    # |--------------------------|------------------------------------------|
+    # | fatal_402_billing > 0    | M2 pre-flight probe missed it → check     |
+    # |                          | budget (A6), re-run pre-flight — not a   |
+    # |                          | code bug                                 |
+    # | transient_429 spike      | reduce --workers / raise backoff cap /   |
+    # |                          | provider load                            |
+    # | transient_timeout spike  | raise TORTOISE_EXTRACTOR_MAX_TOKENS or   |
+    # |                          | reduce chunk_size (S1 output bound)      |
+    # | parse_error spike        | S2/S4 prompt / OUTPUT_CONTRACT regression |
+    # |                          | → fix prompt, not retries                |
+    # | truncated > 0            | cap too low for the stage → raise the    |
+    # |                          | stage cap (TORTOISE_EXTRACTOR_MAX_TOKENS) |
+    # | fatal_401_auth /         | key rotation / provider config — pre-    |
+    # | fatal_403_forbidden      | flight (M2) should have caught           |
+    # ───────────────────────────────────────────────────────────────────────
 
     # ── M7 (D2): leg-mix — match_source aggregation, never re-derived ──
     leg_total: Counter = Counter()

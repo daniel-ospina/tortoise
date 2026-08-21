@@ -34,7 +34,8 @@ class MockModel:
         self.last_prompt_tokens = 0
         self.last_completion_tokens = 0
 
-    def complete(self, *, system: str, user: str) -> str:
+    def complete(self, *, system: str, user: str,
+                 max_tokens: int | None = None) -> str:
         self.calls.append((system, user))
         if callable(self._responses):
             return self._responses(system, user)
@@ -726,11 +727,12 @@ class TestS5:
         """Review fix (P2): the empty-conversation and S5-failed paths return
         the same contract (supersessions present) as the happy path."""
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setattr(v2.time, "sleep", lambda _: None)
         out = v2.extract_session_v2(MockModel([]), [])
         assert "supersessions" in out and out["supersessions"] == []
 
         class BoomModel(MockModel):
-            def complete(self, *, system, user):
+            def complete(self, *, system, user, max_tokens=None):
                 raise RuntimeError("boom")
 
         out2 = v2.extract_session_v2(BoomModel([]), [{"role": "user",
@@ -1375,16 +1377,20 @@ class TestE3Resolution:
 class TestOrchestrator:
     def test_model_exception_recorded_not_silent(self, monkeypatch):
         """Review fix (P1): a raising model must surface in errors, not be
-        masked by the completion thread wrapper."""
+        masked by the completion thread wrapper. M3 (#1524): an UNKNOWN-class
+        exception is transient-safe → retried with backoff (sleep patched out
+        here); the surfaced error is the final attempt's exception."""
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setattr(v2.time, "sleep", lambda _: None)
 
         class BoomModel(MockModel):
-            def complete(self, *, system, user):
+            def complete(self, *, system, user, max_tokens=None):
                 raise RuntimeError("rate limited")
 
         conv = [{"role": "user", "content": "we decided X"}]
         out = v2.extract_session_v2(BoomModel([]), conv)
         assert any("rate limited" in e for e in out["errors"])
+        assert out["error_census"]["transient_unknown"] >= 1
 
     def test_full_pipeline_mock(self, monkeypatch):
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
