@@ -68,7 +68,9 @@ let supabaseClient = null
 try {
   supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
     auth: {
-      flowType: 'pkce',
+      flowType: 'implicit',  // #1566: cross-origin OAuth returns from /auth
+      // carry #access_token (a pkce verifier cannot cross subdomains); the
+      // claim flow's raw key still rides sessionStorage only (#1082).
       storage: supabaseStorage,
       storageKey: COOKIE_NAME,
       persistSession: true,
@@ -429,6 +431,8 @@ function claimIntentInFlight() {
       // claimStatusGuard): a tt_claim_pending marker means a claimable anon
       // team may exist — never mint a stray team over it.
       if (/(?:^|; )tt_claim_pending=/.test(document.cookie)) {
+        // #1566 (code-review P2): the guard must NOT dead-end — offer the
+        // claim card (the welcome.html 'Go claim my team' pattern).
         setWelcomeProvisionError(
           'You have an anonymous team waiting to be claimed — attach your ' +
           'GitHub or Google identity to claim it (same key, same graph).')
@@ -471,23 +475,29 @@ function claimIntentInFlight() {
       if (response && response.ok) {
         // The function wrote the membership row before answering — re-query
         // and reveal through the canonical path (atomic reveal+null, A13).
-        for (let attempt = 0; attempt < 3; attempt++) {
-          const { data, error } = await supabaseClient
-            .from('team_memberships')
-            .select('team_id, team_name, graph_name, status')
-            .eq('user_id', userId)
-            .maybeSingle()
-          if (!error && data && data.status === 'active' && data.team_id) {
-            const { data: key, error: rErr } = await supabaseClient
-              .rpc('reveal_api_key', { p_user_id: userId, p_team_id: data.team_id })
-            if (rErr) return null
-            if (!key || key === 'pending') {
-              // Already consumed (a prior reveal elsewhere) — no re-reveal.
-              return { api_key: '', team_name: data.team_name, graph_name: data.graph_name }
+        try {
+          for (let attempt = 0; attempt < 3; attempt++) {
+            const { data, error } = await supabaseClient
+              .from('team_memberships')
+              .select('team_id, team_name, graph_name, status')
+              .eq('user_id', userId)
+              .maybeSingle()
+            if (!error && data && data.status === 'active' && data.team_id) {
+              const { data: key, error: rErr } = await supabaseClient
+                .rpc('reveal_api_key', { p_user_id: userId, p_team_id: data.team_id })
+              if (rErr) return null
+              if (!key || key === 'pending') {
+                // Already consumed (a prior reveal elsewhere) — no re-reveal.
+                return { api_key: '', team_name: data.team_name, graph_name: data.graph_name }
+              }
+              return { api_key: key, team_name: data.team_name, graph_name: data.graph_name }
             }
-            return { api_key: key, team_name: data.team_name, graph_name: data.graph_name }
+            await new Promise(r => setTimeout(r, 1000))
           }
-          await new Promise(r => setTimeout(r, 1000))
+        } catch {
+          // #1566 (code-review P2): a transport error must NOT leave the
+          // provisioning spinner forever — fall through to the error card.
+          return null
         }
         // The membership write may have failed despite 201 — the 201 body is
         // the only other copy of the plaintext.
@@ -712,8 +722,21 @@ function claimIntentInFlight() {
             teamsList = await teamsRes.json()
             // Round-12: SIGNED_OUT during this fetch must not resurrect teams
             if (sessionTokenRef.current === session.access_token) setTeams(teamsList)
+          } else {
+            // #1566 (code-review P1): a transient API failure is NOT 'no
+            // teams' — fail CLOSED to the error card rather than flipping an
+            // existing user into a surprise provisioning (key rotation).
+            throw new Error('Could not load your teams — try again.')
           }
-        } catch { /* treated as no teams below */ }
+        } catch (e) {
+          // #1566: distinguish 'couldn't check' (fail closed) from 'no teams'.
+          if (!teamsList.length) {
+            setAuthed(false)
+            setMountError((e && e.message) || 'Could not load your teams — try again.')
+            setChecking(false)
+            return
+          }
+        }
 
         // #1566: a first-timer (valid session, NO teams) is provisioned
         // IN-APP — the team + membership + key are created here (the
@@ -2000,7 +2023,13 @@ function claimIntentInFlight() {
                 </h1>
                 <p className="error" role="alert">{welcomeProvisionError}</p>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-                  <button className="btn-primary" onClick={() => window.location.reload()}>Try again</button>
+                  {/anonymous team waiting/.test(welcomeProvisionError) ? (
+                    // #1566 (code-review P2): the claim-guard must not
+                    // dead-end — the claim card is the escape.
+                    <a className="btn-primary" href="https://app.premiselabs.co/?claim=1">Go claim my team →</a>
+                  ) : (
+                    <button className="btn-primary" onClick={() => window.location.reload()}>Try again</button>
+                  )}
                   <p className="dim">Still stuck? Contact <a href="mailto:hello@premiselabs.co">hello@premiselabs.co</a>.</p>
                 </div>
               </>

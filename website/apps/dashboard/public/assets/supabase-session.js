@@ -152,7 +152,11 @@
       }
       return window.supabase.createClient(supabaseUrl, supabaseAnonKey, {
         auth: {
-          flowType: 'implicit', // matches live prod fragment callbacks (#1225)
+          flowType: 'implicit', // #1566: cross-origin OAuth (tortoise → app)
+          // must share the flow — a pkce verifier is origin-scoped and cannot
+          // cross subdomains, so the app cannot exchange a pkce code minted
+          // on /auth. Implicit #access_token fragments are ingested by the
+          // app's implicit client (the raw tt_ key never leaves sessionStorage).
           storage: supabaseStorage,
           storageKey: COOKIE_NAME, // cookie name = storage key (dashboard parity)
           persistSession: true,

@@ -370,6 +370,79 @@ def test_welcome_mode_provision_401_clears_session_and_redirects(page: Page) -> 
     expect(page).to_have_url(re.compile(rf"^{re.escape(AUTH_HOST)}/auth"), timeout=20_000)
 
 
+def test_oauth_callback_fragment_lands_in_dashboard(page: Page) -> None:
+    """#1566 (code-review P0): a first-time OAuth return lands on the app with
+    the session in the FRAGMENT (#access_token=…) and NO cookie yet — the
+    synchronous head gate must NOT bounce (that would drop the fragment and
+    loop back to /auth); supabase-js ingests it and the dashboard mounts."""
+    import urllib.parse as _up
+    import time as _time
+    user_id = "u-frag"
+    # NO session cookie — the fragment carries the tokens (supabase-js
+    # ingests them; the mocked /auth/v1/user returns the identity). All
+    # supabase-host calls are intercepted (401 fallback) so a real network
+    # round trip can't invalidate the ingested fake session.
+    def handle(route):
+        url = route.request.url
+        if "ybetwichurajbfswfeqa.supabase.co" in url:
+            if "auth/v1/user" in url:
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"id": user_id, "aud": "authenticated",
+                                               "role": "authenticated",
+                                               "email": "frag@premise-labs.dev",
+                                               "app_metadata": {"provider": "github"},
+                                               "user_metadata": {"display_name": "Frag"}}))
+                return
+            route.fulfill(status=401, content_type="application/json", body="{}")
+            return
+        if "api.premiselabs.co" in url:
+            if url.endswith("/v1/teams"):
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps([{"team_id": "team_frag", "name": "Frag Team"}]))
+                return
+            if url.endswith("/v1/session/key"):
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"key": "tt_frag_key_1234567890abcdef", "team_id": "team_frag"}))
+                return
+            if url.endswith("/v1/team") or url.endswith("/v1/team/"):
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"team_id": "team_frag", "name": "Frag Team", "tier": "free"}))
+                return
+            if url.endswith("/v1/team/keys"):
+                route.fulfill(status=200, content_type="application/json", body=json.dumps({"keys": []}))
+                return
+            if url.endswith("/v1/sessions"):
+                route.fulfill(status=200, content_type="application/json", body=json.dumps({"sessions": []}))
+                return
+            if url.endswith("/backups"):
+                route.fulfill(status=200, content_type="application/json", body=json.dumps({"backups": []}))
+                return
+            route.fulfill(status=401, content_type="application/json", body="{}")
+            return
+        if url.startswith(AUTH_HOST):
+            from tests.e2e.test_session_login_flow import AUTH_ORIGIN
+            resp = page.request.get(AUTH_ORIGIN + url[len(AUTH_HOST):])
+            route.fulfill(status=resp.status, content_type="text/html", body=resp.text())
+            return
+        if url.startswith(APP_HOST):
+            from tests.e2e.test_session_login_flow import DASHBOARD_URL
+            local = DASHBOARD_URL.rstrip("/") + url[len(APP_HOST):]
+            ctype = "application/javascript" if local.endswith(".js") else ("text/css" if local.endswith(".css") else "text/html")
+            resp = page.request.get(local)
+            route.fulfill(status=resp.status, content_type=ctype, body=resp.body())
+            return
+        route.continue_()
+    page.route("**/*", handle)
+    # Implicit-flow fragment return (the signup.html OAuth target).
+    _FRAG_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiAidS1mcmFnIiwgImF1ZCI6ICJhdXRoZW50aWNhdGVkIiwgInJvbGUiOiAiYXV0aGVudGljYXRlZCIsICJleHAiOiA0MTAyNDQ0ODAwLCAiZW1haWwiOiAiZnJhZ0BwcmVtaXNlLWxhYnMuZGV2In0.sig"
+    page.goto(APP_HOST + "/#access_token=" + _FRAG_TOKEN + "&refresh_token=fake-rt&expires_in=3600&token_type=bearer",
+              wait_until="domcontentloaded", timeout=30_000)
+    # The gate must NOT bounce to /auth; the session ingests and the app
+    # chrome (with a team) renders.
+    expect(page).not_to_have_url(re.compile(rf"^{re.escape(AUTH_HOST)}/auth"), timeout=10_000)
+    expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
+
+
 def test_logout_redirects_to_auth(page: Page) -> None:
     """#1511 (VGATE P1): a signed-in user clicking Log out is redirected to
     /auth — the key-only card is gone, so sign-out must land on the login

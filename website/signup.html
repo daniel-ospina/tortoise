@@ -26,7 +26,7 @@
         var s = (typeof window.readValidSession === "function") ? window.readValidSession() : null;
         if (!s) return;  // no VALID session → stay on the auth card
         var claim = /(?:^|; )tt_claim_pending=/.test(document.cookie);
-        window.location.replace(claim ? "https://app.premiselabs.co/?claim=1" : "https://app.premiselabs.co/welcome");  // #1566: in-app welcome
+        window.location.replace(claim ? "https://app.premiselabs.co/?claim=1" : "https://app.premiselabs.co");  // #1566: in-app welcome (root)
       } catch (e) { /* best-effort — the async bounce below still applies */ }
     })();
   </script>
@@ -529,7 +529,7 @@
     // ── Configuration ──────────────────────────────────────────────────────
     const SUPABASE_URL = "https://ybetwichurajbfswfeqa.supabase.co";
     const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InliZXR3aWNodXJhamJmc3dmZXFhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUyNzgzNDYsImV4cCI6MjEwMDg1NDM0Nn0.YHysJAebPualDNDQTU5bnGBUHg5guLe8eBadm0LiEiY";
-    const WELCOME_URL = "https://app.premiselabs.co/welcome";  // #1566: provisioning lives in the app now
+    const WELCOME_URL = "https://app.premiselabs.co";  // #1566: OAuth lands on the app ROOT — first-timers get provisioned (welcome mode), returning users get the dashboard home
     // #1082 (PR1): claim-intent routing — when a claim is IN FLIGHT
     // (non-secret tt_claim_pending marker set by the dashboard claim card
     // on app.premiselabs.co — the raw tt_ key never leaves app-origin

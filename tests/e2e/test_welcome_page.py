@@ -88,7 +88,7 @@ def test_welcome_signed_in_redirects_to_app(page: Page) -> None:
         body="<html><body>APP-WELCOME</body></html>"))
     page.goto(WELCOME_URL + "#access_token=fake-at&refresh_token=fake-rt&expires_in=3600&token_type=bearer",
               wait_until="domcontentloaded", timeout=30_000)
-    expect(page).to_have_url(re.compile(r"^https://app\.premiselabs\.co/welcome"), timeout=20_000)
+    expect(page).to_have_url(re.compile(r"^https://app\.premiselabs\.co"), timeout=20_000)
 
 
 def _fake_user_id() -> str:
