@@ -47,7 +47,8 @@ from .ingest import SESSION_TRANSCRIPT_KIND, _point_exists, _session_transcript 
 def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
                    si: int, evidence_turns: list[str],
                    session_date: str | None = None,
-                   turns: list[dict], ev_sessions: set[str]) -> dict:
+                   turns: list[dict], ev_sessions: set[str],
+                   n_turns: int = 0) -> dict:
     """Write a v2 Layer-1 payload into the eval graph. Idempotent per point
     (explicit deterministic ids + _point_exists guard). Returns stats.
 
@@ -103,6 +104,14 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
                     params={"id": pid})
             continue
         try:
+            # E3 (D6): resolve the payload's 0-based source_turn_id index to
+            # the turn node id (the eval read path derives speaker from it).
+            # Bounded to the SESSION's actual turn count (never guess — an
+            # index beyond the turns writes no dangling link).
+            turn_idx = p.get("source_turn_id")
+            turn_ref = (f"lme:{qid}:s{si}:t{turn_idx}"
+                        if type(turn_idx) is int and 0 <= turn_idx < n_turns
+                        else None)
             point_props: dict = {}
             # E1 (#1533): the payload `when` slot rides onto the node only
             # when non-empty — undated sessions write no `when` prop.
@@ -112,7 +121,10 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
                 "statement", content, id=pid, session_id=sid,
                 lme_question_id=qid, lme_session_index=si,
                 is_episodic=True, has_answer=mark["has_answer"],
-                quote=quote, status="draft", **point_props,
+                quote=quote, status="draft",
+                search_keys=p.get("search_keys") or None,
+                source_turn_id=turn_ref,
+                **point_props,
             )
             stats["points"] += 1
             if mark["has_answer"]:
@@ -222,6 +234,24 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
         )
         stats["sessions"] += 1
 
+        # ── E3 (D8): turn points — the speaker-derivation substrate. Same
+        # deterministic ids + speaker property as the v1 leg; has_answer is
+        # NOT set (v2 turn/evidence recall measures extracted points). ──
+        for ti, turn in enumerate(session):
+            role = str(turn.get("role") or "unknown")
+            turn_id = f"lme:{qid}:s{si}:t{ti}"
+            if not _point_exists(sdk._get_proj(), turn_id):
+                sdk.create_point(
+                    "event", f"[{role}] {str(turn.get('content') or '')}",
+                    id=turn_id, session_id=sid, lme_question_id=qid,
+                    lme_session_index=si, speaker=role,
+                    is_episodic=True, status="draft",
+                )
+            sdk._get_proj().g.query(
+                "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
+                "MERGE (s)-[:CONTAINS]->(t)",
+                params={"sid": s_node, "tid": turn_id})
+
         # ── Raw verbatim transcript (retained — verbatim recall mitigation) ──
         # M6 mark (c)+(a): the answer-session transcript contains the answer
         # turns verbatim (52/52 on the healthy fixture) — has_answer=true so
@@ -280,7 +310,8 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
         written = _write_payload(sdk, payload, sid=sid, qid=qid, si=si,
                                  evidence_turns=all_evidence_turns,
                                  turns=turns, ev_sessions=ev_sessions,
-                                 session_date=session_date or None)
+                                 session_date=session_date or None,
+                                 n_turns=len(session))
         for k in ("points", "events", "entities", "operators",
                   "evidence_points"):
             stats[k] += written.get(k, 0)

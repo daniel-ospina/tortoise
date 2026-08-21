@@ -4245,6 +4245,8 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: "CommitPayload", plan):
                 pr.point.pointKind, pr.point.content, dedup=True, id=pid,
                 status=pr.point.status, confidence=pr.point.confidence,
                 c_cal=pr.point.c_cal, quote=pr.point.quote,
+                search_keys=pr.point.search_keys or None,
+                source_turn_id=pr.point.source_turn_id,
                 source_ref=pr.point.source_ref,
                 extractedFrom=pr.point.source_ref, is_episodic=False,
                 # #1526 (M6 owner validation): the commit-receiver points were
@@ -4263,6 +4265,8 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: "CommitPayload", plan):
                 pr.point.pointKind, pr.point.content, dedup=True, id=pid,
                 status=pr.point.status, confidence=pr.point.confidence,
                 c_cal=pr.point.c_cal, quote=pr.point.quote,
+                search_keys=pr.point.search_keys or None,
+                source_turn_id=pr.point.source_turn_id,
                 source_ref=pr.point.source_ref,
                 extractedFrom=pr.point.source_ref, is_episodic=False,
                 # #1526 (M6 owner validation): see above — session_id on the

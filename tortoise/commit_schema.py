@@ -258,6 +258,8 @@ class Point(BaseModel):
     source_ref: str = Field(min_length=1)  # REQUIRED — resolves to a Source
     quote: str = Field(default="", max_length=200)
     when: str = Field(default="", max_length=40)  # "" = undated (E1, #1533)
+    search_keys: list[str] = Field(default_factory=list)  # E3: 2-4 aliases + verbatim tokens
+    source_turn_id: int | None = Field(default=None, ge=0)  # E3: 0-based conversation turn index
     status: Literal["live", "draft"] = "draft"
     slots: ParticipantSlots | None = None  # #1418: typed participant slots
 
@@ -273,6 +275,22 @@ class Point(BaseModel):
         if not re.match(r"^\d{4}-\d{2}-\d{2}([Tt ].*)?$", v.strip()):
             raise ValueError("when must be an ISO date (YYYY-MM-DD...) or empty")
         return v
+
+    @field_validator("search_keys")
+    @classmethod
+    def _search_keys(cls, v: list[str]) -> list[str]:
+        if v is None:
+            return []
+        out: list[str] = []
+        for k in v:
+            k = str(k).strip()
+            if not k or len(k) > 60:
+                raise ValueError("search_keys entries must be 1-60 characters")
+            if k not in out:
+                out.append(k)
+        if len(out) > 4:
+            raise ValueError("search_keys allows at most 4 entries")
+        return out
 
     @field_validator("id")
     @classmethod
@@ -954,7 +972,8 @@ def _slots_canonical(slots: Any) -> list[dict] | None:
 
 
 def _point_canonical(p: Any) -> dict:
-    """Canonical point entry — slots folded in only when present (#1418)."""
+    """Canonical point entry — slots + E3 fields folded in only when present
+    (#1418 / #1350 additive pattern)."""
     out = {
         "id": _f(p, "id"),
         "content": _f(p, "content"),
@@ -966,6 +985,13 @@ def _point_canonical(p: Any) -> dict:
     slots = _slots_canonical(_f(p, "slots"))
     if slots:
         out["slots"] = slots
+    # #1350 additive parity: E3 keys fold in ONLY when present — a pre-E3
+    # payload's client_commit_id stays byte-identical (the additive contract
+    # must not change the id of a payload that never had them).
+    if _f(p, "search_keys", []) or []:
+        out["search_keys"] = sorted(_f(p, "search_keys", []) or [])
+    if _f(p, "source_turn_id", None) is not None:
+        out["source_turn_id"] = _f(p, "source_turn_id")
     return out
 
 

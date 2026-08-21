@@ -1188,3 +1188,98 @@ class TestEventOperatorEndpoints:
         res, _ = _check(raw)
         assert not res.ok
         assert "operators[0].dst" in res.errors
+
+
+# ── E3 (issue #1535): additive Point fields + source_role rejection ────────
+
+class TestE3PointFields:
+    """E3: Point gains search_keys (<=4 x 1-60, deduped) and source_turn_id
+    (int|None) under extra="forbid"; `source_role` must stay REJECTED (the
+    2026-08-20 review-gate fix — speaker is derived, never written); the
+    additive canonical pattern keeps legacy commit ids byte-identical."""
+
+    def test_e3_fields_validate(self):
+        result, _ = _check(_raw_payload(points=[
+            _point(0, quote="my 5K best is 27:12",
+                   search_keys=["personal best", "27:12"],
+                   source_turn_id=0)]))
+        assert result.ok, result.errors
+
+    def test_search_keys_entry_over_60_rejected(self):
+        # the Layer-1 gate REJECTS an over-long entry (no silent trim — the
+        # extractor sanitizes; the schema enforces bounds)
+        result, _ = _check(_raw_payload(points=[_point(0, search_keys=["x" * 61])]))
+        assert not result.ok
+        assert "points[0].search_keys" in str(result.errors)
+
+    def test_search_keys_max_four(self):
+        result, _ = _check(_raw_payload(
+            points=[_point(0, search_keys=["a", "b", "c", "d", "e"])]))
+        assert not result.ok
+        assert "points[0].search_keys" in str(result.errors)
+
+    def test_source_role_extra_field_422(self):
+        # review-gate fix: source_role must stay rejected — speaker is derived
+        result, _ = _check(_raw_payload(points=[_point(0, source_role="user")]))
+        assert not result.ok
+        assert "source_role" in str(result.errors)
+
+    def test_speaker_extra_field_422(self):
+        # review-gate fix, graph mirror: speaker must NEVER be written on an
+        # extracted point (derived at read time) — extra="forbid" rejects it
+        result, _ = _check(_raw_payload(points=[_point(0, speaker="user")]))
+        assert not result.ok
+        assert "speaker" in str(result.errors)
+
+    def test_source_turn_id_non_negative(self):
+        # the turn index is 0-based — a negative value must not reach the
+        # graph (the eval ingest guards 0..1000; the Layer-1 gate is the
+        # fail-closed boundary for the hosted commit path). The upper bound
+        # is the extractor's concern (ge=0 is the schema's boundary).
+        result, _ = _check(_raw_payload(points=[_point(0, source_turn_id=-1)]))
+        assert not result.ok
+        assert "points[0].source_turn_id" in str(result.errors)
+        result_ok, _ = _check(_raw_payload(points=[_point(0, source_turn_id=0)]))
+        assert result_ok.ok, result_ok.errors
+
+    def test_e3_fields_do_not_change_legacy_commit_id(self):
+        # #1350 additive pattern: absent keys keep the legacy id byte-identical;
+        # present keys fold in and change it (that's the intended parity boundary)
+        legacy = _finalize(_raw_payload(points=[_point(0)]))
+        with_keys = _finalize(_raw_payload(
+            points=[_point(0, search_keys=["k1"], source_turn_id=0)]))
+        assert with_keys["client_commit_id"] != legacy["client_commit_id"]
+        # the additive guard itself: a legacy-shaped point's canonical must NOT
+        # contain the E3 keys at all (a removed guard → keys leak in → id drift)
+        canon = canonical_payload("s1", [_point(0)], [], [], "s", "a")
+        assert '"search_keys"' not in canon
+        assert '"source_turn_id"' not in canon
+        # the EXTRACTOR's real output shape: execute_embed always emits
+        # explicit search_keys=[] and source_turn_id=None — those explicit
+        # empties must fold in as ABSENT (same id as the truly-absent shape),
+        # or every pre-E3 extractor commit would 400 with commit_id_mismatch
+        ext = _finalize(_raw_payload(points=[_point(0, search_keys=[],
+                                                    source_turn_id=None)]))
+        assert ext["client_commit_id"] == legacy["client_commit_id"]
+        ext_canon = canonical_payload(
+            "s1", [_point(0, search_keys=[], source_turn_id=None)], [], [],
+            "s", "a")
+        assert '"search_keys"' not in ext_canon
+        assert '"source_turn_id"' not in ext_canon
+
+    def test_search_keys_order_insensitive_commit_id(self):
+        # _point_canonical sorts search_keys — the commit id must not depend
+        # on the model's array order (same keys, permuted → same id)
+        a = _finalize(_raw_payload(points=[_point(
+            0, search_keys=["27:12", "personal best"], source_turn_id=0)]))
+        b = _finalize(_raw_payload(points=[_point(
+            0, search_keys=["personal best", "27:12"], source_turn_id=0)]))
+        assert a["client_commit_id"] == b["client_commit_id"]
+
+    def test_search_keys_boundaries_validate(self):
+        # exactly 4 entries and exactly 60 chars are VALID (only >4 / >60 fail)
+        result, _ = _check(_raw_payload(points=[_point(
+            0, search_keys=["a", "b", "c", "d"])]))
+        assert result.ok, result.errors
+        result2, _ = _check(_raw_payload(points=[_point(0, search_keys=["x" * 60])]))
+        assert result2.ok, result2.errors
