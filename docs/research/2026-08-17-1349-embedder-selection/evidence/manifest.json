@@ -1,0 +1,91 @@
+{
+  "split": "s",
+  "retriever": "vector",
+  "probe_revisions": {
+    "minilm": "rev-minilm",
+    "bge-small": "rev-bge-small",
+    "arctic-xs": "rev-arctic-xs",
+    "arctic-s": "rev-arctic-s"
+  },
+  "configs": [
+    {
+      "name": "minilm",
+      "model": "minilm",
+      "prompt": null,
+      "resolved_revision": "rev-minilm",
+      "n": 150,
+      "checkpoint_state": "complete",
+      "report_sha": "82a7913b7d7fb313fe899aa14539c5bd1ac7c77e2203a4ca8805f814857b8d84",
+      "code_sha": "ae2c388c4b4a7e596c04b8ec4d8dbd830e817e09",
+      "report": "docker/minilm.json"
+    },
+    {
+      "name": "bge-small",
+      "model": "bge-small",
+      "prompt": null,
+      "resolved_revision": "rev-bge-small",
+      "n": 150,
+      "checkpoint_state": "complete",
+      "report_sha": "51bfc993884c24f059b5eefae3d3837a6188c2d37ed7a85b9e9eeda4260df760",
+      "code_sha": "ae2c388c4b4a7e596c04b8ec4d8dbd830e817e09",
+      "report": "docker/bge-small.json"
+    },
+    {
+      "name": "arctic-xs",
+      "model": "arctic-xs",
+      "prompt": null,
+      "resolved_revision": "rev-arctic-xs",
+      "n": 150,
+      "checkpoint_state": "complete",
+      "report_sha": "4f3532ee7672bb005a8ef7c27ecbb3a0f0db927b54bd7d8c35838dca2aaa7b0b",
+      "code_sha": "ae2c388c4b4a7e596c04b8ec4d8dbd830e817e09",
+      "report": "docker/arctic-xs.json"
+    },
+    {
+      "name": "arctic-xs-q",
+      "model": "arctic-xs",
+      "prompt": "query",
+      "resolved_revision": "rev-arctic-xs",
+      "n": 150,
+      "checkpoint_state": "complete",
+      "report_sha": "0362cce3834816f5e17a9c55dfd37afbe95254d11055e46f7161914d08480b52",
+      "code_sha": "ae2c388c4b4a7e596c04b8ec4d8dbd830e817e09",
+      "report": "docker/arctic-xs-q.json"
+    },
+    {
+      "name": "arctic-s",
+      "model": "arctic-s",
+      "prompt": null,
+      "resolved_revision": "rev-arctic-s",
+      "n": 150,
+      "checkpoint_state": "complete",
+      "report_sha": "8e9c80b952dd2bc0f5c5d74c52756413b521abd9da6a6e5d4f8b8971da88adda",
+      "code_sha": "ae2c388c4b4a7e596c04b8ec4d8dbd830e817e09",
+      "report": "docker/arctic-s.json"
+    },
+    {
+      "name": "arctic-s-q",
+      "model": "arctic-s",
+      "prompt": "query",
+      "resolved_revision": "rev-arctic-s",
+      "n": 150,
+      "checkpoint_state": "complete",
+      "report_sha": "7a5344a9cc08bade66b14164bba91334404267a68080870d0deba3fb0c96b377",
+      "code_sha": "ae2c388c4b4a7e596c04b8ec4d8dbd830e817e09",
+      "report": "docker/arctic-s-q.json"
+    }
+  ],
+  "preconditions": {
+    "product_call": "pre/product-call.json",
+    "hnsw_spotcheck": "pre/hnsw-spotcheck.json",
+    "e2e8": {
+      "minilm": "pre/e2e8-minilm.json",
+      "bge-small": "pre/e2e8-bge-small.json",
+      "arctic-xs": "pre/e2e8-arctic-xs.json",
+      "arctic-s": "pre/e2e8-arctic-s.json"
+    },
+    "issue_265": {
+      "status": "not-landed"
+    }
+  }
+}
