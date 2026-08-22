@@ -6,20 +6,38 @@ persisted on the Team node. The 4-webhook-event semantics live in
 tests/test_billing.py::TestWebhook (monkeypatched StripeClient) — they are NOT
 re-tested here.
 
-Skips cleanly (no error) when STRIPE_TEST_* keys are absent.
+Skips cleanly (no error) when STRIPE_TEST_* keys are absent. #1623: also
+requires STRIPE_PRICE_IDS (the /v1/team checkout_price_id assertion at line 53
+is catalog-resolved — without the env it is None and the checkout would 503).
 """
-import json  # noqa: F401
+import json
 import os
 
 import pytest
 
 pytestmark = pytest.mark.stripe
 
+# 8 price ids — 4 tiers × monthly/annual (mirror of tests/test_billing.py's
+# VALID_CATALOG; tests/ has no __init__.py so no cross-import). Amounts match
+# pricing.json (annual = monthly × 12 × (1 − 20%)).
+_E2E_CATALOG = {
+    "free": {"monthly": {"id": "price_000freeM", "amount_usd": 0},
+             "annual": {"id": "price_000freeA", "amount_usd": 0}},
+    "solo": {"monthly": {"id": "price_100soloM", "amount_usd": 900},
+             "annual": {"id": "price_100soloA", "amount_usd": 8640}},
+    "pro": {"monthly": {"id": "price_200proMM", "amount_usd": 2500},
+            "annual": {"id": "price_200proAA", "amount_usd": 24000}},
+    "team": {"monthly": {"id": "price_300teamM", "amount_usd": 14900},
+             "annual": {"id": "price_300teamA", "amount_usd": 143040}},
+}
+
+
 def _skip_guard():
-    missing = [k for k in ("STRIPE_TEST_SECRET_KEY", "STRIPE_TEST_WEBHOOK_SECRET")
+    missing = [k for k in ("STRIPE_TEST_SECRET_KEY", "STRIPE_TEST_WEBHOOK_SECRET",
+                           "STRIPE_PRICE_IDS")
                if not os.environ.get(k)]
     if missing:
-        pytest.skip(f"Stripe test keys absent: {missing}")
+        pytest.skip(f"Stripe env absent: {missing}")
 
 
 def test_upgrade_checkout_live_leg():
@@ -35,8 +53,12 @@ def test_upgrade_checkout_live_leg():
         old_uri = os.environ.get("TORTOISE_DB_URI")
         os.environ.pop("TORTOISE_DB_URI", None)
         os.environ["TORTOISE_DB_PATH"] = db
+        old_secret = os.environ.get("STRIPE_SECRET_KEY")
+        old_webhook = os.environ.get("STRIPE_WEBHOOK_SECRET")
+        old_price_ids = os.environ.get("STRIPE_PRICE_IDS")
         os.environ["STRIPE_SECRET_KEY"] = os.environ["STRIPE_TEST_SECRET_KEY"]
         os.environ["STRIPE_WEBHOOK_SECRET"] = os.environ["STRIPE_TEST_WEBHOOK_SECRET"]
+        os.environ["STRIPE_PRICE_IDS"] = json.dumps(_E2E_CATALOG)
         try:
             sdk = TortoiseSDK(db, namespace="registry")
             with TestClient(app) as tc:
@@ -68,3 +90,12 @@ def test_upgrade_checkout_live_leg():
             else:
                 os.environ.pop("TORTOISE_DB_URI", None)
             os.environ.pop("TORTOISE_DB_PATH", None)
+            # restore every env var this test mutated — the hardcoded e2e
+            # catalog and test-mode keys must not leak into the process
+            for name, old in (("STRIPE_SECRET_KEY", old_secret),
+                              ("STRIPE_WEBHOOK_SECRET", old_webhook),
+                              ("STRIPE_PRICE_IDS", old_price_ids)):
+                if old is not None:
+                    os.environ[name] = old
+                else:
+                    os.environ.pop(name, None)
