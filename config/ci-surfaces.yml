@@ -113,9 +113,11 @@ surfaces:
   - test_canonical.py
   - test_capture_session.py
   - test_ci_selection.py
+  - test_consolidation_4way.py
   - test_dataset_audit.py
   - test_eval_report_integrity.py
   - test_extractor_reliability.py
+  - test_ingest_v2_consolidation.py
   - test_lint_config.py
   - test_lme_m6_evidence.py
   - test_longmem_errors.py
@@ -250,6 +252,7 @@ surfaces:
   - test_slack_connector.py
   - test_status_projection.py
   - test_stop_writes.py
+  - test_structural_leg_r4.py
   - test_suggest_entry_points.py
   - test_supabase_control.py
   - test_taxonomy.py
