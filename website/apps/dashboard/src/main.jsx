@@ -2292,12 +2292,18 @@ function claimIntentInFlight() {
           </section>
         )}
         {tab === 'overview' && team && team.graph_ready === false && (team.point_count ?? 0) === 0 && (
-          // #1591: the team's graph is missing/broken (half-failed
-          // provisioning) — the API fails soft so the dashboard renders; a
-          // graph write recreates it. Give the user a clear signal.
+          // #1591 (UX review): the team's graph doesn't EXIST yet (a
+          // half-failed provisioning) — say it plainly + give the one-step
+          // action (a write creates it). Never imply data is "recovering".
           <section className="overview empty-state">
-            <h2>Your graph is being prepared</h2>
-            <p className="dim">The team's data graph is missing or still recovering — it is recreated automatically on the first write. Try again in a moment, or contact hello@premiselabs.co if this persists.</p>
+            <h2>Your graph isn't created yet</h2>
+            <p className="dim">It is created automatically the first time you add data — connect your agent, or run the write command below. Your team and API keys are ready.</p>
+            <div className="empty-actions">
+              <a className="btn-primary" href="https://tortoise.premiselabs.co/welcome" target="_blank" rel="noreferrer">
+                Connect your agent →
+              </a>
+              <span className="dim small">or run: <code>{`curl -X POST https://api.premiselabs.co/v1/points -H "Authorization: Bearer ${apiKey.slice(0, 12)}…" -H "Content-Type: application/json" -d '{"content":"hello graph","kind":"statement"}'`}</code></span>
+            </div>
           </section>
         )}
         {tab === 'overview' && team && team.graph_ready !== false && (team.point_count ?? 0) === 0 && (
