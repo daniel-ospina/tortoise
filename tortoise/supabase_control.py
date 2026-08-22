@@ -88,6 +88,9 @@ _TEAM_ADDITIVE_SELECT = [
     # #1230: import idempotency ledger + quarantine record + points-cap
     # override (see _TEAM_ADDITIVE_IMPORT_TIER).
     "last_import_sha256", "last_import_quarantined_sha256", "max_points",
+    # #1623: Stripe billing state (0012 migration — the webhook's store) so
+    # /v1/team can render plan state + the dashboard Billing page.
+    "subscription_status", "customer_email",
 ]
 # Retry tiers for the fail-soft ladder (#1096): the NEWEST migration is
 # dropped FIRST, so a schema missing only the newest additive (e.g.
@@ -102,6 +105,11 @@ _TEAM_ADDITIVE_IMPORT_TIER = [
 ]
 _TEAM_ADDITIVE_DKL_TIER = ["dashboard_key_login"]      # 20260813000005
 _TEAM_ADDITIVE_0015_TIER = ["suspended_at", "flagged_at"]  # 0015
+# Stripe billing state (0012 — OLDER than 0015). Dropped LAST in the retry
+# ladder (newest migration is dropped first), so a schema missing only 0015
+# still reads real billing state and a pre-0012 schema degrades to safe
+# defaults (None) rather than taking down auth. #1623.
+_TEAM_ADDITIVE_BILLING_TIER = ["subscription_status", "customer_email"]
 
 # Combined quota read (primary query) — the healthy path stays ONE round-trip.
 _QUOTA_SELECT = _TEAM_BASE_SELECT + _TEAM_ADDITIVE_SELECT
@@ -544,7 +552,8 @@ def resolve_api_key(cp, token: str) -> dict | None:
     team_row = _teams_row_fail_soft(
         cp, team_id, select=_QUOTA_SELECT,
         additive_tiers=[_TEAM_ADDITIVE_IMPORT_TIER,
-                         _TEAM_ADDITIVE_DKL_TIER, _TEAM_ADDITIVE_0015_TIER])
+                         _TEAM_ADDITIVE_DKL_TIER, _TEAM_ADDITIVE_0015_TIER,
+                         _TEAM_ADDITIVE_BILLING_TIER])
     if team_row is None:
         # Key's team vanished — fail closed (401), never authenticate.
         return None
@@ -598,6 +607,10 @@ def resolve_api_key(cp, token: str) -> dict | None:
         "suspended_at": team_row.get("suspended_at"),
         "flagged_at": team_row.get("flagged_at"),
         "email": team_row.get("email"),
+        # #1623: Stripe billing state (webhook store, 0012) — /v1/team
+        # renders plan state from these.
+        "subscription_status": team_row.get("subscription_status"),
+        "customer_email": team_row.get("customer_email"),
     }
 
 
@@ -684,7 +697,8 @@ def team_by_id(cp, team_id: str) -> dict | None:
                 "created_at", "deleted_at", "grace_hours"]
             + _TEAM_ADDITIVE_SELECT,
         additive_tiers=[_TEAM_ADDITIVE_IMPORT_TIER,
-                         _TEAM_ADDITIVE_DKL_TIER, _TEAM_ADDITIVE_0015_TIER])
+                         _TEAM_ADDITIVE_DKL_TIER, _TEAM_ADDITIVE_0015_TIER,
+                         _TEAM_ADDITIVE_BILLING_TIER])
 
 
 # ── Session-key mint writes (E2E-2 round-trip: mint → api_keys → resolve) ──

@@ -332,3 +332,25 @@ button:focus-visible, select:focus-visible, a:focus-visible, input:focus-visible
 /* the email submit is inside a form — same absolute treatment via wrapper */
 .auth-email-form button { position: relative; }
 .auth-email-form .last-used { right: 8px; }
+
+/* #1623: Billing page — plan grid (mirrors product.html pricing cards) */
+.plans-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+}
+.plan-card {
+  background: var(--surface);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.plan-card.current { border-color: rgba(6, 182, 212, 0.4); }
+.plan-card-head { display: flex; justify-content: space-between; align-items: center; gap: 6px; }
+.plan-price { font-size: 24px; font-weight: 700; }
+.plan-limits { margin: 0; padding-left: 1.1rem; font-size: 13px; color: var(--text-dim); display: flex; flex-direction: column; gap: 3px; flex: 1; }
+.plan-limits li { line-height: 1.35; }
+.plan-card .btn-primary, .plan-card .ghost { text-align: center; }
