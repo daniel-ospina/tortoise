@@ -1581,3 +1581,166 @@ def test_s3_real_backend_search(tmp_path):
         assert res["points"], "seeded point must be found by the real backend"
     finally:
         sdk.close()
+
+
+# ── E4 (#1536): S4 merges-not-replaces — unit + orchestrator ───────────────
+
+def _pt(content: str) -> dict:
+    return {"content": content, "pointKind": "statement",
+            "about_entities": [], "slots": None}
+
+
+class TestS4Merge:
+    def test_s2_item_s4_dropped_survives(self):
+        """E2E-5 core regression: an early-asserted S2 point S4 fails to
+        re-emit must NOT be lost (complete_list=s4 dropped it pre-E4)."""
+        s2 = {"entities": [], "events": [], "points": [
+            _pt("my personal best 5K time is 27:12")],
+            "operators": [], "chain_notes": [], "link_before_create": []}
+        s4 = {"entities": [], "events": [], "points": [
+            _pt("single-flash with granularity is the working path")],
+            "operators": [], "chain_notes": [], "link_before_create": []}
+        merged = v2.merge_embed_lists(s2, s4)
+        contents = {p["content"] for p in merged["points"]}
+        assert "my personal best 5K time is 27:12" in contents
+        assert "single-flash with granularity is the working path" in contents
+
+    def test_s4_correction_wins_on_conflict(self):
+        """Same identity key in S2 and S4 → the reviewer's version (graph-
+        informed lifecycle/supersedes) wins, and S4's name normalization
+        matches S2's (case/space drift is identity, not a new item)."""
+        s2 = {"entities": [{"name": "strategy  A", "kind": "core:plan",
+                            "lifecycle": "created", "supersedes": None,
+                            "note": None}], "events": [], "points": [],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        s4 = {"entities": [{"name": "Strategy A", "kind": "core:plan",
+                            "lifecycle": "unchanged", "supersedes": None,
+                            "note": "already in graph"}], "events": [],
+              "points": [], "operators": [], "chain_notes": [],
+              "link_before_create": []}
+        merged = v2.merge_embed_lists(s2, s4)
+        assert len(merged["entities"]) == 1
+        assert merged["entities"][0]["lifecycle"] == "unchanged"
+        assert merged["entities"][0]["name"] == "Strategy A"
+
+    def test_identical_s4_is_identity(self):
+        assert v2.merge_embed_lists(S2_FIXTURE, S2_FIXTURE) == S2_FIXTURE
+
+    def test_empty_s4_returns_s2(self):
+        assert v2.merge_embed_lists(S2_FIXTURE, {}) == S2_FIXTURE
+
+    def test_gap_items_appended_after_s2(self):
+        def ent(name):
+            return {"name": name, "kind": "core:plan", "lifecycle": "created",
+                    "supersedes": None, "note": None}
+        s2 = {"entities": [ent("A")], "events": [], "points": [],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        s4 = {"entities": [ent("B")], "events": [], "points": [],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        merged = v2.merge_embed_lists(s2, s4)
+        assert [e["name"] for e in merged["entities"]] == ["A", "B"]
+
+    def test_operator_dedup_includes_target_edge(self):
+        """Two MITIGATES with identical src/dst but different target edges are
+        distinct; a re-emitted operator with the SAME edge collapses (S4's
+        strength wins)."""
+        op1 = {"src": "p", "dst": "e", "op_type": "MITIGATES",
+               "target_edge": {"src": "p", "dst": "e", "op_type": "IMPL"},
+               "strength": 0.3}
+        op2 = {"src": "p", "dst": "e", "op_type": "MITIGATES",
+               "target_edge": {"src": "p", "dst": "e", "op_type": "NAND"},
+               "strength": 0.5}
+        s2 = {"entities": [], "events": [], "points": [],
+              "operators": [op1], "chain_notes": [], "link_before_create": []}
+        s4 = {"entities": [], "events": [], "points": [],
+              "operators": [op1, op2], "chain_notes": [], "link_before_create": []}
+        merged = v2.merge_embed_lists(s2, s4)
+        assert len(merged["operators"]) == 2          # op1 collapsed, op2 added
+        assert any(o["strength"] == 0.3 for o in merged["operators"])
+
+    def test_none_sections_and_non_dict_entries_skipped(self):
+        s2 = {"entities": None, "events": [{"content": "E"}], "points": [],
+              "operators": None, "chain_notes": [], "link_before_create": []}
+        s4 = {"entities": [None, {"name": "X", "kind": "core:plan",
+                                  "lifecycle": "created", "supersedes": None,
+                                  "note": None}], "events": [], "points": [],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        merged = v2.merge_embed_lists(s2, s4)
+        assert [e["name"] for e in merged["entities"]] == ["X"]
+        assert merged["events"][0]["content"] == "E"   # S2 event survived
+
+    def test_stats_recorded(self):
+        s2 = {"entities": [], "events": [], "points": [_pt("A"), _pt("B")],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        s4 = {"entities": [], "events": [], "points": [_pt("A"), _pt("C")],
+              "operators": [], "chain_notes": [], "link_before_create": []}
+        merged = v2.merge_embed_lists(s2, s4)
+        stats = v2._s4_merge_stats(s2, s4, merged)
+        assert stats == {"s2_items": 2, "s4_items": 2, "merged_items": 3,
+                         "corrected_by_s4": 1, "kept_from_s2": 1,
+                         "added_by_s4": 1}
+
+
+class TestE4Orchestrator:
+    def test_s4_drop_does_not_lose_s2_point(self, monkeypatch):
+        """The E2E-5 scenario at pipeline level: S2 extracts the early-asserted
+        5K fact; S4's gap-review response omits it; the fact must still reach
+        the Layer-1 payload and the s4_merge stats must show the keep."""
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+        s2_body = {"entities": [], "events": [],
+                   "points": [_pt("my personal best 5K time is 27:12")],
+                   "operators": [], "chain_notes": [], "link_before_create": []}
+        s4_body = {"entities": [], "events": [],
+                   "points": [_pt("single-flash with granularity is the working path")],
+                   "operators": [], "chain_notes": [], "link_before_create": []}
+
+        def resp(system, user):
+            if "STORY SUMMARIZER" in system:
+                return "The user stated their 5K record early in the session."
+            if "GAP REVIEWER" in system:
+                return json.dumps(s4_body)
+            return json.dumps(s2_body)
+
+        conv = [{"role": "user", "content": "my personal best 5K time is 27:12"},
+                {"role": "assistant", "content": "that's a great time"}]
+        out = v2.extract_session_v2(MockModel(resp), conv)
+        contents = {p["content"] for p in out["payload"]["points"]}
+        assert "my personal best 5K time is 27:12" in contents
+        assert out["stats"]["s4_merge"]["kept_from_s2"] == 1
+        assert out["stats"]["s4_merge"]["added_by_s4"] == 1
+
+    def test_s4_empty_keeps_s2_with_warning(self, monkeypatch):
+        """Existing graceful degradation preserved: S4 empty → S2 stands + warning."""
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+
+        def resp(system, user):
+            if "STORY SUMMARIZER" in system:
+                return "We believed X."
+            if "GAP REVIEWER" in system:
+                return json.dumps({})   # empty list
+            return json.dumps(S2_FIXTURE)
+
+        conv = [{"role": "user", "content": "we decided X"}]
+        out = v2.extract_session_v2(MockModel(resp), conv)
+        assert any("kept S2 output" in w for w in out["warnings"])
+        assert out["payload"]["points"]   # S2 output embedded
+
+    def test_s4_exception_keeps_s2_with_error(self, monkeypatch):
+        """Existing failure path preserved: S4 raises → S2 stands + error.
+        Sleep patched (M3 precedent): an unknown-class exception is
+        transient-retried with backoff; real sleeps would slow the test."""
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setattr(v2.time, "sleep", lambda _: None)
+
+        class BoomModel(MockModel):
+            def complete(self, *, system, user, max_tokens=None):
+                if "GAP REVIEWER" in system:
+                    raise RuntimeError("s4 exploded")
+                return "We believed X." if "STORY SUMMARIZER" in system \
+                    else json.dumps(S2_FIXTURE)
+
+        conv = [{"role": "user", "content": "we decided X"}]
+        out = v2.extract_session_v2(BoomModel([]), conv)
+        assert any("S4 failed" in e for e in out["errors"])
+        assert out["payload"]["points"]   # S2 output embedded

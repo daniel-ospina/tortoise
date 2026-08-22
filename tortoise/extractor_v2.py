@@ -996,6 +996,81 @@ def run_s4(model, story: str, search: dict, embed_list: dict,
         raise _ParseError(str(e)) from e
 
 
+# ── E4 (#1536): S4 merges-not-replaces — programmatic union (S2 ∪ S4) ──────
+
+def _merge_key(section: str, item: dict) -> tuple:
+    """E4 identity key for embed-list reconciliation (S2 ∪ S4)."""
+    if section == "entities":
+        return ("entity", _norm(item.get("name")), _norm_kind(item.get("kind")))
+    if section in ("events", "points"):
+        return (section, _norm(item.get("content")))
+    if section == "operators":
+        te = item.get("target_edge") or {}
+        return ("op", _norm(item.get("src")), _norm(item.get("dst")),
+                _norm(str(item.get("op_type"))),
+                _norm(te.get("src")), _norm(te.get("dst")),
+                _norm(str(te.get("op_type"))))
+    if section == "chain_notes":
+        return ("chain", _norm(item.get("chain")), _norm(item.get("finding")))
+    if section == "link_before_create":
+        return ("lbc", _norm(item.get("searched_for")), bool(item.get("found")))
+    return (section, json.dumps(item, sort_keys=True, default=str))
+
+
+def merge_embed_lists(s2: dict, s4: dict) -> dict:
+    """Programmatic union of the S2 and S4 embed lists (E4 — merges-not-replaces).
+
+    S4 is the gap reviewer: on identity-key collision its (graph-informed)
+    version wins; S2 items S4 omitted are PRESERVED (no silent drops); S4-only
+    items append in S4 order. S2 order is preserved in place. Items pass
+    through by reference — unknown fields ride through untouched (E1/E3).
+    None sections and non-dict entries are tolerated (skipped).
+    """
+    sections = ("entities", "events", "points", "operators",
+                "chain_notes", "link_before_create")
+    out: dict = {}
+    for section in sections:
+        s2_items = [i for i in (s2.get(section) or []) if isinstance(i, dict)]
+        s4_items = [i for i in (s4.get(section) or []) if isinstance(i, dict)]
+        s4_by_key = {_merge_key(section, i): i for i in s4_items}
+        merged: list[dict] = []
+        seen: set = set()
+        for item in s2_items:
+            k = _merge_key(section, item)
+            if k in seen:
+                continue                      # S2-side duplicate — first wins
+            seen.add(k)
+            merged.append(s4_by_key.get(k, item))   # S4 wins on collision; S2 never dropped
+        for item in s4_items:
+            k = _merge_key(section, item)
+            if k not in seen:
+                seen.add(k)
+                merged.append(item)           # S4 gap addition
+        out[section] = merged
+    return out
+
+
+def _s4_merge_stats(s2: dict, s4: dict, merged: dict) -> dict:
+    """E4 observability: prove 'no silent drops' in a live run (M7-adjacent)."""
+    sections = ("entities", "events", "points", "operators")
+    s2_n = sum(len(s2.get(s) or []) for s in sections)
+    s4_n = sum(len(s4.get(s) or []) for s in sections)
+    merged_n = sum(len(merged.get(s) or []) for s in sections)
+    s4_keys = {_merge_key(s, i)
+               for s in sections for i in (s4.get(s) or [])
+               if isinstance(i, dict)}
+    corrected = sum(1 for s in sections for i in (s2.get(s) or [])
+                    if isinstance(i, dict) and _merge_key(s, i) in s4_keys)
+    return {
+        "s2_items": s2_n,
+        "s4_items": s4_n,
+        "merged_items": merged_n,
+        "corrected_by_s4": corrected,
+        "kept_from_s2": max(0, s2_n - corrected),   # no-silent-drop counter
+        "added_by_s4": max(0, merged_n - s2_n),
+    }
+
+
 # ── S5: EMBED — deterministic execution → Layer-1 payload ──────────────────
 
 def _norm(s: str) -> str:
@@ -2054,9 +2129,10 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # ── S3: search the graph (real backend, graceful degradation) ──────────
     search = search_graph(sdk, embed_list, story)
 
-    # ── S4: review gaps → complete embed list ──────────────────────────────
+    # ── S4: review gaps → complete embed list (E4: merges-not-replaces) ───
     complete_list: dict = embed_list
     s4_warnings: list[str] = []
+    s4_merge_stats: dict = {}
     if story:
         stage_stats: dict = {}
         try:
@@ -2065,7 +2141,8 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                         stats=stage_stats)
             if s4 and (s4.get("entities") or s4.get("points") or
                        s4.get("events") or s4.get("operators")):
-                complete_list = s4
+                complete_list = merge_embed_lists(embed_list, s4)
+                s4_merge_stats = _s4_merge_stats(embed_list, s4, complete_list)
             else:
                 # graceful degradation — S2 output stands; not an error
                 s4_warnings.append("S4 returned an empty list — kept S2 output")
@@ -2098,6 +2175,7 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     result["stats"]["elapsed_s"] = round(time.time() - t0, 1)
     result["stats"]["chunks"] = len(chunks)
     result["stats"]["failed_chunks"] = failed_chunks
+    result["stats"]["s4_merge"] = s4_merge_stats  # E4 (#1536): no-silent-drop proof
     # M3 (#1524, D3): additive integrity surface — the per-session census +
     # LLM roll-up feed the harness's per-question ``valid`` / ``error_classes``
     # (M4). The payload telemetry's hardcoded retry_count is wired to the
@@ -2368,6 +2446,7 @@ __all__ = [  # noqa: RUF022
     "run_s2", "render_s2_prompt",
     "resolve_backend_mode", "search_graph",
     "run_s4", "render_s4_prompt",
+    "merge_embed_lists", "_merge_key", "_s4_merge_stats",
     "execute_embed", "validate_chains", "derive_supersessions",
     "extract_session_v2",
     "S1_TMPL", "S2_TMPL", "S4_TMPL", "OUTPUT_CONTRACT",
