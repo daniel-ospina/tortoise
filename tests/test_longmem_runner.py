@@ -1450,10 +1450,14 @@ def test_download_is_atomic_and_validated(monkeypatch, tmp_path):
     import urllib.error
     import urllib.request
 
+    # digest-pin the fake payload so the download passes the T2 sha256 guard
+    mini_payload = b'[{"question_id": "mini_x"}]'
+    monkeypatch.setitem(ds.SPLIT_DIGESTS, "s", ds._sha256_bytes(mini_payload))
+
     class _FakeResp:
         def __init__(self, mode):
             self._mode = mode
-            self._payload = b'[{"question_id": "mini_x"}]'
+            self._payload = mini_payload
 
         def read(self, n):
             if self._mode == "interrupted":
@@ -1495,9 +1499,12 @@ def test_download_creates_missing_cache_dir(monkeypatch, tmp_path):
     from tools.longmem_eval import dataset as ds  # noqa: I001
     import urllib.request
 
+    mini_payload = b'[{"question_id": "mini_x"}]'
+    monkeypatch.setitem(ds.SPLIT_DIGESTS, "s", ds._sha256_bytes(mini_payload))
+
     class _FakeResp:
         def __init__(self):
-            self._payload = b'[{"question_id": "mini_x"}]'
+            self._payload = mini_payload
 
         def read(self, n):
             data, self._payload = self._payload[:n], self._payload[n:]

@@ -113,26 +113,15 @@ surfaces:
   - test_canonical.py
   - test_capture_session.py
   - test_ci_selection.py
-  - test_consolidation_4way.py
-  - test_dataset_audit.py
-  - test_e2e9_point_in_time.py
-  - test_eval_report_integrity.py
-  - test_extractor_reliability.py
-  - test_ingest_v2_consolidation.py
-  - test_lint_config.py
-  - test_lme_ingest_v2_supersession.py
-  - test_lme_m6_evidence.py
-  - test_longmem_errors.py
-  - test_no_tests_imports_in_production.py
-  - test_sdk_adapter_cap.py
-  - test_skip_guard.py
   - test_connector_loader.py
   - test_connector_secrets.py
   - test_connector_sources.py
+  - test_consolidation_4way.py
   - test_control_plane.py
   - test_crash_recovery.py
   - test_crash_recovery_e2e.py
   - test_cross_lens_candidates.py
+  - test_dataset_audit.py
   - test_de2e1_entity_extraction.py
   - test_de2e3_content_dedup.py
   - test_de2e5_instantiates_ranking.py
@@ -143,10 +132,11 @@ surfaces:
   - test_doctor.py
   - test_domain_loader_adapter.py
   - test_domain_validators.py
+  - test_e2e9_point_in_time.py
   - test_e2e_journey.py
   - test_embedded_concurrency.py
   - test_embedded_lifecycle.py
-  - test_embedded_lifecycle_fast_close.py  # #1371 lifecycle-seam fast close
+  - test_embedded_lifecycle_fast_close.py
   - test_embeddings.py
   - test_embeddings_filters.py
   - test_entity_stage.py
@@ -161,12 +151,15 @@ surfaces:
   - test_epic903_staleness.py
   - test_epic903_warmstart.py
   - test_eval_metrics.py
+  - test_eval_report_integrity.py
   - test_event_log.py
   - test_event_provenance.py
   - test_event_store.py
   - test_extractor.py
   - test_extractor_doc.py
   - test_extractor_priors.py
+  - test_extractor_reliability.py
+  - test_extractor_v2.py
   - test_falkordb_compat.py
   - test_file_indexer.py
   - test_flip_gate.py
@@ -190,19 +183,23 @@ surfaces:
   - test_ingest_promotion.py
   - test_ingest_rebuild_durability.py
   - test_ingest_safety.py
+  - test_ingest_v2_consolidation.py
   - test_ingest_validation.py
   - test_integration_search.py
   - test_issue_insight.py
   - test_joint_index_ingest.py
   - test_judge_harness.py
   - test_linear_connector.py
+  - test_lint_config.py
   - test_list_contexts.py
+  - test_lme_m6_evidence.py
+  - test_longmem_errors.py
   - test_longmem_preflight.py
   - test_longmem_reader_aggregation.py
   - test_longmem_reader_pinning.py
   - test_longmem_reader_prompting.py
-  - test_longmem_runner.py
   - test_longmem_rerank.py
+  - test_longmem_runner.py
   - test_lookup_hash.py
   - test_m0.py
   - test_m1.py
@@ -218,6 +215,7 @@ surfaces:
   - test_model_adapters_taxonomy.py
   - test_monitoring.py
   - test_navigation.py
+  - test_no_tests_imports_in_production.py
   - test_notify.py
   - test_open_kinds.py
   - test_operator_source_search.py
@@ -238,13 +236,13 @@ surfaces:
   - test_query_suggestions.py
   - test_reaper.py
   - test_reaper_orphan.py
-  - test_sparse.py
-  - test_status_projection.py
   - test_references_edge.py
+  - test_relationships_bounded.py
   - test_remove_context_migration.py
   - test_render.py
   - test_review_connections.py
   - test_run_protocol.py
+  - test_sdk_adapter_cap.py
   - test_search_engine.py
   - test_search_engine_gaps.py
   - test_search_engine_nameerror.py
@@ -252,7 +250,10 @@ surfaces:
   - test_search_sessions_temporal.py
   - test_security.py
   - test_semantic_extractor.py
+  - test_skip_guard.py
   - test_slack_connector.py
+  - test_sparse.py
+  - test_status_projection.py
   - test_status_projection.py
   - test_stop_writes.py
   - test_structural_leg_r4.py
@@ -262,10 +263,8 @@ surfaces:
   - test_tool_registry.py
   - test_topic_summarization.py
   - test_tortoise_search.py
-  - test_relationships_bounded.py
   - test_validity_windows.py
   - test_value_extractor.py
-  - test_extractor_v2.py
   - test_wiring_phase01.py
   - test_write_consolidation.py
   - test_writer_inventory.py
@@ -342,6 +341,27 @@ surfaces:
   - test_sdk_props_coercion.py
   - test_tortoise_client.py
   - test_version_vector.py
+  eval:
+  - bench/test_bench_core.py
+  - bench/test_degradation_chain.py
+  - bench/test_roundrobin.py
+  - bench/test_smoke_embedded.py
+  - eval/retrieval/test_1348.py
+  - eval/retrieval/test_bootstrap.py
+  - eval/retrieval/test_gate_1349.py
+  - eval/retrieval/test_integration.py
+  - eval/retrieval/test_judge.py
+  - eval/retrieval/test_metrics.py
+  - eval/retrieval/test_oracle.py
+  - eval/retrieval/test_run.py
+  - longmem_eval/test_vector_arm.py
+  - mini_beir/test_mini_beir.py
+  - test_backfill_embeddings_force.py
+  - test_calibrate_thresholds.py
+  - test_embedder_probe.py
+  - test_labeled_pairs_schema.py
+  - test_lme_ingest_v2_supersession.py
+  - test_pair_label_runner.py
 tier1:
 - test_cli_serve.py
 - test_config.py
@@ -369,12 +389,6 @@ tier1:
 - test_tool_registry.py
 - test_weights.py
 - test_writer_inventory.py
-
-# #1371: slow files run ONLY in the test-slow CI job, never in the fast
-# gate. Single source of truth — tools/ci_selection.py subtracts these from
-# tier-1/tier-2 selections and the workflow's test-slow job builds its file
-# list from this key (the old workflow-level SLOW_FILES env var is gone).
-# Kept in their surfaces below so --integrity still classifies them.
 slow_files:
 - test_about_edges.py
 - test_backfill_sources.py
@@ -405,19 +419,7 @@ slow_files:
 - test_sdk_group3.py
 - test_search_engine_gaps.py
 - test_source_inheritance_own.py
-
-# #1472: unclassifiable-as-top-level files that still run in the push matrix
-# (bench suite — tests/bench/* is not a top-level test_*.py surface).
-push_extra:
-- bench/test_bench_core.py
-- bench/test_degradation_chain.py
-- bench/test_roundrobin.py
-- bench/test_smoke_embedded.py
-
-# #1473: measured per-file durations (seconds) for the tier-2 PR split.
-# Source: --durations=15 output of CI runs 32193298962/32241846147/32243341350,
-# max-per-run aggregation (heavy tail). Missing files default to 2.0s in the
-# split. Keys must be classified, non-slow test files (enforced by --integrity).
+push_extra: []
 durations:
   test_calibration.py: 52.1
   test_battery_setup.py: 26.0
@@ -432,4 +434,3 @@ durations:
   test_analyze_scoped.py: 5.2
   test_projection_version_gate.py: 5.1
   test_analyze.py: 3.9
-

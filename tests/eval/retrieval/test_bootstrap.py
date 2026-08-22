@@ -9,7 +9,9 @@ from tests.eval.retrieval.bootstrap import (
     GATE_BLOCK_LOWER,
     GATE_WARN_LOWER,
     ConfidenceInterval,
+    bh_fdr,
     one_sample_ci,
+    one_sided_bootstrap_p,
     paired_bootstrap_ci,
     paired_deltas,
     quality_gate,
@@ -143,6 +145,89 @@ def test_paired_deltas_on_query_ids():
     assert dropped == 2                # q-new + q-old unpaired
     # deltas are in POINTS (x100): q0 → (0.5-0.6)*100 = -10
     assert deltas[0] == pytest.approx(-10.0)
+
+
+# ── #1349: one-sided bootstrap p + BH-FDR (net-new, alongside #1144) ──────
+
+def test_one_sided_bootstrap_p_exact_on_tiny_synthetic():
+    """Exact p on a tiny synthetic delta set with a deterministic rng: p must
+    equal the fraction of resampled means ≤ 0, replicated in-test with the
+    same seed (the #1144 exact-percentile lock, one-sided)."""
+    deltas = [1.0, -1.0]  # resampled mean ∈ {1, 0, 0, −1}; P(≤0) = 3/4
+    rng = random.Random(1349)
+    n_resamples = 400
+    p = one_sided_bootstrap_p(deltas, n_resamples=n_resamples, rng=rng)
+    r2 = random.Random(1349)
+    n = len(deltas)
+    le = sum(
+        1 for _ in range(n_resamples)
+        if sum(deltas[r2.randrange(n)] for _ in range(n)) / n <= 0.0
+    )
+    assert p == pytest.approx(le / n_resamples)
+    assert 0.0 < p < 1.0
+    # The theoretical probability for this tiny set is 0.75.
+    assert p == pytest.approx(0.75, abs=0.06)
+
+
+def test_one_sided_bootstrap_p_sign_conventions():
+    """All-positive deltas → p=0 (every resampled mean positive); all-negative
+    → p=1; all-zero → p=1 (no evidence of a positive delta)."""
+    assert one_sided_bootstrap_p([0.5] * 30, rng=random.Random(1)) == 0.0
+    assert one_sided_bootstrap_p([-0.5] * 30, rng=random.Random(1)) == 1.0
+    assert one_sided_bootstrap_p([0.0] * 30, rng=random.Random(1)) == 1.0
+
+
+def test_one_sided_bootstrap_p_deterministic_given_seed():
+    deltas = [0.2, -0.1, 0.4, -0.3, 0.1] * 10
+    r1, r2 = random.Random(7), random.Random(7)
+    assert (one_sided_bootstrap_p(deltas, rng=r1)
+            == one_sided_bootstrap_p(deltas, rng=r2))
+
+
+def test_one_sided_bootstrap_p_empty_is_no_evidence():
+    assert one_sided_bootstrap_p([]) == 1.0
+
+
+def test_bh_fdr_known_rejection_pattern():
+    """Hand-computed BH step-up at q=0.10 on pvals [0.001, 0.02, 0.04, 0.2],
+    m=4: sorted p_(i) vs q·i/m = {0.025, 0.05, 0.075, 0.10} → p_(1..3) all
+    ≤ their threshold, p_(4)=0.2 > 0.10 → k=3, reject the 3 smallest."""
+    pvals = [0.001, 0.02, 0.04, 0.2]
+    rejected = bh_fdr(pvals, q=0.10)
+    assert rejected == [True, True, True, False]
+
+
+def test_bh_fdr_lower_q_rejects_less():
+    """At q=0.05 the thresholds are {0.0125, 0.025, 0.0375, 0.05} → only
+    p_(1)=0.001 and p_(2)=0.02 clear → k=2."""
+    pvals = [0.001, 0.02, 0.04, 0.2]
+    assert bh_fdr(pvals, q=0.05) == [True, True, False, False]
+
+
+def test_bh_fdr_monotonicity_in_pvals():
+    """BH is monotone in the p-values: shrinking any p cannot un-reject."""
+    base = [0.001, 0.02, 0.04, 0.2]
+    smaller = [0.0005, 0.015, 0.04, 0.2]
+    r_base = bh_fdr(base, q=0.10)
+    r_smaller = bh_fdr(smaller, q=0.10)
+    for i in range(len(base)):
+        assert (r_base[i] and not r_smaller[i]) is False  # never un-rejected
+
+
+def test_bh_fdr_m6_top_rank_threshold():
+    """The #1349 locked case: m=6, q=0.10 → the smallest p must be ≤
+    q/m = 0.10/6 = 0.016666… (presented as 0.0167, z≈2.128) to reject
+    anything. A p exactly at q/m with the rest large is rejected; a hair
+    above is not."""
+    boundary = 0.10 / 6
+    assert bh_fdr([boundary, 0.9, 0.9, 0.9, 0.9, 0.9], q=0.10)[0] is True
+    assert bh_fdr([boundary + 1e-9, 0.9, 0.9, 0.9, 0.9, 0.9], q=0.10)[0] is False
+
+
+def test_bh_fdr_edge_cases():
+    assert bh_fdr([]) == []
+    assert bh_fdr([0.001] * 4, q=0.10) == [True] * 4
+    assert bh_fdr([0.5] * 4, q=0.10) == [False] * 4
 
 
 # ── Gate bands (pre-registered semantics) ───────────────────────────────────

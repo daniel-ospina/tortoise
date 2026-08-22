@@ -43,15 +43,156 @@ contract), so the metrics reflect what the reader could actually see.
 """
 from __future__ import annotations
 
+import math
 import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from tortoise import search_engine
+from tortoise.embeddings import EmbeddingModel
 from tortoise.sdk import TortoiseSDK
 
+from . import encode_cache
 from .ingest import EXTRACTION_POINT_KIND, event_props_for_hits, point_props_for_hits
+
+# ── #1349 vector arm: exceptions, nDCG/P metrics, vector_search ────────────
+#: The runner aborts a config run with this exit code when the graph has zero
+#: embedding-bearing points (empty recall is indistinguishable from a legit
+#: no-hit — never reported as a result).
+MODEL_ENCODE_FAILED_EXIT = 4
+
+
+class ModelEncodeFailedError(RuntimeError):
+    """The graph has zero embedding-bearing points (MODEL_ENCODE_FAILED).
+
+    Raised by :func:`vector_search` at search time — an empty recall is
+    indistinguishable from a legit no-hit and must never be reported as
+    such; the runner aborts that config run with a distinct exit code.
+    """
+
+
+class VectorBreakerOpenError(RuntimeError):
+    """The vector circuit breaker is OPEN (or ``run_vector_query`` raised).
+
+    Caught by the runner's dropped-question accounting: excluded from the
+    means, count surfaced (``dropped.breaker_open``).
+    """
+
+
+def dcg_at_k(gains: list[float], k: int) -> float:
+    """Discounted cumulative gain over ``gains[:k]`` with log2(i+2) discount."""
+    return sum(g / math.log2(i + 2) for i, g in enumerate(gains[:k]))
+
+
+def ndcg_at_k(ranked_ids: list[str], evidence_ids: set[str], k: int = 10) -> float:
+    """Binary-gain nDCG@k over the ranked retrieved ids.
+
+    gain = 1 for a retrieved turn that is a ``has_answer`` evidence turn else
+    0; position discount log2(i+2); IDCG = the ideal ranking with all evidence
+    turns first, capped at k. Zero-evidence-turn questions -> 0.0 (included in
+    the mean — matches turn_recall@10's report default).
+    """
+    if not evidence_ids:
+        return 0.0
+    gains = [1.0 if pid in evidence_ids else 0.0 for pid in ranked_ids[:k]]
+    idcg = dcg_at_k([1.0] * min(len(evidence_ids), k), k)
+    if idcg == 0.0:
+        return 0.0
+    return dcg_at_k(gains, k) / idcg
+
+
+def precision_at_k(ranked_ids: list[str], evidence_ids: set[str], k: int) -> float:
+    """Precision@k: fraction of the top-k retrieved ids that are evidence
+    turns (0.0 when there are no evidence turns)."""
+    if k <= 0:
+        return 0.0
+    top = ranked_ids[:k]
+    if not top:
+        return 0.0
+    return len(set(top) & evidence_ids) / k
+
+
+def _count_embedded_points(proj) -> int:
+    """n(embedding IS NOT NULL) over the per-question graph's Points."""
+    rows = proj.g.query(
+        "MATCH (n:Point) WHERE n.embedding IS NOT NULL RETURN count(n)"
+    ).result_set
+    if not rows:
+        return 0
+    try:
+        return int(rows[0][0])
+    except (TypeError, ValueError, IndexError):
+        return 0
+
+
+#: Elevated vector-search timeout (ms). The search_engine default (500ms) plus
+#: the per-strategy circuit breaker trips on large haystacks and returns [] —
+#: indistinguishable from recall 0. The in-repo hard tier uses 5000ms.
+VECTOR_TIMEOUT_MS = 5000
+
+
+def _encode_query_vec(query: str) -> list[float]:
+    """Encode the query via the injected model (EmbeddingModel singleton).
+
+    ``tools.embedder_probe.inject_model`` replaces the sentence-transformers
+    symbol BEFORE the first ``EmbeddingModel.get()``, so the singleton IS the
+    candidate model. Routed through the disk-persisted encode cache when one
+    is active (model-keyed — no cross-model contamination)."""
+    model = EmbeddingModel.get()
+    if model is None:
+        raise ModelEncodeFailedError(
+            "query encoding failed: EmbeddingModel.get() returned None "
+            "(degraded to TF-IDF) — refusing to run the vector arm")
+    return encode_cache.encode_query(model, query)
+
+
+def vector_search(sdk: TortoiseSDK, query: str, limit: int) -> list[tuple[str, float]]:
+    """Vector-only retrieval over the question's ingested graph.
+
+    Returns raw ``(id, score)`` tuples from ``search_engine.run_vector_query``
+    — the HNSW ``queryNodes`` branch in ``--db``/server mode, brute-force
+    euclideanDistance in embedded mode. NEVER calls ``tortoise_fts_query``.
+
+    Raises:
+        ModelEncodeFailedError: the graph has zero embedding-bearing points
+            (MODEL_ENCODE_FAILED — aborts the config run).
+        VectorBreakerOpenError: the vector circuit breaker is open or
+            ``run_vector_query`` raised.
+    """
+    proj = sdk._get_proj()
+    if _count_embedded_points(proj) == 0:
+        raise ModelEncodeFailedError(
+            f"MODEL_ENCODE_FAILED: graph has 0 embedding-bearing Points — the "
+            f"injected embedder degraded at ingest; aborting the vector arm "
+            f"(refusing to report empty recall as a result)")
+    if search_engine._breaker("vector").is_open():
+        raise VectorBreakerOpenError(
+            "vector circuit breaker is OPEN — question dropped from the "
+            "vector arm (surfaced via dropped-question accounting)")
+    qvec = _encode_query_vec(query)
+    breaker = search_engine._breaker("vector")
+    fails_before = breaker._fails
+    try:
+        res = search_engine.run_vector_query(
+            proj.g, qvec, limit,
+            is_embedded=getattr(proj, "_is_embedded", True),
+            vector_index_api=getattr(proj, "_vector_index_api", None),
+            timeout_ms=VECTOR_TIMEOUT_MS,
+        )
+    except VectorBreakerOpenError:
+        raise
+    except Exception as e:  # noqa: BLE001 — breaker-open routing (never recall 0)
+        raise VectorBreakerOpenError(
+            f"run_vector_query raised for the question: {e!r}") from e
+    if breaker._fails > fails_before or breaker.is_open():
+        raise VectorBreakerOpenError(
+            "vector query failed/breaker tripped during the call — question "
+            "dropped from the vector arm (surfaced via dropped-question "
+            "accounting)")
+    return res
+
 
 # token-count estimator: rough LLM token ≈ whitespace tokens, plus markup
 # allowance for role prefixes/JSON. Documented in report provenance.
@@ -581,12 +722,100 @@ def hybrid_search(sdk: TortoiseSDK, query: str, limit: int,
     )
 
 
+def _vector_retrieve(sdk: TortoiseSDK, question: dict, qid: str, *,
+                     ks: tuple[int, ...], top_k: int) -> dict[str, Any]:
+    """#1349 vector-only arm: encode with the injected model, run
+    ``search_engine.run_vector_query`` ONLY (never tortoise_fts_query).
+
+    Returns the pinned outcome shape the gate consumes: ranked ids,
+    evidence-turn matches, and nDCG@10 / P@10 / P@5 alongside the standard
+    session/turn recall@k over the raw vector hits (no dedup pool, no
+    rerank, no TR knobs — the metric is the raw vector ranking).
+    """
+    answer_sessions = set(question.get("answer_session_ids") or [])
+    dates: list[str] = question.get("haystack_dates") or []
+    evidence_turn_ids = {
+        f"lme:{qid}:s{si}:t{ti}"
+        for si, session in enumerate(question.get("haystack_sessions") or [])
+        for ti, turn in enumerate(session)
+        if turn.get("has_answer")
+    }
+
+    start = time.monotonic()
+    raw_hits = vector_search(sdk, question["question"], limit=max(ks))
+    latency_ms = (time.monotonic() - start) * 1000.0
+    hits: list[dict] = [
+        {"id": pid, "score": score, "match_source": "vector"}
+        for pid, score in raw_hits
+    ]
+
+    props = point_props_for_hits(sdk._get_proj(), [h["id"] for h in hits])
+    annotated: list[dict] = []
+    for h in hits:
+        p = props.get(h["id"], {})
+        si = p.get("lme_session_index", -1)
+        annotated.append({
+            "id": h["id"],
+            "content": p.get("content") or h.get("content", ""),
+            "match_source": h.get("match_source", ""),
+            "session_id": p.get("session_id", ""),
+            "lme_session_index": si,
+            "session_date": dates[si] if 0 <= si < len(dates) else "",
+            "has_answer": p.get("has_answer", False),
+        })
+
+    # ── recall@k (session-level + turn-level) over the raw vector ranking ──
+    session_recall: dict[str, float] = {}
+    turn_recall: dict[str, float] = {}
+    for k in ks:
+        top = annotated[:k]
+        if answer_sessions:
+            retrieved_sessions = {h["session_id"] for h in top if h["session_id"]}
+            session_recall[str(k)] = (
+                len(answer_sessions & retrieved_sessions) / len(answer_sessions))
+        else:
+            session_recall[str(k)] = 0.0
+        if evidence_turn_ids:
+            top_ids = {h["id"] for h in top}
+            turn_recall[str(k)] = len(evidence_turn_ids & top_ids) / len(evidence_turn_ids)
+        else:
+            turn_recall[str(k)] = 0.0
+
+    # ── context handed to the reader (top_k) ──
+    context_points = annotated[:top_k]
+    question_date = question.get("question_date", "") or None
+    context_text = render_context(context_points, question_date=question_date)
+    context_tokens = _estimate_tokens(context_text) if context_text else 0
+
+    ranked_ids = [h["id"] for h in annotated]
+    out: dict[str, Any] = {
+        "question_id": qid,
+        "retriever": "vector",
+        "hits": annotated,
+        "session_recall@k": session_recall,
+        "turn_recall@k": turn_recall,
+        "context_tokens": context_tokens,
+        "context_point_count": len(context_points),
+        "retrieval_latency_ms": round(latency_ms, 2),
+        # #1349 gate metrics — computed alongside turn_recall@10.
+        "ranked_ids": ranked_ids,
+        "evidence_turn_matches": sorted(evidence_turn_ids & set(ranked_ids)),
+        "ndcg@10": round(ndcg_at_k(ranked_ids, evidence_turn_ids, k=10), 6),
+        "p@10": round(precision_at_k(ranked_ids, evidence_turn_ids, k=10), 6),
+        "p@5": round(precision_at_k(ranked_ids, evidence_turn_ids, k=5), 6),
+    }
+    return out
+
 def retrieve_for_question(
     sdk: TortoiseSDK,
     question: dict,
     *,
     ks: tuple[int, ...] = (5, 10, 20),
     top_k: int = 20,
+    # #1349: the vector arm (``retriever="vector"``) bypasses the hybrid
+    # pool/rerank/TR path entirely — run_vector_query ONLY, nDCG@10 + P@10 +
+    # P@5 + ranked ids + evidence-turn matches in the outcome.
+    retriever: str = "hybrid",
     max_chunks_per_session: int = DEFAULT_MAX_CHUNKS_PER_SESSION,
     max_context_tokens: int = DEFAULT_CONTEXT_TOKEN_CAP,
     # R5 (#1544): TR knobs — temporal-reasoning questions get the events
@@ -633,6 +862,10 @@ def retrieve_for_question(
     date-weight) order — they measure retrieval, not rendering.
     """
     qid = question["question_id"]
+    if retriever not in ("hybrid", "vector"):
+        raise ValueError(f"retriever must be 'hybrid' or 'vector', got {retriever!r}")
+    if retriever == "vector":
+        return _vector_retrieve(sdk, question, qid, ks=ks, top_k=top_k)
     is_tr = question.get("question_type") == "temporal-reasoning"
     effective_top_k = tr_top_k if is_tr else top_k
     answer_sessions = set(question.get("answer_session_ids") or [])

@@ -33,6 +33,11 @@ DEFAULT_N_RESAMPLES = 2000
 GATE_WARN_LOWER = -2.0             # points; CI.lower >= -2 → SHIP
 GATE_BLOCK_LOWER = -4.0            # points; CI.lower < -4 → BLOCK
 
+# #1349 (embedder-selection gate): default FDR level for :func:`bh_fdr`.
+# The locked rule uses q=0.10 over m=6 pairwise tests (3 families × 2
+# co-primary metrics) → top-rank p threshold = q/m = 0.0167 (z≈2.128).
+DEFAULT_Q = 0.10
+
 
 @dataclass
 class ConfidenceInterval:
@@ -91,6 +96,70 @@ def one_sample_ci(
     """90% percentile bootstrap CI on the MEAN of one sample (the per-run
     uncertainty of a single strategy's metric)."""
     return paired_bootstrap_ci(values, n_resamples, alpha, rng)
+
+
+def one_sided_bootstrap_p(
+    deltas: Sequence[float],
+    n_resamples: int = DEFAULT_N_RESAMPLES,
+    rng: random.Random | None = None,
+) -> float:
+    """One-sided bootstrap p-value (#1349): P(mean resampled paired delta ≤ 0).
+
+    The #1349 embedder-selection gate's pairwise significance test — the
+    fraction of resampled means (resampling the observation indices with
+    replacement, exactly as :func:`paired_bootstrap_ci` does) that land ≤ 0
+    is the percentile-bootstrap one-sided p for the null Δmean ≤ 0. Small p
+    = evidence the candidate's mean beats control. Deterministic given
+    ``rng`` (defaults to a fixed seed so gate results reproduce).
+
+    Edge cases: empty deltas → 1.0 (no evidence of a positive delta);
+    constant positive deltas → 0.0 (every resampled mean positive); constant
+    zero/negative deltas → 1.0.
+    """
+    deltas = list(deltas)
+    if not deltas:
+        return 1.0
+    if n_resamples <= 0:
+        raise ValueError("n_resamples must be > 0")
+    rng = rng or random.Random(1349)
+    n = len(deltas)
+    le_zero = 0
+    for _ in range(n_resamples):
+        s = 0.0
+        for _ in range(n):
+            s += deltas[rng.randrange(n)]
+        if s / n <= 0.0:
+            le_zero += 1
+    return le_zero / n_resamples
+
+
+def bh_fdr(
+    pvals: Sequence[float],
+    q: float = DEFAULT_Q,
+) -> list[bool]:
+    """Benjamini–Hochberg step-up FDR control (#1349) at level ``q``.
+
+    Standard procedure over m = len(pvals): sort p ascending, find the
+    largest k with p_(k) ≤ q·k/m, reject the k smallest p-values. Returns a
+    boolean mask in the INPUT order (True = rejected). Order-invariant in
+    the p-value multiset. Empty input → empty mask.
+
+    Validity note (pre-registered): the 6 one-sided tests share a common
+    control, so they are positively dependent; BH controls FDR under PRDS,
+    which plausibly holds for one-sided tests against a common control —
+    asserted, with a dependent-deltas case in test_gate_1349.py.
+    """
+    m = len(pvals)
+    pvals = list(pvals)
+    order = sorted(range(m), key=lambda i: (pvals[i], i))
+    k = 0
+    for rank, idx in enumerate(order, start=1):
+        if pvals[idx] <= q * rank / m:
+            k = rank
+    rejected = [False] * m
+    for idx in order[:k]:
+        rejected[idx] = True
+    return rejected
 
 
 def paired_deltas(

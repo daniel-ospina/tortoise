@@ -47,6 +47,12 @@
     "embedded": "smoke only — FalkorDBLite has no FTS/HNSW: FTS degrades (parameter-bound queryNodes is unreliable on redislite), structural degrades to empty without a kind, vector runs brute-force; synthetic semantic query vectors stand in for the embedding model; numbers NOT prod-parity",
     "docker": "authoritative — Docker FalkorDB >= 4.x with HNSW + FTS indexes (auto-created at boot) and the all-MiniLM embedding model; run on-demand per optimization cycle + monthly scheduled"
   },
+  "embedder_parameterization": {
+    "since": "2026-08-17 (#1349 T3)",
+    "surface": "the hard tier is a 4-model surface — run.py --model <name> injects the candidate via tools/embedder_probe.inject_model BEFORE query-vector computation; --query-prompt threads the arctic vendor prompt_name='query' seam; a candidate that cannot load HARD FAILS (EmbedderProbeError), never silently degrades",
+    "models": ["minilm", "arctic-xs", "arctic-s", "bge-small"],
+    "provenance": "embedding_model records the probe-recorded model id (hf_id); 'unavailable' when degraded to synthetic vectors; benchmarks/run_report.py shares the same probe-read semantics for the pre-swap E2E-8 precondition"
+  },
   "files": {
     "queries": "tests/eval/retrieval/queries/oracle_queries.json + authored_queries.json",
     "metrics": "tests/eval/retrieval/metrics.py",

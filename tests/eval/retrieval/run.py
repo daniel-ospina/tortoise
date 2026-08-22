@@ -37,6 +37,9 @@ Usage:
 
     # gate a new run against the baseline
     python -m tests.eval.retrieval.run --db /tmp/new.db --baseline baseline.json
+
+    # 4-model surface (#1349): run the hard tier under a candidate embedder
+    python -m tests.eval.retrieval.run --db /tmp/new.db --model arctic-s --query-prompt query
 """
 from __future__ import annotations
 
@@ -72,6 +75,7 @@ from tests.eval.retrieval.queries import (  # noqa: E402
     AUTHORED_QUERIES_PATH, ORACLE_QUERIES_PATH,
     build_oracle_query_set, load_authored_queries, load_oracle_queries,
 )
+from tools.embedder_probe import PROBE_MODELS, inject_model  # noqa: E402
 
 STRATEGIES = ("fts", "vector", "structural", "tfidf", "fused")
 # #1348: fused_rerank is an OPT-IN arm (--graph-ranker-arm) — it is NOT in
@@ -111,6 +115,31 @@ def _host_specs() -> dict:
     return specs
 
 
+def _resolved_embedding_model(use_model: bool, injected: bool) -> str:
+    """Truthful embedding-model identity for provenance (#1349 T3).
+
+    --model active: the probe-recorded candidate hf_id (the probe state IS
+    the swap proof — inject_model HARD FAILs before the run otherwise). No
+    injection but a real model loaded: the probe state when present (in a
+    warm in-process re-run the loaded singleton may be a previously-injected
+    candidate — the probe state persists, so reporting its hf_id is truthful),
+    else the default model id (the only model EmbeddingModel._load resolves
+    without the probe). Degraded (no model — synthetic query vectors):
+    'unavailable'.
+    """
+    from tools import embedder_probe
+    state = embedder_probe.get_state()
+    if injected:
+        if state is not None:
+            return str(state["hf_id"])
+        return "unavailable"
+    if use_model:
+        if state is not None:
+            return str(state["hf_id"])
+        return embedder_probe.DEFAULT_MODEL_ID
+    return "unavailable"
+
+
 def _capture_provenance(proj, is_embedded: bool, extras: dict) -> dict:
     prov = {
         "timestamp_utc": _dt.datetime.now(_dt.timezone.utc).isoformat(),  # noqa: UP017
@@ -118,6 +147,7 @@ def _capture_provenance(proj, is_embedded: bool, extras: dict) -> dict:
         "host": _host_specs(),
         "db_mode": "embedded-falkordblite" if is_embedded else "docker-falkordb",
         "tor_toise_db_uri_set": bool(os.environ.get("TORTOISE_DB_URI")),
+        "embedding_model": extras.get("embedding_model", "unavailable"),
         "indexes": extras.get("indexes", {}),
         "corpus": extras.get("corpus_fingerprint", {}),
         "oracle": extras.get("oracle_meta", {}),
@@ -379,13 +409,27 @@ def _run_authored_query(q: dict, ctx: dict) -> dict[str, list[tuple[str, float]]
     )
 
 
+def _inject_probe_model(args) -> None:
+    """Apply --model before the run: inject the candidate embedder via
+    tools.embedder_probe so _query_vecs encodes with it (after injection
+    EmbeddingModel.get() IS the candidate, which is exactly what _query_vecs
+    auto-uses). HARD FAIL (EmbedderProbeError) when the candidate cannot
+    load — --model never silently degrades to synthetic query vectors."""
+    model = getattr(args, "model", None)
+    if model is None:
+        return
+    inject_model(model, query_prompt=getattr(args, "query_prompt", None))
+
+
 def _query_vecs(oracle, queries, seed: int) -> dict[str, list[float]]:
     """Precompute one query vector per query (outside the measured window).
 
     Embedded mode: synthetic semantic stand-ins derived from the oracle
     topic structure (see TopicOracle.query_vector_for). Docker mode: the
     real embedding model when available (tortoise.embeddings.EmbeddingModel),
-    else the same synthetic stand-in (flagged in provenance).
+    else the same synthetic stand-in (flagged in provenance). When --model
+    was passed, _inject_probe_model already loaded the candidate, so
+    EmbeddingModel.get() returns the candidate here.
     """
     use_model = False
     try:
@@ -512,6 +556,7 @@ def run_eval(args) -> dict:
 def _run_with_sdk(args, sdk) -> dict:
     proj = sdk._get_proj()
     is_embedded = getattr(proj, "_is_embedded", True)
+    _inject_probe_model(args)  # must precede _query_vecs (provenance records it)
     rng = random.Random(args.seed * 65537)  # bootstrap/CI resampling rng
 
     # 1. Oracle + corpus. #1348: --corpus-variant enhanced seeds topic-correlated
@@ -768,6 +813,8 @@ def _run_with_sdk(args, sdk) -> dict:
             "graph_ranker_arm": graph_ranker_arm,
             "corpus_variant": getattr(args, "corpus_variant", "plain"),
             "synthetic_query_vectors": not use_model,
+            "embedding_model": _resolved_embedding_model(
+                use_model, getattr(args, "model", None) is not None),
             "judge_labels": args.judge_labels or "none",
         }),
         "notes": [
@@ -898,12 +945,23 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-seed-corpus", action="store_true")
     p.add_argument("--rebuild-queries", action="store_true",
                    help="regenerate and overwrite the committed query JSONs")
+    p.add_argument("--model", choices=sorted(PROBE_MODELS.keys()),
+                   help="embedding model short name for query "
+                   "vectors (tools/embedder_probe PROBE_MODELS: minilm | "
+                   "arctic-xs | arctic-s | bge-small); injected BEFORE the "
+                   "run — HARD FAIL (EmbedderProbeError) if it cannot load")
+    p.add_argument("--query-prompt", help="named prompt template threaded to "
+                   "the injected model (e.g. 'query' for the snowflake-arctic "
+                   "vendor config prompt_name='query')")
     p.add_argument("--quiet", action="store_true")
     args = p.parse_args(argv)
     # #1348 post-parse resolution: depth defaults to limit (argparse defaults
     # are static — resolve after parse).
     if args.depth is None:
         args.depth = args.limit
+
+    if args.query_prompt is not None and args.model is None:
+        p.error("--query-prompt requires --model")
 
     if not args.quiet:
         print(f"#1144 retrieval eval — corpus={args.corpus_size} "

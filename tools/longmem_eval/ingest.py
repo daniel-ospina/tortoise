@@ -312,27 +312,33 @@ def ingest_haystack(sdk: TortoiseSDK, question: dict, *,
 
 def point_props_for_hits(proj, point_ids: list[str]) -> dict[str, dict[str, Any]]:
     """Fetch (session_id, has_answer, lme_session_index, quote, search_keys,
-    source_turn_id, speaker, point_kind) for a list of Point ids in one
-    Cypher query (avoid N+1 on the retrieval path). E3 (#1535): the
+    source_turn_id, speaker, point_kind, content) for a list of Point ids in
+    one Cypher query (avoid N+1 on the retrieval path). E3 (#1535): the
     source-turn link + speaker prop ride along so read-time speaker
     derivation is query-able. R1 (#1540): ``point_kind`` lets retrieval
     distinguish raw chunks from extracted points (per-session chunk dedup +
-    the D5 evidence denominator split both key on the kind)."""
+    the D5 evidence denominator split both key on the kind). ``content``
+    (#1349 vector arm) is returned since the vector arm's hits carry no
+    content in the raw hit dict (unlike FTS hits) — the reader context is
+    built from this fetch."""
+
     if not point_ids:
         return {}
     rows = proj.g.query(
         "MATCH (n:Point) WHERE n.id IN $ids "
         "RETURN n.id, coalesce(n.session_id, ''), coalesce(n.has_answer, false), "
         "       coalesce(n.lme_session_index, -1), "
+        "       coalesce(n.content, ''), "  # #1349 vector arm: hits carry no content
         "       coalesce(n.quote, ''), coalesce(n.search_keys, []), "
         "       coalesce(n.source_turn_id, ''), coalesce(n.speaker, ''), "
         "       coalesce(n.pointKind, '')",
         params={"ids": point_ids},
     ).result_set
     return {row[0]: {"session_id": row[1], "has_answer": bool(row[2]),
-                     "lme_session_index": row[3], "quote": row[4],
-                     "search_keys": row[5], "source_turn_id": row[6],
-                     "speaker": row[7], "point_kind": row[8]}
+                     "lme_session_index": row[3], "content": row[4],
+                     "quote": row[5], "search_keys": row[6],
+                     "source_turn_id": row[7], "speaker": row[8],
+                     "point_kind": row[9]}
             for row in rows}
 
 
@@ -360,3 +366,4 @@ def event_props_for_hits(proj, event_ids: list[str]) -> dict[str, dict[str, Any]
                      "has_answer": False,
                      "point_kind": row[3]}
             for row in rows}
+

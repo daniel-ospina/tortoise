@@ -18,6 +18,8 @@ ownedBy: epistemic-team
 | Ontology | `docs/ONTOLOGY.md` |
 | Registry graph schema | `docs/registry-graph-schema.md` |
 | Retrieval latency benchmark runbook (#316) | `benchmarks/README.md` |
+| Embedder selection decision record (ADR-009, #1349) | `docs/adr/ADR-009-embedder-selection.md` |
+| Hosted-vs-local embedding UX research (#1349) | `docs/research/2026-08-17-1349-embedder-selection/ux-research.md` |
 | Ingest contract (`tortoise_ingest` / `sdk.ingest` bundle API) | `docs/INGEST_CONTRACT.md` |
 | Data safety — encryption in transit + at rest | `docs/data-safety.md` |
 | Quickstart — hosted | `docs/quickstart-cloud.md` |

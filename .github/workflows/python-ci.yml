@@ -217,9 +217,27 @@ jobs:
         # Unconditional: every event runs the integrity check so new test
         # files can never silently drift out of selection again (the #1260
         # 12-file + #1270 6-file drift class — test_ci_selection.py only ran
-        # on selected surfaces, not push/main). <1s, fail-closed.
+        # on selected surfaces, not push/main). <1s, fail-closed. rglob
+        # (recursive) since #1349 so subdir test files are drift-checked;
+        # tests/e2e/ is deliberately exempt (welcome-e2e-monitor + legal-e2e
+        # + ENV_BROKEN_FILES cover those 17 files).
         run: |
           python3 tools/ci_selection.py --integrity
+
+      - name: Secrets scan (evidence artifacts, #1349)
+        # Evidence commits (T8/T15/T16) must never carry live keys. The
+        # provenance writer redacts (primary defense); this grep is the
+        # backstop on every event. Matches key VALUES (sk-or-/sk-ant-/sk-…)
+        # and env-var-name-with-assignment (OPENROUTER_API_KEY=…) — NOT the
+        # bare env-var name, which legitimately appears in docs/code. Fail
+        # on match; <1s.
+        run: |
+          if grep -rInE '(^|[^A-Za-z0-9])(sk-or-[A-Za-z0-9_-]{16,}|sk-ant-[A-Za-z0-9_-]{16,}|sk-[A-Za-z0-9_-]{20,})|OPENROUTER_API_KEY[[:space:]]*[=:][[:space:]]*[A-Za-z0-9_-]{16,}' \
+            docs/research/2026-08-17-1349-embedder-selection/ docs/plans/2026-08-17-1349-embedder-selection.md docs/adr/ADR-009-embedder-selection.md docs/scoping/2026-08-17-1349-embedder-selection-scoping.md tests/eval/retrieval/ tests/fixtures/labeled_pairs.jsonl tools/mini_beir/ tools/longmem_eval/ 2>/dev/null; then
+            echo "::error::key-like pattern found in committed evidence artifacts (redact before merge)"
+            exit 1
+          fi
+          echo "secrets scan clean"
 
   test:
     # #880: split into two parallel halves (matrix). The fast suite's pytest
@@ -317,16 +335,19 @@ jobs:
           TMPD=$(python3 -c "import tempfile;print(tempfile.gettempdir())")
           find "$TMPD" -maxdepth 1 -type d -name "tmp*" -mmin +30 -exec rm -rf {} + 2>/dev/null || true
           echo "tempdir cleaned"
-      - name: Cache HF embedding model (all-MiniLM-L6-v2)
-        # ~90MB; persisted so the pre-cache step below is a no-op on
+      - name: Cache HF embedding model (BAAI/bge-small-en-v1.5)
+        # ~130MB; persisted so the pre-cache step below is a no-op on
         # subsequent runs and CI never re-downloads from huggingface.co.
+        # Cache key v2 (#1349 T10): the v1 cache holds all-MiniLM-L6-v2 and
+        # must never serve bge-small runs — a v1 restore would silently
+        # exercise the WRONG embedder.
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
-          key: hf-embedding-cache-v1-${{ runner.os }}
+          key: hf-embedding-cache-v2-${{ runner.os }}
           restore-keys: |
-            hf-embedding-cache-v1-${{ runner.os }}-
-      - name: Pre-cache embedding model (all-MiniLM-L6-v2)
+            hf-embedding-cache-v2-${{ runner.os }}-
+      - name: Pre-cache embedding model (BAAI/bge-small-en-v1.5)
         # Best-effort: when the model is already cached (actions/cache
         # restore) this is a no-op. When the download succeeds, the suite
         # exercises the real embedding path. When it fails (HF unreachable
@@ -345,17 +366,22 @@ jobs:
         run: |
           python - <<'EOF'
           import os, time
+          # #1349 T10: the CI-cached model must match tortoise/embeddings.py
+          # EMBEDDING_MODEL (BAAI/bge-small-en-v1.5) — cache key v2 ensures a
+          # stale all-MiniLM v1 cache can never serve these runs.
+          MODEL = "BAAI/bge-small-en-v1.5"
+          REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"  # P2-2: pinned (VULN-001)
           os.environ["HF_HUB_OFFLINE"] = "1"
           from sentence_transformers import SentenceTransformer
           try:
-              SentenceTransformer("all-MiniLM-L6-v2")
+              SentenceTransformer(MODEL, revision=REVISION)
               print("embedding model: cached, no download needed")
           except Exception:
               print("embedding model: not cached — downloading (with retries)")
               del os.environ["HF_HUB_OFFLINE"]
               for attempt in range(1, 4):
                   try:
-                      SentenceTransformer("all-MiniLM-L6-v2")
+                      SentenceTransformer(MODEL, revision=REVISION)
                       print("embedding model: downloaded")
                       break
                   except Exception as e:
@@ -571,14 +597,17 @@ jobs:
           TMPD=$(python3 -c "import tempfile;print(tempfile.gettempdir())")
           find "$TMPD" -maxdepth 1 -type d -name "tmp*" -mmin +30 -exec rm -rf {} + 2>/dev/null || true
           echo "tempdir cleaned"
-      - name: Cache HF embedding model (all-MiniLM-L6-v2)
+      - name: Cache HF embedding model (BAAI/bge-small-en-v1.5)
+        # Cache key v2 (#1349 T10): the v1 cache holds all-MiniLM-L6-v2 and
+        # must never serve bge-small runs — a v1 restore would silently
+        # exercise the WRONG embedder.
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
-          key: hf-embedding-cache-v1-${{ runner.os }}
+          key: hf-embedding-cache-v2-${{ runner.os }}
           restore-keys: |
-            hf-embedding-cache-v1-${{ runner.os }}-
-      - name: Pre-cache embedding model (all-MiniLM-L6-v2)
+            hf-embedding-cache-v2-${{ runner.os }}-
+      - name: Pre-cache embedding model (BAAI/bge-small-en-v1.5)
         # Same best-effort contract as the fast job: no mid-suite HF access;
         # download failure is a warning (TF-IDF fallback), never a failure.
         # #964: step-level timeout bounds a hung download (stalled TCP with
@@ -589,17 +618,22 @@ jobs:
         run: |
           python - <<'EOF'
           import os, time
+          # #1349 T10: the CI-cached model must match tortoise/embeddings.py
+          # EMBEDDING_MODEL (BAAI/bge-small-en-v1.5) — cache key v2 ensures a
+          # stale all-MiniLM v1 cache can never serve these runs.
+          MODEL = "BAAI/bge-small-en-v1.5"
+          REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"  # P2-2: pinned (VULN-001)
           os.environ["HF_HUB_OFFLINE"] = "1"
           from sentence_transformers import SentenceTransformer
           try:
-              SentenceTransformer("all-MiniLM-L6-v2")
+              SentenceTransformer(MODEL, revision=REVISION)
               print("embedding model: cached, no download needed")
           except Exception:
               print("embedding model: not cached — downloading (with retries)")
               del os.environ["HF_HUB_OFFLINE"]
               for attempt in range(1, 6):
                   try:
-                      SentenceTransformer("all-MiniLM-L6-v2")
+                      SentenceTransformer(MODEL, revision=REVISION)
                       print("embedding model: downloaded")
                       break
                   except Exception as e:
@@ -737,16 +771,19 @@ jobs:
           TMPD=$(python3 -c "import tempfile;print(tempfile.gettempdir())")
           find "$TMPD" -maxdepth 1 -type d -name "tmp*" -mmin +30 -exec rm -rf {} + 2>/dev/null || true
           echo "tempdir cleaned"
-      - name: Cache HF embedding model (all-MiniLM-L6-v2)
+      - name: Cache HF embedding model (BAAI/bge-small-en-v1.5)
         # Sibling parity (test/test-slow both cache BEFORE pre-caching) —
-        # without the restore step every run downloads ~90MB.
+        # without the restore step every run downloads ~130MB. Cache key v2
+        # (#1349 T10): the v1 cache holds all-MiniLM-L6-v2 and must never
+        # serve bge-small runs — a v1 restore would silently exercise the
+        # WRONG embedder.
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
-          key: hf-embedding-cache-v1-${{ runner.os }}
+          key: hf-embedding-cache-v2-${{ runner.os }}
           restore-keys: |
-            hf-embedding-cache-v1-${{ runner.os }}-
-      - name: Pre-cache embedding model (all-MiniLM-L6-v2)
+            hf-embedding-cache-v2-${{ runner.os }}-
+      - name: Pre-cache embedding model (BAAI/bge-small-en-v1.5)
         # Same best-effort contract as the sibling jobs: no mid-suite HF
         # access; the live seq test exercises compute_embedding via create_point.
         # #964 (review): same hung-download guard as test/test-slow — this
@@ -757,17 +794,22 @@ jobs:
         run: |
           python - <<'EOF'
           import os, time
+          # #1349 T10: the CI-cached model must match tortoise/embeddings.py
+          # EMBEDDING_MODEL (BAAI/bge-small-en-v1.5) — cache key v2 ensures a
+          # stale all-MiniLM v1 cache can never serve these runs.
+          MODEL = "BAAI/bge-small-en-v1.5"
+          REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"  # P2-2: pinned (VULN-001)
           os.environ["HF_HUB_OFFLINE"] = "1"
           from sentence_transformers import SentenceTransformer
           try:
-              SentenceTransformer("all-MiniLM-L6-v2")
+              SentenceTransformer(MODEL, revision=REVISION)
               print("embedding model: cached, no download needed")
           except Exception:
               print("embedding model: not cached — downloading (with retries)")
               del os.environ["HF_HUB_OFFLINE"]
               for attempt in range(1, 6):
                   try:
-                      SentenceTransformer("all-MiniLM-L6-v2")
+                      SentenceTransformer(MODEL, revision=REVISION)
                       print("embedding model: downloaded")
                       break
                   except Exception as e:

@@ -1718,7 +1718,7 @@ def tortoise_review_connections(mode: str = "both", scope: str | None = None) ->
 
 
 def tortoise_find_cross_lens_candidates(
-    threshold: float = 0.40,
+    threshold: float = 0.72,
     max_candidates: int = 200,
     routing: str = "truth",
     top_k: int = 20,

@@ -1,0 +1,495 @@
+{
+  "bars": {
+    "arctic-s": {
+      "ndcg@10": 0.1128,
+      "turn_recall@10": 0.1014
+    },
+    "arctic-xs": {
+      "ndcg@10": 0.1078,
+      "turn_recall@10": 0.0989
+    },
+    "bge-small": {
+      "ndcg@10": 0.0877,
+      "turn_recall@10": 0.0837
+    }
+  },
+  "bh": {
+    "m": 6,
+    "pvals": {
+      "arctic-s__ndcg@10": 0.807,
+      "arctic-s__turn_recall@10": 0.9675,
+      "arctic-xs__ndcg@10": 0.0,
+      "arctic-xs__turn_recall@10": 0.0135,
+      "bge-small__ndcg@10": 0.0,
+      "bge-small__turn_recall@10": 0.0005
+    },
+    "q": 0.1,
+    "rejected": {
+      "arctic-s__ndcg@10": false,
+      "arctic-s__turn_recall@10": false,
+      "arctic-xs__ndcg@10": true,
+      "arctic-xs__turn_recall@10": true,
+      "bge-small__ndcg@10": true,
+      "bge-small__turn_recall@10": true
+    },
+    "z": 2.128
+  },
+  "blocked": true,
+  "blocking_reasons": [
+    "pre-swap E2E-8 p95 344.61ms > 300ms for arctic-xs \u2014 the latency band vetoes the swap"
+  ],
+  "burn_qids": [
+    "001be529",
+    "00ca467f",
+    "06878be2",
+    "06f04340",
+    "0862e8bf",
+    "09d032c9",
+    "0a995998",
+    "0edc2aef",
+    "10d9b85a",
+    "118b2229",
+    "129d1232",
+    "15745da0",
+    "195a1a1b",
+    "19b5f2b3",
+    "1a1907b4",
+    "1a8a66a6",
+    "1e043500",
+    "1faac195",
+    "21436231",
+    "2318644b",
+    "25e5aa4f",
+    "2788b940",
+    "28dc39ac",
+    "29f2956b",
+    "2b8f3739",
+    "2ce6a0f2",
+    "2e6d26dc",
+    "311778f1",
+    "32260d93",
+    "35a27287",
+    "36580ce8",
+    "36b9f61e",
+    "37d43f65",
+    "38146c39",
+    "3a704032",
+    "3b6f954b",
+    "3d86fd0a",
+    "3f1e9474",
+    "4100d0a0",
+    "46a3abf7",
+    "4fd1909e",
+    "51a45a95",
+    "54026fce",
+    "545bd2b5",
+    "577d4d32",
+    "57f827a0",
+    "58bf7951",
+    "58ef2f1c",
+    "5a7937c8",
+    "5d3d2817",
+    "60472f9c",
+    "60bf93ed",
+    "60d45044",
+    "66f24dbb",
+    "6ade9755",
+    "6b168ec8",
+    "6b7dfb22",
+    "6cb6f249",
+    "6d550036",
+    "6f9b354f",
+    "7024f17c",
+    "726462e0",
+    "7527f7e2",
+    "75499fd8",
+    "75832dbd",
+    "76d63226",
+    "80ec1f4f",
+    "81507db6",
+    "853b0a1d",
+    "8550ddae",
+    "86b68151",
+    "86f00804",
+    "88432d0a",
+    "8a137a7f",
+    "8a2466db",
+    "8e9d538c",
+    "8ebdbe50",
+    "94f70d80",
+    "95228167",
+    "95bcc1c8",
+    "9d25d4e0",
+    "a06e4cfe",
+    "a82c026e",
+    "a9f6b44c",
+    "aae3761f",
+    "ad7109d1",
+    "af8d2e46",
+    "afdc33df",
+    "b320f3f8",
+    "b3c15d39",
+    "b5ef892d",
+    "b86304ba",
+    "bc8a6e93",
+    "bf659f65",
+    "c14c00dd",
+    "c19f7a0b",
+    "c2ac3c61",
+    "c4a1ceb8",
+    "c5e8278d",
+    "c8c3f81d",
+    "c960da58",
+    "caf03d32",
+    "caf9ead2",
+    "ccb36322",
+    "d23cf73b",
+    "d24813b1",
+    "d52b4f67",
+    "d682f1a2",
+    "d851d5ba",
+    "dccbc061",
+    "dd2973ad",
+    "e01b8e2f",
+    "e3038f8c",
+    "e47becba",
+    "e831120c",
+    "ec81a493",
+    "edced276",
+    "eeda8a6d",
+    "f4f1d8a4",
+    "f8c5f88b",
+    "faba32e5",
+    "gpt4_15e38248",
+    "gpt4_194be4b3",
+    "gpt4_2ba83207",
+    "gpt4_2f8be40d",
+    "gpt4_2f91af09",
+    "gpt4_31ff4165",
+    "gpt4_372c3eed",
+    "gpt4_5501fe77",
+    "gpt4_59c863d7",
+    "gpt4_731e37d7",
+    "gpt4_7fce9456",
+    "gpt4_a56e767c",
+    "gpt4_ab202e7f",
+    "gpt4_d12ceb0e",
+    "gpt4_d84a3211",
+    "gpt4_e05b82a6",
+    "gpt4_f2262a51"
+  ],
+  "categories": {
+    "Information Extraction": {
+      "arctic-s": {
+        "ndcg@10": -0.06783489024390243,
+        "turn_recall@10": -0.09146341463414634
+      },
+      "arctic-xs": {
+        "ndcg@10": 0.07573474390243902,
+        "turn_recall@10": 0.022357723577235773
+      },
+      "bge-small": {
+        "ndcg@10": 0.09345262195121952,
+        "turn_recall@10": 0.06504065040650406
+      }
+    },
+    "Knowledge Updates": {
+      "arctic-s": {
+        "ndcg@10": 0.0,
+        "turn_recall@10": 0.0
+      },
+      "arctic-xs": {
+        "ndcg@10": 0.0,
+        "turn_recall@10": 0.0
+      },
+      "bge-small": {
+        "ndcg@10": 0.0,
+        "turn_recall@10": 0.0
+      }
+    },
+    "Multi-Session Reasoning": {
+      "arctic-s": {
+        "ndcg@10": 0.043806482142857144,
+        "turn_recall@10": -0.015178571428571428
+      },
+      "arctic-xs": {
+        "ndcg@10": 0.16043264285714284,
+        "turn_recall@10": 0.14404761904761904
+      },
+      "bge-small": {
+        "ndcg@10": 0.15392430357142858,
+        "turn_recall@10": 0.1669642857142857
+      }
+    },
+    "Temporal Reasoning": {
+      "arctic-s": {
+        "ndcg@10": 0.0,
+        "turn_recall@10": 0.0
+      },
+      "arctic-xs": {
+        "ndcg@10": 0.0,
+        "turn_recall@10": 0.0
+      },
+      "bge-small": {
+        "ndcg@10": 0.0,
+        "turn_recall@10": 0.0
+      }
+    }
+  },
+  "clearing_families": [
+    "bge-small",
+    "arctic-xs"
+  ],
+  "control": {
+    "ndcg@10": 0.49140449275362325,
+    "p@10": 0.11231884057971014,
+    "p@5": 0.15507246376811595,
+    "turn_recall@10": 0.6792270531400966
+  },
+  "escalation": {
+    "triggered": false
+  },
+  "families": {
+    "arctic-s": {
+      "absolute_turn_recall@10": 0.6187,
+      "cleared": {
+        "ndcg@10": false,
+        "turn_recall@10": false
+      },
+      "configs": [
+        "arctic-s",
+        "arctic-s-q"
+      ],
+      "metrics": {
+        "ndcg@10": {
+          "bar": 0.1128,
+          "best_config": "arctic-s-q",
+          "bh_rejected": false,
+          "ci90": {
+            "lower": -0.0653,
+            "mean": -0.0225,
+            "n": 138,
+            "upper": 0.0189
+          },
+          "cleared": false,
+          "control_mean": 0.4914,
+          "family_mean": 0.4689,
+          "mean_delta": -0.0225,
+          "n": 138,
+          "p": 0.807,
+          "relative_delta": -0.0459
+        },
+        "turn_recall@10": {
+          "bar": 0.1014,
+          "best_config": "arctic-s-q",
+          "bh_rejected": false,
+          "ci90": {
+            "lower": -0.112,
+            "mean": -0.0605,
+            "n": 138,
+            "upper": -0.007
+          },
+          "cleared": false,
+          "control_mean": 0.6792,
+          "family_mean": 0.6187,
+          "mean_delta": -0.0605,
+          "n": 138,
+          "p": 0.9675,
+          "relative_delta": -0.0891
+        }
+      },
+      "p@10": {
+        "control_mean": 0.1123,
+        "family_mean": 0.1043,
+        "mean_delta": -0.008
+      },
+      "p@5": {
+        "control_mean": 0.1551,
+        "family_mean": 0.1551,
+        "mean_delta": 0.0
+      },
+      "winner": false
+    },
+    "arctic-xs": {
+      "absolute_turn_recall@10": 0.751,
+      "cleared": {
+        "ndcg@10": true,
+        "turn_recall@10": true
+      },
+      "configs": [
+        "arctic-xs",
+        "arctic-xs-q"
+      ],
+      "metrics": {
+        "ndcg@10": {
+          "bar": 0.1078,
+          "best_config": "arctic-xs-q",
+          "bh_rejected": true,
+          "ci90": {
+            "lower": 0.0694,
+            "mean": 0.1101,
+            "n": 138,
+            "upper": 0.1525
+          },
+          "cleared": true,
+          "control_mean": 0.4914,
+          "family_mean": 0.6015,
+          "mean_delta": 0.1101,
+          "n": 138,
+          "p": 0.0,
+          "relative_delta": 0.2241
+        },
+        "turn_recall@10": {
+          "bar": 0.0989,
+          "best_config": "arctic-xs-q",
+          "bh_rejected": true,
+          "ci90": {
+            "lower": 0.0222,
+            "mean": 0.0717,
+            "n": 138,
+            "upper": 0.124
+          },
+          "cleared": true,
+          "control_mean": 0.6792,
+          "family_mean": 0.751,
+          "mean_delta": 0.0717,
+          "n": 138,
+          "p": 0.0135,
+          "relative_delta": 0.1056
+        }
+      },
+      "p@10": {
+        "control_mean": 0.1123,
+        "family_mean": 0.1333,
+        "mean_delta": 0.021
+      },
+      "p@5": {
+        "control_mean": 0.1551,
+        "family_mean": 0.2145,
+        "mean_delta": 0.0594
+      },
+      "winner": true
+    },
+    "bge-small": {
+      "absolute_turn_recall@10": 0.7856,
+      "cleared": {
+        "ndcg@10": true,
+        "turn_recall@10": true
+      },
+      "configs": [
+        "bge-small"
+      ],
+      "metrics": {
+        "ndcg@10": {
+          "bar": 0.0877,
+          "best_config": "bge-small",
+          "bh_rejected": true,
+          "ci90": {
+            "lower": 0.0868,
+            "mean": 0.118,
+            "n": 138,
+            "upper": 0.1525
+          },
+          "cleared": true,
+          "control_mean": 0.4914,
+          "family_mean": 0.6094,
+          "mean_delta": 0.118,
+          "n": 138,
+          "p": 0.0,
+          "relative_delta": 0.2401
+        },
+        "turn_recall@10": {
+          "bar": 0.0837,
+          "best_config": "bge-small",
+          "bh_rejected": true,
+          "ci90": {
+            "lower": 0.0635,
+            "mean": 0.1064,
+            "n": 138,
+            "upper": 0.1512
+          },
+          "cleared": true,
+          "control_mean": 0.6792,
+          "family_mean": 0.7856,
+          "mean_delta": 0.1064,
+          "n": 138,
+          "p": 0.0005,
+          "relative_delta": 0.1567
+        }
+      },
+      "p@10": {
+        "control_mean": 0.1123,
+        "family_mean": 0.1384,
+        "mean_delta": 0.0261
+      },
+      "p@5": {
+        "control_mean": 0.1551,
+        "family_mean": 0.2043,
+        "mean_delta": 0.0493
+      },
+      "winner": true
+    }
+  },
+  "hnsw_waived": true,
+  "insufficient_power": {
+    "absolute_fallback_clearances": {
+      "arctic-s": 0.6187,
+      "arctic-xs": 0.751,
+      "bge-small": 0.7856
+    },
+    "absolute_fallback_threshold": 0.3,
+    "control_turn_recall@10": 0.6792,
+    "judgment_tiebreak": [
+      "mini-beir-ood",
+      "labeled-pair-calibration",
+      "ndcg@10"
+    ],
+    "n_paired_min": 138,
+    "note": "INSUFFICIENT-POWER disposition: judgment tiebreak in pinned order \u2014 mini-BEIR OOD datasets \u2192 labeled-pair calibration \u2192 nDCG@10 \u2014 recorded as judgment-based in ADR-009 (the gate EMITS this recommendation; the actual judgment is human/ADR)."
+  },
+  "n_paired_min": 138,
+  "preconditions": {
+    "checks": [
+      {
+        "detail": "server-side",
+        "met": true,
+        "name": "product_call"
+      },
+      {
+        "detail": "WAIVED \u2014 no winner to spot-check (NO-WINNER/INSUFFICIENT-POWER); the HNSW spot-check validates a shipped winner only",
+        "met": true,
+        "name": "hnsw_spotcheck"
+      },
+      {
+        "detail": "pre-swap E2E-8 p95 344.61ms > 300ms for arctic-xs \u2014 the latency band vetoes the swap",
+        "met": false,
+        "name": "e2e8_<=300ms"
+      },
+      {
+        "detail": "not-landed",
+        "met": true,
+        "name": "issue_265"
+      }
+    ]
+  },
+  "retriever": "vector",
+  "split": "s",
+  "split_config_rule": null,
+  "statistical_verdict": "INSUFFICIENT-POWER",
+  "swap_config": null,
+  "tiebreak_evidence": {
+    "combined_rank": {
+      "arctic-s": 6,
+      "arctic-xs": 4,
+      "bge-small": 2
+    },
+    "e2e8_p95_ms": {
+      "arctic-s": 344.61,
+      "arctic-xs": 344.61,
+      "bge-small": 344.61,
+      "minilm": 464.11
+    }
+  },
+  "verdict": "BLOCKED",
+  "winner": null
+}
