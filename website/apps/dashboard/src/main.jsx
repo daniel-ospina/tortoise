@@ -805,6 +805,11 @@ function claimIntentInFlight() {
               setWelcomeTeamName(provisioned.team_name)
               setWelcomeGraphName(provisioned.graph_name || '')
               setWelcomeProvisioning(false)
+              // #1623: the welcome plan step needs the team row
+              // (checkout_price_ids for per-tier Upgrade CTAs) — the welcome
+              // card never fetched /v1/team before. Best-effort: a failure
+              // falls back to the "See pricing" link on the plan cards.
+              refreshTeam(provisioned.api_key).catch(() => {})
             } else {
               setWelcomeProvisionError('Could not create your team — try again.')
               setWelcomeProvisioning(false)
@@ -2153,6 +2158,51 @@ function claimIntentInFlight() {
                     Build with Tortoise — SDK quickstart →
                   </a>
                 </div>
+                {/* #1623: non-blocking plan-selection step — first-timers only
+                    (welcomeKey set = freshly provisioned). Free is selected by
+                    default (no card); paid Upgrade CTAs use the server-resolved
+                    checkout_price_ids; "Start free" proceeds to the dashboard. */}
+                {welcomeKey && team && (
+                  <div className="welcome-plans" style={{ marginTop: '1.5rem', paddingTop: '1.25rem', borderTop: '1px solid var(--border,#1e293b)' }}>
+                    <h2 style={{ fontFamily: 'var(--serif, Georgia, serif)', fontWeight: 400, fontSize: 20, marginBottom: '0.4rem' }}>Choose your plan</h2>
+                    <p className="dim" style={{ marginBottom: '0.9rem' }}>
+                      You're on the free plan — no card needed. Upgrade any time as you grow.
+                    </p>
+                    <div className="plans-grid">
+                      {planOptions().map((p) => {
+                        const hasPrice = Boolean(team.checkout_price_ids?.[p.tier])
+                        return (
+                          <div key={p.tier} className={`plan-card${p.tier === 'free' ? ' current' : ''}`}>
+                            <div className="plan-card-head">
+                              <strong>{p.label}</strong>
+                              {p.tier === 'free' && <span className="tier-badge" style={{ fontSize: 10, padding: '1px 8px' }}>Default</span>}
+                            </div>
+                            <div className="plan-price">
+                              {p.price === 0 ? '$0' : `$${p.price}`}<span className="dim small">/mo</span>
+                            </div>
+                            <ul className="plan-limits">
+                              {p.limits.map((l) => <li key={l}>{l}</li>)}
+                            </ul>
+                            {p.tier === 'free' ? (
+                              <button
+                                className="btn-primary"
+                                onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false); setTab('keys') }}
+                              >
+                                Start free
+                              </button>
+                            ) : hasPrice ? (
+                              <button className="ghost" onClick={() => upgradeToPrice(team.checkout_price_ids[p.tier])} disabled={checkoutPending}>
+                                {checkoutPending ? 'Opening checkout…' : 'Upgrade'}
+                              </button>
+                            ) : (
+                              <a className="ghost" href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">See pricing</a>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
               </>
             )}
           </div>
