@@ -212,6 +212,12 @@ class SearchResult:
     status: str = ""  # live / superseded / deprecated / retracted / draft
     superseded_by: dict | None = None  # {id, content_snippet, created_at} | None
     supersedes: list[dict] = field(default_factory=list)  # [{id, content_snippet, created_at}]
+    # E6 (#1538) D5/D7: promoted validity-window fields — additive, emitted
+    # only when present (undated points ⇒ empty string, no marker). Written
+    # by supersede_point/invalidate_point (D2).
+    valid_from: str = ""
+    valid_to: str = ""
+    expired_at: str = ""
     subject: dict | None = None  # {id, name, kind} | None — ≤1 hop, fail-closed (D10)
 
     def to_dict(self) -> dict:
@@ -245,6 +251,14 @@ class SearchResult:
             d["superseded_by"] = self.superseded_by
         if self.supersedes:
             d["supersedes"] = self.supersedes
+        # E6 (#1538) D7: window fields — additive keys, emitted only when
+        # present (#1353 D8 rule).
+        if self.valid_from:
+            d["valid_from"] = self.valid_from
+        if self.valid_to:
+            d["valid_to"] = self.valid_to
+        if self.expired_at:
+            d["expired_at"] = self.expired_at
         if self.subject:
             d["subject"] = self.subject
         return d
@@ -1646,6 +1660,7 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
             "OPTIONAL MATCH (n)-[r:CORRECTS]->(old:Point) "
             "OPTIONAL MATCH (new:Point)-[r2:CORRECTS]->(n) "
             "RETURN n.id, n.status, "
+            "  n.validFrom, n.validTo, n.expiredAt, "
             "  old.id, old.content, old.createdAt, "
             "  new.id, new.status, new.content, new.createdAt, "
             "  s.id, s.name, s.subjectKind, "
@@ -1662,8 +1677,14 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
                 "supersedes": [],
                 "subject": None,
             })
-            old_id, old_content, old_created = row[2], row[3], row[4]
-            new_id, new_status, new_content, new_created = row[5], row[6], row[7], row[8]
+            # E6 (#1538) D5/D7: promoted window fields — additive, absent
+            # when undated (open window ⇒ no marker, byte-identical
+            # rendering). Written by supersede_point/invalidate_point (D2).
+            st.setdefault("valid_from", row[2] or None)
+            st.setdefault("valid_to", row[3] or None)
+            st.setdefault("expired_at", row[4] or None)
+            old_id, old_content, old_created = row[5], row[6], row[7]
+            new_id, new_status, new_content, new_created = row[8], row[9], row[10], row[11]
             if old_id and old_id not in {s["id"] for s in st["supersedes"]}:
                 st["supersedes"].append({
                     "id": old_id,
@@ -1683,8 +1704,8 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
                         st["superseded_by"].get("created_at")):
                     st["superseded_by"] = cand
             # Subject: own aboutSubject wins; event's is the ≤1-hop fallback.
-            s_id, s_name, s_kind = row[9], row[10], row[11]
-            es_id, es_name, es_kind = row[12], row[13], row[14]
+            s_id, s_name, s_kind = row[12], row[13], row[14]
+            es_id, es_name, es_kind = row[15], row[16], row[17]
             if st["subject"] is None and s_id:
                 st["subject"] = {"id": s_id, "name": s_name or "", "kind": s_kind or ""}
             elif st["subject"] is None and es_id:

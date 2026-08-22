@@ -4336,8 +4336,11 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: "CommitPayload", plan):
             point_props: dict = {}
             # E1 (#1533): the payload `when` slot rides onto the node only
             # when non-empty — undated points write no `when` prop.
+            # E6 (#1538) D3: validFrom = the fact's valid-time start; the
+            # supersede below stamps the window END on the prior (D2).
             if pr.point.when:
                 point_props["when"] = pr.point.when
+                point_props["validFrom"] = pr.point.when
             sdk.create_point(
                 pr.point.pointKind, pr.point.content, dedup=True, id=pid,
                 status=pr.point.status, confidence=pr.point.confidence,
@@ -4359,6 +4362,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: "CommitPayload", plan):
             point_props = {}
             if pr.point.when:
                 point_props["when"] = pr.point.when
+                point_props["validFrom"] = pr.point.when
             sdk.create_point(
                 pr.point.pointKind, pr.point.content, dedup=True, id=pid,
                 status=pr.point.status, confidence=pr.point.confidence,

@@ -265,6 +265,11 @@ def _annotate_hits(hits: list[dict], props: dict, dates: list[str]) -> list[dict
             # re-detected.
             "superseded_by": h.get("superseded_by"),
             "supersedes": h.get("supersedes") or [],
+            # E6 (#1538) D7: promoted validity-window fields — additive,
+            # only when present (undated hits render no [valid …] marker).
+            "valid_from": h.get("valid_from") or "",
+            "valid_to": h.get("valid_to") or "",
+            "expired_at": h.get("expired_at") or "",
         })
     return annotated
 
@@ -314,12 +319,18 @@ def _leg_mix(hits: list[dict]) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
-def _supersede_marker(h: dict) -> str:
-    """Supersession marker text for one hit (#1367). Empty when the hit has
-    no supersession state. Uses the promoted content_snippet (≤120 chars,
-    #1353 D8) — for LongMemEval's short turns the snippet IS the claim.
-    Each relationship renders in its own bracket group (reader-parsing
-    clarity)."""
+def _validity_marker(h: dict) -> str:
+    """Validity-window marker text for one hit (E6 #1538, D7).
+
+    Extends the #1367 supersession markers with the promoted window fields:
+      - live hit with ``valid_from`` → ``[valid since <from>]``
+      - superseded hit → ``[valid <from> → <to>]``; with ``expired_at`` →
+        ``[valid <from> → <to>; expired <tx-date>]``
+      - undated hits → NO validity marker (byte-identical rendering)
+    ISO date strings (YYYY-MM-DD — the dataset/``when`` normalization): no
+    full timestamps in the reader context; timestamps stay on the graph
+    properties. The supersession markers (SUPERSEDED BY / SUPERSEDES) are
+    unchanged and render first."""
     marks: list[str] = []
     sb = h.get("superseded_by") or {}
     snippet = (sb.get("content_snippet") or "").strip()
@@ -330,6 +341,21 @@ def _supersede_marker(h: dict) -> str:
              for s in supersedes if (s.get("content_snippet") or "").strip()]
     if snips:
         marks.append("[SUPERSEDES: " + " ; ".join(snips) + "]")
+    vf = (h.get("valid_from") or "").strip()
+    vt = (h.get("valid_to") or "").strip()
+    ex = (h.get("expired_at") or "").strip()
+    if vf:
+        # ISO date strings only — truncate full timestamps to YYYY-MM-DD.
+        vfd = vf[:10] if len(vf) > 10 else vf
+        if vt:
+            vtd = vt[:10] if len(vt) > 10 else vt
+            if ex:
+                exd = ex[:10] if len(ex) > 10 else ex
+                marks.append(f"[valid {vfd} → {vtd}; expired {exd}]")
+            else:
+                marks.append(f"[valid {vfd} → {vtd}]")
+        else:
+            marks.append(f"[valid since {vfd}]")
     return " ".join(marks)
 
 
@@ -357,10 +383,11 @@ def _render_block(h: dict) -> str:
     # must not suppress speaker attribution
     if spk and not _ROLE_PREFIX.match(h.get("content", "")):
         prefix = f"{prefix} [{spk}]"
-    marker = _supersede_marker(h)
+    marker = _validity_marker(h)
     if marker:
-        # _supersede_marker already returns self-bracketed groups
-        # (e.g. "[SUPERSEDED BY: x] [SUPERSEDES: y]") — no extra wrap.
+        # _validity_marker already returns self-bracketed groups
+        # (e.g. "[SUPERSEDED BY: x] [valid 2026-06-10 → 2026-06-12]") — no
+        # extra wrap.
         prefix = f"{prefix} {marker}"
     return f"{prefix} {h.get('content', '')}"
 
