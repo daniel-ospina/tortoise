@@ -233,6 +233,7 @@ surfaces:
   - test_query_suggestions.py
   - test_reaper.py
   - test_reaper_orphan.py
+  - test_sparse.py
   - test_status_projection.py
   - test_references_edge.py
   - test_remove_context_migration.py
