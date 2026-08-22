@@ -46,7 +46,7 @@ PROBE_MODELS: dict[str, str] = {
     "minilm": "sentence-transformers/all-MiniLM-L6-v2",
     "arctic-xs": "snowflake/snowflake-arctic-embed-xs",
     "arctic-s": "snowflake/snowflake-arctic-embed-s",
-    "bge-small": "BAAI/bge-small-en-v1.5",
+    "bge-small": "BAAI/bge-small-en-v1.5@5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
 }
 
 #: The production default — alias of the embeddings.py EMBEDDING_MODEL

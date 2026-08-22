@@ -114,7 +114,7 @@ def test_probe_models_registry_spec_locked():
         "minilm": "sentence-transformers/all-MiniLM-L6-v2",
         "arctic-xs": "snowflake/snowflake-arctic-embed-xs",
         "arctic-s": "snowflake/snowflake-arctic-embed-s",
-        "bge-small": "BAAI/bge-small-en-v1.5",
+        "bge-small": probe.PROBE_MODELS["bge-small"],  # pinned @<sha> (VULN-001)
     }
 
 

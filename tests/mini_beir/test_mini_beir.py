@@ -555,6 +555,9 @@ def test_dataset_failure_recorded_not_abort(tmp_path, monkeypatch):
                             "name": name, "hf_id": f"hf/{name}",
                             "resolved_revision": None, "query_prompt": None,
                             "dim": 384})
+    # P1 (code review): run_main also calls the real EmbeddingModel.get() after
+    # probe injection — stub it so the test stays offline (no HF download).
+    monkeypatch.setattr(mb.EmbeddingModel, "get", lambda: _FakeModel())
     seen = []
 
     def _flaky_load(name, cache, download=True):

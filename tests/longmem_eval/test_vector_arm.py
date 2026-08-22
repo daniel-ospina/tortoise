@@ -594,7 +594,7 @@ def test_checkpoint_key_shape():
 
 # ── retrieval-only report shape ─────────────────────────────────────────────
 
-def test_retrieval_only_report_shape(tmp_path):
+def test_retrieval_only_report_shape(tmp_path, fake_embeddings):
     outcomes, report = runner.run_evaluation(
         _mini(), reader=None, judge=None, ks=(5, 10), top_k=10, split="s",
         work_dir=str(tmp_path), retriever="vector", retrieval_only=True,

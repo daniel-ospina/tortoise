@@ -27,6 +27,9 @@ logger = logging.getLogger(__name__)
 # all-MiniLM-L6-v2 as the default (evidence gate: recall +15.7%, p=0.0005;
 # HNSW spot-check cleared). Rotating the embedder = editing this line.
 EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
+# Supply-chain pin (VULN-001, security review): resolved HF commit at bake time
+# (2026-08-21). A mutable tag would silently serve tampered weights.
+EMBEDDING_MODEL_REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
 
 # #1349: thresholds are model-specific — recalibrated for bge-small from
 # tests/fixtures/labeled_pairs.jsonl (tools/calibrate_thresholds --model
@@ -114,7 +117,8 @@ class EmbeddingModel:
         def _load():
             try:
                 from sentence_transformers import SentenceTransformer
-                result["model"] = SentenceTransformer(EMBEDDING_MODEL)
+                result["model"] = SentenceTransformer(
+                    EMBEDDING_MODEL, revision=EMBEDDING_MODEL_REVISION)
             except ImportError:
                 # Designed zero-dependency path — INFO, no traceback noise.
                 logger.info("sentence-transformers not installed — embeddings degrade")

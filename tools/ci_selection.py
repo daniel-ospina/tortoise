@@ -64,7 +64,11 @@ SOURCE_PATTERNS = {
     "eval": ("tools/longmem_eval/", "tools/mini_beir/",
              "tools/embedder_probe.py", "tools/calibrate_thresholds.py",
              "tools/pair_label_runner.py", "benchmarks/",
-             "graph-scripts/backfill_embeddings.py"),
+             "graph-scripts/backfill_embeddings.py",
+             # P2-1 (code review): an embeddings.py/cross_lens.py-only PR must
+             # select eval so probe/vector-arm/threshold tests run (they assert
+             # the EMBEDDING_MODEL + threshold constants — drift class #1260).
+             "tortoise/embeddings.py", "tortoise/cross_lens.py"),
     # core is the fallback for any other python-relevant path
 }
 

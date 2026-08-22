@@ -273,7 +273,8 @@ def test_sentence_transformers_path():
         assert matches[0]["similarity"] >= 0.7
         # #1349 T9: assert the CONSTANT (single model reference), not a
         # literal — a model rotation touches exactly one line.
-        mock_st.SentenceTransformer.assert_called_once_with(mod.EMBEDDING_MODEL)
+        mock_st.SentenceTransformer.assert_called_once_with(
+            mod.EMBEDDING_MODEL, revision=mod.EMBEDDING_MODEL_REVISION)
         mock_model.encode.assert_called_once()
     finally:
         # #399 (D9b): clear the singleton — it may hold the MOCK model loaded

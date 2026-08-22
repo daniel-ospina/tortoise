@@ -38,7 +38,7 @@ RUN pip install --no-cache-dir '.[embeddings]' '.[backups]' '.[postgres]' \
     # (fix #160-followup — image booted with a missing cache and entrypoint
     # exited 1). #1349: bake must match tortoise/embeddings.py EMBEDDING_MODEL
     # (the org-qualified cache dir is models--BAAI--bge-small-en-v1.5).
-    && HF_HOME=/app/model SENTENCE_TRANSFORMERS_HOME=/app/model python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-small-en-v1.5')" \
+    && HF_HOME=/app/model SENTENCE_TRANSFORMERS_HOME=/app/model python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-small-en-v1.5', revision='5c38ec7c405ec4b44b94cc5a9bb96e735b38267a')" \
     && test -d /app/model/models--BAAI--bge-small-en-v1.5 \
         || (echo 'FATAL: embedding model cache not at /app/model/models--BAAI--bge-small-en-v1.5' >&2; exit 1)
 

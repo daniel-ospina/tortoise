@@ -202,7 +202,7 @@ jobs:
         # on match; <1s.
         run: |
           if grep -rInE '(^|[^A-Za-z0-9])(sk-or-[A-Za-z0-9_-]{16,}|sk-ant-[A-Za-z0-9_-]{16,}|sk-[A-Za-z0-9_-]{20,})|OPENROUTER_API_KEY[[:space:]]*[=:][[:space:]]*[A-Za-z0-9_-]{16,}' \
-            docs/research/2026-08-17-1349-embedder-selection/ tests/eval/retrieval/ tools/mini_beir/ tools/longmem_eval/ 2>/dev/null; then
+            docs/research/2026-08-17-1349-embedder-selection/ docs/plans/2026-08-17-1349-embedder-selection.md docs/adr/ADR-009-embedder-selection.md docs/scoping/2026-08-17-1349-embedder-selection-scoping.md tests/eval/retrieval/ tests/fixtures/labeled_pairs.jsonl tools/mini_beir/ tools/longmem_eval/ 2>/dev/null; then
             echo "::error::key-like pattern found in committed evidence artifacts (redact before merge)"
             exit 1
           fi
@@ -300,17 +300,18 @@ jobs:
           # EMBEDDING_MODEL (BAAI/bge-small-en-v1.5) — cache key v2 ensures a
           # stale all-MiniLM v1 cache can never serve these runs.
           MODEL = "BAAI/bge-small-en-v1.5"
+          REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"  # P2-2: pinned (VULN-001)
           os.environ["HF_HUB_OFFLINE"] = "1"
           from sentence_transformers import SentenceTransformer
           try:
-              SentenceTransformer(MODEL)
+              SentenceTransformer(MODEL, revision=REVISION)
               print("embedding model: cached, no download needed")
           except Exception:
               print("embedding model: not cached — downloading (with retries)")
               del os.environ["HF_HUB_OFFLINE"]
               for attempt in range(1, 4):
                   try:
-                      SentenceTransformer(MODEL)
+                      SentenceTransformer(MODEL, revision=REVISION)
                       print("embedding model: downloaded")
                       break
                   except Exception as e:
@@ -461,17 +462,18 @@ jobs:
           # EMBEDDING_MODEL (BAAI/bge-small-en-v1.5) — cache key v2 ensures a
           # stale all-MiniLM v1 cache can never serve these runs.
           MODEL = "BAAI/bge-small-en-v1.5"
+          REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"  # P2-2: pinned (VULN-001)
           os.environ["HF_HUB_OFFLINE"] = "1"
           from sentence_transformers import SentenceTransformer
           try:
-              SentenceTransformer(MODEL)
+              SentenceTransformer(MODEL, revision=REVISION)
               print("embedding model: cached, no download needed")
           except Exception:
               print("embedding model: not cached — downloading (with retries)")
               del os.environ["HF_HUB_OFFLINE"]
               for attempt in range(1, 6):
                   try:
-                      SentenceTransformer(MODEL)
+                      SentenceTransformer(MODEL, revision=REVISION)
                       print("embedding model: downloaded")
                       break
                   except Exception as e:
@@ -597,17 +599,18 @@ jobs:
           # EMBEDDING_MODEL (BAAI/bge-small-en-v1.5) — cache key v2 ensures a
           # stale all-MiniLM v1 cache can never serve these runs.
           MODEL = "BAAI/bge-small-en-v1.5"
+          REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"  # P2-2: pinned (VULN-001)
           os.environ["HF_HUB_OFFLINE"] = "1"
           from sentence_transformers import SentenceTransformer
           try:
-              SentenceTransformer(MODEL)
+              SentenceTransformer(MODEL, revision=REVISION)
               print("embedding model: cached, no download needed")
           except Exception:
               print("embedding model: not cached — downloading (with retries)")
               del os.environ["HF_HUB_OFFLINE"]
               for attempt in range(1, 6):
                   try:
-                      SentenceTransformer(MODEL)
+                      SentenceTransformer(MODEL, revision=REVISION)
                       print("embedding model: downloaded")
                       break
                   except Exception as e:
