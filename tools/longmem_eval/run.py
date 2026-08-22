@@ -50,7 +50,14 @@ from .ingest import DEFAULT_CHUNK_TURNS, ingest_haystack
 from .judge import build_judge, is_abstention
 from .preflight import FatalProviderError, PreflightError, run_preflight
 from .reader import build_reader, reader_prompt_constants
-from .report import build_report, default_report_path, git_sha, save_report
+from .report import (
+    build_report,
+    compare_reports,
+    default_report_path,
+    git_sha,
+    print_comparison,
+    save_report,
+)
 from .retrieve import (
     DEFAULT_CONTEXT_TOKEN_CAP,
     DEFAULT_MAX_CHUNKS_PER_SESSION,
@@ -725,6 +732,9 @@ def outcomes_to_report(
                 "evidence_recall@k",
                 "chunk_evidence_recall@k",  # R1 #1540 D5: containment view
                 "n_ingest_errors", "context_tokens",
+                # M8 (#1528, D6): the live graph point count rides the
+                # projection — the flip-list zero-point flag consumes it.
+                "context_point_count",
                 "retrieval_latency_ms", "reader_latency_ms",
                 "judge_latency_ms", "total_ms",
                 # M7 (#1527, D11): the Layer-1 payload projection — validity,
@@ -971,6 +981,18 @@ def _build_parser() -> argparse.ArgumentParser:
                         "longmemeval_<split>_<ts>.report.json in CWD)")
     p.add_argument("--no-download", action="store_true",
                    help="fail instead of downloading the dataset")
+    # M8 (#1528, D6): the capstone's report-comparison command — no dataset
+    # load, no API keys, no run environment needed.
+    p.add_argument("--compare", nargs=2, metavar=("REPORT_A", "REPORT_B"),
+                   default=None,
+                   help="compare two report JSONs (A = baseline/older, "
+                        "B = newer): shared-qid deltas are primary, exact "
+                        "McNemar + Wilson 95%% CIs per category, per-category "
+                        "flip lists, comparability warnings + caveats — no "
+                        "run needed")
+    p.add_argument("--compare-out", default=None,
+                   help="path to write the comparison JSON with --compare "
+                        "(default: stdout only)")
     return p
 
 
@@ -991,6 +1013,22 @@ def _assert_python_version() -> None:
 def run_main(argv: list[str] | None = None) -> dict[str, Any]:
     _assert_python_version()
     args = _build_parser().parse_args(argv)
+    # M8 (#1528, D6): --compare is a pure artifact command — handled before
+    # ANY run machinery (no dataset load, no embedder pre-flight, no keys).
+    if args.compare:
+        a_path, b_path = args.compare
+        cmp = compare_reports(
+            json.loads(Path(a_path).read_text(encoding="utf-8")),
+            json.loads(Path(b_path).read_text(encoding="utf-8")),
+        )
+        print_comparison(cmp)
+        if args.compare_out:
+            out = Path(args.compare_out)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(json.dumps(cmp, indent=2, sort_keys=True)
+                           + "\n", encoding="utf-8")
+            print(f"\ncomparison saved to: {out}")
+        return cmp
     ks = _parse_ks(args.k)
     top_k = args.top_k
     # R1 (#1540) knobs: env-first, CLI overrides, validated >= 1 (R6).

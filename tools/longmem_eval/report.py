@@ -22,6 +22,7 @@ serializes every recall key to null.
 from __future__ import annotations
 
 import json
+import math
 import os  # noqa: F401
 import subprocess
 from collections import Counter, defaultdict
@@ -70,13 +71,49 @@ def _percentile(xs: list[float], q: float) -> float:
     if not xs:
         return 0.0
     xs = sorted(xs)
-    import math
     k = (len(xs) - 1) * q
     lo = int(math.floor(k))  # noqa: RUF046
     hi = int(math.ceil(k))  # noqa: RUF046
     if lo == hi:
         return xs[lo]
     return xs[lo] + (xs[hi] - xs[lo]) * (k - lo)
+
+
+def wilson_ci(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """95% Wilson score interval for k/n, no continuity correction.
+
+    M8 (#1528) D1 — stdlib-only (the eval toolchain has zero third-party
+    deps; no scipy/numpy). Pinned to the validity-synthesis
+    recomputations (/tmp/v3-synth/02-validity.md):
+    (20,28) -> (0.529, 0.847); (63,121) -> (0.432, 0.608);
+    (72,133) -> (0.457, 0.624).
+    """
+    if n <= 0:
+        return (0.0, 0.0)
+    p = k / n
+    z2 = z * z
+    denom = 1.0 + z2 / n
+    center = (p + z2 / (2 * n)) / denom
+    half = (z / denom) * math.sqrt(p * (1 - p) / n + z2 / (4 * n * n))
+    return (round(max(0.0, center - half), 3), round(center + half, 3))
+
+
+def mcnemar_exact(w: int, l: int) -> float:  # noqa: E741 — w/l = A-wins/B-wins
+    """Two-sided exact McNemar p-value on discordant pairs (exact binomial).
+
+    M8 (#1528) D1 — w = pairs where run A correct / run B wrong (B lost);
+    l = the converse (B won). p = 2 * P(X <= min(w, l)) for
+    X ~ Binomial(w+l, 0.5), capped at 1.0. Integer arithmetic via
+    math.comb — no float-overflow risk at n <= 500.
+    Pinned: (4,1)->0.375, (11,10)->1.0, (19,18)->1.0, (3,15)->0.0075,
+    (1,0)->1.0.
+    """
+    n = w + l
+    if n == 0:
+        return 1.0
+    k = min(w, l)
+    p = sum(math.comb(n, i) for i in range(k + 1)) / (2 ** n)
+    return min(1.0, 2.0 * p)
 
 
 def git_sha() -> str:
@@ -179,8 +216,18 @@ def build_report(
         if "_abs" in q["question_id"]:
             abstention_labels.append(o["label"])
 
+    # M8 (#1528) D3: every published accuracy carries its 95% Wilson CI
+    # (additive — ``overall``/``abstention``/``per_category`` accuracies stay
+    # floats; the interval rides beside them, so existing consumers reading
+    # ``accuracy``/``n`` only are untouched).
+    def _ci95(correct: int, n: int) -> list[float]:
+        return list(wilson_ci(correct, n))
+
     per_category = {c: {"accuracy": _mean([1.0 if l else 0.0 for l in ls]),  # noqa: E741
-                        "n": len(ls)} for c, ls in sorted(by_category.items())}
+                        "n": len(ls),
+                        "ci95": _ci95(sum(1 for l in ls if l),  # noqa: E741
+                                      len(ls))}
+                    for c, ls in sorted(by_category.items())}
     per_type = {t: {"accuracy": _mean([1.0 if l else 0.0 for l in ls]),  # noqa: E741
                     "n": len(ls)} for t, ls in sorted(by_type.items())}
     # task-averaged accuracy = mean of the per-raw-type means (official
@@ -415,8 +462,12 @@ def build_report(
         "n_questions": n,
         "accuracy": {
             "overall": overall,
+            "ci95": _ci95(sum(1 for l in labels if l), n),  # noqa: E741
             "task_averaged": task_averaged,
             "abstention": _mean([1.0 if l else 0.0 for l in abstention_labels]),  # noqa: E741
+            "abstention_ci95": _ci95(
+                sum(1 for l in abstention_labels if l),  # noqa: E741
+                len(abstention_labels)),
             "abstention_n": len(abstention_labels),
             "per_category": per_category,
             "per_type": per_type,
@@ -582,3 +633,318 @@ def default_report_path(split: str, *, output_dir: str | None = None) -> Path:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")  # noqa: UP017
     base = Path(output_dir) if output_dir else Path.cwd()
     return base / f"longmemeval_{split}_{stamp}.report.json"
+
+
+# ── M8 (#1528): paired report comparison — shared-qid deltas are PRIMARY ──
+
+def _pick(o: dict[str, Any], key: str, default=None) -> Any:
+    return o.get(key, default) if isinstance(o, dict) else default
+
+
+def _flip_row(qid, category, a_o, b_o, failed_in_a, failed_in_b) -> dict[str, Any]:
+    """One flip-list row (M8 D4): best-effort auxiliary columns via ``.get()``
+    — honest ``None`` on stripped reports, never fabricated."""
+    a_lab, b_lab = bool(a_o["label"]), bool(b_o["label"])
+
+    def _num(o, *keys):
+        v = o
+        for k in keys:
+            v = _pick(v, k) if isinstance(v, dict) else None
+            if v is None:
+                return None
+        return v if isinstance(v, (int, float)) else None
+
+    zp_a, zp_b = _num(a_o, "context_point_count"), _num(b_o, "context_point_count")
+    return {
+        "question_id": qid, "category": category,
+        "direction": "b_win" if (not a_lab and b_lab) else "a_win",
+        "a_label": a_lab, "b_label": b_lab,
+        "failed_in_a": failed_in_a, "failed_in_b": failed_in_b,
+        "sr20_a": _num(a_o, "session_recall@k", "20"),
+        "sr20_b": _num(b_o, "session_recall@k", "20"),
+        "context_tokens_a": _num(a_o, "context_tokens"),
+        "context_tokens_b": _num(b_o, "context_tokens"),
+        "error_count_a": _num(a_o, "n_ingest_errors"),
+        "error_count_b": _num(b_o, "n_ingest_errors"),
+        "zero_point_a": (zp_a == 0) if zp_a is not None else None,
+        "zero_point_b": (zp_b == 0) if zp_b is not None else None,
+    }
+
+
+def compare_reports(report_a: dict[str, Any], report_b: dict[str, Any]) -> dict[str, Any]:
+    """Paired comparison of two run reports (A = older/baseline, B = newer).
+
+    M8 (#1528) D4 — shared-qid deltas are the PRIMARY statistic (validity
+    synthesis, "Statistical discipline requirements" 1-3, 5, 9): every delta
+    is joined on question_id, per category via ``category_of()`` (the same
+    function the single report uses, so ``_abs`` handling cannot drift), with
+    exact McNemar on discordant pairs, Wilson 95% CIs for both runs,
+    per-category flip lists, a stated ``_abs`` inclusion rule, a
+    comparability block (v2 lesson F1: reader/judge drift), and fixed caveats
+    (judge-stability x answer-shape — owner-accepted —, content-identity, and
+    reliability-restored-not-a-sample).
+    """
+    ABS_RULE = ("Categories follow report.category_of: question ids containing "
+                "'_abs' are categorized as 'Abstention' in per_category (counted "
+                "once there) AND under their raw question_type in per_type. All "
+                "completed questions are included — no silent subsetting (the v2 "
+                "MSR report silently excluded its 12 _abs qids from its flip "
+                "table; validity B5). Flip lists and McNemar are per_category.")
+    CAVEATS = [
+        "judge-stability x answer-shape (owner-accepted methodology note): the "
+        "judge is temperature-0 with a fixed model (see each report's "
+        "methodology), but clean-abstention vs partial-answer-with-decoy scoring "
+        "is judge-model-dependent and unmeasured — label flips near the "
+        "abstention boundary may reflect answer cleanliness, not memory content.",
+        "identical-context claims carry the content-identity caveat: token-count "
+        "identity is not content identity (validity requirement 7).",
+        "reliability-restored qids (failed in one run, completed in the other) "
+        "failed by a run event (network/billing), not by content — they are not "
+        "a difficulty sample (validity F5).",
+    ]
+    oa = {o["question_id"]: o for o in report_a.get("outcomes", [])}
+    ob = {o["question_id"]: o for o in report_b.get("outcomes", [])}
+    fa = {f["question_id"] for f in report_a.get("failures", [])}
+    fb = {f["question_id"] for f in report_b.get("failures", [])}
+    shared = sorted(oa.keys() & ob.keys())
+    only_a, only_b = sorted(set(oa) - set(ob)), sorted(set(ob) - set(oa))
+    n_a, n_b = len(oa), len(ob)
+    acc_a, acc_b = (sum(1 for o in oa.values() if o["label"]) / n_a if n_a else 0.0,
+                    sum(1 for o in ob.values() if o["label"]) / n_b if n_b else 0.0)
+
+    # categories
+    def _cat(o):
+        return category_of({"question_id": o["question_id"],
+                            "question_type": o.get("question_type", "")})
+
+    cats = sorted({_cat(o) for o in [*oa.values(), *ob.values()]})
+    by_cat: dict[str, dict] = {c: {"a": [], "b": [], "shared": [],
+                                   "only_a": [], "only_b": []} for c in cats}
+    for qid, o in oa.items():
+        by_cat[_cat(o)]["a"].append(o)
+        by_cat[_cat(o)]["only_a"].append(qid)
+    for qid, o in ob.items():
+        by_cat[_cat(o)]["b"].append(o)
+        by_cat[_cat(o)]["only_b"].append(qid)
+    for qid in shared:
+        by_cat[_cat(oa[qid])]["shared"].append(qid)
+
+    per_category: dict[str, Any] = {}
+    flip_lists: dict[str, list] = {}
+    for c in cats:
+        blk = by_cat[c]
+        n_shared = len(blk["shared"])
+        b_wins = sum(1 for q in blk["shared"] if not oa[q]["label"] and ob[q]["label"])
+        a_wins = sum(1 for q in blk["shared"] if oa[q]["label"] and not ob[q]["label"])
+        b_correct_s = sum(1 for q in blk["shared"] if ob[q]["label"])
+        a_correct_s = sum(1 for q in blk["shared"] if oa[q]["label"])
+        per_category[c] = {
+            "a": {"accuracy": _mean([1.0 if o["label"] else 0.0 for o in blk["a"]]),
+                  "n": len(blk["a"]),
+                  "ci95": list(wilson_ci(sum(1 for o in blk["a"] if o["label"]),
+                                         len(blk["a"])))},
+            "b": {"accuracy": _mean([1.0 if o["label"] else 0.0 for o in blk["b"]]),
+                  "n": len(blk["b"]),
+                  "ci95": list(wilson_ci(sum(1 for o in blk["b"] if o["label"]),
+                                         len(blk["b"])))},
+            "shared": {"n": n_shared, "a_correct": a_correct_s,
+                       "b_correct": b_correct_s,
+                       "b_wins": b_wins, "a_wins": a_wins,
+                       "concordant": n_shared - b_wins - a_wins,
+                       "delta_pp": round(
+                           (b_correct_s - a_correct_s) / n_shared * 100, 2)
+                           if n_shared else 0.0},
+            "mcnemar": {"discordant_n": b_wins + a_wins, "b_wins": b_wins,
+                        "a_wins": a_wins,
+                        "p_value": mcnemar_exact(a_wins, b_wins),
+                        "significant_at_0_05": mcnemar_exact(a_wins, b_wins) < 0.05},
+        }
+        flip_lists[c] = sorted(
+            (_flip_row(q, c, oa[q], ob[q], q in fa, q in fb)
+             for q in blk["shared"] if oa[q]["label"] != ob[q]["label"]),
+            key=lambda r: r["question_id"])
+
+    # overall decomposition (MSR-pinned: headline = shared + reliability + residual)
+    n_shared = len(shared)
+    restored = [q for q in only_b if q in fa]
+    lost = [q for q in only_a if q in fb]
+    k_restored = sum(1 for q in restored if ob[q]["label"])
+    k_lost = sum(1 for q in lost if oa[q]["label"])
+    acc_b_shared = (sum(1 for q in shared if ob[q]["label"]) / n_shared
+                    if n_shared else 0.0)
+    shared_delta_pp = round(
+        (sum(1 for q in shared if ob[q]["label"])
+         - sum(1 for q in shared if oa[q]["label"])) / n_shared * 100, 2) \
+        if n_shared else 0.0
+    reliability_pp = round(
+        (k_restored - len(restored) * acc_b_shared) / n_b * 100, 2) if n_b else 0.0
+    headline_pp = round((acc_b - acc_a) * 100, 2)
+
+    def _meta(r): return r.get("methodology", {})
+
+    def _val(r, k):
+        m = _meta(r)
+        if k == "dataset":
+            return m.get("dataset_source") or r.get("dataset")
+        return m.get(k)
+
+    def _match(k):
+        va, vb = _val(report_a, k), _val(report_b, k)
+        return {"a": va, "b": vb,
+                "match": (va == vb) if (va is not None and vb is not None) else None}
+
+    warnings: list[str] = []
+    for k, human in (("reader_model", "reader_model"), ("judge_model", "judge_model"),
+                     ("ingest_mode", "ingest_mode"), ("split", "split"),
+                     ("dataset", "dataset")):
+        m = _match(k)
+        if m["match"] is False:
+            warnings.append(
+                f"{human} differs: {m['a']} vs {m['b']} — deltas may reflect "
+                f"{human.replace('_', ' ')} drift, not memory content (v2 "
+                f"lesson F1)")
+    ph = _match("reader_prompt_hash")
+    if ph["match"] is None:
+        warnings.append(
+            "reader_prompt_hash absent on one side — prompt identity "
+            "unverifiable across the comparison (pre-hash report)")
+
+    b_wins_all = sum(1 for q in shared if not oa[q]["label"] and ob[q]["label"])
+    a_wins_all = sum(1 for q in shared if oa[q]["label"] and not ob[q]["label"])
+    restored_rate = round(k_restored / len(restored), 4) if restored else None
+    lost_rate = round(k_lost / len(lost), 4) if lost else None
+    residual_pp = round(headline_pp - shared_delta_pp - reliability_pp, 2)
+
+    def _identity(r):
+        m = _meta(r)
+        return {
+            "dataset": m.get("dataset_source") or r.get("dataset"),
+            "split": m.get("split") or r.get("split"),
+            "n_completed": len(r.get("outcomes", [])),
+            "n_failed": len(r.get("failures", [])),
+            "reader_model": m.get("reader_model"),
+            "judge_model": m.get("judge_model"),
+            "git_sha": m.get("git_sha"),
+            "run_at_utc": m.get("run_at_utc"),
+        }
+
+    return {
+        "comparison_rule": "shared-qid deltas are primary; every delta is "
+                           "joined on question_id — no cross-question-set "
+                           "comparison (validity requirement 9)",
+        "a": _identity(report_a),
+        "b": _identity(report_b),
+        "header": {
+            "abs_inclusion_rule": ABS_RULE,
+            "per_category_n": {c: {"a": len(by_cat[c]["a"]),
+                                   "b": len(by_cat[c]["b"]),
+                                   "shared": len(by_cat[c]["shared"])}
+                               for c in cats},
+            "per_type_n": {t: {"a": sum(1 for o in oa.values()
+                                        if o.get("question_type") == t),
+                               "b": sum(1 for o in ob.values()
+                                        if o.get("question_type") == t),
+                               "shared": sum(1 for q in shared
+                                             if oa[q].get("question_type") == t)}
+                           for t in sorted({o.get("question_type", "")
+                                            for o in [*oa.values(), *ob.values()]})},
+        },
+        "overall": {
+            "headline_delta_pp": headline_pp,
+            "a_accuracy": round(acc_a, 4), "b_accuracy": round(acc_b, 4),
+            "shared_n": n_shared,
+            "shared_delta_pp": shared_delta_pp,          # PRIMARY
+            "decomposition": {
+                "shared_net_flips": b_wins_all - a_wins_all,
+                "b_wins": b_wins_all, "a_wins": a_wins_all,
+                "concordant": n_shared - b_wins_all - a_wins_all,
+                "reliability_restored": {"count": len(restored),
+                                         "correct": k_restored,
+                                         "rate": restored_rate},
+                "reliability_lost": {"count": len(lost),
+                                     "correct_in_a": k_lost,
+                                     "rate": lost_rate},
+                "composition_only_in_b": len(only_b) - len(restored),
+                "composition_only_in_a": len(only_a) - len(lost),
+                "reliability_pp": reliability_pp,
+                # denominator drift + A-side-only qids; reported so nothing hides
+                "residual_pp": residual_pp,
+            },
+            "decomposition_note": "MSR verified: headline +2.07pp (52.07% "
+                                  "n=121 -> 54.14% n=133) = +0.83pp shared "
+                                  "(1 net flip / 121) + ~1.24pp reliability "
+                                  "(8/12 on baseline-failed) + ~0 residual. "
+                                  "Every component is reported as a count or "
+                                  "an explicit pp so the headline cannot hide "
+                                  "its parts.",
+        },
+        "per_category": per_category,
+        "flip_lists": flip_lists,
+        "comparability": {
+            "dataset": _match("dataset"),
+            "split": _match("split"),
+            "reader_model": _match("reader_model"),
+            "judge_model": _match("judge_model"),
+            "ingest_mode": _match("ingest_mode"),
+            "reader_prompt_hash": ph,
+            "warnings": warnings,
+        },
+        "caveats": CAVEATS,
+    }
+
+
+def print_comparison(cmp: dict[str, Any], file=None) -> None:
+    """Console render of a ``compare_reports`` artifact (mirrors
+    ``_print_summary`` style). Header + per-category rows (both runs'
+    accuracies with n and ci95, shared delta, McNemar p), flip-list counts,
+    comparability warnings, then the fixed caveats."""
+    print("\n" + "=" * 64, file=file)
+    a_id, b_id = cmp["a"], cmp["b"]
+    print("LongMemEval report comparison — A (baseline) vs B (newer)", file=file)
+    print(f"  A: dataset={a_id['dataset']} split={a_id['split']} "
+          f"n_completed={a_id['n_completed']} n_failed={a_id['n_failed']} "
+          f"reader={a_id['reader_model']} judge={a_id['judge_model']}",
+          file=file)
+    print(f"  B: dataset={b_id['dataset']} split={b_id['split']} "
+          f"n_completed={b_id['n_completed']} n_failed={b_id['n_failed']} "
+          f"reader={b_id['reader_model']} judge={b_id['judge_model']}",
+          file=file)
+    ov = cmp["overall"]
+    print("── score ──", file=file)
+    print(f"headline delta:   {ov['headline_delta_pp']:+}pp "
+          f"(A {ov['a_accuracy']} -> B {ov['b_accuracy']})", file=file)
+    print(f"SHARED-qid delta: {ov['shared_delta_pp']:+}pp (shared n="
+          f"{ov['shared_n']}) — PRIMARY", file=file)
+    dec = ov["decomposition"]
+    rst, lost = dec["reliability_restored"], dec["reliability_lost"]
+    print(f"decomposition: net flips {dec['shared_net_flips']:+} "
+          f"(W/L {dec['b_wins']}/{dec['a_wins']}, "
+          f"concordant {dec['concordant']}); restored {rst['count']} "
+          f"({rst['correct']} correct, rate {rst['rate']}); lost "
+          f"{lost['count']} ({lost['correct_in_a']} correct-in-A); "
+          f"reliability {dec['reliability_pp']:+}pp; residual "
+          f"{dec['residual_pp']:+}pp", file=file)
+    print("── per-category ──", file=file)
+    for cat, v in sorted(cmp["per_category"].items()):
+        a, b = v["a"], v["b"]
+        s = v["shared"]
+        m = v["mcnemar"]
+        print(f"  {cat:<28} A {a['accuracy']} (n={a['n']}, ci95 {a['ci95']}) vs "
+              f"B {b['accuracy']} (n={b['n']}, ci95 {b['ci95']})  "
+              f"Δshared {s['delta_pp']:+}pp  McNemar p={m['p_value']}"
+              f"{' *' if m['significant_at_0_05'] else ''}", file=file)
+        flips = cmp["flip_lists"].get(cat, [])
+        if flips:
+            print(f"    flips: {len(flips)} ({sum(1 for f in flips if f['direction'] == 'b_win')} b-win / "
+                  f"{sum(1 for f in flips if f['direction'] == 'a_win')} a-win)", file=file)
+    print("── comparability ──", file=file)
+    warnings = cmp["comparability"]["warnings"]
+    if warnings:
+        for w in warnings:
+            print(f"⚠ {w}", file=file)
+    else:
+        print("no methodology mismatches detected", file=file)
+    print("── caveats ──", file=file)
+    for c in cmp["caveats"]:
+        print(f"  - {c}", file=file)
+    print("=" * 64, file=file)
