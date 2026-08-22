@@ -62,6 +62,19 @@ register_kind("event")
 # drift (drift = silent empty structural leg).
 EXTRACTION_POINT_KIND = "statement"
 
+# R5 (#1544): the explicit sentinel for UNDATED sessions — deterministic-
+# oldest so the recency factor is 0.0 (never the server default
+# createdAt=now, which would silently give an undated session MAXIMUM
+# recency boost). The reader never consumes createdAt (it renders the
+# dataset's haystack_dates annotation), so the sentinel cannot cause a
+# false date-answer (E2E-4 owned negative stays safe).
+UNDATED_SENTINEL = "1970-01-01T00:00:00Z"
+
+# R5 (#1544): the eval-instrumentation eventKind for one dated timeline
+# :Event per haystack session (mirrors the existing lmeHaystackCaptured
+# pattern — NOT an ontology kind; the timeline surface E2E-4 reads).
+TIMELINE_EVENT_KIND = "lmeHaystackSession"
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()  # noqa: UP017
@@ -152,6 +165,11 @@ def ingest_haystack(sdk: TortoiseSDK, question: dict, *,
         session_date = dates[si] if si < len(dates) else ""
         s_node = f"lme:{qid}:s{si}"
         proj = sdk._get_proj()
+        # R5 (#1544): points in a dated session carry the session date as
+        # their creation time; undated sessions get the explicit sentinel
+        # (deterministic-oldest → recency factor 0.0, never the server
+        # default createdAt=now which would max the boost).
+        point_created_at = session_date or UNDATED_SENTINEL
 
         # ── Session node ──
         proj.g.query(
@@ -194,6 +212,7 @@ def ingest_haystack(sdk: TortoiseSDK, question: dict, *,
                     is_episodic=True,
                     has_answer=is_evidence,
                     status="draft",
+                    createdAt=point_created_at,  # R5: session date (sentinel)
                 )
                 # M6: evidence_points counts points WRITTEN this run
                 # (create-only, mirroring the v2 leg) — re-ingest is a no-op,
@@ -225,6 +244,7 @@ def ingest_haystack(sdk: TortoiseSDK, question: dict, *,
                     lme_session_index=si, lme_chunk_index=ci,
                     lme_chunk_turns=len(turn_idxs), is_episodic=True,
                     status="draft",
+                    createdAt=point_created_at,  # R5: session date (sentinel)
                 )
                 chunks += 1  # written (post-guard) — stats == graph state
             proj.g.query(
@@ -232,6 +252,34 @@ def ingest_haystack(sdk: TortoiseSDK, question: dict, *,
                 "MERGE (s)-[:CONTAINS]->(t)",
                 params={"sid": s_node, "tid": chunk_id},
             )
+
+        # ── R5 (#1544): the dated timeline :Event for this session ──
+        # One ``lmeHaystackSession`` event per dated session (``startedAt ==
+        # session_date``, ``sessionId == dataset sid`` — session_recall@k
+        # keys on h["session_id"], so events join the same sessions as
+        # points) with an aboutSession edge. Skipped entirely when
+        # ``session_date`` is empty (undated session → no timeline event;
+        # honest absence — no false date-answer). Intentionally minimal
+        # name — proves the timeline surface, doesn't fake extraction (the
+        # v2 leg's payload events carry the real content).
+        if session_date:
+            try:
+                ev = sdk.create_event(
+                    f"lme_{qid}_s{si}", TIMELINE_EVENT_KIND,
+                    startedAt=session_date, endedAt=session_date,
+                    sessionId=sid, lme_question_id=qid, lme_session_index=si,
+                    is_episodic=True,
+                )
+                event_id = ev.get("id") or ev.get("eventId")
+                if event_id:
+                    proj.g.query(
+                        "MATCH (e:Event {id:$eid}), (s:Session {id:$sid}) "
+                        "MERGE (e)-[:aboutSession]->(s)",
+                        params={"eid": event_id, "sid": s_node})
+            except Exception as e:  # noqa: BLE001, RUF100
+                # best-effort, mirrors the provenance event's non-fatal write
+                logger.warning("lmeHaystackSession event write failed "
+                               "(non-fatal): %s", e)
 
     # ── Provenance event (best-effort — mirrors capture_session) ──
     try:
@@ -285,4 +333,30 @@ def point_props_for_hits(proj, point_ids: list[str]) -> dict[str, dict[str, Any]
                      "lme_session_index": row[3], "quote": row[4],
                      "search_keys": row[5], "source_turn_id": row[6],
                      "speaker": row[7], "point_kind": row[8]}
+            for row in rows}
+
+
+def event_props_for_hits(proj, event_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """Fetch (session_id, lme_session_index) for a list of Event ids in one
+    Cypher query (R5 #1544, D8 — the event side of the TR union pool).
+    ``has_answer`` is hardcoded False: evidence marking is point-level (M6
+    scope), so event hits can never inflate the evidence/turn denominators.
+    Session linkage uses the same ``sessionId == dataset sid`` contract as
+    points, so ``session_recall@k`` measures the union pool correctly and
+    ``session_date`` annotation resolves through the existing
+    lme_session_index → haystack_dates mapping (identical for both labels).
+    """
+    if not event_ids:
+        return {}
+    rows = proj.g.query(
+        "MATCH (n:Event) WHERE n.eventId IN $ids "
+        "RETURN n.eventId, coalesce(n.sessionId, ''), "
+        "       coalesce(n.lme_session_index, -1), "
+        "       coalesce(n.eventKind, '')",
+        params={"ids": event_ids},
+    ).result_set
+    return {row[0]: {"session_id": row[1],
+                     "lme_session_index": row[2],
+                     "has_answer": False,
+                     "point_kind": row[3]}
             for row in rows}

@@ -148,6 +148,10 @@ def build_report(
     reader_system_prompt: str = "",
     reader_type_fragments: dict[str, str] | None = None,
     r1_knobs: dict[str, Any] | None = None,
+    # R5 (#1544) D7: the TR knob values (tr_top_k / tr_date_weight /
+    # tr_events) — recorded in the methodology via the same spread pattern
+    # as ``r1_knobs`` (published numbers carry their methodology).
+    r5_knobs: dict[str, Any] | None = None,
     # R3 (#1542) D5: the embedder pre-flight status (from run.py's
     # _preflight_embedder) recorded in the methodology — embedder identity,
     # sentence-transformers version, availability, reason. Always-emitted:
@@ -612,6 +616,7 @@ def build_report(
                                 if (embedder_status or {})
                                 .get("available") else "unavailable"),
             **(r1_knobs or {}),
+            **(r5_knobs or {}),
         },
         "failures": failures or [],
         "n_failed": len(failures or []),
