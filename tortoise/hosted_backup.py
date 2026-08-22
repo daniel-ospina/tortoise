@@ -721,9 +721,22 @@ def _restore_into_temp_verify_swap(
     # count read FAILS CLOSED: a query failure is NOT treated as "graph
     # missing" — only a confirmed-absent graph (via list_graphs) is safe to
     # proceed on. A read failure must never authorize a destructive delete.
+    #
+    # #1625: count NON-SKIP nodes (same predicate as dump_graph/expected_nodes)
+    # — a live graph holding only internal bookkeeping (the R2/R3 FTS-migration
+    # Meta marker) is effectively EMPTY of user data, so an empty content
+    # backup must not be rejected for it (the guard exists to protect real
+    # data, not runtime markers).
+    from tortoise.hosted_api import _is_export_skip_node
     live_g = db.select_graph(live_name)
     try:
-        live_nodes = int(live_g.query("MATCH (n) RETURN count(n)").result_set[0][0])
+        _live_rows = live_g.query(
+            "MATCH (n) RETURN labels(n), properties(n)").result_set
+        live_nodes = sum(
+            1 for row in _live_rows
+            if not _is_export_skip_node(
+                [str(l) for l in (row[0] or [])], dict(row[1] or {}))
+        )
     except Exception:
         # Fail closed: only a CONFIRMED-absent graph (via GRAPH.LIST) is safe to
         # proceed on. A query failure OR a list_graphs failure (dead connection —
