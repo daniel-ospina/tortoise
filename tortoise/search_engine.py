@@ -268,9 +268,19 @@ def classify_query(
 
 # ── FalkorDB query runners ──────────────────────────────────────────────────
 
+#: R3 (#1542) D4 leg-trace entry shape (the R2 #1541 shared contract):
+#: {"leg", "ran", "degraded", "reason", "count"}. ``reason`` is never null
+#: when ``degraded`` is true (shape rule).
+def _trace_entry(leg: str, *, ran: bool, degraded: bool,
+                 reason: str | None, count: int) -> dict:
+    return {"leg": leg, "ran": ran, "degraded": degraded,
+            "reason": reason, "count": count}
+
+
 def run_fts_query(
     graph, query: str, entity_type: str = "point", limit: int = 20,
     timeout_ms: int = 500, excluded_statuses: tuple | None = None,
+    leg_trace: list[dict] | None = None,
 ) -> list[tuple[str, float]]:
     """Run full-text search via FalkorDB FTS index.
 
@@ -281,6 +291,14 @@ def run_fts_query(
     Returns n.url for source (canonical key, #448), n.eventId for event,
     n.id for all other entity types.
 
+    R3 (#1542) D4: ``leg_trace`` — when provided, appends a per-leg entry
+    at EVERY exit branch (the FTS leg is recorded AT THE SOURCE, never
+    reconstructed from the results dict — an absent strategy is
+    indistinguishable from one that ran-and-returned-empty). The index-
+    missing catch is promoted to ``reason="index_missing"`` so surface 11's
+    owned negative ("fts skipped (no index)" vs "fts ran, no results") is
+    truthful from R3 forward. Default None = no trace (byte-identical).
+
     Note: the connection-level `timeout` is passed straight to the FalkorDB
     driver (Graph.query(timeout=...)) so a slow query is killed server-side,
     not merely observed. The post-hoc check below remains as a safety net
@@ -288,10 +306,17 @@ def run_fts_query(
     breaker additionally short-circuits after consecutive slow/failed
     queries so a wedged DB stops eating caller latency.
     """
+    def _record(*, ran: bool, degraded: bool, reason: str | None,
+                count: int) -> None:
+        if leg_trace is not None:
+            leg_trace.append(_trace_entry("fts", ran=ran, degraded=degraded,
+                                          reason=reason, count=count))
+
     if entity_type == "operator":
         # Operators are Points with is_operator=true — match label via CONTAINS
         if not _breaker_allow("fts"):
             logger.warning("FTS circuit breaker OPEN — skipping FTS strategy")
+            _record(ran=False, degraded=True, reason="breaker_open", count=0)
             return []
         try:
             start = time.monotonic()
@@ -316,13 +341,16 @@ def run_fts_query(
                 # exception → breaker failure below).
                 logger.warning("FTS query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
             _breaker_record("fts", True)
+            _record(ran=True, degraded=False, reason="ok", count=len(rows))
             return [(row[0], float(row[1])) for row in rows]
         except Exception as e:
             logger.warning("Operator FTS query failed: %s", e)
             _breaker_record("fts", False)
+            _record(ran=True, degraded=True, reason="query_failed", count=0)
             return []
     if not _breaker_allow("fts"):
         logger.warning("FTS circuit breaker OPEN — skipping FTS strategy")
+        _record(ran=False, degraded=True, reason="breaker_open", count=0)
         return []
     label = entity_type.capitalize()  # point→Point, event→Event, subject→Subject
     # #448: three-way id_field — source→url (canonical key, #149),
@@ -360,6 +388,10 @@ def run_fts_query(
         if elapsed > timeout_ms:
             logger.warning("FTS query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
         _breaker_record("fts", True)
+        # R3 (#1542) D4: a clean zero-hit run is ``empty_results`` (the leg
+        # RAN and found nothing) — distinct from ``index_missing`` below.
+        _record(ran=True, degraded=False,
+                reason=("ok" if rows else "empty_results"), count=len(rows))
         return [(row[0], float(row[1])) for row in rows]
     except Exception as e:
         msg = str(e).lower()
@@ -370,9 +402,14 @@ def run_fts_query(
             # label must not disable FTS for all labels). (#249 review P1-1)
             logger.info("FTS index not available — skipping FTS strategy")
             _breaker_record("fts", True)
+            # R3 (#1542) D4: the promoted index-missing trace (surface 11's
+            # owned negative — "fts skipped (no index)" is recorded, never
+            # silently conflated with "fts ran, no results").
+            _record(ran=True, degraded=True, reason="index_missing", count=0)
         else:
             logger.warning("FTS query failed: %s", e)
             _breaker_record("fts", False)
+            _record(ran=True, degraded=True, reason="query_failed", count=0)
         return []
 
 
@@ -380,10 +417,20 @@ def run_vector_query(
     graph, query_vec: list[float], limit: int = 20, timeout_ms: int = 500,
     is_embedded: bool = True, entity_type: str = "point",
     vector_index_api: str | None = None, excluded_statuses: tuple | None = None,
+    leg_trace: list[dict] | None = None,
 ) -> list[tuple[str, float]]:
     """Run vector similarity search via FalkorDB vector index.
 
     query_vec must be a 384-dim embedding matching the index dimension.
+
+    R3 (#1542) D4: ``leg_trace`` — when provided, appends a per-leg entry
+    at every exit branch. The empty-embedding case is an EXPLICIT zero-row
+    guard on the success path (an all-no-embedding graph returns [] WITHOUT
+    raising — the exception-only catch never fires for the real empty case):
+    {0-row result set with zero embedded points → ``no_embeddings``},
+    {0-row result set with embedded points present → ``empty_results``},
+    {malformed plain-list embedding node (the vecf32 MATCH throws per-row)
+    or driver exception → ``query_failed``}. Default None = no trace.
 
     In Docker/server mode (is_embedded=False), uses the HNSW vector index
     via CALL db.idx.vector.queryNodes — with both known argument orders
@@ -416,10 +463,18 @@ def run_vector_query(
     timeout, and the per-strategy circuit breaker short-circuits after
     consecutive slow/failed queries. (#249)
     """
+    def _record(*, ran: bool, degraded: bool, reason: str | None,
+                count: int) -> None:
+        if leg_trace is not None:
+            leg_trace.append(_trace_entry("vector", ran=ran,
+                                          degraded=degraded,
+                                          reason=reason, count=count))
+
     if not query_vec:
         return []
     if not _breaker_allow("vector"):
         logger.warning("Vector circuit breaker OPEN — skipping vector strategy")
+        _record(ran=False, degraded=True, reason="breaker_open", count=0)
         return []
 
     # Operators are Points with is_operator=true — match the Point label
@@ -516,11 +571,13 @@ def run_vector_query(
                     except (IndexError, TypeError, ValueError):
                         score = 0.0
                     out.append((row[0], max(0.0, min(1.0, score))))
+                _record(ran=True, degraded=False, reason="ok", count=len(out))
                 return out
             # Index results are ranked by similarity; assign rank-based scores.
             # RRF fusion uses rank not absolute scores; single-strategy mode
             # gets reasonable descending ordering.
             total = len(rows)
+            _record(ran=True, degraded=False, reason="ok", count=total)
             return [(row[0], 1.0 - (i / max(total, 1))) for i, row in enumerate(rows)]
         except Exception as e:
             msg = str(e).lower()
@@ -568,18 +625,39 @@ def run_vector_query(
             # #561: latency warning only — return the results.
             logger.warning("Vector query exceeded timeout: %.0fms > %dms", elapsed, timeout_ms)
         _breaker_record("vector", True)
-        return [(row[0], float(row[1])) for row in rows]
+        if rows:
+            _record(ran=True, degraded=False, reason="ok", count=len(rows))
+            return [(row[0], float(row[1])) for row in rows]
+        # R3 (#1542) D4: the explicit zero-row guard — an all-no-embedding
+        # graph returns [] WITHOUT raising (the except catch below never
+        # fires for the real empty case). Cheap count(p.embedding) guard
+        # distinguishes no_embeddings (zero embedded points) from
+        # empty_results (embedded points present, no matches).
+        try:
+            cnt_rows = graph.query(
+                f"MATCH (n:{label}) WHERE n.embedding IS NOT NULL "
+                "RETURN count(*)", timeout=timeout_ms).result_set
+            embedded = cnt_rows[0][0] if cnt_rows else 0
+        except Exception:  # noqa: BLE001, RUF100
+            embedded = 0
+        _record(ran=True, degraded=(embedded == 0),
+                reason=("no_embeddings" if embedded == 0 else "empty_results"),
+                count=0)
+        return []
     except Exception as e:
         msg = str(e).lower()
         if "index" in msg or "not found" in msg or "does not exist" in msg:
             logger.info("Vector index not available — skipping vector strategy")
             _breaker_record("vector", True)
+            _record(ran=True, degraded=True, reason="index_missing", count=0)
         elif "embedding" in msg and "null" in msg:
             logger.info("No Points with embeddings — skipping vector strategy")
             _breaker_record("vector", True)
+            _record(ran=True, degraded=True, reason="no_embeddings", count=0)
         else:
             logger.warning("Vector query failed: %s", e)
             _breaker_record("vector", False)
+            _record(ran=True, degraded=True, reason="query_failed", count=0)
         return []
 
 
@@ -587,6 +665,7 @@ def run_structural_query(
     graph, kind: str | None,
     entity_type: str = "point", limit: int = 20, timeout_ms: int = 500,
     excluded_statuses: tuple | None = None,
+    leg_trace: list[dict] | None = None,
 ) -> list[tuple[str, float]]:
     """Run structural/kind query via range indexes.
 
@@ -595,10 +674,21 @@ def run_structural_query(
                  'source' (sourceKind), 'document' (documentKind), 'object' (objectKind).
     Returns matching entities with a score of 1.0 (exact match) or 0.5 (partial match).
 
+    R3 (#1542) D4: ``leg_trace`` — when provided, appends a per-leg entry
+    at every exit branch (ok / empty_results / index_missing / query_failed /
+    breaker_open). Default None = no trace.
+
     #249: the driver-level timeout is passed through so a wedged DB cannot
     hang the structural strategy (the third leg of the degradation chain);
     the per-strategy breaker short-circuits after consecutive failures.
     """
+    def _record(*, ran: bool, degraded: bool, reason: str | None,
+                count: int) -> None:
+        if leg_trace is not None:
+            leg_trace.append(_trace_entry("structural", ran=ran,
+                                          degraded=degraded,
+                                          reason=reason, count=count))
+
     if entity_type == "operator":
         # Operators are Points with is_operator=true, kind=op_type
         label_str = "Point"
@@ -623,6 +713,7 @@ def run_structural_query(
         id_field = "id"
     if not _breaker_allow("structural"):
         logger.warning("Structural circuit breaker OPEN — skipping structural strategy")
+        _record(ran=False, degraded=True, reason="breaker_open", count=0)
         return []
     try:
         conditions = []
@@ -637,6 +728,7 @@ def run_structural_query(
             # No filters — caller should use full-scan path instead. Normal
             # completion: record success so a HALF_OPEN probe never latches.
             _breaker_record("structural", True)
+            _record(ran=True, degraded=False, reason="empty_results", count=0)
             return []
 
         # #1391: terminal-status exclusion (after the no-filters gate so a
@@ -663,15 +755,19 @@ def run_structural_query(
             match_score = 1.0 if kind else 0.5
             results.append((pid, match_score))
         _breaker_record("structural", True)
+        _record(ran=True, degraded=False,
+                reason=("ok" if results else "empty_results"), count=len(results))
         return results
     except Exception as e:
         msg = str(e).lower()
         if "index" in msg or "not found" in msg or "does not exist" in msg:
             logger.info("Structural index not available — skipping structural strategy")
             _breaker_record("structural", True)
+            _record(ran=True, degraded=True, reason="index_missing", count=0)
         else:
             logger.warning("Structural query failed: %s", e)
             _breaker_record("structural", False)
+            _record(ran=True, degraded=True, reason="query_failed", count=0)
         return []
 
 
@@ -715,6 +811,7 @@ def degradation_chain(
     elevated_timeout_ms: int | None = None,
     vector_index_api: str | None = None,
     excluded_statuses: tuple | None = None,
+    leg_trace: list[dict] | None = None,
 ) -> dict[str, list[tuple[str, float]]]:
     """Run retrieval strategies in parallel with per-strategy degradation.
 
@@ -743,15 +840,39 @@ def degradation_chain(
 
     Returns:
         {strategy_name: [(id, score), ...]} — only strategies that succeeded
+
+    R3 (#1542) D4: ``leg_trace`` — when provided, per-strategy entries are
+    merged into it in FIXED order (fts, vector, structural). Runner threads
+    record into their own PRIVATE list (a cancelled-but-running worker can
+    never append to the shared trace after the merge); the merge reads only
+    ``future.done()`` futures via ``result(timeout=0)`` so it is
+    non-blocking — a still-running worker is never joined past the deadline;
+    on ``TimeoutError`` it is discarded and self-recorded as
+    ``reason="timeout", ran=True, degraded=True`` (never absent). Default
+    None = no trace (byte-identical behavior).
     """
     import concurrent.futures
 
     results: dict[str, list[tuple[str, float]]] = {}
     futures: dict[concurrent.futures.Future, str] = {}
+    trace_active = leg_trace is not None
+    #: per-strategy private lists (workers record here, never into the
+    #: caller's shared trace — the data-race guard, review P1).
+    private: dict[str, list[dict]] = {}
+    if trace_active:
+        for _name in ("fts", "vector", "structural"):
+            private[_name] = []
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
         # Submit all enabled strategies in parallel
         runner_timeout = int(elevated_timeout_ms or 500)
+        # R3 (#1542) D4: the per-strategy private list is passed ONLY when
+        # tracing is active — a default (leg_trace=None) caller sees
+        # byte-identical submit kwargs (the bench fakes in
+        # tests/bench/test_degradation_chain.py pin this).
+        def _runner_kwargs(name: str) -> dict:
+            return ({"leg_trace": private.get(name)} if trace_active else {})
+
         # #1391: the caller's exclusion applies uniformly (best-match AND
         # full-scan). Full-scan completeness callers (the #1353 supersede-
         # structure surface) opt in via excluded_statuses=() (include_terminal).
@@ -759,6 +880,7 @@ def degradation_chain(
             futures[executor.submit(
                 run_fts_query, graph, query, entity_type=entity_type, limit=limit,
                 timeout_ms=runner_timeout, excluded_statuses=excluded_statuses,
+                **_runner_kwargs("fts"),
             )] = "fts"
 
         if strategies.get("vector") and query_vec:
@@ -766,12 +888,14 @@ def degradation_chain(
                 run_vector_query, graph, query_vec, limit=limit, is_embedded=is_embedded,
                 entity_type=entity_type, timeout_ms=runner_timeout,
                 vector_index_api=vector_index_api, excluded_statuses=excluded_statuses,
+                **_runner_kwargs("vector"),
             )] = "vector"
 
         if strategies.get("structural"):
             futures[executor.submit(
                 run_structural_query, graph, kind, entity_type=entity_type, limit=limit,
                 timeout_ms=runner_timeout, excluded_statuses=excluded_statuses,
+                **_runner_kwargs("structural"),
             )] = "structural"
 
         # Collect results with 500ms total timeout across all strategies.
@@ -780,6 +904,7 @@ def degradation_chain(
         # #316: elevated_timeout_ms threads the benchmark cap into the
         # deadline too (default-off — production callers keep 0.5s).
         deadline = (elevated_timeout_ms or 500) / 1000.0
+        timed_out: set[str] = set()
         try:
             for future in concurrent.futures.as_completed(futures, timeout=deadline):
                 strategy_name = futures[future]
@@ -793,10 +918,43 @@ def degradation_chain(
                 "Strategies timed out (500ms) — collected %d/%d, cancelling remaining",
                 len(results), len(futures),
             )
-            for f in futures:
-                f.cancel()
+            # R3 (#1542) D4: a future not completed by the deadline is
+            # discarded AND self-recorded as ``timeout`` (never absent). The
+            # merge reads only done futures via result(timeout=0) — a
+            # still-running worker is never joined past the deadline; its
+            # late private-list entries are discarded (timed_out skip below).
+            for f in list(futures):
+                strategy_name = futures[f]
+                if strategy_name in results:
+                    continue
+                if f.done():
+                    try:
+                        strategy_results = f.result(timeout=0)
+                        if strategy_results:
+                            results[strategy_name] = strategy_results
+                    except Exception as e:
+                        logger.warning("Strategy execution failed: %s — degraded", e)
+                else:
+                    timed_out.add(strategy_name)
+                    f.cancel()
         except Exception as e:
             logger.warning("Strategy execution failed: %s — degraded", e)
+
+        # R3 (#1542) D4: merge the private lists in FIXED order (fts, vector,
+        # structural) — as_completed yields in COMPLETION order, so the merge
+        # must not follow it. Timed-out strategies get their self-recorded
+        # timeout entry here (fixed order too); a cancelled-but-running
+        # worker's late append to its PRIVATE list cannot land in the trace.
+        if trace_active:
+            for strategy_name in ("fts", "vector", "structural"):
+                if strategy_name in timed_out:
+                    leg_trace.append(_trace_entry(
+                        strategy_name, ran=True, degraded=True,
+                        reason="timeout", count=0))
+                    continue
+                entries = private.get(strategy_name)
+                if entries:
+                    leg_trace.extend(entries)
 
     return results
 

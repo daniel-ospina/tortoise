@@ -31,6 +31,19 @@ from typing import Any
 
 from .dataset_audit import is_trusted
 
+# R3 (#1542) D5: the dense-leg methodology is ALWAYS emitted — a report can
+# never be keyless about the vector strategy (MemDelta pinning: embedder
+# identity + availability ride in the methodology so a future swap or silent
+# degradation is visible before any accuracy comparison). Programmatic
+# callers (existing tests, battery/parity, the capstone harness) that omit
+# embedder_status get the not_checked default.
+DEFAULT_EMBEDDER_STATUS = {
+    "model": "all-MiniLM-L6-v2",
+    "sentence_transformers_version": None,
+    "available": False,
+    "reason": "not_checked",
+}
+
 # question_type → paper category (the five abilities from the LongMemEval
 # paper; abstention is signalled by the ``_abs`` suffix, not a type).
 PAPER_CATEGORY = {
@@ -98,6 +111,11 @@ def build_report(
     reader_system_prompt: str = "",
     reader_type_fragments: dict[str, str] | None = None,
     r1_knobs: dict[str, Any] | None = None,
+    # R3 (#1542) D5: the embedder pre-flight status (from run.py's
+    # _preflight_embedder) recorded in the methodology — embedder identity,
+    # sentence-transformers version, availability, reason. Always-emitted:
+    # when omitted the not_checked default is recorded (never keyless).
+    embedder_status: dict[str, Any] | None = None,
     # M7 (#1527): publication-gated inputs — see the docstring.
     dataset_semantics_audit: dict[str, Any] | None = None,
     integrity_threshold: float = 0.0,
@@ -535,6 +553,13 @@ def build_report(
             "dataset_fingerprint": dataset_fingerprint,
             "integrity_threshold": effective_threshold,
             "dataset_semantics_audit": dataset_semantics_audit,
+            # R3 (#1542) D5: embedder identity + vector-strategy availability
+            # — always present (default reason="not_checked" when omitted, so
+            # no report is ever keyless about the dense leg).
+            "embedder": embedder_status or dict(DEFAULT_EMBEDDER_STATUS),
+            "vector_strategy": ("enabled"
+                                if (embedder_status or {})
+                                .get("available") else "unavailable"),
             **(r1_knobs or {}),
         },
         "failures": failures or [],
