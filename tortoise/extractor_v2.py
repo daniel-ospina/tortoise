@@ -482,7 +482,8 @@ OUTPUT_CONTRACT = """{
     {"src": str, "dst": str, "op_type": "MITIGATES", "target_edge": {"src": str, "dst": str, "op_type": "IMPL"}, "strength": 0.1|0.3|0.5}
   ],
   "chain_notes": [{"chain": str, "finding": str, "action": "repaired|warned", "note": str}],
-  "link_before_create": [{"searched_for": str, "found": bool, "note": str}]
+  "link_before_create": [{"searched_for": str, "found": bool, "note": str}],
+  "retractions": [{"content": str}|"id": str]  # E7: explicit withdrawals — emit when the conversation RETRACTS a previously-stated fact (additive; omit when nothing is withdrawn)
 }"""
 
 
@@ -770,6 +771,47 @@ def _fts_rows(sdk, entity_type: str, query: str, limit: int = 3) -> list[dict]:
     return out
 
 
+def _enrich_point_priors(sdk, points: list[dict]) -> None:
+    """D7: ONE batched Cypher fetches aboutObject names + when/created_at
+    for the candidate point ids and merges them INTO the row dicts (in
+    place) — the classifier's entity gate (D2) + later-date guard (CG-2)
+    inputs. Anti-N+1: a single query for the whole candidate set. Best-
+    effort: any failure leaves the rows un-enriched (never degrades the
+    search). Mock/embedded callers without a projection are skipped."""
+    if not points:
+        return
+    get_proj = getattr(sdk, "_get_proj", None)
+    if get_proj is None:
+        return
+    try:
+        proj = get_proj()
+    except Exception:  # noqa: BLE001, RUF100 — best-effort enrichment
+        return
+    ids = [str(p.get("id") or "") for p in points if p.get("id")]
+    if not ids:
+        return
+    try:
+        rows = proj.g.query(
+            "MATCH (p:Point) WHERE p.id IN $ids "
+            "OPTIONAL MATCH (p)-[:aboutObject]->(o:Object) "
+            "RETURN p.id, collect(o.name), p.when, p.createdAt",
+            params={"ids": ids}).result_set
+    except Exception:  # noqa: BLE001, RUF100 — enrichment is best-effort
+        return
+    by_id = {str(row[0]): row for row in rows}
+    for p in points:
+        row = by_id.get(str(p.get("id") or ""))
+        if not row:
+            continue
+        names = [n for n in (row[1] or []) if n]
+        if names:
+            p["about_entities"] = names
+        if row[2]:
+            p["when"] = row[2]
+        if row[3]:
+            p["created_at"] = row[3]
+
+
 def search_graph(sdk, embed_list: dict, story: str, *,
                  max_queries: int = 15, limit: int = 3) -> dict:
     """S3: search the REAL graph for existing entities/points/events.
@@ -828,6 +870,7 @@ def search_graph(sdk, embed_list: dict, story: str, *,
                     continue
                 first = False
     except Exception as e:  # backend unreachable — degrade, don't raise
+        _enrich_point_priors(sdk, list(results["points"].values()))
         return {
             "mode": mode, "degraded": True,
             "reason": f"S3 degraded: graph search failed ({type(e).__name__}: {e})",
@@ -836,6 +879,7 @@ def search_graph(sdk, embed_list: dict, story: str, *,
             "events": list(results["events"].values()),
             "queries_run": q_run,
         }
+    _enrich_point_priors(sdk, list(results["points"].values()))
     return {
         "mode": mode, "degraded": False, "reason": None,
         "entities": list(results["entities"].values()),
@@ -949,9 +993,19 @@ Rules:
   NAND: truth attack on a FACTUALLY WRONG point. Golden rule: relevance lives
   on the OPERATOR, truth lives on the POINT. Never NAND an option/criterion
   for being a bad fit.
+- RETRACTIONS (E7): when the conversation explicitly WITHDRAWS a previously-
+  stated fact ("forget my gym schedule", "scratch that", "that is no longer
+  true"), add {"content": "<the exact prior claim>"} or {"id": "<existing-id>"}
+  to the top-level "retractions" array. Additive — emit nothing when nothing
+  is withdrawn. Never retract from ambiguity — only explicit withdrawals.
 - chain_notes: flag violations, TRY TO REPAIR toward the nearest valid chain
   position, never invent entities.
 - link_before_create: record what you searched / what the graph already had.
+- RETRACTIONS (E7): when the conversation explicitly WITHDRAWS a previously-
+  stated fact ("forget my gym schedule", "scratch that", "that is no longer
+  true"), add {"content": "<the exact prior claim>"} or {"id": "<existing-id>"}
+  to the top-level "retractions" array. Additive — emit nothing when nothing
+  is withdrawn. Never retract from ambiguity — only explicit withdrawals.
 - Tier-A state-value points from the S2 list are NEVER dropped — re-emit
   them (with corrections if the search shows they exist). The S4 pass
   COMPLETES the list; it does not replace S2 findings. The value is the fact.
@@ -1014,6 +1068,11 @@ def _merge_key(section: str, item: dict) -> tuple:
         return ("chain", _norm(item.get("chain")), _norm(item.get("finding")))
     if section == "link_before_create":
         return ("lbc", _norm(item.get("searched_for")), bool(item.get("found")))
+    if section == "retractions":
+        # E7 (D5): retraction refs dedupe by (content | id) — S4's
+        # graph-informed version wins on collision (E4 union semantics).
+        return ("retraction", _norm(str(item.get("content") or "")),
+                _norm(str(item.get("id") or "")))
     return (section, json.dumps(item, sort_keys=True, default=str))
 
 
@@ -1027,7 +1086,7 @@ def merge_embed_lists(s2: dict, s4: dict) -> dict:
     None sections and non-dict entries are tolerated (skipped).
     """
     sections = ("entities", "events", "points", "operators",
-                "chain_notes", "link_before_create")
+                "chain_notes", "link_before_create", "retractions")
     out: dict = {}
     for section in sections:
         s2_items = [i for i in (s2.get(section) or []) if isinstance(i, dict)]
@@ -1046,7 +1105,11 @@ def merge_embed_lists(s2: dict, s4: dict) -> dict:
             if k not in seen:
                 seen.add(k)
                 merged.append(item)           # S4 gap addition
-        out[section] = merged
+        # emit a section when EITHER input carries the key (empty lists
+        # included — identity preserved; absent keys stay absent, so the
+        # additive E7 ``retractions`` section never fabricates keys)
+        if section in s2 or section in s4:
+            out[section] = merged
     return out
 
 
@@ -1335,30 +1398,419 @@ def _find_existing_entity(entities: list[dict], name: str, kind: str) -> tuple[d
     return None, "none"
 
 
+_RESOLUTION_SYSTEM = (
+    "You are the ENTITY RESOLUTION assistant for the Tortoise epistemic "
+    "memory. You map NEW entity names from a conversation to EXISTING "
+    "entities already in the knowledge graph. Resolve ONLY confident "
+    "aliases: same referent, case/variant/abbreviation forms (\"Joe\" → "
+    "\"Joseph\", \"NYC\" → \"New York City\"). NEVER guess: an ambiguous or "
+    "unclear name must be omitted. Never invent ids. "
+    "Output ONE JSON object: {\"resolutions\": [{\"name\": str, "
+    "\"resolves_to\": str}]} where resolves_to is the existing entity's "
+    "id or exact name."
+)
+
+
+def _resolution_prompt(existing: list[dict], new_names: list[str]) -> str:
+    """D3 phase-2 prompt: the existing-entity candidate table + the new
+    names to resolve (the JSON contract pinned in the prompt so the model
+    output is parseable and validated against the table)."""
+    lines = [f"- {e.get('id', '')} | {e.get('name', '')} | {e.get('kind', '')}"
+             for e in existing if e.get("name")]
+    table = "\n".join(lines) if lines else "(none)"
+    names = "\n".join(f"- {n}" for n in new_names) if new_names else "(none)"
+    return (f"EXISTING ENTITIES (id | name | kind):\n{table}\n\n"
+            f"NEW ENTITY NAMES:\n{names}\n\n"
+            "Return {\"resolutions\":[{\"name\": ..., \"resolves_to\": "
+            "existing-id-or-name}]} — every resolution must match an id or "
+            "exact name in the EXISTING ENTITIES table; ambiguous → omit.")
+
+
+def resolve_entities(entity_refs: list[dict], search: dict,
+                     model=None) -> dict:
+    """D3: two-phase entity resolution — returns
+    {"map": {name: {"id", "name"}}, "records": [{"name", "resolves_to",
+    "mode"}], "warnings": [...]}.
+
+    Phase 1 (deterministic): the existing ``_find_existing_entity`` (exact
+    → bare → ambiguous) for every ref — no model call.
+    Phase 2 (LLM fallback): fires ONLY when ``model`` is set AND the search
+    has entity candidates AND >=1 ref is unmatched/ambiguous. ONE
+    ``_complete`` call (existing 600s wall-clock bound; temperature 0.0 via
+    the MODELS seam — adapters default temperature=0.0), strict JSON
+    contract; every resolution validated against the candidate table (id
+    or normalized-name match) — invalid/ambiguous dropped with a warning,
+    never guessed.
+    Failure/timeout → warning + phase-1-only map (degrade to ADD semantics
+    at the caller — unresolved entities keep their names). NEVER raises.
+    """
+    existing = [e for e in (search or {}).get("entities", []) or []
+                if isinstance(e, dict) and e.get("id")]
+    warnings: list[str] = []
+    resolved: dict[str, dict] = {}
+    records: list[dict] = []
+    unmatched: list[dict] = []
+    for ref in entity_refs:
+        name = str(ref.get("name") or "").strip()
+        kind = str(ref.get("kind") or "").strip()
+        if not name:
+            continue
+        ex, mode = _find_existing_entity(existing, name, kind)
+        if ex is not None:
+            resolved[name] = {"id": str(ex.get("id") or ""),
+                              "name": str(ex.get("name") or name)}
+            records.append({"name": name,
+                            "resolves_to": resolved[name]["id"],
+                            "mode": mode})
+        else:
+            unmatched.append({"name": name, "kind": kind, "mode": mode})
+    # Phase 2 — bounded LLM fallback for the unmatched/ambiguous remainder
+    if model is not None and existing and unmatched:
+        try:
+            prompt = _resolution_prompt(
+                existing, [u["name"] for u in unmatched])
+            resp = _complete(model, _RESOLUTION_SYSTEM, prompt,
+                             max_tokens=500)
+            parsed = _parse_json(resp)
+            unmatched_names = {u["name"] for u in unmatched}
+            for item in (parsed.get("resolutions") or []):
+                if not isinstance(item, dict):
+                    continue
+                cand = str(item.get("name") or "").strip()
+                target = str(item.get("resolves_to") or "").strip()
+                if not cand or not target or cand not in unmatched_names:
+                    if cand:
+                        warnings.append(f"resolution {cand!r} not among the "
+                                        "unmatched names — dropped")
+                    continue
+                hit = next((e for e in existing
+                            if e.get("id") == target
+                            or _norm(e.get("name", "")) == _norm(target)),
+                           None)
+                if hit is None:
+                    warnings.append(f"resolution {cand!r} → {target!r} does "
+                                    "not match an existing entity — dropped")
+                    continue
+                resolved[cand] = {"id": str(hit.get("id") or ""),
+                                  "name": str(hit.get("name") or cand)}
+                records.append({"name": cand,
+                                "resolves_to": resolved[cand]["id"],
+                                "mode": "llm"})
+        except Exception as e:  # noqa: BLE001, RUF100 — degrade, never block
+            warnings.append(f"entity-resolution LLM fallback failed "
+                            f"({type(e).__name__}: {e}) — phase-1 results "
+                            "only (degrade to ADD)")
+    return {"map": resolved, "records": records, "warnings": warnings}
+
+
+def _apply_entity_resolution(embed_list: dict, resolution_map: dict) -> dict:
+    """D3: rewrite the embed list's entity names + about_entities/slot refs
+    to the canonical existing name (deep copy — the caller keeps the raw
+    S2/S4 list for provenance). Operator endpoints reference CONTENT, not
+    names — untouched."""
+    import copy
+    out = copy.deepcopy(embed_list or {})
+    name_map = {k: v.get("name", k) for k, v in (resolution_map or {}).items()}
+    if not name_map:
+        return out
+    for e in out.get("entities") or []:
+        if isinstance(e, dict) and e.get("name") in name_map:
+            e["name"] = name_map[e["name"]]
+    for section in ("points", "events"):
+        for item in out.get(section) or []:
+            if not isinstance(item, dict):
+                continue
+            about = item.get("about_entities") or []
+            item["about_entities"] = [name_map.get(a, a) for a in about
+                                       if isinstance(a, str)]
+            slots = item.get("slots")
+            if isinstance(slots, dict):
+                for role in ("subject", "object"):
+                    for s in slots.get(role) or []:
+                        if isinstance(s, dict) and s.get("name") in name_map:
+                            s["name"] = name_map[s["name"]]
+    return out
+
+
+# ── E7 (#1539): the 4-way consolidation classifier (D1) ───────────────────
+
+# Tunable via the run protocol (Q2 first-cut): REVISES_MIN_OVERLAP reuses
+# E5's existing band; NOOP_MIN_OVERLAP is the paraphrase-NOOP floor.
+REVISES_MIN_OVERLAP = 0.6      # E5 #1537: supersede-by-correction band
+NOOP_MIN_OVERLAP = 0.45        # Q2: paraphrase-NOOP band floor
+
+
+class DecisionRecord:
+    """One 4-way consolidation decision (D1).
+
+    decision ∈ {"ADD", "UPDATE", "NOOP", "DELETE"}; prior_id = the matched
+    existing point ("" for ADD); overlap = the length-guarded token overlap
+    vs the chosen prior; reason ∈ {"", "identical", "paraphrase",
+    "value_change"}; evidence = human-readable why (rides the result-level
+    records + link_before_create notes).
+    """
+
+    __slots__ = ("decision", "evidence", "overlap", "prior_id", "reason")
+
+    def __init__(self, decision: str, prior_id: str = "",
+                 overlap: float = 0.0, reason: str = "",
+                 evidence: str = "") -> None:
+        self.decision = decision
+        self.prior_id = prior_id
+        self.overlap = overlap
+        self.reason = reason
+        self.evidence = evidence
+
+
+_NUMBER_WORDS = {
+    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
+    "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+    "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
+    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
+}
+
+_MINUTE_WORDS = {"half": 30, "quarter": 15, "thirty": 30, "fifteen": 15,
+                  "forty": 40, "forty-five": 45, "forty five": 45}
+
+
+def _num_word_value(s: str) -> int | None:
+    """Digit value of an English number word ("six" → 6, "twenty three" →
+    23); None when not a number word."""
+    s = (s or "").strip().lower()
+    if s in _NUMBER_WORDS:
+        return _NUMBER_WORDS[s]
+    parts = re.split(r"[\s-]+", s)
+    if len(parts) == 2 and parts[0] in _NUMBER_WORDS \
+            and parts[1] in _NUMBER_WORDS:
+        tens, ones = _NUMBER_WORDS[parts[0]], _NUMBER_WORDS[parts[1]]
+        if tens >= 20 and 0 <= ones <= 9:
+            return tens + ones
+    return None
+
+
+_NUM_WORD_ALT = "|".join(sorted(_NUMBER_WORDS, key=len, reverse=True))
+
+
+def _value_signature(content: str) -> str | None:
+    """Deterministic value-token normalization (D2, Q3) — the value-identity
+    oracle behind the Tier-A NOOP-vs-UPDATE decision: "6pm"/"six pm"/
+    "6:00 pm" → "p06:00"; "27:12" → "27:12"; "27m12s" → "27m12s"; "5k" →
+    "5k". Returns None when the content carries no value-shaped token
+    (Tier-B → the classifier falls back to the bands). Deterministic-but-
+    curated (Q3): the vocabulary is deliberately small — clock times,
+    compound numbers, and quantity+unit tokens. The clock branch is the
+    single authority for HH(:MM) am/pm forms (the compound pass excludes
+    them via lookahead so "6:00 pm" never double-signatures)."""
+    c = _norm(content)
+    sigs: list[str] = []
+    # clock forms: "6pm" | "6:00 pm" | "six pm" | "six thirty pm" — the
+    # hour word is constrained to the number-word vocabulary so "at six pm"
+    # cannot greedily capture "at six" as the hour (deterministic).
+    clock_re = re.compile(
+        rf"\b(\d{{1,2}}(?::\d{{2}})?|(?:{_NUM_WORD_ALT})(?:[\s-]+"
+        rf"(?:{_NUM_WORD_ALT}))?)\s*(a\.?m\.?|p\.?m\.?)\b")
+    for m in clock_re.finditer(c):
+        raw, amp = m.group(1), m.group(2)[0].lower()
+        if ":" in raw:
+            hh, mm = raw.split(":")
+            sigs.append(f"{amp}{int(hh) % 12 or 12:02d}:{mm}")
+        elif raw.isdigit():
+            sigs.append(f"{amp}{int(raw) % 12 or 12:02d}:00")
+        else:
+            words = raw.split()
+            hour_v = _num_word_value(words[0])
+            if hour_v is None:
+                continue
+            minute_v = (_MINUTE_WORDS.get(" ".join(words[1:]), 0)
+                        if len(words) > 1 else 0)
+            sigs.append(f"{amp}{hour_v % 12 or 12:02d}:{minute_v:02d}")
+    # compound numbers: "27:12", "1:02:30", "27m12s" (clock forms already
+    # captured above — a following am/pm excludes the compound pass)
+    for m in re.finditer(
+            r"\b\d{1,4}(?::\d{2})+(?:\.\d+)?\b(?!\s*(?:a\.?m\.?|"
+            r"p\.?m\.?))|\b\d+m\d+s\b", c):
+        sigs.append(re.sub(r"\s+", "", m.group(0)))
+    # quantity+unit: "5k", "10km", "2 hours"
+    for m in re.finditer(
+            r"\b\d+(?:\.\d+)?\s*(?:k|km|mi|m|kg|lb|min|mins|h|hr|hrs|"
+            r"s|sec|secs|minutes|hours)\b", c):
+        sigs.append(re.sub(r"\s+", "", m.group(0)))
+    if not sigs:
+        return None
+    return "|".join(sorted(set(sigs)))
+
+
+def _entity_gate(prior: dict, entity_mentions: list[str]) -> bool:
+    """D2 entity gate: the candidate's resolved entity mention co-mentions
+    in the prior's content (eval proxy — S3 point rows carry content only)
+    OR matches the prior's aboutObject names (production graph / Task 4
+    enrichment). No mention at all → undetermined → True (never block on
+    absent data — the bands decide)."""
+    mentions = [str(m).strip().lower() for m in (entity_mentions or [])
+                if isinstance(m, str) and m.strip()]
+    if not mentions:
+        return True
+    prior_norm = _norm(str(prior.get("content") or ""))
+    if any(m in prior_norm for m in mentions):
+        return True
+    prior_ents = [str(a).strip().lower()
+                  for a in (prior.get("about_entities") or [])
+                  if isinstance(a, str) and a.strip()]
+    return any(m == a for m in mentions for a in prior_ents)
+
+
+def _attribute_gate(point: dict, prior: dict) -> bool:
+    """D2 attribute gate: search_keys overlap (E3) when BOTH sides carry
+    keys; either side lacking keys → undetermined → True (the value-
+    signature / band decides)."""
+    keys_new = {_norm(k) for k in (point.get("search_keys") or [])
+                if isinstance(k, str) and k.strip()}
+    keys_old = {_norm(k) for k in (prior.get("search_keys") or [])
+                if isinstance(k, str) and k.strip()}
+    if not keys_new or not keys_old:
+        return True
+    return bool(keys_new & keys_old)
+
+
+def _date_is_later_or_undated(current_date: str | None, prior: dict) -> bool:
+    """CG-2 later-date guard: when BOTH the candidate's session date and the
+    prior's when/created_at/createdAt are valid ISO dates, the candidate's
+    must be >= the prior's; either absent → True (session-ingest order
+    supplies the invariant)."""
+    if not current_date:
+        return True
+    old_when = str(prior.get("when") or prior.get("created_at")
+                   or prior.get("createdAt") or "").strip()
+    if not old_when:
+        return True
+    try:
+        if _valid_iso_date(str(current_date)) and _valid_iso_date(old_when):
+            return str(current_date)[:10] >= old_when[:10]
+    except (TypeError, ValueError):
+        pass
+    return True
+
+
+def classify_consolidation(point: dict, priors: list[dict], *,
+                           entity_mentions: list[str] | None = None,
+                           current_date: str | None = None) -> DecisionRecord:
+    """D1: the pure 4-way consolidation classifier (no LLM, no graph I/O).
+
+    Maps (candidate point + S3-retrieved priors + entity/attribute context)
+    to one of ADD / UPDATE / NOOP / DELETE in priority order:
+
+      1. NOOP (identical)   — normalized content equals a prior (the
+                              existing exact/content-hash dedup);
+      2. UPDATE             — same entity + same attribute, VALUE differs
+                              (value-signature inequality when both sides
+                              carry a signature, else the E5 frame-token
+                              diff), length-guarded overlap ≥
+                              REVISES_MIN_OVERLAP OR the E5 entity-grounded
+                              contradiction pass, and the session date is
+                              not before the prior's (CG-2);
+      3. NOOP (paraphrase)  — equal value-signature with an explicit entity
+                              mention (or the Tier-A marker) + the gates,
+                              OR overlap ≥ NOOP_MIN_OVERLAP with the gates,
+                              OR high overlap with an AMBIGUOUS gate (never
+                              UPDATE);
+      4. ADD                — no prior match.
+
+    DELETE is NEVER produced from content alone (D5 — only explicit
+    retractions). Ambiguous entity/attribute → NOOP only on high text
+    overlap, else ADD — never UPDATE (E2E-11 owned negative). Self-match is
+    impossible by construction: identical content → NOOP (step 1), changed
+    content → new content-addressed id ≠ prior id (E5's supersede guard
+    remains the backstop).
+
+    ``priors`` are the S3 point rows ({id, content, kind} + the Task 4
+    enrichment fields about_entities/when/created_at when available).
+    """
+    content = str(point.get("content") or "").strip()
+    if not content:
+        return DecisionRecord("ADD", evidence="empty candidate content")
+    norm = _norm(content)
+    mentions = [str(m) for m in (entity_mentions or [])
+                if isinstance(m, str) and m.strip()]
+    tier_a = str(point.get("tier") or "").strip().upper() == "A"
+
+    # 1) NOOP — identical (existing exact/content-hash dedup)
+    for p in priors:
+        if _norm(str(p.get("content") or "")) == norm:
+            return DecisionRecord("NOOP", prior_id=str(p.get("id") or ""),
+                                  overlap=1.0, reason="identical",
+                                  evidence="exact normalized content match")
+
+    best_update: tuple[float, dict] | None = None
+    best_noop: tuple[float, dict, str] | None = None   # (overlap, prior, mode)
+    for p in priors:
+        if not str(p.get("id") or ""):
+            continue
+        old_content = str(p.get("content") or "")
+        ov = _token_overlap(old_content, content)
+        gate = _entity_gate(p, mentions) and _attribute_gate(point, p)
+        sig_new = _value_signature(content)
+        sig_old = _value_signature(old_content)
+        both_sigs = bool(sig_new and sig_old)
+        sig_equal = both_sigs and sig_new == sig_old
+        if both_sigs:
+            value_differs = not sig_equal
+        else:
+            value_differs = bool(_frame_tokens(content)
+                                 - _frame_tokens(old_content))
+        later = _date_is_later_or_undated(current_date, p)
+        # 2) UPDATE — priority over NOOP
+        if gate and later and value_differs:
+            band_ok = ov >= REVISES_MIN_OVERLAP
+            contradiction = _fact_value_contradiction(
+                content, mentions, p, when=current_date)
+            if (band_ok or contradiction) \
+                    and (best_update is None or ov > best_update[0]):
+                best_update = (ov, p)
+        # 3) NOOP — paraphrase
+        if sig_equal and (tier_a or bool(mentions)) and gate:
+            # value identity — short-circuits both bands
+            if best_noop is None or ov > best_noop[0]:
+                best_noop = (ov, p, "value_signature_equal")
+        elif ov >= NOOP_MIN_OVERLAP:
+            # band with the gates, or ambiguous-but-high overlap (never
+            # UPDATE — E2E-11 owned negative)
+            mode = "overlap_band" if gate else "ambiguous_high_overlap"
+            if best_noop is None or ov > best_noop[0]:
+                best_noop = (ov, p, mode)
+
+    if best_update is not None:
+        ov, p = best_update
+        return DecisionRecord(
+            "UPDATE", prior_id=str(p.get("id") or ""), overlap=round(ov, 3),
+            reason="value_change",
+            evidence="same entity+attribute, value differs, length-guarded "
+                     "overlap or fact-value contradiction, later date")
+    if best_noop is not None:
+        ov, p, mode = best_noop
+        return DecisionRecord(
+            "NOOP", prior_id=str(p.get("id") or ""), overlap=round(ov, 3),
+            reason="paraphrase",
+            evidence=f"{mode} (overlap {ov:.2f})")
+    return DecisionRecord("ADD", evidence="no prior match")
+
+
 def _find_point_match(points: list[dict], content: str, *,
                        about_entities: list[str] | None = None,
                        when: str | None = None) -> tuple[str, str]:
-    """(match_kind, existing_id) — 'exact' (same id, dedup), 'revises'
-    (supersedes by correction — new content-addressed id), or ('none', '').
-
-    Third pass (E5 #1537): entity-grounded fact-value contradictions that
-    the length-guarded overlap misses ("gym 6pm" → "gym 5pm": 1 shared
-    token) still REVISES when the new point's about_entities co-mention in
-    the existing point's content, the non-value frame overlaps ≥ 0.5, and
-    the value actually differs. ``when`` (E1) is the new point's ISO date —
-    when BOTH sides carry a date the new must be >= the old (CG-2); when
-    either is absent the session-ingest order supplies the invariant.
+    """(match_kind, existing_id) compatibility shim over
+    ``classify_consolidation`` (E7): 'exact' (NOOP — identical or
+    paraphrase), 'revises' (UPDATE), or ('none', ''). Kept so the E5-level
+    unit surface (``_token_overlap``/``_fact_value_contradiction`` tests)
+    stays green; ``execute_embed`` calls the classifier directly.
     """
-    norm = _norm(content)
-    for p in points:
-        if _norm(p.get("content", "")) == norm:
-            return "exact", p.get("id", "")
-    for p in points:
-        if _token_overlap(p.get("content", ""), content) >= 0.6:
-            return "revises", p.get("id", "")
-    for p in points:
-        if _fact_value_contradiction(content, about_entities, p, when=when):
-            return "revises", p.get("id", "")
+    dec = classify_consolidation(
+        {"content": content, "about_entities": about_entities or []},
+        points, entity_mentions=about_entities, current_date=when)
+    if dec.decision == "NOOP":
+        return "exact", dec.prior_id
+    if dec.decision == "UPDATE":
+        return "revises", dec.prior_id
     return "none", ""
 
 
@@ -1502,6 +1954,42 @@ def _resolve_superseded(ref: str, search: dict, *, kind: str = "") -> dict | Non
     if len(matches) == 1:
         return matches[0]
     return None  # 0 or >1 → caller warns, never guesses
+
+
+def _resolve_retraction(ref: dict, search: dict,
+                        *, warnings: list[str]) -> dict | None:
+    """D5: resolve an embed-list retraction ref to an S3 prior POINT using
+    the never-guess discipline: by id (unique), else normalized-content
+    match; 0 or >1 matches → None (the caller warns + fails open). S3 only
+    returns live priors (terminal excluded at the search layer, #1391), so
+    a resolved deletion target is live by construction."""
+    rid = str(ref.get("id") or "").strip()
+    content = str(ref.get("content") or "").strip()
+    points = [p for p in (search or {}).get("points", []) or []
+              if isinstance(p, dict) and p.get("id")]
+    if rid:
+        for p in points:
+            if str(p.get("id")) == rid:
+                return p
+        warnings.append(f"retraction id={rid!r} matches no S3 prior — "
+                        "skipped (fail-open)")
+        return None
+    if content:
+        norm = _norm(content)
+        matches = [p for p in points
+                   if _norm(str(p.get("content") or "")) == norm]
+        if not matches:
+            warnings.append(f"retraction content {content[:60]!r} matches no "
+                            "S3 prior — skipped (fail-open)")
+            return None
+        if len(matches) > 1:
+            warnings.append(f"retraction content {content[:60]!r} is "
+                            f"ambiguous ({len(matches)} priors) — skipped "
+                            "(never guess)")
+            return None
+        return matches[0]
+    warnings.append("empty retraction ref (no id, no content) — skipped")
+    return None
 
 
 def _supersession_records(entity_refs: list[dict], search: dict,
@@ -1807,6 +2295,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     payload_points: list[dict] = []
     point_ids: dict[str, str] = {}   # norm content → point id
     tier_a_points = 0                # E2 (#1534): Tier-A state-value count
+    noops: list[dict] = []           # E7 (D4): folded duplicates — result-level
     for p in embed_list.get("points", []) or []:
         if not isinstance(p, dict):
             warnings.append(f"non-dict point entry {p!r} skipped")
@@ -1831,18 +2320,48 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 f"point when {when!r} is not a valid ISO date — dropped")
         about_list = [str(a) for a in (p.get("about_entities") or [])
                       if isinstance(a, str) and a.strip()]
-        match, existing_id = _find_point_match(idx["points"], content,
-                                               about_entities=about_list,
-                                               when=when_valid)
+        # E3 (D1/D4): atomicity soft guard + E3 point keys. The verbatim
+        # quote (<=200) is the anchor; search_keys are sanitized aliases;
+        # source_turn_id is resolved DETERMINISTICALLY (the model's index
+        # is advisory — a conflicting model index loses with a warning).
+        sents = _split_sentences(content)
+        if len(sents) > 1:
+            warnings.append(f"point '{content[:60]}' has {len(sents)} sentences — "
+                            "E3 atomicity expects ONE claim per point")
+        quote = str(p.get("quote") or "").strip()[:200]
+        search_keys = _clean_search_keys(p.get("search_keys"), warnings,
+                                         f"point '{content[:60]}'")
+        # E7 (D1): the 4-way decision vs the S3-retrieved priors — pure and
+        # deterministic. NOOP folds into the existing point (a `duplicates`
+        # stamp at the write path, D4 — physically ONE point, no new edge),
+        # never a new payload point.
+        decision = classify_consolidation(
+            {"content": content, "about_entities": about_list,
+             "search_keys": search_keys, "when": when_valid,
+             "tier": str(p.get("tier") or "")},
+            idx["points"], entity_mentions=about_list,
+            current_date=when_valid or session_date)
         pid = _content_id("pt", content)
-        if match == "exact":
-            pid = existing_id or pid
-            reason = "NEW"   # identical content → same content-addressed id → dedup
+        if decision.decision == "NOOP":
+            # D4: no payload point — the record rides result["noops"] and
+            # the eval write path stamps duplicates + the CONTAINS link.
+            # point_ids maps the content to the EXISTING id so operators
+            # referencing the folded point resolve to the canonical one.
+            pid = decision.prior_id or pid
+            noops.append({
+                "point_id": pid, "session_ref": session_id,
+                "overlap": decision.overlap,
+                "evidence": decision.evidence,
+                "reason": decision.reason})   # "identical" | "paraphrase"
+            point_ids[n] = pid
             link_before_create.append({
                 "searched_for": f"point '{content[:60]}'", "found": True,
-                "note": f"exact existing {pid} — content-addressed dedup"})
-        elif match == "revises":
+                "note": f"duplicate of existing {pid} ({decision.reason}) — "
+                        "folded (duplicates stamp, no new point)"})
+            continue
+        if decision.decision == "UPDATE":
             reason = "REVISES"  # supersession: new content corrects the old
+            existing_id = decision.prior_id
             link_before_create.append({
                 "searched_for": f"point '{content[:60]}'", "found": True,
                 "note": f"revises existing {existing_id} — supersede by correction"})
@@ -1861,17 +2380,6 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 "searched_for": f"point '{content[:60]}'", "found": False,
                 "note": "no match — created"})
         point_ids[n] = pid
-        # E3 (D1/D4): atomicity soft guard + E3 point keys. The verbatim
-        # quote (<=200) is the anchor; search_keys are sanitized aliases;
-        # source_turn_id is resolved DETERMINISTICALLY (the model's index
-        # is advisory — a conflicting model index loses with a warning).
-        sents = _split_sentences(content)
-        if len(sents) > 1:
-            warnings.append(f"point '{content[:60]}' has {len(sents)} sentences — "
-                            "E3 atomicity expects ONE claim per point")
-        quote = str(p.get("quote") or "").strip()[:200]
-        search_keys = _clean_search_keys(p.get("search_keys"), warnings,
-                                         f"point '{content[:60]}'")
         turn_idx = _resolve_source_turn(p, edus, warnings=warnings)
         pt_entry = {
             "id": pid, "content": content, "pointKind": pkind,
@@ -1972,6 +2480,27 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             "target": {"src": t_src, "dst": t_dst, "op_type": "IMPL"},
             "strength": round(strength, 2)})
 
+    # ── retractions (D5): explicit withdrawals → DELETE-soft records ──────
+    # Never from content alone: only the embed list's additive `retractions`
+    # refs (resolved with the never-guess discipline) produce deletions.
+    # Records stay RESULT-level (D8) — the Layer-1 payload does not grow.
+    deletions: list[dict] = []
+    for ref in embed_list.get("retractions", []) or []:
+        if not isinstance(ref, dict):
+            warnings.append(f"non-dict retraction ref {ref!r} skipped")
+            continue
+        prior = _resolve_retraction(ref, search, warnings=warnings)
+        if prior is None:
+            continue
+        rid = str(prior.get("id") or "").strip()
+        if not rid:
+            continue
+        deletions.append({
+            "point_id": rid,
+            "evidence": f"explicit retraction in session {session_id} — "
+                         "conversation withdrew the fact",
+        })
+
     # ── chain validation (deterministic, warn+repair, never block) ───────
     chain_notes = validate_chains(embed_list, master)
     llm_chain_notes = [dict(c) for c in (embed_list.get("chain_notes") or [])
@@ -2021,6 +2550,8 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
 
     return {
         "payload": payload,
+        "noops": noops,                # E7 (D4): result-level, NOT in the payload
+        "deletions": deletions,        # E7 (D5): result-level, NOT in the payload
         "supersessions": supersessions,
         "chain_notes": llm_chain_notes + chain_notes,
         "link_before_create": link_before_create,
@@ -2030,6 +2561,8 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             "entities": len(payload_entities), "events": len(payload_events),
             "points": len(payload_points), "operators": len(payload_operators),
             "tier_a_points": tier_a_points,
+            "noops": len(noops),
+            "deletions": len(deletions),
             "search_queries": (search or {}).get("queries_run", 0),
             "search_degraded": bool((search or {}).get("degraded")),
             "chain_notes": len(chain_notes),
@@ -2151,6 +2684,32 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             _bump_census(error_census, e)
         _rollup_llm(llm_stats, stage_stats)
 
+    # ── entity resolution (D3): deterministic-first, bounded LLM fallback.
+    # Runs BETWEEN S4 and S5; rewrites the embed list's entity names +
+    # about_entities/slot refs to canonical existing names so execute_embed's
+    # link-before-create + the server-side aboutObject MERGE-by-name land on
+    # the canonical Object. Skipped when S3 is degraded or has no candidates
+    # (nothing to resolve against). Never blocks capture (P1).
+    resolution_records: list[dict] = []
+    resolution_warnings: list[str] = []
+    if search and not search.get("degraded") and (search.get("entities") or []):
+        ent_refs = [{"name": str(e.get("name", "")).strip(),
+                     "kind": str(e.get("kind", "")).strip()}
+                    for e in (complete_list.get("entities") or [])
+                    if isinstance(e, dict) and e.get("name")]
+        if ent_refs:
+            try:
+                res = resolve_entities(ent_refs, search, model=model)
+                if res.get("map"):
+                    complete_list = _apply_entity_resolution(
+                        complete_list, res["map"])
+                resolution_records = res.get("records") or []
+                resolution_warnings = res.get("warnings") or []
+            except Exception as e:  # noqa: BLE001, RUF100 — resolve_entities is
+                # guarded internally, but the orchestrator never dies on
+                # resolution (P1: degrade to phase-1/ADD semantics)
+                errors.append(f"entity resolution failed: {type(e).__name__}: {e}")
+
     # ── S5: embed execution (deterministic) ────────────────────────────────
     if not complete_list:
         errors.append("no embed list produced (S2/S4 empty) — nothing to embed")
@@ -2161,7 +2720,7 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     except Exception as e:  # S5 must NEVER block the pipeline (design §7.4)
         errors.append(f"S5 failed: {type(e).__name__}: {e}")
         result = {"payload": None, "chain_notes": [], "link_before_create": [],
-                  "supersessions": [],
+                  "supersessions": [], "noops": [], "deletions": [],
                   "warnings": [f"S5 embed execution failed: {e}"],
                   "minted_kinds": [], "stats": {}}
     result["session_id"] = session_id
@@ -2170,6 +2729,16 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     result["s2_embed"] = embed_list          # S2 raw (pre-S4) — owner loop
     result["search"] = search
     result["errors"] = errors
+    if resolution_records:
+        result["resolution"] = resolution_records   # D3 evidence surface
+        result["link_before_create"] = (
+            (result.get("link_before_create") or []) + [
+                {"searched_for": f"entity '{r['name']}'", "found": True,
+                 "note": f"resolved via entity resolution ({r['mode']}) to "
+                         f"{r['resolves_to']}"}
+                for r in resolution_records])
+    if resolution_warnings:
+        result["warnings"] = resolution_warnings + (result.get("warnings") or [])
     if s4_warnings:
         result["warnings"] = s4_warnings + (result.get("warnings") or [])
     result["stats"]["elapsed_s"] = round(time.time() - t0, 1)
@@ -2448,6 +3017,7 @@ __all__ = [  # noqa: RUF022
     "run_s4", "render_s4_prompt",
     "merge_embed_lists", "_merge_key", "_s4_merge_stats",
     "execute_embed", "validate_chains", "derive_supersessions",
+    "classify_consolidation", "DecisionRecord", "resolve_entities",
     "extract_session_v2",
     "S1_TMPL", "S2_TMPL", "S4_TMPL", "OUTPUT_CONTRACT",
     "SUBJECTS", "EVENTS", "CHAINS",

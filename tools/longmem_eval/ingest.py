@@ -108,6 +108,22 @@ def _point_exists(proj, pid: str) -> bool:
     return bool(rows)
 
 
+def _existing_point_ids(proj, ids: list[str]) -> set[str]:
+    """Batch existence probe (E7 #1539 D6 — surface 12 N+1 fix): ONE
+    ``MATCH (n:Point) WHERE n.id IN $ids RETURN n.id`` query returns the
+    set of ids that already exist. The per-turn/per-point ``_point_exists``
+    N+1 at 500-Q run scale collapses to O(1) queries per session. Point-
+    node semantics only — event/operator ids are simply absent from the
+    result set (event-endpoint operator checks keep today's behavior)."""
+    ids = [i for i in (ids or []) if i]
+    if not ids:
+        return set()
+    rows = proj.g.query(
+        "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id",
+        params={"ids": ids}).result_set
+    return {row[0] for row in rows}
+
+
 def question_node_ids(question: dict) -> dict[str, str]:
     """Deterministic node-id prefixes for a question (fresh graph per qid)."""
     qid = question["question_id"]
@@ -135,9 +151,10 @@ def ingest_haystack(sdk: TortoiseSDK, question: dict, *,
         sid = ids[si] if si < len(ids) else f"{qid}-s{si}"
         session_date = dates[si] if si < len(dates) else ""
         s_node = f"lme:{qid}:s{si}"
+        proj = sdk._get_proj()
 
         # ── Session node ──
-        sdk._get_proj().g.query(
+        proj.g.query(
             "MERGE (s:Session {id:$id}) "
             "SET s.created_at=coalesce(s.created_at, $ts), "
             "    s.turn_count=$tc, s.is_episodic=true, s.lme_question_id=$qid, "
@@ -145,6 +162,15 @@ def ingest_haystack(sdk: TortoiseSDK, question: dict, *,
             params={"id": s_node, "ts": session_date or _now_iso(), "tc": len(session),
                     "qid": qid, "si": si, "sid": sid},
         )
+
+        # E7 (#1539 D6): ONE batch existence probe per session (turn + raw
+        # chunk ids together) — the per-turn ``_point_exists`` N+1 collapses
+        # to O(1) queries per session at 500-Q run scale. Idempotency
+        # semantics unchanged (the batch is just the existence probe).
+        turn_ids = [f"lme:{qid}:s{si}:t{ti}" for ti in range(len(session))]
+        session_chunks = list(_session_chunks(session, chunk_turns))
+        chunk_ids = [f"lme:{qid}:s{si}:c{ci}" for ci, _, _ in session_chunks]
+        existing = _existing_point_ids(proj, turn_ids + chunk_ids)
 
         for ti, turn in enumerate(sessions[si]):
             role = turn.get("role") or "unknown"
@@ -156,7 +182,7 @@ def ingest_haystack(sdk: TortoiseSDK, question: dict, *,
             # Episodic turn point — create_point computes content-hash +
             # embedding (gracefully None when no embedder), accepts explicit
             # deterministic id (mirrors capture_session's turn shape).
-            if not _point_exists(sdk._get_proj(), turn_id):
+            if turn_id not in existing:
                 sdk.create_point(
                     "event",
                     turn_text,
@@ -177,7 +203,7 @@ def ingest_haystack(sdk: TortoiseSDK, question: dict, *,
                     evidence_points += 1
             if is_evidence:
                 evidence_turns += 1
-            sdk._get_proj().g.query(
+            proj.g.query(
                 "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
                 "MERGE (s)-[:CONTAINS]->(t)",
                 params={"sid": s_node, "tid": turn_id},
@@ -190,9 +216,9 @@ def ingest_haystack(sdk: TortoiseSDK, question: dict, *,
         # keeps its turn-id evidence path (evidence_turn_ids) — marking them
         # would flip retrieval into the v2 evidence-marks branch and silently
         # change baseline turn-recall semantics.
-        for ci, text, turn_idxs in _session_chunks(session, chunk_turns):
+        for ci, text, turn_idxs in session_chunks:
             chunk_id = f"lme:{qid}:s{si}:c{ci}"
-            if not _point_exists(sdk._get_proj(), chunk_id):
+            if chunk_id not in existing:
                 sdk.create_point(
                     SESSION_TRANSCRIPT_KIND, text, id=chunk_id,
                     session_id=sid, lme_question_id=qid,
@@ -201,7 +227,7 @@ def ingest_haystack(sdk: TortoiseSDK, question: dict, *,
                     status="draft",
                 )
                 chunks += 1  # written (post-guard) — stats == graph state
-            sdk._get_proj().g.query(
+            proj.g.query(
                 "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
                 "MERGE (s)-[:CONTAINS]->(t)",
                 params={"sid": s_node, "tid": chunk_id},
