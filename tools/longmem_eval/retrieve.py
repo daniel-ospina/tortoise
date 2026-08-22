@@ -45,11 +45,14 @@ from __future__ import annotations
 
 import re
 import time
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from tortoise.sdk import TortoiseSDK
 
-from .ingest import (EXTRACTION_POINT_KIND, point_props_for_hits)
+from .ingest import (EXTRACTION_POINT_KIND, event_props_for_hits,
+                     point_props_for_hits)
 
 # token-count estimator: rough LLM token ≈ whitespace tokens, plus markup
 # allowance for role prefixes/JSON. Documented in report provenance.
@@ -65,6 +68,128 @@ DEFAULT_CONTEXT_TOKEN_CAP = 8000
 #: R1 (#1540): candidate-depth headroom — one session's points must not
 #: crowd other sessions out BEFORE dedup runs.
 DEFAULT_POOL_MULTIPLIER = 3
+
+#: R5 (#1544): TR top_k cap (20→12) — the transcript-flood control for
+#: temporal-reasoning questions (9/18 TR losses were reader refusals under
+#: ~40k-token floods despite sr@5=1.0). Knob-exposed via ``--tr-top-k``.
+DEFAULT_TR_TOP_K = 12
+
+
+# ── R5 (#1544): TR-constraint detection ─────────────────────────────────────
+
+@dataclass(frozen=True)
+class TimeConstraint:
+    """A detected temporal shape in a TR question (D5).
+
+    ``kind``: "interval" | "recency" | "ordering" | None
+    ``start``: ISO date (interval) | day count (recency) | None
+    ``end``: ISO date (interval) | None
+    """
+    kind: str | None
+    start: str | None = None
+    end: str | None = None
+
+
+#: recency window unit map (D5): day=1, week=7, month=30.
+_UNIT_DAYS = {"day": 1, "week": 7, "month": 30}
+
+
+def detect_time_constraint(text: str, *,
+                           default_year: int | None = None) -> TimeConstraint:
+    """Detect the temporal shape the issue names ("between…and…", "ago",
+    "how many days") in a TR question's text (D5).
+
+    | kind      | trigger                                                       | behavior |
+    |-----------|---------------------------------------------------------------|----------|
+    | interval  | "between <Month day> and <Month day>" (year from              | hard filter on session_date ∈ [start, end] |
+    |           |  ``default_year``) or ISO "YYYY-MM-DD" bounds                | |
+    | recency   | "N days/weeks/months ago", "last N …" (unit map              | hard filter on [qdate − N_days, qdate] |
+    |           |  day=1/week=7/month=30)                                      | |
+    | ordering  | "how many days", "how long", "when did", bare "ago" with     | no filter — the question needs the full |
+    |           |  no numeric bound                                             | dated set to compute a span/ordering |
+    | None      | no match                                                     | no filter, no reorder (pure date weight) |
+
+    Degradation rule: an unparseable bound (bare "ago", "how many days"
+    with no number) degrades to ``ordering`` — never a hard filter that
+    could starve the evidence out of the window. ``default_year`` anchors
+    month-day intervals without a year (the caller passes the question's
+    year; fallback 2026).
+    """
+    t = " ".join(text.lower().split())
+    # recency bound: "N days/weeks/months ago" / "last N …" — the only
+    # shapes that give a computable window without the answer.
+    m = re.search(
+        r"(?:\b(\d+)\s+(days?|weeks?|months?)\s+ago\b"
+        r"|\blast\s+(\d+)\s+(days?|weeks?|months?)\b)", t)
+    if m:
+        n = int(m.group(1) or m.group(3))
+        unit = (m.group(2) or m.group(4)).rstrip("s")
+        return TimeConstraint("recency", start=str(n * _UNIT_DAYS[unit]))
+    # ordering shapes: the question needs the FULL dated set — "how many
+    # days ago" with no numeric bound, "how long", "when did", bare
+    # "ago" with no bound (D5: no hard filter, no false bounds).
+    if (re.search(r"\bago\b", t)
+            or re.search(r"\bhow\s+(many\s+)?days\b", t)
+            or re.search(r"\bhow\s+long\b", t)
+            or re.search(r"\bwhen\s+did\b", t)):
+        return TimeConstraint("ordering")
+    # interval: "between <Month day> and <Month day>" (year from
+    # ``default_year``) or ISO "YYYY-MM-DD" bounds — explicit window.
+    m = re.search(
+        r"between\s+(\d{4}-\d{2}-\d{2})\s+and\s+(\d{4}-\d{2}-\d{2})", t)
+    if m:
+        return TimeConstraint("interval", start=m.group(1), end=m.group(2))
+    m = re.search(
+        r"between\s+([a-z]+)\s+(\d{1,2})\s+and\s+([a-z]+)\s+(\d{1,2})", t)
+    if m:
+        def _iso(mon: str, day: str) -> str:
+            d = datetime.strptime(f"{mon} {day} {default_year or 2026}",
+                                  "%B %d %Y")
+            return d.date().isoformat()
+        return TimeConstraint("interval", start=_iso(m.group(1), m.group(2)),
+                              end=_iso(m.group(3), m.group(4)))
+    return TimeConstraint(None)
+
+
+def _apply_time_window(annotated: list[dict], constraint: TimeConstraint,
+                       *, question_date: str | None) -> list[dict]:
+    """R5 (D5): hard time-window filter on the annotated hits' session_date.
+
+    * interval — keep hits whose ``session_date ∈ [start, end]`` (inclusive;
+      ISO dates compare lexicographically).
+    * recency — keep hits whose ``session_date ∈ [qdate − N_days, qdate]``
+      (N from ``constraint.start``; missing/unparseable qdate → the filter
+      cannot compute bounds → returns [] so the caller's defensive fallback
+      (``tr_window_fallback``) keeps the unfiltered pool).
+
+    Undated hits (no session_date) never satisfy a window — the filter
+    returns only in-window DATED hits. The caller falls back when this
+    returns empty (never starve the reader into abstention).
+    """
+    if not annotated:
+        return []
+    if constraint.kind == "interval":
+        start, end = constraint.start, constraint.end
+        if not start or not end:
+            return []
+        return [h for h in annotated
+                if h.get("session_date") and start <= h["session_date"] <= end]
+    if constraint.kind == "recency":
+        try:
+            n_days = int(constraint.start or 0)
+            qdate = (datetime.strptime(str(question_date or "")[:10],
+                                       "%Y-%m-%d").date()
+                     if question_date else None)
+        except (TypeError, ValueError):
+            return []
+        if qdate is None:
+            return []  # recency math needs the question date — fall back
+        from datetime import timedelta
+        lo = (qdate - timedelta(days=n_days)).isoformat()
+        hi = qdate.isoformat()
+        return [h for h in annotated
+                if h.get("session_date") and lo <= h["session_date"] <= hi]
+    return list(annotated)  # ordering/None → no filter
 
 
 def _estimate_tokens(text: str) -> int:
@@ -307,12 +432,28 @@ def render_context(hits: list[dict], *, question_date: str | None = None) -> str
 
 
 def hybrid_search(sdk: TortoiseSDK, query: str, limit: int,
-                   *, leg_trace: list[dict] | None = None) -> list[dict]:
-    """Hybrid retrieval over the question's ingested graph (points only).
+                   *, entity_types: tuple[str, ...] = ("point",),
+                   recency_fields: dict[str, str] | None = None,
+                   recency_boost: float = 0.0,
+                   leg_trace: list[dict] | None = None) -> list[dict]:
+    """Hybrid retrieval over the question's ingested graph.
 
-    Returns raw hit dicts from ``tortoise_fts_query`` (id, content,
-    match_source, scores…) — embedded mode degrades to the in-memory TF-IDF
-    fallback automatically.
+    R5 (#1544) D4: ``entity_types`` selects the retrieval pool — TR
+    questions pass ``("point", "event")`` so the dated events timeline
+    joins the pool (E2E-4's "no point-only filter"); the default
+    ``("point",)`` keeps every non-TR path byte-identical (baseline
+    isolation, M8). Per entity type the hits come from
+    ``tortoise_fts_query`` (RRF fusion of FTS + vector + structural with
+    the TF-IDF degradation fallback); the results merge by
+    ``scores.rrf`` desc (comparable across the calls — same k constant,
+    same leg structure) with a deterministic id tiebreak. Event hits use
+    ``eventId`` as ``id`` — the Point/Event id namespaces never collide
+    (different label, different id field).
+
+    ``recency_fields`` (R5 D2): {entity_type: Cypher property name} — the
+    date source for the engine's recency re-rank (points ``createdAt``,
+    events ``startedAt``). ``recency_boost`` is the multiplier strength
+    (0.0 off). Both default off → byte-identical to pre-R5.
 
     ``leg_trace`` (R3 #1542 D4): a list the search records per-leg entries
     into (vector/fts/structural/fallback — the E2E-1 never-null leg-mix
@@ -331,11 +472,25 @@ def hybrid_search(sdk: TortoiseSDK, query: str, limit: int,
     must keep the R1 union (turn points + raw transcripts + extracted
     points).
     """
-    return sdk.tortoise_fts_query(
-        query, entity_type="point", limit=limit,
-        structural_kind=EXTRACTION_POINT_KIND,
-        structural_hops=2,
-        include_terminal=True, leg_trace=leg_trace)
+    merged: dict[str, dict] = {}
+    for et in entity_types:
+        for h in sdk.tortoise_fts_query(
+            query, entity_type=et, limit=limit,
+            structural_kind=EXTRACTION_POINT_KIND,
+            structural_hops=2,
+            include_terminal=True, leg_trace=leg_trace,
+            recency_field=(recency_fields.get(et) if recency_fields
+                           else None),
+            recency_boost=recency_boost,
+        ):
+            merged[h["id"]] = h
+    # deterministic union: RRF score desc, then id (no namespace collision
+    # — Point ids and eventIds are distinct namespaces by construction).
+    return sorted(
+        merged.values(),
+        key=lambda h: (-((h.get("scores") or {}).get("rrf") or 0.0),
+                       h["id"]),
+    )
 
 
 def retrieve_for_question(
@@ -346,6 +501,14 @@ def retrieve_for_question(
     top_k: int = 20,
     max_chunks_per_session: int = DEFAULT_MAX_CHUNKS_PER_SESSION,
     max_context_tokens: int = DEFAULT_CONTEXT_TOKEN_CAP,
+    # R5 (#1544): TR knobs — temporal-reasoning questions get the events
+    # union pool, the engine recency weight, the TR-constraint window
+    # filter, time-ascending rendering, and the tighter ``tr_top_k`` cap
+    # (20→12 — the transcript-flood control). Non-TR questions ignore all
+    # of them (byte-identical path, regression-guarded).
+    tr_top_k: int = DEFAULT_TR_TOP_K,
+    tr_date_weight: float = 0.5,
+    tr_events: bool = True,
 ) -> dict[str, Any]:
     """Run retrieval for one question and compute recall@k + context stats.
 
@@ -357,8 +520,22 @@ def retrieve_for_question(
     (``ret["hits"]`` == the pool — pinned contract), and the reader's
     context is the budget-capped points-first ``_assemble_context`` output
     (``context_points``, bounded by ``max_context_tokens``).
+
+    R5 (#1544) D4–D7 (TR questions only, ``question_type ==
+    "temporal-reasoning"``): the pool is the point+event union
+    (``hybrid_search`` entity_types — E2E-4's "no point-only filter"),
+    recency-weighted by the engine (``recency_fields`` → ``recency_boost``
+    keyed on the dataset's haystack_dates via graph createdAt/startedAt),
+    TR-constraint detection drives a time-window filter BEFORE truncation
+    (``tr_window_fallback`` when the filter would empty the dated pool —
+    never starve the reader into abstention), and the reader context
+    renders time-ascending (dated first, undated last). ``effective_top_k
+    = tr_top_k if is_tr else top_k``. Recall metrics keep retrieval (RRF +
+    date-weight) order — they measure retrieval, not rendering.
     """
     qid = question["question_id"]
+    is_tr = question.get("question_type") == "temporal-reasoning"
+    effective_top_k = tr_top_k if is_tr else top_k
     answer_sessions = set(question.get("answer_session_ids") or [])
     dates: list[str] = question.get("haystack_dates") or []
     evidence_turn_ids = {
@@ -377,12 +554,25 @@ def retrieve_for_question(
     start = time.monotonic()
     # R1: pool-depth headroom — a monopolizing session's points must not
     # crowd other sessions out BEFORE dedup runs (E2E-1).
-    hits = hybrid_search(sdk, question["question"],
-                         limit=max(ks) * DEFAULT_POOL_MULTIPLIER,
-                         leg_trace=legs)
+    # R5 (D4): TR questions fetch the point+event union (E2E-4's "no
+    # point-only filter"); non-TR keeps the exact points-only path.
+    hits = hybrid_search(
+        sdk, question["question"],
+        limit=max(ks) * DEFAULT_POOL_MULTIPLIER,
+        leg_trace=legs,
+        entity_types=("point", "event") if (is_tr and tr_events)
+        else ("point",),
+        recency_fields=({"point": "createdAt", "event": "startedAt"}
+                        if is_tr else None),
+        recency_boost=tr_date_weight if is_tr else 0.0,
+    )
     latency_ms = (time.monotonic() - start) * 1000.0
 
-    props = point_props_for_hits(sdk._get_proj(), [h["id"] for h in hits])
+    point_props = point_props_for_hits(sdk._get_proj(), [h["id"] for h in hits])
+    # R5 (D8): event hits join the same annotation surface — merge the
+    # event props (namespaces disjoint; lookup by h["id"] unchanged).
+    event_props = event_props_for_hits(sdk._get_proj(), [h["id"] for h in hits])
+    props = {**point_props, **event_props}
 
     # E3 (D7): resolve speaker for source-turn links whose turn node was NOT
     # itself retrieved — one batch query (the derivation surface E2E-5 builds
@@ -403,6 +593,30 @@ def retrieve_for_question(
     # fields (additive — E5 #1537 decorates the embedded fallback too, so
     # markers render in embedded AND full modes).
     annotated = _annotate_hits(hits, props, dates)
+
+    # ── R5 (D5): TR-constraint detection → time-window filter BEFORE
+    # truncation (the in-window pool is what session_recall@k measures —
+    # correct TR semantics). Defensive rule: when the filter would empty
+    # the dated pool (no in-window hits), fall back to the unfiltered pool
+    # — never starve the reader into abstention — recorded as
+    # ``tr_window_fallback``. Non-TR questions skip detection entirely. ──
+    tr_constraint = None
+    tr_window_fallback = False
+    if is_tr:
+        question_date = question.get("question_date", "") or None
+        try:
+            year = int(question_date[:4]) if question_date else None
+        except ValueError:
+            year = None
+        tr_constraint = detect_time_constraint(
+            question["question"], default_year=year)
+        if tr_constraint.kind in ("interval", "recency"):
+            windowed = _apply_time_window(annotated, tr_constraint,
+                                          question_date=question_date)
+            if windowed:
+                annotated = windowed
+            else:
+                tr_window_fallback = True  # keep the unfiltered pool
 
     # ── deduped pool (the retrieval contract: ret["hits"] == pool) ──
     pool = _dedup_pool(annotated, max_chunks_per_session=max_chunks_per_session)
@@ -488,8 +702,20 @@ def retrieve_for_question(
     # ── context handed to the reader (D4: budget-capped, points first) ──
     question_date = question.get("question_date", "") or None
     context_points = _assemble_context(
-        pool, top_k=top_k, max_context_tokens=max_context_tokens,
+        pool, top_k=effective_top_k,
+        max_context_tokens=max_context_tokens,
         question_date=question_date)
+    # R5 (D6): TR context renders time-ascending — after truncation the
+    # context list is stable-sorted by session_date (dated first, undated
+    # last, stable within a date = retrieval order preserved). Recall
+    # metrics keep retrieval order: only the READER's context list is
+    # reordered. Non-TR keeps RRF order (byte-identical to today).
+    if is_tr:
+        context_points = sorted(
+            context_points,
+            key=lambda h: ((1, "") if not h.get("session_date")
+                           else (0, h["session_date"])),
+        )
     # The reader consumes the SAME rendered context (with the Current Date
     # header) — keep context_tokens aligned with what the reader saw.
     context_text = render_context(context_points, question_date=question_date)
@@ -517,6 +743,11 @@ def retrieve_for_question(
         "context_points": context_points,
         "context_tokens": context_tokens,
         "context_point_count": len(context_points),
+        # R5 (#1544): TR-constraint surface — the detected kind (TR only)
+        # and whether the window filter fell back to the unfiltered pool
+        # (never starve the reader into abstention).
+        "tr_constraint": tr_constraint.kind if tr_constraint else None,
+        "tr_window_fallback": tr_window_fallback,
         # R3 (#1542) D3: write-time embedding coverage (observable dense leg).
         "points_total": total_pts,
         "points_embedded": embedded_pts,

@@ -10,7 +10,7 @@ import threading
 import time
 from collections import Counter
 from dataclasses import dataclass, asdict, field
-from typing import Literal
+from typing import Any, Literal
 
 # #1391: terminal (no-longer-current) Point statuses EXCLUDED from every
 # default read surface (FTS/vector/structural/operator + sdk query paths).
@@ -855,6 +855,9 @@ def expand_structural_hops(
 def rrf_fusion(
     ranked_lists: list[list[tuple[str, float]]],
     k: int = 60,
+    *,
+    recency_weights: dict[str, float] | None = None,
+    recency_boost: float = 0.0,
 ) -> dict[str, float]:
     """Reciprocal Rank Fusion — combine multiple ranked lists.
 
@@ -863,6 +866,13 @@ def rrf_fusion(
     Args:
         ranked_lists: List of strategies, each is [(id, score), ...] ranked desc
         k: RRF constant (default 60 from Cormack et al. 2009)
+        recency_weights (R5 #1544): {id: factor ∈ [0,1]} — rank-based
+            recency percentile from ``_recency_factors`` (newest → 1.0,
+            oldest → 0.0, undated → 0.0). Optional; default None = off.
+        recency_boost (R5 #1544): multiplier strength. Final score per doc:
+            RRF(d) × (1 + recency_boost × weight(d)). Default 0.0 = off.
+            When weights are None or boost is 0.0 the arithmetic is
+            untouched → byte-identical output for all pre-R5 callers.
 
     Returns:
         {id: combined_rrf_score} sorted by score descending
@@ -872,6 +882,14 @@ def rrf_fusion(
         for rank, (pid, _score) in enumerate(ranked):
             rrf_score = 1.0 / (k + rank + 1)
             scores[pid] = scores.get(pid, 0.0) + rrf_score
+    # R5 (#1544): optional recency multiplier — a multiplier, NOT an additive
+    # constant: the RRF score range is ~0.01–0.05 (the SearchScores rrf
+    # docstring), so an additive offset would swamp fusion entirely.
+    if recency_weights and recency_boost > 0:
+        for pid in scores:
+            w = recency_weights.get(pid, 0.0)
+            if w > 0:
+                scores[pid] = scores[pid] * (1.0 + recency_boost * w)
     return dict(sorted(scores.items(), key=lambda x: x[1], reverse=True))
 
 
@@ -1069,6 +1087,42 @@ def _created_sort_key(value):
         except ValueError:
             pass
     return (1, s)
+
+
+def _recency_factors(entries: list[tuple[str, Any]]) -> dict[str, float]:
+    """Rank-based recency factor per id, newest→1.0, oldest→0.0.
+
+    R5 (#1544): the date-weight primitive fed into ``rrf_fusion``'s
+    ``recency_weights``. Reuses ``_created_sort_key`` (ISO + epoch
+    mixed-format safe, #1353). Undated/unparseable ids get 0.0 (no boost).
+    Ties on the same date sort by id for determinism and share the highest
+    factor in their rank group.
+
+    Rank-based (not age-based) so it is format-agnostic and immune to
+    out-of-range ages; with <2 dated entries there is no spread and every
+    factor stays 0.0 (nothing to weight).
+    """
+    dated = [(pid, k) for pid, d in entries
+             if (k := _created_sort_key(d))[0] == 0]  # parseable dates only
+    factors: dict[str, float] = {pid: 0.0 for pid, _ in entries}
+    if len(dated) < 2:
+        return factors
+    # Descending date order: index 0 = newest → highest factor (1.0),
+    # last = oldest → 0.0 (the rank-based percentile, newest-first). Docs
+    # on the SAME date form a rank group and SHARE the group's highest
+    # factor (deterministic tie-break — same date ⇒ same recency).
+    ordered = sorted(dated, key=lambda t: (t[1], t[0]), reverse=True)
+    n = len(ordered)
+    i = 0
+    while i < n:
+        j = i
+        while j + 1 < n and ordered[j + 1][1] == ordered[i][1]:
+            j += 1
+        factor = (n - 1 - i) / (n - 1)
+        for pid, _k in ordered[i:j + 1]:
+            factors[pid] = factor
+        i = j + 1
+    return factors
 
 
 def _beta_variance(alpha: float, beta: float) -> float:

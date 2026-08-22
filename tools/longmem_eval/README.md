@@ -237,3 +237,65 @@ jq '.methodology | {reader_model_spec, reader_pinned, reader_system_prompt, read
 
 shows `reader_pinned: true` and identical values across the three cell
 reports (pilot → 500-Q → confirmation).
+
+## Temporal/recency (R5, #1544)
+
+Temporal-reasoning (TR) questions get a distinct retrieval path, default-ON
+for the TR category and completely inert for every other question type
+(non-TR path is byte-identical to pre-R5 — baseline isolation, M8):
+
+* **Events in the TR pool** — the retrieval pool is the point + event
+  union (E2E-4's "no point-only filter"): dated `:Event` nodes
+  (eventKind `lmeHaystackSession`, one per dated haystack session,
+  `startedAt == haystack_dates[si]`, `sessionId == dataset sid`) join the
+  point hits, merged by RRF score with a deterministic id tiebreak. The
+  v2 leg's payload events (core:occurrence etc.) ride the same union with
+  `startedAt` from their payload/session date (E1 #1533 dependency —
+  landed).
+* **Recency date weight in RRF** — the engine's `rrf_fusion` caller
+  (`tortoise_fts_query`) accepts an optional recency multiplier
+  (`recency_field` / `recency_boost`): a rank-based percentile (newest
+  → 1.0, oldest → 0.0, undated → 0.0 — parsed via the existing
+  `_created_sort_key`, mixed ISO/epoch safe) multiplies each doc's RRF
+  score by `(1 + boost × factor)`. Default-off → byte-identical for every
+  pre-R5 caller. On the eval graph points carry `createdAt := session_date`
+  (sentinel `1970-01-01T00:00:00Z` for undated sessions — deterministic-
+  oldest, never the server default now), so the weight ranks by session
+  date.
+* **TR-constraint detection → time-window filter** — `detect_time_constraint`
+  classifies the TR question text: `interval` ("between … and …", ISO or
+  Month-day with the question's year) and `recency` ("N days/weeks/months
+  ago", "last N …") produce a hard window filter on the annotated
+  session_dates BEFORE truncation — session_recall@k measures the
+  in-window pool. `ordering` ("how many days", "how long", "when did",
+  bare "ago" with no bound) applies no filter — the question needs the
+  full dated set. Defensive rule: when the filter would empty the dated
+  pool, the unfiltered pool is kept (the reader is never starved into
+  abstention), recorded per question as `tr_window_fallback`.
+* **Time-ascending rendering** — the TR reader context renders dated hits
+  in ascending session_date order (dated first, undated last; stable
+  within a date). Recall metrics keep retrieval order — they measure
+  retrieval, not rendering.
+* **TR top_k cap (20→12)** — TR context items are capped at `tr_top_k`
+  (the transcript-flood control; R1's per-session chunk cap is the
+  complementary flood control).
+
+Knobs (recorded in the report methodology — same provenance as `top_k` /
+`ks`):
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--tr-top-k` | 12 | TR context item cap (20→12) |
+| `--tr-date-weight` | 0.5 | RRF recency multiplier strength (0.0 off) |
+| `--no-tr-events` | off | exclude the events timeline from the TR pool |
+
+Per-question outcomes carry `tr_constraint` (the detected kind, TR only)
+and `tr_window_fallback` (whether the window filter fell back). The run
+protocol step-2/6 knob sweeps should cover `tr_date_weight ∈ {0.0, 0.5,
+1.0}` and `tr_top_k ∈ {8, 12, 16}` on the TR subset.
+
+> ⛔ **E1 dependency note**: the v2 leg's payload-event dating
+> (`startedAt` on core:occurrence events) requires the E1 (#1533)
+> `session_date` kwarg on `extract_session_v2` — landed; without it, v2
+> events keep the server default and the dated timeline surface is
+> exercised via the deterministic leg's `lmeHaystackSession` events only.

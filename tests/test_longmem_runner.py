@@ -31,7 +31,7 @@ from tools.longmem_eval.judge import (  # noqa: E402, RUF100
 from tools.longmem_eval.reader import MockReader, build_reader  # noqa: E402, RUF100
 from tools.longmem_eval.retrieve import (  # noqa: E402, RUF100
     _annotate_hits, _assemble_context, _dedup_pool, _estimate_tokens,
-    _is_raw_chunk, render_context, retrieve_for_question,
+    _is_raw_chunk, hybrid_search, render_context, retrieve_for_question,
 )
 from tools.longmem_eval.run import (
     CheckpointStaleError, _assert_python_version, _print_summary,
@@ -341,6 +341,10 @@ def test_outcomes_to_report_golden_shape():
         "points_embedded": None,
         "embedding_coverage": None,
         "legs": [],
+        # R5 (#1544): the TR-constraint surface with defaults (None/False)
+        # — pre-R5 checkpoints render instead of KeyError.
+        "tr_constraint": None,
+        "tr_window_fallback": False,
     }
     assert report["failures"] == []
     assert report["n_failed"] == 0
@@ -467,6 +471,297 @@ def test_ingestion_chunk_window_boundaries(tmp_path):
         # empty session → 0 chunks, no exception
         q4 = {"question_id": "bva4", "haystack_sessions": [[]]}
         assert ingest_haystack(sdk, q4, chunk_turns=2)["chunks"] == 0
+    finally:
+        sdk.close()
+
+
+# ── R5 (#1544): session dates on points + dated timeline Events ────────────
+
+def test_ingest_writes_dated_session_events(tmp_path):
+    """R5 D3: one dated ``lmeHaystackSession`` :Event per dated haystack
+    session — ``startedAt == haystack_dates[si]``, ``sessionId == dataset
+    sid`` (session_recall@k keys on h["session_id"]), ``lme_session_index``
+    for the date annotation, and an ``aboutSession`` edge to the Session
+    node. mini_ie_user_001 has 2 dated sessions (2025-06-10 / 2025-06-14)."""
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        q = next(x for x in _mini() if x["question_id"] == "mini_ie_user_001")
+        ingest_haystack(sdk, q)
+        proj = sdk._get_proj()
+        rows = proj.g.query(
+            "MATCH (e:Event {eventKind:'lmeHaystackSession'}) "
+            "RETURN e.eventId, e.startedAt, e.sessionId, e.lme_session_index "
+            "ORDER BY e.lme_session_index").result_set
+        assert [(r[1], r[2], r[3]) for r in rows] == [
+            ("2025-06-10", "mini-s0", 0), ("2025-06-14", "mini-s1", 1)]
+        # aboutSession edges exist (event → Session)
+        n = proj.g.query(
+            "MATCH (e:Event {eventKind:'lmeHaystackSession'})"
+            "-[:aboutSession]->(s:Session) "
+            "RETURN count(*)").result_set[0][0]
+        assert n == 2
+        # endedAt mirrors startedAt (the dated timeline surface)
+        rows = proj.g.query(
+            "MATCH (e:Event {eventKind:'lmeHaystackSession'}) "
+            "RETURN e.startedAt, e.endedAt").result_set
+        assert all(s == e for s, e in rows)
+    finally:
+        sdk.close()
+
+
+def test_ingest_undated_session_gets_no_timeline_event(tmp_path):
+    """R5 D3 negative: an undated session (empty haystack_dates entry)
+    produces NO timeline event — honest absence (a dated event with a fake
+    date would be a false date-answer vector). Points still get the explicit
+    sentinel createdAt (deterministic-oldest → recency 0.0, never the
+    server default now)."""
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        q = {"question_id": "undated", "haystack_dates": [""],
+             "haystack_session_ids": ["s-ud"],
+             "haystack_sessions": [[{"role": "user", "content": "hi"}]]}
+        ingest_haystack(sdk, q)
+        proj = sdk._get_proj()
+        n = proj.g.query(
+            "MATCH (e:Event {eventKind:'lmeHaystackSession'}) RETURN count(*)"
+        ).result_set[0][0]
+        assert n == 0
+        rows = proj.g.query(
+            "MATCH (p:Point) RETURN p.createdAt").result_set
+        assert all(r[0] == "1970-01-01T00:00:00Z" for r in rows)
+    finally:
+        sdk.close()
+
+
+def test_ingest_points_carry_session_date_as_created_at(tmp_path):
+    """R5 D3: turn + raw-chunk points carry the session date as their
+    creation-time prop (``createdAt`` — the stored key the engine's
+    recency re-rank queries). mini_tr_003 has one dated session
+    (2025-06-10)."""
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        q = next(x for x in _mini() if x["question_id"] == "mini_tr_003")
+        ingest_haystack(sdk, q)
+        rows = sdk._get_proj().g.query(
+            "MATCH (p:Point) WHERE p.lme_question_id = 'mini_tr_003' "
+            "RETURN p.createdAt, p.lme_session_index").result_set
+        assert all(r[0] == "2025-06-10" for r in rows)  # single dated session
+    finally:
+        sdk.close()
+
+
+# ── R5 (#1544): TR union pool (point + event) + event annotation ───────────
+
+def test_hybrid_search_tr_union_includes_events(tmp_path):
+    """R5 D4: ``hybrid_search(entity_types=("point", "event"))`` merges
+    event hits into the pool — each hit carries ``scores.rrf`` (comparable
+    across the two calls — same k constant, same leg structure) and the
+    merge is deterministic (RRF desc, id tiebreak). The retrievable event
+    here is created inline with a ``subject`` (the engine fetches
+    ``n.subject`` as event content) — the deterministic timeline events
+    (name-only) prove the graph surface, not retrieval."""
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        q = next(x for x in _mini() if x["question_id"] == "mini_tr_003")
+        ingest_haystack(sdk, q)
+        sdk.create_event("adopted dog", "core:occurrence",
+                         subject="Ava adopted a dog last week",
+                         sessionId="mini-s0", lme_question_id="mini_tr_003",
+                         lme_session_index=0, startedAt="2025-06-10",
+                         is_episodic=True)
+        hits = hybrid_search(sdk, q["question"], limit=20,
+                             entity_types=("point", "event"),
+                             recency_fields={"point": "createdAt",
+                                             "event": "startedAt"},
+                             recency_boost=0.5)
+        # the event hit surfaced with a comparable rrf score
+        ev_hits = [h for h in hits
+                   if h.get("point_kind") == "core:occurrence"]
+        assert ev_hits
+        for h in hits:
+            assert (h.get("scores") or {}).get("rrf") is not None
+        # deterministic merge: rrf desc, then id
+        rrf = [((h.get("scores") or {}).get("rrf") or 0.0, h["id"])
+               for h in hits]
+        assert rrf == sorted(rrf, key=lambda t: (-t[0], t[1]))
+    finally:
+        sdk.close()
+
+
+def test_hybrid_search_default_stays_points_only(tmp_path):
+    """R5 D4 regression: the default ``entity_types=("point",)`` path is
+    unchanged — an event in the graph does NOT join the pool unless the
+    caller opts in (baseline isolation, M8)."""
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        q = next(x for x in _mini() if x["question_id"] == "mini_tr_003")
+        ingest_haystack(sdk, q)
+        sdk.create_event("adopted dog", "core:occurrence",
+                         subject="Ava adopted a dog last week",
+                         sessionId="mini-s0", lme_question_id="mini_tr_003",
+                         lme_session_index=0, startedAt="2025-06-10",
+                         is_episodic=True)
+        hits = hybrid_search(sdk, q["question"], limit=20)
+        kinds = {h.get("point_kind") for h in hits}
+        assert kinds and "core:occurrence" not in kinds
+    finally:
+        sdk.close()
+
+
+def test_annotate_hits_resolves_event_session_linkage(tmp_path):
+    """R5 D8: ``event_props_for_hits`` resolves an event id to its session
+    linkage (sessionId → session_id, lme_session_index) and ``_annotate_hits``
+    maps it to the dataset's haystack_dates — the same session_date
+    annotation path as points. ``has_answer`` stays False (evidence marking
+    is point-level)."""
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        q = next(x for x in _mini() if x["question_id"] == "mini_tr_003")
+        ingest_haystack(sdk, q)
+        from tools.longmem_eval.retrieve import _annotate_hits
+        from tools.longmem_eval.ingest import event_props_for_hits
+        proj = sdk._get_proj()
+        ev = proj.g.query(
+            "MATCH (e:Event {eventKind:'lmeHaystackSession'}) "
+            "RETURN e.eventId").result_set
+        eid = ev[0][0]
+        props = event_props_for_hits(proj, [eid])
+        assert props[eid]["lme_session_index"] == 0
+        assert props[eid]["session_id"] == "mini-s0"
+        assert props[eid]["has_answer"] is False
+        ann = _annotate_hits([{"id": eid, "content": "x",
+                               "match_source": "rrf"}],
+                             props, q["haystack_dates"])
+        assert ann[0]["session_date"] == "2025-06-10"
+    finally:
+        sdk.close()
+
+
+# ── R5 (#1544): TR wiring — union pool, window filter, time-ascending ──────
+
+def _tr_question(two_sessions: bool = True) -> dict:
+    """A TR-shaped question with one/two dated sessions (the mini fixture's
+    TR question has a single session; the ordering/window tests need two)."""
+    base = {
+        "question_id": "mini_tr_tmp",
+        "question_type": "temporal-reasoning",
+        "question": "How many days ago did Ava tell you she adopted a dog?",
+        "question_date": "2025-06-15",
+        "haystack_session_ids": ["s0", "s1"],
+        "haystack_dates": ["2025-06-10", "2025-06-14"],
+        "haystack_sessions": [
+            [{"role": "user", "content": "I adopted a dog last week.",
+              "has_answer": True}],
+            [{"role": "user", "content": "I got a new job."}],
+        ],
+        "answer_session_ids": ["s0"],
+    }
+    if not two_sessions:
+        base["haystack_session_ids"] = ["s0"]
+        base["haystack_dates"] = ["2025-06-10"]
+        base["haystack_sessions"] = base["haystack_sessions"][:1]
+    return base
+
+
+def test_tr_question_uses_tr_top_k_and_events_pool(tmp_path):
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        q = next(x for x in _mini() if x["question_id"] == "mini_tr_003")
+        ingest_haystack(sdk, q)
+        # a retrievable event (subject content matching the question) —
+        # proves the TR union pool carries event hits (E2E-4's "no
+        # point-only filter")
+        sdk.create_event("adopted dog", "core:occurrence",
+                         subject="Ava adopted a dog last week",
+                         sessionId="mini-s0", lme_question_id="mini_tr_003",
+                         lme_session_index=0, startedAt="2025-06-10",
+                         is_episodic=True)
+        ret = retrieve_for_question(sdk, q, ks=(5, 10, 20), top_k=20,
+                                    tr_top_k=12, tr_date_weight=0.5)
+        assert ret["context_point_count"] <= 12          # TR cap (20→12)
+        # union pool engaged: the event hit joined the pool
+        assert any(h.get("point_kind") == "core:occurrence"
+                   for h in ret["hits"])
+        assert ret["context_tokens"] > 0
+        # TR questions surface the detected constraint kind
+        assert ret["tr_constraint"] == "ordering"
+        assert ret["tr_window_fallback"] is False
+    finally:
+        sdk.close()
+
+
+def test_tr_context_renders_time_ascending(tmp_path):
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        q = _tr_question(two_sessions=True)
+        ingest_haystack(sdk, q)
+        ret = retrieve_for_question(sdk, q, ks=(5,), top_k=20,
+                                    tr_top_k=12)
+        # the READER's context is time-ascending (D6) — dated hits sorted
+        # by session_date, undated last; the pool (ret["hits"]) keeps
+        # retrieval order (recall measures retrieval, not rendering).
+        ctx_dates = [h["session_date"] for h in ret["context_points"]
+                     if h["session_date"]]
+        assert ctx_dates == sorted(ctx_dates)
+        assert ctx_dates  # both dated sessions present in context
+    finally:
+        sdk.close()
+
+
+def test_non_tr_question_path_unchanged(tmp_path, monkeypatch):
+    """R5 regression: a non-TR question ignores every TR knob — points-only
+    pool, top_k 20 (not TR-capped), RRF order, no constraint surface."""
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        q = next(x for x in _mini() if x["question_id"] == "mini_ie_user_001")
+        _no_embedder(monkeypatch)
+        ingest_haystack(sdk, q)
+        ret = retrieve_for_question(sdk, q, ks=(5, 10, 20), top_k=20,
+                                    tr_top_k=12, tr_date_weight=0.5)
+        assert ret["tr_constraint"] is None
+        assert ret["tr_window_fallback"] is False
+        assert ret["context_point_count"] <= 20  # not TR-capped
+        # points-only pool: no event kind anywhere in the hits
+        kinds = {h.get("point_kind") for h in ret["hits"]}
+        assert "lmeHaystackSession" not in kinds
+    finally:
+        sdk.close()
+
+
+def test_tr_window_filter_excludes_out_of_window_session(tmp_path):
+    """R5 D5: a numeric recency bound hard-filters the pool to the
+    in-window sessions BEFORE truncation — session_recall@k measures the
+    in-window pool. s1 (2025-06-01) is outside [2025-06-05, 2025-06-15]."""
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        q = _tr_question(two_sessions=True)
+        q["question"] = "What did Ava do 10 days ago?"
+        q["haystack_dates"] = ["2025-06-10", "2025-06-01"]
+        ingest_haystack(sdk, q)
+        ret = retrieve_for_question(sdk, q, ks=(5,), top_k=20, tr_top_k=12)
+        assert ret["tr_constraint"] == "recency"
+        assert ret["tr_window_fallback"] is False
+        pool_dates = {h["session_date"] for h in ret["hits"]
+                      if h["session_date"]}
+        assert pool_dates == {"2025-06-10"}  # only the in-window session
+    finally:
+        sdk.close()
+
+
+def test_tr_window_filter_falls_back_when_starved(tmp_path):
+    """R5 D5 defensive rule: when the filter would empty the dated pool
+    (no in-window hits), the unfiltered pool is kept — the reader is never
+    starved into abstention — recorded as ``tr_window_fallback: true``."""
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        q = _tr_question(two_sessions=True)
+        q["question"] = "What did Ava do 3 days ago?"
+        q["haystack_dates"] = ["2025-06-10", "2025-06-01"]
+        ingest_haystack(sdk, q)
+        ret = retrieve_for_question(sdk, q, ks=(5,), top_k=20, tr_top_k=12)
+        assert ret["tr_constraint"] == "recency"
+        assert ret["tr_window_fallback"] is True
+        assert len(ret["hits"]) > 0  # unfiltered pool retained
     finally:
         sdk.close()
 
@@ -1725,7 +2020,9 @@ class TestE3SpeakerDerivation:
                              session_id="s0", is_episodic=True)
             monkeypatch.setattr(
                 rt, "hybrid_search",
-                lambda sdk, query, limit, *, leg_trace=None: [{"id": "pt_x",
+                lambda sdk, query, limit, *, leg_trace=None,
+                       entity_types=("point",), recency_fields=None,
+                       recency_boost=0.0: [{"id": "pt_x",
                                             "content": "my 5K best is 27:12",
                                             "match_source": "fts"}])
             question = {
@@ -1783,7 +2080,9 @@ def test_session_dedup_cap_in_pool(tmp_path, monkeypatch):
                          session_id="sess-b", lme_question_id="dedup_q",
                          lme_session_index=1, is_episodic=True, status="draft")
 
-        def _fake_search(sdk_, query, limit, *, leg_trace=None):
+        def _fake_search(sdk_, query, limit, *, leg_trace=None,
+                 entity_types=("point",), recency_fields=None,
+                 recency_boost=0.0):
             return ([{"id": f"a{ci}", "content": f"chunk {ci}",
                       "match_source": "tfidf"} for ci in range(5)]
                     + [{"id": "b0", "content": "the answer point",
@@ -1868,7 +2167,9 @@ def test_session_crowded_out_still_surfaces(tmp_path, monkeypatch):
                          lme_session_index=1, is_episodic=True, status="draft")
         captured = {}
 
-        def _fake_search(sdk_, query, limit, *, leg_trace=None):
+        def _fake_search(sdk_, query, limit, *, leg_trace=None,
+                 entity_types=("point",), recency_fields=None,
+                 recency_boost=0.0):
             captured["limit"] = limit
             return ([{"id": f"a{i}", "content": f"filler {i}",
                       "match_source": "tfidf"} for i in range(20)]
@@ -1914,7 +2215,9 @@ def test_recall_on_deduped_pool(tmp_path, monkeypatch):
                              lme_question_id="pool_q", lme_session_index=0,
                              is_episodic=True, has_answer=True, status="draft")
 
-        def _fake_search(sdk_, query, limit, *, leg_trace=None):
+        def _fake_search(sdk_, query, limit, *, leg_trace=None,
+                 entity_types=("point",), recency_fields=None,
+                 recency_boost=0.0):
             return [{"id": f"e{ci}", "content": f"evidence chunk {ci}",
                      "match_source": "tfidf"} for ci in range(3)]
 

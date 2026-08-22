@@ -76,6 +76,26 @@ class TestRRFFusion:
         fused = rrf_fusion(lists)
         assert fused["a"] > fused["c"]
 
+    # R5 (#1544): recency-weighted RRF — date weight in fusion, default-off
+    # so every pre-R5 caller stays byte-identical.
+    def test_recency_boost_lifts_newer_over_older(self):
+        # equal RRF across both docs — date weight must break the tie
+        lists = [[("old", 1.0)], [("new", 1.0)]]
+        weights = {"new": 1.0, "old": 0.0}
+        fused = rrf_fusion(lists, recency_weights=weights, recency_boost=0.5)
+        assert fused["new"] > fused["old"]
+
+    def test_recency_defaults_byte_identical(self):
+        lists = [[("a", 1.0), ("b", 0.5)]]
+        assert rrf_fusion(lists) == rrf_fusion(lists, recency_weights={"a": 1.0}, recency_boost=0.0)
+        assert rrf_fusion(lists) == rrf_fusion(lists, recency_weights=None, recency_boost=0.5)
+
+    def test_undated_docs_get_no_boost(self):
+        lists = [[("dated", 1.0)], [("undated", 1.0)]]
+        fused = rrf_fusion(lists, recency_weights={"dated": 1.0}, recency_boost=0.5)
+        assert fused["dated"] > fused["undated"]
+        assert abs(fused["undated"] - (1.0 / 61)) < 1e-9  # unchanged contribution
+
 
 class TestSearchResult:
     def test_to_dict(self):

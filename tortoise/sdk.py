@@ -9398,6 +9398,8 @@ class TortoiseSDK:
         _elevated_timeout_ms: int | None = None,
         pool_size: int | None = None,
         leg_trace: list[dict] | None = None,
+        recency_field: str | None = None,
+        recency_boost: float = 0.0,
     ) -> list[dict]:
         """Hybrid search with RRF fusion + EP annotation.
 
@@ -9455,6 +9457,19 @@ class TortoiseSDK:
             folds the neighbors into the structural strategy's ranked list
             (deduped) — the graph-as-recall-amplifier pass. Default 0 skips
             the expansion entirely (byte-identical to pre-R4).
+        recency_field (R5 #1544): keyword-only, default None (off) — the
+            Cypher property name whose value re-ranks the fused pool by
+            date (e.g. ``createdAt`` on Points, ``startedAt`` on Events;
+            must match the STORED key — ``createdAt``, not the ``created_at``
+            API alias). One batch date fetch per call; the rank-based
+            factor comes from ``_recency_factors`` (newest → 1.0, undated →
+            0.0) and multiplies each doc's RRF score by
+            ``(1 + recency_boost × factor)``. Applied AFTER the RRF fusion +
+            threshold filter, BEFORE the kind filter — re-ranks the fused
+            candidate set so truncation picks up the new order. Any graph
+            error → fail-open to plain RRF (logged, never crashes).
+        recency_boost (R5 #1544): multiplier strength, clamped 0.0–10.0.
+            Default 0.0 = off (byte-identical output to pre-R5).
         """
         from .search_engine import (  # noqa: I001
             classify_query, degradation_chain, rrf_fusion,
@@ -9463,6 +9478,7 @@ class TortoiseSDK:
             SearchResult, SearchScores,
             filter_by_relationship, filter_by_traversal_predicate,
             expand_structural_hops,
+            _recency_factors,
             _trace_entry,
         )
 
@@ -9474,6 +9490,9 @@ class TortoiseSDK:
             raise ValueError(f"threshold must be 0.0-1.0, got {threshold}")
         if not (0.0 <= min_confidence <= 1.0):
             raise ValueError(f"min_confidence must be 0.0-1.0, got {min_confidence}")
+        if not (0.0 <= recency_boost <= 10.0):
+            raise ValueError(
+                f"recency_boost must be 0.0-10.0, got {recency_boost!r}")
         if order_by not in ("relevance", "confidence", "graph"):
             raise ValueError(f"order_by must be 'relevance', 'confidence', or 'graph', got {order_by!r}")
 
@@ -9667,6 +9686,36 @@ class TortoiseSDK:
             id_field = "id"
         # Graph label for MATCH (operators are Point nodes with is_operator=true)
         graph_label = "Point" if entity_type == "operator" else label
+
+        # 4b. Recency re-rank (#1544 R5): optional date weight on the fused
+        #     pool. Rank-based factor from ``recency_field`` (newest → 1.0,
+        #     undated → 0.0 via ``_recency_factors``); fail-open to plain
+        #     RRF on any graph error (circuit-breaker pattern). Default off
+        #     → byte-identical. ``id_field`` is the existing per-entity id
+        #     (``id`` for Point, ``eventId`` for Event) and ``graph_label``
+        #     likewise — the one batch Cypher per call stays label-correct.
+        if recency_field and recency_boost > 0 and result_ids:
+            try:
+                rows = graph.query(
+                    f"MATCH (n:{graph_label}) WHERE n.{id_field} IN $ids "
+                    f"RETURN n.{id_field}, n.{recency_field}",
+                    params={"ids": result_ids},
+                ).result_set
+                weights = _recency_factors([(row[0], row[1]) for row in rows])
+                fused = {pid: s * (1.0 + recency_boost * weights.get(pid, 0.0))
+                         for pid, s in fused.items()}
+                # Secondary sort key = the recency factor: at EQUAL multiplied
+                # score (including the degenerate all-0.0 case — FalkorDBLite's
+                # fulltext scores identical documents 0.0), the newer doc still
+                # ranks first (the plan's D1 multiplier can't break a 0×1.5=0
+                # tie on its own). Enabled branch only — default stays
+                # byte-identical.
+                fused = dict(sorted(fused.items(),
+                                    key=lambda x: (x[1], weights.get(x[0], 0.0)),
+                                    reverse=True))
+                result_ids = list(fused.keys())
+            except Exception as e:  # noqa: BLE001 — degrade, never crash
+                _logger.warning("recency weighting failed (%s) — plain RRF", e)
 
         if kind and query is not None and result_ids:
             expanded = expanded_kinds

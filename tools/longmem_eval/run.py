@@ -61,6 +61,7 @@ from .report import (
 from .retrieve import (
     DEFAULT_CONTEXT_TOKEN_CAP,
     DEFAULT_MAX_CHUNKS_PER_SESSION,
+    DEFAULT_TR_TOP_K,
     retrieve_for_question,
 )
 
@@ -431,6 +432,13 @@ def run_evaluation(
     chunk_turns: int = DEFAULT_CHUNK_TURNS,
     max_context_tokens: int = DEFAULT_CONTEXT_TOKEN_CAP,
     max_chunks_per_session: int = DEFAULT_MAX_CHUNKS_PER_SESSION,
+    # R5 (#1544): TR knobs — temporal-reasoning questions get the events
+    # union pool, the engine recency date weight, the TR-constraint window
+    # filter, time-ascending rendering, and the tighter tr_top_k cap
+    # (20→12). Non-TR questions ignore them (byte-identical path).
+    tr_top_k: int = DEFAULT_TR_TOP_K,
+    tr_date_weight: float = 0.5,
+    tr_events: bool = True,
     # M7 (#1527): run-hygiene inputs.
     dataset_fingerprint: str = "unknown",
     integrity_threshold: float = 0.0,
@@ -521,7 +529,10 @@ def run_evaluation(
                     ret = retrieve_for_question(
                         sdk, question, ks=ks, top_k=top_k,
                         max_context_tokens=max_context_tokens,
-                        max_chunks_per_session=max_chunks_per_session)
+                        max_chunks_per_session=max_chunks_per_session,
+                        tr_top_k=tr_top_k,
+                        tr_date_weight=tr_date_weight,
+                        tr_events=tr_events)
 
                     _stage = "reader"
                     t0 = time.monotonic()
@@ -608,6 +619,11 @@ def run_evaluation(
                 "points_embedded": ret["points_embedded"],
                 "embedding_coverage": ret["embedding_coverage"],
                 "legs": ret["legs"],
+                # R5 (#1544): the TR-constraint surface per question — the
+                # detected kind (TR only) + whether the window filter fell
+                # back to the unfiltered pool (never starve the reader).
+                "tr_constraint": ret.get("tr_constraint"),
+                "tr_window_fallback": ret.get("tr_window_fallback", False),
             }
             with _lock:
                 outcomes.append(outcome)
@@ -675,6 +691,14 @@ def run_evaluation(
             "context_token_cap": max_context_tokens,
             "max_chunks_per_session": max_chunks_per_session,
         },
+        # R5 (#1544) D7: TR knob values recorded verbatim in the
+        # methodology (the run protocol step-2/6 knob sweeps consume them;
+        # tr_top_k and R1's context cap are complementary flood controls).
+        r5_knobs={
+            "tr_top_k": tr_top_k,
+            "tr_date_weight": tr_date_weight,
+            "tr_events": tr_events,
+        },
         # M7 (#1527): publication-gated audit + run-hygiene provenance.
         dataset_semantics_audit=dataset_semantics_audit,
         integrity_threshold=integrity_threshold,
@@ -707,6 +731,10 @@ def outcomes_to_report(
     # keys are always emitted (not_checked default when omitted).
     embedder_status: dict | None = None,
     r1_knobs: dict[str, Any] | None = None,
+    # R5 (#1544) D7: the TR knob values (tr_top_k / tr_date_weight /
+    # tr_events) recorded in the report methodology — same pattern as
+    # ``r1_knobs``.
+    r5_knobs: dict[str, Any] | None = None,
     # M7 (#1527): publication-gated audit + run-hygiene provenance.
     dataset_semantics_audit: dict[str, Any] | None = None,
     integrity_threshold: float = 0.0,
@@ -747,7 +775,13 @@ def outcomes_to_report(
                 # o.get so a pre-R3 checkpoint resumes with the defaults
                 # (coverage keys → None, legs → []) instead of KeyError.
                 "points_total", "points_embedded", "embedding_coverage",
-            )} | {"legs": list(o.get("legs") or [])}
+                # R5 (#1544): TR-constraint surface — read via o.get so a
+                # pre-R5 checkpoint resumes with the defaults (None/False).
+                "tr_constraint",
+            )} | {"legs": list(o.get("legs") or []),
+                  # False default: a pre-R5 checkpoint had no TR path — no
+                  # filter ran, so the fallback flag is honestly False.
+                  "tr_window_fallback": bool(o.get("tr_window_fallback", False))}
             for o in outcomes
         ]
     }
@@ -778,6 +812,7 @@ def outcomes_to_report(
         top_k=top_k,
         failures=failures,
         r1_knobs=r1_knobs,
+        r5_knobs=r5_knobs,
         embedder_status=embedder_status,
         extra=extra,
         # M7 (#1527): publication-gated audit + run-hygiene provenance.
@@ -916,6 +951,15 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--top-k", type=int, default=DEFAULT_TOP_K,
                    help="max context items handed to the reader (default 20; "
                         "the token budget --context-cap bounds it further, R1 #1540)")
+    p.add_argument("--tr-top-k", type=int, default=DEFAULT_TR_TOP_K,
+                   help="TR-questions context cap (default 12 — the 20→12 "
+                        "transcript-flood control, R5 #1544)")
+    p.add_argument("--tr-date-weight", type=float, default=0.5,
+                   help="TR-questions recency date weight (default 0.5 — the "
+                        "RRF recency multiplier; 0.0 disables, R5 #1544)")
+    p.add_argument("--no-tr-events", action="store_true",
+                   help="exclude the events timeline from the TR retrieval "
+                        "pool (default: events included, R5 #1544)")
     p.add_argument("--chunk-turns", type=_positive_int, default=None,
                    help="turns per raw-chunk window (env TORTOISE_LME_CHUNK_TURNS; "
                         "default 2; >= 1; the run protocol step-2 sweep selects "
@@ -1039,6 +1083,11 @@ def run_main(argv: list[str] | None = None) -> dict[str, Any]:
     max_chunks_per_session = _resolve_int_knob(
         "TORTOISE_LME_MAX_CHUNKS_PER_SESSION",
         DEFAULT_MAX_CHUNKS_PER_SESSION, args.max_chunks_per_session)
+    # R5 (#1544) TR knobs: argparse defaults (12 / 0.5 / events-on),
+    # recorded verbatim in the report methodology (D7).
+    tr_top_k = args.tr_top_k
+    tr_date_weight = args.tr_date_weight
+    tr_events = not args.no_tr_events
 
     # R3 (#1542) D2: embedder pre-flight — before dataset load (fail before
     # the ~tens-of-MB download). Real runs refuse to start when the dense
@@ -1115,6 +1164,8 @@ def run_main(argv: list[str] | None = None) -> dict[str, Any]:
             embedder_status=embedder_status,
             chunk_turns=chunk_turns, max_context_tokens=context_cap,
             max_chunks_per_session=max_chunks_per_session,
+            tr_top_k=tr_top_k, tr_date_weight=tr_date_weight,
+            tr_events=tr_events,
             dataset_fingerprint=dataset_fingerprint,
             integrity_threshold=args.integrity_threshold,
             integrity_justification=args.integrity_justification,
