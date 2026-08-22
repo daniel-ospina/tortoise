@@ -168,6 +168,43 @@ def _make_sdk(*, namespace: str | None = None) -> TortoiseSDK:
     return sdk
 
 
+def _registry_anchor() -> "TortoiseSDK":
+    """Return the process-lifetime registry SDK (the _FALLBACK_KEEPALIVE
+    anchor), creating it if absent. Unlike _make_sdk (which returns a FRESH
+    SDK per call), the anchor's embedded server survives for the process —
+    writes through it are visible to later calls (#1607: a fresh SDK is
+    GC'd with close-on-GC + SHUTDOWN NOSAVE, losing the writes before an
+    idempotent replay reads them).
+
+    URI mode: honors TORTOISE_DB_URI exactly like _make_sdk (the registry
+    control plane + real FalkorDB config) — host-mode finalizers are no-ops,
+    so there is no GC/NOSAVE concern there and the anchor is just the
+    cached handle."""
+    if os.environ.get("TORTOISE_DB_URI"):
+        return TortoiseSDK(namespace="registry")
+    db_path = os.environ.get("TORTOISE_DB_PATH", "/data/tortoise.db")
+    try:
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    except OSError:
+        import tempfile
+        db_path = os.path.join(tempfile.gettempdir(), "tortoise.db")
+    anchor = _FALLBACK_KEEPALIVE.get("registry")
+    if anchor is None or not _anchor_usable(anchor, db_path):
+        if anchor is not None:
+            try:
+                anchor.close()
+            except Exception:
+                pass
+            _FALLBACK_KEEPALIVE.pop("registry", None)
+        anchor = TortoiseSDK(db_path=db_path, namespace="registry")
+        try:
+            anchor._get_proj()
+        except Exception:
+            pass
+        _FALLBACK_KEEPALIVE["registry"] = anchor
+    return anchor
+
+
 # ── MCP Streamable HTTP sub-app (#236) ────────────────────────────
 # Built BEFORE _lifespan references it (no unbound reference). Mounted at /mcp
 # — the MCP app carries its own auth/rate-limit/security middleware stack;
@@ -6275,8 +6312,14 @@ def _soft_delete_registry_team(team_id: str, now: str, grace_hours: float) -> No
     FIRST and the ``deleted_at`` stamp LAST, so a partial failure leaves
     the team NOT marked deleted and a retry re-runs the full cascade —
     never a "deleted" team whose keys still authenticate.
+
+    #1607: uses the KEEPALIVE anchor (not a fresh _make_sdk) — the anchor's
+    embedded server is process-lifetime; a fresh SDK's server is GC'd with
+    close-on-GC + SHUTDOWN NOSAVE, so the cascade's writes could vanish
+    before an idempotent replay reads deleted_at (403 instead of the 200
+    already-replay).
     """
-    sdk = _make_sdk(namespace="registry")
+    sdk = _registry_anchor()
     reg = sdk._get_registry()
     reg.query(
         "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL "
