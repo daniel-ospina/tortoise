@@ -1173,17 +1173,22 @@ async def get_current_team(request: Request) -> dict:
             # #329: quota fields read with tier in one round-trip. max_teams is
             # NOT read — multi-team is a user capability, not a tier field (D1).
             # #308: suspended_at/flagged_at/email ride the same round-trip.
+            # #1623: subscription_status/customer_email (the Stripe webhook's
+            # store, #310) ride the same round-trip so the dashboard Billing
+            # page can render plan state.
             "MATCH (t:Team {id: $id}) RETURN t.tier, t.max_users, t.max_graphs, "
             "t.max_points, t.max_api_keys, t.max_sessions, t.suspended_at, "
-            "t.flagged_at, t.email",
+            "t.flagged_at, t.email, t.subscription_status, t.customer_email",
             params={"id": team_id},
         )
         row = team.result_set[0] if team.result_set else None
         if row:
-            tier, mu, mg, mp, mak, ms, t_suspended, t_flagged, t_email = row
+            (tier, mu, mg, mp, mak, ms, t_suspended, t_flagged, t_email,
+             t_sub_status, t_customer_email) = row
         else:
             tier, mu, mg, mp, mak, ms = ("free", None, None, None, None, None)
             t_suspended = t_flagged = t_email = None
+            t_sub_status = t_customer_email = None
         # #308 (R5): durable suspension check (registry mode — the
         # MemoryAbuseStore registry_write callback wired in
         # supabase_control.get_abuse_store writes these props).
@@ -1206,6 +1211,10 @@ async def get_current_team(request: Request) -> dict:
                 # #308 additive: enforcement state + owner email
                 "suspended_at": t_suspended, "flagged_at": t_flagged,
                 "email": t_email,
+                # #1623: billing surface (the Stripe webhook's store) so
+                # /v1/team can render plan state + the dashboard Billing page.
+                "subscription_status": t_sub_status,
+                "customer_email": t_customer_email,
                 # #1148: dashboard key-login acceptance. Registry mode
                 # defaults true (selfhost operators control access directly).
                 "dashboard_key_login": True}
@@ -1301,13 +1310,17 @@ async def _session_user_team(request: Request, user: dict) -> dict:
     # create_graph (_membership_team).
     if team_id not in {m["team_id"] for m in memberships}:
         raise HTTPException(status_code=403, detail="No membership in team")
-    from tortoise.supabase_control import (_TEAM_ADDITIVE_DKL_TIER,
-                                            _TEAM_ADDITIVE_0015_TIER,
-                                            _QUOTA_SELECT,
-                                            _teams_row_fail_soft)
+    from tortoise.supabase_control import (
+        _QUOTA_SELECT,
+        _TEAM_ADDITIVE_0015_TIER,
+        _TEAM_ADDITIVE_BILLING_TIER,
+        _TEAM_ADDITIVE_DKL_TIER,
+        _teams_row_fail_soft,
+    )
     row = _teams_row_fail_soft(
         cp, team_id, select=_QUOTA_SELECT,
-        additive_tiers=[_TEAM_ADDITIVE_DKL_TIER, _TEAM_ADDITIVE_0015_TIER])
+        additive_tiers=[_TEAM_ADDITIVE_DKL_TIER, _TEAM_ADDITIVE_0015_TIER,
+                         _TEAM_ADDITIVE_BILLING_TIER])
     if row is None:
         raise HTTPException(status_code=403, detail="Team not found")
     from tortoise.pricing import tier_limits
@@ -1322,6 +1335,10 @@ async def _session_user_team(request: Request, user: dict) -> dict:
         "suspended_at": row.get("suspended_at"),
         "flagged_at": row.get("flagged_at"),
         "email": row.get("email"),
+        # #1623: Stripe billing state (webhook store) — /v1/team renders
+        # plan state from these.
+        "subscription_status": row.get("subscription_status"),
+        "customer_email": row.get("customer_email"),
         # session always passes the dashboard-login gate
         "dashboard_key_login": True,
     }
@@ -1601,6 +1618,14 @@ class TeamInfoResponse(BaseModel):
     # The Protect-your-account banner + the toggle read this. Registry mode
     # defaults true (selfhost operators control access directly).
     dashboard_key_login: bool = True
+    # #1623: billing surface for the dashboard Billing page — subscription
+    # state (read off the Team node through the auth dict sources) and
+    # catalog-resolved checkout price ids (STRIPE_PRICE_IDS via
+    # PriceCatalog — the client never hardcodes Stripe price ids, #310).
+    subscription_status: str | None = None
+    customer_email: str | None = None
+    checkout_price_id: str | None = None
+    checkout_price_ids: dict[str, str] = {}
 
 
 # ── Billing: Checkout + Portal request/response models (#310, Task 5) ───────
@@ -2427,6 +2452,12 @@ async def team_info(team: dict = Depends(get_current_team)):
         # Coerce None → True (legacy/registry dicts may omit it; a falsy None
         # would fail the Pydantic bool and 500 every /v1/team call).
         dashboard_key_login=team.get("dashboard_key_login", True) is not False,
+        # #1623: billing surface — subscription state + catalog-resolved
+        # price ids (best-effort None/{} when STRIPE_PRICE_IDS is unset).
+        subscription_status=team.get("subscription_status"),
+        customer_email=team.get("customer_email"),
+        checkout_price_id=_default_checkout_price_id(),
+        checkout_price_ids=_checkout_price_ids(),
     )
 
 
@@ -8700,6 +8731,39 @@ def _billing_portal_sync(team: dict) -> dict:
 async def billing_portal(request: Request, team: dict = Depends(get_current_team_session)):
     """Customer portal for existing subscribers (team auth)."""
     return await asyncio.to_thread(_billing_portal_sync, team)
+
+
+def _default_checkout_price_id() -> str | None:
+    """Server-resolved default checkout price: pro monthly (#310 Task 9).
+
+    The dashboard upgrade CTA uses this so price ids stay env-driven
+    (STRIPE_PRICE_IDS) and never leak into the client. Best-effort — None
+    when the catalog is unconfigured (missing env → BillingConfigError on
+    PriceCatalog() construction; registry/selfhost must not 500 /v1/team).
+    """
+    try:
+        from tortoise.billing import PriceCatalog
+        catalog = PriceCatalog()
+        return catalog.price_for("pro", "monthly") or None
+    except Exception:
+        return None
+
+
+def _checkout_price_ids() -> dict[str, str]:
+    """#1623: tier → monthly price_id for the paid public tiers, server-
+    resolved from STRIPE_PRICE_IDS (the Billing page's per-plan Upgrade
+    CTAs — never hardcoded in the client). Free/anon ($0) have no checkout.
+    Best-effort {} when the catalog is unconfigured.
+    """
+    try:
+        from tortoise.billing import PriceCatalog
+        catalog = PriceCatalog()
+        return {
+            tier: pid for tier in ("solo", "pro", "team")
+            if (pid := catalog.price_for(tier, "monthly")) is not None
+        }
+    except Exception:
+        return {}
 
 
 

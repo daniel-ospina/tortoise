@@ -952,3 +952,51 @@ class TestBootReconcile:
         elapsed = time.monotonic() - started
         assert elapsed < 5, "lifespan must not block on a hanging Stripe client"
         assert not t.is_alive() or True  # lifespan returned
+
+
+class TestTeamInfoBillingSurface:
+    """#1623 — GET /v1/team exposes the billing surface the dashboard needs:
+    subscription_status/customer_email (read off the Team node through the
+    auth dict sources) + catalog-resolved checkout_price_id/checkout_price_ids.
+    """
+
+    def test_team_info_exposes_billing_surface(self, billing_client):
+        """subscription_status/customer_email are read from the Team NODE —
+        SET them (the webhook's store) then assert the round-trip; the
+        catalog-driven fields resolve from STRIPE_PRICE_IDS."""
+        billing_client["sdk"]._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t.subscription_status=$s, "
+            "t.customer_email=$e",
+            params={"id": billing_client["team_id"], "s": "active",
+                    "e": "billing-owner@example.com"})
+        r = billing_client["client"].get("/v1/team",
+                                         headers=billing_client["headers"])
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["subscription_status"] == "active"
+        assert body["customer_email"] == "billing-owner@example.com"
+        assert body["checkout_price_id"] == VALID_CATALOG["pro"]["monthly"]["id"]
+        assert body["checkout_price_ids"] == {
+            "solo": VALID_CATALOG["solo"]["monthly"]["id"],
+            "pro": VALID_CATALOG["pro"]["monthly"]["id"],
+            "team": VALID_CATALOG["team"]["monthly"]["id"],
+        }
+
+    def test_team_info_billing_surface_degrades_without_catalog(self, billing_client, monkeypatch):
+        """No STRIPE_PRICE_IDS (registry/selfhost) → best-effort None/{} —
+        /v1/team must NOT 500/503 (PriceCatalog() constructor raises
+        BillingConfigError when unconfigured; the helper catches it)."""
+        monkeypatch.delenv("STRIPE_PRICE_IDS", raising=False)
+        r = billing_client["client"].get("/v1/team",
+                                         headers=billing_client["headers"])
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["checkout_price_id"] is None
+        assert body["checkout_price_ids"] == {}
+
+    def test_team_info_subscription_status_none_when_unset(self, billing_client):
+        """Node field unset → None (the Billing page renders 'Free plan')."""
+        r = billing_client["client"].get("/v1/team",
+                                         headers=billing_client["headers"])
+        assert r.status_code == 200, r.text
+        assert r.json()["subscription_status"] is None
