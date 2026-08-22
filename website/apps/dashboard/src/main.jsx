@@ -331,6 +331,11 @@ function claimIntentInFlight() {
   // ── Billing (#310 Task 9): upgrade CTA + manage billing ──
   const ACTIVE_STATUSES = ['active', 'past_due', 'trialing']
   const hasActiveSubscription = team && ACTIVE_STATUSES.includes(team.subscription_status)
+  // #1623 (review P2): canceled/unpaid teams still have a Stripe customer —
+  // the portal gives invoice history + cancel management. Upgrade stays for
+  // re-subscription.
+  const PORTAL_STATUSES = [...ACTIVE_STATUSES, 'canceled', 'unpaid']
+  const canManageSubscription = team && PORTAL_STATUSES.includes(team.subscription_status)
 
   // #1623: parameterized upgrade — the header Upgrade button uses the
   // server-resolved default (team.checkout_price_id); the Billing page and
@@ -2305,9 +2310,11 @@ function claimIntentInFlight() {
         {/* #1290: manage subscription — Stripe portal (upgrade/downgrade/cancel)
             for teams with an existing Stripe customer (#310 backend exists). */}
         {team && hasActiveSubscription && (
+          {canManageSubscription && (
           <button className="tier-badge tier-manage" onClick={manageBilling} disabled={billingPending}>
             {billingPending ? 'Opening portal…' : 'Manage subscription'}
           </button>
+          )}
         )}
         {team && team.status === 'flagged' && (
           <span className="tier-badge" title="Suspicious activity detected — see security alerts">⚠ flagged</span>
@@ -2610,7 +2617,7 @@ function claimIntentInFlight() {
           <section className="billing">
             <div className="row">
               <h2>Billing</h2>
-              {hasActiveSubscription && (
+              {canManageSubscription && (
                 <button className="tier-badge tier-manage" onClick={manageBilling} disabled={billingPending}>
                   {billingPending ? 'Opening portal…' : 'Manage subscription'}
                 </button>
@@ -2679,7 +2686,7 @@ function claimIntentInFlight() {
                     </ul>
                     {current ? (
                       <button className="ghost" disabled title="You're on this plan">Current plan</button>
-                    ) : hasActiveSubscription ? (
+                    ) : canManageSubscription ? (
                       <button className="ghost" onClick={manageBilling} disabled={billingPending}>
                         {billingPending ? 'Opening portal…' : 'Manage subscription'}
                       </button>
