@@ -452,16 +452,25 @@ class TestS5:
         assert payload.get("supersessions") == []
 
     def test_point_supersession_revises(self):
+        """E7 (D1): a later-session VALUE change for the same entity+attribute
+        (length-guarded overlap >= REVISES_MIN_OVERLAP) is UPDATE — the
+        payload point rides reason REVISES + a point-level supersession
+        record (the E5 machinery, unchanged). A same-VALUE re-wording is
+        NOOP (E2E-11 MECE boundary), never REVISES — covered in the
+        consolidation tests."""
         search = {"entities": [], "events": [],
-                  "points": [{"id": "pt-old", "content":
-                              "single flash with granularity is the working path",
+                  "points": [{"id": "pt_old", "content": "gym at 6pm",
                               "kind": "statement"}]}
-        result = v2.execute_embed(S2_FIXTURE, search, session_id="s1")
+        embed = {"points": [{"content": "gym at 5pm",
+                             "pointKind": "statement",
+                             "about_entities": ["gym"]}]}
+        result = v2.execute_embed(embed, search, session_id="s1")
         pts = result["payload"]["points"]
         assert pts[0]["reason"] == "REVISES"
-        note = next(n for n in result["link_before_create"]
-                    if "single-flash with granularity" in n["searched_for"])
-        assert note["found"] is True
+        assert pts[0]["id"] != "pt_old"     # new content-addressed id
+        ss = [s for s in result["supersessions"] if s["superseded"] == "pt_old"]
+        assert ss, "point-level supersession record must ride the payload"
+        assert result["stats"]["points"] == 1
 
     def test_exact_point_match_dedups(self):
         content = "single-flash with granularity is the working path"
@@ -472,7 +481,17 @@ class TestS5:
         embed["points"] = [{"content": content, "pointKind": "statement",
                             "about_entities": []}]
         result = v2.execute_embed(embed, search, session_id="s1")
-        assert result["payload"]["points"][0]["id"] == "pt-same"
+        # E7 (D1/D4): identical content → NOOP(identical) — NO payload point;
+        # the prior id + session ref ride the RESULT-level noops record
+        # (the E2E-11 MECE boundary: identical-value re-assertion → NOOP).
+        assert len(result["noops"]) == 1
+        noop = result["noops"][0]
+        assert noop["point_id"] == "pt-same"
+        assert noop["reason"] == "identical"
+        assert noop["session_ref"] == "s1"
+        assert all(p["content"] != content
+                   for p in result["payload"]["points"])
+        assert result["stats"]["noops"] == 1
 
     def test_minted_kind_repair(self):
         embed = json.loads(json.dumps(S2_FIXTURE))

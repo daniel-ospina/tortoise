@@ -42,11 +42,13 @@ from .evidence import (EVIDENCE_QUOTE_CAP, anchor_quote, evidence_sessions,  # n
                        mark_for)
 from .evidence import _overlap  # noqa: F401, E402 — back-compat re-export
 from .ingest import (SESSION_TRANSCRIPT_KIND, EXTRACTION_POINT_KIND,  # noqa: E402
-                     _point_exists, _session_chunks)
+                     _point_exists, _existing_point_ids, _session_chunks)
 
 
 def _point_status(proj, pid: str) -> str:
-    """The point's persisted status — '' when the point does not exist."""
+    """The point's persisted status — '' when the point does not exist.
+    (E7 D6: supersession endpoint statuses now ride the batch probe — this
+    per-id helper is retained for direct callers only.)"""
     rows = proj.g.query(
         "MATCH (p:Point {id:$id}) RETURN p.status",
         params={"id": pid}).result_set
@@ -74,6 +76,21 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
                                 "raw_chunk": 0}}
     proj = sdk._get_proj()
 
+    # E7 (#1539 D6): ONE batch existence probe per payload — the payload's
+    # point ids + operator src/dst ids — so the per-point/per-op
+    # ``_point_exists`` N+1 collapses to O(1) queries per session at 500-Q
+    # run scale. Point-node semantics preserved exactly: event-endpoint
+    # operator ids are simply absent from the set (today's behavior —
+    # operators over events stay skipped). Supersession endpoints are NOT
+    # here: the new point is created by the points loop BELOW, so its
+    # existence is probed by the supersession section's own single batch.
+    batch_ids: list[str] = [
+        str(p.get("id") or "") for p in (payload.get("points") or [])
+        if p.get("id")]
+    for op in (payload.get("operators") or []):
+        batch_ids += [str(op.get("src") or ""), str(op.get("dst") or "")]
+    existing = _existing_point_ids(proj, batch_ids)
+
     # ── entities (objects) ──
     for e in payload.get("entities", []) or []:
         name = str(e.get("name", "")).strip()
@@ -89,6 +106,11 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
             logger.warning("v2 ingest entity %r failed: %s", name, ex)
 
     # ── points (the search surface) ──
+    # ``created_point_ids`` (E7 D6): the ids the points loop actually
+    # creates this run — the operator loop runs AFTER the points loop, so
+    # same-payload endpoints are in THIS set (the pre-loop batch ``existing``
+    # only covers points that already existed, e.g. re-ingest).
+    created_point_ids: set[str] = set()
     for p in payload.get("points", []) or []:
         content = str(p.get("content", "")).strip()
         pid = str(p.get("id", "")).strip()
@@ -103,7 +125,7 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
         mark = mark_for({**p, "content": content, "quote": quote},
                         session_id=sid, evidence_sessions=ev_sessions,
                         answer_turn_contents=evidence_turns)
-        if _point_exists(proj, pid):
+        if pid in existing:
             # #1369 review P2: content-addressed collision across sessions —
             # OR-in this session's evidence marking (M6: never overwrite a
             # True with False on collision; first-writer props keep the
@@ -137,7 +159,19 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
                 reason=str(p.get("reason") or "NEW"),   # E5: REVISES visible on the node
                 **point_props,
             )
+            # E7 (D7): aboutObject parity — the canonical predicate the
+            # classifier's entity gate (D2) keys off in the eval graph
+            # (mirrors the hosted §4.2 MERGE; one batched query per point).
+            names = [str(n) for n in (p.get("about_entities") or [])
+                     if isinstance(n, str) and n.strip()]
+            if names:
+                proj.g.query(
+                    "UNWIND $names AS name "
+                    "MATCH (p:Point {id:$pid}), (o:Object {name:name}) "
+                    "MERGE (p)-[:aboutObject]->(o)",
+                    params={"pid": pid, "names": names})
             stats["points"] += 1
+            created_point_ids.add(pid)
             if mark["has_answer"]:
                 stats["evidence_points"] += 1
                 for mk, fired in mark["marks"].items():
@@ -175,19 +209,22 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
         src, dst = str(op.get("src", "")), str(op.get("dst", ""))
         if op_type not in ("IMPL", "NAND") or not src or not dst:
             continue
-        if not _point_exists(proj, src) or not _point_exists(proj, dst):
+        if (src not in existing and src not in created_point_ids) \
+                or (dst not in existing and dst not in created_point_ids):
             continue
         # #1369 review P2: operator idempotency — create_operator mints a
         # fresh node each call; guard on the (op_type, src, dst) triple
         # (op_type is validated IMPL/NAND — safe to inline as the rel type).
-        existing = proj.g.query(
+        # NOTE: the batch ``existing`` set must NOT be rebound here — later
+        # operators need it for their endpoint membership checks.
+        dup_edge = proj.g.query(
             f"MATCH (o:Point {{is_operator:true, op_type:$t}})-[:{op_type} {{idx:0}}]->(s) "
             f"WHERE s.id = $src "
             f"MATCH (o)-[:{op_type} {{idx:1}}]->(d) WHERE d.id = $dst "
             "RETURN count(*) LIMIT 1",
             params={"t": op_type,
                     "src": src, "dst": dst}).result_set
-        if existing and existing[0][0]:
+        if dup_edge and dup_edge[0][0]:
             continue
         try:
             sdk.create_operator(op_type, src, [dst],
@@ -203,19 +240,36 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
     # transfer. Runs AFTER the points loop so the new point exists (ordering
     # contract, mirrored from the hosted §6b loop). Unresolvable endpoints /
     # already-terminal olds are skipped with a warning (idempotent re-ingest;
-    # supersede_point would raise on a terminal old). ──
-    for sr in payload.get("supersessions", []) or []:
-        old_id = str(sr.get("superseded", "") or "").strip()
-        new_id = str(sr.get("supersedes_by", "") or "").strip()
+    # supersede_point would raise on a terminal old). ONE batched probe
+    # (id + status) covers every endpoint — no per-record N+1 (D6). ──
+    ss_records = [sr for sr in (payload.get("supersessions") or [])
+                  if isinstance(sr, dict)]
+    ss_existing: dict[str, str] = {}
+    if ss_records:
+        ss_endpoints: list[str] = []
+        for sr in ss_records:
+            old_id = str(sr.get("superseded") or "").strip()
+            new_id = str(sr.get("supersedes_by") or "").strip()
+            if old_id.startswith("pt_") and new_id.startswith("pt_")\
+                    and old_id != new_id:
+                ss_endpoints += [old_id, new_id]
+        if ss_endpoints:
+            rows = proj.g.query(
+                "MATCH (n:Point) WHERE n.id IN $ids "
+                "RETURN n.id, n.status",
+                params={"ids": ss_endpoints}).result_set
+            ss_existing = {r[0]: (r[1] or "") for r in rows}
+    for sr in ss_records:
+        old_id = str(sr.get("superseded") or "").strip()
+        new_id = str(sr.get("supersedes_by") or "").strip()
         if not (old_id.startswith("pt_") and new_id.startswith("pt_")) \
                 or old_id == new_id:
             continue
-        if not _point_exists(proj, old_id) or not _point_exists(proj, new_id):
+        if old_id not in ss_existing or new_id not in ss_existing:
             logger.warning("v2 supersession skip %s→%s: endpoint missing "
                            "(fail-open)", old_id, new_id)
             continue
-        if _point_status(proj, old_id) in ("superseded", "retracted",
-                                           "archived"):
+        if ss_existing[old_id] in ("superseded", "retracted", "archived"):
             continue   # idempotent re-ingest — already terminal
         try:
             sdk.supersede(old_id, new_id)     # EXISTING canonical unified tool
@@ -225,6 +279,71 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
 
     stats["minted_kinds"] = len(payload.get("minted_kinds", []) or [])
     return stats
+
+
+def _apply_noops(sdk: TortoiseSDK, noops: list[dict], *, s_node: str,
+                 has_evidence: bool) -> int:
+    """D4 write path: apply result-level NOOP records to the eval graph.
+
+    For each record — the folded session's ref is stamped onto the CANONICAL
+    point (additive ``duplicates`` list property, set-merge — idempotent:
+    a re-run appends nothing new), the Session gets the link-only CONTAINS
+    edge (existing edge types only — NO new edge type, NO IMPL), and when
+    the folded session carried an answer turn ``has_answer`` is OR'd onto
+    the canonical point (evidence-marking OR-in, mirrors the #1369 P2
+    collision OR-in). Physically ONE point → retrieval dedup by
+    construction (E2E-11 no-double-count). Best-effort: any failure is
+    warned and skipped. Returns the count applied."""
+    proj = sdk._get_proj()
+    applied = 0
+    for rec in noops or []:
+        pid = str(rec.get("point_id") or "").strip()
+        ref = str(rec.get("session_ref") or s_node or "").strip()
+        if not pid:
+            continue
+        try:
+            rows = proj.g.query(
+                "MATCH (p:Point {id:$id}) "
+                "SET p.duplicates = coalesce(p.duplicates, []) + "
+                "    CASE WHEN $ref IN coalesce(p.duplicates, []) "
+                "         THEN [] ELSE [$ref] END "
+                "RETURN p.id",
+                params={"id": pid, "ref": ref}).result_set
+            if not rows:
+                logger.warning("v2 noop target %s missing — skipped", pid)
+                continue
+            if has_evidence:
+                proj.g.query(
+                    "MATCH (p:Point {id:$id}) SET p.has_answer = true",
+                    params={"id": pid})
+            proj.g.query(
+                "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
+                "MERGE (s)-[:CONTAINS]->(p)",
+                params={"sid": s_node, "pid": pid})
+            applied += 1
+        except Exception as ex:  # noqa: BLE001, RUF100 — best-effort in the eval
+            logger.warning("v2 noop stamp on %s failed: %s", pid, ex)
+    return applied
+
+
+def _apply_deletions(sdk: TortoiseSDK, deletions: list[dict]) -> int:
+    """D5 write path: apply result-level DELETE-soft records via the
+    EXISTING canonical ``retract_point`` — status='retracted' tombstone
+    (point stays in the graph; no resurrect on recall by construction —
+    default retrieval excludes terminal statuses, #1391). Best-effort:
+    a missing/already-terminal point raises ValueError → warned, the eval
+    never dies on a delete. Returns the count applied."""
+    applied = 0
+    for rec in deletions or []:
+        pid = str(rec.get("point_id") or "").strip()
+        if not pid:
+            continue
+        try:
+            sdk.retract_point(pid)
+            applied += 1
+        except ValueError as e:
+            logger.warning("v2 deletion %s skipped (fail-open): %s", pid, e)
+    return applied
 
 
 def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
@@ -245,6 +364,7 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
              "events": 0, "entities": 0, "operators": 0, "evidence_points": 0,
              "evidence_turns": 0, "minted_kinds": 0, "supersessions": 0,
              "supersessions_written": 0,
+             "noops_applied": 0, "deletions_applied": 0,
              "evidence_marks": {"source_session": 0, "verbatim": 0,
                                 "raw_chunk": 0}, "errors": [],
              # M4 (#1524, D4): the per-question error census — rolled up from
@@ -277,6 +397,15 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
                     "qid": qid, "si": si, "sid": sid},
         )
         stats["sessions"] += 1
+        proj = sdk._get_proj()
+
+        # E7 (#1539 D6): ONE batch existence probe per session (turn ids +
+        # raw chunk ids) — the per-turn/per-chunk ``_point_exists`` N+1
+        # collapses to O(1) queries per session at 500-Q run scale.
+        turn_ids = [f"lme:{qid}:s{si}:t{ti}" for ti in range(len(session))]
+        session_chunks = list(_session_chunks(session, chunk_turns))
+        chunk_ids = [f"lme:{qid}:s{si}:c{ci}" for ci, _, _ in session_chunks]
+        existing = _existing_point_ids(proj, turn_ids + chunk_ids)
 
         # ── E3 (D8): turn points — the speaker-derivation substrate. Same
         # deterministic ids + speaker property as the v1 leg; has_answer is
@@ -284,14 +413,14 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
         for ti, turn in enumerate(session):
             role = str(turn.get("role") or "unknown")
             turn_id = f"lme:{qid}:s{si}:t{ti}"
-            if not _point_exists(sdk._get_proj(), turn_id):
+            if turn_id not in existing:
                 sdk.create_point(
                     "event", f"[{role}] {turn.get('content') or ''!s}",
                     id=turn_id, session_id=sid, lme_question_id=qid,
                     lme_session_index=si, speaker=role,
                     is_episodic=True, status="draft",
                 )
-            sdk._get_proj().g.query(
+            proj.g.query(
                 "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
                 "MERGE (s)-[:CONTAINS]->(t)",
                 params={"sid": s_node, "tid": turn_id})
@@ -303,12 +432,12 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
         # v2 chunks ARE marked (D5): a chunk is an evidence chunk iff any
         # contained turn is an evidence turn (the union of a session's chunks
         # is the session, so no evidence turn is orphaned).
-        for ci, text, turn_idxs in _session_chunks(session, chunk_turns):
+        for ci, text, turn_idxs in session_chunks:
             chunk_id = f"lme:{qid}:s{si}:c{ci}"
             contains_evidence = any(
                 bool(turn.get("has_answer"))
                 for ti, turn in enumerate(session) if ti in turn_idxs)
-            if not _point_exists(sdk._get_proj(), chunk_id):
+            if chunk_id not in existing:
                 sdk.create_point(
                     SESSION_TRANSCRIPT_KIND, text, id=chunk_id,
                     session_id=sid, lme_question_id=qid,
@@ -319,10 +448,10 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
                 stats["chunks"] += 1  # written (post-guard) — stats == graph
             elif contains_evidence:
                 # Idempotent OR-in: never overwrite a True with False.
-                sdk._get_proj().g.query(
+                proj.g.query(
                     "MATCH (p:Point {id:$id}) SET p.has_answer = true",
                     params={"id": chunk_id})
-            sdk._get_proj().g.query(
+            proj.g.query(
                 "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
                 "MERGE (s)-[:CONTAINS]->(t)",
                 params={"sid": s_node, "tid": chunk_id},
@@ -367,6 +496,16 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
             stats["evidence_marks"][mk] = (
                 stats["evidence_marks"].get(mk, 0)
                 + written.get("evidence_marks", {}).get(mk, 0))
+
+        # E7 (D4/D5): apply the result-level consolidation records — NOOP
+        # folds (duplicates stamp + CONTAINS link + has_answer OR-in) and
+        # DELETE-soft retractions (retract_point tombstone). Both stay
+        # OUT of the Layer-1 payload (D8) — they ride the extractor result.
+        stats["noops_applied"] += _apply_noops(
+            sdk, out.get("noops") or [], s_node=s_node,
+            has_evidence=bool(evidence_turns))
+        stats["deletions_applied"] += _apply_deletions(
+            sdk, out.get("deletions") or [])
 
         # ── Session CONTAINS the extracted points ──
         for p in payload.get("points", []) or []:
