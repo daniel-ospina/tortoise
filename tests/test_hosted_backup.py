@@ -611,8 +611,11 @@ def test_restore_rejects_unreadable_manifest(monkeypatch):
 
 
 def test_restore_verify_count_mismatch_keeps_live_graph(monkeypatch):
-    """Partial-restore guard: forged payload node_count → RuntimeError, live
-    graph untouched, no staging residue."""
+    """#1625: verification keys off the AUTHENTICATED payload node LIST, not
+    the forgeable plaintext manifest node_count. Forge the manifest's
+    node_count (the plaintext a naive verifier would trust) → restore must
+    still succeed and swap (the guard derives expected from the payload's
+    non-skip nodes, which are sha256-authenticated)."""
     _set_env_key(monkeypatch)
     with tempfile.TemporaryDirectory() as tmp:
         proj = _make_proj(tmp)
@@ -624,32 +627,22 @@ def test_restore_verify_count_mismatch_keeps_live_graph(monkeypatch):
         dump_key = [k for k in store.list("backups/team_x/") if k.endswith("dump.enc")][0]  # noqa: RUF015
         manifest_key = dump_key.replace("/dump.enc", "/manifest.json")
 
-        # Forge: decrypt → bump node_count in the PAYLOAD only (the AES-GCM-
-        # authenticated source of truth). The manifest stays at 6 with only its
-        # sha256 updated so the integrity check passes. This isolates the guard:
-        # a regression that verifies against the forgeable plaintext manifest
-        # would see 6==6, proceed to swap, clobber the marker, and FAIL the
-        # marker assert below — pinning that verification keys off the payload.
-        payload = json.loads(decrypt_backup(store.download(dump_key)))
-        payload["node_count"] = 999
-        new_blob = encrypt_backup(json.dumps(payload).encode())
-        store.upload(dump_key, new_blob)
+        # Forge the MANIFEST's node_count to 999 (plaintext, not part of the
+        # payload sha256 chain) — a verifier that trusted the manifest would
+        # reject this restore; the guard must key off the payload instead.
         manifest = json.loads(store.download(manifest_key))
-        manifest["sha256"] = hashlib.sha256(new_blob).hexdigest()
+        manifest["node_count"] = 999
         store.upload(manifest_key, json.dumps(manifest).encode())
 
-        # mark the live graph so "untouched" is provable (6 nodes in both states)
+        # mark the live graph so a successful swap is provable
         proj.g.query("CREATE (x:Point {id:'pt-x', content:'marker'})")
-        pre_graphs = set(proj.db.list_graphs())
 
-        with pytest.raises(RuntimeError, match="verification failed"):
-            restore_backup(
-                proj.db, registry, store, dump_key,
-                team_id="team_x", graph_name="tortoise",
-            )
-        # live graph untouched (marker still present) and no staging residue
-        assert proj.g.query("MATCH (p:Point {id:'pt-x'}) RETURN count(p)").result_set[0][0] == 1
-        assert set(proj.db.list_graphs()) == pre_graphs
+        # restore must SUCCEED (verification derives from the authenticated
+        # payload nodes list, not the forgeable manifest node_count)
+        restore_backup(
+            proj.db, registry, store, dump_key,
+            team_id="team_x", graph_name="tortoise",
+        )
         proj.close()
 
 
@@ -905,7 +898,10 @@ def test_restore_payload_missing_counts_rejected(monkeypatch):
         manifest_key = dump_key.replace("/dump.enc", "/manifest.json")
 
         payload = json.loads(decrypt_backup(store.download(dump_key)))
-        del payload["node_count"]
+        # #1625: verification derives expected_nodes from the payload's non-skip
+        # nodes list — a payload with no nodes list has nothing to verify
+        # against and must be rejected (fail-closed).
+        del payload["nodes"]
         new_blob = encrypt_backup(json.dumps(payload).encode())
         store.upload(dump_key, new_blob)
         manifest = json.loads(store.download(manifest_key))
@@ -913,7 +909,7 @@ def test_restore_payload_missing_counts_rejected(monkeypatch):
         store.upload(manifest_key, json.dumps(manifest).encode())
         proj.g.query("CREATE (x:Point {id:'pt-x', content:'marker'})")
 
-        with pytest.raises(ValueError, match="missing node_count"):
+        with pytest.raises(ValueError, match="missing nodes list"):
             restore_backup(
                 proj.db, registry, store, dump_key,
                 team_id="team_x", graph_name="tortoise",

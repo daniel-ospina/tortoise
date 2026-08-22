@@ -160,13 +160,24 @@ def dump_graph(g, graph_name: str | None = None) -> dict:
 
     Uses internal ids only as a temporary bridge (``__dump_id``) — restore rewires
     edges before removing the bridge, so the export is fully portable.
+
+    #1625: internal bookkeeping (EpMeta/GraphEventMeta/TeamMeta label-wide,
+    # plus Meta nodes with key in {point_fts_v2, event_fts_v2} — the R2/R3
+    # FTS-migration markers) is EXCLUDED — runtime markers, not content;
+    # exporting them inflates node_count and restore recreates them
+    # spuriously. Meta {key:'calibration_milestone'} is DATA (Gate B state)
+    # and is NOT excluded (key-scoped).
     """
+    from tortoise.hosted_api import _is_export_skip_node
     nodes = []
     rows = g.query("MATCH (n) RETURN id(n), labels(n), properties(n)").result_set
     for internal_id, labels, props in rows:
+        labels_list = [str(l) for l in (labels or [])]  # noqa: E741
+        if _is_export_skip_node(labels_list, dict(props or {})):
+            continue
         nodes.append({
             "dump_id": int(internal_id),
-            "labels": [str(l) for l in (labels or [])],  # noqa: E741
+            "labels": labels_list,
             "props": dict(props or {}),
         })
     edges = []
@@ -260,7 +271,18 @@ def restore_graph(g, dump: dict) -> dict:
         )
     # ACTUAL node count from the graph (not the dump bookkeeping) — the
     # verification gate must compare real graph state, mirroring the edge check.
-    actual_nodes = g.query("MATCH (n) RETURN count(n)").result_set[0][0]
+    # #1625: count non-skip nodes by applying the SAME predicate as the dump
+    # (_is_export_skip_node) so the two sides can never drift again (the
+    # earlier label/cypher query missed TeamMeta — a pre-fix team backup's
+    # TeamMeta node made actual = expected + 1 → RestoreVerificationError).
+    # The dst projection's open re-creates the FTS Meta markers, which the
+    # dump excludes; calibration_milestone is data and IS counted.
+    from tortoise.hosted_api import _is_export_skip_node
+    actual_nodes = 0
+    for row in g.query("MATCH (n) RETURN labels(n), properties(n)").result_set:
+        labels = [str(l) for l in (row[0] or [])]
+        if not _is_export_skip_node(labels, dict(row[1] or {})):
+            actual_nodes += 1
     return {"nodes": int(actual_nodes), "edges": int(actual_edges)}
 
 
@@ -624,7 +646,24 @@ def _restore_into_temp_verify_swap(
     recoverable.
     """
     if expected_nodes is None:
-        expected_nodes = payload.get("node_count")
+        # #1625: derive the expected count from the AUTHENTICATED dump content
+        # (non-skip nodes), not the manifest node_count — a pre-fix backup's
+        # node_count includes the R2/R3 Meta markers (old dump_graph filtered
+        # nothing), while restore_graph's actual count excludes them. The
+        # payload is sha256-authenticated, so this is equally secure and
+        # correct for both old and new dumps.
+        from tortoise.hosted_api import _is_export_skip_node
+        nodes_list = payload.get("nodes")
+        if not isinstance(nodes_list, list):
+            raise ValueError(
+                "Backup payload missing nodes list — refusing to restore "
+                "with count verification disabled"
+            )
+        expected_nodes = sum(
+            1 for n in nodes_list
+            if not _is_export_skip_node(list(n.get("labels") or []),
+                                        dict(n.get("props") or {}))
+        )
     if expected_edges is None:
         expected_edges = payload.get("edge_count")
     if expected_nodes is None or expected_edges is None:

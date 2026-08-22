@@ -119,9 +119,9 @@ def test_event_nodes_invisible_to_domain_queries(sdk_factory, tmp_path):
     assert ev["event_id"] not in hit_ids
     domain = proj.g.query(
         "MATCH (n) WHERE NOT (n:GraphEvent) AND NOT (n:GraphEventMeta) "
-        "AND NOT (n:EpMeta) RETURN count(n)"
+        "AND NOT (n:EpMeta) AND NOT (n:Meta) RETURN count(n)"
     ).result_set[0][0]
-    assert domain == 1  # only the Point; event + EpMeta bookkeeping nodes excluded
+    assert domain == 1  # only the Point; event + EpMeta/Meta bookkeeping nodes excluded
 
 
 def test_seq_is_monotonic_under_concurrency(sdk_factory, tmp_path):
