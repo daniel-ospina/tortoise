@@ -542,16 +542,32 @@ def test_retrieval_multi_session_evidence(tmp_path, monkeypatch):
         ret = None
         for attempt in range(3):
             reset_circuit_breakers()
-            ret = retrieve_for_question(sdk, q, ks=(5,), top_k=20)
-            if ret["session_recall@k"]["5"] == 1.0 and ret["turn_recall@k"]["5"] >= 0.5:
+            # #1608: this question's evidence turn ranks at position 6 under
+            # sparse-only TF-IDF — k=5 is a marginal boundary (0.5 locally,
+            # 0.0 under CI load), k=10 is stable (1.0). Assert both sessions
+            # at k=5 (exact) + turn recall at k=10 (robust); the k=5 turn
+            # check stays as a loose floor (0.5 = one of the two evidence
+            # turns) so the ranking claim is still honest.
+            ret = retrieve_for_question(sdk, q, ks=(5, 10), top_k=20)
+            # Loop condition must dominate the final assertion set: retry
+            # unless BOTH the k=5 floor (one evidence turn) and the k=10
+            # floor (both evidence turns) hold — a degraded run that shifts
+            # s0's turn past position 5 yields turn@5=0.0 but session@5=1.0
+            # and turn@10=1.0, so gating on k=10 alone would break with NO
+            # retry on the exact #1608 flake mode.
+            if (ret["session_recall@k"]["5"] == 1.0
+                    and ret["turn_recall@k"]["5"] >= 0.5
+                    and ret["turn_recall@k"]["10"] >= 1.0):
                 break
             if attempt < 2:
                 time.sleep(0.5 * (attempt + 1))
         # both evidence sessions are recovered (session-level recall exact);
-        # turn-level: s0's evidence turn is inside the top-5, s1's is further
-        # down (TF-IDF ranks s1's planning turn higher) — ≥0.5 is honest.
+        # turn-level: s0's evidence turn is inside the top-10, s1's is
+        # further down (TF-IDF ranks s1's planning turn higher) — both are
+        # recovered by k=10, and ≥0.5 of them by k=5 is honest.
         assert ret["session_recall@k"]["5"] == 1.0  # both evidence sessions
-        assert ret["turn_recall@k"]["5"] >= 0.5
+        assert ret["turn_recall@k"]["5"] >= 0.5  # at least one in top-5
+        assert ret["turn_recall@k"]["10"] >= 1.0  # both by top-10 (#1608)
     finally:
         sdk.close()
 
