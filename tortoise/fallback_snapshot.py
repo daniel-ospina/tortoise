@@ -43,7 +43,8 @@ SNAPSHOT_TTL_SECONDS = 60.0
 _SNAPSHOT_QUERY = (
     "MATCH (n:Point) "
     "WHERE (n.is_operator = false OR n.is_operator IS NULL) "
-    "RETURN n.id, n.content, n.pointKind, n.status, coalesce(n.outdated, false)"
+    "RETURN n.id, n.content, n.pointKind, n.status, "
+    "       coalesce(n.outdated, false), coalesce(n.search_keys, '')"
 )
 
 
@@ -111,7 +112,10 @@ def build_snapshot(proj) -> dict | None:
         rows = g.query(_SNAPSHOT_QUERY).result_set
         points = [
             {"id": r[0], "content": r[1] or "", "pointKind": r[2] or "",
-             "status": r[3] or "", "outdated": bool(r[4])}
+             "status": r[3] or "", "outdated": bool(r[4]),
+             # R2 (#1541) D4: search_keys joins the snapshot (flat string in
+             # the graph since R2; legacy lists handled by index_text).
+             "search_keys": r[5] or ""}
             for r in rows
         ]
     except Exception as e:  # noqa: BLE001, RUF100
@@ -120,7 +124,11 @@ def build_snapshot(proj) -> dict | None:
 
     vectorizer = doc_vecs = None
     model_id = None
-    texts = [p["content"] for p in points]
+    # R2 (#1541) D4: the corpus text is content ∪ search_keys — the
+    # embedded-stack counterpart of the real backend's multi-field Point
+    # FTS index (surface-11 normalization is the shared index_text builder).
+    from tortoise.sparse import index_text
+    texts = [index_text(p["content"], p["search_keys"]) for p in points]
     try:
         from tortoise.embeddings import EmbeddingModel
         model = EmbeddingModel.get()
@@ -250,7 +258,18 @@ def search_snapshot(
             vectors_failed = True
     if (not scored and query_vec is None) or vectors_failed:
         # Cached vectors unavailable/failed — legacy in-memory scorer (same inputs).
-        scored = search_points(query, points, threshold=threshold, limit=limit)
+        # R2 (#1541) D4: the scorer sees the indexed text (content ∪
+        # search_keys) — same union the real stack indexes; the returned
+        # payload keeps the REAL content (alias text is index-only).
+        from tortoise.sparse import index_text
+        real_content = {p["id"]: p["content"] for p in points}
+        indexed = [
+            {**p, "content": index_text(p["content"], p.get("search_keys"))}
+            for p in points
+        ]
+        scored = search_points(query, indexed, threshold=threshold, limit=limit)
+        for r in scored:
+            r["content"] = real_content.get(r["id"], r["content"])
 
     meta = {p["id"]: p for p in points}
     return [

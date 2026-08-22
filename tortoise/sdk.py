@@ -504,6 +504,34 @@ def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
     return props
 
 
+def _flatten_search_keys_prop(props: dict) -> None:
+    """R2 (#1541) D3: search_keys must be a FLAT space-joined STRING in the
+    graph — FalkorDB's fulltext index (``db.idx.fulltext.createNodeIndex``)
+    does NOT index array-valued properties (verified on server v4.16.7: a
+    list-valued search_keys never matches, the flat string does). E3's
+    canonical payload keeps the list (commit_schema pins ``list[str]`` and
+    E3's persistence tests assert the list at the node); the GRAPH value is
+    flattened here — a cross-lane deviation the R2 plan pre-authorized with
+    an owner flag (plan D3: "R2 normalizes at index time via ' '.join(...) in
+    the projection"). The FTS index then matches unqualified query tokens
+    against content ∪ search_keys — the issue's "question ∪ search_keys"
+    query expansion, at the index level.
+
+    No-op for str values, None, and absent keys (absent search_keys → no
+    prop written, the pre-E3 shape). An empty list drops the prop (E3's
+    ``or None`` convention).
+    """
+    sk = props.get("search_keys")
+    if sk is None:
+        return
+    if isinstance(sk, (list, tuple)):
+        flat = " ".join(str(s).strip() for s in sk if str(s).strip())
+        if flat:
+            props["search_keys"] = flat
+        else:
+            props.pop("search_keys", None)
+
+
 def _coerce_props(props: dict) -> dict:
     """Flatten a nested 'props' dict into top-level keyword props, in place.
 
@@ -1445,6 +1473,8 @@ class TortoiseSDK:
         # #329: server-managed fields rejected on the props passthrough
         # (the explicit-id path via props.pop("id") below is preserved for operators)
         props = _sanitize_props(props)
+        # R2 (#1541) D3: search_keys is stored flat (see _flatten_search_keys_prop).
+        _flatten_search_keys_prop(props)
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         proj = self._get_proj()
@@ -2477,6 +2507,8 @@ class TortoiseSDK:
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         # #329: id mutation + server-managed fields rejected
         props = _sanitize_props(props, reject_id=True)
+        # R2 (#1541) D3: search_keys is stored flat (see _flatten_search_keys_prop).
+        _flatten_search_keys_prop(props)
         if is_episodic is not None:
             props["is_episodic"] = is_episodic  # server-managed (explicit param only)
 
