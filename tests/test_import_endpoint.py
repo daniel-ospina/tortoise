@@ -162,10 +162,30 @@ def _seed_team(fake, *, role: str = "owner", deleted_at: str | None = None,
     fake.seed("api_keys", [_key_row()])
 
 
+# #1612: hold seeded projections alive — _seed_live_graph creates a
+# FalkorProjection whose server is GC'd with close-on-GC + SHUTDOWN NOSAVE
+# (#1475) when it goes out of scope, losing the seeded writes before a later
+# _counts read re-opens the DB (assert [] == ['old-0'] flake). Same pattern
+# as _REG_SDKS / _SEED_SDKS elsewhere. Closed at session end.
+_SEED_PROJS: list = []
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _close_seed_projs():
+    """Close held seeded projections at session end (see _SEED_PROJS)."""
+    yield
+    while _SEED_PROJS:
+        try:
+            _SEED_PROJS.pop().close()
+        except Exception:
+            pass
+
+
 def _seed_live_graph(db_path: str, n_points: int = 1, *,
                      graph_name: str = GRAPH_NAME) -> None:
     """Seed the team's live FalkorDB graph (the content an import replaces)."""
     proj = FalkorProjection(db_path, graph_name=graph_name)
+    _SEED_PROJS.append(proj)  # #1612: hold so the server (and writes) survive
     try:
         g = proj.g
         for i in range(n_points):
@@ -174,7 +194,8 @@ def _seed_live_graph(db_path: str, n_points: int = 1, *,
                 params={"id": f"old-{i}", "c": f"old content {i}"},
             )
     finally:
-        proj._conn.close() if hasattr(proj, "_conn") else None
+        # keep the projection + its server alive until session end (#1612)
+        pass
 
 
 def _counts(db_path: str, graph_name: str = GRAPH_NAME) -> dict:
