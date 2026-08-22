@@ -311,24 +311,31 @@ def _finalize_embedder_preflight(status: dict, *, mock: bool) -> dict:
     continues (CI smoke stays runnable offline)."""
     reason = status.get("reason")
     if mock:
+        # Reachable under --mock (warn + continue) AND under --skip-preflight
+        # (the gate is lifted for debugging; #1626). Distinguish the two so an
+        # operator isn't told a real run was "mock".
         print("[longmem_eval] WARNING: embedder unavailable "
               f"(reason={reason}) — the vector/dense leg is DISABLED for "
-              "this mock run; install with: uv sync --group dev "
+              "this run; install with: uv sync --group dev "
               "--extra embeddings", file=sys.stderr)
         return status
-    raise SystemExit(
-        "[longmem_eval] EMBEDDER PRE-FLIGHT FAILED — the dense (vector) "
-        f"leg cannot run (reason={reason}). Refusing to start: publishing "
-        "a dense-less report is worse than no report.\n"
-        "The eval env must install the pinned embedder (R3 #1542):\n"
-        "  uv sync --group dev --extra embeddings\n"
-        "  uv run python -c \"from sentence_transformers import "
-        "SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')\"\n"
-        "Verify with:\n"
-        "  uv run python -c \"from tortoise.embeddings import "
-        "EmbeddingModel; m = EmbeddingModel.get(load_timeout=600); "
-        "assert m is not None; print('embedder OK')\"")
-
+    print("[longmem_eval] EMBEDDER PRE-FLIGHT FAILED — the dense (vector) "
+          f"leg cannot run (reason={reason}). Refusing to start: publishing "
+          "a dense-less report is worse than no report.", file=sys.stderr)
+    print("The eval env must install the pinned embedder (R3 #1542):",
+          file=sys.stderr)
+    print("  uv sync --group dev --extra embeddings", file=sys.stderr)
+    print("  uv run python -c \"from sentence_transformers import "
+          "SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')\"",
+          file=sys.stderr)
+    print("Verify with:", file=sys.stderr)
+    print("  uv run python -c \"from tortoise.embeddings import "
+          "EmbeddingModel; m = EmbeddingModel.get(load_timeout=600); "
+          "assert m is not None; print('embedder OK')\"", file=sys.stderr)
+    # #1626: numeric exit code (the message goes to stderr) — consistent with
+    # the PreflightError path's SystemExit(1); a string code made CLI exit
+    # status 1 ambiguous and broke the exit-code contract.
+    raise SystemExit(1)
 
 def _call_with_backoff(fn, *, what: str, retries: int,
                        base: float = BACKOFF_BASE_S, cap: float = BACKOFF_CAP_S):
@@ -1134,9 +1141,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--mock", action="store_true",
                    help="offline mode: MockReader + MockJudge, no API keys (CI)")
     p.add_argument("--skip-preflight", action="store_true",
-                   help="bypass the pre-flight API gate (debugging/offline "
-                        "only — the run-protocol gate must be ON for "
-                        "pilot/500 runs)")
+                   help="bypass the pre-flight API gate AND the dense-leg "
+                        "(embedder) gate (debugging/offline only — the "
+                        "run-protocol gate must be ON for pilot/500 runs; "
+                        "a skipped dense leg is recorded as unavailable in "
+                        "the report methodology)")
     p.add_argument("--ingest-mode", default="deterministic",
                    choices=["deterministic", "v2"],
                    help="ingestion: deterministic (turn points + raw transcripts) "
@@ -1312,7 +1321,11 @@ def run_main(argv: list[str] | None = None) -> dict[str, Any]:
     # the ~tens-of-MB download). Real runs refuse to start when the dense
     # leg can't run; --mock warns and continues. The status flows into the
     # report methodology (D5: embedder + vector_strategy always emitted).
-    embedder_status = _preflight_embedder(mock=args.mock)
+    # R3 (#1542) D2: the embedder gate. `--skip-preflight` must ALSO skip
+    # this gate — it's the "skip all gates" debugging flag; a real (non-mock)
+    # run without it still refuses to start dense-less (#1626).
+    embedder_status = _preflight_embedder(
+        mock=args.mock or args.skip_preflight)
 
     instances = ds.load_dataset(
         args.split, limit=args.limit, data_path=args.data,
