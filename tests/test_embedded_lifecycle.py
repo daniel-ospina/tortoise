@@ -72,6 +72,7 @@ RAW_EMBEDDED_ALLOWLIST = {
     "test_redis_guard.py",
     "test_remove_context_migration.py",
     "test_semantic_extractor.py",
+    "test_search_engine.py",  # #1541 R2 FTS-migration test builds a live FalkorDB( client directly
     "test_supplementary.py",
 }
 
