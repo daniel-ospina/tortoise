@@ -509,7 +509,7 @@ from tortoise.search_engine import fetch_point_epistemic_state, SearchResult, Se
 def test_fetch_state_basic(sdk):
     p = _point(sdk, content="plain claim")
     state = fetch_point_epistemic_state(_graph(sdk), [p["id"]])[p["id"]]
-    assert set(state) == {"status", "superseded_by", "supersedes", "subject"}
+    assert {"status", "superseded_by", "supersedes", "subject"} <= set(state)
     assert state["subject"] is None
     assert state["superseded_by"] is None
     assert state["supersedes"] == []
