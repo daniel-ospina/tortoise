@@ -1,6 +1,8 @@
 import React from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
+// #1623: plan display data (build-time import of product/pricing.json).
+import { planOptions, planForTier, STATUS_LABELS, TIER_LABELS } from './pricing.js'
 
 const API_BASE = 'https://api.premiselabs.co'
 const KEY_STORAGE = 'tortoise_api_key'
@@ -330,15 +332,18 @@ function claimIntentInFlight() {
   const ACTIVE_STATUSES = ['active', 'past_due', 'trialing']
   const hasActiveSubscription = team && ACTIVE_STATUSES.includes(team.subscription_status)
 
-  async function upgrade() {
-    if (!team?.checkout_price_id || checkoutPending) return
+  // #1623: parameterized upgrade — the header Upgrade button uses the
+  // server-resolved default (team.checkout_price_id); the Billing page and
+  // welcome plan step pass a per-tier price id from team.checkout_price_ids.
+  async function upgradeToPrice(priceId) {
+    if (!priceId || checkoutPending) return
     setCheckoutPending(true)
     try {
       const { checkout_url } = await api('/v1/billing/checkout', {
         useSession: true,  // #1148: management → session JWT when signed in
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ price_id: team.checkout_price_id }),
+        body: JSON.stringify({ price_id: priceId }),
       })
       const win = window.open(checkout_url, '_blank')
       // Round-13: async-fetch-then-open is popup-blocked in Firefox/Safari —
@@ -358,6 +363,10 @@ function claimIntentInFlight() {
       setError(err.message)
       setCheckoutPending(false)
     }
+  }
+
+  async function upgrade() {
+    await upgradeToPrice(team?.checkout_price_id)
   }
 
   async function manageBilling() {
@@ -2176,6 +2185,9 @@ function claimIntentInFlight() {
           <button className={tab === 'keys' ? 'active' : ''} onClick={() => { setTab('keys'); setSelectedSessionId(null); setSessionDetail(null); }}>API Keys</button>
           <button className={tab === 'graphs' ? 'active' : ''} onClick={() => setTab('graphs')}>Graphs</button>
           <button className={tab === 'members' ? 'active' : ''} onClick={() => setTab('members')}>Members</button>
+          {/* #1623: Billing — plan, usage, upgrade/portal. Session-gated like
+              the rest of the dashboard (anon teams get the Protect screen). */}
+          <button className={tab === 'billing' ? 'active' : ''} onClick={() => setTab('billing')}>Billing</button>
         </nav>
         {/* #1148-ux: account blob — GitHub/Vercel/Linear pattern: current
             workspace name + avatar top-right; dropdown switches team and
@@ -2537,6 +2549,101 @@ function claimIntentInFlight() {
                 })}
               </tbody>
             </table>
+          </section>
+        )}
+
+        {/* #1623: Billing — current plan, limits/usage, plan options, upgrade
+            + Stripe portal CTAs. Renders only when team is loaded (the rest
+            of the dashboard guards the same way). Price ids come from
+            team.checkout_price_ids (server-resolved, #310) — never hardcoded. */}
+        {tab === 'billing' && team && (
+          <section className="billing">
+            <div className="row">
+              <h2>Billing</h2>
+              {hasActiveSubscription && (
+                <button className="tier-badge tier-manage" onClick={manageBilling} disabled={billingPending}>
+                  {billingPending ? 'Opening portal…' : 'Manage subscription'}
+                </button>
+              )}
+            </div>
+
+            {/* Current plan card */}
+            <div className="card" style={{ marginBottom: 24 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
+                <div>
+                  <span className="tier-badge">{(TIER_LABELS[team.tier] || team.tier || 'free')} plan</span>
+                  {team.subscription_status && (
+                    <span className="dim small" style={{ marginLeft: '0.5rem' }}>
+                      {STATUS_LABELS[team.subscription_status] || team.subscription_status}
+                    </span>
+                  )}
+                </div>
+                {team.customer_email && <span className="dim small">Billing: {team.customer_email}</span>}
+              </div>
+              <div className="cards" style={{ marginTop: 12, marginBottom: 0 }}>
+                <div className="card"><div className="card-val">{(team.write_ops_used ?? 0).toLocaleString()}</div><div className="card-label">Write ops used{(team.write_ops_limit ? ` / ${team.write_ops_limit.toLocaleString()}` : '')}{team.write_ops_period ? ` · ${team.write_ops_period}` : ''}</div></div>
+                <div className="card"><div className="card-val">{team.point_count ?? 0}</div><div className="card-label">Data points</div></div>
+                <div className="card"><div className="card-val">{team.max_graphs == null ? '∞' : team.max_graphs}</div><div className="card-label">Graphs</div></div>
+                <div className="card"><div className="card-val">{team.max_users == null ? '∞' : team.max_users}</div><div className="card-label">Users</div></div>
+              </div>
+              {(team.write_ops_limit ?? 0) > 0 && (
+                <div style={{ marginTop: 4 }}>
+                  <div style={{ background: 'var(--surface-hover, rgba(255,255,255,0.06))', borderRadius: 6, height: 8, overflow: 'hidden' }}>
+                    <div style={{
+                      width: `${Math.min(100, Math.round(((team.write_ops_used ?? 0) / team.write_ops_limit) * 100))}%`,
+                      background: 'var(--accent, #06b6d4)',
+                      height: '100%',
+                    }} />
+                  </div>
+                  <p className="dim small" style={{ marginTop: 6 }}>
+                    {Math.round(((team.write_ops_used ?? 0) / team.write_ops_limit) * 100)}% of monthly write ops
+                    {team.overage_eligible && team.overage_cost_usd ? ` · overage after limit at $${team.overage_cost_usd}/10k ops` : ''}
+                  </p>
+                </div>
+              )}
+              {hasActiveSubscription && (
+                <p className="dim small" style={{ marginTop: 8 }}>
+                  Changes to your plan (upgrade, downgrade, cancel, invoices) go through the Stripe customer portal.
+                </p>
+              )}
+            </div>
+
+            {/* Plan options */}
+            <h3 style={{ fontSize: 15, marginBottom: 10 }}>Plans</h3>
+            <div className="plans-grid">
+              {planOptions().map((p) => {
+                const current = p.tier === team.tier
+                const hasPrice = Boolean(team.checkout_price_ids?.[p.tier])
+                return (
+                  <div key={p.tier} className={`plan-card${current ? ' current' : ''}`}>
+                    <div className="plan-card-head">
+                      <strong>{p.label}</strong>
+                      {p.popular && !current && <span className="dim small">popular</span>}
+                      {current && <span className="tier-badge" style={{ fontSize: 10, padding: '1px 8px' }}>Current plan</span>}
+                    </div>
+                    <div className="plan-price">
+                      {p.price === 0 ? '$0' : `$${p.price}`}<span className="dim small">/mo</span>
+                    </div>
+                    <ul className="plan-limits">
+                      {p.limits.map((l) => <li key={l}>{l}</li>)}
+                    </ul>
+                    {current ? (
+                      <button className="ghost" disabled title="You're on this plan">Current plan</button>
+                    ) : hasActiveSubscription ? (
+                      <button className="ghost" onClick={manageBilling} disabled={billingPending}>
+                        {billingPending ? 'Opening portal…' : 'Manage subscription'}
+                      </button>
+                    ) : hasPrice ? (
+                      <button className="btn-primary" onClick={() => upgradeToPrice(team.checkout_price_ids[p.tier])} disabled={checkoutPending}>
+                        {checkoutPending ? 'Opening checkout…' : 'Upgrade'}
+                      </button>
+                    ) : (
+                      <a className="ghost" href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">See pricing</a>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
           </section>
         )}
 
