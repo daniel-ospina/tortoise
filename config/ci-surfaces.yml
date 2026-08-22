@@ -115,10 +115,12 @@ surfaces:
   - test_ci_selection.py
   - test_consolidation_4way.py
   - test_dataset_audit.py
+  - test_e2e9_point_in_time.py
   - test_eval_report_integrity.py
   - test_extractor_reliability.py
   - test_ingest_v2_consolidation.py
   - test_lint_config.py
+  - test_lme_ingest_v2_supersession.py
   - test_lme_m6_evidence.py
   - test_longmem_errors.py
   - test_no_tests_imports_in_production.py
@@ -261,6 +263,7 @@ surfaces:
   - test_topic_summarization.py
   - test_tortoise_search.py
   - test_relationships_bounded.py
+  - test_validity_windows.py
   - test_value_extractor.py
   - test_extractor_v2.py
   - test_wiring_phase01.py
