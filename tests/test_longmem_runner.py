@@ -1013,6 +1013,43 @@ def test_retrieve_for_question_surfaces_supersession_annotation(tmp_path):
         sdk.close()
 
 
+def test_retrieve_for_question_structural_recall_amplifier(tmp_path):
+    """R4 (#1543) — graph as recall amplifier: the answer statement has no
+    text overlap with the question; it enters top-k via the structural leg
+    (kind-scan of statement points + 1-2 hop IMPL expansion from the text
+    hit). match_source is never null (E2E-1)."""
+    from tools.longmem_eval.ingest import EXTRACTION_POINT_KIND, ingest_haystack
+    from tools.longmem_eval.retrieve import retrieve_for_question
+
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        # a question whose answer turn is the seed text hit
+        q = next(x for x in _mini()
+                 if x["question_id"] == "mini_ku_004")
+        ingest_haystack(sdk, q)
+        # mint an extracted statement (v2-write shape) with NO text overlap
+        # with the question, then wire turn → op → statement (IMPL)
+        sdk.create_point(
+            EXTRACTION_POINT_KIND, "personal best 5K time is 27:12",
+            id="r4-amp-stmt-1", session_id="s1",
+            lme_question_id=q["question_id"], lme_session_index=0,
+            is_episodic=True, status="draft")
+        sdk._get_proj().g.query(
+            "MATCH (t:Point) WHERE t.id = $tid "
+            "MATCH (s:Point) WHERE s.id = $sid "
+            "CREATE (op:Point {is_operator:true, op_type:'IMPL', label:'supports'}) "
+            "CREATE (t)-[:IMPL {idx:0}]->(op) "
+            "CREATE (op)-[:IMPL {idx:1}]->(s)",
+            params={"tid": "lme:mini_ku_004:s0:t0", "sid": "r4-amp-stmt-1"},
+        )
+        ret = retrieve_for_question(sdk, q, ks=(5,), top_k=20)
+        ids = {h["id"] for h in ret["hits"]}
+        assert "r4-amp-stmt-1" in ids       # amplifier surfaced the statement
+        assert all(h["match_source"] for h in ret["hits"])  # never null
+    finally:
+        sdk.close()
+
+
 # ── Error isolation + checkpoint/resume (P2) ───────────────────────────────
 
 

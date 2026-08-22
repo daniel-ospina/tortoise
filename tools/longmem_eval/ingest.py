@@ -55,6 +55,13 @@ SESSION_TRANSCRIPT_KIND = "session-transcript"
 register_kind(SESSION_TRANSCRIPT_KIND)
 register_kind("event")
 
+# R4 (#1543): the extracted-point kind written by the v2 ingest (must match
+# the extractor's default pointKind — extractor_v2 falls back to
+# "statement"). The structural retrieval leg scans THIS kind and hop-expands
+# text hits over IMPL/NAND edges. Single source of truth so write/read can't
+# drift (drift = silent empty structural leg).
+EXTRACTION_POINT_KIND = "statement"
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()  # noqa: UP017

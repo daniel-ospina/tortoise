@@ -49,7 +49,7 @@ from typing import Any
 
 from tortoise.sdk import TortoiseSDK
 
-from .ingest import point_props_for_hits
+from .ingest import (EXTRACTION_POINT_KIND, point_props_for_hits)
 
 # token-count estimator: rough LLM token ≈ whitespace tokens, plus markup
 # allowance for role prefixes/JSON. Documented in report provenance.
@@ -323,9 +323,19 @@ def hybrid_search(sdk: TortoiseSDK, query: str, limit: int,
     so the reader sees the [SUPERSEDED BY] marker and discounts them; the
     marker (A2) is the reader's discount mechanism. Terminal exclusion
     (#1391) would hide the superseded claim entirely.
+
+    R4 (#1543): structural leg activated — structural_kind scans the
+    extracted (statement) points so run_structural_query stops returning
+    []; hops=2 expands text hits over IMPL/NAND edges (graph as recall
+    amplifier). structural_kind deliberately does NOT post-filter: the pool
+    must keep the R1 union (turn points + raw transcripts + extracted
+    points).
     """
-    return sdk.tortoise_fts_query(query, entity_type="point", limit=limit,
-                                  include_terminal=True, leg_trace=leg_trace)
+    return sdk.tortoise_fts_query(
+        query, entity_type="point", limit=limit,
+        structural_kind=EXTRACTION_POINT_KIND,
+        structural_hops=2,
+        include_terminal=True, leg_trace=leg_trace)
 
 
 def retrieve_for_question(

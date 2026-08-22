@@ -785,6 +785,71 @@ def run_structural_query(
         return []
 
 
+def expand_structural_hops(
+    graph, seed_ids: list[str],
+    *,
+    max_hops: int = 2,
+    limit: int = 40,
+    excluded_statuses: tuple | None = None,
+    timeout_ms: int = 500,
+) -> list[tuple[str, float]]:
+    """Expand seed point ids over IMPL/NAND edges (1-2 hops) — the
+    graph-as-recall-amplifier pass (R4; graphiti episode-mentions pattern).
+
+    A text hit (FTS/vector) seeds traversal of its epistemic neighborhood:
+    hop-1 neighbors score 1.0, hop-2 neighbors 0.5 (the partial-match score
+    convention from run_structural_query). The eval materializes IMPL/NAND
+    edges operator-mediated (seed-[:IMPL]->op{is_operator:true}-[:IMPL]->peer,
+    so seed→op→peer is exactly 2 hops); legacy direct Point→Point edges are
+    1 hop. The variable-length pattern covers both.
+
+    Shares the "structural" circuit breaker with run_structural_query (same
+    leg). Terminal-status peers are excluded by default (#1391 posture);
+    pass excluded_statuses=() to include them. Operators are never returned
+    (the traversal reaches them but the WHERE clause excludes them).
+    """
+    if not seed_ids:
+        return []
+    if not _breaker_allow("structural"):
+        logger.warning("Structural circuit breaker OPEN — skipping hop expansion")
+        return []
+    try:
+        start = time.monotonic()
+        cypher = (
+            "MATCH (seed:Point) WHERE seed.id IN $seeds "
+            f"MATCH path = (seed)-[:IMPL|NAND*1..{max_hops}]-(n:Point) "
+            "WHERE n.id <> seed.id AND n.is_operator <> true"
+            + ("" if excluded_statuses == ()
+               else f" AND {_exclude_status_clause('n', excluded_statuses or TERMINAL_EXCLUDED_STATUSES)}")
+            + " WITH n, min(length(path)) AS hops "
+            "RETURN n.id AS id, hops "
+            "ORDER BY hops ASC "
+            "LIMIT $limit"
+        )
+        rows = graph.query(
+            cypher, params={"seeds": list(seed_ids), "limit": limit},
+            timeout=timeout_ms,
+        ).result_set
+        elapsed = (time.monotonic() - start) * 1000
+        if elapsed > timeout_ms:
+            # same post-hoc latency warning posture as run_fts_query (#249)
+            logger.warning(
+                "Structural hop expansion exceeded timeout: %.0fms > %dms",
+                elapsed, timeout_ms)
+        results = [(row[0], 1.0 if int(row[1]) == 1 else 0.5) for row in rows]
+        _breaker_record("structural", True)
+        return results
+    except Exception as e:
+        msg = str(e).lower()
+        if "index" in msg or "not found" in msg or "does not exist" in msg:
+            logger.info("Structural hop expansion not available — skipping structural expansion")
+            _breaker_record("structural", True)
+        else:
+            logger.warning("Structural hop expansion failed: %s", e)
+            _breaker_record("structural", False)
+        return []
+
+
 # ── RRF fusion ───────────────────────────────────────────────────────────────
 
 def rrf_fusion(
