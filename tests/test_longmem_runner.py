@@ -105,7 +105,11 @@ def _no_embedder(monkeypatch) -> None:
 
 # ── Pipeline end-to-end (mocked reader + judge, embedded DB) ───────────────
 
-def test_mini_pipeline_end_to_end_mock(tmp_path):
+def test_mini_pipeline_end_to_end_mock(tmp_path, monkeypatch):
+    """Env-hermeticity (R6 #1545): a leaked TORTOISE_LME_RERANK must never
+    flip this baseline regression into a rerank-on run (the R6 gate default
+    is fail-safe OFF, but the guard pins it)."""
+    monkeypatch.delenv("TORTOISE_LME_RERANK", raising=False)
     instances = _mini()
     assert len(instances) == 5
     outcomes, report = run_evaluation(
@@ -618,8 +622,8 @@ def test_annotate_hits_resolves_event_session_linkage(tmp_path):
     try:
         q = next(x for x in _mini() if x["question_id"] == "mini_tr_003")
         ingest_haystack(sdk, q)
-        from tools.longmem_eval.retrieve import _annotate_hits
         from tools.longmem_eval.ingest import event_props_for_hits
+        from tools.longmem_eval.retrieve import _annotate_hits
         proj = sdk._get_proj()
         ev = proj.g.query(
             "MATCH (e:Event {eventKind:'lmeHaystackSession'}) "

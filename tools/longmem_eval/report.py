@@ -152,6 +152,10 @@ def build_report(
     # tr_events) — recorded in the methodology via the same spread pattern
     # as ``r1_knobs`` (published numbers carry their methodology).
     r5_knobs: dict[str, Any] | None = None,
+    # R6 (#1545): the effective rerank config + pre-warm outcome (None on
+    # baseline runs → the report carries ZERO rerank keys — the
+    # no-flag-report contract, D2).
+    rerank_config: dict[str, Any] | None = None,
     # R3 (#1542) D5: the embedder pre-flight status (from run.py's
     # _preflight_embedder) recorded in the methodology — embedder identity,
     # sentence-transformers version, availability, reason. Always-emitted:
@@ -453,6 +457,74 @@ def build_report(
                 "p50_ms": round(_percentile(xs, 0.50), 2),
                 "p95_ms": round(_percentile(xs, 0.95), 2)} if xs else {}
 
+    # ── R6 (#1545): rerank aggregation over the per-question rerank_pass ──
+    # (only on rerank runs — ``rerank_config`` is None on baseline, so the
+    # report carries zero rerank keys including the latency block).
+    rerank_agg: dict[str, Any] | None = None
+    rerank_report_block: dict[str, Any] | None = None
+    if rerank_config is not None:
+        applied = [o.get("rerank_pass") or {} for o in outcomes]
+        applied_ok = [rp for rp in applied if rp.get("applied")]
+        degraded = [rp for rp in applied if not rp.get("applied")]
+        reasons: list[str] = []
+        seen: set[str] = set()
+        for rp in degraded:
+            reason = (rp.get("degrade_reason") or "").strip() or "unknown"
+            if reason not in seen:
+                seen.add(reason)
+                reasons.append(reason)
+        mcs = [float(rp.get("max_session_chunks") or 0) for rp in applied_ok]
+        pool_recall_mean: dict[str, dict[str, float]] = {}
+        carriers = [rp.get("pool_recall@k") or {} for rp in applied_ok]
+        if carriers:
+            for level in ("session", "turn", "evidence"):
+                ks_lists: dict[str, list[float]] = {}
+                for cr in carriers:
+                    lvl = cr.get(level) or {}
+                    for k, v in lvl.items():
+                        if v is not None:
+                            ks_lists.setdefault(str(k), []).append(float(v))
+                pool_recall_mean[level] = {
+                    str(k): round(sum(v) / len(v), 4)
+                    for k, v in sorted(ks_lists.items())}
+        rerank_agg = {
+            "applied_fraction": (round(len(applied_ok) / n, 4)
+                                 if n else 0.0),
+            "degraded_n": len(degraded),
+            "degraded_fraction": (round(len(degraded) / n, 4)
+                                  if n else 0.0),
+            "sample_reasons": reasons[:5],
+            "mean_moved": round(sum(float(rp.get("moved") or 0)
+                                     for rp in applied_ok) / len(applied_ok), 2)
+                if applied_ok else 0.0,
+            "mean_dropped": round(sum(float(rp.get("dropped") or 0)
+                                      for rp in applied_ok) / len(applied_ok), 2)
+                if applied_ok else 0.0,
+            "mean_selected_count": round(
+                sum(float(rp.get("selected_count") or 0)
+                    for rp in applied_ok) / len(applied_ok), 2)
+                if applied_ok else 0.0,
+            # E2E-10 assertion 2: the MAX over questions (a mean would mask
+            # a single violating question).
+            "max_session_chunks_max": round(max(mcs), 2) if mcs else 0.0,
+            "pool_recall_mean@k": pool_recall_mean,
+        }
+        # The report's rerank block = effective config + pre-warm + aggregates
+        # (spread into ``extra`` by the caller — the block rides the report at
+        # top level like ``outcomes``/``preflight``).
+        rerank_report_block = {
+            "rerank": {
+                "enabled": rerank_config.get("enabled"),
+                "model": rerank_config.get("model"),
+                "lambda_": rerank_config.get("lambda_"),
+                "per_session_cap": rerank_config.get("per_session_cap"),
+                "pool_size": rerank_config.get("pool_size"),
+                "model_load_ms": rerank_config.get("model_load_ms"),
+                "prewarmed": rerank_config.get("prewarmed"),
+                **rerank_agg,
+            }
+        }
+
     # M7 (Gate 2): a not-trusted audit serializes EVERY recall key to null —
     # the report then contains no recall numbers until the dataset is
     # re-audited (E2E-3 Precondition 2).
@@ -492,9 +564,18 @@ def build_report(
             "context_tokens_mean": ctx_mean,
             "context_point_count_mean": round(
                 sum(o["context_point_count"] for o in outcomes) / n, 2) if n else 0,
+            # R6 (#1545): the same aggregate block, gated on the same
+            # condition — a baseline report carries zero rerank keys.
+            **({"rerank": rerank_agg} if rerank_agg is not None else {}),
         },
         "latency_ms": {
             "retrieval": _lat(["retrieval_latency_ms"]),
+            # R6 (#1545): the rerank latency is recorded SEPARATELY so the
+            # follow-up delta can subtract it (the R6 arm's
+            # retrieval_latency_ms includes rerank_ms — the plan's latency
+            # comparability note).
+            **({"rerank": _lat(["rerank_latency_ms"])}
+               if rerank_agg is not None else {}),
             "reader": _lat(["reader_latency_ms"]),
             "judge": _lat(["judge_latency_ms"]),
             "ingest": _lat(["ingest_latency_ms"]),  # M7 (D5): write-path cost
@@ -536,13 +617,19 @@ def build_report(
                                      "turn-granular chunks backfill the remaining "
                                      "context_token_cap tokens",
             "extraction_approach": extraction_approach,
-            "retrieval": "Tortoise hybrid RRF (FTS+vector+structural, TF-IDF "
-                         "fallback) over graph turn points + turn-granular raw "
-                         "chunks (pointKind session-transcript, chunk_turns "
-                         "turns per non-overlapping window; candidates fetched "
-                         "at max(k)*3 depth, deduped per-session to "
-                         "max_chunks_per_session raw chunks in rank order, R1 "
-                         "#1540)",
+            "retrieval": (
+                "Tortoise hybrid RRF (FTS+vector+structural, TF-IDF "
+                "fallback) over graph turn points + turn-granular raw "
+                "chunks (pointKind session-transcript, chunk_turns "
+                "turns per non-overlapping window; candidates fetched "
+                "at max(k)*3 depth, deduped per-session to "
+                "max_chunks_per_session raw chunks in rank order, R1 "
+                "#1540)"
+                + (f" + R6 rerank stage (cross-encoder + MMR, pool "
+                   f"{rerank_config['pool_size']} — post-fusion "
+                   "precision+diversity, #1545)"
+                   if rerank_agg is not None else "")
+            ),
             "retrieval_scope": "ISOLATED per-question corpus — each question's "
                                "haystack is ingested into a fresh graph and "
                                "recall is measured against that question alone; "
@@ -620,6 +707,7 @@ def build_report(
         },
         "failures": failures or [],
         "n_failed": len(failures or []),
+        **(rerank_report_block if rerank_report_block is not None else {}),
         **(extra or {}),
     }
 

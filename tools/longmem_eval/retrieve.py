@@ -51,8 +51,7 @@ from typing import Any
 
 from tortoise.sdk import TortoiseSDK
 
-from .ingest import (EXTRACTION_POINT_KIND, event_props_for_hits,
-                     point_props_for_hits)
+from .ingest import EXTRACTION_POINT_KIND, event_props_for_hits, point_props_for_hits
 
 # token-count estimator: rough LLM token ≈ whitespace tokens, plus markup
 # allowance for role prefixes/JSON. Documented in report provenance.
@@ -299,6 +298,68 @@ def _dedup_pool(annotated: list[dict], *,
     return pool
 
 
+def _recall_metrics(
+    hits: list[dict],
+    *,
+    ks: tuple[int, ...],
+    answer_sessions: set[str],
+    evidence_turn_ids: set[str],
+    evidence_point_count: int,
+    chunk_evidence_point_count: int,
+) -> tuple[dict[str, float], dict[str, float | None],
+           dict[str, float | None], dict[str, float | None]]:
+    """Recall@k over a hit list (session + turn + evidence + chunk-evidence).
+
+    Extracted from ``retrieve_for_question`` (R6 #1545) — identical math,
+    reused for the rerank pool-recall diagnostic. ``evidence_point_count`` /
+    ``chunk_evidence_point_count`` are the D5 denominators (computed once,
+    before the loop — no hoisting exists or is needed).
+    """
+    session_recall: dict[str, float] = {}
+    turn_recall: dict[str, float | None] = {}
+    _evidence_recall: dict[str, float | None] = {}
+    chunk_evidence_recall: dict[str, float | None] = {}
+    for k in ks:
+        top = hits[:k]
+        if answer_sessions:
+            retrieved_sessions = {h["session_id"] for h in top if h["session_id"]}
+            session_recall[str(k)] = (
+                len(answer_sessions & retrieved_sessions) / len(answer_sessions))
+        else:
+            session_recall[str(k)] = 0.0
+        # turn/evidence numerators exclude raw chunks (D5) — otherwise
+        # marked chunks in top-k inflate turn_recall beyond 1.0 against the
+        # points-only denominator.
+        ev_hits = {h["id"] for h in top
+                   if h["has_answer"] and not _is_raw_chunk(h)}
+        if evidence_point_count:
+            # v2 leg: did the extracted point CONTAINING the answer surface?
+            turn_recall[str(k)] = len(ev_hits) / evidence_point_count
+            _evidence_recall[str(k)] = len(ev_hits) / evidence_point_count
+        else:
+            # M6 (#1526) N/A-not-0.0: an empty denominator is None, never a
+            # forced 0.0 — "no evidence exists" stays distinguishable from
+            # "evidence exists but never surfaces" (#1369).
+            _evidence_recall[str(k)] = None
+            if evidence_turn_ids:
+                # deterministic leg: did the evidence TURN surface?
+                top_ids = {h["id"] for h in top}
+                turn_recall[str(k)] = (
+                    len(evidence_turn_ids & top_ids) / len(evidence_turn_ids))
+            else:
+                turn_recall[str(k)] = None
+        # chunk containment view (M6): marked raw chunks surfaced / marked
+        # raw chunks total — granularity-aware by construction.
+        if chunk_evidence_point_count:
+            chunk_hits = {h["id"] for h in top
+                          if h["has_answer"] and _is_raw_chunk(h)}
+            chunk_evidence_recall[str(k)] = (
+                len(chunk_hits) / chunk_evidence_point_count)
+        else:
+            chunk_evidence_recall[str(k)] = None
+    return session_recall, turn_recall, _evidence_recall, chunk_evidence_recall
+
+
 def _leg_mix(hits: list[dict]) -> dict[str, int]:
     """Counter of ``match_source`` over a hit list (M7 #1527, D2).
 
@@ -509,6 +570,17 @@ def retrieve_for_question(
     tr_top_k: int = DEFAULT_TR_TOP_K,
     tr_date_weight: float = 0.5,
     tr_events: bool = True,
+    # R6 (#1545): rerank knobs — the post-fusion cross-encoder + MMR stage,
+    # OFF by default (the V3 baseline path is byte-identical; no rerank keys
+    # off-path, D2). ``rerank`` tri-state: True/False explicit, None = env
+    # TORTOISE_LME_RERANK (fail-safe OFF). ``rerank_pool`` is honored when
+    # explicitly passed even with rerank off (the pool-only isolation arm);
+    # env defaults apply only while rerank is on.
+    rerank: bool | None = None,
+    rerank_model: str | None = None,
+    rerank_pool: int | None = None,
+    per_session_cap: int | None = None,
+    mmr_lambda: float | None = None,
 ) -> dict[str, Any]:
     """Run retrieval for one question and compute recall@k + context stats.
 
@@ -545,6 +617,33 @@ def retrieve_for_question(
         if turn.get("has_answer")
     }
 
+    # ── R6 (#1545) D3: scorer resolution precedes pool deepening — a
+    # degraded (load-failure) question retrieves the SAME baseline pool as
+    # the V3 run (never a 40-pool stand-in — D3/S11 pool contamination),
+    # and the deep pool is only fetched when it would be honored. Call-time
+    # imports keep the monkeypatch seam (tests inject a fake scorer). ──
+    from .rerank import _env_float, _env_int, get_scorer, rerank_enabled, rerank_hits
+    rerank_on = rerank_enabled(rerank)
+    scorer, degrade_reason = (get_scorer(rerank_model) if rerank_on
+                              else (None, ""))
+    cap = (per_session_cap if per_session_cap is not None
+           else _env_int("TORTOISE_LME_RERANK_CAP", 2))
+    lam = (mmr_lambda if mmr_lambda is not None
+           else _env_float("TORTOISE_LME_RERANK_LAMBDA", 0.7))
+    pool_override = (rerank_pool if rerank_pool is not None
+                     else _env_int("TORTOISE_LME_RERANK_POOL", 40))
+    if rerank_on and scorer is not None:
+        # applied arm — the deep pool (default 2x the baseline 20) gives the
+        # reranker reorderable headroom (D4)
+        pool_limit = max(pool_override, max(ks))
+    elif (rerank_pool is not None) and not rerank_on:
+        # pool-only isolation arm (--rerank off --rerank-pool N): deeper
+        # pool, baseline ordering, hits truncated to top_k (OQ5)
+        pool_limit = max(rerank_pool, max(ks))
+    else:
+        # baseline / degraded / off — the exact current fetch depth
+        pool_limit = max(ks) * DEFAULT_POOL_MULTIPLIER
+
     # ── R3 (#1542) D4: per-leg trace (E2E-1 never-null leg-mix). The
     # retrieval records into ``legs`` at the engine (tortoise_fts_query) and
     # the result surfaces a SNAPSHOT copy (list(legs)) so late appends — a
@@ -558,7 +657,7 @@ def retrieve_for_question(
     # point-only filter"); non-TR keeps the exact points-only path.
     hits = hybrid_search(
         sdk, question["question"],
-        limit=max(ks) * DEFAULT_POOL_MULTIPLIER,
+        limit=pool_limit,
         leg_trace=legs,
         entity_types=("point", "event") if (is_tr and tr_events)
         else ("point",),
@@ -654,50 +753,65 @@ def retrieve_for_question(
     total_pts, embedded_pts = cov_rows[0] if cov_rows else (0, 0)
     embedding_coverage = (embedded_pts / total_pts) if total_pts else None
 
-    # ── recall@k over the DEDUPED pool (session + turn + evidence + chunk) ──
-    session_recall: dict[str, float] = {}
-    turn_recall: dict[str, float] = {}
-    _evidence_recall: dict[str, float | None] = {}
-    chunk_evidence_recall: dict[str, float | None] = {}
-    for k in ks:
-        top = pool[:k]
-        if answer_sessions:
-            retrieved_sessions = {h["session_id"] for h in top if h["session_id"]}
-            session_recall[str(k)] = (
-                len(answer_sessions & retrieved_sessions) / len(answer_sessions))
+    # ── R6 (#1545): post-fusion rerank stage — the measured surface (S11).
+    # Off-path byte-identical (no rerank keys, no extra queries); the
+    # reader/context invariant holds on EVERY path:
+    #   * non-applied (pool-only / score-failure / load-failure degrade):
+    #     hits truncated to top_k (len(hits) == context_point_count ==
+    #     min(len(pool), top_k));
+    #   * applied: rerank_hits returns the SELECTED-ONLY reordered list, so
+    #     len(hits) == selected_count <= top_k;
+    #   * plain off (no rerank, no pool override): the full deduped pool
+    #     UNTRUNCATED (today's behavior — the two coincide at defaults
+    #     where the pool <= top_k).
+    rerank_pass: dict[str, Any] = {"applied": False, "dropped": 0}
+    rerank_ms = 0.0
+    if rerank_on:
+        t0 = time.monotonic()
+        applied = False
+        if scorer is None:
+            # degraded: 20-pool fallback + truncation (D3(a)/S25) — never a
+            # 40-pool stand-in masquerading as a rerank result
+            rerank_pass["degrade_reason"] = degrade_reason
+            pool = pool[:top_k]
         else:
-            session_recall[str(k)] = 0.0
-        # turn/evidence numerators exclude raw chunks (D5) — otherwise
-        # marked chunks in top-k inflate turn_recall beyond 1.0 against the
-        # points-only denominator (2 marked chunks + 1 marked point vs
-        # denominator 1).
-        ev_hits = {h["id"] for h in top
-                   if h["has_answer"] and not _is_raw_chunk(h)}
-        if evidence_point_count:
-            # v2 leg: did the extracted point CONTAINING the answer surface?
-            turn_recall[str(k)] = len(ev_hits) / evidence_point_count
-            _evidence_recall[str(k)] = len(ev_hits) / evidence_point_count
-        else:
-            # M6 (#1526) N/A-not-0.0: an empty denominator is None, never a
-            # forced 0.0 — "no evidence exists" must stay distinguishable
-            # from "evidence exists but never surfaces" (#1369).
-            _evidence_recall[str(k)] = None
-            if evidence_turn_ids:
-                # deterministic leg: did the evidence TURN surface?
-                top_ids = {h["id"] for h in top}
-                turn_recall[str(k)] = (
-                    len(evidence_turn_ids & top_ids) / len(evidence_turn_ids))
+            pool_recall = _recall_metrics(
+                pool, ks=ks, answer_sessions=answer_sessions,
+                evidence_turn_ids=evidence_turn_ids,
+                evidence_point_count=evidence_point_count,
+                chunk_evidence_point_count=chunk_evidence_point_count)
+            selected, stats = rerank_hits(
+                question["question"], pool, scorer=scorer,
+                proj=sdk._get_proj(), top_k=top_k,
+                per_session_cap=cap, lambda_=lam)
+            applied = bool(stats.get("applied", True))
+            if applied:
+                rerank_pass.update(stats)
+                rerank_pass["pool_size"] = len(pool)
+                rerank_pass["pool_recall@k"] = {
+                    "session": pool_recall[0], "turn": pool_recall[1],
+                    "evidence": pool_recall[2],
+                    "chunk_evidence": pool_recall[3]}
+                pool = selected          # the hits ARE the reader's context
             else:
-                turn_recall[str(k)] = None
-        # chunk containment view (M6): marked raw chunks surfaced / marked
-        # raw chunks total — granularity-aware by construction.
-        if chunk_evidence_point_count:
-            chunk_hits = {h["id"] for h in top
-                          if h["has_answer"] and _is_raw_chunk(h)}
-            chunk_evidence_recall[str(k)] = (
-                len(chunk_hits) / chunk_evidence_point_count)
-        else:
-            chunk_evidence_recall[str(k)] = None
+                # score-failure degrade (D8c) — same contract as load-failure
+                rerank_pass["degrade_reason"] = stats.get("degrade_reason", "")
+                pool = pool[:top_k]      # reader/context invariant
+        rerank_pass["applied"] = applied
+        rerank_ms = (time.monotonic() - t0) * 1000.0
+    elif (rerank_pool is not None) and not rerank_on:
+        pool = pool[:top_k]              # pool-only arm: reader sees top_k
+
+    # ── recall@k over the DEDUPED pool (session + turn + evidence + chunk) ──
+    # (on the applied path, ``pool`` is the rerank-selected list — recall
+    # measures what the reader could actually see; ``rerank_pass["pool_recall@k"]``
+    # carries the pre-MMR pool recall for the selection-loss diagnostic.)
+    (session_recall, turn_recall, _evidence_recall,
+     chunk_evidence_recall) = _recall_metrics(
+        pool, ks=ks, answer_sessions=answer_sessions,
+        evidence_turn_ids=evidence_turn_ids,
+        evidence_point_count=evidence_point_count,
+        chunk_evidence_point_count=chunk_evidence_point_count)
 
     # ── context handed to the reader (D4: budget-capped, points first) ──
     question_date = question.get("question_date", "") or None
@@ -721,7 +835,7 @@ def retrieve_for_question(
     context_text = render_context(context_points, question_date=question_date)
     context_tokens = _estimate_tokens(context_text) if context_text else 0
 
-    return {
+    out = {
         "question_id": qid,
         "hits": pool,  # pinned contract: the deduped pool (R1 #1540)
         "session_recall@k": session_recall,
@@ -732,7 +846,8 @@ def retrieve_for_question(
         # + per-k over the deduped pool; evidence_retrieved@k = the turn_recall
         # numerator (has_answer non-chunk hits in pool[:k]) — persisted so the
         # report can answer "which leg found what" and "how much evidence was
-        # retrieved" (evidence-written/retrieved accounting).
+        # retrieved" (evidence-written/retrieved accounting). The R6 rerank
+        # bucket is applied to ``match_source_counts`` just before return (D6).
         "match_source_counts": _leg_mix(context_points),
         "match_source_counts@k": {
             str(k): _leg_mix(pool[:k]) for k in ks},
@@ -758,7 +873,22 @@ def retrieve_for_question(
         "dedup_stats": {
             "chunks_retrieved": n_chunks_retrieved,
             "chunks_capped": n_chunks_retrieved - n_chunks_pool,
-            "pool_depth_requested": max(ks) * DEFAULT_POOL_MULTIPLIER,
+            "pool_depth_requested": pool_limit,
         },
-        "retrieval_latency_ms": round(latency_ms, 2),
+        "retrieval_latency_ms": round(latency_ms + rerank_ms, 2),
     }
+    # R6 (#1545) D6: the rerank pass is recorded ADDITIVELY — the leg-mix
+    # ``rerank`` bucket counts selection-loss only (the ``mmr_dropped`` hits),
+    # so ``sum(provenance legs) + dropped == pool_size`` holds as a partition
+    # (never an overlay). ``reranked``/``mmr_promoted`` movement stays a
+    # separate overlay metric (``rerank_pass``), never a leg. Off-path emits
+    # no bucket (byte-identical leg-mix).
+    match_source_counts = _leg_mix(context_points)
+    if rerank_on and rerank_pass.get("applied"):
+        match_source_counts["rerank"] = rerank_pass.get("dropped", 0)
+    out["match_source_counts"] = match_source_counts
+    # Conditional keys (D2): the off-path dict keeps today's exact shape.
+    if rerank_on:
+        out["rerank_pass"] = rerank_pass
+        out["rerank_latency_ms"] = round(rerank_ms, 2)
+    return out
