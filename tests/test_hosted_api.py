@@ -498,6 +498,22 @@ class TestTeamInfo:
         assert "point_count" in body
         assert isinstance(body["point_count"], int)
 
+    def test_team_info_fails_soft_when_graph_unavailable(self, client, monkeypatch):
+        """#1591: a missing/broken team graph must NOT hard-500 /v1/team —
+        it fails soft (point_count=0, graph_ready=false) so the dashboard
+        renders and the graph recovers on the next write."""
+        import tortoise.hosted_api as ha
+
+        def _boom(*a, **kw):
+            raise RuntimeError("graph unavailable")
+
+        monkeypatch.setattr(ha.TortoiseSDK, "_get_proj", _boom)
+        r = client.get("/v1/team")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["point_count"] == 0
+        assert body["graph_ready"] is False
+
     def test_team_info_reflects_point_count(self, client):
         # Start fresh — the fixture gives each test a new DB
         r = client.get("/v1/team")

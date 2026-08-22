@@ -2291,7 +2291,16 @@ function claimIntentInFlight() {
             </ul>
           </section>
         )}
-        {tab === 'overview' && team && (team.point_count ?? 0) === 0 && (
+        {tab === 'overview' && team && team.graph_ready === false && (team.point_count ?? 0) === 0 && (
+          // #1591: the team's graph is missing/broken (half-failed
+          // provisioning) — the API fails soft so the dashboard renders; a
+          // graph write recreates it. Give the user a clear signal.
+          <section className="overview empty-state">
+            <h2>Your graph is being prepared</h2>
+            <p className="dim">The team's data graph is missing or still recovering — it is recreated automatically on the first write. Try again in a moment, or contact hello@premiselabs.co if this persists.</p>
+          </section>
+        )}
+        {tab === 'overview' && team && team.graph_ready !== false && (team.point_count ?? 0) === 0 && (
           <section className="overview empty-state">
             <h2>Welcome to your Tortoise graph</h2>
             <p className="dim">Connect your agent so it remembers why, not just what.</p>
@@ -2303,7 +2312,7 @@ function claimIntentInFlight() {
             </div>
           </section>
         )}
-        {tab === 'overview' && team && (team.point_count ?? 0) > 0 && (
+        {tab === 'overview' && team && team.graph_ready !== false && (team.point_count ?? 0) > 0 && (
           <section className="overview">
             <h2>Overview</h2>
             <div className="cards">
