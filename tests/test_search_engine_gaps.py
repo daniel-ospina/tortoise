@@ -27,6 +27,7 @@ from tortoise.search_engine import (
     run_fts_query,
     run_vector_query,
     run_structural_query,
+    expand_structural_hops,
     reset_circuit_breakers,
     _breaker,
     _breaker_allow,
@@ -1125,6 +1126,58 @@ class TestRunStructuralQuery:
         assert "n.is_operator = true" in cypher
         assert "n.op_type" in cypher
         assert "RETURN n.id" in cypher
+
+
+class TestExpandStructuralHops:
+    """R4 — 1-2 hop IMPL/NAND expansion on text hits (graph as recall
+    amplifier). Hop-1 = 1.0, hop-2 = 0.5 (the run_structural_query
+    exact/partial-match convention)."""
+
+    def test_hop1_direct_neighbor_full_score(self):
+        graph = SimpleMockGraph(result_set=[("p-peer", 1)])
+        result = expand_structural_hops(graph, ["p-seed"])
+        assert result == [("p-peer", 1.0)]
+        cypher = graph.query_calls[0][0]
+        assert "[:IMPL|NAND*1..2]" in cypher
+        assert "n.is_operator <> true" in cypher
+        assert "ORDER BY hops" in cypher
+        assert "LIMIT $limit" in cypher
+
+    def test_hop2_via_operator_partial_score(self):
+        graph = SimpleMockGraph(result_set=[("p-peer", 2)])
+        result = expand_structural_hops(graph, ["p-seed"])
+        assert result == [("p-peer", 0.5)]
+
+    def test_empty_seeds_short_circuits(self):
+        graph = SimpleMockGraph(result_set=[("p1", 1)])
+        assert expand_structural_hops(graph, []) == []
+        assert graph.query_calls == []  # no graph round-trip
+
+    def test_graph_raises_returns_empty(self):
+        graph = SimpleMockGraph(raise_on_query=RuntimeError("DB connection lost"))
+        assert expand_structural_hops(graph, ["p-seed"]) == []
+
+    def test_terminal_status_clause_present_by_default(self):
+        graph = SimpleMockGraph(result_set=[("p1", 1)])
+        expand_structural_hops(graph, ["p-seed"])
+        cypher = graph.query_calls[0][0]
+        assert "n.status" in cypher
+
+    def test_include_terminal_omits_status_clause(self):
+        graph = SimpleMockGraph(result_set=[("p1", 1)])
+        expand_structural_hops(graph, ["p-seed"], excluded_statuses=())
+        cypher = graph.query_calls[0][0]
+        assert "n.status" not in cypher
+
+    def test_limit_param_passed(self):
+        graph = SimpleMockGraph(result_set=[("p1", 1)])
+        expand_structural_hops(graph, ["p-seed"], limit=5)
+        assert graph.query_calls[0][1]["limit"] == 5
+
+    def test_seeds_param_passed(self):
+        graph = SimpleMockGraph(result_set=[("p1", 1)])
+        expand_structural_hops(graph, ["p-a", "p-b"])
+        assert graph.query_calls[0][1]["seeds"] == ["p-a", "p-b"]
 
 
 # ── Cross-cutting edge cases ────────────────────────────────────────────────

@@ -9384,6 +9384,8 @@ class TortoiseSDK:
         kind: str | None = None,
         *,
         entity_type: str = "point",
+        structural_kind: str | None = None,
+        structural_hops: int = 0,
         min_confidence: float = 0.0,
         order_by: str = "relevance",
         graph_ranker=None,
@@ -9440,6 +9442,19 @@ class TortoiseSDK:
             ``fallback`` entry is appended last on every early-return branch
             (snapshot TF-IDF path, legacy fallback_tfidf path, non-point
             return []). Default None = no trace, byte-identical behavior.
+        structural_kind (R4 #1543): keyword-only, default None — the kind
+            passed to the STRUCTURAL strategy only (kind-scan), WITHOUT
+            triggering the post-retrieval kind filter. Deliberately distinct
+            from ``kind``: the eval's pool mixes kinds (turn points + raw
+            transcripts + extracted points — the R1 union design), so a
+            top-level filter would drop the raw-chunk leg. Legacy callers
+            pass kind → struct_kind + post-filter exactly as today.
+        structural_hops (R4 #1543): keyword-only, default 0 (off) — after
+            the degradation chain returns, expands the FTS+vector hit ids
+            over [:IMPL|NAND*1..N] edges (hop-1 = 1.0, hop-2 = 0.5) and
+            folds the neighbors into the structural strategy's ranked list
+            (deduped) — the graph-as-recall-amplifier pass. Default 0 skips
+            the expansion entirely (byte-identical to pre-R4).
         """
         from .search_engine import (  # noqa: I001
             classify_query, degradation_chain, rrf_fusion,
@@ -9447,6 +9462,7 @@ class TortoiseSDK:
             fetch_point_epistemic_state, fallback_tfidf,
             SearchResult, SearchScores,
             filter_by_relationship, filter_by_traversal_predicate,
+            expand_structural_hops,
             _trace_entry,
         )
 
@@ -9530,8 +9546,14 @@ class TortoiseSDK:
                     pass  # garbage → default (TORTOISE_EMBEDDING_REPAIR_BACKOFF_HOURS pattern)
                 pool_floor = max(1, min(pool_floor, 10000))  # clamp per limit validation bound
             str_limit = max(limit * 2, pool_floor)
+        # R4 (#1543): the structural strategy's kind — an explicit override
+        # that does NOT trigger the post-retrieval kind filter below (the
+        # eval's pool mixes kinds: turn points + raw transcripts + extracted
+        # points — a top-level filter would drop the raw-chunk leg). Legacy
+        # callers keep kind → structural kind + post-filter exactly as today.
+        struct_kind = structural_kind if structural_kind is not None else kind
         raw_results = degradation_chain(
-            graph, query, kind, query_vec, strategies,
+            graph, query, struct_kind, query_vec, strategies,
             entity_type=entity_type, limit=str_limit,
             is_embedded=is_embedded,
             elevated_timeout_ms=_elevated_timeout_ms,
@@ -9590,6 +9612,36 @@ class TortoiseSDK:
                     "fallback", ran=True, degraded=True,
                     reason="no_fallback_applicable", count=0))
             return []
+
+        # R4 (#1543): 1-2 hop IMPL/NAND expansion on TEXT hits (graph as
+        # recall amplifier — graphiti episode-mentions pattern). Folds into
+        # the structural strategy so RRF fusion, match_source, and the E2E-1
+        # leg-mix keep the established leg vocabulary (fts/vector/structural/
+        # tfidf). Seeds = FTS + vector hit ids only — never the structural
+        # kind-scan hits (no circular amplification). Default structural_hops
+        # = 0 skips the block entirely (byte-identical to pre-R4); the TF-IDF
+        # fallback above returns before this block, so degraded runs are
+        # unchanged too.
+        if structural_hops > 0:
+            text_hit_ids = [
+                pid
+                for _strat in ("fts", "vector")
+                for pid, _score in raw_results.get(_strat, [])
+            ]
+            if text_hit_ids:
+                expansion = expand_structural_hops(
+                    graph, text_hit_ids, max_hops=structural_hops,
+                    limit=str_limit,
+                    excluded_statuses=() if include_terminal else None,
+                    timeout_ms=int(_elevated_timeout_ms or 500),
+                )
+                if expansion:
+                    merged = list(dict(raw_results.get("structural", [])).items())
+                    seen = {pid for pid, _score in merged}
+                    merged.extend(
+                        (pid, score) for pid, score in expansion
+                        if pid not in seen)
+                    raw_results["structural"] = merged
 
         # 4. Fuse via RRF (skip if single strategy or full-scan)
         if is_full_scan or len(raw_results) == 1:

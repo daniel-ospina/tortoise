@@ -41,7 +41,8 @@ logger = logging.getLogger(__name__)
 from .evidence import (EVIDENCE_QUOTE_CAP, anchor_quote, evidence_sessions,  # noqa: E402, I001
                        mark_for)
 from .evidence import _overlap  # noqa: F401, E402 — back-compat re-export
-from .ingest import (SESSION_TRANSCRIPT_KIND, _point_exists, _session_chunks)  # noqa: E402
+from .ingest import (SESSION_TRANSCRIPT_KIND, EXTRACTION_POINT_KIND,  # noqa: E402
+                     _point_exists, _session_chunks)
 
 
 def _point_status(proj, pid: str) -> str:
@@ -127,7 +128,7 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
             if p.get("when"):
                 point_props["when"] = str(p.get("when"))
             sdk.create_point(
-                "statement", content, id=pid, session_id=sid,
+                EXTRACTION_POINT_KIND, content, id=pid, session_id=sid,
                 lme_question_id=qid, lme_session_index=si,
                 is_episodic=True, has_answer=mark["has_answer"],
                 quote=quote, status="draft",
