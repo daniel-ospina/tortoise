@@ -5604,7 +5604,7 @@ async def change_member_role(team_id: str, user_id: str, body: dict, user: dict 
 # acting user, and idempotent (GET export; repeat DELETE → already-pending).
 
 _EXPORT_MAX_EVENTS = 5000  # event log is a rolling window (30d retention)
-_EXPORT_SKIP_LABELS = {"GraphEventMeta", "TeamMeta"}  # internal plumbing
+_EXPORT_SKIP_LABELS = {"GraphEventMeta", "TeamMeta", "Meta", "EpMeta"}  # internal plumbing
 
 
 def _team_members_sync(team_id: str) -> list[dict]:
@@ -5660,8 +5660,12 @@ def _export_graph_snapshot(namespace: str):
     for labels, props in g.query(
         "MATCH (n) RETURN labels(n), properties(n)"
     ).result_set:
-        summary["nodes"] += 1
         labels = list(labels or [])
+        if _EXPORT_SKIP_LABELS & set(labels):
+            # internal bookkeeping (GraphEventMeta/TeamMeta/Meta/EpMeta) —
+            # excluded from BOTH the entity list and the node count (#1625)
+            continue
+        summary["nodes"] += 1
         if "Point" in labels:
             d = dict(props or {})
             if "pointKind" in d:
@@ -5678,7 +5682,7 @@ def _export_graph_snapshot(namespace: str):
                     pass
             events.append(d)
             summary["events"] += 1
-        elif not (_EXPORT_SKIP_LABELS & set(labels)):
+        else:
             entities.append({"labels": labels, **dict(props or {})})
             summary["entities"] += 1
     for src_labels, src_id, rel_type, tgt_labels, tgt_id, rel_props in g.query(

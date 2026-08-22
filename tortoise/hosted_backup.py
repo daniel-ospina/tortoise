@@ -160,13 +160,22 @@ def dump_graph(g, graph_name: str | None = None) -> dict:
 
     Uses internal ids only as a temporary bridge (``__dump_id``) — restore rewires
     edges before removing the bridge, so the export is fully portable.
+
+    #1625: internal bookkeeping labels (Meta/EpMeta/GraphEventMeta) are
+    EXCLUDED — they're runtime markers (the R2/R3 FTS-migration point_fts_v2 /
+    event_fts_v2 nodes), not content; exporting them inflates node_count and
+    restore recreates them spuriously (the projection re-marks on next open).
     """
+    from tortoise.hosted_api import _EXPORT_SKIP_LABELS
     nodes = []
     rows = g.query("MATCH (n) RETURN id(n), labels(n), properties(n)").result_set
     for internal_id, labels, props in rows:
+        labels_list = [str(l) for l in (labels or [])]  # noqa: E741
+        if _EXPORT_SKIP_LABELS & set(labels_list):
+            continue
         nodes.append({
             "dump_id": int(internal_id),
-            "labels": [str(l) for l in (labels or [])],  # noqa: E741
+            "labels": labels_list,
             "props": dict(props or {}),
         })
     edges = []
@@ -260,7 +269,16 @@ def restore_graph(g, dump: dict) -> dict:
         )
     # ACTUAL node count from the graph (not the dump bookkeeping) — the
     # verification gate must compare real graph state, mirroring the edge check.
-    actual_nodes = g.query("MATCH (n) RETURN count(n)").result_set[0][0]
+    # #1625: exclude internal bookkeeping (Meta/EpMeta/GraphEventMeta) — the
+    # dst projection's open re-creates the R2/R3 FTS-migration markers, which
+    # the dump excludes; counting them would make restore verification fail
+    # on a clean round-trip.
+    from tortoise.hosted_api import _EXPORT_SKIP_LABELS as _skip
+    actual_nodes = g.query(
+        "MATCH (n) WHERE NONE(l IN labels(n) WHERE l IN $skip) "
+        "RETURN count(n)",
+        params={"skip": sorted(_skip)},
+    ).result_set[0][0]
     return {"nodes": int(actual_nodes), "edges": int(actual_edges)}
 
 

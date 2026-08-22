@@ -182,7 +182,12 @@ def _counts(db_path: str, graph_name: str = GRAPH_NAME) -> dict:
     proj = FalkorProjection(db_path, graph_name=graph_name)
     try:
         g = proj.g
-        nodes = int(g.query("MATCH (n) RETURN count(n)").result_set[0][0])
+        # Exclude the R2/R3 Meta bookkeeping marker (point_fts_v2 / event_fts_v2)
+        # — it's internal state, not imported content.
+        nodes = int(g.query(
+            "MATCH (n) WHERE NOT (n:Meta) AND NOT (n:GraphEventMeta) "
+            "AND NOT (n:EpMeta) RETURN count(n)"
+        ).result_set[0][0])
         edges = int(g.query("MATCH ()-[r]->() RETURN count(r)").result_set[0][0])
         ids = sorted(
             str(r[0]) for r in g.query(
