@@ -2,7 +2,7 @@ import React from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 // #1623: plan display data (build-time import of product/pricing.json).
-import { planOptions, planForTier, STATUS_LABELS, TIER_LABELS } from './pricing.js'
+import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
 
 const API_BASE = 'https://api.premiselabs.co'
 const KEY_STORAGE = 'tortoise_api_key'
@@ -2186,7 +2186,7 @@ function claimIntentInFlight() {
                             {p.tier === 'free' ? (
                               <button
                                 className="btn-primary"
-                                onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false); setTab('keys') }}
+                                onClick={() => { window.clearTimeout(checkoutResetTimerRef.current); setCheckoutPending(false); window.history.replaceState({}, '', '/'); setWelcomeMode(false); setTab('keys') }}
                               >
                                 Start free
                               </button>
