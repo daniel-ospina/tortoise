@@ -1582,6 +1582,11 @@ class TeamInfoResponse(BaseModel):
     # suspension renders from the 403 detail (scoping delta 12).
     status: str = "active"
     point_count: int = 0
+    # #1591: the team's graph may be missing/broken (a half-failed
+    # provisioning) — /v1/team must FAIL SOFT (point_count=0, graph_ready
+    # false) instead of hard-500ing, so the dashboard renders and the graph
+    # recovers (the client shows the empty state; a write recreates it).
+    graph_ready: bool = True
     write_ops_used: int = 0
     write_ops_limit: int = 0
     write_ops_period: str = ""
@@ -2375,15 +2380,22 @@ async def topic_summary(
 async def team_info(team: dict = Depends(get_current_team)):
     """Get current team info: tier, usage, limits."""
     sdk = _make_sdk(namespace=team["team_id"])
-    # Count Points in default graph
+    # Count Points in default graph. #1591: FAIL SOFT — a missing/broken team
+    # graph (half-failed provisioning, restores) must not dead-end the
+    # dashboard with a hard 500; the client renders the empty state and a
+    # write recreates the graph.
+    point_count = 0
+    graph_ready = True
     try:
         point_count = sdk._get_proj().g.query(
             "MATCH (n:Point) RETURN count(n)"
         ).result_set[0][0]
-    except Exception as e:
+    except Exception:
         import logging
-        logging.getLogger("tortoise.api").exception("team_info failed")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        logging.getLogger("tortoise.api").warning(
+            "team_info graph unavailable (fail-soft): %s", team["team_id"],
+            exc_info=True)
+        graph_ready = False
 
     # Metering (#681): fetch write-op usage for the current billing period.
     from tortoise.metering import get_current_usage
@@ -2402,6 +2414,7 @@ async def team_info(team: dict = Depends(get_current_team)):
         # 500 on every /v1/team call, exposed by the zero-email signup verification).
         max_teams=None,
         point_count=point_count,
+        graph_ready=graph_ready,
         write_ops_used=usage["write_ops_used"],
         write_ops_limit=usage["write_ops_limit"],
         write_ops_period=usage["period"],
