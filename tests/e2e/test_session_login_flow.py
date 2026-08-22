@@ -77,16 +77,26 @@ def _proxy_body(route, local_url: str, page: Page) -> None:
 
 
 def _wire_prod_domains(page: Page, exchange_body=None, exchange_status=200,
-                       exchange_ctype: str = "application/json") -> None:
+                       exchange_ctype: str = "application/json",
+                       team_row=None, billing_routes=False) -> None:
     """Simulate the prod domains: tortoise → :8788 (auth site),
     app → :8790 (dashboard), api → mocked exchange + a deterministic
     session/team surface so the dashboard app shell renders after a
     successful exchange (the loop: cookie bridges origins → gate passes
-    → mount effect mints + renders, no redirect)."""
+    → mount effect mints + renders, no redirect).
+
+    #1623: ``team_row`` overrides MERGE with the base row (callers pass only
+    the fields they want to change — e.g. subscription_status/billing
+    fields for the Billing page); ``billing_routes`` adds mocked POST
+    /v1/billing/checkout + /v1/billing/portal handlers (returning
+    {checkout_url}/{portal_url}) so Upgrade/Manage CTAs resolve instead of
+    hitting the 401 fallback.
+    """
     minted_key = "tt_loop_minted_key_abcdef0123456789"
-    team_row = {"team_id": "team_loop", "name": "Loop Test", "tier": "free",
-                "max_users": 5, "max_graphs": 5, "graph_size_cap": 10000,
-                "ops_allowance": 1000, "email": "loop@premise-labs.dev"}
+    base_team_row = {"team_id": "team_loop", "name": "Loop Test", "tier": "free",
+                     "max_users": 5, "max_graphs": 5, "graph_size_cap": 10000,
+                     "ops_allowance": 1000, "email": "loop@premise-labs.dev"}
+    team_row = {**base_team_row, **team_row} if team_row else base_team_row
 
     def handle(route):
         url = route.request.url
@@ -100,6 +110,15 @@ def _wire_prod_domains(page: Page, exchange_body=None, exchange_status=200,
                 # The dashboard's session-key mint (Bearer = the loop session).
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"key": minted_key, "team_id": "team_loop"}))
+                return
+            if url.endswith("/v1/billing/checkout") and route.request.method == "POST" and billing_routes:
+                # #1623: capture the body so tests can assert the price_id.
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"checkout_url": "https://checkout.stripe.com/c/pay/test_123"}))
+                return
+            if url.endswith("/v1/billing/portal") and route.request.method == "POST" and billing_routes:
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"portal_url": "https://billing.stripe.com/p/session/test_123"}))
                 return
             if url.endswith("/v1/teams") and route.request.method == "GET":
                 route.fulfill(status=200, content_type="application/json",
