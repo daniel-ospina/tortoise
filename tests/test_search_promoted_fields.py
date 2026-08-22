@@ -150,3 +150,62 @@ def test_expand_tool_registered(sdk):
     entry = next(t for t in TOOL_REGISTRY if t.name == "tortoise_expand_relationships")
     assert entry.sdk_method == "expand_relationships"
     assert entry.group == "memory"
+
+
+# ── E6 (#1538) Task 4 — window fields + marker golden shapes ─────────────
+
+def test_promoted_window_fields_and_default_live_lock(sdk):
+    """T4: superseded hit (include_terminal) carries valid_from/valid_to/
+    expired_at + status; DEFAULT search excludes it (D5 regression lock)."""
+    old = sdk.create_point("statement", "gym at 6pm", validFrom="2026-06-10")
+    new = sdk.create_point("statement", "gym at 5pm", validFrom="2026-06-14")
+    sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-14")
+
+    # default retrieval: superseded old excluded (live preference unchanged)
+    default_ids = [r["id"] for r in _scan(sdk)]
+    assert old["id"] not in default_ids
+    assert new["id"] in default_ids
+
+    # include_terminal surfaces the superseded hit WITH window fields
+    all_results = _scan(sdk, include_terminal=True)
+    old_hit = next(r for r in all_results if r["id"] == old["id"])
+    assert old_hit["status"] == "superseded"
+    assert old_hit["valid_from"] == "2026-06-10"
+    assert old_hit["valid_to"] == "2026-06-14"
+    assert old_hit["expired_at"], "expiredAt promoted on superseded hit"
+
+    new_hit = next(r for r in all_results if r["id"] == new["id"])
+    assert new_hit["valid_from"] == "2026-06-14"
+    # live point — open window end: additive-only rule means NO valid_to key
+    assert "valid_to" not in new_hit
+
+
+def test_undated_hits_have_no_window_keys(sdk):
+    """Undated points: to_dict emits NO valid_* keys (additive-only, #1353
+    D8 rule — byte-identical output for legacy graphs)."""
+    p = sdk.create_point("statement", "timeless belief")
+    results = _scan(sdk)
+    hit = next(r for r in results if r["id"] == p["id"])
+    assert "valid_from" not in hit
+    assert "valid_to" not in hit
+    assert "expired_at" not in hit
+
+
+def test_marker_strings_via_full_scan_decoration(sdk):
+    """T4: the real decoration path surfaces window fields so the reader's
+    [valid …] marker renders from SearchResult-promoted state."""
+    from tools.longmem_eval.retrieve import _validity_marker
+
+    old = sdk.create_point("statement", "gym at 6pm", validFrom="2026-06-10")
+    new = sdk.create_point("statement", "gym at 5pm", validFrom="2026-06-14")
+    sdk.supersede_point(old["id"], new["id"], valid_from="2026-06-14")
+
+    results = _scan(sdk, include_terminal=True)
+    old_hit = next(r for r in results if r["id"] == old["id"])
+    assert old_hit["valid_from"] == "2026-06-10"
+    marker = _validity_marker(old_hit)
+    assert "[valid 2026-06-10 → 2026-06-14; expired " in marker
+    assert marker.endswith("]")
+
+    new_hit = next(r for r in results if r["id"] == new["id"])
+    assert "[valid since 2026-06-14]" in _validity_marker(new_hit)

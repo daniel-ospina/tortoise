@@ -152,8 +152,11 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
             point_props: dict = {}
             # E1 (#1533): the payload `when` slot rides onto the node only
             # when non-empty — undated sessions write no `when` prop.
+            # E6 (#1538) D3: validFrom = the fact's valid-time start (the
+            # `when` slot) — written at creation, undated ⇒ open window.
             if p.get("when"):
                 point_props["when"] = str(p.get("when"))
+                point_props["validFrom"] = str(p.get("when"))
             sdk.create_point(
                 EXTRACTION_POINT_KIND, content, id=pid, session_id=sid,
                 lme_question_id=qid, lme_session_index=si,

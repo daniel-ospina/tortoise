@@ -350,3 +350,36 @@ def test_outdated_flag_excluded_even_when_status_live(sdk):
     assert p["id"] not in [x["id"] for x in sdk.query()]
     # audit opt-in surfaces it
     assert p["id"] in [x["id"] for x in sdk.query(include_retracted=True)]
+
+
+# ── E6 (#1538) additive regression — window stamping is additive ──────────
+
+def test_supersede_window_stamps_additive(sdk):
+    """E6 T1 additive regression: the window stamp adds validTo/expiredAt
+    without changing the supersede return shape or the transfer behavior."""
+    claim_a = _make_point(sdk, content="Claim A: original version")
+    evidence = _make_point(sdk, kind="evidence", content="Evidence for claim")
+    sdk.create_operator("IMPL", evidence["id"], [claim_a["id"]])
+
+    claim_b = _make_point(sdk, content="Claim B: revised version")
+
+    result = sdk.supersede_point(claim_a["id"], claim_b["id"])
+
+    # Return shape unchanged
+    assert set(result) == {"invalidated", "id", "corrected_by",
+                           "edges_transferred"}
+    assert result["invalidated"] is True
+    assert result["id"] == claim_a["id"]
+    assert result["corrected_by"] == claim_b["id"]
+    assert result["edges_transferred"] >= 1
+
+    # Additive stamps on the old point
+    row = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.validTo, n.expiredAt, n.validFrom",
+        params={"id": claim_a["id"]},
+    ).result_set
+    valid_to, expired_at, valid_from = row[0]
+    assert valid_to, "validTo must be stamped (fallback chain)"
+    assert expired_at, "expiredAt must be stamped"
+    # window end == successor's validFrom (absent) → createdAt fallback
+    assert valid_to == claim_b["createdAt"]

@@ -150,6 +150,7 @@ markers = [
     "bench: issue #316 benchmark harness tests (benchmarks/ + tests/bench/)",
     "track_b: epic #902 Track B (post-#780) tests — inert under '-m not track_b' (A8 #1058)",
     "slow: network/venv acceptance tests (wheel build + verify_client.sh gate, PR #1313) — excluded from the default fast suite",
+    "v4_conditional: post-baseline follow-up run assertions (E6 #1538, ⛔ G3) — window-indexed restore + recall measurement, skipped in V3",
 ]
 
 [build-system]
