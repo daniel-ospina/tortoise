@@ -42,6 +42,7 @@ from .evidence import (EVIDENCE_QUOTE_CAP, anchor_quote, evidence_sessions,  # n
                        mark_for)
 from .evidence import _overlap  # noqa: F401, E402 — back-compat re-export
 from .ingest import (SESSION_TRANSCRIPT_KIND, EXTRACTION_POINT_KIND,  # noqa: E402
+                     UNDATED_SENTINEL,
                      _point_exists, _existing_point_ids, _session_chunks)
 
 
@@ -75,6 +76,10 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
              "evidence_marks": {"source_session": 0, "verbatim": 0,
                                 "raw_chunk": 0}}
     proj = sdk._get_proj()
+    # R5 (#1544): points in a dated session carry the session date as their
+    # creation time; undated sessions get the explicit sentinel (never the
+    # server default createdAt=now — deterministic-oldest → recency 0.0).
+    point_created_at = session_date or UNDATED_SENTINEL
 
     # E7 (#1539 D6): ONE batch existence probe per payload — the payload's
     # point ids + operator src/dst ids — so the per-point/per-op
@@ -147,8 +152,11 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
             point_props: dict = {}
             # E1 (#1533): the payload `when` slot rides onto the node only
             # when non-empty — undated sessions write no `when` prop.
+            # E6 (#1538) D3: validFrom = the fact's valid-time start (the
+            # `when` slot) — written at creation, undated ⇒ open window.
             if p.get("when"):
                 point_props["when"] = str(p.get("when"))
+                point_props["validFrom"] = str(p.get("when"))
             sdk.create_point(
                 EXTRACTION_POINT_KIND, content, id=pid, session_id=sid,
                 lme_question_id=qid, lme_session_index=si,
@@ -157,6 +165,7 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
                 search_keys=p.get("search_keys") or None,
                 source_turn_id=turn_ref,
                 reason=str(p.get("reason") or "NEW"),   # E5: REVISES visible on the node
+                createdAt=point_created_at,  # R5: session date (sentinel)
                 **point_props,
             )
             # E7 (D7): aboutObject parity — the canonical predicate the
@@ -386,6 +395,9 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
         evidence_turns = [str(t.get("content") or "") for t in session
                           if t.get("has_answer")]
         stats["evidence_turns"] += len(evidence_turns)
+        # R5 (#1544): points in a dated session carry the session date as
+        # their creation time; undated sessions get the explicit sentinel.
+        point_created_at = session_date or UNDATED_SENTINEL
 
         # ── Session node (mirrors the deterministic leg) ──
         sdk._get_proj().g.query(
@@ -419,6 +431,7 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
                     id=turn_id, session_id=sid, lme_question_id=qid,
                     lme_session_index=si, speaker=role,
                     is_episodic=True, status="draft",
+                    createdAt=point_created_at,  # R5: session date (sentinel)
                 )
             proj.g.query(
                 "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
@@ -444,6 +457,7 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
                     lme_session_index=si, lme_chunk_index=ci,
                     lme_chunk_turns=len(turn_idxs), is_episodic=True,
                     has_answer=contains_evidence, status="draft",
+                    createdAt=point_created_at,  # R5: session date (sentinel)
                 )
                 stats["chunks"] += 1  # written (post-guard) — stats == graph
             elif contains_evidence:

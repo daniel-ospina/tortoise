@@ -10,7 +10,7 @@ import threading
 import time
 from collections import Counter
 from dataclasses import dataclass, asdict, field
-from typing import Literal
+from typing import Any, Literal
 
 # #1391: terminal (no-longer-current) Point statuses EXCLUDED from every
 # default read surface (FTS/vector/structural/operator + sdk query paths).
@@ -212,6 +212,12 @@ class SearchResult:
     status: str = ""  # live / superseded / deprecated / retracted / draft
     superseded_by: dict | None = None  # {id, content_snippet, created_at} | None
     supersedes: list[dict] = field(default_factory=list)  # [{id, content_snippet, created_at}]
+    # E6 (#1538) D5/D7: promoted validity-window fields — additive, emitted
+    # only when present (undated points ⇒ empty string, no marker). Written
+    # by supersede_point/invalidate_point (D2).
+    valid_from: str = ""
+    valid_to: str = ""
+    expired_at: str = ""
     subject: dict | None = None  # {id, name, kind} | None — ≤1 hop, fail-closed (D10)
 
     def to_dict(self) -> dict:
@@ -245,6 +251,14 @@ class SearchResult:
             d["superseded_by"] = self.superseded_by
         if self.supersedes:
             d["supersedes"] = self.supersedes
+        # E6 (#1538) D7: window fields — additive keys, emitted only when
+        # present (#1353 D8 rule).
+        if self.valid_from:
+            d["valid_from"] = self.valid_from
+        if self.valid_to:
+            d["valid_to"] = self.valid_to
+        if self.expired_at:
+            d["expired_at"] = self.expired_at
         if self.subject:
             d["subject"] = self.subject
         return d
@@ -855,6 +869,9 @@ def expand_structural_hops(
 def rrf_fusion(
     ranked_lists: list[list[tuple[str, float]]],
     k: int = 60,
+    *,
+    recency_weights: dict[str, float] | None = None,
+    recency_boost: float = 0.0,
 ) -> dict[str, float]:
     """Reciprocal Rank Fusion — combine multiple ranked lists.
 
@@ -863,6 +880,13 @@ def rrf_fusion(
     Args:
         ranked_lists: List of strategies, each is [(id, score), ...] ranked desc
         k: RRF constant (default 60 from Cormack et al. 2009)
+        recency_weights (R5 #1544): {id: factor ∈ [0,1]} — rank-based
+            recency percentile from ``_recency_factors`` (newest → 1.0,
+            oldest → 0.0, undated → 0.0). Optional; default None = off.
+        recency_boost (R5 #1544): multiplier strength. Final score per doc:
+            RRF(d) × (1 + recency_boost × weight(d)). Default 0.0 = off.
+            When weights are None or boost is 0.0 the arithmetic is
+            untouched → byte-identical output for all pre-R5 callers.
 
     Returns:
         {id: combined_rrf_score} sorted by score descending
@@ -872,6 +896,14 @@ def rrf_fusion(
         for rank, (pid, _score) in enumerate(ranked):
             rrf_score = 1.0 / (k + rank + 1)
             scores[pid] = scores.get(pid, 0.0) + rrf_score
+    # R5 (#1544): optional recency multiplier — a multiplier, NOT an additive
+    # constant: the RRF score range is ~0.01–0.05 (the SearchScores rrf
+    # docstring), so an additive offset would swamp fusion entirely.
+    if recency_weights and recency_boost > 0:
+        for pid in scores:
+            w = recency_weights.get(pid, 0.0)
+            if w > 0:
+                scores[pid] = scores[pid] * (1.0 + recency_boost * w)
     return dict(sorted(scores.items(), key=lambda x: x[1], reverse=True))
 
 
@@ -1069,6 +1101,42 @@ def _created_sort_key(value):
         except ValueError:
             pass
     return (1, s)
+
+
+def _recency_factors(entries: list[tuple[str, Any]]) -> dict[str, float]:
+    """Rank-based recency factor per id, newest→1.0, oldest→0.0.
+
+    R5 (#1544): the date-weight primitive fed into ``rrf_fusion``'s
+    ``recency_weights``. Reuses ``_created_sort_key`` (ISO + epoch
+    mixed-format safe, #1353). Undated/unparseable ids get 0.0 (no boost).
+    Ties on the same date sort by id for determinism and share the highest
+    factor in their rank group.
+
+    Rank-based (not age-based) so it is format-agnostic and immune to
+    out-of-range ages; with <2 dated entries there is no spread and every
+    factor stays 0.0 (nothing to weight).
+    """
+    dated = [(pid, k) for pid, d in entries
+             if (k := _created_sort_key(d))[0] == 0]  # parseable dates only
+    factors: dict[str, float] = {pid: 0.0 for pid, _ in entries}
+    if len(dated) < 2:
+        return factors
+    # Descending date order: index 0 = newest → highest factor (1.0),
+    # last = oldest → 0.0 (the rank-based percentile, newest-first). Docs
+    # on the SAME date form a rank group and SHARE the group's highest
+    # factor (deterministic tie-break — same date ⇒ same recency).
+    ordered = sorted(dated, key=lambda t: (t[1], t[0]), reverse=True)
+    n = len(ordered)
+    i = 0
+    while i < n:
+        j = i
+        while j + 1 < n and ordered[j + 1][1] == ordered[i][1]:
+            j += 1
+        factor = (n - 1 - i) / (n - 1)
+        for pid, _k in ordered[i:j + 1]:
+            factors[pid] = factor
+        i = j + 1
+    return factors
 
 
 def _beta_variance(alpha: float, beta: float) -> float:
@@ -1592,6 +1660,7 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
             "OPTIONAL MATCH (n)-[r:CORRECTS]->(old:Point) "
             "OPTIONAL MATCH (new:Point)-[r2:CORRECTS]->(n) "
             "RETURN n.id, n.status, "
+            "  n.validFrom, n.validTo, n.expiredAt, "
             "  old.id, old.content, old.createdAt, "
             "  new.id, new.status, new.content, new.createdAt, "
             "  s.id, s.name, s.subjectKind, "
@@ -1608,8 +1677,14 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
                 "supersedes": [],
                 "subject": None,
             })
-            old_id, old_content, old_created = row[2], row[3], row[4]
-            new_id, new_status, new_content, new_created = row[5], row[6], row[7], row[8]
+            # E6 (#1538) D5/D7: promoted window fields — additive, absent
+            # when undated (open window ⇒ no marker, byte-identical
+            # rendering). Written by supersede_point/invalidate_point (D2).
+            st.setdefault("valid_from", row[2] or None)
+            st.setdefault("valid_to", row[3] or None)
+            st.setdefault("expired_at", row[4] or None)
+            old_id, old_content, old_created = row[5], row[6], row[7]
+            new_id, new_status, new_content, new_created = row[8], row[9], row[10], row[11]
             if old_id and old_id not in {s["id"] for s in st["supersedes"]}:
                 st["supersedes"].append({
                     "id": old_id,
@@ -1629,8 +1704,8 @@ def fetch_point_epistemic_state(graph, point_ids: list[str]) -> dict[str, dict]:
                         st["superseded_by"].get("created_at")):
                     st["superseded_by"] = cand
             # Subject: own aboutSubject wins; event's is the ≤1-hop fallback.
-            s_id, s_name, s_kind = row[9], row[10], row[11]
-            es_id, es_name, es_kind = row[12], row[13], row[14]
+            s_id, s_name, s_kind = row[12], row[13], row[14]
+            es_id, es_name, es_kind = row[15], row[16], row[17]
             if st["subject"] is None and s_id:
                 st["subject"] = {"id": s_id, "name": s_name or "", "kind": s_kind or ""}
             elif st["subject"] is None and es_id:

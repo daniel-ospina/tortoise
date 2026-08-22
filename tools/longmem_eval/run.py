@@ -58,9 +58,11 @@ from .report import (
     print_comparison,
     save_report,
 )
+from .rerank import RERANK_MODEL_DEFAULT, rerank_enabled
 from .retrieve import (
     DEFAULT_CONTEXT_TOKEN_CAP,
     DEFAULT_MAX_CHUNKS_PER_SESSION,
+    DEFAULT_TR_TOP_K,
     retrieve_for_question,
 )
 
@@ -112,6 +114,16 @@ def _positive_int(raw: str) -> int:
     return value
 
 
+def _rerank_lambda(raw: str) -> float:
+    """argparse ``type=`` guard for ``--rerank-lambda``: must be in [0,1]
+    (boundary values accepted — λ=1 degenerates to pure rerank, λ=0 to pure
+    similarity, per D7). Out-of-range fails fast before the question loop."""
+    value = float(raw)
+    if not (0.0 <= value <= 1.0):
+        raise argparse.ArgumentTypeError(f"must be in [0,1], got {value}")
+    return value
+
+
 def _resolve_int_knob(env_name: str, default: int, cli_value: int | None) -> int:
     """Knob resolution (mirrors the ``TORTOISE_LME_READER_MODEL`` pattern —
     ``spec or env or default``): the CLI flag wins when given, else the env
@@ -130,6 +142,86 @@ def _resolve_int_knob(env_name: str, default: int, cli_value: int | None) -> int
             raise SystemExit(f"{env_name} must be >= 1, got {value}")
         return value
     return default
+
+
+# ── R6 (#1545): effective rerank config resolution ──────────────────────
+
+
+def _resolve_rerank_env_int(name: str, default: int, lo: int) -> int:
+    """Run-level raw-env validation (D9): a parseable-but-out-of-range env
+    value (``CAP=0`` / ``POOL=0``) fails fast (SystemExit) exactly like the
+    CLI path; unparseable garbage falls back to the default — the
+    retrieve-layer clamp (rerank._env_int) is the per-question safety net,
+    NOT the run-level validation. Boundary values (``lo``) accepted."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        return default
+    if value < lo:
+        raise SystemExit(f"{name} must be >= {lo}, got {value!r}")
+    return value
+
+
+def _resolve_rerank_env_float(name: str, default: float,
+                              lo: float, hi: float) -> float:
+    """Run-level raw-env validation for the MMR lambda (0..1; boundary
+    values accepted; out-of-range fails fast; garbage → default)."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw.strip())
+    except ValueError:
+        return default
+    if not (lo <= value <= hi):
+        raise SystemExit(f"{name} must be in [{lo},{hi}], got {value!r}")
+    return value
+
+
+def _resolve_rerank(*, rerank: bool | None, rerank_model: str | None,
+                    rerank_pool: int | None, per_session_cap: int | None,
+                    mmr_lambda: float | None, max_k: int) -> dict:
+    """The effective R6 config (CLI > env > default), resolved ONCE per run
+    (D9). Env resolution + re-validation happen ONLY when the effective
+    rerank is ON — a baseline run must be completely unaffected by the
+    TORTOISE_LME_RERANK_CAP/LAMBDA/POOL env vars (only ``rerank_enabled``
+    reads TORTOISE_LME_RERANK itself). ``pool_size`` is the EFFECTIVE
+    APPLIED pool (the ``max(ks)``-adjusted value — a baseline run records
+    ``max(ks)``, never the nominal env default 40). Returns a dict with the
+    report/fingerprint ``config`` and the per-question retrieve kwargs.
+    """
+    rerank_on = rerank_enabled(rerank)
+    if not rerank_on:
+        applied = (max(rerank_pool, max_k) if rerank_pool is not None
+                   else max_k)
+        return {
+            "rerank_on": False,
+            "config": {"enabled": False, "model": None, "lambda_": None,
+                       "per_session_cap": None, "pool_size": applied},
+            "model": None, "rerank_pool": rerank_pool,
+            "per_session_cap": None, "mmr_lambda": None,
+        }
+    cap = (per_session_cap if per_session_cap is not None
+           else _resolve_rerank_env_int("TORTOISE_LME_RERANK_CAP", 2, lo=1))
+    lam = (mmr_lambda if mmr_lambda is not None
+           else _resolve_rerank_env_float("TORTOISE_LME_RERANK_LAMBDA",
+                                          0.7, 0.0, 1.0))
+    pool = (rerank_pool if rerank_pool is not None
+            else _resolve_rerank_env_int("TORTOISE_LME_RERANK_POOL", 40, lo=1))
+    model = (rerank_model
+             or os.environ.get("TORTOISE_LME_RERANK_MODEL")
+             or RERANK_MODEL_DEFAULT)
+    applied = max(pool, max_k)
+    return {
+        "rerank_on": True,
+        "config": {"enabled": True, "model": model, "lambda_": lam,
+                   "per_session_cap": cap, "pool_size": applied},
+        "model": model, "rerank_pool": pool,
+        "per_session_cap": cap, "mmr_lambda": lam,
+    }
 
 
 # R3 (#1542): the MemDelta-pinned embedder (all-MiniLM-L6-v2, 384-dim,
@@ -285,11 +377,16 @@ def _model_id(model: Any) -> str | None:
 def _build_fingerprint(*, reader_model: str, judge_model: str,
                        ks: tuple[int, ...], top_k: int, split: str,
                        ingest_mode: str, extractor_model: Any,
-                       max_retries: int, dataset_fingerprint: str) -> dict:
+                       max_retries: int, dataset_fingerprint: str,
+                       rerank_config: dict) -> dict:
     """The effective-run-config fingerprint (M7 #1527, D7 schema).
 
     ``workers`` is deliberately EXCLUDED (per-question isolation makes
     results workers-invariant) but recorded in ``methodology.workers``.
+    R6 (#1545, D9): the full effective rerank config rides the fingerprint
+    (``rerank_config``) — a config-mismatched resume is refused by the
+    existing fingerprint gate (a baseline checkpoint resumed with
+    ``--rerank``, a pool change with rerank off, … — Gate 8).
     """
     return {
         "git_sha": git_sha(),
@@ -305,6 +402,7 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
         "max_retries": max_retries,
         "reader_prompt_hash": _sha16(reader_prompt_source()),
         "judge_rubric_id_hash": _sha16(JUDGE_RUBRIC_ID),
+        "rerank": rerank_config,
     }
 
 
@@ -431,6 +529,22 @@ def run_evaluation(
     chunk_turns: int = DEFAULT_CHUNK_TURNS,
     max_context_tokens: int = DEFAULT_CONTEXT_TOKEN_CAP,
     max_chunks_per_session: int = DEFAULT_MAX_CHUNKS_PER_SESSION,
+    # R5 (#1544): TR knobs — temporal-reasoning questions get the events
+    # union pool, the engine recency date weight, the TR-constraint window
+    # filter, time-ascending rendering, and the tighter tr_top_k cap
+    # (20→12). Non-TR questions ignore them (byte-identical path).
+    tr_top_k: int = DEFAULT_TR_TOP_K,
+    tr_date_weight: float = 0.5,
+    tr_events: bool = True,
+    # R6 (#1545): the rerank layer — OFF by default (byte-identical
+    # baseline); ``rerank_prewarm`` carries the run_main pre-warm outcome
+    # (model_load_ms / prewarmed / reason) for the report config block.
+    rerank: bool | None = None,
+    rerank_model: str | None = None,
+    rerank_pool: int | None = None,
+    per_session_cap: int | None = None,
+    mmr_lambda: float | None = None,
+    rerank_prewarm: dict | None = None,
     # M7 (#1527): run-hygiene inputs.
     dataset_fingerprint: str = "unknown",
     integrity_threshold: float = 0.0,
@@ -457,12 +571,21 @@ def run_evaluation(
     # E2E-3 Precondition 2: the audit is computed from the loaded instances
     # BEFORE anything else — no report can be produced without it.
     dataset_semantics_audit = audit_dataset(instances)
+    # R6 (#1545) D9: the effective rerank config resolves once, before the
+    # loop — the fingerprint records it and refuses config-mismatched
+    # resumes (three-valued resume: equal → allowed; different → refused;
+    # pre-R6 checkpoints are refused by M7's fingerprint gate regardless).
+    rr = _resolve_rerank(
+        rerank=rerank, rerank_model=rerank_model, rerank_pool=rerank_pool,
+        per_session_cap=per_session_cap, mmr_lambda=mmr_lambda,
+        max_k=max(ks))
     fingerprint = _build_fingerprint(
         reader_model=reader.model_id,
         judge_model=judge.model_id,
         ks=ks, top_k=top_k, split=split, ingest_mode=ingest_mode,
         extractor_model=extractor_model, max_retries=max_retries,
         dataset_fingerprint=dataset_fingerprint,
+        rerank_config=rr["config"],
     )
     done, prior_failures = _load_checkpoint(checkpoint, fingerprint)
     outcomes: list[dict[str, Any]] = []
@@ -521,7 +644,15 @@ def run_evaluation(
                     ret = retrieve_for_question(
                         sdk, question, ks=ks, top_k=top_k,
                         max_context_tokens=max_context_tokens,
-                        max_chunks_per_session=max_chunks_per_session)
+                        max_chunks_per_session=max_chunks_per_session,
+                        tr_top_k=tr_top_k,
+                        tr_date_weight=tr_date_weight,
+                        tr_events=tr_events,
+                        rerank=rr["rerank_on"],
+                        rerank_model=rr["model"],
+                        rerank_pool=rr["rerank_pool"],
+                        per_session_cap=rr["per_session_cap"],
+                        mmr_lambda=rr["mmr_lambda"])
 
                     _stage = "reader"
                     t0 = time.monotonic()
@@ -608,6 +739,17 @@ def run_evaluation(
                 "points_embedded": ret["points_embedded"],
                 "embedding_coverage": ret["embedding_coverage"],
                 "legs": ret["legs"],
+                # R5 (#1544): the TR-constraint surface per question — the
+                # detected kind (TR only) + whether the window filter fell
+                # back to the unfiltered pool (never starve the reader).
+                "tr_constraint": ret.get("tr_constraint"),
+                "tr_window_fallback": ret.get("tr_window_fallback", False),
+                # R6 (#1545): the rerank pass + latency ride the outcome —
+                # they stay ABSENT on baseline outcomes (the projection in
+                # outcomes_to_report adds them conditionally).
+                **({"rerank_pass": ret["rerank_pass"],
+                    "rerank_latency_ms": ret.get("rerank_latency_ms", 0.0)}
+                   if "rerank_pass" in ret else {}),
             }
             with _lock:
                 outcomes.append(outcome)
@@ -675,6 +817,22 @@ def run_evaluation(
             "context_token_cap": max_context_tokens,
             "max_chunks_per_session": max_chunks_per_session,
         },
+        # R5 (#1544) D7: TR knob values recorded verbatim in the
+        # methodology (the run protocol step-2/6 knob sweeps consume them;
+        # tr_top_k and R1's context cap are complementary flood controls).
+        r5_knobs={
+            "tr_top_k": tr_top_k,
+            "tr_date_weight": tr_date_weight,
+            "tr_events": tr_events,
+        },
+        # R6 (#1545): the effective rerank config + pre-warm outcome → the
+        # report's rerank block (config + aggregates). None on baseline runs
+        # → zero rerank keys in the report (the no-flag-report contract).
+        rerank_config=(rr["config"] | {
+            "model_load_ms": (rerank_prewarm or {}).get("model_load_ms"),
+            "prewarmed": (rerank_prewarm or {}).get("prewarmed"),
+            "prewarm_reason": (rerank_prewarm or {}).get("reason"),
+        }) if rr["rerank_on"] else None,
         # M7 (#1527): publication-gated audit + run-hygiene provenance.
         dataset_semantics_audit=dataset_semantics_audit,
         integrity_threshold=integrity_threshold,
@@ -707,6 +865,13 @@ def outcomes_to_report(
     # keys are always emitted (not_checked default when omitted).
     embedder_status: dict | None = None,
     r1_knobs: dict[str, Any] | None = None,
+    # R5 (#1544) D7: the TR knob values (tr_top_k / tr_date_weight /
+    # tr_events) recorded in the report methodology — same pattern as
+    # ``r1_knobs``.
+    r5_knobs: dict[str, Any] | None = None,
+    # R6 (#1545): the effective rerank config + pre-warm outcome (None on
+    # baseline runs → zero rerank keys in the report).
+    rerank_config: dict[str, Any] | None = None,
     # M7 (#1527): publication-gated audit + run-hygiene provenance.
     dataset_semantics_audit: dict[str, Any] | None = None,
     integrity_threshold: float = 0.0,
@@ -747,7 +912,21 @@ def outcomes_to_report(
                 # o.get so a pre-R3 checkpoint resumes with the defaults
                 # (coverage keys → None, legs → []) instead of KeyError.
                 "points_total", "points_embedded", "embedding_coverage",
-            )} | {"legs": list(o.get("legs") or [])}
+                # R5 (#1544): TR-constraint surface — read via o.get so a
+                # pre-R5 checkpoint resumes with the defaults (None/False).
+                "tr_constraint",
+            )} | {"legs": list(o.get("legs") or []),
+                  # False default: a pre-R5 checkpoint had no TR path — no
+                  # filter ran, so the fallback flag is honestly False.
+                  "tr_window_fallback": bool(o.get("tr_window_fallback", False)),
+                  # R6 (#1545): the rerank pass + latency are added to the
+                  # selector ONLY when the outcome carries them (a baseline
+                  # outcome must NEVER project rerank_pass: null; stale
+                  # pre-R6 checkpoint outcomes are skipped by the same
+                  # condition and read via .get() so they can't KeyError).
+                  **({"rerank_pass": o["rerank_pass"],
+                      "rerank_latency_ms": o.get("rerank_latency_ms", 0.0)}
+                     if o.get("rerank_pass") is not None else {})}
             for o in outcomes
         ]
     }
@@ -778,6 +957,8 @@ def outcomes_to_report(
         top_k=top_k,
         failures=failures,
         r1_knobs=r1_knobs,
+        r5_knobs=r5_knobs,
+        rerank_config=rerank_config,
         embedder_status=embedder_status,
         extra=extra,
         # M7 (#1527): publication-gated audit + run-hygiene provenance.
@@ -877,10 +1058,24 @@ def _print_summary(report: dict[str, Any]) -> None:
     print(f"context tokens mean:     {ret['context_tokens_mean']}")
     lat = report["latency_ms"]
     print(f"latency (ms) retrieval/reader/judge/ingest/total:")  # noqa: F541
-    for key in ("retrieval", "reader", "judge", "ingest",
-                "total_per_question"):
+    lat_keys = ["retrieval", "reader", "judge", "ingest",
+                "total_per_question"]
+    if "rerank" in lat:                       # R6: baseline reports carry no
+        lat_keys.insert(1, "rerank")          # rerank latency block
+    for key in lat_keys:
         d = lat.get(key, {})
         print(f"  {key:<20} {d}")
+    rr_block = report.get("rerank")
+    if rr_block:
+        print("rerank (R6): enabled={} model={} lambda={} cap={} "
+              "pool={} applied_fraction={} degraded_n={} "
+              "max_session_chunks_max={}".format(
+                  rr_block.get("enabled"), rr_block.get("model"),
+                  rr_block.get("lambda_"), rr_block.get("per_session_cap"),
+                  rr_block.get("pool_size"),
+                  rr_block.get("applied_fraction"),
+                  rr_block.get("degraded_n"),
+                  rr_block.get("max_session_chunks_max")))
     print("methodology: reader={} judge={} extraction={}".format(
         report["methodology"]["reader_model"],
         report["methodology"]["judge_model"],
@@ -916,6 +1111,15 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--top-k", type=int, default=DEFAULT_TOP_K,
                    help="max context items handed to the reader (default 20; "
                         "the token budget --context-cap bounds it further, R1 #1540)")
+    p.add_argument("--tr-top-k", type=int, default=DEFAULT_TR_TOP_K,
+                   help="TR-questions context cap (default 12 — the 20→12 "
+                        "transcript-flood control, R5 #1544)")
+    p.add_argument("--tr-date-weight", type=float, default=0.5,
+                   help="TR-questions recency date weight (default 0.5 — the "
+                        "RRF recency multiplier; 0.0 disables, R5 #1544)")
+    p.add_argument("--no-tr-events", action="store_true",
+                   help="exclude the events timeline from the TR retrieval "
+                        "pool (default: events included, R5 #1544)")
     p.add_argument("--chunk-turns", type=_positive_int, default=None,
                    help="turns per raw-chunk window (env TORTOISE_LME_CHUNK_TURNS; "
                         "default 2; >= 1; the run protocol step-2 sweep selects "
@@ -949,6 +1153,38 @@ def _build_parser() -> argparse.ArgumentParser:
                         "practical ceiling is provider rate limits + machine "
                         "memory (each worker spawns an embedded redislite "
                         "server). 8-16 on a quiet machine")
+    # R6 (#1545): the rerank layer — tri-state --rerank/--no-rerank (None
+    # default so the TORTOISE_LME_RERANK env still applies), pool/cap/lambda
+    # validated at parse time (boundary values accepted; the env path is
+    # re-validated in run_main only when the effective rerank is ON).
+    rr = p.add_mutually_exclusive_group()
+    rr.add_argument("--rerank", dest="rerank", action="store_true",
+                    default=None,
+                    help="enable the R6 post-fusion cross-encoder + MMR "
+                         "rerank stage (default: env TORTOISE_LME_RERANK — "
+                         "fail-safe OFF: only 1/true/yes/on enables; "
+                         "requires a FRESH checkpoint, #1545)")
+    rr.add_argument("--no-rerank", dest="rerank", action="store_false",
+                    default=None,
+                    help="disable rerank even when TORTOISE_LME_RERANK is set "
+                         "(tri-state: explicit flags beat the env)")
+    p.add_argument("--rerank-pool", type=_positive_int, default=None,
+                   help="rerank pool depth (env TORTOISE_LME_RERANK_POOL; "
+                        "default 40; honored with rerank OFF too — the "
+                        "pool-only isolation arm, OQ5; >= 1; the effective "
+                        "applied pool is max(pool, max(k)))")
+    p.add_argument("--rerank-cap", type=_positive_int, default=None,
+                   help="per-session MMR cap (env TORTOISE_LME_RERANK_CAP; "
+                        "default 2; >= 1; E2E-10 caps per-session context "
+                        "chunks <= 1-2)")
+    p.add_argument("--rerank-lambda", type=_rerank_lambda, default=None,
+                   help="MMR lambda in [0,1] (env TORTOISE_LME_RERANK_LAMBDA; "
+                        "default 0.7; 1.0 = pure rerank, 0.0 = pure "
+                        "similarity; boundary values accepted)")
+    p.add_argument("--rerank-model", default=None,
+                   help="cross-encoder model name (env "
+                        "TORTOISE_LME_RERANK_MODEL; default "
+                        "cross-encoder/ms-marco-MiniLM-L6-v2)")
     p.add_argument("--checkpoint", default=None,
                    help="partial-results state file (JSON) for error isolation "
                         "+ resume: completed/failed questions are checkpointed "
@@ -1039,6 +1275,38 @@ def run_main(argv: list[str] | None = None) -> dict[str, Any]:
     max_chunks_per_session = _resolve_int_knob(
         "TORTOISE_LME_MAX_CHUNKS_PER_SESSION",
         DEFAULT_MAX_CHUNKS_PER_SESSION, args.max_chunks_per_session)
+    # R5 (#1544) TR knobs: argparse defaults (12 / 0.5 / events-on),
+    # recorded verbatim in the report methodology (D7).
+    tr_top_k = args.tr_top_k
+    tr_date_weight = args.tr_date_weight
+    tr_events = not args.no_tr_events
+
+    # R6 (#1545): the effective rerank config (CLI > env > default) resolves
+    # BEFORE the loop; env resolution + re-validation happen ONLY when the
+    # effective rerank is ON (a baseline run never reads the R6 env vars —
+    # Gate 7). Then pre-warm the cross-encoder ONCE (also gated on the
+    # effective rerank being on — a baseline run never loads the ~90MB
+    # model); a pre-warm failure does NOT disable the run (per-question
+    # get_scorer TTL-retries continue, D8b) and model_load_ms is recorded
+    # once in the report config.
+    rr = _resolve_rerank(
+        rerank=args.rerank, rerank_model=args.rerank_model,
+        rerank_pool=args.rerank_pool, per_session_cap=args.rerank_cap,
+        mmr_lambda=args.rerank_lambda, max_k=max(ks))
+    rerank_prewarm: dict | None = None
+    if rr["rerank_on"]:
+        from .rerank import get_scorer
+        t0 = time.monotonic()
+        scorer, reason = get_scorer(rr["model"])
+        model_load_ms = round((time.monotonic() - t0) * 1000.0, 2)
+        rerank_prewarm = {"model_load_ms": model_load_ms,
+                          "prewarmed": scorer is not None, "reason": reason}
+        if scorer is None:
+            print(f"[longmem_eval] WARNING: cross-encoder pre-warm failed "
+                  f"({reason[:120]}…) — rerank stays ON; per-question "
+                  f"TTL-retries continue (each question degrades to "
+                  f"rerank-off with a recorded reason, D8b)",
+                  file=sys.stderr)
 
     # R3 (#1542) D2: embedder pre-flight — before dataset load (fail before
     # the ~tens-of-MB download). Real runs refuse to start when the dense
@@ -1115,6 +1383,13 @@ def run_main(argv: list[str] | None = None) -> dict[str, Any]:
             embedder_status=embedder_status,
             chunk_turns=chunk_turns, max_context_tokens=context_cap,
             max_chunks_per_session=max_chunks_per_session,
+            tr_top_k=tr_top_k, tr_date_weight=tr_date_weight,
+            tr_events=tr_events,
+            rerank=rr["rerank_on"], rerank_model=rr["model"],
+            rerank_pool=rr["rerank_pool"],
+            per_session_cap=rr["per_session_cap"],
+            mmr_lambda=rr["mmr_lambda"],
+            rerank_prewarm=rerank_prewarm,
             dataset_fingerprint=dataset_fingerprint,
             integrity_threshold=args.integrity_threshold,
             integrity_justification=args.integrity_justification,

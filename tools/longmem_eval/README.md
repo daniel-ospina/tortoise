@@ -58,6 +58,11 @@ and continue offline (CI smoke stays runnable without the extra).
 | `TORTOISE_LME_CHUNK_TURNS` | turns per raw-chunk window (R1 #1540) | `2` (the run protocol step-2 sweep selects the pilot/500-Q value) |
 | `TORTOISE_LME_CONTEXT_CAP` | reader context token budget — points first, chunks backfill (UX decision 3) | `8000` |
 | `TORTOISE_LME_MAX_CHUNKS_PER_SESSION` | per-session raw-chunk cap in the retrieval pool (E2E-1 session dedup) | `2` |
+| `TORTOISE_LME_RERANK` | R6 rerank gate (fail-safe OFF — only `1/true/yes/on` enables; explicit `--rerank`/`--no-rerank` beat it) | unset = OFF |
+| `TORTOISE_LME_RERANK_MODEL` | cross-encoder model name (R6 #1545) | `cross-encoder/ms-marco-MiniLM-L6-v2` |
+| `TORTOISE_LME_RERANK_POOL` | rerank pool depth (R6; applied pool = `max(pool, max(k))`; only read while rerank is on) | `40` |
+| `TORTOISE_LME_RERANK_CAP` | per-session MMR cap (R6; ≥ 1) | `2` |
+| `TORTOISE_LME_RERANK_LAMBDA` | MMR λ in [0,1] (R6; 1.0 = pure rerank, 0.0 = pure similarity; boundary values accepted) | `0.7` |
 
 CLI flags: `--split s|m|oracle`, `--limit N`, `--data <local json/jsonl>`,
 `--k 5,10,20`, `--top-k 20`, `--mock`, `--output <report.json>`,
@@ -73,6 +78,25 @@ override the `integrity.valid` gate — max allowed `invalid_rate`; the
 override is recorded with its justification and a *violated* override still
 yields `valid=false`; default 0.0 = any failed/ingest-error question marks
 the run invalid).
+
+**R6 rerank (issue #1545, epic #1509) — cross-encoder + MMR, OFF by default:**
+`--rerank` / `--no-rerank` (tri-state; `--no-rerank` beats a leaked env),
+`--rerank-pool N`, `--rerank-cap N`, `--rerank-lambda F`, `--rerank-model
+<name>`. The layer is a **post-fusion stage in the eval retrieval layer only**
+(`tools/longmem_eval/rerank.py`): the RRF-fused pool is deepened to the
+rerank pool, re-scored by a sentence-transformers `CrossEncoder` (sigmoid
+normalized), and greedily MMR-selected with a hard per-session cap — the
+selected hits ARE the reader's context. **Off-path is byte-identical to the
+V3 baseline** (no rerank keys, no extra queries, production
+`search_engine.py`/`sdk.py` untouched). Failure semantics: a model load or
+score failure degrades that question to rerank-off with a recorded reason
+(never a run abort; transient load failures are TTL-cached ~1/min); the
+degraded question falls back to the **baseline** pool. Knob sweeps (λ×cap)
+are V5 — the run records the effective config + per-question
+`rerank_pass` (moved/dropped/selected_count/max_session_chunks,
+pool_recall@k) and the report's `rerank` block (applied_fraction,
+degraded_n, max_session_chunks_max — E2E-10 assertable from the report
+alone).
 
 **Run hygiene (M7 #1527):** the runner refuses Python < 3.12 with a clear
 message (pyproject `requires-python >=3.12`); checkpoints carry a code
@@ -120,6 +144,22 @@ path via `--data` skips the download. Split S = `longmemeval_s_cleaned.json`
    its own fresh graph), NOT the official full-corpus indexing — stated
    explicitly in the report's methodology so numbers are never misread as
    paper-comparable recall.
+
+   **Optional R6 post-fusion stage (cross-encoder + MMR, off by default):**
+   with `--rerank`, `hybrid_search` fetches the rerank pool (default 40 —
+   the effective applied pool is `max(pool, max(k))`), `rerank.py` scores
+   every (query, chunk) pair with the pinned cross-encoder (sigmoid → (0,1))
+   and selects up to `top_k` via greedy MMR (`λ·rel − (1−λ)·max_sim`;
+   `sim = (1+cos)/2` over the stored point `embedding` with a per-pair
+   Jaccard fallback on missing/NaN/dimension-mismatched embeddings — scale-
+   consistent so the λ tradeoff is not distorted), capped per-session
+   (E2E-10: ≤ 1–2 chunks per session; empty `session_id` hits are exempt).
+   The per-question result carries `rerank_pass` (applied / degrade_reason /
+   pool_size / pool_recall@k / moved / dropped / selected_count /
+   max_session_chunks) + `rerank_latency_ms`; the leg-mix `rerank` bucket
+   counts the selection-loss (dropped), so `legs + dropped == pool_size`.
+   Degraded (scorer-unavailable) questions fall back to the **baseline
+   20/60 pool** truncated to `top_k` — never a 40-pool stand-in.
 3. **Reader** (`reader.py`) — LLM answering from the top-k context via the
    repo's `OpenAICompatModel` provider wiring; `--mock` = deterministic
    evidence-turn reader. The context follows the official gen.py shape:
@@ -182,6 +222,16 @@ Per-question outcomes (the Layer-1 payload) carry `valid`, `error_classes`,
 `leg_mix`, `leg_mix@k`, `pool_size`, `evidence_written`,
 `evidence_retrieved@k`, `ingest_latency_ms`.
 
+On a rerank run the outcomes additionally carry `rerank_pass`
+(applied / degrade_reason / pool_size / pool_recall@k / moved / dropped /
+selected_count / max_session_chunks) and `rerank_latency_ms`, and the
+report's `rerank` block records the effective config (enabled / model /
+lambda_ / per_session_cap / pool_size / model_load_ms / prewarmed) + the
+aggregates (applied_fraction / degraded_n / sample_reasons / mean_moved /
+mean_dropped / mean_selected_count / **max_session_chunks_max** — the
+E2E-10 cap assertion — / pool_recall_mean@k). Baseline reports carry **zero**
+rerank keys.
+
 ## Full run prerequisites
 
 - The dataset (~tens of MB; auto-downloaded to the cache dir — needs
@@ -192,6 +242,28 @@ Per-question outcomes (the Layer-1 payload) carry `valid`, `error_classes`,
 The full 500-question run is `@pytest.mark.slow` (never in CI); the
 committed mini fixture + `--mock` exercises the entire pipeline offline in
 CI (`tests/test_longmem_runner.py`).
+
+## R6 follow-up run (epic #1509 run protocol step 9)
+
+The R6 layer is **measured post-baseline** — the V3 baseline report must
+exist first, and the follow-up compares **shared qids** against it (never
+unpaired aggregates). Protocol for the follow-up:
+
+1. **Fresh checkpoint** — the R6 arm never resumes a V3-baseline
+   checkpoint: `run.py` records the effective rerank config in the
+   checkpoint fingerprint and refuses any config-mismatched resume
+   (baseline↔rerank, or a pool change with rerank off).
+2. **Pre-warm the model once** before the run (the runner pre-warms at
+   start — `model_load_ms` recorded — but the first-ever load needs a
+   network download into the HF cache, so pre-warm the env, e.g.
+   `uv run python -c "from sentence_transformers import CrossEncoder; "
+   "CrossEncoder('cross-encoder/ms-marco-MiniLM-L6-v2')"`).
+3. **Baseline env must be clean** — `TORTOISE_LME_RERANK` UNSET (or the
+   run's effective config recorded) so the baseline cannot silently become
+   a rerank-on run.
+4. **Latency comparability** — the R6 arm's `retrieval_latency_ms`
+   includes `rerank_ms`; the delta vs baseline must subtract
+   `rerank_latency_ms` (reported separately) or state the confound.
 
 ## Granularity sweep (run protocol step 2, R1 #1540)
 
@@ -237,3 +309,65 @@ jq '.methodology | {reader_model_spec, reader_pinned, reader_system_prompt, read
 
 shows `reader_pinned: true` and identical values across the three cell
 reports (pilot → 500-Q → confirmation).
+
+## Temporal/recency (R5, #1544)
+
+Temporal-reasoning (TR) questions get a distinct retrieval path, default-ON
+for the TR category and completely inert for every other question type
+(non-TR path is byte-identical to pre-R5 — baseline isolation, M8):
+
+* **Events in the TR pool** — the retrieval pool is the point + event
+  union (E2E-4's "no point-only filter"): dated `:Event` nodes
+  (eventKind `lmeHaystackSession`, one per dated haystack session,
+  `startedAt == haystack_dates[si]`, `sessionId == dataset sid`) join the
+  point hits, merged by RRF score with a deterministic id tiebreak. The
+  v2 leg's payload events (core:occurrence etc.) ride the same union with
+  `startedAt` from their payload/session date (E1 #1533 dependency —
+  landed).
+* **Recency date weight in RRF** — the engine's `rrf_fusion` caller
+  (`tortoise_fts_query`) accepts an optional recency multiplier
+  (`recency_field` / `recency_boost`): a rank-based percentile (newest
+  → 1.0, oldest → 0.0, undated → 0.0 — parsed via the existing
+  `_created_sort_key`, mixed ISO/epoch safe) multiplies each doc's RRF
+  score by `(1 + boost × factor)`. Default-off → byte-identical for every
+  pre-R5 caller. On the eval graph points carry `createdAt := session_date`
+  (sentinel `1970-01-01T00:00:00Z` for undated sessions — deterministic-
+  oldest, never the server default now), so the weight ranks by session
+  date.
+* **TR-constraint detection → time-window filter** — `detect_time_constraint`
+  classifies the TR question text: `interval` ("between … and …", ISO or
+  Month-day with the question's year) and `recency` ("N days/weeks/months
+  ago", "last N …") produce a hard window filter on the annotated
+  session_dates BEFORE truncation — session_recall@k measures the
+  in-window pool. `ordering` ("how many days", "how long", "when did",
+  bare "ago" with no bound) applies no filter — the question needs the
+  full dated set. Defensive rule: when the filter would empty the dated
+  pool, the unfiltered pool is kept (the reader is never starved into
+  abstention), recorded per question as `tr_window_fallback`.
+* **Time-ascending rendering** — the TR reader context renders dated hits
+  in ascending session_date order (dated first, undated last; stable
+  within a date). Recall metrics keep retrieval order — they measure
+  retrieval, not rendering.
+* **TR top_k cap (20→12)** — TR context items are capped at `tr_top_k`
+  (the transcript-flood control; R1's per-session chunk cap is the
+  complementary flood control).
+
+Knobs (recorded in the report methodology — same provenance as `top_k` /
+`ks`):
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--tr-top-k` | 12 | TR context item cap (20→12) |
+| `--tr-date-weight` | 0.5 | RRF recency multiplier strength (0.0 off) |
+| `--no-tr-events` | off | exclude the events timeline from the TR pool |
+
+Per-question outcomes carry `tr_constraint` (the detected kind, TR only)
+and `tr_window_fallback` (whether the window filter fell back). The run
+protocol step-2/6 knob sweeps should cover `tr_date_weight ∈ {0.0, 0.5,
+1.0}` and `tr_top_k ∈ {8, 12, 16}` on the TR subset.
+
+> ⛔ **E1 dependency note**: the v2 leg's payload-event dating
+> (`startedAt` on core:occurrence events) requires the E1 (#1533)
+> `session_date` kwarg on `extract_session_v2` — landed; without it, v2
+> events keep the server default and the dated timeline surface is
+> exercised via the deterministic leg's `lmeHaystackSession` events only.

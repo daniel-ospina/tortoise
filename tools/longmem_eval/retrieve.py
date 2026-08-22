@@ -45,11 +45,13 @@ from __future__ import annotations
 
 import re
 import time
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from tortoise.sdk import TortoiseSDK
 
-from .ingest import (EXTRACTION_POINT_KIND, point_props_for_hits)
+from .ingest import EXTRACTION_POINT_KIND, event_props_for_hits, point_props_for_hits
 
 # token-count estimator: rough LLM token ≈ whitespace tokens, plus markup
 # allowance for role prefixes/JSON. Documented in report provenance.
@@ -65,6 +67,128 @@ DEFAULT_CONTEXT_TOKEN_CAP = 8000
 #: R1 (#1540): candidate-depth headroom — one session's points must not
 #: crowd other sessions out BEFORE dedup runs.
 DEFAULT_POOL_MULTIPLIER = 3
+
+#: R5 (#1544): TR top_k cap (20→12) — the transcript-flood control for
+#: temporal-reasoning questions (9/18 TR losses were reader refusals under
+#: ~40k-token floods despite sr@5=1.0). Knob-exposed via ``--tr-top-k``.
+DEFAULT_TR_TOP_K = 12
+
+
+# ── R5 (#1544): TR-constraint detection ─────────────────────────────────────
+
+@dataclass(frozen=True)
+class TimeConstraint:
+    """A detected temporal shape in a TR question (D5).
+
+    ``kind``: "interval" | "recency" | "ordering" | None
+    ``start``: ISO date (interval) | day count (recency) | None
+    ``end``: ISO date (interval) | None
+    """
+    kind: str | None
+    start: str | None = None
+    end: str | None = None
+
+
+#: recency window unit map (D5): day=1, week=7, month=30.
+_UNIT_DAYS = {"day": 1, "week": 7, "month": 30}
+
+
+def detect_time_constraint(text: str, *,
+                           default_year: int | None = None) -> TimeConstraint:
+    """Detect the temporal shape the issue names ("between…and…", "ago",
+    "how many days") in a TR question's text (D5).
+
+    | kind      | trigger                                                       | behavior |
+    |-----------|---------------------------------------------------------------|----------|
+    | interval  | "between <Month day> and <Month day>" (year from              | hard filter on session_date ∈ [start, end] |
+    |           |  ``default_year``) or ISO "YYYY-MM-DD" bounds                | |
+    | recency   | "N days/weeks/months ago", "last N …" (unit map              | hard filter on [qdate − N_days, qdate] |
+    |           |  day=1/week=7/month=30)                                      | |
+    | ordering  | "how many days", "how long", "when did", bare "ago" with     | no filter — the question needs the full |
+    |           |  no numeric bound                                             | dated set to compute a span/ordering |
+    | None      | no match                                                     | no filter, no reorder (pure date weight) |
+
+    Degradation rule: an unparseable bound (bare "ago", "how many days"
+    with no number) degrades to ``ordering`` — never a hard filter that
+    could starve the evidence out of the window. ``default_year`` anchors
+    month-day intervals without a year (the caller passes the question's
+    year; fallback 2026).
+    """
+    t = " ".join(text.lower().split())
+    # recency bound: "N days/weeks/months ago" / "last N …" — the only
+    # shapes that give a computable window without the answer.
+    m = re.search(
+        r"(?:\b(\d+)\s+(days?|weeks?|months?)\s+ago\b"
+        r"|\blast\s+(\d+)\s+(days?|weeks?|months?)\b)", t)
+    if m:
+        n = int(m.group(1) or m.group(3))
+        unit = (m.group(2) or m.group(4)).rstrip("s")
+        return TimeConstraint("recency", start=str(n * _UNIT_DAYS[unit]))
+    # ordering shapes: the question needs the FULL dated set — "how many
+    # days ago" with no numeric bound, "how long", "when did", bare
+    # "ago" with no bound (D5: no hard filter, no false bounds).
+    if (re.search(r"\bago\b", t)
+            or re.search(r"\bhow\s+(many\s+)?days\b", t)
+            or re.search(r"\bhow\s+long\b", t)
+            or re.search(r"\bwhen\s+did\b", t)):
+        return TimeConstraint("ordering")
+    # interval: "between <Month day> and <Month day>" (year from
+    # ``default_year``) or ISO "YYYY-MM-DD" bounds — explicit window.
+    m = re.search(
+        r"between\s+(\d{4}-\d{2}-\d{2})\s+and\s+(\d{4}-\d{2}-\d{2})", t)
+    if m:
+        return TimeConstraint("interval", start=m.group(1), end=m.group(2))
+    m = re.search(
+        r"between\s+([a-z]+)\s+(\d{1,2})\s+and\s+([a-z]+)\s+(\d{1,2})", t)
+    if m:
+        def _iso(mon: str, day: str) -> str:
+            d = datetime.strptime(f"{mon} {day} {default_year or 2026}",
+                                  "%B %d %Y")
+            return d.date().isoformat()
+        return TimeConstraint("interval", start=_iso(m.group(1), m.group(2)),
+                              end=_iso(m.group(3), m.group(4)))
+    return TimeConstraint(None)
+
+
+def _apply_time_window(annotated: list[dict], constraint: TimeConstraint,
+                       *, question_date: str | None) -> list[dict]:
+    """R5 (D5): hard time-window filter on the annotated hits' session_date.
+
+    * interval — keep hits whose ``session_date ∈ [start, end]`` (inclusive;
+      ISO dates compare lexicographically).
+    * recency — keep hits whose ``session_date ∈ [qdate − N_days, qdate]``
+      (N from ``constraint.start``; missing/unparseable qdate → the filter
+      cannot compute bounds → returns [] so the caller's defensive fallback
+      (``tr_window_fallback``) keeps the unfiltered pool).
+
+    Undated hits (no session_date) never satisfy a window — the filter
+    returns only in-window DATED hits. The caller falls back when this
+    returns empty (never starve the reader into abstention).
+    """
+    if not annotated:
+        return []
+    if constraint.kind == "interval":
+        start, end = constraint.start, constraint.end
+        if not start or not end:
+            return []
+        return [h for h in annotated
+                if h.get("session_date") and start <= h["session_date"] <= end]
+    if constraint.kind == "recency":
+        try:
+            n_days = int(constraint.start or 0)
+            qdate = (datetime.strptime(str(question_date or "")[:10],
+                                       "%Y-%m-%d").date()
+                     if question_date else None)
+        except (TypeError, ValueError):
+            return []
+        if qdate is None:
+            return []  # recency math needs the question date — fall back
+        from datetime import timedelta
+        lo = (qdate - timedelta(days=n_days)).isoformat()
+        hi = qdate.isoformat()
+        return [h for h in annotated
+                if h.get("session_date") and lo <= h["session_date"] <= hi]
+    return list(annotated)  # ordering/None → no filter
 
 
 def _estimate_tokens(text: str) -> int:
@@ -140,6 +264,11 @@ def _annotate_hits(hits: list[dict], props: dict, dates: list[str]) -> list[dict
             # re-detected.
             "superseded_by": h.get("superseded_by"),
             "supersedes": h.get("supersedes") or [],
+            # E6 (#1538) D7: promoted validity-window fields — additive,
+            # only when present (undated hits render no [valid …] marker).
+            "valid_from": h.get("valid_from") or "",
+            "valid_to": h.get("valid_to") or "",
+            "expired_at": h.get("expired_at") or "",
         })
     return annotated
 
@@ -174,6 +303,68 @@ def _dedup_pool(annotated: list[dict], *,
     return pool
 
 
+def _recall_metrics(
+    hits: list[dict],
+    *,
+    ks: tuple[int, ...],
+    answer_sessions: set[str],
+    evidence_turn_ids: set[str],
+    evidence_point_count: int,
+    chunk_evidence_point_count: int,
+) -> tuple[dict[str, float], dict[str, float | None],
+           dict[str, float | None], dict[str, float | None]]:
+    """Recall@k over a hit list (session + turn + evidence + chunk-evidence).
+
+    Extracted from ``retrieve_for_question`` (R6 #1545) — identical math,
+    reused for the rerank pool-recall diagnostic. ``evidence_point_count`` /
+    ``chunk_evidence_point_count`` are the D5 denominators (computed once,
+    before the loop — no hoisting exists or is needed).
+    """
+    session_recall: dict[str, float] = {}
+    turn_recall: dict[str, float | None] = {}
+    _evidence_recall: dict[str, float | None] = {}
+    chunk_evidence_recall: dict[str, float | None] = {}
+    for k in ks:
+        top = hits[:k]
+        if answer_sessions:
+            retrieved_sessions = {h["session_id"] for h in top if h["session_id"]}
+            session_recall[str(k)] = (
+                len(answer_sessions & retrieved_sessions) / len(answer_sessions))
+        else:
+            session_recall[str(k)] = 0.0
+        # turn/evidence numerators exclude raw chunks (D5) — otherwise
+        # marked chunks in top-k inflate turn_recall beyond 1.0 against the
+        # points-only denominator.
+        ev_hits = {h["id"] for h in top
+                   if h["has_answer"] and not _is_raw_chunk(h)}
+        if evidence_point_count:
+            # v2 leg: did the extracted point CONTAINING the answer surface?
+            turn_recall[str(k)] = len(ev_hits) / evidence_point_count
+            _evidence_recall[str(k)] = len(ev_hits) / evidence_point_count
+        else:
+            # M6 (#1526) N/A-not-0.0: an empty denominator is None, never a
+            # forced 0.0 — "no evidence exists" stays distinguishable from
+            # "evidence exists but never surfaces" (#1369).
+            _evidence_recall[str(k)] = None
+            if evidence_turn_ids:
+                # deterministic leg: did the evidence TURN surface?
+                top_ids = {h["id"] for h in top}
+                turn_recall[str(k)] = (
+                    len(evidence_turn_ids & top_ids) / len(evidence_turn_ids))
+            else:
+                turn_recall[str(k)] = None
+        # chunk containment view (M6): marked raw chunks surfaced / marked
+        # raw chunks total — granularity-aware by construction.
+        if chunk_evidence_point_count:
+            chunk_hits = {h["id"] for h in top
+                          if h["has_answer"] and _is_raw_chunk(h)}
+            chunk_evidence_recall[str(k)] = (
+                len(chunk_hits) / chunk_evidence_point_count)
+        else:
+            chunk_evidence_recall[str(k)] = None
+    return session_recall, turn_recall, _evidence_recall, chunk_evidence_recall
+
+
 def _leg_mix(hits: list[dict]) -> dict[str, int]:
     """Counter of ``match_source`` over a hit list (M7 #1527, D2).
 
@@ -189,12 +380,18 @@ def _leg_mix(hits: list[dict]) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
-def _supersede_marker(h: dict) -> str:
-    """Supersession marker text for one hit (#1367). Empty when the hit has
-    no supersession state. Uses the promoted content_snippet (≤120 chars,
-    #1353 D8) — for LongMemEval's short turns the snippet IS the claim.
-    Each relationship renders in its own bracket group (reader-parsing
-    clarity)."""
+def _validity_marker(h: dict) -> str:
+    """Validity-window marker text for one hit (E6 #1538, D7).
+
+    Extends the #1367 supersession markers with the promoted window fields:
+      - live hit with ``valid_from`` → ``[valid since <from>]``
+      - superseded hit → ``[valid <from> → <to>]``; with ``expired_at`` →
+        ``[valid <from> → <to>; expired <tx-date>]``
+      - undated hits → NO validity marker (byte-identical rendering)
+    ISO date strings (YYYY-MM-DD — the dataset/``when`` normalization): no
+    full timestamps in the reader context; timestamps stay on the graph
+    properties. The supersession markers (SUPERSEDED BY / SUPERSEDES) are
+    unchanged and render first."""
     marks: list[str] = []
     sb = h.get("superseded_by") or {}
     snippet = (sb.get("content_snippet") or "").strip()
@@ -205,6 +402,21 @@ def _supersede_marker(h: dict) -> str:
              for s in supersedes if (s.get("content_snippet") or "").strip()]
     if snips:
         marks.append("[SUPERSEDES: " + " ; ".join(snips) + "]")
+    vf = (h.get("valid_from") or "").strip()
+    vt = (h.get("valid_to") or "").strip()
+    ex = (h.get("expired_at") or "").strip()
+    if vf:
+        # ISO date strings only — truncate full timestamps to YYYY-MM-DD.
+        vfd = vf[:10] if len(vf) > 10 else vf
+        if vt:
+            vtd = vt[:10] if len(vt) > 10 else vt
+            if ex:
+                exd = ex[:10] if len(ex) > 10 else ex
+                marks.append(f"[valid {vfd} → {vtd}; expired {exd}]")
+            else:
+                marks.append(f"[valid {vfd} → {vtd}]")
+        else:
+            marks.append(f"[valid since {vfd}]")
     return " ".join(marks)
 
 
@@ -232,10 +444,11 @@ def _render_block(h: dict) -> str:
     # must not suppress speaker attribution
     if spk and not _ROLE_PREFIX.match(h.get("content", "")):
         prefix = f"{prefix} [{spk}]"
-    marker = _supersede_marker(h)
+    marker = _validity_marker(h)
     if marker:
-        # _supersede_marker already returns self-bracketed groups
-        # (e.g. "[SUPERSEDED BY: x] [SUPERSEDES: y]") — no extra wrap.
+        # _validity_marker already returns self-bracketed groups
+        # (e.g. "[SUPERSEDED BY: x] [valid 2026-06-10 → 2026-06-12]") — no
+        # extra wrap.
         prefix = f"{prefix} {marker}"
     return f"{prefix} {h.get('content', '')}"
 
@@ -307,12 +520,28 @@ def render_context(hits: list[dict], *, question_date: str | None = None) -> str
 
 
 def hybrid_search(sdk: TortoiseSDK, query: str, limit: int,
-                   *, leg_trace: list[dict] | None = None) -> list[dict]:
-    """Hybrid retrieval over the question's ingested graph (points only).
+                   *, entity_types: tuple[str, ...] = ("point",),
+                   recency_fields: dict[str, str] | None = None,
+                   recency_boost: float = 0.0,
+                   leg_trace: list[dict] | None = None) -> list[dict]:
+    """Hybrid retrieval over the question's ingested graph.
 
-    Returns raw hit dicts from ``tortoise_fts_query`` (id, content,
-    match_source, scores…) — embedded mode degrades to the in-memory TF-IDF
-    fallback automatically.
+    R5 (#1544) D4: ``entity_types`` selects the retrieval pool — TR
+    questions pass ``("point", "event")`` so the dated events timeline
+    joins the pool (E2E-4's "no point-only filter"); the default
+    ``("point",)`` keeps every non-TR path byte-identical (baseline
+    isolation, M8). Per entity type the hits come from
+    ``tortoise_fts_query`` (RRF fusion of FTS + vector + structural with
+    the TF-IDF degradation fallback); the results merge by
+    ``scores.rrf`` desc (comparable across the calls — same k constant,
+    same leg structure) with a deterministic id tiebreak. Event hits use
+    ``eventId`` as ``id`` — the Point/Event id namespaces never collide
+    (different label, different id field).
+
+    ``recency_fields`` (R5 D2): {entity_type: Cypher property name} — the
+    date source for the engine's recency re-rank (points ``createdAt``,
+    events ``startedAt``). ``recency_boost`` is the multiplier strength
+    (0.0 off). Both default off → byte-identical to pre-R5.
 
     ``leg_trace`` (R3 #1542 D4): a list the search records per-leg entries
     into (vector/fts/structural/fallback — the E2E-1 never-null leg-mix
@@ -331,11 +560,25 @@ def hybrid_search(sdk: TortoiseSDK, query: str, limit: int,
     must keep the R1 union (turn points + raw transcripts + extracted
     points).
     """
-    return sdk.tortoise_fts_query(
-        query, entity_type="point", limit=limit,
-        structural_kind=EXTRACTION_POINT_KIND,
-        structural_hops=2,
-        include_terminal=True, leg_trace=leg_trace)
+    merged: dict[str, dict] = {}
+    for et in entity_types:
+        for h in sdk.tortoise_fts_query(
+            query, entity_type=et, limit=limit,
+            structural_kind=EXTRACTION_POINT_KIND,
+            structural_hops=2,
+            include_terminal=True, leg_trace=leg_trace,
+            recency_field=(recency_fields.get(et) if recency_fields
+                           else None),
+            recency_boost=recency_boost,
+        ):
+            merged[h["id"]] = h
+    # deterministic union: RRF score desc, then id (no namespace collision
+    # — Point ids and eventIds are distinct namespaces by construction).
+    return sorted(
+        merged.values(),
+        key=lambda h: (-((h.get("scores") or {}).get("rrf") or 0.0),
+                       h["id"]),
+    )
 
 
 def retrieve_for_question(
@@ -346,6 +589,25 @@ def retrieve_for_question(
     top_k: int = 20,
     max_chunks_per_session: int = DEFAULT_MAX_CHUNKS_PER_SESSION,
     max_context_tokens: int = DEFAULT_CONTEXT_TOKEN_CAP,
+    # R5 (#1544): TR knobs — temporal-reasoning questions get the events
+    # union pool, the engine recency weight, the TR-constraint window
+    # filter, time-ascending rendering, and the tighter ``tr_top_k`` cap
+    # (20→12 — the transcript-flood control). Non-TR questions ignore all
+    # of them (byte-identical path, regression-guarded).
+    tr_top_k: int = DEFAULT_TR_TOP_K,
+    tr_date_weight: float = 0.5,
+    tr_events: bool = True,
+    # R6 (#1545): rerank knobs — the post-fusion cross-encoder + MMR stage,
+    # OFF by default (the V3 baseline path is byte-identical; no rerank keys
+    # off-path, D2). ``rerank`` tri-state: True/False explicit, None = env
+    # TORTOISE_LME_RERANK (fail-safe OFF). ``rerank_pool`` is honored when
+    # explicitly passed even with rerank off (the pool-only isolation arm);
+    # env defaults apply only while rerank is on.
+    rerank: bool | None = None,
+    rerank_model: str | None = None,
+    rerank_pool: int | None = None,
+    per_session_cap: int | None = None,
+    mmr_lambda: float | None = None,
 ) -> dict[str, Any]:
     """Run retrieval for one question and compute recall@k + context stats.
 
@@ -357,8 +619,22 @@ def retrieve_for_question(
     (``ret["hits"]`` == the pool — pinned contract), and the reader's
     context is the budget-capped points-first ``_assemble_context`` output
     (``context_points``, bounded by ``max_context_tokens``).
+
+    R5 (#1544) D4–D7 (TR questions only, ``question_type ==
+    "temporal-reasoning"``): the pool is the point+event union
+    (``hybrid_search`` entity_types — E2E-4's "no point-only filter"),
+    recency-weighted by the engine (``recency_fields`` → ``recency_boost``
+    keyed on the dataset's haystack_dates via graph createdAt/startedAt),
+    TR-constraint detection drives a time-window filter BEFORE truncation
+    (``tr_window_fallback`` when the filter would empty the dated pool —
+    never starve the reader into abstention), and the reader context
+    renders time-ascending (dated first, undated last). ``effective_top_k
+    = tr_top_k if is_tr else top_k``. Recall metrics keep retrieval (RRF +
+    date-weight) order — they measure retrieval, not rendering.
     """
     qid = question["question_id"]
+    is_tr = question.get("question_type") == "temporal-reasoning"
+    effective_top_k = tr_top_k if is_tr else top_k
     answer_sessions = set(question.get("answer_session_ids") or [])
     dates: list[str] = question.get("haystack_dates") or []
     evidence_turn_ids = {
@@ -367,6 +643,33 @@ def retrieve_for_question(
         for ti, turn in enumerate(session)
         if turn.get("has_answer")
     }
+
+    # ── R6 (#1545) D3: scorer resolution precedes pool deepening — a
+    # degraded (load-failure) question retrieves the SAME baseline pool as
+    # the V3 run (never a 40-pool stand-in — D3/S11 pool contamination),
+    # and the deep pool is only fetched when it would be honored. Call-time
+    # imports keep the monkeypatch seam (tests inject a fake scorer). ──
+    from .rerank import _env_float, _env_int, get_scorer, rerank_enabled, rerank_hits
+    rerank_on = rerank_enabled(rerank)
+    scorer, degrade_reason = (get_scorer(rerank_model) if rerank_on
+                              else (None, ""))
+    cap = (per_session_cap if per_session_cap is not None
+           else _env_int("TORTOISE_LME_RERANK_CAP", 2))
+    lam = (mmr_lambda if mmr_lambda is not None
+           else _env_float("TORTOISE_LME_RERANK_LAMBDA", 0.7))
+    pool_override = (rerank_pool if rerank_pool is not None
+                     else _env_int("TORTOISE_LME_RERANK_POOL", 40))
+    if rerank_on and scorer is not None:
+        # applied arm — the deep pool (default 2x the baseline 20) gives the
+        # reranker reorderable headroom (D4)
+        pool_limit = max(pool_override, max(ks))
+    elif (rerank_pool is not None) and not rerank_on:
+        # pool-only isolation arm (--rerank off --rerank-pool N): deeper
+        # pool, baseline ordering, hits truncated to top_k (OQ5)
+        pool_limit = max(rerank_pool, max(ks))
+    else:
+        # baseline / degraded / off — the exact current fetch depth
+        pool_limit = max(ks) * DEFAULT_POOL_MULTIPLIER
 
     # ── R3 (#1542) D4: per-leg trace (E2E-1 never-null leg-mix). The
     # retrieval records into ``legs`` at the engine (tortoise_fts_query) and
@@ -377,12 +680,25 @@ def retrieve_for_question(
     start = time.monotonic()
     # R1: pool-depth headroom — a monopolizing session's points must not
     # crowd other sessions out BEFORE dedup runs (E2E-1).
-    hits = hybrid_search(sdk, question["question"],
-                         limit=max(ks) * DEFAULT_POOL_MULTIPLIER,
-                         leg_trace=legs)
+    # R5 (D4): TR questions fetch the point+event union (E2E-4's "no
+    # point-only filter"); non-TR keeps the exact points-only path.
+    hits = hybrid_search(
+        sdk, question["question"],
+        limit=pool_limit,
+        leg_trace=legs,
+        entity_types=("point", "event") if (is_tr and tr_events)
+        else ("point",),
+        recency_fields=({"point": "createdAt", "event": "startedAt"}
+                        if is_tr else None),
+        recency_boost=tr_date_weight if is_tr else 0.0,
+    )
     latency_ms = (time.monotonic() - start) * 1000.0
 
-    props = point_props_for_hits(sdk._get_proj(), [h["id"] for h in hits])
+    point_props = point_props_for_hits(sdk._get_proj(), [h["id"] for h in hits])
+    # R5 (D8): event hits join the same annotation surface — merge the
+    # event props (namespaces disjoint; lookup by h["id"] unchanged).
+    event_props = event_props_for_hits(sdk._get_proj(), [h["id"] for h in hits])
+    props = {**point_props, **event_props}
 
     # E3 (D7): resolve speaker for source-turn links whose turn node was NOT
     # itself retrieved — one batch query (the derivation surface E2E-5 builds
@@ -403,6 +719,30 @@ def retrieve_for_question(
     # fields (additive — E5 #1537 decorates the embedded fallback too, so
     # markers render in embedded AND full modes).
     annotated = _annotate_hits(hits, props, dates)
+
+    # ── R5 (D5): TR-constraint detection → time-window filter BEFORE
+    # truncation (the in-window pool is what session_recall@k measures —
+    # correct TR semantics). Defensive rule: when the filter would empty
+    # the dated pool (no in-window hits), fall back to the unfiltered pool
+    # — never starve the reader into abstention — recorded as
+    # ``tr_window_fallback``. Non-TR questions skip detection entirely. ──
+    tr_constraint = None
+    tr_window_fallback = False
+    if is_tr:
+        question_date = question.get("question_date", "") or None
+        try:
+            year = int(question_date[:4]) if question_date else None
+        except ValueError:
+            year = None
+        tr_constraint = detect_time_constraint(
+            question["question"], default_year=year)
+        if tr_constraint.kind in ("interval", "recency"):
+            windowed = _apply_time_window(annotated, tr_constraint,
+                                          question_date=question_date)
+            if windowed:
+                annotated = windowed
+            else:
+                tr_window_fallback = True  # keep the unfiltered pool
 
     # ── deduped pool (the retrieval contract: ret["hits"] == pool) ──
     pool = _dedup_pool(annotated, max_chunks_per_session=max_chunks_per_session)
@@ -440,62 +780,89 @@ def retrieve_for_question(
     total_pts, embedded_pts = cov_rows[0] if cov_rows else (0, 0)
     embedding_coverage = (embedded_pts / total_pts) if total_pts else None
 
-    # ── recall@k over the DEDUPED pool (session + turn + evidence + chunk) ──
-    session_recall: dict[str, float] = {}
-    turn_recall: dict[str, float] = {}
-    _evidence_recall: dict[str, float | None] = {}
-    chunk_evidence_recall: dict[str, float | None] = {}
-    for k in ks:
-        top = pool[:k]
-        if answer_sessions:
-            retrieved_sessions = {h["session_id"] for h in top if h["session_id"]}
-            session_recall[str(k)] = (
-                len(answer_sessions & retrieved_sessions) / len(answer_sessions))
+    # ── R6 (#1545): post-fusion rerank stage — the measured surface (S11).
+    # Off-path byte-identical (no rerank keys, no extra queries); the
+    # reader/context invariant holds on EVERY path:
+    #   * non-applied (pool-only / score-failure / load-failure degrade):
+    #     hits truncated to top_k (len(hits) == context_point_count ==
+    #     min(len(pool), top_k));
+    #   * applied: rerank_hits returns the SELECTED-ONLY reordered list, so
+    #     len(hits) == selected_count <= top_k;
+    #   * plain off (no rerank, no pool override): the full deduped pool
+    #     UNTRUNCATED (today's behavior — the two coincide at defaults
+    #     where the pool <= top_k).
+    rerank_pass: dict[str, Any] = {"applied": False, "dropped": 0}
+    rerank_ms = 0.0
+    if rerank_on:
+        t0 = time.monotonic()
+        applied = False
+        if scorer is None:
+            # degraded: 20-pool fallback + truncation (D3(a)/S25) — never a
+            # 40-pool stand-in masquerading as a rerank result
+            rerank_pass["degrade_reason"] = degrade_reason
+            pool = pool[:top_k]
         else:
-            session_recall[str(k)] = 0.0
-        # turn/evidence numerators exclude raw chunks (D5) — otherwise
-        # marked chunks in top-k inflate turn_recall beyond 1.0 against the
-        # points-only denominator (2 marked chunks + 1 marked point vs
-        # denominator 1).
-        ev_hits = {h["id"] for h in top
-                   if h["has_answer"] and not _is_raw_chunk(h)}
-        if evidence_point_count:
-            # v2 leg: did the extracted point CONTAINING the answer surface?
-            turn_recall[str(k)] = len(ev_hits) / evidence_point_count
-            _evidence_recall[str(k)] = len(ev_hits) / evidence_point_count
-        else:
-            # M6 (#1526) N/A-not-0.0: an empty denominator is None, never a
-            # forced 0.0 — "no evidence exists" must stay distinguishable
-            # from "evidence exists but never surfaces" (#1369).
-            _evidence_recall[str(k)] = None
-            if evidence_turn_ids:
-                # deterministic leg: did the evidence TURN surface?
-                top_ids = {h["id"] for h in top}
-                turn_recall[str(k)] = (
-                    len(evidence_turn_ids & top_ids) / len(evidence_turn_ids))
+            pool_recall = _recall_metrics(
+                pool, ks=ks, answer_sessions=answer_sessions,
+                evidence_turn_ids=evidence_turn_ids,
+                evidence_point_count=evidence_point_count,
+                chunk_evidence_point_count=chunk_evidence_point_count)
+            selected, stats = rerank_hits(
+                question["question"], pool, scorer=scorer,
+                proj=sdk._get_proj(), top_k=top_k,
+                per_session_cap=cap, lambda_=lam)
+            applied = bool(stats.get("applied", True))
+            if applied:
+                rerank_pass.update(stats)
+                rerank_pass["pool_size"] = len(pool)
+                rerank_pass["pool_recall@k"] = {
+                    "session": pool_recall[0], "turn": pool_recall[1],
+                    "evidence": pool_recall[2],
+                    "chunk_evidence": pool_recall[3]}
+                pool = selected          # the hits ARE the reader's context
             else:
-                turn_recall[str(k)] = None
-        # chunk containment view (M6): marked raw chunks surfaced / marked
-        # raw chunks total — granularity-aware by construction.
-        if chunk_evidence_point_count:
-            chunk_hits = {h["id"] for h in top
-                          if h["has_answer"] and _is_raw_chunk(h)}
-            chunk_evidence_recall[str(k)] = (
-                len(chunk_hits) / chunk_evidence_point_count)
-        else:
-            chunk_evidence_recall[str(k)] = None
+                # score-failure degrade (D8c) — same contract as load-failure
+                rerank_pass["degrade_reason"] = stats.get("degrade_reason", "")
+                pool = pool[:top_k]      # reader/context invariant
+        rerank_pass["applied"] = applied
+        rerank_ms = (time.monotonic() - t0) * 1000.0
+    elif (rerank_pool is not None) and not rerank_on:
+        pool = pool[:top_k]              # pool-only arm: reader sees top_k
+
+    # ── recall@k over the DEDUPED pool (session + turn + evidence + chunk) ──
+    # (on the applied path, ``pool`` is the rerank-selected list — recall
+    # measures what the reader could actually see; ``rerank_pass["pool_recall@k"]``
+    # carries the pre-MMR pool recall for the selection-loss diagnostic.)
+    (session_recall, turn_recall, _evidence_recall,
+     chunk_evidence_recall) = _recall_metrics(
+        pool, ks=ks, answer_sessions=answer_sessions,
+        evidence_turn_ids=evidence_turn_ids,
+        evidence_point_count=evidence_point_count,
+        chunk_evidence_point_count=chunk_evidence_point_count)
 
     # ── context handed to the reader (D4: budget-capped, points first) ──
     question_date = question.get("question_date", "") or None
     context_points = _assemble_context(
-        pool, top_k=top_k, max_context_tokens=max_context_tokens,
+        pool, top_k=effective_top_k,
+        max_context_tokens=max_context_tokens,
         question_date=question_date)
+    # R5 (D6): TR context renders time-ascending — after truncation the
+    # context list is stable-sorted by session_date (dated first, undated
+    # last, stable within a date = retrieval order preserved). Recall
+    # metrics keep retrieval order: only the READER's context list is
+    # reordered. Non-TR keeps RRF order (byte-identical to today).
+    if is_tr:
+        context_points = sorted(
+            context_points,
+            key=lambda h: ((1, "") if not h.get("session_date")
+                           else (0, h["session_date"])),
+        )
     # The reader consumes the SAME rendered context (with the Current Date
     # header) — keep context_tokens aligned with what the reader saw.
     context_text = render_context(context_points, question_date=question_date)
     context_tokens = _estimate_tokens(context_text) if context_text else 0
 
-    return {
+    out = {
         "question_id": qid,
         "hits": pool,  # pinned contract: the deduped pool (R1 #1540)
         "session_recall@k": session_recall,
@@ -506,7 +873,8 @@ def retrieve_for_question(
         # + per-k over the deduped pool; evidence_retrieved@k = the turn_recall
         # numerator (has_answer non-chunk hits in pool[:k]) — persisted so the
         # report can answer "which leg found what" and "how much evidence was
-        # retrieved" (evidence-written/retrieved accounting).
+        # retrieved" (evidence-written/retrieved accounting). The R6 rerank
+        # bucket is applied to ``match_source_counts`` just before return (D6).
         "match_source_counts": _leg_mix(context_points),
         "match_source_counts@k": {
             str(k): _leg_mix(pool[:k]) for k in ks},
@@ -517,6 +885,11 @@ def retrieve_for_question(
         "context_points": context_points,
         "context_tokens": context_tokens,
         "context_point_count": len(context_points),
+        # R5 (#1544): TR-constraint surface — the detected kind (TR only)
+        # and whether the window filter fell back to the unfiltered pool
+        # (never starve the reader into abstention).
+        "tr_constraint": tr_constraint.kind if tr_constraint else None,
+        "tr_window_fallback": tr_window_fallback,
         # R3 (#1542) D3: write-time embedding coverage (observable dense leg).
         "points_total": total_pts,
         "points_embedded": embedded_pts,
@@ -527,7 +900,22 @@ def retrieve_for_question(
         "dedup_stats": {
             "chunks_retrieved": n_chunks_retrieved,
             "chunks_capped": n_chunks_retrieved - n_chunks_pool,
-            "pool_depth_requested": max(ks) * DEFAULT_POOL_MULTIPLIER,
+            "pool_depth_requested": pool_limit,
         },
-        "retrieval_latency_ms": round(latency_ms, 2),
+        "retrieval_latency_ms": round(latency_ms + rerank_ms, 2),
     }
+    # R6 (#1545) D6: the rerank pass is recorded ADDITIVELY — the leg-mix
+    # ``rerank`` bucket counts selection-loss only (the ``mmr_dropped`` hits),
+    # so ``sum(provenance legs) + dropped == pool_size`` holds as a partition
+    # (never an overlay). ``reranked``/``mmr_promoted`` movement stays a
+    # separate overlay metric (``rerank_pass``), never a leg. Off-path emits
+    # no bucket (byte-identical leg-mix).
+    match_source_counts = _leg_mix(context_points)
+    if rerank_on and rerank_pass.get("applied"):
+        match_source_counts["rerank"] = rerank_pass.get("dropped", 0)
+    out["match_source_counts"] = match_source_counts
+    # Conditional keys (D2): the off-path dict keeps today's exact shape.
+    if rerank_on:
+        out["rerank_pass"] = rerank_pass
+        out["rerank_latency_ms"] = round(rerank_ms, 2)
+    return out

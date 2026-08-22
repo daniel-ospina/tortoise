@@ -937,6 +937,10 @@ def _decorate_fallback_hits(results: list[dict], graph) -> list[dict]:
             r["superseded_by"] = st["superseded_by"]
         if st.get("supersedes"):
             r["supersedes"] = st["supersedes"]
+        # E6 (#1538) D7: promoted window fields — additive, only when present.
+        for key in ("valid_from", "valid_to", "expired_at"):
+            if st.get(key):
+                r[key] = st[key]
     return results
 
 
@@ -2682,7 +2686,8 @@ class TortoiseSDK:
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
         proj.g.query(
-            "MATCH (n:Point {id:$id}) SET n.outdated = true, n.updatedAt = $now",
+            "MATCH (n:Point {id:$id}) SET n.outdated = true, "
+            "n.updatedAt = $now, n.validTo = $now, n.expiredAt = $now",
             params={"id": id, "now": now},
         )
         proj.g.query(
@@ -2721,8 +2726,20 @@ class TortoiseSDK:
             return self.supersede_point(old_id, new_id)
         return self.invalidate_point(old_id, new_id)
 
-    def supersede_point(self, old_id: str, new_id: str) -> dict:
+    def supersede_point(self, old_id: str, new_id: str,
+                        *, valid_from: str | None = None) -> dict:
         """Atomically replace old Point with new — CORRECTS edge + outdated flag + edge transfer.
+
+        E6 (#1538) D2 — bi-temporal validity windows: the supersession ALSO
+        stamps the old point's window END (``validTo`` = the successor's
+        ``validFrom`` — contiguous Graphiti windows: the old fact stops
+        being true exactly when the new fact became true) and its
+        transaction-time expiry (``expiredAt`` = now). The successor's
+        window START is its own ``validFrom`` (the create path, D3), or the
+        optional ``valid_from`` kwarg when the caller knows it (else read
+        the successor's ``validFrom``, fall back to its ``createdAt``, fall
+        back to now — monotone, never a gap). Additive-only: no behavior
+        change for callers that don't pass the kwarg.
 
         Transfers all edges from the old point to the new point:
           - Operator edges (IMPL, NAND, hasPart) with idx
@@ -2790,7 +2807,28 @@ class TortoiseSDK:
         # #432 Task 3: durable PointSuperseded event (append-before-mutation,
         # AFTER the guard + edge-type validation — P2 review fix: emitting
         # before validation produced phantoms on corrupt-edge data).
-        self._emit_event("PointSuperseded", {"id": old_id, "new_id": new_id}, id=old_id)
+        # E6 (#1538) D2: resolve the successor's validFrom (window contiguity
+        # source) BEFORE the emit so the event payload carries the same
+        # values the stamp block writes (read-only — no ordering impact).
+        if valid_from is not None:
+            succ_vf = str(valid_from)
+        else:
+            vf_rows = proj.g.query(
+                "MATCH (n:Point {id:$id}) RETURN n.validFrom, n.createdAt",
+                params={"id": new_id},
+            ).result_set
+            if vf_rows and vf_rows[0][0]:
+                succ_vf = vf_rows[0][0]
+            elif vf_rows and vf_rows[0][1]:
+                succ_vf = vf_rows[0][1]
+            else:
+                succ_vf = now  # monotone fallback — never a gap
+        self._emit_event(
+            "PointSuperseded",
+            {"id": old_id, "new_id": new_id,
+             "valid_from": succ_vf, "valid_to": succ_vf, "expired_at": now},
+            id=old_id,
+        )
 
         # CYCLE-26 REVIEW-FIX P1 (cycle-7 pin): the superseded-status write +
         # CORRECTS edge MOVE AFTER the transfers (2a / 2a-DIRECT / 2b). The
@@ -2987,8 +3025,10 @@ class TortoiseSDK:
         # (back-compat for consumers reading the flag; #690 will consolidate).
         proj.g.query(
             "MATCH (n:Point {id:$id}) SET n.status = 'superseded', "
-            "n.outdated = true, n.updatedAt = $now",
-            params={"id": old_id, "now": now},
+            "n.outdated = true, n.updatedAt = $now, "
+            "n.validTo = $valid_to, n.expiredAt = $expired_at",
+            params={"id": old_id, "now": now,
+                    "valid_to": succ_vf, "expired_at": now},
         )
         proj.g.query(
             "MATCH (a:Point {id:$new_id}), (b:Point {id:$old_id}) "
@@ -9398,6 +9438,8 @@ class TortoiseSDK:
         _elevated_timeout_ms: int | None = None,
         pool_size: int | None = None,
         leg_trace: list[dict] | None = None,
+        recency_field: str | None = None,
+        recency_boost: float = 0.0,
     ) -> list[dict]:
         """Hybrid search with RRF fusion + EP annotation.
 
@@ -9455,6 +9497,19 @@ class TortoiseSDK:
             folds the neighbors into the structural strategy's ranked list
             (deduped) — the graph-as-recall-amplifier pass. Default 0 skips
             the expansion entirely (byte-identical to pre-R4).
+        recency_field (R5 #1544): keyword-only, default None (off) — the
+            Cypher property name whose value re-ranks the fused pool by
+            date (e.g. ``createdAt`` on Points, ``startedAt`` on Events;
+            must match the STORED key — ``createdAt``, not the ``created_at``
+            API alias). One batch date fetch per call; the rank-based
+            factor comes from ``_recency_factors`` (newest → 1.0, undated →
+            0.0) and multiplies each doc's RRF score by
+            ``(1 + recency_boost × factor)``. Applied AFTER the RRF fusion +
+            threshold filter, BEFORE the kind filter — re-ranks the fused
+            candidate set so truncation picks up the new order. Any graph
+            error → fail-open to plain RRF (logged, never crashes).
+        recency_boost (R5 #1544): multiplier strength, clamped 0.0–10.0.
+            Default 0.0 = off (byte-identical output to pre-R5).
         """
         from .search_engine import (  # noqa: I001
             classify_query, degradation_chain, rrf_fusion,
@@ -9463,6 +9518,7 @@ class TortoiseSDK:
             SearchResult, SearchScores,
             filter_by_relationship, filter_by_traversal_predicate,
             expand_structural_hops,
+            _recency_factors,
             _trace_entry,
         )
 
@@ -9474,6 +9530,9 @@ class TortoiseSDK:
             raise ValueError(f"threshold must be 0.0-1.0, got {threshold}")
         if not (0.0 <= min_confidence <= 1.0):
             raise ValueError(f"min_confidence must be 0.0-1.0, got {min_confidence}")
+        if not (0.0 <= recency_boost <= 10.0):
+            raise ValueError(
+                f"recency_boost must be 0.0-10.0, got {recency_boost!r}")
         if order_by not in ("relevance", "confidence", "graph"):
             raise ValueError(f"order_by must be 'relevance', 'confidence', or 'graph', got {order_by!r}")
 
@@ -9667,6 +9726,36 @@ class TortoiseSDK:
             id_field = "id"
         # Graph label for MATCH (operators are Point nodes with is_operator=true)
         graph_label = "Point" if entity_type == "operator" else label
+
+        # 4b. Recency re-rank (#1544 R5): optional date weight on the fused
+        #     pool. Rank-based factor from ``recency_field`` (newest → 1.0,
+        #     undated → 0.0 via ``_recency_factors``); fail-open to plain
+        #     RRF on any graph error (circuit-breaker pattern). Default off
+        #     → byte-identical. ``id_field`` is the existing per-entity id
+        #     (``id`` for Point, ``eventId`` for Event) and ``graph_label``
+        #     likewise — the one batch Cypher per call stays label-correct.
+        if recency_field and recency_boost > 0 and result_ids:
+            try:
+                rows = graph.query(
+                    f"MATCH (n:{graph_label}) WHERE n.{id_field} IN $ids "
+                    f"RETURN n.{id_field}, n.{recency_field}",
+                    params={"ids": result_ids},
+                ).result_set
+                weights = _recency_factors([(row[0], row[1]) for row in rows])
+                fused = {pid: s * (1.0 + recency_boost * weights.get(pid, 0.0))
+                         for pid, s in fused.items()}
+                # Secondary sort key = the recency factor: at EQUAL multiplied
+                # score (including the degenerate all-0.0 case — FalkorDBLite's
+                # fulltext scores identical documents 0.0), the newer doc still
+                # ranks first (the plan's D1 multiplier can't break a 0×1.5=0
+                # tie on its own). Enabled branch only — default stays
+                # byte-identical.
+                fused = dict(sorted(fused.items(),
+                                    key=lambda x: (x[1], weights.get(x[0], 0.0)),
+                                    reverse=True))
+                result_ids = list(fused.keys())
+            except Exception as e:  # noqa: BLE001 — degrade, never crash
+                _logger.warning("recency weighting failed (%s) — plain RRF", e)
 
         if kind and query is not None and result_ids:
             expanded = expanded_kinds
@@ -9903,6 +9992,14 @@ class TortoiseSDK:
                 superseded_by=point_state.get(pid, {}).get("superseded_by")
                 or pt.get("superseded_by") or None,
                 supersedes=point_state.get(pid, {}).get("supersedes") or [],
+                # E6 (#1538) D7: promoted window fields (additive — empty
+                # string when undated ⇒ no marker, byte-identical output).
+                valid_from=point_state.get(pid, {}).get("valid_from")
+                or pt.get("validFrom") or "",
+                valid_to=point_state.get(pid, {}).get("valid_to")
+                or pt.get("validTo") or "",
+                expired_at=point_state.get(pid, {}).get("expired_at")
+                or pt.get("expiredAt") or "",
                 subject=point_state.get(pid, {}).get("subject"),
                 topics=cap_topics,
                 summary=cap_summary,
@@ -9968,6 +10065,144 @@ class TortoiseSDK:
         for e in entries:
             e["related_status"] = statuses.get(e.get("related_id"), "")
         return entries
+
+    # ── Point-in-time restore (E6 #1538, D6) ─────────────────────────
+
+    # Chain-walk guard: at most this many CORRECTS hops before giving up
+    # (bounded BFS — a pathological/cyclic chain can't loop forever).
+    _RESTORE_CHAIN_GUARD = 32
+
+    def restore_point_at(self, point_id: str, at_date: str) -> dict:
+        """Point-in-time restore: what was true at ``at_date`` (E2E-9, #1538).
+
+        V3 mechanism: walk the CORRECTS chain from the given (current/live)
+        point to the point whose ``[validFrom, validTo]`` interval covers
+        ``at_date``. Every supersede/invalidate written by THIS SDK stamps
+        contiguous windows (D2: old.validTo == successor's validFrom), so the
+        walk answers "what was true then" exactly.
+
+        Return shapes:
+          {valid_point: {id, content, valid_from, valid_to},
+           current: {id, content},
+           chain: [{id, valid_from, valid_to}], ...}
+            — exactly one candidate covers ``at_date``.
+          {ambiguous: true, candidates: [...]} — two+ candidates whose
+            windows both plausibly cover (malformed/overlapping windows):
+            explicit ambiguity signal, never a silent wrong answer.
+          {found: false, nearest: {...}, chain: [...]} — honest absence:
+            the date lies outside every window (before the earliest / after
+            the latest); ``nearest`` is the closest window for context.
+
+        Legacy undated points: no ``validFrom`` ⇒ open start; a superseded
+        point without ``validTo`` ⇒ open end (covers everything before the
+        successor's ``validFrom`` — no special case beyond IS NULL
+        handling). Missing point / empty chain ⇒ ``{found: false}``.
+
+        Date comparison reuses ``_created_sort_key``'s mixed-format
+        tolerance (ISO strings + numeric epoch both parse).
+        """
+        from .search_engine import _created_sort_key
+
+        at_date = str(at_date or "").strip()
+        if not at_date:
+            raise ValueError("restore_point_at: at_date must be non-empty")
+        proj = self._get_proj()
+
+        # Walk the CORRECTS chain: (new)-[:CORRECTS]->(old) — outgoing
+        # CORRECTS from the current point leads to OLDER claims.
+        chain: list[dict] = []
+        seen: set[str] = set()
+        cur = point_id
+        for _ in range(self._RESTORE_CHAIN_GUARD):
+            if cur in seen:
+                break  # cycle guard — never loop forever
+            seen.add(cur)
+            rows = proj.g.query(
+                "MATCH (p:Point {id:$id}) RETURN p.content, p.validFrom, "
+                "p.validTo, p.createdAt",
+                params={"id": cur},
+            ).result_set
+            if not rows:
+                if cur == point_id:
+                    # Asked point missing entirely.
+                    return {"found": False, "point_id": point_id,
+                            "at_date": at_date, "chain": []}
+                break
+            content, vf, vt, created = rows[0]
+            chain.append({"id": cur, "content": content,
+                          "valid_from": vf, "valid_to": vt})
+            older = proj.g.query(
+                "MATCH (p:Point {id:$id})-[:CORRECTS]->(old:Point) "
+                "RETURN old.id ORDER BY old.createdAt LIMIT 1",
+                params={"id": cur},
+            ).result_set
+            if not older:
+                break
+            cur = older[0][0]
+
+        if not chain:
+            return {"found": False, "point_id": point_id,
+                    "at_date": at_date, "chain": []}
+
+        t_key = _created_sort_key(at_date)
+
+        def _covers(vf, vt) -> bool:
+            """Window coverage with IS-NULL open ends + mixed-format keys."""
+            if vf is not None and _created_sort_key(vf) > t_key:
+                return False
+            if vt is not None and _created_sort_key(vt) < t_key:
+                return False
+            return True
+
+        covering = [e for e in chain if _covers(e["valid_from"], e["valid_to"])]
+        out = {
+            "point_id": point_id,
+            "at_date": at_date,
+            "current": {"id": chain[0]["id"], "content": chain[0]["content"]},
+            "chain": [{"id": e["id"], "valid_from": e["valid_from"],
+                        "valid_to": e["valid_to"]} for e in chain],
+        }
+        if len(covering) == 1:
+            e = covering[0]
+            out["valid_point"] = {"id": e["id"], "content": e["content"],
+                                   "valid_from": e["valid_from"],
+                                   "valid_to": e["valid_to"]}
+            out["found"] = True
+            return out
+        if len(covering) > 1:
+            # Overlapping/malformed windows — never a silent wrong answer.
+            out["ambiguous"] = True
+            out["candidates"] = [{"id": e["id"], "content": e["content"],
+                                   "valid_from": e["valid_from"],
+                                   "valid_to": e["valid_to"]}
+                                  for e in covering]
+            return out
+
+        # Honest absence: no window covers. Report the nearest window.
+        out["found"] = False
+        nearest = None
+        best = None
+        for e in chain:
+            vf, vt = e["valid_from"], e["valid_to"]
+            dist = None
+            if vf is not None and _created_sort_key(vf) > t_key:
+                kf = _created_sort_key(vf)
+                if kf[0] == 0 and t_key[0] == 0:  # both parseable
+                    dist = kf[1] - t_key[1]
+            elif vt is not None and _created_sort_key(vt) < t_key:
+                kt = _created_sort_key(vt)
+                if kt[0] == 0 and t_key[0] == 0:  # both parseable
+                    dist = t_key[1] - kt[1]
+            if dist is None:
+                continue  # open interval / unparseable — not a candidate
+            if best is None or dist < best:
+                best = dist
+                nearest = e
+        if nearest is not None:
+            out["nearest"] = {"id": nearest["id"],
+                               "valid_from": nearest["valid_from"],
+                               "valid_to": nearest["valid_to"]}
+        return out
 
     # ── Recall (epic #898) — UC1 STATE ──────────────────────────────
 
