@@ -37,6 +37,9 @@ from tools.longmem_eval.run import (
     CheckpointStaleError, _assert_python_version, _print_summary,
     outcomes_to_report, run_evaluation, run_main,
 )
+from tools.longmem_eval.report import (
+    compare_reports, mcnemar_exact, wilson_ci,
+)
 
 MINI = Path(__file__).parent / "fixtures" / "longmemeval_mini.json"
 
@@ -224,9 +227,18 @@ def test_outcomes_to_report_golden_shape():
 
     acc = report["accuracy"]
     assert acc["overall"] == 1.0
+    # M8 (#1528, D3): the additive 95% Wilson CI rides beside every published
+    # accuracy (overall / abstention / per_category). n=1,k=1 -> (0.207, 1.0)
+    # — the standard Wilson interval, no continuity correction (the plan's
+    # draft claimed [1.0, 1.0]; the pinned formula yields 0.207 lower bound).
+    assert acc["ci95"] == [0.207, 1.0]
     assert acc["task_averaged"] == 1.0
+    assert acc["abstention_ci95"] == [0.0, 0.0]  # no _abs outcomes -> (0,0)
     assert acc["per_category"]["Information Extraction"] == {
-        "accuracy": 1.0, "n": 1}
+        "accuracy": 1.0, "n": 1, "ci95": [0.207, 1.0]}
+    assert isinstance(acc["per_category"]["Information Extraction"]["ci95"],
+                      list)
+    assert len(acc["per_category"]["Information Extraction"]["ci95"]) == 2
     assert acc["per_type"]["single-session-user"] == {"accuracy": 1.0, "n": 1}
 
     ret = report["retrieval"]
@@ -305,6 +317,10 @@ def test_outcomes_to_report_golden_shape():
         "chunk_evidence_recall@k": {"5": 0.5, "10": 0.5, "20": 0.5},
         "n_ingest_errors": 0,
         "context_tokens": 120,
+        # M8 (#1528, D6): the projection now carries the live graph point
+        # count (was present per-outcome but stripped) — the compare
+        # flip-list zero-point flag consumes it.
+        "context_point_count": 3,
         "retrieval_latency_ms": 11.0,
         "reader_latency_ms": 22.0,
         "judge_latency_ms": 33.0,
@@ -3398,3 +3414,266 @@ def test_vector_strategy_verified_in_eval_path(tmp_path):
         assert ret["embedding_coverage"] == 1.0
     finally:
         sdk.close()
+
+
+# ── M8 (#1528): statistical discipline — Wilson CI + exact McNemar ──────
+
+@pytest.mark.parametrize("w,l,expected", [
+    (4, 1, 0.375),     # Abstention shared 28 — the v2 "win" that was NOT significant
+    (11, 10, 1.0),     # MSR 121 shared
+    (19, 18, 1.0),     # TR 130 shared
+    (3, 15, 0.0075),   # IE — significant but 9/15 losses never ran extraction
+    (1, 0, 1.0), (5, 0, 0.0625), (0, 0, 1.0),
+])
+def test_mcnemar_exact_fixtures(w, l, expected):  # noqa: E741 — w/l pairs
+    """Two-sided exact binomial McNemar, pinned to /tmp/v3-synth/02-validity.md."""
+    assert mcnemar_exact(w, l) == pytest.approx(expected, abs=1e-3)
+
+
+@pytest.mark.parametrize("k,n,expected", [
+    (20, 28, (0.529, 0.847)),   # Abstention baseline
+    (63, 121, (0.432, 0.608)),  # MSR baseline
+    (72, 133, (0.457, 0.624)),  # MSR v2
+    (0, 10, (0.0, 0.278)),
+    (0, 0, (0.0, 0.0)),         # empty denominator → (0,0), never nan
+])
+def test_wilson_ci_fixtures(k, n, expected):
+    """95% Wilson, no continuity correction — recomputed for the validity synthesis."""
+    lo, hi = wilson_ci(k, n)
+    assert lo == pytest.approx(expected[0], abs=1e-3)
+    assert hi == pytest.approx(expected[1], abs=1e-3)
+
+
+# ── M8 (#1528): compare_reports — shared-qid deltas, McNemar, flip lists ──
+
+def _cmp_report(outcomes, failures, tag, reader_model="reader-x"):
+    """Minimal report dict for compare_reports (the comparison reads
+    outcomes/failures/methodology only — no build_report gate needed)."""
+    return {
+        "benchmark": "LongMemEval",
+        "dataset": "xiaowu0162/longmemeval-cleaned",
+        "split": "s",
+        "n_questions": len(outcomes),
+        "outcomes": outcomes,
+        "failures": failures,
+        "n_failed": len(failures),
+        "methodology": {
+            "dataset_source": "xiaowu0162/longmemeval-cleaned",
+            "split": "s",
+            "reader_model": reader_model,
+            "judge_model": "judge-gpt4o",
+            "ingest_mode": "deterministic",
+            "reader_prompt_hash": "deadbeefcafe1234",
+            "git_sha": "c0ffee",
+            "run_at_utc": "2026-08-20T00:00:00Z",
+        },
+    }
+
+
+def _msr_outcome(qid, label, *, sp20=0.9, ctx=1000, errs=0, points=0):
+    return {"question_id": qid, "question_type": "multi-session", "label": label,
+            "session_recall@k": {"20": sp20}, "context_tokens": ctx,
+            "n_ingest_errors": errs, "context_point_count": points}
+
+
+def _msr_reports():
+    """Validity-synthesis-verified MSR numbers (regression fixture, not a
+    tuning target): 121 shared qids, baseline 63/121 correct, v2 64/121 on
+    the shared set (11 b-wins / 10 a-wins), 12 qids failed-in-A with 8/12
+    correct in B — all zero-point."""
+    a_out, b_out = [], []
+    for i in range(53):      # concordant correct
+        a_out.append(_msr_outcome(f"msr_cc_{i:03d}", True))
+        b_out.append(_msr_outcome(f"msr_cc_{i:03d}", True))
+    for i in range(47):      # concordant wrong
+        a_out.append(_msr_outcome(f"msr_cw_{i:03d}", False))
+        b_out.append(_msr_outcome(f"msr_cw_{i:03d}", False))
+    for i in range(11):      # b-wins (A wrong / B right)
+        a_out.append(_msr_outcome(f"msr_bwin_{i:03d}", False))
+        b_out.append(_msr_outcome(f"msr_bwin_{i:03d}", True))
+    for i in range(10):      # a-wins (A right / B wrong)
+        a_out.append(_msr_outcome(f"msr_awin_{i:03d}", True))
+        b_out.append(_msr_outcome(f"msr_awin_{i:03d}", False))
+    restored = [f"msr_failed_{i:03d}" for i in range(12)]
+    correct_in_b = {f"msr_failed_{i:03d}" for i in range(8)}
+    a_failures = [{"question_id": q, "question_type": "multi-session",
+                   "error": "reader:retries_exhausted",
+                   "failed_at_utc": "2026-08-20T00:00:00Z"} for q in restored]
+    for q in restored:
+        b_out.append(_msr_outcome(q, q in correct_in_b, sp20=0.8, ctx=900))
+    return (_cmp_report(a_out, a_failures, "msr-a"),
+            _cmp_report(b_out, [], "msr-b"))
+
+
+def test_compare_reports_msr_verified():
+    """The MSR numbers from the validity synthesis — the math is pinned so a
+    future refactor cannot silently shift the decomposition."""
+    a, b = _msr_reports()
+    cmp = compare_reports(a, b)
+    assert cmp["overall"]["shared_delta_pp"] == pytest.approx(0.83, abs=0.01)
+    assert cmp["overall"]["headline_delta_pp"] == pytest.approx(2.07, abs=0.01)
+    dec = cmp["overall"]["decomposition"]
+    assert dec["shared_net_flips"] == 1 and dec["b_wins"] == 11
+    assert dec["a_wins"] == 10
+    assert dec["reliability_restored"]["count"] == 12
+    assert dec["reliability_restored"]["correct"] == 8
+    assert dec["reliability_restored"]["rate"] == pytest.approx(8 / 12, abs=0.001)
+    assert dec["reliability_pp"] == pytest.approx(1.24, abs=0.05)
+    assert dec["residual_pp"] == pytest.approx(0.0, abs=0.05)
+    msr = cmp["per_category"]["Multi-Session Reasoning"]
+    assert msr["mcnemar"]["p_value"] == pytest.approx(1.0, abs=1e-3)
+    assert len(cmp["flip_lists"]["Multi-Session Reasoning"]) == 21
+
+
+def _abs_outcome(qid, label):
+    """An _abs qid with question_type "multi-session" (the MSR abstention
+    variants) — must land in the Abstention category."""
+    return {"question_id": qid, "question_type": "multi-session", "label": label,
+            "session_recall@k": {"20": 0.9}, "context_tokens": 1000,
+            "n_ingest_errors": 0, "context_point_count": 0}
+
+
+def _abs_reports():
+    """The VERIFIED v2 Abstention case (validity A7): A 71.4% n=28 -> B 83.3%
+    n=30, shared 23/28 vs 20/28 (4W/1L) -> McNemar p=0.375 (NOT significant).
+    gpt4_372c3eed_abs is a b-win, 6456829e_abs an a-win. Plus composition-only
+    MSR qids on each side so the Multi-Session Reasoning category exists."""
+    a_out, b_out = [], []
+    # 19 concordant correct, 4 concordant wrong, 4 b-wins, 1 a-win (n=28)
+    for i in range(19):
+        a_out.append(_abs_outcome(f"abs_cc_{i:02d}_abs", True))
+        b_out.append(_abs_outcome(f"abs_cc_{i:02d}_abs", True))
+    for i in range(4):
+        a_out.append(_abs_outcome(f"abs_cw_{i:02d}_abs", False))
+        b_out.append(_abs_outcome(f"abs_cw_{i:02d}_abs", False))
+    b_win_qids = [f"abs_bw_{i:02d}_abs" for i in range(3)] + ["gpt4_372c3eed_abs"]
+    for q in b_win_qids:
+        a_out.append(_abs_outcome(q, False))
+        b_out.append(_abs_outcome(q, True))
+    a_out.append(_abs_outcome("6456829e_abs", True))
+    b_out.append(_abs_outcome("6456829e_abs", False))
+    # B-only _abs qids (both correct) -> B n=30 with 25 correct.
+    for q in ("abs_only_b_01_abs", "abs_only_b_02_abs"):
+        b_out.append(_abs_outcome(q, True))
+    # Composition-only MSR qids (ratios keep A/B accuracies at 71.4%/83.3%).
+    for i in range(7):
+        a_out.append(_msr_outcome(f"msr_only_a_{i:02d}", i < 5))
+    for i in range(6):
+        b_out.append(_msr_outcome(f"msr_only_b_{i:02d}", i < 5))
+    return _cmp_report(a_out, [], "abs-a"), _cmp_report(b_out, [], "abs-b")
+
+
+def test_compare_reports_abs_category_and_rule():
+    """_abs qids carry question_type "multi-session" but must land in the
+    "Abstention" category; the inclusion rule is stated in the header."""
+    a, b = _abs_reports()
+    cmp = compare_reports(a, b)
+    assert cmp["overall"]["headline_delta_pp"] == pytest.approx(11.9, abs=0.05)
+    assert cmp["overall"]["shared_delta_pp"] == pytest.approx(10.71, abs=0.01)
+    ab = cmp["per_category"]["Abstention"]
+    assert ab["mcnemar"]["p_value"] == pytest.approx(0.375, abs=1e-3)
+    assert ab["mcnemar"]["significant_at_0_05"] is False
+    assert "Abstention" in cmp["flip_lists"]
+    flips = {f["question_id"]: f for f in cmp["flip_lists"]["Abstention"]}
+    assert flips["gpt4_372c3eed_abs"]["direction"] == "b_win"
+    assert flips["6456829e_abs"]["direction"] == "a_win"
+    assert "gpt4_372c3eed_abs" not in cmp["flip_lists"]["Multi-Session Reasoning"]
+    assert len(flips) == 5                                          # 4W/1L
+    assert "_abs" in cmp["header"]["abs_inclusion_rule"]          # rule stated
+    assert cmp["header"]["per_category_n"]["Abstention"] == \
+        {"a": 28, "b": 30, "shared": 28}
+    # _abs counted under the raw question_type too
+    assert cmp["header"]["per_type_n"]["multi-session"]["a"] >= 28
+    assert cmp["header"]["per_type_n"]["multi-session"]["b"] >= 28
+    assert cmp["header"]["per_type_n"]["multi-session"]["shared"] == 28
+
+
+def test_compare_reports_identical():
+    r, _ = _msr_reports()
+    cmp = compare_reports(r, r)
+    assert cmp["overall"]["shared_delta_pp"] == 0.0
+    assert cmp["overall"]["headline_delta_pp"] == 0.0
+    assert all(not flips for flips in cmp["flip_lists"].values())
+    assert all(v["mcnemar"]["p_value"] == 1.0
+               for v in cmp["per_category"].values())
+
+
+def test_compare_reports_stripped_outcomes_graceful():
+    """Outcomes missing the aux columns (pre-M7 reports) -> honest None in
+    the flip rows, no crash."""
+    a = _cmp_report([
+        {"question_id": "q1", "question_type": "single-session-user",
+         "label": True},
+        {"question_id": "q2", "question_type": "single-session-user",
+         "label": False},
+    ], [], "strip-a")
+    b = _cmp_report([
+        {"question_id": "q1", "question_type": "single-session-user",
+         "label": False},
+        {"question_id": "q2", "question_type": "single-session-user",
+         "label": True},
+    ], [], "strip-b")
+    cmp = compare_reports(a, b)
+    f = next(iter(cmp["flip_lists"].values()))[0]
+    assert f["sr20_a"] is None and f["zero_point_a"] is None
+    assert f["context_tokens_b"] is None and f["error_count_b"] is None
+
+
+def test_compare_reports_comparability_warnings():
+    a, b = _msr_reports()
+    a["methodology"]["reader_model"] = "deepseek/deepseek-chat"
+    b["methodology"]["reader_model"] = "deepseek-v4-flash"
+    cmp = compare_reports(a, b)
+    assert any("reader_model" in w for w in cmp["comparability"]["warnings"])
+    assert cmp["comparability"]["reader_model"]["match"] is False
+    assert any("answer-shape" in c or "judge" in c for c in cmp["caveats"])
+
+
+# ── M8 (#1528): --compare CLI (no run environment needed) ────────────────
+
+def _mini_compare_report(labels):
+    outcomes = [{
+        "question_id": f"q{i}",
+        "question_type": "single-session-user",
+        "question_date": "2024-01-15",
+        "label": lab,
+        "hypothesis": "h",
+        "session_recall@k": {"5": 1.0, "10": 1.0, "20": 1.0},
+        "turn_recall@k": {"5": 1.0, "10": 1.0, "20": 1.0},
+        "context_tokens": 100,
+        "context_point_count": 3,
+    } for i, lab in enumerate(labels)]
+    return outcomes_to_report(
+        outcomes,
+        reader_model="reader-x",
+        judge_model="judge-x",
+        ks=(5, 10, 20),
+        top_k=20,
+        split="s",
+        dataset_semantics_audit=_trusted_audit(),
+    )
+
+
+def test_cli_compare(tmp_path):
+    """--compare A B loads both report JSONs and returns the compare dict;
+    --compare-out persists it round-trippably. No dataset, no keys."""
+    a = tmp_path / "a.json"
+    b = tmp_path / "b.json"
+    a.write_text(json.dumps(_mini_compare_report([True, True, True, False])))
+    b.write_text(json.dumps(_mini_compare_report([True, True, False, True])))
+    cmp = run_main(["--compare", str(a), str(b)])
+    assert isinstance(cmp, dict)
+    assert cmp["comparison_rule"]
+    assert cmp["overall"]["shared_n"] == 4
+    # 1 a-win + 1 b-win on the shared 4 -> net zero shared delta
+    assert cmp["overall"]["shared_delta_pp"] == 0.0
+    assert cmp["overall"]["decomposition"]["a_wins"] == 1
+    assert cmp["overall"]["decomposition"]["b_wins"] == 1
+    out = tmp_path / "cmp.json"
+    cmp2 = run_main(["--compare", str(a), str(b), "--compare-out", str(out)])
+    assert out.is_file()
+    roundtrip = json.loads(out.read_text(encoding="utf-8"))
+    assert roundtrip["overall"]["shared_delta_pp"] == \
+        cmp2["overall"]["shared_delta_pp"]
+    assert roundtrip["header"]["abs_inclusion_rule"] == \
+        cmp2["header"]["abs_inclusion_rule"]
