@@ -5639,7 +5639,22 @@ async def change_member_role(team_id: str, user_id: str, body: dict, user: dict 
 # acting user, and idempotent (GET export; repeat DELETE → already-pending).
 
 _EXPORT_MAX_EVENTS = 5000  # event log is a rolling window (30d retention)
-_EXPORT_SKIP_LABELS = {"GraphEventMeta", "TeamMeta"}  # internal plumbing
+# Internal bookkeeping excluded from exports/backups. Meta nodes are
+# key-scoped (#1625): the R2/R3 FTS-migration markers (point_fts_v2 /
+# event_fts_v2) are re-created on projection open, but Meta {key:
+# 'calibration_milestone'} is DATA (Gate B state, calibration_passed()
+# reads it) and MUST survive backup/restore.
+_EXPORT_SKIP_LABELS = {"GraphEventMeta", "TeamMeta", "EpMeta"}  # label-wide
+_EXPORT_SKIP_META_KEYS = frozenset({"point_fts_v2", "event_fts_v2"})
+
+
+def _is_export_skip_node(labels: list[str], props: dict | None) -> bool:
+    """True for an internal bookkeeping node the export/backup skips."""
+    if _EXPORT_SKIP_LABELS & set(labels):
+        return True
+    if "Meta" in labels and (props or {}).get("key") in _EXPORT_SKIP_META_KEYS:
+        return True
+    return False
 
 
 def _team_members_sync(team_id: str) -> list[dict]:
@@ -5695,10 +5710,16 @@ def _export_graph_snapshot(namespace: str):
     for labels, props in g.query(
         "MATCH (n) RETURN labels(n), properties(n)"
     ).result_set:
-        summary["nodes"] += 1
         labels = list(labels or [])
+        props_dict = dict(props or {})
+        if _is_export_skip_node(labels, props_dict):
+            # internal bookkeeping (GraphEventMeta/TeamMeta/EpMeta + the R2/R3
+            # FTS-migration Meta markers) — excluded from BOTH the entity list
+            # and the node count (#1625)
+            continue
+        summary["nodes"] += 1
         if "Point" in labels:
-            d = dict(props or {})
+            d = props_dict
             if "pointKind" in d:
                 d["kind"] = d.pop("pointKind")
             points.append(d)
@@ -5713,7 +5734,7 @@ def _export_graph_snapshot(namespace: str):
                     pass
             events.append(d)
             summary["events"] += 1
-        elif not (_EXPORT_SKIP_LABELS & set(labels)):
+        else:
             entities.append({"labels": labels, **dict(props or {})})
             summary["entities"] += 1
     for src_labels, src_id, rel_type, tgt_labels, tgt_id, rel_props in g.query(

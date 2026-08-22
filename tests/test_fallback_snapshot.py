@@ -20,12 +20,17 @@ from tortoise import fallback_snapshot as fs
 
 TEST_GRAPH = "tortoise_test_1375_fallback_snapshot"
 
-# FTS-miss queries: "zzz" is not in any corpus, so retrieval strategies miss
-# and the degraded TF-IDF fallback fires deterministically.
-FTS_MISS = "zzz qxqw nonexistent"
+# FTS-miss queries: a token NOT present in any test corpus — retrieval
+# strategies miss and the degraded TF-IDF fallback fires deterministically.
+# NOTE (#1625): must NOT contain 'zzz' — several tests seed points whose
+# content includes 'zzz...' tokens, which FTS matches (the R2 multi-field
+# index matches content tokens; a 'zzz'-containing miss query would no
+# longer be a miss and the snapshot would never build.
+FTS_MISS = "qqqzxwv nonexistent"
 
 
 @pytest.fixture
+
 def sdk(tmp_path):
     sdk = TortoiseSDK(str(tmp_path / "fb.db"), namespace=TEST_GRAPH)
     fs._store.clear()
@@ -37,6 +42,21 @@ def sdk(tmp_path):
     except Exception:
         pass
     sdk.close()
+
+
+@pytest.fixture(autouse=True)
+def _no_embedder(monkeypatch):
+    """#1625: pin the sparse leg — the R3 dense leg (vector nearest-neighbor)
+    returns results for EVERY query (k-NN semantics, no threshold), so a
+    "FTS-miss" query like 'zzz' would still hit via vector and the degraded
+    TF-IDF fallback snapshot would never build. With EmbeddingModel.get →
+    None the vector strategy is never submitted (sdk.py records
+    no_embedder) and the fallback fires deterministically — the original
+    #1375 contract. build_snapshot itself degrades to sklearn TF-IDF when
+    no embedder, so the snapshot still builds."""
+    from tortoise.embeddings import EmbeddingModel
+    monkeypatch.setattr(EmbeddingModel, "get",
+                        staticmethod(lambda load_timeout=None: None))
 
 
 def _no_match_query(sdk, q=FTS_MISS):
@@ -58,20 +78,26 @@ def test_fallback_snapshot_parity_with_legacy(sdk, monkeypatch):
     """Cached snapshot results == legacy path results (identical ids+order)."""
     for i in range(6):
         sdk.create_point("statement", f"pricing tier {i} enterprise plans memory")
+    # #1625: the query must MISS FTS (a 'zzz pricing memory' query now matches
+    # the corpus directly via the R2 multi-field index, so the fallback never
+    # fires and the snapshot never builds). FTS_MISS has no token in any
+    # corpus — both the legacy TF-IDF path and the cached snapshot path then
+    # run the same degraded scorer on the full corpus.
+    q = FTS_MISS
 
     # 1. legacy (snapshot capped off) — restore the cap BEFORE the cached leg
     monkeypatch.setattr(fs, "MAX_CORPUS_POINTS", 0)
-    legacy = [r["id"] for r in sdk.tortoise_fts_query(query="zzz pricing memory", limit=10)]
+    legacy = [r["id"] for r in sdk.tortoise_fts_query(query=q, limit=10)]
     assert not _store_has(sdk), "legacy leg must not build the snapshot"
 
     monkeypatch.setattr(fs, "MAX_CORPUS_POINTS", 50_000)
     fs._store.clear()
-    cached = _cached_results(sdk, q="zzz pricing memory")
+    cached = _cached_results(sdk, q=q)
     assert _store_has(sdk), "cached leg must build the snapshot"
     assert cached == legacy, f"parity broken: cached={cached} legacy={legacy}"
 
     # 3. cached again (from store — same result)
-    again = _cached_results(sdk, q="zzz pricing memory")
+    again = _cached_results(sdk, q=q)
     assert again == cached, "snapshot path must be deterministic"
 
 
@@ -164,7 +190,10 @@ def test_fallback_snapshot_invalidated_on_write(sdk):
     assert _store_has(sdk)
     sdk.create_point("statement", "alpha beta gamma delta zzz-new")
     assert not _store_has(sdk), "create must invalidate the snapshot"
-    rebuilt = _cached_results(sdk, q="zzz alpha beta")
+    # #1625: query the NEW point's unique token ('zzz-new' is in the new
+    # point only; the old point has no zzz token) — the pre-R2 query
+    # 'zzz alpha beta' now matches BOTH points via the R2 multi-field FTS.
+    rebuilt = _cached_results(sdk, q="zzz-new")
     assert len(rebuilt) == 1
 
 
