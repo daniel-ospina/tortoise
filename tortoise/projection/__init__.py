@@ -1370,7 +1370,7 @@ class FalkorProjection(
         _ver = getattr(self, '_falkordb_version', None)
         if _ver is None or _ver[0] >= 4:
             # ── Full-text indexes ──
-            for label, fields in [("Point", ["content"]),
+            for label, fields in [("Point", ["content", "search_keys"]),  # R2 (#1541) D3
                                   # #244: AgentSession events populate name
                                   # (not subject) — index both so session name
                                   # matches surface through FTS.
@@ -1385,10 +1385,80 @@ class FalkorProjection(
                 try:
                     fields_sql = ", ".join(f"'{f}'" for f in fields)
                     self.g.query(f"CALL db.idx.fulltext.createNodeIndex('{label}', {fields_sql})")
+                    if label == "Point":
+                        # R2 (#1541) D3: a FRESH DB created the two-field
+                        # index directly — mark the migration done so a later
+                        # boot (create → "already") never re-enters the
+                        # drop→recreate path (marker guards churn).
+                        try:
+                            self.g.query(
+                                "MERGE (m:Meta {key:'point_fts_v2'}) SET m.v = true"
+                            )
+                        except Exception:
+                            pass
                 except Exception as e:
                     msg = str(e).lower()
                     if "already" in msg:
-                        if label == "Event":
+                        if label == "Point":
+                            # R2 (#1541) D3: legacy single-field ('content')
+                            # Point index → drop→recreate with search_keys,
+                            # the #244 Event-marker pattern: the point_fts_v2
+                            # Meta marker guards a ONE-TIME migration
+                            # (persisted DB marker, not a per-process flag —
+                            # a process-local bool would re-drop+recreate on
+                            # every restart/worker: churn + a drop→recreate
+                            # crash window where Point FTS degrades). The
+                            # drop procedure name varies by engine
+                            # (db.idx.fulltext.drop on server v4.16.7;
+                            # dropIndex on some builds) — try both; an engine
+                            # with neither (FalkorDBLite embedded) leaves the
+                            # content-only index (its sparse path is the D4
+                            # TF-IDF snapshot anyway). The same marker guard
+                            # runs a ONE-TIME data fixup: pre-R2 nodes stored
+                            # search_keys as an ARRAY, and FalkorDB's
+                            # fulltext index does NOT index array-valued
+                            # properties (verified on v4.16.7) — flatten to a
+                            # flat space-joined string (the sdk write path
+                            # already stores flat; this fixes existing nodes).
+                            try:
+                                done = self.g.query(
+                                    "MATCH (m:Meta {key:'point_fts_v2'}) RETURN 1"
+                                ).result_set
+                                if not done:
+                                    rows = self.g.query(
+                                        "MATCH (n:Point) WHERE n.search_keys IS NOT NULL "
+                                        "RETURN n.id, n.search_keys"
+                                    ).result_set
+                                    for nid, sk in rows:
+                                        if isinstance(sk, (list, tuple)):
+                                            flat = " ".join(
+                                                str(k).strip() for k in sk
+                                                if str(k).strip()
+                                            )
+                                            self.g.query(
+                                                "MATCH (n:Point {id:$id}) "
+                                                "SET n.search_keys = $flat",
+                                                params={"id": nid, "flat": flat},
+                                            )
+                                    for drop_proc in ("db.idx.fulltext.drop",
+                                                      "db.idx.fulltext.dropIndex"):
+                                        try:
+                                            self.g.query(
+                                                f"CALL {drop_proc}('Point')"
+                                            )
+                                            break
+                                        except Exception:
+                                            continue
+                                    self.g.query(
+                                        "CALL db.idx.fulltext.createNodeIndex("
+                                        "'Point', 'content', 'search_keys')"
+                                    )
+                                    self.g.query(
+                                        "MERGE (m:Meta {key:'point_fts_v2'}) SET m.v = true"
+                                    )
+                            except Exception:
+                                pass
+                        elif label == "Event":
                             # #244: legacy subject-only Event FTS index —
                             # migrate to include name ONCE (persisted DB
                             # marker, not a per-process flag: a process-local

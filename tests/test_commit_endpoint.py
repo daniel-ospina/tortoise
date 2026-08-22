@@ -390,7 +390,11 @@ class TestFourNodeChain:
             params={"pid": pid}).result_set
         assert props, "Point node missing"
         assert props[0][0] == "my 5K best is 27:12"
-        assert props[0][1] == ["personal best", "27:12"]
+        # R2 (#1541 D3, owner-flagged cross-lane deviation): the GRAPH value
+        # is a flat space-joined string (FalkorDB's fulltext index does not
+        # index array-valued properties); the payload/commit schema keep the
+        # E3 list format. See plan D3 + the R2 PR description.
+        assert props[0][1] == "personal best 27:12"
         assert props[0][2] == 0
 
     def test_supersede_branch_carries_e3_point_props(self, client):
@@ -423,7 +427,8 @@ class TestFourNodeChain:
             params={"c": "my 5K best is 27:12"}).result_set
         assert rows, "superseding point missing"
         assert rows[0][0] == "my 5K best is 27:12"
-        assert rows[0][1] == ["personal best", "27:12"]
+        # R2 (#1541 D3): flat graph value (see test_commit_writes_e3_point_props).
+        assert rows[0][1] == "personal best 27:12"
         assert rows[0][2] == 0
         # pin the supersede branch actually ran: the seeded old node was
         # superseded (status flips, CORRECTS edge to the new point)

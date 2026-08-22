@@ -299,6 +299,15 @@ def run_fts_query(
     owned negative ("fts skipped (no index)" vs "fts ran, no results") is
     truthful from R3 forward. Default None = no trace (byte-identical).
 
+    R2 (#1541) D1: the ``queryNodes`` path runs ``build_or_query`` — the
+    shared OR-union tokenizer (tortoise.sparse) replaces the strict-AND raw
+    passthrough so a point differing from the question by ONE token is no
+    longer zeroed (RediSearch AND requires every whitespace term present).
+    The operator path (label CONTAINS) is structural and unchanged; full-
+    scan mode (query=None) never reaches this function. Single-token and
+    stopword-only queries return the raw string — byte-identical to the
+    pre-R2 behavior.
+
     Note: the connection-level `timeout` is passed straight to the FalkorDB
     driver (Graph.query(timeout=...)) so a slow query is killed server-side,
     not merely observed. The post-hoc check below remains as a safety net
@@ -361,6 +370,11 @@ def run_fts_query(
         id_field = "eventId"
     else:
         id_field = "id"
+    # R2 (#1541) D1: OR-union tolerance for the text path — all labels
+    # share the tokenizer (single-token/degenerate inputs pass the raw
+    # string through unchanged).
+    from .sparse import build_or_query
+    fts_query = build_or_query(query)
     # #689/#1391: terminal-status Points must not leak into FTS results
     # (skipped when the caller opts in via include_terminal — audit/history).
     if label == "Point":
@@ -379,7 +393,7 @@ def run_fts_query(
             "LIMIT $limit"
         )
         rows = graph.query(
-            cypher, params={"query": query, "limit": limit}, timeout=timeout_ms
+            cypher, params={"query": fts_query, "limit": limit}, timeout=timeout_ms
         ).result_set
         # Post-hoc timeout check (see docstring for rationale) — #561: log
         # latency, return the results (the driver-level timeout is the real
@@ -1658,11 +1672,29 @@ def fallback_tfidf(query: str, points: list[dict], limit: int = 10) -> list[dict
     """Last-resort TF-IDF fallback when all FalkorDB strategies fail.
 
     points should be dicts with at least 'id', 'content', 'pointKind'.
+
+    R2 (#1541) D4: the indexed text is ``index_text(content, search_keys)``
+    — content ∪ search_keys — the embedded-stack counterpart of the real
+    backend's multi-field Point FTS index (surface-11 normalization is a
+    shared code path via tortoise.sparse, not a magic parity layer). Points
+    dicts from ``self.query`` carry ``search_keys`` when present (additive;
+    absent → byte-identical to the pre-R2 path). The returned payload keeps
+    the REAL content (the alias text is index-only, never surfaced).
     """
     try:
         from tortoise.embeddings import search_points
+        from .sparse import index_text
         meta = {p["id"]: p for p in points if p.get("id")}
-        results = search_points(query, points, threshold=0.0, limit=limit)
+        # R2: alias text is index-only — restore the real content on the
+        # results (search_points echoes the dicts it was handed).
+        real_content = {p["id"]: p.get("content", "") for p in points if p.get("id")}
+        indexed = [
+            {**p, "content": index_text(p.get("content"), p.get("search_keys"))}
+            for p in points
+        ]
+        results = search_points(query, indexed, threshold=0.0, limit=limit)
+        for r in results:
+            r["content"] = real_content.get(r["id"], r["content"])
         return [
             SearchResult(
                 id=r["id"],

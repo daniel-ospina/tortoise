@@ -373,3 +373,197 @@ class TestTortoiseFtsQueryLimit:
             pytest.fail("default limit=10 should not raise ValueError")
         except Exception:
             pass  # ConnectionError expected without DB
+
+
+# ───────────────────────── R2 #1541 OR-union + search_keys ──────────────────
+
+_LIVE_URI = os.environ.get("TORTOISE_DB_URI") or "docker://:@localhost:16379/tortoise_test_sdk125"
+
+
+@pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="Live FalkorDB (Docker) not available")
+class TestR2OrUnionAndSearchKeys:
+    """R2 (#1541) integration: OR-union one-token-drop tolerance, search_keys
+    index expansion, the multi-field Point FTS migration, and the FTS leg
+    trace on the live backend."""
+
+    @pytest.fixture()
+    def proj(self):
+        from tortoise.projection import FalkorProjection
+        reset_circuit_breakers()
+        p = FalkorProjection.from_uri(_LIVE_URI)
+        p.g.query("MATCH (n) DETACH DELETE n")
+        yield p
+        reset_circuit_breakers()
+        p.close()
+
+    def _seed(self, proj, rows):
+        for pid, content, sk in rows:
+            proj.g.query(
+                "CREATE (n:Point {id:$id, content:$c, search_keys:$sk, "
+                "is_operator:false, pointKind:'statement'})",
+                params={"id": pid, "c": content, "sk": sk or None},
+            )
+
+    def test_one_token_drop_tolerance(self, proj):
+        """The R2 regression: two points differing by ONE token; a question
+        that strictly ANDs one point's terms zeroes the other — OR-union
+        must surface BOTH, overlap-ranked (the doc with more shared terms
+        first)."""
+        self._seed(proj, [
+            ("gym6", "gym schedule 6pm", None),
+            ("gym5", "gym schedule 5pm", None),
+        ])
+        # shared-token query: both surface under any semantics
+        hits = run_fts_query(proj.g, "gym schedule", limit=10)
+        ids = {h[0] for h in hits}
+        assert "gym6" in ids and "gym5" in ids, f"both must surface: {ids}"
+        # one-token-drop paraphrase: strict-AND ("gym schedule 5pm" as a raw
+        # string) would zero gym6 (no 5pm in content); OR-union surfaces it
+        hits = run_fts_query(proj.g, "gym schedule 5pm", limit=10)
+        ids = {h[0] for h in hits}
+        assert "gym6" in ids, f"previously-zeroed point missing: {ids}"
+        assert "gym5" in ids
+
+    def test_search_keys_index_surfaces_alias(self, proj):
+        """R2 D3: the multi-field Point FTS index matches unqualified query
+        tokens against search_keys — the "question ∪ search_keys" expansion.
+        The point's CONTENT lacks the alias tokens entirely."""
+        self._seed(proj, [
+            ("pb", "personal best 5K time is 27:12",
+             "fastest 5k running pb"),
+            ("other", "the weather today is sunny", None),
+        ])
+        # "what's my fastest 5k" → OR-union tokens: fastest|5k
+        hits = run_fts_query(proj.g, "what's my fastest 5k", limit=10)
+        ids = {h[0] for h in hits}
+        assert "pb" in ids, f"search_keys alias not surfaced: {ids}"
+        assert "other" not in ids
+
+    def test_write_path_flattens_search_keys(self, proj):
+        """R2 D3: sdk.create_point stores search_keys as a FLAT string (E3's
+        list payload is flattened on the write path — owner-flagged cross-lane
+        deviation, plan D3) and the flat value is FTS-findable."""
+        from tortoise.sdk import TortoiseSDK
+        _old_uri = os.environ.get("TORTOISE_DB_URI")
+        os.environ["TORTOISE_DB_URI"] = _LIVE_URI
+        try:
+            sdk = TortoiseSDK()
+        finally:
+            if _old_uri is None:
+                os.environ.pop("TORTOISE_DB_URI", None)
+            else:
+                os.environ["TORTOISE_DB_URI"] = _old_uri
+        sdk._proj = proj
+        sdk.create_point("statement", "my 5K best is 27:12", id="flat-pb",
+                         search_keys=["personal best", "27:12"])
+        rows = proj.g.query(
+            "MATCH (n:Point {id:'flat-pb'}) RETURN n.search_keys").result_set
+        assert rows and rows[0][0] == "personal best 27:12", rows
+        hits = run_fts_query(proj.g, "personal best", limit=10)
+        assert "flat-pb" in {h[0] for h in hits}
+
+    def test_multi_field_migration_marker_and_no_churn(self):
+        """R2 D3 migration: a DB with the LEGACY single-field ('content')
+        Point index + pre-R2 LIST-valued search_keys is migrated by
+        _ensure_indexes — drop→recreate to ('content', 'search_keys') +
+        one-time list flatten, guarded by the point_fts_v2 Meta marker; a
+        re-run does not churn (marker guards)."""
+        from falkordb import FalkorDB
+        from tortoise.projection import FalkorProjection
+        reset_circuit_breakers()
+        client = FalkorDB(host="localhost", port=16379)
+        gname = "tortoise_test_r2_migrate"
+        raw = client.select_graph(gname)
+        raw.query("MATCH (n) DETACH DELETE n")
+        try:  # noqa: SIM105
+            raw.query("CALL db.idx.fulltext.drop('Point')")
+        except Exception:
+            pass
+        # legacy state: single-field index + list-valued search_keys
+        raw.query("CALL db.idx.fulltext.createNodeIndex('Point', 'content')")
+        raw.query(
+            "CREATE (n:Point {id:'legacy-pb', "
+            "content:'personal best 5K time is 27:12', "
+            "search_keys:['fastest 5k','running pb'], "
+            "is_operator:false, pointKind:'statement'})")
+        # booting the projection runs _ensure_indexes → the migration
+        proj = FalkorProjection.from_uri(
+            "docker://:@localhost:16379/" + gname)
+        try:
+            # the legacy LIST was flattened in place
+            rows = proj.g.query(
+                "MATCH (n:Point {id:'legacy-pb'}) RETURN n.search_keys"
+            ).result_set
+            assert rows and rows[0][0] == "fastest 5k running pb", rows
+            # the two-field index answers a search_keys-only query
+            hits = run_fts_query(proj.g, "fastest 5k", limit=10)
+            assert "legacy-pb" in {h[0] for h in hits}, \
+                f"search_keys-only query failed post-migration: {hits}"
+            # marker set once
+            marker = proj.g.query(
+                "MATCH (m:Meta {key:'point_fts_v2'}) RETURN m.v").result_set
+            assert marker and marker[0][0] is True, marker
+            # re-run → no churn: marker still set, values untouched, index
+            # still answers (the migration guard short-circuits)
+            proj._ensure_indexes()
+            rows = proj.g.query(
+                "MATCH (n:Point {id:'legacy-pb'}) RETURN n.search_keys"
+            ).result_set
+            assert rows[0][0] == "fastest 5k running pb", \
+                "flat value mangled by re-run"
+            hits = run_fts_query(proj.g, "fastest 5k", limit=10)
+            assert "legacy-pb" in {h[0] for h in hits}
+        finally:
+            proj.close()
+
+    def test_fts_leg_trace_healthy(self, proj):
+        """R2 D5 (inherited from R3 D4): a healthy run records the FTS leg
+        with ran=True, degraded=False, reason='ok', count == hits."""
+        self._seed(proj, [("lt1", "gym schedule", None)])
+        trace: list[dict] = []
+        hits = run_fts_query(proj.g, "gym schedule", limit=5, leg_trace=trace)
+        fts = next(e for e in trace if e["leg"] == "fts")
+        assert fts["ran"] is True
+        assert fts["degraded"] is False
+        assert fts["reason"] == "ok"
+        assert fts["count"] == len(hits) == 1
+        # default-None callers: no trace, byte-identical results
+        assert run_fts_query(proj.g, "gym schedule", limit=5) == hits
+
+    def test_fts_leg_trace_index_missing_live(self, proj):
+        """R2 D5: with the Point FTS index dropped the FTS leg is recorded
+        truthfully, NEVER silent — either the promoted index_missing reason
+        (engines whose driver raises) or an explicit empty run (older
+        engines return an empty result set instead of raising). The R3
+        patched unit test pins the exact index_missing promotion; this live
+        variant pins the never-silent contract on the real backend."""
+        proj.g.query("CALL db.idx.fulltext.drop('Point')")
+        trace: list[dict] = []
+        hits = run_fts_query(proj.g, "gym", leg_trace=trace)
+        assert hits == []
+        fts = next(e for e in trace if e["leg"] == "fts")
+        assert fts["reason"] in ("index_missing", "empty_results"), fts
+        # shape rule: degraded ⇔ the leg could not serve (index missing); a
+        # clean zero-hit run is degraded=False/empty_results (leg RAN).
+        assert fts["degraded"] == (fts["reason"] == "index_missing")
+        assert fts["ran"] is True
+        # restore the shared live DB for later tests
+        proj._ensure_indexes()
+
+    def test_fts_leg_trace_breaker_open(self, proj):
+        """R2 D5: the FTS breaker forced OPEN records reason='breaker_open'."""
+        from tortoise import search_engine as se
+        b = se._breaker("fts")
+        for _ in range(b.fail_threshold):
+            b.record_failure()
+        assert b.is_open()
+        try:
+            trace: list[dict] = []
+            hits = run_fts_query(proj.g, "gym", leg_trace=trace)
+            assert hits == []
+            fts = next(e for e in trace if e["leg"] == "fts")
+            assert fts["reason"] == "breaker_open"
+            assert fts["degraded"] is True
+            assert fts["ran"] is False
+        finally:
+            reset_circuit_breakers()
