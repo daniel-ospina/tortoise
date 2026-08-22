@@ -2291,7 +2291,7 @@ function claimIntentInFlight() {
             </ul>
           </section>
         )}
-        {tab === 'overview' && team && team.graph_ready === false && (
+        {tab === 'overview' && team && team.graph_ready === false && (team.point_count ?? 0) === 0 && (
           // #1591: the team's graph is missing/broken (half-failed
           // provisioning) — the API fails soft so the dashboard renders; a
           // graph write recreates it. Give the user a clear signal.
@@ -2312,7 +2312,7 @@ function claimIntentInFlight() {
             </div>
           </section>
         )}
-        {tab === 'overview' && team && (team.point_count ?? 0) > 0 && (
+        {tab === 'overview' && team && team.graph_ready !== false && (team.point_count ?? 0) > 0 && (
           <section className="overview">
             <h2>Overview</h2>
             <div className="cards">
