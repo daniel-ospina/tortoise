@@ -9,6 +9,7 @@ These tests are pure string parsing — no embedded DB, no Docker.
 """
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -116,7 +117,10 @@ class TestGuardAcceptsCleanLog:
         text = workflow.read_text()
         fast_run = [
             l for l in text.splitlines()  # noqa: E741
-            if "timeout -s INT -k 10 45m" in l and "-m pytest" in l
+            # the watchdog duration is intentionally not pinned (it has moved
+            # 30m->45m->55m as the corpus grew; only the -r summary contract
+            # matters here)
+            if re.search(r"timeout -s INT -k 10 \d+m", l) and "-m pytest" in l
         ]
         assert fast_run, "fast-suite pytest invocation not found"
         assert "-r fEs" in fast_run[0], (
