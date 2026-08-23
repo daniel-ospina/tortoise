@@ -161,6 +161,7 @@ function claimIntentInFlight() {
   const [wizardSeedDone, setWizardSeedDone] = React.useState(false)
   const [wizardSeeding, setWizardSeeding] = React.useState(false)
   const [wizardDone, setWizardDone] = React.useState(false)
+  const [onboardingComplete, setOnboardingComplete] = React.useState(false)
 
   // #1147: build the tier-cap notice. The server's 402 detail carries the
   // real limit ('Team api_keys limit reached (N). Upgrade your plan to
@@ -450,6 +451,17 @@ function claimIntentInFlight() {
   // switcher exists exactly for those users. Mint for a concrete team_id, and
   // on a 400 auto-select the first membership and retry instead of silently
   // degrading to the API-key screen.
+  // #1643 (review P2-1): read the onboarding state on mount so completed
+  // users never see the re-entry card again (the completion marker is
+  // persisted server-side).
+  React.useEffect(() => {
+    let cancelled = false
+    api('/v1/onboarding/state', { useSession: true })
+      .then((st) => { if (!cancelled && st && st.onboarding_complete) setOnboardingComplete(true) })
+      .catch(() => { /* best-effort */ })
+    return () => { cancelled = true }
+  }, [])
+
   // ── #1643 wizard actions ────────────────────────────────────────────────
   const wizardSteps = ['Connect your tool', 'Your agent\'s toolkit', 'Connect GitHub', 'Seed your graph', 'You\'re set']
 
@@ -457,30 +469,36 @@ function claimIntentInFlight() {
     try { navigator.clipboard.writeText(text) } catch { /* clipboard blocked */ }
     setWizardCopied(label)
     setTimeout(() => setWizardCopied(''), 1600)
-    try { api('/v1/onboarding/state', { method: 'PATCH', useSession: true,
-      body: JSON.stringify({ harness: wizardHarness, section: 'config' }) }) } catch { /* best-effort */ }
+    api('/v1/onboarding/state', { method: 'PATCH', useSession: true,
+      body: JSON.stringify({ harness: wizardHarness, section: 'config' }) }).catch(() => {})
   }
 
   async function wizardConnectGithub() {
     setWizardGithub((g) => ({ ...g, busy: true }))
+    let poll = null
+    const stopPoll = () => { if (poll) clearInterval(poll); poll = null }
     try {
       const res = await api('/v1/onboarding/github/connect', { method: 'POST', useSession: true })
-      if (res && res.authorize_url) {
-        const win = window.open(res.authorize_url, '_blank')
+      const authUrl = (res && (res.auth_url || res.authorize_url)) || null
+      if (authUrl) {
+        const win = window.open(authUrl, '_blank')
         if (!win) setError('Popup blocked — allow popups for app.premiselabs.co and try again.')
         // Poll status until the OAuth round trip completes (the callback
-        // redirects to welcome.html, not here).
-        const poll = setInterval(async () => {
+        // redirects to welcome.html, not here). Bounded; on timeout the
+        // button resets (denied/abandoned → a cancel CTA, no stuck state).
+        poll = setInterval(async () => {
           try {
             const st = await api('/v1/onboarding/github/status', { useSession: true })
             if (st && st.connected) {
-              clearInterval(poll)
+              stopPoll()
               setWizardGithub({ connected: true, repos: st.repos_count, busy: false })
-              try { api('/v1/onboarding/state', { method: 'PATCH', useSession: true, body: JSON.stringify({ github_connected: true }) }) } catch {}
+              api('/v1/onboarding/state', { method: 'PATCH', useSession: true, body: JSON.stringify({ github_connected: true }) }).catch(() => {})
             }
           } catch { /* transient */ }
         }, 3000)
-        setTimeout(() => clearInterval(poll), 120000)  // bounded
+        setTimeout(() => { stopPoll(); setWizardGithub((g) => ({ ...g, busy: false })) }, 120000)
+      } else {
+        setWizardGithub((g) => ({ ...g, busy: false }))
       }
     } catch (e) {
       setWizardGithub((g) => ({ ...g, busy: false }))
@@ -499,7 +517,7 @@ function claimIntentInFlight() {
         body: JSON.stringify({ name: workspace, objectKind: 'project', status: 'in_progress' }) })
       const p = await api('/v1/points', { method: 'POST', useSession: true,
         body: JSON.stringify({ content: `I'm building ${workspace}`, kind: 'statement',
-                               about_object: o.id, tags: ['onboarding'] }) })
+                               about_object: o.id, tags: ['onboarding'], dedup: true }) })
       setWizardSeedDone(!!(o && o.id && p && p.id))
       setWizardSeeding(false)
     } catch (e) {
@@ -510,8 +528,8 @@ function claimIntentInFlight() {
 
   async function wizardComplete() {
     setWizardDone(true)
-    try { api('/v1/onboarding/state', { method: 'PATCH', useSession: true,
-      body: JSON.stringify({ onboarding_complete: true }) }) } catch { /* best-effort */ }
+    api('/v1/onboarding/state', { method: 'PATCH', useSession: true,
+      body: JSON.stringify({ onboarding_complete: true }) }).catch(() => {})
     window.history.replaceState({}, '', '/')
     setWelcomeMode(false)
   }
@@ -2260,16 +2278,21 @@ function claimIntentInFlight() {
                       </div>
                       <pre className="snippet" style={{ marginTop: '0.75rem' }}>
                         {HARNESS_INSTALL[wizardHarness](apiKey)}
-                        {'\n\n'}
-                        {HARNESS_PERSIST(apiKey)}
+                        {welcomeKey ? ('\n\n' + HARNESS_PERSIST(apiKey)) : ''}
                       </pre>
                       <div className="wizard-actions">
                         <button type="button" className="btn-primary"
-                          onClick={() => wizardCopy(HARNESS_INSTALL[wizardHarness](apiKey) + '\n\n' + HARNESS_PERSIST(apiKey), 'harness')}>
+                          onClick={() => wizardCopy(HARNESS_INSTALL[wizardHarness](apiKey) + (welcomeKey ? ('\n\n' + HARNESS_PERSIST(apiKey)) : ''), 'harness')}>
                           {wizardCopied === 'harness' ? 'Copied!' : 'Copy setup'}
                         </button>
                         <button type="button" className="ghost" onClick={() => setWizardStep(1)}>Skip →</button>
                       </div>
+                    </div>
+                  )}
+
+                  {wizardStep > 0 && wizardStep < 4 && (
+                    <div className="wizard-actions" style={{ marginTop: 0, marginBottom: '0.5rem' }}>
+                      <button type="button" className="ghost" onClick={() => setWizardStep(wizardStep - 1)}>← Back</button>
                     </div>
                   )}
 
@@ -2317,7 +2340,7 @@ function claimIntentInFlight() {
                           : 'Ask your connected agent to record your project\'s state (it knows how), or seed a sample memory now.'}
                       </p>
                       <div className="wizard-actions">
-                        <button type="button" className="btn-primary" onClick={wizardSeedGraph} disabled={wizardSeeding}>
+                        <button type="button" className="btn-primary" onClick={wizardSeedGraph} disabled={wizardSeeding || wizardSeedDone}>
                           {wizardSeeding ? 'Seeding…' : (wizardSeedDone ? 'Seeded ✓' : 'Seed a sample memory')}
                         </button>
                         <button type="button" className="ghost" onClick={() => setWizardStep(4)}>
@@ -2532,7 +2555,7 @@ function claimIntentInFlight() {
             </ul>
           </section>
         )}
-        {tab === 'overview' && team && !welcomeMode && (team.point_count ?? 0) === 0 && !wizardDone && (
+        {tab === 'overview' && team && !welcomeMode && !onboardingComplete && (team.point_count ?? 0) === 0 && !wizardDone && (
           // #1643: re-entry — a returning user with an empty graph gets the
           // getting-started wizard (harness → skills → GitHub → seed), not a
           // raw-curl dead end.
@@ -2540,13 +2563,13 @@ function claimIntentInFlight() {
             <h2>Your graph is ready for its first data point</h2>
             <p className="dim">Your team and API key are live — finish the setup to connect your tool, learn the skills, and seed your graph.</p>
             <div className="empty-actions">
-              <button className="btn-primary" onClick={() => { setWizardStep(0); setWelcomeMode(true) }}>
+              <button className="btn-primary" onClick={() => { setWizardStep(1); setWelcomeMode(true) }}>
                 Continue setup →
               </button>
             </div>
           </section>
         )}
-        {tab === 'overview' && team && team.graph_ready === false && (team.point_count ?? 0) === 0 && (
+        {tab === 'overview' && team && !(!welcomeMode && !onboardingComplete && (team.point_count ?? 0) === 0 && !wizardDone) && team.graph_ready === false && (team.point_count ?? 0) === 0 && (
           // #1591 (UX design): a clear first-data card — plain copy, a
           // styled copyable snippet, and a single primary action.
           <section className="overview empty-state graph-missing">

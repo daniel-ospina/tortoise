@@ -85,7 +85,7 @@ def _wire(page: Page, *, provision: bool, seed_objects: list = None, onboarding_
                 return
             if url.endswith("/v1/onboarding/github/connect") and method == "POST":
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps({"authorize_url": "https://github.com/login/oauth/authorize?fake"}))
+                              body=json.dumps({"auth_url": "https://github.com/login/oauth/authorize?fake"}))
                 return
             if url.endswith("/v1/onboarding/github/status"):
                 route.fulfill(status=200, content_type="application/json",
@@ -121,9 +121,12 @@ def test_first_timer_wizard_harness_to_done(page: Page) -> None:
     _seed_cookie(page, "u-onb")
     cap = _wire(page, provision=False)
     page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
-    # Re-entry card (empty graph) → Continue setup opens the wizard.
+    # Re-entry card (empty graph) → Continue setup opens the wizard at the
+    # skills step (per the plan); Back reaches the harness chooser.
     expect(page.locator("body")).to_contain_text("Continue setup", timeout=20_000)
     page.get_by_role("button", name="Continue setup").click()
+    expect(page.locator("body")).to_contain_text("Your agent's toolkit", timeout=15_000)
+    page.get_by_role("button", name="← Back").click()
     # STEP 0: harness chooser — the four harness tabs + copy.
     expect(page.locator("body")).to_contain_text("Connect your tool", timeout=15_000)
     expect(page.locator(".harness-tab")).to_have_count(4)

@@ -1623,6 +1623,10 @@ class CreatePointRequest(BaseModel):
     # #1643: wire the (p)-[:aboutObject]->(o) EDGE after creation (never a
     # bare prop — non-canonical + invisible to aboutObject traversal).
     about_object: str | None = None
+    # #1643 (review P1-2): idempotent writes by content hash — the onboarding
+    # seed must not duplicate state on a re-click/retry. Default False keeps
+    # the existing endpoint semantics unchanged.
+    dedup: bool = False
 
     @field_validator("kind")
     @classmethod
@@ -2206,6 +2210,15 @@ async def create_object(body: CreateObjectRequest, request: Request,
         import logging
         logging.getLogger("tortoise.api").exception("create_object failed")
         raise HTTPException(status_code=500, detail="Internal server error")
+    # #1643 (review P2-4): mirror the points handler's bookkeeping — object
+    # writes must count toward metering + leave an audit trail.
+    try:
+        _record_write_op(team["team_id"], "object")
+        _async_audit(request, team["team_id"], "object_create",
+                     resource_id=node.get("id") or body.name,
+                     detail={"name": body.name, "objectKind": body.objectKind})
+    except Exception:
+        pass  # bookkeeping is best-effort — never fail the write
     return node
 
 
@@ -2219,6 +2232,7 @@ async def create_point(body: CreatePointRequest, request: Request, team: dict = 
             content=body.content,
             kind=body.kind,
             tags=body.tags,
+            dedup=body.dedup,
         )
         if body.about_object:
             # #1643: ID-based edge (never the name-resolution path, which
