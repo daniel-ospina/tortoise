@@ -2213,12 +2213,12 @@ async def create_object(body: CreateObjectRequest, request: Request,
     # #1643 (review P2-4): mirror the points handler's bookkeeping — object
     # writes must count toward metering + leave an audit trail.
     try:
-        _record_write_op(team["team_id"], "object")
-        _async_audit(request, team["team_id"], "object_create",
-                     resource_id=node.get("id") or body.name,
-                     detail={"name": body.name, "objectKind": body.objectKind})
+        _record_write_op(team, nodes_written=1)
     except Exception:
-        pass  # bookkeeping is best-effort — never fail the write
+        pass  # metering is best-effort — never fail the write
+    await _async_audit(request, team["team_id"], "object_create",
+                       resource_id=node.get("id") or body.name,
+                       detail={"name": body.name, "objectKind": body.objectKind})
     return node
 
 

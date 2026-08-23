@@ -457,7 +457,7 @@ function claimIntentInFlight() {
   React.useEffect(() => {
     let cancelled = false
     api('/v1/onboarding/state', { useSession: true })
-      .then((st) => { if (!cancelled && st && st.onboarding_complete) setOnboardingComplete(true) })
+      .then((st) => { if (!cancelled && st && st.onboarding && st.onboarding.onboarding_complete) setOnboardingComplete(true) })
       .catch(() => { /* best-effort */ })
     return () => { cancelled = true }
   }, [])
@@ -482,7 +482,11 @@ function claimIntentInFlight() {
       const authUrl = (res && (res.auth_url || res.authorize_url)) || null
       if (authUrl) {
         const win = window.open(authUrl, '_blank')
-        if (!win) setError('Popup blocked — allow popups for app.premiselabs.co and try again.')
+        if (!win) {
+          stopPoll()
+          setWizardGithub((g) => ({ ...g, busy: false }))
+          setError('Popup blocked — allow popups for app.premiselabs.co and try again.')
+        }
         // Poll status until the OAuth round trip completes (the callback
         // redirects to welcome.html, not here). Bounded; on timeout the
         // button resets (denied/abandoned → a cancel CTA, no stuck state).
@@ -2320,6 +2324,9 @@ function claimIntentInFlight() {
                         <p className="dim">Connect GitHub to bring your issues in as Events on the graph. Uses your own token — stored encrypted, never shared.</p>
                       )}
                       <div className="wizard-actions">
+                        {!wizardGithub.connected && wizardGithub.busy && (
+                          <button type="button" className="ghost" onClick={() => setWizardGithub((g) => ({ ...g, busy: false }))}>Cancel</button>
+                        )}
                         {!wizardGithub.connected && (
                           <button type="button" className="btn-primary" onClick={wizardConnectGithub} disabled={wizardGithub.busy}>
                             {wizardGithub.busy ? 'Connecting…' : 'Connect GitHub'}
@@ -2555,7 +2562,7 @@ function claimIntentInFlight() {
             </ul>
           </section>
         )}
-        {tab === 'overview' && team && !welcomeMode && !onboardingComplete && (team.point_count ?? 0) === 0 && !wizardDone && (
+        {tab === 'overview' && team && !welcomeMode && !onboardingComplete && team.graph_ready !== false && (team.point_count ?? 0) === 0 && !wizardDone && (
           // #1643: re-entry — a returning user with an empty graph gets the
           // getting-started wizard (harness → skills → GitHub → seed), not a
           // raw-curl dead end.
@@ -2569,7 +2576,7 @@ function claimIntentInFlight() {
             </div>
           </section>
         )}
-        {tab === 'overview' && team && !(!welcomeMode && !onboardingComplete && (team.point_count ?? 0) === 0 && !wizardDone) && team.graph_ready === false && (team.point_count ?? 0) === 0 && (
+        {tab === 'overview' && team && !(!welcomeMode && !onboardingComplete && team.graph_ready !== false && (team.point_count ?? 0) === 0 && !wizardDone) && team.graph_ready === false && (team.point_count ?? 0) === 0 && (
           // #1591 (UX design): a clear first-data card — plain copy, a
           // styled copyable snippet, and a single primary action.
           <section className="overview empty-state graph-missing">
@@ -2599,7 +2606,7 @@ function claimIntentInFlight() {
             </div>
           </section>
         )}
-        {tab === 'overview' && team && team.graph_ready !== false && (team.point_count ?? 0) === 0 && (
+        {tab === 'overview' && team && !(!welcomeMode && !onboardingComplete && team.graph_ready !== false && (team.point_count ?? 0) === 0 && !wizardDone) && team.graph_ready !== false && (team.point_count ?? 0) === 0 && (
           <section className="overview empty-state">
             <h2>Welcome to your Tortoise graph</h2>
             <p className="dim">Connect your agent so it remembers why, not just what.</p>
@@ -2611,7 +2618,7 @@ function claimIntentInFlight() {
             </div>
           </section>
         )}
-        {tab === 'overview' && team && team.graph_ready !== false && (team.point_count ?? 0) > 0 && (
+        {tab === 'overview' && team && !(!welcomeMode && !onboardingComplete && team.graph_ready !== false && (team.point_count ?? 0) === 0 && !wizardDone) && team.graph_ready !== false && (team.point_count ?? 0) > 0 && (
           <section className="overview">
             <h2>Overview</h2>
             <div className="cards">
