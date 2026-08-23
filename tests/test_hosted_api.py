@@ -52,6 +52,27 @@ TEST_TEAM = {
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
 
+def _count_about_edges(point_id: str, object_id: str) -> int:
+    import tortoise.hosted_api as ha
+    sdk = ha._make_sdk(namespace=TEST_TEAM["team_id"])
+    proj = sdk._get_proj()
+    rows = proj.g.query(
+        "MATCH (p:Point {id:$pid})-[:aboutObject]->(o {id:$oid}) RETURN count(*)",
+        params={"pid": point_id, "oid": object_id},
+    ).result_set
+    return rows[0][0] if rows else 0
+
+
+def _count_stub_nodes() -> int:
+    import tortoise.hosted_api as ha
+    sdk = ha._make_sdk(namespace=TEST_TEAM["team_id"])
+    proj = sdk._get_proj()
+    rows = proj.g.query(
+        "MATCH (n) WHERE (n:Point OR n:Subject OR n:Operator) "
+        "AND n.content IS NULL AND n.name IS NULL RETURN count(n)").result_set
+    return rows[0][0] if rows else 0
+
+
 def _patch_tortoise_sdk_init(db_path: str):
     """Make TortoiseSDK use a temp db_path when constructed without one."""
     import tortoise.hosted_api as ha_mod
@@ -547,6 +568,41 @@ class TestTeamInfo:
         r = client.get("/v1/sessions/some-id")
         assert r.status_code == 200, r.text
         assert r.json() == {"session": None}
+
+    def test_create_object_idempotent(self, client):
+        """#1643 (Task 2): POST /v1/objects wraps sdk.create_object —
+        deterministic id by name, idempotent across calls (node outcome)."""
+        r1 = client.post("/v1/objects", json={"name": "proj-x", "objectKind": "project"})
+        assert r1.status_code == 200, r1.text
+        o1 = r1.json()
+        assert o1["id"]
+        r2 = client.post("/v1/objects", json={"name": "proj-x", "objectKind": "project"})
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["id"] == o1["id"], "create_object must be idempotent by name"
+
+    def test_create_object_requires_name(self, client):
+        r = client.post("/v1/objects", json={"objectKind": "project"})
+        assert r.status_code == 422
+
+    def test_point_with_about_object_wires_edge(self, client):
+        """#1643 (Task 2): an about_object on the point write wires the
+        (p)-[:aboutObject]->(o) EDGE (never a bare prop) — visible to
+        traversal, and NO stub nodes are minted (#334 class)."""
+        ro = client.post("/v1/objects", json={"name": "proj-y", "objectKind": "project"})
+        obj_id = ro.json()["id"]
+        rp = client.post("/v1/points", json={
+            "content": "I'm building proj-y",
+            "kind": "statement",
+            "about_object": obj_id,
+        })
+        assert rp.status_code == 200, rp.text
+        pid = rp.json()["id"]
+        # The aboutObject edge exists.
+        rows = _count_about_edges(pid, obj_id)
+        assert rows == 1, f"expected 1 aboutObject edge, got {rows}"
+        # No stub Subject/operator nodes were minted.
+        assert _count_stub_nodes() == 0, "stub nodes minted (#334 class)"
+
 
     def test_team_info_fails_soft_when_graph_unavailable(self, client, monkeypatch):
         """#1591: a missing/broken team graph must NOT hard-500 /v1/team —

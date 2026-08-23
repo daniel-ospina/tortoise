@@ -1620,6 +1620,9 @@ class CreatePointRequest(BaseModel):
     content: str = Field(..., min_length=1, max_length=10000)
     kind: str = Field(default="statement")
     tags: list[str] = Field(default_factory=list)
+    # #1643: wire the (p)-[:aboutObject]->(o) EDGE after creation (never a
+    # bare prop — non-canonical + invisible to aboutObject traversal).
+    about_object: str | None = None
 
     @field_validator("kind")
     @classmethod
@@ -2176,6 +2179,36 @@ async def _check_invite_accept_rate_limit(request: Request, token: str) -> None:
 
 # ── Endpoints ─────────────────────────────────────────────────────
 
+class CreateObjectRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    objectKind: str = Field(default="other")
+    # lifecycle status rides props (create_entity splats **props over the
+    # 'live' default) — the onboarding STATE seed passes in_progress.
+    status: str | None = None
+
+
+@app.post("/v1/objects")
+async def create_object(body: CreateObjectRequest, request: Request,
+                        team: dict = Depends(get_current_team)):
+    """#1643: create an Object in the team's graph (the STATE layer).
+
+    Wraps sdk.create_object — deterministic id by name, idempotent (a repeat
+    returns the canonical node). objectKind/status/… ride the props.
+    """
+    _check_team_limit(team, "points")
+    sdk = _make_sdk(namespace=team["team_id"])
+    try:
+        props = {}
+        if body.status:
+            props["status"] = body.status
+        node = sdk.create_object(body.name, objectKind=body.objectKind, **props)
+    except Exception as e:
+        import logging
+        logging.getLogger("tortoise.api").exception("create_object failed")
+        raise HTTPException(status_code=500, detail="Internal server error")
+    return node
+
+
 @app.post("/v1/points", response_model=PointResponse)
 async def create_point(body: CreatePointRequest, request: Request, team: dict = Depends(get_current_team)):
     """Create a Point in the team's graph."""
@@ -2187,6 +2220,11 @@ async def create_point(body: CreatePointRequest, request: Request, team: dict = 
             kind=body.kind,
             tags=body.tags,
         )
+        if body.about_object:
+            # #1643: ID-based edge (never the name-resolution path, which
+            # mints Subject stubs on miss — #334 class).
+            sdk._get_proj().create_about_edge(
+                result["id"], body.about_object, "aboutObject")
     except HTTPException:
         raise
     except Exception as e:
