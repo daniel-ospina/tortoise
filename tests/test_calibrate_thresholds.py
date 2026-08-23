@@ -24,8 +24,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tools import calibrate_thresholds as ct  # noqa: E402
-from tools import embedder_probe  # noqa: E402
+from tools import calibrate_thresholds as ct
+from tools import embedder_probe
+
 pytestmark = pytest.mark.timeout(600)  # real-embedder tests load bge-small (~57s load) — #1349 swap
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "labeled_pairs.jsonl"
@@ -134,7 +135,7 @@ def test_suggested_thresholds_finite_and_in_band():
     assert th["DEFAULT_THRESHOLD"] < th["NEAR_DUPLICATE_THRESHOLD"]
     # MiniLM sanity vs the #399 anchors: paraphrase band ≈ 0.35-0.51,
     # DEFAULT_THRESHOLD ≈ 0.40 (measured all-MiniLM value).
-    assert 0.35 <= para["min"] and para["max"] <= 0.51
+    assert para["min"] >= 0.35 and para["max"] <= 0.51
     assert 0.35 <= th["DEFAULT_THRESHOLD"] <= 0.45
 
 

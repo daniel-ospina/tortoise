@@ -20,6 +20,7 @@ import sys  # noqa: E402, I001
 sys.path.insert(0, str(REPO_ROOT))
 
 from tests.eval.retrieval.run import STRATEGIES, run_eval, write_outputs  # noqa: E402
+
 pytestmark = pytest.mark.timeout(600)  # real-embedder tests load bge-small (~57s load) — #1349 swap
 
 

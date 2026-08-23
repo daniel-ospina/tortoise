@@ -63,8 +63,8 @@ from pathlib import Path
 
 import numpy as np
 
-from tools.embedder_probe import PROBE_MODELS, inject_model  # noqa: E402
-from tortoise.embeddings import EmbeddingModel  # noqa: E402
+from tools.embedder_probe import PROBE_MODELS, inject_model
+from tortoise.embeddings import EmbeddingModel
 
 #: Rank depth for both metrics (the #1349 mini-BEIR contract).
 K = 10
@@ -220,7 +220,7 @@ def _record_sidecar(name: str, cache_root: Path, files: dict[str, Path]) -> None
     sidecar.write_text(json.dumps({
         "dataset": name,
         "source": DATASETS.get(name, {}).get("url", "local"),
-        "fetched": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "fetched": datetime.datetime.now(datetime.UTC).isoformat(),
         "files": {rel: _sha256_file(p) for rel, p in files.items()},
     }, indent=2), encoding="utf-8")
 
@@ -422,7 +422,7 @@ def _parse_line(path: Path, line_no: int, raw: str) -> dict:
 
 def _read_queries(path: Path) -> list[dict]:
     out = []
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         for i, raw in enumerate(f, start=1):
             obj = _parse_line(path, i, raw)
             if "_id" not in obj or not isinstance(obj.get("text"), str):
@@ -433,7 +433,7 @@ def _read_queries(path: Path) -> list[dict]:
 
 def _read_qrels(path: Path) -> dict[str, dict[str, int]]:
     out: dict[str, dict[str, int]] = {}
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         for i, raw in enumerate(f, start=1):
             line = raw.strip()
             if not line or line.startswith("query-id"):
@@ -463,7 +463,7 @@ def _load_all_corpus(path: Path) -> tuple[list[dict], int]:
     """Read the full corpus (small datasets). Blank lines are skipped — an
     empty corpus file is DEFINED output (0 passages), not an error."""
     docs = []
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         for i, raw in enumerate(f, start=1):
             if not raw.strip():
                 continue
@@ -480,7 +480,7 @@ def _stream_corpus(path: Path, sample_n: int, seed: int) -> tuple[list[dict], in
     rng = random.Random(seed)
     sample: list[dict] = []
     total = 0
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         for raw in f:
             if not raw.strip():
                 continue  # blank lines skipped (empty corpus = 0 passages)
@@ -765,7 +765,7 @@ def run_main(argv: list[str] | None = None) -> dict:
     results: dict = {
         "harness": "mini-beir",
         "version": 1,
-        "generated": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "generated": datetime.datetime.now(datetime.UTC).isoformat(),
         "model": args.model,
         "query_prompt": args.query_prompt,
         "probe": probe,

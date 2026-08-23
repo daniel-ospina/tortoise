@@ -34,9 +34,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-import tortoise.embeddings as emb  # noqa: E402
-
-from tools.mini_beir import run as mb  # noqa: E402
+import tortoise.embeddings as emb
+from tools.mini_beir import run as mb
 
 _FAKE_DIM = 32
 _TOKEN_RE = re.compile(r"[a-z0-9']+")

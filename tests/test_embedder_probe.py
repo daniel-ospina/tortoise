@@ -24,8 +24,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tools import embedder_probe as probe  # noqa: E402
-from tortoise.embeddings import EmbeddingModel, _encode  # noqa: E402
+from tools import embedder_probe as probe
+from tortoise.embeddings import EmbeddingModel, _encode
+
 pytestmark = pytest.mark.timeout(600)  # real-embedder tests load bge-small (~57s load) — #1349 swap
 
 FAKE_COMMIT = "a" * 40  # recorded resolved revision on fake models
@@ -110,12 +111,12 @@ def _clean_probe_state():
 
 def test_probe_models_registry_spec_locked():
     """The registry maps the 4 candidate short names to their HF ids."""
-    assert probe.PROBE_MODELS == {
+    assert {
         "minilm": "sentence-transformers/all-MiniLM-L6-v2",
         "arctic-xs": "snowflake/snowflake-arctic-embed-xs",
         "arctic-s": "snowflake/snowflake-arctic-embed-s",
         "bge-small": probe.PROBE_MODELS["bge-small"],  # pinned @<sha> (VULN-001)
-    }
+    } == probe.PROBE_MODELS
 
 
 def test_inject_sets_singleton_and_routes_encode():

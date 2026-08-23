@@ -33,18 +33,19 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-import tortoise.embeddings as emb  # noqa: E402
-import tortoise.search_engine as se  # noqa: E402
-from tortoise.sdk import TortoiseSDK  # noqa: E402
-
-from tools.longmem_eval import dataset as ds  # noqa: E402
-from tools.longmem_eval import encode_cache  # noqa: E402
-from tools.longmem_eval import retrieve  # noqa: E402
-from tools.longmem_eval import run as runner  # noqa: E402
-from tools.longmem_eval.ingest import ingest_haystack  # noqa: E402
-from tools.longmem_eval.judge import MockJudge  # noqa: E402
-from tools.longmem_eval.reader import MockReader  # noqa: E402
-from tools.longmem_eval.retrieve import retrieve_for_question  # noqa: E402
+import tortoise.embeddings as emb
+import tortoise.search_engine as se
+from tools.longmem_eval import dataset as ds
+from tools.longmem_eval import (
+    encode_cache,
+    retrieve,
+)
+from tools.longmem_eval import run as runner
+from tools.longmem_eval.ingest import ingest_haystack
+from tools.longmem_eval.judge import MockJudge
+from tools.longmem_eval.reader import MockReader
+from tools.longmem_eval.retrieve import retrieve_for_question
+from tortoise.sdk import TortoiseSDK
 
 MINI = Path(__file__).parent.parent / "fixtures" / "longmemeval_mini.json"
 

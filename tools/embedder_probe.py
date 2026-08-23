@@ -165,7 +165,7 @@ def inject_model(name: str, query_prompt: str | None = None,
             if old_model is not None and _base_name(prev_id) != _base_name(hf_id):
                 try:
                     ref_vec = _encode_vec(old_model, _DISCRIMINATOR_TEXT)
-                except Exception:  # noqa: BLE001 — no baseline ⇒ skip the check
+                except Exception:
                     ref_vec = None
 
             wrapper = _CandidateFactory(original, hf_id, revision, query_prompt)
@@ -187,7 +187,7 @@ def inject_model(name: str, query_prompt: str | None = None,
                 )
             try:
                 new_vec = _encode_vec(model, _DISCRIMINATOR_TEXT)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 raise EmbedderProbeError(
                     f"probe model {name!r} ({hf_id}) failed to encode: {e}"
                 ) from e
@@ -271,12 +271,12 @@ def _model_dim(model: Any) -> int | None:
                 dim = int(fn())
                 if dim:
                     return dim
-            except Exception:  # noqa: BLE001
+            except Exception:
                 continue
     try:
         vec = np.asarray(model.encode([_DISCRIMINATOR_TEXT]))
         return int(vec.shape[-1])
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None
 
 
@@ -297,7 +297,7 @@ def _resolved_revision(model: Any) -> str | None:
         rev = getattr(mcd, "base_model_revision", None)
         if rev:
             return str(rev)
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
     return None
 

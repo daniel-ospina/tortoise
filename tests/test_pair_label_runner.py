@@ -26,7 +26,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tools import pair_label_runner as plr  # noqa: E402
+from tools import pair_label_runner as plr
 
 I, N, U = "IMPLIES", "NEAR_DUPLICATE", "UNRELATED"
 

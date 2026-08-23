@@ -164,9 +164,9 @@ def vector_search(sdk: TortoiseSDK, query: str, limit: int) -> list[tuple[str, f
     proj = sdk._get_proj()
     if _count_embedded_points(proj) == 0:
         raise ModelEncodeFailedError(
-            f"MODEL_ENCODE_FAILED: graph has 0 embedding-bearing Points — the "
-            f"injected embedder degraded at ingest; aborting the vector arm "
-            f"(refusing to report empty recall as a result)")
+            "MODEL_ENCODE_FAILED: graph has 0 embedding-bearing Points — the "
+            "injected embedder degraded at ingest; aborting the vector arm "
+            "(refusing to report empty recall as a result)")
     if search_engine._breaker("vector").is_open():
         raise VectorBreakerOpenError(
             "vector circuit breaker is OPEN — question dropped from the "
@@ -183,7 +183,7 @@ def vector_search(sdk: TortoiseSDK, query: str, limit: int) -> list[tuple[str, f
         )
     except VectorBreakerOpenError:
         raise
-    except Exception as e:  # noqa: BLE001 — breaker-open routing (never recall 0)
+    except Exception as e:
         raise VectorBreakerOpenError(
             f"run_vector_query raised for the question: {e!r}") from e
     if breaker._fails > fails_before or breaker.is_open():

@@ -98,9 +98,10 @@ import math
 import statistics
 import subprocess
 import sys
-from datetime import datetime, timezone
+from collections.abc import Callable, Mapping, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any
 
 from tests.eval.retrieval.bootstrap import (
     DEFAULT_N_RESAMPLES,
@@ -252,7 +253,7 @@ def _git_head(repo_root: Path | None) -> str | None:
         if out.returncode != 0:
             return None
         return out.stdout.strip() or None
-    except Exception:  # noqa: BLE001 — provenance unverifiable → fail closed
+    except Exception:
         return None
 
 
@@ -268,7 +269,7 @@ def _git_changed(code_sha: str, repo_root: Path | None) -> list[str] | None:
         if out.returncode != 0:
             return None
         return [l for l in out.stdout.splitlines() if l.strip()]
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None
 
 
@@ -388,7 +389,7 @@ def validate_manifest(
     # family reduction while model counts and len(configs)==6 still pass.
     names = [c.get("name") for c in configs if isinstance(c, dict)]
     if len(set(names)) != len(names):
-        dup = sorted((repr(n) for n in names if names.count(n) > 1))
+        dup = sorted(repr(n) for n in names if names.count(n) > 1)
         errors.append(f"(a) duplicate config names {dup} — report_data is "
                       "keyed by name; a duplicate silently drops one "
                       "config's evidence from family reduction")
@@ -589,7 +590,7 @@ def _read_e2e8_latencies(manifest: Mapping[str, Any],
             continue
         try:
             report = json.loads(p.read_text(encoding="utf-8"))
-        except Exception:  # noqa: BLE001
+        except Exception:
             continue
         arms = report.get("arms") or {}
         e2e = arms.get("e2e") or {}
@@ -942,9 +943,9 @@ def _evaluate_escalation(manifest, manifest_dir, top2, ctrl_data,
     burn_qids = sorted(ctrl_data)
     fp = art.get("question_set_fingerprint")
     if fp != question_set_fingerprint(burn_qids):
-        return fail(f"question-set fingerprint mismatch: judged run covers a "
-                    f"different question set than the burn's FULL filtered "
-                    f"set — a post-hoc n cherry-pick is forbidden")
+        return fail("question-set fingerprint mismatch: judged run covers a "
+                    "different question set than the burn's FULL filtered "
+                    "set — a post-hoc n cherry-pick is forbidden")
     # P0 fix (code-review): the fingerprint pins the question SET, not the
     # per-question coverage — an artifact declaring the full-set fingerprint
     # but carrying per_question for only a subset must not pass (with the
@@ -1018,7 +1019,7 @@ def _check_product_call(path: Path | None) -> dict:
     except (ValueError, TypeError):
         return {"name": "product_call", "met": False,
                 "detail": f"product-call timestamp {ts_raw!r} unparseable"}
-    if ts > datetime.now(timezone.utc):
+    if ts > datetime.now(UTC):
         return {"name": "product_call", "met": False,
                 "detail": f"product-call timestamp {ts_raw!r} is in the future"}
     if decision != "server-side":

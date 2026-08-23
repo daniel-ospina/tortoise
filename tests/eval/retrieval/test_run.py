@@ -35,6 +35,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from tests.eval.retrieval import run as run_module  # noqa: E402
 from tests.eval.retrieval.run import run_eval  # noqa: E402
 from tortoise.embeddings import EMBEDDING_MODEL  # noqa: E402
+
 pytestmark = pytest.mark.timeout(600)  # real-embedder tests load bge-small (~57s load) — #1349 swap
 
 ARCTIC_S_HF = "snowflake/snowflake-arctic-embed-s"
@@ -48,6 +49,7 @@ DEFAULT_LITERAL = EMBEDDING_MODEL
 def _has_embedded() -> bool:
     try:
         import redislite.falkordb_client  # noqa: F401
+
         from tortoise.projection import FalkorProjection  # noqa: F401
         return True
     except Exception:
@@ -281,7 +283,6 @@ def test_warm_stale_provenance_reports_probe_state_when_loaded():
     hf_id when probe state exists (warm in-process re-run — the loaded
     singleton may be a previously-injected candidate, so DEFAULT_MODEL_ID
     would be a lie), else the default id."""
-    from tools import embedder_probe
 
     with patch("tools.embedder_probe.get_state",
                return_value=_fake_state("arctic-s")):
@@ -305,7 +306,6 @@ def test_benchmark_warm_stale_provenance_reports_probe_state_when_loaded():
     """Fix 3 (T3 P2): same warm-stale truthfulness in benchmarks/run_report.py
     provenance."""
     from benchmarks.run_report import _resolved_embedding_model
-    from tools import embedder_probe
 
     with patch("tools.embedder_probe.get_state",
                return_value=_fake_state("arctic-s")):

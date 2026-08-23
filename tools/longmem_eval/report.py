@@ -557,13 +557,16 @@ def build_report(
         "dataset": dataset_id,
         "split": split,
         "n_questions": n,
-        "dropped": {
-            "n": len(dropped),
-            "breaker_open": sum(1 for o in dropped
-                                 if o.get("dropped_reason") == "breaker_open"),
-            "questions": [o.get("question_id") for o in dropped],
-        },
-        "n_dropped": len(dropped),
+        # #1349: dropped-question accounting — emitted ONLY when a question
+        # was dropped (breaker_open), so the zero-dropped report shape is
+        # byte-identical to origin's published contract (golden-shape pin).
+        **({"dropped": {
+                "n": len(dropped),
+                "breaker_open": sum(1 for o in dropped
+                                     if o.get("dropped_reason") == "breaker_open"),
+                "questions": [o.get("question_id") for o in dropped],
+            },
+            "n_dropped": len(dropped)} if dropped else {}),
         "accuracy": (
             None if retrieval_only else {
             "overall": overall,

@@ -38,7 +38,7 @@ import re
 import sys
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +56,10 @@ from tortoise.model_adapters import is_fatal
 from tortoise.sdk import TortoiseSDK
 from tortoise.shared_state.concurrency import flock_exclusive
 
+# #1349: the probe seam — benchmark-only model injection (the production
+# entrypoint rejects the override env). Imported at module level so the
+# spot-check producer and the test monkeypatch share one symbol.
+from ..embedder_probe import DEFAULT_MODEL_ID, PROBE_MODELS, inject_model
 from . import dataset as ds
 from . import encode_cache
 from .dataset_audit import audit_dataset
@@ -77,13 +81,11 @@ from .retrieve import (
     DEFAULT_CONTEXT_TOKEN_CAP,
     DEFAULT_MAX_CHUNKS_PER_SESSION,
     DEFAULT_TR_TOP_K,
-    MODEL_ENCODE_FAILED_EXIT, ModelEncodeFailedError, VectorBreakerOpenError,
+    MODEL_ENCODE_FAILED_EXIT,
+    ModelEncodeFailedError,
+    VectorBreakerOpenError,
     retrieve_for_question,
 )
-# #1349: the probe seam — benchmark-only model injection (the production
-# entrypoint rejects the override env). Imported at module level so the
-# spot-check producer and the test monkeypatch share one symbol.
-from ..embedder_probe import DEFAULT_MODEL_ID, PROBE_MODELS, inject_model  # noqa: E402,F401
 
 DEFAULT_KS = (5, 10, 20)
 DEFAULT_TOP_K = 20
@@ -586,9 +588,30 @@ def _load_checkpoint(path: str | None,
         print(f"[longmem_eval] WARNING: checkpoint {p} is corrupt ({e!r}) — "
               f"ignoring; every question re-encodes", file=sys.stderr)
         return {}, []
-    if run_key is not None and data.get("run_key") != run_key:
+    fmt = data.get("format")
+    saved_key = data.get("run_key")
+    if fmt is None and saved_key is None:
+        # No #1349 format marker AND no run_key → stale #1144-era or
+        # foreign. A file carrying an M7 fingerprint falls through to the
+        # fingerprint gate; otherwise refuse (raise when a fingerprint is
+        # expected — M7 D7 contract; warn+return on the raw keyed path).
+        if data.get("fingerprint") is None:
+            if expected_fingerprint is not None:
+                raise CheckpointStaleError(
+                    f"checkpoint {p} predates the fingerprint contract (no "
+                    f"'fingerprint' key) — delete it or re-fingerprint it")
+            print(f"[longmem_eval] WARNING: checkpoint {p} has no format/"
+                  f"run_key/fingerprint markers (stale #1144-era or foreign) "
+                  f"— ignoring; every question re-encodes", file=sys.stderr)
+            return {}, []
+    elif fmt is not None and fmt != CHECKPOINT_FORMAT:
+        print(f"[longmem_eval] WARNING: checkpoint {p} format "
+              f"{fmt!r} != {CHECKPOINT_FORMAT!r} — ignoring; every question "
+              f"re-encodes", file=sys.stderr)
+        return {}, []
+    elif run_key is not None and saved_key is not None and saved_key != run_key:
         print(f"[longmem_eval] WARNING: checkpoint {p} belongs to run "
-              f"{data.get('run_key')!r}, current run is {run_key!r} — "
+              f"{saved_key!r}, current run is {run_key!r} — "
               f"refusing cross-config resume (per-model checkpoint keying); "
               f"every question re-encodes", file=sys.stderr)
         return {}, []
@@ -903,7 +926,7 @@ def run_evaluation(
                 sdk.close()
                 try:
                     _sdk_cleanup()
-                except Exception:  # noqa: BLE001
+                except Exception:
                     pass
 
             # M7 (D4): evidence written = the ingest leg's own count
@@ -978,7 +1001,7 @@ def run_evaluation(
             with _lock:
                 outcomes.append(outcome)
                 done[qid] = outcome
-        except VectorBreakerOpenError as e:
+        except VectorBreakerOpenError:
             # #1349: vector-arm breaker drops are NOT failures — the question
             # is marked breaker_open and excluded from the means (count
             # surfaced in report["dropped"]). Never recall 0.
@@ -996,7 +1019,7 @@ def run_evaluation(
                 }
                 outcomes.append(dropped_outcome)
                 done[qid] = dropped_outcome
-        except ModelEncodeFailedError as e:
+        except ModelEncodeFailedError:
             # #1349: the graph has ZERO embedding-bearing points — empty
             # recall is indistinguishable from a legit no-hit. ABORT the
             # whole config run (never report empty recall as a result); the
@@ -1647,7 +1670,7 @@ def _build_spotcheck_artifact(winner: str, control: str,
                  "min one-sided p ≤ 0.05. gate_1349.py recomputes the exact "
                  "bootstrap p from the per-question deltas."),
         "checkpoint_key_prefix": "hnsw__vector__{model}__{prompt}",
-        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "generated_at_utc": datetime.now(UTC).isoformat(),
         "git_sha": git_sha(),
     }
 

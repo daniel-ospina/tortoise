@@ -43,8 +43,8 @@ import argparse
 import json
 import sys
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 # Make the tools package importable when run directly (python tools/xxx.py).
 _REPO_ROOT = str(Path(__file__).resolve().parent.parent)

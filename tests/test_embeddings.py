@@ -12,13 +12,12 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.embeddings import (  # noqa: E402
+from tortoise.embeddings import (
     DEFAULT_THRESHOLD,
     EMBEDDING_MODEL,
     NEAR_DUPLICATE_THRESHOLD,
     find_cross_source_matches,
 )
-
 
 # ── helpers ──────────────────────────────────────────────────────────
 

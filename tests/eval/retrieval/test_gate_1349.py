@@ -28,14 +28,8 @@ from pathlib import Path
 import pytest
 
 from tests.eval.retrieval import gate_1349
-from tests.eval.retrieval.bootstrap import (
-    bh_fdr,
-    one_sided_bootstrap_p,
-)
 from tests.eval.retrieval.gate_1349 import (
     ABSOLUTE_FALLBACK,
-    DROPPED_FRACTION,
-    E2E8_LIMIT_MS,
     FAMILY_ORDER,
     MIN_PAIRED_N,
     Z,
@@ -365,7 +359,7 @@ def test_n_adaptive_bar_m6_pins():
     assert bars[500] == pytest.approx(0.095, abs=0.001)
     assert bars[200] > bars[300] > bars[500]
     # z pin: the m=6 top-rank one-sided threshold q/m = 0.0167 ↔ z≈2.128.
-    assert Z == pytest.approx(2.128, abs=0.001)
+    assert pytest.approx(2.128, abs=0.001) == Z
 
 
 def test_n_adaptive_bar_degenerate_control():
