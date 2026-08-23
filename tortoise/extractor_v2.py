@@ -671,6 +671,34 @@ def render_s2_prompt(master: dict | None = None, *,
             + (("\n\n" + transcript) if transcript else ""))
 
 
+_PARSE_RETRIES = 1  # re-prompt once on unparseable S2/S4 output (pilot #1549 fix:
+# parse_error dominated the pilot census 18-31/qid — LLM sloppiness, self-corrects)
+
+
+def _complete_parsed(model, system: str, user: str, *,
+                     max_tokens: int | None, stats: dict | None) -> dict:
+    """``_complete`` + ``_parse_json`` with one re-prompt on parse failure.
+
+    Transient/fatal classification lives in the ``_complete`` retry loop
+    (M3); this layer adds the parse-retry the pilot census demanded: a
+    parse_error is usually LLM sloppiness and the model self-corrects on
+    the same prompt. Retries are counted in ``stats["llm"]["retries"]``
+    (D3) and the census still records the final failure as ``parse_error``."""
+    attempts = 0
+    last: Exception | None = None
+    while attempts <= _PARSE_RETRIES:
+        attempts += 1
+        try:
+            return _parse_json(_complete(model, system, user,
+                                         max_tokens=max_tokens, stats=stats))
+        except ValueError as e:
+            last = e
+            if stats is not None:
+                stats.setdefault("llm", {}).setdefault("retries", 0)
+                stats["llm"]["retries"] += 1
+    raise _ParseError(str(last)) from last
+
+
 def run_s2(model, story: str, master: dict | None = None, *,
            session_date: str | None = None,
            edus: list[dict] | None = None,
@@ -680,16 +708,14 @@ def run_s2(model, story: str, master: dict | None = None, *,
     Output is bounded at ``_S2_S4_MAX_TOKENS`` (M3 #1524, D2); a truncated
     or unparseable response raises ``_ParseError`` → census ``parse_error``
     (the tail-cut tolerance of ``_parse_json`` still recovers truncated
-    JSON; the census records the truncation for the fix loop)."""
-    out = _complete(model,
-                    render_s2_prompt(master, session_date=session_date,
-                                     edus=edus),
-                    "S1 STORY:\n" + story,
-                    max_tokens=_stage_cap(_S2_S4_MAX_TOKENS), stats=stats)
-    try:
-        return _parse_json(out)
-    except ValueError as e:
-        raise _ParseError(str(e)) from e
+    JSON; the census records the truncation for the fix loop). S2 retries
+    once on parse failure (``_complete_parsed`` — pilot #1549 fix)."""
+    return _complete_parsed(model,
+                            render_s2_prompt(master, session_date=session_date,
+                                             edus=edus),
+                            "S1 STORY:\n" + story,
+                            max_tokens=_stage_cap(_S2_S4_MAX_TOKENS),
+                            stats=stats)
 
 
 # ── S3: SEARCH THE GRAPH (real backend, graceful degradation) ─────────────
@@ -1039,15 +1065,12 @@ def run_s4(model, story: str, search: dict, embed_list: dict,
 
     Output bounded at ``_S2_S4_MAX_TOKENS`` (M3 #1524, D2); unparseable
     output → ``_ParseError`` → census ``parse_error`` (see ``run_s2``)."""
-    out = _complete(model,
-                    render_s4_prompt(story, search, embed_list, master,
-                                     session_date=session_date, edus=edus),
-                    "Complete the embed list.",
-                    max_tokens=_stage_cap(_S2_S4_MAX_TOKENS), stats=stats)
-    try:
-        return _parse_json(out)
-    except ValueError as e:
-        raise _ParseError(str(e)) from e
+    return _complete_parsed(model,
+                            render_s4_prompt(story, search, embed_list, master,
+                                             session_date=session_date, edus=edus),
+                            "Complete the embed list.",
+                            max_tokens=_stage_cap(_S2_S4_MAX_TOKENS),
+                            stats=stats)
 
 
 # ── E4 (#1536): S4 merges-not-replaces — programmatic union (S2 ∪ S4) ──────
