@@ -141,6 +141,12 @@ function claimIntentInFlight() {
   // so the key is displayed here and never elsewhere.
   const [welcomeProvisioning, setWelcomeProvisioning] = React.useState(false)
   const [welcomeKey, setWelcomeKey] = React.useState('')
+  // #1591: the first-data snippet (graph-missing card) — full command with
+  // the user's own key (their dashboard, their key; copy-able).
+  const firstDataSnippet = `curl -X POST https://api.premiselabs.co/v1/points \
+  -H "Authorization: Bearer ${apiKey}" \
+  -H "Content-Type: application/json" \
+  -d '{"content":"hello graph","kind":"statement"}'`
   const [welcomeTeamName, setWelcomeTeamName] = React.useState('')
   const [welcomeGraphName, setWelcomeGraphName] = React.useState('')
   const [welcomeProvisionError, setWelcomeProvisionError] = React.useState('')
@@ -2359,17 +2365,32 @@ function claimIntentInFlight() {
           </section>
         )}
         {tab === 'overview' && team && team.graph_ready === false && (team.point_count ?? 0) === 0 && (
-          // #1591 (UX review): the team's graph doesn't EXIST yet (a
-          // half-failed provisioning) — say it plainly + give the one-step
-          // action (a write creates it). Never imply data is "recovering".
-          <section className="overview empty-state">
-            <h2>Your graph isn't created yet</h2>
-            <p className="dim">It is created automatically the first time you add data — connect your agent, or run the write command below. Your team and API keys are ready.</p>
+          // #1591 (UX design): a clear first-data card — plain copy, a
+          // styled copyable snippet, and a single primary action.
+          <section className="overview empty-state graph-missing">
+            <h2>Your graph is ready for its first data point</h2>
+            <p className="dim">
+              Your team and API key are live — the graph is created the moment
+              you add data. Connect your agent, or add a point yourself:
+            </p>
+            <div className="snippet-wrap">
+              <pre className="snippet">{firstDataSnippet}</pre>
+              <button
+                type="button"
+                className="snippet-copy"
+                onClick={(e) => {
+                  try { navigator.clipboard.writeText(firstDataSnippet) } catch { /* clipboard blocked */ }
+                  e.currentTarget.textContent = 'Copied'
+                  setTimeout(() => { e.currentTarget.textContent = 'Copy' }, 1600)
+                }}
+              >
+                Copy
+              </button>
+            </div>
             <div className="empty-actions">
               <a className="btn-primary" href="https://tortoise.premiselabs.co/welcome" target="_blank" rel="noreferrer">
                 Connect your agent →
               </a>
-              <span className="dim small">or run: <code>{`curl -X POST https://api.premiselabs.co/v1/points -H "Authorization: Bearer ${apiKey.slice(0, 12)}…" -H "Content-Type: application/json" -d '{"content":"hello graph","kind":"statement"}'`}</code></span>
             </div>
           </section>
         )}
