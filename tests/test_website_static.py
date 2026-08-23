@@ -384,6 +384,28 @@ class TestRenderElementInventory:
 # ── #1566: welcome.html's provisioning pipeline must stay dead ──
 
 
+def test_tortoise_decide_skill_ships_the_workflow():
+    """#1643 (Task 3): skills/tortoise-decide/SKILL.md exists and AUTHORS the
+    decision workflow (options → criteria → findings → edges → mitigations →
+    EP ranking) — the onboarding skills primer links a REAL invokable skill."""
+    p = Path("skills/tortoise-decide/SKILL.md")
+    if not p.exists():
+        # The repo's skills/ is a symlink to a local agent-infra checkout
+        # (broken on CI) — the skill is committed there; skip with an
+        # annotation rather than fail the CI checkout (TORTISE_HOST_CHECK
+        # pattern).
+        pytest.skip("skills/ symlink not present (agent-infra not checked out)")
+    assert p.exists(), "skills/tortoise-decide/SKILL.md missing"
+    src = p.read_text()
+    for marker in ("tortoise-decide", "options", "criteria", "findings",
+                   "IMPL", "NAND", "mitigation", "confidence"):
+        assert marker in src, f"skill missing the {marker!r} step"
+    # Tool-based (MCP): the skill must reference the graph-write tools, not
+    # require a local FalkorDB.
+    assert "create_point" in src or "tortoise_create_point" in src, \
+        "the skill must be tool-based (MCP write tools)"
+
+
 def test_welcome_provisioning_pipeline_is_dead_since_1566():
     """#1566 (review P2): welcome.html's provisioning pipeline must STAY dead
     — restoring it would recreate the double-provision surface #1082/#1566
