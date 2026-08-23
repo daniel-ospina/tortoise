@@ -53,6 +53,36 @@ def _mk():
     return uuid.uuid4().hex[:8]
 
 
+class TestDecideScriptSmoke:
+    """#1643 (D3): the decide.py SCRIPT itself must run end-to-end — points
+    land (no #334 stubs), operators resolve, EP ranks the options. The #49
+    `context=` TypeError made every point soft-fail and silently produced
+    stub operators; this smoke test runs the script via subprocess against
+    the live FalkorDB and asserts a clean run (ticks + EP, no ⚠ failures)."""
+
+    def test_script_runs_clean(self):
+        import subprocess, sys
+        import uuid as _uuid
+        graph = f"test_decide_smoke_{_uuid.uuid4().hex[:8]}"
+        uri = f"docker://:@localhost:16379/{graph}"
+        res = subprocess.run(
+            [sys.executable, "graph-scripts/decide.py",
+             "--options", '{"opt:a":"Option A","opt:b":"Option B"}',
+             "--criteria", '{"crit:1":"Criterion 1"}',
+             "--findings", '{"finding:1":"Finding 1"}',
+             "--edges", '[["crit:1","IMPL","opt:a"],["finding:1","IMPL","opt:a"],["finding:1","NAND","opt:b"]]',
+             "--db", uri],
+            capture_output=True, text=True, timeout=120,
+        )
+        out = res.stdout + res.stderr
+        assert res.returncode == 0, f"decide.py failed:\n{out}"
+        # Every point created (no ⚠ soft-failures — the #49 TypeError class).
+        assert "⚠" not in out, f"soft-failures present:\n{out}"
+        assert out.count("✓") >= 3, f"expected >=3 point ticks:\n{out}"
+        # EP computation + ranking ran.
+        assert "EP computed" in out or "rank" in out.lower(), out
+
+
 class TestDecideWiring:
     """Decision comparison — create points, operators, EP computation."""
 
