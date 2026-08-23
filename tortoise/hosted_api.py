@@ -1620,6 +1620,13 @@ class CreatePointRequest(BaseModel):
     content: str = Field(..., min_length=1, max_length=10000)
     kind: str = Field(default="statement")
     tags: list[str] = Field(default_factory=list)
+    # #1643: wire the (p)-[:aboutObject]->(o) EDGE after creation (never a
+    # bare prop — non-canonical + invisible to aboutObject traversal).
+    about_object: str | None = None
+    # #1643 (review P1-2): idempotent writes by content hash — the onboarding
+    # seed must not duplicate state on a re-click/retry. Default False keeps
+    # the existing endpoint semantics unchanged.
+    dedup: bool = False
 
     @field_validator("kind")
     @classmethod
@@ -2176,6 +2183,45 @@ async def _check_invite_accept_rate_limit(request: Request, token: str) -> None:
 
 # ── Endpoints ─────────────────────────────────────────────────────
 
+class CreateObjectRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    objectKind: str = Field(default="other")
+    # lifecycle status rides props (create_entity splats **props over the
+    # 'live' default) — the onboarding STATE seed passes in_progress.
+    status: str | None = None
+
+
+@app.post("/v1/objects")
+async def create_object(body: CreateObjectRequest, request: Request,
+                        team: dict = Depends(get_current_team)):
+    """#1643: create an Object in the team's graph (the STATE layer).
+
+    Wraps sdk.create_object — deterministic id by name, idempotent (a repeat
+    returns the canonical node). objectKind/status/… ride the props.
+    """
+    _check_team_limit(team, "points")
+    sdk = _make_sdk(namespace=team["team_id"])
+    try:
+        props = {}
+        if body.status:
+            props["status"] = body.status
+        node = sdk.create_object(body.name, objectKind=body.objectKind, **props)
+    except Exception as e:
+        import logging
+        logging.getLogger("tortoise.api").exception("create_object failed")
+        raise HTTPException(status_code=500, detail="Internal server error")
+    # #1643 (review P2-4): mirror the points handler's bookkeeping — object
+    # writes must count toward metering + leave an audit trail.
+    try:
+        _record_write_op(team, nodes_written=1)
+    except Exception:
+        pass  # metering is best-effort — never fail the write
+    await _async_audit(request, team["team_id"], "object_create",
+                       resource_id=node.get("id") or body.name,
+                       detail={"name": body.name, "objectKind": body.objectKind})
+    return node
+
+
 @app.post("/v1/points", response_model=PointResponse)
 async def create_point(body: CreatePointRequest, request: Request, team: dict = Depends(get_current_team)):
     """Create a Point in the team's graph."""
@@ -2186,7 +2232,13 @@ async def create_point(body: CreatePointRequest, request: Request, team: dict = 
             content=body.content,
             kind=body.kind,
             tags=body.tags,
+            dedup=body.dedup,
         )
+        if body.about_object:
+            # #1643: ID-based edge (never the name-resolution path, which
+            # mints Subject stubs on miss — #334 class).
+            sdk._get_proj().create_about_edge(
+                result["id"], body.about_object, "aboutObject")
     except HTTPException:
         raise
     except Exception as e:

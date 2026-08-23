@@ -148,7 +148,11 @@ def main():
                 "evidence"
             )
             try:
-                p = sdk.create_point(kind, content, context=ctx, dedup=True)
+                # #1643 (D3): `context=` was removed from create_point in #49 —
+                # passing it raised TypeError, every point soft-failed, and
+                # operator resolution fell back to stub nodes (#334 class).
+                # dedup=True keeps the write idempotent by content hash.
+                p = sdk.create_point(kind, content, dedup=True)
                 all_points[pid] = p["id"]
                 print(f"  ✓ {pid} → {p['id']}")
             except Exception as e:

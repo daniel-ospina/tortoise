@@ -383,3 +383,21 @@ button:focus-visible, select:focus-visible, a:focus-visible, input:focus-visible
   font-size: 12px;
   font-weight: 600;
 }
+
+/* #1643: onboarding wizard (post-key steps) */
+.wizard { margin-top: 1.25rem; border-top: 1px solid var(--border, #1e293b); padding-top: 1rem; }
+.wizard-progress { display: flex; gap: 6px; margin-bottom: 0.75rem; }
+.wizard-step { flex: 1; height: 4px; border-radius: 2px; background: rgba(255,255,255,0.1); }
+.wizard-step.active { background: var(--accent, #38bdf8); }
+.wizard-step.done { background: var(--green, #4ade80); }
+.wizard-title { font-weight: 600; margin-bottom: 0.25rem; }
+.wizard-sub { font-size: 13px; }
+.harness-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+.harness-tab { padding: 6px 12px; font-size: 13px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 6px; color: var(--text, #e2e8f0); cursor: pointer; }
+.harness-tab.active { background: var(--accent, #38bdf8); color: #04121a; border-color: var(--accent, #38bdf8); }
+.wizard-actions { display: flex; gap: 10px; margin-top: 1rem; flex-wrap: wrap; }
+.wizard-actions .btn-primary, .wizard-actions button.btn-primary { background: var(--accent, #38bdf8); color: #04121a; }
+.wizard-actions .ghost, .wizard-actions a.ghost { background: none; border: 1px solid rgba(255,255,255,0.12); color: var(--text, #e2e8f0); padding: 8px 14px; border-radius: 8px; text-decoration: none; font-size: 13px; }
+.skill-row { display: flex; flex-direction: column; gap: 2px; padding: 0.6rem 0; border-bottom: 1px solid rgba(255,255,255,0.06); }
+.skill-row:last-of-type { border-bottom: none; }
+.skill-row strong { font-size: 14px; }

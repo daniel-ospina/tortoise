@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 // #1623: plan display data (build-time import of product/pricing.json).
 import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
+import { HARNESS_INSTALL, HARNESS_NAMES, HARNESS_ORDER, HARNESS_PERSIST } from './harnesses.js'
 
 const API_BASE = 'https://api.premiselabs.co'
 const KEY_STORAGE = 'tortoise_api_key'
@@ -150,6 +151,20 @@ function claimIntentInFlight() {
   const [welcomeTeamName, setWelcomeTeamName] = React.useState('')
   const [welcomeGraphName, setWelcomeGraphName] = React.useState('')
   const [welcomeProvisionError, setWelcomeProvisionError] = React.useState('')
+  // #1643: the getting-started wizard (post-key steps: harness → skills →
+  // GitHub → seed → done). For first-timers it follows the key reveal; for
+  // returning empty-graph users it re-opens at the skills step (Back
+  // reaches the harness chooser).
+  const [wizardStep, setWizardStep] = React.useState(0)
+  const [wizardHarness, setWizardHarness] = React.useState('claude')
+  const [wizardCopied, setWizardCopied] = React.useState('')
+  const [wizardGithub, setWizardGithub] = React.useState({ connected: false, repos: null, busy: false })
+  const wizardGithubPollRef = React.useRef(null)  // #1643 review P1: the status poll handle (hoisted so Cancel/unmount can stop it)
+  const [wizardSeedDone, setWizardSeedDone] = React.useState(false)
+  const [wizardSeeding, setWizardSeeding] = React.useState(false)
+  const [wizardDone, setWizardDone] = React.useState(false)
+  const [onboardingComplete, setOnboardingComplete] = React.useState(false)
+  React.useEffect(() => () => { stopGithubPoll && stopGithubPoll() }, [])  // unmount cleanup
 
   // #1147: build the tier-cap notice. The server's 402 detail carries the
   // real limit ('Team api_keys limit reached (N). Upgrade your plan to
@@ -439,6 +454,95 @@ function claimIntentInFlight() {
   // switcher exists exactly for those users. Mint for a concrete team_id, and
   // on a 400 auto-select the first membership and retry instead of silently
   // degrading to the API-key screen.
+  // #1643 (review P2-1): read the onboarding state on mount so completed
+  // users never see the re-entry card again (the completion marker is
+  // persisted server-side).
+  React.useEffect(() => {
+    let cancelled = false
+    api('/v1/onboarding/state', { useSession: true })
+      .then((st) => { if (!cancelled && st && st.onboarding && st.onboarding.onboarding_complete) setOnboardingComplete(true) })
+      .catch(() => { /* best-effort */ })
+    return () => { cancelled = true }
+  }, [])
+
+  // ── #1643 wizard actions ────────────────────────────────────────────────
+  const wizardSteps = ['Connect your tool', 'Your agent\'s toolkit', 'Connect GitHub', 'Seed your graph', 'You\'re set']
+
+  function wizardCopy(text, label) {
+    try { navigator.clipboard.writeText(text) } catch { /* clipboard blocked */ }
+    setWizardCopied(label)
+    setTimeout(() => setWizardCopied(''), 1600)
+    api('/v1/onboarding/state', { method: 'PATCH', useSession: true,
+      body: JSON.stringify({ harness: wizardHarness, section: 'config' }) }).catch(() => {})
+  }
+
+  const stopGithubPoll = () => {
+    if (wizardGithubPollRef.current) { clearInterval(wizardGithubPollRef.current); wizardGithubPollRef.current = null }
+  }
+
+  async function wizardConnectGithub() {
+    setWizardGithub((g) => ({ ...g, busy: true }))
+    try {
+      const res = await api('/v1/onboarding/github/connect', { method: 'POST', useSession: true })
+      const authUrl = (res && (res.auth_url || res.authorize_url)) || null
+      if (!authUrl) { setWizardGithub((g) => ({ ...g, busy: false })); return }
+      const win = window.open(authUrl, '_blank')
+      if (!win) {
+        // Popup blocked — no poll to run; reset immediately (review P1).
+        setWizardGithub((g) => ({ ...g, busy: false }))
+        setError('Popup blocked — allow popups for app.premiselabs.co and try again.')
+        return
+      }
+      // Poll status until the OAuth round trip completes (the callback
+      // redirects to welcome.html, not here). Bounded; the handle is a ref
+      // so Cancel/unmount can stop it (no stacked intervals).
+      stopGithubPoll()
+      wizardGithubPollRef.current = setInterval(async () => {
+        try {
+          const st = await api('/v1/onboarding/github/status', { useSession: true })
+          if (st && st.connected) {
+            stopGithubPoll()
+            setWizardGithub({ connected: true, repos: st.repos_count, busy: false })
+            api('/v1/onboarding/state', { method: 'PATCH', useSession: true, body: JSON.stringify({ github_connected: true }) }).catch(() => {})
+          }
+        } catch { /* transient */ }
+      }, 3000)
+      setTimeout(() => { stopGithubPoll(); setWizardGithub((g) => ({ ...g, busy: false })) }, 120000)
+    } catch (e) {
+      stopGithubPoll()
+      setWizardGithub((g) => ({ ...g, busy: false }))
+      setError((e && e.message) || 'Could not start GitHub connect.')
+    }
+  }
+
+  async function wizardSeedGraph() {
+    setWizardSeeding(true)
+    try {
+      // #1643/ontology: the STATE sample — an Object ({workspace},
+      // in_progress) + a statement Point wired aboutObject (authored by the
+      // user). Idempotent server-side (deterministic ids).
+      const workspace = welcomeTeamName || 'my-workspace'
+      const o = await api('/v1/objects', { method: 'POST', useSession: true,
+        body: JSON.stringify({ name: workspace, objectKind: 'project', status: 'in_progress' }) })
+      const p = await api('/v1/points', { method: 'POST', useSession: true,
+        body: JSON.stringify({ content: `I'm building ${workspace}`, kind: 'statement',
+                               about_object: o.id, tags: ['onboarding'], dedup: true }) })
+      setWizardSeedDone(!!(o && o.id && p && p.id))
+      setWizardSeeding(false)
+    } catch (e) {
+      setWizardSeeding(false)
+      setError((e && e.message) || 'Could not seed your graph — try again.')
+    }
+  }
+
+  async function wizardComplete() {
+    setWizardDone(true)
+    api('/v1/onboarding/state', { method: 'PATCH', useSession: true,
+      body: JSON.stringify({ onboarding_complete: true }) }).catch(() => {})
+    window.history.replaceState({}, '', '/')
+    setWelcomeMode(false)
+  }
+
   // #1566: in-app first-time provisioning (ported from welcome.html).
   // The tenant-provision edge function authorizes the app origin; the
   // membership row + the key are created here. The raw tt_ key NEVER leaves
@@ -2085,6 +2189,9 @@ function claimIntentInFlight() {
   // app.premiselabs.co/welcome after signup (welcome.html did the
   // provisioning + key reveal-once; this is the in-dashboard onboarding:
   // chooser + routes to the API Keys tab where the key lives).
+  const showReentryCard = !welcomeMode && !onboardingComplete &&
+    team && team.graph_ready !== false && (team.point_count ?? 0) === 0 && !wizardDone
+
   if (welcomeMode && authed) {
     // #1566: first-timers are provisioned IN-APP — show the provisioning
     // spinner, then the revealed key (exactly once, A13), or an actionable
@@ -2155,19 +2262,118 @@ function claimIntentInFlight() {
                     Your team is set up. You can manage your API key in the dashboard anytime.
                   </p>
                 )}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-                  <button
-                    className="btn-primary"
-                    onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false); setTab('keys') }}
-                  >
-                    Go to my API keys →
-                  </button>
-                  <a className="btn-primary" href="https://tortoise.premiselabs.co/docs#mcp" target="_blank" rel="noreferrer">
-                    Use Tortoise with MCP — set up my agent →
-                  </a>
-                  <a className="btn-primary" href="https://tortoise.premiselabs.co/docs#quickstart" target="_blank" rel="noreferrer">
-                    Build with Tortoise — SDK quickstart →
-                  </a>
+                <div className="wizard">
+                  <div className="wizard-progress">
+                    {wizardSteps.map((s, i) => (
+                      <span key={s} className={'wizard-step' + (i === wizardStep ? ' active' : (i < wizardStep ? ' done' : ''))} />
+                    ))}
+                  </div>
+                  <p className="wizard-title">{wizardSteps[wizardStep]}</p>
+                  <p className="wizard-sub" style={{ marginBottom: '1rem' }}>
+                    {wizardStep === 0 ? 'Pick your tool — the setup command goes straight to your clipboard.'
+                      : wizardStep === 1 ? 'Your agent now has the two Tortoise skills — this is how you use them.'
+                      : wizardStep === 2 ? 'Bring your GitHub issues in as Events — optional, do it now or later.'
+                      : wizardStep === 3 ? 'Add your first memory — the graph is created the moment data lands.'
+                      : 'Everything\'s ready — your graph is live.'}
+                  </p>
+
+                  {wizardStep === 0 && (
+                    <div className="harness">
+                      <div className="harness-tabs">
+                        {HARNESS_ORDER.map((h) => (
+                          <button key={h} type="button"
+                            className={'harness-tab' + (wizardHarness === h ? ' active' : '')}
+                            onClick={() => { setWizardHarness(h); setWizardCopied('') }}>
+                            {HARNESS_NAMES[h]}
+                          </button>
+                        ))}
+                      </div>
+                      <pre className="snippet" style={{ marginTop: '0.75rem' }}>
+                        {HARNESS_INSTALL[wizardHarness](apiKey)}
+                        {welcomeKey ? ('\n\n' + HARNESS_PERSIST(apiKey)) : ''}
+                      </pre>
+                      <div className="wizard-actions">
+                        <button type="button" className="btn-primary"
+                          onClick={() => wizardCopy(HARNESS_INSTALL[wizardHarness](apiKey) + (welcomeKey ? ('\n\n' + HARNESS_PERSIST(apiKey)) : ''), 'harness')}>
+                          {wizardCopied === 'harness' ? 'Copied!' : 'Copy setup'}
+                        </button>
+                        <button type="button" className="ghost" onClick={() => setWizardStep(1)}>Skip →</button>
+                      </div>
+                    </div>
+                  )}
+
+                  {wizardStep > 0 && wizardStep < 4 && (
+                    <div className="wizard-actions" style={{ marginTop: 0, marginBottom: '0.5rem' }}>
+                      <button type="button" className="ghost" onClick={() => setWizardStep(wizardStep - 1)}>← Back</button>
+                    </div>
+                  )}
+
+                  {wizardStep === 1 && (
+                    <div className="skills">
+                      <div className="skill-row">
+                        <strong>how-to-use-tortoise</strong>
+                        <span className="dim small">the passive skill — your agent loads it to know how to read and write the graph. Nothing to invoke.</span>
+                      </div>
+                      <div className="skill-row">
+                        <strong>tortoise-decide</strong>
+                        <span className="dim small">the invoke skill — run it when you make a decision: it weighs options against the graph\'s state and records the reasoning.</span>
+                      </div>
+                      <div className="wizard-actions">
+                        <button type="button" className="btn-primary" onClick={() => setWizardStep(2)}>Next</button>
+                      </div>
+                    </div>
+                  )}
+
+                  {wizardStep === 2 && (
+                    <div className="github-connect">
+                      {wizardGithub.connected ? (
+                        <p className="dim">GitHub connected — {wizardGithub.repos ?? ''} repos available to index (issues → Events).</p>
+                      ) : (
+                        <p className="dim">Connect GitHub to bring your issues in as Events on the graph. Uses your own token — stored encrypted, never shared.</p>
+                      )}
+                      <div className="wizard-actions">
+                        {!wizardGithub.connected && wizardGithub.busy && (
+                          <button type="button" className="ghost" onClick={() => { stopGithubPoll(); setWizardGithub((g) => ({ ...g, busy: false })) }}>Cancel</button>
+                        )}
+                        {!wizardGithub.connected && (
+                          <button type="button" className="btn-primary" onClick={wizardConnectGithub} disabled={wizardGithub.busy}>
+                            {wizardGithub.busy ? 'Connecting…' : 'Connect GitHub'}
+                          </button>
+                        )}
+                        <button type="button" className="ghost" onClick={() => setWizardStep(3)}>
+                          {wizardGithub.connected ? 'Next' : 'Skip →'}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {wizardStep === 3 && (
+                    <div className="seed">
+                      <p className="dim">
+                        {wizardSeedDone
+                          ? 'Your graph is live — the overview now shows your first Object and the memory behind it.'
+                          : 'Ask your connected agent to record your project\'s state (it knows how), or seed a sample memory now.'}
+                      </p>
+                      <div className="wizard-actions">
+                        <button type="button" className="btn-primary" onClick={wizardSeedGraph} disabled={wizardSeeding || wizardSeedDone}>
+                          {wizardSeeding ? 'Seeding…' : (wizardSeedDone ? 'Seeded ✓' : 'Seed a sample memory')}
+                        </button>
+                        <button type="button" className="ghost" onClick={() => setWizardStep(4)}>
+                          {wizardSeedDone ? 'Finish' : 'Skip →'}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {wizardStep === 4 && (
+                    <div className="done">
+                      <p className="dim">Your Tortoise is set up — the overview is live, your agent knows how to use it, and your decisions are being recorded.</p>
+                      <div className="wizard-actions">
+                        <button type="button" className="btn-primary" onClick={wizardComplete}>Open my dashboard →</button>
+                        <a className="ghost" href="https://tortoise.premiselabs.co/docs" target="_blank" rel="noreferrer">Read the docs</a>
+                      </div>
+                    </div>
+                  )}
                 </div>
                 {/* #1623: non-blocking plan-selection step — first-timers only
                     (welcomeKey set = freshly provisioned). Free is selected by
@@ -2364,7 +2570,21 @@ function claimIntentInFlight() {
             </ul>
           </section>
         )}
-        {tab === 'overview' && team && team.graph_ready === false && (team.point_count ?? 0) === 0 && (
+        {tab === 'overview' && team && showReentryCard && (
+          // #1643: re-entry — a returning user with an empty graph gets the
+          // getting-started wizard (harness → skills → GitHub → seed), not a
+          // raw-curl dead end.
+          <section className="overview empty-state graph-missing">
+            <h2>Your graph is ready for its first data point</h2>
+            <p className="dim">Your team and API key are live — finish the setup to connect your tool, learn the skills, and seed your graph.</p>
+            <div className="empty-actions">
+              <button className="btn-primary" onClick={() => { setWizardStep(1); setWelcomeMode(true) }}>
+                Continue setup →
+              </button>
+            </div>
+          </section>
+        )}
+        {tab === 'overview' && team && !showReentryCard && team.graph_ready === false && (team.point_count ?? 0) === 0 && (
           // #1591 (UX design): a clear first-data card — plain copy, a
           // styled copyable snippet, and a single primary action.
           <section className="overview empty-state graph-missing">
@@ -2394,7 +2614,7 @@ function claimIntentInFlight() {
             </div>
           </section>
         )}
-        {tab === 'overview' && team && team.graph_ready !== false && (team.point_count ?? 0) === 0 && (
+        {tab === 'overview' && team && !showReentryCard && team.graph_ready !== false && (team.point_count ?? 0) === 0 && (
           <section className="overview empty-state">
             <h2>Welcome to your Tortoise graph</h2>
             <p className="dim">Connect your agent so it remembers why, not just what.</p>
@@ -2406,7 +2626,7 @@ function claimIntentInFlight() {
             </div>
           </section>
         )}
-        {tab === 'overview' && team && team.graph_ready !== false && (team.point_count ?? 0) > 0 && (
+        {tab === 'overview' && team && !showReentryCard && team.graph_ready !== false && (team.point_count ?? 0) > 0 && (
           <section className="overview">
             <h2>Overview</h2>
             <div className="cards">
