@@ -534,6 +534,20 @@ class TestTeamInfo:
         assert r.status_code == 200, r.text
         assert r.json() == {"sessions": []}
 
+    def test_session_detail_fails_soft_when_graph_unavailable(self, client, monkeypatch):
+        """#1591: /v1/sessions/{id} returns {"session": None} (never 500)
+        when the team graph is missing — a 500 would strip the CORS headers
+        and surface as a misleading 'CORS blocked' in the dashboard."""
+        import tortoise.hosted_api as ha
+
+        def _boom(*a, **kw):
+            raise RuntimeError("graph unavailable")
+
+        monkeypatch.setattr(ha.TortoiseSDK, "_get_proj", _boom)
+        r = client.get("/v1/sessions/some-id")
+        assert r.status_code == 200, r.text
+        assert r.json() == {"session": None}
+
     def test_team_info_fails_soft_when_graph_unavailable(self, client, monkeypatch):
         """#1591: a missing/broken team graph must NOT hard-500 /v1/team —
         it fails soft (point_count=0, graph_ready=false) so the dashboard

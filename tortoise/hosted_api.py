@@ -4776,7 +4776,14 @@ async def get_session_detail(session_id: str, team: dict = Depends(get_current_t
     """
     import re
     sdk = _make_sdk(namespace=team["team_id"])
-    proj = sdk._get_proj()
+    try:
+        proj = sdk._get_proj()
+    except Exception:
+        import logging
+        logging.getLogger("tortoise.api").warning(
+            "get_session_detail graph unavailable (fail-soft): %s",
+            team["team_id"], exc_info=True)
+        return {"session": None}  # #1591 fail-soft
 
     # Session node
     sess_rows = proj.g.query(
