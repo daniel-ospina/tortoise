@@ -153,15 +153,18 @@ function claimIntentInFlight() {
   const [welcomeProvisionError, setWelcomeProvisionError] = React.useState('')
   // #1643: the getting-started wizard (post-key steps: harness → skills →
   // GitHub → seed → done). For first-timers it follows the key reveal; for
-  // returning empty-graph users it re-opens at the harness step.
+  // returning empty-graph users it re-opens at the skills step (Back
+  // reaches the harness chooser).
   const [wizardStep, setWizardStep] = React.useState(0)
   const [wizardHarness, setWizardHarness] = React.useState('claude')
   const [wizardCopied, setWizardCopied] = React.useState('')
   const [wizardGithub, setWizardGithub] = React.useState({ connected: false, repos: null, busy: false })
+  const wizardGithubPollRef = React.useRef(null)  // #1643 review P1: the status poll handle (hoisted so Cancel/unmount can stop it)
   const [wizardSeedDone, setWizardSeedDone] = React.useState(false)
   const [wizardSeeding, setWizardSeeding] = React.useState(false)
   const [wizardDone, setWizardDone] = React.useState(false)
   const [onboardingComplete, setOnboardingComplete] = React.useState(false)
+  React.useEffect(() => () => { stopGithubPoll && stopGithubPoll() }, [])  // unmount cleanup
 
   // #1147: build the tier-cap notice. The server's 402 detail carries the
   // real limit ('Team api_keys limit reached (N). Upgrade your plan to
@@ -473,38 +476,40 @@ function claimIntentInFlight() {
       body: JSON.stringify({ harness: wizardHarness, section: 'config' }) }).catch(() => {})
   }
 
+  const stopGithubPoll = () => {
+    if (wizardGithubPollRef.current) { clearInterval(wizardGithubPollRef.current); wizardGithubPollRef.current = null }
+  }
+
   async function wizardConnectGithub() {
     setWizardGithub((g) => ({ ...g, busy: true }))
-    let poll = null
-    const stopPoll = () => { if (poll) clearInterval(poll); poll = null }
     try {
       const res = await api('/v1/onboarding/github/connect', { method: 'POST', useSession: true })
       const authUrl = (res && (res.auth_url || res.authorize_url)) || null
-      if (authUrl) {
-        const win = window.open(authUrl, '_blank')
-        if (!win) {
-          stopPoll()
-          setWizardGithub((g) => ({ ...g, busy: false }))
-          setError('Popup blocked — allow popups for app.premiselabs.co and try again.')
-        }
-        // Poll status until the OAuth round trip completes (the callback
-        // redirects to welcome.html, not here). Bounded; on timeout the
-        // button resets (denied/abandoned → a cancel CTA, no stuck state).
-        poll = setInterval(async () => {
-          try {
-            const st = await api('/v1/onboarding/github/status', { useSession: true })
-            if (st && st.connected) {
-              stopPoll()
-              setWizardGithub({ connected: true, repos: st.repos_count, busy: false })
-              api('/v1/onboarding/state', { method: 'PATCH', useSession: true, body: JSON.stringify({ github_connected: true }) }).catch(() => {})
-            }
-          } catch { /* transient */ }
-        }, 3000)
-        setTimeout(() => { stopPoll(); setWizardGithub((g) => ({ ...g, busy: false })) }, 120000)
-      } else {
+      if (!authUrl) { setWizardGithub((g) => ({ ...g, busy: false })); return }
+      const win = window.open(authUrl, '_blank')
+      if (!win) {
+        // Popup blocked — no poll to run; reset immediately (review P1).
         setWizardGithub((g) => ({ ...g, busy: false }))
+        setError('Popup blocked — allow popups for app.premiselabs.co and try again.')
+        return
       }
+      // Poll status until the OAuth round trip completes (the callback
+      // redirects to welcome.html, not here). Bounded; the handle is a ref
+      // so Cancel/unmount can stop it (no stacked intervals).
+      stopGithubPoll()
+      wizardGithubPollRef.current = setInterval(async () => {
+        try {
+          const st = await api('/v1/onboarding/github/status', { useSession: true })
+          if (st && st.connected) {
+            stopGithubPoll()
+            setWizardGithub({ connected: true, repos: st.repos_count, busy: false })
+            api('/v1/onboarding/state', { method: 'PATCH', useSession: true, body: JSON.stringify({ github_connected: true }) }).catch(() => {})
+          }
+        } catch { /* transient */ }
+      }, 3000)
+      setTimeout(() => { stopGithubPoll(); setWizardGithub((g) => ({ ...g, busy: false })) }, 120000)
     } catch (e) {
+      stopGithubPoll()
       setWizardGithub((g) => ({ ...g, busy: false }))
       setError((e && e.message) || 'Could not start GitHub connect.')
     }
@@ -2184,6 +2189,9 @@ function claimIntentInFlight() {
   // app.premiselabs.co/welcome after signup (welcome.html did the
   // provisioning + key reveal-once; this is the in-dashboard onboarding:
   // chooser + routes to the API Keys tab where the key lives).
+  const showReentryCard = !welcomeMode && !onboardingComplete &&
+    team && team.graph_ready !== false && (team.point_count ?? 0) === 0 && !wizardDone
+
   if (welcomeMode && authed) {
     // #1566: first-timers are provisioned IN-APP — show the provisioning
     // spinner, then the revealed key (exactly once, A13), or an actionable
@@ -2325,7 +2333,7 @@ function claimIntentInFlight() {
                       )}
                       <div className="wizard-actions">
                         {!wizardGithub.connected && wizardGithub.busy && (
-                          <button type="button" className="ghost" onClick={() => setWizardGithub((g) => ({ ...g, busy: false }))}>Cancel</button>
+                          <button type="button" className="ghost" onClick={() => { stopGithubPoll(); setWizardGithub((g) => ({ ...g, busy: false })) }}>Cancel</button>
                         )}
                         {!wizardGithub.connected && (
                           <button type="button" className="btn-primary" onClick={wizardConnectGithub} disabled={wizardGithub.busy}>
@@ -2562,7 +2570,7 @@ function claimIntentInFlight() {
             </ul>
           </section>
         )}
-        {tab === 'overview' && team && !welcomeMode && !onboardingComplete && team.graph_ready !== false && (team.point_count ?? 0) === 0 && !wizardDone && (
+        {tab === 'overview' && team && showReentryCard && (
           // #1643: re-entry — a returning user with an empty graph gets the
           // getting-started wizard (harness → skills → GitHub → seed), not a
           // raw-curl dead end.
@@ -2576,7 +2584,7 @@ function claimIntentInFlight() {
             </div>
           </section>
         )}
-        {tab === 'overview' && team && !(!welcomeMode && !onboardingComplete && team.graph_ready !== false && (team.point_count ?? 0) === 0 && !wizardDone) && team.graph_ready === false && (team.point_count ?? 0) === 0 && (
+        {tab === 'overview' && team && !showReentryCard && team.graph_ready === false && (team.point_count ?? 0) === 0 && (
           // #1591 (UX design): a clear first-data card — plain copy, a
           // styled copyable snippet, and a single primary action.
           <section className="overview empty-state graph-missing">
@@ -2606,7 +2614,7 @@ function claimIntentInFlight() {
             </div>
           </section>
         )}
-        {tab === 'overview' && team && !(!welcomeMode && !onboardingComplete && team.graph_ready !== false && (team.point_count ?? 0) === 0 && !wizardDone) && team.graph_ready !== false && (team.point_count ?? 0) === 0 && (
+        {tab === 'overview' && team && !showReentryCard && team.graph_ready !== false && (team.point_count ?? 0) === 0 && (
           <section className="overview empty-state">
             <h2>Welcome to your Tortoise graph</h2>
             <p className="dim">Connect your agent so it remembers why, not just what.</p>
@@ -2618,7 +2626,7 @@ function claimIntentInFlight() {
             </div>
           </section>
         )}
-        {tab === 'overview' && team && !(!welcomeMode && !onboardingComplete && team.graph_ready !== false && (team.point_count ?? 0) === 0 && !wizardDone) && team.graph_ready !== false && (team.point_count ?? 0) > 0 && (
+        {tab === 'overview' && team && !showReentryCard && team.graph_ready !== false && (team.point_count ?? 0) > 0 && (
           <section className="overview">
             <h2>Overview</h2>
             <div className="cards">
