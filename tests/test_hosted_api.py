@@ -498,6 +498,56 @@ class TestTeamInfo:
         assert "point_count" in body
         assert isinstance(body["point_count"], int)
 
+    def test_unhandled_500_carries_cors_headers(self, client, monkeypatch):
+        """#1591: an unhandled exception must return a 500 WITH the CORS
+        headers for the request origin — cross-origin clients otherwise read
+        it as a misleading 'CORS blocked' (unhandled 500s bubble OUTSIDE the
+        CORS middleware)."""
+        import tortoise.hosted_api as ha
+        from starlette.testclient import TestClient
+
+        @app.get("/__test_boom")
+        async def _boom():
+            raise RuntimeError("boom")
+
+        # A fresh client WITHOUT raise_server_exceptions — the handler's
+        # 500 response (with the CORS headers) is what we're asserting.
+        with TestClient(app, raise_server_exceptions=False) as tc:
+            r = tc.get("/__test_boom",
+                       headers={"Origin": "https://app.premiselabs.co"})
+        assert r.status_code == 500
+        assert r.headers.get("access-control-allow-origin") == "https://app.premiselabs.co"
+        assert r.json()["detail"] == "Internal server error"
+
+
+    def test_sessions_fail_soft_when_graph_unavailable(self, client, monkeypatch):
+        """#1591: /v1/sessions must return an empty list (never a 500) when
+        the team graph is missing — a 500 would strip the CORS headers and
+        surface as a misleading 'CORS blocked' in the dashboard."""
+        import tortoise.hosted_api as ha
+
+        def _boom(*a, **kw):
+            raise RuntimeError("graph unavailable")
+
+        monkeypatch.setattr(ha.TortoiseSDK, "_get_proj", _boom)
+        r = client.get("/v1/sessions")
+        assert r.status_code == 200, r.text
+        assert r.json() == {"sessions": []}
+
+    def test_session_detail_fails_soft_when_graph_unavailable(self, client, monkeypatch):
+        """#1591: /v1/sessions/{id} returns {"session": None} (never 500)
+        when the team graph is missing — a 500 would strip the CORS headers
+        and surface as a misleading 'CORS blocked' in the dashboard."""
+        import tortoise.hosted_api as ha
+
+        def _boom(*a, **kw):
+            raise RuntimeError("graph unavailable")
+
+        monkeypatch.setattr(ha.TortoiseSDK, "_get_proj", _boom)
+        r = client.get("/v1/sessions/some-id")
+        assert r.status_code == 200, r.text
+        assert r.json() == {"session": None}
+
     def test_team_info_fails_soft_when_graph_unavailable(self, client, monkeypatch):
         """#1591: a missing/broken team graph must NOT hard-500 /v1/team —
         it fails soft (point_count=0, graph_ready=false) so the dashboard

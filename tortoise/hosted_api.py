@@ -403,6 +403,31 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception):
+    """#1591: an unhandled exception bubbles OUTSIDE the CORS middleware
+    (ServerErrorMiddleware is the outermost layer), so the 500 response has
+    NO Access-Control-Allow-Origin — cross-origin clients (the dashboard)
+    read it as 'CORS blocked' instead of the real error. Re-apply the CORS
+    headers for the request's allowed origin and return a plain 500 JSON.
+    The original exception is re-raised for the server's logging/telemetry
+    AFTER the response is prepared."""
+    import logging as _logging
+    _logging.getLogger("tortoise.api").exception(
+        "unhandled exception: %s %s", request.method, request.url.path)
+    origin = request.headers.get("origin")
+    acao = origin if origin in _ALLOWED_ORIGINS else _ALLOWED_ORIGINS[0]
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error"},
+        headers={
+            "Access-Control-Allow-Origin": acao,
+            "Vary": "Origin",
+            "Access-Control-Allow-Credentials": "true",
+        },
+    )
+
 # ── Dreaming queue (#85) ────────────────────────────────────────────────
 # Per-tenant async queue: writes enqueue the affected roots; a cooperative
 # per-tenant drain task runs incremental EP dreaming. Serialized per tenant
@@ -4714,16 +4739,27 @@ async def commit_session(request: Request, team: dict = Depends(get_current_team
 
 @app.get("/v1/sessions")
 async def list_sessions(team: dict = Depends(get_current_team)):
-    """List captured sessions with turn and extracted point counts (#714)."""
+    """List captured sessions with turn and extracted point counts (#714).
+
+    #1591: FAIL SOFT — a missing team graph (half-failed provisioning)
+    returns an empty list, never a 500 (a 500 also strips the CORS headers
+    and surfaces as a misleading 'CORS blocked' to the browser).
+    """
     sdk = _make_sdk(namespace=team["team_id"])
-    proj = sdk._get_proj()
-    rows = proj.g.query(
-        "MATCH (s:Session) "
-        "OPTIONAL MATCH (s)-[:CONTAINS]->(p:Point) "
-        "WHERE p.pointKind IN ['decision', 'statement'] "
-        "RETURN s.id, s.created_at, s.turn_count, count(p) "
-        "ORDER BY s.created_at DESC LIMIT 50"
-    ).result_set
+    try:
+        rows = sdk._get_proj().g.query(
+            "MATCH (s:Session) "
+            "OPTIONAL MATCH (s)-[:CONTAINS]->(p:Point) "
+            "WHERE p.pointKind IN ['decision', 'statement'] "
+            "RETURN s.id, s.created_at, s.turn_count, count(p) "
+            "ORDER BY s.created_at DESC LIMIT 50"
+        ).result_set
+    except Exception:
+        import logging
+        logging.getLogger("tortoise.api").warning(
+            "list_sessions graph unavailable (fail-soft): %s", team["team_id"],
+            exc_info=True)
+        rows = []
     return {"sessions": [
         {"id": r[0], "created_at": r[1], "turns": r[2], "extracted": r[3]}
         for r in rows
@@ -4740,7 +4776,14 @@ async def get_session_detail(session_id: str, team: dict = Depends(get_current_t
     """
     import re
     sdk = _make_sdk(namespace=team["team_id"])
-    proj = sdk._get_proj()
+    try:
+        proj = sdk._get_proj()
+    except Exception:
+        import logging
+        logging.getLogger("tortoise.api").warning(
+            "get_session_detail graph unavailable (fail-soft): %s",
+            team["team_id"], exc_info=True)
+        return {"session": None}  # #1591 fail-soft
 
     # Session node
     sess_rows = proj.g.query(
