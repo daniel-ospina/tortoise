@@ -354,3 +354,32 @@ button:focus-visible, select:focus-visible, a:focus-visible, input:focus-visible
 .plan-limits { margin: 0; padding-left: 1.1rem; font-size: 13px; color: var(--text-dim); display: flex; flex-direction: column; gap: 3px; flex: 1; }
 .plan-limits li { line-height: 1.35; }
 .plan-card .btn-primary, .plan-card .ghost { text-align: center; }
+
+/* #1591: graph-missing first-data card — styled snippet + copy */
+.graph-missing .snippet-wrap {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  margin: 16px 0 20px;
+}
+.graph-missing .snippet {
+  flex: 1;
+  margin: 0;
+  padding: 12px 14px;
+  background: var(--surface, #0d1a2d);
+  border: 1px solid var(--border, #1e293b);
+  border-radius: 8px;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text, #e2e8f0);
+  overflow-x: auto;
+  white-space: pre;
+}
+.graph-missing .snippet-copy {
+  align-self: center;
+  min-width: 64px;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 600;
+}
