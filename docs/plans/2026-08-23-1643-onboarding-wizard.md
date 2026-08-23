@@ -6,6 +6,13 @@
 
 **Base:** origin/main. Worktree `feat-1591-onboarding`.
 
+## Plan-review resolutions (2026-08-23)
+- **P1-1 (STEP 0 rename):** DROP the rename sub-step — STEP 0 = show the auto-created team + create-another (POST /v1/teams) + multi-team SELECT. No new PATCH endpoint.
+- **P1-2 (STEP 5 handoff):** the OAuth callback redirects to welcome.html?github=connected|denied — the dashboard popup POLLS GET /v1/onboarding/github/status until connected=true (or cancelled); denied → a cancel CTA, no error card. No repo PICKER exists — the index call uses the connect-time org (default team_id) + an optional free-text repo. Preview = repos_count + indexed state.
+- **P2-1 (Task 8):** the Object passes status via props (splats over the 'live' default); assert NODE-count idempotency (the event log grows on repeat); add an e2e asserting a seed write from graph_ready===false flips /v1/team graph_ready to true.
+- **P2-2 (Task 2):** use the ID-based `projection/edges.py create_about_edge(point_id, object_id, ...)` (ALREADY public — no exposure step); the test must assert NO stub Subject/operator nodes were minted (the #334 regression class).
+- **P2-3 (Task 1):** minimal fix = drop `context=` (dedup=True already passed); NO anchors concept — the ctx label is dropped from the create calls.
+
 ## Task 1 — Fix `graph-scripts/decide.py` (the D3 blocker)
 
 **Acceptance:** decide.py no longer passes `context=` to `create_point` (TypeError since #49 — every point soft-failed → stub-operator corruption #334). Points use anchors per #49; the script's option/criterion/finding/edge/truth/relevance flow writes real nodes + operators + computes EP confidence.
