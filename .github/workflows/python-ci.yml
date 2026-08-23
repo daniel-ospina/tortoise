@@ -228,9 +228,9 @@ jobs:
     # 10s timeouts), pushing the single job past every watchdog we set
     # (32/36/40/46m all hit exactly at the boundary). Two parallel jobs
     # halve per-job server count (atexit ~8 min) and overlap collection —
-    # wall time drops to ~max(half) ≈ 22-25 min. Watchdog back to 45m
+    # wall time drops to ~max(half) ≈ 22-25 min. Watchdog 45m (raised to 55m when R3 corpus growth pushed legs past 45m)
     # (2026-08-14): on HF-unreachable/loaded runners the half + redislite
-    # teardown exceeded 30m (1223 passed then watchdog kill) — 45m fits
+    # teardown exceeded 30m (1223 passed then watchdog kill) — 55m fits
     # under test-slow's 75m critical path.
     needs: changes
     if: needs.changes.outputs.python == 'true'
@@ -245,8 +245,8 @@ jobs:
           - half: b
             files: ${{ needs.changes.outputs.matrix_b }}
     name: test (${{ matrix.half }})
-    # Outer cap: setup (checkout+install+cache) + watchdog (45m) + SIGINT
-    # grace (10s) + tail print. Cap 60m ≈ 45m watchdog + ~15m setup margin.
+    # Outer cap: setup (checkout+install+cache) + watchdog (55m) + SIGINT
+    # grace (10s) + tail print. Cap 60m ≈ 55m watchdog + ~5m setup margin.
     timeout-minutes: 60
     # #1436: provision live FalkorDB so the ~72 live-required tests (test_ep_directional
     # et al.) actually RUN in the fast matrix instead of silently skipping (CI was
@@ -257,7 +257,7 @@ jobs:
     # test_integration_search). Mirrors test-concurrency-falkor's service block.
     # NO job-level TORTOISE_DB_URI: the ~600 embedded tests need the redislite default;
     # the live tests' module probes set/restore their own env. ~2-3 min added runtime
-    # vs the 45m watchdog. The skip-fail guard step below fails closed if they skip.
+    # vs the 55m watchdog. The skip-fail guard step below fails closed if they skip.
     services:
       falkordb:
         image: falkordb/falkordb-server:latest
@@ -366,7 +366,7 @@ jobs:
           EOF
       - name: Run fast test suite (slow files run in the test-slow job)
         # #798: in-step watchdog + guaranteed summary tail. pytest gets
-        # SIGINT at 45m (SIGKILL 10s later if stuck inside a test — pytest
+        # SIGINT at 55m (SIGKILL 10s later if stuck inside a test — pytest
         # ignores INT mid-test); the step then prints counts + tail + real
         # exit code. The runner's own timeout-minutes is NOT what bounds
         # pytest, so a silent runner cancel is impossible.
@@ -404,7 +404,7 @@ jobs:
               echo "HEARTBEAT: pytest still running — $p passed, $f failed so far"
             done ) &
           HB_PID=$!
-          timeout -s INT -k 10 45m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b' --maxfail=20 -r fEs --durations=15 > /tmp/pytest.log 2>&1
+          timeout -s INT -k 10 55m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b' --maxfail=20 -r fEs --durations=15 > /tmp/pytest.log 2>&1
           # #1436: -v truncates skip reasons to terminal width (80 cols when
           # redirected to a file with COLUMNS unset), dropping e.g.
           # test_ep_directional's 81-char nodeid reason entirely — so the guard
@@ -431,7 +431,7 @@ jobs:
             passed=$(grep -c ' PASSED' /tmp/pytest.log)
             failed=$(grep -c ' FAILED' /tmp/pytest.log)
             errored=$(grep -c ' ERROR' /tmp/pytest.log)
-            echo "==================== WATCHDOG: pytest killed after 45m ($passed passed, $failed failed, $errored errored so far) — last test lines above ===================="
+            echo "==================== WATCHDOG: pytest killed after 55m ($passed passed, $failed failed, $errored errored so far) — last test lines above ===================="
           fi
           echo "==================== pytest exit code: $rc ===================="
           exit $rc
