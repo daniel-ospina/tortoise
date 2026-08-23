@@ -150,7 +150,7 @@ def test_inject_unknown_model_raises():
 
 
 def test_dim_mismatch_raises_hard_fail():
-    fake, prev = _seed_st(Dim768ST)
+    _fake, prev = _seed_st(Dim768ST)
     try:
         with pytest.raises(probe.EmbedderProbeError, match="dim 768"):
             probe.inject_model("minilm")
@@ -162,7 +162,7 @@ def test_dim_mismatch_raises_hard_fail():
 
 
 def test_load_failure_raises_never_degrades():
-    fake, prev = _seed_st(FailingST)
+    _fake, prev = _seed_st(FailingST)
     try:
         # Candidate fails to construct → EmbeddingModel returns None → the
         # probe HARD FAILS instead of letting _encode fall through to TF-IDF.
@@ -176,7 +176,7 @@ def test_load_failure_raises_never_degrades():
 
 
 def test_encode_failure_raises_hard_fail():
-    fake, prev = _seed_st(FailingEncodeST)
+    _fake, prev = _seed_st(FailingEncodeST)
     try:
         # Model loads at the right dim but fails to encode — the warm-process
         # discriminating check must HARD FAIL rather than accept a broken model.
@@ -210,7 +210,7 @@ def test_reset_restores_original_state():
 
 
 def test_warm_process_swap_is_genuine():
-    fake, prev = _seed_st()
+    _fake, prev = _seed_st()
     try:
         # Warm the singleton with the DEFAULT model first (no injection).
         warm = EmbeddingModel.get()
@@ -233,7 +233,7 @@ def test_warm_process_swap_is_genuine():
 
 
 def test_warm_same_model_reinject_is_ok():
-    fake, prev = _seed_st()
+    _fake, prev = _seed_st()
     try:
         probe.inject_model("minilm")
         # Re-injecting the same candidate skips the discriminating check
@@ -246,7 +246,7 @@ def test_warm_same_model_reinject_is_ok():
 
 
 def test_active_injection_overridden_by_different_model():
-    fake, prev = _seed_st()
+    _fake, prev = _seed_st()
     try:
         probe.inject_model("minilm")
         # Re-inject a DIFFERENT candidate over the active injection: the old
@@ -261,7 +261,7 @@ def test_active_injection_overridden_by_different_model():
 
 
 def test_warm_process_stale_singleton_hard_fails():
-    fake, prev = _seed_st(ConstantST)
+    _fake, prev = _seed_st(ConstantST)
     try:
         # Warm the singleton, then inject a "different" candidate whose vectors
         # are identical to the old model's — the discriminating check must HARD
@@ -276,7 +276,7 @@ def test_warm_process_stale_singleton_hard_fails():
 
 
 def test_query_prompt_threaded_to_model():
-    fake, prev = _seed_st()
+    _fake, prev = _seed_st()
     try:
         state = probe.inject_model("arctic-xs", query_prompt="query")
         assert state["query_prompt"] == "query"
@@ -290,7 +290,7 @@ def test_query_prompt_threaded_to_model():
 
 
 def test_resolved_revision_recorded():
-    fake, prev = _seed_st()
+    _fake, prev = _seed_st()
     try:
         state = probe.inject_model("minilm")
         assert state["resolved_revision"] == FAKE_COMMIT
@@ -310,7 +310,7 @@ def test_split_pin_parses_id_and_commit():
 
 
 def test_pinned_revision_reaches_constructor():
-    fake, prev = _seed_st()
+    _fake, prev = _seed_st()
     try:
         prev_entry = probe.PROBE_MODELS["minilm"]
         probe.PROBE_MODELS["minilm"] = (

@@ -443,7 +443,7 @@ def test_encode_cache_disk_persistence(tmp_path):
 def test_encode_cache_intercepts_ingest_and_reuses(tmp_path, monkeypatch):
     """The cache must intercept the ingest-time encode path (the 5-10×
     cross-question redundancy) and survive across instances (crash-safe)."""
-    real = emb.compute_embedding
+    _real = emb.compute_embedding
     calls = {"n": 0}
 
     def _counting(content, max_tokens=512):
@@ -506,7 +506,7 @@ def _minimal_outcome(qid: str, **over) -> dict:
 
 def test_checkpoint_atomic_write_and_format(tmp_path):
     cp = tmp_path / "state.json"
-    outcomes, report = runner.run_evaluation(
+    outcomes, _report = runner.run_evaluation(
         _mini()[:2], reader=MockReader(), judge=MockJudge(),
         ks=(5,), top_k=5, split="s", work_dir=str(tmp_path), checkpoint=str(cp),
     )
@@ -529,7 +529,7 @@ def test_checkpoint_truncated_outcome_reruns_just_that_question(tmp_path, capsys
                             run_key=key, surface="embedded", retriever="hybrid",
                             model=None, prompt=None)
 
-    outcomes, report = runner.run_evaluation(
+    outcomes, _report = runner.run_evaluation(
         _mini()[:2], reader=MockReader(), judge=MockJudge(),
         ks=(5,), top_k=5, split="s", work_dir=str(tmp_path), checkpoint=str(cp),
     )
@@ -632,7 +632,7 @@ def test_retrieval_only_never_calls_reader_or_judge(tmp_path):
         def answer(self, **kw):
             raise AssertionError("reader must not run in retrieval-only mode")
 
-    outcomes, report = runner.run_evaluation(
+    outcomes, _report = runner.run_evaluation(
         _mini()[:1], reader=_Boom(), judge=MockJudge(),
         ks=(5,), top_k=5, split="s", work_dir=str(tmp_path),
         retrieval_only=True,
@@ -741,11 +741,11 @@ def test_db_mode_sdk_gets_per_question_namespace(monkeypatch, tmp_path):
     monkeypatch.setattr(runner, "TortoiseSDK", _FakeSDK)
     monkeypatch.setenv("TORTOISE_DB_URI", "docker://localhost:6379/bench")
 
-    sdk1, cleanup1 = runner._make_question_sdk(
+    _sdk1, cleanup1 = runner._make_question_sdk(
         db_uri="docker://localhost:6379/bench",
         namespace=runner.question_graph_namespace("arctic-s", "query", "q1"),
         work_dir=None)
-    sdk2, cleanup2 = runner._make_question_sdk(
+    _sdk2, cleanup2 = runner._make_question_sdk(
         db_uri="docker://localhost:6379/bench",
         namespace=runner.question_graph_namespace("minilm", "query", "q1"),
         work_dir=None)
@@ -817,7 +817,7 @@ def test_spot_check_emits_paired_artifact(tmp_path, monkeypatch, fake_embeddings
     monkeypatch.setattr(runner, "SPOTCHECK_ARTIFACT_DIR", tmp_path)
 
     out = tmp_path / "report.json"
-    artifact = runner.run_main([
+    _artifact = runner.run_main([
         "--db", "docker://localhost:6379/bench", "--spot-check",
         "--model", "arctic-s", "--retriever", "vector",
         "--data", str(MINI), "--limit", "2", "--split", "s", "--mock",

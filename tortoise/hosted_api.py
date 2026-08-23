@@ -296,7 +296,7 @@ async def _lifespan(app):
                     st_module = model[0] if len(model) > 0 else model
                     config = getattr(getattr(st_module, "auto_model", None), "config", None)
                     return getattr(config, "_name_or_path", None) or None
-                except Exception as exc:  # noqa: BLE001 — probe is best-effort
+                except Exception as exc:
                     _logger.debug("embedding model-id probe failed: %s", exc)
                     return None
 

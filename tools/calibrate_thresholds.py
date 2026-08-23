@@ -77,7 +77,8 @@ def load_pairs(path: str) -> list[dict]:
         try:
             row = json.loads(line)
         except json.JSONDecodeError as exc:
-            raise CalibrationError(f"{path}:{lineno}: invalid JSON: {exc}")
+            raise CalibrationError(
+                f"{path}:{lineno}: invalid JSON: {exc}") from exc
         if not isinstance(row, dict):
             raise CalibrationError(f"{path}:{lineno}: row must be an object")
         missing = {"content_a", "content_b", "band"} - set(row)
@@ -101,7 +102,7 @@ def _percentile(sorted_vals: list[float], q: float) -> float:
     if not sorted_vals:
         raise CalibrationError("percentile over an empty band")
     n = len(sorted_vals)
-    rank = max(int(math.ceil(q * n)), 1)
+    rank = max(math.ceil(q * n), 1)
     return sorted_vals[min(rank - 1, n - 1)]
 
 
@@ -171,7 +172,7 @@ def calibrate(
     texts = sorted({row["content_a"] for row in pairs}
                    | {row["content_b"] for row in pairs})
     vecs = list(encode_fn(texts))
-    vec_map = {text: vec for text, vec in zip(texts, vecs)}
+    vec_map = {text: vec for text, vec in zip(texts, vecs, strict=True)}
 
     cosines: dict[str, list[float]] = {band: [] for band in BANDS}
     for row in pairs:

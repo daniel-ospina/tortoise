@@ -617,14 +617,12 @@ def _load_checkpoint(path: str | None,
         return {}, []
     if expected_fingerprint is not None:
         fp = data.get("fingerprint")
-        if fp is None:
-            # #1349 merge: a checkpoint written by the vector-arm path carries
-            # format+run_key but no M7 fingerprint — the run_key check above
-            # already guards cross-config resume; fall through (no code-drift
-            # gate available) instead of refusing a legitimately-keyed file.
-            diffs = []
-        else:
-            diffs = _fingerprint_diffs(expected_fingerprint, fp)
+        # #1349 merge: a checkpoint written by the vector-arm path carries
+        # format+run_key but no M7 fingerprint — the run_key check above
+        # already guards cross-config resume; fall through (no code-drift
+        # gate available) instead of refusing a legitimately-keyed file.
+        diffs = ([] if fp is None
+                 else _fingerprint_diffs(expected_fingerprint, fp))
         if diffs:
             raise CheckpointStaleError(
                 f"checkpoint {p} is stale: effective run config differs on "
@@ -924,10 +922,8 @@ def run_evaluation(
                     judge_ms = (time.monotonic() - t0) * 1000.0
             finally:
                 sdk.close()
-                try:
+                with contextlib.suppress(Exception):
                     _sdk_cleanup()
-                except Exception:
-                    pass
 
             # M7 (D4): evidence written = the ingest leg's own count
             # (deterministic → evidence_turns; v2 → evidence_points);

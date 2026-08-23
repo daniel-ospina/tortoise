@@ -181,7 +181,7 @@ def label_pairs(
     k = kappa(labels_a, labels_b)
     decision = decide(k)
 
-    disagreements = [i for i, (a, b) in enumerate(zip(labels_a, labels_b))
+    disagreements = [i for i, (a, b) in enumerate(zip(labels_a, labels_b, strict=True))
                      if a != b]
 
     # Owner adjudication path: an optional third judge labels ONLY the
@@ -292,7 +292,8 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 pair = json.loads(line)
             except json.JSONDecodeError as exc:
-                raise PairLabelError(f"{args.pairs}:{lineno}: invalid JSON: {exc}")
+                raise PairLabelError(
+                    f"{args.pairs}:{lineno}: invalid JSON: {exc}") from exc
             if not isinstance(pair, dict) or "content_a" not in pair or \
                     "content_b" not in pair:
                 raise PairLabelError(

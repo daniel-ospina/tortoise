@@ -261,8 +261,8 @@ def _download_zip(name: str, dest: Path, *, timeout: int = 120) -> Path:
     tmp = dest.with_name(dest.name + ".part")
     try:
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                with open(tmp, "wb") as f:
+            with (urllib.request.urlopen(req, timeout=timeout) as resp,
+                  open(tmp, "wb") as f):
                     while True:
                         chunk = resp.read(1 << 20)
                         if not chunk:

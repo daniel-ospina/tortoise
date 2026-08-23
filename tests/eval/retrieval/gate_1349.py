@@ -268,7 +268,7 @@ def _git_changed(code_sha: str, repo_root: Path | None) -> list[str] | None:
                              cwd=str(repo_root) if repo_root else None)
         if out.returncode != 0:
             return None
-        return [l for l in out.stdout.splitlines() if l.strip()]
+        return [line for line in out.stdout.splitlines() if line.strip()]
     except Exception:
         return None
 
@@ -685,7 +685,7 @@ def decision_rule(
                                    n_resamples=n_resamples)
         for key in bh_order}
     rejected = bh_fdr([pvals[k] for k in bh_order], q=Q)
-    bh_map = dict(zip(bh_order, rejected))
+    bh_map = dict(zip(bh_order, rejected, strict=True))
 
     cleared: dict[str, dict[str, bool]] = {}
     mean_deltas: dict[str, dict[str, float]] = {}
@@ -799,7 +799,7 @@ def decision_rule(
             combined = combined_rank(FAMILY_ORDER, mean_deltas)
             top2 = sorted(FAMILY_ORDER, key=lambda f: combined[f])[:2]
             escalation["top2"] = top2
-            escalation["judged_families"] = top2 + [CONTROL_MODEL]
+            escalation["judged_families"] = [*top2, CONTROL_MODEL]
             escalation["judged"] = _evaluate_escalation(
                 manifest, manifest_dir, top2, ctrl_data, n_resamples)
 
@@ -914,7 +914,8 @@ def _evaluate_escalation(manifest, manifest_dir, top2, ctrl_data,
     cherry-picking window, forbidden). Judge unavailable/non-answers →
     NO-WINNER with negative evidence.
     """
-    fail = lambda reason: {"pass": False, "winner": None, "reason": reason}
+    def fail(reason):
+        return {"pass": False, "winner": None, "reason": reason}
     entry = manifest.get("escalation_judged")
     if not isinstance(entry, dict) or not entry.get("path"):
         return fail("escalation fired but no escalation-judged artifact "
@@ -1097,10 +1098,8 @@ def _check_hnsw_spotcheck(manifest, manifest_dir, n_resamples,
         # burn set, fail-closed (a subset of deltas that shrinks until p
         # clears is a cherry-picking window, forbidden).
         paired = [d for d in deltas if d is not None]
-        if new_shape:
-            covered = len(paired) + len(dropped_qids)
-        else:
-            covered = len(deltas)
+        covered = (len(paired) + len(dropped_qids) if new_shape
+                   else len(deltas))
         if burn_qids is None or covered != len(burn_qids):
             expect = (f"{len(burn_qids)}" if burn_qids is not None
                       else "unknown (no burn set)")

@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools import pair_label_runner as plr
 
-I, N, U = "IMPLIES", "NEAR_DUPLICATE", "UNRELATED"
+I, N, U = "IMPLIES", "NEAR_DUPLICATE", "UNRELATED"  # noqa: E741 — test constants
 
 
 class FakeJudge:
@@ -125,7 +125,7 @@ def test_runner_kappa_is_shared_core_adapter():
 
 def test_single_judge_api_failure_aborts_and_never_emits(tmp_path):
     out = tmp_path / "labels.json"
-    with pytest.raises(plr.PairLabelError, match="[Jj]udge"):
+    with pytest.raises(plr.PairLabelError, match=r"[Jj]udge"):
         plr.label_pairs(
             pairs(), FailingJudge("model-a", fail_on_call=0),
             FakeJudge("model-b", [I, I, I, I]), out_path=out,
@@ -267,7 +267,7 @@ def test_adjudicator_called_only_on_disagreements():
 # ── distinct-judge enforcement ─────────────────────────────────────────
 
 def test_same_judge_model_rejected():
-    with pytest.raises(plr.PairLabelError, match="(?i)distinct"):
+    with pytest.raises(plr.PairLabelError, match=r"(?i)distinct"):
         plr.label_pairs(pairs(), FakeJudge("same-model", [I, I, I, I]),
                         FakeJudge("same-model", [I, I, I, I]))
 

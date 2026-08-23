@@ -444,7 +444,7 @@ def test_recorded_digest_catches_tamper_after_first_download(monkeypatch, tmp_pa
     cache.mkdir()
     # first download records the sidecar
     ds1 = mb.load_dataset(name, cache=cache, download=True)
-    corpus, total = mb._load_all_corpus(ds1["corpus_path"])
+    corpus, _total = mb._load_all_corpus(ds1["corpus_path"])
     assert len(corpus) == len(CORPUS_LINES)
     sidecar = cache / f"{name}.digest.json"
     assert sidecar.is_file()

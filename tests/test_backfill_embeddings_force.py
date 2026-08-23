@@ -212,7 +212,7 @@ def test_force_reembed_idempotent_on_partial_rerun(proj, monkeypatch):
     fake = _FakeEmbed()
     monkeypatch.setattr("tortoise.embeddings.compute_embedding", fake)
 
-    first = _backfill_run(mod, proj, force=True)
+    _first = _backfill_run(mod, proj, force=True)
     stored_before = {
         label: _embedding(g, label, _fixture_id_prop(label),
                           _fixture_embedded_key(label))

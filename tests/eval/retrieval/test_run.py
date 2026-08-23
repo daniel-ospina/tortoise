@@ -174,10 +174,10 @@ def test_model_injection_failure_aborts_run(tmp_path):
     synthetic query vectors."""
     from tools.embedder_probe import EmbedderProbeError
 
-    with patch.object(run_module, "inject_model",
-                      side_effect=EmbedderProbeError("candidate unavailable")):
-        with pytest.raises(EmbedderProbeError):
-            run_eval(_args(str(tmp_path / "eval-fail.db"), model="bge-small"))
+    with (patch.object(run_module, "inject_model",
+                       side_effect=EmbedderProbeError("candidate unavailable")),
+          pytest.raises(EmbedderProbeError)):
+        run_eval(_args(str(tmp_path / "eval-fail.db"), model="bge-small"))
 
 
 @pytest.mark.skipif(not _has_embedded(), reason="embedded FalkorDBLite unavailable")

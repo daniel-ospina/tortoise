@@ -71,7 +71,7 @@ def test_band_stats_monotone_in_band():
     report = _real_calibration()
     medians = [report["bands"][band]["p50"] for band in BAND_ORDER]
     assert medians == sorted(medians) and len(set(medians)) == len(medians), (
-        f"p50 per band must be strictly increasing: {dict(zip(BAND_ORDER, medians))}"
+        f"p50 per band must be strictly increasing: {dict(zip(BAND_ORDER, medians, strict=True))}"
     )
 
 
@@ -81,7 +81,7 @@ def test_empty_pairs_explicit_error():
     try:
         pairs = ct.load_pairs(str(empty))
         assert pairs == []
-        with pytest.raises(ct.CalibrationError, match="[Ee]mpty"):
+        with pytest.raises(ct.CalibrationError, match=r"[Ee]mpty"):
             ct.calibrate(pairs, encode_fn=None, min_samples=30)
     finally:
         empty.unlink(missing_ok=True)
@@ -99,7 +99,7 @@ def test_below_min_samples_explicit_error():
 def test_missing_band_explicit_error():
     pairs = [{"content_a": f"a{i}", "content_b": f"b{i}",
               "band": "near-dup", "label": "NEAR_DUPLICATE"} for i in range(40)]
-    with pytest.raises(ct.CalibrationError, match="near-dup|dedup|paraphrase|noise"):
+    with pytest.raises(ct.CalibrationError, match=r"near-dup|dedup|paraphrase|noise"):
         ct.calibrate(pairs, encode_fn=None, min_samples=30)
 
 
@@ -194,5 +194,5 @@ def test_non_finite_cosine_aborts_never_nan():
     def nan_encode(texts):
         return np.full((len(list(texts)), 384), np.nan)
 
-    with pytest.raises(ct.CalibrationError, match="non-finite|NaN"):
+    with pytest.raises(ct.CalibrationError, match=r"non-finite|NaN"):
         ct.calibrate(pairs, nan_encode, min_samples=1)
