@@ -448,6 +448,13 @@
     "note": "INSUFFICIENT-POWER disposition: judgment tiebreak in pinned order \u2014 mini-BEIR OOD datasets \u2192 labeled-pair calibration \u2192 nDCG@10 \u2014 recorded as judgment-based in ADR-009 (the gate EMITS this recommendation; the actual judgment is human/ADR)."
   },
   "n_paired_min": 138,
+  "override": {
+    "artifact_note": "this verdict JSON records the RAW gate output (BLOCKED on the latency precondition); the user override + swap landing is recorded here and in ADR-009 so the artifact and the shipped state agree.",
+    "authority": "user decision (2026-08-21) \u2014 option 1",
+    "decision": "proceed",
+    "rationale": "statistical core PASSED (bge-small +15.7% turn_recall@10, p=0.0005, BH-FDR clean; HNSW spot-check passed p=3.7e-05); the E2E-8 300ms latency band was deferred to T15 production-class-box re-validation because the benchmark box could not certify <=300ms for EITHER the candidate (344ms) or the control (418ms) \u2014 bge-small is 15-25% faster than the status quo.",
+    "revalidate": "T15: E2E-8 p95 <=300ms on the production-class benchmark box"
+  },
   "preconditions": {
     "checks": [
       {

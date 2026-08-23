@@ -330,10 +330,12 @@ def _resolve_rerank(*, rerank: bool | None, rerank_model: str | None,
     }
 
 
-# R3 (#1542): the MemDelta-pinned embedder (all-MiniLM-L6-v2, 384-dim,
-# #399 calibration). The pre-flight probe asserts this dimension so a swap
+# R3 (#1542): the embedder pinned for the eval pre-flight — now derived from
+# tortoise.embeddings (the single source of truth; #1349 swapped the default
+# to bge-small). The pre-flight probe asserts this dimension (384) so a swap
 # or a wrong-dimension model is caught before any run, never silently used.
-PINNED_EMBEDDER_MODEL = "all-MiniLM-L6-v2"
+from tortoise.embeddings import EMBEDDING_MODEL as PINNED_EMBEDDER_MODEL  # noqa: E402
+
 EMBEDDER_PROBE_DIM = 384
 
 
@@ -387,7 +389,17 @@ def _preflight_embedder(*, mock: bool) -> dict:
         status = _embedder_status(available=False, reason="no_embedder",
                                   st_version=st_version)
         return _finalize_embedder_preflight(status, mock=mock)
-    model_id = getattr(model, "model_id", None) or PINNED_EMBEDDER_MODEL
+    # #1349: the loaded model id — EmbeddingModel has no model_id attr, so
+    # fall back to the probe state (the ACTUAL injected candidate for
+    # --model runs) before the pinned default. Without the probe check an
+    # injected minilm/arctic-xs run would mislabel its evidence as the
+    # production literal.
+    try:
+        from ..embedder_probe import get_state as _probe_state
+        _ps = _probe_state()
+        model_id = (_ps or {}).get("hf_id") or PINNED_EMBEDDER_MODEL
+    except Exception:
+        model_id = PINNED_EMBEDDER_MODEL
     try:
         vec = model.encode(["probe"])
         if vec is None or len(vec) == 0:
@@ -432,7 +444,7 @@ def _finalize_embedder_preflight(status: dict, *, mock: bool) -> dict:
           file=sys.stderr)
     print("  uv sync --group dev --extra embeddings", file=sys.stderr)
     print("  uv run python -c \"from sentence_transformers import "
-          "SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')\"",
+          f"SentenceTransformer; SentenceTransformer('{PINNED_EMBEDDER_MODEL}')\"",
           file=sys.stderr)
     print("Verify with:", file=sys.stderr)
     print("  uv run python -c \"from tortoise.embeddings import "
@@ -1179,6 +1191,12 @@ def outcomes_to_report(
                 "evidence_recall@k",
                 "chunk_evidence_recall@k",  # R1 #1540 D5: containment view
                 "n_ingest_errors", "context_tokens",
+                # #1349 vector arm: the gate's per-question metrics ride the
+                # Layer-1 projection (extract_report in gate_1349.py reads
+                # them from the report's outcomes) + the breaker-open dropped
+                # markers (dropped-question accounting, never recall 0).
+                "ndcg@10", "p@10", "p@5", "ranked_ids",
+                "evidence_turn_matches", "breaker_open", "dropped_reason",
                 # M8 (#1528, D6): the live graph point count rides the
                 # projection — the flip-list zero-point flag consumes it.
                 "context_point_count",
@@ -1430,7 +1448,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--load-timeout", type=float, default=None,
                    help="EmbeddingModel load timeout override (seconds) — the "
                         "first model load on a contended machine can exceed "
-                        "the 30s default (bge-small measured ~57s)")
+                        "the 90s default)")
     p.add_argument("--tr-top-k", type=int, default=DEFAULT_TR_TOP_K,
                    help="TR-questions context cap (default 12 — the 20→12 "
                         "transcript-flood control, R5 #1544)")
@@ -1612,13 +1630,37 @@ def _build_spotcheck_artifact(winner: str, control: str,
     """Paired winner-vs-control artifact shape: {cleared, n, dropped_qids,
     metric_deltas}.
 
-    ``n`` is the FULL question count the spot-check ran (the union of both
-    arms, in burn order) — never the shrinking intersection. Each metric's
-    ``deltas`` is full-length (one entry per qid); a qid that is
+    ``n`` is the GATE question count the spot-check ran — the union of both
+    arms EXCLUDING ``_abs`` abstention questions (mirroring the gate's
+    ``is_gate_question`` filter; the gate requires art n == its filtered
+    burn set, so a producer that counts the full split never matches on a
+    split containing abstentions). Never the shrinking intersection. Each
+    metric's ``deltas`` is full-length (one entry per qid); a qid that is
     breaker_open or absent in either arm is recorded as a None sentinel and
     listed in ``dropped_qids`` (the paired p skips it)."""
     k = "10" if "10" in (str(x) for x in ks) else str(ks[-1])
-    full_qids = sorted(set(results[winner]) | set(results[control]))
+
+    def _gate_qid(qid: str) -> bool:
+        # Exclude _abs abstentions (the gate's is_gate_question filter).
+        # Divergence note: gate_1349.is_gate_question returns False for a
+        # MISSING question_type; here absent type counts as included. Real
+        # outcomes always carry it from the dataset (so the divergence is
+        # unreachable in production), and the lenient side only over-counts
+        # the artifact n → BLOCK, never a false pass (fail-closed). The
+        # test fixtures omit question_type, hence the leniency.
+        if "_abs" in qid:
+            return False
+        o = results[winner].get(qid) or results[control].get(qid) or {}
+        qt = o.get("question_type")
+        if not qt:
+            return True
+        return (str(qt).startswith("single-session-")
+                or qt in {"temporal-reasoning", "knowledge-update",
+                          "multi-session"})
+
+    full_qids = sorted(q for q in
+                       (set(results[winner]) | set(results[control]))
+                       if _gate_qid(q))
 
     def _dropped(qid: str) -> bool:
         w, c = results[winner].get(qid), results[control].get(qid)
@@ -1684,12 +1726,19 @@ def _run_spot_check(args, instances: list[dict], *, ks, top_k, db_uri) -> dict:
         cache = encode_cache.EncodeCache(
             encode_cache.cache_path_for(cache_root, model, args.query_prompt),
             model_id=model_id, prompt_name=args.query_prompt)
-        outcomes, _report = run_evaluation(
-            instances, reader=None, judge=None, ks=ks, top_k=top_k,
-            work_dir=args.work_dir, split=args.split,
-            retriever="vector", model=model, query_prompt=args.query_prompt,
-            retrieval_only=True, db_uri=db_uri, encode_cache=cache,
-        )
+        # Activate the model-keyed cache around the whole pass: it wraps
+        # compute_embedding (ingest-time interception) AND sets the
+        # _ACTIVE_CACHE global that encode_query reads (query-encode
+        # persistence across questions/processes). Without .active() the
+        # cache is dead code — every question re-encodes the overlapping
+        # haystack (the 5-10x redundancy the cache exists to eliminate).
+        with cache.active():
+            outcomes, _report = run_evaluation(
+                instances, reader=None, judge=None, ks=ks, top_k=top_k,
+                work_dir=args.work_dir, split=args.split,
+                retriever="vector", model=model, query_prompt=args.query_prompt,
+                retrieval_only=True, db_uri=db_uri, encode_cache=cache,
+            )
         results[model] = {o["question_id"]: o for o in outcomes}
         print(f"[longmem_eval] spot-check pass complete: model={model} "
               f"questions={len(outcomes)}", file=sys.stderr)
@@ -1809,6 +1858,9 @@ def _run_main(parser: argparse.ArgumentParser, args,
         if args.retriever != "vector":
             parser.error("--spot-check is a vector-arm producer — pass "
                          "--retriever vector")
+        if 10 not in ks:
+            parser.error("--spot-check measures turn_recall@10 / ndcg@10 — "
+                         f"10 must be in --k (got {','.join(map(str, ks))})")
 
     # #1349: inject the candidate embedder BEFORE the pre-flight so the
     # singleton IS the candidate (probe records resolved revision; HARD-FAILs

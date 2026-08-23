@@ -44,7 +44,7 @@ class EmbeddingModel:
 
     Loads BAAI/bge-small-en-v1.5 (384-dim, EMBEDDING_MODEL) via
     sentence-transformers. Model loading
-    runs in a worker thread with a 30s timeout. In the hosted Docker image the
+    runs in a worker thread with a 90s timeout (#1349: bge-small cold load measured ~57s). In the hosted Docker image the
     model is pre-downloaded at build time (Dockerfile.hosted) and pre-warmed at
     container start (entrypoint.sh), so the first API request never hits a cold
     start. Failures are NOT permanent — the next get() call creates a fresh
@@ -55,7 +55,10 @@ class EmbeddingModel:
     _instance: "EmbeddingModel | None" = None  # noqa: UP037
     _model = None
     _lock = threading.Lock()
-    _LOAD_TIMEOUT_S = 30.0  # generous for cold I/O (model is 90MB on disk; pre-warmed at startup in hosted)
+    _LOAD_TIMEOUT_S = 90.0  # #1349: bge-small cold load measured ~57s on a
+    # contended machine (vs ~30s for the old MiniLM) — 30s caused silent
+    # TF-IDF degrade on cold caches; 90s covers the download+torch-import
+    # window. Pre-warmed at startup in hosted.
     _FAIL_COOLDOWN_S = 60.0  # negative cache: skip retry for 60s after a failed load
     _last_failed_at: float | None = None
 
@@ -82,7 +85,7 @@ class EmbeddingModel:
         if cls._instance is None and cls._last_failed_at is not None and \
                 (now - cls._last_failed_at) < cls._FAIL_COOLDOWN_S:
             # Negative cache (code-review P2, #399): a load just failed — return
-            # None immediately instead of blocking up to 30s per request in a
+            # None immediately instead of blocking up to 90s per request in a
             # degraded environment (offline dev, cold CI, OOM). Retry after the
             # cooldown window via the normal "retries on next get()" path.
             return None

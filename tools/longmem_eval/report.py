@@ -30,6 +30,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from tortoise.embeddings import EMBEDDING_MODEL
+
 from .dataset_audit import is_trusted
 
 # R3 (#1542) D5: the dense-leg methodology is ALWAYS emitted — a report can
@@ -39,7 +41,7 @@ from .dataset_audit import is_trusted
 # callers (existing tests, battery/parity, the capstone harness) that omit
 # embedder_status get the not_checked default.
 DEFAULT_EMBEDDER_STATUS = {
-    "model": "all-MiniLM-L6-v2",
+    "model": EMBEDDING_MODEL,  # derived — single source of truth (#1349 swap)
     "sentence_transformers_version": None,
     "available": False,
     "reason": "not_checked",
@@ -768,6 +770,17 @@ def build_report(
         },
         "failures": failures or [],
         "n_failed": len(failures or []),
+        # #1349 gate contract: the per-question outcomes ride the report so
+        # gate_1349.py's extract_report can recompute per-question metrics
+        # (nDCG@10/P@10/P@5/ranked_ids/evidence_turn_matches + breaker_open
+        # dropped markers) from the producer's own output — the gate reads
+        # the report file, never a side channel. NOTE: when the caller
+        # passes ``extra["outcomes"]`` (run_evaluation's outcomes_to_report
+        # Layer-1 projection), the ``**(extra or {})`` spread below
+        # OVERRIDES this raw list with the projected one — which carries the
+        # same per-question keys plus the validity/leg-mix/evidence
+        # instrumentation the gate's extract_report also reads.
+        "outcomes": outcomes,
         **(rerank_report_block if rerank_report_block is not None else {}),
         **(extra or {}),
     }

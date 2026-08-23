@@ -122,8 +122,8 @@ def inject_model(name: str, query_prompt: str | None = None,
         query_prompt: optional named prompt template threaded to the model
             (e.g. ``"query"`` for the snowflake-arctic vendor config).
         load_timeout: override ``EmbeddingModel._LOAD_TIMEOUT_S`` (default
-            30s). The burn's first load of a model on a contended machine can
-            exceed 30s (bge-small measured ~57s) — pass a longer window for
+            90s now; the default was 30s before #1349 — bge-small cold
+            load measured ~57s). Pass a longer window for
             the evidence burn (the hosted pre-warm uses 300s).
 
     Returns:

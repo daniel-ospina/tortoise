@@ -6485,7 +6485,10 @@ class TortoiseSDK:
         mode: str = "both",
         scope: str | None = None,
         *,
-        similarity_threshold: float = 0.72,
+        # #1349 T14: derived from tortoise.embeddings DEFAULT_THRESHOLD
+        # (0.72 for bge-small) — single source of threshold truth; a model
+        # rotation recalibrates embeddings.py and this follows.
+        similarity_threshold: float = DEFAULT_THRESHOLD,
         variance_threshold: float = 0.04,
         add_limit: int = 20,
         prune_limit: int = 50,

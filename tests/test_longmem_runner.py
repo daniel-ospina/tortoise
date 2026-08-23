@@ -354,6 +354,16 @@ def test_outcomes_to_report_golden_shape():
         # — pre-R5 checkpoints render instead of KeyError.
         "tr_constraint": None,
         "tr_window_fallback": False,
+        # #1349 vector arm: the gate's per-question metrics ride the Layer-1
+        # projection (None on non-vector runs — extract_report in
+        # gate_1349.py reads them from the report's outcomes).
+        "ndcg@10": None,
+        "p@10": None,
+        "p@5": None,
+        "ranked_ids": None,
+        "evidence_turn_matches": None,
+        "breaker_open": None,
+        "dropped_reason": None,
     }
     assert report["failures"] == []
     assert report["n_failed"] == 0
@@ -3256,7 +3266,7 @@ def test_preflight_embedder_missing_real_run_exits(monkeypatch, capsys):
     assert ei.value.code == 1
     err = capsys.readouterr().err
     assert "--extra embeddings" in err
-    assert "all-MiniLM-L6-v2" in err
+    assert "bge-small-en-v1.5" in err  # #1349 swap: the remediation names the new default
 
 
 def test_preflight_embedder_missing_mock_warns_and_continues(monkeypatch):

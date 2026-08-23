@@ -1237,7 +1237,22 @@ def check_preconditions(manifest, manifest_dir, stats, n_resamples) -> tuple[lis
     required_e2e8: set[str] = set(stats.get("clearing_families") or [])
     if stats.get("winner"):
         required_e2e8.add(stats["winner"])
-    checks.append(_check_e2e8(manifest, manifest_dir, required_e2e8))
+    if stats.get("winner") is None:
+        # Second-model gate (P1): mirror the HNSW waiver — with no winner
+        # there is nothing to ship, so the E2E-8 latency band must not
+        # BLOCK-mask an honest INSUFFICIENT-POWER/NO-WINNER verdict (the
+        # committed verdict-final.json tripped exactly this: BLOCKED on
+        # arctic-xs latency when the correct disposition was
+        # INSUFFICIENT-POWER → human judgment per ADR-009).
+        stats["e2e8_waived"] = True
+        checks.append({"name": "e2e8", "met": True,
+                       "detail": "WAIVED — no winner to ship; the E2E-8 "
+                                 "latency band vetoes a shipped candidate "
+                                 "only (NO-WINNER/INSUFFICIENT-POWER → "
+                                 "human judgment)"})
+    else:
+        stats["e2e8_waived"] = False
+        checks.append(_check_e2e8(manifest, manifest_dir, required_e2e8))
     checks.append(_check_issue265(manifest))
 
     for c in checks:
