@@ -2295,19 +2295,16 @@ function claimIntentInFlight() {
                         {HARNESS_INSTALL[wizardHarness](apiKey)}
                         {welcomeKey ? ('\n\n' + HARNESS_PERSIST(apiKey)) : ''}
                       </pre>
-                      <div className="wizard-actions">
-                        <button type="button" className="btn-primary"
-                          onClick={() => wizardCopy(HARNESS_INSTALL[wizardHarness](apiKey) + (welcomeKey ? ('\n\n' + HARNESS_PERSIST(apiKey)) : ''), 'harness')}>
-                          {wizardCopied === 'harness' ? 'Copied!' : 'Copy setup'}
-                        </button>
-                        <button type="button" className="ghost" onClick={() => setWizardStep(1)}>Skip →</button>
+                      <div className="wizard-nav">
+                        <span className="wizard-nav-spacer" />
+                        <div className="wizard-nav-actions">
+                          <button type="button" className="btn-primary"
+                            onClick={() => wizardCopy(HARNESS_INSTALL[wizardHarness](apiKey) + (welcomeKey ? ('\n\n' + HARNESS_PERSIST(apiKey)) : ''), 'harness')}>
+                            {wizardCopied === 'harness' ? 'Copied!' : 'Copy setup'}
+                          </button>
+                          <button type="button" className="ghost" onClick={() => setWizardStep(1)}>Skip →</button>
+                        </div>
                       </div>
-                    </div>
-                  )}
-
-                  {wizardStep > 0 && wizardStep < 4 && (
-                    <div className="wizard-actions" style={{ marginTop: 0, marginBottom: '0.5rem' }}>
-                      <button type="button" className="ghost" onClick={() => setWizardStep(wizardStep - 1)}>← Back</button>
                     </div>
                   )}
 
@@ -2321,8 +2318,11 @@ function claimIntentInFlight() {
                         <strong>tortoise-decide</strong>
                         <span className="dim small">the invoke skill — run it when you make a decision: it weighs options against the graph\'s state and records the reasoning.</span>
                       </div>
-                      <div className="wizard-actions">
-                        <button type="button" className="btn-primary" onClick={() => setWizardStep(2)}>Next</button>
+                      <div className="wizard-nav">
+                        <button type="button" className="ghost" onClick={() => setWizardStep(wizardStep - 1)}>← Back</button>
+                        <div className="wizard-nav-actions">
+                          <button type="button" className="btn-primary" onClick={() => setWizardStep(2)}>Next</button>
+                        </div>
                       </div>
                     </div>
                   )}
@@ -2334,18 +2334,21 @@ function claimIntentInFlight() {
                       ) : (
                         <p className="dim">Connect GitHub to bring your issues in as Events on the graph. Uses your own token — stored encrypted, never shared.</p>
                       )}
-                      <div className="wizard-actions">
-                        {!wizardGithub.connected && wizardGithub.busy && (
-                          <button type="button" className="ghost" onClick={() => { stopGithubPoll(); setWizardGithub((g) => ({ ...g, busy: false })) }}>Cancel</button>
-                        )}
-                        {!wizardGithub.connected && (
-                          <button type="button" className="btn-primary" onClick={wizardConnectGithub} disabled={wizardGithub.busy}>
-                            {wizardGithub.busy ? 'Connecting…' : 'Connect GitHub'}
+                      <div className="wizard-nav">
+                        <button type="button" className="ghost" onClick={() => setWizardStep(wizardStep - 1)}>← Back</button>
+                        <div className="wizard-nav-actions">
+                          {!wizardGithub.connected && wizardGithub.busy && (
+                            <button type="button" className="ghost" onClick={() => { stopGithubPoll(); setWizardGithub((g) => ({ ...g, busy: false })) }}>Cancel</button>
+                          )}
+                          {!wizardGithub.connected && (
+                            <button type="button" className="btn-primary" onClick={wizardConnectGithub} disabled={wizardGithub.busy}>
+                              {wizardGithub.busy ? 'Connecting…' : 'Connect GitHub'}
+                            </button>
+                          )}
+                          <button type="button" className="ghost" onClick={() => setWizardStep(3)}>
+                            {wizardGithub.connected ? 'Next' : 'Skip →'}
                           </button>
-                        )}
-                        <button type="button" className="ghost" onClick={() => setWizardStep(3)}>
-                          {wizardGithub.connected ? 'Next' : 'Skip →'}
-                        </button>
+                        </div>
                       </div>
                     </div>
                   )}
@@ -2357,13 +2360,16 @@ function claimIntentInFlight() {
                           ? 'Your graph is live — the overview now shows your first Object and the memory behind it.'
                           : 'Ask your connected agent to record your project\'s state (it knows how), or seed a sample memory now.'}
                       </p>
-                      <div className="wizard-actions">
-                        <button type="button" className="btn-primary" onClick={wizardSeedGraph} disabled={wizardSeeding || wizardSeedDone}>
-                          {wizardSeeding ? 'Seeding…' : (wizardSeedDone ? 'Seeded ✓' : 'Seed a sample memory')}
-                        </button>
-                        <button type="button" className="ghost" onClick={() => setWizardStep(4)}>
-                          {wizardSeedDone ? 'Finish' : 'Skip →'}
-                        </button>
+                      <div className="wizard-nav">
+                        <button type="button" className="ghost" onClick={() => setWizardStep(wizardStep - 1)}>← Back</button>
+                        <div className="wizard-nav-actions">
+                          <button type="button" className="btn-primary" onClick={wizardSeedGraph} disabled={wizardSeeding || wizardSeedDone}>
+                            {wizardSeeding ? 'Seeding…' : (wizardSeedDone ? 'Seeded ✓' : 'Seed a sample memory')}
+                          </button>
+                          <button type="button" className="ghost" onClick={() => setWizardStep(4)}>
+                            {wizardSeedDone ? 'Finish' : 'Skip →'}
+                          </button>
+                        </div>
                       </div>
                     </div>
                   )}
