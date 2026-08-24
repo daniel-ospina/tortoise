@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 // #1623: plan display data (build-time import of product/pricing.json).
 import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
-import { HARNESS_INSTALL, HARNESS_NAMES, HARNESS_ORDER, HARNESS_PERSIST } from './harnesses.js'
+import { HARNESS_INSTALL, HARNESS_NAMES, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SKILLS } from './harnesses.js'
 
 const API_BASE = 'https://api.premiselabs.co'
 const KEY_STORAGE = 'tortoise_api_key'
@@ -2293,13 +2293,14 @@ function claimIntentInFlight() {
                       </div>
                       <pre className="snippet" style={{ marginTop: '0.75rem' }}>
                         {HARNESS_INSTALL[wizardHarness](apiKey)}
+                        {HARNESS_SKILLS(wizardHarness)}
                         {welcomeKey ? ('\n\n' + HARNESS_PERSIST(apiKey)) : ''}
                       </pre>
                       <div className="wizard-nav">
                         <span className="wizard-nav-spacer" />
                         <div className="wizard-nav-actions">
                           <button type="button" className="btn-primary"
-                            onClick={() => wizardCopy(HARNESS_INSTALL[wizardHarness](apiKey) + (welcomeKey ? ('\n\n' + HARNESS_PERSIST(apiKey)) : ''), 'harness')}>
+                            onClick={() => wizardCopy(HARNESS_INSTALL[wizardHarness](apiKey) + HARNESS_SKILLS(wizardHarness) + (welcomeKey ? ('\n\n' + HARNESS_PERSIST(apiKey)) : ''), 'harness')}>
                             {wizardCopied === 'harness' ? 'Copied!' : 'Copy setup'}
                           </button>
                           <button type="button" className="ghost" onClick={() => setWizardStep(1)}>Skip →</button>
