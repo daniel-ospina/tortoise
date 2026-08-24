@@ -270,6 +270,7 @@ surfaces:
   - test_tool_registry.py
   - test_topic_summarization.py
   - test_tortoise_search.py
+  - test_tripwire.py
   - test_uri_env_mutations_declared.py
   - test_validity_windows.py
   - test_value_extractor.py

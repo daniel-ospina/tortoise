@@ -103,6 +103,11 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     #    5; declared so the guard stays green in the interim) ────────────────
     "test_config.py": [r'monkeypatch\.(?:delenv|setenv)\(\s*"TORTOISE_DB_URI"',
                        r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
+    # ── Task 4 tripwire surface: the probe-flips unit test forces the
+    #    docker lane via monkeypatch (DELIBERATE_URI — the env control IS
+    #    the test input); the subprocess session tests pass env through
+    #    subprocess env= and never mutate this process's environment ────────
+    "test_tripwire.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;

@@ -48,6 +48,8 @@ RAW_EMBEDDED_ALLOWLIST = {
     "test_backfill_embeddings_force.py",  # #1349 backfill: live-FalkorDB rebuild test
     "test_config.py",
     "test_de2e1_entity_extraction.py",
+    "test_derived_names.py",  # epic #1647 Task 7 — the path= construction IS the derived-name-under-test input
+    "test_divergence_conformance.py",  # epic #1647 E2E-8 — both legs construct the projection as the input
     "test_embedded_concurrency.py",
     "test_embedded_lifecycle.py",
     "test_export_cli.py",  # drift registration (#1401) — raw embedded construction
@@ -77,6 +79,8 @@ RAW_EMBEDDED_ALLOWLIST = {
     "test_semantic_extractor.py",
     "test_search_engine.py",  # #1541 R2 FTS-migration test builds a live FalkorDB( client directly
     "test_supplementary.py",
+    "test_tripwire.py",  # epic #1647 Task 4 tripwire probe — the path= probe construction IS the redirect-under-test input
+    "test_wipe_server.py",  # epic #1647 E2E-2 — the projection construction IS the wipe-under-test input
 }
 
 

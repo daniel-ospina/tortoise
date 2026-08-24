@@ -560,6 +560,127 @@ def _server_graph_hygiene(_redislite_hygiene):
             print(f"[server-graph-hygiene] GRAPH.LIST bound check skipped: {exc}")
 
 
+# ── Epic #1647 Task 4 (P2): session-start backend-identity tripwire ────────
+@pytest.fixture(scope="session", autouse=True)
+def _assert_backend_identity():
+    """Epic #1647 E2E-6 tripwire: on docker-URI sessions, the session must
+    be server mode — a dormant redirect would silently run the migrated
+    suite on embedded and pass green. Cycle-2 P0-2: a non-loopback URI fails
+    here, before ANY test writes. Cycle-2 P2-6: TORTOISE_TEST_EXPECT_URI=1
+    (CI docker halves) fails a URI-less session instead of green-passing on
+    the carve-out shape.
+
+    Cycle-5 P1-4: the probe TRAVERSES THE REDIRECT. `from_uri` builds
+    host-mode DIRECTLY, so `_is_embedded` is False on any reachable server
+    regardless of redirect state: an inert redirect could never be detected
+    (vacuous — the cycle-4 probe). The helper `_tripwire_probe()`
+    (tests/test_tripwire.py) constructs via `path=` from a test_-named
+    frame — `_caller_test_stem()` resolves to the non-exempt stem
+    "test_tripwire", the redirect arms under URI + TEST_MODE, and
+    `_is_embedded is False` IFF the redirect is armed — an inert redirect
+    leaves the probe embedded and this assert fails at session start. An
+    unreachable server raises during probe construction (the server-mode
+    health check fails loud) — also a session failure, never a skip
+    (D-4=A fail-closed).
+
+    Records the observed backend into the session-scoped BackendIdentity
+    record (tests._embedded.BACKEND_IDENTITY) so other conftest machinery
+    (skip-guard, manifest, the Task 5 embedded_only hook) reads the lane
+    without re-probing.
+
+    Divergence note (deep-review Issue 4): the supported-URI gate is
+    `is_db_uri` (scheme split on "://"), while the redirect's own gate is
+    `_is_supported_uri_scheme` (split on ":") — a malformed value like
+    "docker:foo" reads embedded here but the redirect refuses it at every
+    construction (hostless → non-loopback RuntimeError). Fails closed
+    either way (never a vacuous green); the predicate split is left
+    untouched because is_db_uri is the wide seam predicate.
+    """
+    from tortoise.config import is_db_uri, is_loopback_uri  # shared predicates
+    uri = os.environ.get("TORTOISE_DB_URI", "")
+    # VGATE P2-2: EXPECT_URI must fail not only on an UNSET URI but also on
+    # a set-but-unsupported-scheme URI (postgres://... or a bare path) —
+    # either way the session would run the embedded lane and green-pass on
+    # the wrong backend (the exact vacuous-pass class EXPECT_URI exists to
+    # close). is_db_uri() covers both: False for empty and for any
+    # non-supported value.
+    if os.environ.get("TORTOISE_TEST_EXPECT_URI") == "1" and not is_db_uri(uri):
+        if not uri:
+            pytest.fail(
+                "TORTOISE_TEST_EXPECT_URI=1 but TORTOISE_DB_URI unset — the "
+                "docker-half session must run against the server (epic #1647 "
+                "E2E-6)")
+        pytest.fail(
+            f"TORTOISE_TEST_EXPECT_URI=1 but TORTOISE_DB_URI {uri!r} is not "
+            f"a supported connection URI — the docker-half session must run "
+            f"against the server (epic #1647 E2E-6)")
+    if not uri or not is_db_uri(uri):
+        # Embedded session (carve-out) — the tripwire is inert, but the
+        # backend identity is still recorded for conftest machinery.
+        from tests._embedded import BACKEND_IDENTITY
+        BACKEND_IDENTITY.backend = "embedded"
+        BACKEND_IDENTITY.uri = uri
+        yield
+        return
+    if not is_loopback_uri(uri) and os.environ.get("TORTOISE_TEST_ALLOW_REMOTE") != "1":
+        pytest.fail(
+            f"TORTOISE_DB_URI {uri!r} is not loopback — refusing before "
+            f"any test writes (epic #1647 D-4/P0-2); set "
+            f"TORTOISE_TEST_ALLOW_REMOTE=1 to override")
+    from tests._embedded import BACKEND_IDENTITY
+    from tests.test_tripwire import _tripwire_probe
+    try:
+        probe = _tripwire_probe()  # cycle-5 P1-4: through the redirect, not around it
+    except Exception as exc:
+        # Re-review Issue 1: remove the session journal ONLY for
+        # connection-class failures. On a dead/unreachable server the
+        # redirect journaled the probe mint BEFORE the failed connect — the
+        # graph never came to exist, and this session's sweeps cannot
+        # connect to drop the entry (keep-on-partial would retain the
+        # journal in ACTIVE_SUITES_DIR until a later docker session's stale
+        # sweep). Classification note (cycle-3 re-review): the server-mode
+        # health check swallows the raw redis exception and raises the
+        # RuntimeError "DB health check failed...", so refused-connect,
+        # dropped-SYN timeout, and mid-session server death ALL classify as
+        # journal-removal — a graph that did come to exist before the
+        # failure is bounded by the journal-independent last-suite-standing
+        # leftover sweep (test_-prefixed, scope=None), so no leak. Only a
+        # NON-server failure (a redirect bug on a reachable URI) keeps the
+        # journal, letting the session-end/stale sweeps drain real mints.
+        from redis.exceptions import (
+            ConnectionError as _RedisConnError,
+            TimeoutError as _RedisTimeoutError,
+        )
+        _conn_class = (_RedisConnError, _RedisTimeoutError, OSError)
+        if isinstance(exc, _conn_class) or (
+                isinstance(exc, RuntimeError)
+                and "health check failed" in str(exc)):
+            from tests._embedded import _remove_journal_file
+            _remove_journal_file(os.environ.get("TORTOISE_TEST_JOURNAL_FILE", ""))
+        raise
+    try:
+        assert probe._is_embedded is False, (
+            "backend-identity tripwire: server session but the probe is "
+            "embedded — the redirect is INERT; the migrated suite would "
+            "green-pass on the wrong backend (epic #1647 E2E-6)")
+    finally:
+        probe.close()
+    BACKEND_IDENTITY.backend = "server"
+    BACKEND_IDENTITY.uri = uri
+    yield
+
+
+@pytest.fixture(scope="session")
+def backend_identity():
+    """The recorded session backend (epic #1647 E2E-6) — which lane this
+    session actually ran on, recorded by the session-start tripwire
+    (_assert_backend_identity). Consumers read this instead of re-probing:
+    backend == "server" when the tripwire's redirect-traversing probe ran
+    server-mode, "embedded" on URI-less sessions. The record is also
+    reachable as tests._embedded.BACKEND_IDENTITY for non-fixture conftest
+    machinery."""
+    from tests._embedded import BACKEND_IDENTITY
+    return BACKEND_IDENTITY
 
 
 @pytest.fixture(autouse=True)

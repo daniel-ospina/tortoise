@@ -132,6 +132,26 @@ _JOURNAL: list[str] = []
 _WIPED_UP_TO = 0
 _JOURNAL_FILE: str = os.environ.get("TORTOISE_TEST_JOURNAL_FILE", "") or ""
 
+# ── Epic #1647 Task 4 (P2): session backend-identity record ────────────────
+class BackendIdentity:
+    """Which backend this session actually ran on (epic #1647 E2E-6).
+
+    Recorded by the conftest session-start tripwire (_assert_backend_identity)
+    so other conftest machinery (skip-guard wiring, manifest generation, the
+    Task 5 embedded_only marker hook) can read the lane without re-probing.
+    backend: "server" when the tripwire's redirect-traversing probe ran in
+    server mode; "embedded" on URI-less sessions. uri: the TORTOISE_DB_URI
+    the session ran with ("" on the embedded lane).
+    """
+    __slots__ = ("backend", "uri")
+
+    def __init__(self, backend: str = "embedded", uri: str = ""):
+        self.backend = backend
+        self.uri = uri
+
+
+BACKEND_IDENTITY = BackendIdentity()
+
 _GRAPH_NAME_RE = re.compile(r"[A-Za-z0-9_.\-]+")
 
 
