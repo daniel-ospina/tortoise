@@ -1,7 +1,7 @@
 # Epic: Migrate test suite from FalkorDBLite (embedded) to real FalkorDB (docker)
 
 **Issue:** [tortoise#1647](https://github.com/daniel-ospina/tortoise/issues/1647)
-**Status:** SCOPE (Stage 3/6 — human gate)
+**Status:** PLAN ✅ APPROVED (Stage 4/6 — 8 review cycles clean)
 **Team:** epistemic-team
 **Started:** 2026-08-24
 
@@ -11,9 +11,9 @@
 |-------|--------|------|----------|
 | 1. Align | ✅ DONE | verifier (REDIRECT applied) | Strategy Alignment Decision |
 | 2. Research | ✅ DONE | verifier (2 passes, all P1s closed) | research-brief.md |
-| 3. Scope | 🔄 IN PROGRESS | **human** | scope-brief.md + E2E |
-| 4. Plan | ⏳ | human | plan.md |
-| 5. Decompose | ⏳ | verifier | child issues + wiring |
+| 3. Scope | ✅ DONE | human (approved D-1=A D-2=A D-3=A D-4=A) | scope-brief.md + E2E |
+| 4. Plan | ✅ DONE | verifier (8 cycles clean) | plan.md (2684 lines) |
+| 5. Decompose | 🔄 NEXT | verifier | child issues + wiring |
 | 6. Verify | ⏳ | verifier | verification-proof.md |
 
 ## Stage artifacts
