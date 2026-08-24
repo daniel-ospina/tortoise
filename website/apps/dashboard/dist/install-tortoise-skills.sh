@@ -21,11 +21,27 @@ SKILLS_VERSION="v1"   # bump when the skill set changes
 SKILLS_BASE="https://app.premiselabs.co/skills"
 SKILLS=(how-to-use-tortoise tortoise-decide tortoise-file-finding)
 
+usage() {
+  cat <<'HELP'
+Usage: install-tortoise-skills.sh --harness claude|codex|cursor|pi
+
+Installs the official Tortoise skills into the harness's skills directory:
+  claude -> .claude/skills (project)
+  codex  -> .codex/skills  (project)
+  cursor -> .cursor/skills (project)
+  pi     -> ~/.pi/agent/skills (personal)
+
+Run: curl -fsSL https://app.premiselabs.co/install-tortoise-skills.sh | bash -s -- --harness <harness>
+HELP
+  exit 0
+}
+
 HARNESS=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --harness) HARNESS="${2:-}"; shift 2 ;;
-    -h|--help) sed -n '1,20p' "$0"; exit 0 ;;
+    --harness) [ $# -ge 2 ] || { echo "Missing value for --harness" >&2; exit 2; }
+               HARNESS="${2}"; shift 2 ;;
+    -h|--help) usage ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -48,10 +64,14 @@ mkdir -p "$DEST"
 
 for s in "${SKILLS[@]}"; do
   mkdir -p "$DEST/$s"
-  if curl -fsSL "$SKILLS_BASE/$s/SKILL.md" -o "$DEST/$s/SKILL.md" 2>/dev/null; then
+  tmp="$DEST/$s/SKILL.md.tmp"
+  if curl -fsSL --max-time 20 "$SKILLS_BASE/$s/SKILL.md" -o "$tmp" \
+      && grep -q "^name: $s$" "$tmp"; then
+    mv "$tmp" "$DEST/$s/SKILL.md"
     echo "  ✓ $s"
   else
-    echo "  ✗ $s — download failed from $SKILLS_BASE/$s/SKILL.md" >&2
+    rm -f "$tmp"
+    echo "  ✗ $s — download failed or payload was not the skill file ($SKILLS_BASE/$s/SKILL.md)" >&2
     exit 1
   fi
 done
@@ -59,7 +79,7 @@ done
 # Verify the target dir — we KNOW where we wrote, so this is a local check.
 missing=()
 for s in "${SKILLS[@]}"; do
-  [ -s "$DEST/$s/SKILL.md" ] || missing+=("$s")
+  [ -f "$DEST/$s/SKILL.md" ] || missing+=("$s")
 done
 
 if [ ${#missing[@]} -eq 0 ]; then
