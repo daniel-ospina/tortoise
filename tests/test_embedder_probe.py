@@ -110,13 +110,15 @@ def _clean_probe_state():
 
 
 def test_probe_models_registry_spec_locked():
-    """The registry maps the 4 candidate short names to their HF ids."""
-    assert {
-        "minilm": "sentence-transformers/all-MiniLM-L6-v2",
-        "arctic-xs": "snowflake/snowflake-arctic-embed-xs",
-        "arctic-s": "snowflake/snowflake-arctic-embed-s",
-        "bge-small": probe.PROBE_MODELS["bge-small"],  # pinned @<sha> (VULN-001)
-    } == probe.PROBE_MODELS
+    """The registry maps the 4 candidate short names to their pinned HF ids.
+
+    All four are commit-pinned (P2, code review): HF tags are mutable and
+    sentence-transformers unpickles weights at load — a redirected tag would
+    execute code in the harness process. bge-small mirrors the production
+    EMBEDDING_MODEL_REVISION."""
+    assert all("@" in probe.PROBE_MODELS[k] for k in
+               ("minilm", "arctic-xs", "arctic-s", "bge-small")),         "every probe candidate must be commit-pinned (@<sha>)"
+    assert probe.PROBE_MODELS["bge-small"].split("@")[1] ==         probe.EMBEDDING_MODEL_REVISION,         "bge-small pin must match the production literal revision"
 
 
 def test_inject_sets_singleton_and_routes_encode():

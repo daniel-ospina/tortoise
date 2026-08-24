@@ -31,7 +31,10 @@ import numpy as np
 # Single source of truth (#1349 T14): the bge-small calibrated bands live in
 # tortoise.embeddings — importing (not re-defining) keeps this module in sync
 # across model swaps.
-from tortoise.embeddings import DEFAULT_THRESHOLD, NEAR_DUPLICATE_THRESHOLD
+from tortoise.embeddings import (  # noqa: F401 — re-export for consumers
+    DEFAULT_THRESHOLD,
+    NEAR_DUPLICATE_THRESHOLD,
+)
 
 logger = logging.getLogger(__name__)
 

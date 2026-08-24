@@ -117,7 +117,7 @@ def cohens_kappa(a_labels: Sequence[str], b_labels: Sequence[str]) -> float:
             f"sequences (got {len(a_labels)} vs {len(b_labels)})"
         )
     n = len(a_labels)
-    po = sum(1 for a, b in zip(a_labels, b_labels) if a == b) / n
+    po = sum(1 for a, b in zip(a_labels, b_labels, strict=True) if a == b) / n
     a_counts = Counter(a_labels)
     b_counts = Counter(b_labels)
     pe = sum((a_counts[c] / n) * (b_counts[c] / n)

@@ -452,8 +452,13 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
     The original exception is re-raised for the server's logging/telemetry
     AFTER the response is prepared."""
     import logging as _logging
+    # P2 (code review): sanitize the path before logging — Starlette's
+    # URL.path is percent-decoded, so an unauthenticated request to
+    # /foo%0d%0a[forged-line] could write CRLF-decoded control chars into
+    # the log (log-line forgery for monitoring/audit pipelines).
+    _path = request.url.path.replace("\r", "\\r").replace("\n", "\\n")
     _logging.getLogger("tortoise.api").exception(
-        "unhandled exception: %s %s", request.method, request.url.path)
+        "unhandled exception: %s %s", request.method, _path)
     origin = request.headers.get("origin")
     acao = origin if origin in _ALLOWED_ORIGINS else _ALLOWED_ORIGINS[0]
     return JSONResponse(

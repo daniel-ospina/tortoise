@@ -34,18 +34,19 @@ from typing import Any
 
 import numpy as np
 
-from tortoise.embeddings import EMBEDDING_MODEL, EmbeddingModel
+from tortoise.embeddings import (EMBEDDING_MODEL, EMBEDDING_MODEL_REVISION, EmbeddingModel)
 
 #: Short name → HF model id. Revision pins use the ``id@<commit>`` form —
 #: parsed by :func:`_split_pin`; the resolved revision is recorded at load.
-#: No commit pins are recorded in-repo yet (research/scoping docs carry none);
-#: pin entries via ``@<commit>`` before an evidence burn once the commits are
-#: resolved (HF tags are mutable — same-revision is asserted across the 6
-#: config runs by T4's manifest check).
+#: All four candidates are commit-pinned (P2, code review): HF tags are
+#: mutable and sentence-transformers unpickles pytorch_model.bin at load —
+#: a redirected tag would execute arbitrary code in the harness process.
+#: The bge-small pin mirrors EMBEDDING_MODEL_REVISION (production literal);
+#: the burn asserts same-revision across configs via T4's manifest check.
 PROBE_MODELS: dict[str, str] = {
-    "minilm": "sentence-transformers/all-MiniLM-L6-v2",
-    "arctic-xs": "snowflake/snowflake-arctic-embed-xs",
-    "arctic-s": "snowflake/snowflake-arctic-embed-s",
+    "minilm": "sentence-transformers/all-MiniLM-L6-v2@1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
+    "arctic-xs": "snowflake/snowflake-arctic-embed-xs@d8c86521100d3556476a063fc2342036d45c106f",
+    "arctic-s": "snowflake/snowflake-arctic-embed-s@e596f507467533e48a2e17c007f0e1dacc837b33",
     "bge-small": "BAAI/bge-small-en-v1.5@5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
 }
 

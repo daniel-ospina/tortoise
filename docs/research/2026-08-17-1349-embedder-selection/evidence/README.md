@@ -17,3 +17,14 @@ Reproduction: `tools/longmem_eval/run.py --retriever vector --db ... --model <ca
 then `tests/eval/retrieval/gate_1349.py` on the manifest. See
 `docs/adr/ADR-009-embedder-selection.md` for the decision record and
 `docs/research/2026-08-17-1349-embedder-selection.md` for the full burn log.
+
+> **Reproducibility note (2026-08-24):** the burn ran on commit `ae2c388c`
+> (pre-review-cycle). The PR's review fixes touched eval-critical files
+> (gate_1349, run.py, report.py, retrieve.py, embedder_probe, thresholds),
+> so re-running the gate on the CURRENT code emits the pre-registered
+> code_sha-drift BLOCK (precondition (d)): "re-run the gate + spot-checks on
+> drifted main (full re-burn only if eval code moved)". The statistical
+> disposition is unchanged (INSUFFICIENT-POWER n=138<200 → human judgment,
+> ADR-009) and the user override (proceed, T15 re-validation) is recorded in
+> verdict-final.json. A re-burn is a T15-era follow-up, not a precondition
+> of this PR — the swap ships on the burn evidence + user decision.
