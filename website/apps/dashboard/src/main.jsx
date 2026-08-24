@@ -2579,7 +2579,11 @@ function claimIntentInFlight() {
           // raw-curl dead end.
           <section className="overview empty-state graph-missing">
             <h2>Your graph is ready for its first data point</h2>
-            <p className="dim">Your team and API key are live — finish the setup to connect your tool, learn the skills, and seed your graph.</p>
+            <p className="dim">
+              Your team and API key are live. Finish the setup to connect your
+              tool, learn the two skills, and seed your graph — it only takes a
+              minute.
+            </p>
             <div className="empty-actions">
               <button className="btn-primary" onClick={() => { setWizardStep(1); setWelcomeMode(true) }}>
                 Continue setup →

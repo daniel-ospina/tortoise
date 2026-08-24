@@ -401,3 +401,42 @@ button:focus-visible, select:focus-visible, a:focus-visible, input:focus-visible
 .skill-row { display: flex; flex-direction: column; gap: 2px; padding: 0.6rem 0; border-bottom: 1px solid rgba(255,255,255,0.06); }
 .skill-row:last-of-type { border-bottom: none; }
 .skill-row strong { font-size: 14px; }
+
+/* #1643 UX: the empty-state cards (re-entry + first-data + welcome) — proper
+   spacing, typography, and a clear primary CTA. */
+.overview.empty-state {
+  max-width: 620px;
+  padding: 2rem 1.75rem;
+  background: var(--surface, #0d1a2d);
+  border: 1px solid var(--border, #1e293b);
+  border-radius: 12px;
+}
+.overview.empty-state h2 {
+  margin: 0 0 0.75rem;
+  font-size: 20px;
+  line-height: 1.35;
+}
+.overview.empty-state p.dim {
+  margin: 0 0 1.5rem;
+  line-height: 1.6;
+  font-size: 14px;
+}
+.overview.empty-state .empty-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 0.5rem;
+}
+.overview.empty-state .empty-actions .btn-primary {
+  padding: 10px 18px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.overview.empty-state .empty-actions .dim.small {
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.overview.empty-state .empty-actions code {
+  font-size: 12px;
+}
