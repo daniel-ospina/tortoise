@@ -37,26 +37,26 @@ def test_resolve_deepseek_direct_with_both_keys(monkeypatch):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
     monkeypatch.setenv("OPENROUTER_API_KEY", "or")
     monkeypatch.setenv("TORTOISE_EXTRACTOR_PROVIDER", "deepseek-direct")
-    assert resolve_extractor_provider() == ("deepseek-direct", "openrouter")
+    assert resolve_extractor_provider() == ("deepseek-direct", ["deepseek-direct", "openrouter"])
 
 
 def test_resolve_openrouter_with_both_keys(monkeypatch):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
     monkeypatch.setenv("OPENROUTER_API_KEY", "or")
     monkeypatch.setenv("TORTOISE_EXTRACTOR_PROVIDER", "openrouter")
-    assert resolve_extractor_provider() == ("openrouter", "deepseek-direct")
+    assert resolve_extractor_provider() == ("openrouter", ["openrouter", "deepseek-direct"])
 
 
 def test_resolve_deepseek_direct_without_fallback(monkeypatch):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
     monkeypatch.setenv("TORTOISE_EXTRACTOR_PROVIDER", "deepseek-direct")
-    assert resolve_extractor_provider() == ("deepseek-direct", None)
+    assert resolve_extractor_provider() == ("deepseek-direct", ["deepseek-direct"])
 
 
 def test_resolve_openrouter_without_fallback(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "or")
     monkeypatch.setenv("TORTOISE_EXTRACTOR_PROVIDER", "openrouter")
-    assert resolve_extractor_provider() == ("openrouter", None)
+    assert resolve_extractor_provider() == ("openrouter", ["openrouter"])
 
 
 def test_resolve_explicit_deepseek_missing_key_fails_closed(monkeypatch):
@@ -87,17 +87,17 @@ def test_resolve_unset_infers_deepseek_primary(monkeypatch):
     (owner-confirmed production decision, epic #1509 00-scope item 6)."""
     monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
     monkeypatch.setenv("OPENROUTER_API_KEY", "or")
-    assert resolve_extractor_provider() == ("deepseek-direct", "openrouter")
+    assert resolve_extractor_provider() == ("deepseek-direct", ["deepseek-direct", "openrouter"])
 
 
 def test_resolve_unset_deepseek_only(monkeypatch):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
-    assert resolve_extractor_provider() == ("deepseek-direct", None)
+    assert resolve_extractor_provider() == ("deepseek-direct", ["deepseek-direct"])
 
 
 def test_resolve_unset_openrouter_only(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "or")
-    assert resolve_extractor_provider() == ("openrouter", None)
+    assert resolve_extractor_provider() == ("openrouter", ["openrouter"])
 
 
 def test_resolve_unset_no_keys(monkeypatch):
@@ -126,8 +126,6 @@ def _fake_post_logger():
                     "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
 
     def _fake_post(self_or_url, *args, **kwargs):
-        # Patched as Session.post → (self, url, **kwargs); also tolerates the
-        # legacy module-level requests.post → (url, **kwargs) shape.
         if args:
             url = args[0]
         else:
@@ -323,3 +321,47 @@ def test_registry_key_normalized_to_real_model_id():
     # raw specs pass through untouched
     m3 = build_extractor_model("deepseek/deepseek-v4-flash")
     assert m3.primary.id == "deepseek/deepseek-v4-flash"
+
+
+def test_three_provider_rotation_pool(monkeypatch):
+    """Pilot #1549: with a Venice key, build_extractor_model returns the
+    RotatingModel pool [deepseek-direct, openrouter, venice] — all serving
+    the same model id."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or")
+    monkeypatch.setenv("VENICE_API_KEY", "vz")
+    m = build_extractor_model("deepseek-flash-direct")
+    from tortoise.model_adapters import RotatingModel, DeepSeekDirectModel, VeniceModel
+    assert isinstance(m, RotatingModel)
+    assert [p.provider for p in m.providers] == ["deepseek-direct", "openrouter", "venice"]
+    assert all(p.id == "deepseek-v4-flash" for p in m.providers)
+    assert isinstance(m.providers[0], DeepSeekDirectModel)
+    assert isinstance(m.providers[2], VeniceModel)
+
+
+def test_rotation_round_robin_and_cooldown(monkeypatch):
+    """The pool rotates through providers and cooldowns a failing one."""
+    from tortoise.model_adapters import RotatingModel
+
+    class _P:
+        def __init__(self, name, fail=False):
+            self.provider = name; self.fail = fail; self.last_finish_reason = None
+            self.calls = 0
+        def complete(self, **kw):
+            self.calls += 1
+            if self.fail:
+                raise RuntimeError("boom")
+            return f"ok-{self.provider}"
+        def close(self): pass
+
+    a, b, c = _P("a"), _P("b"), _P("c")
+    pool = RotatingModel([a, b, c], cooldown_s=0)  # 0 cooldown: rotation only
+    assert pool.complete(system="s", user="u") == "ok-a"
+    assert pool.complete(system="s", user="u") == "ok-b"
+    assert pool.complete(system="s", user="u") == "ok-c"
+    assert pool.complete(system="s", user="u") == "ok-a"  # round-robin
+    # a failing provider is skipped
+    bad = _P("bad", fail=True)
+    p2 = RotatingModel([bad, a], cooldown_s=10)
+    assert p2.complete(system="s", user="u") == "ok-a"
+    assert bad.provider in p2._cooldowns

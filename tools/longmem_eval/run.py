@@ -732,6 +732,7 @@ def run_evaluation(
     ingest_mode: str = "deterministic",
     extractor_model=None,
     workers: int = 1,
+    session_workers: int = 1,
     preflight: dict | None = None,
     # R3 (#1542) D2: the embedder pre-flight status (from _preflight_embedder
     # in run_main) — forwarded to the report methodology (D5: embedder +
@@ -865,7 +866,16 @@ def run_evaluation(
                     from .ingest_v2 import ingest_haystack_v2
                     ingest_stats = ingest_haystack_v2(
                         sdk, question, extractor_model,
-                        chunk_turns=chunk_turns)
+                        chunk_turns=chunk_turns,
+                        # Pilot #1549: session-parallel extraction within a
+                        # question (the LLM phase is the wall-clock dominant
+                        # cost; each worker gets a fresh model from the same
+                        # build path — no shared RoutingModel state).
+                        session_workers=session_workers,
+                        model_factory=(
+                            lambda: build_extractor_model(
+                                args.extractor_model or None)
+                            if session_workers > 1 else None))
                 else:
                     ingest_stats = ingest_haystack(
                         sdk, question, chunk_turns=chunk_turns)
@@ -1487,6 +1497,11 @@ def _build_parser() -> argparse.ArgumentParser:
                         "(default: the production router — TORTOISE_EXTRACTOR_"
                         "PROVIDER deepseek-direct primary / openrouter fallback, "
                         "uncapped, #1530)")
+    p.add_argument("--session-workers", type=int, default=1,
+                   help="parallelize session extraction WITHIN a question "
+                        "(pilot #1549: the LLM phase is the wall-clock "
+                        "dominant cost; 8 = up to ~10x faster when the API "
+                        "sustains it; requires the model factory path)")
     p.add_argument("--workers", type=int, default=1,
                    help="parallel question workers (default 1 = sequential). "
                         "Each question runs in its own isolated graph; the "
