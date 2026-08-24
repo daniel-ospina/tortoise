@@ -2189,8 +2189,11 @@ function claimIntentInFlight() {
   // app.premiselabs.co/welcome after signup (welcome.html did the
   // provisioning + key reveal-once; this is the in-dashboard onboarding:
   // chooser + routes to the API Keys tab where the key lives).
+  // #1643: the re-entry card covers EVERY empty-graph state — graph_ready
+  // may be false (missing graph — the seed write recovers it) or true with
+  // 0 points. When it shows, the legacy empty-state cards hide.
   const showReentryCard = !welcomeMode && !onboardingComplete &&
-    team && team.graph_ready !== false && (team.point_count ?? 0) === 0 && !wizardDone
+    team && (team.point_count ?? 0) === 0 && !wizardDone
 
   if (welcomeMode && authed) {
     // #1566: first-timers are provisioned IN-APP — show the provisioning
