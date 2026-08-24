@@ -31,3 +31,22 @@
 4. **Divergence surface enumerated** — 16 branches (recovery, guard, index composite D6, HNSW, concurrency, busy-error) with per-branch test impact.
 5. **Phased strangler rollout** — seam → one-half flip → both halves → allowlist/reaper shrink.
 6. **#1645 fixed the reaper, not the leak sources** — orphan baseline (4) is the migration precondition, met.
+
+## Decomposition (Stage 5 — MECE verified)
+
+Child issues (created 2026-08-24, MECE CLEAN after 4 dependency fixes):
+
+| Issue | Task | Phase | Depends |
+|-------|------|-------|---------|
+| #1661 | T1 URI redirect + seam | P1 | none |
+| #1662 | T2 wipe_server + journal + sweeps | P1 | #1661 |
+| #1663 | T3 skip-guard manifest | P1 | none (parallel) |
+| #1664 | T7 graph/namespace census | P1 | #1661 |
+| #1665 | T8 divergence + conformance | P1 | #1661, #1664, #1668 |
+| #1666 | T4 backend tripwire | P2 | #1661, #1662 |
+| #1667 | T5 markers + carve-out | P2 | #1661, #1664, #1663 |
+| #1668 | T6 CI half-b flip | P2 | #1661-1665 |
+| #1669 | T9 phase-3 both halves | P3 | #1666-1668 |
+| #1670 | T10 allowlist + reaper | P4 | #1669 |
+
+Execution order: P1 (#1663 ∥ #1661→#1662→#1664→#1665) → P1 gate → P2 (#1666/#1667→#1668) → P2 gate → P3 (#1669) → P3 gate → P4 (#1670).
