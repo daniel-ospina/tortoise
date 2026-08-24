@@ -333,10 +333,13 @@ def test_three_provider_rotation_pool(monkeypatch):
     m = build_extractor_model("deepseek-flash-direct")
     from tortoise.model_adapters import RotatingModel, DeepSeekDirectModel, VeniceModel
     assert isinstance(m, RotatingModel)
-    assert [p.provider for p in m.providers] == ["deepseek-direct", "openrouter", "venice"]
+    # Scale-optimized order (pilot #1549 research): venice (1000 RPM backbone)
+    # first, openrouter (cheapest lane), deepseek-direct (spare).
+    assert [p.provider for p in m.providers] == ["venice", "openrouter", "deepseek-direct"]
     assert all(p.id == "deepseek-v4-flash" for p in m.providers)
-    assert isinstance(m.providers[0], DeepSeekDirectModel)
-    assert isinstance(m.providers[2], VeniceModel)
+    assert isinstance(m.providers[2], DeepSeekDirectModel)
+    assert isinstance(m.providers[0], VeniceModel)
+    assert m.weights == [0.5, 0.35, 0.15]
 
 
 def test_rotation_round_robin_and_cooldown(monkeypatch):
@@ -355,13 +358,25 @@ def test_rotation_round_robin_and_cooldown(monkeypatch):
         def close(self): pass
 
     a, b, c = _P("a"), _P("b"), _P("c")
-    pool = RotatingModel([a, b, c], cooldown_s=0)  # 0 cooldown: rotation only
-    assert pool.complete(system="s", user="u") == "ok-a"
-    assert pool.complete(system="s", user="u") == "ok-b"
-    assert pool.complete(system="s", user="u") == "ok-c"
-    assert pool.complete(system="s", user="u") == "ok-a"  # round-robin
-    # a failing provider is skipped
+    pool = RotatingModel([a, b, c], cooldown_s=0)  # weighted rotation
+    served = set()
+    for _ in range(12):
+        out = pool.complete(system="s", user="u")
+        served.add(out)
+    assert served == {"ok-a", "ok-b", "ok-c"}  # all providers get served
+    # a failing provider is skipped + cooldowned
     bad = _P("bad", fail=True)
     p2 = RotatingModel([bad, a], cooldown_s=10)
     assert p2.complete(system="s", user="u") == "ok-a"
     assert bad.provider in p2._cooldowns
+    # weighting: a 0.8-weighted provider dominates the share
+    heavy = _P("heavy")
+    p3 = RotatingModel([heavy, a], cooldown_s=0, weights=[0.8, 0.2])
+    counts = {"ok-heavy": 0, "ok-a": 0}
+    for _ in range(50):
+        counts[pool3_out(p3)] += 1
+    assert counts["ok-heavy"] > counts["ok-a"]
+
+
+def pool3_out(pool):
+    return pool.complete(system="s", user="u")
