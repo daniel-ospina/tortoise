@@ -430,7 +430,7 @@ jobs:
               echo "HEARTBEAT: pytest still running — $p passed, $f failed so far"
             done ) &
           HB_PID=$!
-          timeout -s INT -k 10 55m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b' --maxfail=20 -r fEs --durations=15 > /tmp/pytest.log 2>&1
+          timeout -s INT -k 10 55m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
           # #1436: -v truncates skip reasons to terminal width (80 cols when
           # redirected to a file with COLUMNS unset), dropping e.g.
           # test_ep_directional's 81-char nodeid reason entirely — so the guard
@@ -439,6 +439,11 @@ jobs:
           # repeated, so a trailing -rfE would suppress the skip summary the
           # guard depends on (pinned by
           # tests/test_skip_guard.py::test_workflow_keeps_rs).
+          # #1663: emit lossless junitxml (--junitxml + -o junit_family=xunit1)
+          # so the coverage manifest (epic #1647 Task 3) can reconcile
+          # --collect-only expected nodeids against the junitxml testcases
+          # (file/line attributes only exist under junit_family=xunit1). Dormant
+          # at P1 — the guard step consumes it at P2 (Task 6, half-b flip).
           # #1371: capture pytest's real exit code IMMEDIATELY (before the
           # heartbeat kill / rc write below) and persist it for the orphan
           # check — the kill-aware logic needs it to distinguish a watchdog
