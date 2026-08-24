@@ -401,3 +401,30 @@ button:focus-visible, select:focus-visible, a:focus-visible, input:focus-visible
 .skill-row { display: flex; flex-direction: column; gap: 2px; padding: 0.6rem 0; border-bottom: 1px solid rgba(255,255,255,0.06); }
 .skill-row:last-of-type { border-bottom: none; }
 .skill-row strong { font-size: 14px; }
+
+/* #1643 UX: wizard footer nav — Back left, primary actions right. */
+.wizard-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+.wizard-nav .ghost {
+  padding: 8px 14px;
+  font-size: 13px;
+  background: none;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: var(--text, #e2e8f0);
+  border-radius: 8px;
+  cursor: pointer;
+}
+.wizard-nav-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+}
+.wizard-nav-spacer { flex: 1; }
