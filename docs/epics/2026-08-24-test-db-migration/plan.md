@@ -34,7 +34,7 @@ From the Test-Design gate: the epic's 5 verification surfaces mapped to the 8 E2
 | E2E-4 | Carve-out (342 tests) still passes on embedded | unit + integration (URI-unset job) | carve-out accidentally migrated | all 342 pass; recovery auto-rebuild (D2/D3) + busy-error (D11) embedded-only; no carve-out file's embedded path depends on `TORTOISE_DB_URI` being set |
 | E2E-5 | Fast matrix green on docker; wall ≤ 20% of baseline | e2e (CI matrix) | wall-time regression; watchdog ride | both halves pass; half a ≤ ~50m, half b clears 55m watchdog (target ≤ ~45m); wall recorded for P3/P4 merge decision |
 | E2E-6 | Missing docker → fail-closed / visible skip, never green-skip | e2e (outage simulation + skip-guard) | vacuous pass (#942 class) | every migrated test fails loudly OR skips with FalkorDB-reason → guard red; backend-identity tripwire catches "redirect inert + embedded succeeds" |
-| E2E-7 | Zero redislite orphans on docker halves; bounded on carve-out | e2e (orphan assert step) | leak accumulation | docker halves: 0 orphans post-run; carve-out jobs keep <20 bounded assert |
+| E2E-7 | Zero redislite orphans on docker halves; bounded on carve-out; **server GRAPH.LIST bounded (cycle-4 P1-9)** | e2e (orphan assert step + GRAPH.LIST check) | leak accumulation (redislite processes **and** server graph-count) | docker halves: 0 orphans post-run; carve-out jobs keep <20 bounded assert; **docker sessions end with `GRAPH.LIST` count < journal size + constant — the session-end/stale sweeps GRAPH.DELETE journaled graphs after DETACH (Task 2 Step 7, drop=True) so a persistent dev docker cannot accumulate every derived graph forever (the old spec measured redislite processes only — invisible to DETACH-only wipe accumulation)** |
 | E2E-8 | Divergence change-list conformance (D1–D16) | integration (conformance file) | silent divergence beyond the documented list | each D1–D16 branch asserts its documented behavior in both modes; the file is the executable change list |
 | — | **Seam redirect** (new unit surface) | unit (tests/test_redirect_seam.py) | redirect fires when it must not (prod path) | URI unset → `_is_embedded is True` byte-identical; URI + `TORTOISE_TEST_MODE` set → server mode + derived `test_*` name; explicit graph_name honored; `TORTOISE_TEST_NO_REDIRECT` exempts the **caller test module** (frame-identified, never the DB-file stem); `:memory:` derives a per-construction unique `test_memory_<nonce>` |
 | — | **wipe_server** (new unit surface) | unit (tests/test_wipe_server.py) | wiping a non-test graph (data loss) | wipes only `test_`/`tortoise_test_`-prefixed graphs; refuses non-loopback hosts; embedded `wipe()` unchanged |
@@ -54,7 +54,7 @@ Each E2E ships as a concrete artifact (new test file, CI job config, or existing
 - **E2E-4** — carve-out job (URI unset) running exactly the 342-test set; skip-guard exempts them (redislite-availability class ≠ FalkorDB-availability). **Gates:** P1 (untouched) → P4 (post-shrink registry consistency).
 - **E2E-5** — fast-matrix CI jobs; half-b wall is the P2 data point, both-halves the P3 gate. **Wall measured on the JOB wall** (`timeout-minutes: 60`), not the pytest-step wall (cycle-2 P2-12: manifest collect-only runs in its own step so it cannot consume the pytest step's 55m budget) — **AND the pytest-step wall separately (cycle-3 P2-16):** the run step captures `step_wall` via the in-step `SECONDS` accounting the watchdog already uses; gate `step_wall < 55m` with margin (target ≤ ~45m) so a step that silently rides the watchdog is caught by the gate, not just reported. **Gates:** P2 (half b) → P3 (both halves).
 - **E2E-6** — skip-guard coverage manifest + backend-identity tripwire; outage simulation = **docker service down WITH URI set** → FalkorDB-reasoned skips → guard red (cycle-2 P2-6: a URI-less run is the carve-out shape and can never go red; the vacuous-pass side is closed by `TORTOISE_TEST_EXPECT_URI=1`, the session signal that fails a docker-half session whose URI is missing). **Gates:** P2 (manifest on half b) → P3 (both halves).
-- **E2E-7** — orphan-assert CI step re-targeted per surface. **Gates:** P3 (docker ~0) → P4 (reaper demotion; dev-machine <20 without reaper).
+- **E2E-7** — orphan-assert CI step re-targeted per surface; **cycle-4 P1-9 adds the server-side GRAPH.LIST growth bound** (docker sessions end with `GRAPH.LIST` count < journal size + constant — DETACH-only wipes empty but never remove graphs, invisible to the redislite-process count). **Gates:** P3 (docker ~0) → P4 (reaper demotion; dev-machine <20 without reaper).
 - **E2E-8** — `tests/test_divergence_conformance.py` (new): asserts D2/D3 recovery raises on server, D6 composite only on server, D8 HNSW only on server, D11 busy-error embedded-only, D12 multi-tenant on server. **Gates:** P1 (expectation split) → P2 (side-by-side confirmation) → P3 (both modes enforced).
 
 ---
@@ -69,7 +69,7 @@ Each E2E ships as a concrete artifact (new test file, CI job config, or existing
 
 **Acceptance:**
 - With `TORTOISE_DB_URI` unset, `FalkorProjection(path=...)` constructs identically to today (`_is_embedded is True`, embedded subclass, AOF/relative-path semantics intact) — verified by the pre-existing embedded suite plus the new inertness test.
-- With `TORTOISE_DB_URI` set to a supported scheme (`docker`/`redis`/`rediss`), `TORTOISE_TEST_MODE=1`, **and a calling test frame present** (`_caller_test_stem() is not None` — cycle-2 P1-1b), `FalkorProjection(path=...)` from a non-exempt test module constructs server-mode (`_is_embedded is False`, host/port/user/pass from the URI — `from_uri` semantics), with graph name = test-prefixed explicit `graph_name` if given (the **shared opt-in**: honored verbatim, e.g. `test_explicit`/`test_suite_<uuid>`), else derived `test_<stem_sanitized>_<hash12(session+path)>` (guard-passing, **per-path AND per-session unique** — cycle-2 P0-1b: distinct paths with the same explicit non-test name (the parity/g_consistency pairs) must land on distinct server graphs; cycle-2 P2-3: the session nonce keeps concurrent sessions' same-path derivations distinct; cycle-3 P2-5: the path-derived stem is sanitized to `[a-zA-Z0-9_]` before embedding — tmp paths carry `-`/`/`; cycle-3 P2-17: 12 hex = 48+ bits, the 32-bit `[:8]` is a collision risk at multi-thousand-graph scale). With URI set but `TORTOISE_TEST_MODE` absent (prod tools: backup.py:134/144, ingest.py:471, `__main__.py:13` rebuild, migrate_db.py:75/184, hosted_api.py:6254/8263/8357, pipeline_cli.py:139 — verified), **no redirect** — the embedded path construction is preserved (plan-review P0-4); prod-role entry points additionally `os.environ.pop("TORTOISE_TEST_MODE", None)` **only in their `if __name__ == "__main__":` blocks / subprocess-launcher paths** so a TEST_MODE leaked into their process cannot redirect them (cycle-2 P2-10; cycle-3 P1-3: never at module import or in a `main()` a test can call in-process — a mid-session pop would silently kill the redirect and green-pass on the wrong backend). **hosted_api is dropped from the pop list entirely** (verified: its 3 `path=` constructions at 6254/8263/8357 are inside `if getattr(proj, "_path", None):` embedded-only guards — no pop needed; it has no `main()`/`__main__` block to pin to).
+- With `TORTOISE_DB_URI` set to a supported scheme (`docker`/`redis`/`rediss`), `TORTOISE_TEST_MODE=1`, **and a calling test frame present** (`_caller_test_stem() is not None` — cycle-2 P1-1b), `FalkorProjection(path=...)` from a non-exempt test module constructs server-mode (`_is_embedded is False`, host/port/user/pass from the URI — `from_uri` semantics), with graph name = test-prefixed explicit `graph_name` if given (the **shared opt-in**: honored verbatim, e.g. `test_explicit`/`test_suite_<uuid>`), else derived `test_<stem_sanitized>_<hash12(session+path)>` (guard-passing, **per-path AND per-session unique** — cycle-2 P0-1b: distinct paths with the same explicit non-test name (the parity/g_consistency pairs) must land on distinct server graphs; cycle-2 P2-3: the session nonce keeps concurrent sessions' same-path derivations distinct; cycle-3 P2-5: the path-derived stem is sanitized to `[a-zA-Z0-9_]` before embedding — tmp paths carry `-`/`/`; cycle-3 P2-17: 12 hex = 48+ bits, the 32-bit `[:8]` is a collision risk at multi-thousand-graph scale). With URI set but `TORTOISE_TEST_MODE` absent (prod tools: backup.py:134/144, ingest.py:471, **`__main__.py` 6 path-construction sites** — L13 rebuild, L521 doctor-fallback, L1724 `_resolve_db_target`, L1915 dump, L2165 backfill, L2562 export; **cycle-4 P2-8 corrected census: the plan's "`__main__.py:13`" undercounted — VERIFIED 6 sites this pass; backup.py has NO `main()`/`__main__` block — its backup/restore entry is the `tortoise` CLI at `__main__.py:4121-4127` (pyproject scripts: tortoise/tortoise-ingest/tortoise-serve only, verified)**; migrate_db.py:75/184, hosted_api.py:6254/8263/8357, pipeline_cli.py:139 — verified), **no redirect** — the embedded path construction is preserved (plan-review P0-4); prod-role entry points additionally `os.environ.pop("TORTOISE_TEST_MODE", None)` **only in their `if __name__ == "__main__":` blocks / subprocess-launcher paths** so a TEST_MODE leaked into their process cannot redirect them (cycle-2 P2-10; cycle-3 P1-3: never at module import or in a `main()` a test can call in-process — a mid-session pop would silently kill the redirect and green-pass on the wrong backend). **hosted_api is dropped from the pop list entirely** (verified: its 3 `path=` constructions at 6254/8263/8357 are inside `if getattr(proj, "_path", None):` embedded-only guards — no pop needed; it has no `main()`/`__main__` block to pin to).
 - **Lane-safe seam/parity tests (cycle-3 P1-6):** every seam/parity test is self-contained w.r.t. `TORTOISE_DB_URI` — unset-assuming tests `monkeypatch.delenv("TORTOISE_DB_URI", raising=False)`, URI-assuming tests set it explicitly; E2E-1 is parametrized with real env control (embedded leg `delenv`, docker leg `setenv`) so a URI-set dev lane can never run docker-vs-docker (which can never detect divergence). Item added to the Task 1 acceptance checklist (below) and verified in Step 1's tests.
 - **Non-loopback refusal (cycle-2 P0-2, fail-fast):** the redirect raises `RuntimeError` with a locality message when the URI's host is not loopback — BEFORE `path = None` falls through to any construction, so a typo'd/shared `TORTOISE_DB_URI` can never mint `test_*` graphs or write on a remote server (D-4's protection currently fires only at `wipe_server`, which is AFTER pollution). Escape: `TORTOISE_TEST_ALLOW_REMOTE=1` (explicit opt-in; wipe_server/sweep still refuse — D-4 unchanged; **cycle-3 P2-6: the escape is WRITE-ONLY by design** — a `TORTOISE_TEST_ALLOW_REMOTE=1` session can redirect + write on a remote server but cannot wipe it, so it is only usable for assert-only/read-only sessions; recorded in Failure Modes. If a future workflow needs remote wipes, that is a separate explicit opt-in, never folded into the write escape). The session-start tripwire (Task 4) re-checks the same predicate so the failure happens before ANY test writes, not just before the first redirect-eligible construction.
 - **Host recording + connection lifecycle (cycle-3 P0-1/P1-4, supersedes cycle-2 P2-11):** the host branch records `self._host = host` at construction (both `from_uri` → `cls(host=...)` and the redirect's fall-through land there), so `wipe_server`/session sweep/tripwire read the projection, never the raw client. VERIFIED: the host branch constructs `from falkordb import FalkorDB` (raw — projection/__init__.py:380-381); the guarded subclass is embedded-only (redislite can't take `host=`/`port=`), so the redirect inherits the existing host branch's raw-client lifecycle — **no better, no worse than today's `from_uri` sites**, and `FalkorProjection.close()` disconnects the pool (L1547-1568, verified). The boundedness unit test asserts POOL RELEASE (below), not `conn.closed`/`conn.connection` — those do not exist on a redis.Redis (redis-py 8.1.0 verified: host lives in `connection_pool.connection_kwargs['host']`, and `_falkordb_version_cache_key` at projection L999 reads the same dead `.connection.host` pattern — fixed by the same `self._host` recording).
@@ -228,7 +228,14 @@ def test_caller_test_stem_nearest_frame_semantics(uri_env, monkeypatch):
     # never be listed). Non-test_-prefixed helpers (tests/_embedded.py) are
     # skipped by the prefix sniff and resolve UP to the calling test module.
     from tortoise.projection import _caller_test_stem
-    import tests.test_helpers as _th  # test_-prefixed helper module (new, tiny)
+    # Cycle-4 P1-4: tests/test_helpers.py is CREATED in Step 3's edit list
+    # below (this file would otherwise ImportError at collection — the
+    # cycle-3 plan referenced it without an owner task). It is the ONLY
+    # test_-prefixed shared helper; the P2-9 stem-registry guard (Task 5
+    # Step 1) asserts no carve-out file imports it — a carve-out
+    # constructing through it would resolve to stem "test_helpers" (not its
+    # own exempted stem) and silently lose its redirect exemption.
+    import tests.test_helpers as _th  # test_-prefixed helper module (tiny, new)
     assert _caller_test_stem() == "test_redirect_seam"  # this file is nearest
     assert _th.construct_via_helper() == "test_helpers", \
         "nearest-frame semantics: the helper's own stem wins over the caller"
@@ -280,6 +287,32 @@ def test_allow_remote_escape_lets_non_loopback_through(monkeypatch):
     monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@db.internal.example.com:6379")
     monkeypatch.setenv("TORTOISE_TEST_MODE", "1")
     monkeypatch.setenv("TORTOISE_TEST_ALLOW_REMOTE", "1")
+    # Cycle-4 P1-1: the redirect falls through to the host branch, which
+    # constructs `from falkordb import FalkorDB` — and the REAL FalkorDB
+    # constructor performs a LIVE round-trip at __init__ (falkordb.py:132
+    # Is_Sentinel(conn) → conn.info(), verified in the vendored 3.x source)
+    # BEFORE returning, so a remote host raises redis.exceptions.ConnectionError
+    # (not RuntimeError) and the test could never reach its assertions. FIX:
+    # monkeypatch falkordb.FalkorDB with a stub — the host branch only needs
+    # select_graph() + close() (projection L380-390 + L1547-1568, verified);
+    # the redirect's own predicate + _host recording are what this test pins.
+    import types
+
+    class _GraphStub:
+        def query(self, *a, **k):
+            return types.SimpleNamespace(result_set=[])
+
+    class _DbStub:
+        def select_graph(self, name):
+            return _GraphStub()
+        def close(self):
+            pass
+
+    class _FakeFalkorDB:
+        def __init__(self, **kw):
+            self.db = _DbStub()
+
+    monkeypatch.setattr("falkordb.FalkorDB", _FakeFalkorDB)
     proj = FalkorProjection("/tmp/seam-remote.db", skip_health_check=True)
     try:
         assert proj._is_embedded is False
@@ -290,26 +323,50 @@ def test_allow_remote_escape_lets_non_loopback_through(monkeypatch):
 
 
 def test_redirect_connection_boundedness(uri_env):
-    # Cycle-3 P1-4 (re-scoped from cycle-2 P2-11): the host branch constructs
-    # the RAW falkordb.FalkorDB (projection/__init__.py:380-381, verified) —
-    # the guarded subclass is embedded-only (redislite cannot take host=/port=).
-    # The redirect inherits that branch's lifecycle: no better, no worse than
-    # today's from_uri sites. The OLD assert read conn.closed/conn.connection on
-    # a redis.Redis — neither exists (redis-py 8.1.0, verified) — so it passed
-    # vacuously. Re-scoped assert: FalkorProjection.close() must RELEASE the
-    # pool (close() disconnects it, L1547-1568, verified) — many construct/
-    # close cycles return the pool's available connections to baseline.
+    # Cycle-4 P1-2 (re-scoped from cycle-3 P1-4 — the pool-release assert was
+    # STILL INVERTED/VACUOUS): on redis-py 8.1.0, `p.db.connection` CHECKS OUT
+    # a connection (pool._available_connections == 0 before), then close() →
+    # pool.release() → disconnect() (which does NOT remove connection objects)
+    # → reset() (which empties) → after == 0 → "0 >= 0" passes; AND a NO-OP
+    # close (a real leak) also passes (after == before). The assert cannot
+    # distinguish release from leak. Re-scoped to a SERVER-VISIBLE metric +
+    # a weakref live-count; redis-py introspection is secondary only.
+    #   (a) WEAKREF live ConnectionPool count: after close(), the pool must be
+    #       unreferenced (collected by gc) — a leaked client keeps it alive.
+    #   (b) SERVER-VISIBLE: INFO clients' connected_clients before vs after 20
+    #       construct/close cycles must grow by ≤ 1 (the probe's own client),
+    #       never by ~20 — this is what the docker job can actually observe.
+    import gc
+    import weakref
     import redis
+    pools = []
     for i in range(20):
         p = FalkorProjection(f"/tmp/seam-conn-{i}.db")
         conn = p.db.connection  # redis.Redis client
-        pool = conn.connection_pool
-        before = len(pool._available_connections)
-        p.close()
-        after = len(pool._available_connections)
-        assert after >= before, \
-            f"iteration {i}: close() leaked a pool connection ({before} → {after})"
+        pools.append(weakref.ref(conn.connection_pool))
         assert isinstance(conn, redis.Redis), "host branch is the raw redis client"
+        p.close()
+    gc.collect()
+    live = [r for r in pools if r() is not None]
+    assert len(live) <= 1, \
+        f"close() leaked {len(live)} of 20 live ConnectionPool instances (weakref)"
+    probe = redis.Redis(host="localhost", port=6379, password="falkordb",
+                        socket_connect_timeout=5)
+    try:
+        before = int(probe.info("clients")["connected_clients"])
+    finally:
+        probe.close()
+    for i in range(20):
+        p = FalkorProjection(f"/tmp/seam-conn-{i}.db")
+        p.close()
+    probe = redis.Redis(host="localhost", port=6379, password="falkordb",
+                        socket_connect_timeout=5)
+    try:
+        after = int(probe.info("clients")["connected_clients"])
+    finally:
+        probe.close()
+    assert after - before <= 1, \
+        f"close() left {after - before} extra server-side clients (INFO clients)"
 
 
 def test_unsupported_uri_scheme_stays_embedded(monkeypatch):
@@ -336,7 +393,23 @@ explicit_path = path is not None
 
 Between the no-arg resolution and the existing `if path is not None:` branch, insert the redirect. It resolves the server params, sets `path = None`, and falls through to the EXISTING `elif host is not None:` branch — the host-mode construction is reused, not duplicated, and the embedded body (relative-path reject, AOF config, `FalkorDB(path, serverconfig=...)` subclass) is skipped because `path` is now None. `skip_health_check`/`allow_nonstandard_path` keep their caller values (plan-review P0-4) — no recursive `cls(...)` call. **The host branch additionally records `self._host = host` after constructing `self.db` (cycle-3 P0-1)** — the redirect's reassigned `host` local flows into that branch, and `from_uri` → `cls(host=...)` lands there too, so every server projection carries its host on the projection (wipe_server/sweep/tripwire read it instead of the raw client, which has no `.host` — redis-py 8.1.0 verified; `_falkordb_version_cache_key` at L999 reads the same dead pattern and is fixed by the same recording: `host = getattr(self, "_host", None)` first).
 
-**Edit list for this step (cycle-3 P2-4):** add `import hashlib` to the module imports of `tortoise/projection/__init__.py` (verified NOT currently imported — the snippet below calls `hashlib.sha1`).
+**Edit list for this step (cycle-3 P2-4 + cycle-4 P1-4):** add `import hashlib` to the module imports of `tortoise/projection/__init__.py` (verified NOT currently imported — the snippet below calls `hashlib.sha1`). **Create `tests/test_helpers.py` (cycle-4 P1-4 — the cycle-3 plan's `test_caller_test_stem_nearest_frame_semantics` imports it but no task created it → ImportError at collection):** a tiny module whose ONLY content is the nearest-frame pin:
+
+```python
+# tests/test_helpers.py — epic #1647 cycle-4 P1-4
+"""Tiny test_-prefixed shared helper pinning _caller_test_stem()'s NEAREST-frame
+semantics (cycle-3 P2-18): a construction made through THIS module resolves to
+"test_helpers" — the helper's own stem — never the calling file's. A shared
+test_-prefixed helper must therefore NEVER be listed in TEST_NO_REDIRECT_STEMS
+(its exemption would exempt every caller), and no carve-out file may import it
+(a carve-out constructing through it would lose its own stem's exemption). The
+P2-9 stem-registry guard (Task 5 Step 1) enforces both."""
+from tortoise.projection import _caller_test_stem
+
+
+def construct_via_helper() -> str:
+    return _caller_test_stem()
+```
 
 ```python
 # Epic #1647 (D-1=A): class-level URI-aware redirect. Fires ONLY in a test
@@ -580,7 +653,7 @@ git commit -m "feat(testdb): class-level URI-aware redirect + URI-aware seam fix
 - Existing `wipe()` unchanged: all-graphs wipe on embedded; server refusal retained.
 - **Backup fixtures use guard-passing per-test graphs (cycle-2 P0-1a):** `test_backup_sweep._make_env()` seeds `registry_control_plane` + `team_team_x` — non-test-prefixed graphs on the SHARED projection that only `wipe()` (all-graphs) cleared. `_wipe_or` → `wipe_server` skips them by design (fail-closed), so leftover Team nodes survive into later tests (`test_enumerate_teams_returns_registry_ids`, `test_sweep_no_teams_is_signal_not_incident` break order-dependently). The fixtures route the registry/team graph names through a per-test config seam (Step 6): `test_registry_<uuid>` + `test_team_<uuid>_tortoise` — extending the P1-5 per-test-unique-name pattern. A docker-lane unit test proves team/registry isolation across two sequential tests.
 - `_wipe_or(proj)` dispatches on `_is_embedded`: embedded → `wipe(proj)` (all-graphs, today's semantics); server → `wipe_server(proj)` (filtered, loopback-only). This is the plan-review P0-2 fix — Task 2 of the ORIGINAL plan only added `wipe_server` and no task rewired the callers, so `test_projection._shared_proj()` (per-test `_wipe()`), `test_backup_sweep` (22 calls), `test_projection_version_gate` (6), `test_analyze` (3), `test_1162_add_operator_local_svbp`, `test_github_connector` would all raise on docker. Every migrated `wipe()` caller converts to `_wipe_or()`; E2E-2's gate depends on this.
-- **Session-end server sweep (plan-review P2-14 + cycle-2 P0-3/P2-1/3):** a conftest session-end autouse fixture (URI set only) drops the `test_`-prefixed graphs CREATED BY THIS SESSION — mirroring `_redislite_hygiene`'s active-suite registry + defer-to-last-suite-standing: (1) the fixture records every graph it created in a session-scoped set (`test_suite_<uuid>`/`test_memory_<nonce>`/derived names all embed the session token from `TORTOISE_TEST_SESSION`); (2) it sweeps ONLY that set — never another concurrent suite's live graphs; (3) the FULL leftover sweep (all `test_`-prefixed) is deferred to the LAST suite standing (an active-suite marker file, same pattern as `_redislite_hygiene`), so two concurrent URI sessions on one docker cannot drop each other's live graphs; (4) a **session-start stale sweep** drops graphs whose session token is not in the active registry (crash leftovers), and (5) an **atexit fallback** (mirroring `_redislite_hygiene`) runs the sweep when the session dies abnormally before the session-end fixture.
+- **Session-end server sweep (plan-review P2-14 + cycle-2 P0-3/P2-1/3 + cycle-4 P2-9):** a conftest session-end autouse fixture (URI set only) drops the `test_`-prefixed graphs CREATED BY THIS SESSION — mirroring `_redislite_hygiene`'s active-suite registry + defer-to-last-suite-standing: (1) the fixture records every graph it created in a **per-session created-graph JOURNAL** (cycle-3 P1-8 — **NOT** a token-embedded name claim; cycle-4 P2-9: the old bullet said "`test_suite_<uuid>`/`test_memory_<nonce>`/derived names all embed the session token from `TORTOISE_TEST_SESSION`" — FALSE, and contradicted by P1-8's own "not invertible"/"os.urandom nonce" finding: derived names are `hash12(session+path)` (not recoverable) and nonce names use `os.urandom` (not the session token), so NO graph name carries a recoverable session token — the journal is the only source of truth); (2) it sweeps ONLY the journal's names — never another concurrent suite's live graphs; (3) the FULL leftover sweep (all `test_`-prefixed) is deferred to the LAST suite standing (an active-suite marker file, same `{pid}-{uuid8}` format + `pid=`/`start=` lines + `active_suite_markers`/`_process_start_time` helpers as `_redislite_hygiene` — cycle-4 P2-1), so two concurrent URI sessions on one docker cannot drop each other's live graphs; (4) a **session-start stale sweep** drops DEAD sessions' journaled graphs (journal present, marker absent), and (5) an **atexit fallback** (mirroring `_redislite_hygiene`) runs the sweep when the session dies abnormally before the session-end fixture.
 - Unit surface green; the shared-graph tier (E2E-2) uses it.
 
 **Files:**
@@ -648,17 +721,21 @@ def test_wipe_server_skips_non_test_graphs(server_proj):
         "MATCH (n) RETURN count(n)").result_set[0][0] == 0  # not wiped — never created
 
 def test_wipe_server_refuses_non_loopback(monkeypatch):
-    from tortoise.projection import FalkorProjection
-    # P2-10: skip_health_check=True — the constructor's auto health check
-    # probes the unreachable host and raises RuntimeError BEFORE wipe_server
-    # can run its own refusal, so the test could never pass without it.
-    proj = FalkorProjection(host="db.internal.example.com", port=6379,
-                            graph_name="test_remote", skip_health_check=True)
-    try:
-        with pytest.raises(RuntimeError, match="loopback"):
-            wipe_server(proj)
-    finally:
-        proj.close()
+    import types
+    # Cycle-4 P1-1: constructing FalkorProjection(host="db.internal...") here
+    # can NEVER reach wipe_server — the host branch builds the REAL
+    # falkordb.FalkorDB, whose __init__ does a LIVE round-trip at
+    # construction (falkordb.py:132 Is_Sentinel(conn) → conn.info(),
+    # verified in the vendored 3.x source) and raises
+    # redis.exceptions.ConnectionError (not RuntimeError) BEFORE returning —
+    # so pytest.raises(RuntimeError, match="loopback") never fires (and the
+    # cycle-1 P2-10 skip_health_check fix only bypasses the projection's own
+    # health probe, not the falkordb client's). FIX: stub the projection —
+    # wipe_server reads ONLY proj._host + (past the host check) db
+    # list_graphs()/select_graph(); the host check raises first here.
+    proj = types.SimpleNamespace(_host="db.internal.example.com")
+    with pytest.raises(RuntimeError, match="loopback"):
+        wipe_server(proj)
 
 
 def test_embedded_wipe_still_refuses_server_mode(server_proj):
@@ -721,6 +798,40 @@ def test_team_registry_isolation_across_sequential_tests(server_proj, monkeypatc
             assert stale == 0, "test 0's Team survived into test 1 (pollution)"
 
 
+def test_per_test_wipe_or_touches_only_session_set(server_proj, monkeypatch):
+    # Cycle-4 P0-1 (WIRING): Task 2 Step 6 converts every caller to
+    # `_wipe_or(proj)` with NO scope arg. Under the cycle-3 spec that meant
+    # scope=None → server-global blind wipe (re-opening the P1-7 concurrency
+    # hazard + quadratic wall). This test runs the wipe EXACTLY as converted
+    # and proves the default scope is the session's created-since-last-wipe
+    # registry — a foreign session's graph + unrelated test_* graphs survive.
+    import uuid
+    from tests._embedded import _wipe_or, _JOURNAL, _WIPED_UP_TO
+    foreign = f"test_foreign_{uuid.uuid4().hex[:8]}"
+    foreign_g = server_proj.db.select_graph(foreign)
+    foreign_g.query("CREATE (:Point {id:'foreign'})")
+    unrelated = []
+    for i in range(100):
+        g = f"test_unrelated_{i}"
+        server_proj.db.select_graph(g).query("CREATE (:Point {id:'u'})")
+        unrelated.append(g)
+    # session's own since-last-wipe set (the journal appender records it)
+    mine = f"test_ws_{uuid.uuid4().hex[:8]}"
+    server_proj.db.select_graph(mine).query("CREATE (:Point {id:'mine'})")
+    _JOURNAL.append(mine)
+    _wipe_or(server_proj)  # converted-style call: NO explicit scope
+    assert server_proj.db.select_graph(mine).query(
+        "MATCH (n) RETURN count(n)").result_set[0][0] == 0, "session's own graph wiped"
+    assert foreign_g.query(
+        "MATCH (n) RETURN count(n)").result_set[0][0] == 1, \
+        "foreign-session graph's nodes must SURVIVE a per-test wipe"
+    for g in unrelated:
+        assert server_proj.db.select_graph(g).query(
+            "MATCH (n) RETURN count(n)").result_set[0][0] == 1, \
+            f"unrelated test_* graph {g} must survive (scope ≠ server-global)"
+    _JOURNAL.clear(); _WIPED_UP_TO = 0  # reset the shared registry for later tests
+
+
 def test_wipe_server_failure_is_collected(server_proj, monkeypatch):
     # Cycle-2 P2-7: a failing DETACH must re-raise, not pass silently.
     def _boom(*a, **k):
@@ -738,7 +849,7 @@ Expected: FAIL — `wipe_server` does not exist (ImportError); all server-mode t
 **Step 3: Implement**
 
 ```python
-def wipe_server(proj, scope: set[str] | None = None) -> None:
+def wipe_server(proj, scope: set[str] | None = None, drop: bool = False) -> None:
     """Server-mode hermeticity wipe (epic #1647, D-4).
 
     Enumerates list_graphs() and DETACH-DELETEs ONLY graphs named
@@ -752,6 +863,26 @@ def wipe_server(proj, scope: set[str] | None = None) -> None:
     considered — a per-test wipe must never blind-wipe another concurrent
     session's live graphs; scope=None is the server-global sweep, used only
     at session-end/last-suite-standing.
+
+    Cycle-4 P0-1 (scope DEFAULT — never None for per-test callers): the
+    caller-side registry below (tests/_embedded.py `_CREATED_SINCE_LAST_WIPE`,
+    populated by the journal appender) is the default scope, so a converted
+    `_wipe_or(proj)` with NO explicit scope argument is STILL scoped to the
+    session's created set — the cycle-3 signature added `scope=` but the
+    Task 2 Step 6 conversion never wired it, so every converted caller
+    passed scope=None → server-global blind wipe (re-opening the
+    concurrent-session hazard + quadratic wall). `_wipe_or` resolves the
+    default below; wipe_server keeps scope=None meaning "caller decided
+    global" for the session-end/last-suite-standing sweep ONLY.
+
+    Cycle-4 P1-9 (GRAPH.DELETE after DETACH): DETACH DELETE empties a graph
+    but never removes it — every wiped graph accumulates in GRAPH.LIST
+    forever (invisible to the orphan assert, which counts redislite
+    processes). The session-end/stale sweeps (Step 7) therefore call
+    `wipe_server(..., drop=True)` — DETACH first, then GRAPH.DELETE the
+    journaled names so server graph-count stays bounded (E2E-7's new
+    bound: server graph count < journal size + constant). Per-test wipes
+    keep drop=False (graphs are reused across tests in a session).
     """
     from tortoise.projection import _is_loopback_host  # shared predicate (P0-2)
     # Cycle-3 P0-1: host extraction reads the projection, never the raw
@@ -773,6 +904,7 @@ def wipe_server(proj, scope: set[str] | None = None) -> None:
             f"wipe_server() refuses non-loopback host {host!r} — test wipes "
             f"are local-only (decision D-4)")
     failures = []
+    dropped = []
     for g in proj.db.list_graphs() or []:
         if scope is not None and g not in scope:
             continue  # cycle-3 P1-7: per-test wipes touch only the session's own graphs
@@ -782,13 +914,43 @@ def wipe_server(proj, scope: set[str] | None = None) -> None:
             proj.db.select_graph(g).query("MATCH (n) DETACH DELETE n")
         except Exception as e:  # P2-7: collect + re-raise, never pass silently
             failures.append((g, e))
+        else:
+            if drop:
+                dropped.append(g)
     if failures:
         raise RuntimeError(
             "wipe_server() failed on graph(s): " +
             "; ".join(f"{g}: {e!r}" for g, e in failures))
+    for g in dropped:  # cycle-4 P1-9: DETACH-then-DELETE keeps GRAPH.LIST bounded
+        try:  # noqa: SIM105
+            proj.db.select_graph(g).query("GRAPH.DELETE")
+        except Exception as e:
+            failures.append((g, e))
+    if failures:
+        raise RuntimeError(
+            "wipe_server() GRAPH.DELETE failed on graph(s): " +
+            "; ".join(f"{g}: {e!r}" for g, e in failures))
 
 
-def _wipe_or(proj, scope=None) -> None:
+def _created_since_last_wipe() -> set[str]:
+    """The session's created-since-last-wipe set (cycle-4 P0-1/P2-10).
+
+    Module-level in-memory registry in tests/_embedded.py: the journal
+    appender (Task 2 Step 7) records every graph name the redirect/seam/
+    from_uri minted, and the per-test autouse fixture advances the
+    `_WIPED_UP_TO` cursor to len(_JOURNAL) after each wipe. `_wipe_or`
+    defaults its scope to the slice of the journal AFTER that cursor, so a
+    per-test wipe is O(created-since-last-wipe) — NOT O(whole-session)
+    (cycle-4 P2-10: scoping to the session's full accumulated created-set
+    is still quadratic across a long session — the honest bound is the
+    since-last-wipe delta). The full `_JOURNAL` stays intact for the
+    session-end sweep's source of truth.
+    """
+    global _WIPED_UP_TO
+    return set(_JOURNAL[_WIPED_UP_TO:])
+
+
+def _wipe_or(proj, scope: set[str] | None = None) -> None:
     """Mode-dispatching hermeticity wipe (plan-review P0-2).
 
     Embedded projection → wipe(proj) (all-graphs, today's semantics).
@@ -798,11 +960,32 @@ def _wipe_or(proj, scope=None) -> None:
     refusal. Cycle-3 P1-7: per-test callers pass the session's created-set
     as scope (wipe_server then touches ONLY that set — never another
     concurrent session's live graphs); scope=None is the server-global full
-    sweep, reserved for session-end/last-suite-standing only."""
+    sweep, reserved for session-end/last-suite-standing only.
+
+    Cycle-4 P0-1 (WIRING — the cycle-3 fix was signature-only): when the
+    caller passes NO scope (every Task 2 Step 6 conversion does today),
+    scope DEFAULTS to `_created_since_last_wipe()` — the session's
+    created-since-last-wipe registry — NEVER None. scope=None (true
+    server-global) is reachable only via the explicit sentinel used by the
+    session-end/last-suite-standing sweep. The per-test autouse fixture
+    (Step 7 item 0a) advances the since-last-wipe cursor after each wipe so
+    the next per-test wipe is O(delta), not O(session) (cycle-4 P2-10)."""
     if getattr(proj, "_is_embedded", False):
         wipe(proj)
     else:
+        if scope is None:
+            scope = _created_since_last_wipe()  # cycle-4 P0-1: never None by default
         wipe_server(proj, scope=scope)
+
+
+# Cycle-4 P0-1/P2-3: the created-set registry + per-session journal live in
+# tests/_embedded.py next to wipe/_wipe_or. The journal is append-only, one
+# graph name per line, written with per-append atomicity (open/write/close
+# per append — a torn write can never interleave); the tolerant reader
+# parses line-by-line and truncates at the first unparseable line (a
+# truncated final line from a killed writer is dropped, the rest honored).
+_JOURNAL: list[str] = []
+_WIPED_UP_TO = 0
 ```
 
 **Step 4: Run to verify they pass**
@@ -816,6 +999,8 @@ Run: `uv run pytest tests/test_projection.py -v -k "wipe"` → embedded wipe pat
 **Step 6: Convert the `wipe()` callers to `_wipe_or()` (plan-review P0-2)**
 
 For each migrated wipe caller, swap the import/alias and the call site — `from tests._embedded import wipe` → `from tests._embedded import _wipe_or` (or alias `_wipe = _wipe_or` where the file keeps a local alias):
+
+**Cycle-4 P0-1 note:** every converted call site stays `_wipe_or(proj)` with NO explicit scope — the scope default is wired in Step 3/7 (`_wipe_or` resolves `_created_since_last_wipe()` when the caller passes nothing, never None). The wiring-level test in Step 1 (`test_per_test_wipe_or_touches_only_session_set`) pins this: it runs a converted-style `_wipe_or(proj)` against pre-created foreign-session graphs and asserts they survive.
 - `tests/test_projection.py` — `_shared_proj()` L85 (`from tests._embedded import wipe as _wipe` → `import _wipe_or as _wipe`)
 - `tests/test_backup_sweep.py` — 22 call sites
 - `tests/test_projection_version_gate.py` — 6 call sites
@@ -830,7 +1015,7 @@ Verify embedded behavior is unchanged (URI unset → `_wipe_or` dispatches to `w
 
 - Introduce a config seam in `tests/test_backup_sweep.py`: `_REGISTRY_GRAPH = f"test_registry_{os.urandom(4).hex()}"` and `_TEAM_GRAPH = f"test_team_{os.urandom(4).hex()}_tortoise"` (uuid per test, module-level is fine — per-test unique names via the uuid + `_wipe_or` clearing them each test; per-TEST uuid for exact isolation where a file has multiple independent tests).
 - `_make_env()`/`_seed_team_graph()` and ALL registry/team graph sites route through the seam. **Cycle-3 P1-2: route by regex sweep, not an enumerated line list** — the cycle-2 census (L47/49/71/84/100/117/139/163/177/189/207/215/231/248/284/304/318/335/379/419) MISSED 9 sites (verified this pass): `select_graph("registry_control_plane")` at L452/475/510/533/603/606, `select_graph("team_team_x")` at L538, `select_graph("registry_control_plane")` at L744, and the `team_graph_name(reg, "team_x") == "team_team_x"` assertion at L745 — 20 of 29 sites total. Sweep commands: `grep -n 'select_graph("registry_control_plane")\|select_graph("team_team_x")' tests/test_backup_sweep.py` + `grep -n 'team_graph_name' tests/test_backup_sweep.py` (plus the dynamic `select_graph(f"team_{team_id}")` at L57 and `team_team_e` L233 / `team_myapp` L770/860 / `team_beta` L816 sites — every non-test graph name in the file routes through the seam). The `manifest["graph_name"] == "team_team_x"` assertion (L745) follows the seam.
-- **Consumption side (cycle-3 P1-1 — completes cycle-2 P0-1a):** the seam routes only the SEED; the sweep's per-team graph name still comes from `team_graph_name()` (backup_sweep.py:190, called at :514) → deterministic `team_team_x`, so on docker `_backup_team` (select_graph at :264) dumps the EMPTY derived graph while the seeded data sits on `test_team_<uuid>_tortoise` → content assertions fail (test_backup_sweep rides half b at P2 — this is a P2 blocker, not a P3 afterthought). The docker-lane test monkeypatches `tortoise.backup_sweep.team_graph_name` (or `enumerate_teams`) to return the seam names per test, and asserts the P0 guard in `_backup_team` still holds (the consumed name is `test_`-prefixed — `_assert_test_graph` passes). Concretely: in `test_team_registry_isolation_across_sequential_tests` (Step 1) + a dedicated `test_sweep_consumes_seam_team_graph` that runs `backup_sweep.backup_teams(...)` against a fake registry + `monkeypatch.setattr(bs, "team_graph_name", ...)` and asserts the dump reads the seeded seam graph (content present), never `team_team_x`.
+- **Consumption side (cycle-3 P1-1 + cycle-4 P1-5 — completes cycle-2 P0-1a):** the seam routes only the SEED; the sweep's per-team graph name still comes from `team_graph_name()` (backup_sweep.py:190, called at :514) → deterministic `team_team_x`, so on docker `_backup_team` (select_graph at :264) dumps the EMPTY derived graph while the seeded data sits on `test_team_<uuid>_tortoise` → content assertions fail (test_backup_sweep rides half b at P2 — this is a P2 blocker, not a P3 afterthought). **Cycle-4 P1-5: the cycle-3 fix covered only 2 of ~17 registry-mode sweep tests** — `test_team_registry_isolation_across_sequential_tests` + `test_sweep_consumes_seam_team_graph` monkeypatch `tortoise.backup_sweep.team_graph_name` individually, but the OTHER ~15 registry-mode tests (verified this pass: 22 of 27 `run_backup_sweep(` call sites ride registry mode — test_sweep_enum_delta*, test_sweep_backs_up_team_and_writes_state, test_sweep_size_guard*, test_sweep_data_loss*, test_sweep_steady_zero, test_sweep_p0_guard, test_team_sweep_*, test_sweep_uses/missing_registry_stream_key, test_sweep_per_label_drift*) consume `team_team_x` via the REAL function and would dump an EMPTY graph on docker → red. FIX — **route consumption FILE-WIDE**: an autouse module-scoped fixture in `tests/test_backup_sweep.py` monkeypatches `tortoise.backup_sweep.team_graph_name` to the seam constants (`test_team_<uuid>_tortoise`) for EVERY sweep test, matching the seeded seam names. The patch CANNOT live in `_make_env` (its monkeypatch arg is passed `None` at L162 today — verified — and only some tests call `_make_env`); the autouse fixture patches at the MODULE level so seed AND consumption agree file-wide. **L745 contradiction resolved explicitly:** `test_team_graph_name_reads_from_teams` (L732-746) tests the REAL function's registry branch (`team_graph_name(reg, "team_x") == "team_team_x"`) — under the file-wide monkeypatch it would assert against the patched stub and become vacuous. The autouse fixture therefore SKIPS patching for that one test (`if request.node.name == "test_team_graph_name_reads_from_teams": return`), so the real-function semantics stay covered — the fixture documents this exemption inline. Concretely: the docker-lane proof adds a `test_sweep_consumes_seam_team_graph` that runs `backup_sweep.backup_teams(...)` against a fake registry + the autouse seam and asserts the dump reads the seeded seam graph (content present), never `team_team_x`; `test_team_registry_isolation_across_sequential_tests` (Step 1) keeps its per-test monkeypatch (it needs per-iteration seam names) and asserts the P0 guard in `_backup_team` still holds (the consumed name is `test_`-prefixed — `_assert_test_graph` passes).
 - `_wipe_or(proj)` (converted in Step 6) clears them per test; the docker-lane isolation proof is `test_team_registry_isolation_across_sequential_tests` (Step 1).
 - Embedded lane: the seam names only matter on the server; embedded behavior (all-graphs `wipe`) is unchanged.
 
@@ -840,14 +1025,19 @@ Verify: `uv run pytest tests/test_backup_sweep.py -v` (embedded) → green; URI-
 
 Conftest session fixtures (URI set only), mirroring `_redislite_hygiene`'s active-suite registry + defer-to-last-suite-standing (conftest L151-307):
 
-0. **Per-test wipes are session-scoped (cycle-3 P1-7 — the #1 concurrency hazard):** as written, `wipe_server` is a server-global blind wipe — it enumerates `list_graphs()` and DETACHes EVERY `test_`/`tortoise_test_` graph. Two concurrent pytest processes on one docker: session A's per-test `_wipe_or` deletes session B's LIVE `test_suite_<uuid>` graphs mid-suite; and mid-session each per-test wipe re-enumerates + DETACHes the entire session's accumulated graphs (thousands) — a quadratic wall driver. FIX: `_wipe_or` takes the session's created-set (`wipe_server(proj, scope=None)` — per-test callers pass the session-scoped created set, so a per-test wipe touches ONLY graphs this session created); the server-global full sweep is reserved for session-end/last-suite-standing ONLY. Cost-bound test: pre-create ~2000 `test_*` graphs (fake `list_graphs`), time a scoped `_wipe_or`, assert it is bounded (touches only the created set — O(created), never O(server-graphs)).
-1. **Session-start (autouse, before any test):** (a) a stale sweep reads DEAD sessions' **journals** (below) and drops exactly the graphs they recorded — never a live suite's graphs (live = marker present in ACTIVE_SUITES_DIR); (b) registers THIS session's token (from `TORTOISE_TEST_SESSION`) as an active suite.
-2. **Created-graph journal (cycle-3 P1-8 — replaces the token-matching claim):** no graph name embeds a recoverable session token (derived = `hash12(session+path)`, not invertible; `test_memory_<nonce>`/`test_suite_<uuid>` use `os.urandom`, not `TORTOISE_TEST_SESSION`), so token-matching `list_graphs()` is IMPOSSIBLE and the created-set has no recording mechanism. FIX: the redirect + seam fixtures APPEND each derived/verbatim graph name to a per-session journal — a token-named file in `ACTIVE_SUITES_DIR` (e.g. `{ACTIVE_SUITES_DIR}/{TORTOISE_TEST_SESSION}.graphs.jsonl`, same directory as the embedded markers so the last-suite-standing coordination is shared). Journal lines are append-only (thread-safe within the single-process session; `os.urandom` nonce names prevent cross-session clobber). The session-end sweep drops exactly the journal's names; the stale sweep reads dead sessions' journals (marker file absent → dead → drop its journaled graphs, then remove the journal). Drop the "recoverable by token-matching" claim entirely — the journal is the source of truth.
-3. **Session-end (autouse):** sweep the session's OWN journaled graphs. **Never** drop another live suite's graphs: if other active-suite markers exist, this session sweeps only its own journal; the FULL leftover sweep (all `test_`-prefixed via `list_graphs()`) is deferred to the last suite standing (same marker/countdown as `_redislite_hygiene`).
-4. **atexit fallback:** register `_atexit_cleanup` (mirroring conftest L254-276) so an abnormal process exit (watchdog kill, crash) still records the session as dead — the NEXT session's stale sweep reads its journal and drops its graphs.
-5. Loopback-only + `test_`-prefix filter shared with `wipe_server` (common helper); non-test graphs never touched.
+0. **Per-test wipes are session-scoped (cycle-3 P1-7 — the #1 concurrency hazard):** as written, `wipe_server` is a server-global blind wipe — it enumerates `list_graphs()` and DETACHes EVERY `test_`/`tortoise_test_` graph. Two concurrent pytest processes on one docker: session A's per-test `_wipe_or` deletes session B's LIVE `test_suite_<uuid>` graphs mid-suite; and mid-session each per-test wipe re-enumerates + DETACHes the entire session's accumulated graphs (thousands) — a quadratic wall driver. FIX: per-test wipes touch ONLY the session's created set (`_wipe_or` passes the scope; the server-global full sweep is reserved for session-end/last-suite-standing ONLY). **Cycle-4 P2-10 — the quadratic claim is STATED HONESTLY:** scoping to the session's FULL accumulated created-set is still O(session) per wipe → O(session²) across the session. The honest bound is the **created-since-last-wipe delta** (`_created_since_last_wipe()`, Step 3 — the `_WIPED_UP_TO` cursor slices the journal after the previous wipe), so each per-test wipe is O(delta) and the session total is O(created) amortized. Cost-bound test: pre-create ~2000 `test_*` graphs (fake `list_graphs`), time a scoped `_wipe_or`, assert it is bounded (touches only the since-last-wipe slice — never O(server-graphs), never O(whole-session)).
+0a. **The WIRING (cycle-4 P0-1 — the cycle-3 signature was never wired):** Task 2 Step 6 converts 30+ call sites to `_wipe_or(proj)` with NO scope arg — under the cycle-3 spec that means scope=None → server-global blind wipe → the exact hazard P1-7 was meant to close, and the cost-bound test exercised the primitive but NOT the wiring. FIX — three pieces, all in `tests/_embedded.py` + `tests/conftest.py`:
+    - a **module-level in-memory created-set registry** (`_JOURNAL` + `_WIPED_UP_TO`, Step 3) populated by the journal appender — every graph the redirect/seam/from_uri mints is appended at the construction seam;
+    - an **autouse per-test fixture** (conftest, URI set only) that snapshots the "created since last wipe" slice into the registry cursor and advances `_WIPED_UP_TO = len(_JOURNAL)` after each per-test wipe;
+    - **`_wipe_or` defaults its scope to the registry — NEVER None** (`scope = _created_since_last_wipe()` when the caller passes nothing; the true server-global sweep is reachable only through the session-end/last-suite-standing sentinel).
+    Wiring-level test (in `tests/test_wipe_server.py`): pre-create a FOREIGN-session graph `test_foreign_<uuid>` + 100 unrelated `test_*` graphs on the server, then run a converted per-test `_wipe_or(proj)` (as Task 2 Step 6 converts it — no explicit scope); assert the foreign graph's nodes SURVIVE and only the session's since-last-wipe set was touched. This is the test that would have red every converted caller under the cycle-3 spec.
+1. **Session-start (autouse, before any test):** (a) a stale sweep reads DEAD sessions' **journals** (below) and drops exactly the graphs they recorded — never a live suite's graphs (live = marker present in ACTIVE_SUITES_DIR); (b) registers THIS session's token (from `TORTOISE_TEST_SESSION`) as an active suite. **Cycle-4 P2-1 — the docker marker REUSES the embedded format:** `token = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"` (verified conftest L178), marker file written with `pid=`/`start=` lines (conftest L188-192), and the same `tortoise.embedded_reaper` helpers (`active_suite_markers`, `_process_start_time`, `ACTIVE_SUITES_DIR`) — so `active_suite_markers()`' liveness verification (recycled-pid guard, #1642 FIX 5) applies to docker sessions too, and the last-suite-standing coordination is literally shared code, not a parallel implementation. Pin with a parser test: a docker-marker file written by the conftest fixture parses through `active_suite_markers()` with the same (pid, start) identity checks as an embedded marker.
+2. **Created-graph journal (cycle-3 P1-8 + cycle-4 P2-3/P2-2 — replaces the token-matching claim):** no graph name embeds a recoverable session token (derived = `hash12(session+path)`, not invertible; `test_memory_<nonce>`/`test_suite_<uuid>` use `os.urandom`, not `TORTOISE_TEST_SESSION`), so token-matching `list_graphs()` is IMPOSSIBLE and the created-set has no recording mechanism. FIX: the redirect + seam fixtures APPEND each derived/verbatim graph name to a per-session journal — a token-named file in `ACTIVE_SUITES_DIR` (e.g. `{ACTIVE_SUITES_DIR}/{TORTOISE_TEST_SESSION}.graphs.jsonl`, same directory as the embedded markers so the last-suite-standing coordination is shared). The session-end sweep drops exactly the journal's names; the stale sweep reads dead sessions' journals (marker file absent → dead → drop its journaled graphs, then remove the journal). Drop the "recoverable by token-matching" claim entirely — the journal is the source of truth. **Cycle-4 P2-3 — torn-writes + threading are SPECIFIED:** each append is `open(path, "a"); fh.write(name + "\n"); fh.close()` — open/write/close per append (a killed writer can never interleave a half-line into another append; no cross-append lock needed in the single-process session, and the per-append open is the atomicity boundary against concurrent sessions appending to DIFFERENT token-named files). The READER is tolerant: parse line-by-line, stop at the first unparseable line (a truncated final line from a killed writer is dropped, all prior lines honored), and if even the first line is unparseable, treat the journal as empty and delete it (poison-file guard, mirroring the marker hygiene). **Cycle-4 P2-2 — `from_uri` bypasses the journal, and the URI-default graph is shared across sessions:** `from_uri(uri)` without an explicit `graph_name` resolves the URI path (`/tortoise_test_matrix` under the P2 job URI) — a SHARED graph every session uses; a per-session DETACH of it (via a per-test scope that includes it) races other sessions' live writes. FIX: (a) in test mode (`TORTOISE_TEST_MODE=1`, conftest-only), `FalkorProjection.from_uri()` appends its resolved graph name (URI-path default OR explicit) to the session journal — the single seam point, so every from_uri-minted graph is owned by its session's journal; (b) the per-test wipe scope EXCLUDES the shared URI-default graph (it is swept only at session-end by the last suite standing — the same coordination as everything else); (c) the from_uri census is enumerated for the P2 divergence pass: test_embedded_concurrency `test_live_mw_tortoise` (×3), the Task 4 tripwire probe (`test_tripwire_probe`), test_namespace_uri_mode (`tortoise_test_221_namespace`), and the URI-default `from_uri(os.environ["TORTOISE_DB_URI"])` sites (test_search_engine L303/304+L413/414+L497 — already fixed by the path-ed job URI, P1-2). Test: a session whose journal contains `tortoise_test_matrix` never DETACHes it in a per-test wipe, and the session-end/last-suite-standing sweep owns it.
+3. **Session-end (autouse):** sweep the session's OWN journaled graphs. **Never** drop another live suite's graphs: if other active-suite markers exist, this session sweeps only its own journal; the FULL leftover sweep (all `test_`-prefixed via `list_graphs()`) is deferred to the last suite standing (same marker/countdown as `_redislite_hygiene`). **Cycle-4 P1-9 — DETACH-only wipes grow GRAPH.LIST unboundedly:** every wipe is DETACH DELETE (empties a graph, never removes it); a persistent dev docker accumulates every derived graph forever — invisible to E2E-7's orphan assert, which counts redislite PROCESSES, not server graphs. FIX: session-end + stale sweeps call `wipe_server(..., drop=True)` (DETACH first, then GRAPH.DELETE the journaled names — Step 3); per-test wipes keep drop=False (graphs are reused across tests in a session). E2E-7 gains a server-side bound: `GRAPH.LIST` count < journal size + constant (P1-9, catalog row below). **Cycle-4 P1-8 — sweeps SKIP on non-loopback, they do NOT raise:** a `TORTOISE_TEST_ALLOW_REMOTE=1` session redirects+writes to a remote server (write-only escape, P2-6) — if the session-end/stale/atexit sweeps "share the loopback refusal with wipe_server" (raise), every ALLOW_REMOTE session fails at TEARDOWN, after its tests passed. FIX: the sweep helpers take `skip_on_non_loopback=True` — log-and-continue (no graphs touched, journal preserved for the next session); D-4's `RuntimeError` refusal remains ONLY for explicit `wipe_server()` calls. New test: a 1-test ALLOW_REMOTE session (stub projection, fake journal) ends GREEN — teardown logs the skip instead of raising.
+4. **atexit fallback:** register `_atexit_cleanup` (mirroring conftest L254-276) so an abnormal process exit (watchdog kill, crash) still records the session as dead — the NEXT session's stale sweep reads its journal and drops its graphs. Same non-loopback skip semantics as item 3 (P1-8).
+5. Loopback + `test_`-prefix filter shared with `wipe_server` (common helper); non-test graphs never touched. **Split semantics (cycle-4 P1-8):** the shared helper raises on non-loopback for EXPLICIT `wipe_server()` calls (D-4) and logs-and-skips for the sweep paths — the same predicate, different failure policy, both pinned by tests.
 
-Verify (cycle-3 P2-13 — unit, not just manual two-process): **`test_concurrent_suite_end_sweep_leaves_other_suite_graphs`** with a FAKE `list_graphs`/marker dir: suite A's end-sweep (journal A) must leave suite B's live graphs (marker B present) untouched; with B's marker removed (B crashed), A's stale sweep drops B's journaled graphs. The manual two-process check stays as the integration confirmation.
+Verify (cycle-3 P2-13 + cycle-4 P2-3/P1-8 — unit, not just manual two-process): **`test_concurrent_suite_end_sweep_leaves_other_suite_graphs`** with a FAKE `list_graphs`/marker dir: suite A's end-sweep (journal A) must leave suite B's live graphs (marker B present) untouched; with B's marker removed (B crashed), A's stale sweep drops B's journaled graphs. **`test_journal_tolerant_reader_truncated_line` (P2-3):** a journal whose last line is a truncated half-name (simulated torn write) parses to the complete prefix lines only, and the stale sweep drops exactly those; a journal whose FIRST line is unparseable is treated as empty and deleted (poison guard). **`test_allow_remote_session_teardown_green` (P1-8):** the ALLOW_REMOTE session above. The manual two-process check stays as the integration confirmation.
 
 **Step 8: Commit**
 
@@ -1021,7 +1211,7 @@ git commit -m "feat(testdb): skip-guard coverage manifest reconciled against jun
 - **g_rebuild*/g_consistency/parity classification (plan-review P1-4):** the test_projection `g_rebuild*` (L888/910/937/965/1981/2786), `g_consistency*` (L1400/1417) and apply-vs-rebuild parity (L1866/1867) tests MIGRATE with a name-only sweep — verified by inspection: they call `rebuild()`/`rebuild_all()`/`check_consistency()`, DB-agnostic apply-path operations (JSONL → graph) that run identically on the server; they do NOT exercise the D2/D3 `_auto_health_recover`/`recover_from_log` branches (those live in test_ops_safety — carve-out). No mode-split needed.
 - The sweep extends to `graph_name="test"`/`"tortoise"`/`"crash_live"` in ALL migrated files (not just the wipe/assert files) — every migrated construction must be guard-passing before the flip; with the cycle-2 P0-1b derivation this holds automatically on the server lane.
 - Seam default graph name is `test_suite_<uuid>` in docker mode (Task 1) — never bare `test`.
-- No-namespace `TortoiseSDK(db_path)` constructions in migrated files that bulk-wipe or assert exact sets gain a `namespace="test_<file>_..."` (the SDK maps `test_<ns>` → `test_<ns>_tortoise`, sdk.py L1115-1123 — verified). **Cycle-3 P1-5 — the no-namespace share is REAL and must be fixed at the SDK layer, not per-file:** `TortoiseSDK._get_proj()` (sdk.py L1115-1123, VERIFIED) with URI set IGNORES `db_path` and resolves `urlparse(uri).path or "tortoise"` for no-namespace constructions — under the P2 job URI (`/tortoise_test_matrix`) EVERY no-namespace `TortoiseSDK(db_path=...)` in the half shares ONE graph. test_projection has 5 such sites (L2043/2135/2321/2346/2507 — VERIFIED, distinct `_tmp` paths) whose exact-set assertions get cross-test data. FIX: give no-namespace SDK constructions a **per-session default namespace** (`test_sdk_<hash12(session + id(db_path))>` — session-scoped so concurrent sessions don't collide; id(db_path) keeps distinct db_paths distinct) OR enumerate them and give each an explicit per-test namespace (the census grep above drives the enumeration). Add a unit test: two no-namespace SDKs with distinct db_paths under the same URI → `_get_proj()` yields DISTINCT graphs (assert `projA.graph_name != projB.graph_name`, both `test_`-prefixed). **All explicit non-test namespaces in migrated files route to per-test `test_*` namespaces (cycle-2 P1-4):** `namespace="registry"` → `test_registry_<uuid>` (test_invites_http — per-test uuid so the 36 tests share within a test but never across tests); `namespace="team-a"`/`"team-c"` → `test_<file>_<uuid>` (test_pack_state, all 8 sites); `graph_name="team_team-k"`/`"t"` → redirect-derived per-path (P0-1b rule) or explicit test-prefixed. wipe_server's skip behavior on one of these (e.g. a seeded `registry_tortoise` survives `wipe_server` untouched) is asserted in `tests/test_wipe_server.py` — `test_wipe_server_clears_only_test_prefixed` already seeds/asserts a non-test graph survives; add the registry/team variants. Non-wiping SDK users may share the URI default graph (no guard trip) but are listed for the P2 divergence pass.
+- No-namespace `TortoiseSDK(db_path)` constructions in migrated files that bulk-wipe or assert exact sets gain a `namespace="test_<file>_..."` (the SDK maps `test_<ns>` → `test_<ns>_tortoise`, sdk.py L1115-1123 — verified). **Cycle-3 P1-5 + cycle-4 P1-6 — the no-namespace share is REAL and is fixed AT THE SDK LAYER (the OR is RESOLVED — SDK-layer, not per-file enumeration):** `TortoiseSDK._get_proj()` (sdk.py L1115-1123, VERIFIED) with URI set IGNORES `db_path` and resolves `urlparse(uri).path or "tortoise"` for no-namespace constructions — under the P2 job URI (`/tortoise_test_matrix`) EVERY no-namespace `TortoiseSDK(db_path=...)` in the half shares ONE graph. test_projection has 5 such sites (L2043/2135/2321/2346/2507 — VERIFIED, distinct `_tmp` paths) whose exact-set assertions get cross-test data. FIX (chosen Good): give no-namespace SDK constructions a **per-session default namespace** gated on the SAME test-session signal as the redirect: `db_path is not None and TORTOISE_TEST_MODE=1 and no namespace` → derive `test_sdk_<hash12(session + db_path)>`; otherwise today's semantics unchanged (URI-path graph / `tortoise` default). Gating on `db_path is not None` is mandatory — `TortoiseSDK()` with no db_path is exactly the URI-graph case (`test_namespace_uri_mode`'s two no-namespace tests, below) and must keep resolving the URI's own graph. **Cycle-4 P0-2 — the hash input is the VALUE, never `id()`:** the cycle-3 plan wrote `hash12(session + id(db_path))` — `id()` is the CPython MEMORY ADDRESS: (a) test 1's SDK is GC'd, test 2's construction reuses the freed address → SAME hash → SAME graph → cross-test pollution (the exact hazard the derivation exists to prevent); (b) two same-value/different-instance db_paths (distinct str objects, equal value) → DIFFERENT hashes → DIFFERENT graphs → write-then-read-stale within one test (the same-path share breaks). FIX: hash the string VALUE — `test_sdk_<hash12(session + db_path)>` — distinct values → distinct graphs, same value → shared (the correct embedded analog). Add BOTH unit tests: (a) two SEQUENTIAL no-namespace SDKs with distinct db_paths + `gc.collect()` between → DISTINCT graphs (proves the GC/reuse scenario cannot collapse them); (b) two constructions of the SAME path VALUE (fresh `str` each, e.g. `str(Path(x))` built twice) → SAME graph (proves same-value sharing). **Expectation splits for `test_namespace_uri_mode` (P1-6):** its two no-namespace tests construct `TortoiseSDK()` with NO db_path — `test_no_namespace_uses_uri_graph` asserts the URI-path graph (`tortoise_test_221_namespace`), `test_uri_without_path_defaults_to_tortoise` asserts the `tortoise` default — an UNCONDITIONAL SDK-layer default would red both (the cycle-3 prose was unconditional). With the db_path gate they stay green as-is; add ONE docker-session expectation to the file: a no-namespace SDK WITH a db_path under URI derives `test_sdk_<hash12>` (assert the `test_sdk_` prefix + 12 hex + `_is_embedded is False`), documenting the two semantics side by side. **Census completed (P1-6 + P2-7):** `grep -rn "TortoiseSDK(" tests/ --include="*.py"` — the no-namespace sites are ~25 across ~20 files (crude same-line grep count this pass — the reviewer's per-file figures (test_suggest_entry_points ×11, test_ep_operatorless ×4, test_mcp_server ×2) and this pass's same-line counts differ slightly because multi-line calls land differently under each counting method; the aggregate ~25/~20 magnitude agrees, and Task 7 Step 1's census grep is the authoritative enumeration to implement against; the cycle-3 plan named only test_projection's 5): test_suggest_entry_points (10), test_ep_operatorless (5), test_mcp_server (5), test_references_edge (10), test_integration_search (13), test_de2e1_entity_extraction (8), test_battery_setup (7), test_search_engine (7), test_pack_state (6), test_projection (5), test_ep_draft_filter (5), test_index_cli (5), test_embedded_lifecycle (5, carve-out — untouched), test_sdk_props_coercion/test_ingest_bundle/test_analyze_scoped/test_sdk/test_search_engine_recency/test_calibration (4 each) + the long tail (~90 single-site files). The SDK-layer default fixes the whole class at the seam — no per-file edits; files whose sites must NOT derive (carve-out + test_namespace_uri_mode) are protected by the db_path/TEST_MODE gate and their own TEST_NO_REDIRECT_STEMS exemption. Add a unit test: two no-namespace SDKs with distinct db_paths under the same URI → `_get_proj()` yields DISTINCT graphs (assert `projA.graph_name != projB.graph_name`, both `test_`-prefixed). **All explicit non-test namespaces in migrated files route to per-test `test_*` namespaces (cycle-2 P1-4):** `namespace="registry"` → `test_registry_<uuid>` (test_invites_http — per-test uuid so the 36 tests share within a test but never across tests); `namespace="team-a"`/`"team-c"` → `test_<file>_<uuid>` (test_pack_state — **cycle-4 P2-7 census completed: 13 team-* namespace sites, not 8**: team-a ×8 L62/73/118/126/133/143/159/167, team-c L88, **team-p L188, team-k L296, team-red L324, team-green L345 — all VERIFIED this pass**; plus the other non-test namespaces in the file: tenant-a/tenant-b L175/176/539/540, t-reg-2 L456, mcp-team L578, registry L616, t-bf-1 L719); **`namespace="e2e-900"` → `test_e2e900_<uuid>` (cycle-4 P2-7 — MISSED by every prior census): test_index_surfacing L39 + test_backfill_sources L37/902/916/959/989 map to the SHARED non-test graph `team_e2e-900` (the SDK's team_* mapping) used by the e2e-900 suites — route to per-test test_* namespaces like the rest**; `graph_name="team_team-k"`/`"t"` → redirect-derived per-path (P0-1b rule) or explicit test-prefixed. wipe_server's skip behavior on one of these (e.g. a seeded `registry_tortoise` survives `wipe_server` untouched) is asserted in `tests/test_wipe_server.py` — `test_wipe_server_clears_only_test_prefixed` already seeds/asserts a non-test graph survives; add the registry/team variants. Non-wiping SDK users may share the URI default graph (no guard trip) but are listed for the P2 divergence pass.
 - Red-herring gate: a test asserts that with URI set, constructing on bare `test`/`tortoise` and bulk-wiping still raises (guard intact — this is the E2E-2 control).
 - Embedded mode (URI unset): zero behavior change — embedded guard is disabled and graph-name is only observable where a test asserts it; those assertions are updated consciously (P1 diff-review item).
 
@@ -1039,7 +1229,7 @@ grep -rn "TortoiseSDK(" tests/ --include="*.py"  # cycle-3 P1-5: no-namespace SD
 grep -rn "DETACH DELETE" tests/ --include="*.py" | grep -v __pycache__  # bulk-wipe users
 grep -rc 'graph_name="test"' tests/ --include="*.py" | grep -v ":0"   # per-file counts (P1-4 census)
 ```
-Expected: the corrected census above (35× `graph_name="test"` / 2× `tortoise` / 1× `crash_live` / 1× `t` / 1× `team_team-k` constructions + the `namespace="registry"`/`"team-a"` sites — cycle-2 P1-4; **cycle-3 P2-9: test_pack_state's namespace census is incomplete — `namespace="team-c"` at L88 and `namespace="team-a"` at L118/126 (VERIFIED this pass: team-a also at L62/73/133/143/159/167) — all route to per-test `test_*` namespaces (Step 5); per-path derivation isolates the `team_team-k` lock-keying arg anyway, but the census list must be complete**); the bulk-wipe users list (D4 table: test_projection, test_search_engine_gaps, test_a9_direct_edge_traversal, test_index_surfacing, test_recall_gaps_subgraph, test_about_event_untangle, test_pre_migration_safety, test_embedded_concurrency live-reset).
+Expected: the corrected census above (35× `graph_name="test"` / 2× `tortoise` / 1× `crash_live` / 1× `t` / 1× `team_team-k` constructions + the `namespace="registry"`/`"team-a"` sites — cycle-2 P1-4; **cycle-3 P2-9: test_pack_state's namespace census is incomplete — `namespace="team-c"` at L88 and `namespace="team-a"` at L118/126 (VERIFIED this pass: team-a also at L62/73/133/143/159/167) — all route to per-test `test_*` namespaces (Step 5); per-path derivation isolates the `team_team-k` lock-keying arg anyway, but the census list must be complete**; **cycle-4 P2-7: the census is STILL incomplete — team-p L188, team-k L296, team-red L324, team-green L345 (all VERIFIED this pass) + `namespace="e2e-900"` (test_index_surfacing L39, test_backfill_sources L37/902/916/959/989) were missed by every prior cycle — all route to per-test `test_*` namespaces (Step 5); the e2e-900 namespace is especially load-bearing: it maps to the SHARED non-test graph `team_e2e-900`**); the bulk-wipe users list (D4 table: test_projection, test_search_engine_gaps, test_a9_direct_edge_traversal, test_index_surfacing, test_recall_gaps_subgraph, test_about_event_untangle, test_pre_migration_safety, test_embedded_concurrency live-reset).
 
 **Step 2: Write the failing control test**
 
@@ -1232,6 +1422,34 @@ def test_no_redirect_stems_exist_as_modules():
         hit = list((root / "tests").glob(f"{stem}.py")) or \
               list((root / "tests/bench").glob(f"{stem}.py"))
         assert hit, f"TEST_NO_REDIRECT_STEMS entry {stem!r} is not a test module"
+
+
+def test_no_carve_out_imports_test_helpers():
+    # Cycle-4 P1-4 guard: _caller_test_stem() keys on the NEAREST test_
+    # frame — a carve-out file constructing through tests/test_helpers.py
+    # would resolve to stem "test_helpers" (not its own exempted stem), so
+    # its redirect exemption silently never fires. Assert no carve-out
+    # module (a TEST_NO_REDIRECT_STEMS entry) imports it.
+    from tests._embedded import TEST_NO_REDIRECT_STEMS
+    root = Path(__file__).resolve().parents[1]
+    for stem in TEST_NO_REDIRECT_STEMS:
+        for p in (root / "tests").glob(f"{stem}.py"):
+            src = p.read_text()
+            assert "test_helpers" not in src, \
+                f"carve-out {stem} imports test_helpers — loses its stem exemption (P1-4)"
+
+
+def test_session_token_present_and_hex8_during_docker_session(monkeypatch):
+    # Cycle-4 P2-14: mid-session TEST_SESSION mutation would strand this
+    # session's graphs (journal filename + derived names key off the ORIGINAL
+    # value; Task 1's no-mutation probe covers drift, this covers presence/
+    # shape on docker lanes). Only asserted when the URI is actually set
+    # (the docker-half session shape) — embedded sessions need no token.
+    import os, re
+    if not os.environ.get("TORTOISE_DB_URI"):
+        pytest.skip("no docker session — token not required")
+    assert re.fullmatch(r"[0-9a-f]{8}", os.environ.get("TORTOISE_TEST_SESSION", "")), \
+        "docker session must carry TORTOISE_TEST_SESSION = 8 hex (conftest export)"
 ```
 
 **Step 2: Implement the autouse skip + apply markers to the 3 tests**; add the 7 stems to `TEST_NO_REDIRECT_STEMS` (the 6 from cycle 1 + `test_smoke_embedded`, cycle-2 P1-1a).
@@ -1259,6 +1477,7 @@ git commit -m "feat(testdb): embedded_only per-test markers + carve-out redirect
 - Skip-guard step on half b passes `--manifest` + `--junitxml` (Task 3); fail-closed — **gated on pytest rc==0 AND non-empty `$FILES`** (plan-review P1-7: the "no selected files" path writes rc=0 with no junitxml; with a manifest that would false-red, so the guard must skip when `$FILES` is empty). Half a unchanged (embedded canary, current guard).
 - No test-slow / e2e / track_b changes (P2 out of scope — they follow in P3).
 - P2 divergence confirmation (Task 8 Step 4) runs against the observed half-b results.
+- **Cycle-4 P2-6 — the live-required job is added to this task's audit:** `test-concurrency-falkor` (python-ci.yml L695-760, VERIFIED) sets job-level `TORTOISE_DB_URI: "docker://:falkordb@localhost:6379/tortoise"` — a NON-test-prefixed path (bare `tortoise`). This is currently INERT and stays that way through P2/P3: both live tests construct via `FalkorProjection.from_uri(uri, graph_name="test_live_mw_tortoise")` with EXPLICIT test-prefixed names (test_embedded_concurrency L111-153, verified — no `path=` construction, no URI-default DETACH), so nothing resolves a bulk-wipe to `/tortoise`. The audit adds a grep in Task 6 Step 3: no construction in the live-required job's two test files may (a) construct with `path=` under URI (would redirect to a derived name — harmless but must be declared) or (b) bulk-`DETACH DELETE` the URI-default graph (guard trip / cross-run pollution). If a future test adds either, the job URI must gain the test-prefixed path like the fast matrix (P1-2).
 
 **Files:**
 - Modify: `.github/workflows/python-ci.yml` (`test` job: half-b include env, manifest generation + guard wiring)
@@ -1279,7 +1498,7 @@ if [ "${{ needs.changes.outputs.full }}" = "true" ] && [ "${{ matrix.half }}" = 
 fi
 ```
 
-and export it on the pytest step: `TORTOISE_DB_URI: $URI` (plus `TORTOISE_TEST_MODE: "1"` is already exported by conftest; `TORTOISE_TEST_NO_REDIRECT` comes from conftest too — CI override optional).
+and export it on the pytest step: `TORTOISE_DB_URI: $URI` (plus `TORTOISE_TEST_MODE: "1"` is already exported by conftest; `TORTOISE_TEST_NO_REDIRECT` comes from conftest too — CI override optional). **Cycle-4 P1-7 — wire the E2E-6 session signal into CI:** the half-b docker job also exports `TORTOISE_TEST_EXPECT_URI: "1"` (Task 4's tripwire consumes it — a docker-half session whose URI is missing/dropped fails at session start instead of green-passing on the carve-out shape; the cycle-3 plan defined the signal but Task 6's workflow edits never set it, so CI never actually armed it). The env line lands in the same half-b include block as the URI.
 3. Manifest generation BEFORE pytest on half b, in a SEPARATE step (same `$FILES` + `-m 'not track_b'` collect-only) so the collect-only wall never rides the pytest step's 55m budget (cycle-2 P2-12; cache the emitted manifest keyed on a hash of `$FILES` so tier-1/tier-2 reruns reuse it).
 4. The pytest invocation gains `--junitxml=/tmp/junit.xml -o junit_family=xunit1` (Task 3's authoritative observed-set source; `-r fEs` stays for the human summary).
 5. Skip-guard step: `RC=$(cat ${RUNNER_TEMP:-/tmp}/pytest-rc)`; skip when `$RC != 0` or the files file is empty; else `python3 tools/skip-guard.py /tmp/pytest.log --junitxml=/tmp/junit.xml --manifest <expected-nodeids>`.
@@ -1296,7 +1515,7 @@ uv run pytest tests/test_search_engine.py tests/test_ranking.py tests/test_pack_
   -v --timeout=300 -m 'not track_b' --maxfail=20 -r fEs --junitxml=/tmp/junit.xml -o junit_family=xunit1
 ```
 
-Expected: half-b DB-agnostic tests run against docker; the 3 busy-error tests skip (marker); the 7 carve-out files run embedded (exemption, cycle-2 P1-1a); the wipe-heavy surfaces run green via `_wipe_or` (E2E-2); the live-writer concurrency test runs with 0 busy errors (E2E-3); any embedded-calibrated assertion break = a divergence-confirmation item (Task 8 Step 4), not a silent fix. **URI-default DETACH check (cycle-2 P1-2, scope per cycle-3 P2-2):** grep the half-b migrated files for `from_uri(os.environ["TORTOISE_DB_URI"])`/`_LIVE_URI` sites that bulk-`DETACH DELETE` — with the path-ed job URI every such site resolves to `tortoise_test_matrix` (guard-passing). Only the half-b bulk-DETACH sites matter at P2 (test_search_engine L303/304 + L413/414 + L497 — VERIFIED in half b); test_hnsw_vector_index (half a, STARTS-WITH-scoped wipes) and test_ingest (slow_files, P3) are out of this check's scope; any half-b site still resolving to a non-test graph is normalized to an explicit test-prefixed graph in the same step (the `tortoise_test_r2_migrate`-style literals already carry one). Then verify the manifest closes: generate the expected nodeids from the same file list × collect-only and run `tools/skip-guard.py /tmp/pytest.log --junitxml=/tmp/junit.xml --manifest <expected-nodeids>` → exit 0.
+Expected: half-b DB-agnostic tests run against docker; the 3 busy-error tests skip (marker); the 7 carve-out files run embedded (exemption, cycle-2 P1-1a); the wipe-heavy surfaces run green via `_wipe_or` (E2E-2); the live-writer concurrency test runs with 0 busy errors (E2E-3); any embedded-calibrated assertion break = a divergence-confirmation item (Task 8 Step 4), not a silent fix. **Cycle-4 P2-12 — in-process prod-command call sites are added to the pre-flight (the cycle-3 audit never covered them):** `tests/test_domain_validators.py` calls `tortoise.__main__._cmd_validate` in-process (8 sites, L543-579 verified), `tests/test_session_index_health.py:207` calls `main(["doctor"])`, `tests/test_cli_context.py:45` calls `main(["context"])` — under a docker session the redirect fires inside these prod commands (their `FalkorProjection(args.db)` constructions have the TEST file in the caller stack, so `_caller_test_stem()` resolves to the test module and the path redirects to a derived server graph). Add the three files to the Step 3 pre-flight run and verify each stays green on docker (DB-agnostic — the redirect makes the CLI test the server lane with a derived name, which is the DESIRED outcome) or is explicitly exempted; document the result in the divergence-confirmation log. Also add the L521 `doctor`-fallback path (`FalkorProjection(db_path)` — the embedded fallback after a failed URI probe) to the audit: it must stay reachable when URI is set but the server is down (embedded fallback, no redirect — the redirect never fires because `_caller_test_stem()` is None in the subprocess; in-process `main(["doctor"])` DOES redirect, and its embedded-fallback branch is then unreachable — pin which leg `test_session_index_health` exercises on each lane). **URI-default DETACH check (cycle-2 P1-2, scope per cycle-3 P2-2):** grep the half-b migrated files for `from_uri(os.environ["TORTOISE_DB_URI"])`/`_LIVE_URI` sites that bulk-`DETACH DELETE` — with the path-ed job URI every such site resolves to `tortoise_test_matrix` (guard-passing). Only the half-b bulk-DETACH sites matter at P2 (test_search_engine L303/304 + L413/414 + L497 — VERIFIED in half b); test_hnsw_vector_index (half a, STARTS-WITH-scoped wipes) and test_ingest (slow_files, P3) are out of this check's scope; any half-b site still resolving to a non-test graph is normalized to an explicit test-prefixed graph in the same step (the `tortoise_test_r2_migrate`-style literals already carry one). **Cycle-4 P2-6 — the live-required job joins the same grep:** `grep -rn "from_uri\|path=\|DETACH DELETE" tests/test_embedded_concurrency.py` — the `test-concurrency-falkor` job URI is `docker://.../tortoise` (non-test-prefixed, python-ci.yml L695-760 verified); both live tests pass explicit `graph_name="test_live_mw_tortoise"` and never bulk-wipe the URI default (verified L111-153), so it stays inert — the grep pins that no new `path=` construction or URI-default DETACH sneaks in (if one does, the job URI must gain the P1-2 test-prefixed path). Then verify the manifest closes: generate the expected nodeids from the same file list × collect-only and run `tools/skip-guard.py /tmp/pytest.log --junitxml=/tmp/junit.xml --manifest <expected-nodeids>` → exit 0.
 
 **Step 4: Commit + push + observe CI** — record half-b wall; confirm half a (embedded) still green; confirm the skip-guard manifest passes (junitxml-reconciled, Task 3).
 
@@ -1344,9 +1563,9 @@ git commit -m "ci(testdb): phase-2 flip — fast half b on docker + junitxml-rec
 **Step 1:** Flip half a env + extend manifest to both halves; run the full fast matrix locally against docker (E2E-5 dry run).
 **Step 2:** Retire `skip_if_no_falkor` from the 10 files (visible skip or fail-fast); verify each with URI set and unset.
 **Step 3:** Gate `TORTOISE_FAST_ATEXIT`/`_redislite_hygiene` to embedded sessions; verify docker halves log no hygiene action (E2E-7).
-**Step 4:** Flip the orphan assert for docker halves; carve-out job keeps <20.
+**Step 4:** Flip the orphan assert for docker halves; carve-out job keeps <20. **Cycle-4 P1-9:** add the E2E-7 server-side GRAPH.LIST bound to the same step — after the session-end/stale sweeps (drop=True), `GRAPH.LIST` count must be < this session's journal size + constant (the sweep's DELETE leaves only pre-existing/foreign graphs).
 **Step 5:** Wire test-slow / track_b / e2e/ to docker; extend the manifest; add the dedicated carve-out job (URI unset, `TORTOISE_TEST_CARVE_OUT=1`, the 342-test set) as E2E-4's CI home — this job is what keeps the P4 URI-required enforcement (Task 10 Step 1a) from failing the carve-out.
-**Step 6:** After 5 consecutive green CI runs, remove the embedded canary lane (half-a embedded config retired — the dual-lane was bounded per D-3). **The streak is instrumented (cycle-2 P2-8 + cycle-3 P2-15 — producer/population/classifier now specified):** a `config/testdb-canary-streak.json` CI artifact records `{runs: [run_id...], consecutive_green: N}`. **Producer:** a dedicated post-merge step in the fast-matrix job (runs AFTER both halves + the skip-guard manifest step; `post-merge` trigger only — PR runs never mutate the artifact); it writes via atomic rename (write to `testdb-canary-streak.json.tmp` → `mv`) so a concurrent writer can never half-read. **Population:** ONLY post-merge full-matrix runs count (the canary lane is the push/schedule lane; a tier-2 PR run is a different shape and is excluded). **Classifier:** a scripted triage step (`tools/testdb_canary_classify.py`) reads the run's junitxml + manifest output + divergence-confirmation log and buckets each failing run: D1–D16 divergence (expected table entry → does NOT reset; logged), unexpected divergence / guard red / manifest red / infra flake (→ resets to 0). The classification is deterministic (scripted, no human-in-the-loop): the same inputs always classify the same run. A run with the manifest + tripwire green increments, any docker-divergence flake or guard red **resets it to 0**; the canary drop is gated on `consecutive_green >= 5` (the artifact, not a hand-wave). What breaks a streak is defined: a FalkorDB-reasoned skip (guard red), a vanished nodeid (manifest red), a divergence-attributable failure (P3 Gate 3 triage), or an infra flake on the docker service — infra flakes reset too (the lane must prove the CODE is green on docker, N times in a row).
+**Step 6:** After 5 consecutive green CI runs, remove the embedded canary lane (half-a embedded config retired — the dual-lane was bounded per D-3). **The streak is instrumented (cycle-2 P2-8 + cycle-3 P2-15 — producer/population/classifier now specified):** a `config/testdb-canary-streak.json` CI artifact records `{runs: [run_id...], consecutive_green: N}`. **Producer:** a dedicated post-merge step in the fast-matrix job (runs AFTER both halves + the skip-guard manifest step; `post-merge` trigger only — PR runs never mutate the artifact); it writes via atomic rename (write to `testdb-canary-streak.json.tmp` → `mv`) so a concurrent writer can never half-read. **Population:** ONLY post-merge full-matrix runs count (the canary lane is the push/schedule lane; a tier-2 PR run is a different shape and is excluded). **Classifier:** a scripted triage step (`tools/testdb_canary_classify.py`) reads the run's junitxml + manifest output + divergence-confirmation log **+ the recorded `step_wall` (cycle-4 P2-4 — a MANDATORY input, not optional: E2E-5 gates `step_wall < 55m`, so a run that silently rides the watchdog and passes green is a masked wall regression — it must break the streak like any other failure)** and buckets each failing run: D1–D16 divergence (expected table entry → does NOT reset; logged), unexpected divergence / guard red / manifest red / **step-wall-gate failure (`step_wall ≥ 55m` → resets to 0)** / infra flake (→ resets to 0). The classification is deterministic (scripted, no human-in-the-loop): the same inputs always classify the same run. A run with the manifest + tripwire green increments, any docker-divergence flake or guard red **resets it to 0**; the canary drop is gated on `consecutive_green >= 5` (the artifact, not a hand-wave). What breaks a streak is defined: a FalkorDB-reasoned skip (guard red), a vanished nodeid (manifest red), a divergence-attributable failure (P3 Gate 3 triage), **a step-wall-gate failure (cycle-4 P2-4)**, or an infra flake on the docker service — infra flakes reset too (the lane must prove the CODE is green on docker, N times in a row).
 **Step 7:** Commit each step (`git commit -m "ci(testdb): phase-3 ..."`).
 
 ---
@@ -1356,7 +1575,7 @@ git commit -m "ci(testdb): phase-2 flip — fast half b on docker + junitxml-rec
 1. Full fast matrix green on docker services; half a ≤ ~50m, half b clears the 55m watchdog (target ≤ ~45m) — no >20% regression vs baseline (E2E-5).
 2. Manifest passes with zero FalkorDB-reasoned skips and zero missing nodeids on both halves (E2E-6).
 3. 0 flaky failures attributable to docker-vs-embedded divergence in 5+ consecutive CI runs (epic indicator #2).
-4. Orphan assert on docker halves ≈ 0 (E2E-7).
+4. Orphan assert on docker halves ≈ 0 (E2E-7); **server GRAPH.LIST count < journal size + constant after session-end/stale sweeps (cycle-4 P1-9 — the DETACH-only accumulation bound)**.
 5. Carve-out 342 still green on embedded (dedicated URI-unset `TORTOISE_TEST_CARVE_OUT=1` job, E2E-4).
 6. E2E-8 conformance passes in both modes.
 
@@ -1389,7 +1608,7 @@ git commit -m "ci(testdb): phase-2 flip — fast half b on docker + junitxml-rec
 **Steps:**
 
 **Step 1:** Remove the 13 migrated files from the allowlist; run the enforcement test → green (they've been running docker since P2/P3 — the move is a registry update, not a first run).
-**Step 1a:** Implement the P4 enforcement (plan-review P1-9): conftest session-start URI-required check + `TORTOISE_TEST_CARVE_OUT` gate (above); wire `.github/workflows/post-merge-validation.yml` to job-level URI + junitxml-reconciled manifest; verify the carve-out job passes with `TORTOISE_TEST_CARVE_OUT=1` and that a URI-less migrated run fails with the actionable message. **The post-merge-validation manifest must replicate the run's OWN ignore set (cycle-2 P2-14):** the pmv run excludes `--ignore=tests/e2e` + `$SLOW_IGNORES` (the **29** slow files from `config/ci-surfaces.yml` — cycle-3 P2-11: verified count, the plan's "21" undercounted); its collect-only manifest generation uses the SAME excludes — otherwise the manifest expects slow/e2e nodeids that the pmv run never produces and every merge reds on vanished nodeids.
+**Step 1a:** Implement the P4 enforcement (plan-review P1-9): conftest session-start URI-required check + `TORTOISE_TEST_CARVE_OUT` gate (above); wire `.github/workflows/post-merge-validation.yml` to job-level URI + junitxml-reconciled manifest; verify the carve-out job passes with `TORTOISE_TEST_CARVE_OUT=1` and that a URI-less migrated run fails with the actionable message. **The post-merge-validation manifest must replicate the run's OWN ignore set (cycle-2 P2-14 + cycle-4 P2-11):** the pmv run excludes `--ignore=tests/e2e` + `$SLOW_IGNORES` (the **29** slow files from `config/ci-surfaces.yml` — cycle-3 P2-11: verified count, the plan's "21" undercounted); its collect-only manifest generation uses the SAME excludes — otherwise the manifest expects slow/e2e nodeids that the pmv run never produces and every merge reds on vanished nodeids. **Cycle-4 P2-11 — the marker filter rides too:** the pmv run applies `-m 'not track_b'` (post-merge-validation.yml:318, VERIFIED: `pytest tests/ -v --timeout=300 -p no:cacheprovider -m 'not track_b' --ignore=tests/e2e $SLOW_IGNORES ...`), so the manifest generation MUST pass the same `-m 'not track_b'` — a manifest built without it expects every track_b nodeid the pmv run deliberately deselects, and every merge reds on vanished nodeids.
 **Step 2:** Review `e2e/hosted/test_12_selfhost_migration.py` (open question 4): selfhost path is docker FalkorDB — verify it runs under URI; fix drift if it hardcodes embedded paths; migrate it or document the carve-out decision.
 **Step 3:** File the D1–D16 change list as the canonical divergence doc (epic indicator #3).
 **Step 4:** Demote the reaper: CI drops its correctness dependency; keep local-dev hygiene (conftest sweep + cron for dev boxes).
@@ -1417,7 +1636,7 @@ git commit -m "ci(testdb): phase-2 flip — fast half b on docker + junitxml-rec
 | Missing docker service → whole half fails/skips | Skip-guard coverage manifest → red (fail-closed); never green-skip | `tests/test_skip_guard.py` manifest cases |
 | Redirect inert + embedded succeeds → job green on the wrong backend | Backend-identity tripwire fails the session at start | `tests/test_backend_identity_tripwire.py` |
 | Redirect fires in a subprocess CLI child (URI+TEST_MODE inherited via `os.environ.copy()`, e.g. test_export_cli's `python -m tortoise export`, redis-guard fixture scripts) | Redirect gated on a test frame being present — `_caller_test_stem() is None` → no redirect; the child keeps the embedded/CLI lane (cycle-2 P1-1b); prod entry points pop TEST_MODE at startup (P2-10) | `tests/test_redirect_seam.py::test_no_test_frame_in_stack_no_redirect` |
-| Typo'd / shared (non-loopback) `TORTOISE_DB_URI` → every migrated construction writes `test_*` graphs on a remote server before any wipe refuses | Redirect + session-start tripwire refuse BEFORE the first write (loopback predicate; `TORTOISE_TEST_ALLOW_REMOTE=1` escape); `wipe_server`'s D-4 refusal is the third line (cycle-2 P0-2). **Cycle-3 P2-6: the escape is WRITE-ONLY** — it unlocks redirect+write but wipes/sweeps still refuse non-loopback, so a `TORTOISE_TEST_ALLOW_REMOTE=1` session is assert-only/read-only by construction (any `_wipe_or` raises); remote wipes would need a separate explicit opt-in, never folded into the write escape | `tests/test_redirect_seam.py::test_uri_set_refuses_non_loopback_host` + Task 4 tripwire (zero graphs created) |
+| Typo'd / shared (non-loopback) `TORTOISE_DB_URI` → every migrated construction writes `test_*` graphs on a remote server before any wipe refuses | Redirect + session-start tripwire refuse BEFORE the first write (loopback predicate; `TORTOISE_TEST_ALLOW_REMOTE=1` escape); `wipe_server`'s D-4 refusal is the third line (cycle-2 P0-2). **Cycle-3 P2-6: the escape is WRITE-ONLY** — it unlocks redirect+write but explicit wipes still refuse non-loopback, so a `TORTOISE_TEST_ALLOW_REMOTE=1` session is assert-only/read-only by construction (any `_wipe_or` raises); remote wipes would need a separate explicit opt-in, never folded into the write escape. **Cycle-4 P1-8: the SESSION-END/STALE/ATEXIT SWEEPS SKIP (log-and-continue) on non-loopback — they do NOT raise** — so a read-only ALLOW_REMOTE session passes its tests AND teardowns green (D-4's `RuntimeError` remains ONLY for explicit `wipe_server()`/`_wipe_or` calls; the old "wipes/sweeps still refuse" wording made every ALLOW_REMOTE session red at teardown) | `tests/test_redirect_seam.py::test_uri_set_refuses_non_loopback_host` + Task 4 tripwire (zero graphs created) + `test_allow_remote_session_teardown_green` (Task 2 Step 7) |
 | Path-less job URI → `from_uri` resolves default graph `tortoise` → `DETACH DELETE` trips the guard | Job URI carries a test-prefixed path (`/tortoise_test_matrix`); URI-default DETACH sites verified/normalized in Task 6 Step 3 (cycle-2 P1-2) | P2 half-b run (Task 6) |
 | Two concurrent URI sessions on one docker → session A's end-sweep drops session B's live graphs | **Per-session created-graph JOURNAL** (token-named file in `ACTIVE_SUITES_DIR` — the redirect/seam append each derived/verbatim name; cycle-3 P1-8: token-matching `list_graphs()` is impossible because derived names are hash12(session+path), not invertible, and nonce names use `os.urandom` — the journal is the source of truth) + per-test wipes scoped to the session's created-set (cycle-3 P1-7: `_wipe_or` passes the scope; the server-global sweep runs ONLY at session-end/last-suite-standing) + defer-full-sweep-to-last-suite-standing + session-start stale sweep reading DEAD sessions' journals + atexit fallback (mirror `_redislite_hygiene`; cycle-2 P0-3/P2-1/3) | Task 2 Step 7 + `test_concurrent_suite_end_sweep_leaves_other_suite_graphs` (unit, cycle-3 P2-13) + two-process integration |
 | Hidden cross-file state on the shared docker graph | Per-test graph names (exact-set tier) + filtered `wipe_server()` (shared tier); guard makes bare-`test` wipes impossible | E2E-2 |
@@ -1542,7 +1761,7 @@ Third review pass (3 fresh reviewers). Every P0/P1 fixed; every actionable P2 fi
 | P1-2 | P1 | backup_sweep census incomplete (20 of 29 sites): missed L452/475/510/533/538/603/606 (select_graph), L744 (select_graph), L745 (assert team_graph_name) | Route by regex sweep (`select_graph("registry_control_plane")` / `select_graph("team_team_x")` / `team_graph_name` grep + dynamic `f"team_{team_id}"` L57 / `team_team_e` L233 / `team_myapp` L770/860 / `team_beta` L816), not an enumerated list | Task 2 Step 6b
 | P1-3 | P1 | TEST_MODE pop placement dangerous: hosted_api has no `main()`/`__main__` guard; module-import placement fires in-session (conftest imports hosted_api at L337), main()-placement fires in-process (tests call main()s) → mid-session pop kills the redirect → wrong-backend green (#942 class) | Pops pinned to `if __name__ == "__main__":` blocks / subprocess-launcher paths ONLY; hosted_api DROPPED from the pop list (its 3 path= constructions at 6254/8263/8357 are inside embedded-only `_path` guards — verified safe); mcp_server's existing `__main__` block (L2699) is the pop site; test_mcp_server env-pop loop gains TEST_MODE | Task 1 (acceptance, seam-fixtures paragraph), Failure-Modes prod row
 | P1-4 | P1 | Connection-boundedness claim FALSE: host branch is `from falkordb import FalkorDB` (raw, L380-381); guarded subclass is redislite-only; test asserts `conn.closed`/`conn.connection` on a redis.Redis — neither exists → passes vacuously | Re-scoped to "redirect inherits the existing host branch's raw-client lifecycle — no worse than today's from_uri sites"; `FalkorProjection.close()` already disconnects the pool (L1547-1568); test rewritten to assert POOL RELEASE (`connection_pool._available_connections` back to baseline) | Task 1 (acceptance, Step 1/3), cycle-2 P2-11 row amended
-| P1-5 | P1 | No-namespace TortoiseSDK sites share the URI-default graph: `_get_proj()` (sdk.py L1115-1123) with URI set IGNORES db_path, resolves `urlparse(uri).path or "tortoise"` → under `/tortoise_test_matrix` EVERY no-namespace SDK shares one graph (test_projection L2043/2135/2321/2346/2507 — 5 sites, distinct _tmp paths) → exact-set assertions get cross-test data | Task 7 census gains `grep -rn "TortoiseSDK("`; no-namespace SDK constructions get a per-session default namespace (`test_sdk_<hash12(session + id(db_path))>`) OR enumerated per-test namespaces; new test: two no-namespace SDKs with distinct db_paths under URI → distinct `test_`-prefixed graphs | Task 7 (acceptance, Step 1/5)
+| P1-5 | P1 | No-namespace TortoiseSDK sites share the URI-default graph: `_get_proj()` (sdk.py L1115-1123) with URI set IGNORES db_path, resolves `urlparse(uri).path or "tortoise"` → under `/tortoise_test_matrix` EVERY no-namespace SDK shares one graph (test_projection L2043/2135/2321/2346/2507 — 5 sites, distinct _tmp paths) → exact-set assertions get cross-test data | Task 7 census gains `grep -rn "TortoiseSDK("`; no-namespace SDK constructions get a per-session default namespace (`test_sdk_<hash12(session + id(db_path))>`) OR enumerated per-test namespaces; new test: two no-namespace SDKs with distinct db_paths under URI → distinct `test_`-prefixed graphs. **Cycle-4 P0-2/P1-6 amendment (the cycle-3 fix was based on a false premise):** `id(db_path)` is a memory address (GC/reuse collapses distinct SDKs; same-value/different-instance splits them) — the hash input is the VALUE (`session + db_path`); the SDK-layer default is gated on `db_path is not None and TORTOISE_TEST_MODE=1` (an unconditional default reds `test_namespace_uri_mode`'s two no-db_path tests); the OR is resolved to the SDK-layer option | Task 7 (acceptance, Step 1/5)
 | P1-6 | P1 | Seam/parity tests not lane-safe: `test_unset_uri_constructs_embedded` has NO `monkeypatch.delenv("TORTOISE_DB_URI")` (red on URI-set lanes); E2E-1's `test_round_trip_same_shape` has no env control — the claimed "parametrized URI set/unset" is prose (docker-vs-docker on a URI-set lane, never detects divergence) | Every seam/parity test self-contained: unset-assuming tests `delenv`; E2E-1 parametrized with REAL env control (embedded leg delenv, docker leg setenv); acceptance checklist item added | Task 1 (acceptance, Step 1, Step 5b)
 | P1-7 | P1 | Per-test `_wipe_or` is a server-global blind wipe: session A's per-test wipe deletes session B's LIVE graphs; mid-session each wipe enumerates + DETACHes the whole session's accumulated graphs (quadratic wall) | Per-test wipes scoped to the session's created-set (`wipe_server(proj, scope=...)` — shared predicate with the session sweep); server-global full sweep ONLY at session-end/last-suite-standing; cost-bound test (~2000 pre-created test_* graphs, scoped wipe bounded) | Task 2 (acceptance, Step 3 `_wipe_or`/`wipe_server`, Step 7)
 | P1-8 | P1 | Stale-sweep token matching impossible (derived = hash12(session+path) not invertible; nonce names use os.urandom, not TORTOISE_TEST_SESSION); created-set has no recording mechanism | Per-session created-graph JOURNAL (token-named file in ACTIVE_SUITES_DIR; redirect + seam append each derived/verbatim name); stale sweep reads DEAD sessions' journals; "recoverable by token-matching" claim dropped | Task 2 Step 7, Failure-Modes concurrent-session row
@@ -1586,3 +1805,57 @@ All 8 P0/P1 issues fixed (P0-1, P1-1 … P1-8) and all 18 P2s fixed in-line; thr
 3. **P2-2** — test_hnsw_vector_index/test_ingest were over-catalogued as P2 URI-default DETACH risks (scoped wipes / slow_files).
 
 Every other claim was verified exactly as the reviewers stated (redis.Redis `.host` absence, the 9 missed select_graph sites, 10 run_guard call sites, 29 slow files, hosted_api's missing `__main__` + conftest import, the no-namespace SDK graph share, hyphenated stems, 32-bit hash, the write-only escape, the vacuous boundedness test). The plan's structure (Tasks 1-10, Phase 1-4 gates, E2E catalog, Failure Modes, changelogs) is preserved; all changes are surgical in place.
+
+---
+
+## Plan-Review Changelog (cycle 4 → fixed plan)
+
+Fourth review pass (3 fresh reviewers). All P0s/P1s fixed; all actionable P2s fixed in-line; the rest are explicit Good-vs-Easy deferrals. **All code claims verified against the worktree before editing** (`falkordb.FalkorDB.__init__` live round-trip at falkordb.py:132 `Is_Sentinel(conn)` → `conn.info()`; `_is_embedded` instance-attr at projection L390 (no class attr); test_helpers.py absent; team_graph_name registry branch `team_{id}` at backup_sweep.py:246 + consumption :514 + `_backup_team` select_graph :264; 27 `run_backup_sweep(` call sites / 22 registry-mode tests in test_backup_sweep; L745 real-function assert in `test_team_graph_name_reads_from_teams`; SDK no-namespace → URI-path graph sdk.py L1106-1128 + TortoiseSDK() default db_path=None L962; test_namespace_uri_mode's 2 no-namespace tests; __main__.py 6 path-construction sites L13/521/1724/1915/2165/2562 + `if __name__ == "__main__":` at the bottom; backup.py has NO main()/`__main__` (entry = tortoise CLI L4121-4127; pyproject scripts: tortoise/tortoise-ingest/tortoise-serve only); test-concurrency-falkor job URI `docker://.../tortoise` python-ci.yml L695-760 + live tests use explicit `test_live_mw_tortoise` (test_embedded_concurrency L111-153); pmv run applies `-m 'not track_b'` (post-merge-validation.yml:318); embedded marker format `{pid}-{uuid8}` + `pid=`/`start=` lines (conftest L178-192) via `tortoise.embedded_reaper` helpers; test_pack_state team-p L188 / team-k L296 / team-red L324 / team-green L345 + e2e-900 namespaces (test_index_surfacing L39, test_backfill_sources L37/902/916/959/989); `_cmd_validate` ×7-8 in test_domain_validators L543-579 + `main(["doctor"])` L207 + `main(["context"])` L45; pool-release vacuity on redis-py 8.1.0 `_available_connections`).
+
+| ID | Severity | Issue (reviewer finding) | Fix applied | Where |
+|---|---|---|---|---|
+| P0-1 | P0 | `_wipe_or` scope WIRING never happened: cycle-3 added `scope=` to wipe_server/_wipe_or but Task 2 Step 6 converts 30+ call sites (test_projection._shared_proj, test_backup_sweep ×22, test_projection_version_gate ×6, test_analyze ×3) to `_wipe_or(proj)` with NO scope → scope=None → server-global blind wipe → re-opens the concurrent-session deletion hazard + quadratic wall; the cost-bound test exercises the primitive, not the wiring | Mechanism defined: module-level in-memory created-set registry in tests/_embedded.py (`_JOURNAL` + `_WIPED_UP_TO` cursor) populated by the journal appender; an autouse per-test fixture advances the since-last-wipe cursor; **`_wipe_or` defaults scope to the registry — NEVER None** (true server-global reachable only via the session-end sentinel); wiring-level test `test_per_test_wipe_or_touches_only_session_set` (foreign `test_foreign_<uuid>` + 100 unrelated `test_*` graphs survive a converted-style `_wipe_or(proj)`) | Task 2 (Step 3 impl, Step 6 note, Step 7 item 0a, Step 1 test)
+| P0-2 | P0 | `id(db_path)` as the SDK namespace hash input is a memory-address collision: test 1's SDK GC'd → test 2 reuses the freed address → SAME graph → cross-test pollution; same-value/different-instance str objects → DIFFERENT graphs → write-then-read-stale within one test | Hash the VALUE: `test_sdk_<hash12(session + db_path)>` (distinct values → distinct graphs, same value → shared — the correct embedded analog); two new unit tests: (a) sequential SDKs + `gc.collect()` between → distinct graphs; (b) two constructions of the same path value (fresh str each) → same graph | Task 7 (acceptance, Step 5)
+| P1-1 | P1 | falkordb constructor does a LIVE round-trip: `FalkorDB.__init__` at falkordb.py:132 `Is_Sentinel(conn)` → `conn.info()` — an eager server command BEFORE returning. `test_wipe_server_refuses_non_loopback` (host="db.internal...") and `test_allow_remote_escape_lets_non_loopback_through` raise redis.exceptions.ConnectionError (NOT RuntimeError) during construction → `pytest.raises(RuntimeError, match="loopback")` never fires on both | Stub/monkeypatch: `test_wipe_server_refuses_non_loopback` constructs `types.SimpleNamespace(_host="db.internal.example.com")` (wipe_server reads only `proj._host` before the host check raises); the escape test `monkeypatch.setattr("falkordb.FalkorDB", _FakeFalkorDB)` (stub needs select_graph + close only — host branch L380-390 + close L1547-1568 verified) | Task 1 Step 1 (escape test), Task 2 Step 1 (refusal test)
+| P1-2 | P1 | Pool-release assert still inverted/vacuous: `p.db.connection` CHECKS OUT a connection (`_available_connections` == 0 before); close() → release → disconnect (does not remove connection objects) → reset (empties) → after == 0 → "0 >= 0" passes; a NO-OP close (leak) also passes (after == before) | Re-scoped to (a) weakref live-ConnectionPool count after gc.collect() (≤ 1 of 20) — the primary; (b) server-visible INFO clients `connected_clients` before/after the loop (growth ≤ 1 — what the docker job can actually observe); redis-py introspection kept secondary | Task 1 Step 1 (`test_redirect_connection_boundedness`)
+| P1-3 | P1 | E2E-1 smoke assert is an AttributeError: `FalkorProjection._is_embedded` is an INSTANCE attr (set in `__init__` L390, verified) — no class attr → the assert raises on BOTH legs, making E2E-1 red in both modes | Line dropped; replaced with an instance-level probe (`probe._is_embedded in (True, False)` on a constructed instance) | Task 1 Step 5b
+| P1-4 | P1 | `tests/test_helpers.py` referenced (imported by `test_caller_test_stem_nearest_frame_semantics`) but never created → ImportError at collection; and it would be the only test_-prefixed shared helper — carve-out files constructing through it resolve to stem `test_helpers` (not exempt) → redirect fires despite the exemption | Module added to Task 1 Step 3's edit list with its full spec (`construct_via_helper()` returns `_caller_test_stem()`); guard added to the P2-9 stem-registry test (`test_no_carve_out_imports_test_helpers` — no TEST_NO_REDIRECT_STEMS module's source may contain "test_helpers") | Task 1 (Step 1 test, Step 3 edit list), Task 5 Step 1 (guard)
+| P1-5 | P1 | backup_sweep consumption seam covers only 2 of ~22 registry-mode sweep tests: `team_graph_name` (backup_sweep.py:190) registry branch returns deterministic `team_{id}` (L246) and `run_backup_sweep` consumes it at :514 — the two cycle-3 docker-lane tests monkeypatch it individually; the other ~20 ride half b and dump the EMPTY derived graph (seam-seeded data sits on `test_team_<uuid>_tortoise`) → red | Consumption routed FILE-WIDE: a module-scoped autouse fixture in test_backup_sweep monkeypatches `tortoise.backup_sweep.team_graph_name` to the seam constants for every sweep test (the patch can't live in `_make_env` — its monkeypatch arg is None at L162, verified); the L745 contradiction resolved explicitly: `test_team_graph_name_reads_from_teams` (tests the REAL function) is exempted from the autouse patch by name, so the real-function semantics stay covered and the patch isn't vacuous | Task 2 Step 6b
+| P1-6 | P1 | No-namespace SDK default namespace: (1) the cycle-3 OR (SDK-layer default vs per-file enumeration) is unresolved — the plan's unit test only passes under the SDK-layer option; (2) an unconditional SDK-layer default reds `test_namespace_uri_mode`'s two no-namespace tests (`test_no_namespace_uses_uri_graph` → URI-path graph, `test_uri_without_path_defaults_to_tortoise` → `tortoise` — both construct `TortoiseSDK()` with NO db_path); (3) census names only test_projection's 5 (~25 sites across ~20 files) | OR RESOLVED: SDK-layer default gated on `db_path is not None and TORTOISE_TEST_MODE=1 and no namespace` (the db_path gate is what protects the no-db_path URI-graph semantics — TEST_MODE alone is set in every pytest session); expectation split: the two no-namespace tests stay as-is (their `TortoiseSDK()` constructions carry no db_path, so the gate leaves them green) + ONE new docker-session test asserts a no-namespace SDK WITH db_path derives `test_sdk_<hash12>`; census completed via `grep -rn "TortoiseSDK("` (test_suggest_entry_points 10, test_ep_operatorless 5, test_mcp_server 5, test_references_edge 10, test_integration_search 13, test_de2e1_entity_extraction 8, test_battery_setup 7, test_search_engine 7, test_pack_state 6, test_projection 5 + long tail) | Task 7 (acceptance, Step 1/5)
+| P1-7 | P1 | `TORTOISE_TEST_EXPECT_URI` never wired into CI: the E2E-6 session signal exists as a Task 4 mechanism but Task 6 Step 2's workflow edits never set it on the docker-half job — CI's docker half could silently lose its URI and green-pass | `TORTOISE_TEST_EXPECT_URI: "1"` added to Task 6 Step 2's half-b include env block (same place as the URI) | Task 6 Step 2
+| P1-8 | P1 | ALLOW_REMOTE sessions red at teardown: the session-end/stale/atexit sweeps "share the loopback refusal with wipe_server" → they RAISE on non-loopback → every write-escape session fails after its tests passed (sweep-vs-raise was unspecified) | Specified + tested: session-end/stale/atexit sweeps SKIP (log-and-continue, `skip_on_non_loopback=True`, journal preserved) — D-4's `RuntimeError` remains ONLY for explicit `wipe_server()`/`_wipe_or` calls; new 1-test `test_allow_remote_session_teardown_green` (stub projection, fake journal); Failure-Modes row rewritten | Task 2 Step 7 items 3-5 + Verify, Failure-Modes table
+| P1-9 | P1 | DETACH-only wipes → unbounded GRAPH.LIST growth: every wipe is DETACH DELETE (empties but never removes the graph); a persistent dev docker accumulates every derived graph forever — invisible to E2E-7 (counts redislite processes, not server graphs) | Session-end + stale sweeps call `wipe_server(..., drop=True)` (DETACH then GRAPH.DELETE the journaled names; per-test wipes keep drop=False); E2E-7 gains a server-side bound: `GRAPH.LIST` count < journal size + constant (catalog row + Task 9 Step 4 + P3 Gate 4) | Task 2 Step 3/7, E2E-7 catalog, Task 9, P3 Gate 4
+| P2-1 | P2 | Docker marker format unspecified: the plan said "an active-suite marker file, same pattern as `_redislite_hygiene`" without pinning the FORMAT — a divergent format breaks `active_suite_markers()` liveness (recycled-pid, start-time identity) | Docker markers REUSE the embedded format exactly: `{pid}-{uuid8}` token, `pid=`/`start=` lines, same `tortoise.embedded_reaper` helpers (`active_suite_markers`, `_process_start_time`, `ACTIVE_SUITES_DIR`) — shared code, not a parallel implementation; pinned by a parser test (a conftest-written docker marker parses through `active_suite_markers()` with the same identity checks) | Task 2 Step 7 item 1
+| P2-2 | P2 | `from_uri` bypasses the journal: the URI-default graph (`tortoise_test_matrix`) is shared across sessions — a per-session DETACH of it races other sessions' live writes | In test mode (`TORTOISE_TEST_MODE=1`), `from_uri()` appends its resolved graph name to the session journal (single seam point); the per-test wipe scope EXCLUDES the shared URI-default graph (owned by session-end/last-suite-standing); from_uri census enumerated (test_live_mw_tortoise ×3, tripwire probe, tortoise_test_221_namespace, URI-default sites) | Task 2 Step 7 item 2
+| P2-3 | P2 | Journal torn-writes + threaded appends unspecified: a killed writer can truncate the journal mid-line; concurrent appenders unspecified | Per-append atomicity (open/write/close per append — the atomicity boundary; no cross-append lock needed with token-named per-session files); tolerant reader (parse line-by-line, truncate at the first unparseable line; an unparseable FIRST line → treat as empty + delete — poison-file guard); stale-sweep test `test_journal_tolerant_reader_truncated_line` | Task 2 Step 7 item 2 + Verify
+| P2-4 | P2 | Canary classifier omits step-wall/job outcome: `tools/testdb_canary_classify.py` reads junitxml + manifest + divergence log but never the E2E-5 step-wall gate — a run that rides the watchdog and passes green is classified as green | `step_wall` added as a MANDATORY classifier input; a step-wall-gate failure (`step_wall ≥ 55m`) resets the streak to 0 like any other failure | Task 9 Step 6
+| P2-5 | P2 | `TORTOISE_TEST_SESSION` mutation has no test: the nonce folds into derived names AND the journal filename — a mid-session mutation strands this session's graphs with no probe | `test_session_nonce_is_stable_and_hex8` added (module-import snapshot `_SESSION_NONCE_AT_IMPORT` vs runtime value + 8-hex shape) | Task 1 Step 1
+| P2-6 | P2 | The live-required CI job (`test-concurrency-falkor`, python-ci.yml L695-760) sets `TORTOISE_DB_URI: docker://.../tortoise` — a NON-test-prefixed path — and was never in any audit | Added to the Task 6 audit (acceptance + Step 3 grep): currently INERT (both live tests use `from_uri(uri, graph_name="test_live_mw_tortoise")` with explicit test-prefixed names, no `path=`, no URI-default DETACH — verified L111-153); the grep pins that no new construction flips it; if one does, the job URI gains the P1-2 test-prefixed path | Task 6 (acceptance, Step 3)
+| P2-7 | P2 | Census misses test_pack_state team-p/team-k/team-red/team-green (L188/296/324/345, verified) + e2e-900 (test_index_surfacing L39, test_backfill_sources L37/902/916/959/989 → shared non-test `team_e2e-900`) | Census completed: 13 team-* namespace sites (not 8) + the tenant-*/t-reg-2/mcp-team/registry/t-bf-1 sites + e2e-900 routed to per-test `test_*` namespaces | Task 7 (acceptance, Step 1)
+| P2-8 | P2 | `__main__.py` has 6 FalkorProjection path-construction sites (L13/521/1724/1915/2165/2562, verified) not 1; backup.py has no `main()`/`__main__` block (its backup/restore entry is the `tortoise` CLI at L4121-4127; pyproject scripts = tortoise/tortoise-ingest/tortoise-serve only, verified) — the prod-census + pop-site claims were built on a false single-site assumption | Task 1 acceptance + Failure-Modes prod row corrected to the 6-site census + backup.py entry-point reality (the pop for backup.py lives at its `tortoise` CLI subprocess-launcher path in `__main__.py`, not in backup.py) | Task 1 (acceptance), Failure-Modes row
+| P2-9 | P2 | Task 2 Step 7 acceptance bullet still claims "all embed the session token" — directly contradicting the cycle-3 P1-8 journal finding (derived = hash12, nonce = os.urandom; no graph name carries a recoverable token) | Bullet rewritten: the journal is the ONLY source of truth; the token-embedding claim is dropped with the contradiction called out | Task 2 (acceptance bullet)
+| P2-10 | P2 | P1-7's quadratic-wall fix overstated: scoping per-test wipes to the FULL session created-set is still O(session) per wipe → O(session²) across the session; "O(created)" was only true of the primitive | Honest bound: per-test scope = the created-since-last-wipe DELTA (`_WIPED_UP_TO` cursor slicing `_JOURNAL`), so per-test wipes are O(delta) and the session total is O(created) amortized; cost-bound test re-specified on the delta | Task 2 Step 3/7 item 0
+| P2-11 | P2 | pmv manifest must include `-m 'not track_b'`: post-merge-validation.yml:318 runs `pytest tests/ ... -m 'not track_b' --ignore=tests/e2e $SLOW_IGNORES` (verified) — a manifest generated without the marker filter expects track_b nodeids the pmv run deselects → every merge reds | Task 10 Step 1a's manifest-generation spec gains the same `-m 'not track_b'` filter | Task 10 Step 1a
+| P2-12 | P2 | In-process prod-command calls unaudited: test_domain_validators `_cmd_validate` ×7-8 (L543-579), test_session_index_health `main(["doctor"])` (L207), test_cli_context `main(["context"])` (L45) — under a docker session the redirect fires inside these prod commands (test frame in the caller stack) | Task 6 Step 3's pre-flight gains the three files + the L521 doctor-fallback leg is pinned per lane (subprocess → embedded fallback; in-process → redirect); results recorded in the divergence-confirmation log | Task 6 Step 3
+| P2-13 | P2 | `test_wipe_server_completeness` was server-global (reds spuriously on a dev docker with leftovers) | **ALREADY FIXED — verified:** the cycle-3 P2-7 scoping is in place (fixture's own graphs via faked `list_graphs`; the session-end stale sweep owns the global cleanup and must run BEFORE this assert in CI order). No change needed this pass; recorded for the record | Task 2 Step 1 (verified)
+| P2-14 | P2 | Mid-session TEST_SESSION mutation unguarded at the carve-out/stem-registry level | `test_session_token_present_and_hex8_during_docker_session` added to test_markers.py (conditional on `TORTOISE_DB_URI` set — docker-half shape; asserts presence + 8-hex) | Task 5 Step 1
+
+### Good-vs-Easy deferrals (cycle 4 — rule 4/5 records)
+
+| Issue | Chosen (Good) | Deferred alternative | Cost of deferral | Rationale |
+|---|---|---|---|---|
+| P0-1 scope wiring | Registry + since-last-wipe cursor in `_wipe_or`'s default scope | Thread an explicit scope arg through all 30+ converted call sites | Touches every migrated file again; the default at the seam fixes the whole class and future callers | One default in the dispatcher beats 30 call-site edits that future callers would forget anyway |
+| P1-6 SDK default | SDK-layer per-session default namespace gated on `db_path is not None` + TEST_MODE | Per-file enumeration + explicit per-test namespaces at ~25 sites across ~20 files | ~25 edits, drift-prone (new no-namespace sites appear), and the plan's own unit test only works under the SDK-layer option | The seam fixes the class; the gate preserves `TortoiseSDK()`'s URI-graph semantics with zero churn to test_namespace_uri_mode |
+| P1-9 GRAPH.DELETE | Session-end/stale sweeps drop journaled graphs after DETACH (drop=True) | A scheduled server-side GRAPH.LIST reaper | A new ops surface for a problem the sweep can solve at its own boundary | The sweep already knows the session's exact graph set — deleting at the same seam is one flag |
+| P2-2 from_uri | from_uri journals its resolved graph in test mode + per-test scope excludes the shared default | Per-session URI path (`/tortoise_test_matrix_<session>`) | Changes the CI URI format (ripples through every job/env/assert) and still leaves explicit-name from_uri sites unjournaled | One seam point covers URI-default AND explicit from_uri constructions; the last-suite-standing coordination already bounds the shared graph |
+| P2-6 live-required job | Audit + grep pin (job URI stays `/tortoise`) | Change the job URI to the test-prefixed path now | The job's live tests use explicit `test_live_*` names today — a URI change is churn with no current risk | Inertness is verified; the audit + grep turn a future regression into a visible CI failure instead of silent pollution |
+
+## Cycle-4 SUMMARY
+
+All 10 P0/P1 issues fixed (P0-1, P0-2, P1-1 … P1-9) and all 14 actionable P2s fixed in-line; one issue (P2-13) verified as already-fixed. The dominant theme this pass was **wiring vs primitive**: cycle 3 specified mechanisms whose CALL SITES never delivered them (P0-1 scope, P1-7 EXPECT_URI, P1-5 file-wide consumption, P1-2's vacuous assert) and two mechanisms that could never run at all (P1-1's constructor round-trip, P1-3's class-attr assert). Three reviewer premises were confirmed with fresh line-level evidence rather than rubber-stamped:
+
+1. **P1-5** — the consumption seam's coverage is 2 of ~22 registry-mode tests (verified: 27 `run_backup_sweep(` call sites; `team_graph_name` registry branch is deterministic `team_{id}`), so half b reds at P2 without a file-wide fixture.
+2. **P2-8** — `__main__.py` has 6 path-construction sites (L13/521/1724/1915/2165/2562) and backup.py has NO main/`__main__` block — the plan's single-site census + pop-site assumption were factually wrong.
+3. **P2-6/P2-11** — the live-required job's non-test-prefixed URI (`/tortoise`) is inert today (explicit `test_live_mw_tortoise` names) but was never audited; the pmv run DOES apply `-m 'not track_b'` (post-merge-validation.yml:318) so the pmv manifest must too.
+
+Every other claim was verified exactly as stated (falkordb `Is_Sentinel` live round-trip at :132, `_is_embedded` instance-only, test_helpers.py absent, L745 real-function assert, `TortoiseSDK()` default db_path=None + URI-graph resolution, embedded marker `{pid}-{uuid8}` + `pid=`/`start=` lines, team-p/team-k/team-red/team-green + e2e-900 census gaps, `_cmd_validate`/`main([...])` in-process calls, `_available_connections` vacuity). The plan's structure (Tasks 1-10, Phase 1-4 gates, E2E catalog, Failure Modes, changelogs) is preserved; all changes are surgical in place.
