@@ -27,8 +27,9 @@ from __future__ import annotations
 
 import json
 import re
-import pytest
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PRODUCT_HTML = REPO_ROOT / "website" / "product.html"

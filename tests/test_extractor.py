@@ -10,14 +10,24 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest  # noqa: E402 — after the sys.path bootstrap
+import pytest
 
 from tortoise.api import EventAPI, provenance  # noqa: E402, F401, I001, RUF100
 from tortoise.extractor import (  # noqa: E402, RUF100
-    _document_sections, _has_cue, _is_claim, _json, _overlap,
-    _PUNC, _REFUTE_PHRASES, _REFUTE_SINGLE_RE,
-    _SUPPORT_PHRASES, _SUPPORT_SINGLE_RE,
-    _utterances, LLMExtractor, MockExtractor, MockModel,
+    _PUNC,
+    _REFUTE_PHRASES,
+    _REFUTE_SINGLE_RE,
+    _SUPPORT_PHRASES,
+    _SUPPORT_SINGLE_RE,
+    LLMExtractor,
+    MockExtractor,
+    MockModel,
+    _document_sections,
+    _has_cue,
+    _is_claim,
+    _json,
+    _overlap,
+    _utterances,
 )
 from tortoise.log import EventLog  # noqa: E402, RUF100
 
