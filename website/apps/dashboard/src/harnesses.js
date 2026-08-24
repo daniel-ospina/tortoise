@@ -39,11 +39,12 @@ export const HARNESS_INSTALL = {
     `Create or merge .mcp.json in this project with:\n${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}\n(First: export TORTOISE_API_KEY=${key} — the config references the env var, not the key.)`,
 }
 
-// #1643: the first-party skill installer (agent-infra, public) — installs
-// the 3 core skills into the harness's project-scoped skills dir (personal
-// for Pi). Appended to each harness's copy.
+// #1643: the official skill installer — served from the product site (the
+// public source of truth is github.com/daniel-ospina/tortoise-skills-and-
+// integrations). Installs the 3 core skills into the harness's project-
+// scoped skills dir (personal for Pi). Appended to each harness's copy.
 export const SKILLS_INSTALL_URL =
-  'https://raw.githubusercontent.com/daniel-ospina/agent-infra/main/scripts/install-tortoise-skills.sh'
+  'https://app.premiselabs.co/install-tortoise-skills.sh'
 
 export const HARNESS_SKILLS = (harness) =>
   `\n\nInstall the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding):\ncurl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness ${harness}`
