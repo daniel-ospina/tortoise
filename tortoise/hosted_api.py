@@ -2506,11 +2506,20 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), team: dict = Depe
     """
     sdk = _make_sdk(namespace=team["team_id"])
     try:
-        results = sdk.tortoise_fts_query(q, limit=limit)
+        # #1676 (launch capacity): tortoise_fts_query is CPU-blocking — the
+        # query encode (sdk.py model.encode, ~10-50ms for bge-small) runs
+        # inline plus the 3 search legs. In a single-worker async server this
+        # serializes ALL requests on the event loop. Offload to a worker
+        # thread so concurrent searches overlap their encode/DB work (same
+        # asyncio.to_thread pattern used throughout this file).
+        results = await asyncio.to_thread(
+            sdk.tortoise_fts_query, q, limit=limit)
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("search failed")
         raise HTTPException(status_code=500, detail="Search failed")
+    finally:
+        sdk.close()
     # Normalize to the public response shape (kind from pointKind).
     out = []
     for r in results:
@@ -2545,10 +2554,12 @@ async def topic_summary(
     """
     sdk = _make_sdk(namespace=team["team_id"])
     try:
-        result = sdk.topic_summarize(
-            topic,
-            max_seeds=max_seeds,
-            max_hops=max_hops,
+        # #1676 (launch capacity): topic_summarize is CPU-blocking (EP
+        # classification + neighborhood traversal) — offload to a worker
+        # thread so the event loop stays free (same as the /v1/search fix).
+        result = await asyncio.to_thread(
+            sdk.topic_summarize, topic,
+            max_seeds=max_seeds, max_hops=max_hops,
             include_relationships=include_relationships,
         )
         return result
@@ -2556,6 +2567,8 @@ async def topic_summary(
         import logging
         logging.getLogger("tortoise.api").exception("topic summary failed")
         raise HTTPException(status_code=500, detail="Topic summary failed")
+    finally:
+        sdk.close()
 
 
 @app.get("/v1/team", response_model=TeamInfoResponse)

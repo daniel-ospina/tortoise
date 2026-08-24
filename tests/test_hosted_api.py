@@ -524,7 +524,6 @@ class TestTeamInfo:
         headers for the request origin — cross-origin clients otherwise read
         it as a misleading 'CORS blocked' (unhandled 500s bubble OUTSIDE the
         CORS middleware)."""
-        import tortoise.hosted_api as ha
         from starlette.testclient import TestClient
 
         @app.get("/__test_boom")
@@ -1114,8 +1113,8 @@ class TestSessionCapture:
         est=0 → 2+0 > 1 → gate-after-quota yields 402 while gate-first yields
         422 — the assertion discriminates; non-blank → 2+est > 1 → 402 either
         order (control)."""
-        from tortoise.hosted_api import app, get_current_team
         import tortoise.hosted_api as ha_mod
+        from tortoise.hosted_api import app, get_current_team
         app.dependency_overrides[get_current_team] = lambda: {
             **TEST_TEAM, "max_points": 1}
         sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
@@ -2653,6 +2652,7 @@ def test_make_sdk_reuses_healthy_anchor(monkeypatch):
     reused across _make_sdk calls — the keepalive's whole point. Eviction
     must only happen for a stale (path-drifted) or dead anchor."""
     import uuid
+
     import tortoise.hosted_api as ha
 
     ns = f"selfheal-keep-{uuid.uuid4().hex}"
@@ -2686,6 +2686,7 @@ def test_make_sdk_rebinds_stale_anchor(monkeypatch):
     must be evicted and re-bound to the CURRENT TORTOISE_DB_PATH.
     """
     import uuid
+
     import tortoise.hosted_api as ha
 
     ns = f"selfheal-{uuid.uuid4().hex}"
@@ -2883,8 +2884,8 @@ class TestCaptureStoredTurnParity:
         """#1532 D1/D2: identical input -> identical stored turns (content +
         speaker) on the SDK path and the hosted path — the shared window +
         role helpers keep the two loops byte-identical."""
-        from tortoise.sdk import TortoiseSDK
         from tortoise.hosted_api import TortoiseSDK as _HASDK
+        from tortoise.sdk import TortoiseSDK
         conv = [{"role": "user", "content": "prefix sentence. " + "x" * 6000},
                 {"role": None, "content": "short sentence here."},
                 {"role": 123, "content": "y"}]
@@ -2920,3 +2921,180 @@ class TestV2SessionFloodGate:
             "MATCH (s:Session {id:$sid}) RETURN count(s)",
             params={"sid": "dense-v2-session"}).result_set
         assert rows[0][0] == 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── #1676: search/topic_summary offload — event-loop concurrency + thread safety
+
+class TestSearchOffloadConcurrency:
+    """The search + topic_summary SDK calls are offloaded via asyncio.to_thread
+    so the event loop stays free (launch capacity, #1676). These tests prove
+    the offload at the HANDLER level — TestClient serializes, so an HTTP-level
+    test cannot demonstrate overlap."""
+
+    def test_two_concurrent_searches_overlap_on_thread_pool(self, monkeypatch):
+        """Two concurrent searches whose encode blocks on a shared barrier must
+        complete in ~1x encode time, not 2x — proving they run on worker
+        threads, not serialized on the event loop. With the offload removed,
+        the first encode blocks the loop, the barrier times out (3s), and the
+        wall-time bound fails in ~4.5s (the discriminator)."""
+        import asyncio
+        import threading
+        import time
+
+        import numpy as np
+
+        import tortoise.hosted_api as ha_mod
+        from tortoise.embeddings import EmbeddingModel
+
+        barrier = threading.Barrier(2, timeout=3)
+
+        class _SlowEmbedder:
+            """Stub whose encode blocks on the shared barrier + sleeps, then
+            returns a valid 384-dim vector (matches bge-small-en-v1.5)."""
+            def encode(self, texts, **kwargs):
+                time.sleep(0.5)
+                barrier.wait()
+                return np.zeros((1, 384), dtype=np.float32)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            _orig_init = _patch_tortoise_sdk_init(db_path)
+            try:
+                # Sequential pre-warm (concurrency_harness split-brain rule):
+                # the first _make_sdk seeds the redislite keepalive anchor and
+                # EAGERLY connects (_get_proj) so the daemon socket exists
+                # before the gather's worker threads construct their SDKs — a
+                # raced constructor would spawn a second daemon (split-brain)
+                # or hit the socket before it appears.
+                pre = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+                pre._get_proj()  # eager: ensure the daemon socket is up
+                # Install the stub AFTER the pre-warm so the pre-warm doesn't
+                # consume/break the shared barrier.
+                monkeypatch.setattr(EmbeddingModel, "get",
+                                    lambda: _SlowEmbedder())
+
+                async def _run():
+                    from tortoise.hosted_api import search
+                    t0 = time.monotonic()
+                    await asyncio.wait_for(asyncio.gather(
+                        search("falkordb traversal", limit=10, team=TEST_TEAM),
+                        search("graph performance", limit=10, team=TEST_TEAM),
+                    ), timeout=15)
+                    return time.monotonic() - t0
+
+                elapsed = asyncio.run(_run())
+                # Overlap: ~0.5s (one encode window) + small overhead, well
+                # under 2x (1.0s+). Cap 1.5s clears the measured cold path
+                # (0.91s) without flaking green code.
+                assert 0.4 <= elapsed < 1.5, f"searches did not overlap: {elapsed:.2f}s"
+            finally:
+                _restore_tortoise_sdk_init(_orig_init)
+
+    def test_search_degrades_to_fts_when_embedder_unavailable(self, monkeypatch):
+        """#1676: with the embedder absent (get -> None), search must return
+        200 (degrade to FTS), never 500 — the _vec_reason='no_embedder' path
+        (sdk.py) is preserved by the offload."""
+        import asyncio
+
+        import tortoise.hosted_api as ha_mod
+        from tortoise.embeddings import EmbeddingModel
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            _orig_init = _patch_tortoise_sdk_init(db_path)
+            try:
+                ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+                monkeypatch.setattr(EmbeddingModel, "get", lambda: None)
+
+                from tortoise.hosted_api import search
+                result = asyncio.run(search("anything", limit=10,
+                                            team=TEST_TEAM))
+                # Empty temp DB -> FTS finds nothing; the meaningful assert is
+                # 200-shaped (no HTTPException) + count == 0.
+                assert result == {"results": [], "count": 0}
+            finally:
+                _restore_tortoise_sdk_init(_orig_init)
+
+    def test_topic_summary_offload_returns_shape(self):
+        """#1676: topic_summary runs off the loop and returns the full
+        materialized dict (200-shaped) with the SDK closed afterwards."""
+        import asyncio
+
+        import tortoise.hosted_api as ha_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            _orig_init = _patch_tortoise_sdk_init(db_path)
+            try:
+                ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+
+                from tortoise.hosted_api import topic_summary
+                result = asyncio.run(topic_summary(
+                    "some topic", max_seeds=50, max_hops=1,
+                    include_relationships=True, team=TEST_TEAM))
+                # Empty DB -> empty-but-shaped summary (no 500).
+                assert isinstance(result, dict)
+                assert result.get("topic") == "some topic"
+                assert "total_points" in result
+            finally:
+                _restore_tortoise_sdk_init(_orig_init)
+
+
+class TestEmbedderThreadSafety:
+    """#1676: concurrent encode() calls on the shared EmbeddingModel singleton
+    must be correct (same input -> cosine ≈ 1), not just exception-free. Gated
+    on real-model availability so embedder-less CI skips fast (no false pass)."""
+
+    @staticmethod
+    def _require_model():
+        import os as _os
+
+        from tortoise.embeddings import EmbeddingModel
+        _cache = _os.path.expanduser(
+            "~/.cache/huggingface/hub/models--BAAI--bge-small-en-v1.5")
+        if not _os.path.isdir(_cache):
+            pytest.skip("bge-small-en-v1.5 not cached — skipping thread-safety test")
+        if EmbeddingModel.get() is None:
+            pytest.skip("bge-small-en-v1.5 unavailable — model load timed out")
+
+    def test_concurrent_encode_is_correct(self):
+        """2+ threads encode the same input concurrently; all results must be
+        cosine ≈ 1 (deterministic inference, thread-safe read-only weights)."""
+        pytest.importorskip("sentence_transformers")
+        self._require_model()
+
+        import threading
+
+        from tortoise.embeddings import EmbeddingModel
+
+        model = EmbeddingModel.get()
+        assert model is not None
+        query = ("How does falkordb handle graph traversal performance "
+                 "for complex queries?")
+        barrier = threading.Barrier(3)
+        results: list = []
+        errors: list = []
+
+        def _worker():
+            try:
+                barrier.wait(timeout=10)
+                results.append(model.encode([query]))
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=_worker) for _ in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+
+        assert not errors, f"concurrent encode raised: {errors}"
+        assert len(results) == 3
+        import numpy as np
+        v0 = np.asarray(results[0])[0]
+        for v in results[1:]:
+            vi = np.asarray(v)[0]
+            denom = (np.linalg.norm(v0) * np.linalg.norm(vi))
+            cos = float(np.dot(v0, vi) / denom) if denom else 0.0
+            assert cos > 0.999, f"concurrent encodes diverged: cos={cos}"
