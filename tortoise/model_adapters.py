@@ -125,6 +125,22 @@ class OpenRouterModel:
         return content
 
 
+class VeniceModel(OpenRouterModel):
+    """Venice.ai adapter (pilot #1549 — 3-provider rotation). OpenAI-compatible
+    at api.venice.ai/api/v1; serves deepseek-v4-flash at ~2x/4x cheaper than
+    direct DeepSeek. Same model, different GPU farm — the rotation spreads the
+    sustained load that degraded the direct API to 15-90s/call."""
+    provider = "venice"
+    base_url = "https://api.venice.ai/api/v1/chat/completions"
+    key_env = "VENICE_API_KEY"
+
+    def __init__(self, model_id: str, max_tokens: int | None = None,
+                 temperature: float = 0.0, **kw):
+        super().__init__(model_id, max_tokens=max_tokens,
+                         temperature=temperature, **kw)
+        self.api_key = os.environ.get(self.key_env, "")
+
+
 class DeepSeekDirectModel(OpenRouterModel):
     """Direct DeepSeek API adapter (api.deepseek.com) — same model ids as
     OpenRouter (deepseek-v4-flash / v4-pro) but no OpenRouter hop. Used when
@@ -294,6 +310,19 @@ def resolve_extractor_provider() -> tuple[str, str | None]:
     explicit = os.environ.get("TORTOISE_EXTRACTOR_PROVIDER", "").strip().lower()
     ds_key = bool(os.environ.get("DEEPSEEK_API_KEY"))
     or_key = bool(os.environ.get("OPENROUTER_API_KEY"))
+    vz_key = bool(os.environ.get("VENICE_API_KEY"))
+
+    # Pilot #1549 — 3-provider rotation: the fallback chain extends to
+    # venice when its key is configured. The ordered pool is
+    # [primary, openrouter?, venice?] — build_extractor_model rotates.
+    def _chain(primary: str, *ordered: str) -> tuple[str, list[str]]:
+        avail = [primary]
+        for p in ordered:
+            if ((p == "deepseek-direct" and ds_key)
+                    or (p == "openrouter" and or_key)
+                    or (p == "venice" and vz_key)):
+                avail.append(p)
+        return (primary, avail)
 
     if explicit == "deepseek-direct":
         if not ds_key:
@@ -302,7 +331,7 @@ def resolve_extractor_provider() -> tuple[str, str | None]:
                 "DEEPSEEK_API_KEY is not set — an explicit provider names a "
                 "key that isn't configured; never silently routing elsewhere "
                 "(#1530 fail-closed)")
-        return ("deepseek-direct", "openrouter" if or_key else None)
+        return _chain("deepseek-direct", "openrouter", "venice")
     if explicit == "openrouter":
         if not or_key:
             raise ValueError(
@@ -310,15 +339,17 @@ def resolve_extractor_provider() -> tuple[str, str | None]:
                 "OPENROUTER_API_KEY is not set — an explicit provider names a "
                 "key that isn't configured; never silently routing elsewhere "
                 "(#1530 fail-closed)")
-        return ("openrouter", "deepseek-direct" if ds_key else None)
+        return _chain("openrouter", "deepseek-direct", "venice")
     if explicit:
         raise ValueError(
             f"TORTOISE_EXTRACTOR_PROVIDER={explicit!r} invalid — valid values: "
             f"{' | '.join(_PROVIDER_NAMES)}")
     if ds_key:
-        return ("deepseek-direct", "openrouter" if or_key else None)
+        return _chain("deepseek-direct", "openrouter", "venice")
     if or_key:
-        return ("openrouter", None)
+        return _chain("openrouter", "deepseek-direct", "venice")
+    if vz_key:
+        return _chain("venice", "openrouter", "deepseek-direct")
     return (None, None)
 
 
@@ -433,7 +464,76 @@ def _build_single(provider: str, model_id: str, *, max_tokens, temperature):
         return DeepSeekDirectModel(
             _strip_family_prefix(model_id),
             max_tokens=max_tokens, temperature=temperature)
+    if provider == "venice":
+        return VeniceModel(
+            _strip_family_prefix(model_id),
+            max_tokens=max_tokens, temperature=temperature)
     return OpenRouterModel(model_id, max_tokens=max_tokens, temperature=temperature)
+
+
+class RotatingModel:
+    """3-provider pool with round-robin rotation + per-provider cooldown
+    (pilot #1549 — the DeepSeek direct API degrades to 15-90s/call under
+    sustained load; three independent GPU farms with uncorrelated
+    reliability spread the load AND give redundancy).
+
+    ``complete()`` routes each call to the next healthy provider in the
+    rotation; a transient failure puts that provider in cooldown (skipped
+    for ``cooldown_s``) and the next provider is tried; fatal errors
+    (401/402/403 + config 4xx, P2 taxonomy) re-raise immediately — no
+    rotation on auth/billing failures. Exposes the capture-meta contract:
+    ``provider``/``route`` (active provider), ``errors``, ``last_finish_reason``
+    (the truncation signal — read from the serving adapter), ``close()``
+    (interrupt a hung read — the #1655 fix, applied to the active adapter)."""
+    def __init__(self, providers: list, *, cooldown_s: float = 300.0):
+        self.providers = providers
+        self.cooldown_s = cooldown_s
+        self._rr = 0
+        self._cooldowns: dict[str, float] = {}
+        self.errors: list[str] = []
+        self.last_finish_reason: str | None = None
+        self.route = providers[0].provider if providers else None
+
+    @property
+    def provider(self) -> str:
+        return self.route or (self.providers[0].provider if self.providers else "none")
+
+    def complete(self, *, system: str, user: str,
+                 max_tokens: int | None = None) -> str:
+        import time
+        now = time.time()
+        n = len(self.providers)
+        if n == 0:
+            raise RuntimeError("RotatingModel with no providers")
+        last_err: Exception | None = None
+        for i in range(n):
+            idx = (self._rr + i) % n
+            p = self.providers[idx]
+            if self._cooldowns.get(p.provider, 0.0) > now:
+                continue
+            try:
+                out = p.complete(system=system, user=user, max_tokens=max_tokens)
+                self._rr = (idx + 1) % n  # advance the rotation past this provider
+                self.route = p.provider
+                self.last_finish_reason = getattr(p, "last_finish_reason", None)
+                return out
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                if is_fatal(e):
+                    raise  # never rotate on auth/billing/config failures
+                self._cooldowns[p.provider] = now + self.cooldown_s
+                self.errors.append(f"{p.provider}: {type(e).__name__}: {e}")
+        raise last_err if last_err is not None else RuntimeError(
+            f"all {n} providers in cooldown")
+
+    def close(self) -> None:
+        for p in self.providers:
+            close = getattr(p, "close", None)
+            if close is not None:
+                try:
+                    close()
+                except Exception:
+                    pass
 
 
 # Eval CLI extractor-registry keys (MODELS) → the real DeepSeek/OpenRouter
@@ -475,13 +575,16 @@ def build_extractor_model(model_id: str | None = None, *,
     # Registry-key normalization (pilot #1549 fix) — unknown strings pass
     # through untouched (raw specs stay valid).
     model_id = _REGISTRY_KEY_TO_ID.get(model_id, model_id)
-    primary_name, fallback_name = resolve_extractor_provider()
-    primary_name = primary_name or "openrouter"  # lenient no-key default (D3)
-    primary = _build_single(primary_name, model_id,
-                            max_tokens=max_tokens, temperature=temperature)
-    fallback = None
-    if fallback_name:
-        fallback = _build_single(fallback_name, model_id,
-                                 max_tokens=max_tokens, temperature=temperature)
-    return RoutingModel(primary, fallback,
+    primary_name, pool_names = resolve_extractor_provider()
+    if not pool_names:
+        pool_names = ["openrouter"]  # lenient no-key default (D3)
+    providers = [_build_single(p, model_id, max_tokens=max_tokens,
+                               temperature=temperature)
+                 for p in pool_names]
+    # Pilot #1549: 3+ configured providers → the rotating pool (spread the
+    # sustained load + redundancy); 1-2 → the existing RoutingModel semantics.
+    if len(providers) >= 3:
+        return RotatingModel(providers,
+                             cooldown_s=_failover_cooldown_seconds())
+    return RoutingModel(providers[0], providers[1] if len(providers) > 1 else None,
                         cooldown_s=_failover_cooldown_seconds())
