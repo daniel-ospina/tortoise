@@ -32,13 +32,13 @@ export const HARNESS_NAMES = {
 
 // Harnesses with no local file system for the file-based skills or shell
 // profile (Claude Web connects from Anthropic's cloud — MCP only).
-export const HARNESS_SKILLLESS = ['claude-web']
+export const HARNESS_SKILLLESS = ['claude-desktop', 'claude-web']
 
 export const HARNESS_INSTALL = {
   claude: (key) =>
     `Run this command:\nclaude mcp add --transport http tortoise ${MCP_URL} --header "Authorization: Bearer ${key}"`,
   'claude-desktop': (key) =>
-    `Edit ~/Library/Application Support/Claude/claude_desktop_config.json (macOS) — or Claude > Settings > Developer in the app — and add:\n${JSON.stringify({ mcpServers: { tortoise: { url: MCP_URL, headers: { Authorization: `Bearer ${key}` } } } }, null, 2)}\n(Claude Desktop keeps this key literal in the file — keep that file private. Restart Claude after saving.)`,
+    `Edit ~/Library/Application Support/Claude/claude_desktop_config.json (macOS) — or Claude > Settings > Developer in the app — and add the tortoise block\n${JSON.stringify({ mcpServers: { tortoise: { url: MCP_URL, headers: { Authorization: `Bearer ${key}` } } } }, null, 2)}\n(Claude Desktop keeps this key literal in the file — keep that file private. If you already have an mcpServers section, merge this into it — don't replace the whole file. Restart Claude after saving.)`,
   'claude-web': () =>
     `No command needed — do it in the browser:\n1. Go to claude.ai > Settings > Connectors\n2. Add custom connector → ${MCP_URL}\n3. In Request headers (advanced): Authorization: Bearer <your-key>\n(Claude connects from its own cloud — your key is stored by Anthropic, and the file-based skills don't apply on web.)`,
   codex: (key) =>

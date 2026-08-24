@@ -524,8 +524,8 @@ function claimIntentInFlight() {
       // #1660/ontology: the STATE sample — the user's Subject + their
       // Project as the first graph entities, wired by a statement Point
       // (aboutObject on the project). Idempotent server-side.
-      const subjectName = (wizardSubject || 'me').trim()
-      const projectName = (wizardProject || 'my-project').trim()
+      const subjectName = (wizardSubject || 'me').trim() || 'me'
+      const projectName = (wizardProject || 'my-project').trim() || 'my-project'
       const subj = await api('/v1/subjects', { method: 'POST', useSession: true,
         body: JSON.stringify({ name: subjectName, subjectKind: 'person' }) })
       const proj = await api('/v1/objects', { method: 'POST', useSession: true,
@@ -2296,7 +2296,7 @@ function claimIntentInFlight() {
                     <button className="btn-primary" onClick={() => setWelcomeOriented(true)}>Continue →</button>
                   </div>
                 )}
-                {welcomeKey && welcomeOriented && (
+                {(!welcomeKey || welcomeOriented) && (
                 <div className="wizard">
                   <div className="wizard-progress">
                     {wizardSteps.map((s, i) => (
@@ -2357,10 +2357,10 @@ function claimIntentInFlight() {
                       </div>
                       <p className="dim small" style={{ marginTop: '0.75rem' }}>
                         The setup command in the next step installs all three into your
-                        agent's skills directory (project-scoped for Claude Code / Claude
-                        Desktop / Codex / Cursor; <code>~/.pi/agent/skills</code> for Pi — Claude
-                        Web connects from the cloud, so it has no local skills). They're
-                        maintained in the public Tortoise skills repo (<a href="https://github.com/daniel-ospina/tortoise-skills-and-integrations" target="_blank" rel="noreferrer">skills-and-integrations</a>)
+                        agent's skills directory (project-scoped for Claude Code / Codex /
+                        Cursor; <code>~/.pi/agent/skills</code> for Pi — Claude Desktop and
+                        Claude Web connect from the app/cloud, so they have no local skills).
+                        They're maintained in the public Tortoise skills repo (<a href="https://github.com/daniel-ospina/tortoise-skills-and-integrations" target="_blank" rel="noreferrer">skills-and-integrations</a>)
                         and the installer is safe to re-run — it updates them in place.
                       </p>
                       <div className="wizard-nav">
@@ -2498,7 +2498,6 @@ function claimIntentInFlight() {
                     </div>
                   )}
                 </div>
-                )}
                 )}
               </>
             )}
