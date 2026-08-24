@@ -125,7 +125,13 @@ def _fake_post_logger():
             return {"choices": [{"message": {"content": "ok"}}],
                     "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
 
-    def _fake_post(url, **kwargs):
+    def _fake_post(self_or_url, *args, **kwargs):
+        # Patched as Session.post → (self, url, **kwargs); also tolerates the
+        # legacy module-level requests.post → (url, **kwargs) shape.
+        if args:
+            url = args[0]
+        else:
+            url = self_or_url
         log.append((url, kwargs.get("json", {})))
         return _FakeResp()
 
@@ -134,7 +140,7 @@ def _fake_post_logger():
 
 def test_direct_route_sends_bare_model_id(monkeypatch):
     log, fake = _fake_post_logger()
-    monkeypatch.setattr(requests, "post", fake)
+    monkeypatch.setattr(requests.sessions.Session, "post", fake)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
     model = build_extractor_model("deepseek/deepseek-v4-flash",
                                   max_tokens=4000, temperature=0.0)
@@ -148,7 +154,7 @@ def test_direct_route_sends_bare_model_id(monkeypatch):
 
 def test_openrouter_route_sends_family_prefixed_model_id(monkeypatch):
     log, fake = _fake_post_logger()
-    monkeypatch.setattr(requests, "post", fake)
+    monkeypatch.setattr(requests.sessions.Session, "post", fake)
     monkeypatch.setenv("OPENROUTER_API_KEY", "or")
     model = build_extractor_model("deepseek/deepseek-v4-flash",
                                   max_tokens=None, temperature=0.0)
@@ -162,7 +168,7 @@ def test_no_key_lenient_build_defaults_to_openrouter(monkeypatch):
     """D3: no keys → lenient single OpenRouter adapter (back-compat for
     direct callers / TestModelAdapterBounds)."""
     log, fake = _fake_post_logger()
-    monkeypatch.setattr(requests, "post", fake)
+    monkeypatch.setattr(requests.sessions.Session, "post", fake)
     model = build_extractor_model()
     assert model.provider == "openrouter"
     assert model.fallback is None
