@@ -32,7 +32,7 @@ the structural signal).
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Callable
 
 from tortoise.sdk import TortoiseSDK
 
@@ -356,12 +356,322 @@ def _apply_deletions(sdk: TortoiseSDK, deletions: list[dict]) -> int:
 
 
 def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
-                       model: Any, *, chunk_turns: int = 2) -> dict:
+                       model: Any, *, chunk_turns: int = 2,
+                       session_workers: int = 1,
+                       model_factory: Callable | None = None) -> dict:
     """v2 ingest: each haystack session through extract_session_v2 → the
     payload written to the eval graph (Session + turn-granular raw chunks
     retained — the verbatim recall mitigation). Returns stats for
     provenance (mirrors ingest_haystack's shape). ``chunk_turns`` (R1
     #1540) is the turns-per-window granularity of the raw chunks (>= 1).
+
+    ``session_workers`` (pilot #1549 — session-parallelism): when > 1, the
+    LLM extraction (the wall-clock dominant phase) runs across the sessions
+    of THIS question in parallel (the DeepSeek API sustains ~11 calls/s at
+    16 concurrent — measured). Graph writes stay sequential (thread-safe by
+    construction): phase A writes the session nodes + turn/chunk raw leg for
+    ALL sessions, phase B extracts in parallel (each worker uses its own
+    ``model_factory()`` model so the RoutingModel's mutable route/truncation
+    state is never shared across threads), phase C writes each payload +
+    consolidation records. ``model_factory`` (callable → fresh model) is
+    REQUIRED for session_workers > 1; otherwise the shared model is used.
+    """
+    from tortoise.extractor_v2 import _classify_error, extract_session_v2
+
+    qid = question["question_id"]
+    sessions: list[list[dict]] = question.get("haystack_sessions") or []
+    dates: list[str] = question.get("haystack_dates") or []
+    ids: list[str] = question.get("haystack_session_ids") or []
+    stats = {"sessions": 0, "turns": 0, "chunks": 0, "points": 0,
+             "events": 0, "entities": 0, "operators": 0, "evidence_points": 0,
+             "evidence_turns": 0, "minted_kinds": 0, "supersessions": 0,
+             "supersessions_written": 0,
+             "noops_applied": 0, "deletions_applied": 0,
+             "evidence_marks": {"source_session": 0, "verbatim": 0,
+                                "raw_chunk": 0}, "errors": [],
+             # M4 (#1524, D4): the per-question error census — rolled up from
+             # each session's extractor ``error_census`` + the session-level
+             # exception class; feeds outcome ``valid``/``error_classes``.
+             "error_census": {}}
+    # M6: the evidence-session id set (haystack sessions containing >=1
+    # has_answer turn) + ALL answer-turn contents (question-wide — marks
+    # (b)/(c) match against every answer turn, wherever it lives).
+    ev_sessions = evidence_sessions(question)
+    all_evidence_turns = [
+        str(t.get("content") or "")
+        for session in sessions for t in session if t.get("has_answer")]
+
+    # ── Phase A (sequential, fast): session nodes + turn/chunk raw leg for
+    # ALL sessions — written BEFORE any extraction so verbatim retention +
+    # containment marks survive an extractor failure, AND so every session's
+    # S3 search sees the full raw graph (cross-session linking, E7). ──
+    ctxs: list[dict] = []
+    for si, session in enumerate(sessions):
+        sid = ids[si] if si < len(ids) else f"{qid}-s{si}"
+        session_date = dates[si] if si < len(dates) else ""
+        s_node = f"lme:{qid}:s{si}"
+        evidence_turns = [str(t.get("content") or "") for t in session
+                          if t.get("has_answer")]
+        stats["evidence_turns"] += len(evidence_turns)
+        # R5 (#1544): points in a dated session carry the session date as
+        # their creation time; undated sessions get the explicit sentinel.
+        point_created_at = session_date or UNDATED_SENTINEL
+
+        # ── Session node (mirrors the deterministic leg) ──
+        sdk._get_proj().g.query(
+            "MERGE (s:Session {id:$id}) "
+            "SET s.created_at=coalesce(s.created_at, $ts), "
+            "    s.turn_count=$tc, s.is_episodic=true, s.lme_question_id=$qid, "
+            "    s.lme_session_index=$si, s.lme_source_session_id=$sid",
+            params={"id": s_node, "ts": session_date or _now_iso(), "tc": len(session),
+                    "qid": qid, "si": si, "sid": sid},
+        )
+        stats["sessions"] += 1
+        proj = sdk._get_proj()
+
+        # E7 (#1539 D6): ONE batch existence probe per session (turn ids +
+        # raw chunk ids) — the per-turn/per-chunk ``_point_exists`` N+1
+        # collapses to O(1) queries per session at 500-Q run scale.
+        turn_ids = [f"lme:{qid}:s{si}:t{ti}" for ti in range(len(session))]
+        session_chunks = list(_session_chunks(session, chunk_turns))
+        chunk_ids = [f"lme:{qid}:s{si}:c{ci}" for ci, _, _ in session_chunks]
+        existing = _existing_point_ids(proj, turn_ids + chunk_ids)
+
+        # ── E3 (D8): turn points — the speaker-derivation substrate. Same
+        # deterministic ids + speaker property as the v1 leg; has_answer is
+        # NOT set (v2 turn/evidence recall measures extracted points). ──
+        for ti, turn in enumerate(session):
+            role = str(turn.get("role") or "unknown")
+            turn_id = f"lme:{qid}:s{si}:t{ti}"
+            if turn_id not in existing:
+                sdk.create_point(
+                    "event", f"[{role}] {turn.get('content') or ''!s}",
+                    id=turn_id, session_id=sid, lme_question_id=qid,
+                    lme_session_index=si, speaker=role,
+                    is_episodic=True, status="draft",
+                    createdAt=point_created_at,  # R5: session date (sentinel)
+                )
+            proj.g.query(
+                "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
+                "MERGE (s)-[:CONTAINS]->(t)",
+                params={"sid": s_node, "tid": turn_id})
+
+        # ── Raw verbatim turn-granular chunks (R1 #1540) + containment
+        # marks (M6, mark c). Written BEFORE extraction so verbatim
+        # retention + marks survive an extractor failure on this session
+        # (fail-closed — the raw evidence leg is never silently lost). ──
+        for ci, text, turn_idxs in session_chunks:
+            chunk_id = f"lme:{qid}:s{si}:c{ci}"
+            contains_evidence = any(
+                bool(turn.get("has_answer"))
+                for ti, turn in enumerate(session) if ti in turn_idxs)
+            if chunk_id not in existing:
+                sdk.create_point(
+                    SESSION_TRANSCRIPT_KIND, text, id=chunk_id,
+                    session_id=sid, lme_question_id=qid,
+                    lme_session_index=si, lme_chunk_index=ci,
+                    lme_chunk_turns=len(turn_idxs), is_episodic=True,
+                    has_answer=contains_evidence, status="draft",
+                    createdAt=point_created_at,  # R5: session date (sentinel)
+                )
+                stats["chunks"] += 1  # written (post-guard) — stats == graph
+            elif contains_evidence:
+                # Idempotent OR-in: never overwrite a True with False.
+                proj.g.query(
+                    "MATCH (p:Point {id:$id}) SET p.has_answer = true",
+                    params={"id": chunk_id})
+            proj.g.query(
+                "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
+                "MERGE (s)-[:CONTAINS]->(t)",
+                params={"sid": s_node, "tid": chunk_id},
+            )
+
+        ctxs.append({
+            "si": si, "sid": sid, "session_date": session_date,
+            "s_node": s_node, "session": session, "evidence_turns": evidence_turns,
+        })
+
+    # ── Phase B (parallel): the LLM extraction — the wall-clock dominant
+    # phase (pilot #1549 measured ~15-90s/session vs ~1s of graph writes).
+    # Each worker uses its OWN model (model_factory) so the RoutingModel's
+    # mutable route/last_finish_reason state is never shared across threads.
+    # The sdk is shared for S3 reads — FalkorDBLite/redis commands are
+    # thread-safe, and phase A has already written the full raw graph. ──
+    def _extract_ctx(ctx: dict) -> dict:
+        si = ctx["si"]
+        turns = [{"role": str(t.get("role") or "unknown"),
+                  "content": str(t.get("content") or "")}
+                 for t in ctx["session"]]
+        worker_model = model_factory() if model_factory else model
+        try:
+            return {"si": si,
+                    "out": extract_session_v2(
+                        worker_model, turns, sdk=sdk,
+                        session_id=ctx["s_node"],
+                        session_date=ctx["session_date"] or None)}
+        except Exception as ex:  # noqa: BLE001, RUF100
+            return {"si": si, "exc": ex}
+
+    if session_workers > 1 and len(ctxs) > 1:
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(
+                max_workers=session_workers) as _ex:
+            results = list(_ex.map(_extract_ctx, ctxs))
+    else:
+        results = [_extract_ctx(ctx) for ctx in ctxs]
+
+    # ── Phase C (sequential): payload writes + consolidation records + the
+    # extracted-point CONTAINS edges. All graph writes stay sequential. ──
+    for ctx, res in zip(ctxs, results):
+        si, s_node, session = ctx["si"], ctx["s_node"], ctx["session"]
+        sid, session_date = ctx["sid"], ctx["session_date"]
+        evidence_turns = ctx["evidence_turns"]
+        turns = [{"role": str(t.get("role") or "unknown"),
+                  "content": str(t.get("content") or "")}
+                 for t in session]
+        if "exc" in res:
+            ex = res["exc"]
+            stats["errors"].append(f"s{si}: {type(ex).__name__}: {ex}")  # kill the run
+            # M4 (D4): the session-level exception is CLASSIFIED into the same
+            # granular census vocabulary (S1/S2/S4 failures already ride in
+            # out["error_census"]).
+            _class = _classify_error(ex)
+            stats["error_census"][_class] = stats["error_census"].get(_class, 0) + 1
+            continue
+        out = res["out"]
+        payload = out.get("payload") or {}
+        stats["turns"] += len(session)
+        stats["minted_kinds"] += len(out.get("minted_kinds", []) or [])
+        stats["supersessions"] += len(out.get("supersessions", []) or [])
+        stats["errors"].extend(out.get("errors", []) or [])
+        for _class, count in (out.get("error_census") or {}).items():
+            stats["error_census"][_class] = stats["error_census"].get(_class, 0) + count
+
+        # the ACTUAL writes (the _write_payload stats are authoritative —
+        # they skip duplicates, so payload-len double-counts)
+        written = _write_payload(sdk, payload, sid=sid, qid=qid, si=si,
+                                 evidence_turns=all_evidence_turns,
+                                 turns=turns, ev_sessions=ev_sessions,
+                                 session_date=session_date or None,
+                                 n_turns=len(session))
+        for k in ("points", "events", "entities", "operators",
+                  "evidence_points"):
+            stats[k] += written.get(k, 0)
+        stats["supersessions_written"] += written.get("supersessions_written", 0)
+        for mk in ("source_session", "verbatim", "raw_chunk"):
+            stats["evidence_marks"][mk] = (
+                stats["evidence_marks"].get(mk, 0)
+                + written.get("evidence_marks", {}).get(mk, 0))
+
+        # E7 (D4/D5): apply the result-level consolidation records — NOOP
+        # folds (duplicates stamp + CONTAINS link + has_answer OR-in) and
+        # DELETE-soft retractions (retract_point tombstone). Both stay
+        # OUT of the Layer-1 payload (D8) — they ride the extractor result.
+        stats["noops_applied"] += _apply_noops(
+            sdk, out.get("noops") or [], s_node=s_node,
+            has_evidence=bool(evidence_turns))
+        stats["deletions_applied"] += _apply_deletions(
+            sdk, out.get("deletions") or [])
+
+        # ── Session CONTAINS the extracted points ──
+        for p in payload.get("points", []) or []:
+            pid = str(p.get("id", "")).strip()
+            if not pid:
+                continue
+            sdk._get_proj().g.query(
+                "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
+                "MERGE (s)-[:CONTAINS]->(t)",
+                params={"sid": s_node, "tid": pid},
+            )
+
+    return stats
+
+
+def _apply_noops(sdk: TortoiseSDK, noops: list[dict], *, s_node: str,
+                 has_evidence: bool) -> int:
+    """D4 write path: apply result-level NOOP records to the eval graph.
+
+    For each record — the folded session's ref is stamped onto the CANONICAL
+    point (additive ``duplicates`` list property, set-merge — idempotent:
+    a re-run appends nothing new), the Session gets the link-only CONTAINS
+    edge (existing edge types only — NO new edge type, NO IMPL), and when
+    the folded session carried an answer turn ``has_answer`` is OR'd onto
+    the canonical point (evidence-marking OR-in, mirrors the #1369 P2
+    collision OR-in). Physically ONE point → retrieval dedup by
+    construction (E2E-11 no-double-count). Best-effort: any failure is
+    warned and skipped. Returns the count applied."""
+    proj = sdk._get_proj()
+    applied = 0
+    for rec in noops or []:
+        pid = str(rec.get("point_id") or "").strip()
+        ref = str(rec.get("session_ref") or s_node or "").strip()
+        if not pid:
+            continue
+        try:
+            rows = proj.g.query(
+                "MATCH (p:Point {id:$id}) "
+                "SET p.duplicates = coalesce(p.duplicates, []) + "
+                "    CASE WHEN $ref IN coalesce(p.duplicates, []) "
+                "         THEN [] ELSE [$ref] END "
+                "RETURN p.id",
+                params={"id": pid, "ref": ref}).result_set
+            if not rows:
+                logger.warning("v2 noop target %s missing — skipped", pid)
+                continue
+            if has_evidence:
+                proj.g.query(
+                    "MATCH (p:Point {id:$id}) SET p.has_answer = true",
+                    params={"id": pid})
+            proj.g.query(
+                "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
+                "MERGE (s)-[:CONTAINS]->(p)",
+                params={"sid": s_node, "pid": pid})
+            applied += 1
+        except Exception as ex:  # noqa: BLE001, RUF100 — best-effort in the eval
+            logger.warning("v2 noop stamp on %s failed: %s", pid, ex)
+    return applied
+
+
+def _apply_deletions(sdk: TortoiseSDK, deletions: list[dict]) -> int:
+    """D5 write path: apply result-level DELETE-soft records via the
+    EXISTING canonical ``retract_point`` — status='retracted' tombstone
+    (point stays in the graph; no resurrect on recall by construction —
+    default retrieval excludes terminal statuses, #1391). Best-effort:
+    a missing/already-terminal point raises ValueError → warned, the eval
+    never dies on a delete. Returns the count applied."""
+    applied = 0
+    for rec in deletions or []:
+        pid = str(rec.get("point_id") or "").strip()
+        if not pid:
+            continue
+        try:
+            sdk.retract_point(pid)
+            applied += 1
+        except ValueError as e:
+            logger.warning("v2 deletion %s skipped (fail-open): %s", pid, e)
+    return applied
+
+
+def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
+                       model: Any, *, chunk_turns: int = 2,
+                       session_workers: int = 1,
+                       model_factory: Callable | None = None) -> dict:
+    """v2 ingest: each haystack session through extract_session_v2 → the
+    payload written to the eval graph (Session + turn-granular raw chunks
+    retained — the verbatim recall mitigation). Returns stats for
+    provenance (mirrors ingest_haystack's shape). ``chunk_turns`` (R1
+    #1540) is the turns-per-window granularity of the raw chunks (>= 1).
+
+    ``session_workers`` (pilot #1549 — session-parallelism): when > 1, the
+    LLM extraction (the wall-clock dominant phase) runs across the sessions
+    of THIS question in parallel (the DeepSeek API sustains ~11 calls/s at
+    16 concurrent — measured). Graph writes stay sequential (thread-safe by
+    construction): phase A writes the session nodes + turn/chunk raw leg for
+    ALL sessions, phase B extracts in parallel (each worker uses its own
+    ``model_factory()`` model so the RoutingModel's mutable route/truncation
+    state is never shared across threads), phase C writes each payload +
+    consolidation records. ``model_factory`` (callable → fresh model) is
+    REQUIRED for session_workers > 1; otherwise the shared model is used.
     """
     from tortoise.extractor_v2 import _classify_error, extract_session_v2
 
