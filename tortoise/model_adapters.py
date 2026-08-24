@@ -63,9 +63,23 @@ class OpenRouterModel:
         self.temperature = temperature
         self.thinking_budget = thinking_budget  # for reasoning models
         self.disable_reasoning = disable_reasoning  # send reasoning.effort=none
+        # Session per adapter so a deadline can interrupt a hung read
+        # (pilot #1549: the DeepSeek/OpenRouter API stalls mid-chunked-response;
+        # requests.post per-call leaks the socket — close() on deadline kills it).
+        self._session = requests.Session()
         # M3 (#1524, GATE-2): the per-call finish reason — "length" = the
         # generation hit the cap (truncation detected, not silently lost).
         self.last_finish_reason: str | None = None
+
+    def close(self) -> None:
+        """Interrupt any in-flight request (pilot #1549: called by the
+        extractor's deadline when a call exceeds its wall-clock bound — the
+        hung socket read raises and the daemon thread dies instead of
+        leaking + billing forever)."""
+        try:
+            self._session.close()
+        except Exception:
+            pass
 
     def complete(self, *, system: str, user: str,
                  max_tokens: int | None = None) -> str:
@@ -94,8 +108,8 @@ class OpenRouterModel:
         elif self.disable_reasoning:
             body["reasoning"] = {"effort": "none"}
 
-        r = requests.post(
-            self.base_url, headers=headers, json=body, timeout=60,
+        r = self._session.post(
+            self.base_url, headers=headers, json=body, timeout=(10, 60),
         )
         r.raise_for_status()
         data = r.json()
@@ -140,11 +154,11 @@ class DeepSeekDirectModel(OpenRouterModel):
         cap = self.max_tokens if max_tokens is None else max_tokens
         if cap is not None:
             body["max_tokens"] = cap
-        r = requests.post(
+        r = self._session.post(
             self.base_url,
             headers={"Authorization": f"Bearer {self.api_key}",
                      "Content-Type": "application/json"},
-            json=body, timeout=60,
+            json=body, timeout=(10, 60),
         )
         r.raise_for_status()
         data = r.json()
@@ -422,6 +436,26 @@ def _build_single(provider: str, model_id: str, *, max_tokens, temperature):
     return OpenRouterModel(model_id, max_tokens=max_tokens, temperature=temperature)
 
 
+# Eval CLI extractor-registry keys (MODELS) → the real DeepSeek/OpenRouter
+# model ids. The eval passes 'deepseek-flash-direct' etc. (the legacy run.py
+# MODELS keys); build_extractor_model treats model_id as a raw API spec, so
+# extractor registry keys must be normalized here — otherwise the suffix
+# reaches the API as the model name (pilot #1549: HTTP 400 'you passed
+# deepseek-flash-direct' on every S1 call → zero extraction). Only the
+# extractor-relevant DeepSeek keys are mapped; other MODELS keys (qwen3.8-max,
+# solar-pro4, claude-opus-5, ...) are judge/reader-only and intentionally
+# pass through — they are not valid extractor specs on either provider.
+_REGISTRY_KEY_TO_ID = {
+    "deepseek-flash": "deepseek/deepseek-v4-flash",
+    "deepseek-flash-direct": "deepseek-v4-flash",
+    "deepseek-v4-pro-direct": "deepseek-v4-pro",
+    "deepseek-v4-pro": "deepseek/deepseek-v4-pro",
+    "deepseek-v4-pro-noreason": "deepseek-v4-pro",
+    "deepseek-r1-xhigh": "deepseek/deepseek-r1-0528",
+    "deepseek-v4-pro-xhigh": "deepseek/deepseek-v4-pro",
+}
+
+
 def build_extractor_model(model_id: str | None = None, *,
                           max_tokens: int | None = 4000,
                           temperature: float = 0.0) -> RoutingModel:
@@ -438,6 +472,9 @@ def build_extractor_model(model_id: str | None = None, *,
     if model_id is None:
         model_id = (os.environ.get("TORTOISE_EXTRACT_MODEL", "").strip()
                     or "deepseek/deepseek-v4-flash")
+    # Registry-key normalization (pilot #1549 fix) — unknown strings pass
+    # through untouched (raw specs stay valid).
+    model_id = _REGISTRY_KEY_TO_ID.get(model_id, model_id)
     primary_name, fallback_name = resolve_extractor_provider()
     primary_name = primary_name or "openrouter"  # lenient no-key default (D3)
     primary = _build_single(primary_name, model_id,

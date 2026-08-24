@@ -2967,6 +2967,16 @@ def _call_once(model, system: str, user: str, *, deadline_s: int,
     t.start()
     t.join(timeout=deadline_s)
     if t.is_alive():
+        # Pilot #1549: kill the hung request so the daemon thread's blocking
+        # socket read raises and dies (was: abandoned thread leaked the
+        # socket + kept billing; the API stalls mid-chunked-response and a
+        # trickle defeats the requests read timeout). close() is best-effort.
+        close = getattr(model, "close", None)
+        if close is not None:
+            try:
+                close()
+            except Exception:
+                pass
         raise TimeoutError(f"model call exceeded {deadline_s}s")
     if "exc" in box:
         raise box["exc"]
