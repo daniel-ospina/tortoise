@@ -8,12 +8,14 @@ cue-word gate today; the LLM relation verifier in #6306).
 Lens derivation (when lens_key is None): point["lens"] → point["source"] →
 point["provenance"]["source_id"] → point["speaker"] → "unknown".
 
-Threshold calibration (all-MiniLM-L6-v2, measured 2026-08-07):
-  near-duplicate paraphrases ....... 0.90+   (NEAR_DUPLICATE_THRESHOLD = 0.75)
-  cross-vocabulary paraphrase band . 0.35-0.51  ← DEFAULT_THRESHOLD = 0.40
-  motivating pair (#399) ............ 0.29 (boundary: topically similar, NOT
-                                         logically implied — verification's job)
-  unrelated / noise floor ........... <= 0.15
+Threshold calibration (BAAI/bge-small-en-v1.5, measured 2026-08-21 for #1349):
+  near-duplicate paraphrases ....... 0.89+   (NEAR_DUPLICATE_THRESHOLD)
+  cross-vocabulary paraphrase band . 0.72+   (DEFAULT_THRESHOLD)
+  unrelated / noise floor ........... below the 0.72 default band
+
+The constants are IMPORTED from tortoise.embeddings — the single source of
+threshold truth (#1349 T14). Do NOT define local copies; a model swap
+recalibrates embeddings.py and this module follows automatically.
 
 #6306 contract: find_cross_lens_matches(points) over folded document points
 ({pid: {"content", "lens"}} or provenance.source_id); candidates are INPUT to
@@ -26,10 +28,15 @@ from typing import Callable  # noqa: UP035
 
 import numpy as np
 
-logger = logging.getLogger(__name__)
+# Single source of truth (#1349 T14): the bge-small calibrated bands live in
+# tortoise.embeddings — importing (not re-defining) keeps this module in sync
+# across model swaps.
+from tortoise.embeddings import (  # noqa: F401 — re-export for consumers
+    DEFAULT_THRESHOLD,
+    NEAR_DUPLICATE_THRESHOLD,
+)
 
-NEAR_DUPLICATE_THRESHOLD = 0.75
-DEFAULT_THRESHOLD = 0.40
+logger = logging.getLogger(__name__)
 
 
 def _lens_of(point: dict, lens_key: str | None) -> str:
@@ -62,7 +69,8 @@ def find_cross_lens_matches(
     Args:
         points: point_id → {"content": str, ...}; content is the only
             required key. Lens identity resolved via _lens_of.
-        threshold: cosine similarity cutoff (default 0.40, calibrated).
+        threshold: cosine similarity cutoff (default 0.72, bge-small
+            DEFAULT_THRESHOLD — imported from tortoise.embeddings).
         lens_key: explicit field to use as the lens; None → derivation chain.
         encode: injected encoder (tests); None → shared tortoise.embeddings
             _encode (real model; deterministic TF-IDF degraded fallback).

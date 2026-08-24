@@ -280,17 +280,55 @@ async def _lifespan(app):
         try:
             import threading
 
+            def _probe_loaded_model_id(model) -> str | None:
+                """Best-effort extraction of the loaded HF model id from a
+                sentence-transformers object (probe state). The presence-only
+                cache FATAL (entrypoint.sh) cannot catch a present-but-corrupt
+                bake, so the post-pre-warm log reports what ACTUALLY loaded
+                (#1349 T10). Returns None when the id cannot be resolved.
+                """
+                if model is None:
+                    return None
+                try:
+                    # ST wraps the HF transformer in module[0] (Transformer);
+                    # its auto_model config records the org-qualified id used
+                    # at load time (e.g. BAAI/bge-small-en-v1.5).
+                    st_module = model[0] if len(model) > 0 else model
+                    config = getattr(getattr(st_module, "auto_model", None), "config", None)
+                    return getattr(config, "_name_or_path", None) or None
+                except Exception as exc:
+                    _logger.debug("embedding model-id probe failed: %s", exc)
+                    return None
+
             def _prewarm_embeddings() -> None:
                 try:
-                    from tortoise.embeddings import EmbeddingModel
+                    from tortoise.embeddings import EMBEDDING_MODEL, EmbeddingModel
                     # Longer window than request paths (30s): cold-start torch
                     # import on a 2-core/2GB VM can exceed 30s (#545). The
                     # thread is daemon + background, so it never blocks bind.
                     model = EmbeddingModel.get(load_timeout=300.0)
-                    _logger.info(
-                        "embeddings: background pre-warm %s",
-                        "ready" if model is not None else "deferred (retries on next call)",
-                    )
+                    loaded_id = _probe_loaded_model_id(model)
+                    if model is not None:
+                        if loaded_id and loaded_id != EMBEDDING_MODEL:
+                            # Degraded signal (#1349 T10, non-blocking): a
+                            # present-but-corrupt/stale bake passes the
+                            # entrypoint presence FATAL and would serve a
+                            # wrong embedder silently — surface it. Embeddings
+                            # are optional, so this is a WARNING, never a
+                            # crash (no #545 cold-start regression).
+                            _logger.warning(
+                                "embeddings: DEGRADED — loaded model %r does not "
+                                "match EMBEDDING_MODEL %r (stale/corrupt bake)",
+                                loaded_id, EMBEDDING_MODEL,
+                            )
+                        _logger.info(
+                            "embeddings: background pre-warm ready (model=%s)",
+                            loaded_id or "unknown",
+                        )
+                    else:
+                        _logger.info(
+                            "embeddings: background pre-warm deferred (retries on next call)",
+                        )
                 except Exception as exc:  # noqa: BLE001 — never crash the app
                     _logger.warning("embeddings: background pre-warm failed: %s", exc)
 
@@ -414,8 +452,13 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
     The original exception is re-raised for the server's logging/telemetry
     AFTER the response is prepared."""
     import logging as _logging
+    # P2 (code review): sanitize the path before logging — Starlette's
+    # URL.path is percent-decoded, so an unauthenticated request to
+    # /foo%0d%0a[forged-line] could write CRLF-decoded control chars into
+    # the log (log-line forgery for monitoring/audit pipelines).
+    _path = request.url.path.replace("\r", "\\r").replace("\n", "\\n")
     _logging.getLogger("tortoise.api").exception(
-        "unhandled exception: %s %s", request.method, request.url.path)
+        "unhandled exception: %s %s", request.method, _path)
     origin = request.headers.get("origin")
     acao = origin if origin in _ALLOWED_ORIGINS else _ALLOWED_ORIGINS[0]
     return JSONResponse(

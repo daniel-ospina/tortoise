@@ -21,6 +21,8 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from tests.eval.retrieval.run import STRATEGIES, run_eval, write_outputs  # noqa: E402
 
+pytestmark = pytest.mark.timeout(600)  # real-embedder tests load bge-small (~57s load) — #1349 swap
+
 
 def _has_embedded() -> bool:
     try:
@@ -110,7 +112,13 @@ def test_report_is_regenerable(tmp_path):
     (provenance timestamp/git_sha/host naturally differ). This is what
     makes the committed baseline a trustworthy "where we stand" anchor
     for the gate."""
+    # Second-model gate (P1): regenerability must not depend on GLOBAL
+    # circuit-breaker state (tortoise/search_engine breakers are
+    # process-wide) — a breaker tripped during r1 (e.g. FTS under a slow
+    # first bge load) would make r2 differ for the WRONG reason.
+    import tortoise.search_engine as _se
     r1 = run_eval(_args(str(tmp_path / "regen1.db"), corpus_size=300))
+    _se.reset_circuit_breakers()
     r2 = run_eval(_args(str(tmp_path / "regen2.db"), corpus_size=300))
     for key in ("metrics", "per_query", "by_tier", "paired_vs_fused",
                 "oracle", "authored", "authored_metrics", "seed",

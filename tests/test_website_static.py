@@ -29,6 +29,8 @@ import json
 import re
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PRODUCT_HTML = REPO_ROOT / "website" / "product.html"
 PRICING_JSON = REPO_ROOT / "product" / "pricing.json"
@@ -415,3 +417,5 @@ def test_welcome_provisioning_pipeline_is_dead_since_1566():
     prov = src.index("DEAD SINCE #1566")
     assert prov < src.index("provisionViaEdgeFunction"), \
         "the pipeline marker must precede the provisioning functions"
+
+

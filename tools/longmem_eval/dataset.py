@@ -24,6 +24,7 @@ user-supplied local path.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -41,6 +42,25 @@ SPLIT_FILES: dict[str, str] = {
     "m": "longmemeval_m_cleaned.json",       # LongMemEval-M: ~500 sessions/history
     "oracle": "longmemeval_oracle.json",     # oracle retrieval: evidence sessions only
 }
+
+# Digest-pin per split (sha256 of the official HF file — the git-LFS oid the
+# ``x-linked-etag`` header carries). A truncated/tampered cache must never be
+# served as a partial corpus with a silently wrong denominator: load verifies
+# the cached file against the pin and re-downloads (or errors) on mismatch.
+#   s      — verified against the local authentic 277MB file AND the official
+#            HF LFS etag (2026-08-17).
+#   m      — official HF LFS etag (2.7GB file — etag IS the LFS sha256 oid).
+#   oracle — verified by downloading the official 15MB file (2026-08-17).
+SPLIT_DIGESTS: dict[str, str] = {
+    "s": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442",
+    "m": "9d79e5524794a2e6900a3aa9cb7d9152c5a3e8319c9a87c25494ba1eacee495f",
+    "oracle": "821a2034d219ab45846873dd14c14f12cfe7776e73527a483f9dac095d38620c",
+}
+
+
+class DatasetDigestError(ValueError):
+    """The dataset file's sha256 does not match the pinned digest — the cache
+    is truncated/tampered. Re-download or fail; never serve a partial corpus."""
 
 DEFAULT_CACHE_DIR = "~/.cache/tortoise-longmemeval"
 
@@ -66,14 +86,41 @@ def remote_url(split: str) -> str:
             f"/resolve/main/{SPLIT_FILES[split]}")
 
 
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(1 << 20)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _verify_digest(path: Path, split: str) -> None:
+    """Raise :class:`DatasetDigestError` when the file's sha256 does not match
+    the pinned digest for the split (truncated/tampered cache)."""
+    expected = SPLIT_DIGESTS[split]
+    actual = _sha256_file(path)
+    if actual != expected:
+        raise DatasetDigestError(
+            f"dataset digest mismatch for {split}: expected {expected}, got "
+            f"{actual} — the cached file is truncated or tampered; "
+            f"re-download or pass a verified file")
+
+
 def _download(url: str, dest: Path, *, timeout: int = 120) -> Path:
     """Download ``url`` to ``dest`` atomically.
 
     Streams to a ``<dest>.part`` temp file first (the S split is tens of MB),
-    JSON-validates the downloaded bytes, THEN atomically renames into place —
-    an interrupted/corrupt download can never leave a poisoned "cache" that
-    would be served forever: the partial file is cleaned up and the next run
-    re-downloads.
+    JSON-validates the downloaded bytes AND verifies the pinned sha256, THEN
+    atomically renames into place — an interrupted/corrupt download can never
+    leave a poisoned "cache" that would be served forever: the partial file is
+    cleaned up and the next run re-downloads.
     """
     print(f"[longmem_eval] downloading {url} …", file=sys.stderr)
     req = urllib.request.Request(url, headers={"User-Agent": "tortoise-longmem-eval"})
@@ -82,6 +129,7 @@ def _download(url: str, dest: Path, *, timeout: int = 120) -> Path:
     # crashes with FileNotFoundError.
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(dest.name + ".part")
+    split = next((s for s, f in SPLIT_FILES.items() if f == dest.name), None)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: SIM117
             with open(tmp, "wb") as f:
@@ -91,8 +139,12 @@ def _download(url: str, dest: Path, *, timeout: int = 120) -> Path:
                         break
                     f.write(chunk)
         # Validate BEFORE the file can become the cache (raises on corrupt
-        # JSON, leaving the .part behind for cleanup below).
+        # JSON or a digest mismatch, leaving the .part behind for cleanup
+        # below). Digest-pin: a tampered/truncated download is discarded, not
+        # promoted into the cache (never a partial corpus).
         _read_instances(tmp)
+        if split is not None:
+            _verify_digest(tmp, split)
         os.replace(tmp, dest)
     finally:
         tmp.unlink(missing_ok=True)
@@ -132,12 +184,17 @@ def load_dataset(
         cached = cache_base / SPLIT_FILES[split]
         if cached.is_file():
             try:
+                # Digest-pin first (cheap sha256 < JSON parse): a truncated/
+                # tampered cache must re-download or error — never a partial
+                # corpus with a silently wrong denominator.
+                _verify_digest(cached, split)
                 raw = _read_instances(cached)
-            except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+            except (json.JSONDecodeError, ValueError, UnicodeDecodeError,
+                    DatasetDigestError):
                 if not download:
                     raise
-                print(f"[longmem_eval] cached dataset {cached} is corrupt — "
-                      f"re-downloading", file=sys.stderr)
+                print(f"[longmem_eval] cached dataset {cached} is corrupt or "
+                      f"digest-mismatched — re-downloading", file=sys.stderr)
                 cached.unlink(missing_ok=True)
                 _download(remote_url(split), cached)
                 raw = _read_instances(cached)

@@ -119,23 +119,24 @@ def test_add_below_threshold_excluded(sdk_factory, tmp_path):
     p2 = sdk.create_point("statement", "beta")
     result = sdk.review_connections(
         mode="add",
-        similarity_fn=_sim({(p1["id"], p2["id"]): 0.3}),  # < default 0.40
+        similarity_fn=_sim({(p1["id"], p2["id"]): 0.3}),  # < default 0.72
     )
     assert result["add"] == []
 
 
 def test_add_default_threshold_boundary(sdk_factory, tmp_path):
-    """A pair at 0.45 (inside the #399-calibrated 'semantically related'
-    band 0.35-0.51) IS suggested under the default threshold 0.40."""
+    """A pair at 0.78 (inside the bge-small 'semantically related' band
+    0.72+) IS suggested under the default threshold 0.72 (#1349 T14 — was
+    0.45 inside the MiniLM band 0.35-0.51 under the old 0.40 default)."""
     sdk = sdk_factory(tmp_path)
     p1 = sdk.create_point("statement", "alpha")
     p2 = sdk.create_point("statement", "beta")
     result = sdk.review_connections(
         mode="add",
-        similarity_fn=_sim({(p1["id"], p2["id"]): 0.45}),
+        similarity_fn=_sim({(p1["id"], p2["id"]): 0.78}),
     )
     assert len(result["add"]) == 1
-    assert result["add"][0]["similarity"] == pytest.approx(0.45)
+    assert result["add"][0]["similarity"] == pytest.approx(0.78)
 
 
 def test_add_surfaces_iml_only_for_similar_unconnected(sdk_factory, tmp_path):
@@ -148,7 +149,7 @@ def test_add_surfaces_iml_only_for_similar_unconnected(sdk_factory, tmp_path):
         mode="add",
         similarity_fn=_sim({
             (p1["id"], p2["id"]): 0.9,
-            (p1["id"], p3["id"]): 0.7,
+            (p1["id"], p3["id"]): 0.75,  # > default 0.72 (bge-small band, #1349 T14)
         }),
     )
     assert len(result["add"]) == 2

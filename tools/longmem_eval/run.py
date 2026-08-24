@@ -28,14 +28,17 @@ pipeline in CI.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
+import math
 import os
 import random
+import re
 import sys
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -53,7 +56,12 @@ from tortoise.model_adapters import is_fatal
 from tortoise.sdk import TortoiseSDK
 from tortoise.shared_state.concurrency import flock_exclusive
 
+# #1349: the probe seam — benchmark-only model injection (the production
+# entrypoint rejects the override env). Imported at module level so the
+# spot-check producer and the test monkeypatch share one symbol.
+from ..embedder_probe import DEFAULT_MODEL_ID, PROBE_MODELS, inject_model
 from . import dataset as ds
+from . import encode_cache
 from .dataset_audit import audit_dataset
 from .errors import eval_failure_class
 from .ingest import DEFAULT_CHUNK_TURNS, ingest_haystack
@@ -73,6 +81,9 @@ from .retrieve import (
     DEFAULT_CONTEXT_TOKEN_CAP,
     DEFAULT_MAX_CHUNKS_PER_SESSION,
     DEFAULT_TR_TOP_K,
+    MODEL_ENCODE_FAILED_EXIT,
+    ModelEncodeFailedError,
+    VectorBreakerOpenError,
     retrieve_for_question,
 )
 
@@ -81,6 +92,91 @@ DEFAULT_TOP_K = 20
 DEFAULT_MAX_RETRIES = 3
 BACKOFF_BASE_S = 2.0
 BACKOFF_CAP_S = 30.0
+
+#: #1349 HNSW spot-check artifact dir — gate_1349.py's "HNSW artifact
+#: present+cleared" check reads exactly this file.
+SPOTCHECK_ARTIFACT_DIR = (
+    Path(__file__).resolve().parent.parent.parent
+    / "docs" / "research" / "2026-08-17-1349-embedder-selection"
+)
+
+#: #1349 checkpoint format marker (v2 = keyed by surface/retriever/model/
+#: prompt + code fingerprint).
+CHECKPOINT_FORMAT = "lme-checkpoint-v2"
+
+#: Per-retriever required outcome keys — checkpoint validation drops a
+#: truncated/corrupt record so the question re-encodes (never silently
+#: dropped from the denominator).
+REQUIRED_OUTCOME_KEYS: dict[str, tuple[str, ...]] = {
+    "hybrid": ("question_id", "session_recall@k", "turn_recall@k"),
+    "vector": ("question_id", "session_recall@k", "turn_recall@k",
+               "ndcg@10", "p@10", "p@5", "ranked_ids"),
+}
+
+
+def checkpoint_key(surface: str, retriever: str, model: str | None,
+                   prompt: str | None) -> str:
+    """Checkpoint key ``{surface}__{retriever}__{model}__{prompt}``.
+
+    surface ∈ embedded|hnsw — a ``--db`` HNSW run must NEVER resume against
+    embedded-mode brute-force checkpoints (which would emit brute-force
+    retrieval as the HNSW artifact and trivially clear GATE (c) on the wrong
+    surface). Cross-model resume is impossible by construction.
+    """
+    return f"{surface}__{retriever}__{model or 'default'}__{prompt or 'default'}"
+
+
+def question_graph_namespace(model: str, prompt: str | None, qid: str) -> str:
+    """Distinct FalkorDB graph per (question, model-run).
+
+    Point-id/label scoping does NOT isolate the HNSW index (it is global
+    across the graph, filters only on retracted status). Without a distinct
+    graph per (model, qid) a winner-vs-control spot-check's second run finds
+    ids already present and silently reuses the first model's vectors
+    (control recall ≈ winner recall — a bogus comparison).
+    """
+    m = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(model or "default"))[:40] or "default"
+    p = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(prompt or "default"))[:16] or "default"
+    return f"{m}__{p}__{qid}"
+
+
+def _make_question_sdk(*, db_uri: str | None, namespace: str | None,
+                       work_dir: str | None = None) -> tuple[TortoiseSDK, Any]:
+    """Per-question SDK construction.
+
+    ``--db`` mode: a FalkorDB connection on the URI's server, scoped to the
+    (question, model-run) graph via the SDK namespace (graph name
+    ``team_{namespace}``) — HNSW ``queryNodes`` branch reachable
+    (``_is_embedded=False``). Embedded mode: a fresh tempdir db (isolation by
+    construction). Returns (sdk, cleanup).
+
+    The ``--db`` cleanup restores ``TORTOISE_DB_URI`` to its pre-call value:
+    the setdefault below is how the URI reaches the SDK, but mutating the
+    process env permanently leaks the URI into every later SDK/validation in
+    the same process (issue #1349 test isolation).
+    """
+    if db_uri:
+        prev = os.environ.get("TORTOISE_DB_URI")
+        os.environ.setdefault("TORTOISE_DB_URI", db_uri)
+
+        def _cleanup():
+            if prev is None:
+                os.environ.pop("TORTOISE_DB_URI", None)
+            else:
+                os.environ["TORTOISE_DB_URI"] = prev
+
+        return TortoiseSDK(namespace=namespace), _cleanup
+    td = tempfile.TemporaryDirectory(dir=work_dir, prefix="lme-")
+    return TortoiseSDK(os.path.join(td.name, "lme.db")), td.cleanup
+
+
+def _ensure_work_dir(work_dir: str | None) -> None:
+    """Create the work dir if missing — ``TemporaryDirectory(dir=…)`` and
+    the checkpoint file both require the parent to exist (issue #1349 T8
+    pilot: observed FileNotFoundError on every question)."""
+    if work_dir:
+        Path(work_dir).mkdir(parents=True, exist_ok=True)
+
 
 # Recorded verbatim in report methodology — published numbers carry their
 # extraction approach (design-locked axis 2: "WITH full methodology").
@@ -234,10 +330,12 @@ def _resolve_rerank(*, rerank: bool | None, rerank_model: str | None,
     }
 
 
-# R3 (#1542): the MemDelta-pinned embedder (all-MiniLM-L6-v2, 384-dim,
-# #399 calibration). The pre-flight probe asserts this dimension so a swap
+# R3 (#1542): the embedder pinned for the eval pre-flight — now derived from
+# tortoise.embeddings (the single source of truth; #1349 swapped the default
+# to bge-small). The pre-flight probe asserts this dimension (384) so a swap
 # or a wrong-dimension model is caught before any run, never silently used.
-PINNED_EMBEDDER_MODEL = "all-MiniLM-L6-v2"
+from tortoise.embeddings import EMBEDDING_MODEL as PINNED_EMBEDDER_MODEL  # noqa: E402
+
 EMBEDDER_PROBE_DIM = 384
 
 
@@ -291,7 +389,17 @@ def _preflight_embedder(*, mock: bool) -> dict:
         status = _embedder_status(available=False, reason="no_embedder",
                                   st_version=st_version)
         return _finalize_embedder_preflight(status, mock=mock)
-    model_id = getattr(model, "model_id", None) or PINNED_EMBEDDER_MODEL
+    # #1349: the loaded model id — EmbeddingModel has no model_id attr, so
+    # fall back to the probe state (the ACTUAL injected candidate for
+    # --model runs) before the pinned default. Without the probe check an
+    # injected minilm/arctic-xs run would mislabel its evidence as the
+    # production literal.
+    try:
+        from ..embedder_probe import get_state as _probe_state
+        _ps = _probe_state()
+        model_id = (_ps or {}).get("hf_id") or PINNED_EMBEDDER_MODEL
+    except Exception:
+        model_id = PINNED_EMBEDDER_MODEL
     try:
         vec = model.encode(["probe"])
         if vec is None or len(vec) == 0:
@@ -336,7 +444,7 @@ def _finalize_embedder_preflight(status: dict, *, mock: bool) -> dict:
           file=sys.stderr)
     print("  uv sync --group dev --extra embeddings", file=sys.stderr)
     print("  uv run python -c \"from sentence_transformers import "
-          "SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')\"",
+          f"SentenceTransformer; SentenceTransformer('{PINNED_EMBEDDER_MODEL}')\"",
           file=sys.stderr)
     print("Verify with:", file=sys.stderr)
     print("  uv run python -c \"from tortoise.embeddings import "
@@ -346,6 +454,28 @@ def _finalize_embedder_preflight(status: dict, *, mock: bool) -> dict:
     # the PreflightError path's SystemExit(1); a string code made CLI exit
     # status 1 ambiguous and broke the exit-code contract.
     raise SystemExit(1)
+
+@contextlib.contextmanager
+def _temporary_env_var(name: str, value: str):
+    """Set ``name`` to ``value`` for the duration of the block; restore on exit.
+
+    An explicit ``--db`` must WIN over a stale pre-existing env URI (a stale
+    ``TORTOISE_DB_URI`` in the caller's shell would otherwise silently
+    redirect the spot-check to the wrong FalkorDB server). The env is always
+    restored so ``run_main()`` can be invoked repeatedly in one process
+    without leaking the URI into later no-path SDK constructions (issue
+    #1349 isolation).
+    """
+    prev = os.environ.get(name)
+    os.environ[name] = value
+    try:
+        yield
+    finally:
+        if prev is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = prev
+
 
 def _call_with_backoff(fn, *, what: str, retries: int,
                        base: float = BACKOFF_BASE_S, cap: float = BACKOFF_CAP_S):
@@ -443,35 +573,91 @@ def _dataset_fingerprint(path: Path) -> str:
 
 
 def _load_checkpoint(path: str | None,
-                     expected_fingerprint: dict) -> tuple[dict[str, dict], list[dict]]:
+                     expected_fingerprint: dict | None = None,
+                     *, run_key: str | None = None,
+                     retriever: str = "hybrid"
+                     ) -> tuple[dict[str, dict], list[dict]]:
     """Load (completed-by-qid, failures) from the checkpoint state file.
 
     M7 (#1527, D7): the loaded checkpoint's fingerprint must match the
     effective run config — a mismatch raises ``CheckpointStaleError`` naming
     the differing fields (refuse stale resume). A legacy v1 checkpoint
-    (no ``fingerprint`` key) is refused too. The read happens under an
-    exclusive flock (D8) so a reader never sees a mid-merge file.
+    (no ``fingerprint`` key) is refused too. #1349: the checkpoint also
+    carries the per-model ``run_key`` (``{surface}__{retriever}__{model}__
+    {prompt}``) — a cross-surface (embedded↔hnsw) or cross-model resume is
+    impossible by construction. The read happens under an exclusive flock
+    (D8) so a reader never sees a mid-merge file.
     """
     if not path:
         return {}, []
     p = Path(path)
     if not p.is_file():
         return {}, []
-    with flock_exclusive(p.with_suffix(p.suffix + ".lock")):
-        data = json.loads(p.read_text(encoding="utf-8"))
-    fp = data.get("fingerprint")
-    if fp is None:
-        raise CheckpointStaleError(
-            f"checkpoint {p} predates the fingerprint contract (no "
-            f"'fingerprint' key) — delete it or re-fingerprint it")
-    diffs = _fingerprint_diffs(expected_fingerprint, fp)
-    if diffs:
-        raise CheckpointStaleError(
-            f"checkpoint {p} is stale: effective run config differs on "
-            f"{sorted(diffs)} — refusing resume (delete the file to re-run "
-            f"the questions)")
-    outcomes = {o["question_id"]: o for o in data.get("outcomes", [])}
-    failures = list(data.get("failures", []))
+    try:
+        with flock_exclusive(p.with_suffix(p.suffix + ".lock")):
+            data = json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
+        print(f"[longmem_eval] WARNING: checkpoint {p} is corrupt ({e!r}) — "
+              f"ignoring; every question re-encodes", file=sys.stderr)
+        return {}, []
+    fmt = data.get("format")
+    saved_key = data.get("run_key")
+    if fmt is None and saved_key is None:
+        # No #1349 format marker AND no run_key → stale #1144-era or
+        # foreign. A file carrying an M7 fingerprint falls through to the
+        # fingerprint gate; otherwise refuse (raise when a fingerprint is
+        # expected — M7 D7 contract; warn+return on the raw keyed path).
+        if data.get("fingerprint") is None:
+            if expected_fingerprint is not None:
+                raise CheckpointStaleError(
+                    f"checkpoint {p} predates the fingerprint contract (no "
+                    f"'fingerprint' key) — delete it or re-fingerprint it")
+            print(f"[longmem_eval] WARNING: checkpoint {p} has no format/"
+                  f"run_key/fingerprint markers (stale #1144-era or foreign) "
+                  f"— ignoring; every question re-encodes", file=sys.stderr)
+            return {}, []
+    elif fmt is not None and fmt != CHECKPOINT_FORMAT:
+        print(f"[longmem_eval] WARNING: checkpoint {p} format "
+              f"{fmt!r} != {CHECKPOINT_FORMAT!r} — ignoring; every question "
+              f"re-encodes", file=sys.stderr)
+        return {}, []
+    elif run_key is not None and saved_key is not None and saved_key != run_key:
+        print(f"[longmem_eval] WARNING: checkpoint {p} belongs to run "
+              f"{saved_key!r}, current run is {run_key!r} — "
+              f"refusing cross-config resume (per-model checkpoint keying); "
+              f"every question re-encodes", file=sys.stderr)
+        return {}, []
+    if expected_fingerprint is not None:
+        fp = data.get("fingerprint")
+        # #1349 merge: a checkpoint written by the vector-arm path carries
+        # format+run_key but no M7 fingerprint — the run_key check above
+        # already guards cross-config resume; fall through (no code-drift
+        # gate available) instead of refusing a legitimately-keyed file.
+        diffs = ([] if fp is None
+                 else _fingerprint_diffs(expected_fingerprint, fp))
+        if diffs:
+            raise CheckpointStaleError(
+                f"checkpoint {p} is stale: effective run config differs on "
+                f"{sorted(diffs)} — refusing resume (delete the file to "
+                f"re-run the questions)")
+    required = REQUIRED_OUTCOME_KEYS.get(retriever, ("question_id",))
+    outcomes: dict[str, dict] = {}
+    for o in data.get("outcomes", []):
+        if not isinstance(o, dict) or not o.get("question_id"):
+            continue
+        if o.get("breaker_open"):
+            outcomes[o["question_id"]] = o  # legitimately dropped — keep
+            continue
+        missing = [k for k in required if k not in o]
+        if missing:
+            print(f"[longmem_eval] WARNING: checkpoint outcome "
+                  f"{o.get('question_id')!r} truncated/corrupt (missing "
+                  f"{missing}) — re-encoding just this question",
+                  file=sys.stderr)
+            continue
+        outcomes[o["question_id"]] = o
+    failures = [f for f in data.get("failures", [])
+                if isinstance(f, dict) and f.get("question_id")]
     print(f"[longmem_eval] resumed checkpoint {p}: {len(outcomes)} completed, "
           f"{len(failures)} failed (skipping both)", file=sys.stderr)
     return outcomes, failures
@@ -498,7 +684,10 @@ def _merge_checkpoint(path: Path, outcomes: list[dict],
 
 
 def _save_checkpoint(path: str | None, outcomes: list[dict],
-                     failures: list[dict], fingerprint: dict) -> None:
+                     failures: list[dict], fingerprint: dict | None = None, *,
+                     run_key: str | None = None, surface: str | None = None,
+                     retriever: str | None = None, model: str | None = None,
+                     prompt: str | None = None) -> None:
     """Atomically persist partial results after each question (resume).
 
     M7 (#1527, D7/D8): writes the code fingerprint; the write happens under
@@ -515,6 +704,12 @@ def _save_checkpoint(path: str | None, outcomes: list[dict],
             p, outcomes, failures)
         tmp = p.with_suffix(p.suffix + ".tmp")
         tmp.write_text(json.dumps({
+            "format": CHECKPOINT_FORMAT,
+            "run_key": run_key,
+            "surface": surface,
+            "retriever": retriever,
+            "model": model or "default",
+            "prompt": prompt or "default",
             "fingerprint": fingerprint,
             "outcomes": merged_outcomes,
             "failures": merged_failures,
@@ -566,6 +761,19 @@ def run_evaluation(
     dataset_fingerprint: str = "unknown",
     integrity_threshold: float = 0.0,
     integrity_justification: str | None = None,
+    # #1349 vector arm: retriever routing + injected model + retrieval-only.
+    retriever: str = "hybrid",
+    model: str | None = None,
+    query_prompt: str | None = None,
+    retrieval_only: bool = False,
+    surface: str = "embedded",
+    run_key: str | None = None,
+    # #1349 --db mode: a FalkorDB URI drives the per-question SDK (HNSW
+    # queryNodes surface, per-(question, model) graph isolation) instead of
+    # the embedded tempdir. encode_cache (model-keyed) persists query
+    # encodings across questions/processes.
+    db_uri: str | None = None,
+    encode_cache: Any | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Run the full per-question pipeline over ``instances``.
 
@@ -596,15 +804,23 @@ def run_evaluation(
         rerank=rerank, rerank_model=rerank_model, rerank_pool=rerank_pool,
         per_session_cap=per_session_cap, mmr_lambda=mmr_lambda,
         max_k=max(ks))
+    # #1349: per-model checkpoint keying — a --db HNSW run never resumes
+    # against embedded brute-force checkpoints (and vice versa); cross-model
+    # resume is impossible by construction.
+    surface = "hnsw" if db_uri else "embedded"
+    run_key = checkpoint_key(surface, retriever, model, query_prompt)
     fingerprint = _build_fingerprint(
-        reader_model=reader.model_id,
-        judge_model=judge.model_id,
+        reader_model=(reader.model_id if reader is not None
+                      else "n/a (retrieval-only)"),
+        judge_model=(judge.model_id if judge is not None
+                     else "n/a (retrieval-only)"),
         ks=ks, top_k=top_k, split=split, ingest_mode=ingest_mode,
         extractor_model=extractor_model, max_retries=max_retries,
         dataset_fingerprint=dataset_fingerprint,
         rerank_config=rr["config"],
     )
-    done, prior_failures = _load_checkpoint(checkpoint, fingerprint)
+    done, prior_failures = _load_checkpoint(checkpoint, fingerprint,
+                                            run_key=run_key)
     outcomes: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = list(prior_failures)
     import threading
@@ -634,43 +850,56 @@ def run_evaluation(
         # before their calls.
         _stage = "ingest"
         try:
-            with tempfile.TemporaryDirectory(dir=work_dir, prefix="lme-") as td:
-                sdk = TortoiseSDK(os.path.join(td, "lme.db"))
-                try:
-                    # M7 (D5): ingest is timed in isolation — the write-path
-                    # cost is a report component (extractor vs retrieve vs
-                    # reader vs judge attribution).
-                    t_ingest = time.monotonic()
-                    if ingest_mode == "v2":
-                        from .ingest_v2 import ingest_haystack_v2
-                        ingest_stats = ingest_haystack_v2(
-                            sdk, question, extractor_model,
-                            chunk_turns=chunk_turns)
-                    else:
-                        ingest_stats = ingest_haystack(
-                            sdk, question, chunk_turns=chunk_turns)
-                    ingest_latency_ms = round(
-                        (time.monotonic() - t_ingest) * 1000.0, 2)
-                    # M7 (D3): the authoritative live graph pool size — the
-                    # retrieval-pool denominator the methodology documents
-                    # (single Cypher, no N+1).
-                    pool_rows = sdk._get_proj().g.query(
-                        "MATCH (p:Point {lme_question_id:$q}) RETURN count(*)",
-                        params={"q": qid}).result_set
-                    pool_size = pool_rows[0][0] if pool_rows else 0
-                    ret = retrieve_for_question(
-                        sdk, question, ks=ks, top_k=top_k,
-                        max_context_tokens=max_context_tokens,
-                        max_chunks_per_session=max_chunks_per_session,
-                        tr_top_k=tr_top_k,
-                        tr_date_weight=tr_date_weight,
-                        tr_events=tr_events,
-                        rerank=rr["rerank_on"],
-                        rerank_model=rr["model"],
-                        rerank_pool=rr["rerank_pool"],
-                        per_session_cap=rr["per_session_cap"],
-                        mmr_lambda=rr["mmr_lambda"])
+            sdk, cleanup = _make_question_sdk(
+                db_uri=db_uri,
+                namespace=question_graph_namespace(model, query_prompt, qid)
+                if db_uri else None,
+                work_dir=work_dir)
+            try:
+                _sdk_cleanup = cleanup
+                # M7 (D5): ingest is timed in isolation — the write-path
+                # cost is a report component (extractor vs retrieve vs
+                # reader vs judge attribution).
+                t_ingest = time.monotonic()
+                if ingest_mode == "v2":
+                    from .ingest_v2 import ingest_haystack_v2
+                    ingest_stats = ingest_haystack_v2(
+                        sdk, question, extractor_model,
+                        chunk_turns=chunk_turns)
+                else:
+                    ingest_stats = ingest_haystack(
+                        sdk, question, chunk_turns=chunk_turns)
+                ingest_latency_ms = round(
+                    (time.monotonic() - t_ingest) * 1000.0, 2)
+                # M7 (D3): the authoritative live graph pool size — the
+                # retrieval-pool denominator the methodology documents
+                # (single Cypher, no N+1).
+                pool_rows = sdk._get_proj().g.query(
+                    "MATCH (p:Point {lme_question_id:$q}) RETURN count(*)",
+                    params={"q": qid}).result_set
+                pool_size = pool_rows[0][0] if pool_rows else 0
+                ret = retrieve_for_question(
+                    sdk, question, ks=ks, top_k=top_k,
+                    retriever=retriever,
+                    max_context_tokens=max_context_tokens,
+                    max_chunks_per_session=max_chunks_per_session,
+                    tr_top_k=tr_top_k,
+                    tr_date_weight=tr_date_weight,
+                    tr_events=tr_events,
+                    rerank=rr["rerank_on"],
+                    rerank_model=rr["model"],
+                    rerank_pool=rr["rerank_pool"],
+                    per_session_cap=rr["per_session_cap"],
+                    mmr_lambda=rr["mmr_lambda"])
 
+                # #1349 retrieval-only: reader/judge never invoked — the
+                # outcome carries retrieval + breaker accounting only.
+                if retrieval_only:
+                    hypothesis = None
+                    label = None
+                    reader_ms = 0.0
+                    judge_ms = 0.0
+                else:
                     _stage = "reader"
                     t0 = time.monotonic()
                     # A1 #1546 invariant: the reader receives question_type
@@ -703,8 +932,10 @@ def run_evaluation(
                         ),
                         what=f"judge for {qid}", retries=max_retries)
                     judge_ms = (time.monotonic() - t0) * 1000.0
-                finally:
-                    sdk.close()
+            finally:
+                sdk.close()
+                with contextlib.suppress(Exception):
+                    _sdk_cleanup()
 
             # M7 (D4): evidence written = the ingest leg's own count
             # (deterministic → evidence_turns; v2 → evidence_points);
@@ -743,19 +974,19 @@ def run_evaluation(
                 # failures stay in the top-level ``failures`` list.
                 "valid": len(ingest_errors) == 0,
                 "error_classes": ingest_stats.get("error_census", {}),
-                "leg_mix": ret["match_source_counts"],
-                "leg_mix@k": ret["match_source_counts@k"],
+                "leg_mix": ret.get("match_source_counts"),
+                "leg_mix@k": ret.get("match_source_counts@k"),
                 "pool_size": pool_size,
                 "evidence_written": evidence_written,
-                "evidence_retrieved@k": ret["evidence_retrieved@k"],
+                "evidence_retrieved@k": ret.get("evidence_retrieved@k"),
                 "ingest_latency_ms": ingest_latency_ms,
                 # R3 (#1542) D3/D4: write-time embedding coverage + the
                 # per-leg trace (vector/fts/structural/fallback — E2E-1
                 # never-null leg-mix, recorded per question).
-                "points_total": ret["points_total"],
-                "points_embedded": ret["points_embedded"],
-                "embedding_coverage": ret["embedding_coverage"],
-                "legs": ret["legs"],
+                "points_total": ret.get("points_total"),
+                "points_embedded": ret.get("points_embedded"),
+                "embedding_coverage": ret.get("embedding_coverage"),
+                "legs": ret.get("legs"),
                 # R5 (#1544): the TR-constraint surface per question — the
                 # detected kind (TR only) + whether the window filter fell
                 # back to the unfiltered pool (never starve the reader).
@@ -767,10 +998,41 @@ def run_evaluation(
                 **({"rerank_pass": ret["rerank_pass"],
                     "rerank_latency_ms": ret.get("rerank_latency_ms", 0.0)}
                    if "rerank_pass" in ret else {}),
+                # #1349 vector arm: gate metrics + breaker-open dropped marker.
+                **({"ranked_ids": ret["ranked_ids"],
+                    "evidence_turn_matches": ret["evidence_turn_matches"],
+                    "ndcg@10": ret["ndcg@10"],
+                    "p@10": ret["p@10"],
+                    "p@5": ret["p@5"]}
+                   if "ndcg@10" in ret else {}),
             }
             with _lock:
                 outcomes.append(outcome)
                 done[qid] = outcome
+        except VectorBreakerOpenError:
+            # #1349: vector-arm breaker drops are NOT failures — the question
+            # is marked breaker_open and excluded from the means (count
+            # surfaced in report["dropped"]). Never recall 0.
+            with _lock:
+                dropped_outcome = {
+                    "question_id": qid,
+                    "question_type": question.get("question_type", ""),
+                    "breaker_open": True,
+                    "dropped_reason": "breaker_open",
+                    "label": None,
+                    "hypothesis": None,
+                    "session_recall@k": {str(k): 0.0 for k in ks},
+                    "turn_recall@k": {str(k): 0.0 for k in ks},
+                    "ndcg@10": None, "p@10": None, "p@5": None,
+                }
+                outcomes.append(dropped_outcome)
+                done[qid] = dropped_outcome
+        except ModelEncodeFailedError:
+            # #1349: the graph has ZERO embedding-bearing points — empty
+            # recall is indistinguishable from a legit no-hit. ABORT the
+            # whole config run (never report empty recall as a result); the
+            # runner exits MODEL_ENCODE_FAILED_EXIT.
+            raise
         except Exception as e:  # noqa: BLE001, RUF100
             # M2 (#1523, D4): a fatal-class provider error mid-run means the
             # key died (billing cap hit, revocation) — continuing would
@@ -794,8 +1056,10 @@ def run_evaluation(
                     "failed_at_utc": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
                 })
         with _lock:
-            _save_checkpoint(checkpoint, list(done.values()), failures,
-                             fingerprint)
+            _save_checkpoint(
+                checkpoint, list(done.values()), failures, fingerprint,
+                run_key=run_key, surface=surface, retriever=retriever,
+                model=model, prompt=query_prompt)
 
     # ── dispatch: sequential (workers=1) or a thread pool ──
     if workers <= 1:
@@ -813,13 +1077,18 @@ def run_evaluation(
 
     return outcomes, outcomes_to_report(
         outcomes,
-        reader_model=reader.model_id,
-        reader_model_spec=getattr(reader, "model_spec", ""),
-        reader_provider=getattr(reader, "provider", None),
-        reader_pinned=getattr(reader, "pinned", None),
+        # #1349 vector arm: retriever/model/query_prompt/mode/run_key.
+        retriever=retriever, model=model, query_prompt=query_prompt,
+        retrieval_only=retrieval_only, surface=surface, run_key=run_key,
+        reader_model=(reader.model_id if reader is not None
+                      else "n/a (retrieval-only)"),
+        reader_model_spec=getattr(reader, "model_spec", "") if reader else "",
+        reader_provider=getattr(reader, "provider", None) if reader else None,
+        reader_pinned=getattr(reader, "pinned", None) if reader else None,
         reader_system_prompt=system_prompt,
         reader_type_fragments=type_fragments,
-        judge_model=judge.model_id,
+        judge_model=(judge.model_id if judge is not None
+                     else "n/a (retrieval-only)"),
         ks=ks,
         top_k=top_k,
         split=split,
@@ -878,6 +1147,14 @@ def outcomes_to_report(
     reader_system_prompt: str = "",
     reader_type_fragments: dict[str, str] | None = None,
     preflight: dict | None = None,
+    # #1349 vector arm: forwarded to build_report — retriever routing +
+    # injected model + mode ride the report methodology + provenance.
+    retriever: str = "hybrid",
+    model: str | None = None,
+    query_prompt: str | None = None,
+    retrieval_only: bool = False,
+    surface: str = "embedded",
+    run_key: str | None = None,
     # R3 (#1542) D5: forwarded to build_report — the dense-leg methodology
     # keys are always emitted (not_checked default when omitted).
     embedder_status: dict | None = None,
@@ -914,6 +1191,12 @@ def outcomes_to_report(
                 "evidence_recall@k",
                 "chunk_evidence_recall@k",  # R1 #1540 D5: containment view
                 "n_ingest_errors", "context_tokens",
+                # #1349 vector arm: the gate's per-question metrics ride the
+                # Layer-1 projection (extract_report in gate_1349.py reads
+                # them from the report's outcomes) + the breaker-open dropped
+                # markers (dropped-question accounting, never recall 0).
+                "ndcg@10", "p@10", "p@5", "ranked_ids",
+                "evidence_turn_matches", "breaker_open", "dropped_reason",
                 # M8 (#1528, D6): the live graph point count rides the
                 # projection — the flip-list zero-point flag consumes it.
                 "context_point_count",
@@ -978,6 +1261,14 @@ def outcomes_to_report(
         rerank_config=rerank_config,
         embedder_status=embedder_status,
         extra=extra,
+        # #1349 vector arm: retriever/model/query_prompt/retrieval_only/
+        # surface/run_key ride the report methodology + provenance.
+        retriever=retriever,
+        model=model,
+        query_prompt=query_prompt,
+        retrieval_only=retrieval_only,
+        surface=surface,
+        run_key=run_key,
         # M7 (#1527): publication-gated audit + run-hygiene provenance.
         dataset_semantics_audit=dataset_semantics_audit,
         integrity_threshold=integrity_threshold,
@@ -1128,6 +1419,36 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--top-k", type=int, default=DEFAULT_TOP_K,
                    help="max context items handed to the reader (default 20; "
                         "the token budget --context-cap bounds it further, R1 #1540)")
+    # #1349 vector arm (embedder selection): retriever routing + injected model.
+    p.add_argument("--retriever", default="hybrid", choices=("hybrid", "vector"),
+                   help="retriever: 'hybrid' (default RRF) or 'vector' (#1349 "
+                        "vector-only arm — run_vector_query ONLY, nDCG@10 + "
+                        "P@10/P@5 emitted; breaker-open questions dropped)")
+    p.add_argument("--model", default=None,
+                   help="embedding model short name injected before the run "
+                        "(tools/embedder_probe PROBE_MODELS: minilm | arctic-xs "
+                        "| arctic-s | bge-small; default = production literal)")
+    p.add_argument("--query-prompt", default=None,
+                   help="named prompt template threaded to the injected model "
+                        "(e.g. 'query' for snowflake-arctic vendor configs)")
+    p.add_argument("--retrieval-only", action="store_true",
+                   help="run retrieval WITHOUT reader/judge — accuracy is None "
+                        "and the report is the #1349 gate's vector recall block")
+    p.add_argument("--db", default=None,
+                   help="#1349 --db mode: a FalkorDB URI "
+                        "(docker://|redis://|rediss://|bolt://) — per-question "
+                        "SDKs scoped to (question, model-run) graphs, HNSW "
+                        "queryNodes surface. Without it, embedded tempdir "
+                        "graphs (brute-force surface).")
+    p.add_argument("--spot-check", action="store_true",
+                   help="#1349 HNSW spot-check: run winner AND control in one "
+                        "pass over the FULL question set, emit the paired "
+                        "{cleared, n, metric_deltas} artifact at the pinned "
+                        "path (requires --db and --model)")
+    p.add_argument("--load-timeout", type=float, default=None,
+                   help="EmbeddingModel load timeout override (seconds) — the "
+                        "first model load on a contended machine can exceed "
+                        "the 90s default)")
     p.add_argument("--tr-top-k", type=int, default=DEFAULT_TR_TOP_K,
                    help="TR-questions context cap (default 12 — the 20→12 "
                         "transcript-flood control, R5 #1544)")
@@ -1265,9 +1586,200 @@ def _assert_python_version() -> None:
             "requires-python >=3.12; the eval graph write path is 3.12-only")
 
 
+
+
+def spotcheck_artifact_path(winner: str) -> Path:
+    """Pinned artifact path — gate_1349.py's "HNSW artifact present+cleared"
+    check reads exactly this file."""
+    return SPOTCHECK_ARTIFACT_DIR / f"hnsw-spotcheck-{winner}.json"
+
+
+def _normal_cdf(x: float) -> float:
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def _delta_summary(deltas: list[float | None]) -> dict[str, Any]:
+    """One-sided paired normal-approximation summary of winner−control deltas.
+
+    ``deltas`` is the FULL-length per-question list in burn order; entries
+    that are None are DROPPED questions (breaker_open/absent in either arm)
+    and are skipped by the n/mean/var/p math — but they keep their slot in
+    the emitted ``deltas`` list so the gate sees the full coverage.
+    """
+    valid = [d for d in deltas if d is not None]
+    n = len(valid)
+    base = {"n": n, "deltas": list(deltas)}
+    if n == 0:
+        return {"mean_delta": 0.0, "one_sided_p": None, **base}
+    mean = sum(valid) / n
+    if n == 1:
+        return {"mean_delta": round(mean, 6), "one_sided_p": None, **base}
+    var = sum((d - mean) ** 2 for d in valid) / (n - 1)
+    std = math.sqrt(var)
+    if std == 0.0:
+        p = 0.0 if mean > 0.0 else 1.0  # deterministic sign
+    else:
+        z = mean / (std / math.sqrt(n))
+        p = 1.0 - _normal_cdf(z)
+    return {"mean_delta": round(mean, 6), "one_sided_p": round(p, 6), **base}
+
+
+def _build_spotcheck_artifact(winner: str, control: str,
+                              results: dict[str, dict[str, dict]],
+                              ks: tuple[int, ...]) -> dict[str, Any]:
+    """Paired winner-vs-control artifact shape: {cleared, n, dropped_qids,
+    metric_deltas}.
+
+    ``n`` is the GATE question count the spot-check ran — the union of both
+    arms EXCLUDING ``_abs`` abstention questions (mirroring the gate's
+    ``is_gate_question`` filter; the gate requires art n == its filtered
+    burn set, so a producer that counts the full split never matches on a
+    split containing abstentions). Never the shrinking intersection. Each
+    metric's ``deltas`` is full-length (one entry per qid); a qid that is
+    breaker_open or absent in either arm is recorded as a None sentinel and
+    listed in ``dropped_qids`` (the paired p skips it)."""
+    k = "10" if "10" in (str(x) for x in ks) else str(ks[-1])
+
+    def _gate_qid(qid: str) -> bool:
+        # Exclude _abs abstentions (the gate's is_gate_question filter).
+        # Divergence note: gate_1349.is_gate_question returns False for a
+        # MISSING question_type; here absent type counts as included. Real
+        # outcomes always carry it from the dataset (so the divergence is
+        # unreachable in production), and the lenient side only over-counts
+        # the artifact n → BLOCK, never a false pass (fail-closed). The
+        # test fixtures omit question_type, hence the leniency.
+        if "_abs" in qid:
+            return False
+        o = results[winner].get(qid) or results[control].get(qid) or {}
+        qt = o.get("question_type")
+        if not qt:
+            return True
+        return (str(qt).startswith("single-session-")
+                or qt in {"temporal-reasoning", "knowledge-update",
+                          "multi-session"})
+
+    full_qids = sorted(q for q in
+                       (set(results[winner]) | set(results[control]))
+                       if _gate_qid(q))
+
+    def _dropped(qid: str) -> bool:
+        w, c = results[winner].get(qid), results[control].get(qid)
+        return (w is None or c is None
+                or w.get("breaker_open") or c.get("breaker_open"))
+
+    dropped_qids = [qid for qid in full_qids if _dropped(qid)]
+    metric_deltas: dict[str, Any] = {}
+    for metric in ("turn_recall@10", "ndcg@10"):
+        deltas: list[float | None] = []
+        for qid in full_qids:
+            w, c = results[winner].get(qid), results[control].get(qid)
+            if _dropped(qid):
+                deltas.append(None)  # sentinel: dropped, no paired delta
+                continue
+            if metric == "turn_recall@10":
+                dw = w.get("turn_recall@k", {}).get(k, 0.0)
+                dc = c.get("turn_recall@k", {}).get(k, 0.0)
+            else:
+                dw = w.get("ndcg@10", 0.0)
+                dc = c.get("ndcg@10", 0.0)
+            deltas.append(float(dw) - float(dc))
+        metric_deltas[metric] = _delta_summary(deltas)
+    cleared = any(
+        metric_deltas[m].get("one_sided_p") is not None
+        and metric_deltas[m]["one_sided_p"] <= 0.05
+        for m in metric_deltas
+    )
+    return {
+        "producer": "tools/longmem_eval/run.py --spot-check",
+        "surface": "hnsw",
+        "retriever": "vector",
+        "winner": winner,
+        "control": control,
+        "n": len(full_qids),
+        "dropped_qids": dropped_qids,
+        "metric_deltas": metric_deltas,
+        "cleared": cleared,
+        "rule": ("one-sided paired normal-approximation z-test per co-primary "
+                 "metric over the non-dropped questions of the FULL question "
+                 "set (n records the full count; a post-hoc n that shrinks "
+                 "until p<0.10 is forbidden — dropped breaker_open/absent "
+                 "qids keep None sentinels in the full-length deltas and are "
+                 "listed in dropped_qids); BH q=0.10 over m=2 → cleared iff "
+                 "min one-sided p ≤ 0.05. gate_1349.py recomputes the exact "
+                 "bootstrap p from the per-question deltas."),
+        "checkpoint_key_prefix": "hnsw__vector__{model}__{prompt}",
+        "generated_at_utc": datetime.now(UTC).isoformat(),
+        "git_sha": git_sha(),
+    }
+
+
+def _run_spot_check(args, instances: list[dict], *, ks, top_k, db_uri) -> dict:
+    """Winner AND control in one pass → one paired artifact (documented shape)."""
+    winner = args.model
+    control = "minilm"
+    cache_root = Path(args.cache_dir).expanduser() if args.cache_dir else ds.cache_dir()
+    results: dict[str, dict[str, dict]] = {}
+    for model in (winner, control):
+        state = inject_model(model, query_prompt=args.query_prompt,
+                              load_timeout=getattr(args, "load_timeout", None))
+        model_id = state.get("hf_id") or PROBE_MODELS.get(model) or DEFAULT_MODEL_ID
+        cache = encode_cache.EncodeCache(
+            encode_cache.cache_path_for(cache_root, model, args.query_prompt),
+            model_id=model_id, prompt_name=args.query_prompt)
+        # Activate the model-keyed cache around the whole pass: it wraps
+        # compute_embedding (ingest-time interception) AND sets the
+        # _ACTIVE_CACHE global that encode_query reads (query-encode
+        # persistence across questions/processes). Without .active() the
+        # cache is dead code — every question re-encodes the overlapping
+        # haystack (the 5-10x redundancy the cache exists to eliminate).
+        with cache.active():
+            outcomes, _report = run_evaluation(
+                instances, reader=None, judge=None, ks=ks, top_k=top_k,
+                work_dir=args.work_dir, split=args.split,
+                retriever="vector", model=model, query_prompt=args.query_prompt,
+                retrieval_only=True, db_uri=db_uri, encode_cache=cache,
+            )
+        results[model] = {o["question_id"]: o for o in outcomes}
+        print(f"[longmem_eval] spot-check pass complete: model={model} "
+              f"questions={len(outcomes)}", file=sys.stderr)
+    artifact = _build_spotcheck_artifact(winner, control, results, ks=ks)
+    path = spotcheck_artifact_path(winner)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(artifact, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8")
+    print(f"[longmem_eval] HNSW spot-check artifact written: {path}",
+          file=sys.stderr)
+    return artifact
+
+
 def run_main(argv: list[str] | None = None) -> dict[str, Any]:
     _assert_python_version()
-    args = _build_parser().parse_args(argv)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    # --db: FalkorDB URI handling mirroring tests/eval/retrieval/run.py:549
+    # (URI → TORTOISE_DB_URI → TortoiseSDK()). Non-URI --db is rejected —
+    # the per-question graph isolation derives from the URI server. Test
+    # isolation (#1349): the URI reaches the SDK via the env, restored on
+    # exit so a leaked TORTOISE_DB_URI can't silently change later SDKs.
+    db_uri = args.db
+    if db_uri is None and os.environ.get("TORTOISE_DB_URI"):
+        db_uri = os.environ["TORTOISE_DB_URI"]
+    if db_uri is not None:
+        if "://" not in db_uri:
+            parser.error(
+                f"--db must be a FalkorDB URI (docker://|redis://|rediss://|"
+                f"bolt://), got {db_uri!r} — the per-question isolated graphs "
+                f"derive from the URI's server")
+        with _temporary_env_var("TORTOISE_DB_URI", db_uri):
+            return _run_main(parser, args, db_uri)
+    return _run_main(parser, args, db_uri)
+
+
+def _run_main(parser: argparse.ArgumentParser, args,
+              db_uri: str | None) -> dict[str, Any]:
+    """Body of :func:`run_main` (split so the caller can scope the
+    TORTOISE_DB_URI env to the run — issue #1349 test isolation)."""
     # M8 (#1528, D6): --compare is a pure artifact command — handled before
     # ANY run machinery (no dataset load, no embedder pre-flight, no keys).
     if args.compare:
@@ -1327,6 +1839,42 @@ def run_main(argv: list[str] | None = None) -> dict[str, Any]:
                   f"rerank-off with a recorded reason, D8b)",
                   file=sys.stderr)
 
+    # #1349 HNSW spot-check: a dedicated evidence producer — winner + control
+    # in one pass over the FULL question set, paired artifact at the pinned
+    # path. Requires --db (HNSW surface) + --model != control. Guards run
+    # BEFORE model injection so a bad invocation fails fast (no model load).
+    if args.spot_check:
+        if not db_uri:
+            parser.error("--spot-check requires --db (the HNSW production "
+                         "surface — the spot-check must never run on "
+                         "embedded brute-force)")
+        if not args.model:
+            parser.error("--spot-check requires --model <winner>")
+        if args.model == "minilm":
+            # winner == control → every metric delta is 0 by construction; the
+            # paired artifact would be meaningless. Rejected at the gate.
+            parser.error("--spot-check requires a non-control winner model "
+                         "(minilm is the control)")
+        if args.retriever != "vector":
+            parser.error("--spot-check is a vector-arm producer — pass "
+                         "--retriever vector")
+        if 10 not in ks:
+            parser.error("--spot-check measures turn_recall@10 / ndcg@10 — "
+                         f"10 must be in --k (got {','.join(map(str, ks))})")
+
+    # #1349: inject the candidate embedder BEFORE the pre-flight so the
+    # singleton IS the candidate (probe records resolved revision; HARD-FAILs
+    # on load failure). ``--model`` is benchmark-only — the production
+    # entrypoint rejects the override env (Dockerfile entrypoint.sh).
+    # The spot-check injects winner AND control itself (one pass, one
+    # artifact) — never pre-inject here.
+    if args.model and not args.spot_check:
+        if args.model not in PROBE_MODELS:
+            raise SystemExit(
+                f"unknown --model {args.model!r}; known: {sorted(PROBE_MODELS)}")
+        inject_model(args.model, query_prompt=args.query_prompt,
+                     load_timeout=args.load_timeout)
+
     # R3 (#1542) D2: embedder pre-flight — before dataset load (fail before
     # the ~tens-of-MB download). Real runs refuse to start when the dense
     # leg can't run; --mock warns and continues. The status flows into the
@@ -1342,6 +1890,9 @@ def run_main(argv: list[str] | None = None) -> dict[str, Any]:
         cache=Path(args.cache_dir).expanduser() if args.cache_dir else None,
         download=not args.no_download,
     )
+
+    if args.spot_check:
+        return _run_spot_check(args, instances, ks=ks, top_k=top_k, db_uri=db_uri)
 
     # M7 (D7): the dataset fingerprint hashes the RESOLVED dataset file (the
     # checkpoint's dataset_fingerprint must match on resume).
@@ -1416,6 +1967,12 @@ def run_main(argv: list[str] | None = None) -> dict[str, Any]:
             dataset_fingerprint=dataset_fingerprint,
             integrity_threshold=args.integrity_threshold,
             integrity_justification=args.integrity_justification,
+            # #1349 vector arm: retriever routing + injected model + mode.
+            retriever=args.retriever,
+            model=args.model,
+            query_prompt=args.query_prompt,
+            retrieval_only=args.retrieval_only,
+            db_uri=db_uri,
         )
     except FatalProviderError as e:
         print("[longmem_eval] RUN ABORTED — fatal provider error mid-run "
@@ -1423,6 +1980,12 @@ def run_main(argv: list[str] | None = None) -> dict[str, Any]:
               "degrade the run):", file=sys.stderr)
         print(str(e), file=sys.stderr)
         raise SystemExit(1) from e
+    except ModelEncodeFailedError as e:
+        print(f"[longmem_eval] MODEL_ENCODE_FAILED: {e}", file=sys.stderr)
+        print(f"[longmem_eval] aborting this config run with exit code "
+              f"{MODEL_ENCODE_FAILED_EXIT} (never report empty recall as a "
+              f"result)", file=sys.stderr)
+        raise SystemExit(MODEL_ENCODE_FAILED_EXIT) from e
 
     out = args.output or str(default_report_path(args.split))
     save_report(report, out)

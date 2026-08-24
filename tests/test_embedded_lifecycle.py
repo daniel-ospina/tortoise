@@ -45,6 +45,7 @@ RAW_EMBEDDED_ALLOWLIST = {
     "fixtures/redis-guard/good_absolute_path.py",
     "repro/reproduce_redislite_leak.py",
     "test_backup_e2e.py",
+    "test_backfill_embeddings_force.py",  # #1349 backfill: live-FalkorDB rebuild test
     "test_config.py",
     "test_de2e1_entity_extraction.py",
     "test_embedded_concurrency.py",

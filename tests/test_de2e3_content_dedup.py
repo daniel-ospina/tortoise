@@ -2,7 +2,8 @@
 
 Epic plan §7 DE2E-3 (Variants A/B/C + idempotency) + DE2E-N11 (pointKind
 scoping) + N13/R14 (checkpoint back-compat). Pinned review band:
-REVIEW_THRESHOLD=0.60, AUTO_MERGE=0.92.
+REVIEW_THRESHOLD=0.84, AUTO_MERGE=0.94 (bge-small calibration, 2026-08-21
+— was 0.60/0.92 under all-MiniLM, #1349 T14).
 """
 from __future__ import annotations
 
@@ -13,8 +14,8 @@ import pytest
 
 from tortoise.sdk import TortoiseSDK
 
-REVIEW_THRESHOLD = 0.60   # pinned band (plan §7 preamble)
-AUTO_MERGE_THRESHOLD = 0.92  # pinned band (calibration keeps prod in band)
+REVIEW_THRESHOLD = 0.84   # pinned band (plan §7 preamble; bge-small calib 2026-08-21)
+AUTO_MERGE_THRESHOLD = 0.94  # pinned band (calibration keeps prod in band)
 
 DECISION_TEXT = "We decided to move the FalkorDB default port to 16379."
 
@@ -164,19 +165,19 @@ class TestDe2e3:
         sdk.create_point("decision", DECISION_TEXT, status="draft")
         pairs = sdk._semantic_dedup(
             [({"id": "x1", "content": DECISION_TEXT}, "")],
-            threshold=0.60, pointKind="decision", return_pairs=True)
+            threshold=REVIEW_THRESHOLD, pointKind="decision", return_pairs=True)
         assert pairs, "identical text must pair with sim >= threshold"
         assert pairs[0]["existing"] is not None
         assert 0.0 <= pairs[0]["similarity"] <= 1.0
         # Unrelated text → no pair.
         pairs2 = sdk._semantic_dedup(
             [({"id": "x2", "content": "completely unrelated topic about cats"}, "")],
-            threshold=0.60, pointKind="decision", return_pairs=True)
+            threshold=REVIEW_THRESHOLD, pointKind="decision", return_pairs=True)
         assert pairs2 == []
         # similarity_out shapes (item, ch, sim) for below-threshold survivors.
         out = sdk._semantic_dedup(
             [({"id": "x3", "content": "completely unrelated topic about cats"}, "ch3")],
-            threshold=0.60, pointKind="decision", similarity_out=True)
+            threshold=REVIEW_THRESHOLD, pointKind="decision", similarity_out=True)
         assert out and len(out[0]) == 3
 
     def test_checkpoint_back_compat(self, sdk):
@@ -209,7 +210,7 @@ class TestDe2e3ReviewFixes:
         assert res["dedup_hits"] == 0  # novel decision, no prior
 
     def test_embedding_tier_in_band_surfaces_candidate(self, sdk, tmp_path, monkeypatch):
-        """P2: embedding-tier hit in the review band (0.60–0.92) surfaces a
+        """P2: embedding-tier hit in the review band (0.84–0.94) surfaces a
         candidate with method=embedding and the reported similarity."""
         # Prior content DIFFERS from the mined decision (so the hash tier
         # misses and the embedding tier runs); the pair selector is pinned

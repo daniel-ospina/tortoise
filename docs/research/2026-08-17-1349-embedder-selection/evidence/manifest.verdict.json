@@ -1,0 +1,12 @@
+{
+  "blocked": true,
+  "blocking_reasons": [
+    "(d) code_sha drift on eval-critical paths between ae2c388c4b4a7e596c04b8ec4d8dbd830e817e09 and HEAD: ['benchmarks/run_report.py', 'benchmarks/synthetic_corpus.py', 'graph-scripts/backfill_embeddings.py', 'tests/eval/retrieval/README.md', 'tests/eval/retrieval/baseline/baseline-embedded-2026-08-17.json', 'tests/eval/retrieval/bootstrap.py', 'tests/eval/retrieval/gate_1349.py', 'tests/eval/retrieval/judge.py', 'tests/eval/retrieval/metrics.py', 'tests/eval/retrieval/queries.py', 'tests/eval/retrieval/run.py', 'tests/eval/retrieval/task0_probe.py', 'tests/eval/retrieval/test_1348.py', 'tests/eval/retrieval/test_bootstrap.py', 'tests/eval/retrieval/test_gate_1349.py', 'tests/eval/retrieval/test_integration.py', 'tests/eval/retrieval/test_judge.py', 'tests/eval/retrieval/test_metrics.py', 'tests/eval/retrieval/test_oracle.py', 'tests/eval/retrieval/test_run.py', 'tools/calibrate_thresholds.py', 'tools/embedder_probe.py', 'tools/longmem_eval/README.md', 'tools/longmem_eval/build_healthy52_fixture.py', 'tools/longmem_eval/dataset.py', 'tools/longmem_eval/dataset_audit.py', 'tools/longmem_eval/errors.py', 'tools/longmem_eval/evidence.py', 'tools/longmem_eval/full_context.py', 'tools/longmem_eval/ingest.py', 'tools/longmem_eval/ingest_v2.py', 'tools/longmem_eval/judge.py', 'tools/longmem_eval/preflight.py', 'tools/longmem_eval/reader.py', 'tools/longmem_eval/report.py', 'tools/longmem_eval/rerank.py', 'tools/longmem_eval/retrieve.py', 'tools/longmem_eval/run.py', 'tools/longmem_eval/run_protocol.py', 'tools/longmem_eval/sweep_granularity.py', 'tools/mini_beir/run.py', 'tools/pair_label_runner.py', 'tortoise/embeddings.py', 'tortoise/projection/__init__.py', 'tortoise/projection/edges.py', 'tortoise/projection/entities.py', 'tortoise/projection/grounding.py', 'tortoise/sdk.py', 'tortoise/search_engine.py'] \u2014 re-run the gate + spot-checks on drifted main (full re-burn only if eval code moved)",
+    "(e) model 'minilm' manifest revision != probe-recorded revision '1110a243fdf4706b3f48f1d95db1a4f5529b4d41'",
+    "(e) model 'bge-small' manifest revision != probe-recorded revision '5c38ec7c405ec4b44b94cc5a9bb96e735b38267a'",
+    "(e) model 'arctic-xs' manifest revision != probe-recorded revision 'd8c86521100d3556476a063fc2342036d45c106f'",
+    "(e) model 'arctic-s' manifest revision != probe-recorded revision 'e596f507467533e48a2e17c007f0e1dacc837b33'"
+  ],
+  "statistical_verdict": null,
+  "verdict": "BLOCKED"
+}

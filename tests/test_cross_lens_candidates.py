@@ -46,7 +46,7 @@ _V = {
 
 
 class _FakeEmbedder:
-    """Deterministic stand-in for the all-MiniLM-L6-v2 model."""
+    """Deterministic stand-in for the active embedding model (384-dim)."""
 
     def encode(self, texts, batch_size=32, show_progress_bar=False):
         return np.stack([_V.get(t, np.array([0.0, 0.1, 0.2])) for t in texts])

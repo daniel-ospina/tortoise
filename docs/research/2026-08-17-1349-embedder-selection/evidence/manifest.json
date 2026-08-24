@@ -1,0 +1,91 @@
+{
+  "configs": [
+    {
+      "checkpoint_state": "complete",
+      "code_sha": "ae2c388c4b4a7e596c04b8ec4d8dbd830e817e09",
+      "model": "minilm",
+      "n": 150,
+      "name": "minilm",
+      "prompt": null,
+      "report": "minilm.json",
+      "report_sha": "82a7913b7d7fb313fe899aa14539c5bd1ac7c77e2203a4ca8805f814857b8d84",
+      "resolved_revision": "rev-minilm"
+    },
+    {
+      "checkpoint_state": "complete",
+      "code_sha": "ae2c388c4b4a7e596c04b8ec4d8dbd830e817e09",
+      "model": "bge-small",
+      "n": 150,
+      "name": "bge-small",
+      "prompt": null,
+      "report": "bge-small.json",
+      "report_sha": "51bfc993884c24f059b5eefae3d3837a6188c2d37ed7a85b9e9eeda4260df760",
+      "resolved_revision": "rev-bge-small"
+    },
+    {
+      "checkpoint_state": "complete",
+      "code_sha": "ae2c388c4b4a7e596c04b8ec4d8dbd830e817e09",
+      "model": "arctic-xs",
+      "n": 150,
+      "name": "arctic-xs",
+      "prompt": null,
+      "report": "arctic-xs.json",
+      "report_sha": "4f3532ee7672bb005a8ef7c27ecbb3a0f0db927b54bd7d8c35838dca2aaa7b0b",
+      "resolved_revision": "rev-arctic-xs"
+    },
+    {
+      "checkpoint_state": "complete",
+      "code_sha": "ae2c388c4b4a7e596c04b8ec4d8dbd830e817e09",
+      "model": "arctic-xs",
+      "n": 150,
+      "name": "arctic-xs-q",
+      "prompt": "query",
+      "report": "arctic-xs-q.json",
+      "report_sha": "0362cce3834816f5e17a9c55dfd37afbe95254d11055e46f7161914d08480b52",
+      "resolved_revision": "rev-arctic-xs"
+    },
+    {
+      "checkpoint_state": "complete",
+      "code_sha": "ae2c388c4b4a7e596c04b8ec4d8dbd830e817e09",
+      "model": "arctic-s",
+      "n": 150,
+      "name": "arctic-s",
+      "prompt": null,
+      "report": "arctic-s.json",
+      "report_sha": "8e9c80b952dd2bc0f5c5d74c52756413b521abd9da6a6e5d4f8b8971da88adda",
+      "resolved_revision": "rev-arctic-s"
+    },
+    {
+      "checkpoint_state": "complete",
+      "code_sha": "ae2c388c4b4a7e596c04b8ec4d8dbd830e817e09",
+      "model": "arctic-s",
+      "n": 150,
+      "name": "arctic-s-q",
+      "prompt": "query",
+      "report": "arctic-s-q.json",
+      "report_sha": "7a5344a9cc08bade66b14164bba91334404267a68080870d0deba3fb0c96b377",
+      "resolved_revision": "rev-arctic-s"
+    }
+  ],
+  "preconditions": {
+    "e2e8": {
+      "arctic-s": "pre/e2e8-arctic-s.json",
+      "arctic-xs": "pre/e2e8-arctic-xs.json",
+      "bge-small": "pre/e2e8-bge-small.json",
+      "minilm": "pre/e2e8-minilm.json"
+    },
+    "hnsw_spotcheck": "pre/hnsw-spotcheck.json",
+    "issue_265": {
+      "status": "not-landed"
+    },
+    "product_call": "pre/product-call.json"
+  },
+  "probe_revisions": {
+    "arctic-s": "e596f507467533e48a2e17c007f0e1dacc837b33",
+    "arctic-xs": "d8c86521100d3556476a063fc2342036d45c106f",
+    "bge-small": "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
+    "minilm": "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
+  },
+  "retriever": "vector",
+  "split": "s"
+}

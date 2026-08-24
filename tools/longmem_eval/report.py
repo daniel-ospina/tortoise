@@ -30,6 +30,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from tortoise.embeddings import EMBEDDING_MODEL
+
 from .dataset_audit import is_trusted
 
 # R3 (#1542) D5: the dense-leg methodology is ALWAYS emitted — a report can
@@ -39,7 +41,7 @@ from .dataset_audit import is_trusted
 # callers (existing tests, battery/parity, the capstone harness) that omit
 # embedder_status get the not_checked default.
 DEFAULT_EMBEDDER_STATUS = {
-    "model": "all-MiniLM-L6-v2",
+    "model": EMBEDDING_MODEL,  # derived — single source of truth (#1349 swap)
     "sentence_transformers_version": None,
     "available": False,
     "reason": "not_checked",
@@ -168,6 +170,15 @@ def build_report(
     python_version: str = "",
     workers: int = 1,
     dataset_fingerprint: str = "unknown",
+    # #1349 vector arm: retriever/model/query_prompt/retrieval_only/surface/
+    # run_key — recorded in the methodology + provenance so a gate report
+    # always says which retriever + injected model produced it.
+    retriever: str = "hybrid",
+    model: str | None = None,
+    query_prompt: str | None = None,
+    retrieval_only: bool = False,
+    surface: str = "embedded",
+    run_key: str | None = None,
 ) -> dict[str, Any]:
     """Aggregate per-question outcomes into the report + provenance dict.
 
@@ -207,6 +218,10 @@ def build_report(
             "computes it; programmatic callers must pass "
             "audit_dataset(instances)")
     trusted = is_trusted(dataset_semantics_audit)
+    # #1349: questions dropped by the vector arm (breaker_open) are excluded
+    # from the means and surfaced in ``dropped`` — never recall 0.
+    dropped = [o for o in outcomes if o.get("breaker_open")]
+    outcomes = [o for o in outcomes if not o.get("breaker_open")]
     n = len(outcomes)
 
     # ── accuracy ──
@@ -311,6 +326,14 @@ def build_report(
         str(k): _paper_agg("turn_recall@k", k) for k in ks}
     evidence_recall_paper = {
         str(k): _paper_agg("evidence_recall@k", k) for k in ks}
+
+    # ── #1349 vector-arm metrics (binary-gain nDCG@10 + P@10/P@5) ──
+    def _vmean(key: str):
+        vals = [o.get(key) for o in outcomes if o.get(key) is not None]
+        return _mean(vals) if vals else None
+    ndcg10 = _vmean("ndcg@10")
+    p10 = _vmean("p@10")
+    p5 = _vmean("p@5")
 
     # ── M7 (D1): integrity — validity + per-question error census ──
     # invalid = a failed question OR a completed question with
@@ -536,7 +559,18 @@ def build_report(
         "dataset": dataset_id,
         "split": split,
         "n_questions": n,
-        "accuracy": {
+        # #1349: dropped-question accounting — emitted ONLY when a question
+        # was dropped (breaker_open), so the zero-dropped report shape is
+        # byte-identical to origin's published contract (golden-shape pin).
+        **({"dropped": {
+                "n": len(dropped),
+                "breaker_open": sum(1 for o in dropped
+                                     if o.get("dropped_reason") == "breaker_open"),
+                "questions": [o.get("question_id") for o in dropped],
+            },
+            "n_dropped": len(dropped)} if dropped else {}),
+        "accuracy": (
+            None if retrieval_only else {
             "overall": overall,
             "ci95": _ci95(sum(1 for l in labels if l), n),  # noqa: E741
             "task_averaged": task_averaged,
@@ -547,7 +581,8 @@ def build_report(
             "abstention_n": len(abstention_labels),
             "per_category": per_category,
             "per_type": per_type,
-        },
+            }
+        ),
         "retrieval": {
             "session_recall@k": _gated(session_recall),
             "turn_recall@k": _gated(turn_recall),
@@ -561,6 +596,11 @@ def build_report(
             "session_recall_paper@k": _gated(session_recall_paper),
             "turn_recall_paper@k": _gated(turn_recall_paper),
             "evidence_recall_paper@k": _gated(evidence_recall_paper),
+            # #1349 vector arm: nDCG@10 (binary-gain) — emitted only when the
+            # per-question outcomes carry it (vector runs).
+            **({"ndcg@10": _gated(ndcg10)} if ndcg10 is not None else {}),
+            **({"p@10": _gated(p10)} if p10 is not None else {}),
+            **({"p@5": _gated(p5)} if p5 is not None else {}),
             "context_tokens_mean": ctx_mean,
             "context_point_count_mean": round(
                 sum(o["context_point_count"] for o in outcomes) / n, 2) if n else 0,
@@ -617,7 +657,30 @@ def build_report(
                                      "turn-granular chunks backfill the remaining "
                                      "context_token_cap tokens",
             "extraction_approach": extraction_approach,
+            "retriever": retriever,
+            "retrieval_arm": (
+                "#1349 vector arm — run_vector_query ONLY, never "
+                "tortoise_fts_query; nDCG@10 (binary gains, "
+                "log2(i+2), IDCG all-evidence-first capped 10, "
+                "zero-evidence -> 0.0) + P@10/P@5; elevated "
+                "5000ms timeout; MODEL_ENCODE_FAILED abort on "
+                "empty embedding graph; breaker-open questions "
+                "dropped from means"
+                if retriever == "vector" else
+                "hybrid RRF (FTS+vector+structural, TF-IDF "
+                "fallback) over graph turn points + raw session "
+                "transcripts"
+            ),
+            "model": model or "default (production literal)",
+            "query_prompt": query_prompt,
+            "surface": surface,
+            "checkpoint_key": run_key,
+            "retrieval_only": retrieval_only,
             "retrieval": (
+                "#1349 vector arm: run_vector_query ONLY (never "
+                "tortoise_fts_query); nDCG@10 + P@10/P@5; breaker-open "
+                "questions dropped from means"
+                if retriever == "vector" else
                 "Tortoise hybrid RRF (FTS+vector+structural, TF-IDF "
                 "fallback) over graph turn points + turn-granular raw "
                 "chunks (pointKind session-transcript, chunk_turns "
@@ -707,6 +770,17 @@ def build_report(
         },
         "failures": failures or [],
         "n_failed": len(failures or []),
+        # #1349 gate contract: the per-question outcomes ride the report so
+        # gate_1349.py's extract_report can recompute per-question metrics
+        # (nDCG@10/P@10/P@5/ranked_ids/evidence_turn_matches + breaker_open
+        # dropped markers) from the producer's own output — the gate reads
+        # the report file, never a side channel. NOTE: when the caller
+        # passes ``extra["outcomes"]`` (run_evaluation's outcomes_to_report
+        # Layer-1 projection), the ``**(extra or {})`` spread below
+        # OVERRIDES this raw list with the projected one — which carries the
+        # same per-question keys plus the validity/leg-mix/evidence
+        # instrumentation the gate's extract_report also reads.
+        "outcomes": outcomes,
         **(rerank_report_block if rerank_report_block is not None else {}),
         **(extra or {}),
     }

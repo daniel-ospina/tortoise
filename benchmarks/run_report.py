@@ -68,6 +68,9 @@ from benchmarks.synthetic_corpus import (  # noqa: E402
     seed_operator_edges,
     verify_indexes,
 )
+from tools import embedder_probe  # noqa: E402
+from tools.embedder_probe import PROBE_MODELS  # noqa: E402
+from tortoise.embeddings import EMBEDDING_MODEL  # noqa: E402
 
 MIX_PATH = Path(__file__).resolve().parent / "query_mix.json"
 
@@ -97,6 +100,29 @@ def _host_specs() -> dict:
         except (ValueError, OSError, AttributeError):
             pass
     return specs
+
+
+def _resolved_embedding_model(use_model: bool, injected: bool) -> str:
+    """Truthful embedding-model identity for provenance.
+
+    --model active: the probe-recorded candidate hf_id (the probe state IS
+    the swap proof). No injection but a real model loaded: the probe state
+    when present (in a warm in-process re-run the loaded singleton may be a
+    previously-injected candidate — the probe state persists, so reporting
+    its hf_id is truthful), else the EMBEDDING_MODEL constant (T9 re-pointed
+    provenance to the constant — the single source of truth for the default
+    embedder). Degraded (no model — synthetic vectors): 'unavailable'.
+    """
+    state = embedder_probe.get_state()
+    if injected:
+        if state is not None:
+            return str(state["hf_id"])
+        return "unavailable"
+    if use_model:
+        if state is not None:
+            return str(state["hf_id"])
+        return EMBEDDING_MODEL
+    return "unavailable"
 
 
 def capture_provenance(proj, is_embedded: bool, extras: dict) -> dict:
@@ -138,6 +164,8 @@ def capture_provenance(proj, is_embedded: bool, extras: dict) -> dict:
             "populated 40/100 queries in the committed #1144 baseline); "
             "numbers NOT prod-parity — can reverse on Docker)"
         )
+    if extras.get("query_prompt") is not None:
+        prov["query_prompt"] = extras["query_prompt"]
     return prov
 
 
@@ -502,6 +530,15 @@ def _run_with_sdk(args, sdk) -> dict:
     proj = sdk._get_proj()
     is_embedded = getattr(proj, "_is_embedded", True)
 
+    # --model: inject the candidate embedder BEFORE the E2E-8 measurement
+    # (query vectors are precomputed below via EmbeddingModel.get() — after
+    # injection that IS the candidate). HARD FAIL if it cannot load.
+    if getattr(args, "model", None) is not None:
+        embedder_probe.inject_model(
+            args.model,
+            query_prompt=getattr(args, "query_prompt", None),
+            load_timeout=getattr(args, "load_timeout", None))
+
     # 2. Corpus (seed unless --no-seed-corpus).
     seeded = 0
     if not args.no_seed_corpus:
@@ -687,7 +724,9 @@ def _run_with_sdk(args, sdk) -> dict:
 
     # 7. Assemble.
     extras = {
-        "embedding_model": "all-MiniLM-L6-v2" if use_model else "unavailable",
+        "embedding_model": _resolved_embedding_model(
+            use_model, getattr(args, "model", None) is not None),
+        "query_prompt": getattr(args, "query_prompt", None),
         "synthetic_vectors": not use_model,
         "tfidf_available": tfidf_available,
         "indexes": indexes,
@@ -752,12 +791,30 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-seed-corpus", action="store_true",
                    help="use the existing corpus; verify indexes only")
     p.add_argument("--skip-e2e", action="store_true", help="skip the E2E SDK arm")
+    p.add_argument("--model", choices=sorted(PROBE_MODELS.keys()),
+                   help="embedding model short name (tools/"
+                   "embedder_probe PROBE_MODELS: minilm | arctic-xs | "
+                   "arctic-s | bge-small) injected before the E2E-8 "
+                   "measurement; provenance records the probe-recorded model "
+                   "id (#1349 pre-swap precondition runs)")
+    p.add_argument("--query-prompt", help="named prompt template threaded to "
+                   "the injected model (e.g. 'query' for the snowflake-arctic "
+                   "vendor config prompt_name='query') — parity with run.py: "
+                   "the in-path E2E-8 encode must carry the vendor prompt "
+                   "prefix (it adds tokens to every measured encode)")
+    p.add_argument("--load-timeout", type=float, default=None,
+                   help="EmbeddingModel load timeout override (seconds) — "
+                        "the first model load on a contended machine can exceed "
+                        "the 30s default (bge-small measured ~57s)")
     p.add_argument("--depth", type=int, default=None,
                    help="#1348 per-strategy retrieval depth (default = the pool "
                         "floor max(2 x e2e_limit, TORTOISE_POOL_FLOOR)); the "
                         "pre-floor #316 baseline used depth 20")
     p.add_argument("--quiet", action="store_true")
     args = p.parse_args(argv)
+
+    if args.query_prompt is not None and args.model is None:
+        p.error("--query-prompt requires --model")
 
     if not args.quiet:
         print(f"#316 benchmark — corpus={args.corpus_size} samples/arm={args.samples} "

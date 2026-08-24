@@ -29,7 +29,7 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Any
 
-EMBEDDING_DIM = 384          # all-MiniLM-L6-v2 (matches projection HNSW 384-d)
+EMBEDDING_DIM = 384          # all 4 #1349 candidates are 384-dim (matches projection HNSW 384-d)
 
 KIND_WEIGHTS: list[tuple[str, float]] = [
     ("claim", 0.35),

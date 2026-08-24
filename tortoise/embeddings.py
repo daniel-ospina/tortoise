@@ -3,12 +3,12 @@
 Different sources use different words for the same concepts. Term-index matching
 finds 0 cross-lens connections; embeddings bridge that gap.
 
-Threshold calibration (all-MiniLM-L6-v2, measured 2026-08-07 for #399):
-    near-duplicate paraphrases ....... 0.90+   (NEAR_DUPLICATE_THRESHOLD = 0.75)
-    cross-vocabulary paraphrase band . 0.35-0.51  (DEFAULT_THRESHOLD = 0.40)
-    issue #399 motivating pair ....... 0.29 (boundary: topically similar, NOT
-                                         logically implied — verification decides)
-    unrelated / noise floor ........... <= 0.15
+Threshold calibration (BAAI/bge-small-en-v1.5, measured 2026-08-21 for #1349):
+    near-duplicate paraphrases ....... 0.89+   (NEAR_DUPLICATE_THRESHOLD = 0.89)
+    dedup review band ................ 0.84    (DEDUP_REVIEW — sdk.py, T14)
+    dedup auto-merge band ............ 0.94    (DEDUP_AUTO_MERGE — sdk.py, T14)
+    cross-vocabulary paraphrase band . 0.72+   (DEFAULT_THRESHOLD = 0.72)
+    unrelated / noise floor ........... below the 0.72 default band
 
 Thresholds are model-specific — recalibrate when swapping the embedder.
 """
@@ -22,17 +22,29 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# #399: the issue's proposed 0.75 threshold is a near-duplicate-only setting
-# with all-MiniLM-L6-v2 (cross-vocab paraphrase pairs score 0.35-0.51).
-NEAR_DUPLICATE_THRESHOLD = 0.75
-DEFAULT_THRESHOLD = 0.40
+# The active embedder — single source of truth for the production model id.
+# #1349 embedder-selection swap (2026-08-21): bge-small replaces
+# all-MiniLM-L6-v2 as the default (evidence gate: recall +15.7%, p=0.0005;
+# HNSW spot-check cleared). Rotating the embedder = editing this line.
+EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
+# Supply-chain pin (VULN-001, security review): resolved HF commit at bake time
+# (2026-08-21). A mutable tag would silently serve tampered weights.
+EMBEDDING_MODEL_REVISION = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a"
+
+# #1349: thresholds are model-specific — recalibrated for bge-small from
+# tests/fixtures/labeled_pairs.jsonl (tools/calibrate_thresholds --model
+# bge-small, measured 2026-08-21): DEFAULT = p25(paraphrase band),
+# NEAR_DUPLICATE = p5(near-dup band).
+NEAR_DUPLICATE_THRESHOLD = 0.89
+DEFAULT_THRESHOLD = 0.72
 
 
 class EmbeddingModel:
     """Lazy-loaded embedding model singleton.
 
-    Loads all-MiniLM-L6-v2 (384-dim) via sentence-transformers. Model loading
-    runs in a worker thread with a 30s timeout. In the hosted Docker image the
+    Loads BAAI/bge-small-en-v1.5 (384-dim, EMBEDDING_MODEL) via
+    sentence-transformers. Model loading
+    runs in a worker thread with a 90s timeout (#1349: bge-small cold load measured ~57s). In the hosted Docker image the
     model is pre-downloaded at build time (Dockerfile.hosted) and pre-warmed at
     container start (entrypoint.sh), so the first API request never hits a cold
     start. Failures are NOT permanent — the next get() call creates a fresh
@@ -43,7 +55,10 @@ class EmbeddingModel:
     _instance: "EmbeddingModel | None" = None  # noqa: UP037
     _model = None
     _lock = threading.Lock()
-    _LOAD_TIMEOUT_S = 30.0  # generous for cold I/O (model is 90MB on disk; pre-warmed at startup in hosted)
+    _LOAD_TIMEOUT_S = 90.0  # #1349: bge-small cold load measured ~57s on a
+    # contended machine (vs ~30s for the old MiniLM) — 30s caused silent
+    # TF-IDF degrade on cold caches; 90s covers the download+torch-import
+    # window. Pre-warmed at startup in hosted.
     _FAIL_COOLDOWN_S = 60.0  # negative cache: skip retry for 60s after a failed load
     _last_failed_at: float | None = None
 
@@ -70,7 +85,7 @@ class EmbeddingModel:
         if cls._instance is None and cls._last_failed_at is not None and \
                 (now - cls._last_failed_at) < cls._FAIL_COOLDOWN_S:
             # Negative cache (code-review P2, #399): a load just failed — return
-            # None immediately instead of blocking up to 30s per request in a
+            # None immediately instead of blocking up to 90s per request in a
             # degraded environment (offline dev, cold CI, OOM). Retry after the
             # cooldown window via the normal "retries on next get()" path.
             return None
@@ -105,7 +120,8 @@ class EmbeddingModel:
         def _load():
             try:
                 from sentence_transformers import SentenceTransformer
-                result["model"] = SentenceTransformer("all-MiniLM-L6-v2")
+                result["model"] = SentenceTransformer(
+                    EMBEDDING_MODEL, revision=EMBEDDING_MODEL_REVISION)
             except ImportError:
                 # Designed zero-dependency path — INFO, no traceback noise.
                 logger.info("sentence-transformers not installed — embeddings degrade")
@@ -168,7 +184,8 @@ def compute_embedding(content: str, max_tokens: int = 512) -> list[float] | None
 def _encode(texts: list[str]) -> tuple[np.ndarray, bool]:
     """Encode texts → (vectors, degraded). degraded=True ⇒ TF-IDF fallback.
 
-    Routes through the EmbeddingModel singleton (all-MiniLM-L6-v2) — never
+    Routes through the EmbeddingModel singleton (EMBEDDING_MODEL, the
+    bge-small embedder) — never
     re-instantiates the model per call (#399: find_cross_source_matches and
     search_points used to reload the 90MB model on EVERY call). Falls back to
     deterministic sklearn TF-IDF when the model is unavailable. Embeddings stay
@@ -207,13 +224,18 @@ def cosine_similarity_matrix(vectors: np.ndarray) -> np.ndarray:
 
 def find_cross_source_matches(
     points: dict[str, dict],
-    threshold: float = 0.75,
+    threshold: float = NEAR_DUPLICATE_THRESHOLD,
 ) -> list[dict]:
     """Find points from different speakers that describe the same concept.
 
     Backward-compatible wrapper (speaker-keyed) over the shared encode +
     cosine pipeline (#399). Use find_cross_lens_matches (tortoise/cross_lens.py)
     for lens/source-keyed matching.
+
+    The default keeps the #399 issue-spec near-dup-ONLY semantics: it tracks
+    NEAR_DUPLICATE_THRESHOLD (0.89 for bge-small) so a model swap cannot
+    silently admit loose paraphrases into this conservative wrapper (#1349
+    T14 — was the hand-pinned 0.75 MiniLM literal).
 
     Args:
         points: point_id → {content, speaker, ...} from fold()

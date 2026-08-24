@@ -10,12 +10,24 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import pytest
+
 from tortoise.api import EventAPI, provenance  # noqa: E402, F401, I001, RUF100
 from tortoise.extractor import (  # noqa: E402, RUF100
-    _document_sections, _has_cue, _is_claim, _json, _overlap,
-    _PUNC, _REFUTE_PHRASES, _REFUTE_SINGLE_RE,
-    _SUPPORT_PHRASES, _SUPPORT_SINGLE_RE,
-    _utterances, LLMExtractor, MockExtractor, MockModel,
+    _PUNC,
+    _REFUTE_PHRASES,
+    _REFUTE_SINGLE_RE,
+    _SUPPORT_PHRASES,
+    _SUPPORT_SINGLE_RE,
+    LLMExtractor,
+    MockExtractor,
+    MockModel,
+    _document_sections,
+    _has_cue,
+    _is_claim,
+    _json,
+    _overlap,
+    _utterances,
 )
 from tortoise.log import EventLog  # noqa: E402, RUF100
 
@@ -396,11 +408,18 @@ def test_mock_extractor_multi_source_embedding():
     """Multi-source mode: near-identical claims from different speakers (lenses)
     produce embedding candidates; the cue-gate creates the operator.
 
-    #399: multi_source transcripts treat speakers as sources (lens_key=
-    "speaker") — the old ≥3-shared-content-words gate is gone; similarity is
-    the candidate gate and cue words decide direction. #6306's multi-document
-    fold will use lens_key="source" / the derivation chain.
+    Requires the real embedder (the multi-source path encodes via
+    EmbeddingModel); skip gracefully when it's unavailable — same pattern as
+    #1626's embedder-less CI handling (HF cache unreachable on runners).
     """
+    from tortoise.embeddings import EmbeddingModel
+    if EmbeddingModel.get(load_timeout=120) is None:
+        pytest.skip("sentence-transformers / bge-small cache not available "
+                    "— multi-source embedding test skipped (embedder-less CI)")
+
+    # #399: multi_source transcripts treat speakers as sources (lens_key=
+    # "speaker") — the old ≥3-shared-content-words gate is gone; similarity
+    # is the candidate gate and cue words decide direction.
     api, log = _api()
     # Near-identical claims from different speakers so TF-IDF cosine > 0.40
     # Must be >40 chars and contain stance word for _is_claim
