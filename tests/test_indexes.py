@@ -31,6 +31,21 @@ EXPECTED_RANGE_EMBEDDED = {
     "Source": ["id", "url"],
 }
 
+# ── Epic #1647 T8 (D5/D6): docker sibling expectations ────────────────────
+# D5 (research-brief §2.1): the RANGE sets are IDENTICAL on both engines —
+# point_props (id, pointKind, content_hash) is not mode-split (verified
+# _ensure_indexes L1214-1224). is_operator is deliberately ABSENT from the D5
+# range set on BOTH lanes: on docker it is served by the D6 composite's
+# leftmost prefix, never a standalone D5 single index (the #522 regression
+# guard).
+EXPECTED_RANGE_DOCKER = {k: list(v) for k, v in EXPECTED_RANGE_EMBEDDED.items()}
+
+# D6: the docker-only composite freshness index — created on non-embedded
+# engines only (the #522-safe path; embedded gets the plain (lastDreamedAt)
+# index instead — a composite containing is_operator is #522-unsafe on
+# redislite).
+EXPECTED_POINT_COMPOSITE_DOCKER = ("is_operator", "lastDreamedAt")
+
 
 @pytest.fixture
 def proj():
@@ -193,7 +208,11 @@ def test_get_entity_parity_all_types(sdk):
     rows = proj.g.query(
         "MATCH (n) RETURN n.id, labels(n)[0], n.url, n.eventId").result_set
     assert rows, "no nodes created"
-    INTERNAL = {"GraphEvent", "GraphEventMeta", "EpMeta"}
+    INTERNAL = {"GraphEvent", "GraphEventMeta", "EpMeta", "Meta"}
+    # "Meta" (epic #1541): the FTS migration markers (:Meta {key:
+    # 'point_fts_v2'|'event_fts_v2'}) are internal bookkeeping written by
+    # _ensure_indexes on fresh DBs — same class as EpMeta, never a user
+    # entity. (#647 sweep catch — the test predates the marker.)
     for r in rows:
         label = r[1]
         if label in INTERNAL:
@@ -468,4 +487,53 @@ def test_non_embedded_is_operator_index_created():
         assert proj.g.query("MATCH (n:Point) WHERE n.is_operator = false "
                             "RETURN count(n)").result_set[0][0] == 2
     finally:
+        proj.close()
+
+
+@pytest.mark.skipif(not FALKORDB_AVAILABLE,
+                    reason="FalkorDB not available")
+def test_docker_lane_index_shape():
+    """Epic #1647 T8 (D5/D6): docker sibling of test_entity_key_indexes_exist.
+
+    The D5 range sets are IDENTICAL to embedded (EXPECTED_RANGE_DOCKER); the
+    D6 composite (is_operator, lastDreamedAt) is docker-only (the #522-safe
+    path — embedded gets the plain lastDreamedAt index, see
+    test_embedded_reopen_false_equality_correct). is_operator is NOT added to
+    the D5 range set (the #522 regression guard, verified _ensure_indexes
+    L1214-1224) — its RANGE presence on docker comes from the composite's
+    leftmost prefix.
+    """
+    from urllib.parse import urlparse
+    uri = _current_uri()
+    # Round-2 guard (same as test_non_embedded_is_operator_index_created): the
+    # probe may resolve to a LIVE non-test graph — skip rather than DETACH a
+    # real DB (graph name must start with test_/tortoise_test_).
+    if not urlparse(uri).path.lstrip("/").startswith(("test_", "tortoise_test")):
+        pytest.skip(f"resolved URI {uri!r} is not a test graph "
+                    "(graph name must start with 'test_'/'tortoise_test_')")
+    proj = FalkorProjection.from_uri(
+        uri, graph_name=f"test_indexes_docker_{os.urandom(4).hex()}")
+    try:
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        proj._ensure_indexes()
+        idx = _range_indexes(proj)
+        for label, fields in EXPECTED_RANGE_DOCKER.items():
+            assert label in idx, f"no indexes for {label}: {idx}"
+            for f in fields:
+                assert "RANGE" in idx[label].get(f, []), \
+                    f"{label}.{f} index missing: {idx[label]}"
+        rows = proj.g.query("CALL db.indexes()").result_set
+        composite = [
+            r for r in rows if r[0] == "Point"
+            and all(p in str(r[1]) for p in EXPECTED_POINT_COMPOSITE_DOCKER)
+        ]
+        assert composite, (
+            f"docker must create the D6 composite "
+            f"{EXPECTED_POINT_COMPOSITE_DOCKER}, got {rows}")
+    finally:
+        try:  # tidy (epic #1647 review P2): this from_uri mint is not
+            # journaled in URI-unset sessions — drop it explicitly
+            proj.db.select_graph(proj.graph_name).delete()
+        except Exception:
+            pass
         proj.close()
