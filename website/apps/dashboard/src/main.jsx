@@ -2274,7 +2274,7 @@ function claimIntentInFlight() {
                   <p className="wizard-title">{wizardSteps[wizardStep]}</p>
                   <p className="wizard-sub" style={{ marginBottom: '1rem' }}>
                     {wizardStep === 0 ? 'Pick your tool — the setup command goes straight to your clipboard.'
-                      : wizardStep === 1 ? 'These are the two skills your agent uses with Tortoise — what they do, and how to install them.'
+                      : wizardStep === 1 ? 'These are the three skills your agent uses with Tortoise — what they do, and how to install them.'
                       : wizardStep === 2 ? 'Bring your GitHub issues in as Events — optional, do it now or later.'
                       : wizardStep === 3 ? 'Add your first memory — the graph is created the moment data lands.'
                       : 'Everything\'s ready — your graph is live.'}
@@ -2319,11 +2319,16 @@ function claimIntentInFlight() {
                         <strong>tortoise-decide</strong>
                         <span className="dim small">the invoke skill — run it when you make a decision: it weighs options against the graph\'s state and records the reasoning as Events.</span>
                       </div>
+                      <div className="skill-row">
+                        <strong>tortoise-file-finding</strong>
+                        <span className="dim small">the ingest skill — run it to record a research finding: it creates a Point and surfaces related claims to connect.</span>
+                      </div>
                       <p className="dim small" style={{ marginTop: '0.75rem' }}>
-                        Install both into your agent's skills directory — they live in the
-                        Tortoise repo (<a href="https://github.com/daniel-ospina/tortoise/tree/main/skills" target="_blank" rel="noreferrer">skills/</a>).
-                        Agents that sync the agent-infra skills get them automatically; others
-                        copy the folder into your agent's skills path (e.g. <code>~/.claude/skills</code>).
+                        The setup command you copied in the previous step installs all three
+                        into your agent's skills directory (project-scoped for Claude Code /
+                        Codex / Cursor; <code>~/.pi/agent/skills</code> for Pi). They're maintained
+                        in the public agent-infra repo (<a href="https://github.com/daniel-ospina/agent-infra/tree/main/skills" target="_blank" rel="noreferrer">skills/</a>)
+                        and the installer is safe to re-run — it updates them in place.
                       </p>
                       <div className="wizard-nav">
                         <button type="button" className="ghost" onClick={() => setWizardStep(wizardStep - 1)}>← Back</button>
@@ -2594,7 +2599,7 @@ function claimIntentInFlight() {
             <h2>Your graph is ready for its first data point</h2>
             <p className="dim">
               Your team and API key are live. Finish the setup to connect your
-              tool, learn the two skills, and seed your graph — it only takes a
+              tool, learn the three skills, and seed your graph — it only takes a
               minute.
             </p>
             <div className="empty-actions">
