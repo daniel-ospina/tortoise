@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 // #1623: plan display data (build-time import of product/pricing.json).
 import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
-import { HARNESS_INSTALL, HARNESS_NAMES, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SKILLS } from './harnesses.js'
+import { HARNESS_INSTALL, HARNESS_NAMES, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SKILLS, HARNESS_SKILLLESS } from './harnesses.js'
 
 const API_BASE = 'https://api.premiselabs.co'
 const KEY_STORAGE = 'tortoise_api_key'
@@ -164,6 +164,9 @@ function claimIntentInFlight() {
   const [wizardSeeding, setWizardSeeding] = React.useState(false)
   const [wizardDone, setWizardDone] = React.useState(false)
   const [onboardingComplete, setOnboardingComplete] = React.useState(false)
+  const [welcomeOriented, setWelcomeOriented] = React.useState(false)
+  const [wizardSubject, setWizardSubject] = React.useState('')
+  const [wizardProject, setWizardProject] = React.useState('')
   React.useEffect(() => () => { stopGithubPoll && stopGithubPoll() }, [])  // unmount cleanup
 
   // #1147: build the tier-cap notice. The server's 402 detail carries the
@@ -466,7 +469,7 @@ function claimIntentInFlight() {
   }, [])
 
   // ── #1643 wizard actions ────────────────────────────────────────────────
-  const wizardSteps = ['Connect your tool', 'Your agent\'s toolkit', 'Connect GitHub', 'Seed your graph', 'You\'re set']
+  const wizardSteps = ['Your agent\'s toolkit', 'Connect your tool', 'Connect GitHub', 'Seed your graph', 'You\'re set']
 
   function wizardCopy(text, label) {
     try { navigator.clipboard.writeText(text) } catch { /* clipboard blocked */ }
@@ -518,16 +521,19 @@ function claimIntentInFlight() {
   async function wizardSeedGraph() {
     setWizardSeeding(true)
     try {
-      // #1643/ontology: the STATE sample — an Object ({workspace},
-      // in_progress) + a statement Point wired aboutObject (authored by the
-      // user). Idempotent server-side (deterministic ids).
-      const workspace = welcomeTeamName || 'my-workspace'
-      const o = await api('/v1/objects', { method: 'POST', useSession: true,
-        body: JSON.stringify({ name: workspace, objectKind: 'project', status: 'in_progress' }) })
+      // #1660/ontology: the STATE sample — the user's Subject + their
+      // Project as the first graph entities, wired by a statement Point
+      // (aboutObject on the project). Idempotent server-side.
+      const subjectName = (wizardSubject || 'me').trim() || 'me'
+      const projectName = (wizardProject || 'my-project').trim() || 'my-project'
+      const subj = await api('/v1/subjects', { method: 'POST', useSession: true,
+        body: JSON.stringify({ name: subjectName, subjectKind: 'person' }) })
+      const proj = await api('/v1/objects', { method: 'POST', useSession: true,
+        body: JSON.stringify({ name: projectName, objectKind: 'project', status: 'in_progress' }) })
       const p = await api('/v1/points', { method: 'POST', useSession: true,
-        body: JSON.stringify({ content: `I'm building ${workspace}`, kind: 'statement',
-                               about_object: o.id, tags: ['onboarding'], dedup: true }) })
-      setWizardSeedDone(!!(o && o.id && p && p.id))
+        body: JSON.stringify({ content: `${subjectName} is building ${projectName}`, kind: 'statement',
+                               about_object: proj.id, tags: ['onboarding'], dedup: true }) })
+      setWizardSeedDone(!!(subj && subj.id && proj && proj.id && p && p.id))
       setWizardSeeding(false)
     } catch (e) {
       setWizardSeeding(false)
@@ -919,6 +925,13 @@ function claimIntentInFlight() {
               setWelcomeKey(provisioned.api_key)
               setWelcomeTeamName(provisioned.team_name)
               setWelcomeGraphName(provisioned.graph_name || '')
+              // #1660: prefill the seed step — the Subject from the OAuth
+              // identity (name or email prefix), the Project from the team.
+              {
+                const m = (session.user && session.user.user_metadata) || {}
+                setWizardSubject(m.display_name || (session.user && session.user.email ? session.user.email.split('@')[0] : '') || 'me')
+                setWizardProject(provisioned.team_name || 'my-project')
+              }
               setWelcomeProvisioning(false)
               // #1623: the welcome plan step needs the team row
               // (checkout_price_ids for per-tier Upgrade CTAs) — the welcome
@@ -2240,7 +2253,7 @@ function claimIntentInFlight() {
             ) : (
               <>
                 <h1 style={{ fontFamily: 'var(--serif, Georgia, serif)', fontWeight: 400, marginBottom: '0.5rem' }}>
-                  {welcomeKey ? 'Your Tortoise is ready!' : 'Welcome back!'}
+                  {welcomeKey ? 'Your Tortoise is ready!' : 'Welcome to Tortoise'}
                 </h1>
                 {welcomeKey ? (
                   <>
@@ -2265,6 +2278,25 @@ function claimIntentInFlight() {
                     Your team is set up. You can manage your API key in the dashboard anytime.
                   </p>
                 )}
+                {welcomeKey && !welcomeOriented && (
+                  <div className="wizard-orient" style={{ marginBottom: '1.5rem' }}>
+                    <h2 style={{ fontFamily: 'var(--serif, Georgia, serif)', fontWeight: 400, fontSize: 20, marginBottom: '0.4rem' }}>
+                      What you're setting up
+                    </h2>
+                    <p className="dim" style={{ marginBottom: '0.9rem' }}>
+                      Tortoise gives your agent a memory — a knowledge graph of what it
+                      learns. Decisions get recorded as points and build on each other.
+                    </p>
+                    <ol className="wizard-intro" style={{ margin: '0 0 1rem 1.1rem', padding: 0, lineHeight: 1.7 }}>
+                      <li><strong>Copy your API key</strong> — shown once, never again.</li>
+                      <li><strong>Connect your agent</strong> — Claude Code, Claude Desktop, Claude Web, Codex, Cursor, or Pi.</li>
+                      <li><strong>Add your first data</strong> — yourself and your project, then connect GitHub if you like.</li>
+                      <li><strong>Start using it</strong> — ask your agent to record decisions; the graph does the rest.</li>
+                    </ol>
+                    <button className="btn-primary" onClick={() => setWelcomeOriented(true)}>Continue →</button>
+                  </div>
+                )}
+                {(!welcomeKey || welcomeOriented) && (
                 <div className="wizard">
                   <div className="wizard-progress">
                     {wizardSteps.map((s, i) => (
@@ -2273,14 +2305,14 @@ function claimIntentInFlight() {
                   </div>
                   <p className="wizard-title">{wizardSteps[wizardStep]}</p>
                   <p className="wizard-sub" style={{ marginBottom: '1rem' }}>
-                    {wizardStep === 0 ? 'Pick your tool — the setup command goes straight to your clipboard.'
-                      : wizardStep === 1 ? 'These are the three skills your agent uses with Tortoise — what they do, and how to install them.'
+                    {wizardStep === 0 ? 'These are the three skills your agent uses with Tortoise — what they do, and what the setup command installs.'
+                      : wizardStep === 1 ? 'Pick your tool — the setup command connects the MCP server and installs the skills in one copy.'
                       : wizardStep === 2 ? 'Bring your GitHub issues in as Events — optional, do it now or later.'
-                      : wizardStep === 3 ? 'Add your first memory — the graph is created the moment data lands.'
-                      : 'Everything\'s ready — your graph is live.'}
+                      : wizardStep === 3 ? 'Add yourself and your project as the first objects on your graph.'
+                      : 'Welcome to Tortoise — your graph is live.'}
                   </p>
 
-                  {wizardStep === 0 && (
+                  {wizardStep === 1 && (
                     <div className="harness">
                       <div className="harness-tabs">
                         {HARNESS_ORDER.map((h) => (
@@ -2294,22 +2326,22 @@ function claimIntentInFlight() {
                       <pre className="snippet" style={{ marginTop: '0.75rem' }}>
                         {HARNESS_INSTALL[wizardHarness](apiKey)}
                         {HARNESS_SKILLS(wizardHarness)}
-                        {welcomeKey ? ('\n\n' + HARNESS_PERSIST(apiKey)) : ''}
+                        {welcomeKey && !HARNESS_SKILLLESS.includes(wizardHarness) ? ('\n\n' + HARNESS_PERSIST(apiKey)) : ''}
                       </pre>
                       <div className="wizard-nav">
-                        <span className="wizard-nav-spacer" />
+                        <button type="button" className="ghost" onClick={() => setWizardStep(wizardStep - 1)}>← Back</button>
                         <div className="wizard-nav-actions">
                           <button type="button" className="btn-primary"
-                            onClick={() => wizardCopy(HARNESS_INSTALL[wizardHarness](apiKey) + HARNESS_SKILLS(wizardHarness) + (welcomeKey ? ('\n\n' + HARNESS_PERSIST(apiKey)) : ''), 'harness')}>
+                            onClick={() => wizardCopy(HARNESS_INSTALL[wizardHarness](apiKey) + HARNESS_SKILLS(wizardHarness) + (welcomeKey && !HARNESS_SKILLLESS.includes(wizardHarness) ? ('\n\n' + HARNESS_PERSIST(apiKey)) : ''), 'harness')}>
                             {wizardCopied === 'harness' ? 'Copied!' : 'Copy setup'}
                           </button>
-                          <button type="button" className="ghost" onClick={() => setWizardStep(1)}>Skip →</button>
+                          <button type="button" className="ghost" onClick={() => setWizardStep(2)}>Skip →</button>
                         </div>
                       </div>
                     </div>
                   )}
 
-                  {wizardStep === 1 && (
+                  {wizardStep === 0 && (
                     <div className="skills">
                       <div className="skill-row">
                         <strong>how-to-use-tortoise</strong>
@@ -2324,16 +2356,17 @@ function claimIntentInFlight() {
                         <span className="dim small">the ingest skill — run it to record a research finding: it creates a Point and surfaces related claims to connect.</span>
                       </div>
                       <p className="dim small" style={{ marginTop: '0.75rem' }}>
-                        The setup command you copied in the previous step installs all three
-                        into your agent's skills directory (project-scoped for Claude Code /
-                        Codex / Cursor; <code>~/.pi/agent/skills</code> for Pi). They're maintained
-                        in the public Tortoise skills repo (<a href="https://github.com/daniel-ospina/tortoise-skills-and-integrations" target="_blank" rel="noreferrer">skills-and-integrations</a>)
+                        The setup command in the next step installs all three into your
+                        agent's skills directory (project-scoped for Claude Code / Codex /
+                        Cursor; <code>~/.pi/agent/skills</code> for Pi — Claude Desktop and
+                        Claude Web connect from the app/cloud, so they have no local skills).
+                        They're maintained in the public Tortoise skills repo (<a href="https://github.com/daniel-ospina/tortoise-skills-and-integrations" target="_blank" rel="noreferrer">skills-and-integrations</a>)
                         and the installer is safe to re-run — it updates them in place.
                       </p>
                       <div className="wizard-nav">
-                        <button type="button" className="ghost" onClick={() => setWizardStep(wizardStep - 1)}>← Back</button>
+                        <span className="wizard-nav-spacer" />
                         <div className="wizard-nav-actions">
-                          <button type="button" className="btn-primary" onClick={() => setWizardStep(2)}>Next</button>
+                          <button type="button" className="btn-primary" onClick={() => setWizardStep(1)}>Next</button>
                         </div>
                       </div>
                     </div>
@@ -2367,16 +2400,44 @@ function claimIntentInFlight() {
 
                   {wizardStep === 3 && (
                     <div className="seed">
-                      <p className="dim">
-                        {wizardSeedDone
-                          ? 'Your graph is live — the overview now shows your first Object and the memory behind it.'
-                          : 'Ask your connected agent to record your project\'s state (it knows how), or seed a sample memory now.'}
-                      </p>
+                      {wizardSeedDone ? (
+                        <p className="dim">Your graph is live — it starts with you and your project, and the statement connecting them.</p>
+                      ) : (
+                        <>
+                          <p className="dim" style={{ marginBottom: '0.9rem' }}>
+                            Your graph starts with two objects: you (the subject) and your
+                            project. We've prefilled them — adjust or keep as they are.
+                          </p>
+                          <div className="seed-fields" style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginBottom: '1rem' }}>
+                            <label className="small" style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
+                              <span className="dim small">Your name</span>
+                              <input
+                                value={wizardSubject}
+                                onChange={(e) => setWizardSubject(e.target.value)}
+                                placeholder="e.g. daniel"
+                                aria-label="Your name (subject)"
+                                style={{ padding: '0.5rem 0.7rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, fontSize: 14 }}
+                              />
+                            </label>
+                            <label className="small" style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem' }}>
+                              <span className="dim small">Project name</span>
+                              <input
+                                value={wizardProject}
+                                onChange={(e) => setWizardProject(e.target.value)}
+                                placeholder="e.g. tortoise"
+                                aria-label="Project name"
+                                style={{ padding: '0.5rem 0.7rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, fontSize: 14 }}
+                              />
+                            </label>
+                          </div>
+                          <p className="dim small">Seeding adds: your subject, the project object (in progress), and a statement connecting them.</p>
+                        </>
+                      )}
                       <div className="wizard-nav">
                         <button type="button" className="ghost" onClick={() => setWizardStep(wizardStep - 1)}>← Back</button>
                         <div className="wizard-nav-actions">
                           <button type="button" className="btn-primary" onClick={wizardSeedGraph} disabled={wizardSeeding || wizardSeedDone}>
-                            {wizardSeeding ? 'Seeding…' : (wizardSeedDone ? 'Seeded ✓' : 'Seed a sample memory')}
+                            {wizardSeeding ? 'Seeding…' : (wizardSeedDone ? 'Seeded ✓' : 'Seed my graph')}
                           </button>
                           <button type="button" className="ghost" onClick={() => setWizardStep(4)}>
                             {wizardSeedDone ? 'Finish' : 'Skip →'}
@@ -2388,58 +2449,55 @@ function claimIntentInFlight() {
 
                   {wizardStep === 4 && (
                     <div className="done">
-                      <p className="dim">Your Tortoise is set up — the overview is live, your agent knows how to use it, and your decisions are being recorded.</p>
+                      <p className="dim">Welcome to Tortoise — your graph is live, your agent knows how to use it, and your decisions are being recorded.</p>
                       <div className="wizard-actions">
                         <button type="button" className="btn-primary" onClick={wizardComplete}>Open my dashboard →</button>
                         <a className="ghost" href="https://tortoise.premiselabs.co/docs" target="_blank" rel="noreferrer">Read the docs</a>
                       </div>
+                      {welcomeKey && team && (
+                        <div className="welcome-plans" style={{ marginTop: '1.5rem', paddingTop: '1.25rem', borderTop: '1px solid var(--border,#1e293b)' }}>
+                          <h2 style={{ fontFamily: 'var(--serif, Georgia, serif)', fontWeight: 400, fontSize: 20, marginBottom: '0.4rem' }}>Choose your plan</h2>
+                          <p className="dim" style={{ marginBottom: '0.9rem' }}>
+                            You're on the free plan — no card needed. Upgrade any time as you grow.
+                          </p>
+                          <div className="plans-grid">
+                            {planOptions().map((p) => {
+                              const hasPrice = Boolean(team.checkout_price_ids?.[p.tier])
+                              return (
+                                <div key={p.tier} className={`plan-card${p.tier === 'free' ? ' current' : ''}`}>
+                                  <div className="plan-card-head">
+                                    <strong>{p.label}</strong>
+                                    {p.tier === 'free' && <span className="tier-badge" style={{ fontSize: 10, padding: '1px 8px' }}>Default</span>}
+                                  </div>
+                                  <div className="plan-price">
+                                    {p.price === 0 ? '$0' : `$${p.price}`}<span className="dim small">/mo</span>
+                                  </div>
+                                  <ul className="plan-limits">
+                                    {p.limits.map((l) => <li key={l}>{l}</li>)}
+                                  </ul>
+                                  {p.tier === 'free' ? (
+                                    <button
+                                      className="btn-primary"
+                                      onClick={() => { window.clearTimeout(checkoutResetTimerRef.current); setCheckoutPending(false); window.history.replaceState({}, '', '/'); setWelcomeMode(false); setTab('keys') }}
+                                    >
+                                      Start free
+                                    </button>
+                                  ) : hasPrice ? (
+                                    <button className="ghost" onClick={() => upgradeToPrice(team.checkout_price_ids[p.tier])} disabled={checkoutPending}>
+                                      {checkoutPending ? 'Opening checkout…' : 'Upgrade'}
+                                    </button>
+                                  ) : (
+                                    <a className="ghost" href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">See pricing</a>
+                                  )}
+                                </div>
+                              )
+                            })}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
-                {/* #1623: non-blocking plan-selection step — first-timers only
-                    (welcomeKey set = freshly provisioned). Free is selected by
-                    default (no card); paid Upgrade CTAs use the server-resolved
-                    checkout_price_ids; "Start free" proceeds to the dashboard. */}
-                {welcomeKey && team && (
-                  <div className="welcome-plans" style={{ marginTop: '1.5rem', paddingTop: '1.25rem', borderTop: '1px solid var(--border,#1e293b)' }}>
-                    <h2 style={{ fontFamily: 'var(--serif, Georgia, serif)', fontWeight: 400, fontSize: 20, marginBottom: '0.4rem' }}>Choose your plan</h2>
-                    <p className="dim" style={{ marginBottom: '0.9rem' }}>
-                      You're on the free plan — no card needed. Upgrade any time as you grow.
-                    </p>
-                    <div className="plans-grid">
-                      {planOptions().map((p) => {
-                        const hasPrice = Boolean(team.checkout_price_ids?.[p.tier])
-                        return (
-                          <div key={p.tier} className={`plan-card${p.tier === 'free' ? ' current' : ''}`}>
-                            <div className="plan-card-head">
-                              <strong>{p.label}</strong>
-                              {p.tier === 'free' && <span className="tier-badge" style={{ fontSize: 10, padding: '1px 8px' }}>Default</span>}
-                            </div>
-                            <div className="plan-price">
-                              {p.price === 0 ? '$0' : `$${p.price}`}<span className="dim small">/mo</span>
-                            </div>
-                            <ul className="plan-limits">
-                              {p.limits.map((l) => <li key={l}>{l}</li>)}
-                            </ul>
-                            {p.tier === 'free' ? (
-                              <button
-                                className="btn-primary"
-                                onClick={() => { window.clearTimeout(checkoutResetTimerRef.current); setCheckoutPending(false); window.history.replaceState({}, '', '/'); setWelcomeMode(false); setTab('keys') }}
-                              >
-                                Start free
-                              </button>
-                            ) : hasPrice ? (
-                              <button className="ghost" onClick={() => upgradeToPrice(team.checkout_price_ids[p.tier])} disabled={checkoutPending}>
-                                {checkoutPending ? 'Opening checkout…' : 'Upgrade'}
-                              </button>
-                            ) : (
-                              <a className="ghost" href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">See pricing</a>
-                            )}
-                          </div>
-                        )
-                      })}
-                    </div>
-                  </div>
                 )}
               </>
             )}
@@ -2603,7 +2661,7 @@ function claimIntentInFlight() {
               minute.
             </p>
             <div className="empty-actions">
-              <button className="btn-primary" onClick={() => { setWizardStep(1); setWelcomeMode(true) }}>
+              <button className="btn-primary" onClick={() => { setWizardStep(0); setWelcomeMode(true) }}>
                 Continue setup →
               </button>
             </div>

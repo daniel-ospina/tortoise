@@ -2265,6 +2265,39 @@ async def create_object(body: CreateObjectRequest, request: Request,
     return node
 
 
+class CreateSubjectRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    subjectKind: str = Field(default="other")
+
+
+@app.post("/v1/subjects")
+async def create_subject(body: CreateSubjectRequest, request: Request,
+                         team: dict = Depends(get_current_team)):
+    """#1660: create a Subject in the team's graph (the STATE layer).
+
+    Mirrors /v1/objects for the Subject node type — deterministic id by
+    name, idempotent (a repeat returns the canonical node), metered +
+    audited. The onboarding seed creates the user's Subject + their Project
+    as the first graph entities.
+    """
+    _check_team_limit(team, "points")
+    sdk = _make_sdk(namespace=team["team_id"])
+    try:
+        node = sdk.create_subject(body.name, subjectKind=body.subjectKind)
+    except Exception:
+        import logging
+        logging.getLogger("tortoise.api").exception("create_subject failed")
+        raise HTTPException(status_code=500, detail="Internal server error")
+    try:
+        _record_write_op(team, nodes_written=1)
+    except Exception:
+        pass  # metering is best-effort — never fail the write
+    await _async_audit(request, team["team_id"], "subject_create",
+                       resource_id=node.get("id") or body.name,
+                       detail={"name": body.name, "subjectKind": body.subjectKind})
+    return node
+
+
 @app.post("/v1/points", response_model=PointResponse)
 async def create_point(body: CreatePointRequest, request: Request, team: dict = Depends(get_current_team)):
     """Create a Point in the team's graph."""

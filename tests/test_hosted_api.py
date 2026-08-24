@@ -579,6 +579,21 @@ class TestTeamInfo:
         assert r2.status_code == 200, r2.text
         assert r2.json()["id"] == o1["id"], "create_object must be idempotent by name"
 
+    def test_create_subject_wraps_sdk_idempotent(self, client):
+        """#1660: POST /v1/subjects wraps sdk.create_subject —
+        deterministic id by name, idempotent across calls."""
+        r1 = client.post("/v1/subjects", json={"name": "daniel", "subjectKind": "person"})
+        assert r1.status_code == 200, r1.text
+        s1 = r1.json()
+        assert s1["id"]
+        r2 = client.post("/v1/subjects", json={"name": "daniel", "subjectKind": "person"})
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["id"] == s1["id"], "create_subject must be idempotent by name"
+
+    def test_create_subject_requires_name(self, client):
+        r = client.post("/v1/subjects", json={"subjectKind": "person"})
+        assert r.status_code == 422
+
     def test_create_object_requires_name(self, client):
         r = client.post("/v1/objects", json={"objectKind": "project"})
         assert r.status_code == 422
