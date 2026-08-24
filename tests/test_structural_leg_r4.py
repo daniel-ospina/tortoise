@@ -14,7 +14,7 @@ def _db() -> str:
 
 
 def _sdk(db: str | None = None) -> TortoiseSDK:
-    return TortoiseSDK(db or _db(), namespace="r4-structural")
+    return TortoiseSDK(db or _db(), namespace=f"test_r4_structural_{os.urandom(4).hex()}")
 
 
 def test_structural_kind_activates_kind_scan_without_post_filter():

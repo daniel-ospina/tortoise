@@ -34,7 +34,7 @@ from tortoise.sdk import TortoiseSDK
 
 # ── Test constants ───────────────────────────────────────────────────────────
 
-TEST_TEAM_ID = "test-team-001"
+TEST_TEAM_ID = "team-001"  # epic #1647 (T7): a TEAM id, not a test namespace — a "test-" prefix would trip the SDK's hyphenated test-* normalization (sdk.py) and map the team graph to test_team_001_tortoise while team_graph_name resolves team_team-001 (backup dump divergence)
 TEST_TEAM = {
     "team_id": TEST_TEAM_ID,
     "key_id": "test-key-001",
@@ -1226,13 +1226,14 @@ class TestSessionDetail:
 
         The harness patches TortoiseSDK to use a shared temp DB, but
         namespaces isolate graphs — a session written to namespace
-        ``other-team-999`` is invisible to the endpoint which resolves
-        ``TEST_TEAM_ID`` (``test-team-001``).
+        ``test_hosted_other_team_999_<uuid>`` (epic #1647 T7 per-test
+        namespace) is invisible to the endpoint which resolves
+        ``TEST_TEAM_ID`` (``team-001``).
         """
         from datetime import datetime, timezone  # noqa: I001
         from tortoise.hosted_api import _make_sdk
 
-        sdk_b = _make_sdk(namespace="other-team-999")
+        sdk_b = _make_sdk(namespace=f"test_hosted_other_team_999_{os.urandom(4).hex()}")
         proj_b = sdk_b._get_proj()
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
@@ -1537,10 +1538,10 @@ class TestCrossTenantIsolation:
 
         # Create a point in team A's namespace directly
         from tortoise.hosted_api import _make_sdk
-        sdk_a = _make_sdk(namespace="iso-team-a")
+        sdk_a = _make_sdk(namespace=f"test_hosted_iso_team_a_{os.urandom(4).hex()}")
         sdk_a.create_point(content="TEAM_A_SECRET", kind="statement")
         # Create a point in team B
-        sdk_b = _make_sdk(namespace="iso-team-b")
+        sdk_b = _make_sdk(namespace=f"test_hosted_iso_team_b_{os.urandom(4).hex()}")
         sdk_b.create_point(content="TEAM_B_SECRET", kind="statement")
 
         # Verify team A's graph has its own point and NOT team B's
@@ -1592,8 +1593,8 @@ class TestIssueInsightAPI:
 
         # Team B: different team_id -> different namespace, same DB file.
         app.dependency_overrides[get_current_team] = lambda: dict(
-            TEST_TEAM, team_id="test-team-002")
-        sdk_b = _make_sdk(namespace="test-team-002")
+            TEST_TEAM, team_id="team-002")
+        sdk_b = _make_sdk(namespace="team-002")
         sdk_b.create_point(
             kind="observation", content="b-corp/web #3: unrelated styling tweak",
             source="github", github_repo="b-corp/web", github_number=3, github_state="closed",
@@ -1730,7 +1731,7 @@ class TestSessionEventAlignment:
 
         # The client fixture patched TortoiseSDK.__init__ to use the temp DB,
         # so constructing an SDK inside the test reads the same graph.
-        sdk = TortoiseSDK(namespace="test-team-001")
+        sdk = TortoiseSDK(namespace=TEST_TEAM_ID)
         proj = sdk._get_proj()
 
         # The :Session node exists

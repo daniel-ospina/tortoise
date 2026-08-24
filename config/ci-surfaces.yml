@@ -129,6 +129,7 @@ surfaces:
   - test_de2e7_gates_mcp.py
   - test_deploy_workflow.py
   - test_deployment.py
+  - test_derived_names.py
   - test_doctor.py
   - test_domain_loader_adapter.py
   - test_domain_validators.py
@@ -207,6 +208,7 @@ surfaces:
   - test_m1.py
   - test_m2.py
   - test_main_guards.py
+  - test_markers.py
   - test_memory_orchestrator.py
   - test_migrate_db.py
   - test_migration_append_only.py
@@ -267,6 +269,7 @@ surfaces:
   - test_tool_registry.py
   - test_topic_summarization.py
   - test_tortoise_search.py
+  - test_uri_env_mutations_declared.py
   - test_validity_windows.py
   - test_value_extractor.py
   - test_wipe_server.py

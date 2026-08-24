@@ -330,7 +330,11 @@ def test_sdk_document_search_returns_metadata():
     # from an earlier test must not short-circuit to the default-less empty
     # string and blow up from_uri with "Unsupported scheme").
     uri = os.environ.get("TORTOISE_DB_URI") or "docker://:@localhost:16379/tortoise_test_sdk125"
-    proj = FalkorProjection.from_uri(uri)
+    # Epic #1647 (T7, cycle-5 P1-6): the env URI may resolve the SHARED job
+    # path — bulk-DETACHing it would clobber concurrent sessions; resolve to
+    # a per-test test_* graph instead.
+    proj = FalkorProjection.from_uri(
+        uri, graph_name=f"test_search_engine_doc_{os.urandom(4).hex()}")
     proj.g.query("MATCH (n) DETACH DELETE n")
     proj._ensure_indexes()
     proj.g.query(
@@ -440,7 +444,10 @@ class TestR2OrUnionAndSearchKeys:
     def proj(self):
         from tortoise.projection import FalkorProjection
         reset_circuit_breakers()
-        p = FalkorProjection.from_uri(_LIVE_URI)
+        # Epic #1647 (T7): per-test graph — the env/job URI path is shared and
+        # this fixture bulk-DETACHes its graph on every test.
+        p = FalkorProjection.from_uri(
+            _LIVE_URI, graph_name=f"test_search_engine_fts_{os.urandom(4).hex()}")
         p.g.query("MATCH (n) DETACH DELETE n")
         yield p
         reset_circuit_breakers()
@@ -519,10 +526,21 @@ class TestR2OrUnionAndSearchKeys:
         one-time list flatten, guarded by the point_fts_v2 Meta marker; a
         re-run does not churn (marker guards)."""
         from falkordb import FalkorDB
+
         from tortoise.projection import FalkorProjection
         reset_circuit_breakers()
+        # Epic #1647 (T7, cycle-6 P1-3): the historical FIXED name
+        # tortoise_test_r2_migrate is a SHARED test-prefixed graph — the raw
+        # client bypasses _assert_test_graph AND the per-test wipe scope, so
+        # concurrent sessions DETACH each other's live writes (and the fixed
+        # name passes the "test-prefixed" check vacuously). Resolve to a
+        # per-test-unique name + journal it (raw-client code is TEST code and
+        # CAN import tests/_embedded) so the session-end sweep GRAPH.DELETEs
+        # it — the leak is closed, not just renamed (cycle-8 P2-2).
         client = FalkorDB(host="localhost", port=16379)
-        gname = "tortoise_test_r2_migrate"
+        gname = f"tortoise_test_r2_migrate_{os.urandom(4).hex()}"
+        from tests._embedded import _journal_append
+        _journal_append(gname)
         raw = client.select_graph(gname)
         raw.query("MATCH (n) DETACH DELETE n")
         try:  # noqa: SIM105

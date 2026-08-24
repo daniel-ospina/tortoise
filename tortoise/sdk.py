@@ -1118,6 +1118,17 @@ class TortoiseSDK:
                     # _assert_test_graph guard still passes (#221). Matches the
                     # historical {ns}_tortoise naming.
                     graph_name = f"{self._namespace}_tortoise"
+                elif self._namespace.startswith("test-"):
+                    # Epic #1647 (T7, cycle-5 P1-5): the hyphenated test-*
+                    # family (test-tiers, test-invites, test-hosted, test-e1,
+                    # test-team-722, ...) is a TEST namespace too — normalize
+                    # '-' → '_' so it maps to the guard-passing
+                    # test_<ns>_tortoise graph (test-tiers →
+                    # test_tiers_tortoise). Without the branch it falls
+                    # into team_<ns> (team_test-tiers) — a NON-test graph that
+                    # is invisible to `grep -v 'namespace="test_'` and fails
+                    # _assert_test_graph on bulk wipe.
+                    graph_name = f"{self._namespace.replace('-', '_')}_tortoise"
                 else:
                     # Team SDK: isolated team graph (matches provision's
                     # team_{team_id} namespace creation, #7886).
@@ -1193,6 +1204,13 @@ class TortoiseSDK:
             proj = self._get_proj()
             graph_name = getattr(proj, "graph_name", None)
             ns = self._namespace or ""
+            # Epic #1647 (T7): the hyphenated test-* namespace family is
+            # normalized in _get_proj (test-tiers → test_tiers_tortoise); the
+            # control-plane prefix must normalize identically so the registry
+            # graph ({ns}_{test_graph}_control_plane) stays test-prefix-valid
+            # for wipe_server's fail-closed filter.
+            if ns.startswith("test-"):
+                ns = ns.replace("-", "_")
             if graph_name and graph_name.startswith(("tortoise_test_", "test_")):
                 # Keep the test prefix so test-graph guards still apply.
                 registry_name = f"{ns}_{graph_name}_control_plane" if ns else f"{graph_name}_control_plane"

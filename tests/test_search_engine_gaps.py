@@ -1458,7 +1458,8 @@ class TestFilterByTraversalPredicateEntityType:
 def test_document_fts_index_created():
     """#125: Document._searchText FTS index exists after projection init."""
     from tortoise.projection import FalkorProjection
-    proj = FalkorProjection.from_uri(_current_uri())
+    proj = FalkorProjection.from_uri(
+        _current_uri(), graph_name=f"test_seg_fts_{os.urandom(4).hex()}")
     proj.g.query("MATCH (n) DETACH DELETE n")
     proj._ensure_indexes()
     # db.indexes() output: [label, properties, ...] — label is col 0, props col 1
@@ -1472,7 +1473,8 @@ def test_document_fts_index_created():
 def test_backfill_document_search_text():
     """#125: backfill sets _searchText=title on pre-existing Documents."""
     from tortoise.projection import FalkorProjection
-    proj = FalkorProjection.from_uri(_current_uri())
+    proj = FalkorProjection.from_uri(
+        _current_uri(), graph_name=f"test_seg_fts_{os.urandom(4).hex()}")
     proj.g.query("MATCH (n) DETACH DELETE n")
     # Create a Document WITHOUT _searchText (simulating pre-125)
     proj.g.query(
@@ -1490,7 +1492,8 @@ def test_document_fts_search_by_topic():
     """#125: Document FTS on _searchText returns sessions matching a topic."""
     from tortoise.projection import FalkorProjection  # noqa: I001
     import tortoise.search_engine as se
-    proj = FalkorProjection.from_uri(_current_uri())
+    proj = FalkorProjection.from_uri(
+        _current_uri(), graph_name=f"test_seg_fts_{os.urandom(4).hex()}")
     proj.g.query("MATCH (n) DETACH DELETE n")
     proj._ensure_indexes()
     proj.g.query(
@@ -1513,7 +1516,8 @@ def test_document_fts_search_by_topic():
 def test_document_structural_topic_any():
     """#125: any() list filter matches topics on Document nodes."""
     from tortoise.projection import FalkorProjection
-    proj = FalkorProjection.from_uri(_current_uri())
+    proj = FalkorProjection.from_uri(
+        _current_uri(), graph_name=f"test_seg_fts_{os.urandom(4).hex()}")
     proj.g.query("MATCH (n) DETACH DELETE n")
     proj.g.query(
         "CREATE (d:Document {id:'doc-a', topics:['licensing','AGPL'], documentKind:'transcript'})"

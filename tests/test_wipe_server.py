@@ -105,20 +105,35 @@ def test_wipe_server_clears_only_test_prefixed(server_proj):
     proj = server_proj
     non_test = f"team_ws_ctrl_{uuid.uuid4().hex[:8]}"
     proj.db.select_graph(non_test).query("CREATE (:Point {id:'keep'})")
+    # Epic #1647 (T7): the swept-names family — a registry-shaped and a
+    # team-shaped graph must ALSO survive wipe_server untouched (the Task 7
+    # namespace sweep's fail-closed guarantee: only test_/tortoise_test_*
+    # are ever wiped). Per-run-unique names (review P1): the fixed literals
+    # registry_tortoise/team_e2e-900 are SHARED graphs (44 registry sites +
+    # the index suite) — seeding + DETACH + GRAPH.DELETE on them would
+    # destroy peer sessions'/dev-docker data. The fail-closed property is
+    # prefix-based, so unique names prove it identically.
+    swept_a = f"registry_ws_{uuid.uuid4().hex[:8]}"
+    swept_b = f"team_ws_{uuid.uuid4().hex[:8]}"
+    for g in (swept_a, swept_b):
+        proj.db.select_graph(g).query("CREATE (:Point {id:'keep'})")
     try:
         wipe_server(proj)
         # test-prefixed graph emptied
         assert proj.g.query("MATCH (n) RETURN count(n)").result_set[0][0] == 0
-        # non-test graph untouched (delta: the seeded node survives)
-        assert proj.db.select_graph(non_test).query(
-            "MATCH (n) RETURN count(n)").result_set[0][0] == 1
+        # non-test graphs untouched (delta: the seeded nodes survive)
+        for g in (non_test, swept_a, swept_b):
+            assert proj.db.select_graph(g).query(
+                "MATCH (n) RETURN count(n)").result_set[0][0] == 1, \
+                f"non-test graph {g} must survive wipe_server (fail-closed)"
     finally:
-        # the seeded non-test graph is deliberately never wiped (fail-closed);
-        # delete it here so a dev docker does not accumulate one per run
-        try:  # noqa: SIM105
-            proj.db.select_graph(non_test).delete()
-        except Exception:
-            pass
+        # the seeded non-test graphs are deliberately never wiped (fail-closed);
+        # delete them here so a dev docker does not accumulate one per run
+        for g in (non_test, swept_a, swept_b):
+            try:  # noqa: SIM105
+                proj.db.select_graph(g).delete()
+            except Exception:
+                pass
 
 
 def test_wipe_server_localhost_acceptance(uri_env):

@@ -447,7 +447,10 @@ def test_non_embedded_is_operator_index_created():
     if not urlparse(uri).path.lstrip("/").startswith(("test_", "tortoise_test")):
         pytest.skip(f"resolved URI {uri!r} is not a test graph "
                     "(graph name must start with 'test_'/'tortoise_test_')")
-    proj = FalkorProjection.from_uri(uri)
+    # Epic #1647 (T7): per-test graph — the env/job URI path is shared and
+    # this fixture bulk-DETACHes its graph on every test.
+    proj = FalkorProjection.from_uri(
+        uri, graph_name=f"test_indexes_range_{os.urandom(4).hex()}")
     try:
         proj.g.query("MATCH (n) DETACH DELETE n")
         proj._ensure_indexes()

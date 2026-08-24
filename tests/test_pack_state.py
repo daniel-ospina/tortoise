@@ -59,7 +59,7 @@ def _read_installs(sdk) -> list[tuple]:
 
 class TestEnsureTenantPacks:
     def test_activation_writes_provenance_marked_nodes(self, tmp_path):
-        sdk = TortoiseSDK(db_path=str(tmp_path / "a.db"), namespace="team-a")
+        sdk = TortoiseSDK(db_path=str(tmp_path / "a.db"), namespace=f"test_pack_team_a_{os.urandom(4).hex()}")
         activated = ensure_tenant_packs(sdk)
         rows = _read_installs(sdk)
         assert sorted(r[0] for r in rows) == sorted(_expected_defaults())
@@ -70,7 +70,7 @@ class TestEnsureTenantPacks:
         assert len(activated) == len(_expected_defaults())
 
     def test_idempotent_rerun_no_duplicates(self, tmp_path):
-        sdk = TortoiseSDK(db_path=str(tmp_path / "a.db"), namespace="team-a")
+        sdk = TortoiseSDK(db_path=str(tmp_path / "a.db"), namespace=f"test_pack_team_a_{os.urandom(4).hex()}")
         ensure_tenant_packs(sdk)
         first = _read_installs(sdk)
         ensure_tenant_packs(sdk)   # provision retry / self-heal / backfill
@@ -85,7 +85,7 @@ class TestEnsureTenantPacks:
         regardless of interleaving — server-side MERGE atomicity where the
         engine provides it; in-process per-(graph, namespace) serialization
         on the embedded engine (#1307)."""
-        sdk = TortoiseSDK(db_path=str(tmp_path / "c.db"), namespace="team-c")
+        sdk = TortoiseSDK(db_path=str(tmp_path / "c.db"), namespace=f"test_pack_team_c_{os.urandom(4).hex()}")
         sdk._get_proj()  # pre-initialize before threading
         n = 8
         barrier = threading.Barrier(n)
@@ -115,7 +115,7 @@ class TestEnsureTenantPacks:
     def test_unknown_starter_names_skipped_with_warning(self, tmp_path, monkeypatch):
         """Env typo → skipped, never fails provisioning, never ghosts installs."""
         monkeypatch.setenv("TORTOISE_STARTER_PACKS", "dev,bogus-pack,marketing")
-        sdk = TortoiseSDK(db_path=str(tmp_path / "a.db"), namespace="team-a")
+        sdk = TortoiseSDK(db_path=str(tmp_path / "a.db"), namespace=f"test_pack_team_a_{os.urandom(4).hex()}")
         activated = ensure_tenant_packs(sdk)  # noqa: F841
         namespaces = sorted(r[0] for r in _read_installs(sdk))
         assert namespaces == ["dev", "marketing"]
@@ -123,14 +123,14 @@ class TestEnsureTenantPacks:
 
     def test_empty_env_falls_back_to_default(self, tmp_path, monkeypatch):
         monkeypatch.setenv("TORTOISE_STARTER_PACKS", "")
-        sdk = TortoiseSDK(db_path=str(tmp_path / "a.db"), namespace="team-a")
+        sdk = TortoiseSDK(db_path=str(tmp_path / "a.db"), namespace=f"test_pack_team_a_{os.urandom(4).hex()}")
         ensure_tenant_packs(sdk)
         assert sorted(r[0] for r in _read_installs(sdk)) == sorted(_expected_defaults())
 
     def test_additive_only_removal_is_noop(self, tmp_path):
         """Removing a pack from the starter set never uninstalls existing
         installs (non-destructive deactivation-by-config-change)."""
-        sdk = TortoiseSDK(db_path=str(tmp_path / "a.db"), namespace="team-a")
+        sdk = TortoiseSDK(db_path=str(tmp_path / "a.db"), namespace=f"test_pack_team_a_{os.urandom(4).hex()}")
         ensure_tenant_packs(sdk, starter=["dev", "marketing"])
         ensure_tenant_packs(sdk, starter=["dev"])   # marketing "removed"
         rows = _read_installs(sdk)
@@ -140,7 +140,7 @@ class TestEnsureTenantPacks:
 
 class TestGetTenantPacks:
     def test_joins_catalog_metadata_sorted(self, tmp_path):
-        sdk = TortoiseSDK(db_path=str(tmp_path / "a.db"), namespace="team-a")
+        sdk = TortoiseSDK(db_path=str(tmp_path / "a.db"), namespace=f"test_pack_team_a_{os.urandom(4).hex()}")
         ensure_tenant_packs(sdk)
         packs = get_tenant_packs(sdk)
         catalog = _catalog()
@@ -156,7 +156,7 @@ class TestGetTenantPacks:
             assert p["status"] == "active" and p["source"] == "starter"
 
     def test_empty_graph_self_heals_on_first_read(self, tmp_path):
-        sdk = TortoiseSDK(db_path=str(tmp_path / "a.db"), namespace="team-a")
+        sdk = TortoiseSDK(db_path=str(tmp_path / "a.db"), namespace=f"test_pack_team_a_{os.urandom(4).hex()}")
         # never activated (e.g. pre-#318 tenant) → first read ensures + returns
         packs = get_tenant_packs(sdk)
         assert sorted(p["namespace"] for p in packs) == sorted(_expected_defaults())
@@ -164,7 +164,7 @@ class TestGetTenantPacks:
 
     def test_self_heal_disabled_returns_empty(self, tmp_path, monkeypatch):
         monkeypatch.setenv("PACK_STATE_DISABLE_SELF_HEAL", "1")
-        sdk = TortoiseSDK(db_path=str(tmp_path / "a.db"), namespace="team-a")
+        sdk = TortoiseSDK(db_path=str(tmp_path / "a.db"), namespace=f"test_pack_team_a_{os.urandom(4).hex()}")
         assert get_tenant_packs(sdk) == []      # D6: empty, not an error
         assert _read_installs(sdk) == []        # pure eager path untouched
 
@@ -172,8 +172,13 @@ class TestGetTenantPacks:
         """Tenant A sees ONLY A's set; tenant B sees ONLY B's — the tenant
         graph is the isolation boundary (no shared mutable state)."""
         db = str(tmp_path / "multi.db")
-        sdk_a = TortoiseSDK(db_path=db, namespace="tenant-a")
-        sdk_b = TortoiseSDK(db_path=db, namespace="tenant-b")
+        # Epic #1647 (T7): distinct per-test test_* namespaces — under URI the
+        # redirect's per-path derivation would collapse the literals onto ONE
+        # derived graph (same db_path) and the isolation assert would compare
+        # a graph to itself (vacuous — #942 class). Distinct test_* names are
+        # honored verbatim and stay isolated.
+        sdk_a = TortoiseSDK(db_path=db, namespace=f"test_pack_tenant_a_{os.urandom(4).hex()}")
+        sdk_b = TortoiseSDK(db_path=db, namespace=f"test_pack_tenant_b_{os.urandom(4).hex()}")
         ensure_tenant_packs(sdk_a, starter=["dev"])
         ensure_tenant_packs(sdk_b, starter=["marketing", "pm"])
         assert [p["namespace"] for p in get_tenant_packs(sdk_a)] == ["dev"]
@@ -185,7 +190,7 @@ class TestGetTenantPacks:
         """One namespace's MERGE fails → next ensure converges without dupes
         (best-effort skip + re-run semantics)."""
         db = str(tmp_path / "p.db")
-        sdk = TortoiseSDK(db_path=db, namespace="team-p")
+        sdk = TortoiseSDK(db_path=db, namespace=f"test_pack_team_p_{os.urandom(4).hex()}")
 
         class _Flaky:
             def __init__(self, g):
@@ -321,7 +326,7 @@ class TestPackInstallLockSerialization:
             monkeypatch.setattr(ps, "_pack_install_lock",
                                 lambda graph, ns: nullcontext())
         db = str(tmp_path / "red.db")
-        sdk = TortoiseSDK(db_path=db, namespace="team-red")
+        sdk = TortoiseSDK(db_path=db, namespace=f"test_pack_team_red_{os.urandom(4).hex()}")
         sdk._get_proj()  # pre-initialize before threading
         g = sdk._get_proj().g
         seam = _RaceSeam(g, threading.Barrier(2), threading.Barrier(2))
@@ -342,7 +347,7 @@ class TestPackInstallLockSerialization:
         (duplicate, as #1307 observed). Deterministic: no timing luck."""
         import tortoise.pack_state as ps
         db = str(tmp_path / "green.db")
-        sdk = TortoiseSDK(db_path=db, namespace="team-green")
+        sdk = TortoiseSDK(db_path=db, namespace=f"test_pack_team_green_{os.urandom(4).hex()}")
         sdk._get_proj()  # pre-initialize before threading
         g = sdk._get_proj().g
         seam = _RaceSeam(g, threading.Barrier(2), threading.Barrier(2))
@@ -613,7 +618,7 @@ class TestMcpPacksList:
 
         # registry SDK (auth resolution) + team SDK share one embedded DB
         db = str(tmp_path / "mcp-http.db")
-        reg_sdk = TortoiseSDK(db_path=db, namespace="registry")
+        reg_sdk = TortoiseSDK(db_path=db, namespace=f"test_pack_registry_{os.urandom(4).hex()}")
         team = reg_sdk.team_create("test-team")
         key_info = reg_sdk.apikey_create(team["id"], "test-fixture")
         sdk_team = TortoiseSDK(db_path=db, namespace=team["id"])

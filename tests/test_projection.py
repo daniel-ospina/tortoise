@@ -1456,7 +1456,10 @@ def live_proj():
     if not _docker_falkor_reachable():
         pytest.skip("live FalkorDB (FALKORDB_HOST:PORT) not reachable")
     uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_proj125")
-    proj = FalkorProjection.from_uri(uri)
+    # Epic #1647 (T7, cycle-5 P1-6): the env URI may resolve the SHARED job
+    # path — bulk-DETACHing it clobbers concurrent sessions; per-test graph.
+    proj = FalkorProjection.from_uri(
+        uri, graph_name=f"test_proj125_{os.urandom(4).hex()}")
     # Clean the test graph (test-prefixed — test_guard permits; production blocked)
     proj.g.query("MATCH (n) DETACH DELETE n")
     yield proj
