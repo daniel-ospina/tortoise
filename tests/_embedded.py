@@ -21,9 +21,31 @@ import tempfile
 
 import pytest
 
+from tortoise.config import is_db_uri
 from tortoise.projection import FalkorProjection
 
+# Epic #1647 (plan-review P0-1): in-repo carve-out exemption list — the
+# caller TEST-MODULE stems exempted from the URI-aware redirect via
+# TORTOISE_TEST_NO_REDIRECT (conftest exports it from this constant so the
+# product-side redirect reads the list without importing tests/). Exemption
+# keys on the CALLER test module (frame-identified by _caller_test_stem),
+# NEVER on the DB-file basename. The list is wired in Task 5; empty in P1
+# (URI unset everywhere → the redirect is dormant).
+TEST_NO_REDIRECT_STEMS: tuple[str, ...] = ()
+
 _HAS_FALKOR: bool | None = None
+
+
+def _uri_set_supported() -> bool:
+    """Epic #1647: True when a supported TORTOISE_DB_URI is set.
+
+    The seam-fixture URI branch predicate (plan-review P2-16): under a
+    supported URI the redirect flips embedded constructions to the server,
+    so the fixtures construct server-mode directly and has_falkor()
+    short-circuits (the embedded probe would redirect, mint a test graph on
+    the server, and misreport backend availability).
+    """
+    return is_db_uri(os.environ.get("TORTOISE_DB_URI"))
 
 
 def has_falkor() -> bool:
@@ -32,8 +54,18 @@ def has_falkor() -> bool:
     Mirrors the historical per-file probes (issue #82 — redislite interprets
     some paths as hostnames → idna UnicodeEncodeError). Centralized so
     converted files do not construct a raw client just to probe.
+
+    Epic #1647 (P2-16): under a supported TORTOISE_DB_URI the probe is
+    SKIPPED and True is returned immediately — the probe would construct a
+    projection, which would redirect (calling test frame + URI + TEST_MODE)
+    and mint a derived test_<stem>_<hash> graph on the server while
+    misreporting backend availability. Under URI the server IS the backend,
+    so skip_if_no_falkor() returns False and migrated files never
+    vacuous-return.
     """
     global _HAS_FALKOR
+    if _uri_set_supported():
+        return True
     if _HAS_FALKOR is None:
         try:
             from redislite.falkordb_client import FalkorDB  # noqa: F401
@@ -94,7 +126,20 @@ def shared_proj():
     converted files: ONE redislite server for the whole session instead of
     one per test. Yields None when embedded mode is unavailable so callers
     keep the historical skip semantics (`if shared_proj is None: return`).
+
+    Epic #1647 (D-1=A): URI-aware seam — when a supported TORTOISE_DB_URI is
+    set, construct server-mode via from_uri with a guard-passing shared-tier
+    graph name (test_suite_<uuid>) instead; the URI branch runs BEFORE
+    has_falkor() (P2-16: the probe would redirect and mint a server graph).
+    Unset → today's embedded construction unchanged (P1 zero-change).
     """
+    if _uri_set_supported():
+        proj = FalkorProjection.from_uri(
+            os.environ["TORTOISE_DB_URI"],
+            graph_name=f"test_suite_{os.urandom(4).hex()}")
+        yield proj
+        proj.close()
+        return
     if not has_falkor():
         yield None
         return

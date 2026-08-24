@@ -71,7 +71,9 @@ RAW_EMBEDDED_ALLOWLIST = {
     "test_projection_lifecycle.py",
     "test_reaper.py",
     "test_redis_guard.py",
+    "test_redirect_seam.py",  # epic #1647 seam unit tests — construction IS the test input
     "test_remove_context_migration.py",
+    "test_round_trip_parity.py",  # epic #1647 E2E-1 — both legs construct the projection directly
     "test_semantic_extractor.py",
     "test_search_engine.py",  # #1541 R2 FTS-migration test builds a live FalkorDB( client directly
     "test_supplementary.py",

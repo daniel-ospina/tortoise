@@ -36,8 +36,34 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tests._embedded import shared_proj  # noqa: F401, I001
 
-from tortoise.sdk import TortoiseSDK
+# ── Epic #1647 (D-1=A): the test-session signal + redirect env ────────────
+# Exported at CONFTEST IMPORT so the PRODUCT-side redirect
+# (tortoise/projection/__init__.py) reads them without importing tests/
+# (import cycle). TORTOISE_TEST_MODE is the test-session signal that gates
+# the redirect (plan-review P0-4); TORTOISE_TEST_NO_REDIRECT is the in-repo
+# carve-out exemption list (caller test-module stems, frame-identified);
+# TORTOISE_TEST_SESSION is the session nonce folded into derived graph names.
+from tests._embedded import TEST_NO_REDIRECT_STEMS  # noqa: E402
+
+os.environ.setdefault("TORTOISE_TEST_MODE", "1")
+os.environ.setdefault("TORTOISE_TEST_NO_REDIRECT", ",".join(TEST_NO_REDIRECT_STEMS))
+
+# Cycle-5 P2-1 / cycle-6 P1-5: the session nonce is an OVERWRITE (never
+# setdefault) — a pre-set env value (dev shell, CI wrapper, task runners)
+# would freeze the nonce for every session, so concurrent sessions share one
+# journal filename and session A's end-sweep drops session B's live graphs.
+# 6 bytes = 12 hex = 48 bits (the width matches the derived-name hash
+# guards). The overwrite is paired with a 12-hex shape guard: os.urandom(6)
+# always yields 12 hex chars, so the assert can only fire on a broken
+# platform — fail loudly rather than export a malformed nonce.
+import re as _re  # noqa: I001, E402
+_SESSION_NONCE = os.urandom(6).hex()
+assert _re.fullmatch(r"[0-9a-f]{12}", _SESSION_NONCE), \
+    f"TORTOISE_TEST_SESSION must be 12 hex (48 bits), got {_SESSION_NONCE!r}"
+os.environ["TORTOISE_TEST_SESSION"] = _SESSION_NONCE
+
 from tortoise.pricing import tier_limits
+from tortoise.sdk import TortoiseSDK
 
 
 @pytest.fixture
@@ -46,7 +72,17 @@ def provision_test_user():
 
     def factory(tier: str = "free", demo_seed: bool = True):
         tmpdir = tempfile.mkdtemp()
-        sdk = TortoiseSDK(os.path.join(tmpdir, "e2e.db"), namespace="e2e-tests")
+        # Epic #1647 (plan-review P1-5): under a supported URI, sweep the
+        # shared non-test "e2e-tests" namespace to a guard-passing per-test
+        # test_e2e_<uuid> (the SDK maps it to test_e2e_<uuid>_tortoise,
+        # sdk.py L1115-1123) — "e2e-tests" would mint the non-test
+        # team_e2e-tests graph on the server, shared by the whole suite.
+        # URI unset → today's namespace unchanged (P1 zero-change).
+        from tortoise.config import is_db_uri as _is_db_uri
+        _ns = "e2e-tests"
+        if _is_db_uri(os.environ.get("TORTOISE_DB_URI")):
+            _ns = f"test_e2e_{os.urandom(4).hex()}"
+        sdk = TortoiseSDK(os.path.join(tmpdir, "e2e.db"), namespace=_ns)
         team = sdk.team_create(f"e2e-{os.urandom(4).hex()}")
         lim = tier_limits(tier)
         # #310 (review fix 16b): mirror production CREATE semantics — write
@@ -109,6 +145,16 @@ def sdk_factory(tmp_path):
     def factory(_tmp_path=None, *, ensure_schema=False, namespace=None):
         base = _tmp_path if _tmp_path is not None else tmp_path
         db_path = os.path.join(str(base), f"evt-{os.urandom(4).hex()}.db")
+        # Epic #1647 (D-1=A): URI-aware seam — under a supported
+        # TORTOISE_DB_URI the redirect flips the SDK's internal path=
+        # construction to the server; pass a guard-passing per-call
+        # namespace so the graph name is the deterministic
+        # test_suite_<uuid>_tortoise (honored verbatim by the redirect)
+        # instead of a path-derived name. URI unset → today's construction
+        # (namespace None) unchanged.
+        from tortoise.config import is_db_uri as _is_db_uri
+        if namespace is None and _is_db_uri(os.environ.get("TORTOISE_DB_URI")):
+            namespace = f"test_suite_{os.urandom(4).hex()}"
         sdk = TortoiseSDK(db_path, namespace=namespace)
         if ensure_schema:
             from tortoise import event_store
@@ -141,6 +187,14 @@ def shared_embedded_db():
     # TortoiseSDK close on GC) + the _redislite_hygiene session sweeps below;
     # kept because the fixture's shared path is still the cheap way for the
     # seven dependent files to share one server.
+    #
+    # Epic #1647 (D-1=A): URI-aware seam — this fixture yields the
+    # session-stable shared PATH; under a supported TORTOISE_DB_URI the
+    # consumers' path= constructions redirect to the server (the redirect
+    # derives a per-session test_shared_<hash12> graph from this same
+    # session-stable path, preserving the shared-tier semantics: one shared
+    # server graph per session, per-test wipes). URI unset → today's
+    # embedded shared server, unchanged.
     """
     import tempfile as _tf
     db_path = os.path.join(_tf.mkdtemp(prefix="tortoise_shared_embedded_"), "shared.db")

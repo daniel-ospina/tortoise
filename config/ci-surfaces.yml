@@ -168,6 +168,7 @@ surfaces:
   - test_graph_diagnostics.py
   - test_guard.py
   - test_hard_reject.py
+  - test_helpers.py
   - test_hnsw_vector_index.py
   - test_idempotency.py
   - test_index_cli.py
@@ -201,6 +202,7 @@ surfaces:
   - test_longmem_rerank.py
   - test_longmem_runner.py
   - test_lookup_hash.py
+  - test_loopback_predicate_single_source.py
   - test_m0.py
   - test_m1.py
   - test_m2.py
@@ -236,11 +238,13 @@ surfaces:
   - test_query_suggestions.py
   - test_reaper.py
   - test_reaper_orphan.py
+  - test_redirect_seam.py
   - test_references_edge.py
   - test_relationships_bounded.py
   - test_remove_context_migration.py
   - test_render.py
   - test_review_connections.py
+  - test_round_trip_parity.py
   - test_run_protocol.py
   - test_sdk_adapter_cap.py
   - test_search_engine.py
