@@ -422,6 +422,26 @@ def _build_single(provider: str, model_id: str, *, max_tokens, temperature):
     return OpenRouterModel(model_id, max_tokens=max_tokens, temperature=temperature)
 
 
+# Eval CLI extractor-registry keys (MODELS) → the real DeepSeek/OpenRouter
+# model ids. The eval passes 'deepseek-flash-direct' etc. (the legacy run.py
+# MODELS keys); build_extractor_model treats model_id as a raw API spec, so
+# extractor registry keys must be normalized here — otherwise the suffix
+# reaches the API as the model name (pilot #1549: HTTP 400 'you passed
+# deepseek-flash-direct' on every S1 call → zero extraction). Only the
+# extractor-relevant DeepSeek keys are mapped; other MODELS keys (qwen3.8-max,
+# solar-pro4, claude-opus-5, ...) are judge/reader-only and intentionally
+# pass through — they are not valid extractor specs on either provider.
+_REGISTRY_KEY_TO_ID = {
+    "deepseek-flash": "deepseek/deepseek-v4-flash",
+    "deepseek-flash-direct": "deepseek-v4-flash",
+    "deepseek-v4-pro-direct": "deepseek-v4-pro",
+    "deepseek-v4-pro": "deepseek/deepseek-v4-pro",
+    "deepseek-v4-pro-noreason": "deepseek-v4-pro",
+    "deepseek-r1-xhigh": "deepseek/deepseek-r1-0528",
+    "deepseek-v4-pro-xhigh": "deepseek/deepseek-v4-pro",
+}
+
+
 def build_extractor_model(model_id: str | None = None, *,
                           max_tokens: int | None = 4000,
                           temperature: float = 0.0) -> RoutingModel:
@@ -438,6 +458,9 @@ def build_extractor_model(model_id: str | None = None, *,
     if model_id is None:
         model_id = (os.environ.get("TORTOISE_EXTRACT_MODEL", "").strip()
                     or "deepseek/deepseek-v4-flash")
+    # Registry-key normalization (pilot #1549 fix) — unknown strings pass
+    # through untouched (raw specs stay valid).
+    model_id = _REGISTRY_KEY_TO_ID.get(model_id, model_id)
     primary_name, fallback_name = resolve_extractor_provider()
     primary_name = primary_name or "openrouter"  # lenient no-key default (D3)
     primary = _build_single(primary_name, model_id,

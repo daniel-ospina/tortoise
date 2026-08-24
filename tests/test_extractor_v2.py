@@ -200,9 +200,18 @@ class TestS2:
         assert out["points"][0]["pointKind"] == "statement"
 
     def test_rejects_unparseable(self):
-        model = MockModel(["no json here"])
+        # S2 retries once on parse failure (pilot #1549 fix) then raises.
+        model = MockModel(["no json here", "no json here"])
         with pytest.raises(ValueError):
             v2.run_s2(model, "STORY")
+        assert len(model.calls) == 2  # one parse-retry happened before raising
+
+    def test_parse_retry_recovers(self):
+        """Parse-retry (pilot #1549): an unparseable first output is re-prompted
+        and a valid second output succeeds."""
+        model = MockModel(["not json", json.dumps(S2_FIXTURE)])
+        out = v2.run_s2(model, "STORY")
+        assert out  # recovered after the parse retry
 
     def test_prompt_contains_master_and_chains(self):
         model = MockModel([json.dumps(S2_FIXTURE)])

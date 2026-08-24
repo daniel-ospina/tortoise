@@ -304,3 +304,16 @@ def test_build_extractor_model_returns_routing_model(monkeypatch):
     assert model.provider == "deepseek-direct"
     assert model.fallback is not None
     assert model.fallback.provider == "openrouter"
+
+
+def test_registry_key_normalized_to_real_model_id():
+    """Pilot #1549: the eval CLI passes MODELS registry keys ('deepseek-flash-direct')
+    to build_extractor_model; they must normalize to the real API model id or the
+    suffix reaches DeepSeek as the model name (HTTP 400 on every S1 call)."""
+    m = build_extractor_model("deepseek-flash-direct")
+    assert m.primary.id == "deepseek-v4-flash"  # the API-facing id is what matters
+    m2 = build_extractor_model("deepseek-v4-pro-direct")
+    assert m2.primary.id == "deepseek-v4-pro"
+    # raw specs pass through untouched
+    m3 = build_extractor_model("deepseek/deepseek-v4-flash")
+    assert m3.primary.id == "deepseek/deepseek-v4-flash"
