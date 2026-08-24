@@ -62,6 +62,24 @@ assert _re.fullmatch(r"[0-9a-f]{12}", _SESSION_NONCE), \
     f"TORTOISE_TEST_SESSION must be 12 hex (48 bits), got {_SESSION_NONCE!r}"
 os.environ["TORTOISE_TEST_SESSION"] = _SESSION_NONCE
 
+# ── Epic #1647 Task 2 Step 7: the session created-graph journal ───────────
+# The journal path is resolved at CONFTEST IMPORT (cycle-4 P2-9) — product-
+# side appends (the redirect + the frame-gated from_uri seam) fire during
+# TEST-MODULE imports and collect-only runs, before any session fixture.
+# The export is URI-GATED (divergence from the plan's unconditional export,
+# documented in the epic changelog): on the embedded lane there is no server
+# to sweep, and leaving the env unset keeps embedded runs from writing
+# journal files that a later docker session's stale sweep would misread as
+# dead sessions' drop sets (their graphs were never minted on the server).
+from tortoise.config import is_db_uri as _is_db_uri_conftest  # noqa: E402, I001
+from tortoise.embedded_reaper import ACTIVE_SUITES_DIR as _ACTIVE_SUITES_DIR  # noqa: E402
+if _is_db_uri_conftest(os.environ.get("TORTOISE_DB_URI")):
+    _JOURNAL_PATH = os.path.join(
+        _ACTIVE_SUITES_DIR, f"{_SESSION_NONCE}.graphs.jsonl")
+    os.environ["TORTOISE_TEST_JOURNAL_FILE"] = _JOURNAL_PATH
+    import tests._embedded as _embedded_mod
+    _embedded_mod._JOURNAL_FILE = _JOURNAL_PATH
+
 from tortoise.pricing import tier_limits
 from tortoise.sdk import TortoiseSDK
 
@@ -347,10 +365,21 @@ def _redislite_hygiene():
             os.remove(marker_path)
         except OSError:
             pass
-    others = [t for t in active_suite_tokens() if t != token]
+    others = [t for t in active_suite_tokens()
+              if t != token and t.split('-', 1)[0] != str(os.getpid())]
     foreign_matches: list[dict] = []
     for m in active_suite_markers():
-        if m["token"] != token:
+        # Epic #1647 (cycle-6 P2-16 / cycle-7 P1-2 — branch (a)): own/foreign
+        # is PID-GROUPED, never token-compared. A docker session writes TWO
+        # markers in ACTIVE_SUITES_DIR — its embedded-format marker
+        # ({pid}-{uuid8}) AND the docker-format marker ({pid}-{nonce12}, the
+        # Task 2 Step 7 session-end fixture) — same pid, different tokens. A
+        # token-based predicate counts the session's OWN second marker as a
+        # foreign suite: `others != []` forever → every end-sweep degrades to
+        # only_safe and the 6 P2 carve-out stems' embedded servers leak (the
+        # orphan-survival hazard). PID-grouped: a same-pid marker is OWN
+        # regardless of token fragment — one session, one suite.
+        if m.get("pid") != os.getpid():
             foreign_matches.append({"pid": m["pid"], "token": m["token"]})
     # #1642 FIX 4 review P2: keep the diagnostic signal real (was hardcoded
     # False after the pgrep-based foreign detection was removed).
@@ -377,6 +406,158 @@ def _redislite_hygiene():
             }, fh, indent=2)
     except Exception:
         pass
+
+
+# ── Epic #1647 Task 2 Step 7 (P2-14/P0-3/P1-8/P1-9/P2-3/P2-4) ─────────────
+# The docker-lane session journal + stale/session-end/atexit sweeps. Mirrors
+# _redislite_hygiene's active-suite registry + defer-to-last-suite-standing,
+# sharing the SAME marker directory + liveness helpers (active_suite_markers
+# / _process_start_time) so the recycled-pid guard (#1642 FIX 5) applies to
+# docker sessions too. Declared AFTER _redislite_hygiene so its teardown runs
+# BEFORE the reaper's (pytest tears session fixtures down in reverse setup
+# order) — the server sweep completes before the redislite end-sweep.
+_SERVER_SWEEP_GRAPH_LIST_CONSTANT = 20  # E2E-7: absorbs pre-existing/foreign
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _server_graph_hygiene(_redislite_hygiene):
+    """Docker-lane session sweep (URI set only).
+
+    Session start: write this session's docker-format active-suite marker
+    ({pid}-{nonce}, same pid=/start= lines as the embedded format so
+    active_suite_markers() parses it identically — cycle-4 P2-1/P1-6), then
+    run the STALE sweep: drop DEAD sessions' journaled graphs (liveness via
+    active_suite_markers — cycle-8 P2-7; bare marker-file existence is NOT
+    the liveness rule). Session end: drop THIS session's own journaled
+    graphs (file = single source of truth, cycle-8 P1-2) and defer the FULL
+    leftover sweep (scope=None) to the last suite standing (PID-grouped,
+    cycle-6 P2-16). Atexit: repeat the own-journal drop when the session
+    dies abnormally so the next session's stale sweep finds the journal
+    already drained.
+
+    Failure policy (cycle-8 P2-3/P2-4): log-and-continue; the journal file
+    is removed only when every journaled graph dropped (keep-on-partial —
+    the next session's stale sweep retries). Skip-on-non-loopback (cycle-4
+    P1-8): ALLOW_REMOTE sessions end green.
+    """
+    from tortoise.config import is_db_uri as _is_db_uri_srv
+    uri = os.environ.get("TORTOISE_DB_URI", "")
+    if not uri or not _is_db_uri_srv(uri):
+        yield
+        return  # embedded lane — nothing to sweep
+    import atexit
+    import json as _json
+
+    from tests._embedded import (
+        _JOURNAL_FILE,
+        _leftover_sweep,
+        _read_journal,
+        _session_end_own_sweep,
+        _stale_sweep,
+        _sweep_proj,
+    )
+    from tortoise.embedded_reaper import _process_start_time, active_suite_markers
+
+    nonce = os.environ["TORTOISE_TEST_SESSION"]
+    docker_token = f"{os.getpid()}-{nonce}"
+    marker_path = None
+    try:
+        os.makedirs(_ACTIVE_SUITES_DIR, exist_ok=True)
+        marker_path = os.path.join(_ACTIVE_SUITES_DIR, docker_token)
+        start = _process_start_time(os.getpid())
+        with open(marker_path, "w") as fh:
+            fh.write(f"pid={os.getpid()}\n")
+            if start is not None:
+                fh.write(f"start={start}\n")
+    except OSError:
+        marker_path = None  # never fail the suite over marker hygiene
+
+    # Session-start stale sweep — our own marker is live, so our own journal
+    # (possibly holding module-import appends) is never classified dead.
+    try:
+        stale = _stale_sweep(uri, skip_on_non_loopback=True)
+        if stale.get("stale"):
+            print(f"[server-graph-hygiene] stale sweep: "
+                  f"{len(stale['stale'])} dead session journal(s) dropped")
+    except Exception as exc:
+        print(f"[server-graph-hygiene] stale sweep skipped: {exc}")
+
+    _teardown_ran = [False]
+
+    def _atexit_cleanup() -> None:
+        if _teardown_ran[0]:
+            return
+        try:  # noqa: SIM105
+            _session_end_own_sweep(uri, _JOURNAL_FILE, skip_on_non_loopback=True)
+        except Exception:
+            pass  # hygiene never fails the interpreter exit
+        if marker_path:
+            try:  # noqa: SIM105
+                os.remove(marker_path)
+            except OSError:
+                pass
+
+    atexit.register(_atexit_cleanup)
+
+    yield
+
+    _teardown_ran[0] = True
+    # Cycle-5 P2-3: capture the journal size BEFORE the sweep — the sweep
+    # deletes the journal, so "journal size" is unreadable after.
+    journal_size = len(_read_journal())
+    try:
+        own = _session_end_own_sweep(uri, _JOURNAL_FILE, skip_on_non_loopback=True)
+    except Exception as exc:
+        own = {"error": str(exc)}
+        print(f"[server-graph-hygiene] session-end sweep failed: {exc}")
+    # Cycle-6 P2-16: deferral is PID-grouped — same-pid markers (our own
+    # embedded + docker markers) never defer; only a DIFFERENT pid (a
+    # genuinely concurrent suite) defers the FULL leftover sweep.
+    others = [m for m in active_suite_markers()
+              if m.get("pid") != os.getpid()]
+    full = None
+    if not others:
+        try:
+            full = _leftover_sweep(uri, skip_on_non_loopback=True)
+        except Exception as exc:
+            full = {"error": str(exc)}
+            print(f"[server-graph-hygiene] leftover sweep failed: {exc}")
+    if marker_path:
+        try:  # noqa: SIM105
+            os.remove(marker_path)
+        except OSError:
+            pass
+    # E2E-7 bound (cycle-8 P2-11): while last suite standing, post-sweep
+    # GRAPH.LIST must be < journal_size + constant — the sweep's GRAPH.DELETE
+    # leaves only pre-existing/foreign graphs. SOFTENED from a hard assert
+    # (divergence documented in the epic changelog): a pre-existing dev
+    # docker with many non-test graphs must not fail the suite at teardown
+    # (cycle-8 P2-3 — hygiene never fails the suite); a trip is logged loudly
+    # and mirrored to the hygiene log so the E2E-7 leak stays visible.
+    if not others and not own.get("skipped") \
+            and full and full.get("full_sweep", False):
+        try:
+            with _sweep_proj(uri) as probe:
+                graph_count = len(probe.db.list_graphs() or [])
+            bound = journal_size + _SERVER_SWEEP_GRAPH_LIST_CONSTANT
+            if graph_count >= bound:
+                msg = (f"GRAPH.LIST {graph_count} >= journal size {journal_size} "
+                       f"+ constant {_SERVER_SWEEP_GRAPH_LIST_CONSTANT} — "
+                       f"journaled graphs were NOT all deleted (E2E-7 leak)")
+                print(f"[server-graph-hygiene] WARNING: {msg}")
+                try:
+                    log_dir = os.environ.get("RUNNER_TEMP") \
+                        or tempfile.gettempdir()
+                    with open(os.path.join(log_dir, "server-hygiene-end.json"),
+                              "w") as fh:
+                        _json.dump({"graph_list": graph_count,
+                                    "journal_size": journal_size,
+                                    "bound": bound, "violation": msg},
+                                   fh, indent=2)
+                except Exception:
+                    pass
+        except Exception as exc:
+            print(f"[server-graph-hygiene] GRAPH.LIST bound check skipped: {exc}")
 
 
 

@@ -22,7 +22,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tests._embedded import wipe  # noqa: E402, I001, RUF100
+from tests._embedded import _wipe_or as wipe  # noqa: E402, I001, RUF100
 
 from tortoise.api import EventAPI, provenance  # noqa: E402, RUF100
 from tortoise.log import EventLog  # noqa: E402, RUF100

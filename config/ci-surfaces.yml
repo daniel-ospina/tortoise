@@ -269,6 +269,7 @@ surfaces:
   - test_tortoise_search.py
   - test_validity_windows.py
   - test_value_extractor.py
+  - test_wipe_server.py
   - test_wiring_phase01.py
   - test_write_consolidation.py
   - test_writer_inventory.py

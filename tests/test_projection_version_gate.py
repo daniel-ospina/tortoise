@@ -18,7 +18,7 @@ from tortoise.projection import _apply_one, FalkorProjection  # noqa: E402, F401
 
 
 from tests._embedded import skip_if_no_falkor as _skip_if_no_falkor  # noqa: E402, RUF100
-from tests._embedded import wipe  # noqa: E402, RUF100
+from tests._embedded import _wipe_or as wipe  # noqa: E402, RUF100
 
 
 # ═══════════════════════════════════════════════════════════════════════════

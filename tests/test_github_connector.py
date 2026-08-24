@@ -7,7 +7,7 @@ import subprocess as sp
 import pytest  # noqa: F401
 from tortoise.connectors.github import GitHubConnector, _verify_sig
 
-from tests._embedded import wipe  # noqa: E402, RUF100
+from tests._embedded import _wipe_or as wipe  # noqa: E402, RUF100
 
 
 # ── Issue mapping ─────────────────────────────────────────────────

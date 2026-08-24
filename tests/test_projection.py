@@ -81,7 +81,7 @@ def _shared_proj():
                          "shared.db"),
             graph_name="test",
         )
-    from tests._embedded import wipe as _wipe
+    from tests._embedded import _wipe_or as _wipe
     _wipe(_SHARED_EMBEDDED_PROJ)
     return _SHARED_EMBEDDED_PROJ
 

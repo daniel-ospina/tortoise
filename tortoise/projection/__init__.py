@@ -787,6 +787,23 @@ class FalkorProjection(
         password = parsed.password or None
         if graph_name is None:
             graph_name = parsed.path.lstrip('/') or "tortoise"
+        # Epic #1647 (cycle-4 P2-2 / cycle-6 P2-13 / cycle-7 P2-9): in a TEST
+        # SESSION with a calling test frame (TORTOISE_TEST_MODE=1 AND
+        # _caller_test_stem() is not None — the SAME predicate as the
+        # redirect), append the resolved graph name (URI-path default OR
+        # explicit) to the session journal — the single seam point, so every
+        # from_uri-minted graph is owned by its session's journal (the
+        # per-test wipe delta + the session-end/stale sweep drop sets both
+        # derive from the FILE journal). TEST_MODE alone is NOT the gate:
+        # frame-less subprocess CLI children inherit TEST_MODE via
+        # os.environ.copy() and would become CONCURRENT WRITERS to the
+        # parent's journal (torn-line hazard) while journaling non-test
+        # CLI-lane graphs (cycle-7 P2-9 — pinned by
+        # test_from_uri_append_gated_on_test_frame). The append is a NO-OP
+        # when the journal env var is absent (P1 window / non-test process).
+        if os.environ.get("TORTOISE_TEST_MODE") == "1" \
+                and _caller_test_stem() is not None:
+            _journal_append_product(graph_name)
         return cls(host=parsed.hostname or "localhost",
                    port=parsed.port or 16379,
                    username=username,
