@@ -20,6 +20,9 @@ ownedBy: epistemic-team
 | Retrieval latency benchmark runbook (#316) | `benchmarks/README.md` |
 | Embedder selection decision record (ADR-009, #1349) | `docs/adr/ADR-009-embedder-selection.md` |
 | Hosted-vs-local embedding UX research (#1349) | `docs/research/2026-08-17-1349-embedder-selection/ux-research.md` |
+| E2E-8 latency re-validation scoping/research (#1656) | `docs/scoping/2026-08-24-1656-e2e8-latency-revalidation-scoping.md` |
+| Retrieval levers research (#1657) | `docs/research/2026-08-24-1657-retrieval-levers/research.md` |
+| Reaper race scoping/research (#1658) | `docs/scoping/2026-08-24-1658-reaper-race-scoping.md` |
 | Ingest contract (`tortoise_ingest` / `sdk.ingest` bundle API) | `docs/INGEST_CONTRACT.md` |
 | Data safety — encryption in transit + at rest | `docs/data-safety.md` |
 | Quickstart — hosted | `docs/quickstart-cloud.md` |
