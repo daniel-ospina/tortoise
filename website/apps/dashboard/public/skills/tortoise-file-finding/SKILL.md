@@ -1,8 +1,6 @@
 ---
 name: tortoise-file-finding
 title: "tortoise-file-finding"
-doc_status: live
-subjects.team: epistemic-team
 created: 2026-07-18
 description: Ingest a research finding into the Tortoise graph. Creates a Point, checks for existing related claims, and surfaces connection candidates.
 type: capability
@@ -14,6 +12,13 @@ allowed-tools: mcp__tortoise__tortoise_create_point, mcp__tortoise__tortoise_que
 # tortoise:file-finding
 
 Ingest a research finding into the epistemic graph.
+
+## Which Tortoise are you on?
+
+- **Hosted (cloud):** your agent reaches the graph through the Tortoise MCP server (`tortoise_*` tools) — no local database or SDK needed. If you installed the skills via the onboarding wizard, the MCP server is already wired (`claude mcp add tortoise` pointing at `https://api.premiselabs.co/mcp/` with your API key, or the equivalent `.mcp.json` entry).
+- **Self-hosted:** you run your own FalkorDB + local MCP server (or the Python SDK). The MCP tool names below are the same; SDK callers use `sdk.create_point(...)`, `sdk.query(...)`, `sdk.list_sources()`.
+
+The steps below use the MCP tools, which work for both audiences when an MCP server is configured.
 
 ## Steps
 

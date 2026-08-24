@@ -20,6 +20,18 @@ reasons (edges), and the resulting confidence ranking all live in Tortoise —
 so the decision is auditable, comparable across time, and re-runnable as new
 evidence lands.
 
+## Which Tortoise are you on?
+
+- **Hosted (cloud):** your agent uses the Tortoise MCP tools (`tortoise_*`),
+  configured via `claude mcp add tortoise` / the `.mcp.json` snippet pointing
+  at `https://api.premiselabs.co/mcp/` with your API key.
+- **Self-hosted:** your agent uses the same `tortoise_*` MCP tools against a
+  local MCP server pointed at your own FalkorDB, or runs
+  `graph-scripts/decide.py` / the Python SDK directly.
+
+The execution below is tool-based (MCP) — the same tool names for both
+audiences. The script variant is at the end.
+
 ## The 7-step workflow (authoritative)
 
 1. **Refine the decision with the user.** What exactly is being decided? Write
@@ -47,9 +59,9 @@ evidence lands.
 Then run the EP computation and present the **ranked options with their
 confidence** — plus the *why*: the top reasons (edges) that moved each option.
 
-## Execution (tool-based — hosted tenants)
+## Execution (tool-based — MCP tools)
 
-Use the Tortoise MCP tools (never a local FalkorDB):
+Use the Tortoise MCP tools (no local FalkorDB needed for hosted tenants; self-hosted users with a local MCP server use the same names — otherwise use the script variant below):
 
 1. **Create the nodes** — `tortoise_create_point` per point (dedup by
    content): options → `pointKind: option`, criteria → `criterion`,

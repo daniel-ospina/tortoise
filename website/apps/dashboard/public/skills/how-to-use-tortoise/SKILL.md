@@ -5,9 +5,9 @@ domain: capability
 type: Workflow
 status: live
 tags: [tortoise, graph, epistemology, knowledge-graph, operations, search, entity-type, pack, decision-comparison, discovery]
-summary: "Safe Tortoise graph write operations — teaches edge semantics (IMPL vs NAND), mitigation ranges, supersession cleanup, sourceKind taxonomy, annotation rules, decision comparison workflow, structural discovery, DB URI reality, and ID fragmentation."
+summary: "Safe Tortoise graph write operations — teaches edge semantics (IMPL vs NAND), mitigation ranges, supersession cleanup, sourceKind taxonomy, annotation rules, decision comparison workflow, structural discovery, and ID fragmentation. Routed for hosted (MCP tools) and self-hosted (SDK) invocation."
 created: 2026-07-14
-updated: 2026-08-05
+updated: 2026-08-23
 allowed-tools: read write edit bash grep find
 ---
 
@@ -16,6 +16,35 @@ allowed-tools: read write edit bash grep find
 # How to Use Tortoise
 
 Safe graph write operations for the Tortoise probabilistic inference graph.
+
+## Which Tortoise Are You On?
+
+The graph-write operations in this skill are identical for every Tortoise deployment — only the **invocation** differs. Find your setup:
+
+### Hosted (cloud)
+
+Your agent reaches the graph through the Tortoise **MCP server** at `https://api.premiselabs.co/mcp/`, authenticated with a Bearer API key (`TORTOISE_API_KEY`). If you installed the skills via the onboarding wizard, the MCP server is already wired — `claude mcp add tortoise` (or the `.mcp.json` snippet: `{"type": "http", "url": "https://api.premiselabs.co/mcp/", "headers": {"Authorization": "Bearer ${TORTOISE_API_KEY}"}}`). Every operation below maps to a `tortoise_*` MCP tool. No local database, SDK, `.env`, or graph-scripts.
+
+### Self-hosted
+
+You run your own FalkorDB and connect with a local MCP server (same `tortoise_*` tool names) or the Python SDK (`sdk.*`). Local-only details — the Docker URI, `TORTOISE_DB_URI`/`.env`, graph-scripts, and the "never point local tooling at the hosted instance" rule — live in [Self-Hosted Setup](#self-hosted-setup-db-uri-reality) below.
+
+### Invocation map
+
+The write operations appear once in this skill (by operation name). Invoke them per your setup:
+
+| Operation | Hosted — MCP tool | Self-hosted — SDK |
+|---|---|---|
+| Create point | `tortoise_create_point` | `sdk.create_point(kind, content)` |
+| Create operator (IMPL/NAND edge) | `tortoise_create_operator` | `sdk.create_operator(op_type, src, [targets])` |
+| Mitigate operator | `tortoise_mitigate_operator` | `sdk.mitigate_operator(id, reason, strength)` |
+| Annotate operator | `tortoise_annotate_operator` | `sdk.annotate_operator(id, bias, precision, …)` |
+| Supersede point | `tortoise_supersede` | `sdk.supersede_point(old, new)` |
+| Invalidate point | `tortoise_invalidate` | `sdk.supersede(old, new, transfer_edges=False)` |
+| Delete point | `tortoise_delete_point` | `sdk.delete_point(id)` |
+| Update point | `tortoise_update_point` | `sdk.update_point(id, **props)` |
+| Compute confidence | `tortoise_compute_confidence` | `sdk.compute_confidence(anchors=…)` |
+| Check structure | `tortoise_check_structure` | `sdk.check_structure()` |
 
 ## Hard Gate
 
@@ -119,7 +148,7 @@ An agent auditing an ADR can walk the full chain: understand not just what was d
 
 When superseding a point:
 1. Create the new point with updated content
-2. Call `supersede_point(old_id, new_id)` — this cleans up edges
+2. Call `supersede_point(old_id, new_id)` — this cleans up edges (hosted: `tortoise_supersede`; self-hosted: `sdk.supersede_point`)
 3. Verify old point's edges are properly transferred
 
 ## Annotation Rules
@@ -169,7 +198,7 @@ The most common high-value agent operation: comparing options against weighted c
 
 ## Anchors Convention
 
-Decision comparisons use explicit anchor lists to scope EP propagation. Collect all option IDs into a list and pass them to `compute_confidence(anchors=...)`.
+Decision comparisons use explicit anchor lists to scope EP propagation. Collect all option IDs into a list and pass them to `compute_confidence(anchors=...)` (hosted: `tortoise_compute_confidence`; self-hosted: `sdk.compute_confidence`).
 
 ## Code Pattern
 
@@ -231,14 +260,18 @@ for pid, confidence in ranked:
     print(f"  {pid}: {confidence:.4f}")
 ```
 
+**Hosted equivalent:** the same flow runs on the hosted MCP server with the `tortoise_*` tools — `tortoise_create_point` per node, `tortoise_create_operator` per edge, then `tortoise_compute_confidence` with the option ids as `anchors`. No local SDK or database needed.
+
 ## Link-Before-Create Rule
 
 Before creating a new evidence point, search whether it already exists:
-- Use `tortoise_search` with the evidence claim as query
+- Use `tortoise_search` with the evidence claim as query (self-hosted SDK: `sdk.tortoise_fts_query`)
 - Use `create_point` with `dedup=True` (idempotent — returns existing if content matches)
 - This prevents duplicate evidence points that fragment EP propagation
 
-## Worked Examples
+## Worked Examples (self-hosted)
+
+These run against a local FalkorDB via the SDK — the self-hosted path. Hosted tenants run the identical pattern with the MCP tools (`tortoise_create_point` → `tortoise_create_operator` → `tortoise_compute_confidence`); the scripts are reference implementations of the flow, not a hosted requirement.
 
 ### `graph-scripts/file_pricing_decision.py`
 Compares Pro/Team pricing options ($29/$49/$79) using criteria (competitor positioning, conversion rate, ARPU) and findings (devtool sweetspot, OSS conversion rates). Wires IMPL to chosen options, NAND to rejected ones. EP computes per-option confidence.
@@ -250,8 +283,8 @@ Compares 3 license options (AGPLv3-dual, BSL+AGPL, SSPL) using 7 criteria and 20
 TORTOISE_DB_URI=docker://:@localhost:16379/tortoise python3 graph-scripts/decide_licensing.py
 ```
 
-### `graph-scripts/decide.py` (future — Issue #43)
-Generic decision comparison tool. Will accept criteria/options/findings as structured input and automate the create→wire→compute→rank pipeline. Until it lands, follow the pattern above manually.
+### `graph-scripts/decide.py`
+Generic decision comparison tool — accepts criteria/options/findings as structured input (`--input file.json|yaml` with the full decision definition, or `--options/--criteria/--findings/--edges` JSON on the CLI) and automates the create→wire→compute→rank pipeline. This is the self-host variant documented in the `tortoise-decide` skill; follow the pattern above if you're driving the SDK directly.
 
 ## Decision Comparison Checklist
 
@@ -359,11 +392,11 @@ When connecting Points with operators, use the `label` parameter to add domain c
 | **addresses** | IMPL | unidirectional (A→B) | "Feature addresses Need", "Task implements Feature" |
 | **opposes** | NAND | unidirectional (A→B) | "Feature competesWith Competitor", "Issue blocks Issue" |
 
-**Direction is explicit, not label-derived.** `create_operator(..., direction="bidirectional"|"unidirectional")` controls EP back-propagation: `bidirectional` (default) propagates both ways; `unidirectional` is source→target only. The `label` carries domain semantics only — EP reads `direction`, never the label. NAND defaults to bidirectional but also supports unidirectional.
+**Direction is explicit, not label-derived.** `create_operator(..., direction="bidirectional"|"unidirectional")` controls EP back-propagation: `bidirectional` (default) propagates both ways; `unidirectional` is source→target only. The `label` carries domain semantics only — EP reads `direction`, never the label. NAND defaults to bidirectional but also supports unidirectional. (Hosted: `tortoise_create_operator`; self-hosted: `sdk.create_operator`.)
 
-**Backward compatibility:** existing operators without a `direction` property default to bidirectional in EP (with a warning log). Run `graph-scripts/migrate_direction.py` to backfill `direction` on existing operators per their old semantics (NAND / hasPart / part-of → bidirectional; other IMPL → unidirectional).
+**Backward compatibility:** existing operators without a `direction` property default to bidirectional in EP (with a warning log). Self-hosted: run `graph-scripts/migrate_direction.py` to backfill `direction` on existing operators per their old semantics (NAND / hasPart / part-of → bidirectional; other IMPL → unidirectional). Hosted tenants do not run graph-scripts — the hosted API does not expose them.
 
-**Strength:** Set via `set_point_baseline(operator_id, alpha, beta)`. High alpha = strong support. High beta = strong contradiction.
+**Strength:** Set via `set_point_baseline(operator_id, alpha, beta)` (hosted: `tortoise_set_point_baseline`; self-hosted: `sdk.set_point_baseline`). High alpha = strong support. High beta = strong contradiction.
 
 ```python
 # Create a relationship with semantic context + explicit direction
@@ -416,15 +449,17 @@ sdk.expand_kind("WorkItem")  # returns ["dev:issue", "pm:task", ...]
 
 ---
 
-# DB URI Reality
+# Self-Hosted Setup: DB URI Reality
 
-**The DB target is explicit, never accidental, and local stays local.** A self-hosted/local instance is intentionally local — local tooling (MCP server, SDK, graph-scripts) targets the local FalkorDB, never a remote cloud DB. The **hosted version** is a separate product: the Fly API resolves `FALKORDB_CLOUD_URI` → `TORTOISE_DB_URI` via entrypoint.sh and refuses to start without it; clients reach it over HTTP with API keys.
+> **Hosted tenants: skip this section.** Your connection is configured once at MCP registration (Bearer API key) — none of these environment variables or URIs apply to the hosted service.
+
+**The DB target is explicit, never accidental, and local stays local.** A self-hosted/local instance is intentionally local — local tooling (MCP server, SDK, graph-scripts) targets the local FalkorDB, never a remote cloud DB. The **hosted version** is a separate product: the hosted API resolves `FALKORDB_CLOUD_URI` → `TORTOISE_DB_URI` via its entrypoint and refuses to start without it; clients reach it over HTTP with API keys.
 
 | Source | URI resolution | Behavior when unset |
 |--------|----------------|---------------------|
 | **MCP server (local)** | `TORTOISE_DB_URI` in `.mcp.json` — defaults to local `docker://:@localhost:16379/tortoise`; a repo-root `.env` only fills keys `.mcp.json` does **not** set (useful for SDK scripts / direct launches — `.mcp.json` env always wins for the MCP server) | Fails loud on startup (exit 1) — never silently connects to an empty embedded graph (`TORTOISE_ALLOW_EMBEDDED=1` is the test-only escape hatch) |
 | **SDK / graph-scripts** | `os.environ["TORTOISE_DB_URI"]` (or `FalkorProjection.from_uri`) | Embedded redislite (dev/test only) |
-| **Hosted API (Fly)** | `FALKORDB_CLOUD_URI` secret → `TORTOISE_DB_URI` via entrypoint.sh | Refuses to start on Fly |
+| **Hosted API** | `FALKORDB_CLOUD_URI` secret → `TORTOISE_DB_URI` via entrypoint | Refuses to start without it |
 
 Supported URI schemes: `docker://` (local), `redis://` / `rediss://` (accepted so the hosted API can consume cloud connection strings).
 
@@ -461,7 +496,7 @@ TORTOISE_DB_URI=docker://:@localhost:16379/tortoise
 
 Restart the MCP server after changing the URI — the connection is resolved once at startup. Do **not** point local tooling at the hosted (cloud) instance.
 
-## SDK Props Convention
+## Self-Hosted: SDK Props Convention
 
 `create_point(kind, content, **props)` takes **flattened** kwargs. Direct SDK callers may pass a nested `props={"k": v}` dict (mirroring the MCP tool signature) — the SDK now flattens it automatically (#218). A dict-valued `props` property is illegal in FalkorDB ("Property values can only be of primitive types"), so the flatten is the single place handling both conventions.
 
@@ -493,7 +528,7 @@ Restart the MCP server after changing the URI — the connection is resolved onc
 
 > Continue following the workflow as mandated by this skill. Do not skip steps.
 
-# Ingest Workflow (epic #902 — the bundle surface)
+# Ingest Workflow (the bundle surface)
 
 ## The Bundle Shape
 
