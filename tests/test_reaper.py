@@ -28,6 +28,16 @@ pytest.importorskip("redislite")
 
 
 @pytest.fixture(autouse=True)
+def _isolate_zero_client_state(tmp_path, monkeypatch):
+    """#1642 FIX 3: never read/write the user's real zero-client
+    confirmation state during tests (the suite's own sweep otherwise
+    records every discovered live server into ~/.tortoise)."""
+    from tortoise import embedded_reaper
+    monkeypatch.setattr(embedded_reaper, "ZERO_CLIENT_STATE_PATH",
+                        str(tmp_path / "reaper-zero-client.json"))
+
+
+@pytest.fixture(autouse=True)
 def _clean_redislite_residue():
     """Remove redislite servers + socket dirs spawned by THIS test.
 
@@ -627,6 +637,105 @@ def test_reap_removes_tempdir_after_kill(monkeypatch):
     assert not os.path.exists(dbdir), "tempdir not cleaned after kill"
 
 
+def test_reap_kill_removes_socket_dir_and_ephemeral_data_dir(monkeypatch):
+    """#1642 FIX 2: the kill path removes BOTH the socket dir (record
+    dbdir) AND a separate ephemeral registry data dir — a kill previously
+    left the data dir (e.g. a tortoise_test_x_* path) as a permanent
+    tempdir entry (observed: 32k entries). Exercises the actual reap()
+    kill-path cleanup loop."""
+    from tortoise.embedded_reaper import reap
+    killed = []
+
+    def fake_kill(pid, timeout):
+        killed.append(pid)
+
+    monkeypatch.setattr("tortoise.embedded_reaper._kill", fake_kill)
+    monkeypatch.setattr("tortoise.embedded_reaper._active_client_count",
+                        lambda _s: 0)
+    base = Path(tempfile.mkdtemp(prefix="tt_"))
+    try:
+        sock_dir = base / "redislite_x"
+        sock_dir.mkdir()
+        sp = sock_dir / "redis.socket"
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.bind(str(sp))
+        s.close()
+        (sock_dir / "redis.pid").write_text("99999999\n")
+        data_dir = base / "tortoise_test_y"
+        data_dir.mkdir()
+        (data_dir / "x.db.settings").write_text("{}")
+        rec = {
+            "classification": "candidate", "dir_missing": False,
+            "socket_path": str(sp), "pid": os.getpid(),
+            "dbdir": str(sock_dir), "path_based": False,
+            "settings": {"dir": str(data_dir), "dbfilename": "redis.db"},
+        }
+        acted = reap([rec], dry_run=False, only_safe=False)
+        assert killed == [os.getpid()]
+        assert not sock_dir.exists(), "socket dir not cleaned after kill"
+        assert not data_dir.exists(), \
+            "ephemeral data dir not cleaned after kill (#1642 FIX 2)"
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_reap_kill_preserves_non_ephemeral_data_dir(monkeypatch):
+    """#1642 FIX 2: a user-path (non-ephemeral) registry data dir is NEVER
+    rmtree'd by the kill path — the containment check is the safety
+    boundary (path-based data outlives the test tree)."""
+    from tortoise.embedded_reaper import reap
+    killed = []
+
+    def fake_kill(pid, timeout):
+        killed.append(pid)
+
+    monkeypatch.setattr("tortoise.embedded_reaper._kill", fake_kill)
+    monkeypatch.setattr("tortoise.embedded_reaper._active_client_count",
+                        lambda _s: 0)
+    base = Path(tempfile.mkdtemp(prefix="tt_"))
+    try:
+        sock_dir = base / "redislite_x"
+        sock_dir.mkdir()
+        sp = sock_dir / "redis.socket"
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.bind(str(sp))
+        s.close()
+        user_dir = Path(tempfile.gettempdir()) / \
+            f"reaper-user-data-test-{os.getpid()}"  # non-ephemeral name
+        user_dir.mkdir()
+        (user_dir / "keep.db.settings").write_text("{}")
+        try:
+            rec = {
+                "classification": "candidate", "dir_missing": False,
+                "socket_path": str(sp), "pid": os.getpid(),
+                "dbdir": str(sock_dir), "path_based": False,
+                "settings": {"dir": str(user_dir), "dbfilename": "user.db"},
+            }
+            acted = reap([rec], dry_run=False, only_safe=False)
+            assert killed == [os.getpid()]
+            assert not sock_dir.exists(), "socket dir should be cleaned"
+            assert user_dir.exists(), \
+                "non-ephemeral user data dir must be preserved"
+        finally:
+            shutil.rmtree(user_dir, ignore_errors=True)
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_discover_walk_runs_on_large_tempdir(monkeypatch):
+    """#1642 FIX 2 (#1449): the stale-socket walk runs even when the
+    tempdir's entry count exceeds max_tempdir_entries — pollution can no
+    longer disable cleanup (previously the walk was skipped wholesale above
+    5000 entries, the chicken-and-egg hole). The walk no longer consults
+    st_nlink at all: the find-based scan finds this stale dir regardless."""
+    from tortoise.embedded_reaper import discover
+    with _stale_dir_env() as (dbdir, sock):  # noqa: RUF059
+        found = discover(max_tempdir_entries=5000)
+        matches = [s for s in found if str(dbdir) in s.get("dbdir", "")]
+        assert matches, "stale-socket walk skipped on large tempdir (#1449)"
+        assert matches[0]["classification"] == "stale_socket"
+
+
 def test_reap_dry_run_does_not_kill(monkeypatch):
     """dry_run=True (default) logs planned kills, kills nothing."""
     monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
@@ -729,8 +838,14 @@ def _pid_alive_for(pid):
 
 # ── Task 3: CLI, singleton lock, timeout ────────────────────────────
 
-def _run_cli(*args, timeout=30):
-    """Run the reaper CLI as a subprocess; return (rc, stdout, stderr)."""
+def _run_cli(*args, timeout=120):
+    """Run the reaper CLI as a subprocess; return (rc, stdout, stderr).
+
+    Default timeout matches the CLI's own --timeout default (120s): on a
+    shared dev box under concurrent-suite churn, reap()'s serial CLIENT
+    LIST double-check can take tens of seconds against hung servers — the
+    CLI is budgeted, not speed-tested.
+    """
     import subprocess as sp
     import sys as _sys
     env = dict(os.environ)
@@ -830,7 +945,7 @@ def test_cli_singleton_lock_prevents_concurrent(monkeypatch):
     lock = _ReaperLock()
     assert lock.acquire(), "could not acquire lock for test"
     try:
-        rc, out, err = _run_cli("--no-dry-run", timeout=10)
+        rc, out, err = _run_cli("--no-dry-run", timeout=120)
         assert rc == 0
         assert "already running" in (out + err).lower()
     finally:
@@ -857,7 +972,7 @@ def test_cli_singleton_lock_released_on_sigkill(monkeypatch):
     holder.kill()  # SIGKILL while holding lock
     holder.wait(timeout=5)
     time.sleep(1)
-    rc, out, err = _run_cli("--no-dry-run", timeout=10)
+    rc, out, err = _run_cli("--no-dry-run", timeout=120)
     # should run normally (lock released via kernel), not 'already running'
     assert rc == 0
     assert "already running" not in (out + err).lower()
@@ -1001,6 +1116,48 @@ def test_active_suite_tokens_lists_markers(monkeypatch, tmp_path):
                         str(marker_dir))
     # malformed/empty/stale markers are skipped; only the live one counts
     assert active_suite_tokens() == ["1234-abc"]
+
+
+def test_active_suite_markers_recycled_pid_is_stale(monkeypatch, tmp_path):
+    """#1642 FIX 5: a marker whose pid is LIVE but whose process start time
+    does NOT match the recorded start is a recycled pid — treated as stale
+    (absent). A SIGKILLed suite whose pid number was reused can therefore
+    never defer later sweeps to only-safe forever. Markers with the correct
+    (pid, start) identity stay live."""
+    from tortoise.embedded_reaper import (
+        ACTIVE_SUITES_DIR, active_suite_markers, _process_start_time)
+    marker_dir = tmp_path / "active_suites"
+    marker_dir.mkdir(parents=True)
+    start = _process_start_time(os.getpid())
+    assert start is not None, "cannot derive own start time"
+    (marker_dir / "right-identity").write_text(
+        f"pid={os.getpid()}\nstart={start}\n")
+    # Wrong start: the pid is live but it is a DIFFERENT process now.
+    (marker_dir / "recycled-pid").write_text(
+        f"pid={os.getpid()}\nstart={start - 999999}\n")
+    # Legacy marker without a start field: pid-only verification (back-compat).
+    (marker_dir / "legacy-no-start").write_text(f"pid={os.getpid()}\n")
+    (marker_dir / "dead-pid").write_text("pid=99999999\nstart=1.0\n")
+    monkeypatch.setattr("tortoise.embedded_reaper.ACTIVE_SUITES_DIR",
+                        str(marker_dir))
+    markers = active_suite_markers()
+    tokens = sorted(m["token"] for m in markers)
+    assert tokens == ["legacy-no-start", "right-identity"], tokens
+
+
+def test_parse_lstart_both_platform_formats():
+    """#1642 FIX 5: ps -o lstart= formats differ between macOS (day before
+    month) and Linux (month before day); both must parse, plus a
+    space-padded single-digit day."""
+    from tortoise.embedded_reaper import _parse_lstart
+    macos = _parse_lstart("Sun 23 Aug 23:03:24 2026")
+    linux = _parse_lstart("Wed Aug 23 10:00:00 2026")
+    assert macos is not None and linux is not None
+    assert abs(macos - linux) > 1  # different processes/times, both parsed
+    single = _parse_lstart("Wed Aug  2 10:00:00 2026")
+    assert single is not None
+    assert _parse_lstart("garbage not a date") is None
+    assert _parse_lstart("") is None
 
 
 # ── #1231: stale index-lock pid-file sweep ──────────────────────────
@@ -1260,9 +1417,14 @@ def test_discover_classifies_dead_pid_dir_stale_socket():
 def test_classify_live_never_stale_socket_for_respawned_server(monkeypatch):
     """Regression (PM3): a LIVE pgrep'd server whose registry pidfile is
     stale must NOT classify stale_socket — the known_pid pass-through keeps
-    classification based on the authoritative live pid."""
+    classification based on the authoritative live pid. #1642 FIX 5: the
+    known_pid stands in for a real pgrep'd redis-server, so _pid_is_redis
+    is patched (a live non-redis pid is a recycled number and correctly
+    classifies stale_socket)."""
     from tortoise.embedded_reaper import _classify_dir
     monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
+    monkeypatch.setattr("tortoise.embedded_reaper._pid_is_redis",
+                        lambda pid: pid == os.getpid())
     base = Path(tempfile.mkdtemp(prefix="tt_"))
     dbdir, sock = _make_dead_pid_dir(base, name="redislite_x")
     try:
@@ -1279,9 +1441,13 @@ def test_classify_live_never_stale_socket_for_path_based_server(monkeypatch):
     """Regression (review P1): the known_pid pass-through must ALSO hold for
     PATH-BASED servers (user dir + user dbfilename in the registry) — the
     #1427 orphan branches previously dropped known_pid and re-read the stale
-    registry pidfile, misclassifying a LIVE server as stale_socket."""
+    registry pidfile, misclassifying a LIVE server as stale_socket.
+    #1642 FIX 5: known_pid patched as a real redis-server (see respawned
+    test)."""
     from tortoise.embedded_reaper import _classify_dir
     monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
+    monkeypatch.setattr("tortoise.embedded_reaper._pid_is_redis",
+                        lambda pid: pid == os.getpid())
     base = Path(tempfile.mkdtemp(prefix="tt_"))
     try:
         dbdir = base / "redislite_pb"
@@ -1314,9 +1480,14 @@ def test_classify_live_never_stale_socket_for_path_based_server(monkeypatch):
 
 def test_classify_dir_client_count_none_on_probe_failure(monkeypatch):
     """Probe-failed client count records None, not a false 0 — must FAIL
-    pre-fix (old behavior records 0) and pin the fix."""
+    pre-fix (old behavior records 0) and pin the fix. #1642 FIX 5: the
+    known_pid stands in for a real pgrep'd redis-server, so _pid_is_redis
+    is patched (a live non-redis pid would otherwise classify recycled -
+    stale_socket)."""
     from tortoise.embedded_reaper import _classify_dir
     monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
+    monkeypatch.setattr("tortoise.embedded_reaper._pid_is_redis",
+                        lambda pid: pid == os.getpid())
     with _stale_dir_env() as (dbdir, sock):
         monkeypatch.setattr(
             "tortoise.embedded_reaper._active_client_count", lambda _s: None)
@@ -1378,15 +1549,37 @@ def test_reap_stale_socket_dry_run_reports_without_mutating():
         assert os.path.exists(dbdir), "dry-run must not mutate"
 
 
-def test_reap_stale_socket_aborts_when_pidfile_pid_alive():
-    """Respawn window: pidfile now holds a LIVE pid -> abort, keep dir."""
+def test_reap_stale_socket_aborts_when_pidfile_pid_alive(monkeypatch):
+    """Respawn window: pidfile now holds a LIVE REDIS pid (a server
+    respawned on the same socket) -> abort, keep dir. #1642 FIX 5: the
+    discriminator is now redis-identity — a live non-redis pid is a
+    recycled number (see the recycled-pid test below), so the redis check
+    is patched here to model a genuine respawn."""
     from tortoise.embedded_reaper import reap
+    monkeypatch.setattr("tortoise.embedded_reaper._pid_is_redis",
+                        lambda pid: True)
     with _stale_dir_env() as (dbdir, sock):
         _backdate_dir(dbdir)
         (dbdir / "redis.pid").write_text(f"{os.getpid()}\n")  # live pid
         acted = reap([_stale_record(dbdir, sock)], dry_run=False)
         assert acted == []
         assert os.path.exists(dbdir)
+
+
+def test_reap_stale_socket_recycled_pid_proceeds(monkeypatch):
+    """#1642 FIX 5: a stale dir whose pidfile holds a LIVE but NON-redis pid
+    is a recycled number — the recorded server is provably gone, so the
+    guarded removal proceeds (the socket re-probe + age guards still gate;
+    this dir is a dead-socket old leftover). Previously the live-pid check
+    aborted and the leftover was never cleaned (recycled pids defeated
+    kill(0) liveness forever)."""
+    from tortoise.embedded_reaper import reap
+    with _stale_dir_env() as (dbdir, sock):
+        _backdate_dir(dbdir)
+        (dbdir / "redis.pid").write_text(f"{os.getpid()}\n")  # live, non-redis
+        acted = reap([_stale_record(dbdir, sock)], dry_run=False)
+        assert any(a["dbdir"] == str(dbdir) for a in acted)
+        assert not os.path.exists(dbdir)
 
 
 def test_reap_stale_socket_aborts_when_socket_alive():
@@ -1469,8 +1662,12 @@ def test_reap_stale_socket_quarantine_probe_alive_leaves_dir(monkeypatch):
 
 def test_reap_stale_socket_quarantine_moved_pid_alive_aborts(monkeypatch):
     """Guard 8: a live pid written into the MOVED pidfile during the
-    window (backlog-full hardening) -> leave quarantine, never delete."""
+    window (backlog-full hardening) -> leave quarantine, never delete.
+    #1642 FIX 5: only a live REDIS pid aborts — the test's live pid stands
+    in for a respawned server, so _pid_is_redis is patched."""
     from tortoise.embedded_reaper import reap
+    monkeypatch.setattr("tortoise.embedded_reaper._pid_is_redis",
+                        lambda pid: pid == os.getpid())
     with _stale_dir_env() as (dbdir, sock):
         _backdate_dir(dbdir)
         real_rename = os.rename
@@ -1608,11 +1805,17 @@ def test_reap_mixed_list_budget_exhaustion_stale_still_processed(monkeypatch):
         assert not os.path.exists(s1) and not os.path.exists(s2)
 
 
-def test_stale_dir_reuse_pidfile_rewrite_does_not_refresh_dir_mtime():
+def test_stale_dir_reuse_pidfile_rewrite_does_not_refresh_dir_mtime(monkeypatch):
     """Pins the documented assumption: an in-place pidfile rewrite updates
     the FILE mtime, not the DIR mtime — the age guard alone does NOT catch
-    a reused old dir; guards 3/4 (pidfile re-read + socket probe) carry it."""
+    a reused old dir; guards 3/4 (pidfile re-read + socket probe) carry it.
+    #1642 FIX 5: the guards catch a LIVE REDIS pid (respawn); the test's
+    live pid stands in for the respawned server via the _pid_is_redis
+    patch (an alive non-redis pid is a recycled number and correctly
+    proceeds to removal)."""
     from tortoise.embedded_reaper import reap
+    monkeypatch.setattr("tortoise.embedded_reaper._pid_is_redis",
+                        lambda pid: pid == os.getpid())
     with _stale_dir_env() as (dbdir, sock):
         _backdate_dir(dbdir)
         before = os.stat(dbdir).st_mtime_ns
@@ -1741,6 +1944,11 @@ def test_run_sweep_pass1_live_server_in_quarantine_not_killed(monkeypatch):
         live_pid = 42424242
         # Make ONLY the fake live pid 'alive' (all real pids report dead).
         monkeypatch.setattr("tortoise.embedded_reaper._pid_alive",
+                            lambda pid: pid == live_pid)
+        # #1642 FIX 5: the fake live pid stands in for a real pgrep'd
+        # redis-server (a live non-redis pid would classify recycled -
+        # stale_socket instead of the dangerous candidate shape).
+        monkeypatch.setattr("tortoise.embedded_reaper._pid_is_redis",
                             lambda pid: pid == live_pid)
         monkeypatch.setattr("tortoise.embedded_reaper._socket_dir_from_cmdline",
                             lambda pid: str(dbdir))  # original (gone) path
@@ -2133,3 +2341,272 @@ def test_reap_only_safe_protects_live_pid_dir_gone(monkeypatch):
             proc.wait(timeout=5)
     finally:
         os.unlink(marker) if os.path.exists(marker) else None
+
+
+# ── #1642 FIX 3: orphan confirmation (detachment + persisted 0-client) ──
+
+def _markerless_suite(monkeypatch, tmp_path):
+    """Point ACTIVE_SUITES_DIR at an empty dir so _mark_orphan_confirmation
+    sees no live suite markers (confirmation allowed)."""
+    marker_dir = tmp_path / "no-suites"
+    marker_dir.mkdir()
+    monkeypatch.setattr("tortoise.embedded_reaper.ACTIVE_SUITES_DIR",
+                        str(marker_dir))
+
+
+def _zero_client_candidate(socket_path, pid, dbdir="", path_based=False):
+    return {"classification": "candidate", "socket_path": socket_path,
+            "pid": pid, "dbdir": dbdir, "client_count": 0,
+            "path_based": path_based, "settings": None}
+
+
+def test_mark_orphan_confirmation_two_sweeps(monkeypatch, tmp_path):
+    """#1642 FIX 3: a live 0-client candidate is NOT confirmed on first
+    observation (state recorded); after the confirmation window elapses
+    with the same (pid, start) identity, it IS confirmed. A recycled pid
+    (start mismatch) restarts the window (FIX 5)."""
+    from tortoise.embedded_reaper import (
+        _mark_orphan_confirmation, _process_start_time)
+    _markerless_suite(monkeypatch, tmp_path)
+    monkeypatch.setattr("tortoise.embedded_reaper.ZERO_CLIENT_CONFIRM_MINUTES",
+                        0.0)  # confirm on the SECOND sweep (window elapsed)
+    monkeypatch.setattr("tortoise.embedded_reaper._pid_alive", lambda p: True)
+    monkeypatch.setattr("tortoise.embedded_reaper._pid_is_redis",
+                        lambda p: True)
+    start = _process_start_time(os.getpid())
+    rec = _zero_client_candidate("/tmp/fake-orphan.sock", os.getpid())
+    # Sweep 1: first observation -> recorded, NOT confirmed.
+    _mark_orphan_confirmation([rec])
+    assert rec.get("_orphan_confirmed") is not True
+    # Sweep 2 (window elapsed, identity unchanged): confirmed.
+    rec2 = _zero_client_candidate("/tmp/fake-orphan.sock", os.getpid())
+    _mark_orphan_confirmation([rec2])
+    assert rec2.get("_orphan_confirmed") is True
+    # A server that gained clients clears its state entry (not confirmed).
+    rec3 = _zero_client_candidate("/tmp/fake-orphan.sock", os.getpid())
+    rec3["client_count"] = 2
+    _mark_orphan_confirmation([rec3])
+    assert rec3.get("_orphan_confirmed") is not True
+    rec4 = _zero_client_candidate("/tmp/fake-orphan.sock", os.getpid())
+    _mark_orphan_confirmation([rec4])
+    assert rec4.get("_orphan_confirmed") is not True, \
+        "state must reset after the server had clients"
+
+
+def test_mark_orphan_confirmation_no_confirmation_while_suite_active(
+        monkeypatch, tmp_path):
+    """#1642 FIX 3/4: while ANY live suite marker exists, live servers are
+    never orphan-confirmed — a concurrent suite's between-tests idle server
+    must not be killable by the cron's only_safe sweep (#1557/#1005)."""
+    from tortoise.embedded_reaper import (
+        ACTIVE_SUITES_DIR, _mark_orphan_confirmation)
+    marker_dir = tmp_path / "active"
+    marker_dir.mkdir()
+    (marker_dir / "other-suite").write_text(f"pid={os.getpid()}\n")
+    monkeypatch.setattr("tortoise.embedded_reaper.ACTIVE_SUITES_DIR",
+                        str(marker_dir))
+    monkeypatch.setattr("tortoise.embedded_reaper.ZERO_CLIENT_CONFIRM_MINUTES",
+                        0.0)
+    monkeypatch.setattr("tortoise.embedded_reaper._pid_alive", lambda p: True)
+    monkeypatch.setattr("tortoise.embedded_reaper._pid_is_redis",
+                        lambda p: True)
+    for _ in range(2):  # even after the window, no confirmation
+        rec = _zero_client_candidate("/tmp/fake-orphan.sock", os.getpid())
+        _mark_orphan_confirmation([rec])
+    assert rec.get("_orphan_confirmed") is not True
+
+
+def test_reap_only_safe_kills_orphan_confirmed_candidate(monkeypatch):
+    """#1642 FIX 3: only_safe kills a live-pid candidate ONLY when it is
+    orphan-confirmed (persisted 0-client + no live suite markers) — the
+    cron mode's discriminator that #1557's blanket live-pid protection
+    lacked. The CLIENT LIST double-check still runs before the kill."""
+    from tortoise.embedded_reaper import reap
+    killed = []
+
+    def fake_kill(pid, timeout):
+        killed.append(pid)
+
+    monkeypatch.setattr("tortoise.embedded_reaper._kill", fake_kill)
+    monkeypatch.setattr("tortoise.embedded_reaper._active_client_count",
+                        lambda _s: 0)
+    # redislite servers daemonize to ppid=1 — every candidate is detached.
+    monkeypatch.setattr("tortoise.embedded_reaper._is_detached", lambda p: True)
+    confirmed = {"classification": "candidate", "dir_missing": False,
+                 "socket_path": "/tmp/s-confirmed", "pid": os.getpid(),
+                 "path_based": False, "_orphan_confirmed": True}
+    acted = reap([confirmed], dry_run=False, only_safe=True)
+    assert killed == [os.getpid()]
+    assert acted  # killed
+    unconfirmed = {"classification": "candidate", "dir_missing": False,
+                   "socket_path": "/tmp/s-unconfirmed", "pid": os.getpid(),
+                   "path_based": False}
+    killed.clear()
+    acted = reap([unconfirmed], dry_run=False, only_safe=True)
+    assert killed == [], "unconfirmed live server killed under only_safe"
+    assert acted == []
+
+
+def test_reap_path_based_requires_confirmation(monkeypatch):
+    """#1642 FIX 3: a path_based (user-data) candidate is killed in the
+    FULL sweep only when orphan-confirmed; without confirmation it is
+    protected even at 0 clients (its data outlives the test tree)."""
+    from tortoise.embedded_reaper import reap
+    killed = []
+
+    def fake_kill(pid, timeout):
+        killed.append(pid)
+
+    monkeypatch.setattr("tortoise.embedded_reaper._kill", fake_kill)
+    monkeypatch.setattr("tortoise.embedded_reaper._active_client_count",
+                        lambda _s: 0)
+    unconfirmed = {"classification": "candidate", "dir_missing": False,
+                   "socket_path": "/tmp/pb-unconfirmed", "pid": os.getpid(),
+                   "path_based": True}
+    acted = reap([unconfirmed], dry_run=False, only_safe=False)
+    assert killed == [], "unconfirmed path-based server killed in full sweep"
+    assert acted == []
+    confirmed = {"classification": "candidate", "dir_missing": False,
+                 "socket_path": "/tmp/pb-confirmed", "pid": os.getpid(),
+                 "path_based": True, "_orphan_confirmed": True}
+    acted = reap([confirmed], dry_run=False, only_safe=False)
+    assert killed == [os.getpid()]
+
+
+def test_reap_ephemeral_full_sweep_kills_without_confirmation(monkeypatch):
+    """#1642 FIX 3: ephemeral test-tree candidates keep the existing FULL
+    sweep contract — 0-client (double-checked) candidates are killed on
+    first pass (the 445-kill wave behavior); only_safe still requires
+    confirmation (covered above)."""
+    from tortoise.embedded_reaper import reap
+    killed = []
+
+    def fake_kill(pid, timeout):
+        killed.append(pid)
+
+    monkeypatch.setattr("tortoise.embedded_reaper._kill", fake_kill)
+    monkeypatch.setattr("tortoise.embedded_reaper._active_client_count",
+                        lambda _s: 0)
+    rec = {"classification": "candidate", "dir_missing": False,
+           "socket_path": "/tmp/eph", "pid": os.getpid(),
+           "path_based": False}
+    acted = reap([rec], dry_run=False, only_safe=False)
+    assert killed == [os.getpid()]
+
+
+# ── #1642 FIX 7: lme-* ephemeral prefix ─────────────────────────────
+
+def test_lme_prefix_is_ephemeral():
+    """#1642 FIX 7: longmem_eval's lme-* per-question trees (58 dirs were
+    observed protected on the dev box) are now ephemeral test trees — a
+    dead-pid lme- leftover classifies stale_socket (reapable), not
+    protected forever."""
+    from tortoise.embedded_reaper import (
+        _is_ephemeral_dir, _real_gettempdir, _classify)
+    tmp = _real_gettempdir()
+    assert _is_ephemeral_dir(os.path.join(tmp, "lme-abc123"), tmp)
+    socket_dir = os.path.join(tmp, "lme-abc123")
+    registry = {"dir": socket_dir, "dbfilename": "redis.db",
+                "pidfile": "/nonexistent/pid"}
+    # A dead-pid lme- leftover reclassifies stale_socket (previously
+    # 'protected' via the unrecognized-pattern fail-closed).
+    assert _classify(socket_dir, socket_dir, tmp, registry, pid=99999999) \
+        == "stale_socket"
+
+
+def test_mark_orphan_confirmation_socketless_server(monkeypatch, tmp_path):
+    """#1642 FIX 3: a live socket-LESS server (socket dir gone — no client
+    can exist, probes cannot succeed) is orphan-confirmed via the persisted
+    state once the window + (pid, start) identity + no-live-markers hold —
+    the missing-dir signal substitutes for the 0-client CLIENT LIST probe
+    (274 socket-less orphans observed on the dev box). A probe failure with
+    the dir still present stays fail-closed (never confirmed)."""
+    import json as _json
+    from tortoise.embedded_reaper import (
+        _mark_orphan_confirmation, _process_start_time, _socket_dir_missing)
+    _markerless_suite(monkeypatch, tmp_path)
+    monkeypatch.setattr("tortoise.embedded_reaper.ZERO_CLIENT_CONFIRM_MINUTES",
+                        0.0)
+    monkeypatch.setattr("tortoise.embedded_reaper._pid_alive", lambda p: True)
+    monkeypatch.setattr("tortoise.embedded_reaper._pid_is_redis",
+                        lambda p: True)
+    sock_path = "/nonexistent/dir-1642/redis.socket"
+    assert _socket_dir_missing(sock_path)
+    # seed the state with an observation from 10+ min ago
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr("tortoise.embedded_reaper.ZERO_CLIENT_STATE_PATH",
+                        str(state_path))
+    _json.dump({sock_path: {"pid": os.getpid(),
+                            "start": _process_start_time(os.getpid()),
+                            "first_seen": time.time() - 600}},
+               open(state_path, "w"))
+    rec = _zero_client_candidate(sock_path, os.getpid())
+    rec["client_count"] = None  # probe cannot succeed (no socket)
+    _mark_orphan_confirmation([rec])
+    assert rec.get("_orphan_confirmed") is True
+    # A candidate whose socket DIR still exists but whose probe failed is
+    # never confirmed (transient failure -> fail closed).
+    rec2 = _zero_client_candidate("/tmp/1642-dir-exists.sock", os.getpid())
+    rec2["client_count"] = None
+    _mark_orphan_confirmation([rec2])
+    assert rec2.get("_orphan_confirmed") is not True
+
+
+def test_reap_kills_confirmed_socketless_orphan(monkeypatch):
+    """#1642 FIX 3: reap() kills a CONFIRMED socket-less orphan directly —
+    the CLIENT LIST gates are skipped because no client can exist (the
+    missing-dir signal is stronger than a 0-client probe). An UNCONFIRMED
+    socket-less candidate stays protected (fail closed — probes cannot
+    succeed)."""
+    from tortoise.embedded_reaper import reap
+    killed = []
+    monkeypatch.setattr("tortoise.embedded_reaper._kill",
+                        lambda pid, timeout: killed.append(pid))
+    monkeypatch.setattr("tortoise.embedded_reaper._is_detached", lambda p: True)
+    confirmed = {"classification": "candidate", "dir_missing": False,
+                 "socket_path": "/nonexistent/1642/redis.socket",
+                 "pid": os.getpid(), "path_based": False,
+                 "_orphan_confirmed": True}
+    acted = reap([confirmed], dry_run=False, only_safe=True)
+    assert killed == [os.getpid()]
+    assert acted
+    unconfirmed = {"classification": "candidate", "dir_missing": False,
+                   "socket_path": "/nonexistent/1642b/redis.socket",
+                   "pid": os.getpid(), "path_based": False}
+    killed.clear()
+    acted = reap([unconfirmed], dry_run=False, only_safe=True)
+    assert killed == []
+    assert acted == []
+
+
+def test_mark_orphan_confirmation_recycled_pid_restarts_window(
+        monkeypatch, tmp_path):
+    """#1642 FIX 5 (review P1): a recycled pid — the SAME pid now a DIFFERENT
+    redis-server (different process start) — must NOT inherit the old
+    first_seen window. Without this, the new server would be orphan-
+    confirmed on its first sweep and killed at 0 clients (the #1557
+    live-server hazard)."""
+    from tortoise.embedded_reaper import (
+        _mark_orphan_confirmation, _process_start_time)
+    _markerless_suite(monkeypatch, tmp_path)
+    monkeypatch.setattr("tortoise.embedded_reaper.ZERO_CLIENT_CONFIRM_MINUTES",
+                        0.0)  # confirm on the SECOND sweep (window elapsed)
+    monkeypatch.setattr("tortoise.embedded_reaper._pid_alive", lambda p: True)
+    monkeypatch.setattr("tortoise.embedded_reaper._pid_is_redis",
+                        lambda p: True)
+    from tortoise.embedded_reaper import (
+        _zero_client_state_read, _zero_client_state_write)
+    sock = "/tmp/fake-orphan-recycled.sock"
+    # Sweep 1: first observation -> recorded (window starts).
+    _mark_orphan_confirmation([_zero_client_candidate(sock, os.getpid())])
+    # Simulate a RECYCLED pid: rewrite the persisted entry with the OLD
+    # server's start (a different process start than the current pid).
+    state = _zero_client_state_read()
+    entry = state[sock]
+    entry["start"] = entry["start"] - 999_999.0  # old server's start
+    _zero_client_state_write(state)
+    # Sweep 2 (window elapsed, but identity CHANGED): must NOT confirm.
+    rec2 = _zero_client_candidate(sock, os.getpid())
+    _mark_orphan_confirmation([rec2])
+    assert rec2.get("_orphan_confirmed") is not True, \
+        "recycled pid must restart the confirmation window, not inherit it"
