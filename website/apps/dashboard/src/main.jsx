@@ -2327,7 +2327,7 @@ function claimIntentInFlight() {
                         The setup command you copied in the previous step installs all three
                         into your agent's skills directory (project-scoped for Claude Code /
                         Codex / Cursor; <code>~/.pi/agent/skills</code> for Pi). They're maintained
-                        in the public agent-infra repo (<a href="https://github.com/daniel-ospina/agent-infra/tree/main/skills" target="_blank" rel="noreferrer">skills/</a>)
+                        in the public Tortoise skills repo (<a href="https://github.com/daniel-ospina/tortoise-skills-and-integrations" target="_blank" rel="noreferrer">skills-and-integrations</a>)
                         and the installer is safe to re-run — it updates them in place.
                       </p>
                       <div className="wizard-nav">
