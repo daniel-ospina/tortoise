@@ -2682,3 +2682,6 @@ All 3 P1s fixed (P1-1 … P1-3) and all 15 actionable P2s fixed in-line. No P0s 
 3. **P2-14** — the no-graph-name `FalkorProjection(` count is method-dependent: 117 sites in 28 files under this pass's multi-line-aware regex (including carve-out fixtures), 93 in 28 under the reviewer's method, 114 in 27 in the original plan text. The plan now says so and defers to Task 7 Step 1's census grep + the gate's collect-only total.
 
 Every other claim was verified exactly as stated (the wipe_server Step 3 filter's missing URI-default skip, the 3 "convenience cache" phrases, test_metering's 6 delenv sites, test_namespace_uri_mode's import-time env write, test_hard_reject L131 / test_search_engine_gaps L231 / test_session_index_health L348 mutations, the absent sentinel in `_wipe_or`, the stale Task 4 Step 3 sentence, the stale item 1(a) liveness phrase). The plan's structure (Tasks 1-10, Phase 1-4 gates, E2E catalog, Failure Modes, changelogs) is preserved; all changes are surgical in place.
+
+<!-- plan-review: cycles=8, status=clean, version=2.3.0 -->
+<!-- final-verification: APPROVED (no P0/P1), advisory P2s: Task-2 risk concentration, hoist _uri_default_graph_name, fix E2E-7 constant -->
