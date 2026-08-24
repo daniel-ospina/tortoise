@@ -63,9 +63,23 @@ class OpenRouterModel:
         self.temperature = temperature
         self.thinking_budget = thinking_budget  # for reasoning models
         self.disable_reasoning = disable_reasoning  # send reasoning.effort=none
+        # Session per adapter so a deadline can interrupt a hung read
+        # (pilot #1549: the DeepSeek/OpenRouter API stalls mid-chunked-response;
+        # requests.post per-call leaks the socket — close() on deadline kills it).
+        self._session = requests.Session()
         # M3 (#1524, GATE-2): the per-call finish reason — "length" = the
         # generation hit the cap (truncation detected, not silently lost).
         self.last_finish_reason: str | None = None
+
+    def close(self) -> None:
+        """Interrupt any in-flight request (pilot #1549: called by the
+        extractor's deadline when a call exceeds its wall-clock bound — the
+        hung socket read raises and the daemon thread dies instead of
+        leaking + billing forever)."""
+        try:
+            self._session.close()
+        except Exception:
+            pass
 
     def complete(self, *, system: str, user: str,
                  max_tokens: int | None = None) -> str:
@@ -94,8 +108,8 @@ class OpenRouterModel:
         elif self.disable_reasoning:
             body["reasoning"] = {"effort": "none"}
 
-        r = requests.post(
-            self.base_url, headers=headers, json=body, timeout=60,
+        r = self._session.post(
+            self.base_url, headers=headers, json=body, timeout=(10, 60),
         )
         r.raise_for_status()
         data = r.json()
@@ -140,11 +154,11 @@ class DeepSeekDirectModel(OpenRouterModel):
         cap = self.max_tokens if max_tokens is None else max_tokens
         if cap is not None:
             body["max_tokens"] = cap
-        r = requests.post(
+        r = self._session.post(
             self.base_url,
             headers={"Authorization": f"Bearer {self.api_key}",
                      "Content-Type": "application/json"},
-            json=body, timeout=60,
+            json=body, timeout=(10, 60),
         )
         r.raise_for_status()
         data = r.json()
