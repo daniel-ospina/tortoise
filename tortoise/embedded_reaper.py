@@ -11,6 +11,10 @@ Classification (dual-signal):
   - tempdir socket + uptime < MIN_UPTIME            -> protected (boot cooldown)
   - tempdir socket + uptime >= MIN_UPTIME + no db_filename + no .db -> candidate
   - path-based + registry-recorded owner pid DEAD   -> orphan (candidate; #1427)
+  - path-based + LIVE server + 0 clients persisted  -> orphan (#1642 FIX 3:
+    redislite's registry pidfile is the server's OWN pid, so the #1427 owner
+    check is circular for live servers — orphanhood is decided from ppid=1
+    detachment + CLIENT LIST zero-client state instead)
   - registry pidfile pid dead (Z-aware)           -> stale_socket (#1383)
     (dead-pid leftover dir — guarded-rmtree reaped, never a killable
     'candidate'; no CLIENT LIST probe happens — no server exists to list)
@@ -91,6 +95,12 @@ EPHEMERAL_PREFIXES = (
     "redislite_", "tmp", "pytest-of-", "tortoise_", "tortoise-",
     "tortoise_test_", "tortoise_shared_embedded_", "tortoise_m0_",
     "tortoise-hardreject-", "tortoise-concurrency-", "tt_", "pack_v3_bad_",
+    # #1642 FIX 7: longmem_eval builds one isolated graph per question under
+    # tempfile.TemporaryDirectory(dir=work_dir, prefix="lme-") — 58 such dirs
+    # were observed protected on the dev box (unrecognized pattern -> the
+    # `protected` fail-closed), so a SIGKILLed --workers 8 run leaked every
+    # server. The lme- trees are disposable test trees like tt_/tortoise_*.
+    "lme-",
 )
 
 # Marker dir for active pytest suites (conftest writes/removes one file per
@@ -103,6 +113,33 @@ ACTIVE_SUITES_DIR = os.path.join(
 # shutdown bursts ARE the bgsave storm this module exists to prevent.
 KILL_PACING_DEFAULT = 0.5
 DEFAULT_BATCH_SIZE = 50
+
+# #1642 FIX 3 (#1427): a live server is only "orphan-confirmed" when its
+# 0-client CLIENT LIST state has persisted across sweeps for at least this
+# long. The cron cadence (10-15 min) makes this natural: sweep 1 records the
+# zero-client observation, a later sweep confirms. The wait distinguishes a
+# genuine orphan from a concurrent suite's between-tests idle server, which
+# also sits at 0 clients (#1557 — redislite servers all daemonize to ppid=1,
+# so detachment alone cannot discriminate).
+ZERO_CLIENT_CONFIRM_MINUTES = 10.0
+
+# #1642 review P2: a suite marker older than this is provably a crash
+# leftover (pytest sessions never run for days) — prune it so its recycled
+# pid can never pin suites_active=True and disable live-orphan kills.
+MARKER_MAX_AGE_S = 24 * 3600
+# State entries older than this are pruned (a confirmed/reaped server leaves
+# an entry; the socket dir is gone so it is never seen again).
+ZERO_CLIENT_STATE_MAX_AGE = 7 * 86400.0
+# Persisted zero-client observation state (pid + process start time, so a
+# recycled pid restarts the confirmation window — #1642 FIX 5).
+ZERO_CLIENT_STATE_PATH = os.path.join(
+    os.path.expanduser("~"), ".tortoise", "reaper-zero-client.json")
+
+# #1642 FIX 2 (#1449): time budget for the C-speed `find` socket-dir walk.
+# The walk no longer depends on the tempdir's total entry count (pollution
+# disabled cleanup — chicken-and-egg); the budget is the backstop against a
+# pathological tree, never an entry-count gate.
+SOCKET_WALK_TIMEOUT = 20.0
 
 
 def _is_ephemeral_dir(dbdir_real: str, tmpdir_real: str) -> bool:
@@ -130,20 +167,47 @@ def active_suite_tokens() -> list[str]:
     """List active pytest-suite marker tokens (filenames in ACTIVE_SUITES_DIR).
 
     Each marker is created by a suite's conftest at session start and removed
-    at session end. Stale markers (pid dead — suite SIGKILLed) are treated as
-    absent so one crash cannot permanently degrade later suites' sweeps to
-    only-safe (issue #1005 review P2). Empty when no other suite is mid-run.
+    at session end. Stale markers (pid dead, or (pid, start_time) mismatch —
+    a recycled pid, #1642 FIX 5) are treated as absent so one crash cannot
+    permanently degrade later suites' sweeps to only-safe (issue #1005
+    review P2). Empty when no other suite is mid-run.
+    """
+    return [m["token"] for m in active_suite_markers()]
+
+
+def active_suite_markers() -> list[dict]:
+    """Liveness-verified active-suite marker records.
+
+    Returns [{token, pid, start}] for markers whose recorded (pid,
+    start_time) identity is live (#1642 FIX 5: a recycled pid — live but a
+    DIFFERENT process — counts as stale, so a SIGKILLed suite's marker can
+    never defer later sweeps forever). Markers without a parsable pid or
+    start are skipped (fail toward absent).
     """
     try:
         entries = os.listdir(ACTIVE_SUITES_DIR)
     except OSError:
         return []
-    tokens = []
+    now = time.time()
+    markers = []
     for e in entries:
         if e.startswith("."):
             continue
+        mpath = Path(ACTIVE_SUITES_DIR, e)
         try:
-            text = Path(ACTIVE_SUITES_DIR, e).read_text()
+            # #1642 review P2: an age-guard — pytest sessions never run for
+            # days, so a marker older than 24h is provably a crash leftover
+            # (its pid may have been recycled to ANY live process, which the
+            # pid-only legacy-format markers can't detect). Prune it
+            # opportunistically so it can never pin suites_active=True and
+            # silently disable live-orphan kills (the #1642 recurrence).
+            if now - mpath.stat().st_mtime > MARKER_MAX_AGE_S:
+                try:
+                    mpath.unlink()
+                except OSError:
+                    pass
+                continue
+            text = mpath.read_text()
         except OSError:
             continue
         if not text.strip():
@@ -153,13 +217,19 @@ def active_suite_tokens() -> list[str]:
             continue  # no parsable pid -> stale
         try:
             pid = int(m.group(1))
-            alive = _pid_alive(pid)
-        except (ValueError, OverflowError, OSError):
+        except (ValueError, OverflowError):
             continue  # malformed pid -> stale, never fail the sweep
-        if not alive:
-            continue  # stale marker from a killed suite
-        tokens.append(e)
-    return tokens
+        sm = re.search(r"start=([\d.]+)", text)
+        start = None
+        if sm:
+            try:
+                start = float(sm.group(1))
+            except ValueError:
+                start = None
+        if not _pid_identity_matches(pid, start):
+            continue  # dead pid OR recycled (start mismatch) -> stale
+        markers.append({"token": e, "pid": pid, "start": start})
+    return markers
 
 
 def _dir_missing_on_disk(dbdir: str | None) -> bool:
@@ -298,7 +368,7 @@ def _parse_etime(etime: str) -> float:
 def _pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError):
+    except (ProcessLookupError, PermissionError, OverflowError):
         return False
     except OSError:
         return False
@@ -317,6 +387,109 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+# ── #1642 FIX 5 (#1448): (pid, process-start-time) identity ─────────
+# A recycled pid (a live NON-redis process now holding the number) defeats
+# plain kill(0) liveness. Store/verify the process start time alongside the
+# pid wherever the reaper persists process identity (active-suite markers,
+# zero-client state), and treat an alive-but-not-redis pid read from a
+# redis.pid as recycled (provably not the recorded server).
+
+_LSTART_RE = re.compile(
+    r"^\S+\s+(?P<a>\S+)\s+(?P<b>\S+)\s+(?P<c>\S+)\s+(?P<y>\d+)$")
+_MONTHS = {"jan", "feb", "mar", "apr", "may", "jun",
+           "jul", "aug", "sep", "oct", "nov", "dec"}
+
+
+def _parse_lstart(raw: str) -> float | None:
+    """Parse `ps -o lstart=` into epoch seconds (portable).
+
+    macOS emits `Sun 23 Aug 23:03:24 2026` (day before month); Linux emits
+    `Wed Aug 23 10:00:00 2026` (month before day). Tolerates a space-padded
+    single-digit day. Returns None on any parse failure.
+    """
+    m = _LSTART_RE.match(raw.strip())
+    if not m:
+        return None
+    a, b, c, y = m.group("a"), m.group("b"), m.group("c"), m.group("y")
+    if b[:3].lower() in _MONTHS:
+        mon, day = b, a
+    elif a[:3].lower() in _MONTHS:
+        mon, day = a, b
+    else:
+        return None
+    try:
+        day = day.strip().zfill(2)
+        return time.mktime(time.strptime(
+            f"{mon} {day} {c} {y}", "%b %d %H:%M:%S %Y"))
+    except ValueError:
+        return None
+
+
+def _process_start_time(pid: int) -> float | None:
+    """Epoch-seconds start time of a process, or None when undeterminable.
+
+    Consults the per-sweep _PROC_INFO_CACHE when available (one batched ps
+    call in discover()/#mark_orphan_confirmation); falls back to a single
+    `ps -o lstart=` subprocess. A recycled pid has a different start time,
+    so (pid, start) verification defeats pid-reuse (#1642 FIX 5).
+    """
+    cached = _PROC_INFO_CACHE.get(pid)
+    if cached is not None and cached.get("start") is not None:
+        return cached["start"]
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=2,
+            env={**os.environ, "LC_ALL": "C"},
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    raw = out.stdout.strip()
+    if not raw:
+        return None
+    return _parse_lstart(raw)
+
+
+def _pid_is_redis(pid: int) -> bool:
+    """True when the process's cmdline identifies a redis-server.
+
+    Used to detect recycled pids: the recorded pid in a redis.pid is the
+    server's OWN pid (#1642 FIX 3), so a LIVE pid that is NOT a redis-server
+    is provably a recycled number, not the recorded server. Cached cmdline
+    when available; a vanished pid yields "" (False).
+    """
+    return "redis-server" in _cmdline(pid)
+
+
+def _pid_effectively_alive(pid: int | None) -> bool:
+    """Liveness of a pid READ FROM A redis.pid-style file (the server's own
+    pid). Alive only when kill(0) passes AND the process is a redis-server:
+    an alive non-redis pid is a recycled number and is treated as dead
+    (#1642 FIX 5) — the recorded server is gone, so the leftover is reapable
+    (the guarded stale path still re-verifies the socket before removal).
+    """
+    if not pid or not _pid_alive(pid):
+        return False
+    return _pid_is_redis(pid)
+
+
+def _pid_identity_matches(pid: int, start: float | None,
+                          tolerance: float = 2.0) -> bool:
+    """(pid, start_time) identity check: pid alive AND the recorded start
+    matches the current process start (within tolerance) — or no start was
+    recorded (legacy record: pid-only verification). Recycled pids fail the
+    start comparison (#1642 FIX 5)."""
+    if not pid or not _pid_alive(pid):
+        return False
+    if start is None:
+        return True  # legacy record without start — pid liveness only
+    current = _process_start_time(pid)
+    if current is None:
+        return False  # cannot verify -> fail closed
+    return abs(current - start) < tolerance
+
+
+
 def _registry_owner_alive(registry: dict | None) -> bool | None:
     """Liveness of the registry-recorded owning process (issue #1427).
 
@@ -325,6 +498,13 @@ def _registry_owner_alive(registry: dict | None) -> bool | None:
     False when provably dead (orphan), None when unresolvable (no
     pidfile, pid file missing/unreadable, unparseable content). Callers
     must fail closed on None — an unknown owner keeps protection.
+
+    #1642 FIX 3 (#1427 circularity): redislite's pidfile is the server's
+    OWN pid (redis.pid), so this is True for every live server — it cannot
+    distinguish an orphan from a live one. _classify therefore routes LIVE
+    servers through the detachment + persisted-0-client orphanhood decision
+    instead of this check; this remains the dead-owner reclassification
+    (a provably dead — or, per FIX 5, recycled — pid is an orphan leftover).
     """
     if not registry or not registry.get("pidfile"):
         return None
@@ -332,9 +512,9 @@ def _registry_owner_alive(registry: dict | None) -> bool | None:
         pid = int(Path(registry["pidfile"]).read_text().strip())
     except (OSError, ValueError, TypeError):
         return None
-    if not _pid_alive(pid):  # noqa: SIM103
-        return False
-    return True
+    if _pid_effectively_alive(pid):  # noqa: SIM103
+        return True
+    return False
 
 
 def _is_detached(pid: int) -> bool:
@@ -351,6 +531,9 @@ def _is_detached(pid: int) -> bool:
     ppid) returns False so the server is protected, never risked.
     """
     import subprocess as _sp
+    cached = _PROC_INFO_CACHE.get(pid)
+    if cached is not None and cached.get("ppid") is not None:
+        return cached["ppid"] in (0, 1)
     try:
         r = _sp.run(["ps", "-o", "ppid=", "-p", str(pid)],
                     capture_output=True, text=True, timeout=5)
@@ -700,28 +883,41 @@ _PROC_INFO_CACHE: dict[int, dict] = {}
 
 
 def _batch_process_info(pids: list[int]) -> dict[int, dict]:
-    """One ps call for all pids: {pid: {cmdline, etime}}."""
+    """One ps call for all pids: {pid: {cmdline, etime, ppid, start}}."""
     if not pids:
         return {}
     try:
         out = subprocess.run(
-            ["ps", "-ww", "-o", "pid=,etime=,command=",
+            ["ps", "-ww", "-o", "pid=,etime=,ppid=,lstart=,command=",
              "-p", ",".join(str(p) for p in pids)],
             capture_output=True, text=True, timeout=10,
+            env={**os.environ, "LC_ALL": "C"},
         )
     except (subprocess.TimeoutExpired, OSError):
         return {}
     result: dict[int, dict] = {}
     for line in out.stdout.splitlines():
-        parts = line.strip().split(None, 2)
-        if len(parts) < 2:
+        parts = line.strip().split(None, 8)
+        if len(parts) < 3:
             continue
         try:
             pid = int(parts[0])
         except ValueError:
             continue
-        result[pid] = {"etime": _parse_etime(parts[1]),
-                       "cmdline": parts[2] if len(parts) > 2 else ""}
+        # lstart = 6 whitespace-separated tokens on both platforms
+        # (macOS: `Mon 24 Aug 02:17:56 2026`, Linux: `Wed Aug 23 10:00:00
+        # 2026`), so the full command starts at parts[8] (split(None, 8)
+        # keeps the cmdline intact in parts[8]; parts[7] is the lstart YEAR —
+        # using it as the cmdline broke _pid_is_redis and misclassified live
+        # orphans as stale_socket (#1642 FIX 5 review P1)).
+        start = _parse_lstart(" ".join(parts[3:8])) if len(parts) >= 8 \
+            else None
+        result[pid] = {
+            "etime": _parse_etime(parts[1]),
+            "ppid": int(parts[2]) if parts[2].isdigit() else None,
+            "start": start,
+            "cmdline": parts[8] if len(parts) > 8 else "",
+        }
     return result
 
 
@@ -787,10 +983,9 @@ def discover(jobs: int = 1, max_tempdir_entries: int = 5000) -> list[dict]:
     Two passes (issue #1005 perf — the tempdir accumulates tens of thousands
     of stale dirs, making a full walk minutes-long under load):
       1. Live servers via pgrep + cmdline unixsocket extraction — O(servers).
-      2. Tempdir walk for stale sockets / synthetic dirs, ONLY when the
-         tempdir is small (st_nlink <= max_tempdir_entries). On leaky
-         machines the walk is skipped with a warning — stale-socket
-         detection degrades gracefully instead of stalling the sweep.
+      2. Socket-bearing dirs via a time-budgeted `find` walk — O(socket
+         dirs) classification cost, independent of the tempdir's total
+         entry count (#1642 FIX 2: pollution no longer disables cleanup).
 
     jobs>1 parallelizes per-dir classification. Fail-closed semantics are
     per-record and unchanged under parallelism.
@@ -846,44 +1041,33 @@ def _discover_from_live(live_pids, jobs, tmpdir, seen_dirs,
                 results.append(rec)
                 seen_dirs.add(os.path.dirname(rec["socket_path"]))
 
-    # Pass 2: tempdir walk (stale sockets + synthetic dirs in tests). Skip
-    # when the tempdir is pathologically large — the walk is the cost that
-    # made sweeps stall at 64k dirs (issue #1005).
-    try:
-        entry_count = os.stat(tmpdir).st_nlink
-    except OSError:
-        entry_count = 0
-    if entry_count > max_tempdir_entries:
-        logger.warning(
-            "tempdir has %s entries — skipping stale-socket walk "
-            "(issue #1005 perf guard)", entry_count)
-        return results
-
-    try:
-        entries = list(os.scandir(tmpdir))
-    except (PermissionError, OSError) as e:
-        logger.warning("permission denied scanning tempdir %s: %s", tmpdir, e)
-        return results
-
+    # Pass 2: tempdir stale-socket walk (stale sockets + synthetic dirs in
+    # tests). #1642 FIX 2 (#1449): the walk was previously SKIPPED wholesale
+    # when the tempdir exceeded max_tempdir_entries (5000) — pollution
+    # disabled the ONLY path that cleans killed-suite residue (chicken-and-
+    # egg). The walk now scans ONLY socket/pid-bearing dirs via a
+    # time-budgeted `find` subprocess (C-speed traversal; O(socket dirs)
+    # classification cost regardless of the total entry count), so a 32k-
+    # entry tempdir still converges. max_tempdir_entries is retained for API
+    # compatibility but no longer gates the walk.
+    socket_dirs = _find_socket_dirs(tmpdir)
     dirs = []
-    for entry in entries:
-        if not entry.is_dir():
-            continue
+    for d in socket_dirs:
         # #1383 plan-review P1: reaper-owned quarantine dirs (*.reaper-
         # stale-*) are handled exclusively by _sweep_quarantine_dirs —
         # never classify them (a guard-7-preserved LIVE server in a moved
         # dir would otherwise classify 'candidate' and be KILLED).
-        if STALE_QUARANTINE_SUFFIX in entry.name:
+        if STALE_QUARANTINE_SUFFIX in os.path.basename(d):
             continue
         try:
-            socket_path = os.path.join(entry.path, "redis.socket")
+            socket_path = os.path.join(d, "redis.socket")
             if not os.path.exists(socket_path):
                 continue
-            if os.path.realpath(entry.path) in seen_dirs:
+            if os.path.realpath(d) in seen_dirs:
                 continue
-            dirs.append((entry.path, socket_path))
+            dirs.append((d, socket_path))
         except (PermissionError, OSError):
-            logger.warning("dir skipped (OSError): %s", entry.path)
+            logger.warning("dir skipped (OSError): %s", d)
             continue
 
     if jobs > 1 and len(dirs) > 1:
@@ -909,6 +1093,37 @@ def _discover_from_live(live_pids, jobs, tmpdir, seen_dirs,
             if rec is not None:
                 results.append(rec)
     return results
+
+
+def _find_socket_dirs(tmpdir: str) -> list[str]:
+    """Dirs directly under the tempdir that carry redis.socket/redis.pid.
+
+    #1642 FIX 2 (#1449): a C-speed `find` subprocess (time-budgeted) scans
+    for the socket/pid marker files — the stale-socket walk is no longer
+    gated on the tempdir's total entry count, so a 32k-entry polluted
+    tempdir still converges (the ONLY path that cleans killed-suite
+    residue previously skipped itself). Returns deduped dir paths, [] on
+    failure (fail closed — per-record classification still isolates
+    errors). Symlinked marker entries resolve to their dir (the classifier
+    realpaths before containment checks).
+    """
+    try:
+        out = subprocess.run(
+            # marker files live one level BELOW the tempdir root
+            # (T/<tmpXXXX>/redis.socket) -> maxdepth 2
+            ["find", tmpdir, "-maxdepth", "2", "(",
+             "-name", "redis.socket", "-o", "-name", "redis.pid", ")"],
+            capture_output=True, text=True, timeout=SOCKET_WALK_TIMEOUT,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        logger.warning("socket-dir walk failed/timeout for %s", tmpdir)
+        return []
+    dirs: set[str] = set()
+    for line in out.stdout.splitlines():
+        p = os.path.dirname(line)
+        if p and p != tmpdir:
+            dirs.add(p)
+    return sorted(dirs)
 
 
 def _classify_dir(dbdir: str, socket_path: str,
@@ -949,12 +1164,42 @@ def _classify_dir(dbdir: str, socket_path: str,
         "pid": pid,
         "socket_path": socket_real,
         "dbdir": dbdir_real,
+        # #1642 FIX 3: a path-based (user-data) server is NEVER killed
+        # without orphan confirmation — reap() gates on this flag.
+        "path_based": _is_path_based(registry, dbdir_real, tmpdir_real),
         "dir_missing": dir_missing,
         "client_count": client_count,
         "uptime": uptime,
         "classification": classification,
         "settings": registry,
     }
+
+
+def _is_path_based(registry: dict | None, dbdir_real: str,
+                   tmpdir_real: str) -> bool:
+    """True when the registry signals a USER-path (non-ephemeral) server.
+
+    Mirrors _classify's protection signals (Signal 1 registry dir, Signal 2
+    user dbfilename, old-format .db presence). reap() refuses to kill a
+    path_based server unless orphanhood is confirmed (persisted 0-client
+    state — #1642 FIX 3); ephemeral test-tree servers keep the fast full-
+    sweep kill contract.
+    """
+    if not registry:
+        return False
+    reg_dbdir = registry.get("dir", registry.get("dbdir", ""))
+    reg_dbdir_real = os.path.realpath(reg_dbdir) if reg_dbdir else ""
+    if reg_dbdir_real and not _is_ephemeral_dir(reg_dbdir_real, tmpdir_real):
+        return True  # Signal 1: user data dir
+    db_filename = registry.get("dbfilename", "")
+    if db_filename and db_filename != "redis.db" \
+            and not _is_ephemeral_dir(reg_dbdir_real, tmpdir_real):
+        return True  # Signal 2: user db filename
+    if "dbfilename" in registry and registry.get("dbfilename") is None:
+        if _dir_has_db_file(dbdir_real) \
+                and not _is_ephemeral_dir(dbdir_real, tmpdir_real):
+            return True  # old-format path-based
+    return False
 
 
 def _classify(socket_real: str, dbdir_real: str, tmpdir_real: str,
@@ -1001,14 +1246,20 @@ def _classify(socket_real: str, dbdir_real: str, tmpdir_real: str,
         if reg_dbdir_real.startswith(tmpdir_real):
             logger.warning(
                 "unrecognized dir pattern, treating as protected: %s", reg_dbdir_real)
+        # Issue #1642 FIX 3 (#1427 circularity): redislite's registry
+        # pidfile is the server's OWN pid (redis.pid), so the #1427 owner
+        # check is True for every live server — it protected orphaned
+        # path-based servers forever. A LIVE server's orphanhood is decided
+        # from detachment (ppid=1) + persisted 0-client CLIENT LIST state
+        # (_mark_orphan_confirmation + reap()'s double-check), so the server
+        # is admitted as a candidate (boot cooldown still applies). The
+        # #1427 dead-owner reclassification below keeps the stale path.
+        if pid is not None and _pid_effectively_alive(pid):
+            return _cooldown_check(registry, pid=pid)
         # Issue #1427: a path-based server whose registry-recorded owner pid
-        # is provably dead is an orphan — the db file has no live owner, so
-        # the server is a leftover, not live data. Fall through to the
-        # cooldown/candidate path (dead pid -> candidate); live owners keep
-        # the protection below, unresolvable owners fail closed.
-        # #1383 review: pass the authoritative known_pid through — a LIVE
-        # server (pgrep-found) with a STALE registry pidfile must never
-        # classify stale_socket via the registry fallback.
+        # is provably dead (or recycled — FIX 5) is an orphan — the db file
+        # has no live owner, so the server is a leftover, not live data.
+        # Unresolvable owners (None) fail closed below.
         if _registry_owner_alive(registry) is False:
             return _cooldown_check(registry, pid=pid)
         return "protected"
@@ -1019,9 +1270,12 @@ def _classify(socket_real: str, dbdir_real: str, tmpdir_real: str,
     db_filename = registry.get("dbfilename", "")
     if db_filename and db_filename != "redis.db" \
             and not _is_ephemeral_dir(reg_dbdir_real, tmpdir_real):
-        # Issue #1427: same orphan reclassification as Signal 1 — a dead
-        # registry-recorded owner makes this a leftover, not live data.
-        # #1383 review: known_pid pass-through (see Signal 1 comment).
+        # Issue #1642 FIX 3: same live-server restructure as Signal 1 — a
+        # live pid admits the server as a candidate (orphanhood decided by
+        # the 0-client confirmation); a dead/recycled owner reclassifies
+        # below (#1427). #1383 review: known_pid pass-through (see Signal 1).
+        if pid is not None and _pid_effectively_alive(pid):
+            return _cooldown_check(registry, pid=pid)
         if _registry_owner_alive(registry) is False:
             return _cooldown_check(registry, pid=pid)
         return "protected"
@@ -1029,9 +1283,11 @@ def _classify(socket_real: str, dbdir_real: str, tmpdir_real: str,
     # Old-format registry (no dbfilename field): .db file present -> protected.
     if "dbfilename" in registry and registry.get("dbfilename") is None:
         if _dir_has_db_file(dbdir_real) and not _is_ephemeral_dir(dbdir_real, tmpdir_real):
-            # Issue #1427: same orphan reclassification — old-format
-            # path-based servers are the same protection class.
-            # #1383 review: known_pid pass-through (see Signal 1 comment).
+            # Issue #1642 FIX 3: same live-server restructure — old-format
+            # path-based servers are the same protection class. #1383
+            # review: known_pid pass-through (see Signal 1 comment).
+            if pid is not None and _pid_effectively_alive(pid):
+                return _cooldown_check(registry, pid=pid)
             if _registry_owner_alive(registry) is False:
                 return _cooldown_check(registry, pid=pid)
             return "protected"
@@ -1058,7 +1314,7 @@ def _cooldown_check(registry: dict | None,
             pid = int(Path(registry["pidfile"]).read_text().strip())
         except (OSError, ValueError):
             pid = None
-    if pid is not None and not _pid_alive(pid):
+    if pid is not None and not _pid_effectively_alive(pid):
         return "stale_socket"
     uptime = _uptime_seconds(pid) if pid else 0.0
     min_uptime = _parse_min_uptime()
@@ -1117,7 +1373,7 @@ def phase1_probe(record: dict) -> dict:
 
 def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = None,
          sigterm_timeout: float = 10.0, kill_pacing: float = KILL_PACING_DEFAULT,
-         only_safe: bool = False) -> list[dict]:
+         only_safe: bool = False, jobs: int = 8) -> list[dict]:
     """Reap records safely (#1383: the two-verb action engine).
 
     Returns acted-upon list.
@@ -1135,18 +1391,43 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
       guards ARE the safety) and dry_run (reported, not mutated).
 
     only_safe=True (issue #1005 concurrency guard): NEVER kills a live-pid
-    server — redislite servers daemonize to ppid=1, so _is_detached is True
-    for ALL of them and the reaper cannot distinguish a concurrent suite's
-    live test server from a killed-subprocess orphan (#1557). only_safe runs
-    only the stale_socket removals (dead-pid leftover dirs, guarded rmtree);
-    genuine live orphans converge via the FULL sweep (only_safe=False — the
-    single-suite end sweep / cron) and the stale_socket path. This preserves
-    the #1005 guarantee: a concurrent suite's between-tests idle server is
-    never disturbed.
+    server that is not orphan-CONFIRMED — redislite servers daemonize to
+    ppid=1, so _is_detached is True for ALL of them and the reaper cannot
+    distinguish a concurrent suite's live test server from a killed-
+    subprocess orphan on pid/detachment alone (#1557). #1642 FIX 3 gives
+    only_safe the discriminator it lacked: a live server is killed only
+    when `_orphan_confirmed` (persisted 0-client CLIENT LIST state >= 10
+    min with no live suite markers — set by _mark_orphan_confirmation in
+    _run_sweep). Path-based (user-data) servers additionally require
+    confirmation in EVERY mode (their data outlives the test tree). This
+    preserves the #1005 guarantee: a concurrent suite's between-tests idle
+    server is never disturbed.
     """
     acted = []
     killed = 0
     stale_removed = 0  # #1383: stale removals budgeted separately from kills
+    # #1642 perf: pre-probe the CLIENT LIST before-counts of every candidate
+    # in PARALLEL (raw unix-socket probes are thread-safe and read-only).
+    # The old per-record serial double-check made a sweep over hundreds of
+    # servers minutes-long on a loaded box (each probe can take up to ~1-3s
+    # against an unresponsive server) — parallel probes cut it to seconds
+    # while the kills stay serial + paced (#1005). The loop's gates (budget,
+    # only_safe, orphan confirmation) still run in order; fail-closed
+    # semantics are per-record and unchanged (None -> skip). The per-kill
+    # AFTER probe remains a fresh serial probe (a server can gain a client
+    # between the pre-probe and its kill).
+    _client_before_cache: dict[int, int | None] = {}
+    candidate_records = [r for r in records
+                         if r.get("classification") == "candidate"
+                         and r.get("socket_path")]
+    if candidate_records and len(candidate_records) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(
+                max_workers=min(jobs, len(candidate_records))) as pool:
+            futures = [(id(r), pool.submit(_active_client_count,
+                                           r["socket_path"]))
+                       for r in candidate_records]
+            _client_before_cache = {rid: f.result() for rid, f in futures}
     for record in records:
         classification = record.get("classification")
         if classification == "stale_socket":
@@ -1179,34 +1460,31 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
                 record.get("socket_path"))
             continue
 
-        # #1557: in only_safe mode, a live-pid server whose registry owner
-        # is ALIVE (or unknown) is a concurrent suite's server — protect it.
-        # redislite servers daemonize to ppid=1, so _is_detached is True for
-        # ALL of them (the #1115 "spawning tree exited" intent is false for
-        # redislite: a test-owned server is reparented at birth while its
-        # pytest parent is alive). The discriminator is the registry owner
-        # pid (the process that spawned the server): a test server's owner
-        # (pytest) is alive -> protect; a genuine orphan's owner subprocess
-        # was killed -> _registry_owner_alive is False -> still reaped;
-        # unresolvable owner (None) -> fail closed -> protect. This preserves
-        # the #1005 only_safe guarantee (never disturb a concurrent suite's
-        # server) AND keeps reaping true orphans.
-        # #1557 (final): a live-pid server under only_safe is NEVER killed —
-        # redislite daemonizes to ppid=1 (all servers are "detached") and the
-        # registry owner is None for no-path servers, so the reaper cannot
-        # distinguish a concurrent suite's live test server from a
-        # killed-subprocess orphan on pid/registry alone. only_safe's
-        # contract is "never disturb a concurrent suite" (#1005) — err on
-        # protection: skip ANY live-pid server. Genuine orphans are reaped
-        # by the FULL sweep (only_safe=False, the single-suite end sweep)
-        # and by the stale_socket path (dead-pid leftover dirs).
-        if only_safe and record.get("pid") and _pid_alive(record["pid"]):
-            logger.info(
-                "concurrent-suite guard: live-pid server protected under "
-                "only_safe (daemonized, cannot distinguish orphan from "
-                "test server), skipping %s",
-                record.get("socket_path"))
-            continue
+        # #1642 FIX 3: orphanhood for a LIVE-pid server is decided by
+        # detachment + persisted 0-client CLIENT LIST state (`_orphan_
+        # confirmed`, set by _mark_orphan_confirmation in _run_sweep), never
+        # by the registry pidfile (redislite writes the server's OWN pid
+        # there — the #1427 owner=self-pid circularity protected orphaned
+        # path-based servers forever). Gates:
+        #   - only_safe: a live-pid server is killed ONLY when confirmed
+        #     (a concurrent suite's between-tests idle server is also
+        #     0-client + detached — #1557; the confirmation wait + no-live-
+        #     markers guard distinguishes them).
+        #   - path_based (user-data) server: confirmation required in EVERY
+        #     mode — its data outlives the test tree.
+        if record.get("pid") and _pid_alive(record["pid"]):
+            if not record.get("_orphan_confirmed"):
+                if only_safe:
+                    logger.info(
+                        "concurrent-suite guard: live-pid server not "
+                        "orphan-confirmed under only_safe, skipping %s",
+                        record.get("socket_path"))
+                    continue
+                if record.get("path_based"):
+                    logger.info(
+                        "path-based server not orphan-confirmed, "
+                        "skipping %s", record.get("socket_path"))
+                    continue
 
         # Liveness-first: never kill a dead PID's leftovers via connect.
         if not record.get("pid") or not _pid_alive(record["pid"]):
@@ -1214,8 +1492,20 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
                            record.get("socket_path"))
             continue
 
-        # Double-check CLIENT LIST (before+after).
-        clients_before = _active_client_count(record["socket_path"])
+        # #1642 FIX 3: a CONFIRMED socket-less orphan (socket dir GONE —
+        # no client can exist and no probe can succeed) skips the CLIENT
+        # LIST gates: the missing-dir signal is strictly stronger than a
+        # 0-client probe, and the confirmation already required the 10-min
+        # window + (pid, start) identity + no live suite markers.
+        socketless = (record.get("_orphan_confirmed")
+                      and _socket_dir_missing(record["socket_path"]))
+
+        # Double-check CLIENT LIST (before+after). The before-count comes
+        # from the parallel pre-probe cache when available (the loop's gates
+        # may skip records the pre-probe covered — fine); a live fallback
+        # covers direct reap() calls with uncached records.
+        clients_before = 0 if socketless else _client_before_cache.get(
+            id(record), _active_client_count(record["socket_path"]))
         if clients_before is None:
             logger.warning(
                 "CLIENT LIST probe failed, skipping (fail closed): %s",
@@ -1225,7 +1515,8 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
             logger.info("server has %d active client(s), skipping: %s",
                         clients_before, record["socket_path"])
             continue
-        clients_after = _active_client_count(record["socket_path"])
+        clients_after = (0 if socketless
+                         else _active_client_count(record["socket_path"]))
         if clients_after is None:
             logger.warning(
                 "CLIENT LIST re-probe failed, skipping (fail closed): %s",
@@ -1247,13 +1538,23 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
         # must honor the same containment discipline as the stale path — a
         # pgrep-decoy's crafted dbdir must never be rmtree'd. Legit kills
         # always target ephemeral test trees, so this breaks nothing.
+        # #1642 FIX 2: remove BOTH the socket dir (record dbdir) AND the
+        # registry's data dir when they are ephemeral test trees — a kill
+        # previously left the data dir (e.g. a tortoise_test_x_* path) as a
+        # permanent tempdir entry (observed: 32k entries). User-path data
+        # dirs fail the ephemeral containment check and are preserved.
         dbdir = record.get("dbdir")
-        if dbdir and _is_ephemeral_dir(
-                os.path.realpath(dbdir), os.path.realpath(tempfile.gettempdir())):
-            _cleanup_tempdir(dbdir)
-        else:
-            logger.warning("kill path: skipping tempdir cleanup for "
-                           "non-ephemeral dbdir %r", dbdir)
+        reg_dir = (record.get("settings") or {}).get(
+            "dir", (record.get("settings") or {}).get("dbdir", ""))
+        tmpdir_real = os.path.realpath(tempfile.gettempdir())
+        for d in dict.fromkeys([dbdir, reg_dir]):
+            if not d:
+                continue
+            if _is_ephemeral_dir(os.path.realpath(d), tmpdir_real):
+                _cleanup_tempdir(d)
+            else:
+                logger.warning("kill path: skipping tempdir cleanup for "
+                               "non-ephemeral dir %r", d)
         logger.warning("killed orphan PID %s (%s)",
                        record["pid"], record["socket_path"])
         acted.append(record)
@@ -1322,15 +1623,18 @@ def _remove_stale_socket_dir(record: dict, dry_run: bool) -> dict | None:
         logger.info("stale dir already gone: %s", dbdir_real)
         return record
     # Guard 3: re-read the pidfile — a now-live pid means respawn/pid-reuse
+    # (#1642 FIX 5: only a LIVE REDIS process aborts — an alive non-redis
+    # pid is a recycled number, provably not the recorded server, so the
+    # socket re-probe below remains the real gate).
     pid = None
     pidfile = os.path.join(dbdir_real, "redis.pid")
     try:
         pid = int(Path(pidfile).read_text().strip())
     except (OSError, ValueError):
         pid = None
-    if pid is not None and _pid_alive(pid):
-        logger.warning("stale dir pidfile now alive (%s), skipping: %s",
-                       pid, dbdir_real)
+    if pid is not None and _pid_effectively_alive(pid):
+        logger.warning("stale dir pidfile now a live redis-server (%s), "
+                       "skipping: %s", pid, dbdir_real)
         return None
     # Guard 4: re-probe the socket with the SHORT timeout. Only
     # 'dead' (ECONNREFUSED — socket file exists, no listener) proceeds;
@@ -1399,9 +1703,9 @@ def _remove_stale_socket_dir(record: dict, dry_run: bool) -> dict | None:
         moved_pid = int(Path(os.path.join(renamed, "redis.pid")).read_text().strip())
     except (OSError, ValueError):
         moved_pid = None
-    if moved_pid is not None and _pid_alive(moved_pid):
-        logger.warning("quarantined pidfile now alive (%s), leaving dir: %s",
-                       moved_pid, renamed)
+    if moved_pid is not None and _pid_effectively_alive(moved_pid):
+        logger.warning("quarantined pidfile now a live redis-server (%s), "
+                       "leaving dir: %s", moved_pid, renamed)
         return None
     _cleanup_tempdir(renamed)
     if os.path.exists(renamed):
@@ -1577,30 +1881,27 @@ def _sweep_quarantine_dirs(dry_run: bool = False,
     moved socket (a server moved with its dir retains its socket inode, so
     the probe is authoritative) and remove only dead ones. Same budget
     CONSTANT as reap()'s stale branch but a SEPARATE counter — one sweep
-    can remove up to 2xSTALE_SWEEP_BUDGET (plan-review cycle 2). Gated on
-    the same tempdir walk-size guard; symlinked entries are skipped (mirror
-    discover pass 2).
+    can remove up to 2xSTALE_SWEEP_BUDGET (plan-review cycle 2). Scanned
+    via the C-speed `find` walk (#1642 FIX 2 — no longer gated on the
+    tempdir entry count); symlinked entries are skipped (mirror discover
+    pass 2).
     """
     tmpdir = _real_gettempdir()
     try:
-        entry_count = os.stat(tmpdir).st_nlink
-    except OSError:
-        entry_count = 0
-    if entry_count > 5000:  # same perf guard as discover() pass 2
+        out = subprocess.run(
+            ["find", tmpdir, "-maxdepth", "1", "-name",
+             f"*{STALE_QUARANTINE_SUFFIX}*"],
+            capture_output=True, text=True, timeout=SOCKET_WALK_TIMEOUT,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        logger.warning("quarantine find walk failed/timeout for %s", tmpdir)
         return []
     removed = []
-    try:
-        entries = list(os.scandir(tmpdir))
-    except (PermissionError, OSError):
-        return removed
-    for entry in entries:
-        if not entry.is_dir() or entry.is_symlink():
-            continue  # symlink safety mirrors discover pass 2 (cycle 2)
-        if STALE_QUARANTINE_SUFFIX not in entry.name:
-            continue
+    for q in out.stdout.splitlines():
         if len(removed) >= budget:
             break
-        q = entry.path
+        if os.path.islink(q) or not os.path.isdir(q):
+            continue  # symlink safety mirrors discover pass 2 (cycle 2)
         # #1383 security review (Issue 3): only rmtree dirs carrying the
         # reaper-owned marker — a same-suffix foreign dir (another tool's
         # temp naming, a planted decoy) must never be touched. The marker
@@ -1619,9 +1920,9 @@ def _sweep_quarantine_dirs(dry_run: bool = False,
             qpid = int(Path(os.path.join(q, "redis.pid")).read_text().strip())
         except (OSError, ValueError):
             qpid = None
-        if qpid is not None and _pid_alive(qpid):
-            logger.warning("quarantined dir pidfile live (%s), leaving: %s",
-                           qpid, q)
+        if qpid is not None and _pid_effectively_alive(qpid):
+            logger.warning("quarantined dir pidfile live redis (%s), "
+                           "leaving: %s", qpid, q)
             continue
         if not os.path.exists(qsock):
             # Partial-rmtree shell (SIGALRM interrupt deleted the socket
@@ -1673,6 +1974,14 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
     # #1383: reapable classes are candidate (live orphan -> kill) and
     # stale_socket (dead-pid leftover dir -> guarded rmtree). Phase 1
     # resolves stale-pid records before any action.
+    # #1642 FIX 3: annotate live 0-client candidates with orphan-confirmed
+    # state (persisted (pid, start) observation — FIX 5) BEFORE any action,
+    # so only_safe and the path_based gate can distinguish genuine orphans
+    # from a concurrent suite's between-tests idle server.
+    _mark_orphan_confirmation(records)
+    # #1383: reapable classes are candidate (live orphan -> kill) and
+    # stale_socket (dead-pid leftover dir -> guarded rmtree). Phase 1
+    # resolves stale-pid records before any action.
     reapables = [r for r in records
                  if r["classification"] in ("candidate", "stale_socket")]
     resolved = [phase1_probe(r) for r in reapables]
@@ -1699,6 +2008,116 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
     return acted
 
 
+def _zero_client_state_read() -> dict:
+    """Read the persisted zero-client observation state (best-effort).
+
+    Keyed by realpath socket path; entry = {pid, start, first_seen}.
+    Returns {} on any read error — the state is an accelerator for
+    orphan confirmation, never a correctness dependency.
+    """
+    try:
+        return json.loads(Path(ZERO_CLIENT_STATE_PATH).read_text())
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+
+
+def _zero_client_state_write(state: dict) -> None:
+    """Persist the zero-client state atomically (tmp file + os.replace).
+    Best-effort: a write failure never fails the sweep.
+    """
+    try:
+        os.makedirs(os.path.dirname(ZERO_CLIENT_STATE_PATH), exist_ok=True)
+        tmp = ZERO_CLIENT_STATE_PATH + f".{os.getpid()}.tmp"
+        Path(tmp).write_text(json.dumps(state, indent=2))
+        os.replace(tmp, ZERO_CLIENT_STATE_PATH)
+    except OSError:
+        logger.warning("could not persist zero-client state")
+
+
+def _mark_orphan_confirmation(records: list[dict]) -> None:
+    """#1642 FIX 3: decide orphanhood for LIVE 0-client candidates.
+
+    A live detached server with 0 clients is NOT yet provably an orphan — a
+    concurrent suite's between-tests idle server looks identical (#1557:
+    all redislite servers daemonize to ppid=1). Orphanhood is confirmed
+    only when the 0-client state has persisted >= ZERO_CLIENT_CONFIRM_
+    MINUTES across sweeps AND no live suite markers exist (FIX 4). The
+    state is keyed by (pid, process_start_time) so a recycled pid restarts
+    the window (FIX 5). Mutates records in place (`_orphan_confirmed`);
+    reap() reads the flag. Never raises.
+    """
+    state = _zero_client_state_read()
+    now = time.time()
+    changed = False
+    # Prune entries older than the horizon (confirmed/reaped servers are
+    # never seen again — their socket dir is gone).
+    stale_keys = [k for k, e in state.items()
+                  if now - e.get("first_seen", 0) > ZERO_CLIENT_STATE_MAX_AGE]
+    for k in stale_keys:
+        del state[k]
+        changed = True
+    candidates = [r for r in records
+                  if r.get("classification") == "candidate"
+                  and r.get("socket_path") and r.get("pid")
+                  and _pid_alive(r["pid"])]
+    if candidates:
+        # One batched ps for the confirmation checks (start + ppid) — the
+        # per-sweep cache discover() populated was cleared in its finally.
+        _PROC_INFO_CACHE.update(
+            _batch_process_info([r["pid"] for r in candidates]))
+    suites_active = bool(active_suite_tokens())
+    for rec in candidates:
+        cc = rec.get("client_count")
+        if cc is None:
+            # #1642 FIX 3: a SOCKET-LESS live server — socket dir GONE, so
+            # no client can exist and CLIENT LIST probes cannot succeed — is
+            # an orphan once the confirmation window + (pid, start) identity
+            # + no-live-markers hold (the missing-dir signal substitutes for
+            # the 0-client probe). A probe failure with the socket dir still
+            # present is a transient (loaded server) -> fail closed.
+            if not _socket_dir_missing(rec["socket_path"]):
+                continue  # probe failed but dir exists -> fail closed
+        elif cc > 0:
+            if rec["socket_path"] in state:
+                del state[rec["socket_path"]]
+                changed = True
+            continue
+        start = _process_start_time(rec["pid"])
+        entry = state.get(rec["socket_path"])
+        # #1642 FIX 5 (review P1): compare the process's CURRENT start against
+        # the PERSISTED start in the state entry — a recycled pid (now a
+        # different redis-server with a different start) must NOT inherit the
+        # old first_seen window (it would be orphan-confirmed on its first
+        # sweep and killed at 0 clients — the #1557 live-server hazard).
+        identity = bool(entry and entry.get("pid") == rec["pid"]
+                        and _pid_identity_matches(rec["pid"],
+                                                  entry.get("start")))
+        if identity and now - entry["first_seen"] \
+                >= ZERO_CLIENT_CONFIRM_MINUTES * 60 and not suites_active:
+            rec["_orphan_confirmed"] = True
+        else:
+            state[rec["socket_path"]] = {
+                "pid": rec["pid"],
+                "start": start,
+                "first_seen": entry["first_seen"] if identity else now,
+            }
+            changed = True
+    if changed:
+        _zero_client_state_write(state)
+
+
+def _socket_dir_missing(socket_path: str) -> bool:
+    """True when the socket's PARENT DIR is gone (not just the socket file
+    missing — the whole dir was deleted). A live server whose socket dir is
+    gone cannot serve anyone: no socket path exists for a client to connect
+    to. The signal substitutes for the 0-client CLIENT LIST probe in the
+    orphan confirmation (#1642 FIX 3 — hundreds of socket-less orphans
+    observed on the dev box: alive daemonized redis-servers whose tmp dirs
+    were swept from under them)."""
+    d = os.path.dirname(socket_path)
+    return bool(d) and not os.path.isdir(d)
+
+
 def main(argv: list[str] | None = None) -> int:
     import argparse
     import json as _json
@@ -1720,8 +2139,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--jobs", type=int, default=8,
                         help="Parallel probe workers (default 8)")
     parser.add_argument("--only-safe", action="store_true",
-                        help="Never kill live-pid servers — stale_socket "
-                             "removals only (concurrent-suite safe, #1005/#1557)")
+                        help="Concurrent-suite-safe sweep: kill only "
+                             "orphan-CONFIRMED live servers (persisted "
+                             "0-client state) + stale_socket removals "
+                             "(#1642 FIX 3; the scheduled-cron mode)")
     parser.add_argument("--json", action="store_true",
                         help="Machine-readable JSON output")
     parser.add_argument("--timeout", type=str, default=None,
@@ -1763,6 +2184,15 @@ def main(argv: list[str] | None = None) -> int:
              "classification": r.get("classification")}
             for r in acted
         ]))
+    else:
+        # #1642 FIX 1: the scheduled/standalone runs need a visible summary
+        # (the sweep otherwise prints nothing when clean — a cron log that
+        # never says anything cannot be verified).
+        killed = sum(1 for r in acted if r.get("classification") == "candidate")
+        stale = sum(1 for r in acted if r.get("classification") in (
+            "stale_socket", "stale_quarantine", "stale_pid_file"))
+        print(f"[reaper] sweep complete: {len(acted)} acted "
+              f"({killed} killed, {stale} stale cleaned)")
     return 0
 
 

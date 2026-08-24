@@ -13,6 +13,13 @@ import pytest
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
+# #1642 FIX 6: the session-end sweep loops discover->reap until the backlog
+# is cleared or this wall-clock budget is exhausted, at a raised batch size
+# — one completing suite can clear a multi-hundred orphan backlog (the old
+# single batch_size=50 pass could not).
+SWEEP_TIME_BUDGET = 30.0
+SWEEP_BATCH_SIZE = 200
+
 # #1371: opt-in fast interpreter-exit close for ephemeral embedded test
 # servers (tortoise/embedded_lifecycle.py) — kills the ~10-15 min atexit
 # teardown tail on every test run (local + CI + post-merge-validation, which
@@ -155,12 +162,14 @@ def _redislite_hygiene():
     watchdog SIGINT) so test-spawned lock files never accumulate.
     """
     import atexit
+    import time
     import uuid
 
     from tortoise.embedded_reaper import (
         ACTIVE_SUITES_DIR,
         _ReaperLock,
         _run_sweep,
+        active_suite_markers,
         active_suite_tokens,
         sweep_stale_index_pid_files,
     )
@@ -171,8 +180,16 @@ def _redislite_hygiene():
     try:
         os.makedirs(marker_dir, exist_ok=True)
         marker_path = os.path.join(marker_dir, token)
+        # #1642 FIX 5: record the suite process's START time alongside its
+        # pid — a recycled pid (the number reused by a different live
+        # process) then reads as a stale marker, so a SIGKILLed suite can
+        # never defer later sweeps to only-safe forever (#1448).
+        from tortoise.embedded_reaper import _process_start_time
+        start = _process_start_time(os.getpid())
         with open(marker_path, "w") as fh:
             fh.write(f"pid={os.getpid()}\n")
+            if start is not None:
+                fh.write(f"start={start}\n")
     except OSError:
         # never fail the suite over hygiene; remove any partial marker so a
         # poison file cannot degrade every future suite's sweep to only-safe
@@ -199,10 +216,26 @@ def _redislite_hygiene():
                 if not only_safe:
                     os.environ["TORTOISE_REAPER_MIN_UPTIME"] = "0"
                 try:
-                    acted = _run_sweep(
-                        dry_run=False, batch_size=50, only_safe=only_safe,
-                        jobs=8, kill_pacing=0.4)
-                    return {"reaped": len(acted)}
+                    # #1642 FIX 6: loop discover->reap until the time budget
+                    # is exhausted or the backlog is cleared, at a raised
+                    # batch size — ONE completing suite must be able to clear
+                    # a multi-hundred backlog (the old single batch_size=50
+                    # pass could not; the 445-orphan wave needed 9 sweeps).
+                    deadline = time.monotonic() + SWEEP_TIME_BUDGET
+                    total = 0
+                    # The budget bounds ITERATIONS, not wall time — one
+                    # iteration at batch 200 with kill_pacing 0.4 takes ~80s
+                    # of pacing, so a multi-hundred backlog can run past the
+                    # 30s soft budget (review P2; it still terminates). The
+                    # cron sweeps every 10 min make up the difference.
+                    while True:
+                        acted = _run_sweep(
+                            dry_run=False, batch_size=SWEEP_BATCH_SIZE,
+                            only_safe=only_safe, jobs=8, kill_pacing=0.4)
+                        total += len(acted)
+                        if not acted or time.monotonic() >= deadline:
+                            break
+                    return {"reaped": total}
                 finally:
                     if prev is None:
                         os.environ.pop("TORTOISE_REAPER_MIN_UPTIME", None)
@@ -244,89 +277,16 @@ def _redislite_hygiene():
 
     yield
 
-    def _cmdline_of(pid: str) -> str:
-        """Short cmdline for a pid, for the hygiene log (issue #1103).
-        Linux /proc first (CI), macOS ps fallback. Best-effort — "?" on
-        failure (the pid may have just exited).
-        """
-        import subprocess as _sp
-        try:
-            with open(f"/proc/{pid}/cmdline", "rb") as fh:
-                raw = fh.read()
-            if raw:
-                return raw.replace(b"\x00", b" ").decode(
-                    errors="replace")[:120]
-        except OSError:
-            pass
-        try:
-            return (_sp.run(["ps", "-o", "args=", "-p", pid],
-                            capture_output=True, text=True, timeout=5)
-                    .stdout.strip()[:120])
-        except Exception:
-            return "?"
-
-    def _foreign_suites_active() -> tuple[bool, list[dict]]:
-        """(foreign, matches) — True when pytest processes outside this suite's
-        process tree are running, plus the matched pids (pid + cmdline) so the
-        decision is diagnosable (issue #1103). Catches suites running the
-        pre-#1005 conftest, which do not write active-suite markers — without
-        this, our full end-sweep could kill another suite's between-tests idle
-        server (issue #1005 P1).
-        """
-        import subprocess as _sp
-        my_pid = os.getpid()
-        # Ancestors of THIS suite's invocation (runner shell → bash -c step →
-        # timeout → stdbuf → python) carry "pytest" in their cmdline (the step
-        # script text) but are NOT foreign suites. Without the ancestry skip,
-        # the CI step wrapper false-positives and the end-sweep defers forever
-        # — every suite leaks its servers (observed as 13 orphans on test (b),
-        # issue #1005). Genuine concurrent suites (different process tree) are
-        # not ancestors and are still detected below.
-        ancestors: set[int] = set()
-        pid = my_pid
-        for _ in range(64):  # bounded walk to init
-            try:
-                ppid = int(_sp.run(["ps", "-o", "ppid=", "-p", str(pid)],
-                                   capture_output=True, text=True, timeout=5
-                                   ).stdout.strip())
-            except (_sp.TimeoutExpired, OSError, ValueError):
-                break
-            if ppid <= 0 or ppid == pid:
-                break
-            ancestors.add(ppid)
-            pid = ppid
-        try:
-            out = _sp.run(["pgrep", "-f", "pytest"], capture_output=True,
-                          text=True, timeout=10)
-        except (_sp.TimeoutExpired, OSError):
-            return True, []  # unknown -> fail closed (defer full sweep)
-        for line in out.stdout.splitlines():
-            pid = line.strip()
-            if not pid.isdigit() or int(pid) == my_pid or int(pid) in ancestors:
-                continue
-            try:
-                r = _sp.run(["ps", "-o", "ppid=", "-p", pid],
-                            capture_output=True, text=True, timeout=5)
-            except (_sp.TimeoutExpired, OSError):
-                return True, []  # unknown liveness -> fail closed
-            raw = r.stdout.strip()
-            if not raw:
-                # pgrep/ps race — the pid exited between the two calls. A dead
-                # process cannot be a live foreign suite, so it must NOT defer
-                # the sweep (issue #1103: the race makes the full end-sweep
-                # skip, leaking this suite's own 0-client servers as the CI
-                # orphan count).
-                continue
-            try:
-                ppid = int(raw)
-            except ValueError:
-                return True, []  # unparseable -> fail closed
-            if ppid != my_pid:
-                return True, [{"pid": pid, "cmdline": _cmdline_of(pid)}]
-        return False, []
-
     # Session end: remove our marker first, then check for other active
-    # suites (markers) AND foreign pytest processes (old-conftest suites).
+    # suites (markers). #1642 FIX 4: foreign-suite detection is marker-FILE-
+    # based ONLY — the pgrep -f "pytest" check was removed: it matched ANY
+    # process with "pytest" in its cmdline (including the investigator's own
+    # `pgrep -fl "pytest"` command and other agents' shell commands), a
+    # permanent false positive that degraded every end-sweep to only_safe
+    # forever. Markers verified by (pid, start_time) identity (FIX 5) are
+    # the reliable signal; pre-#1005 conftest suites without markers are a
+    # bounded residual — their servers converge via the scheduled reaper
+    # (FIX 1) and the cron's orphan confirmation.
     # Full sweep only when we are the last suite standing.
     if marker_path:
         try:  # noqa: SIM105
@@ -334,10 +294,16 @@ def _redislite_hygiene():
         except OSError:
             pass
     others = [t for t in active_suite_tokens() if t != token]
-    foreign, foreign_matches = _foreign_suites_active()
-    end_result = _sweep(only_safe=bool(others) or foreign)
-    print(f"[redislite-hygiene] end sweep (other-suites={len(others)}, "
-          f"foreign-pytest={foreign}): {end_result}")
+    foreign_matches: list[dict] = []
+    for m in active_suite_markers():
+        if m["token"] != token:
+            foreign_matches.append({"pid": m["pid"], "token": m["token"]})
+    # #1642 FIX 4 review P2: keep the diagnostic signal real (was hardcoded
+    # False after the pgrep-based foreign detection was removed).
+    foreign = bool(foreign_matches)
+    end_result = _sweep(only_safe=bool(others))
+    print(f"[redislite-hygiene] end sweep (other-suites={len(others)}): "
+          f"{end_result}")
     # #1231: normal teardown completed — the atexit fallback must not re-run.
     _teardown_ran[0] = True
     # Issue #1103: pytest capture swallows the print above, so the sweep

@@ -39,6 +39,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+# #1642 FIX 7: this tool is NOT a pytest suite — it has no conftest, so its
+# --workers 8 mode used to leak every per-question embedded server outside
+# any lifecycle seam. Opt into the fast interpreter-exit close for ephemeral
+# test-tree servers (embedded_lifecycle.atexit_fast_close): a SIGKILLed run
+# now exits its servers in seconds instead of orphaning them. The lme-*
+# per-question trees are classified ephemeral by the reaper (EPHEMERAL_
+# PREFIXES), so even a hard-killed run's servers converge via the scheduled
+# reaper.
+os.environ.setdefault("TORTOISE_FAST_ATEXIT", "1")
+
 from tortoise.model_adapters import is_fatal
 from tortoise.sdk import TortoiseSDK
 from tortoise.shared_state.concurrency import flock_exclusive
