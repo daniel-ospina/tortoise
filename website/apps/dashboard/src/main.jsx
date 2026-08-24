@@ -2274,7 +2274,7 @@ function claimIntentInFlight() {
                   <p className="wizard-title">{wizardSteps[wizardStep]}</p>
                   <p className="wizard-sub" style={{ marginBottom: '1rem' }}>
                     {wizardStep === 0 ? 'Pick your tool — the setup command goes straight to your clipboard.'
-                      : wizardStep === 1 ? 'Your agent now has the two Tortoise skills — this is how you use them.'
+                      : wizardStep === 1 ? 'These are the two skills your agent uses with Tortoise — what they do, and how to install them.'
                       : wizardStep === 2 ? 'Bring your GitHub issues in as Events — optional, do it now or later.'
                       : wizardStep === 3 ? 'Add your first memory — the graph is created the moment data lands.'
                       : 'Everything\'s ready — your graph is live.'}
@@ -2312,12 +2312,18 @@ function claimIntentInFlight() {
                     <div className="skills">
                       <div className="skill-row">
                         <strong>how-to-use-tortoise</strong>
-                        <span className="dim small">the passive skill — your agent loads it to know how to read and write the graph. Nothing to invoke.</span>
+                        <span className="dim small">the passive skill — your agent loads it automatically to read and write the graph. Nothing to invoke.</span>
                       </div>
                       <div className="skill-row">
                         <strong>tortoise-decide</strong>
-                        <span className="dim small">the invoke skill — run it when you make a decision: it weighs options against the graph\'s state and records the reasoning.</span>
+                        <span className="dim small">the invoke skill — run it when you make a decision: it weighs options against the graph\'s state and records the reasoning as Events.</span>
                       </div>
+                      <p className="dim small" style={{ marginTop: '0.75rem' }}>
+                        Install both into your agent's skills directory — they live in the
+                        Tortoise repo (<a href="https://github.com/daniel-ospina/tortoise/tree/main/skills" target="_blank" rel="noreferrer">skills/</a>).
+                        Agents that sync the agent-infra skills get them automatically; others
+                        copy the folder into your agent's skills path (e.g. <code>~/.claude/skills</code>).
+                      </p>
                       <div className="wizard-nav">
                         <button type="button" className="ghost" onClick={() => setWizardStep(wizardStep - 1)}>← Back</button>
                         <div className="wizard-nav-actions">
