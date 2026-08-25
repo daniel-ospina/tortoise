@@ -343,7 +343,14 @@ def _redislite_hygiene():
                     while True:
                         acted = _run_sweep(
                             dry_run=False, batch_size=SWEEP_BATCH_SIZE,
-                            only_safe=only_safe, jobs=8, kill_pacing=0.4)
+                            only_safe=only_safe, jobs=8, kill_pacing=0.4,
+                            # Epic #1647 (PR #1684 CI-fix): the suite is
+                            # ENDING — a server that ignores SIGTERM for 3s
+                            # gets SIGKILL regardless; the default 10s wait ×
+                            # many servers compounds past pytest-timeout under
+                            # CI load (observed: TestMcpHandlers teardown
+                            # timed out at 600s with the reaper in _kill).
+                            sigterm_timeout=3.0)
                         total += len(acted)
                         if not acted or time.monotonic() >= deadline:
                             break
