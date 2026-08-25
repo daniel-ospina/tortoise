@@ -11,9 +11,13 @@ ops NULL-excluding, SQL semantics). PATCH applies json_body to matching
 rows; POST appends a row (return=representation semantics); DELETE
 removes matching rows (mirrors PostgREST service-role deletes, #302).
 
-``rpc(fn, body)`` simulates PostgREST RPC calls — currently ``provision_team``
+``rpc(fn, body)`` simulates PostgREST RPC calls — ``provision_team``
 (#765 plan Task 8: the atomic teams + team_memberships + api_keys upsert,
-migration 0010), mirroring the SQL semantics the real function executes
+migration 0010) plus the #1709 agent-signup-token trio
+(``provision_team_with_token`` / ``resolve_signup_token`` /
+``recover_team_key``, migration 20260814000001 — the recovery mint is
+serialized under a process lock, emulating the RPC's FOR UPDATE row lock),
+mirroring the SQL semantics the real functions execute
 (idempotent upserts, identity anchor rows, deterministic api_keys id).
 """
 from __future__ import annotations
@@ -33,6 +37,11 @@ class FakeControlPlane:
         # table (mirrors PostgREST 400 PGRST204 on select/filter of an
         # absent column). Default None → behavior identical to before.
         self.missing_columns: dict[str, set[str]] | None = missing_columns
+        # #1709: serializes recover_team_key emulation (the real RPC SELECTs
+        # the token row FOR UPDATE — the fake must be atomic under the
+        # concurrency E2E).
+        import threading
+        self._recover_lock = threading.Lock()
 
     def seed(self, table: str, rows: list[dict]) -> "FakeControlPlane":  # noqa: UP037
         self.tables.setdefault(table, []).extend(rows)
@@ -185,9 +194,96 @@ class FakeControlPlane:
                 if t.get("id") == team_id:
                     t["email"] = email
             return None
+        if fn == "provision_team_with_token":
+            # #1709 (20260814000001): the signup wrapper = provision_team + one
+            # token row in the SAME emulated transaction. Unique-constraint
+            # parity is checked BEFORE the provision (the real SQL rolls the
+            # whole tx back on uq_agent_signup_tokens_team).
+            p = body or {}
+            th = p.get("p_signup_token_hash")
+            tid = p.get("p_team_id") or ""
+            if th:
+                tokens = self.tables.setdefault("agent_signup_tokens", [])
+                live = [t for t in tokens if t.get("team_id") == tid
+                        and t.get("revoked_at") is None]
+                if live:
+                    raise RuntimeError(
+                        "agent_signup_tokens: uq_agent_signup_tokens_team")
+            self._provision_team_emulation(p)
+            if th and not any(
+                    t.get("token_hash") == th
+                    for t in self.tables.get("agent_signup_tokens", [])):
+                # ON CONFLICT (token_hash) DO NOTHING parity
+                self.tables.setdefault("agent_signup_tokens", []).append({
+                    "token_hash": th, "team_id": tid, "created_at": None,
+                    "last_used_at": None, "revoked_at": None})
+            return None
+        if fn == "resolve_signup_token":
+            # #1709: token → team_id (revocation-aware); NULL = unknown/revoked.
+            from datetime import datetime, timezone
+            p = body or {}
+            th = p.get("p_token_hash") or ""
+            tokens = self.tables.get("agent_signup_tokens", [])
+            row = next((t for t in tokens
+                        if t.get("token_hash") == th
+                        and t.get("revoked_at") is None), None)
+            if row is not None:
+                row["last_used_at"] = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+                return row.get("team_id")
+            return None
+        if fn == "recover_team_key":
+            # #1709: keyless recovery mint — atomic cap-check + insert under a
+            # lock (emulates the RPC's FOR UPDATE row serialization so the
+            # concurrency E2E can assert the cap never overshoots).
+            from datetime import datetime, timezone
+            p = body or {}
+            th = p.get("p_token_hash") or ""
+            tid = p.get("p_team_id") or ""
+            lookup = p.get("p_lookup_hash") or ""
+            with self._recover_lock:
+                tokens = self.tables.setdefault("agent_signup_tokens", [])
+                row = next((t for t in tokens
+                            if t.get("token_hash") == th
+                            and t.get("revoked_at") is None
+                            and t.get("team_id") == tid), None)
+                if row is None:
+                    raise RuntimeError(
+                        "recover_team_key: token not found or revoked")
+                if any(t.get("id") == tid and t.get("deleted_at")
+                       for t in self.tables.get("teams", [])):
+                    raise RuntimeError("recover_team_key: team deleted")
+                cap = int(p.get("p_max_api_keys") or 2)
+                key_rows = self.tables.setdefault("api_keys", [])
+                active = [k for k in key_rows
+                          if k.get("team_id") == tid
+                          and k.get("revoked_at") is None
+                          and k.get("created_via") != "bootstrap"]
+                now_iso = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+                if len(active) >= cap:
+                    oldest = min(active, key=lambda k: k.get("created_at") or "")
+                    oldest["revoked_at"] = now_iso
+                if not any(k.get("lookup_hash") == lookup for k in key_rows):
+                    key_rows.append({
+                        "id": f"key_{tid}_{lookup[:12]}",
+                        "team_id": tid,
+                        "lookup_hash": lookup,
+                        "key_prefix": p.get("p_key_prefix") or tid[:8],
+                        "created_via": "recovery",
+                        "created_by": "st_" + th[:12],
+                        "created_at": None,
+                        "expires_at": None,
+                        "revoked_at": None,
+                    })
+                    self._trigger_key_create(tid, f"key_{tid}_{lookup[:12]}",
+                                             "recovery")
+                return tid
         if fn != "provision_team":
             return None
-        p = body or {}
+        return self._provision_team_emulation(body or {})
+
+    def _provision_team_emulation(self, p: dict) -> None:
+        """The provision_team RPC body (migration 0010) over the in-memory
+        rows — shared by the plain RPC and the #1709 wrapper."""
         team_id = p.get("p_team_id") or ""
         team_name = p.get("p_team_name") or ""
         api_key = p.get("p_api_key") or ""

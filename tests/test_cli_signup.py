@@ -63,6 +63,18 @@ def _ok_mint(body=None):
         "key": "tt_mint_000000000000000000000000000000000000000000",
         "team_id": "team-mint-1", "team_name": "agent-mint", "graph_name": "team_team-mint-1",
         "identity": "anon-mint", "tier": "free"}).encode()
+
+# ── #1709: signup-token persistence + recovery UX ─────────────────────────
+# The mint response now carries an additive signup_token (the keyless-
+# recovery credential); re-signup re-presents a stored token (recovery on
+# the SAME team); a 422 invalid_signup_token warns + requires confirmation
+# before clearing the token and minting fresh; a 403 suspended team fails
+# closed; `tortoise recover` is the config-loss path.
+
+
+def _ok_json(body):
+    resp = mock.MagicMock()
+    resp.read.return_value = json.dumps(body).encode()
     resp.__enter__.return_value = resp
     return resp
 
@@ -657,3 +669,203 @@ class TestReuse:
         assert rc == 0
         err = capsys.readouterr().err
         assert "TORTOISE_API_KEY" in err and "shadow" in err.lower()
+
+def _mint_body(team_id="team-cli-1709", key="tt_cli_1709_key_0000000000000000000000000000"):
+    return {"key": key, "team_id": team_id, "team_name": "agent-cli-1709",
+            "graph_name": f"team_{team_id}", "identity": "anon-cli-1709",
+            "tier": "free", "signup_token": "st_" + "ab" * 32}
+
+
+def _capture_urlopen(requests):
+    def _inner(req, timeout=None):
+        requests.append(req)
+        return _ok_json(_mint_body())
+    return _inner
+
+
+class TestSignupTokenPersistence:
+    def test_mint_persists_signup_token(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        with mock.patch("urllib.request.urlopen", _capture_urlopen([])):
+            rc = main._cmd_signup(mock.Mock())
+        assert rc == 0
+        cfg = json.loads((tmp_path / ".tortoise").read_text())
+        assert cfg["signup_token"].startswith("st_")
+        assert cfg["api_key"].startswith("tt_")
+        out = capsys.readouterr().out
+        assert "RECOVERY TOKEN — save this" in out
+        assert "st_" in out
+
+    def test_resignup_represents_stored_token(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        # a previous mint wrote the token into the config
+        (tmp_path / ".tortoise").write_text(json.dumps({
+            "api_key": "tt_old", "api_url": "https://api.premiselabs.co",
+            "team_id": "team-1", "team_name": "agent-1",
+            "signup_token": "st_" + "cd" * 32}))
+        requests = []
+        with mock.patch("urllib.request.urlopen", _capture_urlopen(requests)):
+            rc = main._cmd_signup(mock.Mock())
+        assert rc == 0
+        body = json.loads(requests[0].data)
+        assert body["signup_token"] == "st_" + "cd" * 32  # re-presented
+
+    def test_recovery_response_keeps_stored_token(self, monkeypatch, tmp_path):
+        """A token-present re-signup that RECOVERS (no signup_token in the
+        response) must keep the stored token — rotation is rejected server-
+        side, so without persistence recovery would be one-shot-only."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        (tmp_path / ".tortoise").write_text(json.dumps({
+            "api_key": "tt_old", "api_url": "https://api.premiselabs.co",
+            "team_id": "team-1", "team_name": "agent-1",
+            "signup_token": "st_" + "cd" * 32}))
+        stored = "st_" + "cd" * 32
+        # recovery response: NO signup_token field (server does not re-issue)
+        with mock.patch("urllib.request.urlopen",
+                        lambda req, timeout=None: _ok_json({
+                            "key": "tt_recovered_0000000000000000000000000000000000000000",
+                            "team_id": "team-1", "team_name": "agent-1",
+                            "graph_name": "team_team-1", "tier": "free"})):
+            rc = main._cmd_signup(mock.Mock())
+        assert rc == 0
+        cfg = json.loads((tmp_path / ".tortoise").read_text())
+        assert cfg["signup_token"] == stored  # kept
+        assert cfg["api_key"].startswith("tt_recovered")
+
+
+class TestSignup422OrphanGuard:
+    """A revoked/truncated stored token must NOT silently orphan the original
+    team: warn first, require confirmation before clearing + minting fresh."""
+
+    def test_422_non_interactive_fails_closed(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        (tmp_path / ".tortoise").write_text(json.dumps({
+            "api_key": "tt_old", "api_url": "https://api.premiselabs.co",
+            "team_id": "team-1", "team_name": "agent-1",
+            "signup_token": "st_" + "cd" * 32}))
+        with mock.patch("sys.stdin.isatty", return_value=False):  # noqa: SIM117
+            with mock.patch("urllib.request.urlopen",
+                            side_effect=_http_error(422, json.dumps({
+                                "detail": {"error_code": "invalid_signup_token"}}))):
+                rc = main._cmd_signup(mock.Mock())
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "recovery token is invalid" in err
+        assert "Non-interactive — aborting" in err
+
+    def test_422_confirm_yes_clears_token_and_remints(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        (tmp_path / ".tortoise").write_text(json.dumps({
+            "api_key": "tt_old", "api_url": "https://api.premiselabs.co",
+            "team_id": "team-1", "team_name": "agent-1",
+            "signup_token": "st_" + "cd" * 32}))
+        requests = []
+        calls = [
+            _http_error(422, json.dumps({"detail": {"error_code": "invalid_signup_token"}})),
+            _ok_json(_mint_body(team_id="team-fresh-1709")),
+        ]
+        with mock.patch("sys.stdin.isatty", return_value=True):  # noqa: SIM117
+            with mock.patch("builtins.input", return_value="YES"):
+                def _side_effect(req, timeout=None):
+                    requests.append(req)
+                    c = calls.pop(0)
+                    if isinstance(c, Exception):
+                        raise c
+                    return c
+                with mock.patch("urllib.request.urlopen", side_effect=_side_effect):
+                    rc = main._cmd_signup(mock.Mock())
+        assert rc == 0
+        # the retry minted WITHOUT the token (cleared)
+        assert len(requests) == 2
+        body = json.loads(requests[1].data)
+        assert "signup_token" not in body
+        cfg = json.loads((tmp_path / ".tortoise").read_text())
+        assert cfg["team_id"] == "team-fresh-1709"
+
+    def test_422_confirm_no_aborts(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        (tmp_path / ".tortoise").write_text(json.dumps({
+            "api_key": "tt_old", "api_url": "https://api.premiselabs.co",
+            "team_id": "team-1", "team_name": "agent-1",
+            "signup_token": "st_" + "cd" * 32}))
+        with mock.patch("sys.stdin.isatty", return_value=True):  # noqa: SIM117
+            with mock.patch("builtins.input", return_value="no"):
+                with mock.patch("urllib.request.urlopen",
+                                side_effect=_http_error(422, json.dumps({
+                                    "detail": {"error_code": "invalid_signup_token"}}))):
+                    rc = main._cmd_signup(mock.Mock())
+        assert rc == 1
+        assert "Aborted" in capsys.readouterr().err
+
+
+class TestSignup403Suspended:
+    def test_suspended_team_fails_closed(self, monkeypatch, tmp_path, capsys):
+        """A suspended team must NOT be pushed toward orphaning — no fresh
+        mint, no orphan prompt; fail closed with the suspension message."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        (tmp_path / ".tortoise").write_text(json.dumps({
+            "api_key": "tt_old", "api_url": "https://api.premiselabs.co",
+            "team_id": "team-1", "team_name": "agent-1",
+            "signup_token": "st_" + "cd" * 32}))
+        with mock.patch("sys.stdin.isatty", return_value=True):  # noqa: SIM117
+            with mock.patch("urllib.request.urlopen",
+                            side_effect=_http_error(403, json.dumps({
+                                "detail": {"code": "SUSPENDED",
+                                            "message": "suspended due to unusual activity",
+                                            "appeal_url": "https://x/appeal"}}))):
+                rc = main._cmd_signup(mock.Mock())
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "suspended" in err
+        assert "appeal" in err
+
+
+class TestCmdRecover:
+    """tortoise recover --token st_... → POST /v1/agent/recover → config
+    rewritten; the token is PERSISTED back (recovery must not be one-shot)."""
+
+    def test_recover_happy_path_writes_config(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        token = "st_" + "ef" * 32
+        with mock.patch("urllib.request.urlopen",
+                        lambda req, timeout=None: _ok_json({
+                            "key": "tt_rec_000000000000000000000000000000000000000000",
+                            "team_id": "team-9", "team_name": "agent-9",
+                            "graph_name": "team_team-9", "tier": "free"})):
+            rc = main._cmd_recover(mock.Mock(token=token))
+        assert rc == 0
+        cfg = json.loads((tmp_path / ".tortoise").read_text())
+        assert cfg["api_key"].startswith("tt_rec")
+        assert cfg["team_id"] == "team-9"
+        assert cfg["signup_token"] == token  # ⛔ persisted
+        out = capsys.readouterr().out
+        assert "Key recovered on team agent-9" in out
+        assert "data intact" in out
+
+    def test_recover_no_token_fails(self, capsys):
+        rc = main._cmd_recover(mock.Mock(token=None))
+        assert rc == 1
+        assert "No recovery token" in capsys.readouterr().err
+
+    def test_recover_422_invalid_token(self, capsys):
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=_http_error(422, json.dumps({
+                            "detail": {"error_code": "invalid_signup_token"}}))):
+            rc = main._cmd_recover(mock.Mock(token="st_" + "aa" * 32))
+        assert rc == 1
+        assert "invalid signup token" in capsys.readouterr().err

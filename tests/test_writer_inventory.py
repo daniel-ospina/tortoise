@@ -306,12 +306,13 @@ class TestRevokeApiKey:
         spy.assert_clean()
 
 
-# ── POST /v1/agent/signup (identity path via provision_team RPC) ───────────
+# ── POST /v1/agent/signup (identity path via provision_team_with_token) ──
 
 class TestAgentSignup:
     def test_signup_provisions_identity_path(self, client):
-        """#765 writer flip: signup → provision_team RPC with NULL user_id +
-        identity; teams/membership/api_keys rows land; key resolves."""
+        """#765 writer flip + #1709 token: signup → provision_team_with_token
+        RPC with NULL user_id + identity + the signup-token hash;
+        teams/membership/api_keys/token rows land; key resolves."""
         tc, fake, _ = client
         r = tc.post("/v1/agent/signup", json={})
         assert r.status_code == 200, r.text
@@ -319,10 +320,10 @@ class TestAgentSignup:
         key, team_id, identity = body["key"], body["team_id"], body["identity"]
         assert identity.startswith("anon-")
 
-        # exactly one provision_team RPC call, identity path
+        # exactly one provision RPC call, identity path, wrapper fn
         assert len(fake.rpc_calls) == 1
         fn, p = fake.rpc_calls[0]
-        assert fn == "provision_team"
+        assert fn == "provision_team_with_token"
         assert p["p_user_id"] is None
         assert p["p_identity"] == identity
         # key_prefix = api_key[:10] — registry-path parity (review P2,
@@ -333,6 +334,11 @@ class TestAgentSignup:
         assert p["p_lookup_hash"] == lookup_hash(key)
         assert p["p_key_hash"]  # salted PBKDF2 continuity hash
         assert p["p_tier"] == "free"
+        # #1709: the minted st_ token is hashed (SHA-256 lookup_hash — never
+        # the plaintext) and passed to the wrapper
+        tok = body["signup_token"]
+        assert tok.startswith("st_")
+        assert p["p_signup_token_hash"] == lookup_hash(tok)
 
         # rows landed (fake simulates the RPC)
         assert any(t["id"] == team_id for t in fake.tables["teams"])
@@ -345,6 +351,11 @@ class TestAgentSignup:
         keys = [k for k in fake.tables["api_keys"] if k["team_id"] == team_id]
         assert len(keys) == 1
         assert keys[0]["lookup_hash"] == lookup_hash(key)
+        # #1709: the token row landed (hash-only; bound to the team)
+        token_rows = [t for t in fake.tables.get("agent_signup_tokens", [])
+                      if t["team_id"] == team_id]
+        assert len(token_rows) == 1
+        assert token_rows[0]["token_hash"] == lookup_hash(tok)
 
         # minted key authenticates (api_keys.lookup_hash path)
         r2 = tc.get("/v1/team", headers={"Authorization": f"Bearer {key}"})
@@ -369,7 +380,7 @@ class TestAgentSignup:
         identity is fresh per request) and has been REMOVED. The per-IP
         signup limiter (2/24h) is the compensating control; the 3rd mint
         from one IP 429s in Supabase mode too (mode-independent store)."""
-        tc, fake, _ = client  # noqa: RUF059
+        tc, fake, _ = client
         monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
         for _ in range(2):
             r = tc.post("/v1/agent/signup", json={"identity": "anon-client-chosen"})
@@ -385,7 +396,7 @@ class TestAgentSignup:
         tc, fake, _ = client
         r = tc.post("/v1/agent/signup", json={})
         assert r.status_code == 200, r.text
-        fn, p = next(c for c in fake.rpc_calls if c[0] == "provision_team")  # noqa: RUF059
+        fn, p = next(c for c in fake.rpc_calls if c[0] == "provision_team_with_token")  # noqa: RUF059
         lim = tier_limits("free")
         assert p["p_max_users"] == lim["max_users_per_team"]
         assert p["p_max_graphs"] == lim["max_graphs_per_team"]
@@ -961,6 +972,17 @@ class TestBackupEndpointsSupabaseGraphName:
         body = r.json()
         assert body["restored"]["nodes"] == 1
         assert body["restored"]["edges"] == 0
+        # #1709 (docker-lane hygiene): team_myapp is a SHARED graph in the
+        # test matrix — the seed + restore leftovers must be cleaned up or
+        # the next test in this class (backup_restore, which expects the
+        # graph EMPTY) fails on stale nodes.
+        try:
+            sdk = ha_mod._make_sdk(namespace="registry")
+            live = sdk._get_proj().db.select_graph("team_myapp")
+            live.query("MATCH (n) DELETE n")
+            sdk.close()
+        except Exception:
+            pass
 
     def test_backup_create_fail_closed_when_team_vanished(self, pro_backup_client):
         """A team missing from teams (or without graph_name) 503s — never a
