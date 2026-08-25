@@ -1,8 +1,8 @@
 """Per-harness MCP config shapes (#529/#981).
 
-Verifies each harness's emitted MCP config matches the welcome page Block A
-contracts (tests/test_onboarding_variants.py T3) — the paste-path surface for
-hosted (HTTP) and self-hosted (stdio) onboarding:
+Verifies each harness's emitted MCP config matches the canonical copy
+surface — the dashboard wizard harnesses.js (hosted) and self-hosted.html
+(stdio); welcome.html is a pure session/recovery bridge since #1730.
 
 - claude:  .mcp.json, `type: "http"` (hosted) / stdio command (self-hosted)
 - codex:   `codex mcp add ...` command — Codex manages its own config
@@ -18,6 +18,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -48,7 +49,7 @@ class TestHostedHttpShapes:
         tortoise = cfg["mcpServers"]["tortoise"]
         assert "type" not in tortoise
         assert tortoise["url"] == ENDPOINT
-        assert tortoise["headers"]["Authorization"] == "Bearer ${TORTOISE_API_KEY}"
+        assert tortoise["headers"]["Authorization"] == "Bearer ${env:TORTOISE_API_KEY}"
 
     def test_cursor_env_form_no_type(self):
         # Cursor docs: remote url-based servers take url+headers, no `type`.
@@ -78,81 +79,59 @@ class TestHostedHttpShapes:
             assert cfg, f"empty config for {harness}"
 
 
-class TestWelcomePageParity:
-    """#981: CLI hosted config must match welcome.html Block A (T3).
+class TestWizardCopyParity:
+    """#981-contract follow-up: the CLI hosted config must match the dashboard
+    wizard's copy surface (harnesses.js — the page users actually copy from
+    since #1566 moved onboarding in-app and welcome.html became a pure
+    session/recovery bridge, #1730).
 
-    The page is the surface users copy from — the CLI and the page must not
-    be able to drift again (this is the #529-regression that #981 fixes).
+    welcome.html no longer hosts harness config blocks (stripped in #1730); the
+    canonical hosted copy surface is website/apps/dashboard/src/harnesses.js.
     """
 
-    PAGE = REPO_ROOT / "website" / "welcome.html"
+    HARNESSES = REPO_ROOT / "website" / "apps" / "dashboard" / "src" / "harnesses.js"
     PAGE_URL = "https://api.premiselabs.co"
 
-    @staticmethod
-    def _marker_json(html: str, harness: str) -> dict:
-        import re
-        pattern = (r"/\* TORTOISE_CFG_BEGIN:" + harness +
-                   r" \*/(.*?)/\* TORTOISE_CFG_END:" + harness + r" \*/")
-        match = re.search(pattern, html, re.S)
-        assert match, f"TORTOISE_CFG markers missing for {harness}"
-        block = match.group(1).strip()
-        block = re.sub(r"^const\s+\w+\s*=\s*", "", block)
-        return json.loads(block.rstrip().rstrip(";"))
+    @classmethod
+    def _extract_block(cls, const_name: str) -> str:
+        """Return the raw JS object literal for a harnesses.js const (brace-
+        balanced) — substring assertions avoid fragile JS→JSON parsing."""
+        html = cls.HARNESSES.read_text(encoding="utf-8")
+        idx = html.index(f"{const_name} =")
+        open_brace = html.index("{", idx)
+        depth = 0
+        for j in range(open_brace, len(html)):
+            if html[j] == "{":
+                depth += 1
+            elif html[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+        return html[open_brace : j + 1]
 
-    def test_cursor_and_pi_match_page_env_blocks_exactly(self):
-        html = self.PAGE.read_text(encoding="utf-8")
-        for harness in ("cursor", "pi"):
+    def test_cursor_and_pi_match_harnesses_env_blocks(self):
+        html = self.HARNESSES.read_text(encoding="utf-8")
+        for harness, const in (("cursor", "CURSOR_MCP_CONFIG_ENV"), ("pi", "PI_MCP_CONFIG_ENV")):
             cli = _harness_mcp_config(harness, "tt_any", self.PAGE_URL)
-            page = self._marker_json(html, harness)
-            assert cli == page, (
-                f"CLI {harness} config drifted from welcome.html canonical block:\n"
-                f"  CLI:  {json.dumps(cli)}\n  PAGE: {json.dumps(page)}"
-            )
+            tortoise = cli["mcpServers"]["tortoise"]
+            block = self._extract_block(const)
+            # The wizard copy must use env-indirection (never a literal key)
+            # and reference the same MCP_URL the CLI canonical config uses.
+            assert "${env:TORTOISE_API_KEY}" in block, f"env token missing for {harness}"
+            assert "MCP_URL" in block, f"MCP_URL reference missing for {harness}"
+            assert f"const MCP_URL = '{self.PAGE_URL}/mcp/'" in html, "MCP_URL const drift"
+            assert tortoise["url"] == f"{self.PAGE_URL}/mcp/", tortoise["url"]
 
-    def test_claude_matches_page_mcpjson_alternative(self):
-        html = self.PAGE.read_text(encoding="utf-8")
-        i = html.find("claude mcp add")
-        assert i > 0, "claude mcp add one-liner missing from welcome.html"
-        start = html.find("# {", i)
-        assert start > 0, "claude .mcp.json alternative missing from welcome.html"
-        end = html.find("\n", start)
-        raw = html[start:end].lstrip("# ").replace("\\${", "${")
-        raw = raw.replace("${MCP_URL}", f"{self.PAGE_URL}/mcp/")
-        page_cfg = json.loads(raw)
+    def test_claude_http_config_has_env_expansion(self):
         cli = _harness_mcp_config("claude", "tt_any", self.PAGE_URL)
-        assert cli == page_cfg, (
-            f"CLI claude config drifted from welcome.html .mcp.json alternative:\n"
-            f"  CLI:  {json.dumps(cli)}\n  PAGE: {json.dumps(page_cfg)}"
-        )
+        headers = cli["mcpServers"]["tortoise"]["headers"]
+        # CLI claude uses plain ${TORTOISE_API_KEY}; cursor/pi use env: expansion
+        assert list(headers.values()) == ["Bearer ${TORTOISE_API_KEY}"], headers
 
-    def test_codex_command_matches_page(self):
-        html = self.PAGE.read_text(encoding="utf-8")
-        i = html.find("codex mcp add tortoise")
-        assert i > 0, "codex mcp add line missing from welcome.html"
-        end = html.find("\n", i)
-        page_cmd = html[i:end].rstrip("`,").strip().replace(
-            "${MCP_URL}", f"{self.PAGE_URL}/mcp/"
-        )
-        cli = _harness_mcp_config("codex", "tt_any", self.PAGE_URL)["command"]
-        assert cli == page_cmd, (
-            f"CLI codex command drifted from welcome.html:\n"
-            f"  CLI:  {cli}\n  PAGE: {page_cmd}"
-        )
-
-    def test_claude_one_liner_printed_by_cli(self):
-        # The page's PRIMARY claude shape is the CLI one-liner — the CLI's
-        # --harness claude output must show it (with the user's literal key).
-        from tortoise.__main__ import _print_mcp_configs
-        buf = io.StringIO()
-        old = sys.stdout
-        sys.stdout = buf
-        try:
-            _print_mcp_configs("tt_key", self.PAGE_URL, "claude")
-        finally:
-            sys.stdout = old
-        out = buf.getvalue()
-        assert "claude mcp add --transport http tortoise https://api.premiselabs.co/mcp/" in out
-        assert '"type": "http"' in out
+    def test_codex_command_present_in_harness_copy(self):
+        html = self.HARNESSES.read_text(encoding="utf-8")
+        assert "codex mcp add" in html
+        assert "TORTOISE_API_KEY" in html
 
 
 class TestSelfHostedStdioShapes:

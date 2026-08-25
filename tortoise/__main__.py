@@ -1646,7 +1646,9 @@ def _harness_mcp_config(harness: str, api_key: str, api_url: str) -> dict:
     endpoint = api_url.rstrip("/") + "/mcp/"
     if harness == "codex":
         return {"command": f"codex mcp add tortoise --url {endpoint} --bearer-token-env-var TORTOISE_API_KEY"}
-    header = "${env:TORTOISE_API_KEY}" if harness == "cursor" else "${TORTOISE_API_KEY}"
+    # env-indirection for both cursor AND pi — matches the wizard copy
+    # (harnesses.js) and keeps the CLI canonical surface consistent (#1730).
+    header = "${env:TORTOISE_API_KEY}" if harness in ("cursor", "pi") else "${TORTOISE_API_KEY}"
     server: dict = {
         "url": endpoint,
         "headers": {"Authorization": f"Bearer {header}"},
