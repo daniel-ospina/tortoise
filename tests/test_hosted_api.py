@@ -73,6 +73,26 @@ def _count_stub_nodes() -> int:
     return rows[0][0] if rows else 0
 
 
+def _listed_key(client, kid, timeout: float = 3.0) -> dict:
+    """Return the GET /v1/team/keys row for `kid`, tolerating the embedded
+    lane's write-visibility lag (a just-minted node may not be visible on an
+    immediate read — the #1502-class single-writer race; the canonical docker
+    lane is instant). Bounded retry — a genuinely missing key still fails with
+    a clear message instead of a bare IndexError."""
+    import time
+    deadline = time.monotonic() + timeout
+    while True:
+        keys = client.get("/v1/team/keys").json()["keys"]
+        hit = [k for k in keys if k["id"] == kid]
+        if hit:
+            return hit[0]
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"minted key {kid} missing from list after {timeout:.1f}s: "
+                f"{[k['id'] for k in keys]}")
+        time.sleep(0.15)
+
+
 def _patch_tortoise_sdk_init(db_path: str):
     """Make TortoiseSDK use a temp db_path when constructed without one."""
     import tortoise.hosted_api as ha_mod
@@ -695,9 +715,7 @@ class TestKeysCreate:
         body = r.json()
         assert body["name"] == "CI deploy"
         # the label appears in the list response
-        listed = [k for k in client.get("/v1/team/keys").json()["keys"] if k["id"] == body["id"]]
-        assert len(listed) == 1
-        assert listed[0]["name"] == "CI deploy"
+        assert _listed_key(client, body["id"])["name"] == "CI deploy"
 
     def test_create_key_name_optional_and_defaults_unnamed(self, client):
         # no body / empty label → stored unnamed (name null in the list).
@@ -706,18 +724,14 @@ class TestKeysCreate:
             r = client.post("/v1/team/keys", json=body) if body is not None else client.post("/v1/team/keys")
             assert r.status_code == 200, r.text
             kid = r.json()["id"]
-            listed = client.get("/v1/team/keys").json()["keys"]
-            ids = [k["id"] for k in listed]
-            assert kid in ids, f"minted key {kid} missing from list (embedded-lane visibility?): {ids}"
-            assert next(k for k in listed if k["id"] == kid).get("name") is None, f"body={body!r}"
+            assert _listed_key(client, kid).get("name") is None, f"body={body!r}"
 
     def test_create_key_name_clamped_to_64_chars(self, client):
         long = "x" * 200
         r = client.post("/v1/team/keys", json={"name": long})
         assert r.status_code == 200, r.text
         assert r.json()["name"] == "x" * 64
-        listed = [k for k in client.get("/v1/team/keys").json()["keys"] if k["id"] == r.json()["id"]]
-        assert listed[0]["name"] == "x" * 64
+        assert _listed_key(client, r.json()["id"])["name"] == "x" * 64
 
 
 class TestKeysList:
@@ -758,13 +772,12 @@ class TestKeysList:
 
     def test_list_keys_includes_name_field(self, client):
         # 20260825000001: every listed key carries the (nullable) label.
-        client.post("/v1/team/keys", json={"name": "ci"})
+        kid = client.post("/v1/team/keys", json={"name": "ci"}).json()["id"]
+        listed = _listed_key(client, kid)
+        assert "name" in listed
+        assert listed.get("name") == "ci"
         r = client.get("/v1/team/keys")
-        keys = r.json()["keys"]
-        assert keys
-        for k in keys:
-            assert "name" in k
-        assert any(k.get("name") == "ci" for k in keys)
+        assert all("name" in k for k in r.json()["keys"])
 
 
 class TestKeysRename:
@@ -802,7 +815,7 @@ class TestKeysRename:
         # registry mode has no enabled column — echo preserves the #1148
         # no-op contract {key_id, enabled: True} alongside the applied name
         assert r.json() == {"key_id": kid, "enabled": True, "name": "prod"}
-        listed = next(k for k in client.get("/v1/team/keys").json()["keys"] if k["id"] == kid)
+        listed = _listed_key(client, kid)
         assert listed["name"] == "prod"
 
     def test_rename_clears_label_with_empty_string(self, client):
@@ -811,7 +824,7 @@ class TestKeysRename:
         r = client.patch(f"/v1/team/keys/{kid}", json={"name": "   "})
         assert r.status_code == 200, r.text
         assert r.json()["name"] is None
-        listed = next(k for k in client.get("/v1/team/keys").json()["keys"] if k["id"] == kid)
+        listed = _listed_key(client, kid)
         assert listed.get("name") is None
 
     def test_rename_clears_label_with_null(self, client):
@@ -822,7 +835,7 @@ class TestKeysRename:
         r = client.patch(f"/v1/team/keys/{kid}", json={"name": None})
         assert r.status_code == 200, r.text
         assert r.json()["name"] is None
-        listed = next(k for k in client.get("/v1/team/keys").json()["keys"] if k["id"] == kid)
+        listed = _listed_key(client, kid)
         assert listed.get("name") is None
 
     def test_rename_clamps_to_64_chars(self, client):
@@ -854,7 +867,7 @@ class TestKeysRename:
         r = client.patch(f"/v1/team/keys/{kid}", json={"name": "hijacked"})
         assert r.status_code == 403, r.text
         # label unchanged
-        listed = next(k for k in client.get("/v1/team/keys").json()["keys"] if k["id"] == kid)
+        listed = _listed_key(client, kid)
         assert listed.get("name") == "staging"
 
 
