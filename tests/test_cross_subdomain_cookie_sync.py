@@ -22,6 +22,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SHARED = REPO_ROOT / "website" / "assets" / "supabase-session.js"
 DASHBOARD = REPO_ROOT / "website" / "apps" / "dashboard" / "src" / "main.jsx"
+OAUTH = REPO_ROOT / "tortoise" / "oauth.py"
 
 PAGES = [
     REPO_ROOT / "website" / "signup.html",
@@ -43,7 +44,7 @@ def _read(path: Path) -> str:
 def test_shared_adapter_declares_dashboard_cookie_identity() -> None:
     """Both adapters must declare the same cookie name + domain (anchored to
     const declarations so comment text can't false-match)."""
-    for path, other in ((SHARED, DASHBOARD), (DASHBOARD, SHARED)):
+    for path, other in ((SHARED, DASHBOARD), (DASHBOARD, SHARED), (OAUTH, SHARED)):
         text = _read(path)
         for const in ("COOKIE_NAME", "COOKIE_DOMAIN"):
             # shared file uses var (ES5-safe in the CDN-loaded classic script);
@@ -58,6 +59,13 @@ def test_shared_adapter_declares_dashboard_cookie_identity() -> None:
             )
     assert "sb-tortoise-auth-token" in _read(SHARED)
     assert ".premiselabs.co" in _read(SHARED)
+    # #1704: the OAuth consent page embeds a third copy of the adapter — it
+    # must declare the full SupportedStorage interface + the size guard (a
+    # missing setItem/COOKIE_DOMAIN breaks prod cookie writes at runtime).
+    oauth_text = _read(OAUTH)
+    assert "setItem(key, value) {" in oauth_text
+    assert "removeItem(key) {" in oauth_text
+    assert "SIZE_GUARD" in oauth_text and "provider_token" in oauth_text
 
 
 def test_both_adapters_write_and_remove_cookie_with_same_attributes() -> None:

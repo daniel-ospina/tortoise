@@ -852,10 +852,88 @@ _CONSENT_HTML = """<!DOCTYPE html>
   const SUPABASE_URL = __SUPABASE_URL__;
   const SUPABASE_ANON_KEY = __SUPABASE_ANON_KEY__;
   const AUTHORIZE_PATH = "/oauth/authorize";
+  // #1704: reuse the dashboard's parent-domain session cookie
+  // (sb-tortoise-auth-token on .premiselabs.co — main.jsx supabaseStorage).
+  // The user is already signed in on app.premiselabs.co; this page must not
+  // ask for a SECOND login. persistSession stays TRUE (gotrue DISCARDS a
+  // custom storage when persistSession is false, review P0) and
+  // setItem/removeItem are REAL writes — getSession() always re-reads
+  // storage, so an ingested OAuth/email session must persist to the cookie
+  // or the sign-in fallback loops. detectSessionInUrl stays true so the
+  // provider redirect back with #access_token is ingested.
+  const COOKIE_NAME = "sb-tortoise-auth-token";
+  // #1704: parent-domain cookie storage — a faithful port of the
+  // dashboard's supabaseStorage (website/assets/supabase-session.js):
+  // getItem reads an existing dashboard session (no second login),
+  // setItem/removeItem persist sign-ins here (the OAuth/email fallback
+  // needs a REAL write — getSession() always re-reads storage).
+  // Method shorthand so `this` binds to the object (arrow functions
+  // would bind window). Size guard + localhost-aware domain/secure
+  // attributes mirror the canonical adapter.
+  const COOKIE_PATH = "/";
+  const COOKIE_DOMAIN = ".premiselabs.co";
+  const SIZE_GUARD = 3800;
+  const isLocal = () => {
+    const h = window.location.hostname;
+    if (h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "[::1]") return true;
+    if (h.startsWith("10.") || h.startsWith("192.168.")) return true;
+    return /^172\.(1[6-9]|2\d|3[01])\./.test(h);
+  };
+  const isPremiselabsHost = () => {
+    const h = window.location.hostname;
+    return h === "premiselabs.co" || h.endsWith(".premiselabs.co");
+  };
+  const domainAttr = () => (isPremiselabsHost() && !isLocal() ? "; Domain=" + COOKIE_DOMAIN : "");
+  const secureAttr = () => (isLocal() ? "" : "; Secure");
+  const cookieStorage = {
+    getItem(key) {
+      try {
+        const parts = document.cookie.split("; ");
+        for (const p of parts) {
+          const eq = p.indexOf("=");
+          if (eq > 0 && p.slice(0, eq) === key) return decodeURIComponent(p.slice(eq + 1));
+        }
+        return null;
+      } catch (e) { return null; }
+    },
+    setItem(key, value) {
+      if (!value) { this.removeItem(key); return; }
+      let encoded = encodeURIComponent(value);
+      // Size guard (#1225): a GitHub OAuth session (user_metadata +
+      // identities + provider_token) can exceed the 4096-byte cookie
+      // cap. provider tokens are only needed by the initiating flow.
+      if (encoded.length > SIZE_GUARD) {
+        try {
+          const obj = JSON.parse(value);
+          delete obj.provider_token;
+          delete obj.provider_refresh_token;
+          encoded = encodeURIComponent(JSON.stringify(obj));
+        } catch (e) { /* not JSON — leave as-is */ }
+        if (encoded.length > SIZE_GUARD + 100) {
+          console.warn('sb-tortoise-auth-token session exceeds cookie size cap (' + encoded.length + ' bytes) — session may not bridge subdomains');
+        }
+      }
+      const expires = new Date(Date.now() + 7 * 24 * 3600 * 1000).toUTCString();
+      document.cookie = key + "=" + encoded + domainAttr() + "; Path=" + COOKIE_PATH +
+        "; SameSite=Lax" + secureAttr() + "; Expires=" + expires;
+    },
+    removeItem(key) {
+      document.cookie = key + "=;" + domainAttr() + "; Path=" + COOKIE_PATH +
+        "; SameSite=Lax" + secureAttr() + "; Max-Age=0";
+    },
+  };
   let supabaseClient = null;
   try {
     if (typeof window.supabase !== "undefined") {
-      supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+      supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+        auth: {
+          storage: cookieStorage,
+          storageKey: COOKIE_NAME,
+          persistSession: true,   // required for the custom storage to be used
+          autoRefreshToken: false,
+          detectSessionInUrl: true,  // OAuth fallback ingests the hash
+        },
+      });
     } else {
       showError("Auth is temporarily unavailable (script blocked).");
     }
