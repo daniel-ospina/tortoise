@@ -1532,6 +1532,46 @@ def recover_team_key(cp, *, token_hash: str, team_id: str,
     return team_id
 
 
+def signup_token_row(cp, token_hash: str) -> dict | None:
+    """Read a signup-token row (team_id, revoked_at) by its hash (#1715).
+
+    Unlike resolve_signup_token, the read is UNFILTERED by revocation state
+    — the revoke surface must distinguish live / already-revoked / unknown.
+    None = no such token anywhere. A control-plane failure raises
+    (fail-closed → 500, never a fabricated "unknown").
+    """
+    rows = cp.query(
+        "agent_signup_tokens",
+        select=["team_id", "revoked_at"],
+        filters=[("token_hash", "eq", token_hash)],
+    )
+    return rows[0] if rows else None
+
+
+def revoke_signup_token(cp, token_hash: str, team_id: str) -> None:
+    """User-facing signup-token revocation (#1715, migration 20260826000001).
+
+    Calls the service_role SECURITY DEFINER RPC — team-scoped + idempotent IN
+    SQL: UPDATE ... WHERE token_hash AND team_id AND revoked_at IS NULL. An
+    unknown token / another team's token / already-revoked is a zero-row
+    NO-OP (no RAISE — the endpoint maps 404/403/already from its pre-read
+    signup_token_row; the RPC's WHERE is the authoritative team-scope guard,
+    so a caller can never revoke another team's token even with a wrong
+    pre-read). The RPC is RETURNS void (PostgREST return=minimal does not
+    echo volatile results) — the caller's pre-read is the state authority.
+    A control-plane failure raises (fail-closed → 500, never a silent no-op).
+    """
+    try:
+        cp.rpc("revoke_signup_token", {
+            "p_token_hash": token_hash,
+            "p_team_id": team_id,
+        })
+    except RuntimeError as e:
+        _logger.warning(
+            "revoke_signup_token RPC failed (%s) — fail-closed", e)
+        raise
+
+
 # ── Claim path (#1082, PR1 — 20260813000004) ────────────────────────────────
 #
 # claim_membership attaches a provider-verified Supabase user to the team
