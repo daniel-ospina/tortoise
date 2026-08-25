@@ -151,10 +151,10 @@ function claimIntentInFlight() {
   const [welcomeTeamName, setWelcomeTeamName] = React.useState('')
   const [welcomeGraphName, setWelcomeGraphName] = React.useState('')
   const [welcomeProvisionError, setWelcomeProvisionError] = React.useState('')
-  // #1643: the getting-started wizard (post-key steps: harness → skills →
-  // GitHub → seed → done). For first-timers it follows the key reveal; for
-  // returning empty-graph users it re-opens at the skills step (Back
-  // reaches the harness chooser).
+  // #1643/#1692: the getting-started wizard (post-key steps: harness →
+  // integrations → skills → seed → done). For first-timers it follows the
+  // key reveal; for returning empty-graph users it re-opens at step 0
+  // (harness); step-0 Back returns to the orientation card.
   const [wizardStep, setWizardStepRaw] = React.useState(0)
   const setWizardStep = React.useCallback((n) => { setWizardStepRaw(n); setWizardCopied((c) => (c === 'harness' ? '' : c)) }, [])
   const [wizardHarness, setWizardHarness] = React.useState('claude')
