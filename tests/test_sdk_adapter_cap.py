@@ -45,11 +45,11 @@ def _chat_data(content: str = "hello", finish_reason: str = "stop") -> dict:
 def test_openrouter_max_tokens_kwarg_reaches_body(monkeypatch):
     captured: dict = {}
 
-    def _fake_post(url, headers=None, json=None, timeout=None):
+    def _fake_post(self_or_url, url=None, headers=None, json=None, timeout=None, **kwargs):
         captured["body"] = json
         return _FakeResponse(_chat_data())
 
-    monkeypatch.setattr("tortoise.model_adapters.requests.post", _fake_post)
+    monkeypatch.setattr("tortoise.model_adapters.requests.Session.post", _fake_post)
     model = OpenRouterModel("deepseek/deepseek-v4-flash", max_tokens=8000)
     model.complete(system="s", user="u", max_tokens=1500)
     assert captured["body"]["max_tokens"] == 1500
@@ -61,11 +61,11 @@ def test_openrouter_max_tokens_kwarg_reaches_body(monkeypatch):
 def test_deepseek_direct_max_tokens_kwarg_reaches_body(monkeypatch):
     captured: dict = {}
 
-    def _fake_post(url, headers=None, json=None, timeout=None):
+    def _fake_post(self_or_url, url=None, headers=None, json=None, timeout=None, **kwargs):
         captured["body"] = json
         return _FakeResponse(_chat_data())
 
-    monkeypatch.setattr("tortoise.model_adapters.requests.post", _fake_post)
+    monkeypatch.setattr("tortoise.model_adapters.requests.Session.post", _fake_post)
     model = DeepSeekDirectModel("deepseek-v4-flash", max_tokens=4000)
     model.complete(system="s", user="u", max_tokens=1500)
     assert captured["body"]["max_tokens"] == 1500
@@ -76,7 +76,7 @@ def test_deepseek_direct_max_tokens_kwarg_reaches_body(monkeypatch):
 ])
 def test_openrouter_last_finish_reason(monkeypatch, finish_reason, expected):
     monkeypatch.setattr(
-        "tortoise.model_adapters.requests.post",
+        "tortoise.model_adapters.requests.Session.post",
         lambda *a, **k: _FakeResponse(_chat_data(finish_reason=finish_reason)))
     model = OpenRouterModel("m")
     model.complete(system="s", user="u")
@@ -89,11 +89,11 @@ def test_routing_model_forwards_cap_and_finish_reason(monkeypatch):
     cap to the inner adapter and surfaces last_finish_reason."""
     captured: dict = {}
 
-    def _fake_post(url, headers=None, json=None, timeout=None):
+    def _fake_post(self_or_url, url=None, headers=None, json=None, timeout=None, **kwargs):
         captured["body"] = json
         return _FakeResponse(_chat_data(finish_reason="length"))
 
-    monkeypatch.setattr("tortoise.model_adapters.requests.post", _fake_post)
+    monkeypatch.setattr("tortoise.model_adapters.requests.Session.post", _fake_post)
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     routing = build_extractor_model("deepseek/deepseek-v4-flash",
