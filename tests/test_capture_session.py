@@ -726,9 +726,9 @@ class _FakeLLMResp:
 
 
 def _install_fake_provider(monkeypatch, requests_log):
-    """Monkeypatch requests.post with the _V2SessionMock response logic so the
-    real adapters (OpenRouterModel / DeepSeekDirectModel) run fully offline;
-    every request URL is appended to ``requests_log``."""
+    """Monkeypatch requests.Session.post with the _V2SessionMock response
+    logic so the real adapters (OpenRouterModel / DeepSeekDirectModel) run
+    fully offline; every request URL is appended to ``requests_log``."""
     import requests as _requests
 
     def _fake_post(self_or_url, url=None, **kwargs):
