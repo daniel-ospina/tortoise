@@ -181,10 +181,8 @@ def is_falkor_reason_violation(reason: str) -> bool:
         if reason.startswith(prefix):
             return False
     lowered = reason.lower()
-    for prefix in _EMBEDDED_UNAVAILABLE_PREFIXES:
-        if lowered.startswith(prefix):
-            return False
-    return True
+    return not any(lowered.startswith(prefix)
+                   for prefix in _EMBEDDED_UNAVAILABLE_PREFIXES)
 
 
 def find_violations(log_text: str) -> list[str]:
@@ -270,7 +268,7 @@ def _read_manifest(path: str) -> tuple[set[str], list[str]] | None:
     exactly the #942 vacuity class this guard exists to kill.
     """
     try:
-        with open(path, encoding="utf-8", errors="replace") as f:  # noqa: SIM115
+        with open(path, encoding="utf-8", errors="replace") as f:
             lines = f.read().splitlines()
     except OSError:
         return None

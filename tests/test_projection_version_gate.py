@@ -11,17 +11,13 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest  # noqa: E402
+import pytest
 
-from tortoise.projection import _apply_one, FalkorProjection  # noqa: E402, F401, I001, RUF100
-
-
-# ── helpers ────────────────────────────────────────────────────────────────
-
-
-from tests._embedded import skip_if_no_falkor as _skip_if_no_falkor  # noqa: E402, RUF100
 from tests._embedded import _wipe_or as wipe  # noqa: E402, RUF100
 
+# ── helpers ────────────────────────────────────────────────────────────────
+from tests._embedded import skip_if_no_falkor as _skip_if_no_falkor  # noqa: E402, RUF100
+from tortoise.projection import FalkorProjection, _apply_one  # noqa: E402, F401, I001, RUF100
 
 # ═══════════════════════════════════════════════════════════════════════════
 # _apply_one (InMemoryProjection) version gate tests

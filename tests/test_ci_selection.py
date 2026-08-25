@@ -420,7 +420,6 @@ def test_push_legs_partitions_every_classified_file():
     from tools.ci_selection import push_legs, ENV_BROKEN_FILES  # noqa: I001
     m = load_manifest()
     legs = push_legs(m)
-    slow = {f.replace(".py", "") for f in m["slow_files"]}
     carve = {f.replace(".py", "") for f in m["carve_out"]}
     classified = set()
     for s, files in m["surfaces"].items():  # noqa: B007
@@ -646,8 +645,8 @@ def test_pmv_job_carries_uri_manifest_guard():
     invocation = run["run"]
     assert "--junitxml=/tmp/pmv-junit.xml" in invocation
     assert "-o junit_family=xunit1" in invocation
-    cmdline = next(l for l in invocation.splitlines()
-                   if "python -m pytest" in l)
+    cmdline = next(line for line in invocation.splitlines()
+                   if "python -m pytest" in line)
     assert "-r fEs" in cmdline and "-rfE" not in cmdline, \
         "pmv must use -r fEs (the skip-summary superset), never -rfE"
     assert "--ignore=tests/e2e" in cmdline
@@ -723,8 +722,8 @@ def test_test_slow_job_carries_junitxml_manifest_guard():
     assert "-o junit_family=xunit1" in invocation
     # the pytest command line itself (the comment block may mention the
     # historical flag) must carry -r fEs and never -rfE
-    cmdline = next(l for l in invocation.splitlines()
-                   if "python -m pytest" in l)
+    cmdline = next(line for line in invocation.splitlines()
+                   if "python -m pytest" in line)
     assert "-r fEs" in cmdline and "-rfE" not in cmdline, \
         "test-slow must use -r fEs (the guard's skip-summary superset), never -rfE"
     assert "pytest-rc" in invocation, "the run step must persist pytest rc"

@@ -14,7 +14,7 @@ Plus a live integration test against a running FalkorDB server
 """
 from __future__ import annotations
 
-import os  # noqa: F401
+import os
 import sys
 from pathlib import Path
 

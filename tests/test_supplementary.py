@@ -8,11 +8,11 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest  # noqa: E402
+import pytest
 
 from tortoise.log import EventLog  # noqa: E402, I001, RUF100
+from tortoise.models import OllamaModel, OpenAICompatModel  # noqa: E402, RUF100
 from tortoise.projection import FalkorProjection  # noqa: E402, RUF100
-from tortoise.models import OpenAICompatModel, OllamaModel  # noqa: E402, RUF100
 
 
 def _tmp(name):

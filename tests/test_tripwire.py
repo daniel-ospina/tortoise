@@ -19,6 +19,7 @@ frame is irrelevant (the probe's frame is the caller's, inside this module).
 from __future__ import annotations
 
 import os
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -102,7 +103,7 @@ def docker_up():
     return True
 
 
-def _dead_port_holder() -> tuple[int, "socket.socket"]:
+def _dead_port_holder() -> tuple[int, socket.socket]:
     """A local port that FAILS connections deterministically.
 
     Bind WITHOUT listen and hold the socket for the caller's duration: the

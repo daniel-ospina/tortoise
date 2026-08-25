@@ -39,29 +39,29 @@ from tortoise.projection import FalkorProjection
 # on the server).
 from tortoise.config import is_db_uri as _is_db_uri_seam
 
-_URI_LANE = _is_db_uri_seam(os.environ.get("TORTOISE_DB_URI"))
-_REGISTRY_GRAPH = (f"test_registry_{os.urandom(4).hex()}" if _URI_LANE
+_DOCKER_LANE = _is_db_uri_seam(os.environ.get("TORTOISE_DB_URI"))
+_REGISTRY_GRAPH = (f"test_registry_{os.urandom(4).hex()}" if _DOCKER_LANE
                    else "registry_control_plane")
-_TEAM_SEAM_HEX = os.urandom(4).hex() if _URI_LANE else None
+_TEAM_SEAM_HEX = os.urandom(4).hex() if _DOCKER_LANE else None
 # Supabase-mode graphs: the teams ROW names the graph (the sweep reads
 # teams.graph_name). The rows + seeds + manifest asserts all route through
 # these constants so the docker lane never mints a non-test graph (a literal
 # team_myapp/team_beta would leak across runs — non-test-prefixed graphs are
 # never wiped).
-_MYAPP_GRAPH = (f"test_myapp_{os.urandom(4).hex()}_tortoise" if _URI_LANE
+_MYAPP_GRAPH = (f"test_myapp_{os.urandom(4).hex()}_tortoise" if _DOCKER_LANE
                 else "team_myapp")
-_BETA_GRAPH = (f"test_beta_{os.urandom(4).hex()}_tortoise" if _URI_LANE
+_BETA_GRAPH = (f"test_beta_{os.urandom(4).hex()}_tortoise" if _DOCKER_LANE
                else "team_beta")
-_GAMMA_GRAPH = (f"test_gamma_{os.urandom(4).hex()}_tortoise" if _URI_LANE
+_GAMMA_GRAPH = (f"test_gamma_{os.urandom(4).hex()}_tortoise" if _DOCKER_LANE
                 else "team_gamma")
-_GHOST_GRAPH = (f"test_ghostapp_{os.urandom(4).hex()}_tortoise" if _URI_LANE
+_GHOST_GRAPH = (f"test_ghostapp_{os.urandom(4).hex()}_tortoise" if _DOCKER_LANE
                 else "team_ghost_app")
 
 
 def _team_graph(team_id: str) -> str:
     """Seam-resolved registry-mode team graph name: team_{id} → a guard-
     passing per-team test_* name under URI; historical team_{id} embedded."""
-    if _URI_LANE:
+    if _DOCKER_LANE:
         return f"test_team_{team_id}_{_TEAM_SEAM_HEX}_tortoise"
     return f"team_{team_id}"
 
@@ -84,7 +84,7 @@ def _route_sweep_team_graph_consumption(monkeypatch, request):
     (test_team_graph_name_reads_from_teams, ..._supabase_fail_closed) keep
     real semantics without extra exemptions.
     """
-    if not _URI_LANE:
+    if not _DOCKER_LANE:
         return
     if request.node.name == "test_team_graph_name_reads_from_teams":
         return
@@ -114,7 +114,7 @@ def _journal_backup_seam_graphs():
     otherwise, and the per-test wipe must clear the seam graphs on the server
     lane (the embedded lane's all-graphs wipe() needs nothing).
     """
-    if not _URI_LANE:
+    if not _DOCKER_LANE:
         return
     from tests._embedded import _journal_append
     _journal_append(_REGISTRY_GRAPH)

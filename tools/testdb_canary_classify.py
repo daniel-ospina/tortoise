@@ -358,7 +358,7 @@ def _settle(prev: dict, bucket: str, detail: str, run_id: int,
     """Apply the bucket to the previous streak and return the new record."""
     runs = [r for r in prev.get("runs", []) if isinstance(r, int)]
     if run_id not in runs:
-        runs = [run_id] + runs
+        runs = [run_id, *runs]
     runs = runs[:20]  # bounded history — the artifact stays small
 
     reset_buckets = {"infra-flake", "step-wall-gate", "guard-red",

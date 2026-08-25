@@ -22,9 +22,9 @@ nodeids, and the findings land in docs/divergence-change-list.md.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
-import tempfile
 
 import pytest
 
@@ -108,10 +108,8 @@ def _drop_own_graph(proj) -> None:
     """
     if getattr(proj, "_is_embedded", False):
         return
-    try:
+    with contextlib.suppress(Exception):
         proj.db.select_graph(proj.graph_name).delete()
-    except Exception:
-        pass
 
 
 def _point_count(proj) -> int:
@@ -211,7 +209,7 @@ def test_d2_probe_failure_recovery(leg, tmp_path):
     _write_adjacent_log(tmp_path, 5)
     db_path = str(tmp_path / "lost.db")
     orig = FalkorProjection._probe_ok
-    FalkorProjection._probe_ok = lambda self: False  # noqa: E731
+    FalkorProjection._probe_ok = lambda self: False
     try:
         if leg == "embedded":
             proj = FalkorProjection(db_path)
@@ -271,11 +269,9 @@ def test_d4_bulk_wipe_graph_guard(leg, tmp_path):
         with pytest.raises(RuntimeError, match="Graph guard"):
             proj.g.query("MATCH (n) DETACH DELETE n")  # non-test graph → refused
     finally:
-        try:  # tidy: drop the probe graph (it is not a test_ graph — the
-            # session sweep will never touch it)
+        with contextlib.suppress(Exception):  # tidy: drop the probe graph (it
+            # is not a test_ graph — the session sweep will never touch it)
             proj.db.select_graph("divergence_guard_probe").delete()
-        except Exception:
-            pass
         _drop_own_graph(proj)
         proj.close()
     # A test_-prefixed graph passes the guard.

@@ -7,6 +7,7 @@ entity-CRUD / edge / navigation / org-query rewrites preserve behavior.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 import tempfile
@@ -543,9 +544,8 @@ def test_docker_lane_index_shape():
             f"docker must create the D6 composite "
             f"{EXPECTED_POINT_COMPOSITE_DOCKER}, got {rows}")
     finally:
-        try:  # tidy (epic #1647 review P2): this from_uri mint is not
-            # journaled in URI-unset sessions — drop it explicitly
+        with contextlib.suppress(Exception):  # tidy (epic #1647 review P2):
+            # this from_uri mint is not journaled in URI-unset sessions —
+            # drop it explicitly
             proj.db.select_graph(proj.graph_name).delete()
-        except Exception:
-            pass
         proj.close()

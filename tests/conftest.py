@@ -80,8 +80,8 @@ if _is_db_uri_conftest(os.environ.get("TORTOISE_DB_URI")):
     import tests._embedded as _embedded_mod
     _embedded_mod._JOURNAL_FILE = _JOURNAL_PATH
 
-from tortoise.pricing import tier_limits
-from tortoise.sdk import TortoiseSDK
+from tortoise.pricing import tier_limits  # noqa: E402  (late import: after TEST_MODE env wiring)
+from tortoise.sdk import TortoiseSDK  # noqa: E402
 
 
 # ── Epic #1647 Task 10 Step 1a (P4, plan-review P1-9): URI-required ───────
@@ -685,7 +685,7 @@ def _assert_backend_identity():
         # leftover sweep (test_-prefixed, scope=None), so no leak. Only a
         # NON-server failure (a redirect bug on a reachable URI) keeps the
         # journal, letting the session-end/stale sweeps drain real mints.
-        from redis.exceptions import (
+        from redis.exceptions import (  # noqa: I001 (late, deliberate)
             ConnectionError as _RedisConnError,
             TimeoutError as _RedisTimeoutError,
         )

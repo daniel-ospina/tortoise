@@ -353,7 +353,6 @@ def test_missing_manifest_file_is_red(tmp_path):
     # unreadable → red with an actionable message (a vanished manifest must
     # never vacuous-green — the expected-set is then unknowable, which is
     # itself the failure).
-    junit = _write(tmp_path, "junit.xml", JUNIT_PASSED)
     rc = run_guard_with_manifest(str(tmp_path / "pytest.log"),
                                  manifest=str(tmp_path / "no-such-manifest.txt"),
                                  junit=str(tmp_path / "junit.xml"))
@@ -411,7 +410,7 @@ def test_live_uri_reason_prefix_is_exempt(tmp_path):
     # CONTAINS the "FalkorDB" substring AND starts with the exempted family
     # prefix — it must NOT trip the guard (the visible URI-gate is
     # intentional):
-    junit = _write(tmp_path, "junit.xml", JUNIT_SKIPPED.replace(
+    _junit = _write(tmp_path, "junit.xml", JUNIT_SKIPPED.replace(
         "redislite unavailable",
         "requires TORTOISE_DB_URI (live FalkorDB sidecar; see CI job "
         "test-concurrency-falkor)"))
@@ -429,13 +428,13 @@ def test_live_6399_reason_prefix_is_exempt(tmp_path):
     # family prefix is exempted alongside "requires TORTOISE_DB_URI" — but
     # the availability-REGRESSION family ("Live FalkorDB (Docker) not
     # available") must STILL red (that is the guard's whole job):
-    junit = _write(tmp_path, "junit.xml", JUNIT_SKIPPED.replace(
+    _junit = _write(tmp_path, "junit.xml", JUNIT_SKIPPED.replace(
         "redislite unavailable",
         "Live FalkorDB server on localhost:6399 not available"))
     rc = run_guard_with_manifest(str(tmp_path / "pytest.log"),
                                  junit=str(tmp_path / "junit.xml"))
     assert rc == 0  # 6399 family exempt — the class skips by design
-    junit_red = _write(tmp_path, "junit-red.xml", JUNIT_SKIPPED.replace(
+    _junit_red = _write(tmp_path, "junit-red.xml", JUNIT_SKIPPED.replace(
         "redislite unavailable",
         "Live FalkorDB (Docker) not available"))
     rc = run_guard_with_manifest(str(tmp_path / "pytest.log"),
@@ -451,17 +450,17 @@ def test_embedded_unavailable_reason_prefix_is_exempt(tmp_path):
     # embedded-lane files, which run embedded BY DESIGN under a URI job. The
     # family prefixes are exempted (mirror 6399); the availability-REGRESSION
     # family stays red:
-    junit = _write(tmp_path, "junit.xml", JUNIT_SKIPPED.replace(
+    _junit = _write(tmp_path, "junit.xml", JUNIT_SKIPPED.replace(
         "redislite unavailable", "embedded FalkorDBLite unavailable"))
     rc = run_guard_with_manifest(str(tmp_path / "pytest.log"),
                                  junit=str(tmp_path / "junit.xml"))
     assert rc == 0  # embedded-unavailability family exempt
-    junit2 = _write(tmp_path, "junit2.xml", JUNIT_SKIPPED.replace(
+    _junit2 = _write(tmp_path, "junit2.xml", JUNIT_SKIPPED.replace(
         "redislite unavailable", "redislite falkordb unavailable"))
     rc = run_guard_with_manifest(str(tmp_path / "pytest.log"),
                                  junit=str(tmp_path / "junit2.xml"))
     assert rc == 0  # lowercase-falkordb variant exempt too
-    junit_red = _write(tmp_path, "junit-red.xml", JUNIT_SKIPPED.replace(
+    _junit_red = _write(tmp_path, "junit-red.xml", JUNIT_SKIPPED.replace(
         "redislite unavailable", "Live FalkorDB (Docker) not available"))
     rc = run_guard_with_manifest(str(tmp_path / "pytest.log"),
                                  junit=str(tmp_path / "junit-red.xml"))
@@ -557,7 +556,7 @@ def _load_skip_guard():
     return mod
 
 
-_skip_guard = _load_skip_guard()  # noqa: E402
+_skip_guard = _load_skip_guard()
 
 
 COLLECT_ONLY_SAMPLE = """\
