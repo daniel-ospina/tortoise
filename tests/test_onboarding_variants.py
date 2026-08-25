@@ -230,7 +230,7 @@ def test_wizard_copy_beacon_persists_harness_section():
     dashboard = REPO_ROOT / "website" / "apps" / "dashboard" / "src" / "main.jsx"
     src = dashboard.read_text(encoding="utf-8")
     assert "onboarding/state" in src
-    assert "harness: wizardHarness" in src or "harness: wizardHarness" in src
+    assert "harness: wizardHarness" in src
     assert "section: 'config'" in src
 
 

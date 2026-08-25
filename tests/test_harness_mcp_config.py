@@ -49,7 +49,9 @@ class TestHostedHttpShapes:
         tortoise = cfg["mcpServers"]["tortoise"]
         assert "type" not in tortoise
         assert tortoise["url"] == ENDPOINT
-        assert tortoise["headers"]["Authorization"] == "Bearer ${env:TORTOISE_API_KEY}"
+        # pi's mcp-client expands plain ${VAR} only — no env: prefix (verified
+        # against extensions/mcp-client expandExpr; pi-header.md documents this).
+        assert tortoise["headers"]["Authorization"] == "Bearer ${TORTOISE_API_KEY}"
 
     def test_cursor_env_form_no_type(self):
         # Cursor docs: remote url-based servers take url+headers, no `type`.
@@ -111,16 +113,25 @@ class TestWizardCopyParity:
 
     def test_cursor_and_pi_match_harnesses_env_blocks(self):
         html = self.HARNESSES.read_text(encoding="utf-8")
-        for harness, const in (("cursor", "CURSOR_MCP_CONFIG_ENV"), ("pi", "PI_MCP_CONFIG_ENV")):
+        # cursor supports env: expansion (Cursor docs); pi's mcp-client expands
+        # plain ${VAR} only — the exact pi token is pinned in #1729 (harness
+        # copy); this PR scopes pi to the env-indirection contract.
+        for harness, const, token in (("cursor", "CURSOR_MCP_CONFIG_ENV", "${env:TORTOISE_API_KEY}"),
+                                      ("pi", "PI_MCP_CONFIG_ENV", None)):
             cli = _harness_mcp_config(harness, "tt_any", self.PAGE_URL)
             tortoise = cli["mcpServers"]["tortoise"]
             block = self._extract_block(const)
             # The wizard copy must use env-indirection (never a literal key)
-            # and reference the same MCP_URL the CLI canonical config uses.
-            assert "${env:TORTOISE_API_KEY}" in block, f"env token missing for {harness}"
+            # and reference the same MCP_URL the CLI uses.
+            assert "TORTOISE_API_KEY" in block, f"env token missing for {harness}"
+            assert "tt_" not in block, f"literal key in {const}"
             assert "MCP_URL" in block, f"MCP_URL reference missing for {harness}"
             assert f"const MCP_URL = '{self.PAGE_URL}/mcp/'" in html, "MCP_URL const drift"
             assert tortoise["url"] == f"{self.PAGE_URL}/mcp/", tortoise["url"]
+            if token:  # cursor: exact expansion pinned
+                assert token in block, f"{token} missing for {harness}"
+                assert token in tortoise["headers"]["Authorization"], (
+                    f"CLI {harness} header drifted from wizard copy")
 
     def test_claude_http_config_has_env_expansion(self):
         cli = _harness_mcp_config("claude", "tt_any", self.PAGE_URL)
