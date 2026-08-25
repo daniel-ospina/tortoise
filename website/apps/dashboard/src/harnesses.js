@@ -56,7 +56,7 @@ export const HARNESS_INSTALL = {
   'claude-desktop': (key) =>
     `Edit ~/Library/Application Support/Claude/claude_desktop_config.json (macOS) — or Claude > Settings > Developer in the app — and add the tortoise block\n${JSON.stringify({ mcpServers: { tortoise: { url: MCP_URL, headers: { Authorization: `Bearer ${key}` } } } }, null, 2)}\n(Claude Desktop keeps this key literal in the file — keep that file private. If you already have an mcpServers section, merge this into it — don't replace the whole file. Restart Claude after saving.)`,
   'claude-web': (key) =>
-    `Paste this into a Claude Web chat (after the connector above is connected) so it knows the Tortoise workflows:\n\nYou have Tortoise connected (the 'tortoise' MCP tools). Follow these workflows:\n\n1) Writing to the graph — Tortoise stores knowledge as points with edges: IMPL means 'supports', NAND means 'contradicts'. Mitigations reduce confidence (range 0.10–0.50). To change a point, supersede it and clean up its active edges rather than editing in place. Prefer structural claims over labels and always cite provenance.\n\n2) Decisions — to make a decision, first refine it, then research the options, the criteria that matter, and the findings/evidence, then wire IMPL/NAND edges from findings and criteria to options (mitigate an edge, range 0.10–0.50, when it's true but matters less), and rank the options by EP confidence.\n\n3) Research findings — when I share a research finding, ingest it as a point, check for existing related claims first, and surface connections to what we already know.`,
+    `Paste this into a Claude Web chat (after the connector is connected) so it knows the Tortoise workflows:\n\nYou have Tortoise connected (the 'tortoise' MCP tools). Follow these workflows:\n\n1) Writing to the graph — Tortoise stores knowledge as points with edges: IMPL means 'supports', NAND means 'contradicts'. Mitigations reduce confidence (range 0.10–0.50). To change a point, supersede it and clean up its active edges rather than editing in place. Prefer structural claims over labels and always cite provenance.\n\n2) Decisions — to make a decision, first refine it, then research the options, the criteria that matter, and the findings/evidence, then wire IMPL/NAND edges from findings and criteria to options (mitigate an edge, range 0.10–0.50, when it's true but matters less), and rank the options by EP confidence.\n\n3) Research findings — when I share a research finding, ingest it as a point, check for existing related claims first, and surface connections to what we already know.`,
   codex: (key) =>
     `Run these commands:\nexport TORTOISE_API_KEY=${key}\ncodex mcp add tortoise --url ${MCP_URL} --bearer-token-env-var TORTOISE_API_KEY`,
   cursor: (key) =>
@@ -81,6 +81,13 @@ export const HARNESS_SKILLS = (harness) =>
 // prompt, not a setup command).
 export const HARNESS_COPY_LABEL = {
   'claude-web': 'Copy prompt',
+}
+
+// #1694: per-harness label for the post-copy Continue affordance — for
+// harnesses with manual UI steps (Claude Web), copying ≠ setup done, so
+// the button says what copying actually achieved.
+export const HARNESS_CONTINUE_LABEL = {
+  'claude-web': "I've pasted it — Continue →",
 }
 
 export const HARNESS_PERSIST = (key) =>
