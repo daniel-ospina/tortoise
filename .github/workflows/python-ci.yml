@@ -1478,6 +1478,12 @@ jobs:
         # run-list query FAILS LOUD (review finding #2: a silent query failure
         # would read as "no previous streak" and wrongly reset a real streak
         # on the next green run).
+        env:
+          # Epic #1647 (post-merge CI-fix): gh run list/download needs a token
+          # — without GH_TOKEN the step failed with "To use GitHub CLI in a
+          # GitHub Actions workflow, set the GH_TOKEN environment variable"
+          # (exit 4), which red'd python-ci-gate on the merge run.
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -e
           gh run list --workflow python-ci.yml --branch main --event push --limit 5 \
