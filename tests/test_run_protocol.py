@@ -296,9 +296,16 @@ def test_full_context_cli_dry_run(tmp_path, capsys):
     assert "full_context_" in out and ".report.json" in out
 
 
-def test_cmd_run_owner_gate_and_ordering(tmp_path):
+def test_cmd_run_owner_gate_and_ordering(tmp_path, monkeypatch):
     """The `run` path enforces owner gates (8/9) and gate ordering exactly
     like `gate` does — 03-scope's 'explicit owner decision'."""
+    # Epic #1647 (PR #1684 CI-fix): this test pins the ORDERING contract —
+    # the final step-8 assertion expects the real-backend guard to fire
+    # (SystemExit without TORTOISE_DB_URI). On the docker lane the URI is
+    # present → step 8 proceeds → no exit. Pop the URI so the ordering
+    # contract is lane-independent (the URI-required behavior is its own
+    # test below).
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     state = _fresh_state(tmp_path)
     # owner-gated step without approval → SystemExit
     with pytest.raises(SystemExit):

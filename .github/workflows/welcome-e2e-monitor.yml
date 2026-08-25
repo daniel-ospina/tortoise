@@ -42,6 +42,9 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          # Epic #1647 Task 10 (P4): URI-less e2e surface — the URI-required
+          # enforcement opt-in.
+          TORTOISE_TEST_CARVE_OUT: "1"
       - name: Warn if live signup smoke is skipping (no-429 monitor off)
         if: always()
         # The secrets must be passed to THIS step too — without an env block the

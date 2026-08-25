@@ -1118,6 +1118,17 @@ class TortoiseSDK:
                     # _assert_test_graph guard still passes (#221). Matches the
                     # historical {ns}_tortoise naming.
                     graph_name = f"{self._namespace}_tortoise"
+                elif self._namespace.startswith("test-"):
+                    # Epic #1647 (T7, cycle-5 P1-5): the hyphenated test-*
+                    # family (test-tiers, test-invites, test-hosted, test-e1,
+                    # test-team-722, ...) is a TEST namespace too — normalize
+                    # '-' → '_' so it maps to the guard-passing
+                    # test_<ns>_tortoise graph (test-tiers →
+                    # test_tiers_tortoise). Without the branch it falls
+                    # into team_<ns> (team_test-tiers) — a NON-test graph that
+                    # is invisible to `grep -v 'namespace="test_'` and fails
+                    # _assert_test_graph on bulk wipe.
+                    graph_name = f"{self._namespace.replace('-', '_')}_tortoise"
                 else:
                     # Team SDK: isolated team graph (matches provision's
                     # team_{team_id} namespace creation, #7886).
@@ -1193,6 +1204,14 @@ class TortoiseSDK:
             proj = self._get_proj()
             graph_name = getattr(proj, "graph_name", None)
             ns = self._namespace or ""
+            # Epic #1647 (T7): the hyphenated test-* namespace family is
+            # normalized in _get_proj (test-tiers → test_tiers_tortoise); the
+            # control-plane prefix must normalize identically so the registry
+            # graph ({ns}_{test_graph}_control_plane) — the JOURNAL sweep owns
+            # these (wipe_server's prefix filter cannot: namespaced registries
+            # start with the ns, not test_).
+            if ns.startswith("test-"):
+                ns = ns.replace("-", "_")
             if graph_name and graph_name.startswith(("tortoise_test_", "test_")):
                 # Keep the test prefix so test-graph guards still apply.
                 registry_name = f"{ns}_{graph_name}_control_plane" if ns else f"{graph_name}_control_plane"
@@ -1201,6 +1220,16 @@ class TortoiseSDK:
             else:
                 registry_name = "control_plane"
             self._registry_g = proj.db.select_graph(registry_name)
+            # Epic #1647 (CI P2): the registry name derived from a TEST graph
+            # is `{ns}_{test_graph}_control_plane` — NOT test-prefixed (starts
+            # with registry_/ns_), so wipe_server's test-prefix filter skips
+            # it AND it never reaches the session journal (the redirect only
+            # journals the main graph). Every such mint LEAKED one server
+            # graph per construction (E2E-7 GRAPH.LIST bound red at 466+).
+            # Journal the registry name too (product writer: env-gated no-op
+            # outside a test session).
+            from tortoise.projection import _journal_append_product
+            _journal_append_product(registry_name)
             self._ensure_registry_indexes()
         return self._registry_g
 

@@ -81,7 +81,7 @@ class TestEnforceTeamLimit:
         from tortoise.sdk import TortoiseSDK  # noqa: I001
         import os
         db = os.path.join(tmp_path, "team.db")
-        sdk = TortoiseSDK(db, namespace="team1")
+        sdk = TortoiseSDK(db, namespace=f"test_quota_team1_{os.urandom(4).hex()}")
         sdk.create_point("statement", "A")
         limits = {"team_id": "team1", "max_points": 1}
         with pytest.raises(QuotaExceededError):
@@ -92,7 +92,7 @@ class TestEnforceTeamLimit:
         from tortoise.sdk import TortoiseSDK  # noqa: I001
         import os
         db = os.path.join(tmp_path, "team.db")
-        sdk = TortoiseSDK(db, namespace="team1")
+        sdk = TortoiseSDK(db, namespace=f"test_quota_team1_{os.urandom(4).hex()}")
         sdk.create_point("statement", "A")
         limits = {"team_id": "team1", "max_points": 10}
         enforce_team_limit(limits, "points", sdk=sdk)  # must not raise
@@ -107,7 +107,7 @@ class TestEnforceTeamLimit:
         import logging
         import os
         db = os.path.join(tmp_path, "team.db")
-        sdk = TortoiseSDK(db, namespace="team1")
+        sdk = TortoiseSDK(db, namespace=f"test_quota_team1_{os.urandom(4).hex()}")
         limits = {"team_id": "team1", "max_points": 1000}
         def boom(*a, **kw):
             raise RuntimeError("db down")

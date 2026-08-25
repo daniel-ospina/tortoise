@@ -1018,8 +1018,11 @@ class TestStubEntityULID:
 def _docker_falkor_reachable(port: int = 16379) -> bool:
     """True when a live FalkorDB (Docker) answers on localhost:port.
 
-    #212 live-DB tests self-skip on embedded-only runs (CI pre-merge gate has
-    no Docker) — mirrors the _skip_if_no_falkor pattern used elsewhere.
+    #212 live-DB tests probe the provisioned falkordb-legacy service (16379)
+    — on the P3 docker lane (test-slow) the service is up so these RUN; the
+    skip is VISIBLE (never a vacuous return) and the reason is intentionally
+    NOT guard-exempt: a downed provisioned service must flip the guard red
+    (fail-closed, epic #1647 D-4), not green-skip.
     """
     import socket
     try:

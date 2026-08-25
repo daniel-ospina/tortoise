@@ -42,7 +42,10 @@ def _proj():
     # (the .get() default only applies when the key is ABSENT).
     uri = os.environ.get("TORTOISE_DB_URI") or \
         "docker://:@localhost:16379/tortoise_test_e2e125"
-    proj = FalkorProjection.from_uri(uri)
+    # Epic #1647 (T7): per-test graph — the env/job URI path is shared and
+    # this fixture bulk-DETACHes its graph on every test.
+    proj = FalkorProjection.from_uri(
+        uri, graph_name=f"test_session_capture_e2e_{os.urandom(4).hex()}")
     proj.g.query("MATCH (n) DETACH DELETE n")  # test-prefixed — safe (own graph)
     proj._ensure_indexes()
     return proj

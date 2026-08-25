@@ -42,7 +42,7 @@ def _transport_context(monkeypatch):
 
 
 def _sdk(tmp_path) -> TortoiseSDK:
-    return TortoiseSDK(os.path.join(str(tmp_path), "t.db"), namespace="e2e-1196")
+    return TortoiseSDK(os.path.join(str(tmp_path), "t.db"), namespace=f"test_e2e1196_{os.urandom(4).hex()}")
 
 
 def _dispatch_sdk(monkeypatch, sdk):

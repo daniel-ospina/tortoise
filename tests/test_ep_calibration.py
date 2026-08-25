@@ -8,6 +8,7 @@ Tests use the embedded DB (no Docker needed).
 """
 from __future__ import annotations  # noqa: I001
 
+import os
 import pytest
 
 from tortoise.quadrature import phi_nand
@@ -93,7 +94,7 @@ class TestNANDCalibrationAtRealWeights:
 
         Returns (sdk, claim_a_id, claim_b_id, op_id).
         """
-        sdk = sdk_factory(namespace="ep_calib")
+        sdk = sdk_factory(namespace=f"test_ep_calib_{os.urandom(4).hex()}")
         # Create two claim points (regular points, not operators).
         claim_a = sdk.create_point("evidence", "Claim A: high-confidence finding", status="live")
         claim_b = sdk.create_point("evidence", "Claim B: contradictory finding", status="live")

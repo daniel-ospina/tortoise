@@ -110,7 +110,7 @@ class TestE2E10Decoupling:
         # One SDK, two teams — the same user is a member of both (M:N)
         import tempfile, os as _os  # noqa: E401, F811, I001
         tmpdir = tempfile.mkdtemp()
-        sdk = TortoiseSDK(_os.path.join(tmpdir, "e2e.db"), namespace="e2e-decouple")
+        sdk = TortoiseSDK(_os.path.join(tmpdir, "e2e.db"), namespace=f"test_e2e_decouple_{os.urandom(4).hex()}")
         team_a = sdk.team_create("team-a")
         team_b = sdk.team_create("team-b")
         user_id = "shared-user-1"

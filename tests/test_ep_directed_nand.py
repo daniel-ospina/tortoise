@@ -204,11 +204,18 @@ def test_reinstatement(sdk):
     )
 
 
-def test_mcp_tool_honors_direction(sdk, tmp_path):
+def test_mcp_tool_honors_direction(sdk, tmp_path, monkeypatch):
     """The MCP tool default is bidirectional (mutual); an agent passing
     direction='unidirectional' gets a directed attack stored."""
     import os
     _prev_db = os.environ.get("TORTOISE_DB_PATH")
+    # Epic #1647 (PR #1684 CI-fix): the tool SDK (_get_sdk) reads
+    # TORTOISE_DB_URI on the docker lane → connects to the URI-default graph,
+    # while the test's sdk fixture (path=) redirects to a DERIVED graph → the
+    # tool cannot see the seeded points. This test's contract is MCP-tool +
+    # fixture-SDK SHARING one store — pop the URI so both resolve through
+    # TORTOISE_DB_PATH (embedded store) on BOTH lanes.
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     os.environ["TORTOISE_DB_PATH"] = str(tmp_path / "t.db")  # align tool SDK with fixture
     from tortoise.mcp_auth import _current_team_id, _transport_mode
     tok_mode = _transport_mode.set("stdio")

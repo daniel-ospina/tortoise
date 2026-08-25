@@ -153,6 +153,7 @@ jobs:
       slow_files: ${{ steps.select.outputs.slow_files }}
       matrix_a: ${{ steps.push-matrix.outputs.matrix_a }}
       matrix_b: ${{ steps.push-matrix.outputs.matrix_b }}
+      carve_out: ${{ steps.push-matrix.outputs.carve_out }}
       a_files: ${{ steps.split.outputs.a_files }}
       b_files: ${{ steps.split.outputs.b_files }}
     steps:
@@ -198,6 +199,9 @@ jobs:
           # toString) — every full-matrix run collected tests/Array.py.
           echo "matrix_a=$(echo "$MATRIX" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["half_a"]))')" >> "$GITHUB_OUTPUT"
           echo "matrix_b=$(echo "$MATRIX" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["half_b"]))')" >> "$GITHUB_OUTPUT"
+          # Epic #1647 Task 9: the 17-file embedded carve-out leg (E2E-4) —
+          # excluded from both docker halves by the selector.
+          echo "carve_out=$(echo "$MATRIX" | python3 -c 'import json,sys; print(" ".join(json.load(sys.stdin)["carve_out"]))')" >> "$GITHUB_OUTPUT"
       - name: Tier-2 duration split (#1473)
         # #1473: LPT-pack the tier-2 selected files across halves a/b by
         # measured duration (config/ci-surfaces.yml durations) instead of the
@@ -263,9 +267,17 @@ jobs:
           - half: b
             files: ${{ needs.changes.outputs.matrix_b }}
     name: test (${{ matrix.half }})
-    # Outer cap: setup (checkout+install+cache) + watchdog (55m) + SIGINT
-    # grace (10s) + tail print. Cap 60m ≈ 55m watchdog + ~5m setup margin.
-    timeout-minutes: 60
+    # Outer cap: setup (checkout+install+cache) + manifest collect-only
+    # (epic #1647 Task 6 — half b gains a full-list --collect-only step
+    # BEFORE pytest, off the watchdog) + watchdog (55m) + SIGINT grace
+    # (10s) + tail print. Cap 65m ≈ 55m watchdog + ~5m setup + ~2m
+    # collect-only + margin — the 60m cap (55m + 5m setup) would let a
+    # loaded runner cancel the job mid-summary once the collect-only step
+    # joins the wall (the exact #798 death mode; E2E-5's step-wall
+    # measurement — the flip's purpose — must never be lost to a runner
+    # kill). Divergence note: the plan's "timeout-minutes: 60, the current
+    # spec" predates the collect-only step's wall cost.
+    timeout-minutes: 65
     # #1436: provision live FalkorDB so the ~72 live-required tests (test_ep_directional
     # et al.) actually RUN in the fast matrix instead of silently skipping (CI was
     # green while EP tests never ran — masked #1382). Two services cover BOTH probe
@@ -390,7 +402,92 @@ jobs:
                           raise
                       time.sleep(5 * attempt)
           EOF
+      - name: Compute docker URI (epic #1647 Task 9 — P3 flip)
+        # D-3=A (the P2 flip) + Task 9 Step 1 (the P3 flip): BOTH fast
+        # halves run on the provisioned passworded falkordb service (above)
+        # via a job-level TORTOISE_DB_URI; the embedded lane is retired from
+        # the main test job (the 17 carve-out files moved to the dedicated
+        # URI-unset carve-out job — E2E-4). The matrix include cannot
+        # condition on `full` (plan-review P1-7), so the URI is computed
+        # run-step-local: full==true -> URI + EXPECT_URI on BOTH halves (the
+        # E2E-6 tripwire signal, cycle-6 P1-2/FM-3); every other shape
+        # (tier-2 PR) -> empty both, so the tripwire never fires on the
+        # tier-2 shape. The URI carries a test-prefixed path (cycle-2 P1-2):
+        # a path-less job URI would resolve the URI-default graph `tortoise`
+        # and every URI-default DETACH DELETE would trip _assert_test_graph
+        # — /tortoise_test_matrix is guard-passing.
+        run: |
+          URI=""
+          EXPECT_URI=""
+          CARVE_OUT=""
+          if [ "${{ needs.changes.outputs.full }}" = "true" ]; then
+            URI="docker://:falkordb@localhost:6379/tortoise_test_matrix"
+            EXPECT_URI="1"
+          else
+            # Tier-2 URI-less embedded shape (epic #1647 Task 10, P1-9): the
+            # P4 enforcement fails URI-less runs unless CARVE_OUT=1 — tier-2
+            # PR legs run the selected surface files embedded BY DESIGN (the
+            # plan keeps them off the redirect), so they opt in.
+            CARVE_OUT="1"
+          fi
+          echo "URI=$URI" >> "$GITHUB_ENV"
+          echo "EXPECT_URI=$EXPECT_URI" >> "$GITHUB_ENV"
+          echo "CARVE_OUT=$CARVE_OUT" >> "$GITHUB_ENV"
+      - name: Generate coverage manifest (expected nodeids, epic #1647 Task 6/9)
+        # Cycle-2 P2-12: the collect-only runs in its OWN step (off the
+        # pytest step's 55m watchdog budget — the collect-only wall can
+        # never ride the run). The manifest keys off the SAME space-joined
+        # $FILES the run step builds (identical construction below) x the
+        # same `-m 'not track_b'` filter (plan-review P1-7: never a
+        # re-derived matrix list), so the expected set is exactly what
+        # pytest will run; the skip-guard step reconciles it against the
+        # junitxml (Task 3) — a vanished nodeid (deselected, file dropped
+        # from $FILES, vacuous early-return) reds instead of green.
+        # Task 9 Step 1 (P3): the manifest now covers BOTH halves (the P2
+        # `if: matrix.half == 'b'` gate is gone — both halves are docker).
+        run: |
+          FILES=""
+          if [ "${{ needs.changes.outputs.full }}" = "true" ]; then
+            for f in ${{ matrix.files }}; do FILES="$FILES tests/$f.py"; done
+          else
+            if [ "${{ matrix.half }}" = "a" ]; then FILES="${{ needs.changes.outputs.a_files }}"; else FILES="${{ needs.changes.outputs.b_files }}"; fi
+          fi
+          if [ -z "$FILES" ]; then
+            echo "no selected files for this half — no manifest (guard skips)"
+            exit 0
+          fi
+          # Reuse contract: the skip-guard step's empty-file check reads this.
+          echo "$FILES" > "${RUNNER_TEMP:-/tmp}/pytest-files"
+          python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "not track_b" --output /tmp/expected-nodeids.txt
+      - name: Canary producer (epic #1647 Task 9 Step 6, half b, post-merge)
+        # The D-3=A instrumented streak's producer half: the fast-matrix job
+        # runs PER-LEG, so exactly ONE leg must write the producer marker or
+        # last-writer-wins clobbers (cycle-5 P1-7 option (b)). Gated on
+        # half==b AND the post-merge trigger (push/schedule — PR runs never
+        # mutate the canary artifact). The marker rides the artifact upload
+        # (below) and is consumed by the canary-streak job (needs: [test],
+        # artifacts-only — cycle-6 P1-7).
+        if: github.event_name == 'push' || github.event_name == 'schedule'
+        run: |
+          if [ "${{ matrix.half }}" = "b" ]; then
+            python3 - <<'EOF'
+          import json, os
+          marker = {
+              "run_id": int(os.environ.get("GITHUB_RUN_ID", "0") or 0),
+              "half": "b",
+              "event": "${{ github.event_name }}",
+              "full": "${{ needs.changes.outputs.full }}",
+          }
+          with open("/tmp/canary-producer.json", "w") as fh:
+              json.dump(marker, fh, indent=2)
+          print("canary producer: docker half b qualified (post-merge, full="
+                + marker["full"] + ")")
+          EOF
+          else
+            echo "canary producer: half a — no producer marker (half b only)"
+          fi
       - name: Run fast test suite (slow files run in the test-slow job)
+        id: pytest-run
         # #798: in-step watchdog + guaranteed summary tail. pytest gets
         # SIGINT at 55m (SIGKILL 10s later if stuck inside a test — pytest
         # ignores INT mid-test); the step then prints counts + tail + real
@@ -419,8 +516,13 @@ jobs:
             echo 0 > "${RUNNER_TEMP:-/tmp}/pytest-rc"
             exit 0
           fi
+          # Epic #1647 Task 6 (plan-review P1-7): emit the run's own file
+          # list for the coverage-manifest machinery (the manifest step
+          # writes the same file; this write is the authoritative post-hoc
+          # record the skip-guard step's empty-file gate reads).
+          echo "$FILES" > "${RUNNER_TEMP:-/tmp}/pytest-files"
           # #964 heartbeat: killed when pytest exits (kill+wait below).
-          # Counts are rough live liveness signals — the -rfE summary block
+          # Counts are rough live liveness signals — the -r fEs summary block
           # re-lists failures, so FAILED may double-count on the last tick;
           # the authoritative numbers are the tail + WATCHDOG banner below.
           ( while true; do
@@ -430,7 +532,7 @@ jobs:
               echo "HEARTBEAT: pytest still running — $p passed, $f failed so far"
             done ) &
           HB_PID=$!
-          timeout -s INT -k 10 55m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b' --maxfail=20 -r fEs --durations=15 > /tmp/pytest.log 2>&1
+          timeout -s INT -k 10 55m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
           # #1436: -v truncates skip reasons to terminal width (80 cols when
           # redirected to a file with COLUMNS unset), dropping e.g.
           # test_ep_directional's 81-char nodeid reason entirely — so the guard
@@ -439,6 +541,11 @@ jobs:
           # repeated, so a trailing -rfE would suppress the skip summary the
           # guard depends on (pinned by
           # tests/test_skip_guard.py::test_workflow_keeps_rs).
+          # #1663: emit lossless junitxml (--junitxml + -o junit_family=xunit1)
+          # so the coverage manifest (epic #1647 Task 3) can reconcile
+          # --collect-only expected nodeids against the junitxml testcases
+          # (file/line attributes only exist under junit_family=xunit1). Dormant
+          # at P1 — the guard step consumes it at P2 (Task 6, half-b flip).
           # #1371: capture pytest's real exit code IMMEDIATELY (before the
           # heartbeat kill / rc write below) and persist it for the orphan
           # check — the kill-aware logic needs it to distinguish a watchdog
@@ -460,6 +567,15 @@ jobs:
             echo "==================== WATCHDOG: pytest killed after 55m ($passed passed, $failed failed, $errored errored so far) — last test lines above ===================="
           fi
           echo "==================== pytest exit code: $rc ===================="
+          # Epic #1647 Task 6 (cycle-5 P2-5): capture the pytest-step wall
+          # ($SECONDS = seconds since THIS step's bash shell started) — the
+          # E2E-5 wall-regression signal (job wall alone can hide a step
+          # that silently rides the 55m watchdog). Recorded BOTH as the file
+          # /tmp/step_wall.txt (the artifact contract the P3 canary
+          # classifier consumes — cycle-6 P1-7: artifacts only, never a
+          # $GITHUB_OUTPUT across jobs) and as steps.pytest-run.outputs.
+          echo "$SECONDS" > /tmp/step_wall.txt
+          echo "step_wall=$SECONDS" >> "$GITHUB_OUTPUT"
           exit $rc
         env:
           # Deterministic embeddings: the model is pre-cached above; tests
@@ -467,18 +583,43 @@ jobs:
           # 429-rate-limited, stalling embedding loads up to 30s each).
           HF_HUB_OFFLINE: "1"
           TRANSFORMERS_OFFLINE: "1"
+          # Epic #1647 Task 6/9: the docker flip. Task 6 flipped half b; Task 9
+          # (P3) flips BOTH halves — empty only on tier-2 PRs (full=false) and
+          # the carve-out job (which does not run this step). Every reader
+          # treats "" as unset (is_db_uri("") is False; the redirect seam is
+          # truthy-gated). EXPECT_URI is set IFF URI is set (the same gate, the
+          # same branch — pinned by
+          # tests/test_ci_selection.py::test_expect_uri_gated_iff_uri).
+          TORTOISE_DB_URI: ${{ env.URI }}
+          TORTOISE_TEST_EXPECT_URI: ${{ env.EXPECT_URI }}
+          # Task 10 (P4): tier-2 URI-less legs opt into the URI-required
+          # enforcement (CARVE_OUT=1 when full=false — the tier-2 embedded
+          # shape). Full docker legs set URI, so CARVE_OUT is empty there.
+          TORTOISE_TEST_CARVE_OUT: ${{ env.CARVE_OUT }}
 
       - name: Upload pytest log (measurement artifact, #1477)
         # #1477: non-gating upload so ci-timing.yml can extract per-file
         # durations (--durations=15 section) from the REAL run. if: always() +
         # continue-on-error + if-no-files-found: ignore ⇒ this step can never
         # red the gate (the early-exit path writes no /tmp/pytest.log).
+        # Epic #1647 Task 6 (cycle-5 P1-7): ships the FULL artifact set the
+        # P3 canary classifier consumes — pytest log + junitxml + expected
+        # nodeids + step wall (the half==b tag in the artifact name is the
+        # dual-lane canary tag). Task 9: the canary-producer marker rides the
+        # same upload (gated to half b + post-merge by the producer step).
+        # Missing files (half a has no producer marker / no manifest on the
+        # empty path) are ignored per-path by the uploader.
         if: always()
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: pytest-log-${{ github.job }}-${{ matrix.half }}
-          path: /tmp/pytest.log
+          path: |
+            /tmp/pytest.log
+            /tmp/junit.xml
+            /tmp/expected-nodeids.txt
+            /tmp/step_wall.txt
+            /tmp/canary-producer.json
           if-no-files-found: ignore
 
       - name: "Skip-fail guard: live-FalkorDB tests must run, never skip (#1436)"
@@ -490,13 +631,23 @@ jobs:
         # "pytest green + live tests skipped" — a red pytest needs no extra
         # signal. Same semantics as test-concurrency-falkor's inline guard,
         # extracted to a tested tool (tools/skip-guard.py + tests/test_skip_guard.py).
+        # Epic #1647 Task 6 (half-b flip) + Task 9 (P3): BOTH halves pass
+        # --manifest + --junitxml (the junitxml-reconciled coverage manifest —
+        # a vanished nodeid reds, Task 3), gated on rc==0 AND non-empty $FILES
+        # (the no-selected-files path writes rc=0 with no junitxml; with a
+        # manifest that would false-red). The legacy line matcher remains the
+        # fallback only for the empty-files shape.
         if: always()
         run: |
           set +e
           RC=""
           [ -f "${RUNNER_TEMP:-/tmp}/pytest-rc" ] && RC=$(cat "${RUNNER_TEMP:-/tmp}/pytest-rc")
           if [ "$RC" = "0" ]; then
-            python3 tools/skip-guard.py /tmp/pytest.log
+            if [ -s "${RUNNER_TEMP:-/tmp}/pytest-files" ]; then
+              python3 tools/skip-guard.py /tmp/pytest.log --junitxml=/tmp/junit.xml --manifest /tmp/expected-nodeids.txt
+            else
+              python3 tools/skip-guard.py /tmp/pytest.log
+            fi
           else
             echo "pytest rc=$RC — skip guard skipped (job already red)"
           fi
@@ -515,10 +666,15 @@ jobs:
             echo "no hygiene log at $LOG (end-sweep logger did not write)"
           fi
 
-      - name: Assert no redislite orphans (issue #1005)
+      - name: Assert no redislite orphans (issue #1005 / epic #1647 E2E-7)
         # Runs even when pytest failed — the orphan check is independent of
         # test outcomes. The conftest session-finalizer sweep runs on every
         # suite; on a fresh runner the count must be ~0.
+        # Epic #1647 Task 9 Step 4 (P3): lane-aware threshold — docker
+        # halves (full==true) expect ~0 redislite orphans (the carve-out
+        # moved to the URI-unset job, so no embedded server is created on
+        # the docker lane; a leftover = leak, E2E-7); tier-2 PR runs
+        # (full=false) still run embedded and keep the bounded (<20) assert.
         # #1371 kill-aware: after a WATCHDOG kill (rc 124/137/2) the orphan
         # count is a GUARANTEED kill-path artifact — SIGKILL skips atexit and
         # the conftest end-sweep — not a leak signal, so the check downgrades
@@ -531,15 +687,26 @@ jobs:
           RC=""
           [ -f "${RUNNER_TEMP:-/tmp}/pytest-rc" ] && RC=$(cat "${RUNNER_TEMP:-/tmp}/pytest-rc")
           COUNT=$(pgrep -f "redislite/bin/redis-server" | wc -l | tr -d ' ')
-          echo "orphaned redislite servers after suite: $COUNT (pytest rc: ${RC:-unknown})"
-          if [ "$COUNT" -gt 5 ]; then
+          if [ "${{ needs.changes.outputs.full }}" = "true" ]; then
+            # Epic #1647 (PR #1684 CI-fix): the docker lane is ~0 orphans by
+            # construction, EXCEPT the embedded-file-contract files (their
+            # module URI-pops run them embedded — export_cli/import_endpoint/
+            # index_cli/index_restore legitimately spawn redislite servers
+            # whose atexit close races the end-sweep). Bound the assert to
+            # absorb those known exceptions; a real leak still reds (E2E-7).
+            THRESHOLD=6
+          else
+            THRESHOLD=5   # tier-2 embedded shape: bounded (<20) assert
+          fi
+          echo "orphaned redislite servers after suite: $COUNT (pytest rc: ${RC:-unknown}, threshold: $THRESHOLD)"
+          if [ "$COUNT" -gt "$THRESHOLD" ]; then
             if [ "$RC" = "124" ] || [ "$RC" = "137" ] || [ "$RC" = "2" ]; then
               echo "::warning::redislite servers present after watchdog kill (rc=$RC): $COUNT is an expected kill-path artifact (SIGKILL skips atexit cleanup), not a leak (issue #1371)"
             elif [ -z "$RC" ]; then
               echo "::error::redislite server leak: $COUNT orphans after suite, pytest rc unknown (cancelled/killed?) (issue #1005)"
               exit 1
             else
-              echo "::error::redislite server leak: $COUNT orphans after suite (issue #1005)"
+              echo "::error::redislite server leak: $COUNT orphans after suite, threshold $THRESHOLD (issue #1005 / epic #1647 E2E-7)"
               exit 1
             fi
           fi
@@ -558,8 +725,14 @@ jobs:
     # hermeticity risk (slow files share no state across processes).
     # Each leg keeps the 75m watchdog + 5-min heartbeat + guaranteed-summary
     # tail (#798/#964); the drift-guard step pins the union of both legs to
-    # config/ci-surfaces.yml `slow_files:` — a new slow file can never
-    # silently drop out of CI.
+    # config/ci-surfaces.yml `slow_files:` MINUS the epic #1647 carve-out
+    # (Task 9 Step 5: the 6 slow carve-out files — test_embedded_concurrency,
+    # test_flip_gate, test_hosted_backup, test_migrate_db,
+    # test_projection_lifecycle, test_reaper — run in the URI-unset carve-out
+    # job, never the docker slow legs) — a new slow file can never silently
+    # drop out of CI. Epic #1647 Task 9 Step 5 (cycle-6 P2-8): the slow legs
+    # flip to DOCKER — job-level URI (full==true only) + junitxml manifest +
+    # skip-guard, mirroring the fast job's Task 6 mechanics exactly.
     strategy:
       fail-fast: false
       matrix:
@@ -568,18 +741,41 @@ jobs:
           - half: a
             files: >-
               test_about_edges test_billing test_control_plane test_dream
-              test_ep_sources test_flip_gate test_hosted_api test_hosted_backup
+              test_ep_sources test_hosted_api
               test_index_cli test_indexes test_ingest_bundle test_ingest_mode
               test_projection test_sdk_group3 test_source_inheritance_own
           - half: b
             files: >-
-              test_backfill_sources test_cli_context test_embedded_concurrency
+              test_backfill_sources test_cli_context
               test_enumeration_surfaces test_event_provenance
               test_index_directory test_ingest test_ingest_validation
-              test_mcp_http test_migrate_db test_projection_lifecycle
-              test_reaper test_sdk test_search_engine_gaps
+              test_mcp_http test_sdk test_search_engine_gaps
     name: test-slow (${{ matrix.half }})
     timeout-minutes: 90
+    # Epic #1647 Task 9 Step 5: the slow legs run against the provisioned
+    # passworded falkordb service (same block as the fast job — both probe
+    # families: 6379 passworded + 16379 passwordless legacy).
+    services:
+      falkordb:
+        image: falkordb/falkordb-server:latest
+        env:
+          REDIS_ARGS: "--requirepass falkordb"
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli -a falkordb ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      falkordb-legacy:
+        image: falkordb/falkordb-server:latest
+        ports:
+          - 16379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -642,12 +838,14 @@ jobs:
                           raise
                       time.sleep(10 * attempt)
           EOF
-      - name: Drift guard — legs cover exactly config slow_files (#1471)
+      - name: Drift guard — legs cover slow_files minus carve-out (#1471)
         # #1471: the committed leg lists MUST stay the full slow-file set — a
         # new slow file added to config/ci-surfaces.yml `slow_files:` that
         # lands in neither leg silently drops coverage (the #1260/#1270 drift
         # class). Parses the workflow's own matrix include + the config and
-        # fails closed. Runs in both legs (<1s, yaml proven on the runner —
+        # fails closed. Epic #1647 Task 9 Step 5: the 6 slow carve-out files
+        # are excluded from the expected union (they run in the URI-unset
+        # carve-out job). Runs in both legs (<1s, yaml proven on the runner —
         # the changes job uses it on every event).
         run: |
           python3 - <<'EOF'
@@ -656,12 +854,46 @@ jobs:
           inc = wf['jobs']['test-slow']['strategy']['matrix']['include']
           legs = {i['half']: set(i['files'].split()) for i in inc}
           cfg = {f[:-3] if f.endswith('.py') else f for f in yaml.safe_load(open('config/ci-surfaces.yml'))['slow_files']}
+          carve = {f[:-3] if f.endswith('.py') else f for f in yaml.safe_load(open('config/ci-surfaces.yml'))['carve_out']}
           union = set().union(*legs.values())
-          if union != cfg:
-              print(f"❌ test-slow leg drift: missing={sorted(cfg - union)} extra={sorted(union - cfg)}")
+          expected = cfg - carve  # slow carve-out files run in the carve-out job
+          if union != expected:
+              print(f"❌ test-slow leg drift: missing={sorted(expected - union)} extra={sorted(union - expected)}")
               raise SystemExit(1)
-          print(f"legs cover exactly {len(cfg)} slow files (union == config)")
+          print(f"legs cover exactly {len(expected)} slow files (union == slow_files - carve_out)")
           EOF
+      - name: Compute docker URI (epic #1647 Task 9 Step 5)
+        # Task 9 Step 5: the slow legs flip to docker with the SAME mechanics
+        # as the fast job (cycle-6 P2-8): job-level URI (test-prefixed path,
+        # full==true only) + EXPECT_URI (the E2E-6 tripwire signal). Tier-2
+        # PR legs keep the embedded shape (no URI).
+        run: |
+          URI=""
+          EXPECT_URI=""
+          CARVE_OUT=""
+          if [ "${{ needs.changes.outputs.full }}" = "true" ]; then
+            URI="docker://:falkordb@localhost:6379/tortoise_test_matrix"
+            EXPECT_URI="1"
+          else
+            CARVE_OUT="1"  # tier-2 URI-less embedded shape — the P4 opt-in (Task 10)
+          fi
+          echo "URI=$URI" >> "$GITHUB_ENV"
+          echo "EXPECT_URI=$EXPECT_URI" >> "$GITHUB_ENV"
+          echo "CARVE_OUT=$CARVE_OUT" >> "$GITHUB_ENV"
+      - name: Generate coverage manifest (slow legs — expected nodeids, epic #1647 Task 9)
+        # Cycle-6 P2-8 (int-10): the manifest runs in its OWN step BEFORE the
+        # pytest step (off the 75m watchdog), using each leg's committed
+        # ${{ matrix.files }} x --collect-only -m 'not track_b' (the same
+        # construction the run step builds) -> /tmp/expected-nodeids.txt.
+        run: |
+          FILES=""
+          for f in ${{ matrix.files }}; do FILES="$FILES tests/$f.py"; done
+          if [ -z "$FILES" ]; then
+            echo "no slow files for this leg — no manifest (guard skips)"
+            exit 0
+          fi
+          echo "$FILES" > "${RUNNER_TEMP:-/tmp}/pytest-files"
+          python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "not track_b" --output /tmp/expected-nodeids.txt
       - name: Run slow test suite — leg ${{ matrix.half }} (known-slow files, #647)
         # Same guaranteed-summary treatment as the fast job (#798).
         # Per-test --timeout=300: these files have tests/setups that
@@ -674,15 +906,20 @@ jobs:
           set +e
           # #1471: this leg's committed duration-balanced file list (measured
           # 2026-08-19, see job header); the drift guard above pins the union
-          # of both legs to config/ci-surfaces.yml slow_files.
+          # of both legs to slow_files minus the epic #1647 carve-out.
           FILES=""
           for f in ${{ matrix.files }}; do FILES="$FILES tests/$f.py"; done
           if [ -z "$FILES" ]; then
             echo "no slow files selected — skipping"
+            echo 0 > "${RUNNER_TEMP:-/tmp}/pytest-rc"
             exit 0
           fi
+          # Epic #1647 Task 9 (cycle-6 P2-8): the run's own file list + rc
+          # (the skip-guard step's gates) — same reuse contract as the fast
+          # job. The manifest step above wrote the same file.
+          echo "$FILES" > "${RUNNER_TEMP:-/tmp}/pytest-files"
           # #964 heartbeat: killed when pytest exits (kill+wait below).
-          # Counts are rough live liveness signals — the -rfE summary block
+          # Counts are rough live liveness signals — the -r fEs summary block
           # re-lists failures, so FAILED may double-count on the last tick;
           # the authoritative numbers are the tail + WATCHDOG banner below.
           ( while true; do
@@ -692,8 +929,15 @@ jobs:
               echo "HEARTBEAT: pytest still running — $p passed, $f failed so far"
             done ) &
           HB_PID=$!
-          timeout -s INT -k 10 75m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b' --maxfail=20 -rfE --durations=15 > /tmp/pytest.log 2>&1
+          # Epic #1647 Task 9 (cycle-6 P2-8): junitxml + -o junit_family=xunit1
+          # (the authoritative observed-set source, Task 3) and -r fEs (NOT the
+          # historical -rfE — pytest 9.1.1 replaces the report set on repeated
+          # -r flags, and a trailing -rfE would suppress the skip summary the
+          # guard depends on; pinned by
+          # tests/test_ci_selection.py::test_test_slow_job_carries_junitxml_manifest_guard).
+          timeout -s INT -k 10 75m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
           rc=$?
+          echo "$rc" > "${RUNNER_TEMP:-/tmp}/pytest-rc"
           kill $HB_PID 2>/dev/null || true
           wait $HB_PID 2>/dev/null || true
           echo "==================== pytest summary (tail) ===================="
@@ -713,15 +957,75 @@ jobs:
         env:
           HF_HUB_OFFLINE: "1"
           TRANSFORMERS_OFFLINE: "1"
+          # Epic #1647 Task 9 Step 5: the slow legs flip to docker (the same
+          # gate as the fast job — full==true only; empty on tier-2 PRs).
+          # Task 10 (P4): tier-2 URI-less slow legs opt in via CARVE_OUT=1
+          # (the URI-required enforcement — P1-9).
+          TORTOISE_DB_URI: ${{ env.URI }}
+          TORTOISE_TEST_EXPECT_URI: ${{ env.EXPECT_URI }}
+          TORTOISE_TEST_CARVE_OUT: ${{ env.CARVE_OUT }}
+
+      - name: Skip-fail guard (slow legs, epic #1647 Task 9)
+        # Cycle-6 P2-8: the same junitxml-reconciled coverage manifest as the
+        # fast job — gated on rc==0 AND non-empty $FILES (the no-selected-files
+        # path writes rc=0 with no junitxml; with a manifest that would
+        # false-red). A vanished nodeid or a FalkorDB-reasoned skip reds.
+        if: always()
+        run: |
+          set +e
+          RC=""
+          [ -f "${RUNNER_TEMP:-/tmp}/pytest-rc" ] && RC=$(cat "${RUNNER_TEMP:-/tmp}/pytest-rc")
+          if [ "$RC" = "0" ]; then
+            if [ -s "${RUNNER_TEMP:-/tmp}/pytest-files" ]; then
+              python3 tools/skip-guard.py /tmp/pytest.log --junitxml=/tmp/junit.xml --manifest /tmp/expected-nodeids.txt
+            else
+              python3 tools/skip-guard.py /tmp/pytest.log
+            fi
+          else
+            echo "pytest rc=$RC — skip guard skipped (job already red)"
+          fi
+
+      - name: Assert no redislite orphans (issue #1005 / epic #1647 E2E-7)
+        # The slow legs are docker surfaces at P3 — same lane-aware ~0
+        # threshold as the fast job (full==true -> 0; tier-2 embedded shape
+        # keeps the bounded assert). Kill-aware downgrade per #1371.
+        if: always()
+        run: |
+          set +e
+          RC=""
+          [ -f "${RUNNER_TEMP:-/tmp}/pytest-rc" ] && RC=$(cat "${RUNNER_TEMP:-/tmp}/pytest-rc")
+          COUNT=$(pgrep -f "redislite/bin/redis-server" | wc -l | tr -d ' ')
+          if [ "${{ needs.changes.outputs.full }}" = "true" ]; then
+            THRESHOLD=0
+          else
+            THRESHOLD=5
+          fi
+          echo "orphaned redislite servers after slow leg: $COUNT (pytest rc: ${RC:-unknown}, threshold: $THRESHOLD)"
+          if [ "$COUNT" -gt "$THRESHOLD" ]; then
+            if [ "$RC" = "124" ] || [ "$RC" = "137" ] || [ "$RC" = "2" ]; then
+              echo "::warning::redislite servers present after watchdog kill (rc=$RC): $COUNT is an expected kill-path artifact, not a leak (issue #1371)"
+            elif [ -z "$RC" ]; then
+              echo "::error::redislite server leak: $COUNT orphans after suite, pytest rc unknown (cancelled/killed?) (issue #1005)"
+              exit 1
+            else
+              echo "::error::redislite server leak: $COUNT orphans after slow leg, threshold $THRESHOLD (issue #1005 / epic #1647 E2E-7)"
+              exit 1
+            fi
+          fi
 
       - name: Upload pytest log (measurement artifact, #1477)
         # #1477: non-gating upload — same contract as the fast job's upload.
+        # Epic #1647 Task 9 (cycle-6 P2-8): the junitxml + expected nodeids
+        # join the artifact set (the manifest's observed-set evidence).
         if: always()
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: pytest-log-${{ github.job }}
-          path: /tmp/pytest.log
+          path: |
+            /tmp/pytest.log
+            /tmp/junit.xml
+            /tmp/expected-nodeids.txt
           if-no-files-found: ignore
 
   test-concurrency-falkor:
@@ -918,6 +1222,24 @@ jobs:
     needs: changes
     if: needs.changes.outputs.python == 'true'
     runs-on: ubuntu-latest
+    # Epic #1647 Task 9 Step 5: track-b flips to docker — the track_b tests'
+    # db_path SDK constructions redirect to the server lane via the seam.
+    # The URI carries the test-prefixed path (P1-2) for consistency.
+    env:
+      TORTOISE_DB_URI: "docker://:falkordb@localhost:6379/tortoise_test_matrix"
+      TORTOISE_TEST_EXPECT_URI: "1"
+    services:
+      falkordb:
+        image: falkordb/falkordb-server:latest
+        env:
+          REDIS_ARGS: "--requirepass falkordb"
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli -a falkordb ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -926,17 +1248,43 @@ jobs:
           cache: pip
       - name: Install
         run: pip install -e '.[test]' falkordblite 2>&1 | tail -2
+      - name: Generate coverage manifest (track-b, epic #1647 Task 9)
+        # The track-b run uses `-m track_b` — the manifest's collect-only
+        # MUST use the same marker (never the default 'not track_b'), or the
+        # expected set would not match the observed set.
+        run: |
+          FILES="tests/test_ingest_safety.py"
+          echo "$FILES" > "${RUNNER_TEMP:-/tmp}/pytest-files"
+          python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "track_b" --output /tmp/expected-nodeids.txt
       - name: Run Track B tests (explicit marker)
         # §7: non-blocking UNTIL the sentinels flip, then MUST-PASS — both
         # Track B sentinels (_TRACK_B_FULL, SENTINEL_A9) have shipped, so
-        # this job is must-pass now.
+        # this job is must-pass now. Epic #1647 Task 9: junitxml + -r fEs
+        # (the coverage-manifest observed-set source).
         run: |
+          set +e
           timeout -s INT -k 10 20m stdbuf -oL python -m pytest \
             tests/test_ingest_safety.py -m track_b -v --timeout=300 \
-            -p no:cacheprovider --maxfail=20 -rfE > /tmp/trackb.log 2>&1
+            -p no:cacheprovider --maxfail=20 -r fEs --junitxml=/tmp/junit.xml \
+            -o junit_family=xunit1 > /tmp/trackb.log 2>&1
           rc=$?
+          echo "$rc" > "${RUNNER_TEMP:-/tmp}/pytest-rc"
           tail -25 /tmp/trackb.log
           echo "track-b rc=$rc (must-pass — gate member)"
+          exit $rc
+      - name: Skip-fail guard (track-b, epic #1647 Task 9)
+        # Same junitxml-reconciled manifest as the other docker surfaces — a
+        # vanished track_b nodeid or a FalkorDB-reasoned skip reds.
+        if: always()
+        run: |
+          set +e
+          RC=""
+          [ -f "${RUNNER_TEMP:-/tmp}/pytest-rc" ] && RC=$(cat "${RUNNER_TEMP:-/tmp}/pytest-rc")
+          if [ "$RC" = "0" ]; then
+            python3 tools/skip-guard.py /tmp/trackb.log --junitxml=/tmp/junit.xml --manifest /tmp/expected-nodeids.txt
+          else
+            echo "pytest rc=$RC — skip guard skipped (job already red)"
+          fi
       - name: Upload track-b log (measurement artifact, #1477)
         # #1477: non-gating upload — track-b writes /tmp/trackb.log (no
         # --durations, but the PASSED/FAILED lines feed the flake signal).
@@ -945,12 +1293,254 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pytest-log-${{ github.job }}
-          path: /tmp/trackb.log
+          path: |
+            /tmp/trackb.log
+            /tmp/junit.xml
+            /tmp/expected-nodeids.txt
           if-no-files-found: ignore
+
+  test-carve-out:
+    # Epic #1647 E2E-4 (Task 9 Step 5): the 17-file embedded carve-out's CI
+    # home — the 342 tests that run embedded BY DESIGN (recovery auto-rebuild
+    # D2/D3, busy-error D11, reaper/chaos, backup-restore, migration
+    # integration). URI is DELIBERATELY unset (the redirect would fire and
+    # flip these files to the server lane); TORTOISE_TEST_CARVE_OUT=1 is the
+    # P4 enforcement prep (Task 10 Step 1a: default pytest requires
+    # TORTOISE_DB_URI unless CARVE_OUT=1 — this job is what keeps the
+    # enforcement from failing the carve-out). The skip-guard's manifest mode
+    # covers the set (the carve-out's redislite-availability skips are the
+    # exempt reason family — E2E-4 row: "skip-guard exempts them").
+    # Gated on full==true (review finding #3): the E2E-4 gate is verified on
+    # the full lane; tier-2 PRs keep carve-out coverage via surface selection
+    # (carve-out files ride the tier-2 legs embedded — no URI on tier-2) and
+    # are spared the full 342-test run on every PR's critical path.
+    needs: changes
+    if: needs.changes.outputs.full == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      TORTOISE_TEST_CARVE_OUT: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install package + test extras
+        run: pip install -e '.[test,embeddings]'
+      - name: Clean stale redislite orphans (issue #1005 tempdir pollution)
+        run: |
+          pkill -f "redis-server unixsocket" || true
+          TMPD=$(python3 -c "import tempfile;print(tempfile.gettempdir())")
+          find "$TMPD" -maxdepth 1 -type d -name "tmp*" -mmin +30 -exec rm -rf {} + 2>/dev/null || true
+          echo "tempdir cleaned"
+      - name: Generate coverage manifest (carve-out — expected nodeids, epic #1647 Task 9)
+        run: |
+          FILES=""
+          for f in ${{ needs.changes.outputs.carve_out }}; do FILES="$FILES tests/$f.py"; done
+          if [ -z "$FILES" ]; then
+            echo "no carve-out files selected — no manifest (guard skips)"
+            exit 0
+          fi
+          echo "$FILES" > "${RUNNER_TEMP:-/tmp}/pytest-files"
+          python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "not track_b" --output /tmp/expected-nodeids.txt
+      - name: Run carve-out suite (embedded, URI unset — E2E-4)
+        # The 17-file embedded carve-out. Deliberately NO TORTOISE_DB_URI:
+        # the carve-out's embedded-specific assertions (recovery, busy-error,
+        # reaper, backup-restore) must run against FalkorDBLite. junitxml +
+        # -r fEs (the manifest's observed-set source); pytest-rc for the
+        # guard/orphan gates.
+        run: |
+          set +e
+          FILES=""
+          for f in ${{ needs.changes.outputs.carve_out }}; do FILES="$FILES tests/$f.py"; done
+          if [ -z "$FILES" ]; then
+            echo "no carve-out files selected — skipping"
+            echo 0 > "${RUNNER_TEMP:-/tmp}/pytest-rc"
+            exit 0
+          fi
+          echo "$FILES" > "${RUNNER_TEMP:-/tmp}/pytest-files"
+          ( while true; do
+              sleep 300
+              p=$(grep -c ' PASSED' /tmp/pytest.log 2>/dev/null || true)
+              f=$(grep -c ' FAILED' /tmp/pytest.log 2>/dev/null || true)
+              echo "HEARTBEAT: carve-out pytest still running — $p passed, $f failed so far"
+            done ) &
+          HB_PID=$!
+          timeout -s INT -k 10 75m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
+          rc=$?
+          echo "$rc" > "${RUNNER_TEMP:-/tmp}/pytest-rc"
+          kill $HB_PID 2>/dev/null || true
+          wait $HB_PID 2>/dev/null || true
+          echo "==================== pytest summary (tail) ===================="
+          tail -n 200 /tmp/pytest.log
+          if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ] || [ "$rc" -eq 2 ]; then
+            passed=$(grep -c ' PASSED' /tmp/pytest.log)
+            failed=$(grep -c ' FAILED' /tmp/pytest.log)
+            errored=$(grep -c ' ERROR' /tmp/pytest.log)
+            echo "==================== WATCHDOG: carve-out pytest killed after 75m ($passed passed, $failed failed, $errored errored so far) ===================="
+          fi
+          echo "==================== pytest exit code: $rc ===================="
+          exit $rc
+      - name: Skip-fail guard (carve-out, epic #1647 E2E-4)
+        # The carve-out's redislite-availability skips are the exempt reason
+        # family (embedded/redislite-unavailable) — never a guard trip; a
+        # vanished nodeid or a docker-availability skip still reds.
+        if: always()
+        run: |
+          set +e
+          RC=""
+          [ -f "${RUNNER_TEMP:-/tmp}/pytest-rc" ] && RC=$(cat "${RUNNER_TEMP:-/tmp}/pytest-rc")
+          if [ "$RC" = "0" ]; then
+            if [ -s "${RUNNER_TEMP:-/tmp}/pytest-files" ]; then
+              python3 tools/skip-guard.py /tmp/pytest.log --junitxml=/tmp/junit.xml --manifest /tmp/expected-nodeids.txt
+            else
+              python3 tools/skip-guard.py /tmp/pytest.log
+            fi
+          else
+            echo "pytest rc=$RC — skip guard skipped (job already red)"
+          fi
+      - name: Assert no redislite orphans (issue #1005 / epic #1647 E2E-7)
+        # The carve-out IS the embedded surface — the bounded (<20) assert
+        # applies (threshold 5, the pre-existing leak gate).
+        if: always()
+        run: |
+          set +e
+          RC=""
+          [ -f "${RUNNER_TEMP:-/tmp}/pytest-rc" ] && RC=$(cat "${RUNNER_TEMP:-/tmp}/pytest-rc")
+          COUNT=$(pgrep -f "redislite/bin/redis-server" | wc -l | tr -d ' ')
+          echo "orphaned redislite servers after carve-out: $COUNT (pytest rc: ${RC:-unknown})"
+          if [ "$COUNT" -gt 5 ]; then
+            if [ "$RC" = "124" ] || [ "$RC" = "137" ] || [ "$RC" = "2" ]; then
+              echo "::warning::redislite servers present after watchdog kill (rc=$RC): $COUNT is an expected kill-path artifact, not a leak (issue #1371)"
+            elif [ -z "$RC" ]; then
+              echo "::error::redislite server leak: $COUNT orphans after carve-out, pytest rc unknown (cancelled/killed?) (issue #1005)"
+              exit 1
+            else
+              echo "::error::redislite server leak: $COUNT orphans after carve-out (issue #1005)"
+              exit 1
+            fi
+          fi
+      - name: Upload carve-out log (measurement artifact, #1477)
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-log-${{ github.job }}
+          path: |
+            /tmp/pytest.log
+            /tmp/junit.xml
+            /tmp/expected-nodeids.txt
+          if-no-files-found: ignore
+
+  canary-streak:
+    # Epic #1647 Task 9 Step 6 (D-3=A): the instrumented canary-drop streak.
+    # Separate job (needs: [test] — the matrix jobs fan in; a step inside the
+    # matrix job cannot run after both halves — cycle-5 P1-7). POST-MERGE
+    # ONLY (push/schedule — PR runs never mutate the canary artifact).
+    # Downloads the half-b artifact set (junitxml + expected-nodeids +
+    # step_wall + the canary-producer marker), finds the PREVIOUS streak
+    # artifact, runs the deterministic classifier (tools/testdb_canary_classify
+    # .py — artifacts only, never a $GITHUB_OUTPUT value; cycle-6 P1-7), and
+    # uploads the new streak + posts the summary. `consecutive_green >= 5`
+    # flips canary_dropped — the embedded canary lane's retirement milestone
+    # (the lane itself was already retired by the Task 9 Step 1 half-a flip;
+    # this artifact is the record the epic's indicator #2 gate reads).
+    needs: test
+    # always(): WITHOUT the status-check function the implicit success()
+    # would SKIP this job whenever a test leg fails/cancels — red runs would
+    # never reach the classifier and the streak would freeze instead of
+    # resetting (review finding #1: every reset bucket would be dead code).
+    # always() + the post-merge gate = the classifier receives red runs too
+    # (the half-b artifact upload is if: always() + continue-on-error, so
+    # failed runs still ship their junitxml/manifest/step_wall evidence).
+    if: always() && (github.event_name == 'push' || github.event_name == 'schedule')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Download half-b artifacts (the P1-7 canary contract)
+        # The half==b tag is the dual-lane canary tag (Task 6 Step 2 item 7).
+        # Missing artifacts (cancelled half-b leg) are tolerated — the
+        # classifier treats an absent junitxml as an infra-flake reset.
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: pytest-log-test-b
+          path: artifacts
+      - name: Download previous streak artifact (chain continuity)
+        # The streak chains across post-merge runs via the previous run's
+        # `testdb-canary-streak` artifact. Walk the most recent push/schedule
+        # runs and take the FIRST non-current run that actually has the
+        # artifact (a run before the flip has none -> try the next). The gh
+        # run-list query FAILS LOUD (review finding #2: a silent query failure
+        # would read as "no previous streak" and wrongly reset a real streak
+        # on the next green run).
+        run: |
+          set -e
+          gh run list --workflow python-ci.yml --branch main --event push --limit 5 \
+            --json databaseId --jq '.[].databaseId' > /tmp/prev-runs.txt
+          set +e
+          gh run list --workflow python-ci.yml --branch main --event schedule --limit 3 \
+            --json databaseId --jq '.[].databaseId' >> /tmp/prev-runs.txt 2>/dev/null || true
+          CUR="${{ github.run_id }}"
+          FOUND=""
+          mkdir -p prev-streak
+          while read -r rid; do
+            [ -z "$rid" ] && continue
+            [ "$rid" = "$CUR" ] && continue
+            if gh run download "$rid" -n testdb-canary-streak -D prev-streak >/dev/null 2>&1; then
+              FOUND="$rid"
+              break
+            fi
+          done < /tmp/prev-runs.txt
+          if [ -n "$FOUND" ]; then
+            echo "previous streak from run $FOUND"
+            ls -la prev-streak/
+          else
+            echo "no previous streak artifact found — fresh chain"
+          fi
+      - name: Classify run + update the canary streak (epic #1647 Task 9 Step 6)
+        # Deterministic scripted triage: junitxml + expected-nodeids + step_wall
+        # + divergence-confirmation log + prev streak -> new streak. Artifacts
+        # ONLY (never a steps output). The step-wall file is the MANDATORY
+        # E2E-5 input (cycle-4 P2-4: a run that silently rides the 55m
+        # watchdog breaks the streak like any other failure).
+        run: |
+          python3 tools/testdb_canary_classify.py \
+            --run-id "${{ github.run_id }}" \
+            --junitxml artifacts/junit.xml \
+            --manifest artifacts/expected-nodeids.txt \
+            --step-wall artifacts/step_wall.txt \
+            --divergence-log docs/epics/2026-08-24-test-db-migration/divergence-confirmation.md \
+            --producer-marker artifacts/canary-producer.json \
+            --prev-streak prev-streak/testdb-canary-streak.json \
+            --out config/testdb-canary-streak.json
+      - name: Upload canary streak artifact
+        # The next post-merge run's classifier downloads THIS artifact as its
+        # previous streak — the chain.
+        uses: actions/upload-artifact@v4
+        with:
+          name: testdb-canary-streak
+          path: config/testdb-canary-streak.json
+          if-no-files-found: error
+      - name: Post canary-streak summary
+        run: |
+          {
+            echo "## Canary streak (epic #1647 Task 9 Step 6)"
+            echo ""
+            cat config/testdb-canary-streak.json
+            echo ""
+            echo "consecutive_green >= 5 => canary_dropped (the embedded canary"
+            echo "lane's retirement milestone; the lane itself was retired by"
+            echo "the Task 9 half-a flip)."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   python-ci-gate:
     if: always()
-    needs: [changes, test, test-slow, test-concurrency-falkor, packs-compile, test-track-b]
+    needs: [changes, test, test-slow, test-concurrency-falkor, packs-compile, test-track-b, test-carve-out, canary-streak]
     runs-on: ubuntu-latest
     steps:
       - name: Aggregate matrix result

@@ -147,6 +147,41 @@ def _target_graph(sdk: TortoiseSDK, graph_name: str | None):
     proj = sdk._get_proj()
     if graph_name is None:
         return proj.g
+    # Epic #1647 (PR #1684 CI-fix): on the DOCKER lane the redirect derives
+    # per-path test_<stem>_<hash> names — an explicit legacy name
+    # (team_team-k, the D5 backfill's recorded graph_name) does NOT exist
+    # as a physical server graph. Routing it raw splits the lock AND the
+    # target from the SDK's namespace graph (the #1307 race survives on
+    # docker: provision locks derived-X, backfill locks raw-Y, both write
+    # the same derived graph). Resolve through the projection's derivation:
+    # the redirect's own rule (test-prefixed verbatim, else derived from
+    # path+name) applied to the explicit name.
+    # Epic #1647 (PR #1684 CI-fix): on the DOCKER TEST lane the redirect
+    # derives per-path test_<stem>_<hash> names — an explicit legacy name
+    # (team_team-k, the D5 backfill's recorded graph_name) does NOT exist as
+    # a physical server graph. Routing it raw splits the lock AND the target
+    # from the SDK's namespace graph (the #1307 race survives on docker:
+    # provision locks derived-X, backfill locks raw-Y, both write the same
+    # derived graph). Resolve through the projection's derivation — BUT ONLY
+    # when the redirect actually fired (TEST_MODE=1 + explicit path): in
+    # PROD (URI set, no TEST_MODE) the graph IS the real team_<name> and
+    # deriving would corrupt the backfill into phantom test_ graphs.
+    _test_session = os.environ.get("TORTOISE_TEST_MODE") == "1"
+    _explicit = getattr(proj, "_explicit_path", None)
+    if (not getattr(proj, "_is_embedded", True) and _test_session
+            and _explicit is not None):
+        _gn = graph_name
+        if not _gn.startswith(("test_", "tortoise_test")):
+            import hashlib as _h
+            import os as _os
+            import re as _re
+            _sess = _os.environ.get("TORTOISE_TEST_SESSION", "")
+            _path = str(_explicit)
+            _stem = _re.sub(r"[^a-zA-Z0-9_]", "_",
+                            _os.path.splitext(_os.path.basename(_path))[0])
+            _gn = (f"test_{_stem}_"
+                   + _h.sha1((_sess + _path + _gn).encode()).hexdigest()[:12])
+        return proj.db.select_graph(_gn)
     return proj.db.select_graph(graph_name)
 
 
@@ -169,6 +204,24 @@ def _resolved_graph_name(sdk: TortoiseSDK, graph_name: str | None) -> str:
     proj = sdk._get_proj()
     if graph_name is None:
         return proj.graph_name
+    # Epic #1647 (PR #1684 CI-fix): same derivation as _target_graph — an
+    # explicit legacy name on the docker lane must resolve to the derived
+    # physical graph so the lock matches the target (one lock per physical
+    # graph, conf 75).
+    _test_session = os.environ.get("TORTOISE_TEST_MODE") == "1"
+    _explicit = getattr(proj, "_explicit_path", None)
+    if (not getattr(proj, "_is_embedded", True) and _test_session
+            and _explicit is not None):
+        import hashlib as _h
+        import os as _os
+        import re as _re
+        if not graph_name.startswith(("test_", "tortoise_test")):
+            _sess = _os.environ.get("TORTOISE_TEST_SESSION", "")
+            _path = str(_explicit)
+            _stem = _re.sub(r"[^a-zA-Z0-9_]", "_",
+                            _os.path.splitext(_os.path.basename(_path))[0])
+            return (f"test_{_stem}_"
+                    + _h.sha1((_sess + _path + graph_name).encode()).hexdigest()[:12])
     return graph_name
 
 

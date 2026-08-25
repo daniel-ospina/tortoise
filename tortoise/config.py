@@ -47,6 +47,27 @@ RELATIVE_PATH_ERROR = (
 # documented-supported but _resolve_db_target only recognized docker://).
 SUPPORTED_URI_SCHEMES = ("docker", "redis", "rediss")
 
+# Epic #1647 (cycle-7 P1-3): the SINGLE shared loopback host set — the
+# URI-aware test redirect (projection._is_loopback_host DELEGATES here), the
+# Task 4 session-start tripwire, and wipe_server all resolve the SAME host
+# set so the fail-before-first-write chain cannot diverge (pinned by
+# test_loopback_predicate_single_source).
+LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def is_loopback_uri(uri: str | None) -> bool:
+    """True when the URI's hostname is a loopback host (localhost/127.0.0.1/::1).
+
+    Fail-closed: an absent hostname (``docker://:pw@:6379``) or a bare IPv6
+    literal parses to ``None`` and is NOT loopback — a session must never
+    mint test graphs on an unintended default host (cycle-8 P2-1). Note the
+    RFC 3986 rule: IPv6 literals must be bracketed (``[::1]``) to parse.
+    """
+    if not uri:
+        return False
+    from urllib.parse import urlparse
+    return (urlparse(uri).hostname or "") in LOOPBACK_HOSTS
+
 
 def is_db_uri(uri: str | None) -> bool:
     """True if a value is a supported connection URI (docker://, redis://,

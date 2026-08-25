@@ -443,13 +443,20 @@ def _legacy_check_structure(graph) -> list[dict]:
 
 @pytest.fixture
 def graph_sdk():
-    """Embedded SDK; skips when FalkorDBLite is unavailable."""
+    """Embedded SDK; skips when FalkorDBLite is unavailable (epic #1647).
+
+    Task 9 (P3): the vacuous-probe retirement — under a supported
+    TORTOISE_DB_URI has_falkor() short-circuits True (P2-16), so this
+    fixture always proceeds on the docker lane; on an embedded lane the
+    skip is VISIBLE with the guard-exempt reason family (never a vacuous
+    pass, never a FalkorDB-guard trip).
+    """
     try:
         from tests._embedded import has_falkor
         if not has_falkor():
-            pytest.skip("FalkorDBLite not available")
+            pytest.skip("embedded FalkorDBLite unavailable — migrated tests run on docker (epic #1647)")
     except Exception:
-        pytest.skip("FalkorDBLite not available")
+        pytest.skip("embedded FalkorDBLite unavailable — migrated tests run on docker (epic #1647)")
     sdk = _make_sdk()
     yield sdk
     sdk.close()

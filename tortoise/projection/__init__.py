@@ -12,6 +12,7 @@ Backends behind the `Projection` protocol:
 """
 from __future__ import annotations  # noqa: I001
 
+import hashlib
 import re
 import os
 import shutil
@@ -94,7 +95,7 @@ class _GuardedGraph:
     def __getattr__(self, name):
         return getattr(self._g, name)
 
-from tortoise.config import RELATIVE_PATH_ERROR, SUPPORTED_URI_SCHEMES  # noqa: E402, I001
+from tortoise.config import RELATIVE_PATH_ERROR, SUPPORTED_URI_SCHEMES, LOOPBACK_HOSTS  # noqa: E402, I001
 from tortoise.live import _live_only  # noqa: E402
 from tortoise.embedded_lifecycle import (  # noqa: E402
     atexit_fast_close,  # #1371: registers the batch flush
@@ -106,6 +107,127 @@ from tortoise.embedded_lifecycle import (  # noqa: E402
 # (SUPPORTED_URI_SCHEMES) so URI-routing and connection-layer validation share
 # one source of truth (#715). Kept for existing importers of the private name.
 _SUPPORTED_URI_SCHEMES = SUPPORTED_URI_SCHEMES
+
+# Epic #1647 (cycle-7 P1-3): the redirect's loopback predicate DELEGATES to
+# tortoise.config's LOOPBACK_HOSTS — one implementation shared with the Task 4
+# tripwire and wipe_server (pinned by test_loopback_predicate_single_source).
+_LOOPBACK_HOSTS = LOOPBACK_HOSTS
+
+
+def _is_supported_uri_scheme(uri: str) -> bool:
+    """True when the URI's scheme is in the shared SUPPORTED_URI_SCHEMES
+    (docker/redis/rediss). Single shared predicate — the redirect and any
+    URI-routing check use it (plan-review P2-11: the old plan referenced a
+    non-existent _is_supported_uri_scheme; _validate_uri_scheme RAISES and
+    cannot be used as a predicate)."""
+    return uri.split(":", 1)[0].lower() in _SUPPORTED_URI_SCHEMES
+
+
+def _caller_test_stem() -> str | None:
+    """Nearest calling TEST module's file stem (plan-review P0-1).
+
+    Walks the caller stack for the FIRST (nearest) frame whose ``__file__``
+    basename starts with "test_" — the exemption key for
+    TORTOISE_TEST_NO_REDIRECT. Cycle-3 P2-18: the key is the NEAREST test_
+    frame, NOT the outermost — a cross-test-module helper (e.g. a shared
+    fixture in test_helpers.py called from test_config.py) resolves to the
+    helper's stem, so a shared helper's exemption exempts ALL its callers
+    (documented semantics; the exemption list is the caller-module list, so
+    a helper used by both a carve-out and a migrated file must not be
+    listed). Helpers (tests/_embedded.py, tests/_live_utils.py, conftest.py)
+    are skipped by the prefix sniff, so a carve-out file constructing
+    through a helper still resolves to its own stem. Returns None when no
+    test module is in the stack — subprocess CLI children (test_export_cli's
+    `python -m tortoise export`, redis-guard fixture scripts) and prod
+    callers. None SUPPRESSES the redirect entirely (cycle-2 P1-1b): a child
+    that inherits URI+TEST_MODE must keep the embedded lane, never silently
+    test the server. Pinned by a cross-module unit test (a helper frame
+    between the test and the construction resolves to the nearest stem)."""
+    import inspect
+    frame = inspect.currentframe()
+    try:
+        while frame is not None:
+            mod = frame.f_globals.get("__file__")
+            if mod:
+                name = os.path.basename(mod)
+                if name.startswith("test_") and name.endswith(".py"):
+                    return name[:-3]
+            frame = frame.f_back
+        return None
+    finally:
+        del frame
+
+
+def _is_loopback_host(host: str | None) -> bool:
+    """Shared loopback predicate (cycle-2 P0-2).
+
+    True for localhost/127.0.0.1/::1. Used by the redirect (fail-fast
+    before the first write), the Task 4 session-start tripwire (fail before
+    ANY test writes), and wipe_server (D-4) — one predicate so a typo'd or
+    shared TORTOISE_DB_URI is refused at the earliest possible point.
+    Cycle-7 P1-3: this helper DELEGATES to `tortoise.config`'s
+    LOOPBACK_HOSTS constant (is_loopback_uri(uri) added to tortoise/config.py
+    in this task is the SINGLE shared implementation — conftest/CI and the
+    Task 4 tripwire import `is_loopback_uri` from tortoise.config, so BOTH
+    modules must resolve the SAME host set; pinned by
+    `test_loopback_predicate_single_source`, Step 1)."""
+    from tortoise.config import LOOPBACK_HOSTS
+    return host in LOOPBACK_HOSTS
+
+
+def _journal_file_path() -> str | None:
+    """Per-session created-graph journal path (epic #1647 Task 2 Step 7).
+
+    Reads TORTOISE_TEST_JOURNAL_FILE (exported by conftest at import time,
+    cycle-4 P2-9). Absent env var → None → the appender no-ops, never
+    fails — the specified fallback for the P1 window (Task 2 not yet
+    landed: P1-window mints are unjournaled and bounded by Task 2's
+    last-suite-standing full sweep)."""
+    path = os.environ.get("TORTOISE_TEST_JOURNAL_FILE")
+    return path or None
+
+
+# Epic #1647 (CI P2 fix): process-level test-session flag. conftest sets this
+# True at import; subprocess CLI children (test_export_cli's `python -m
+# tortoise export`, redis-guard fixture scripts) NEVER import conftest, so the
+# flag stays False for them — exactly the subprocess-vs-TestClient distinction
+# the stack-walking _caller_test_stem() cannot make (TestClient runs request
+# handlers in a WORKER THREAD whose stack has no test_ module, so the frame
+# gate wrongly suppresses the redirect there and the fixture-patched db_path
+# SDK constructs embedded → write/read split). With the flag, the redirect
+# fires in the whole test process (worker threads included); the carve-out
+# exemption is still frame-keyed (worker-thread constructions in carve-out
+# files are only exercised in the URI-unset carve-out job, where no redirect
+# fires at all).
+_TEST_SESSION_ACTIVE = False
+
+
+def _journal_append_product(graph_name: str) -> None:
+    """Append a minted graph name to the per-session created-graph journal.
+
+    Product-side seam writer (cycle-6 P2-13 ownership split): the redirect
+    and from_uri are PRODUCT code and cannot import tests/_embedded (import
+    cycle), so the FILE journal is written here; the tests-side in-memory
+    _JOURNAL/_WIPED_UP_TO delta stays tests-side only (Task 2).
+
+    Append = makedirs(parent) + open/write/close per append (cycle-4 P2-3:
+    per-append open is the atomicity boundary against torn writes; cycle-7
+    P1-1: the parent dir exists only after _redislite_hygiene's session
+    fixture — makedirs BEFORE every append so module-import/collect-only
+    appends cannot FileNotFoundError). Absent env var → no-op, never fail
+    (the specified fallback)."""
+    path = _journal_file_path()
+    if not path:
+        return
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a") as fh:
+            fh.write(graph_name + "\n")
+    except Exception:
+        # never fail a construction over journaling (cycle-8 P2-3 spirit)
+        logging.getLogger(__name__).debug(
+            "journal append skipped for %r (%r)", graph_name, path)
+
 
 # ── Mixins ────────────────────────────────────────────────────────────────
 from tortoise.projection.entities import _EntityHandlers  # noqa: E402, I001
@@ -310,12 +432,160 @@ class FalkorProjection(
                  allow_nonstandard_path: bool = False,
                  skip_health_check: bool = False):
 
+        # Epic #1647 (D-1=A): capture whether the caller passed an explicit
+        # path BEFORE the no-arg fallback below resolves it — the redirect
+        # must fire for explicit path= constructions only (no-arg keeps the
+        # canonical embedded path).
+        explicit_path = path is not None
+        # Epic #1647 (PR #1684 CI-fix): preserve the ORIGINAL explicit path —
+        # the redirect nulls `path` to fall through to the host branch, and
+        # downstream derivation (pack_state's lock/target resolution for
+        # explicit legacy graph names) must reproduce the redirect's hash
+        # inputs (session + ORIGINAL path + name).
+        self._explicit_path = path
+
         # No-arg construction -> canonical embedded path (plan Task 9: graph-
         # scripts migrated from FalkorProjection('tortoise.db') to no-arg,
         # which must resolve to the canonical TORTOISE_DB_PATH).
         if path is None and host is None:
             from tortoise.config import resolve_db_path
             path = resolve_db_path()
+
+        # CI-discovered (#1684): the relative-path + tilde reject is a CLI
+        # CONTRACT that must hold in BOTH lanes — hoisted from the embedded
+        # branch (L584) so the test redirect cannot swallow it. A relative
+        # db target is invalid whether it would have gone embedded or to the
+        # server; _cmd_decide/_cmd_init's error-semantics tests
+        # (test_cli_context) assert rc==1 + "Invalid DB target" and must not
+        # silently redirect onto the server.
+        if path is not None:
+            _allow_nonstandard = (
+                allow_nonstandard_path
+                or os.environ.get("TORTOISE_ALLOW_NONSTANDARD_PATH") == "1")
+            if path != ":memory:" and not os.path.isabs(path) and not path.startswith("~"):
+                raise ValueError(RELATIVE_PATH_ERROR.format(path=path))
+            if path.startswith("~") and not _allow_nonstandard:
+                raise ValueError(RELATIVE_PATH_ERROR.format(path=path))
+
+        # ── Epic #1647 (D-1=A): class-level URI-aware test redirect ────────
+        # Fires ONLY in a test session (TORTOISE_TEST_MODE=1, exported by
+        # conftest) with a supported TORTOISE_DB_URI AND a calling test frame
+        # (cycle-2 P1-1b: subprocess CLI children inherit the env but have no
+        # test_ module in their stack, so _caller_test_stem() returns None and
+        # they never redirect). Prod tools (backup.py, __main__.py rebuild,
+        # ingest.py, migrate_db.py, hosted_api.py, pipeline_cli.py) construct
+        # with explicit paths but never run under TEST_MODE, so they never
+        # redirect (P0-4) — and their entry points pop TEST_MODE at startup
+        # anyway (cycle-2 P2-10). Explicit path= only (D-1 option a): no-arg
+        # keeps the embedded canonical path (captured via explicit_path
+        # above). TORTOISE_TEST_NO_REDIRECT (comma-separated TEST-MODULE
+        # stems) exempts carve-out files via caller frame inspection (P0-1) —
+        # the DB-file basename is NEVER the key.
+        _uri = os.environ.get("TORTOISE_DB_URI")
+        if (explicit_path and _uri
+                and os.environ.get("TORTOISE_TEST_MODE") == "1"
+                and _is_supported_uri_scheme(_uri)):
+            _no_redirect = {
+                s.strip() for s in
+                os.environ.get("TORTOISE_TEST_NO_REDIRECT", "").split(",") if s.strip()
+            }
+            _caller_stem = _caller_test_stem()  # None = no test frame
+            # CI P2 fix: the process flag (conftest-set) fires the redirect
+            # in TestClient worker threads where the frame gate sees no test_
+            # module; a None stem is still exempt-free (worker threads have no
+            # frame to exempt — carve-out HTTP paths run only in the carve-out
+            # job, URI unset). Subprocess children keep the embedded lane via
+            # the flag (False — conftest never imported there).
+            if ((_caller_stem is not None and _caller_stem not in _no_redirect)
+                    or (_caller_stem is None and _TEST_SESSION_ACTIVE)):
+                from urllib.parse import urlparse
+                _parsed = urlparse(_uri)
+                _validate_uri_scheme(_parsed.scheme)
+                # Cycle-8 P2-1: NO `or "localhost"` fallback — a hostless URI
+                # (`docker://:pw@:6379`) must resolve host=None so the shared
+                # predicate refuses it fail-closed, matching `is_loopback_uri`
+                # (absent hostname → not in LOOPBACK_HOSTS → False). The old
+                # fallback diverged: the redirect accepted (hostname or
+                # "localhost") while the Task 4 tripwire refused.
+                host = _parsed.hostname  # None when absent → not loopback
+                # Cycle-2 P0-2 (fail-fast): refuse non-loopback hosts BEFORE
+                # the first write — a typo'd/shared TORTOISE_DB_URI must never
+                # mint test_* graphs on a remote server (wipe_server's refusal
+                # is too late: it fires after every migrated construction
+                # already wrote). Cycle-3 P2-6: the escape is WRITE-ONLY by
+                # design — an ALLOW_REMOTE session can write on a remote
+                # server but wipes still refuse (D-4 unchanged).
+                # P2-2 (review): port is parsed AFTER the host refusal — a
+                # bare IPv6 literal (`docker://:pw@::1:6379`) makes
+                # urlparse(...).port raise ValueError before the loopback
+                # check; parsing it after keeps the fail-closed RuntimeError
+                # the single refusal path (hostless/bare-IPv6 alike).
+                if not _is_loopback_host(host) \
+                        and os.environ.get("TORTOISE_TEST_ALLOW_REMOTE") != "1":
+                    raise RuntimeError(
+                        f"test redirect refuses non-loopback host {host!r} — "
+                        f"TORTOISE_DB_URI must point at a local docker (D-4); "
+                        f"set TORTOISE_TEST_ALLOW_REMOTE=1 to override")
+                port = _parsed.port or 16379
+                username = _parsed.username or None
+                password = _parsed.password or None
+                ssl = (_parsed.scheme == "rediss")
+                _sess = os.environ.get("TORTOISE_TEST_SESSION", "")
+                if path == ":memory:":
+                    # P2-13: :memory: is a constant string — a path-hash would
+                    # collide every :memory: construction onto one shared
+                    # graph; embedded :memory: is fresh per construction, so
+                    # derive a per-construction unique test_memory_* graph.
+                    # Cycle-6 P2-14: os.urandom(6).hex() = 12 hex = 48 bits
+                    # (was 8 hex/32 bits) — the width matches the session-
+                    # nonce/hash guards (P2-1/P2-17).
+                    _graph = f"test_memory_{os.urandom(6).hex()}"
+                elif graph_name.startswith(("test_", "tortoise_test")):
+                    # Cycle-2 P0-1b: a TEST-PREFIXED explicit name is the
+                    # shared opt-in — honored verbatim (test_suite_<uuid>
+                    # seam, explicit test_* names). Same name across sites =
+                    # same server graph.
+                    _graph = graph_name
+                else:
+                    # Cycle-2 P0-1b: explicit non-guard-passing names ("test",
+                    # "t", "team_...") derive PER-PATH names — the parity/
+                    # g_consistency pairs construct distinct paths with one
+                    # shared explicit name and must land on DISTINCT server
+                    # graphs (a shared rename makes the apply-vs-rebuild
+                    # parity comparison a graph-vs-itself vacuous pass, #942
+                    # class). Same path + same explicit name shares (the
+                    # embedded same-file analog). The session nonce
+                    # (conftest-exported TORTOISE_TEST_SESSION) keeps
+                    # concurrent sessions' same-path derivations distinct
+                    # (cycle-2 P2-3). Cycle-3 P2-5: the path-derived stem is
+                    # SANITIZED to [a-zA-Z0-9_] — /tmp/seam-test-b.db →
+                    # seam_test_b (hyphens/slashes must never ride into the
+                    # graph name). Cycle-3 P2-17: 12 hex = 48+ bits (was
+                    # 8 hex = 32 bits) — collision-safe at multi-thousand-
+                    # graph scale.
+                    assert path is not None  # explicit_path guarantee (mypy narrow)
+                    _stem = os.path.splitext(os.path.basename(path))[0]
+                    _stem = re.sub(r"[^a-zA-Z0-9_]", "_", _stem)
+                    # CI P2 fix: fold the explicit graph_name into the hash.
+                    # The per-path-only derivation COLLAPSED namespaces — two
+                    # team_<ns> SDKs on the SAME temp path (test_hosted_api's
+                    # cross-team isolation, quota tests) derived the SAME
+                    # server graph, destroying team isolation. hash(path+name)
+                    # keeps parity pairs (distinct paths, one shared name)
+                    # distinct AND namespace pairs (one path, distinct names)
+                    # distinct — the embedded same-file/same-name analog
+                    # (same path + same name) still shares.
+                    _graph = (f"test_{_stem}_"
+                              + hashlib.sha1(
+                                  (_sess + path + graph_name).encode()
+                              ).hexdigest()[:12])
+                path = None  # fall through to the host-mode branch below
+                graph_name = _graph
+                # Cycle-8 P2-5: append the mint to the product-side session
+                # journal so the per-test wipe delta and the session-end
+                # sweep see it. During the P1 window (Task 2 not yet landed)
+                # the env var is absent → the append no-ops (never fails).
+                _journal_append_product(_graph)
 
         if path is not None:
             # Hard-reject relative paths (plan Task 7, issue #176): a relative
@@ -380,6 +650,14 @@ class FalkorProjection(
             from falkordb import FalkorDB  # ponytail: lazy import, only needed for Docker mode
             self.db = FalkorDB(host=host, port=port, username=username, password=password,
                                socket_connect_timeout=5, socket_timeout=10, ssl=ssl)
+            # Epic #1647 (cycle-3 P0-1): record the host ON THE PROJECTION so
+            # wipe_server/session sweep/tripwire read it instead of the raw
+            # client (redis-py 8.1.0 has no .host on the client — the host
+            # lives in connection_pool.connection_kwargs['host']). The
+            # redirect's reassigned host local flows into this branch, and
+            # from_uri → cls(host=...) lands here too — every server
+            # projection carries its host.
+            self._host = host
         else:
             raise ValueError("Either path or host must be provided")
 
@@ -565,6 +843,23 @@ class FalkorProjection(
         password = parsed.password or None
         if graph_name is None:
             graph_name = parsed.path.lstrip('/') or "tortoise"
+        # Epic #1647 (cycle-4 P2-2 / cycle-6 P2-13 / cycle-7 P2-9): in a TEST
+        # SESSION with a calling test frame (TORTOISE_TEST_MODE=1 AND
+        # _caller_test_stem() is not None — the SAME predicate as the
+        # redirect), append the resolved graph name (URI-path default OR
+        # explicit) to the session journal — the single seam point, so every
+        # from_uri-minted graph is owned by its session's journal (the
+        # per-test wipe delta + the session-end/stale sweep drop sets both
+        # derive from the FILE journal). TEST_MODE alone is NOT the gate:
+        # frame-less subprocess CLI children inherit TEST_MODE via
+        # os.environ.copy() and would become CONCURRENT WRITERS to the
+        # parent's journal (torn-line hazard) while journaling non-test
+        # CLI-lane graphs (cycle-7 P2-9 — pinned by
+        # test_from_uri_append_gated_on_test_frame). The append is a NO-OP
+        # when the journal env var is absent (P1 window / non-test process).
+        if os.environ.get("TORTOISE_TEST_MODE") == "1" \
+                and _caller_test_stem() is not None:
+            _journal_append_product(graph_name)
         return cls(host=parsed.hostname or "localhost",
                    port=parsed.port or 16379,
                    username=username,

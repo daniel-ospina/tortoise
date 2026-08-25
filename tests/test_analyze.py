@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 
 from tortoise.analyze import classify, analyze, TEMPLATES, _format_chain  # noqa: I001
 
-from tests._embedded import wipe  # noqa: E402, RUF100
+from tests._embedded import _wipe_or as wipe  # noqa: E402, RUF100
 
 def test_classify_disagreement():
     result = classify("where is the disagreement?")

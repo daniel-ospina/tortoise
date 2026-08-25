@@ -9,9 +9,18 @@
 # makes them visible; it does not roll back. The issue stays open until the
 # failure is resolved and re-validated.
 #
-# Note: runs the embedded-FalkorDBLite suite. Tests needing a live FalkorDB
-# self-skip via _skip_if_no_falkor. A per-test timeout turns any hang into a
-# fast, visible failure instead of a 6h CI budget burn.
+# Note: epic #1647 (Task 10 Step 1a, P4) — this job now runs the suite on
+# the docker lane: job-level TORTOISE_DB_URI (the same test-prefixed path as
+# the fast matrix) + the same junitxml-reconciled coverage manifest + skip
+# guard (a vanished nodeid or a FalkorDB-reasoned skip reds the run). The 17
+# carve-out files keep running embedded via the TORTOISE_TEST_NO_REDIRECT
+# exemption (their embedded-specific assertions must not flip to the server
+# lane); the pmv run excludes tests/e2e + the slow_files list (#1439), and
+# the manifest generation replicates those EXACT excludes (cycle-2 P2-14 /
+# cycle-4 P2-11) or every merge reds on vanished nodeids. Tests needing a
+# live FalkorDB now RUN (falkordb services provisioned below). A per-test
+# timeout turns any hang into a fast, visible failure instead of a 6h CI
+# budget burn.
 #
 # #1439: the validate job excludes config/ci-surfaces.yml `slow_files:` (the
 # 21 files python-ci.yml's test-slow job already covers on the same merge
@@ -163,6 +172,38 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    # Epic #1647 Task 10 Step 1a (P4): the pmv validate job is now a docker
+    # lane (same URI mechanics as the fast matrix — job-level URI + the
+    # EXPECT_URI tripwire signal). The carve-out exemption is the conftest
+    # TORTOISE_TEST_NO_REDIRECT list (17 stems) — no CARVE_OUT needed (URI
+    # is set), and the carve-out files stay embedded by exemption.
+    env:
+      TORTOISE_DB_URI: "docker://:falkordb@localhost:6379/tortoise_test_matrix"
+      TORTOISE_TEST_EXPECT_URI: "1"
+    # Mirror the fast matrix's two falkordb services: the passworded 6379
+    # (the job URI + probe family) and the legacy passwordless 16379 (the
+    # raw-client probes in test_search_engine et al.).
+    services:
+      falkordb:
+        image: falkordb/falkordb-server:latest
+        env:
+          REDIS_ARGS: "--requirepass falkordb"
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli -a falkordb ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      falkordb-legacy:
+        image: falkordb/falkordb-server:latest
+        ports:
+          - 16379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     steps:
       # #1474 review (P1): checkout MUST run unconditionally FIRST — the
       # skip-comment step requires postmerge-dedup.js from the workspace, and
@@ -279,7 +320,22 @@ jobs:
                           raise
                       time.sleep(5 * attempt)
           EOF
-      - name: Run tests (embedded suite, per-test timeout)
+      - name: Generate coverage manifest (expected nodeids, epic #1647 Task 10 Step 1a)
+        # The pmv run's collect-only expected set, generated in its OWN step
+        # (off the pytest step's 50m watchdog). Task 10 Step 1a (cycle-2
+        # P2-14 / cycle-4 P2-11): the manifest MUST replicate the pmv run's
+        # OWN excludes — `--ignore tests/e2e` + the $SLOW_IGNORES list + the
+        # same `-m 'not track_b'` filter (post-merge-validation.yml applies
+        # them in the run step) — or it expects e2e/slow/track_b nodeids the
+        # run never produces and every merge reds on vanished nodeids.
+        if: needs.dedup-check.outputs.skip != 'true'
+        run: |
+          SLOW_IGNORES=$(python3 -c "import yaml; m=yaml.safe_load(open('config/ci-surfaces.yml')); print(' '.join('--ignore=tests/'+f for f in m.get('slow_files', [])))")
+          # The run step computes the same list from the same file — echo it
+          # so the run step cannot drift (single source of truth).
+          echo "$SLOW_IGNORES" > /tmp/pmv-slow-ignores
+          python3 tools/skip-guard.py --emit-manifest "tests/" --marker "not track_b" --ignore tests/e2e $SLOW_IGNORES --output /tmp/pmv-expected-nodeids.txt
+      - name: Run tests (docker lane, per-test timeout)
         id: tests
         if: needs.dedup-check.outputs.skip != 'true'
         run: |
@@ -315,11 +371,15 @@ jobs:
           # slow_files — single source of truth, same yaml.safe_load read as
           # python-ci's changes job). Runtime read = drift-proof: a slow file
           # added to the manifest auto-excludes here; one removed auto-re-enters.
+          # The manifest step computed the same list into /tmp/pmv-slow-ignores
+          # (single source of truth — the run step reads it back, so the run
+          # and its manifest can never diverge).
           # Unquoted $SLOW_IGNORES word-splits into --ignore flags; empty
           # (missing key) falls back to the full suite.
-          SLOW_IGNORES=$(python3 -c "import yaml; m=yaml.safe_load(open('config/ci-surfaces.yml')); print(' '.join('--ignore=tests/'+f for f in m.get('slow_files', [])))")
-          timeout -s INT -k 10 50m stdbuf -oL python -m pytest tests/ -v --timeout=300 -p no:cacheprovider -m 'not track_b' --ignore=tests/e2e $SLOW_IGNORES --maxfail=20 -rfE --durations=15 > /tmp/pmv-pytest.log 2>&1
+          SLOW_IGNORES=$(cat /tmp/pmv-slow-ignores)
+          timeout -s INT -k 10 50m stdbuf -oL python -m pytest tests/ -v --timeout=300 -p no:cacheprovider -m 'not track_b' --ignore=tests/e2e $SLOW_IGNORES --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/pmv-junit.xml -o junit_family=xunit1 > /tmp/pmv-pytest.log 2>&1
           rc=$?
+          echo "$rc" > /tmp/pmv-rc
           kill $HB_PID 2>/dev/null || true
           wait $HB_PID 2>/dev/null || true
           echo "==================== pytest summary (tail) ===================="
@@ -347,6 +407,22 @@ jobs:
           # stalling embedding loads up to 30s each).
           HF_HUB_OFFLINE: "1"
           TRANSFORMERS_OFFLINE: "1"
+      - name: Skip-fail guard (pmv, epic #1647 Task 10 Step 1a)
+        # The same junitxml-reconciled coverage manifest as the fast matrix:
+        # a vanished nodeid (deselected, vacuous early-return) or a
+        # FalkorDB-reasoned skip reds the merge. Gated on pytest rc==0 (a
+        # red pytest needs no extra signal); the manifest step wrote the
+        # expected set from the run's own excludes.
+        if: always() && needs.dedup-check.outputs.skip != 'true'
+        run: |
+          set +e
+          RC=""
+          [ -f /tmp/pmv-rc ] && RC=$(cat /tmp/pmv-rc)
+          if [ "$RC" = "0" ]; then
+            python3 tools/skip-guard.py /tmp/pmv-pytest.log --junitxml=/tmp/pmv-junit.xml --manifest /tmp/pmv-expected-nodeids.txt
+          else
+            echo "pytest rc=$RC — skip guard skipped (job already red)"
+          fi
       - name: Comment result on PR
         if: always() && needs.dedup-check.outputs.skip != 'true'
         uses: actions/github-script@v7

@@ -944,7 +944,8 @@ class TestStdioEntrypointToolRegistration:
         from pathlib import Path
 
         env = dict(os.environ)
-        for k in ("TORTOISE_DB_URI", "TORTOISE_DB_PATH", "TORTOISE_API_KEY"):
+        for k in ("TORTOISE_DB_URI", "TORTOISE_DB_PATH", "TORTOISE_API_KEY",
+                  "TORTOISE_TEST_MODE"):  # epic #1647 P0-4: never leak TEST_MODE into the child
             env.pop(k, None)
         # #942 test-only escape hatch: tools/list needs no DB; avoid a
         # hard error from main()'s missing-config guard.

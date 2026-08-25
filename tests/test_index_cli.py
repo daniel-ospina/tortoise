@@ -32,6 +32,23 @@ from tortoise.sdk import TortoiseSDK
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _embedded_local_file_lane():
+    """Epic #1647 P4 (CI-fix, PR #1684): E2E-15 is a two-process EMBEDDED
+    choreography (the nohup'd index hook child is the SOLE owner of the
+    local db file; the parent opens FRESH after the child exits and reads
+    the RDB-persisted state). Under a docker session the URI-aware redirect
+    would flip the PARENT's TortoiseSDK(db) read to the server (derived
+    graph) while the CHILD (no test frame — P1-1b) stays embedded on the
+    local file → refs=0. Popping the URI for this module keeps child + read
+    on the SAME local file on BOTH lanes. Same embedded-file-contract class
+    as test_export_cli/test_import_endpoint (P4 divergence list)."""
+    os.environ.pop("TORTOISE_DB_URI", None)
+    os.environ.pop("TORTOISE_TEST_EXPECT_URI", None)
+    yield
+    os.environ.pop("TORTOISE_DB_URI", None)
+
+
 def _run_cli(args: list[str], *, env: dict | None = None,
              timeout: int = 120) -> subprocess.CompletedProcess:
     """Run the CLI entry in a subprocess with a scrubbed PATH (never a

@@ -14,7 +14,7 @@ Plus a live integration test against a running FalkorDB server
 """
 from __future__ import annotations
 
-import os  # noqa: F401
+import os
 import sys
 from pathlib import Path
 
@@ -361,7 +361,11 @@ class TestVectorIndexApiConsumption:
 
 # ── Live integration (skips when no server) ─────────────────────────────────
 
-_LIVE_URI = "docker://localhost:6399/tortoise-1359"
+# Epic #1647 (T7): per-session unique test-prefixed path — the historical
+# tortoise-1359 was a FIXED non-test-prefixed graph name (cross-run
+# pollution; the bulk-scoped deletes below are STARTS-WITH, so no guard
+# trip, but every session probed the same shared graph).
+_LIVE_URI = f"docker://localhost:6399/test_falkordb_compat_{os.urandom(4).hex()}"
 _LIVE_AVAILABLE = False
 try:
     _probe = FalkorProjection.from_uri(_LIVE_URI)

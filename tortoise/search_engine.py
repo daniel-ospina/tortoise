@@ -694,6 +694,7 @@ def run_structural_query(
     entity_type: str = "point", limit: int = 20, timeout_ms: int = 500,
     excluded_statuses: tuple | None = None,
     leg_trace: list[dict] | None = None,
+    context: str | None = None,
 ) -> list[tuple[str, float]]:
     """Run structural/kind query via range indexes.
 

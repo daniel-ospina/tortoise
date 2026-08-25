@@ -110,6 +110,7 @@ surfaces:
   - test_backup_watcher.py
   - test_bfs_audit.py
   - test_build_window_transcript.py
+  - test_canary_classify.py
   - test_canonical.py
   - test_capture_session.py
   - test_ci_selection.py
@@ -129,6 +130,8 @@ surfaces:
   - test_de2e7_gates_mcp.py
   - test_deploy_workflow.py
   - test_deployment.py
+  - test_derived_names.py
+  - test_divergence_conformance.py
   - test_doctor.py
   - test_domain_loader_adapter.py
   - test_domain_validators.py
@@ -168,6 +171,7 @@ surfaces:
   - test_graph_diagnostics.py
   - test_guard.py
   - test_hard_reject.py
+  - test_helpers.py
   - test_hnsw_vector_index.py
   - test_idempotency.py
   - test_index_cli.py
@@ -201,10 +205,12 @@ surfaces:
   - test_longmem_rerank.py
   - test_longmem_runner.py
   - test_lookup_hash.py
+  - test_loopback_predicate_single_source.py
   - test_m0.py
   - test_m1.py
   - test_m2.py
   - test_main_guards.py
+  - test_markers.py
   - test_memory_orchestrator.py
   - test_migrate_db.py
   - test_migration_append_only.py
@@ -236,11 +242,13 @@ surfaces:
   - test_query_suggestions.py
   - test_reaper.py
   - test_reaper_orphan.py
+  - test_redirect_seam.py
   - test_references_edge.py
   - test_relationships_bounded.py
   - test_remove_context_migration.py
   - test_render.py
   - test_review_connections.py
+  - test_round_trip_parity.py
   - test_run_protocol.py
   - test_sdk_adapter_cap.py
   - test_search_engine.py
@@ -263,8 +271,11 @@ surfaces:
   - test_tool_registry.py
   - test_topic_summarization.py
   - test_tortoise_search.py
+  - test_tripwire.py
+  - test_uri_env_mutations_declared.py
   - test_validity_windows.py
   - test_value_extractor.py
+  - test_wipe_server.py
   - test_wiring_phase01.py
   - test_write_consolidation.py
   - test_writer_inventory.py
@@ -420,6 +431,33 @@ slow_files:
 - test_sdk_group3.py
 - test_search_engine_gaps.py
 - test_source_inheritance_own.py
+# Epic #1647 Task 9 (P3): the 17-file embedded carve-out set (cycle-3 P2-12
+# count — 7 Task-5 stems + 10 additions; fixtures/redis-guard/* are subprocess
+# scripts, not test modules, and test_smoke_embedded is already one of the 7;
+# matches research-brief §4.1 "17 files / 342 tests"). These tests run
+# embedded BY DESIGN in the dedicated URI-unset carve-out job (E2E-4,
+# TORTOISE_TEST_CARVE_OUT=1) and are EXCLUDED from the docker fast + slow
+# legs — the docker lanes create ~zero redislite servers (E2E-7 ≈ 0 orphans).
+# Mirrors tests/_embedded.TEST_NO_REDIRECT_STEMS (pinned by test_ci_selection
+# + test_markers).
+carve_out:
+- test_backup_e2e.py
+- test_config.py
+- test_embedded_concurrency.py
+- test_embedded_lifecycle.py
+- test_embedded_lifecycle_fast_close.py
+- test_flip_gate.py
+- test_guard.py
+- test_hard_reject.py
+- test_hosted_backup.py
+- test_migrate_db.py
+- test_ops_safety.py
+- test_pre_migration_safety.py
+- test_projection_lifecycle.py
+- test_reaper.py
+- test_reaper_orphan.py
+- test_redis_guard.py
+- bench/test_smoke_embedded.py
 push_extra: []
 durations:
   test_calibration.py: 52.1

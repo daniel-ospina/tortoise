@@ -248,8 +248,19 @@ def test_vector_search_passes_elevated_timeout(tmp_path, monkeypatch, fake_embed
         hits = retrieve.vector_search(sdk, "Ava board game", 10)
         assert len(calls) == 1
         assert calls[0]["timeout_ms"] == retrieve.VECTOR_TIMEOUT_MS == 5000
-        assert calls[0]["is_embedded"] is True
-        assert calls[0]["vector_index_api"] is None
+        # Epic #1647 (PR #1684 CI-fix): is_embedded reflects the lane —
+        # embedded lane True, docker lane False (the redirect's
+        # server-mode flag). The timeout + api + limit contract is
+        # lane-independent.
+        _uri = os.environ.get("TORTOISE_DB_URI")
+        assert calls[0]["is_embedded"] == (_uri is None), (
+            f"is_embedded={calls[0]['is_embedded']} must match the lane")
+        # embedded lane: no vector-index API (brute-force); docker lane: the
+        # server exposes the cypher vector API (R2/D8 divergence)
+        if _uri:
+            assert calls[0]["vector_index_api"] == "cypher"
+        else:
+            assert calls[0]["vector_index_api"] is None
         assert calls[0]["limit"] == 10
         assert hits == [("lme:q:s0:t0", 0.9)]
     finally:
