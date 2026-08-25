@@ -17,6 +17,16 @@ import pytest
 from tortoise.sdk import TortoiseSDK
 
 
+@pytest.fixture(autouse=True)
+def _home_isolated(monkeypatch, tmp_path):
+    """#1708 D9: never read the developer's real ~/.tortoise credentials (a
+    global config would flip `tortoise context` to hosted mode), and never
+    resolve a stray ./.tortoise file in the pytest CWD."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+
 @pytest.fixture
 def db_env():
     """Temp database wired via TORTOISE_DB_PATH."""
@@ -254,8 +264,12 @@ class TestCliOnboardDbTarget:
         monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
         _delenv_falkordb(monkeypatch)
 
-        assert _resolve_db_target(None) == os.path.expanduser(
-            "~/.tortoise/tortoise.db")
+        # Oracle = the import-time-cached constant production actually uses
+        # (tortoise.config.DEFAULT_DB_PATH); a runtime os.path.expanduser
+        # would read the D9-patched HOME and mismatch (#1708).
+        from tortoise.config import DEFAULT_DB_PATH
+
+        assert _resolve_db_target(None) == DEFAULT_DB_PATH
 
     def test_explicit_path_beats_env(self, tmp_path, monkeypatch):
         """onboard --path /custom.db must win over TORTOISE_DB_PATH (#715 bug:
@@ -512,8 +526,12 @@ class TestCliSecurityAndIndex:
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
 
-        assert _resolve_db_target(None) == os.path.expanduser(
-            "~/.tortoise/tortoise.db")
+        # Oracle = the import-time-cached constant production actually uses
+        # (tortoise.config.DEFAULT_DB_PATH); a runtime os.path.expanduser
+        # would read the D9-patched HOME and mismatch (#1708).
+        from tortoise.config import DEFAULT_DB_PATH
+
+        assert _resolve_db_target(None) == DEFAULT_DB_PATH
 
         # Mixed: host set, PORT blank → legacy honored with default port,
         # no int('') ValueError.

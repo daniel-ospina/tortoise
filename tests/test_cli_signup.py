@@ -3,7 +3,18 @@ import json
 from unittest import mock
 from urllib.error import HTTPError
 
+import pytest
+
 import tortoise.__main__ as main
+
+
+@pytest.fixture(autouse=True)
+def _home_isolated(monkeypatch, tmp_path):
+    """#1708 D9: never read the developer's real ~/.tortoise credentials, and
+    never resolve a stray ./.tortoise file in the pytest CWD."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+    monkeypatch.chdir(tmp_path)
 
 
 def _http_error(code, body, headers=None):

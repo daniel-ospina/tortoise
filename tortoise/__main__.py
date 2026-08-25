@@ -3,6 +3,7 @@ from __future__ import annotations  # noqa: I001
 
 import argparse
 import sys
+from pathlib import Path
 
 def _cmd_rebuild(args):
     print(f"Rebuilding from {args.dir} → {args.db}")
@@ -745,30 +746,75 @@ def _cmd_team_info(args) -> int:
 ONBOARDING_PROMPT_URL = "https://premiselabs.co/onboarding-prompt.md"
 
 
-def _read_config(json_mode: bool = False) -> tuple[dict | None, str | None, str | None]:
-    """Read .tortoise config → (config, api_key, api_url).
+class _ConfigError(Exception):
+    """Candidate config file exists but is corrupt or unreadable."""
 
-    Shared by the hosted-team commands (team info, team keys *). Prints the
-    failure reason to stderr; callers must return 1 when api_key is None.
-    With json_mode, also emits the machine-readable error on stdout so the
-    --json contract holds even for config failures (#875 P2).
+
+def _resolve_config_path(include_env: bool = True) -> tuple[Path | None, dict | None, str | None, str | None]:
+    """Shared config resolver — env → cwd/.tortoise → ~/.tortoise/credentials.json (#1708 D1/D5/D6).
+
+    Returns (config_path, config, api_key, api_url) or (None, None, None, None).
+    INVARIANT: whenever api_key is not None, config is a dict (env candidate is
+    synthesized as {"api_key": key, "api_url": url} — callers like
+    _cmd_team_keys_list do config.get(...) unconditionally and must never see None).
+    - Empty/whitespace env TORTOISE_API_KEY (.strip()) is treated as unset
+      (prevents a lockout shadow where a bad env key beats a good stored one).
+    - A candidate file that exists but fails JSON parse / is unreadable / has a
+      non-string api_key raises _ConfigError(path) (catch (OSError, JSONDecodeError,
+      TypeError)). An empty api_key in a file is treated as "no config here" —
+      the next candidate wins.
+    - A directory at a candidate path (cwd/.tortoise in some repos; the global
+      path's directory is by design) is skipped as "no config here" (D5).
+    - include_env=False: file candidates only (used by _cmd_context, D1b — env
+      alone must never flip the local-memory SessionStart hook to hosted mode).
     """
     import json as _json
     import os as _os
     from pathlib import Path
 
-    config_path = Path.cwd() / ".tortoise"
-    if not config_path.exists():
-        return _cmd_fail(json_mode, "no_config",
-                         "No .tortoise config found. Run 'tortoise init --api-key <key>' first."), None, None
+    if include_env:
+        env_key = _os.environ.get("TORTOISE_API_KEY")
+        if env_key and env_key.strip():
+            env_url = _os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
+            return None, {"api_key": env_key, "api_url": env_url}, env_key, env_url
+
+    candidates = (Path.cwd() / ".tortoise", Path.home() / ".tortoise" / "credentials.json")
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            config = _json.loads(path.read_text())
+        except (OSError, _json.JSONDecodeError, TypeError) as e:
+            raise _ConfigError(path) from e
+        api_key = config.get("api_key")
+        if not isinstance(api_key, str):
+            raise _ConfigError(path)
+        if not api_key.strip():
+            continue
+        api_url = config.get("api_url") or _os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
+        return path, config, api_key, api_url
+    return None, None, None, None
+
+
+def _read_config(json_mode: bool = False) -> tuple[dict | None, str | None, str | None]:
+    """Read the resolved config → (config, api_key, api_url) (env → cwd → global).
+
+    Thin wrapper over _resolve_config_path preserving the legacy 3-tuple +
+    _cmd_fail contract for the hosted-team commands (team info, team keys *).
+    Prints the failure reason to stderr; callers must return 1 when api_key is
+    None. With json_mode, also emits the machine-readable error on stdout so
+    the --json contract holds even for config failures (#875 P2).
+    """
     try:
-        config = _json.loads(config_path.read_text())
-    except _json.JSONDecodeError:
-        return _cmd_fail(json_mode, "no_config", f"Invalid .tortoise config at {config_path}"), None, None
-    api_key = config.get("api_key")
-    api_url = config.get("api_url") or _os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
-    if not api_key:
-        return _cmd_fail(json_mode, "no_config", "No api_key in .tortoise config."), None, None
+        _path, config, api_key, api_url = _resolve_config_path()
+    except _ConfigError as e:
+        reason = str(e.__cause__) if e.__cause__ else "api_key missing or invalid"
+        return (_cmd_fail(json_mode, "no_config",
+                          f"Invalid config at {e}: {reason}"), None, None)
+    if api_key is None:
+        return (_cmd_fail(json_mode, "no_config",
+                          "No .tortoise config found. Run 'tortoise init --api-key <key>' first, "
+                          "or run 'tortoise signup' for a free hosted key."), None, None)
     return config, api_key, api_url
 
 
@@ -1168,27 +1214,19 @@ def _cmd_team_keys_revoke(args) -> int:
 
 def _cmd_create_point(args) -> int:
     """Create a Point via Tortoise Cloud API."""
-    import json as _json, os, sys as _sys  # noqa: E401, I001
-    from pathlib import Path
+    import json as _json, sys as _sys  # noqa: E401, I001
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
 
-    # Read config
-    config_path = Path.cwd() / ".tortoise"
-    if not config_path.exists():
-        print("No .tortoise config found. Run 'tortoise init --api-key <key>' first.", file=_sys.stderr)
-        return 1
-
+    # Shared resolver (#1708 D1): env → cwd/.tortoise → ~/.tortoise/credentials.json
     try:
-        config = _json.loads(config_path.read_text())
-    except _json.JSONDecodeError:
-        print(f"Invalid .tortoise config at {config_path}", file=_sys.stderr)
+        _cfg_path, _config, api_key, api_url = _resolve_config_path()
+    except _ConfigError as e:
+        print(f"Invalid config at {e} — fix or delete it, or run "
+              "'tortoise init --api-key <key>'.", file=_sys.stderr)
         return 1
-
-    api_key = config.get("api_key")
-    api_url = config.get("api_url") or os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
-    if not api_key:
-        print("No api_key in .tortoise config.", file=_sys.stderr)
+    if api_key is None:
+        print("No .tortoise config found. Run 'tortoise init --api-key <key>' first.", file=_sys.stderr)
         return 1
 
     payload = {
@@ -1236,19 +1274,19 @@ def _cmd_context(args) -> int:
     Local mode (embedded/Docker): uses TortoiseSDK.session_context().
     """
     import json as _json, os as _os, sys as _sys  # noqa: E401, I001
-    from pathlib import Path
 
-    config_path = Path.cwd() / ".tortoise"
+    # Shared resolver (#1708 D1b): file candidates only (cwd → global) — a
+    # TORTOISE_API_KEY in dev shells must never silently flip this documented
+    # local-memory SessionStart hook to hosted mode. Global-config presence
+    # still flips it (a machine that ran `signup` has a hosted identity).
     api_key = None
     api_url = _os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
-
-    if config_path.exists():
-        try:
-            cfg = _json.loads(config_path.read_text())
-            api_key = cfg.get("api_key")
-            api_url = cfg.get("api_url") or api_url
-        except _json.JSONDecodeError:
-            pass
+    try:
+        _cfg_path, _cfg, api_key, api_url = _resolve_config_path(include_env=False)
+    except _ConfigError as e:
+        print(f"Warning: config at {e} is corrupt or unreadable — falling back "
+              "to local memory mode.", file=_sys.stderr)
+        api_key = None
 
     if api_key:
         # ── Hosted: query the API ──
@@ -1317,27 +1355,19 @@ def _cmd_context(args) -> int:
 
 def _cmd_session(args) -> int:
     """Manage Tortoise Cloud sessions."""
-    import json, os, sys  # noqa: E401, I001
-    from pathlib import Path
+    import sys  # noqa: I001
     from urllib.request import Request, urlopen  # noqa: F401
     from urllib.error import URLError, HTTPError  # noqa: F401
 
-    # Read config
-    config_path = Path.cwd() / ".tortoise"
-    if not config_path.exists():
-        print("No .tortoise config found. Run 'tortoise init --api-key <key>' first.", file=sys.stderr)
-        return 1
-
+    # Shared resolver (#1708 D1): env → cwd/.tortoise → ~/.tortoise/credentials.json
     try:
-        config = json.loads(config_path.read_text())
-    except json.JSONDecodeError:
-        print(f"Invalid .tortoise config at {config_path}", file=sys.stderr)
+        _cfg_path, _config, api_key, api_url = _resolve_config_path()
+    except _ConfigError as e:
+        print(f"Invalid config at {e} — fix or delete it, or run "
+              "'tortoise init --api-key <key>'.", file=sys.stderr)
         return 1
-
-    api_key = config.get("api_key")
-    api_url = config.get("api_url") or os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
-    if not api_key:
-        print("No api_key in .tortoise config.", file=sys.stderr)
+    if api_key is None:
+        print("No .tortoise config found. Run 'tortoise init --api-key <key>' first.", file=sys.stderr)
         return 1
 
     if args.session_cmd == "capture":

@@ -1,8 +1,9 @@
 """`tortoise signup --claim` — dashboard claim instructions (#1082, PR1).
 
-Mint is unchanged (POST /v1/agent/signup, .tortoise config written);
---claim additionally prints the dashboard URL + paste-key instructions so the
-one-time human act (sign in with GitHub/Google, paste the key) is discoverable.
+Mint is unchanged (POST /v1/agent/signup, global ~/.tortoise/credentials.json
+written since #1708); --claim additionally prints the dashboard URL + paste-key
+instructions so the one-time human act (sign in with GitHub/Google, paste the
+key) is discoverable.
 """
 from __future__ import annotations
 
@@ -16,7 +17,18 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from urllib.error import HTTPError
 
+import pytest
+
 from tortoise.__main__ import main
+
+
+@pytest.fixture(autouse=True)
+def _home_isolated(monkeypatch, tmp_path):
+    """#1708 D9: never read the developer's real ~/.tortoise credentials, and
+    never resolve a stray ./.tortoise file in the pytest CWD."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+    monkeypatch.chdir(tmp_path)
 
 SIGNUP_BODY = json.dumps({
     "key": "tt_claimcli_0000000000000000000000000000000000000000",
