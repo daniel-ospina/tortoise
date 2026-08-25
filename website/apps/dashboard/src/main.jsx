@@ -155,7 +155,8 @@ function claimIntentInFlight() {
   // GitHub → seed → done). For first-timers it follows the key reveal; for
   // returning empty-graph users it re-opens at the skills step (Back
   // reaches the harness chooser).
-  const [wizardStep, setWizardStep] = React.useState(0)
+  const [wizardStep, setWizardStepRaw] = React.useState(0)
+  const setWizardStep = React.useCallback((n) => { setWizardStepRaw(n); setWizardCopied((c) => (c === 'harness' ? '' : c)) }, [])
   const [wizardHarness, setWizardHarness] = React.useState('claude')
   const [wizardCopied, setWizardCopied] = React.useState('')
   const [wizardGithub, setWizardGithub] = React.useState({ connected: false, repos: null, busy: false })
@@ -472,12 +473,18 @@ function claimIntentInFlight() {
   }, [])
 
   // ── #1643 wizard actions ────────────────────────────────────────────────
-  const wizardSteps = ['Your agent\'s toolkit', 'Connect your tool', 'Connect GitHub', 'Seed your graph', 'You\'re set']
+  const wizardSteps = ['Connect your tool', 'Your agent\'s toolkit', 'Connect GitHub', 'Seed your graph', 'You\'re set']
 
   function wizardCopy(text, label) {
     try { navigator.clipboard.writeText(text) } catch { /* clipboard blocked */ }
     setWizardCopied(label)
-    setTimeout(() => setWizardCopied(''), 1600)
+    if (label !== 'harness') {
+      // #1691: the harness label is STICKY on purpose — the positive
+      // 'I've set it up — Continue' affordance must persist after the user
+      // copies and goes to paste/run it (the 1.6s flash timer would eat
+      // it). It resets on harness-tab switch and on step change instead.
+      setTimeout(() => setWizardCopied(''), 1600)
+    }
     api('/v1/onboarding/state', { method: 'PATCH', useSession: true,
       body: JSON.stringify({ harness: wizardHarness, section: 'config' }) }).catch(() => {})
   }
@@ -552,6 +559,11 @@ function claimIntentInFlight() {
         body: JSON.stringify({ content: `${subjectName} is building ${projectName}`, kind: 'statement',
                                about_object: proj.id, tags: ['onboarding'], dedup: true }) })
       setWizardSeedDone(!!(subj && subj.id && proj && proj.id && p && p.id))
+      // #1691: reflect the subject in the account username (display_name)
+      // — best-effort; the graph Subject is the source of truth.
+      if (subj && subj.id && supabaseClient) {
+        supabaseClient.auth.updateUser({ data: { display_name: subjectName } }).catch(() => {})
+      }
       setWizardSeeding(false)
     } catch (e) {
       setWizardSeeding(false)
@@ -2307,12 +2319,12 @@ function claimIntentInFlight() {
                     </h2>
                     <p className="dim" style={{ marginBottom: '0.9rem' }}>
                       Tortoise gives your agent a memory — a knowledge graph of what it
-                      learns. Decisions get recorded as points and build on each other.
+                      learns. Here's what we'll set up:
                     </p>
                     <ol className="wizard-intro" style={{ margin: '0 0 1rem 1.1rem', padding: 0, lineHeight: 1.7 }}>
-                      <li><strong>Copy your API key</strong> — shown once, never again.</li>
-                      <li><strong>Connect your agent</strong> — Claude Code, Claude Desktop, Claude Web, Codex, Cursor, or Pi.</li>
-                      <li><strong>Add your first data</strong> — yourself and your project, then connect GitHub if you like.</li>
+                      <li><strong>Install the tools</strong> — an MCP server so your agent can reach Tortoise, plus the skills so it knows how to use them.</li>
+                      <li><strong>Connect your data</strong> — your first sources now; you can always add more by telling your agent.</li>
+                      <li><strong>Add you + your project</strong> — the first entities on your graph.</li>
                       <li><strong>Start using it</strong> — ask your agent to record decisions; the graph does the rest.</li>
                     </ol>
                     <button className="btn-primary" onClick={() => setWelcomeOriented(true)}>Continue →</button>
@@ -2327,14 +2339,14 @@ function claimIntentInFlight() {
                   </div>
                   <p className="wizard-title">{wizardSteps[wizardStep]}</p>
                   <p className="wizard-sub" style={{ marginBottom: '1rem' }}>
-                    {wizardStep === 0 ? 'These are the three skills your agent uses with Tortoise — what they do.'
-                      : wizardStep === 1 ? 'Pick your tool — the setup command connects the MCP server and installs the skills in one copy.'
+                    {wizardStep === 0 ? 'Pick your tool — the setup command connects the MCP server and installs the skills in one copy.'
+                      : wizardStep === 1 ? 'These are the three skills your agent uses with Tortoise — what they do.'
                       : wizardStep === 2 ? 'Bring your GitHub issues in as Events — optional, do it now or later.'
                       : wizardStep === 3 ? 'Add yourself and your project as the first objects on your graph.'
                       : 'Welcome to Tortoise — your graph is live.'}
                   </p>
 
-                  {wizardStep === 1 && (
+                  {wizardStep === 0 && (
                     <div className="harness">
                       <div className="harness-tabs">
                         {HARNESS_ORDER.map((h) => (
@@ -2351,19 +2363,22 @@ function claimIntentInFlight() {
                         {welcomeKey && !HARNESS_SKILLLESS.includes(wizardHarness) && !HARNESS_SKILLS_IN_PROMPT.includes(wizardHarness) ? ('\n\n' + HARNESS_PERSIST(apiKey)) : ''}
                       </pre>
                       <div className="wizard-nav">
-                        <button type="button" className="ghost" onClick={() => setWizardStep(wizardStep - 1)}>← Back</button>
+                        <button type="button" className="ghost" onClick={() => { welcomeKey ? setWelcomeOriented(false) : setWelcomeMode(false) }}>← Back</button>
                         <div className="wizard-nav-actions">
-                          <button type="button" className="btn-primary"
+                          <button type="button" className={wizardCopied === 'harness' ? 'ghost' : 'btn-primary'}
                             onClick={() => wizardCopy(HARNESS_INSTALL[wizardHarness](apiKey) + HARNESS_SKILLS(wizardHarness) + (welcomeKey && !HARNESS_SKILLLESS.includes(wizardHarness) && !HARNESS_SKILLS_IN_PROMPT.includes(wizardHarness) ? ('\n\n' + HARNESS_PERSIST(apiKey)) : ''), 'harness')}>
-                            {wizardCopied === 'harness' ? 'Copied!' : 'Copy setup'}
+                            {wizardCopied === 'harness' ? 'Copied ✓' : 'Copy setup'}
                           </button>
-                          <button type="button" className="ghost" onClick={() => setWizardStep(2)}>Skip →</button>
+                          {wizardCopied === 'harness' && (
+                            <button type="button" className="btn-primary" onClick={() => setWizardStep(1)}>I've set it up — Continue →</button>
+                          )}
+                          <button type="button" className="ghost" onClick={() => setWizardStep(1)}>Skip for now</button>
                         </div>
                       </div>
                     </div>
                   )}
 
-                  {wizardStep === 0 && (
+                  {wizardStep === 1 && (
                     <div className="skills">
                       <div className="skill-row">
                         <strong>how-to-use-tortoise</strong>
@@ -2378,9 +2393,9 @@ function claimIntentInFlight() {
                         <span className="dim small">the ingest skill — run it to record a research finding: it creates a Point and surfaces related claims to connect.</span>
                       </div>
                       <div className="wizard-nav">
-                        <button type="button" className="ghost" onClick={() => { welcomeKey ? setWelcomeOriented(false) : setWelcomeMode(false) }}>← Back</button>
+                        <button type="button" className="ghost" onClick={() => setWizardStep(wizardStep - 1)}>← Back</button>
                         <div className="wizard-nav-actions">
-                          <button type="button" className="btn-primary" onClick={() => setWizardStep(1)}>Next</button>
+                          <button type="button" className="btn-primary" onClick={() => setWizardStep(2)}>Next</button>
                         </div>
                       </div>
                     </div>
@@ -2463,7 +2478,7 @@ function claimIntentInFlight() {
 
                   {wizardStep === 4 && (
                     <div className="done">
-                      <p className="dim">Welcome to Tortoise — your graph is live, your agent knows how to use it, and your decisions are being recorded.</p>
+                      <p className="dim">Welcome to Tortoise — your graph is live and your decisions are being recorded. Once you install the tools, your agent knows how to use them.</p>
                       <div className="wizard-nav">
                         <button type="button" className="ghost" onClick={() => setWizardStep(3)}>← Back</button>
                       </div>

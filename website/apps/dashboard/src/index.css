@@ -468,3 +468,31 @@ button:focus-visible, select:focus-visible, a:focus-visible, input:focus-visible
 .overview.empty-state .empty-actions code {
   font-size: 12px;
 }
+
+/* #1691: dark-theme inputs — the seed/claim inputs rendered black-on-blue
+   (browser default text on the dark surface). Force light text + caret. */
+input, textarea, select {
+  color: var(--text, #e2e8f0);
+  caret-color: var(--text, #e2e8f0);
+}
+input::placeholder, textarea::placeholder {
+  color: rgba(226, 232, 240, 0.45);
+}
+
+/* #1691: the wizard's copied setup (harness prompts) — the long Pi/Web
+   prompts sprawled off-screen (browser <pre> default, no wrapping) and
+   inherited no dark-theme styling. Wrap + light text + mono. */
+.snippet {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  max-width: 100%;
+  background: var(--surface, #0d1a2d);
+  border: 1px solid var(--border, #1e293b);
+  border-radius: 8px;
+  padding: 12px 14px;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text, #e2e8f0);
+}
