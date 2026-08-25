@@ -35,7 +35,7 @@ def _close_seed_sdks():
     """Close held seed SDKs at session end (see _SEED_SDKS docstring)."""
     yield
     while _SEED_SDKS:
-        try:
+        try:  # noqa: SIM105
             _SEED_SDKS.pop().close()
         except Exception:
             pass
@@ -92,7 +92,7 @@ def _clean_team_graphs(monkeypatch):
             _db = _sdk._get_proj().db
             for _g in list(_db.list_graphs() or []):
                 if _g.startswith("team_") and not _g.startswith("team_test_"):
-                    try:
+                    try:  # noqa: SIM105
                         _db.select_graph(_g).delete()
                     except Exception:
                         pass

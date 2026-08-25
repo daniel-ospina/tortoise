@@ -710,8 +710,7 @@ class TestEventsTools:
         assert rt.annotations.destructiveHint is True
 
     def test_events_poll_returns_same_shape_as_sdk(self, monkeypatch, tmp_path):
-        import os  # noqa: I001
-        from tortoise.mcp_server import tortoise_events_poll, _transport_mode
+        from tortoise.mcp_server import _transport_mode, tortoise_events_poll
         from tortoise.sdk import TortoiseSDK
 
         db = os.path.join(str(tmp_path), "evt.db")
@@ -727,8 +726,7 @@ class TestEventsTools:
         assert result["next_cursor"]
 
     def test_events_poll_unknown_type_error(self, monkeypatch, tmp_path):
-        import os  # noqa: I001
-        from tortoise.mcp_server import tortoise_events_poll, _transport_mode
+        from tortoise.mcp_server import _transport_mode, tortoise_events_poll
         from tortoise.sdk import TortoiseSDK
 
         sdk = TortoiseSDK(os.path.join(str(tmp_path), "evt2.db"))
@@ -741,8 +739,7 @@ class TestEventsTools:
         assert result.get("error")  # _safe structured error, not a crash
 
     def test_retract_point_returns_sdk_result(self, monkeypatch, tmp_path):
-        import os  # noqa: I001
-        from tortoise.mcp_server import tortoise_retract_point, _transport_mode
+        from tortoise.mcp_server import _transport_mode, tortoise_retract_point
         from tortoise.sdk import TortoiseSDK
 
         sdk = TortoiseSDK(os.path.join(str(tmp_path), "evt3.db"))
@@ -833,7 +830,6 @@ class TestIngestPromotionPolicy:
             assert "not allowed under promotion_policy 'gated'" in res["error"]
 
     def _sdk_backed_ingest(self, request, monkeypatch, tmp_path, *, reify=False, **kw):
-        import os  # noqa: I001
         from tortoise.sdk import TortoiseSDK
         sdk = TortoiseSDK(os.path.join(str(tmp_path), "ing.db"))
         request.addfinalizer(sdk.close)  # match repo teardown convention
@@ -938,7 +934,6 @@ class TestStdioEntrypointToolRegistration:
 
     def test_stdio_entrypoint_serves_full_registry(self, tmp_path):
         import json
-        import os
         import select
         import subprocess
         import sys

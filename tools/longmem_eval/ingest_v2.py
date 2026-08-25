@@ -32,7 +32,8 @@ the structural signal).
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from tortoise.sdk import TortoiseSDK
 
@@ -43,7 +44,7 @@ from .evidence import (EVIDENCE_QUOTE_CAP, anchor_quote, evidence_sessions,  # n
 from .evidence import _overlap  # noqa: F401, E402 — back-compat re-export
 from .ingest import (SESSION_TRANSCRIPT_KIND, EXTRACTION_POINT_KIND,  # noqa: E402
                      UNDATED_SENTINEL,
-                     _point_exists, _existing_point_ids, _session_chunks)
+                     _existing_point_ids, _session_chunks)
 
 
 def _point_status(proj, pid: str) -> str:
@@ -549,7 +550,7 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
 
     # ── Phase C (sequential): payload writes + consolidation records + the
     # extracted-point CONTAINS edges. All graph writes stay sequential. ──
-    for ctx, res in zip(ctxs, results):
+    for ctx, res in zip(ctxs, results):  # noqa: B905
         si, s_node, session = ctx["si"], ctx["s_node"], ctx["session"]
         sid, session_date = ctx["sid"], ctx["session_date"]
         evidence_turns = ctx["evidence_turns"]
@@ -681,7 +682,7 @@ def _apply_deletions(sdk: TortoiseSDK, deletions: list[dict]) -> int:
     return applied
 
 
-def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
+def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,  # noqa: F811
                        model: Any, *, chunk_turns: int = 2,
                        session_workers: int = 1,
                        model_factory: Callable | None = None) -> dict:

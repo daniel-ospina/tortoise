@@ -246,7 +246,7 @@ def _needs_gloss(kind: str, desc: str) -> bool:
     low = d.lower()
     if any(m in low for m in ("not", "uncertain", "≡", "link:", "never", "only")):
         return True
-    if len(d.split()) > 6:  # longer descriptions carry real semantics
+    if len(d.split()) > 6:  # longer descriptions carry real semantics  # noqa: SIM103
         return True
     return False
 
@@ -1362,7 +1362,7 @@ def _fact_value_contradiction(content: str, about_entities: list[str] | None,
     old_when = str(existing.get("when") or existing.get("createdAt") or "").strip()
     if when and old_when:
         try:
-            if _valid_iso_date(when) and _valid_iso_date(old_when):
+            if _valid_iso_date(when) and _valid_iso_date(old_when):  # noqa: SIM102
                 if when[:10] < old_when[:10]:
                     return False
         except (TypeError, ValueError):
@@ -3099,7 +3099,7 @@ def _call_once(model, system: str, user: str, *, deadline_s: int,
         # trickle defeats the requests read timeout). close() is best-effort.
         close = getattr(model, "close", None)
         if close is not None:
-            try:
+            try:  # noqa: SIM105
                 close()
             except Exception:
                 pass

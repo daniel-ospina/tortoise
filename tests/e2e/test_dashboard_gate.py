@@ -164,7 +164,11 @@ def test_mint_429_shows_error_card_not_stuck_shell(page: Page) -> None:
     page.context.add_cookies([{"name": "sb-tortoise-auth-token",
                                "value": _up.quote(_json.dumps(sess)),
                                "domain": ".premiselabs.co", "path": "/"}])
-    from tests.e2e.test_session_login_flow import AUTH_ORIGIN, DASHBOARD_URL, _proxy_body  # noqa: F401
+    from tests.e2e.test_session_login_flow import (
+        AUTH_ORIGIN,
+        DASHBOARD_URL,
+        _proxy_body,
+    )
 
     def handle(route):
         url = route.request.url
@@ -203,8 +207,8 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
     provisioned IN-APP — tenant-provision → membership poll → reveal — and
     the key is shown in the welcome card exactly once (A13). A returning
     visit (key consumed) shows the ready card without re-revealing."""
-    import urllib.parse as _up
     import time as _time
+    import urllib.parse as _up
     user_id = "u-welcome1566"
     sess = {"access_token": "fake.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sig",
             "refresh_token": "rt", "expires_in": 3600,
@@ -281,8 +285,8 @@ def test_welcome_mode_provision_failure_shows_error_card(page: Page) -> None:
     """#1566: an edge-function provisioning failure shows the actionable
     error card with a retry — never the silent stuck shell (the #1559
     pattern applied to the welcome mode)."""
-    import urllib.parse as _up
     import time as _time
+    import urllib.parse as _up
     user_id = "u-wfail"
     sess = {"access_token": "fake.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sig",
             "refresh_token": "rt", "expires_in": 3600,
@@ -328,8 +332,8 @@ def test_welcome_mode_provision_401_clears_session_and_redirects(page: Page) -> 
     """#1566/#1511 semantic: a 401 from tenant-provision means the session is
     stale — the app clears it and goes to /auth (never an error card or a
     stuck state)."""
-    import urllib.parse as _up
     import time as _time
+    import urllib.parse as _up
     user_id = "u-w401"
     sess = {"access_token": "fake.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sig",
             "refresh_token": "rt", "expires_in": 3600,
@@ -375,8 +379,6 @@ def test_oauth_callback_fragment_lands_in_dashboard(page: Page) -> None:
     the session in the FRAGMENT (#access_token=…) and NO cookie yet — the
     synchronous head gate must NOT bounce (that would drop the fragment and
     loop back to /auth); supabase-js ingests it and the dashboard mounts."""
-    import urllib.parse as _up
-    import time as _time
     user_id = "u-frag"
     # NO session cookie — the fragment carries the tokens (supabase-js
     # ingests them; the mocked /auth/v1/user returns the identity). All
@@ -449,8 +451,8 @@ def test_bootstrap_cap_falls_back_to_recovery_mint(page: Page) -> None:
     'Too many active session keys — wait for expiry' until expiry. The mount
     must fall back to the RECOVERY mint (persistent, auto-revokes at cap) so
     the dashboard still renders."""
-    import urllib.parse as _up
     import time as _time
+    import urllib.parse as _up
     user_id = "u-cap"
     sess = {"access_token": "fake.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sig",
             "refresh_token": "rt", "expires_in": 3600,

@@ -1709,7 +1709,7 @@ class FalkorProjection(
                 # not be dropped/recreated on every reopen (churn).
                 try:
                     for _single in ("is_operator", "lastDreamedAt"):
-                        try:
+                        try:  # noqa: SIM105
                             self.g.query(f"DROP INDEX ON :Point({_single})")
                         except Exception:
                             pass  # no such single index — fine
@@ -1831,7 +1831,7 @@ class FalkorProjection(
                         # index directly — mark the migration done so a later
                         # boot (create → "already") never re-enters the
                         # drop→recreate path (marker guards churn).
-                        try:
+                        try:  # noqa: SIM105
                             self.g.query(
                                 "MERGE (m:Meta {key:'point_fts_v2'}) SET m.v = true"
                             )
