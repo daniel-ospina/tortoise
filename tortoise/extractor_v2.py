@@ -215,7 +215,132 @@ def master_kind_forms(master: dict) -> set[str]:
     return kinds
 
 
-def _render_master(master: dict) -> str:
+# ── Compact master render (pilot #1549 prompt-efficiency research) ────────
+# Toggle: TORTOISE_EXTRACTOR_PROMPT=compact. SAME vocabulary (the real
+# ontology + packs) — tighter presentation: kind names only (gloss retained
+# only when it disambiguates), selective pack injection by story keywords,
+# and NO chains section here (chains_text is the single source — dedup).
+# Research: 4,700-token S2 prompt → ~1,900-2,300 (~2-2.5x); evidence says
+# shorter context IMPROVES structured-output quality (lost-in-the-middle),
+# and "Mind Your Format" says A/B on the actual model — hence the toggle.
+
+# Pack namespace → trigger words (conservative: match → inject the section).
+_PACK_TRIGGERS = {
+    "dev:": ("dev", "epic", "issue", "code", "deploy", "sprint", "pr ",
+             "pull request", "bug", "commit", "test", "repo"),
+    "marketing:": ("marketing", "campaign", "audience", "content", "post",
+                   "channel", "social"),
+    "product-strategy:": ("product", "market", "competitor", "customer",
+                          "roadmap", "feature", "use case", "strategy"),
+    "pm:": ("project", "milestone", "pm:", "portfolio", "program"),
+    "epistemic-team:": ("epistemic", "weight", "confidence", "claim",
+                        "premise", "evidence"),
+}
+
+
+def _needs_gloss(kind: str, desc: str) -> bool:
+    """Gloss only when it disambiguates (research: names-only for the rest)."""
+    d = desc.strip()
+    if not d:
+        return False
+    low = d.lower()
+    if any(m in low for m in ("not", "uncertain", "≡", "link:", "never", "only")):
+        return True
+    if len(d.split()) > 6:  # longer descriptions carry real semantics
+        return True
+    return False
+
+
+def _select_pack_kinds(story: str | None, pack_kinds: dict) -> dict:
+    """Selective pack injection: only sections whose domain words appear in
+    the story (conservative — if nothing matches, return all so no needed
+    kind is ever dropped)."""
+    if not story:
+        return dict(pack_kinds)
+    low = story.lower()
+    selected = {}
+    for k, v in pack_kinds.items():
+        ns = k.split(":")[0] + ":"
+        triggers = _PACK_TRIGGERS.get(ns, ())
+        if any(t in low for t in triggers):
+            selected[k] = v
+    return selected or dict(pack_kinds)  # nothing matched → all (safe)
+
+
+def _render_master(master: dict, story: str | None = None) -> str:
+    import os
+    if os.environ.get("TORTOISE_EXTRACTOR_PROMPT", "").strip() == "compact":
+        return _render_master_compact(master, story)
+    return _render_master_verbose(master)
+
+
+def _render_master_compact(master: dict, story: str | None) -> str:
+    lines = [
+        "MASTER LIST — the closed vocabulary. EVERY kind you emit MUST come "
+        "from this list. Do NOT mint kinds.",
+    ]
+
+    def _group(title: str, d: dict) -> str:
+        out = [f"\n{title}"]
+        for k, v in d.items():
+            out.append(f"- {k}" if not _needs_gloss(k, v) else f"- {k} — {v}")
+        return "\n".join(out)
+
+    lines.append(_group("OBJECTS (core)", master["objects"]))
+    lines.append(_group("SUBJECTS (core)", master["subjects"]))
+    lines.append(_group("POINTS", master["points"]))
+    lines.append(_group("EVENTS", master["events"]))
+    selected = _select_pack_kinds(story, master["pack_kinds"])
+    lines.append(_group("PACK KINDS", selected))
+    # granularity: matched-domain subsections only (compact)
+    g = master.get("memory_granularity") or {}
+    if story:
+        low = story.lower()
+        sub = {k: v for k, v in g.items()
+               if any(t in low for t in _PACK_TRIGGERS.get("dev:", ()) + _PACK_TRIGGERS.get("product-strategy:", ()))}
+        if sub:
+            lines.append(_group("MEMORY GRANULARITY", sub))
+    # NO chains section — chains_text renders it once (dedup).
+    return "\n".join(lines)
+
+
+def _render_master_verbose(master: dict) -> str:
+    lines = [
+        "MASTER LIST — the closed vocabulary. EVERY kind you emit MUST come "
+        "from this list (namespaced or bare form). Do NOT mint kinds: "
+        "\"worktree\", \"test suite\", \"approach\" are NOT kinds — re-map "
+        "to the nearest listed kind or drop the item.",
+    ]
+
+    def _group(title: str, d: dict) -> str:
+        out = [f"\n{title}"]
+        out += [f"- {k} — {v}" for k, v in d.items()]
+        return "\n".join(out)
+
+    lines.append(_group("OBJECTS (core)", master["objects"]))
+    lines.append(_group("SUBJECTS (core)", master["subjects"]))
+    lines.append(_group("POINTS", master["points"]))
+    lines.append(_group("EVENTS", master["events"]))
+    lines.append(_group("PACK KINDS (from the installed packs)", master["pack_kinds"]))
+
+    lines.append("\nCHAINS (the business logic of mapping)")
+    for name, c in master["chains"].items():
+        path = " → ".join(str(x) for x in c.get("path", []))
+        note = c.get("note", "")
+        lines.append(f"- {name}: {path}" + (f" — {note}" if note else ""))
+
+    ups = master.get("user_personal_state") or {}
+    if ups:
+        lines.append("\nUSER-PERSONAL-STATE VOCABULARY (Tier-A classification "
+                     "hint — the VALUE is the fact, retain verbatim)")
+        lines += [f"- {cat}: {desc}" for cat, desc in ups.items()]
+
+    g = master.get("memory_granularity") or {}
+    if g:
+        lines.append("\nMEMORY GRANULARITY (what to keep, what to strip)")
+        lines += [f"- {k}: {v}" for k, v in g.items()]
+    lines.append("\n" + STATE_VALUE_CARVE_OUT)
+    return "\n".join(lines)
     lines = [
         "MASTER LIST — the closed vocabulary. EVERY kind you emit MUST come "
         "from this list (namespaced or bare form). Do NOT mint kinds: "
@@ -659,11 +784,12 @@ def _render_source_transcript(edus: list[dict] | None) -> str:
 
 def render_s2_prompt(master: dict | None = None, *,
                      session_date: str | None = None,
-                     edus: list[dict] | None = None) -> str:
+                     edus: list[dict] | None = None,
+                     story: str | None = None) -> str:
     master = master or build_master_list()
     transcript = _render_source_transcript(edus)
     return (S2_TMPL
-            .replace("{master_list}", _render_master(master))
+            .replace("{master_list}", _render_master(master, story))
             .replace("{chains_text}", _render_chains(master))
             .replace("{date_anchor}", _date_anchor(
                 session_date, include_emission_rules=True))
@@ -1045,7 +1171,7 @@ def render_s4_prompt(story: str, search: dict, embed_list: dict,
     master = master or build_master_list()
     transcript = _render_source_transcript(edus)
     return (S4_TMPL
-            .replace("{master_list}", _render_master(master))
+            .replace("{master_list}", _render_master(master, story))
             .replace("{chains_text}", _render_chains(master))
             .replace("{story}", story)
             .replace("{search_results}", _render_search_results(search))

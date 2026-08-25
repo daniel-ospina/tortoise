@@ -102,6 +102,12 @@ class OpenRouterModel:
         cap = self.max_tokens if max_tokens is None else max_tokens
         if cap is not None:
             body["max_tokens"] = cap
+        # Pilot #1549 (prompt-efficiency research): JSON mode — kills the
+        # parse-error census class at zero prompt cost. DeepSeek requires the
+        # prompt to contain "json" + an example (both present); OpenRouter
+        # passes response_format through. Toggle: TORTOISE_JSON_MODE=0 disables.
+        if os.environ.get("TORTOISE_JSON_MODE", "1") == "1":
+            body["response_format"] = {"type": "json_object"}
         # Enable thinking for reasoning models
         if self.thinking_budget > 0:
             body["reasoning"] = {"max_tokens": self.thinking_budget}
