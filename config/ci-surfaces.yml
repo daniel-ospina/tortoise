@@ -361,6 +361,7 @@ surfaces:
   - test_embedder_probe.py
   - test_labeled_pairs_schema.py
   - test_lme_ingest_v2_supersession.py
+  - test_load_test.py
   - test_pair_label_runner.py
 tier1:
 - test_cli_serve.py
