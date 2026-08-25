@@ -4,6 +4,10 @@ import './index.css'
 // #1623: plan display data (build-time import of product/pricing.json).
 import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
 import { HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_INSTALL, HARNESS_NAMES, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_STEPS } from './harnesses.js'
+// #1708 D8: pure session-key predicate extracted to sessionKey.js (node --test
+// unit-tested); imported under an alias to avoid an ESM redeclaration collision
+// with the local isSessionKey wrapper below.
+import { isSessionKey as isSessionKeyPredicate, isActiveKey } from './sessionKey.js'
 
 const API_BASE = 'https://api.premiselabs.co'
 const KEY_STORAGE = 'tortoise_api_key'
@@ -2014,16 +2018,12 @@ function claimIntentInFlight() {
     }
   }
 
-  // Fix A (review round 2): map a full key value to its list id (or prefix)
-  // so revoke can tell whether the active data-plane key is being revoked.
-  // Round-4 (P3): the dashboard mints ephemeral bootstrap keys (≤3/team,
-  // 24h). They appear in /v1/team/keys with no created_via/expires_at — flag
-  // the one matching our cached active key so it renders 'ephemeral · session'
-  // and can't be revoked from the table (it IS the session the app runs on).
+  // #1708 D8: API-first session-key classification (created_via === 'bootstrap'
+  // || expires_at) with the old active-key prefix guard retained ONLY as a
+  // fallback when the API fields are absent (stale cached responses / registry
+  // lane pre-#1709) so the live session key can never be revoked from the UI.
   function isSessionKey(k) {
-    if (!k || k.revoked_at) return false
-    const active = currentTeamId ? teamKeysRef.current[currentTeamId] : null
-    return !!active && (k.key_prefix === String(active).slice(0, 10))
+    return isSessionKeyPredicate(k, currentTeamId ? teamKeysRef.current[currentTeamId] : null)
   }
 
   function keyIdFromValue(value) {
@@ -2970,7 +2970,7 @@ function claimIntentInFlight() {
                     <td><code>{k.key_prefix || k.id?.slice(0, 12)}</code></td>
                     <td>{fmtTime(k.created_at || k.createdAt)}</td>
                     <td>{k.revoked_at ? <span className="revoked">revoked</span> : isSessionKey(k) ? <span className="live">ephemeral · session</span> : <span className="live">active</span>}</td>
-                    <td>{!k.revoked_at && !isSessionKey(k) && isOwnerAdmin && (
+                    <td>{!k.revoked_at && !isSessionKey(k) && !isActiveKey(k, currentTeamId ? teamKeysRef.current[currentTeamId] : null) && isOwnerAdmin && (
                       <span className="key-actions">
                         {/* #1148-ux review: on/off toggle (new keys default on) */}
                         <button
