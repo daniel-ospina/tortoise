@@ -1010,7 +1010,7 @@ def _cmd_team_keys_list(args) -> int:
     for k in keys:
         status = "revoked" if k.get("revoked_at") else "active"
         last = k.get("last_used_at") or "never"
-        name = str(k.get('name') or '')[:18]
+        name = str(k.get('name') or '')[:20]
         print(f"  {str(k.get('id') or ''):<14}{name:<20}{str(k.get('key_prefix') or ''):<14}"  # noqa: RUF010
               f"{str(k.get('created_at') or ''):<26}{str(last):<26}{status}")  # noqa: RUF010
     return 0

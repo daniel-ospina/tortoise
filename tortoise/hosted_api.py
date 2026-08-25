@@ -1032,7 +1032,7 @@ def _short_id() -> str:
 KEY_NAME_MAX = 64
 
 
-def _clean_key_label(value) -> str | None:
+def _clean_key_label(value: object) -> str | None:
     """Normalize an optional API-key label: strip whitespace, clamp to
     KEY_NAME_MAX chars, empty → None (unnamed). Never raises — a label is
     display metadata, so an invalid value degrades to unnamed rather than
@@ -1672,7 +1672,7 @@ async def _check_turnstile(request: Request, body: dict) -> None:
 
 # ── Pydantic Models ───────────────────────────────────────────────
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class CreatePointRequest(BaseModel):
@@ -3898,12 +3898,19 @@ async def toggle_dashboard_login(
 
 class KeyEnabledToggle(BaseModel):
     # Either field may be present; the handler applies whatever is sent
-    # (enabled=on/off toggle, name=rename). Both optional keeps rename-only
-    # and toggle-only PATCHes valid without forcing clients to echo state
-    # they don't care about. `enabled` was previously required — making it
-    # optional is backward-compatible (existing callers still send it).
+    # (enabled=on/off toggle, name=rename). `model_fields_set` distinguishes
+    # an explicit JSON null (apply it — null clears the label) from an absent
+    # field (leave untouched). `enabled` was previously required — making it
+    # optional is backward-compatible (existing callers still send it). At
+    # least one field must be present (422 on an empty body).
     enabled: bool | None = None
     name: str | None = None
+
+    @model_validator(mode="after")
+    def _at_least_one_field(self) -> KeyEnabledToggle:
+        if not self.model_fields_set:
+            raise ValueError("At least one of enabled or name is required")
+        return self
 
 
 @app.patch("/v1/team/keys/{key_id}")
@@ -3937,9 +3944,9 @@ async def toggle_api_key_enabled(
             # owner is using.
             raise HTTPException(status_code=409, detail="Cannot modify a session key")
         result = {"key_id": key_id}
-        if body.enabled is not None:
-            _sb_set_enabled(cp, key_id, body.enabled)
-            result["enabled"] = body.enabled
+        if "enabled" in body.model_fields_set:
+            _sb_set_enabled(cp, key_id, body.enabled is not False)
+            result["enabled"] = body.enabled is not False
         # model_fields_set distinguishes explicit null (clear label) from
         # field-absent (don't touch) — JSON null must clear, not skip.
         if "name" in body.model_fields_set:
@@ -3947,26 +3954,34 @@ async def toggle_api_key_enabled(
             _sb_set_name(cp, key_id, cleaned)
             result["name"] = cleaned
         return result
-    # Registry mode (selfhost): no enabled flag — enabled is a no-op success;
-    # name IS stored on the APIKey node (parity with supabase mode), with the
-    # same owner/admin + team-scope guard as supabase mode (registry
-    # _require_owner_admin resolves the Membership graph).
+    # Registry mode (selfhost): no enabled column — enabled is a no-op echo
+    # (registry keys are always active, preserving the pre-#1148 contract of
+    # {"key_id", "enabled": True}); name IS stored on the APIKey node
+    # (parity with supabase mode). The same 404/owner-admin/revoked/session
+    # guards apply as supabase mode (_require_owner_admin resolves the
+    # Membership graph).
+    sdk = _make_sdk(namespace="registry")
+    rows = sdk._get_registry().query(
+        "MATCH (k:APIKey {id: $id}) RETURN k.team_id, k.revoked_at, k.created_via",
+        params={"id": key_id},
+    ).result_set
+    if not rows:
+        raise HTTPException(status_code=404, detail="API key not found")
+    team_id, revoked_at, created_via = rows[0]
+    await _require_owner_admin(user["user_id"], team_id)
+    if revoked_at is not None:
+        raise HTTPException(status_code=409, detail="Cannot modify a revoked key")
+    if created_via == "bootstrap":
+        raise HTTPException(status_code=409, detail="Cannot modify a session key")
+    result = {"key_id": key_id, "enabled": True}
     if "name" in body.model_fields_set:
-        sdk = _make_sdk(namespace="registry")
         cleaned = _clean_key_label(body.name)
-        rows = sdk._get_registry().query(
-            "MATCH (k:APIKey {id: $id}) RETURN k.team_id",
-            params={"id": key_id},
-        ).result_set
-        if not rows:
-            raise HTTPException(status_code=404, detail="API key not found")
-        await _require_owner_admin(user["user_id"], rows[0][0])
         sdk._get_registry().query(
             "MATCH (k:APIKey {id: $id}) SET k.name = $name",
             params={"id": key_id, "name": cleaned},
         )
-        return {"key_id": key_id, "name": cleaned}
-    return {"key_id": key_id, "enabled": True}
+        result["name"] = cleaned
+    return result
 
 
 # ── Session Capture ───────────────────────────────────────────────

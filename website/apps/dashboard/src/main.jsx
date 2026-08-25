@@ -1453,6 +1453,7 @@ function claimIntentInFlight() {
     setNewKey(null)        // Round-16: the plaintext key card was shown once on the old team
     setNewKeyName('')      // key-label: a typed label must not leak onto another team's mint
     setEditingKeyId(null)  // key-label: close any in-flight inline rename across teams
+    renameCancelRef.current = true // key-label: the unmount-blur must not fire a rename for the old team
     setError('')
     setCurrentTeamId(teamId)
     teamIdRef.current = teamId
@@ -1800,9 +1801,7 @@ function claimIntentInFlight() {
     try {
       const _teamAtCall = currentTeamId
       const activeKey = _teamAtCall ? (teamKeysRef.current[_teamAtCall] || apiKey) : apiKey
-      // key-label: carry the old key's label onto the replacement
-      const label = (keys.find((k) => k.id === keyId) || {}).name || undefined
-      const newKeyVal = await mintKey(activeKey, label)
+      const newKeyVal = await mintKey(activeKey)
       // Revoke the old key — skip its bootstrap re-mint (we already hold the
       // replacement; the re-mint exists only for revoke-without-replacement).
       await revokeKey(keyId, { skipConfirm: true, skipBootstrap: true })
@@ -1857,6 +1856,11 @@ function claimIntentInFlight() {
     // the enabled toggle (PATCH /v1/team/keys/{id}, body {name}). Optimistic
     // local update; revert on error. Empty/whitespace → unnamed (server
     // stores NULL). 64-char cap mirrors the server's KEY_NAME_MAX.
+    // Round-28 (code-review P1): send ONLY {name} — echoing a stale `enabled`
+    // snapshot could silently re-enable a key disabled in another session/
+    // tab (rename must never touch auth state). Round-20: capture the team at
+    // call; a stale rename's error must not land under the new team's header.
+    const _teamAtCall = currentTeamId
     setEditingKeyId(null)
     setError('')
     const next = (name || '').trim().slice(0, 64) || null
@@ -1871,12 +1875,14 @@ function claimIntentInFlight() {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         useSession: true,  // #1148: management → session JWT when signed in
-        body: JSON.stringify({ enabled: cur.enabled !== false, name: next }),
+        body: JSON.stringify({ name: next }),
       })
+      if (teamIdRef.current !== _teamAtCall) return // stale switch — don't touch the new team's state
       if (updated && (updated.id || updated.key_id)) {
         setKeys((ks) => ks.map((k) => k.id === keyId ? { ...k, name: next } : k))
       }
     } catch (e) {
+      if (teamIdRef.current !== _teamAtCall) return // stale switch — error belongs to the old team
       setKeys((ks) => ks.map((k) => k.id === keyId ? { ...k, name: prevName } : k))
       setError((e && e.message) || `Couldn't rename the key — try again.`)
     }

@@ -80,6 +80,11 @@ DO $$ BEGIN
     WHERE table_schema='public' AND table_name='api_keys' AND column_name='name') = 'text', '20260825000001: api_keys.name text');
   PERFORM tests.assert((SELECT is_nullable FROM information_schema.columns
     WHERE table_schema='public' AND table_name='api_keys' AND column_name='name') = 'YES', '20260825000001: api_keys.name nullable');
+  PERFORM tests.assert(
+    EXISTS (SELECT 1 FROM pg_constraint
+            WHERE conrelid='public.api_keys'::regclass
+              AND contype='c' AND conname='chk_api_keys_name_max_len'),
+    '20260825000001: api_keys.name max-length CHECK exists');
   -- invitations
   PERFORM tests.assert((SELECT data_type FROM information_schema.columns
     WHERE table_schema='public' AND table_name='invitations' AND column_name='lookup_hash') = 'text', 'invitations.lookup_hash text');

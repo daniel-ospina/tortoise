@@ -503,13 +503,13 @@ def resolve_api_key(cp, token: str) -> dict | None:
                             "created_by", "expires_at", "revoked_at"]
     try:
         rows = cp.query(
-            "api_keys", select=_API_KEY_BASE_SELECT + ["enabled", "name"],  # noqa: RUF005
+            "api_keys", select=_API_KEY_BASE_SELECT + ["enabled"],  # noqa: RUF005
             filters=[("lookup_hash", "eq", h)],
         )
     except Exception as e:
         _logger.warning(
-            "api_keys read failed — retrying without additive 'enabled'/'name'; is "
-            "migration 20260813000005 (enabled) or 20260825000001 (name) applied? (%s)", e)
+            "api_keys read failed — retrying without additive 'enabled'; is "
+            "migration 20260813000005 applied? (%s)", e)
         try:
             rows = cp.query(
                 "api_keys", select=_API_KEY_BASE_SELECT,
@@ -602,8 +602,6 @@ def resolve_api_key(cp, token: str) -> dict | None:
         "created_by": created_by,
         # #1148: per-key enabled state (dashboard toggle)
         "enabled": row.get("enabled", True) if rows else True,
-        # key label (migration 20260825000001) — display metadata only
-        "key_name": row.get("name") if rows else None,
         "dashboard_key_login": True if _dkl is None else _dkl,
         # #308: enforcement (403 SUSPENDED) + owner notification
         "suspended_at": team_row.get("suspended_at"),

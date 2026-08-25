@@ -98,6 +98,12 @@ def _restore_tortoise_sdk_init(original_init):
     import tortoise.hosted_api as ha_mod
 
     ha_mod.TortoiseSDK.__init__ = original_init
+    # #1502-class: evict the embedded-fallback anchor created DURING this
+    # test (e.g. by the registry-mode rename helper's _make_sdk). Without
+    # this, a stale anchor bound to this test's temp DB leaks into the next
+    # test file's run (dead socket / stale rows) — the #1497 pattern from
+    # test_writer_inventory.
+    ha_mod._FALLBACK_KEEPALIVE.clear()
 
 
 @pytest.fixture
@@ -700,8 +706,10 @@ class TestKeysCreate:
             r = client.post("/v1/team/keys", json=body) if body is not None else client.post("/v1/team/keys")
             assert r.status_code == 200, r.text
             kid = r.json()["id"]
-            listed = [k for k in client.get("/v1/team/keys").json()["keys"] if k["id"] == kid]
-            assert listed[0].get("name") is None, f"body={body!r} → {listed[0]}"
+            listed = client.get("/v1/team/keys").json()["keys"]
+            ids = [k["id"] for k in listed]
+            assert kid in ids, f"minted key {kid} missing from list (embedded-lane visibility?): {ids}"
+            assert next(k for k in listed if k["id"] == kid).get("name") is None, f"body={body!r}"
 
     def test_create_key_name_clamped_to_64_chars(self, client):
         long = "x" * 200
@@ -791,7 +799,9 @@ class TestKeysRename:
         kid = client.post("/v1/team/keys", json={"name": "staging"}).json()["id"]
         r = client.patch(f"/v1/team/keys/{kid}", json={"name": "prod"})
         assert r.status_code == 200, r.text
-        assert r.json() == {"key_id": kid, "name": "prod"}
+        # registry mode has no enabled column — echo preserves the pre-#1148
+        # no-op contract {key_id, enabled: True} alongside the applied name
+        assert r.json() == {"key_id": kid, "enabled": True, "name": "prod"}
         listed = next(k for k in client.get("/v1/team/keys").json()["keys"] if k["id"] == kid)
         assert listed["name"] == "prod"
 
