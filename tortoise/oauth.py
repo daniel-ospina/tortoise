@@ -855,17 +855,25 @@ _CONSENT_HTML = """<!DOCTYPE html>
   // #1704: reuse the dashboard's parent-domain session cookie
   // (sb-tortoise-auth-token on .premiselabs.co — main.jsx supabaseStorage).
   // The user is already signed in on app.premiselabs.co; this page must not
-  // ask for a SECOND login. Read-only storage (no persist/refresh — the
-  // consent POST only needs the access token).
+  // ask for a SECOND login. Read-only storage: getItem reads the cookie,
+  // setItem/removeItem are no-ops (write protection without persistSession:
+  // false — gotrue DISCARDS a custom storage when persistSession is false,
+  // review P0). detectSessionInUrl stays true so the OAuth sign-in fallback
+  // (provider → redirect back with #access_token) still ingests.
   const COOKIE_NAME = "sb-tortoise-auth-token";
   const cookieStorage = {
     getItem: (key) => {
       try {
-        const m = document.cookie.match(new RegExp("(?:^|; )" + key + "=([^;]*)"));
-        return m ? decodeURIComponent(m[1]) : null;
+        // split-based cookie read — no regex escaping; parity with the
+        // dashboard's readCookie semantics.
+        const parts = document.cookie.split("; ");
+        for (const p of parts) {
+          const eq = p.indexOf("=");
+          if (eq > 0 && p.slice(0, eq) === key) return decodeURIComponent(p.slice(eq + 1));
+        }
+        return null;
       } catch (e) { return null; }
     },
-    setItem: () => {},
     removeItem: () => {},
   };
   let supabaseClient = null;
@@ -875,9 +883,9 @@ _CONSENT_HTML = """<!DOCTYPE html>
         auth: {
           storage: cookieStorage,
           storageKey: COOKIE_NAME,
-          persistSession: false,
+          persistSession: true,   // required for the custom storage to be used
           autoRefreshToken: false,
-          detectSessionInUrl: false,
+          detectSessionInUrl: true,  // OAuth fallback ingests the hash
         },
       });
     } else {
