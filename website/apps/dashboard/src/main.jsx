@@ -257,6 +257,9 @@ function claimIntentInFlight() {
   const [authMode, setAuthMode] = React.useState('session') // 'session' | 'apikey'
   const [checking, setChecking] = React.useState(true)
   const sessionTokenRef = React.useRef(null)
+  // #1680: the session user metadata is captured at mount for component-
+  // scope reads (the seed-step prefill for returning users).
+  const sessionMetaRef = React.useRef(null)
   const [teams, setTeams] = React.useState([])
   const [graphs, setGraphs] = React.useState([])
   const [currentTeamId, setCurrentTeamId] = React.useState(null)
@@ -520,11 +523,14 @@ function claimIntentInFlight() {
 
   // #1680: returning users reopen the wizard via the Setup nav — the seed
   // inputs aren't prefilled by the first-timer provisioning path, so derive
-  // the defaults from the session when the seed step is first shown.
+  // the defaults from the session when the seed step is first entered
+  // (ONCE — a deliberate clear + Back/Next must not re-populate).
+  const seedPrefilledRef = React.useRef(false)
   React.useEffect(() => {
-    if (wizardStep === 3 && !wizardSubject) {
-      const m = (session && session.user && session.user.user_metadata) || {}
-      const s = m.display_name || (session && session.user && session.user.email ? session.user.email.split('@')[0] : '') || 'me'
+    if (wizardStep === 3 && !seedPrefilledRef.current && !wizardSubject) {
+      seedPrefilledRef.current = true
+      const meta = sessionMetaRef.current || {}
+      const s = meta.display_name || (meta.email ? meta.email.split('@')[0] : '') || 'me'
       setWizardSubject(s)
       setWizardProject(welcomeTeamName || currentTeamName || 'my-project')
     }
@@ -801,6 +807,10 @@ function claimIntentInFlight() {
           setChecking(false); return
         }
         sessionTokenRef.current = session.access_token
+        sessionMetaRef.current = (session && session.user) ? {
+          display_name: (session.user.user_metadata && session.user.user_metadata.display_name) || '',
+          email: session.user.email || '',
+        } : null
         // #1567: the session is valid — render the app chrome NOW and let the
         // mint + loads hydrate in the background (the multi-second
         // "Checking your session…" card is gone for session holders). The
@@ -2545,7 +2555,7 @@ function claimIntentInFlight() {
           <button className={tab === 'billing' ? 'active' : ''} onClick={() => setTab('billing')}>Billing</button>
           {/* #1680: the wizard is reachable anytime — advanced users can go
               back to any onboarding step (skills, harness, GitHub, seed). */}
-          <button className="ghost small setup-nav" onClick={() => { setWizardStep(0); setWelcomeMode(true) }}>Setup</button>
+          <button className="ghost small" onClick={() => { setWizardStep(0); setWelcomeMode(true) }}>Setup</button>
         </nav>
         {/* #1148-ux: account blob — GitHub/Vercel/Linear pattern: current
             workspace name + avatar top-right; dropdown switches team and
