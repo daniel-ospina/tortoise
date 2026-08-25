@@ -855,11 +855,12 @@ _CONSENT_HTML = """<!DOCTYPE html>
   // #1704: reuse the dashboard's parent-domain session cookie
   // (sb-tortoise-auth-token on .premiselabs.co — main.jsx supabaseStorage).
   // The user is already signed in on app.premiselabs.co; this page must not
-  // ask for a SECOND login. Read-only storage: getItem reads the cookie,
-  // setItem/removeItem are no-ops (write protection without persistSession:
-  // false — gotrue DISCARDS a custom storage when persistSession is false,
-  // review P0). detectSessionInUrl stays true so the OAuth sign-in fallback
-  // (provider → redirect back with #access_token) still ingests.
+  // ask for a SECOND login. persistSession stays TRUE (gotrue DISCARDS a
+  // custom storage when persistSession is false, review P0) and
+  // setItem/removeItem are REAL writes — getSession() always re-reads
+  // storage, so an ingested OAuth/email session must persist to the cookie
+  // or the sign-in fallback loops. detectSessionInUrl stays true so the
+  // provider redirect back with #access_token is ingested.
   const COOKIE_NAME = "sb-tortoise-auth-token";
   // #1704: parent-domain cookie storage — a faithful port of the
   // dashboard's supabaseStorage (website/assets/supabase-session.js):
