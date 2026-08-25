@@ -2236,9 +2236,10 @@ function claimIntentInFlight() {
   // app.premiselabs.co/welcome after signup (welcome.html did the
   // provisioning + key reveal-once; this is the in-dashboard onboarding:
   // chooser + routes to the API Keys tab where the key lives).
-  // #1643: the re-entry card covers EVERY empty-graph state — graph_ready
-  // may be false (missing graph — the seed write recovers it) or true with
-  // 0 points. When it shows, the legacy empty-state cards hide.
+  // #1643/#1692: the re-entry card covers EVERY empty-graph state —
+  // graph_ready may be false (missing graph — the seed write recovers it)
+  // or true with 0 points. It re-opens the wizard at step 0 (harness).
+  // When it shows, the legacy empty-state cards hide.
   const showReentryCard = !welcomeMode && !onboardingComplete &&
     team && (team.point_count ?? 0) === 0 && !wizardDone
 
@@ -2341,7 +2342,7 @@ function claimIntentInFlight() {
                   <p className="wizard-sub" style={{ marginBottom: '1rem' }}>
                     {wizardStep === 0 ? 'Pick your tool — the setup command connects the MCP server and installs the skills in one copy.'
                       : wizardStep === 1 ? 'Connect your data sources — GitHub issues come in as Events (optional, do it now or later).'
-                      : wizardStep === 2 ? 'These are the three skills your setup command installed — what they do, and when your agent uses them.'
+                      : wizardStep === 2 ? 'These are the three skills your setup command installs — what they do, and when your agent uses them.'
                       : wizardStep === 3 ? 'Add yourself and your project as the first objects on your graph.'
                       : 'Welcome to Tortoise — your graph is live.'}
                   </p>
@@ -2363,7 +2364,7 @@ function claimIntentInFlight() {
                         {welcomeKey && !HARNESS_SKILLLESS.includes(wizardHarness) && !HARNESS_SKILLS_IN_PROMPT.includes(wizardHarness) ? ('\n\n' + HARNESS_PERSIST(apiKey)) : ''}
                       </pre>
                       <div className="wizard-nav">
-                        <button type="button" className="ghost" onClick={() => { welcomeKey ? setWelcomeOriented(false) : setWelcomeMode(false) }}>← Back</button>
+                        <button type="button" className="ghost" onClick={() => setWelcomeOriented(false)}>← Back</button>
                         <div className="wizard-nav-actions">
                           <button type="button" className={wizardCopied === 'harness' ? 'ghost' : 'btn-primary'}
                             onClick={() => wizardCopy(HARNESS_INSTALL[wizardHarness](apiKey) + HARNESS_SKILLS(wizardHarness) + (welcomeKey && !HARNESS_SKILLLESS.includes(wizardHarness) && !HARNESS_SKILLS_IN_PROMPT.includes(wizardHarness) ? ('\n\n' + HARNESS_PERSIST(apiKey)) : ''), 'harness')}>
@@ -2381,8 +2382,8 @@ function claimIntentInFlight() {
                   {wizardStep === 2 && (
                     <div className="skills">
                       <p className="dim" style={{ marginBottom: '0.9rem' }}>
-                        The setup command you ran in the first step installed all three —
-                        here's what they do and when your agent uses them.
+                        The setup command in the first step installs these three — here's
+                        what they do and when your agent uses them.
                       </p>
                       <div className="skill-row">
                         <strong>how-to-use-tortoise</strong>
@@ -2690,9 +2691,9 @@ function claimIntentInFlight() {
           </section>
         )}
         {tab === 'overview' && team && showReentryCard && (
-          // #1643: re-entry — a returning user with an empty graph gets the
-          // getting-started wizard (harness → skills → GitHub → seed), not a
-          // raw-curl dead end.
+          // #1643/#1692: re-entry — a returning user with an empty graph gets
+          // the getting-started wizard (harness → integrations → skills →
+          // seed), not a raw-curl dead end.
           <section className="overview empty-state graph-missing">
             <h2>Your graph is ready for its first data point</h2>
             <p className="dim">
