@@ -136,7 +136,7 @@ def _fake_post_logger():
     return log, _fake_post
 
 
-def test_direct_route_sends_bare_model_id(monkeypatch):
+def test_direct_route_sends_nonreasoning_model_id(monkeypatch):
     log, fake = _fake_post_logger()
     monkeypatch.setattr(requests.sessions.Session, "post", fake)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
@@ -146,7 +146,9 @@ def test_direct_route_sends_bare_model_id(monkeypatch):
     assert out == "ok"
     url, body = log[0]
     assert url == "https://api.deepseek.com/v1/chat/completions"
-    assert body["model"] == "deepseek-v4-flash"          # bare id on direct
+    # Pilot #1549: the direct route must send the NON-reasoning id —
+    # 'deepseek-v4-flash' reasons by default and collapses to empty output.
+    assert body["model"] == "deepseek-chat"
     assert body["max_tokens"] == 4000
 
 
@@ -310,23 +312,49 @@ def test_build_extractor_model_returns_routing_model(monkeypatch):
     assert model.fallback.provider == "openrouter"
 
 
-def test_registry_key_normalized_to_real_model_id():
+def test_registry_key_normalized_to_real_model_id(monkeypatch):
     """Pilot #1549: the eval CLI passes MODELS registry keys ('deepseek-flash-direct')
-    to build_extractor_model; they must normalize to the real API model id or the
+    to build_extractor_model; they must normalize to a real API model id or the
     suffix reaches DeepSeek as the model name (HTTP 400 on every S1 call)."""
+    # Pilot #1549 run (2026-08-25): the direct-API flash id is the NON-reasoning
+    # 'deepseek-chat' — api.deepseek.com's 'deepseek-v4-flash' reasons by
+    # default and collapses to empty output on non-trivial S1 prompts
+    # (1500/1500 reasoning tokens, finish=length, zero content).
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")  # the pilot's direct route
     m = build_extractor_model("deepseek-flash-direct")
-    assert m.primary.id == "deepseek-v4-flash"  # the API-facing id is what matters
+    # family-prefixed key → direct route strips → non-reasoning id on the wire
+    assert m.primary.id == "deepseek-chat"
     m2 = build_extractor_model("deepseek-v4-pro-direct")
-    assert m2.primary.id == "deepseek-v4-pro"
-    # raw specs pass through untouched
-    m3 = build_extractor_model("deepseek/deepseek-v4-flash")
-    assert m3.primary.id == "deepseek/deepseek-v4-flash"
+    assert m2.primary.id == "deepseek-v4-pro"  # sibling direct entry unchanged
+    # v4-pro keys are also family-prefixed: every pool lane gets a valid id
+    # (bare ids 404 on the OpenRouter lane → fatal → pool-kill, #1549 class)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or")
+    monkeypatch.setenv("VENICE_API_KEY", "vz")
+    pool = build_extractor_model("deepseek-v4-pro-direct")
+    assert {p.provider: p.id for p in pool.providers} == {
+        "venice": "deepseek-v4-pro",
+        "openrouter": "deepseek/deepseek-v4-pro",
+        "deepseek-direct": "deepseek-v4-pro",
+    }
+
+
+def test_default_build_uses_nonreasoning_direct_id(monkeypatch):
+    """Pilot #1549 (P1): the DEFAULT production path — TORTOISE_EXTRACT_MODEL
+    unset → 'deepseek/deepseek-v4-flash' — must not collapse. The direct route
+    sends the non-reasoning 'deepseek-chat' on the wire (sdk._model_adapter and
+    the eval CLI both land here)."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
+    model = build_extractor_model()
+    assert model.provider == "deepseek-direct"
+    assert model.primary.id == "deepseek-chat"
 
 
 def test_three_provider_rotation_pool(monkeypatch):
     """Pilot #1549: with a Venice key, build_extractor_model returns the
-    RotatingModel pool [deepseek-direct, openrouter, venice] — all serving
-    the same model id."""
+    RotatingModel pool [deepseek-direct, openrouter, venice]. Each lane gets a
+    VALID wire id for its provider: venice serves its documented catalog id
+    (chat unverified there), openrouter needs the family-prefixed id, the
+    direct lane sends the non-reasoning 'deepseek-chat' (#1549 collapse fix)."""
     monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
     monkeypatch.setenv("OPENROUTER_API_KEY", "or")
     monkeypatch.setenv("VENICE_API_KEY", "vz")
@@ -336,7 +364,11 @@ def test_three_provider_rotation_pool(monkeypatch):
     # Scale-optimized order (pilot #1549 research): venice (1000 RPM backbone)
     # first, openrouter (cheapest lane), deepseek-direct (spare).
     assert [p.provider for p in m.providers] == ["venice", "openrouter", "deepseek-direct"]
-    assert all(p.id == "deepseek-v4-flash" for p in m.providers)
+    assert {p.provider: p.id for p in m.providers} == {
+        "venice": "deepseek-v4-flash",       # documented venice catalog id
+        "openrouter": "deepseek/deepseek-chat",  # valid family-prefixed id
+        "deepseek-direct": "deepseek-chat",      # non-reasoning direct id (#1549)
+    }
     assert isinstance(m.providers[2], DeepSeekDirectModel)
     assert isinstance(m.providers[0], VeniceModel)
     assert m.weights == [0.5, 0.35, 0.15]

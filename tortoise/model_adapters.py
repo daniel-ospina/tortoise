@@ -22,8 +22,10 @@ Routing env vars (documented here; ``.env.example`` entries deferred to P4):
     collapse. Process-local by design (per-worker); shared breakers are a
     follow-up if the collapse class recurs.
   - ``TORTOISE_EXTRACT_MODEL`` — canonical family-prefixed model id
-    (default ``deepseek/deepseek-v4-flash``); the direct route sends the bare
-    id on the wire, the openrouter route sends it unchanged (D6).
+    (default ``deepseek/deepseek-v4-flash``); the direct route sends the
+    flash family's NON-reasoning id (``deepseek-chat``) on the wire (pilot
+    #1549 — ``deepseek-v4-flash`` reasons by default and collapses to empty
+    output), the openrouter route sends the spec unchanged (D6).
 
 Taxonomy contract (M2/M3 import these — do not fork):
   ``LlmErrorClass``, ``FATAL_STATUS_CODES``, ``FATAL_CONFIG_STATUS_CODES``,
@@ -148,11 +150,15 @@ class VeniceModel(OpenRouterModel):
 
 
 class DeepSeekDirectModel(OpenRouterModel):
-    """Direct DeepSeek API adapter (api.deepseek.com) — same model ids as
-    OpenRouter (deepseek-v4-flash / v4-pro) but no OpenRouter hop. Used when
-    DEEPSEEK_API_KEY is set and TORTOISE_EXTRACTOR_PROVIDER != 'openrouter'
-    (#1350 — the extractor's LLM calls were hitting OpenRouter connection
-    errors under load; the direct API is the same model, different route)."""
+    """Direct DeepSeek API adapter (api.deepseek.com) — no OpenRouter hop.
+    The flash family uses the NON-reasoning id ``deepseek-chat`` on the wire
+    (pilot #1549: api.deepseek.com's ``deepseek-v4-flash`` reasons by default
+    and collapses to empty output — 1500/1500 reasoning tokens, finish=length);
+    ``deepseek-v4-pro`` stays as-is (no collapse evidence — pending
+    verification). Used when DEEPSEEK_API_KEY is set and
+    TORTOISE_EXTRACTOR_PROVIDER != 'openrouter' (#1350 — the extractor's LLM
+    calls were hitting OpenRouter connection errors under load; the direct
+    API is the same model, different route)."""
     provider = "deepseek-direct"
     base_url = "https://api.deepseek.com/v1/chat/completions"
     key_env = "DEEPSEEK_API_KEY"
@@ -195,7 +201,15 @@ class DeepSeekDirectModel(OpenRouterModel):
 # re-exports this; the eval harness and tools reference the names).
 MODELS = {
     'deepseek-flash': lambda: OpenRouterModel('deepseek/deepseek-v4-flash', max_tokens=None, temperature=0.0),
-    'deepseek-flash-direct': lambda: DeepSeekDirectModel('deepseek-v4-flash', max_tokens=None, temperature=0.0),
+    # Pilot #1549 (50-Q run, 2026-08-25): the direct API id must be the
+    # NON-reasoning variant. api.deepseek.com's ``deepseek-v4-flash`` reasons
+    # by default and burns the whole max_tokens budget on hidden reasoning
+    # tokens for non-trivial prompts (observed: 1500/1500 reasoning tokens,
+    # finish_reason=length, ZERO output content) — S1 then returns an empty
+    # story, S2/S4 never run, and extraction silently produces no points.
+    # ``deepseek-chat`` is the direct API's non-reasoning chat model
+    # (empirically verified: full story output, finish_reason=stop).
+    'deepseek-flash-direct': lambda: DeepSeekDirectModel('deepseek-chat', max_tokens=None, temperature=0.0),
     'deepseek-v4-pro-direct': lambda: DeepSeekDirectModel('deepseek-v4-pro', max_tokens=None, temperature=0.0),
     'deepseek-v4-pro': lambda: OpenRouterModel('deepseek/deepseek-v4-pro', max_tokens=500),
     'deepseek-r1-xhigh': lambda: OpenRouterModel('deepseek/deepseek-r1-0528', max_tokens=500, thinking_budget=2000),
@@ -460,19 +474,40 @@ class RoutingModel:
 
 
 def _strip_family_prefix(model_id: str) -> str:
-    """Direct-route wire normalization (D6): ``deepseek/deepseek-v4-flash`` →
-    ``deepseek-v4-flash`` (matches the eval's DeepSeekDirectModel ids)."""
+    """Direct-route wire normalization (D6): ``deepseek/deepseek-chat`` →
+    ``deepseek-chat``. Intermediate step feeding ``_direct_wire_id`` (which
+    then remaps the flash family onto its non-reasoning direct id)."""
     return model_id.rsplit("/", 1)[-1] if "/" in model_id else model_id
+
+
+def _direct_wire_id(model_id: str) -> str:
+    """Direct-API wire id (D6 + pilot #1549): api.deepseek.com's
+    ``deepseek-v4-flash`` reasons by DEFAULT and burns the whole max_tokens
+    budget on hidden reasoning for non-trivial prompts (observed 1500/1500
+    reasoning tokens, finish_reason=length, ZERO content) — S1 collapses to
+    an empty story and extraction silently produces no points. The direct
+    route therefore sends the non-reasoning ``deepseek-chat`` for the flash
+    family; ``deepseek-v4-pro`` is unchanged (no collapse evidence — out of
+    scope pending verification)."""
+    bare = _strip_family_prefix(model_id)
+    return "deepseek-chat" if bare in ("deepseek-v4-flash", "deepseek-chat") else bare
 
 
 def _build_single(provider: str, model_id: str, *, max_tokens, temperature):
     if provider == "deepseek-direct":
         return DeepSeekDirectModel(
-            _strip_family_prefix(model_id),
+            _direct_wire_id(model_id),
             max_tokens=max_tokens, temperature=temperature)
     if provider == "venice":
+        # Venice's catalog serves the flash id (docstring); the non-reasoning
+        # 'deepseek-chat' id is unverified there — keep the documented id. A
+        # wrong id fails LOUD via preflight (config-4xx → fatal gate), never
+        # silently; verify the venice catalog before enabling the pool (#1549).
+        bare = _strip_family_prefix(model_id)
+        if bare == "deepseek-chat":
+            bare = "deepseek-v4-flash"
         return VeniceModel(
-            _strip_family_prefix(model_id),
+            bare,
             max_tokens=max_tokens, temperature=temperature)
     return OpenRouterModel(model_id, max_tokens=max_tokens, temperature=temperature)
 
@@ -573,10 +608,23 @@ class RotatingModel:
 # pass through — they are not valid extractor specs on either provider.
 _REGISTRY_KEY_TO_ID = {
     "deepseek-flash": "deepseek/deepseek-v4-flash",
-    "deepseek-flash-direct": "deepseek-v4-flash",
-    "deepseek-v4-pro-direct": "deepseek-v4-pro",
+    # Pilot #1549 (2026-08-25): the DIRECT-API flash id must be the
+    # non-reasoning variant. api.deepseek.com's ``deepseek-v4-flash`` reasons
+    # by default and burns the max_tokens budget on hidden reasoning for
+    # non-trivial prompts (1500/1500 reasoning tokens observed,
+    # finish_reason=length, ZERO content) — S1 collapses to an empty story
+    # and extraction silently produces no points. The key maps to the
+    # FAMILY-PREFIXED ``deepseek/deepseek-chat`` so every route gets a valid
+    # wire id: the direct lane strips to the non-reasoning ``deepseek-chat``
+    # (``_direct_wire_id``), the OpenRouter lane keeps the valid prefixed id,
+    # and the venice lane serves its documented catalog id. ``deepseek-v4-pro-direct``
+    # is unchanged (no collapse evidence for v4-pro — pending verification).
+    # The v4-pro keys are ALSO family-prefixed so the OpenRouter pool lane
+    # gets a valid id (bare ids 404 there → fatal → pool-kill, #1549 class).
+    "deepseek-flash-direct": "deepseek/deepseek-chat",
+    "deepseek-v4-pro-direct": "deepseek/deepseek-v4-pro",
     "deepseek-v4-pro": "deepseek/deepseek-v4-pro",
-    "deepseek-v4-pro-noreason": "deepseek-v4-pro",
+    "deepseek-v4-pro-noreason": "deepseek/deepseek-v4-pro",
     "deepseek-r1-xhigh": "deepseek/deepseek-r1-0528",
     "deepseek-v4-pro-xhigh": "deepseek/deepseek-v4-pro",
 }
@@ -589,7 +637,9 @@ def build_extractor_model(model_id: str | None = None, *,
 
     Resolves (primary, fallback) via ``resolve_extractor_provider()`` and
     wraps them in a ``RoutingModel``. ``model_id`` defaults to
-    ``TORTOISE_EXTRACT_MODEL`` (or ``deepseek/deepseek-v4-flash``). Builds
+    ``TORTOISE_EXTRACT_MODEL`` (or ``deepseek/deepseek-v4-flash``; the
+    default's direct route sends the non-reasoning ``deepseek-chat`` on the
+    wire — pilot #1549). Builds
     leniently — with NO keys at all it degrades to a single OpenRouter
     adapter (back-compat for direct callers / ``TestModelAdapterBounds``);
     fail-closed is enforced at the pipeline gates, not here. An explicit
