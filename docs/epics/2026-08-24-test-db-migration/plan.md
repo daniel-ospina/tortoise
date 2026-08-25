@@ -2685,3 +2685,10 @@ Every other claim was verified exactly as stated (the wipe_server Step 3 filter'
 
 <!-- plan-review: cycles=8, status=clean, version=2.3.0 -->
 <!-- final-verification: APPROVED (no P0/P1), advisory P2s: Task-2 risk concentration, hoist _uri_default_graph_name, fix E2E-7 constant -->
+
+
+## CI-Fix Changelog (PR #1684)
+
+| CI-1 | — | TestClient worker threads have no test frame → redirect suppressed → HTTP-integration write/read split | Process-level `_TEST_SESSION_ACTIVE` flag set by conftest (subprocess children never import conftest → embedded preserved) — CI-discovered at PR #1684 | Process flag only, no carve-out exemption for no-frame constructions (frame-keyed; latent, P2 follow-up #1686) |
+| CI-2 | — | Per-path-only derivation hash collapsed namespaces (`team_team-001`/`team_team-002` same path → same server graph) | Fold explicit `graph_name` into `hash12(session+path+name)` — parity pairs (distinct paths) AND namespaces (distinct names) both distinct | None |
+| CI-3 | — | `_get_registry` mints `{ns}_{test_graph}_control_plane` — not test-prefixed, never journaled → E2E-7 leak (466 graphs) | Journal the registry name via the product writer; session sweep drops it | Not frame-gated (env-gated only) — P2 follow-up #1686 |

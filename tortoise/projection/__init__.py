@@ -474,8 +474,8 @@ class FalkorProjection(
             # frame to exempt — carve-out HTTP paths run only in the carve-out
             # job, URI unset). Subprocess children keep the embedded lane via
             # the flag (False — conftest never imported there).
-            if (_caller_stem is not None and _caller_stem not in _no_redirect
-                    or _caller_stem is None and _TEST_SESSION_ACTIVE):
+            if ((_caller_stem is not None and _caller_stem not in _no_redirect)
+                    or (_caller_stem is None and _TEST_SESSION_ACTIVE)):
                 from urllib.parse import urlparse
                 _parsed = urlparse(_uri)
                 _validate_uri_scheme(_parsed.scheme)

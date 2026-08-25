@@ -1207,8 +1207,9 @@ class TortoiseSDK:
             # Epic #1647 (T7): the hyphenated test-* namespace family is
             # normalized in _get_proj (test-tiers → test_tiers_tortoise); the
             # control-plane prefix must normalize identically so the registry
-            # graph ({ns}_{test_graph}_control_plane) stays test-prefix-valid
-            # for wipe_server's fail-closed filter.
+            # graph ({ns}_{test_graph}_control_plane) — the JOURNAL sweep owns
+            # these (wipe_server's prefix filter cannot: namespaced registries
+            # start with the ns, not test_).
             if ns.startswith("test-"):
                 ns = ns.replace("-", "_")
             if graph_name and graph_name.startswith(("tortoise_test_", "test_")):
