@@ -53,6 +53,35 @@ class TestTeamCRUD:
         assert result2.get("existing") is True
         assert result2["id"] == result1["id"]
 
+    def test_team_create_idempotent_recall_returns_no_api_key(self, sdk):
+        """#1710: idempotent re-call with the same idempotency_key returns
+        existing:true WITHOUT an api_key field — the key previously returned
+        on this branch was minted but never hashed/persisted, so callers got
+        a dead key that failed auth on first use. The caller holds the
+        plaintext from the original creation."""
+        from tortoise.auth import verify_api_key
+
+        result1 = sdk.team_create("durable-no-key", idempotency_key="key-abc")
+        result2 = sdk.team_create("durable-no-key", idempotency_key="key-abc")
+
+        assert result2.get("existing") is True
+        assert result2["id"] == result1["id"]
+        assert "api_key" not in result2
+        # Nothing new was persisted by the re-call: exactly ONE Team node
+        # carries this idempotency key, and the stored hash still verifies
+        # the FIRST call's plaintext (no phantom key was hashed/stored).
+        reg = sdk._get_registry()
+        count = reg.query(
+            "MATCH (t:Team {idempotency_key:$ik}) RETURN count(t)",
+            params={"ik": "key-abc"},
+        ).result_set[0][0]
+        assert count == 1
+        stored_hash = reg.query(
+            "MATCH (t:Team {idempotency_key:$ik}) RETURN t.api_key",
+            params={"ik": "key-abc"},
+        ).result_set[0][0]
+        assert verify_api_key(result1["api_key"], stored_hash) is True
+
     def test_team_create_rejects_duplicate_name(self, sdk):
         sdk.team_create("unique-name")
         with pytest.raises(ControlPlaneError, match="already exists"):
