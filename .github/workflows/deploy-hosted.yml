@@ -55,6 +55,19 @@ on:
       - 'pyproject.toml'
       - 'uv.lock'
   workflow_dispatch:
+    inputs:
+      # #1719 (Task 7): DB-health gate bypass for incident-fix deploys.
+      # Defaults TRUE during the incident window (RC3 FalkorDB restore is
+      # in flight — db.ok=false is the CURRENT prod state, and a hard gate
+      # would block the very fix that restores it). Flip to false once the
+      # data plane is healthy so the gate guards every deploy again.
+      # Emits a ::warning:: when bypassed (auditability — never silently
+      # skipped).
+      skip-db-health-gate:
+        description: 'Skip the post-deploy DB health gate (incident-fix deploys)'
+        required: false
+        default: 'true'
+        type: boolean
 
 concurrency:
   group: deploy-hosted
@@ -254,3 +267,45 @@ jobs:
           exit 1
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN_DEPLOY }}
+      - name: Post-deploy DB health gate (#1719 Task 7)
+        # The deploy pipeline previously certified a GREEN deploy while the
+        # graph DB was dead (NXDOMAIN, #1381 recurrence — /health returned
+        # 200 with status:degraded). Gate the deploy on the DB data plane:
+        # fail fast ONLY on app-unreachable (curl error); keep polling
+        # db.ok=false for >=3 min (cold-start DB connection exceeds 60s per
+        # #338; DNS propagation after a restart runs ~2 min per #1381);
+        # assert /health/ready 200 LAST (it ANDs both planes). Bypassable
+        # for incident-fix deploys: the workflow_dispatch input OR the repo
+        # variable SKIP_DB_HEALTH_GATE='true' (code-review P2 — on
+        # push-triggered runs the inputs context is null, so the variable
+        # lane is the ONLY way to bypass; set it during the incident window,
+        # clear it when RC3 is restored).
+        if: ${{ ! (inputs.skip-db-health-gate || vars.SKIP_DB_HEALTH_GATE == 'true') }}
+        run: |
+          BASE="https://api.premiselabs.co"
+          # Fail fast on app-unreachable (5 quick probes) — a dead app is a
+          # deploy failure, not a DB-wait.
+          APP_OK=0
+          for i in $(seq 1 5); do
+            if curl -fsS "$BASE/health" >/dev/null 2>&1; then APP_OK=1; break; fi
+            sleep 5
+          done
+          [ "$APP_OK" = "1" ] || { echo "::error::app unreachable after deploy ($BASE/health)"; exit 1; }
+          echo "app reachable — polling DB data plane"
+          # Poll db.ok=true for up to 3 min (180s / 10s).
+          DB_OK=0
+          for i in $(seq 1 18); do
+            if curl -fsS "$BASE/health" 2>/dev/null | grep -q '"ok": *true'; then DB_OK=1; break; fi
+            sleep 10
+          done
+          [ "$DB_OK" = "1" ] || { echo "::error::db.ok stayed false for 3 min — FalkorDB unreachable"; exit 1; }
+          echo "db.ok true"
+          # /health/ready LAST — it ANDs the Supabase control plane + the
+          # FalkorDB data plane; a 200 is the strongest signal.
+          curl -fsS -o /dev/null -w "health/ready: %{http_code}\n" "$BASE/health/ready" \
+            || { echo "::error::/health/ready not 200 after deploy"; exit 1; }
+        shell: bash
+      - name: Warn when DB health gate bypassed
+        if: ${{ inputs.skip-db-health-gate || vars.SKIP_DB_HEALTH_GATE == 'true' }}
+        run: |
+          echo "::warning::DB health gate SKIPPED (skip-db-health-gate input or SKIP_DB_HEALTH_GATE repo variable). Clear it once the data plane is healthy (RC3 restored)."

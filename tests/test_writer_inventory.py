@@ -155,13 +155,13 @@ def user_client(client):
     """Client with get_current_user overridden (JWT session user)."""
     tc, fake, spy = client
     app.dependency_overrides[get_current_user] = lambda: {
-        "user_id": "user-1", "email": "user-1@example.com"}
+        "user_id": _USER1, "email": "owner@example.com"}
     return tc, fake, spy
 
 
 def _owner_membership(**overrides) -> dict:
     row = {
-        "id": "mem-1", "user_id": "user-1", "team_id": "team-free-001",
+        "id": "mem-1", "user_id": _USER1, "team_id": "team-free-001",
         "role": "owner", "status": "active", "identity": None,
     }
     row.update(overrides)
@@ -470,13 +470,13 @@ class TestCreateTeam:
 
         fn, p = fake.rpc_calls[0]
         assert fn == "provision_team"
-        assert p["p_user_id"] == "user-1"
+        assert p["p_user_id"] == _USER1
         assert p["p_identity"] is None
         assert p["p_team_id"] == body["team_id"]
         assert p["p_team_name"] == "acme"
         # owner membership landed for the JWT user
         mem = [m for m in fake.tables["team_memberships"]
-               if m["user_id"] == "user-1" and m["team_id"] == body["team_id"]]
+               if m["user_id"] == _USER1 and m["team_id"] == body["team_id"]]
         assert len(mem) == 1 and mem[0]["role"] == "owner"
 
     def test_duplicate_name_409(self, user_client):
@@ -526,7 +526,7 @@ class TestCreateTeam:
         since = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()  # noqa: UP017
         # 3 MEMBER rows (invite accepts) — must NOT trigger the owner limit
         fake.seed("team_memberships", [
-            {"id": f"mem-inv-{i}", "user_id": "user-1",
+            {"id": f"mem-inv-{i}", "user_id": _USER1,
              "team_id": f"team-inv-{i}", "role": "member",
              "status": "active", "created_at": since}
             for i in range(3)
@@ -569,7 +569,7 @@ class TestMembers:
     def _seed_team(self, fake, team_id="team-free-001"):
         fake.seed("team_memberships", [
             _owner_membership(team_id=team_id),
-            {"id": "mem-2", "user_id": "user-2", "team_id": team_id,
+            {"id": "mem-2", "user_id": _USER2, "team_id": team_id,
              "role": "member", "status": "active", "identity": None},
             {"id": "mem-3", "user_id": None, "team_id": team_id,
              "role": "member", "status": "active", "identity": "anon-abc123"},
@@ -579,7 +579,7 @@ class TestMembers:
         tc, fake, _ = user_client
         self._seed_team(fake)
         fake.seed("team_memberships", [
-            {"id": "mem-4", "user_id": "user-4", "team_id": "team-free-001",
+            {"id": "mem-4", "user_id": _USER4, "team_id": "team-free-001",
              "role": "member", "status": "removed", "identity": None},
         ])
         r = tc.get("/v1/teams/team-free-001/members")
@@ -595,7 +595,7 @@ class TestMembers:
     def test_remove_member(self, user_client):
         tc, fake, _ = user_client
         self._seed_team(fake)
-        r = tc.delete("/v1/teams/team-free-001/members/user-2")
+        r = tc.delete(f"/v1/teams/team-free-001/members/{_USER2}")
         assert r.status_code == 200, r.text
         assert r.json() == {"status": "removed"}
         mem = next(m for m in fake.tables["team_memberships"]
@@ -615,7 +615,7 @@ class TestMembers:
     def test_remove_owner_409(self, user_client):
         tc, fake, _ = user_client
         self._seed_team(fake)
-        r = tc.delete("/v1/teams/team-free-001/members/user-1")
+        r = tc.delete(f"/v1/teams/team-free-001/members/{_USER1}")
         assert r.status_code == 409
 
     def test_remove_unknown_404(self, user_client):
@@ -627,10 +627,10 @@ class TestMembers:
     def test_change_role(self, user_client):
         tc, fake, _ = user_client
         self._seed_team(fake)
-        r = tc.patch("/v1/teams/team-free-001/members/user-2",
+        r = tc.patch(f"/v1/teams/team-free-001/members/{_USER2}",
                      json={"role": "admin"})
         assert r.status_code == 200, r.text
-        assert r.json() == {"user_id": "user-2", "role": "admin"}
+        assert r.json() == {"user_id": _USER2, "role": "admin"}
         mem = next(m for m in fake.tables["team_memberships"]
                    if m["id"] == "mem-2")
         assert mem["role"] == "admin"
@@ -638,7 +638,7 @@ class TestMembers:
     def test_change_owner_role_409(self, user_client):
         tc, fake, _ = user_client
         self._seed_team(fake)
-        r = tc.patch("/v1/teams/team-free-001/members/user-1",
+        r = tc.patch(f"/v1/teams/team-free-001/members/{_USER1}",
                      json={"role": "member"})
         assert r.status_code == 409
 
@@ -646,8 +646,8 @@ class TestMembers:
         tc, fake, _ = user_client
         self._seed_team(fake)
         assert tc.get("/v1/teams/team-free-001/members").status_code == 200
-        assert tc.delete("/v1/teams/team-free-001/members/user-2").status_code == 200
-        assert tc.patch("/v1/teams/team-free-001/members/user-2",
+        assert tc.delete(f"/v1/teams/team-free-001/members/{_USER2}").status_code == 200
+        assert tc.patch(f"/v1/teams/team-free-001/members/{_USER2}",
                         json={"role": "member"}).status_code == 200
         spy.assert_clean()
 
@@ -887,11 +887,11 @@ class TestZeroRegistryInventory:
                                              body, headers, note):
         tc, fake, _ = client
         app.dependency_overrides[get_current_user] = lambda: {
-            "user_id": "user-1", "email": "user-1@example.com"}
+            "user_id": _USER1, "email": "owner@example.com"}
         app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM)
         fake.seed("team_memberships", [
             _owner_membership(),
-            {"id": "mem-2", "user_id": "user-2", "team_id": "team-free-001",
+            {"id": "mem-2", "user_id": _USER2, "team_id": "team-free-001",
              "role": "member", "status": "active", "identity": None},
         ])
         kwargs = {}
@@ -1043,3 +1043,12 @@ class TestBackupEndpointsSupabaseGraphName:
             assert "vanished from the control plane" in r.json()["detail"]
         finally:
             app.dependency_overrides.clear()
+
+
+# #1719 (codebase-review P1-1): JWT subjects + team_memberships.user_id are
+# real UUIDs in prod (uuid column) — non-UUID literals would 22P02. Identity
+# anchors (anon-*) stay non-UUID to exercise the identity path.
+_USER1 = "9f2c1a40-0000-4a00-8000-000000000001"
+_USER2 = "9f2c1a40-0000-4a00-8000-000000000002"
+_USER4 = "9f2c1a40-0000-4a00-8000-000000000004"
+

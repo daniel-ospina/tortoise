@@ -89,6 +89,25 @@ try {
   console.warn('Supabase client init failed:', e)
 }
 
+// #1719 (Task 6): humanize an API error detail body. Server failures carry
+// dict details ({"error_code": ..., "message": ...}) — render the message,
+// never raw JSON (JSON.stringify of the dict). 5xx → the unified
+// unavailable copy (contract with signup.html + hosted_api's
+// _control_plane_unavailable()).
+const UNAVAILABLE_COPY = 'Sign-in is temporarily unavailable — try again in a moment.'
+function apiErrorText(status, b) {
+  if (status >= 500) return UNAVAILABLE_COPY
+  if (b && b.detail) {
+    const d = b.detail
+    if (typeof d === 'string') return d
+    if (typeof d === 'object' && d !== null) {
+      if (typeof d.message === 'string' && d.message) return d.message
+      return JSON.stringify(d)
+    }
+  }
+  return null
+}
+
 function App() {
   // #1280 (P0, mirrored from fix/1280): banner state MUST live inside the
   // component — a module-top-level useState crashes the whole bundle.
@@ -257,7 +276,7 @@ function claimIntentInFlight() {
         let msg = `Couldn't update (HTTP ${res.status}).`
         try {
           const b = await res.json()
-          if (b && b.detail) msg = typeof b.detail === 'string' ? b.detail : JSON.stringify(b.detail)
+          msg = apiErrorText(res.status, b) || msg
         } catch { /* non-JSON body */ }
         setTeam(prev)
         setToggleError(msg)
@@ -750,6 +769,10 @@ function claimIntentInFlight() {
       const sus = suspendedFromDetail(b.detail)
       const err = new Error(sus ? (sus.message || 'Team suspended') : (typeof b.detail === 'string' ? b.detail : `HTTP ${res.status}`))
       if (sus) err.suspended = sus
+      // #1719 (Task 6, code-review P1): carry the status so the mint catch
+      // renders UNAVAILABLE_COPY for 5xx (a raw "Internal server error"
+      // string reads like a client bug on the primary fresh-user path).
+      err.status = res.status
       throw err
     }
     const data = await res.json()
@@ -790,7 +813,7 @@ function claimIntentInFlight() {
               let inviteMsg = `Could not accept invite (HTTP ${inviteRes.status}).`
               try {
                 const b = await inviteRes.json()
-                if (b && b.detail) inviteMsg = typeof b.detail === 'string' ? b.detail : JSON.stringify(b.detail)
+                inviteMsg = apiErrorText(inviteRes.status, b) || inviteMsg
               } catch { /* non-JSON body */ }
               if (inviteRes.status !== 409) { // already a member — not an error worth a banner
                 setBanner(inviteMsg)
@@ -886,10 +909,12 @@ function claimIntentInFlight() {
                 // Strip ?claim=1 so a reload doesn't re-claim.
                 window.history.replaceState({}, '', window.location.pathname)
               } else {
+                // #1719 (Task 6): render the dict message (never raw JSON)
+                // and the unavailable copy for 5xx (control-plane outage).
                 let claimMsg = `Claim failed (HTTP ${claimRes.status}).`
                 try {
                   const b = await claimRes.json()
-                  if (b && b.detail) claimMsg = typeof b.detail === 'string' ? b.detail : JSON.stringify(b.detail)
+                  claimMsg = apiErrorText(claimRes.status, b) || claimMsg
                 } catch { /* non-JSON body */ }
                 setClaimError(claimMsg)
                 // #1493: a FAILED claim must not leave the tt_claim_pending
@@ -1045,9 +1070,15 @@ function claimIntentInFlight() {
             // actionable error instead (the Retry button re-runs the mount).
             const msg = (e && e.message) || 'Could not prepare your session.'
             if (teamIdRef.current !== teamAtMountMint) return  // switched mid-mint
-            setMountError(/429|rate limit/i.test(msg)
-              ? 'Too many requests from this network — try again in a minute.'
-              : msg)
+            // #1719 (Task 6): a 5xx mint failure is the server's fault, not
+            // the user's — render the honest unavailable copy (a raw
+            // "Internal server error" string reads like a client bug).
+            const errStatus = (e && e.status) || 0
+            setMountError(errStatus >= 500
+              ? UNAVAILABLE_COPY
+              : /429|rate limit/i.test(msg)
+                ? 'Too many requests from this network — try again in a minute.'
+                : msg)
             setAuthed(false)  // #1567 P0: the error card renders in !authed
             setChecking(false)
             return
@@ -1138,10 +1169,15 @@ function claimIntentInFlight() {
       // #1559 (review P2): a /v1/team or load 5xx after a successful mint
       // must NOT leave the silent redirect shell — same class as the mint
       // failure. The error card (mountError) is the only renderable state.
+      // #1719 (Task 6): 5xx → the honest unavailable copy (never a raw
+      // "Internal server error" string).
       if (teamIdRef.current !== teamAtCompleteLogin) return  // switched mid-load
-      setMountError((e && /429|rate limit/i.test(e.message))
-        ? 'Too many requests from this network — try again in a minute.'
-        : (e && e.message) || 'Could not load your dashboard — try again.')
+      const errStatus = (e && e.status) || 0
+      setMountError(errStatus >= 500
+        ? UNAVAILABLE_COPY
+        : (e && /429|rate limit/i.test(e.message))
+          ? 'Too many requests from this network — try again in a minute.'
+          : (e && e.message) || 'Could not load your dashboard — try again.')
     } finally {
       setBusy(false)
       setChecking(false)
@@ -1189,7 +1225,7 @@ function claimIntentInFlight() {
           let msg = `Signup failed (HTTP ${sres.status}).`
           try {
             const b = await sres.json()
-            if (b && b.detail) msg = typeof b.detail === 'string' ? b.detail : JSON.stringify(b.detail)
+            msg = apiErrorText(sres.status, b) || msg
           } catch { /* non-JSON */ }
           setError(msg)
           return
@@ -1319,7 +1355,7 @@ function claimIntentInFlight() {
       let msg = `Couldn't connect (HTTP ${res.status}).`
       try {
         const b = await res.json()
-        if (b && b.detail) msg = typeof b.detail === 'string' ? b.detail : JSON.stringify(b.detail)
+        msg = apiErrorText(res.status, b) || msg
       } catch { /* non-JSON body */ }
       setClaimError(msg)
     } catch (e) {

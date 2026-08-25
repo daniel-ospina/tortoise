@@ -11,6 +11,7 @@ See also tests/test_auth_flip.py for the REST + MCP end-to-end flips.
 from __future__ import annotations
 
 import os
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -1306,21 +1307,27 @@ class TestTask8Helpers:
         assert by_id["u2"]["email"] == "bob@example.com"
 
     def test_membership_role_and_set_membership(self, fake):
+        # #1719 split (codebase-review cycle-2 P1): the user_id fixture is a
+        # REAL UUID (a "u1" literal in the uuid column is prod-impossible —
+        # would 22P02 on INSERT); identity anchors stay non-UUID so the
+        # identity path stays exercised.
+        user_uuid = str(uuid.uuid4())
         fake.seed("team_memberships", [
-            {"id": "m1", "user_id": "u1", "team_id": "team-free-001",
+            {"id": "m1", "user_id": user_uuid, "team_id": "team-free-001",
              "identity": None, "role": "owner", "status": "active",
              "invited_email": None},
             {"id": "m2", "user_id": None, "team_id": "team-free-001",
              "identity": "anon-abc", "role": "member", "status": "active",
              "invited_email": None},
         ])
-        assert membership_role(fake, "team-free-001", "u1") == "owner"
-        # identity rows match by their anchor
+        assert membership_role(fake, "team-free-001", user_uuid) == "owner"
+        # identity rows match by their anchor (the #1719 shape-branch must
+        # query identity-only for non-UUID values — never the uuid filter)
         assert membership_role(fake, "team-free-001", "anon-abc") == "member"
         assert membership_role(fake, "team-free-001", "ghost") is None
         set_membership(fake, "team-free-001", "anon-abc", status="removed")
         assert fake.tables["team_memberships"][1]["status"] == "removed"
-        set_membership(fake, "team-free-001", "u1", role="admin")
+        set_membership(fake, "team-free-001", user_uuid, role="admin")
         assert fake.tables["team_memberships"][0]["role"] == "admin"
 
     def test_expired_bootstrap_keys(self, fake):

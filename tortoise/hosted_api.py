@@ -1958,6 +1958,7 @@ async def _check_ip_bucket_rate_limit(
     buckets: dict, lock: asyncio.Lock, limit: int, window_s: int,
     detail: str | dict, retry_after_s: int | None = None,
     key: Hashable | None = None, max_entries: int = 10_000,
+    defer_charge: bool = False,
 ) -> None:
     """Per-IP sliding-window rate limit over a caller-owned bucket store.
 
@@ -1972,6 +1973,11 @@ async def _check_ip_bucket_rate_limit(
     would silently merge export/delete budgets (locked by
     test_export_rate_limited_independently). P2-FIX-5: retry_after_s=None
     computes time-until-oldest-entry-expires (sliding-window precision).
+
+    #1719 (Task 5): ``defer_charge=True`` prunes + 429-checks but does NOT
+    append — the caller charges via _charge_ip_bucket at the TERMINAL
+    outcome (success/401/403), so a server fault (5xx) never consumes the
+    user's budget and cannot mask an incident with an hour-long 429.
     """
     if os.environ.get("RATE_LIMIT_DISABLED") == "1":
         return
@@ -1997,6 +2003,42 @@ async def _check_ip_bucket_rate_limit(
                 detail=detail,
                 headers={"Retry-After": str(remaining)},
             )
+        if not defer_charge:
+            bucket.append(now)
+        if len(buckets) > max_entries:
+            stale = [ip for ip, b in buckets.items()
+                     if not any(now - t < window_s for t in b)]
+            for ip in stale:
+                del buckets[ip]
+
+
+async def _charge_ip_bucket(
+    buckets: dict, lock: asyncio.Lock, key: str, *,
+    window_s: int = 3600, max_entries: int = 10_000,
+) -> None:
+    """#1719 (Task 5): append one charge to a deferred bucket store.
+
+    Replicates _check_ip_bucket_rate_limit's early-returns (RATE_LIMIT_DISABLED
+    + empty client) so check-vs-charge can never diverge under test, and
+    re-applies _normalize_mapped_ipv6 (the check normalizes inside; charging
+    with the raw key would split dual-stack buckets). Best-effort — a charge
+    is telemetry, never a failure path. Async: the bucket lock is an
+    asyncio.Lock (all callers are async endpoints).
+    """
+    if os.environ.get("RATE_LIMIT_DISABLED") == "1":
+        return
+    if not key:
+        return
+    ip = _normalize_mapped_ipv6(key)
+    now = time.time()
+    async with lock:
+        # setdefault: the deferred check creates buckets[ip]=[]; a concurrent
+        # request's max_entries prune treats an EMPTY bucket as stale and
+        # deletes it before this charge (botnet regime) — a KeyError here
+        # would replace a terminal 401/403/200 with a 500. A charge is
+        # telemetry and must never alter the response (code-review P2).
+        bucket = buckets.setdefault(ip, [])
+        bucket[:] = [t for t in bucket if now - t < window_s]
         bucket.append(now)
         if len(buckets) > max_entries:
             stale = [ip for ip, b in buckets.items()
@@ -2015,6 +2057,26 @@ async def _check_register_rate_limit(request: Request) -> None:
              or (request.client.host if request.client else None)),
         detail="Too many registration attempts. Please try again later.",
         retry_after_s=3600)
+
+
+def _control_plane_unavailable() -> HTTPException:
+    """#1719: honest 503 for a mint/claim-path control-plane failure.
+
+    The mint-path and claim-funnel ``team_memberships`` reads were unwrapped
+    — a control-plane outage/schema-cache failure escaped to the global
+    handler as a raw 500, which the client rendered as the misleading
+    "Invalid API key.". This 503 carries a structured error_code the client
+    maps to the unified unavailable copy (copy-string contract with
+    website/signup.html: "Sign-in is temporarily unavailable — try again in
+    a moment.").
+    """
+    return HTTPException(
+        status_code=503,
+        detail={
+            "error_code": "control_plane_unavailable",
+            "message": "Sign-in is temporarily unavailable — try again in a moment.",
+        },
+    )
 
 
 def _dashboard_key_login_reason(team: dict) -> str | None:
@@ -2760,12 +2822,16 @@ async def session_login(request: Request):
     401 invalid key; 403 suspended / dashboard_login_disabled /
     ANON_TEAM_NO_OWNER / KEY_NOT_USER_MINTED / ACCOUNT_MISSING;
     429 per-IP rate-limit; 502 GoTrue transport; 503 retryable token
-    consumed/expired. Audit: session_mint.
+    consumed/expired OR control-plane unavailable (#1719). Audit:
+    session_mint.
+
+    #1719 (Task 5): the per-IP bucket charge is DEFERRED to the terminal
+    outcome — the check (below) prunes + 429s without charging, and the
+    body-wide HTTPException wrap charges once on 401/403 (server
+    decisions) while 5xx/429 pass through uncharged, so a server fault
+    never consumes the user's 5/hr budget or masks an incident with an
+    hour-long 429.
     """
-    from tortoise.supabase_control import (
-        get_control_plane, is_anon_team, mint_target_user_for_key,
-        membership_for_user_team,
-    )
     try:
         body = await request.json()
     except Exception:
@@ -2783,12 +2849,10 @@ async def session_login(request: Request):
     if not isinstance(token, str):
         token = ""
     token = token.strip()
-    if not token.startswith("tt_"):
-        await _audit_auth_failure(request, "invalid_key")
-        raise HTTPException(status_code=401, detail="Invalid API key")
 
     # Per-IP rate limit (5/hr) — real client IP via ClientIPMiddleware
-    # (PATH_LIMITS buckets on the Fly proxy IP = global).
+    # (PATH_LIMITS buckets on the Fly proxy IP = global). defer_charge=True:
+    # prune + 429-check now, charge at the terminal outcome below.
     ip = (getattr(request.state, "client_ip", None)
           or (request.client.host if request.client else None))
     if ip:
@@ -2797,10 +2861,47 @@ async def session_login(request: Request):
             limit=_SESSION_LOGIN_LIMIT, window_s=_SESSION_LOGIN_WINDOW_S,
             detail={"error_code": "session_login_rate_limited",
                     "message": "Too many session logins. Try again in about an hour."},
-            retry_after_s=_SESSION_LOGIN_WINDOW_S, key=ip)
+            retry_after_s=_SESSION_LOGIN_WINDOW_S, key=ip,
+            defer_charge=True)
+
+    # #1719 (Task 5): ONE charge mechanism — the body-wide HTTPException
+    # wrap. Charge once on 401/403 (server decisions: invalid key, revoked/
+    # suspended, dashboard gate, ANON_TEAM_NO_OWNER, KEY_NOT_USER_MINTED,
+    # ACCOUNT_MISSING); 429/5xx pass through uncharged. The prefix-gate 401
+    # for non-tt_ junk is covered by the same wrap — no double-charge. On
+    # success (200) charge immediately before returning.
+    try:
+        session = await _session_login_exchange(request, token, ip)
+    except HTTPException as exc:
+        if exc.status_code in (401, 403) and ip:
+            await _charge_ip_bucket(
+                _SESSION_BUCKETS, _SESSION_LOGIN_LOCK, ip,
+                window_s=_SESSION_LOGIN_WINDOW_S)
+        raise
+    if ip:
+        await _charge_ip_bucket(
+            _SESSION_BUCKETS, _SESSION_LOGIN_LOCK, ip,
+            window_s=_SESSION_LOGIN_WINDOW_S)
+    return session
+
+
+async def _session_login_exchange(
+    request: Request, token: str, ip: str | None,
+) -> dict:
+    """The post-limiter exchange body — prefix gate, resolution, mint-path
+    shape tree + 503 map (Task 4), GoTrue mint, TOCTOU backstop, audit.
+    Charges are owned by the session_login wrapper (Task 5)."""
+    from tortoise.supabase_control import (
+        _is_uuid, get_control_plane, is_anon_team, mint_target_user_for_key,
+        membership_for_user_team,
+    )
+    if not token.startswith("tt_"):
+        await _audit_auth_failure(request, "invalid_key")
+        raise HTTPException(status_code=401, detail="Invalid API key")
 
     # Key parity + suspension (the #767 resolution path; raises 401/403).
     team = await _get_current_team_supabase(request, token)
+    # Key parity + suspension (the #767 resolution path; raises 401/403).
 
     # FORCED dashboard-login gate.
     reason = _dashboard_key_login_reason(team)
@@ -2816,17 +2917,30 @@ async def session_login(request: Request):
     # identity (owner-less team) → claim funnel; "api"/NULL/unknown →
     # KEY_NOT_USER_MINTED.
     cp = get_control_plane()
-    target = mint_target_user_for_key(cp, created_by, team_id)
+    try:
+        target = mint_target_user_for_key(cp, created_by, team_id)
+    except RuntimeError:
+        # #1719 (Task 4): the mint-path team_memberships read failed for a
+        # control-plane reason (outage/schema-cache/column grant) — degrade
+        # to an honest 503, never the global-handler 500 the client mapped
+        # to "Invalid API key.". The shape-gate (Task 2) already prevents
+        # the non-UUID 22P02 class; this catches the residual causes.
+        raise _control_plane_unavailable()
     if target is None:
         # Pinned evaluation order (plan Task 2): the claim funnel is for
         # IDENTITY-shaped creators (anon-team keys from provisioning) ONLY —
         # a UUID creator who is no longer an active member (e.g. the team
         # lost its owner) is KEY_NOT_USER_MINTED, never the claim funnel.
-        _is_uuid = bool(re.fullmatch(
-            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
-            created_by or "", re.IGNORECASE))
-        if created_by is not None and created_by != "api" and not _is_uuid \
-                and is_anon_team(cp, team_id):
+        # #1719: reuse the shared _is_uuid (single source of truth — the old
+        # inline regex could drift from the helper's PG-parser-equivalent
+        # acceptance; the inline re.fullmatch is DELETED, not shadowed).
+        try:
+            anon = (created_by is not None and created_by != "api"
+                    and not _is_uuid(created_by)
+                    and is_anon_team(cp, team_id))
+        except RuntimeError:
+            raise _control_plane_unavailable()
+        if anon:
             raise HTTPException(
                 status_code=403,
                 detail={"error_code": "ANON_TEAM_NO_OWNER",
@@ -2886,7 +3000,11 @@ async def session_login(request: Request):
                                "key in the dashboard or use GitHub/Google."})
 
     # Post-verify membership backstop (TOCTOU: creator removed mid-mint).
-    if membership_for_user_team(cp, target, team_id) is None:
+    try:
+        still_member = membership_for_user_team(cp, target, team_id) is not None
+    except RuntimeError:
+        raise _control_plane_unavailable()
+    if not still_member:
         raise HTTPException(
             status_code=403,
             detail={"error_code": "KEY_NOT_USER_MINTED",
@@ -7647,7 +7765,14 @@ async def claim_team(request: Request):
         ClaimError, claim_membership, get_control_plane, is_anon_team,
     )
     cp = get_control_plane()
-    if not is_anon_team(cp, team_id):
+    try:
+        anon = is_anon_team(cp, team_id)
+    except RuntimeError:
+        # #1719 (Task 4): the claim funnel shares the unwrapped
+        # team_memberships reads — an outage must degrade to 503, never a
+        # raw 500 (the dashboard claim card renders the error_code message).
+        raise _control_plane_unavailable()
+    if not anon:
         raise HTTPException(status_code=409,
                             detail="Team has already been claimed")
 
@@ -7720,7 +7845,12 @@ async def claim_email(request: Request, body: ClaimEmailRequest):
     if team is None:
         raise HTTPException(status_code=401, detail="Invalid API key")
     team_id = team["team_id"]
-    if not is_anon_team(cp, team_id):
+    try:
+        anon = is_anon_team(cp, team_id)
+    except RuntimeError:
+        # #1719 (Task 4): claim funnel control-plane outage → honest 503.
+        raise _control_plane_unavailable()
+    if not anon:
         raise HTTPException(status_code=409, detail="This team already has a verified identity")
 
     # 2. create the Supabase auth user (admin API, #801)
@@ -7795,11 +7925,23 @@ async def claim_status(request: Request):
     if team is None:
         return {"claimable": False}
     team_id = team["team_id"]
-    if not is_anon_team(get_control_plane(), team_id):
+    try:
+        anon = is_anon_team(get_control_plane(), team_id)
+    except RuntimeError:
+        # #1719 (Task 4): claim_status's is_anon_team read failed — the
+        # welcome/claim guard must NOT 500 (and must not report claimable).
+        # 503 tells the client to retry later; the resolve_api_key
+        # fail-closed {"claimable": false} behavior above is unchanged.
+        raise _control_plane_unavailable()
+    if not anon:
         # Already claimed — distinguish this-user idempotency for the UI.
         from tortoise.supabase_control import membership_for_user_team
-        if membership_for_user_team(get_control_plane(), session["user_id"],
-                                    team_id) is not None:
+        try:
+            claimed_by_user = membership_for_user_team(
+                get_control_plane(), session["user_id"], team_id) is not None
+        except RuntimeError:
+            raise _control_plane_unavailable()
+        if claimed_by_user:
             return {"claimable": False, "claimed": True, "team_id": team_id}
         return {"claimable": False}
     return {"claimable": True, "team_id": team_id}

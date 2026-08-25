@@ -640,3 +640,29 @@ class TestAnonCeiling:
         assert r.json()["tier"] == "free"
         lim = resolve_team_limits(team_id)
         assert lim["tier"] == "free", lim
+
+
+class TestClaimStatusOutage503:
+    """#1719 Task 4 (RC1-b): the claim funnel shares the unwrapped
+    team_memberships reads — a control-plane failure must degrade to 503
+    control_plane_unavailable, never a global-handler 500."""
+
+    def test_claim_status_is_anon_team_outage_503(self, client, fake, monkeypatch):
+        from tortoise import supabase_control as sc
+
+        key, _ = _provision_anon(client, fake)
+        _patch_verify(monkeypatch, _jwt("user-a", email="a@example.com",
+                                        providers=["github"]))
+
+        def _boom(cp, tid):
+            raise RuntimeError("Supabase control-plane query failed "
+                               "(team_memberships): HTTP 500")
+
+        monkeypatch.setattr(sc, "is_anon_team", _boom)
+        r = client.get(
+            "/v1/claim/status",
+            headers={"Authorization": "Bearer abc.def.ghi",
+                     "X-Claim-Key": key},
+        )
+        assert r.status_code == 503, r.text
+        assert r.json().get("detail", {}).get("error_code") == "control_plane_unavailable"

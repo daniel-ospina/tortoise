@@ -1207,7 +1207,13 @@
           reenable();
           return;
         }
-        if (resp.status === 502 || resp.status === 503) {
+        if (resp.status >= 500) {
+          // #1719 (Task 6): ANY server-side failure (500 unmapped faults,
+          // 501, 502, 503, 504, Cloudflare 52x origin errors) renders the
+          // honest unavailable copy — never "Invalid API key." (which
+          // misdirected users into rotating keys during a control-plane
+          // outage). One unified string contract with hosted_api's
+          // _control_plane_unavailable().
           showApiKeyModalError("Sign-in is temporarily unavailable — try again in a moment.");
           reenable();
           return;
