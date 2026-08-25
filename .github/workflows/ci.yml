@@ -384,6 +384,12 @@ jobs:
           node-version: '22'   # tenant-provision TS-parse guard (#770)
       - run: pip install -e '.[test]'
       - name: Run the #669 pre-deploy flip gate
+        env:
+          # Epic #1647 P4: the flip-gate pytest legs run URI-less by design
+          # (FalkorDBLite + seam fakes — the pre-flip local/CI equivalence,
+          # documented in verify-cutover's header) — the P4 URI-required
+          # enforcement opt-in, same as hosted-e2e.
+          TORTOISE_TEST_CARVE_OUT: "1"
         run: bash .github/scripts/verify-cutover
 
   agent-infra-ci:

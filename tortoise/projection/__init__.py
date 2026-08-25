@@ -557,6 +557,7 @@ class FalkorProjection(
                     # graph name). Cycle-3 P2-17: 12 hex = 48+ bits (was
                     # 8 hex = 32 bits) — collision-safe at multi-thousand-
                     # graph scale.
+                    assert path is not None  # explicit_path guarantee (mypy narrow)
                     _stem = os.path.splitext(os.path.basename(path))[0]
                     _stem = re.sub(r"[^a-zA-Z0-9_]", "_", _stem)
                     # CI P2 fix: fold the explicit graph_name into the hash.
