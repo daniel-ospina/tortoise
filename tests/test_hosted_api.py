@@ -879,12 +879,13 @@ class TestKeysRename:
             assert "created_via" in k
             assert "expires_at" in k
 
-    def test_list_keys_agent_signup_registry_none_tolerant(self, client, monkeypatch):
-        """agent_signup-minted registry nodes lack the props until #1709 — the
-        None-tolerant row[5]/row[6] branch must be exercised by THIS mint.
-        The client fixture overrides get_current_team → TEST_TEAM, so re-point
-        the override at the minted team before GET (list_api_keys is team-
-        scoped; the signup key lives under its own fresh team_id)."""
+    def test_list_keys_agent_signup_registry_writes_props(self, client, monkeypatch):
+        """#1709: the registry-lane agent_signup mint now WRITES created_via/
+        expires_at props (parity with the Supabase lane) — the list endpoint
+        round-trips them (no longer None). The client fixture overrides
+        get_current_team → TEST_TEAM, so re-point the override at the minted
+        team before GET (list_api_keys is team-scoped; the signup key lives
+        under its own fresh team_id)."""
         monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
         r = client.post("/v1/agent/signup", json={})
         assert r.status_code == 200, r.text
@@ -893,8 +894,8 @@ class TestKeysRename:
         r = client.get("/v1/team/keys")
         keys = r.json()["keys"]
         assert keys, "signup team should have exactly one key"
-        assert keys[0]["created_via"] is None   # JSON null, no crash on absent props
-        assert keys[0]["expires_at"] is None
+        assert keys[0]["created_via"] == "provisioned"  # #1709 registry parity
+        assert keys[0]["expires_at"] is None            # durable key — no expiry
         app.dependency_overrides.clear()
 
 

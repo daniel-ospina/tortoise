@@ -711,11 +711,21 @@ def _cmd_recover(args) -> int:
         print(f"Cannot reach API at {api_url}: {e}", file=sys.stderr)
         return 1
 
+    if not (isinstance(data, dict) and "key" in data and "team_id" in data):
+        # #1709 fixer P2.2: a 200 with valid JSON but no key/team_id (proxy/
+        # edge garbage) must not KeyError-traceback on the derefs below —
+        # mirror _cmd_signup's malformed-response guard (fail-soft: the
+        # recovery may have committed server-side, so never blindly retry).
+        print("Recovery may have succeeded but the response was malformed "
+              "(missing 'key' or 'team_id') — check the dashboard or support "
+              "before re-running; do NOT blindly retry.", file=sys.stderr)
+        return 1
+
     config = {
         "api_key": data["key"],
         "api_url": api_url,
         "team_id": data["team_id"],
-        "team_name": data["team_name"],
+        "team_name": data.get("team_name"),
         "signup_token": token,  # ⛔ persist — recovery must not be one-shot
     }
     # Write to the #1708 global store (0600, dir 0700, atomic) — same shape
@@ -930,6 +940,14 @@ def _cmd_signup(args) -> int:
     # #1709: a stored st_ signup token re-presents the SAME team on re-signup
     # (keyless recovery — the dedupe check). Read from the active configs.
     stored_token = _read_stored_signup_token()
+    if force:
+        # #1709 fixer P2.4: --force is the documented escape hatch — a FRESH
+        # mint, never a recovery. Without this the stored token was still
+        # re-presented and --force silently performed a RECOVERY (a suspended
+        # team + dead token could never be escaped). Clearing it here also
+        # makes the recovery/fresh-mint branch distinction below purely
+        # request-shaped (P2.5).
+        stored_token = None
 
     while True:
         print(f"Signing up for a free hosted team (anonymous, no email)…")  # noqa: F541
@@ -1022,7 +1040,13 @@ def _cmd_signup(args) -> int:
     # (previously wrote to cwd/.tortoise which IS the data home directory).
     # #1709: the signup_token is an ADDITIVE field (mint → the fresh token;
     # recovery → the stored token is kept — the server never re-issues tokens).
-    new_token = data.get("signup_token")
+    # #1709 fixer P2.5: a response signup_token is ONLY authoritative on the
+    # fresh-mint branch — distinguish by whether the request PRESENTED a token
+    # (stored_token non-None here ⟺ the successful request was a recovery; the
+    # 422-confirm branch cleared it before continuing). A proxy-injected
+    # signup_token on the recovery branch must never overwrite the real
+    # stored credential.
+    new_token = data.get("signup_token") if not stored_token else None
     config = {
         "api_key": data["key"],
         "api_url": mint_url,

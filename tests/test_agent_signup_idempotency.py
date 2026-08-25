@@ -212,6 +212,18 @@ class TestUniform422:
         d = self._assert_uniform_422(r)
         assert d["error_code"] == "invalid_signup_token"
 
+    def test_non_string_token_uniform_422_not_500(self, client):
+        """#1709 fixer P2.1: a body like {"signup_token": 123} passes the
+        `is not None` gate — the REGISTRY lane must format-gate it to the
+        uniform 422 BEFORE any registry scan (a non-str token reaching the
+        registry full-scan would key.encode() → AttributeError → 500)."""
+        r = client.post("/v1/agent/signup", json={"signup_token": 123})
+        d = self._assert_uniform_422(r)
+        assert d["error_code"] == "invalid_signup_token"
+        r2 = client.post("/v1/agent/recover", json={"signup_token": ["st_", "x"]})
+        d2 = self._assert_uniform_422(r2)
+        assert d2 == d  # identical body — no existence signal
+
 
 class TestSuspendedTeam:
     def test_suspended_team_403_fail_closed(self, client):
@@ -546,3 +558,108 @@ class TestSupabaseLane:
                 if k["team_id"] == team_id and k.get("revoked_at") is None
                 and k.get("created_via") != "bootstrap"]
         assert len(keys) <= 2, f"cap overshot: {len(keys)} active non-bootstrap keys"
+
+    # ── Review P0/P1: transport-shape + error-mapping regressions ──────────
+    # PostgREST return=minimal does NOT echo volatile SECURITY DEFINER RPC
+    # results (repo precedent: metering_increment). The wrappers MUST read
+    # back the authoritative row — these tests stub rpc to mimic the prod
+    # transport (rpc commits server-side, echoes nothing) and assert the
+    # wrapper still resolves.
+
+    def _token_row(self, th: str, team_id: str) -> dict:
+        return {"token_hash": th, "team_id": team_id, "created_at": None,
+                "last_used_at": None, "revoked_at": None}
+
+    def test_resolve_wrapper_reads_back_when_rpc_echoes_nothing(self):
+        """P0 transport shape: cp.rpc returns None (return=minimal) for a
+        VALID token → the old echo-parsing returned None → 422 in prod. The
+        wrapper must resolve via the read-back (token row, revoked_at IS
+        NULL)."""
+        import tortoise.supabase_control as sc
+        from tests.fake_control_plane import FakeControlPlane
+
+        fake = FakeControlPlane()
+        th = _lookup_hash(_st_token())
+        fake.seed("agent_signup_tokens",
+                  [self._token_row(th, "team-1709-t1")])
+        # mimic prod return=minimal: the RPC committed server-side (row
+        # present) but echoes nothing.
+        fake.rpc = lambda fn, body=None: None  # type: ignore[method-assign]
+        assert sc.resolve_signup_token(fake, th) == "team-1709-t1"
+        # revoked → read-back honors revoked_at IS NULL → None (uniform 422)
+        fake.tables["agent_signup_tokens"][0]["revoked_at"] = "2026-01-01T00:00:00Z"
+        assert sc.resolve_signup_token(fake, th) is None
+
+    def test_recover_wrapper_reads_back_when_rpc_echoes_nothing(self):
+        """P0 transport shape: recover_team_key's RPC echoes nothing in prod
+        → the wrapper read back the minted api_keys row (lookup_hash is the
+        authoritative proof the mint committed) — never a fabricated key."""
+        import tortoise.supabase_control as sc
+        from tests.fake_control_plane import FakeControlPlane
+
+        fake = FakeControlPlane()
+        th = _lookup_hash(_st_token())
+        lookup = "lu1709transport0000"
+        fake.seed("agent_signup_tokens",
+                  [self._token_row(th, "team-1709-t1")])
+        fake.seed("teams", [{"id": "team-1709-t1", "name": "T1"}])
+        # the RPC committed server-side (mint landed) but echoed nothing
+        fake.seed("api_keys", [{
+            "id": "key_team-1709-t1_lu1709transp", "team_id": "team-1709-t1",
+            "lookup_hash": lookup, "key_prefix": "tt_1709",
+            "created_via": "recovery", "created_by": "st_" + th[:12],
+            "created_at": None, "expires_at": None, "revoked_at": None}])
+        fake.rpc = lambda fn, body=None: None  # type: ignore[method-assign]
+        out = sc.recover_team_key(fake, token_hash=th, team_id="team-1709-t1",
+                                  lookup_hash=lookup, key_prefix="tt_1709",
+                                  max_api_keys=2)
+        assert out == "team-1709-t1"
+
+    def test_recover_readback_missing_row_fails_closed(self):
+        """The read-back is the mint's authority: an RPC that echoed nothing
+        AND left no api_keys row (response lost / mint rolled back) raises
+        RuntimeError (fail-closed → 500), never a fabricated success."""
+        import tortoise.supabase_control as sc
+        from tests.fake_control_plane import FakeControlPlane
+
+        fake = FakeControlPlane()
+        fake.rpc = lambda fn, body=None: None  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError, match="no team_id"):
+            sc.recover_team_key(fake, token_hash="th", team_id="team-1709-t1",
+                                lookup_hash="lu-absent", key_prefix="tt_",
+                                max_api_keys=2)
+
+    def test_recover_maps_prod_shaped_rpc_error(self):
+        """P1: the RPC error path. With the fix, cp.rpc embeds the PostgREST
+        error body's message in the RuntimeError ("...: HTTP 400: recover_team_key:
+        token not found or revoked" — the RAISE text, no raw SQL). The wrapper
+        must map the semantic rejection to SignupTokenRecoveryError (uniform
+        422), NOT propagate RuntimeError (500) — the mapping was dead when the
+        seam carried only "HTTP 400"."""
+        import tortoise.supabase_control as sc
+        from tests.fake_control_plane import FakeControlPlane
+
+        fake = FakeControlPlane()
+
+        def _prod_rpc(fn, body=None):
+            raise RuntimeError(
+                "Supabase control-plane RPC failed (recover_team_key): "
+                "HTTP 400: recover_team_key: token not found or revoked")
+
+        fake.rpc = _prod_rpc  # type: ignore[method-assign]
+        with pytest.raises(sc.SignupTokenRecoveryError) as ei:
+            sc.recover_team_key(fake, token_hash="th", team_id="team-1",
+                                lookup_hash="lu", key_prefix="tt_",
+                                max_api_keys=2)
+        assert ei.value.status == 422
+        assert ei.value.code == "invalid_signup_token"
+        # non-semantic control-plane failure still propagates RuntimeError
+        def _prod_5xx(fn, body=None):
+            raise RuntimeError(
+                "Supabase control-plane RPC failed (recover_team_key): HTTP 500")
+
+        fake.rpc = _prod_5xx  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError, match="HTTP 500"):
+            sc.recover_team_key(fake, token_hash="th", team_id="team-1",
+                                lookup_hash="lu", key_prefix="tt_",
+                                max_api_keys=2)

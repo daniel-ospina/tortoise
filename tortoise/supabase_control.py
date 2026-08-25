@@ -69,10 +69,15 @@ _logger = logging.getLogger(__name__)
 _SERVICE_KEY_ENV = ("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SERVICE_KEY")
 
 # Base teams columns (migration 0006 — the core teams table; drift-safe).
-# email is 0006, NOT 0015 — it rides the base read.
+# email is 0006, NOT 0015 — it rides the base read. deleted_at/graph_name
+# are ALSO base: graph_name is 0006 and the token-recovery echo needs it;
+# deleted_at is 20260813000001 and the #1709 recovery guard ("a deleted
+# team is indistinguishable from never-existed → uniform 422") must read it
+# for real — a deletion column belongs to the FAIL-CLOSED class (#1096),
+# never an additive-fail-soft tier.
 _TEAM_BASE_SELECT = [
     "id", "name", "tier", "max_users", "max_graphs", "graph_size_cap",
-    "ops_allowance", "email",
+    "ops_allowance", "email", "deleted_at", "graph_name",
 ]
 # Additive teams columns, separately migrated after 0006 (0015 abuse state;
 # 20260813000005 dashboard_key_login; 20260817000001 import ledger + points
@@ -207,9 +212,26 @@ class SupabaseControlPlane:
                 f"Supabase control-plane RPC failed ({fn}): {e}"
             ) from e
         if resp.status_code >= 300:
+            # #1709 fixer P1: carry the PostgREST error body's "message"
+            # (for a Postgres RAISE EXCEPTION it is the RAISE text, e.g.
+            # "recover_team_key: token not found or revoked") so caller-side
+            # code mappings (_RECOVER_ERROR_CODES / _CLAIM_ERROR_CODES) can
+            # actually fire. The seam previously discarded the body and the
+            # RuntimeError carried ONLY "HTTP 400" — every substring mapping
+            # was dead in production (recover degraded to a 500 instead of
+            # the uniform 422). Deliberately best-effort: a body that is not
+            # JSON (or lacks "message") degrades to the old shape.
+            detail = ""
+            try:
+                err = resp.json()
+                if isinstance(err, dict):
+                    detail = err.get("message") or ""
+            except Exception:
+                pass
+            suffix = f": {detail}" if detail else ""
             raise RuntimeError(
                 f"Supabase control-plane RPC failed ({fn}): "
-                f"HTTP {resp.status_code}"
+                f"HTTP {resp.status_code}{suffix}"
             )
         if not resp.content:
             return None
@@ -1410,24 +1432,29 @@ def resolve_signup_token(cp, token_hash: str) -> str | None:
 
     The caller (hosted_api) maps None to the UNIFORM 422 invalid_signup_token
     (same body for malformed/unknown/revoked/soft-deleted team — no existence
-    signal). PostgREST encodes scalar RPC returns in several shapes
-    (dict {fn: value} with return=representation, a scalar array, or a bare
-    scalar); this parses all three. A control-plane failure raises
-    RuntimeError (fail-closed → 500, never 422).
+    signal). PostgREST does NOT echo SECURITY DEFINER RPC results with
+    return=minimal (repo precedent: metering_increment) — the resolve RPC's
+    scalar result is a VOLATILE return, so in production the echo is ALWAYS
+    empty (the old echo-parsing here returned None for a VALID token → the
+    token path 422'd in prod while passing against the fake's bare-string
+    rpc). Read back the authoritative token row instead (the RPC already
+    committed; a read-back failure raises fail-closed → 500, never a false
+    422). A control-plane failure raises RuntimeError (fail-closed → 500,
+    never 422).
     """
     try:
-        out = cp.rpc("resolve_signup_token", {"p_token_hash": token_hash})
+        cp.rpc("resolve_signup_token", {"p_token_hash": token_hash})
     except RuntimeError as e:
         _logger.warning(
             "resolve_signup_token RPC failed (%s) — fail-closed", e)
         raise
-    if out is None:
-        return None
-    if isinstance(out, dict):
-        out = next(iter(out.values()), None)
-    elif isinstance(out, (list, tuple)):
-        out = out[0] if out else None
-    return out if isinstance(out, str) and out else None
+    rows = cp.query(
+        "agent_signup_tokens",
+        select=["team_id"],
+        filters=[("token_hash", "eq", token_hash),
+                 ("revoked_at", "is", None)],
+    )
+    return rows[0].get("team_id") if rows else None
 
 
 class SignupTokenRecoveryError(Exception):
@@ -1449,28 +1476,32 @@ _RECOVER_ERROR_CODES = {
 }
 
 
-def recover_team_key(cp, *, token_hash: str, team_id: str, api_key: str,
-                     key_hash: str, lookup_hash: str,
+def recover_team_key(cp, *, token_hash: str, team_id: str,
+                     lookup_hash: str,
                      key_prefix: str, max_api_keys: int) -> str:
     """Keyless recovery: mint a NEW key on the token's team (one RPC tx).
 
     The RPC (20260814000001) SELECTs the token row FOR UPDATE (serializes
     concurrent recoveries so the non-bootstrap cap cannot overshoot),
-    rejects soft-deleted teams, revokes the OLDEST non-bootstrap key at the
-    cap (deterministic, #750.10 semantics), and inserts the new api_keys row
-    with created_via='recovery' and created_by='st_'||left(token_hash,12)
-    (token-attributable — derived inside the RPC, never caller-supplied).
+    rejects soft-deleted teams, inserts the new api_keys row (created_via=
+    'recovery', created_by='st_'||left(token_hash,12) — token-attributable,
+    derived inside the RPC, never caller-supplied) and ONLY THEN, when a new
+    row was actually inserted, revokes the OLDEST non-bootstrap key at the
+    cap (deterministic, #750.10 semantics; a no-op retry must never revoke a
+    live key). The plaintext api_key / key_hash are caller-held (they never
+    reach SQL — the RPC binds auth on lookup_hash alone; review P2.8).
 
-    Raises SignupTokenRecoveryError (→ uniform 422) on semantic rejections;
-    RuntimeError (fail-closed → 500) on control-plane failures. Returns
-    team_id.
+    PostgREST does NOT echo SECURITY DEFINER RPC results with return=minimal
+    — read back the minted api_keys row (the RPC already committed; a missing
+    row means the mint did NOT commit → fail-closed RuntimeError → 500,
+    never a fabricated key). Raises SignupTokenRecoveryError (→ uniform 422)
+    on semantic rejections; RuntimeError (fail-closed → 500) on control-plane
+    failures. Returns team_id.
     """
     try:
-        out = cp.rpc("recover_team_key", {
+        cp.rpc("recover_team_key", {
             "p_token_hash": token_hash,
             "p_team_id": team_id,
-            "p_api_key": api_key,
-            "p_key_hash": key_hash,
             "p_lookup_hash": lookup_hash,
             "p_key_prefix": key_prefix,
             "p_max_api_keys": max_api_keys,
@@ -1483,15 +1514,18 @@ def recover_team_key(cp, *, token_hash: str, team_id: str, api_key: str,
                     msg, status=status, code=detail_code) from e
         _logger.warning("recover_team_key RPC failed (%s) — fail-closed", e)
         raise
-    if out is None:
+    rows = cp.query(
+        "api_keys",
+        select=["team_id"],
+        filters=[("lookup_hash", "eq", lookup_hash),
+                 ("team_id", "eq", team_id)],
+    )
+    if not rows:
         raise RuntimeError("recover_team_key returned no team_id")
-    if isinstance(out, dict):
-        out = next(iter(out.values()), None)
-    elif isinstance(out, (list, tuple)):
-        out = out[0] if out else None
-    if not isinstance(out, str) or not out:
+    team_id = rows[0].get("team_id")
+    if not isinstance(team_id, str) or not team_id:
         raise RuntimeError("recover_team_key returned no team_id")
-    return out
+    return team_id
 
 
 # ── Claim path (#1082, PR1 — 20260813000004) ────────────────────────────────

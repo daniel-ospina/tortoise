@@ -4,9 +4,11 @@
 -- fresh team + tt_ key AND a 256-bit `st_<64hex>` signup token (hash-only at
 -- rest). Re-presenting the token IS the dedupe check AND the keyless-recovery
 -- credential: there is no unauthenticated dedupe path (no-token always mints,
--- bad token → uniform 422), so no existence oracle, no lockout primitive, and
--- no TOCTOU (the token path never creates a team; recovery mints a NEW key on
--- the SAME team).
+-- bad token → uniform 422), so no existence oracle and no lockout primitive.
+-- TOCTOU serialization lives ONLY in `recover_team_key`'s FOR UPDATE row
+-- lock — `resolve_signup_token` is NOT FOR UPDATE (the check-then-mint gap on
+-- a concurrently-revoked/deleted team is closed by recover's zero-row-lock
+-- fail-closed re-check, never by resolve).
 --
 -- Design contract (scope.md §1):
 --   * NEW-named `provision_team_with_token` wrapper — NOT CREATE OR REPLACE on
@@ -36,9 +38,13 @@
 -- ============================================================================
 -- 1) agent_signup_tokens table (hash-only; one live token per team)
 -- ============================================================================
-CREATE TABLE public.agent_signup_tokens (
+CREATE TABLE IF NOT EXISTS public.agent_signup_tokens (
     token_hash   text PRIMARY KEY,          -- SHA-256(PEPPER + token) — app-side only
-    team_id      text NOT NULL,
+    -- FK (review P1): the boot+hourly purge sweep (20260813000001) HARD-
+    -- deletes teams; without the cascade, token rows would orphan and a
+    -- later recovery would hit an api_keys FK violation (500 instead of the
+    -- uniform 422). teams.id is text (0006) — the column type matches.
+    team_id      text NOT NULL REFERENCES public.teams(id) ON DELETE CASCADE,
     created_at   timestamptz NOT NULL DEFAULT now(),
     last_used_at timestamptz,
     revoked_at   timestamptz
@@ -46,7 +52,7 @@ CREATE TABLE public.agent_signup_tokens (
 
 -- One-token-per-team (the issue's "one-team-per-identity" reframed under C):
 -- a team has at most ONE live (unrevoked) token. Revoking frees the slot.
-CREATE UNIQUE INDEX uq_agent_signup_tokens_team
+CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_signup_tokens_team
     ON public.agent_signup_tokens (team_id) WHERE revoked_at IS NULL;
 
 REVOKE ALL ON public.agent_signup_tokens FROM public, anon, authenticated;
@@ -126,10 +132,15 @@ BEGIN
       FROM public.agent_signup_tokens
      WHERE token_hash = p_token_hash AND revoked_at IS NULL;
     -- Single tx: token-verify + last_used_at touch are atomic; the caller
-    -- checks team suspended/deleted state after.
-    UPDATE public.agent_signup_tokens
-       SET last_used_at = now()
-     WHERE token_hash = p_token_hash;
+    -- checks team suspended/deleted state after. The touch is GATED on a
+    -- live token (review P2.8): an unknown OR revoked token must leave no
+    -- write trace (a revoked token re-presented would otherwise keep its
+    -- last_used_at warm forever).
+    IF v_team_id IS NOT NULL THEN
+        UPDATE public.agent_signup_tokens
+           SET last_used_at = now()
+         WHERE token_hash = p_token_hash;
+    END IF;
     RETURN v_team_id;  -- NULL = unknown or revoked (caller maps to uniform 422)
 END;
 $$;
@@ -137,11 +148,12 @@ $$;
 -- ============================================================================
 -- 4) recover_team_key — keyless recovery mint (FOR UPDATE serialized)
 -- ============================================================================
+-- NOTE (review P2.8): p_api_key / p_key_hash were DROPPED — the RPC binds
+-- auth on lookup_hash alone (api_keys has no key_hash column; the plaintext
+-- never reaches SQL, the caller holds it for the client response).
 CREATE OR REPLACE FUNCTION public.recover_team_key(
     p_token_hash    text,
     p_team_id       text,
-    p_api_key       text,
-    p_key_hash      text,
     p_lookup_hash   text,
     p_key_prefix    text,
     p_max_api_keys  integer DEFAULT 2   -- tier-derived cap (caller; free = 2)
@@ -155,6 +167,7 @@ DECLARE
     v_team_id     text;
     v_count       integer;
     v_oldest_id   text;
+    v_inserted_id text;
 BEGIN
     -- ⛔ Row lock: serializes concurrent recoveries for the SAME token
     -- (READ COMMITTED check-then-insert race closed). Zero rows → fail closed
@@ -177,35 +190,43 @@ BEGIN
         RAISE EXCEPTION 'recover_team_key: team deleted';
     END IF;
 
-    -- Cap: count ACTIVE non-bootstrap keys (a bootstrap-only team is always
-    -- under cap → the 402 branch is unreachable on the token path by design).
-    SELECT count(*) INTO v_count
-      FROM public.api_keys
-     WHERE team_id = p_team_id AND revoked_at IS NULL
-       AND created_via <> 'bootstrap';
-    IF v_count >= p_max_api_keys THEN
-        -- Deterministic revoke-oldest-non-bootstrap (mirrors #750.10
-        -- revoke-oldest-other; the token path has no "presenter's own").
-        SELECT id INTO v_oldest_id
-          FROM public.api_keys
-         WHERE team_id = p_team_id AND revoked_at IS NULL
-           AND created_via <> 'bootstrap'
-         ORDER BY created_at ASC NULLS FIRST
-         LIMIT 1;
-        IF v_oldest_id IS NOT NULL THEN
-            UPDATE public.api_keys SET revoked_at = now() WHERE id = v_oldest_id;
-        END IF;
-    END IF;
-
-    -- Recovery mint: created_via='recovery' (0007 CHECK admits it); created_by
-    -- is DERIVED inside the RPC ('st_' + token-hash prefix) — never
-    -- caller-supplied; it identifies the TOKEN, not a human.
+    -- Recovery mint FIRST (review P2.8): idempotent — ON CONFLICT
+    -- (lookup_hash) DO NOTHING makes a retried recovery with the same key
+    -- material a NO-OP (no second key). created_via='recovery' (0007 CHECK
+    -- admits it); created_by is DERIVED inside the RPC ('st_' + token-hash
+    -- prefix) — never caller-supplied; it identifies the TOKEN, not a human.
     INSERT INTO public.api_keys (id, team_id, lookup_hash, key_prefix,
                                  created_via, created_by)
     VALUES ('key_' || p_team_id || '_' || left(p_lookup_hash, 12),
             p_team_id, p_lookup_hash, p_key_prefix,
             'recovery', 'st_' || left(p_token_hash, 12))
-    ON CONFLICT (lookup_hash) DO NOTHING;
+    ON CONFLICT (lookup_hash) DO NOTHING
+    RETURNING id INTO v_inserted_id;
+
+    -- Cap: ONLY when a new key was actually minted — a no-op retry must
+    -- never revoke a live key. Count AFTER the insert (the new key is
+    -- active); at/over cap, revoke the OLDEST non-bootstrap key
+    -- (deterministic, #750.10 semantics; NULL-tolerant created_via predicate
+    -- mirrors the registry lane — review P2.3). Strictly-bigger-than keeps
+    -- the steady state AT the cap (equivalent to the old count-before-revoke
+    -- ordering, without the no-op-retry key loss).
+    IF v_inserted_id IS NOT NULL THEN
+        SELECT count(*) INTO v_count
+          FROM public.api_keys
+         WHERE team_id = p_team_id AND revoked_at IS NULL
+           AND (created_via IS NULL OR created_via <> 'bootstrap');
+        IF v_count > p_max_api_keys THEN
+            SELECT id INTO v_oldest_id
+              FROM public.api_keys
+             WHERE team_id = p_team_id AND revoked_at IS NULL
+               AND (created_via IS NULL OR created_via <> 'bootstrap')
+             ORDER BY created_at ASC NULLS FIRST
+             LIMIT 1;
+            IF v_oldest_id IS NOT NULL THEN
+                UPDATE public.api_keys SET revoked_at = now() WHERE id = v_oldest_id;
+            END IF;
+        END IF;
+    END IF;
 
     RETURN p_team_id;
 END;

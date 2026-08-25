@@ -11347,6 +11347,12 @@ class TortoiseSDK:
         Registry parity for resolve_signup_token (Supabase lane). The caller
         (hosted_api) maps None to the UNIFORM 422 invalid_signup_token.
         """
+        if not isinstance(token_plaintext, str) or not token_plaintext:
+            # #1709 fixer P2.1: a non-str token must be "unknown" (None →
+            # uniform 422), NEVER an AttributeError from the registry scan
+            # (verify_api_key encodes the plaintext) — defense-in-depth
+            # behind hosted_api's format gate.
+            return None
         matches = [
             p for p in self._verify_hashed_lookup("SignupToken", "token_hash", token_plaintext)
             if p.get("revoked_at") is None

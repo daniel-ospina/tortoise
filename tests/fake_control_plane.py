@@ -254,15 +254,21 @@ class FakeControlPlane:
                     raise RuntimeError("recover_team_key: team deleted")
                 cap = int(p.get("p_max_api_keys") or 2)
                 key_rows = self.tables.setdefault("api_keys", [])
-                active = [k for k in key_rows
-                          if k.get("team_id") == tid
-                          and k.get("revoked_at") is None
-                          and k.get("created_via") != "bootstrap"]
                 now_iso = datetime.now(timezone.utc).isoformat()  # noqa: UP017
-                if len(active) >= cap:
-                    oldest = min(active, key=lambda k: k.get("created_at") or "")
-                    oldest["revoked_at"] = now_iso
                 if not any(k.get("lookup_hash") == lookup for k in key_rows):
+                    # parity with the SQL reorder (review P2.8): the cap
+                    # revoke fires ONLY when a key was genuinely inserted —
+                    # a no-op retry with the same lookup_hash must never
+                    # revoke a live key. (Count-before-insert with >= cap is
+                    # outcome-equivalent to the SQL's count-after-insert with
+                    # > cap.)
+                    active = [k for k in key_rows
+                              if k.get("team_id") == tid
+                              and k.get("revoked_at") is None
+                              and k.get("created_via") != "bootstrap"]
+                    if len(active) >= cap:
+                        oldest = min(active, key=lambda k: k.get("created_at") or "")
+                        oldest["revoked_at"] = now_iso
                     key_rows.append({
                         "id": f"key_{tid}_{lookup[:12]}",
                         "team_id": tid,

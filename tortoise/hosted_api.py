@@ -7074,12 +7074,14 @@ async def _agent_recover_flow(request: Request, signup_token: str) -> dict:
     """
     import uuid as _uuid  # noqa: I001
     from tortoise import abuse as _abuse
-    from tortoise.auth import hash_api_key as _hash, lookup_hash as _lookup_hash
+    from tortoise.auth import lookup_hash as _lookup_hash
     from tortoise.pricing import tier_limits
     from tortoise.supabase_control import (
         get_control_plane, is_supabase_enabled,
         recover_team_key, SignupTokenRecoveryError,
-        _teams_row_fail_soft, _QUOTA_SELECT, _TEAM_ADDITIVE_0015_TIER,
+        _teams_row_fail_soft, _QUOTA_SELECT,
+        _TEAM_ADDITIVE_IMPORT_TIER, _TEAM_ADDITIVE_DKL_TIER,
+        _TEAM_ADDITIVE_0015_TIER, _TEAM_ADDITIVE_BILLING_TIER,
     )
 
     token_hash = None
@@ -7095,24 +7097,29 @@ async def _agent_recover_flow(request: Request, signup_token: str) -> dict:
             raise HTTPException(status_code=422, detail=_INVALID_SIGNUP_TOKEN_DETAIL)
         row = _teams_row_fail_soft(
             cp, team_id, select=_QUOTA_SELECT,
-            additive_tiers=[_TEAM_ADDITIVE_0015_TIER])
+            # #1709 fixer P2.6: the FULL additive ladder (same as
+            # resolve_api_key) — the recovery emergency path must not 500 on
+            # migration skew (a schema one migration behind the newest
+            # additive drops that tier to safe defaults instead of raising).
+            additive_tiers=[_TEAM_ADDITIVE_IMPORT_TIER, _TEAM_ADDITIVE_DKL_TIER,
+                            _TEAM_ADDITIVE_0015_TIER,
+                            _TEAM_ADDITIVE_BILLING_TIER])
         if row is None or row.get("deleted_at") is not None:
             # soft-deleted team → uniform 422 (indistinguishable from
-            # never-existed; the token path never mints on a deleted team)
+            # never-existed; the token path never mints on a deleted team).
+            # deleted_at rides _TEAM_BASE_SELECT (review P1) so this check is
+            # REAL, not a dead .get() on an unselected column.
             raise HTTPException(status_code=422, detail=_INVALID_SIGNUP_TOKEN_DETAIL)
         if row.get("suspended_at") is not None:
             raise HTTPException(status_code=403, detail=_suspended_detail())
         lim = tier_limits(row.get("tier") or "free")
         api_key = f"tt_{_uuid.uuid4().hex}"
-        key_hash = _hash(api_key)
         lookup_hash = _lookup_hash(api_key)
         try:
             recover_team_key(
                 cp,
                 token_hash=token_hash,
                 team_id=team_id,
-                api_key=api_key,
-                key_hash=key_hash,
                 lookup_hash=lookup_hash,
                 key_prefix=api_key[:10],
                 max_api_keys=int(lim.get("max_api_keys", 2)))
@@ -7134,6 +7141,15 @@ async def _agent_recover_flow(request: Request, signup_token: str) -> dict:
 
     # ── Registry lane (selfhost) ──
     from tortoise.exceptions import ControlPlaneError
+    if token_hash is None:
+        # #1709 fixer P2.1: format-gate BEFORE any registry scan — mirrors
+        # the Supabase lane's _resolve_signup_token isinstance gate. A body
+        # like {"signup_token": 123} passes the `is not None` signup-branch
+        # gate and would otherwise reach the registry full-scan
+        # (verify_api_key → key.encode()) → AttributeError → 500. The
+        # uniform 422 body is identical to malformed/unknown/revoked — no
+        # existence signal.
+        raise HTTPException(status_code=422, detail=_INVALID_SIGNUP_TOKEN_DETAIL)
     sdk = _make_sdk(namespace="registry")
     try:
         node = sdk.signup_token_lookup(signup_token)

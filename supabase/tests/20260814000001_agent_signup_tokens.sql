@@ -72,13 +72,13 @@ DO $$ BEGIN
     has_function_privilege('service_role', 'public.resolve_signup_token(text)', 'EXECUTE'),
     'service_role must EXECUTE resolve_signup_token');
   PERFORM tests.assert(
-    NOT has_function_privilege('anon', 'public.recover_team_key(text,text,text,text,text,text,integer)', 'EXECUTE'),
+    NOT has_function_privilege('anon', 'public.recover_team_key(text,text,text,text,integer)', 'EXECUTE'),
     'anon must NOT EXECUTE recover_team_key');
   PERFORM tests.assert(
-    NOT has_function_privilege('authenticated', 'public.recover_team_key(text,text,text,text,text,text,integer)', 'EXECUTE'),
+    NOT has_function_privilege('authenticated', 'public.recover_team_key(text,text,text,text,integer)', 'EXECUTE'),
     'authenticated must NOT EXECUTE recover_team_key');
   PERFORM tests.assert(
-    has_function_privilege('service_role', 'public.recover_team_key(text,text,text,text,text,text,integer)', 'EXECUTE'),
+    has_function_privilege('service_role', 'public.recover_team_key(text,text,text,text,integer)', 'EXECUTE'),
     'service_role must EXECUTE recover_team_key');
 
   -- provision_team stays a SINGLE 15-arg function (no overload created).
@@ -94,6 +94,7 @@ END $$;
 -- ============================================================================
 DO $$ DECLARE
   v_token_hash text := 'ab' || repeat('cd', 31);  -- 64-hex st_ token hash
+  v_err text := NULL;
 BEGIN
   -- Success path: team + membership + key + token row land in one call.
   PERFORM public.provision_team_with_token(
@@ -130,28 +131,39 @@ BEGIN
     'token row must bind to the minted team');
 
   -- ⛔ Atomicity contract: a FAILED provision leaves NO token row behind.
+  -- The rejection must be GENUINE — provision_team's guard is asymmetric:
+  -- p_api_key checks IS NULL ONLY ('' passes — the old p_api_key => ''
+  -- "failure" actually SUCCEEDED and the assert-false EXCEPTION-handler
+  -- savepoint made the assertions vacuous). The structure here is also
+  -- non-vacuous: the rejection is captured into v_err (a swallowed
+  -- provision would leave v_err NULL → the first assert FAILS loudly)
+  -- and the wrapper must propagate provision_team's OWN guard error.
   BEGIN
     PERFORM public.provision_team_with_token(
       p_user_id => NULL,
       p_identity => 'anon-1709b',
-      p_team_id => 'team-1709-mint-b',
+      p_team_id => NULL,               -- genuine rejection (guard: IS NULL)
       p_team_name => 'Agent 1709 B',
-      p_api_key => '',                    -- empty → provision_team RAISEs
+      p_api_key => 'tt_1709mintkeyB',
       p_key_hash => 'pbkdf2-stub-1709',
       p_lookup_hash => 'lookup-1709-b',
       p_graph_name => 'team_team-1709-mint-b',
       p_signup_token_hash => 'bb' || repeat('cd', 31)
     );
-    PERFORM tests.assert(false, 'provision_team_with_token must raise on a failed provision');
   EXCEPTION WHEN OTHERS THEN
-    PERFORM tests.assert(
-      (SELECT count(*) FROM public.agent_signup_tokens
-        WHERE token_hash = 'bb' || repeat('cd', 31)) = 0,
-      'a failed provision must roll back the token insert (no orphan token)');
-    PERFORM tests.assert(
-      (SELECT count(*) FROM public.teams WHERE id = 'team-1709-mint-b') = 0,
-      'a failed provision must roll back the team insert');
+    v_err := SQLERRM;
   END;
+  PERFORM tests.assert(v_err IS NOT NULL,
+    'provision_team_with_token must raise on a failed provision');
+  PERFORM tests.assert(v_err LIKE 'provision_team: required parameters missing%',
+    'the raised error must be provision_team''s guard rejection (not swallowed)');
+  PERFORM tests.assert(
+    (SELECT count(*) FROM public.agent_signup_tokens
+      WHERE token_hash = 'bb' || repeat('cd', 31)) = 0,
+    'a failed provision must roll back the token insert (no orphan token)');
+  PERFORM tests.assert(
+    (SELECT count(*) FROM public.teams WHERE id = 'team-1709-mint-b') = 0,
+    'a failed provision must roll back the team insert');
 
   -- One-token-per-team: a second (different) token for the same team is
   -- rejected by uq_agent_signup_tokens_team.
@@ -216,7 +228,7 @@ BEGIN
 
   -- Under cap (0 non-bootstrap): recovery mints, returns team_id.
   PERFORM tests.assert(
-    public.recover_team_key(v_token_hash, v_team_id, 'tt_1709recover1', 'h-1709-r1', 'lu1709aaaaaaaa', 'tt_1709rec', 2) = v_team_id,
+    public.recover_team_key(v_token_hash, v_team_id, 'lu1709aaaaaaaa', 'tt_1709rec', 2) = v_team_id,
     'recover_team_key returns the team_id');
   SELECT id INTO v_first_id FROM public.api_keys
    WHERE team_id = v_team_id AND created_via = 'recovery' AND revoked_at IS NULL;
@@ -234,35 +246,41 @@ BEGIN
     (SELECT revoked_at IS NULL FROM public.api_keys WHERE id = 'key-bootstrap-1709'),
     'bootstrap key is never revoked by recovery');
 
-  -- Second recovery: now 1 non-bootstrap active; cap=2 → mint (no revoke).
+  -- Second recovery: 1 active non-bootstrap key before the mint; cap=2 →
+  -- INSERT first, re-count AFTER (the new key is active) → 2 ≤ cap → no
+  -- revoke (the cap revoke fires only when a row was genuinely inserted —
+  -- a no-op retry with the same lookup_hash must never revoke a live key).
   PERFORM tests.assert(
-    public.recover_team_key(v_token_hash, v_team_id, 'tt_1709recover2', 'h-1709-r2', 'lu1709bbbbbbbb', 'tt_1709rec', 2) = v_team_id,
+    public.recover_team_key(v_token_hash, v_team_id, 'lu1709bbbbbbbb', 'tt_1709rec', 2) = v_team_id,
     'second recovery under cap mints');
   SELECT count(*) INTO v_count FROM public.api_keys
-   WHERE team_id = v_team_id AND revoked_at IS NULL AND created_via <> 'bootstrap';
+   WHERE team_id = v_team_id AND revoked_at IS NULL
+     AND (created_via IS NULL OR created_via <> 'bootstrap');
   PERFORM tests.assert(v_count = 2, 'non-bootstrap active keys = 2 at cap');
 
-  -- Third recovery: AT cap (2 non-bootstrap) → revoke the OLDEST
-  -- non-bootstrap (lookup-1709-r1, created first) and mint → still 2 active.
+  -- Third recovery: AT cap (2 non-bootstrap) → insert (r3) → count = 3 > cap
+  -- → revoke the OLDEST non-bootstrap (lookup-1709-r1, created first) →
+  -- still 2 active.
   PERFORM tests.assert(
-    public.recover_team_key(v_token_hash, v_team_id, 'tt_1709recover3', 'h-1709-r3', 'lu1709cccccccc', 'tt_1709rec', 2) = v_team_id,
+    public.recover_team_key(v_token_hash, v_team_id, 'lu1709cccccccc', 'tt_1709rec', 2) = v_team_id,
     'third recovery at cap mints');
   PERFORM tests.assert(
     (SELECT revoked_at IS NOT NULL FROM public.api_keys WHERE lookup_hash = 'lu1709aaaaaaaa'),
     'at cap, the OLDEST non-bootstrap key is revoked');
   SELECT count(*) INTO v_count FROM public.api_keys
-   WHERE team_id = v_team_id AND revoked_at IS NULL AND created_via <> 'bootstrap';
+   WHERE team_id = v_team_id AND revoked_at IS NULL
+     AND (created_via IS NULL OR created_via <> 'bootstrap');
   PERFORM tests.assert(v_count = 2, 'non-bootstrap active keys stay ≤ 2 (cap cannot overshoot)');
 
   -- Zero-row lock: a token/team mismatch (or revoked token) fails closed.
   BEGIN
-    PERFORM public.recover_team_key('zz' || repeat('cd', 31), v_team_id, 'tt_1709recover4', 'h-1709-r4', 'lu1709dddddddd', 'tt_1709rec');
+    PERFORM public.recover_team_key('zz' || repeat('cd', 31), v_team_id, 'lu1709dddddddd', 'tt_1709rec');
     PERFORM tests.assert(false, 'recover_team_key must raise on an unknown token');
   EXCEPTION WHEN OTHERS THEN
     PERFORM tests.assert(true, 'recover_team_key fails closed on a zero-row lock');
   END;
   BEGIN
-    PERFORM public.recover_team_key(v_token_hash, 'team-1709-other', 'tt_1709recover5', 'h-1709-r5', 'lu1709eeeeeeee', 'tt_1709rec');
+    PERFORM public.recover_team_key(v_token_hash, 'team-1709-other', 'lu1709eeeeeeee', 'tt_1709rec');
     PERFORM tests.assert(false, 'recover_team_key must raise on a team mismatch');
   EXCEPTION WHEN OTHERS THEN
     PERFORM tests.assert(true, 'recover_team_key fails closed on a team mismatch');
@@ -274,7 +292,7 @@ BEGIN
   INSERT INTO public.agent_signup_tokens (token_hash, team_id)
   VALUES ('dd' || repeat('cd', 31), 'team-1709-del');
   BEGIN
-    PERFORM public.recover_team_key('dd' || repeat('cd', 31), 'team-1709-del', 'tt_1709recover6', 'h-1709-r6', 'lu1709ffffffff', 'tt_1709rec');
+    PERFORM public.recover_team_key('dd' || repeat('cd', 31), 'team-1709-del', 'lu1709ffffffff', 'tt_1709rec');
     PERFORM tests.assert(false, 'recover_team_key must raise on a soft-deleted team');
   EXCEPTION WHEN OTHERS THEN
     PERFORM tests.assert(true, 'recover_team_key fails closed on a soft-deleted team');
