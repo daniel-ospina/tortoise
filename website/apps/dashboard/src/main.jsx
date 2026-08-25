@@ -155,7 +155,8 @@ function claimIntentInFlight() {
   // GitHub → seed → done). For first-timers it follows the key reveal; for
   // returning empty-graph users it re-opens at the skills step (Back
   // reaches the harness chooser).
-  const [wizardStep, setWizardStep] = React.useState(0)
+  const [wizardStep, setWizardStepRaw] = React.useState(0)
+  const setWizardStep = React.useCallback((n) => { setWizardStepRaw(n); setWizardCopied((c) => (c === 'harness' ? '' : c)) }, [])
   const [wizardHarness, setWizardHarness] = React.useState('claude')
   const [wizardCopied, setWizardCopied] = React.useState('')
   const [wizardGithub, setWizardGithub] = React.useState({ connected: false, repos: null, busy: false })
@@ -477,7 +478,13 @@ function claimIntentInFlight() {
   function wizardCopy(text, label) {
     try { navigator.clipboard.writeText(text) } catch { /* clipboard blocked */ }
     setWizardCopied(label)
-    setTimeout(() => setWizardCopied(''), 1600)
+    if (label !== 'harness') {
+      // #1691: the harness label is STICKY on purpose — the positive
+      // 'I've set it up — Continue' affordance must persist after the user
+      // copies and goes to paste/run it (the 1.6s flash timer would eat
+      // it). It resets on harness-tab switch and on step change instead.
+      setTimeout(() => setWizardCopied(''), 1600)
+    }
     api('/v1/onboarding/state', { method: 'PATCH', useSession: true,
       body: JSON.stringify({ harness: wizardHarness, section: 'config' }) }).catch(() => {})
   }
@@ -554,7 +561,7 @@ function claimIntentInFlight() {
       setWizardSeedDone(!!(subj && subj.id && proj && proj.id && p && p.id))
       // #1691: reflect the subject in the account username (display_name)
       // — best-effort; the graph Subject is the source of truth.
-      if (subj && subj.id && typeof supabaseClient !== 'undefined') {
+      if (subj && subj.id && supabaseClient) {
         supabaseClient.auth.updateUser({ data: { display_name: subjectName } }).catch(() => {})
       }
       setWizardSeeding(false)
@@ -2471,7 +2478,7 @@ function claimIntentInFlight() {
 
                   {wizardStep === 4 && (
                     <div className="done">
-                      <p className="dim">Welcome to Tortoise — your graph is live, your agent knows how to use it, and your decisions are being recorded.</p>
+                      <p className="dim">Welcome to Tortoise — your graph is live and your decisions are being recorded. Once you install the tools, your agent knows how to use them.</p>
                       <div className="wizard-nav">
                         <button type="button" className="ghost" onClick={() => setWizardStep(3)}>← Back</button>
                       </div>
