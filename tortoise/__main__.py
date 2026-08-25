@@ -635,15 +635,31 @@ def _cmd_signup(args) -> int:
 
     No email, no dashboard, no Supabase account — the agent/CLI equivalent
     of Mem0's 4-command key mint and Hindsight's npx self-install. Saves
-    the config to .tortoise so `tortoise create-point` etc. work immediately.
+    the config to ~/.tortoise/credentials.json (#1708) so `tortoise
+    create-point` etc. work immediately.
     """
-    import json, os, sys, uuid  # noqa: E401, I001
+    import contextlib
+    import json
+    import os
+    import sys
+    import uuid
     from pathlib import Path
+    from urllib.error import HTTPError, URLError
     from urllib.request import Request, urlopen
-    from urllib.error import URLError, HTTPError
 
     api_url = os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
-    device_id = f"anon-{uuid.uuid4().hex[:12]}"
+    # Stable device_id (#1708): reuse a previously stored one (server still
+    # ignores it — #741(a) unchanged; it anchors CLIENT-side reuse and the
+    # future #1709 dedupe). Read from the GLOBAL credentials store.
+    home_dir = Path.home() / ".tortoise"
+    config_path = home_dir / "credentials.json"
+    stored = {}
+    if config_path.is_file():
+        try:
+            stored = json.loads(config_path.read_text())
+        except json.JSONDecodeError:
+            stored = {}
+    device_id = stored.get("device_id") or f"anon-{uuid.uuid4().hex[:12]}"
 
     print(f"Signing up for a free hosted team (anonymous, no email)…")  # noqa: F541
     try:
@@ -674,16 +690,43 @@ def _cmd_signup(args) -> int:
         print(f"Cannot reach API at {api_url}: {e}", file=sys.stderr)
         return 1
 
-    # Save config so the key works immediately
-    config_path = Path.cwd() / ".tortoise"
+    # Save config so the key works immediately — global credentials store
+    # (#1708 D4): ~/.tortoise/credentials.json (0600), dir 0700, atomic
+    # unique-tmp write — fixes the IsADirectoryError crash when cwd == ~
+    # (previously wrote to cwd/.tortoise which IS the data home directory).
     config = {
         "api_key": data["key"],
         "api_url": api_url,
         "team_id": data["team_id"],
         "team_name": data["team_name"],
+        "device_id": device_id,
     }
-    config_path.write_text(json.dumps(config, indent=2) + "\n")
-    os.chmod(config_path, 0o600)
+    try:
+        home_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(home_dir, 0o700)
+        # Sweep stale tmp-* files (a crashed writer leaves one behind — key
+        # material residue; unbounded accumulation is the failure mode).
+        for stale in home_dir.glob("credentials.json.tmp-*"):
+            with contextlib.suppress(OSError):
+                stale.unlink()
+        # tmp born at 0600 via os.open(O_EXCL) — write_text would create at
+        # umask (0644) with a plaintext-key window before the chmod; the
+        # unique per-writer name prevents concurrent-writer clobbering.
+        tmp_path = home_dir / f"credentials.json.tmp-{uuid.uuid4().hex}"
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(config, indent=2) + "\n")
+        os.replace(tmp_path, config_path)
+    except OSError as e:
+        # Orphan class: the key was minted but cannot be saved — echo it and
+        # fail closed so the user never loses the key and never silently
+        # re-mints (the incident pattern this issue fixes).
+        print(f"A key was minted but could NOT be saved to {config_path}: {e}",
+              file=sys.stderr)
+        print(f"Your API key (store it manually): {data['key']}", file=sys.stderr)
+        print("Fix the path permissions and re-run, or use the key directly.",
+              file=sys.stderr)
+        return 1
 
     print(f"✅ Free team created: {data['team_name']}")
     print(f"   API key: {data['key']}")

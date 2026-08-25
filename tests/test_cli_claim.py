@@ -63,8 +63,9 @@ class TestSignupClaim:
         assert "app.premiselabs.co" in out
         assert "GitHub or Google" in out
         assert "Paste this key" in out
-        # config still written so the key works immediately
-        cfg = json.loads((tmp_path / ".tortoise").read_text())
+        # config still written so the key works immediately (#1708: the global
+        # ~/.tortoise/credentials.json, not cwd/.tortoise)
+        cfg = json.loads((tmp_path / ".tortoise" / "credentials.json").read_text())
         assert cfg["api_key"].startswith("tt_")
         assert urlopen.call_args.args[0].full_url.endswith("/v1/agent/signup")
 
