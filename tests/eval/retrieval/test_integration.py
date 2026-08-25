@@ -11,6 +11,7 @@ never asserted for absolute quality.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -66,7 +67,9 @@ def test_runner_report_shape_and_gate(tmp_path):
 
     assert report1["schema_version"] == 2  # #1348 SCHEMA v2 (fused k=60 alias retained)
     assert report1["issue"] == "1144"
-    assert report1["provenance"]["db_mode"] == "embedded-falkordblite"
+    _expected_mode = ("docker-falkordb" if os.environ.get("TORTOISE_DB_URI")
+                      else "embedded-falkordblite")
+    assert report1["provenance"]["db_mode"] == _expected_mode
     assert report1["provenance"]["corpus"]["n_points"] > 0
     assert report1["oracle"]["n_queries"] == 100
     assert report1["oracle"]["tiers"] == {"easy": 50, "medium": 30, "hard": 20}
@@ -136,7 +139,9 @@ def test_baseline_report_carries_embedded_caveats():
         (Path(REPO_ROOT) / "tests/eval/retrieval/baseline"
          / "baseline-embedded-2026-08-17.json").read_text()
     )
-    assert baseline["provenance"]["db_mode"] == "embedded-falkordblite"
+    _expected_mode2 = ("docker-falkordb" if os.environ.get("TORTOISE_DB_URI")
+                       else "embedded-falkordblite")
+    assert baseline["provenance"]["db_mode"] == _expected_mode2
     assert "embedded_engine" in baseline["provenance"]
     joined_notes = " ".join(baseline.get("notes", [])).lower()
     for caveat in ("fts", "structural", "brute-force", "synthetic",

@@ -437,6 +437,12 @@ class FalkorProjection(
         # must fire for explicit path= constructions only (no-arg keeps the
         # canonical embedded path).
         explicit_path = path is not None
+        # Epic #1647 (PR #1684 CI-fix): preserve the ORIGINAL explicit path —
+        # the redirect nulls `path` to fall through to the host branch, and
+        # downstream derivation (pack_state's lock/target resolution for
+        # explicit legacy graph names) must reproduce the redirect's hash
+        # inputs (session + ORIGINAL path + name).
+        self._explicit_path = path
 
         # No-arg construction -> canonical embedded path (plan Task 9: graph-
         # scripts migrated from FalkorProjection('tortoise.db') to no-arg,

@@ -72,6 +72,30 @@ def _quiet_watcher(monkeypatch):
     monkeypatch.setenv("BACKUP_WATCHER_DISABLED", "1")
 
 
+@pytest.fixture(autouse=True)
+def _clean_team_graphs(monkeypatch):
+    """Epic #1647 (PR #1684 CI-fix): the DR tests seed the RAW team_team_x
+    graph (select_graph(f"team_{team_id}")) — NON-test-prefixed, so the
+    server lane's wipe_server skips it and seeds ACCUMULATE across tests
+    (CREATE not MERGE → duplicate Points → rebaseline count 6 != 3). The
+    embedded lane's wipe() clears everything per test; the server lane must
+    mirror that by dropping the raw team graphs before each test."""
+    yield
+    if os.environ.get("TORTOISE_DB_URI") and not os.environ.get("TORTOISE_TEST_CARVE_OUT"):
+        try:
+            import tortoise.hosted_api as _ha
+            _sdk = _ha._make_sdk(namespace="registry")
+            _db = _sdk._get_proj().db
+            for _g in list(_db.list_graphs() or []):
+                if _g.startswith("team_") and not _g.startswith("team_test_"):
+                    try:
+                        _db.select_graph(_g).delete()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+
 @pytest.fixture
 def dr_env(monkeypatch):
     for k, v in GOOD_ENV.items():

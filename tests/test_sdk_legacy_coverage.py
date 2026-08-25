@@ -182,7 +182,23 @@ class TestTeamCreate:
         team_sdk = TortoiseSDK(db_path=sdk._db_path, namespace="team-beta")
         try:
             proj = team_sdk._get_proj()
-            assert proj.graph_name == "team_team-beta"
+            # Epic #1647 (PR #1684 CI-fix): the embedded lane's namespace
+            # graph is the raw team_team-beta; the docker lane's redirect
+            # derives a per-path test_<stem>_<hash> graph. Both isolate the
+            # team's namespace — the assertion is the ISOLATION property
+            # (team-scoped SDK lands on ITS graph), not a lane-specific
+            # literal.
+            if os.environ.get("TORTOISE_DB_URI"):
+                assert proj.graph_name.startswith("test_"), (
+                    f"docker lane must derive a test_ graph, got {proj.graph_name}")
+                # isolation: the team-beta SDK's graph differs from the base
+                # sdk's graph (per-path derivation folds the explicit name —
+                # team_team-beta vs the base namespace's name)
+                base_name = sdk._get_proj().graph_name
+                assert proj.graph_name != base_name, (
+                    f"team graph {proj.graph_name} collides with base {base_name}")
+            else:
+                assert proj.graph_name == "team_team-beta"
         finally:
             team_sdk.close()
 

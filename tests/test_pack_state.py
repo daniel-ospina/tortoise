@@ -310,8 +310,19 @@ class TestPackInstallLockSerialization:
         ensure_tenant_packs(sdk, graph_name=None, starter=["dev"])
         ensure_tenant_packs(sdk, graph_name="team_team-k", starter=["dev"])
         assert seen, "lock must be consulted for every activation"
-        assert seen == ["team_team-k", "team_team-k"], (
-            f"lock keyed on passed string, not resolved graph: {seen}")
+        assert seen[0] == seen[1], (
+            f"lock keyed on different graphs: {seen}")
+        if os.environ.get("TORTOISE_DB_URI"):
+            # Epic #1647 (PR #1684 CI-fix): on the docker lane the redirect
+            # derives per-path test_<stem>_<hash> names — both calls must
+            # lock the SAME derived physical graph (the conf 75 property),
+            # not the raw team_team-k literal (which doesn't exist on the
+            # server).
+            assert seen[0].startswith("test_"), (
+                f"docker lane must lock the derived graph, got {seen[0]}")
+        else:
+            assert seen == ["team_team-k", "team_team-k"], (
+                f"lock keyed on passed string, not resolved graph: {seen}")
 
     def test_race_seam_reproduces_duplicates_without_serialization(
             self, tmp_path, monkeypatch):
