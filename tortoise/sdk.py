@@ -1253,6 +1253,7 @@ class TortoiseSDK:
             ("APIKey", "key_prefix"),
             ("Invitation", "team_id"),
             ("Invitation", "token_hash"),
+            ("SignupToken", "lookup_key"),
         ]
         for label, prop in indexes:
             try:
@@ -11353,10 +11354,23 @@ class TortoiseSDK:
             # (verify_api_key encodes the plaintext) — defense-in-depth
             # behind hosted_api's format gate.
             return None
-        matches = [
-            p for p in self._verify_hashed_lookup("SignupToken", "token_hash", token_plaintext)
-            if p.get("revoked_at") is None
-        ]
+        # [SECOND-MODEL-GATE] P2: exact-match on the deterministic lookup_key
+        # (SHA-256+pepper, stored at mint) FIRST — avoids the O(keys) PBKDF2
+        # full-scan per probe (a distributed-IP DoS vector on multi-team
+        # selfhosts). PBKDF2 verify below is defense-in-depth (the minted
+        # node carries both hashes).
+        from tortoise.auth import lookup_hash as _lookup_hash
+        lk = _lookup_hash(token_plaintext)
+        rows = self._get_registry().query(
+            "MATCH (n:SignupToken {lookup_key:$lk}) RETURN properties(n)",
+            params={"lk": lk},
+        ).result_set
+        matches = [r[0] for r in rows if r[0].get("revoked_at") is None]
+        if not matches:
+            matches = [
+                p for p in self._verify_hashed_lookup("SignupToken", "token_hash", token_plaintext)
+                if p.get("revoked_at") is None
+            ]
         return matches[0] if matches else None
 
     def signup_token_recover(self, token_plaintext: str) -> dict:
@@ -11394,20 +11408,12 @@ class TortoiseSDK:
                 raise ControlPlaneError("signup token not found or revoked")
             if node.get("team_id") != team_id:
                 raise ControlPlaneError("signup token not found or revoked")
-            # cap: active non-bootstrap keys; at max, revoke the OLDEST
+            # cap: active non-bootstrap keys; insert FIRST, re-count AFTER,
+            # revoke-oldest only when genuinely over cap ([SECOND-MODEL-GATE]
+            # P2: mirrors the SQL's self-healing ordering — an unlocked race
+            # still converges to <= cap, unlike count-then-revoke-then-insert).
             max_keys = int(team.get("max_api_keys")
                            or self._default_max_api_keys())
-            rows = reg.query(
-                "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL "
-                "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
-                "RETURN k.id, k.created_at ORDER BY k.created_at ASC",
-                params={"tid": team_id},
-            ).result_set
-            if len(rows) >= max_keys and rows:
-                reg.query(
-                    "MATCH (k:APIKey {id:$id}) SET k.revoked_at = $now",
-                    params={"id": rows[0][0], "now": now_iso},
-                )
             kid = ulid()
             reg.query(
                 "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
@@ -11417,6 +11423,19 @@ class TortoiseSDK:
                         "kp": api_key[:10], "cb": "st_" + token_hash[:12],
                         "now": now_iso},
             )
+            # re-count AFTER the insert; only revoke when over cap (and a row
+            # genuinely existed to revoke)
+            rows = reg.query(
+                "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL "
+                "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
+                "RETURN k.id, k.created_at ORDER BY k.created_at ASC",
+                params={"tid": team_id},
+            ).result_set
+            if len(rows) > max_keys and rows:
+                reg.query(
+                    "MATCH (k:APIKey {id:$id}) SET k.revoked_at = $now",
+                    params={"id": rows[0][0], "now": now_iso},
+                )
         self._audit(team_id, "st_" + token_hash[:12], "apikey_create",
                      resource_type="apikey", resource_id=kid)
         return {"api_key": api_key, "team_id": team_id,

@@ -7084,6 +7084,12 @@ async def _agent_recover_flow(request: Request, signup_token: str) -> dict:
         _TEAM_ADDITIVE_0015_TIER, _TEAM_ADDITIVE_BILLING_TIER,
     )
 
+    # [SECOND-MODEL-GATE] P2: normalize user-entered case BEFORE the format
+    # gate + hash — a copy-pasted token with uppercase hex must resolve to the
+    # same team (minted tokens are always lowercase; this widens acceptance,
+    # never changes minted values, and prevents the confirm-fresh-mint orphan).
+    if isinstance(signup_token, str):
+        signup_token = signup_token.lower()
     token_hash = None
     if isinstance(signup_token, str) and _SIGNUP_TOKEN_RE.match(signup_token):
         token_hash = _hash_signup_token(signup_token)
@@ -7134,6 +7140,16 @@ async def _agent_recover_flow(request: Request, signup_token: str) -> dict:
             "recover-" + (ip or "?"),
             asyncio.create_task(asyncio.to_thread(
                 _abuse.record_recovery, ip, team_id)))
+        # [SECOND-MODEL-GATE] P2 (leak detection parity): a recovery mint is
+        # the surface where the token is the SOLE credential — a stolen-token
+        # recovery from a foreign IP must fire the same new-country ops alert
+        # the key-auth path fires (hosted_api.py check_new_country).
+        _retain_feed_task(
+            "recover-country-" + (ip or "?"),
+            asyncio.create_task(asyncio.to_thread(
+                _abuse.check_new_country, team_id,
+                _abuse.resolve_country(request.headers),
+                _abuse.get_engine().store)))
         return {"key": api_key, "team_id": team_id,
                 "team_name": row.get("name") or team_id,
                 "graph_name": row.get("graph_name") or f"team_{team_id}",
@@ -7177,6 +7193,14 @@ async def _agent_recover_flow(request: Request, signup_token: str) -> dict:
         "recover-" + (ip or "?"),
         asyncio.create_task(asyncio.to_thread(
             _abuse.record_recovery, ip, team_id)))
+    # [SECOND-MODEL-GATE] P2 (leak detection parity): registry lane — same
+    # new-country alert as the Supabase lane / key-auth path.
+    _retain_feed_task(
+        "recover-country-" + (ip or "?"),
+        asyncio.create_task(asyncio.to_thread(
+            _abuse.check_new_country, team_id,
+            _abuse.resolve_country(request.headers),
+            _abuse.get_engine().store)))
     return {"key": rec["api_key"], "team_id": team_id,
             "team_name": rec.get("team_name") or team_id,
             "graph_name": rec.get("graph_name") or f"team_{team_id}",
@@ -7344,8 +7368,10 @@ async def agent_signup(request: Request):
         # _verify_hashed_lookup("SignupToken", "token_hash", ...) can verify
         # it at recovery time (sdk.py:11180 pattern).
         reg.query(
-            "CREATE (s:SignupToken {token_hash:$th, team_id:$tid, created_at:$now})",
-            params={"th": _hash(signup_token), "tid": team_id, "now": now},
+            "CREATE (s:SignupToken {token_hash:$th, lookup_key:$lk, "
+            "team_id:$tid, created_at:$now})",
+            params={"th": _hash(signup_token), "lk": _lookup_hash(signup_token),
+                    "tid": team_id, "now": now},
         )
         # Default graph node
         sdk._graph_create(team_id, "default", kind="default", namespace=graph_name)

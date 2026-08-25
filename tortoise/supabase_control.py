@@ -1518,7 +1518,11 @@ def recover_team_key(cp, *, token_hash: str, team_id: str,
         "api_keys",
         select=["team_id"],
         filters=[("lookup_hash", "eq", lookup_hash),
-                 ("team_id", "eq", team_id)],
+                 ("team_id", "eq", team_id),
+                 # [SECOND-MODEL-GATE] P2: a parallel sibling recovery can hit
+                 # the cap and revoke the just-minted key between the RPC
+                 # commit and this read-back — never return a dead key.
+                 ("revoked_at", "is", None)],
     )
     if not rows:
         raise RuntimeError("recover_team_key returned no team_id")
