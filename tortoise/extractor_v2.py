@@ -3030,10 +3030,49 @@ def _complete(model, system: str, user: str, *, deadline_s: int = 600,
 
 
 def _parse_json(response: str) -> dict:
-    m = re.search(r"\{.*\}", response or "", re.S)
-    if not m:
+    """Robust JSON extraction (pilot #1549 research).
+
+    The model intermittently wraps the embed list in markdown code fences
+    (```json ... ```) and/or truncates it (finish_reason == "length") —
+    the v2-era strict regex ``{.*}`` then reported "no JSON block in
+    output" even for perfect JSON, and the parse-retry re-prompted into
+    the same failure (the 666-parse_error census). This version:
+    (1) strips markdown fences, (2) finds the JSON object by
+    brace-balancing from the first '{', tolerating a truncated tail
+    (no final closing brace), (3) recovers trailing junk with the
+    progressive tail-cut. Raises ``ValueError`` only when no JSON can be
+    extracted at all — the caller's parse-retry still applies."""
+    resp = (response or "").strip()
+    m = re.search(r"```(?:json)?\s*(.*?)```", resp, re.S)
+    if m:
+        resp = m.group(1).strip()
+    start = resp.find("{")
+    if start < 0:
         raise ValueError("no JSON block in output")
-    block = m.group(0)
+    depth = 0
+    in_str = False
+    esc = False
+    end = len(resp)
+    for i in range(start, len(resp)):
+        c = resp[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            continue
+        if c == '"':
+            in_str = True
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    block = resp[start:end]
     for cut in (None, -1, -2, -3, -5, -10, -20):
         try:
             return json.loads(block if cut is None else block[:cut])

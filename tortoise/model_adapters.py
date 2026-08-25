@@ -485,9 +485,16 @@ class RotatingModel:
     ``provider``/``route`` (active provider), ``errors``, ``last_finish_reason``
     (the truncation signal — read from the serving adapter), ``close()``
     (interrupt a hung read — the #1655 fix, applied to the active adapter)."""
-    def __init__(self, providers: list, *, cooldown_s: float = 300.0):
+    def __init__(self, providers: list, *, cooldown_s: float = 300.0,
+                 weights: list[float] | None = None):
         self.providers = providers
         self.cooldown_s = cooldown_s
+        # Pilot #1549 (scale research): weighted rotation — each provider's
+        # share of traffic ∝ its weight. Venice 1000 RPM = throughput
+        # backbone; OpenRouter = cheapest lane ($0.056/$0.112 vs $0.14+);
+        # DeepSeek direct = expensive ($0.22/$0.66) + starves under load →
+        # keep it a small spare. Weights default to equal round-robin.
+        self.weights = weights or [1.0 / len(providers)] * len(providers)
         self._rr = 0
         self._cooldowns: dict[str, float] = {}
         self.errors: list[str] = []
@@ -506,14 +513,13 @@ class RotatingModel:
         if n == 0:
             raise RuntimeError("RotatingModel with no providers")
         last_err: Exception | None = None
-        for i in range(n):
-            idx = (self._rr + i) % n
+        for _ in range(n * 3):  # bounded attempts: each provider at most ~3x per call
+            idx = self._pick()
             p = self.providers[idx]
             if self._cooldowns.get(p.provider, 0.0) > now:
                 continue
             try:
                 out = p.complete(system=system, user=user, max_tokens=max_tokens)
-                self._rr = (idx + 1) % n  # advance the rotation past this provider
                 self.route = p.provider
                 self.last_finish_reason = getattr(p, "last_finish_reason", None)
                 return out
@@ -525,6 +531,20 @@ class RotatingModel:
                 self.errors.append(f"{p.provider}: {type(e).__name__}: {e}")
         raise last_err if last_err is not None else RuntimeError(
             f"all {n} providers in cooldown")
+
+    def _pick(self) -> int:
+        """Weighted round-robin: pick the next provider by cumulative weight
+        from the advancing cursor (deterministic, proportional to weights)."""
+        import random
+        total = sum(self.weights)
+        r = (self._rr + random.random()) % total  # advance by a random offset
+        self._rr = (self._rr + 1) % total
+        acc = 0.0
+        for i, w in enumerate(self.weights):
+            acc += w
+            if r < acc:
+                return i
+        return 0
 
     def close(self) -> None:
         for p in self.providers:
@@ -584,7 +604,16 @@ def build_extractor_model(model_id: str | None = None, *,
     # Pilot #1549: 3+ configured providers → the rotating pool (spread the
     # sustained load + redundancy); 1-2 → the existing RoutingModel semantics.
     if len(providers) >= 3:
-        return RotatingModel(providers,
-                             cooldown_s=_failover_cooldown_seconds())
+        # Scale-optimized weights (pilot #1549 research): order the pool
+        # Venice-first (1000 RPM backbone), OpenRouter (cheapest lane), then
+        # DeepSeek direct as the small spare (expensive + starves under load).
+        by_name = {p.provider: p for p in providers}
+        ordered = [by_name.get(name) for name in
+                   ("venice", "openrouter", "deepseek-direct")]
+        ordered = [p for p in ordered if p is not None]
+        weights = {"venice": 0.50, "openrouter": 0.35, "deepseek-direct": 0.15}
+        w = [weights.get(p.provider, 0.33) for p in ordered]
+        return RotatingModel(ordered, cooldown_s=_failover_cooldown_seconds(),
+                             weights=w)
     return RoutingModel(providers[0], providers[1] if len(providers) > 1 else None,
                         cooldown_s=_failover_cooldown_seconds())

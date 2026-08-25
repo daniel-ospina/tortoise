@@ -1772,3 +1772,23 @@ class TestE4Orchestrator:
         out = v2.extract_session_v2(BoomModel([]), conv)
         assert any("S4 failed" in e for e in out["errors"])
         assert out["payload"]["points"]   # S2 output embedded
+
+
+def test_parse_json_handles_markdown_fences():
+    """Pilot #1549 research: the model intermittently wraps the S2/S4 embed
+    list in ```json code fences — the v2 strict regex reported 'no JSON block
+    in output' for PERFECT JSON, driving the 666-parse_error census. The
+    robust parser strips the fences."""
+    import json
+    from tortoise.extractor_v2 import _parse_json
+    fenced = '```json\n{"entities": [], "points": [{"content": "x"}]}\n```'
+    r = _parse_json(fenced)
+    assert r["points"][0]["content"] == "x"
+    prose_fenced = 'Here you go:\n```json\n{"a": 1}\n```\nDone!'
+    assert _parse_json(prose_fenced) == {"a": 1}
+    # pure prose still raises -> the caller's parse-retry path
+    try:
+        _parse_json("I cannot produce that.")
+        raise AssertionError("expected ValueError")
+    except ValueError:
+        pass
