@@ -1977,12 +1977,19 @@ def _sweep_quarantine_dirs(dry_run: bool = False,
 
 def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
                jobs: int = 8, kill_pacing: float = KILL_PACING_DEFAULT,
-               sweep_pid_files: bool = True) -> list[dict]:
+               sweep_pid_files: bool = True,
+               sigterm_timeout: float = 10.0) -> list[dict]:
     """Discover + classify + reap; return acted-upon records.
 
     jobs>1 parallelizes the per-candidate CLIENT LIST probes (the dominant
     cost at hundreds of leaked servers — issue #1005); kills stay serial
-    with pacing.
+    with pacing. sigterm_timeout threads into reap()/_kill(): the suite-end
+    sweep (conftest) lowers it to 3.0 so a server ignoring SIGTERM gets
+    SIGKILL quickly — the default 10s wait × many servers compounds past
+    pytest-timeout under CI load (epic #1647 PR #1684 CI-fix; the param was
+    missing from _run_sweep's signature, so the conftest kwarg raised
+    TypeError and the end-sweep silently no-oped — observed as the 104-
+    orphan leak on the tier-2 leg).
 
     NOTE: the reaper singleton lock is held by main() (CLI); direct callers
     (tests, conftest session hygiene) run unlocked — pre-existing contract,
@@ -2004,7 +2011,8 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
                  if r["classification"] in ("candidate", "stale_socket")]
     resolved = [phase1_probe(r) for r in reapables]
     acted = reap(resolved, dry_run=dry_run, batch_size=batch_size,
-                 kill_pacing=kill_pacing, only_safe=only_safe)
+                 kill_pacing=kill_pacing, only_safe=only_safe,
+                 sigterm_timeout=sigterm_timeout)
     # #1383: quarantine convergence (partial-rmtree/respawn leftovers)
     try:
         for q in _sweep_quarantine_dirs(dry_run=dry_run):
