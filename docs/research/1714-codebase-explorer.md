@@ -10,7 +10,7 @@ aboutObjects: tortoise-memory-capture, tortoise-onboarding
 
 # Codebase Explorer — Issue #1714 (scout report, feeds solution-diverge)
 
-All paths relative to worktree root; line refs verified against edb77e18.
+All paths relative to worktree root; line refs approximate (re-anchor at plan time against the current commit).
 
 ## Deliverable 1 — GitHub ingestion rebuild
 
@@ -22,7 +22,7 @@ All paths relative to worktree root; line refs verified against edb77e18.
 
 ## Deliverable 2 — GitHub docs extraction
 
-- `tortoise/file_indexer.py`: `:86-97` compute_file_hash (SHA-256), `:189` derive_source_url, `:246-266` escape rejection (realpath containment), `:327` derive_document_id, `:349` classify_file, `:421` source_kind_for_classifier.
+- `tortoise/file_indexer.py`: `:86-97` compute_file_hash (SHA-256), `:189` derive_source_url, `:172-186` escape rejection (realpath containment), `:327` derive_document_id, `:349` classify_file, `:421` source_kind_for_classifier.
 - `tortoise/tool_registry.py:565-571` tortoise_ingest_corpus: http_policy=False (EXCLUDED from tenant HTTP — the #236 exclusion).
 - #236 layers: mcp_server.py:1582-1586 (http transport → excluded error), sdk.py:8723-8750 ingest_dir_is_safe + TORTOISE_INGEST_BASE_DIR sandbox, .env.example:298-302.
 - **Hosted remote-docs: NO existing path.** Design: Contents-API fetch → server-side staging dir (under ingest base, exempt from user-supplied-path by construction) → internal ingest_corpus. Token scope `repo` (:8018) suffices.
@@ -40,7 +40,7 @@ All paths relative to worktree root; line refs verified against edb77e18.
 
 ## Deliverable 4 — Quota
 
-- tortoise/quota.py: MAX_SESSION_TURNS 500 `:118`, DEFAULT_MAX_SESSIONS 1000 `:145`, count_team_usage `:331-335` (points = non-episodic only `:394-401`), enforce_team_limit `:418-447`. hosted_api.py `_check_team_limit` `:1487-1520` (402). Sessions gated `:4029-4039`; index ungated `:8116-8155` (the asymmetry).
+- tortoise/quota.py: MAX_SESSION_TURNS 500 `:94`, DEFAULT_MAX_SESSIONS 1000 `:118`, count_team_usage `:267` (points = non-episodic only `:394-401`), enforce_team_limit `:381`. hosted_api.py `_check_team_limit` `:1487-1520` (402). Sessions gated `:4029-4039`; index ungated `:8116-8155` (the asymmetry).
 
 ## Patterns
 - Quota-gate an endpoint: _check_team_limit (request-time). Index job is a BACKGROUND task — needs explicit limit resolution before first create_point.

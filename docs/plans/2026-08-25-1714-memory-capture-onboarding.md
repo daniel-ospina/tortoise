@@ -20,7 +20,7 @@ aboutObjects: tortoise-memory-capture, tortoise-onboarding
 **Team:** epistemic-team
 **Role:** product-implementer
 
-**Architecture:** Family 3 — a shared stateless `tortoise/github_map.py` owns all GitHub ontology mapping (single eventId/eventKind vocabulary, statement extraction, lifecycle diff); `github_indexer.py` reworks in place into fetch+diff → project; `connectors/github.py` mappers become thin wrappers. Session capture uses the existing `/v1/sessions` black box (#909 boundary) plus a new MCP tool and a **server-enforced consent gate (403)**. All onboarding state rides jsonb (no migrations); `Session.harness` is graph-side. The wizard ask is off-by-default and mechanism-gated. 4 independently shippable slices, 19 TDD tasks. Contracts pinned in `docs/research/1714-solution-converge.md` (read before implementing — it carries the 16 amendments + Phase 7 incorporations).
+**Architecture:** Family 3 — a shared stateless `tortoise/github_map.py` owns all GitHub ontology mapping (single eventId/eventKind vocabulary, statement extraction, lifecycle diff); `github_indexer.py` reworks in place into fetch+diff → project; `connectors/github.py` mappers become thin wrappers. Session capture uses the existing `/v1/sessions` black box (#909 boundary) plus a new MCP tool and a **server-enforced consent gate (403)**. All onboarding state rides jsonb (no migrations); `Session.harness` is graph-side. The wizard ask is off-by-default and mechanism-gated. 4 independently shippable slices, 17 TDD tasks + 2 config/sweep tasks (Tasks 10, 19). Contracts pinned in `docs/research/1714-solution-converge.md` (read before implementing — it carries the 16 amendments + Phase 7 incorporations).
 
 ### Pattern Research
 
@@ -255,7 +255,7 @@ aboutObjects: tortoise-memory-capture, tortoise-onboarding
 **Acceptance:** import CLI stages parsed session locally (data preservation), POSTs, writes receipt only on 2xx; 403/402/503 ⇒ fail, no receipt, honest error; Codex + Desktop parsers idempotent on re-import; Cursor spike verdict recorded (ships or honest `unsupported`).
 **Files:**
 - Modify: `tortoise/__main__.py`
-- Create: `tortoise/session_import/parsers.py` (codex, claude_desktop, cursor-gated)
+- Create: `tortoise/session_import/parsers.py` (codex, claude_desktop, cursor-gated; **pi reuses the codex parser — pi session JSONL is a tree-structured JSONL like codex's; named reuse + idempotency test**, or add `pi.py`)
 - Test: `tests/test_session_import_codex.py`, `tests/test_session_import_desktop.py`
 
 **Steps:** TDD (fixtures, idempotency, receipt semantics), commit `feat(1714): T2 session backfill import CLI`.
@@ -416,5 +416,5 @@ Docker FalkorDB test lane · `GITHUB_CLIENT_ID/SECRET` + token `repo` scope · `
 | T2-P4 | Cursor 1s-granularity boundary | P1 | Task 2/5 | composite (updated_at, number) cursor |
 | T2-P2a..h | 8 P2s (doc gate, staging, extraction scope, vocab sync, decline data, dismissal, docs terminal, grandfather copy) | P2 | Tasks 9/11/12/16/17/18 | incorporated above |
 
-<!-- plan-review: cycles=5, status=clean, version=2.3.0 -->
+<!-- plan-review: cycles=5, status=clean, version=2.3.0 (cycles 3-5 folded into task bodies; cycles 1-2 have incorporation sections) -->
 <!-- final-verification: clean (2 P2s resolved post-gate) -->
