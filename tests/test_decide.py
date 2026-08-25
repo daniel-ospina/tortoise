@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile as _tempfile
 import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -20,10 +21,20 @@ from tortoise.sdk import TortoiseSDK
 # Requires live FalkorDB (Docker). Skip gracefully when unavailable so the
 # no-Docker embedded suite stays green (AGENTS.md). Mirrors the probe pattern
 # in tests/test_integration_search.py.
+#
+# The probe must not touch the DEFAULT embedded store: the first holder of
+# the canonical path keeps it for the whole pytest process (servers close at
+# atexit), so a bare TortoiseSDK() probe flips FALKORDB_AVAILABLE by LPT
+# order — the tier-2 (b) leg (URI-less, carve-out) reds the skip-guard when
+# an earlier selected file already holds it. Probe an isolated temp path:
+# deterministic on every lane (docker lanes keep the URI branch — db_path is
+# ignored when TORTOISE_DB_URI is set).
+_DECIDE_EMBEDDED_DIR = _tempfile.mkdtemp(prefix="tortoise_")
+
 FALKORDB_AVAILABLE = False
 try:
     from tortoise.sdk import TortoiseSDK as _ProbeSDK
-    _probe = _ProbeSDK()
+    _probe = _ProbeSDK(db_path=os.path.join(_DECIDE_EMBEDDED_DIR, "probe.db"))
     _probe._get_proj().g.query("RETURN 1")
     _probe.close()
     FALKORDB_AVAILABLE = True
@@ -44,7 +55,10 @@ def sdk():
     # and the Track B suite).
     os.environ.setdefault("TORTOISE_EP_REQUIRE_CALIBRATION", "0")
     ns = f"test_decide_{uuid.uuid4().hex[:8]}"
-    sdk = TortoiseSDK(namespace=ns)
+    # Per-test isolated path on the embedded lane (see probe note above) —
+    # never contends with the shared default store; docker lanes ignore it.
+    sdk = TortoiseSDK(namespace=ns,
+                      db_path=os.path.join(_DECIDE_EMBEDDED_DIR, f"{ns}.db"))
     yield sdk
     sdk.close()
 
