@@ -92,11 +92,11 @@ tortoise = ["config/routing.yaml"]
 # baseline NEVER held at merge #1504 (369 violations; hosted_api.py + ~20
 # files uncovered; the CI lint was narrowed to the syntax class E9/F63/F7 so
 # the red passed silently), and +104 more drifted over 319 commits. Refreshed
-# to 0 errors on 2026-08-25 with ruff 0.16.4 (230 safe-fixed / 242 noqa'd on
-# the 2026-08-25 base; 248/242 on the post-rebase base) AND pinned: the CI
-# lint-command prefixes `pip install ruff==0.16.4` (ci.yml) and the dev group
-# carries ruff==0.16.4 (pyproject.toml) so the unpinned agent-infra job
-# install cannot drift again. Counts: docs/lint-baseline-1503.md.
+# to 0 errors on 2026-08-25 with ruff 0.16.4 (473 violations: 230 safe-fixed
+# by `--fix`, 242 `# noqa` directives added) AND pinned: the CI lint-command
+# prefixes `pip install ruff==0.16.4` (ci.yml) and the dev group carries
+# ruff==0.16.4 (pyproject.toml) so the unpinned agent-infra job install
+# cannot drift again. Counts: docs/lint-baseline-1503.md.
 #
 # The baseline makes the full pass run green WITHOUT a code refactor:
 #   ruff — the 3,753 existing violations are recorded as per-line `# noqa`

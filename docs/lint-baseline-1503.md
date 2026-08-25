@@ -76,8 +76,8 @@ low-count codes (`override`, `func-returns-value`, `call-overload`, `list-item`)
 ## #1685 (2026-08-25): baseline refresh + pin — root cause corrected
 
 The issue's premise ("0.16.4 behavior change") is **wrong** — verified: both
-ruff 0.16.3 and 0.16.4 report byte-identical violation locations (473 on the
-pre-rebase base). The real root cause is **the baseline never held**:
+ruff 0.16.3 and 0.16.4 report byte-identical violation locations (473 total).
+The real root cause is **the baseline never held**:
 
 - At merge #1504 the ruff baseline was **369 violations** (not 0): `hosted_api.py`
   and ~20 other files were never covered (37 `# noqa` at the merge).
@@ -87,10 +87,11 @@ pre-rebase base). The real root cause is **the baseline never held**:
   code against the full rule surface).
 
 **Refresh (2026-08-25, ruff 0.16.4):**
-- 248 safe-fixed by `ruff check . --fix` (UP017/UP037/F401/I001/...; the
-  2026-08-25 pre-rebase base was 230 fixed / 242 noqa'd)
-- 242 `# noqa` directives added by `--add-noqa` (B904/SIM105/B008/F821/E402/
-  I001 — not auto-fixable)
+- 473 violations → **230 safe-fixed** by `ruff check . --fix` (UP017/UP037/
+  F401/I001/...; `--fix` mode's own count reports 248 lines changed because
+  UP037 annotation-unquoting is only diagnosed when fixing)
+- **242 `# noqa` directives** added by `--add-noqa` (B904/SIM105/B008/F821/
+  E402 plus F841/RUF059/SIM103/F811 leftovers — not auto-fixable)
 - Result: `ruff check .` == 0 errors; re-running `--add-noqa` adds 0 (idempotent)
 
 **Pin (durability):**
