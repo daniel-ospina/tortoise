@@ -330,7 +330,7 @@ def test_inmemory_conformance():
 
 def test_falkor_apply_point_added():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     proj = _shared_proj()
     try:
         proj.apply({"type": "PointAdded",
@@ -343,7 +343,7 @@ def test_falkor_apply_point_added():
 
 def test_falkor_apply_operator_added():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     """OperatorAdded creates node + edges to its inputs."""
     proj = _shared_proj()
     try:
@@ -377,7 +377,7 @@ def test_falkor_apply_operator_added():
 
 def test_falkor_apply_operator_added_orphan_stubs():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     """OperatorAdded auto-creates stub nodes for short-ID inputs."""
     proj = _shared_proj()
     try:
@@ -394,7 +394,7 @@ def test_falkor_apply_operator_added_orphan_stubs():
 
 def test_falkor_apply_point_revised():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     proj = _shared_proj()
     try:
         proj.apply({"type": "PointAdded",
@@ -413,7 +413,7 @@ def test_falkor_apply_point_revised():
 
 def test_falkor_apply_point_retracted():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     proj = _shared_proj()
     try:
         proj.apply({"type": "PointAdded",
@@ -429,7 +429,7 @@ def test_falkor_apply_point_retracted():
 
 def test_falkor_apply_points_merged():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     proj = _shared_proj()
     try:
         proj.apply({"type": "PointAdded",
@@ -453,7 +453,7 @@ def test_falkor_apply_points_merged_nested_format():
     RAW event instead of the normalized one, so nested-format merges were a
     silent no-op (merged points survived)."""
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     proj = _shared_proj()
     try:
         proj.apply({"type": "PointAdded",
@@ -499,7 +499,7 @@ def test_falkor_apply_ignores_non_dict_point():
     """Regression #325: apply() with a non-dict point must skip the event
     (no crash, no partial write)."""
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     proj = _shared_proj()
     try:
         proj.apply({"type": "PointAdded", "point": "legacy-id-123"})
@@ -520,7 +520,7 @@ def test_apply_one_non_dict_point_skipped():
 
 def test_falkor_nand_operator():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     """NAND operator gets :NAND typed edges."""
     proj = _shared_proj()
     try:
@@ -541,7 +541,7 @@ def test_falkor_nand_operator():
 
 def test_falkor_unknown_operator_type():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     """Unknown operator type defaults to :INPUT edges."""
     proj = _shared_proj()
     try:
@@ -562,7 +562,7 @@ def test_falkor_unknown_operator_type():
 
 def test_falkor_rebuild_from_log():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     api, log = _api()
     _build(api)
     proj = _shared_proj()
@@ -576,7 +576,7 @@ def test_falkor_rebuild_from_log():
 
 def test_falkor_rebuild_then_apply():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     """Incremental apply after rebuild matches full fold."""
     api, log = _api()
     a, b, op = _build(api)  # noqa: RUF059
@@ -596,7 +596,7 @@ def test_falkor_rebuild_then_apply():
 
 def test_falkor_edge_stats():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     proj = _shared_proj()
     try:
         proj.apply({"type": "PointAdded",
@@ -625,7 +625,7 @@ def test_falkor_edge_stats():
 
 def test_falkor_edge_stats_empty():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     proj = _shared_proj()
     try:
         stats = proj.edge_stats()
@@ -641,7 +641,7 @@ def test_falkor_edge_stats_empty():
 
 def test_falkor_upsert_statement():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     proj = _shared_proj()
     try:
         proj._upsert({"id": "s1", "content": "hello", "context": "ctx"})
@@ -657,7 +657,7 @@ def test_falkor_upsert_statement():
 
 def test_falkor_upsert_operator():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     proj = _shared_proj()
     try:
         proj._upsert({"id": "op1", "content": "IMPL(a,b)", "context": "ctx",
@@ -673,7 +673,7 @@ def test_falkor_upsert_operator():
 
 def test_falkor_upsert_idempotent():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     proj = _shared_proj()
     try:
         proj._upsert({"id": "s1", "content": "hello", "context": "ctx"})
@@ -692,7 +692,7 @@ def test_falkor_upsert_idempotent():
 
 def test_falkor_delete():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     proj = _shared_proj()
     try:
         proj._upsert({"id": "p1", "content": "hello", "context": "ctx"})
@@ -705,7 +705,7 @@ def test_falkor_delete():
 
 def test_falkor_delete_missing_noop():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     proj = _shared_proj()
     try:
         proj._delete("nonexistent")  # should not raise
@@ -715,7 +715,7 @@ def test_falkor_delete_missing_noop():
 
 def test_falkor_delete_cascades_edges():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     """DETACH DELETE should cascade to edges."""
     proj = _shared_proj()
     try:
@@ -738,7 +738,7 @@ def test_falkor_delete_cascades_edges():
 
 def test_falkor_confidence_default():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     proj = _shared_proj()
     try:
         # Non-existing node returns 0.5
@@ -752,7 +752,7 @@ def test_falkor_confidence_default():
 
 def test_falkor_confidence_explicit():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     proj = _shared_proj()
     try:
         proj._upsert({"id": "p1", "content": "hello", "context": "ctx"})
@@ -764,7 +764,7 @@ def test_falkor_confidence_explicit():
 
 def test_falkor_neighbors_empty():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     proj = _shared_proj()
     try:
         proj._upsert({"id": "loner", "content": "solitary", "context": "ctx"})
@@ -775,7 +775,7 @@ def test_falkor_neighbors_empty():
 
 def test_falkor_neighbors():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     proj = _shared_proj()
     try:
         proj._upsert({"id": "a", "content": "A", "context": "ctx"})
@@ -808,7 +808,7 @@ def test_falkor_neighbors():
 
 def test_compute_confidence_no_edges():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     proj = _shared_proj()
     try:
         proj._upsert({"id": "p1", "content": "loner", "context": "ctx"})
@@ -820,7 +820,7 @@ def test_compute_confidence_no_edges():
 
 def test_compute_confidence_with_parent():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     proj = _shared_proj()
     try:
         proj._upsert({"id": "p1", "content": "loner", "context": "ctx"})
@@ -832,7 +832,7 @@ def test_compute_confidence_with_parent():
 
 def test_compute_confidence_with_edges():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     proj = _shared_proj()
     try:
         proj._upsert({"id": "a", "content": "A", "context": "ctx"})
@@ -868,7 +868,7 @@ def test_compute_confidence_with_edges():
 
 def test_falkor_rebuild_all():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     """rebuild_all with temp directory of .jsonl files."""
     d = tempfile.mkdtemp(prefix="tortoise_rebuild_")
     try:
@@ -904,7 +904,7 @@ def test_falkor_rebuild_all():
 
 def test_falkor_rebuild_all_empty_dir():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     d = tempfile.mkdtemp(prefix="tortoise_empty_")
     try:
         proj = FalkorProjection(_tmp("g_rebuild_empty.db"), graph_name="test")
@@ -924,7 +924,7 @@ def test_falkor_rebuild_all_ignores_non_dict_point():
     """Regression #325: rebuild_all must skip (not crash on) a PointAdded with
     a non-dict point across ALL passes (1a/1b/2) — parity with apply()."""
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     d = tempfile.mkdtemp(prefix="tortoise_badpoint_")
     try:
         import json
@@ -951,7 +951,7 @@ def test_falkor_rebuild_all_ignores_non_dict_point():
 
 def test_falkor_rebuild_all_with_retractions():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     """rebuild_all handles PointRetracted and PointsMerged events."""
     d = tempfile.mkdtemp(prefix="tortoise_retract_")
     try:
@@ -979,7 +979,7 @@ def test_falkor_rebuild_all_with_retractions():
 
 def test_compute_grounding_empty():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     proj = _shared_proj()
     try:
         result = proj.compute_grounding()
@@ -990,7 +990,7 @@ def test_compute_grounding_empty():
 
 def test_compute_grounding_basic():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     """compute_grounding with resolution events and IMPL edges."""
     try:
         from scipy.sparse import coo_matrix  # noqa: F401
@@ -1027,7 +1027,7 @@ def test_compute_grounding_basic():
 
 def test_compute_grounding_resolution_vector():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     """resolution-vector context also seeds the a-vector."""
     try:
         from scipy.sparse import coo_matrix  # noqa: F401
@@ -1049,7 +1049,7 @@ def test_compute_grounding_resolution_vector():
 
 def test_compute_grounding_operator_excluded():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     """Operator points should not seed the a-vector even if context matches."""
     try:
         from scipy.sparse import coo_matrix  # noqa: F401
@@ -1076,7 +1076,7 @@ def test_compute_grounding_operator_excluded():
 
 def test_propagate_shock_empty_graph():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     proj = _shared_proj()
     try:
         proj._upsert({"id": "e1", "content": "epicenter", "context": "ctx"})
@@ -1093,7 +1093,7 @@ def test_propagate_shock_empty_graph():
 
 def test_propagate_shock_with_edges():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     proj = _shared_proj()
     try:
         # Build a small graph
@@ -1121,7 +1121,7 @@ def test_propagate_shock_with_edges():
 
 def test_propagate_shock_depth_limit():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     proj = _shared_proj()
     try:
         # Chain: a → op1 → b → op2 → c → op3 → d
@@ -1151,7 +1151,7 @@ def test_propagate_shock_depth_limit():
 
 def test_propagate_shock_threshold():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     proj = _shared_proj()
     try:
         proj._upsert({"id": "x", "content": "X", "context": "ctx"})
@@ -1172,7 +1172,7 @@ def test_propagate_shock_threshold():
 
 def test_falkor_query():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     proj = _shared_proj()
     try:
         proj._upsert({"id": "p1", "content": "hello", "context": "ctx"})
@@ -1189,7 +1189,7 @@ def test_falkor_query():
 
 def test_falkor_close():
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     # Close semantics need a per-test projection — closing the shared one
     # would kill the session server (issue #1012 conversion rule).
     proj = FalkorProjection(_tmp("g.db"), graph_name="test")
@@ -1234,7 +1234,7 @@ def test_event_recorded_jsonl_roundtrip():
 def test_falkor_upsert_event():
     """_upsert_event creates :Event node with all properties."""
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     proj = _shared_proj()
     try:
         event = {
@@ -1268,7 +1268,7 @@ def test_falkor_upsert_event():
 def test_falkor_upsert_event_idempotent():
     """Re-applying same event via MERGE does not create duplicates."""
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     proj = _shared_proj()
     try:
         event = {
@@ -1298,7 +1298,7 @@ def test_falkor_upsert_event_idempotent():
 def test_falkor_upsert_event_on_create_no_overwrite():
     """ON CREATE SET prevents overwriting existing event properties."""
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     proj = _shared_proj()
     try:
         event = {
@@ -1394,7 +1394,7 @@ def test_from_uri_rejects_empty_scheme():
 def test_check_consistency_matches():
     """Consistency check passes when log and graph agree."""
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     api, log = _api()
     _build(api)
     proj = FalkorProjection(_tmp("g_consistency_ok.db"), graph_name="test")
@@ -1411,7 +1411,7 @@ def test_check_consistency_matches():
 def test_check_consistency_mismatch():
     """Consistency check fails when graph has extra nodes not in log."""
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     api, log = _api()
     _build(api)
     proj = FalkorProjection(_tmp("g_consistency_bad.db"), graph_name="test")
@@ -1616,7 +1616,7 @@ class TestVocabEdgeValidation:
     def test_instantiates_rejected_by_create_edge(self):
         """create_edge rejects 'instantiates' — Action dissolved in v3.0."""
         if _skip_if_no_falkor():
-            return
+            pytest.skip("redislite falkordb unavailable")
         proj = _shared_proj()
         try:
             proj._upsert({"id": "a", "content": "A", "context": "ctx"})
@@ -1629,7 +1629,7 @@ class TestVocabEdgeValidation:
     def test_dependsOn_accepted_by_create_edge(self):
         """create_edge accepts 'dependsOn' — pack-declared, valid predicate."""
         if _skip_if_no_falkor():
-            return
+            pytest.skip("redislite falkordb unavailable")
         proj = _shared_proj()
         try:
             proj._upsert({"id": "a", "content": "A", "context": "ctx"})
@@ -1642,7 +1642,7 @@ class TestVocabEdgeValidation:
     def test_reportsTo_accepted_by_create_edge(self):
         """create_edge accepts 'reportsTo' — org hierarchy, valid predicate."""
         if _skip_if_no_falkor():
-            return
+            pytest.skip("redislite falkordb unavailable")
         proj = _shared_proj()
         try:
             proj._upsert({"id": "a", "content": "A", "context": "ctx"})
@@ -1655,7 +1655,7 @@ class TestVocabEdgeValidation:
     def test_related_accepted_by_create_edge(self):
         """create_edge accepts 'related' — generic catch-all predicate."""
         if _skip_if_no_falkor():
-            return
+            pytest.skip("redislite falkordb unavailable")
         proj = _shared_proj()
         try:
             proj._upsert({"id": "a", "content": "A", "context": "ctx"})
@@ -1673,7 +1673,7 @@ class TestVocabEdgeValidation:
         against the same constant.
         """
         if _skip_if_no_falkor():
-            return
+            pytest.skip("redislite falkordb unavailable")
         from tortoise.projection.edges import _VALID_EDGE_PREDICATES
         assert "instantiates" not in _VALID_EDGE_PREDICATES
         assert "dependsOn" in _VALID_EDGE_PREDICATES
@@ -1698,7 +1698,7 @@ class TestCreateEdgeAboutPredicates:
     def test_about_edges_accepted_by_create_edge(self):
         """Each documented about* predicate is accepted and creates the edge."""
         if _skip_if_no_falkor():
-            return
+            pytest.skip("redislite falkordb unavailable")
         proj = self._proj()
         try:
             cases = [
@@ -1726,7 +1726,7 @@ class TestCreateEdgeAboutPredicates:
     def test_about_edges_idempotent_on_recreate(self):
         """Re-creating the same about edge is a no-op (MERGE semantics)."""
         if _skip_if_no_falkor():
-            return
+            pytest.skip("redislite falkordb unavailable")
         proj = self._proj()
         try:
             assert proj.create_edge("p1", "s1", "aboutSubject") is True
@@ -1751,7 +1751,7 @@ class TestOwnedByDagGuard:
     def test_direct_cycle_rejected(self):
         """a→b then b→a must raise — same guard as create_owned_by."""
         if _skip_if_no_falkor():
-            return
+            pytest.skip("redislite falkordb unavailable")
         proj = self._proj()
         try:
             assert proj.create_edge("a", "b", "ownedBy") is True
@@ -1768,7 +1768,7 @@ class TestOwnedByDagGuard:
     def test_transitive_cycle_rejected(self):
         """a→b→c then c→a must raise (2-hop cycle closes)."""
         if _skip_if_no_falkor():
-            return
+            pytest.skip("redislite falkordb unavailable")
         proj = self._proj()
         try:
             proj.create_edge("a", "b", "ownedBy")
@@ -1781,7 +1781,7 @@ class TestOwnedByDagGuard:
     def test_acyclic_chain_accepted(self):
         """Valid ownership chains still pass through create_edge."""
         if _skip_if_no_falkor():
-            return
+            pytest.skip("redislite falkordb unavailable")
         proj = self._proj()
         try:
             assert proj.create_edge("a", "b", "ownedBy") is True
@@ -1796,7 +1796,7 @@ class TestOwnedByDagGuard:
     def test_guard_consistent_with_create_owned_by(self):
         """create_owned_by and create_edge agree on the same cycle either way."""
         if _skip_if_no_falkor():
-            return
+            pytest.skip("redislite falkordb unavailable")
         # edge created via create_edge blocks create_owned_by
         proj = self._proj(ids=("a", "b"))
         try:
@@ -1821,7 +1821,7 @@ def test_falkor_rebuild_all_parity_with_apply():
     (extractedFrom), about edges, operator edges, SourceCreated replay and
     PointRevised updatedAt parity."""
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     d = tempfile.mkdtemp(prefix="tortoise_rebuild_parity_")
     try:
         log_path = os.path.abspath(os.path.join(d, "events.jsonl"))
@@ -1966,7 +1966,7 @@ def test_falkor_rebuild_all_revision_before_add():
     this structurally safe — this test pins it so a future one-pass refactor
     can't silently re-introduce lost revisions."""
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     d = tempfile.mkdtemp(prefix="tortoise_21_")
     try:
         # b.jsonl sorts AFTER a.jsonl → PointAdded lands in the later file.
@@ -2000,7 +2000,7 @@ def test_falkor_revise_point_wipes_stale_embedding_on_compute_failure():
     leave the stale embedding — the except block wipes it (embedding = None)
     so SET overwrites the graph value instead of preserving the old vector."""
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     proj = _shared_proj()
     try:
         proj.apply({"type": "PointAdded",
@@ -2034,7 +2034,7 @@ def test_falkor_rebuild_all_with_sdk_points():
     graph and the rebuilt graph.
     """
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     from tortoise.sdk import TortoiseSDK
 
     d = tempfile.mkdtemp(prefix="tortoise_sdk_rebuild_")
@@ -2126,7 +2126,7 @@ def test_falkor_rebuild_all_snapshot_preserves_sdk_points():
     synthetic events for points that have no JSONL counterpart.
     """
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     from tortoise.sdk import TortoiseSDK
 
     d = tempfile.mkdtemp(prefix="tortoise_snapshot_")
@@ -2208,7 +2208,7 @@ def test_falkor_rebuild_all_eventapi_regression():
     the same graph as apply().
     """
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     d = tempfile.mkdtemp(prefix="tortoise_eventapi_reg_")
     try:
         # Create EventAPI events in a JSONL log
@@ -2298,7 +2298,7 @@ def test_retract_tombstone_inmemory():
 def test_retract_tombstone_falkor():
     """FalkorProjection retraction leaves a node with status='retracted'."""
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     proj = FalkorProjection(_tmp("g_tombstone.db"), graph_name="test")
     try:
         proj.apply({"type": "PointAdded",
@@ -2319,7 +2319,7 @@ def test_retract_tombstone_get_point_hidden():
     """SDK get_point returns the retracted tombstone (full fidelity per #432);
     query/paginated_query hide it by default (see test_retract_tombstone_skipped_in_query)."""
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     from tortoise.sdk import TortoiseSDK
     sdk = TortoiseSDK(db_path=_tmp("g_sdk_retracted.db"))
     try:
@@ -2344,7 +2344,7 @@ def test_retract_tombstone_get_point_hidden():
 def test_retract_tombstone_skipped_in_query():
     """SDK query/paginated_query skip retracted points."""
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     from tortoise.sdk import TortoiseSDK
     sdk = TortoiseSDK(db_path=_tmp("g_sdk_query_ret.db"))
     try:
@@ -2369,7 +2369,7 @@ def test_retract_tombstone_skipped_in_query():
 def test_retract_missing_point_noop():
     """Retracting a non-existent point is a no-op (idempotent)."""
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     proj = FalkorProjection(_tmp("g_noop.db"), graph_name="test")
     try:
         proj.apply({"type": "PointRetracted", "id": "nonexistent"})
@@ -2385,7 +2385,7 @@ def test_retract_missing_point_noop():
 def test_retract_tombstone_excluded_from_structural_search():
     """Retracted points are NOT returned by run_structural_query (#689 review)."""
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     from tortoise.search_engine import run_structural_query
     proj = FalkorProjection(_tmp("g_ret_struct.db"), graph_name="test")
     try:
@@ -2418,7 +2418,7 @@ def test_retract_tombstone_excluded_from_vector_search():
     distance computation.
     """
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     from tortoise.search_engine import run_vector_query
     proj = FalkorProjection(_tmp("g_ret_vec.db"), graph_name="test")
     try:
@@ -2465,7 +2465,7 @@ def test_retract_tombstone_excluded_from_vector_search():
 def test_retract_tombstone_excluded_from_svbp_factors():
     """extract_svbp_factors excludes retracted operators and claims (#689 review)."""
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     proj = FalkorProjection(_tmp("g_ret_svbp.db"), graph_name="test")
     try:
         # Create claims
@@ -2505,7 +2505,7 @@ def test_retract_tombstone_excluded_from_svbp_factors():
 def test_retract_tombstone_excluded_from_evidence():
     """_hydrate_evidence excludes retracted baselines (#689 review)."""
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     from tortoise.sdk import TortoiseSDK
     sdk = TortoiseSDK(db_path=_tmp("g_ret_evidence.db"))
     try:
@@ -2530,7 +2530,7 @@ def test_retract_tombstone_excluded_from_evidence():
 def test_retract_tombstone_hosted_list_excludes_retracted():
     """GET /v1/points raw query pattern excludes retracted points (#689 review)."""
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     # Simulate the hosted API query pattern for GET /v1/points
     proj = FalkorProjection(_tmp("g_ret_hosted.db"), graph_name="test")
     try:
@@ -2597,7 +2597,7 @@ def test_falkor_apply_non_dict_operator_no_crash():
     degrade to no-operator in _upsert_point_props — parity with the r4
     guard in _create_edges — not AttributeError in op.get('op_type')."""
     if _skip_if_no_falkor():
-        return
+        pytest.skip("redislite falkordb unavailable")
     proj = _shared_proj()
     try:
         proj.apply({"type": "PointAdded",

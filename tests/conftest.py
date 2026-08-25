@@ -273,7 +273,26 @@ def _redislite_hygiene():
                 pass
         marker_path = None
 
+    # Epic #1647 Task 9 Step 3 (P3 hygiene gating): the sweeps become
+    # no-ops on docker halves — gated on whether ANY embedded redislite
+    # server is actually running (O(servers) pgrep, never the tempdir walk).
+    # Docker halves create no embedded servers by construction (the 17
+    # carve-out files moved to the URI-unset carve-out job; migrated files
+    # redirect), so the gate logs "no hygiene action" (E2E-7) instead of
+    # burning sweep time; a leftover embedded server (carve-out mis-wiring,
+    # an embedded-lane straggler like tests/eval/retrieval/test_oracle)
+    # still gets reaped — the gate is on ACTUAL creation, never a blind
+    # lane assumption.
+    def _embedded_servers_running() -> bool:
+        from tortoise.embedded_reaper import _pgrep_redis_servers
+        try:
+            return bool(_pgrep_redis_servers())
+        except Exception:
+            return True  # probe failure: run the sweep (fail-safe direction)
+
     def _sweep(only_safe: bool) -> dict:
+        if not _embedded_servers_running():
+            return {"no_embedded_servers": True}
         try:
             lock = _ReaperLock()
             if not lock.acquire():

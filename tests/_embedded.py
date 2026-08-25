@@ -41,13 +41,32 @@ from tortoise.projection import FalkorProjection
 # specific assertions never flip to the server lane. The 3 busy-error tests
 # are NOT here: they keep running embedded via the embedded_only marker
 # (D-2=A), a separate mechanism from this redirect exemption.
+# Task 9 (P3): expanded to the FULL 17-file carve-out set (cycle-3 P2-12:
+# the old "16" undercounts — 7 Task-5 stems + 10 additions; fixtures/
+# redis-guard/* are subprocess scripts, not test modules, and
+# test_smoke_embedded is already one of the 7). At P3 the 17 files run in
+# the DEDICATED URI-unset carve-out job (E2E-4); the exemption stays
+# load-bearing for the P4 post-merge-validation full-tests/ run (Task 10
+# Step 1a) and any tier-2/other docker surface that selects a carve-out
+# file — its embedded-specific assertions must never flip to the server
+# lane.
 TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
-    "test_embedded_lifecycle_fast_close",
-    "test_redis_guard",
-    "test_guard",
+    "test_backup_e2e",
     "test_config",
+    "test_embedded_concurrency",
+    "test_embedded_lifecycle",
+    "test_embedded_lifecycle_fast_close",
+    "test_flip_gate",
+    "test_guard",
+    "test_hard_reject",
+    "test_hosted_backup",
+    "test_migrate_db",
     "test_ops_safety",
     "test_pre_migration_safety",
+    "test_projection_lifecycle",
+    "test_reaper",
+    "test_reaper_orphan",
+    "test_redis_guard",
     "test_smoke_embedded",
 )
 
@@ -98,8 +117,18 @@ def has_falkor() -> bool:
 
 
 def skip_if_no_falkor() -> bool:
-    """True when embedded FalkorDBLite is unavailable (callers return early,
-    preserving the historical vacuous-pass behavior)."""
+    """DEPRECATED (epic #1647 Task 9, P3): True when embedded FalkorDBLite
+    is unavailable.
+
+    Historical semantics: callers returned early on True (the vacuous-pass
+    behavior). Task 9 retires the vacuous early-return from migrated files —
+    callers now use a VISIBLE `pytest.skip("embedded FalkorDBLite
+    unavailable ...")` (guard-exempt reason family) or fail-fast. Under a
+    supported TORTOISE_DB_URI the probe short-circuits False (P2-16: the
+    server IS the backend; the embedded probe would redirect and mint a
+    server graph), so migrated docker-lane files never skip. Kept for
+    back-compat with the remaining embedded-lane callers.
+    """
     return not has_falkor()
 
 

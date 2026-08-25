@@ -78,8 +78,12 @@ def _docker_falkor_reachable() -> bool:
     """Socket probe: is a live Docker FalkorDB reachable?
 
     The #125/#133 capture + upgrade tests need a live FalkorDB on
-    FALKORDB_HOST:PORT (default localhost:16379). Embedded CI has no
-    container — probe before connecting so the suite skips instead of
+    FALKORDB_HOST:PORT (default localhost:16379). On the P3 docker lane
+    (test-slow) the provisioned falkordb-legacy service (16379) is up so
+    these RUN; the skip is VISIBLE (never a vacuous return, epic #1647
+    Task 9) and the reason is intentionally NOT guard-exempt — a downed
+    provisioned service flips the guard red (fail-closed, D-4), never a
+    green-skip. Probe before connecting so the suite skips instead of
     raising redis ConnectionError (Error 111/61).
     """
     import socket

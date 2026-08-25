@@ -110,6 +110,7 @@ surfaces:
   - test_backup_watcher.py
   - test_bfs_audit.py
   - test_build_window_transcript.py
+  - test_canary_classify.py
   - test_canonical.py
   - test_capture_session.py
   - test_ci_selection.py
@@ -430,6 +431,33 @@ slow_files:
 - test_sdk_group3.py
 - test_search_engine_gaps.py
 - test_source_inheritance_own.py
+# Epic #1647 Task 9 (P3): the 17-file embedded carve-out set (cycle-3 P2-12
+# count — 7 Task-5 stems + 10 additions; fixtures/redis-guard/* are subprocess
+# scripts, not test modules, and test_smoke_embedded is already one of the 7;
+# matches research-brief §4.1 "17 files / 342 tests"). These tests run
+# embedded BY DESIGN in the dedicated URI-unset carve-out job (E2E-4,
+# TORTOISE_TEST_CARVE_OUT=1) and are EXCLUDED from the docker fast + slow
+# legs — the docker lanes create ~zero redislite servers (E2E-7 ≈ 0 orphans).
+# Mirrors tests/_embedded.TEST_NO_REDIRECT_STEMS (pinned by test_ci_selection
+# + test_markers).
+carve_out:
+- test_backup_e2e.py
+- test_config.py
+- test_embedded_concurrency.py
+- test_embedded_lifecycle.py
+- test_embedded_lifecycle_fast_close.py
+- test_flip_gate.py
+- test_guard.py
+- test_hard_reject.py
+- test_hosted_backup.py
+- test_migrate_db.py
+- test_ops_safety.py
+- test_pre_migration_safety.py
+- test_projection_lifecycle.py
+- test_reaper.py
+- test_reaper_orphan.py
+- test_redis_guard.py
+- bench/test_smoke_embedded.py
 push_extra: []
 durations:
   test_calibration.py: 52.1

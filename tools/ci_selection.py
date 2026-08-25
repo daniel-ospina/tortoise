@@ -295,23 +295,40 @@ def register(manifest_path: Path, tests_dir: Path, surface: str) -> list[str]:
 ENV_BROKEN_FILES = {"test_agent_signup.py"}
 
 
+def carve_out_files(manifest: dict) -> set[str]:
+    """Epic #1647 Task 9 (P3): the 17-file embedded carve-out set.
+
+    The carve-out tests run embedded BY DESIGN (E2E-4) in the dedicated
+    URI-unset job (TORTOISE_TEST_CARVE_OUT=1) — they are excluded from the
+    docker fast legs AND the docker test-slow legs, so the docker lanes
+    create ~zero redislite servers (E2E-7 orphan assert ≈ 0). The set
+    mirrors tests/_embedded.TEST_NO_REDIRECT_STEMS (pinned by
+    tests/test_ci_selection.py + tests/test_markers.py)."""
+    return set(manifest.get("carve_out", []))
+
+
 def push_legs(manifest: dict) -> dict:
     """#1472: partition every manifest-classified file into exactly one push
-    leg (half_a / half_b / slow / env_broken), parity-split the fast set.
+    leg (half_a / half_b / slow / env_broken / carve_out), parity-split the
+    fast set.
 
     Single source of truth for the workflow's push matrix: registration in
     the manifest is sufficient — no manual matrix edit. Returns .py-less
     names (the workflow's matrix format). push_extra (bench files, not
-    classifiable as top-level surfaces) appends to half b.
+    classifiable as top-level surfaces) appends to half b. Epic #1647
+    Task 9: carve_out files are excluded from every docker leg and emitted
+    as their own leg (the URI-unset carve-out job's file list).
     """
     slow = set(manifest.get("slow_files", []))
+    carve_out = carve_out_files(manifest)
     classified = set()
     for s, files in manifest["surfaces"].items():  # noqa: B007
         classified.update(files)
     classified.update(manifest.get("tier1", []))
     classified.update(slow)
     fast = sorted(f for f in classified
-                  if f not in slow and f not in ENV_BROKEN_FILES)
+                  if f not in slow and f not in ENV_BROKEN_FILES
+                  and f not in carve_out)
     half_a = fast[0::2]
     half_b = fast[1::2]
     # #1485: distribute push_extra (bench files) EVENLY so the halves stay
@@ -320,12 +337,17 @@ def push_legs(manifest: dict) -> dict:
         (half_a if i % 2 == 0 else half_b).append(f.replace(".py", ""))
     strip = lambda xs: sorted(x.replace(".py", "") for x in xs)  # noqa: E731
     return {"half_a": strip(half_a), "half_b": strip(half_b),
-            "slow": strip(slow), "env_broken": sorted(ENV_BROKEN_FILES)}
+            # Epic #1647 Task 9: slow carve-out files (test_reaper et al.)
+            # run in the URI-unset carve-out job, never the docker slow legs.
+            "slow": strip(slow - carve_out),
+            "env_broken": sorted(ENV_BROKEN_FILES),
+            "carve_out": strip(carve_out)}
 
 
 def leg_coverage_issues(manifest: dict) -> list[str]:
     """#1472 reverse drift: every classified file in exactly one push leg."""
     slow = set(manifest.get("slow_files", []))
+    carve_out = carve_out_files(manifest)
     legs = push_legs(manifest)
     half_a = {f + ".py" for f in legs["half_a"]}
     half_b = {f + ".py" for f in legs["half_b"]}
@@ -338,6 +360,17 @@ def leg_coverage_issues(manifest: dict) -> list[str]:
         issues.append(f"fast/env-broken overlap: {sorted(fast & ENV_BROKEN_FILES)}")
     if slow & ENV_BROKEN_FILES:
         issues.append(f"slow/env-broken overlap: {sorted(slow & ENV_BROKEN_FILES)}")
+    # Epic #1647 Task 9: carve-out files must never ride the docker legs
+    # (fast OR slow) — they are the E2E-4 embedded surface only. The config
+    # sets MAY overlap (test_reaper et al. are slow AND carve-out); the LEGS
+    # must not.
+    if fast & carve_out:
+        issues.append(f"carve-out file leaked into a fast leg: {sorted(fast & carve_out)}")
+    slow_leg = {f + ".py" for f in legs["slow"]}
+    if slow_leg & carve_out:
+        issues.append(f"carve-out file leaked into the slow legs: {sorted(slow_leg & carve_out)}")
+    if carve_out & ENV_BROKEN_FILES:
+        issues.append(f"carve-out/env-broken overlap: {sorted(carve_out & ENV_BROKEN_FILES)}")
     classified = set()
     for s, files in manifest["surfaces"].items():  # noqa: B007
         classified.update(files)
@@ -349,6 +382,15 @@ def leg_coverage_issues(manifest: dict) -> list[str]:
     for f in sorted(ENV_BROKEN_FILES):
         if f not in classified:
             issues.append(f"env-broken {f} is not classified in the manifest")
+    # carve-out files must be classified (they run in the carve-out job, which
+    # keys off the config list) and must exist on disk (dead entries drift).
+    for f in sorted(carve_out):
+        if f not in classified:
+            issues.append(f"carve-out {f} is not classified in any surface")
+        if f in slow:
+            continue  # slow carve-out files (test_reaper et al.) are legit
+        if not (TESTS_DIR / f).exists():
+            issues.append(f"carve-out {f} has no tests/{f} (dead entry)")
     return issues
 
 
@@ -452,15 +494,18 @@ def workflow_halves_issues(manifest: dict, halves: dict[str, list[str]],
 
 def fast_files_absent_from_halves(manifest: dict, halves: dict[str, list[str]]) -> list[str]:
     """#1266 (informational): manifest fast files that are in NO half — the
-    full-matrix coverage hole. Slow files and bench/* are excluded. Kept as
+    full-matrix coverage hole. Slow files, bench/*, and the epic #1647
+    carve-out set (their leg is `carve_out`) are excluded. Kept as
     a warning (not fail-closed): closing it would push 100+ files into the
     fast gate and blow the watchdog budget (see the scoping doc).
     """
     slow = set(manifest.get("slow_files", []))
+    carve_out = carve_out_files(manifest)
     fast = set()
     for fs in manifest["surfaces"].values():
         fast.update(fs)
     fast -= slow
+    fast -= carve_out
     halfset = {f for fs in halves.values() for f in fs}
     return sorted(f for f in fast if f[:-3] not in halfset)
 
@@ -574,7 +619,8 @@ def main() -> int:
 
     if args.emit_push_matrix:
         legs = push_legs(manifest)
-        print(json.dumps({"half_a": legs["half_a"], "half_b": legs["half_b"]}))
+        print(json.dumps({"half_a": legs["half_a"], "half_b": legs["half_b"],
+                          "carve_out": legs["carve_out"]}))
         return 0
 
     if args.split:
