@@ -419,12 +419,20 @@ jobs:
         run: |
           URI=""
           EXPECT_URI=""
+          CARVE_OUT=""
           if [ "${{ needs.changes.outputs.full }}" = "true" ]; then
             URI="docker://:falkordb@localhost:6379/tortoise_test_matrix"
             EXPECT_URI="1"
+          else
+            # Tier-2 URI-less embedded shape (epic #1647 Task 10, P1-9): the
+            # P4 enforcement fails URI-less runs unless CARVE_OUT=1 — tier-2
+            # PR legs run the selected surface files embedded BY DESIGN (the
+            # plan keeps them off the redirect), so they opt in.
+            CARVE_OUT="1"
           fi
           echo "URI=$URI" >> "$GITHUB_ENV"
           echo "EXPECT_URI=$EXPECT_URI" >> "$GITHUB_ENV"
+          echo "CARVE_OUT=$CARVE_OUT" >> "$GITHUB_ENV"
       - name: Generate coverage manifest (expected nodeids, epic #1647 Task 6/9)
         # Cycle-2 P2-12: the collect-only runs in its OWN step (off the
         # pytest step's 55m watchdog budget — the collect-only wall can
@@ -584,6 +592,10 @@ jobs:
           # tests/test_ci_selection.py::test_expect_uri_gated_iff_uri).
           TORTOISE_DB_URI: ${{ env.URI }}
           TORTOISE_TEST_EXPECT_URI: ${{ env.EXPECT_URI }}
+          # Task 10 (P4): tier-2 URI-less legs opt into the URI-required
+          # enforcement (CARVE_OUT=1 when full=false — the tier-2 embedded
+          # shape). Full docker legs set URI, so CARVE_OUT is empty there.
+          TORTOISE_TEST_CARVE_OUT: ${{ env.CARVE_OUT }}
 
       - name: Upload pytest log (measurement artifact, #1477)
         # #1477: non-gating upload so ci-timing.yml can extract per-file
@@ -852,12 +864,16 @@ jobs:
         run: |
           URI=""
           EXPECT_URI=""
+          CARVE_OUT=""
           if [ "${{ needs.changes.outputs.full }}" = "true" ]; then
             URI="docker://:falkordb@localhost:6379/tortoise_test_matrix"
             EXPECT_URI="1"
+          else
+            CARVE_OUT="1"  # tier-2 URI-less embedded shape — the P4 opt-in (Task 10)
           fi
           echo "URI=$URI" >> "$GITHUB_ENV"
           echo "EXPECT_URI=$EXPECT_URI" >> "$GITHUB_ENV"
+          echo "CARVE_OUT=$CARVE_OUT" >> "$GITHUB_ENV"
       - name: Generate coverage manifest (slow legs — expected nodeids, epic #1647 Task 9)
         # Cycle-6 P2-8 (int-10): the manifest runs in its OWN step BEFORE the
         # pytest step (off the 75m watchdog), using each leg's committed
@@ -937,8 +953,11 @@ jobs:
           TRANSFORMERS_OFFLINE: "1"
           # Epic #1647 Task 9 Step 5: the slow legs flip to docker (the same
           # gate as the fast job — full==true only; empty on tier-2 PRs).
+          # Task 10 (P4): tier-2 URI-less slow legs opt in via CARVE_OUT=1
+          # (the URI-required enforcement — P1-9).
           TORTOISE_DB_URI: ${{ env.URI }}
           TORTOISE_TEST_EXPECT_URI: ${{ env.EXPECT_URI }}
+          TORTOISE_TEST_CARVE_OUT: ${{ env.CARVE_OUT }}
 
       - name: Skip-fail guard (slow legs, epic #1647 Task 9)
         # Cycle-6 P2-8: the same junitxml-reconciled coverage manifest as the

@@ -583,6 +583,94 @@ def test_expect_uri_gated_iff_uri():
         "the producer must be gated on half b (one writer)"
 
 
+def test_carve_out_env_gated_inverse_of_uri():
+    """Epic #1647 Task 10 (P4, P1-9): the URI-required enforcement's CI
+    wiring. The compute step sets TORTOISE_TEST_CARVE_OUT=1 iff full==false
+    (the tier-2 URI-less embedded shape) — the EXACT inverse of the docker
+    URI gate — and the pytest run steps map it onto their env. A future
+    edit that drops the tier-2 opt-in reds every tier-2 PR (the enforcement
+    would fail the URI-less session); one that sets CARVE_OUT on the docker
+    lane would disable the enforcement exactly where it matters."""
+    wf = _load_python_ci()
+    for job_name in ("test", "test-slow"):
+        steps = wf["jobs"][job_name]["steps"]
+        compute = next(s for s in steps
+                       if "Compute docker URI" in s.get("name", ""))
+        script = compute["run"]
+        gate = ('if [ "${{ needs.changes.outputs.full }}" = "true" ]; then')
+        assert gate in script
+        # the docker then-branch runs from the gate keyword to the bash
+        # `else` — CARVE_OUT must never be set there (URI satisfies the
+        # enforcement on the docker lane)
+        then_branch = script.split("then", 1)[1].split("else", 1)[0]
+        assert 'CARVE_OUT="1"' not in then_branch, \
+            f"{job_name}: CARVE_OUT must NOT be set on the docker lane " \
+            "(URI is set there — the enforcement is satisfied by the URI)"
+        assert script.count('CARVE_OUT="1"') == 1, \
+            f"{job_name}: exactly one CARVE_OUT=\"1\" assignment (the tier-2 " \
+            "else branch — the URI-less embedded shape opts in)"
+        assert 'CARVE_OUT=""' in script, f"{job_name}: CARVE_OUT declared empty"
+        assert 'echo "CARVE_OUT=$CARVE_OUT"' in script
+        run = next(s for s in steps
+                   if s.get("name", "").startswith("Run fast test suite")
+                   or s.get("name", "").startswith("Run slow test suite"))
+        assert run["env"]["TORTOISE_TEST_CARVE_OUT"] == "${{ env.CARVE_OUT }}", \
+            f"{job_name}: the run step must map TORTOISE_TEST_CARVE_OUT"
+
+
+def test_pmv_job_carries_uri_manifest_guard():
+    """Epic #1647 Task 10 Step 1a (P1-9 + cycle-2 P2-14 + cycle-4 P2-11):
+    post-merge-validation is now a docker lane — job-level TORTOISE_DB_URI +
+    EXPECT_URI, falkordb services, a manifest-generation step BEFORE the
+    pytest step replicating the run's OWN excludes (--ignore tests/e2e + the
+    SLOW_IGNORES list + `-m not track_b`), the run emitting junitxml with
+    -r fEs (never -rfE), and a skip-guard step gated on rc==0 with the
+    junitxml-reconciled manifest. A manifest built without the run's
+    excludes expects e2e/slow nodeids the run never produces and every
+    merge reds on vanished nodeids."""
+    import yaml as _yaml
+    wf_path = (Path(__file__).resolve().parents[1] / ".github" / "workflows"
+               / "post-merge-validation.yml")
+    wf = _yaml.safe_load(wf_path.read_text())
+    job = wf["jobs"]["validate"]
+    assert job["env"]["TORTOISE_DB_URI"] == \
+        "docker://:falkordb@localhost:6379/tortoise_test_matrix", \
+        "pmv must run the docker lane with the test-prefixed URI path"
+    assert job["env"]["TORTOISE_TEST_EXPECT_URI"] == "1"
+    assert "falkordb" in job.get("services", {}) and \
+        "falkordb-legacy" in job.get("services", {}), \
+        "pmv must provision BOTH falkordb services (6379 URI + 16379 probes)"
+    steps = job["steps"]
+    run = next(s for s in steps
+               if s.get("name", "").startswith("Run tests"))
+    invocation = run["run"]
+    assert "--junitxml=/tmp/pmv-junit.xml" in invocation
+    assert "-o junit_family=xunit1" in invocation
+    cmdline = next(l for l in invocation.splitlines()
+                   if "python -m pytest" in l)
+    assert "-r fEs" in cmdline and "-rfE" not in cmdline, \
+        "pmv must use -r fEs (the skip-summary superset), never -rfE"
+    assert "--ignore=tests/e2e" in cmdline
+    assert "$SLOW_IGNORES" in cmdline
+    assert "-m 'not track_b'" in cmdline
+    assert "pmv-rc" in invocation
+    manifest = next(s for s in steps
+                    if s.get("name", "").startswith("Generate coverage manifest"))
+    assert steps.index(manifest) < steps.index(run), \
+        "the pmv manifest collect-only must run BEFORE pytest"
+    mrun = manifest["run"]
+    assert "--emit-manifest \"tests/\"" in mrun
+    assert "--marker \"not track_b\"" in mrun
+    assert "--ignore tests/e2e" in mrun
+    assert "$SLOW_IGNORES" in mrun
+    guard = next(s for s in steps
+                 if s.get("name", "").startswith("Skip-fail guard"))
+    grun = guard["run"]
+    assert "--junitxml=/tmp/pmv-junit.xml" in grun
+    assert "--manifest /tmp/pmv-expected-nodeids.txt" in grun
+    assert '"$RC" = "0"' in grun, "the guard is gated on pytest rc==0"
+
+
 def test_live_required_job_runs_only_declared_live_tests():
     """cycle-8 P2-12: test-concurrency-falkor runs EXACTLY the declared
     live-test pair — tests/test_event_store.py::test_seq_is_monotonic_under_concurrency_live_falkor

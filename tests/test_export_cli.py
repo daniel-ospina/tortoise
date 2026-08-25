@@ -38,6 +38,24 @@ from tortoise.projection import FalkorProjection
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _embedded_local_file_lane():
+    """Epic #1647 P4 (Task 10): this file's tests are CLI/local-file contract
+    — the `tortoise export` CLI reads and writes a LOCAL redislite DB file by
+    design. Under a docker session the URI-aware redirect would flip the seed
+    constructions to the server (derived graph) while the CLI child keeps
+    reading the local file (no test frame — the epic's P1-1b design), voiding
+    every local-file assertion (node_count == 0, vacuous envelope passes).
+    Popping the URI for this module keeps the seed + CLI on the SAME local
+    file on BOTH lanes. Documented divergence from the plan's Task 10 "13
+    migrate out" list: this is an embedded-file-contract file, not
+    docker-migratable — it stays in RAW_EMBEDDED_ALLOWLIST."""
+    mp = pytest.MonkeyPatch()
+    mp.delenv("TORTOISE_DB_URI", raising=False)
+    yield
+    mp.undo()
+
+
 def _make_proj(tmpdir: str, name: str = "t.db") -> FalkorProjection:
     return FalkorProjection(os.path.join(tmpdir, name))
 

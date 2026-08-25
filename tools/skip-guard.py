@@ -9,7 +9,7 @@ a matching probe), the run must flip RED — the historical silent-green masked 
 
 Usage:
   python3 tools/skip-guard.py <path-to-pytest.log> [--manifest <expected-nodeids.txt>] [--junitxml <path>]
-  python3 tools/skip-guard.py --emit-manifest "<space-joined $FILES>" [--marker <expr>] [--output <path>]
+  python3 tools/skip-guard.py --emit-manifest "<space-joined $FILES>" [--marker <expr>] [--output <path>] [--ignore <path>]...
 
 Manifest GENERATION mode (epic #1647 Task 6 — the coverage-manifest
 producer):
@@ -24,6 +24,12 @@ producer):
       whole manifest mode on empty files); a collect-only failure propagates
       its rc and writes no manifest (fail-closed: a vanished manifest must
       never vacuous-green).
+  Repeatable --ignore <path> flags are passed through to the collect-only
+  command as --ignore=<path> (epic #1647 Task 10 Step 1a): the
+  post-merge-validation run's manifest must replicate its OWN excludes
+  (`--ignore=tests/e2e` + the $SLOW_IGNORES file list, cycle-2 P2-14) or it
+  expects e2e/slow nodeids the pmv run never produces and every merge reds
+  on vanished nodeids.
 
 Semantics:
   - Log missing/unreadable  -> exit 0 (no evidence, nothing to fail on)
@@ -414,7 +420,7 @@ def collect_only_nodeids(text: str) -> list[str]:
 
 
 def emit_manifest(files: list[str], marker: str, output: Path,
-                  runner=None) -> int:
+                  runner=None, ignores: tuple[str, ...] = ()) -> int:
     """Generate the expected-nodeid manifest for the given file list.
 
     Spawns `pytest <files> --collect-only -q -m <marker> -p no:cacheprovider`
@@ -422,6 +428,10 @@ def emit_manifest(files: list[str], marker: str, output: Path,
     nodeid per line to ``output``, with a '#' header comment (the consumer's
     _read_manifest skips comment/blank lines). ``runner`` is injectable for
     tests: ``runner(cmd) -> (rc, stdout)``; the default spawns pytest.
+    ``ignores`` (repeatable --ignore paths, epic #1647 Task 10 Step 1a) are
+    passed through as --ignore=<path> so a manifest can replicate its run's
+    own excludes (the post-merge-validation full-`tests/` run ignores
+    tests/e2e + the slow_files list).
 
     Fail-closed corners:
     - empty files -> exit 0, NO output file (the CI guard skips manifest
@@ -434,7 +444,8 @@ def emit_manifest(files: list[str], marker: str, output: Path,
         print("emit-manifest: no files — no manifest written (guard skips)")
         return 0
     cmd = [sys.executable, "-m", "pytest", *files, "--collect-only", "-q",
-           "-m", marker, "-p", "no:cacheprovider"]
+           "-m", marker, "-p", "no:cacheprovider",
+           *[f"--ignore={ig}" for ig in ignores]]
     if runner is None:
         proc = subprocess.run(cmd, capture_output=True, text=True)
         rc, collected = proc.returncode, proc.stdout
@@ -461,6 +472,7 @@ def _main_emit_manifest(argv: list[str]) -> int:
     files: list[str] = []
     marker = _MANIFEST_MARKER_DEFAULT
     output = Path("/tmp/expected-nodeids.txt")
+    ignores: list[str] = []
     i = 1
     while i < len(argv):
         arg = argv[i]
@@ -481,13 +493,22 @@ def _main_emit_manifest(argv: list[str]) -> int:
                 print("--output requires a value", file=sys.stderr)
                 return 2
             output, i = Path(argv[i + 1]), i + 2
+        elif arg.startswith("--ignore="):
+            ignores.append(arg.split("=", 1)[1])
+            i += 1
+        elif arg == "--ignore":
+            if i + 1 >= len(argv):
+                print("--ignore requires a value", file=sys.stderr)
+                return 2
+            ignores.append(argv[i + 1])
+            i += 2
         else:
             # The space-joined $FILES string the run step passes to pytest
             # (may arrive as one token or many). Test paths never contain
             # spaces, so whitespace-splitting is lossless.
             files += arg.split()
             i += 1
-    return emit_manifest(files, marker, output)
+    return emit_manifest(files, marker, output, ignores=tuple(ignores))
 
 
 def main(argv: list[str]) -> int:

@@ -618,6 +618,31 @@ def test_emit_manifest_consumes_verbatim_file_list_and_marker(tmp_path):
     assert "tests/test_a.py::test_x" in out.read_text()
 
 
+def test_emit_manifest_passes_ignore_flags(tmp_path):
+    # Epic #1647 Task 10 Step 1a (cycle-2 P2-14 / cycle-4 P2-11): the pmv
+    # manifest must replicate its run's OWN excludes (--ignore=tests/e2e + the
+    # $SLOW_IGNORES list) — a manifest without them expects e2e/slow nodeids
+    # the pmv run never produces and every merge reds on vanished nodeids.
+    captured = {}
+
+    def fake_runner(cmd):
+        captured["cmd"] = list(cmd)
+        return 0, "tests/test_a.py::test_x\n1 tests collected in 0.00s\n"
+
+    out = tmp_path / "expected-nodeids.txt"
+    rc = _skip_guard.emit_manifest(
+        ["tests/"], "not track_b", out,
+        runner=fake_runner,
+        ignores=("tests/e2e", "tests/test_slow_a.py", "tests/test_slow_b.py"))
+    assert rc == 0
+    cmd = captured["cmd"]
+    assert "--ignore=tests/e2e" in cmd
+    assert "--ignore=tests/test_slow_a.py" in cmd
+    assert "--ignore=tests/test_slow_b.py" in cmd
+    assert "--collect-only" in cmd and "-m" in cmd
+    assert "tests/test_a.py::test_x" in out.read_text()
+
+
 def test_emit_manifest_empty_files_writes_nothing(tmp_path):
     out = tmp_path / "expected-nodeids.txt"
     rc = _skip_guard.emit_manifest([], "not track_b", out,

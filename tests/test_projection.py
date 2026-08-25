@@ -2373,8 +2373,13 @@ def test_retract_missing_point_noop():
     proj = FalkorProjection(_tmp("g_noop.db"), graph_name="test")
     try:
         proj.apply({"type": "PointRetracted", "id": "nonexistent"})
-        # No crash, no stray nodes created
-        r = proj.query("MATCH (n) RETURN count(n)").result_set
+        # No crash, no stray POINTS created. Epic #1647 P4 (Task 10): the
+        # index machinery writes unlabelled (:Meta{key:"point_fts_v2"})
+        # marker nodes (verified on BOTH lanes in this env — the FTS gate is
+        # version-probe-based, not lane-based), so an unlabelled `MATCH (n)`
+        # counts them (1 == 0 red). The no-op contract is about POINT nodes;
+        # count the labelled set (D5-D8 index-machinery divergence family).
+        r = proj.query("MATCH (n:Point) RETURN count(n)").result_set
         assert r[0][0] == 0
     finally:
         proj.close()

@@ -86,16 +86,20 @@ Premise Labs is the internal R&D and strategy hub. It houses:
 
 ## Testing
 
+> Epic #1647 (P4): `pytest` now defaults to the DOCKER lane — a URI-less
+> run fails unless `TORTOISE_TEST_CARVE_OUT=1` is set (the carve-out's 17
+> embedded-only files). Docker: `docker compose -f ../eldato/operations/memory/docker-compose.yml up -d` + the URI below.
+
 ```bash
-# Run all tests with FalkorDBLite (embedded, no Docker needed)
+# Default (docker FalkorDB — epic #1647 P4):
+export TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix'
 uv run pytest tests/ -v
 
-# Run specific test file
-uv run pytest tests/test_directional_impl_fix.py -v
+# Embedded carve-out (the 17 embedded-only files; URI-less opt-in):
+TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_embedded_lifecycle.py tests/test_guard.py -v
 
-# Run with live FalkorDB (Docker required)
-docker compose -f ../eldato/operations/memory/docker-compose.yml up -d
-uv run pytest tests/ -v -m "not slow"
+# Run specific test file (docker lane)
+TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' uv run pytest tests/test_directional_impl_fix.py -v
 ```
 
 ## Documentation Filing

@@ -84,6 +84,25 @@ from tortoise.pricing import tier_limits
 from tortoise.sdk import TortoiseSDK
 
 
+# ── Epic #1647 Task 10 Step 1a (P4, plan-review P1-9): URI-required ───────
+# Default pytest requires TORTOISE_DB_URI; the carve-out is the sole embedded
+# surface. Declared FIRST among the session fixtures so the enforcement
+# fails the run before any hygiene/sweep machinery spins up. The named
+# helper lives in tests/_embedded.py (pinned by test_markers.py — the
+# tests.conftest import would re-execute conftest's top-level code).
+from tests._embedded import _assert_p4_uri_required  # noqa: E402
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _p4_uri_required():
+    """Epic #1647 P4: fail the session when TORTOISE_DB_URI is unset UNLESS
+    TORTOISE_TEST_CARVE_OUT=1 is set (the carve-out job / tier-2 URI-less
+    legs / e2e surfaces opt in). A URI-less run that is not the carve-out is
+    the pre-epic shape — migrated files would construct embedded and
+    green-pass on the wrong backend."""
+    _assert_p4_uri_required()
+
+
 @pytest.fixture
 def provision_test_user():
     created = []

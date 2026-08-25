@@ -310,10 +310,15 @@ def test_navigation_parity_real_graph():
     g.query("CREATE (a:Point {id:'p1', content:'c1', pointKind:'statement', is_operator:false})")
     g.query("CREATE (b:Point {id:'p2', content:'c2', pointKind:'statement', is_operator:false})")
     g.query("MATCH (a:Point {id:'p1'}), (b:Point {id:'p2'}) CREATE (a)-[:IMPL]->(b)")
-    prof = entityProfile(p.db, "tortoise", "p1", hops=1)
+    # Epic #1647 P4 (Task 10): query by the projection's ACTUAL graph name —
+    # the literal "tortoise" matched only the embedded default; under a
+    # docker session the redirect derives per-path names
+    # (test_<stem>_<hash12>), so a hardcoded name would look in the wrong
+    # graph (KeyError 'id'). p.graph_name is the truth on both lanes.
+    prof = entityProfile(p.db, p.graph_name, "p1", hops=1)
     assert prof["entity"]["id"] == "p1"
     assert any(n.get("id") == "p2" for n in prof["connected"]["points"])
-    trav = tortoise_traverse(p.db, "tortoise", "p1", max_hops=1)
+    trav = tortoise_traverse(p.db, p.graph_name, "p1", max_hops=1)
     assert trav["entity"]["id"] == "p1" and len(trav["nodes"]) >= 1
     p.close()
 
@@ -392,6 +397,13 @@ def test_resolve_entity_queries_use_index_scans(proj):
 # The is_operator index is therefore non-embedded (docker/server)-only —
 # embedded drops any stale persisted copy on open — see _ensure_indexes.
 
+@pytest.mark.embedded_only
+# Epic #1647 P4 (Task 10): the D7 repair path is embedded-only — the test
+# simulates a PRE-#522 stale embedded index (CREATE INDEX on is_operator),
+# which cannot exist on the docker lane (the D6 composite already indexes
+# is_operator — the CREATE would raise "already indexed"). Marked with the
+# D-2=A mechanism: visible skip on docker sessions, runs embedded in
+# URI-less runs (the marker is the documented embedded-only surface).
 def test_embedded_reopen_false_equality_correct():
     """After close/reopen, non-operator lookups must not silently empty.
 

@@ -236,7 +236,7 @@ def test_empty_graph_dump_restore():
 
         proj2 = _make_proj(tmp, "t2.db")
         assert restore_graph(proj2.g, dump) == {"nodes": 0, "edges": 0}
-        assert proj2.g.query("MATCH (n) RETURN count(n)").result_set[0][0] == 0
+        assert proj2.g.query("MATCH (n) WHERE NOT n:Meta RETURN count(n)").result_set[0][0] == 0
         proj2.close()
 
 
@@ -381,7 +381,7 @@ def test_dump_restore_unlabeled_node():
         proj2 = _make_proj(tmp, "t2.db")
         counts = restore_graph(proj2.g, dump)
         assert counts == {"nodes": 1, "edges": 0}
-        row = proj2.g.query("MATCH (n) RETURN labels(n), n.id").result_set
+        row = proj2.g.query("MATCH (n) WHERE NOT n:Meta RETURN labels(n), n.id").result_set
         assert row[0][1] == "bare"
         proj2.close()
 
@@ -450,7 +450,7 @@ def test_restore_empty_backup_over_live_rejected(monkeypatch):
                 team_id="team_e", graph_name="tortoise",
             )
         # live data untouched
-        assert proj.g.query("MATCH (n) RETURN count(n)").result_set[0][0] == 7
+        assert proj.g.query("MATCH (n) WHERE NOT n:Meta RETURN count(n)").result_set[0][0] == 7
         assert proj.g.query("MATCH (p:Point {id:'pt-x'}) RETURN count(p)").result_set[0][0] == 1
         proj.close()
 
@@ -707,7 +707,7 @@ def test_restore_copy_failure_leaves_temp_intact(monkeypatch):
         extras = [g for g in graphs if g != "registry_tortoise"]
         assert len(extras) == 2  # _restore_ (verified) + _pre_restore_ (original)
         for g in extras:
-            assert proj.db.select_graph(g).query("MATCH (n) RETURN count(n)").result_set[0][0] == 6
+            assert proj.db.select_graph(g).query("MATCH (n) WHERE NOT n:Meta RETURN count(n)").result_set[0][0] == 6
         proj.close()
 
 
@@ -1150,11 +1150,11 @@ def test_restore_live_delete_failure_leaves_recovery_copy(monkeypatch):
             )
         # live graph intact (delete failed → copy onto existing key fails) and
         # the verified temp recovery copy + pre-restore snapshot exist
-        assert proj.g.query("MATCH (n) RETURN count(n)").result_set[0][0] == 6
+        assert proj.g.query("MATCH (n) WHERE NOT n:Meta RETURN count(n)").result_set[0][0] == 6
         extras = [g for g in proj.db.list_graphs() if g not in ("tortoise", "registry_tortoise")]
         assert len(extras) == 2  # _restore_ + _pre_restore_
         for g in extras:
-            assert proj.db.select_graph(g).query("MATCH (n) RETURN count(n)").result_set[0][0] == 6
+            assert proj.db.select_graph(g).query("MATCH (n) WHERE NOT n:Meta RETURN count(n)").result_set[0][0] == 6
         proj.close()
 
 
@@ -1267,7 +1267,12 @@ def test_restore_live_check_fail_closed_when_list_graphs_fails(monkeypatch):
         real_list = type(proj.db).list_graphs
 
         def _boom_live_query(self, cypher, *a, **k):
-            if "RETURN count(n)" in cypher and self.name == "tortoise":
+            # Epic #1647 P4 (Task 10): the live-check query is the #1625
+            # NON-SKIP count — `labels(n), properties(n)` — NOT the historical
+            # `RETURN count(n)` shape; the boom must intercept the CURRENT
+            # query or the fail-closed path can never be exercised (pre-existing
+            # test drift: the old trigger stopped matching when #1625 landed).
+            if "labels(n), properties(n)" in cypher and self.name == "tortoise":
                 raise ConnectionError("connection died")
             return real_query(self, cypher, *a, **k)
 
@@ -1286,7 +1291,7 @@ def test_restore_live_check_fail_closed_when_list_graphs_fails(monkeypatch):
         monkeypatch.setattr(type(proj.db), "list_graphs", real_list)
         assert "tortoise" in set(proj.db.list_graphs())
         assert not any("_restore_" in g or "_pre_restore_" in g for g in proj.db.list_graphs())
-        assert proj.g.query("MATCH (n) RETURN count(n)").result_set[0][0] == 6
+        assert proj.g.query("MATCH (n) WHERE NOT n:Meta RETURN count(n)").result_set[0][0] == 6
         proj.close()
 
 

@@ -405,3 +405,36 @@ def test_session_token_present_and_hex12_during_docker_session(monkeypatch):
         pytest.skip("no docker session — token not required")
     assert re.fullmatch(r"[0-9a-f]{12}", os.environ.get("TORTOISE_TEST_SESSION", "")), \
         "docker session must carry TORTOISE_TEST_SESSION = 12 hex (conftest export)"
+
+
+# ── Epic #1647 Task 10 (P4, plan-review P1-9): URI-required enforcement ──
+def test_p4_uri_required_enforcement(monkeypatch):
+    """The P4 enforcement (conftest session-start): a URI-less run fails
+    UNLESS TORTOISE_TEST_CARVE_OUT=1 is set. Driven through the named helper
+    in tests/_embedded.py (the session fixture is autouse and cannot be
+    exercised directly; the tests.conftest import would re-execute conftest's
+    top-level code). The URI gate is SUPPORTED-URI (is_db_uri) — a
+    set-but-unsupported value never redirects, so it must not satisfy the
+    enforcement (symmetry with the E2E-6 tripwire's EXPECT_URI handling)."""
+    from tests._embedded import _assert_p4_uri_required
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.delenv("TORTOISE_TEST_CARVE_OUT", raising=False)
+    with pytest.raises(pytest.fail.Exception, match="TORTOISE_DB_URI"):
+        _assert_p4_uri_required()
+    # carve-out opt-in passes URI-less
+    monkeypatch.setenv("TORTOISE_TEST_CARVE_OUT", "1")
+    _assert_p4_uri_required()
+    # a SUPPORTED URI passes even without the carve-out flag
+    monkeypatch.setenv(
+        "TORTOISE_DB_URI",
+        "docker://:falkordb@localhost:6379/tortoise_test_matrix")
+    _assert_p4_uri_required()
+    # a set-but-UNSUPPORTED URI does NOT satisfy the enforcement (it would
+    # never redirect — migrated files would run embedded)
+    monkeypatch.setenv("TORTOISE_DB_URI", "postgres://x@y/z")
+    monkeypatch.delenv("TORTOISE_TEST_CARVE_OUT", raising=False)
+    with pytest.raises(pytest.fail.Exception, match="TORTOISE_DB_URI"):
+        _assert_p4_uri_required()
+    # ... but CARVE_OUT=1 still opts the operator out of the URI-less shape
+    monkeypatch.setenv("TORTOISE_TEST_CARVE_OUT", "1")
+    _assert_p4_uri_required()

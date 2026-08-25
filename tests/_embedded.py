@@ -198,6 +198,40 @@ class BackendIdentity:
 BACKEND_IDENTITY = BackendIdentity()
 
 
+# ── Epic #1647 Task 10 (P4, plan-review P1-9): URI-required enforcement ──
+# Default pytest requires TORTOISE_DB_URI: at P4 the embedded lane is the
+# carve-out ONLY. A URI-less run that is not the carve-out is the pre-epic
+# shape — migrated files would construct embedded and green-pass on the
+# wrong backend (the exact vacuous class the epic exists to kill). The
+# dedicated carve-out job, the tier-2 URI-less PR legs, and the e2e
+# surfaces (welcome/legal/hosted — they boot embedded selfhost daemons and
+# need no server) opt in via TORTOISE_TEST_CARVE_OUT=1. Lives HERE (not
+# conftest) for the same reason as _embedded_only_skip: an import via
+# `tests.conftest` re-executes conftest's top-level code mid-session.
+def _assert_p4_uri_required() -> None:
+    """Epic #1647 Task 10 Step 1a (plan-review P1-9): fail the session when
+    TORTOISE_DB_URI is unset UNLESS TORTOISE_TEST_CARVE_OUT=1 is set.
+
+    The URI gate is `_uri_set_supported()` (is_db_uri — the seam/redirect's
+    own predicate family): a set-but-unsupported value (postgres://, a bare
+    path) would never redirect, so a "URI-set" session with one would run
+    migrated files embedded and green-pass on the wrong backend (the exact
+    vacuous class the enforcement exists to kill; symmetric with the E2E-6
+    tripwire's EXPECT_URI handling). CARVE_OUT=1 is the explicit opt-in for
+    the URI-less embedded shapes (carve-out job, tier-2 legs, e2e surfaces).
+
+    The named helper (called by the conftest session-start fixture) so
+    test_markers.py can pin the contract without importing tests.conftest
+    (which would re-execute conftest's top-level code)."""
+    if _uri_set_supported():
+        return
+    if os.environ.get("TORTOISE_TEST_CARVE_OUT") == "1":
+        return
+    pytest.fail(
+        "default pytest requires TORTOISE_DB_URI (epic #1647 P4); run the "
+        "carve-out with TORTOISE_TEST_CARVE_OUT=1")
+
+
 # ── Epic #1647 Task 5 (D-2=A): the embedded_only marker hook ──────────────
 def _embedded_only_skip(request: pytest.FixtureRequest) -> None:
     """D-2 skip hook for the `embedded_only` marker (epic #1647 Task 5).

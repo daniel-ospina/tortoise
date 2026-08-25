@@ -1,5 +1,17 @@
 """Embedded redislite orphan reaper.
 
+Epic #1647 P4 (Task 10) DEMOTION: this module is now DEV-MACHINE HYGIENE
+ONLY. CI runs the docker lane — the fast matrix provisions falkordb, and
+migrated files construct via the URI-aware redirect (never spawning a
+redislite server); the 17 carve-out files run embedded in the URI-unset
+carve-out job, whose conftest `_redislite_hygiene` session sweeps own their
+own orphan reclamation. Docker halves produce ~0 embedded orphans by
+construction (E2E-7). The reaper keeps its local-dev role: a dev box's
+embedded sessions can still strand servers on SIGKILL, and the scheduled
+sweep (tools/install-reaper-schedule.sh) + the conftest sweeps reclaim
+them. The orphan-COUNT assert is lane-aware (docker ~0 / carve-out <20,
+set at Task 9 Step 4) — CI no longer depends on this module's correctness.
+
 Finds orphaned redis-server processes spawned by redislite embedded mode and
 classifies them for safe cleanup (issue #176, plan Child 1).
 

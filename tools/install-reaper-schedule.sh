@@ -4,6 +4,16 @@
 # are SIGKILLed/watchdog-killed never sweep, so their redis-servers + socket
 # dirs leaked forever — 456 orphans / 32k tempdir entries observed).
 #
+# Epic #1647 P4 (Task 10) DEMOTION: this schedule is LOCAL-DEV MACHINE
+# HYGIENE ONLY. CI runs the docker lane (both fast halves provision
+# falkordb; the 17 carve-out files run in the URI-unset carve-out job whose
+# conftest _redislite_hygiene sweeps its own sessions), so the embedded
+# reaper no longer carries any CI correctness role — docker halves produce
+# no embedded orphans by construction (E2E-7). Dev machines keep the
+# scheduled sweep for local redislite runs (a dev box's embedded sessions
+# can still strand servers on SIGKILL; the cron/launchd sweep reclaims
+# them).
+#
 # Installs `python -m tortoise.embedded_reaper --no-dry-run --only-safe`
 # every 10 minutes:
 #   - macOS  -> a launchd LaunchAgent (StartInterval 600)
