@@ -159,6 +159,10 @@ jobs:
       - name: Set all app secrets on Fly.io (keeps in sync with GitHub/Supabase)
         run: |
           ARGS="FASTAPI_INTERNAL_KEY=${{ secrets.FASTAPI_INTERNAL_KEY }} TORTOISE_SECRET_PEPPER=${{ secrets.TORTOISE_SECRET_PEPPER }} FALKORDB_CLOUD_URI=${{ secrets.FALKORDB_CLOUD_URI }}"
+          # #1703: SUPABASE_ANON_KEY — public client key the OAuth consent page
+          # embeds (supabase-js createClient). Was never synced to Fly, so the
+          # page rendered with an empty key ('supabaseKey is required').
+          [ -n "${{ secrets.SUPABASE_ANON_KEY }}" ] && ARGS="$ARGS SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }}"
           # Stripe billing (#310): pass all billing secrets when present.
           ARGS="$ARGS STRIPE_SECRET_KEY=${{ secrets.STRIPE_SECRET_KEY }} STRIPE_WEBHOOK_SECRET=${{ secrets.STRIPE_WEBHOOK_SECRET }}"
           [ -n "${{ secrets.STRIPE_PRICE_IDS }}" ] && ARGS="$ARGS STRIPE_PRICE_IDS=${{ secrets.STRIPE_PRICE_IDS }}"
