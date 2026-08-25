@@ -314,12 +314,15 @@ class FakeControlPlane:
         identity = p.get("p_identity")
         if not team_id or not team_name:
             raise RuntimeError("provision_team: required parameters missing")
-        # #1716 all-or-none key guard (mirrors the RPC): the three key params
-        # are ALL provided (a minted key) or ALL NULL/empty (keyless — the
-        # onboarding sub-team path) — never a partial set.
+        # #1716 all-or-none key guard (mirrors the RPC's SQL IS NULL
+        # semantics EXACTLY — Python truthiness would diverge on "" values:
+        # falsy-but-NOT-NULL): the three key params are ALL provided (a
+        # minted key) or ALL None (keyless — the onboarding sub-team path) —
+        # never a partial set.
         key_params = [p.get("p_api_key"), p.get("p_key_hash"),
                       p.get("p_lookup_hash")]
-        if any(key_params) and not all(key_params):
+        n_present = sum(v is not None for v in key_params)
+        if n_present not in (0, 3):
             raise RuntimeError(
                 "provision_team: p_api_key/p_key_hash/p_lookup_hash must be "
                 "all provided or all NULL (keyless)")
@@ -382,7 +385,7 @@ class FakeControlPlane:
         # provision (all-NULL key params) writes NO api_keys row — the team
         # stays keyless until a session-key mint (mirrors the RPC's
         # conditional insert; no api_keys row → no 0015 key_create event).
-        if lookup:
+        if lookup is not None:
             key_rows = self.tables.setdefault("api_keys", [])
             if not any(k.get("lookup_hash") == lookup for k in key_rows):
                 key_rows.append({
