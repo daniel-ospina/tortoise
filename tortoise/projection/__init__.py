@@ -445,6 +445,22 @@ class FalkorProjection(
             from tortoise.config import resolve_db_path
             path = resolve_db_path()
 
+        # CI-discovered (#1684): the relative-path + tilde reject is a CLI
+        # CONTRACT that must hold in BOTH lanes — hoisted from the embedded
+        # branch (L584) so the test redirect cannot swallow it. A relative
+        # db target is invalid whether it would have gone embedded or to the
+        # server; _cmd_decide/_cmd_init's error-semantics tests
+        # (test_cli_context) assert rc==1 + "Invalid DB target" and must not
+        # silently redirect onto the server.
+        if path is not None:
+            _allow_nonstandard = (
+                allow_nonstandard_path
+                or os.environ.get("TORTOISE_ALLOW_NONSTANDARD_PATH") == "1")
+            if path != ":memory:" and not os.path.isabs(path) and not path.startswith("~"):
+                raise ValueError(RELATIVE_PATH_ERROR.format(path=path))
+            if path.startswith("~") and not _allow_nonstandard:
+                raise ValueError(RELATIVE_PATH_ERROR.format(path=path))
+
         # ── Epic #1647 (D-1=A): class-level URI-aware test redirect ────────
         # Fires ONLY in a test session (TORTOISE_TEST_MODE=1, exported by
         # conftest) with a supported TORTOISE_DB_URI AND a calling test frame
