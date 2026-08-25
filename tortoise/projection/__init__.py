@@ -187,6 +187,21 @@ def _journal_file_path() -> str | None:
     return path or None
 
 
+# Epic #1647 (CI P2 fix): process-level test-session flag. conftest sets this
+# True at import; subprocess CLI children (test_export_cli's `python -m
+# tortoise export`, redis-guard fixture scripts) NEVER import conftest, so the
+# flag stays False for them — exactly the subprocess-vs-TestClient distinction
+# the stack-walking _caller_test_stem() cannot make (TestClient runs request
+# handlers in a WORKER THREAD whose stack has no test_ module, so the frame
+# gate wrongly suppresses the redirect there and the fixture-patched db_path
+# SDK constructs embedded → write/read split). With the flag, the redirect
+# fires in the whole test process (worker threads included); the carve-out
+# exemption is still frame-keyed (worker-thread constructions in carve-out
+# files are only exercised in the URI-unset carve-out job, where no redirect
+# fires at all).
+_TEST_SESSION_ACTIVE = False
+
+
 def _journal_append_product(graph_name: str) -> None:
     """Append a minted graph name to the per-session created-graph journal.
 
@@ -453,7 +468,14 @@ class FalkorProjection(
                 os.environ.get("TORTOISE_TEST_NO_REDIRECT", "").split(",") if s.strip()
             }
             _caller_stem = _caller_test_stem()  # None = no test frame
-            if _caller_stem is not None and _caller_stem not in _no_redirect:
+            # CI P2 fix: the process flag (conftest-set) fires the redirect
+            # in TestClient worker threads where the frame gate sees no test_
+            # module; a None stem is still exempt-free (worker threads have no
+            # frame to exempt — carve-out HTTP paths run only in the carve-out
+            # job, URI unset). Subprocess children keep the embedded lane via
+            # the flag (False — conftest never imported there).
+            if (_caller_stem is not None and _caller_stem not in _no_redirect
+                    or _caller_stem is None and _TEST_SESSION_ACTIVE):
                 from urllib.parse import urlparse
                 _parsed = urlparse(_uri)
                 _validate_uri_scheme(_parsed.scheme)
@@ -521,8 +543,19 @@ class FalkorProjection(
                     # graph scale.
                     _stem = os.path.splitext(os.path.basename(path))[0]
                     _stem = re.sub(r"[^a-zA-Z0-9_]", "_", _stem)
+                    # CI P2 fix: fold the explicit graph_name into the hash.
+                    # The per-path-only derivation COLLAPSED namespaces — two
+                    # team_<ns> SDKs on the SAME temp path (test_hosted_api's
+                    # cross-team isolation, quota tests) derived the SAME
+                    # server graph, destroying team isolation. hash(path+name)
+                    # keeps parity pairs (distinct paths, one shared name)
+                    # distinct AND namespace pairs (one path, distinct names)
+                    # distinct — the embedded same-file/same-name analog
+                    # (same path + same name) still shares.
                     _graph = (f"test_{_stem}_"
-                              + hashlib.sha1((_sess + path).encode()).hexdigest()[:12])
+                              + hashlib.sha1(
+                                  (_sess + path + graph_name).encode()
+                              ).hexdigest()[:12])
                 path = None  # fall through to the host-mode branch below
                 graph_name = _graph
                 # Cycle-8 P2-5: append the mint to the product-side session

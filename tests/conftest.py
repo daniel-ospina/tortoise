@@ -46,6 +46,8 @@ from tests._embedded import shared_proj  # noqa: F401, I001
 from tests._embedded import TEST_NO_REDIRECT_STEMS  # noqa: E402
 
 os.environ.setdefault("TORTOISE_TEST_MODE", "1")
+from tortoise import projection as _projection_mod  # noqa: E402
+_projection_mod._TEST_SESSION_ACTIVE = True
 os.environ.setdefault("TORTOISE_TEST_NO_REDIRECT", ",".join(TEST_NO_REDIRECT_STEMS))
 
 # Cycle-5 P2-1 / cycle-6 P1-5: the session nonce is an OVERWRITE (never

@@ -1219,6 +1219,16 @@ class TortoiseSDK:
             else:
                 registry_name = "control_plane"
             self._registry_g = proj.db.select_graph(registry_name)
+            # Epic #1647 (CI P2): the registry name derived from a TEST graph
+            # is `{ns}_{test_graph}_control_plane` — NOT test-prefixed (starts
+            # with registry_/ns_), so wipe_server's test-prefix filter skips
+            # it AND it never reaches the session journal (the redirect only
+            # journals the main graph). Every such mint LEAKED one server
+            # graph per construction (E2E-7 GRAPH.LIST bound red at 466+).
+            # Journal the registry name too (product writer: env-gated no-op
+            # outside a test session).
+            from tortoise.projection import _journal_append_product
+            _journal_append_product(registry_name)
             self._ensure_registry_indexes()
         return self._registry_g
 

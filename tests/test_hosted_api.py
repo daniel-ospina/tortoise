@@ -1818,6 +1818,21 @@ class TestBackupEndpoints:
             _pricing, "daily_backups_enabled", lambda tier: tier == "pro"
         )
         app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM, tier="pro")
+        # Epic #1647 (docker lane): the backup/restore seam resolves the team
+        # graph via team_graph_name() → "team_{id}" — but on the server lane
+        # the team SDK writes to the REDIRECT-derived guard-passing graph
+        # (test_<stem>_<hash12(session+path+name)>). Without a seam, restore's
+        # live_name ("team_team-001") is empty on the server → the
+        # empty-backup-over-live 409 guard sees 0 live nodes and restore
+        # succeeds over live data (the #1635 guard is DEFEATED). Route
+        # team_graph_name to the SDK's actual graph in BOTH lanes (embedded:
+        # the fixture-patched db_path SDK resolves team_team-001 verbatim;
+        # server: the derived graph). The registry-source arg is unused by the
+        # seam (the registry stamp is the historical literal either way).
+        import tortoise.backup_sweep as _bs
+        _sdk_graph = _ha._make_sdk(namespace=TEST_TEAM_ID)._get_proj().graph_name
+        monkeypatch.setattr(_bs, "team_graph_name",
+                            lambda source, tid: _sdk_graph)
         yield client
         app.dependency_overrides.clear()
 
@@ -2663,6 +2678,7 @@ class TestProxyProtoRedirect:
         assert r.headers["location"].startswith("http://"), r.headers["location"]
 
 
+@pytest.mark.embedded_only  # #1470 embedded keepalive: exercises the URI-less fallback anchor — server lane has no anchor (D14)
 def test_make_sdk_reuses_healthy_anchor(monkeypatch):
     """#1502: a healthy anchor bound to the CURRENT db_path is kept and
     reused across _make_sdk calls — the keepalive's whole point. Eviction
@@ -2690,6 +2706,7 @@ def test_make_sdk_reuses_healthy_anchor(monkeypatch):
         ha._FALLBACK_KEEPALIVE.pop(ns, None)
 
 
+@pytest.mark.embedded_only  # #1502 embedded keepalive eviction: URI-less fallback path (D14)
 def test_make_sdk_rebinds_stale_anchor(monkeypatch):
     """#1502: _make_sdk evicts a keepalive anchor whose embedded DB path
     drifted (previous test's tempdir removed, TORTOISE_DB_PATH changed)
