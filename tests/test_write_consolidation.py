@@ -509,6 +509,7 @@ def _transport_context():
     _current_team_limits.set(None)
 
 
+@pytest.mark.timeout(600)  # Epic #1647 (PR #1684 CI-fix): MCP _get_sdk connect + the reaper kill-wait under CI load exceed the default 300s (2× observed). The handlers themselves run in <2s locally — the timeout is CI-contention headroom.
 class TestMcpHandlers:
     def test_tortoise_create_entity_and_update_and_delete(self):
         from tortoise.mcp_server import (  # noqa: I001
