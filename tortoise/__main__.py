@@ -648,23 +648,91 @@ def _cmd_signup(args) -> int:
     from urllib.request import Request, urlopen
 
     api_url = os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
-    # Stable device_id (#1708): reuse a previously stored one (server still
-    # ignores it — #741(a) unchanged; it anchors CLIENT-side reuse and the
-    # future #1709 dedupe). Read from the GLOBAL credentials store.
     home_dir = Path.home() / ".tortoise"
     config_path = home_dir / "credentials.json"
+
+    # ── Reuse-before-mint (#1708 D2/D3) ────────────────────────────────────
+    # A stored key (env → cwd/.tortoise → ~/.tortoise/credentials.json per D1)
+    # is validated against GET /v1/team — the same lightweight check _cmd_init
+    # uses (the two validation sites must stay in sync). 200 = reuse, 0 new
+    # keys; 401/non-suspended-403 = re-mint; SUSPENDED-403 and
+    # cannot-validate (429/5xx/network/timeout/garbage-200) = fail-closed
+    # exit 1 — never mint on an unvalidatable existing key (the incident
+    # pattern this issue fixes).
+    force = getattr(args, "force", False)
+    mint_url = api_url  # may be overridden when re-minting after a 401/403
+    reminting_after_401 = False
+    legacy_device_id = None
+    if not force:
+        try:
+            cfg_path, cfg, existing_key, existing_url = _resolve_config_path()
+        except _ConfigError as e:
+            print(f"Config at {e} is corrupt or unreadable — fix or delete it, "
+                  "or use --force.", file=sys.stderr)
+            return 1  # never mint on a corrupt config (D6)
+        if existing_key:
+            base = (existing_url or api_url).rstrip("/")
+            try:
+                req = Request(
+                    f"{base}/v1/team",
+                    headers={"Authorization": f"Bearer {existing_key}"},
+                )
+                with urlopen(req, timeout=10) as resp:
+                    json.loads(resp.read())
+                src = str(cfg_path) if cfg_path else "TORTOISE_API_KEY"
+                print(f"✅ Already have a Tortoise Cloud key ({src}) — reusing it.")
+                print("   Run 'tortoise team keys' or 'tortoise create-point \"hello\"' to use it.")
+                print("   To mint a fresh key instead: tortoise signup --force")
+                return 0
+            except HTTPError as e:
+                body = e.read().decode() if e.fp else ""
+                if e.code in (401, 403):
+                    # #308: SUSPENDED 403 must NOT mint (mirrors the other
+                    # _cmd_* team handlers — a suspended team must not be
+                    # silently orphaned by a fresh anonymous mint).
+                    sus = _suspended_info(body)
+                    if sus is not None:
+                        print(f"{sus[0]}", file=sys.stderr)
+                        return 1
+                    print(f"Stored key is invalid ({e.code}) — minting a fresh one.",
+                          file=sys.stderr)
+                    reminting_after_401 = True
+                    mint_url = base  # re-mint against the validated config's host (D2)
+                    # device_id backfill: a legacy cwd/.tortoise has none —
+                    # persist it so client identity stays anchored (future #1709).
+                    if isinstance(cfg, dict):
+                        legacy_device_id = cfg.get("device_id")
+                else:
+                    print(f"Cannot validate existing key (API error {e.code}) — not "
+                          "minting to avoid duplicate keys. Retry later or use --force.",
+                          file=sys.stderr)
+                    return 1
+            except (URLError, ValueError, json.JSONDecodeError, TimeoutError, OSError) as e:
+                # TimeoutError/OSError: socket.timeout from resp.read() after
+                # headers arrive (flaky proxy/captive-portal stall) is NOT a
+                # URLError — without it the D2 contract degrades into a traceback.
+                print(f"Cannot validate existing key ({e}) — not minting to avoid "
+                      "duplicate keys. Retry later or use --force.", file=sys.stderr)
+                return 1
+
+    # Stable device_id (#1708): reuse a previously stored one (server still
+    # ignores it — #741(a) unchanged; it anchors CLIENT-side reuse and the
+    # future #1709 dedupe). Read from the GLOBAL credentials store, plus the
+    # legacy-config backfill captured above.
     stored = {}
     if config_path.is_file():
         try:
             stored = json.loads(config_path.read_text())
         except json.JSONDecodeError:
             stored = {}
+    if not stored.get("device_id") and legacy_device_id:
+        stored["device_id"] = legacy_device_id
     device_id = stored.get("device_id") or f"anon-{uuid.uuid4().hex[:12]}"
 
     print(f"Signing up for a free hosted team (anonymous, no email)…")  # noqa: F541
     try:
         req = Request(
-            f"{api_url}/v1/agent/signup",
+            f"{mint_url}/v1/agent/signup",
             data=json.dumps({"identity": device_id}).encode(),
             headers={"Content-Type": "application/json", "X-Device-Id": device_id},
             method="POST",
@@ -680,14 +748,31 @@ def _cmd_signup(args) -> int:
             retry = (e.headers.get("Retry-After")
                      if e.headers and e.headers.get("Retry-After") else None)
             when = f"{int(retry)}s" if (retry and retry.isdigit()) else "later"
-            print(f"Signup rate limit reached — try again in {when}. "
-                  "Need more keys? Contact support@premiselabs.co.",
-                  file=sys.stderr)
+            if reminting_after_401:
+                # D2: a revoked stored key + exhausted budget — the user must
+                # not be told to "wait" as if nothing else is wrong.
+                print(f"Signup rate limit reached — try again in {when}. "
+                      "Note: your stored key is ALSO invalid — fix or revoke it, "
+                      "or --force a fresh mint after the window. "
+                      "Need more keys? Contact support@premiselabs.co.",
+                      file=sys.stderr)
+            else:
+                print(f"Signup rate limit reached — try again in {when}. "
+                      "Need more keys? Contact support@premiselabs.co.",
+                      file=sys.stderr)
             return 1
         print(f"Signup failed ({e.code}): {body}", file=sys.stderr)
         return 1
-    except (URLError, ValueError, json.JSONDecodeError) as e:
-        print(f"Cannot reach API at {api_url}: {e}", file=sys.stderr)
+    except URLError as e:
+        print(f"Cannot reach API at {mint_url}: {e}", file=sys.stderr)
+        return 1
+    except (ValueError, json.JSONDecodeError, TimeoutError, OSError):
+        # 200-with-garbage (proxy/mitm) or a stall after the server accepted:
+        # the server DID mint — "Cannot reach API" would mislead the user into
+        # retrying (the double-fire pattern).
+        print("A key may have been minted but the response was unreadable — "
+              "check the dashboard or support before re-running; "
+              "do NOT blindly retry.", file=sys.stderr)
         return 1
 
     # Save config so the key works immediately — global credentials store
@@ -696,7 +781,7 @@ def _cmd_signup(args) -> int:
     # (previously wrote to cwd/.tortoise which IS the data home directory).
     config = {
         "api_key": data["key"],
-        "api_url": api_url,
+        "api_url": mint_url,
         "team_id": data["team_id"],
         "team_name": data["team_name"],
         "device_id": device_id,
@@ -727,6 +812,12 @@ def _cmd_signup(args) -> int:
         print("Fix the path permissions and re-run, or use the key directly.",
               file=sys.stderr)
         return 1
+
+    if force and os.environ.get("TORTOISE_API_KEY"):
+        # D3: the env key shadows the fresh key at read time (env wins per D1)
+        # — the user must know why the new key isn't being used.
+        print("⚠️  TORTOISE_API_KEY is set and shadows this new key at read time "
+              "(env wins) — unset it to use the key just minted.", file=sys.stderr)
 
     print(f"✅ Free team created: {data['team_name']}")
     print(f"   API key: {data['key']}")
@@ -4086,6 +4177,10 @@ def main(argv: list[str] | None = None) -> int:
     team_keys_revoke_p.add_argument("--force", "-f", action="store_true", help="Skip the confirmation prompt")
     # tortoise signup — zero-email free-team mint (issue #663)
     signup_p = sp.add_parser("signup", help="Mint a free hosted team + API key — no email or dashboard (2 free teams/IP/24h)")
+    signup_p.add_argument(
+        "--force", action="store_true",
+        help="Mint a fresh key even if a stored key exists (#1708)",
+    )
     signup_p.add_argument(
         "--claim", action="store_true",
         help="After minting, print the dashboard claim instructions: sign in "
