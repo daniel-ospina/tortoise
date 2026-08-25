@@ -78,6 +78,36 @@ class TestRRFFusion:
 
     # R5 (#1544): recency-weighted RRF — date weight in fusion, default-off
     # so every pre-R5 caller stays byte-identical.
+
+    def test_weighted_rrf_default_is_byte_identical(self):
+        """#1657: no weights passed → identical to the pre-#1657 arithmetic."""
+        lists = [[("a", 1.0), ("b", 0.5)], [("b", 0.9), ("a", 0.3)]]
+        plain = rrf_fusion(lists)
+        weighted = rrf_fusion(lists, strategy_names=["fts", "vector"],
+                              weights=None)
+        assert weighted == plain
+
+    def test_weighted_rrf_weights_scale_contribution(self):
+        """#1657: a heavier weight on one strategy lifts its rank-1 hit."""
+        # doc in list0 only (rank 1), not in list1: with weights the
+        # vector leg's contribution is scaled by its weight.
+        lists = [[("doc", 1.0)], [("other", 1.0)]]
+        equal = rrf_fusion(lists, strategy_names=["fts", "vector"])
+        boosted = rrf_fusion(lists, strategy_names=["fts", "vector"],
+                             weights={"vector": 3.0})
+        # Equal: fts doc = 1/61, vector other = 1/61 → tie.
+        assert abs(equal["doc"] - equal["other"]) < 1e-9
+        # Weighted: vector leg × 3 → 'other' (from the weighted leg) wins.
+        assert boosted["other"] > boosted["doc"]
+
+    def test_weighted_rrf_weights_missing_strategy_uses_one(self):
+        """#1657: a strategy absent from the weights map defaults to 1.0."""
+        lists = [[("a", 1.0)], [("b", 1.0)]]
+        fused = rrf_fusion(lists, strategy_names=["fts", "vector"],
+                           weights={"vector": 2.0})
+        # fts 'a' = 1/61; vector 'b' = 2/61.
+        assert fused["b"] > fused["a"]
+
     def test_recency_boost_lifts_newer_over_older(self):
         # equal RRF across both docs — date weight must break the tie
         lists = [[("old", 1.0)], [("new", 1.0)]]
