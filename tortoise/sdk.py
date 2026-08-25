@@ -10882,6 +10882,15 @@ class TortoiseSDK:
                 "CREATE (:TeamMeta {name:$name, created:$now})",
                 params={"name": name, "now": now},
             )
+            # #1686: journal the minted team_{name} graph IMMEDIATELY after
+            # the TeamMeta CREATE succeeds (and before _graph_create, whose
+            # failure rolls back only the registry Team node — the graph is
+            # already minted; journaling before it captures the orphan). The
+            # session-end sweep drops journaled names, so team_* graphs no
+            # longer accumulate on the docker. No-op outside test sessions
+            # (journal env absent).
+            from tortoise.projection import _journal_append_product
+            _journal_append_product(graph_name)
             # Graph node (team→graph 1:N, product ontology): the default graph
             self._graph_create(tid, "default", kind="default", namespace=graph_name)
         except Exception:

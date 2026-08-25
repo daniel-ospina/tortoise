@@ -401,3 +401,28 @@ def test_shared_server_survives_single_gc(tmp_path):
     del b
     gc.collect()
     assert _wait_server_dead(pid), "last client's GC should shut the server down"
+
+
+def test_team_create_journals_minted_graph(tmp_path, monkeypatch):
+    """#1686: team_create's minted team_{name} graph is journaled via the
+    product-side seam (_journal_append_product) so the session-end sweep
+    drops it — team_* graphs no longer accumulate on the docker.
+
+    Carve-out file → explicit-path constructions stay embedded in BOTH
+    lanes (exemption holds under a URI-set process); a temp journal env
+    makes the membership assertion exact. team_create writes the registry
+    Team node + mints team_{name} + the graph node, all on the embedded
+    server."""
+    from tests._embedded import _read_journal_file
+    from tortoise.sdk import TortoiseSDK
+
+    journal = tmp_path / "team-create.graphs.jsonl"
+    monkeypatch.setenv("TORTOISE_TEST_JOURNAL_FILE", str(journal))
+    sdk = TortoiseSDK(str(tmp_path / "team-create.db"))
+    try:
+        res = sdk.team_create("journalled")
+        assert res["graph_name"] == "team_journalled"
+        assert "team_journalled" in _read_journal_file(str(journal)), \
+            "team_create mint must be journaled (#1686)"
+    finally:
+        sdk.close()

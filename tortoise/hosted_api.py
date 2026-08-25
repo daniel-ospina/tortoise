@@ -30,6 +30,7 @@ from tortoise.auth import hash_api_key
 from tortoise.security import redact_error  # billing webhook + checkout error logging
 from tortoise.session_auth import get_current_user, verify_session_jwt
 from tortoise.quota import DEFAULT_MAX_SESSIONS  # used by get_current_team (#754 P0: missing import → 500 on every agent_signup auth)
+from tortoise.projection import _journal_append_product  # #1686: team_* mint journaling (session sweep drops them)
 from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op without key)
     api_key_created,
     first_api_call,
@@ -958,6 +959,8 @@ async def provision_tenant(request: Request):
             "CREATE (:TeamMeta {name: $name, created: $now})",
             params={"name": team_name, "now": now},
         )
+        # #1686: journal the minted team_* graph (session sweep drops it).
+        _journal_append_product(graph_name)
 
         # Create Membership (creator is Owner)
         sdk._get_registry().query(
@@ -3060,6 +3063,8 @@ async def register_user(request: Request, response: Response):
                 "CREATE (:TeamMeta {name: $name, created: $now})",
                 params={"name": team_name, "now": now},
             )
+            # #1686: journal the minted team_* graph (session sweep drops it).
+            _journal_append_product(graph_name)
         except Exception:
             raise HTTPException(status_code=500, detail="Registration failed")
         try:
@@ -3130,6 +3135,8 @@ async def register_user(request: Request, response: Response):
                 "CREATE (:TeamMeta {name: $name, created: $now})",
                 params={"name": team_name, "now": now},
             )
+            # #1686: journal the minted team_* graph (session sweep drops it).
+            _journal_append_product(graph_name)
 
             # #318 (multi-tenant pack isolation): activate the starter pack
             # set — registry-mode self-service path (the Supabase-mode path
@@ -5341,6 +5348,8 @@ async def create_team(body: dict, user: dict = Depends(get_current_user)):
             "CREATE (:TeamMeta {name: $name, created: $now})",
             params={"name": name, "now": datetime.now(_tz.utc).isoformat()},
         )
+        # #1686: journal the minted team_* graph (session sweep drops it).
+        _journal_append_product(graph_name)
         try:
             provision_team(cp, **{
                 "p_user_id": user["user_id"],

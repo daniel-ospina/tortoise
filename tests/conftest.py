@@ -20,6 +20,13 @@ os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 # (signup 2/24h, session 5/hr, recovery) delenv RATE_LIMIT_DISABLED — those
 # read env at CALL time and stay live.
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
+# #1686: TEST_MODE must be visible BEFORE tests._embedded imports tortoise.
+# projection (tests/_embedded.py:27 imports it) — the module-body
+# Thread.start stamp install is gated on TEST_MODE, and conftest's own
+# `from tests._embedded import shared_proj` (below) is what triggers that
+# import. (Call-time redirect checks are unaffected — only the module-body
+# install gate needs the env early.)
+os.environ.setdefault("TORTOISE_TEST_MODE", "1")
 
 # #1642 FIX 6: the session-end sweep loops discover->reap until the backlog
 # is cleared or this wall-clock budget is exhausted, at a raised batch size
@@ -53,9 +60,41 @@ from tests._embedded import shared_proj  # noqa: F401, I001
 # TORTOISE_TEST_SESSION is the session nonce folded into derived graph names.
 from tests._embedded import TEST_NO_REDIRECT_STEMS  # noqa: E402
 
-os.environ.setdefault("TORTOISE_TEST_MODE", "1")
+# (TORTOISE_TEST_MODE was already exported above — before the tests._embedded
+# import — so projection's module-body Thread.start stamp install sees it;
+# the call-time redirect checks read the env at construction regardless.)
 from tortoise import projection as _projection_mod  # noqa: E402
 _projection_mod._TEST_SESSION_ACTIVE = True
+# #1686: install the Thread.start test-stem stamp AFTER the session flag is
+# live (prod can never satisfy the flag, so even a leaked TEST_MODE=1 env
+# cannot patch stdlib — see install_thread_stamp's docstring).
+_projection_mod.install_thread_stamp()
+
+
+# ── Epic #1686: per-thread test-module attribution ────────────────────────
+# Record the RUNNING test module's stem on the current (main) thread so
+# worker threads spawned during the test (TestClient portals, background
+# threads) inherit it via projection's patched Thread.start — the
+# frame-keyed carve-out exemption cannot see worker-thread stacks.
+
+
+def pytest_runtest_setup(item):
+    """Record the running test module's stem on the current thread (#1686)."""
+    try:
+        stem = (item.module.__name__.rsplit(".", 1)[-1]
+                if item.module is not None else None)
+    except AttributeError:
+        stem = None
+    _projection_mod._record_current_test_stem(stem)
+
+
+def pytest_runtest_teardown(item, nextitem):
+    """Clear the main-thread stem at test end (#1686).
+
+    Only the MAIN thread's slot is cleared — child threads keep their
+    spawn-time inherited stems (bounded in practice: module-scoped portal
+    threads spawn within one module; documented in projection)."""
+    _projection_mod._record_current_test_stem(None)
 os.environ.setdefault("TORTOISE_TEST_NO_REDIRECT", ",".join(TEST_NO_REDIRECT_STEMS))
 
 # Cycle-5 P2-1 / cycle-6 P1-5: the session nonce is an OVERWRITE (never
