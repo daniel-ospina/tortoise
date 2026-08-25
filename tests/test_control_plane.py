@@ -67,8 +67,6 @@ class TestTeamCRUD:
         assert result2.get("existing") is True
         assert result2["id"] == result1["id"]
         assert "api_key" not in result2
-        assert result2.get("api_key") is None
-
         # Nothing new was persisted by the re-call: exactly ONE Team node
         # carries this idempotency key, and the stored hash still verifies
         # the FIRST call's plaintext (no phantom key was hashed/stored).
