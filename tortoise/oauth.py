@@ -870,6 +870,7 @@ _CONSENT_HTML = """<!DOCTYPE html>
   // would bind window). Size guard + localhost-aware domain/secure
   // attributes mirror the canonical adapter.
   const COOKIE_PATH = "/";
+  const COOKIE_DOMAIN = ".premiselabs.co";
   const SIZE_GUARD = 3800;
   const isLocal = () => {
     const h = window.location.hostname;
