@@ -231,7 +231,16 @@ def _seed_parity_source_graph(db_path: str) -> dict:
             "CREATE (a)-[:IMPL {weight:0.8}]->(b)",
             params={"a": "parity-pt-1", "b": "parity-pt-2"},
         )
-        nodes = int(g.query("MATCH (n) RETURN count(n)").result_set[0][0])
+        # Epic #1647 (PR #1684 CI-fix): the exporter's node_count excludes
+        # internal bookkeeping (the R2/R3 Meta FTS marker — #1625/#1641
+        # class); the raw MATCH count includes it → 5 vs 4. Count non-skip
+        # nodes with the SAME predicate the exporter uses so parity holds.
+        from tortoise.hosted_api import _is_export_skip_node
+        _rows = g.query("MATCH (n) RETURN labels(n), properties(n)").result_set
+        nodes = sum(
+            1 for row in _rows
+            if not _is_export_skip_node(
+                [str(l) for l in (row[0] or [])], dict(row[1] or {})))
         edges = int(g.query("MATCH ()-[r]->() RETURN count(r)").result_set[0][0])
         ids = sorted(str(r[0]) for r in g.query(
             "MATCH (n:Point) RETURN coalesce(n.id, '')").result_set)
