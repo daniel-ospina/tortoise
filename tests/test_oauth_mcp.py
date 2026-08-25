@@ -375,9 +375,10 @@ class TestAuthorizePage:
         # OAuth/email fallback would TypeError on every sign-in).
         assert "sb-tortoise-auth-token" in r.text
         assert "cookieStorage" in r.text
-        assert "getItem: (key) => {" in r.text
-        assert "setItem: (key, value) => {" in r.text
-        assert "removeItem: (key) => {" in r.text
+        assert "getItem(key) {" in r.text
+        assert "setItem(key, value) {" in r.text
+        assert "removeItem(key) {" in r.text
+        assert "SIZE_GUARD" in r.text  # #1225 cookie-cap guard ported
 
     def test_consent_page_escapes_script_breakout(self, api_client):
         """P1 (PR #1264 review): a malicious state / client_name containing
