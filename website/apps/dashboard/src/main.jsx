@@ -151,10 +151,10 @@ function claimIntentInFlight() {
   const [welcomeTeamName, setWelcomeTeamName] = React.useState('')
   const [welcomeGraphName, setWelcomeGraphName] = React.useState('')
   const [welcomeProvisionError, setWelcomeProvisionError] = React.useState('')
-  // #1643: the getting-started wizard (post-key steps: harness → skills →
-  // GitHub → seed → done). For first-timers it follows the key reveal; for
-  // returning empty-graph users it re-opens at the skills step (Back
-  // reaches the harness chooser).
+  // #1643/#1692: the getting-started wizard (post-key steps: harness →
+  // integrations → skills → seed → done). For first-timers it follows the
+  // key reveal; for returning empty-graph users it re-opens at step 0
+  // (harness); step-0 Back returns to the orientation card.
   const [wizardStep, setWizardStepRaw] = React.useState(0)
   const setWizardStep = React.useCallback((n) => { setWizardStepRaw(n); setWizardCopied((c) => (c === 'harness' ? '' : c)) }, [])
   const [wizardHarness, setWizardHarness] = React.useState('claude')
@@ -473,7 +473,7 @@ function claimIntentInFlight() {
   }, [])
 
   // ── #1643 wizard actions ────────────────────────────────────────────────
-  const wizardSteps = ['Connect your tool', 'Your agent\'s toolkit', 'Connect GitHub', 'Seed your graph', 'You\'re set']
+  const wizardSteps = ['Connect your tool', 'Integrations', 'Your agent\'s toolkit', 'Seed your graph', 'You\'re set']
 
   function wizardCopy(text, label) {
     try { navigator.clipboard.writeText(text) } catch { /* clipboard blocked */ }
@@ -2236,9 +2236,10 @@ function claimIntentInFlight() {
   // app.premiselabs.co/welcome after signup (welcome.html did the
   // provisioning + key reveal-once; this is the in-dashboard onboarding:
   // chooser + routes to the API Keys tab where the key lives).
-  // #1643: the re-entry card covers EVERY empty-graph state — graph_ready
-  // may be false (missing graph — the seed write recovers it) or true with
-  // 0 points. When it shows, the legacy empty-state cards hide.
+  // #1643/#1692: the re-entry card covers EVERY empty-graph state —
+  // graph_ready may be false (missing graph — the seed write recovers it)
+  // or true with 0 points. It re-opens the wizard at step 0 (harness).
+  // When it shows, the legacy empty-state cards hide.
   const showReentryCard = !welcomeMode && !onboardingComplete &&
     team && (team.point_count ?? 0) === 0 && !wizardDone
 
@@ -2312,7 +2313,7 @@ function claimIntentInFlight() {
                     Your team is set up. You can manage your API key in the dashboard anytime.
                   </p>
                 )}
-                {welcomeKey && !welcomeOriented && (
+                {!welcomeOriented && (
                   <div className="wizard-orient" style={{ marginBottom: '1.5rem' }}>
                     <h2 style={{ fontFamily: 'var(--serif, Georgia, serif)', fontWeight: 400, fontSize: 20, marginBottom: '0.4rem' }}>
                       What you're setting up
@@ -2330,7 +2331,7 @@ function claimIntentInFlight() {
                     <button className="btn-primary" onClick={() => setWelcomeOriented(true)}>Continue →</button>
                   </div>
                 )}
-                {(!welcomeKey || welcomeOriented) && (
+                {welcomeOriented && (
                 <div className="wizard">
                   <div className="wizard-progress">
                     {wizardSteps.map((s, i) => (
@@ -2340,8 +2341,8 @@ function claimIntentInFlight() {
                   <p className="wizard-title">{wizardSteps[wizardStep]}</p>
                   <p className="wizard-sub" style={{ marginBottom: '1rem' }}>
                     {wizardStep === 0 ? 'Pick your tool — the setup command connects the MCP server and installs the skills in one copy.'
-                      : wizardStep === 1 ? 'These are the three skills your agent uses with Tortoise — what they do.'
-                      : wizardStep === 2 ? 'Bring your GitHub issues in as Events — optional, do it now or later.'
+                      : wizardStep === 1 ? 'Connect your data sources — GitHub issues come in as Events (optional, do it now or later).'
+                      : wizardStep === 2 ? 'These are the three skills your setup command installs — what they do, and when your agent uses them.'
                       : wizardStep === 3 ? 'Add yourself and your project as the first objects on your graph.'
                       : 'Welcome to Tortoise — your graph is live.'}
                   </p>
@@ -2363,7 +2364,7 @@ function claimIntentInFlight() {
                         {welcomeKey && !HARNESS_SKILLLESS.includes(wizardHarness) && !HARNESS_SKILLS_IN_PROMPT.includes(wizardHarness) ? ('\n\n' + HARNESS_PERSIST(apiKey)) : ''}
                       </pre>
                       <div className="wizard-nav">
-                        <button type="button" className="ghost" onClick={() => { welcomeKey ? setWelcomeOriented(false) : setWelcomeMode(false) }}>← Back</button>
+                        <button type="button" className="ghost" onClick={() => setWelcomeOriented(false)}>← Back</button>
                         <div className="wizard-nav-actions">
                           <button type="button" className={wizardCopied === 'harness' ? 'ghost' : 'btn-primary'}
                             onClick={() => wizardCopy(HARNESS_INSTALL[wizardHarness](apiKey) + HARNESS_SKILLS(wizardHarness) + (welcomeKey && !HARNESS_SKILLLESS.includes(wizardHarness) && !HARNESS_SKILLS_IN_PROMPT.includes(wizardHarness) ? ('\n\n' + HARNESS_PERSIST(apiKey)) : ''), 'harness')}>
@@ -2378,11 +2379,15 @@ function claimIntentInFlight() {
                     </div>
                   )}
 
-                  {wizardStep === 1 && (
+                  {wizardStep === 2 && (
                     <div className="skills">
+                      <p className="dim" style={{ marginBottom: '0.9rem' }}>
+                        The setup command in the first step installs these three — here's
+                        what they do and when your agent uses them.
+                      </p>
                       <div className="skill-row">
                         <strong>how-to-use-tortoise</strong>
-                        <span className="dim small">the passive skill — your agent loads it automatically to read and write the graph. Nothing to invoke.</span>
+                        <span className="dim small">the passive skill — your agent loads it automatically for every graph read/write: points, operators, mitigations, NAND edges, supersede, annotate. Nothing to invoke.</span>
                       </div>
                       <div className="skill-row">
                         <strong>tortoise-decide</strong>
@@ -2390,18 +2395,18 @@ function claimIntentInFlight() {
                       </div>
                       <div className="skill-row">
                         <strong>tortoise-file-finding</strong>
-                        <span className="dim small">the ingest skill — run it to record a research finding: it creates a Point and surfaces related claims to connect.</span>
+                        <span className="dim small">the invoke skill — run it when you add a research finding: it creates a Point, checks for related claims, and surfaces connections.</span>
                       </div>
                       <div className="wizard-nav">
                         <button type="button" className="ghost" onClick={() => setWizardStep(wizardStep - 1)}>← Back</button>
                         <div className="wizard-nav-actions">
-                          <button type="button" className="btn-primary" onClick={() => setWizardStep(2)}>Next</button>
+                          <button type="button" className="btn-primary" onClick={() => setWizardStep(3)}>Next</button>
                         </div>
                       </div>
                     </div>
                   )}
 
-                  {wizardStep === 2 && (
+                  {wizardStep === 1 && (
                     <div className="github-connect">
                       {wizardGithub.connected ? (
                         <p className="dim">GitHub connected — {wizardGithub.repos ?? ''} repos available to index (issues → Events).</p>
@@ -2419,7 +2424,7 @@ function claimIntentInFlight() {
                               {wizardGithub.busy ? 'Connecting…' : 'Connect GitHub'}
                             </button>
                           )}
-                          <button type="button" className="ghost" onClick={() => setWizardStep(3)}>
+                          <button type="button" className="ghost" onClick={() => setWizardStep(2)}>
                             {wizardGithub.connected ? 'Next' : 'Skip →'}
                           </button>
                         </div>
@@ -2686,9 +2691,9 @@ function claimIntentInFlight() {
           </section>
         )}
         {tab === 'overview' && team && showReentryCard && (
-          // #1643: re-entry — a returning user with an empty graph gets the
-          // getting-started wizard (harness → skills → GitHub → seed), not a
-          // raw-curl dead end.
+          // #1643/#1692: re-entry — a returning user with an empty graph gets
+          // the getting-started wizard (harness → integrations → skills →
+          // seed), not a raw-curl dead end.
           <section className="overview empty-state graph-missing">
             <h2>Your graph is ready for its first data point</h2>
             <p className="dim">
