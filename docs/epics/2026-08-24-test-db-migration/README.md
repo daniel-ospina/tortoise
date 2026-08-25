@@ -13,7 +13,9 @@
 | 2. Research | ✅ DONE | verifier (2 passes, all P1s closed) | research-brief.md |
 | 3. Scope | ✅ DONE | human (approved D-1=A D-2=A D-3=A D-4=A) | scope-brief.md + E2E |
 | 4. Plan | ✅ DONE | verifier (8 cycles clean) | plan.md (2684 lines) |
-| 5. Decompose | 🔄 NEXT | verifier | child issues + wiring |
+| 5. Decompose | ✅ DONE | MECE verified (4 dep fixes) | 10 issues #1661-#1670 |
+| 6. Implement | ✅ DONE | 10/10 tasks, VGATE+review each | branch epic/test-db-migration |
+| 6b. Capstone verify | ✅ DONE | O1-O4+T1+T3 PASS, T2/T4 post-merge | PR #1684 |
 | 6. Verify | ⏳ | verifier | verification-proof.md |
 
 ## Stage artifacts
