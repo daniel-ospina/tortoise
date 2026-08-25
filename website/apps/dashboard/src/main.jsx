@@ -167,6 +167,12 @@ function claimIntentInFlight() {
   const [onboardingComplete, setOnboardingComplete] = React.useState(false)
   const [welcomeOriented, setWelcomeOriented] = React.useState(false)
   const [wizardSubject, setWizardSubject] = React.useState('')
+  const [copiedStep, setCopiedStep] = React.useState('')
+  function wizardCopyStep(text) {
+    try { navigator.clipboard.writeText(text) } catch { /* clipboard blocked */ }
+    setCopiedStep(text)
+    setTimeout(() => setCopiedStep(''), 1600)
+  }
   const [wizardProject, setWizardProject] = React.useState('')
   React.useEffect(() => () => { stopGithubPoll && stopGithubPoll() }, [])  // unmount cleanup
 
@@ -2361,7 +2367,19 @@ function claimIntentInFlight() {
                       {HARNESS_STEPS[wizardHarness] && (
                         <ol className="harness-steps" style={{ margin: '0.9rem 0 0.25rem 1.1rem', padding: 0, lineHeight: 1.7 }}>
                           {HARNESS_STEPS[wizardHarness].map((s, i) => (
-                            <li key={i} className="dim small">{s}</li>
+                            <li key={i} style={{ marginBottom: '0.35rem', fontSize: 14, color: 'var(--text,#e2e8f0)' }}>
+                              {typeof s === 'string' ? s : (
+                                <>
+                                  <span>{s.label}</span>{' '}
+                                  <code style={{ padding: '2px 6px', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 5, fontSize: 13 }}>{s.code}</code>{' '}
+                                  {s.copy && (
+                                    <button type="button" className="ghost small" onClick={() => wizardCopyStep(s.copy)}>
+                                      {copiedStep === s.copy ? 'Copied ✓' : 'Copy'}
+                                    </button>
+                                  )}
+                                </>
+                              )}
+                            </li>
                           ))}
                         </ol>
                       )}

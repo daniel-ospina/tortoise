@@ -24,10 +24,13 @@ const PI_MCP_CONFIG_ENV = {
 // #1694: per-harness UI steps shown above the snippet (NOT part of the
 // copied content) — e.g. Claude Web's manual connector setup. The user
 // follows these, then copies the prompt below.
+// Step objects support { label, code, copy } — label text, an inline
+// <code> value, and a one-click Copy button for that value.
 export const HARNESS_STEPS = {
   'claude-web': [
     'Go to claude.ai > Settings > Connectors',
-    `Add custom connector → ${MCP_URL}`,
+    'Add custom connector and name it "Tortoise"',
+    { label: 'Server URL', code: MCP_URL, copy: MCP_URL },
     'In Request headers (advanced): Authorization: Bearer <your-key>',
     '(Claude connects from its own cloud — your key is stored by Anthropic. There are no local skills on web — the prompt below gives Claude the workflows instead.)',
   ],
