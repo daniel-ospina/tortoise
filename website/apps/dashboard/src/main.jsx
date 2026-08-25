@@ -2327,7 +2327,7 @@ function claimIntentInFlight() {
                   </div>
                   <p className="wizard-title">{wizardSteps[wizardStep]}</p>
                   <p className="wizard-sub" style={{ marginBottom: '1rem' }}>
-                    {wizardStep === 0 ? 'These are the three skills your agent uses with Tortoise — what they do, and what the setup command installs.'
+                    {wizardStep === 0 ? 'These are the three skills your agent uses with Tortoise — what they do.'
                       : wizardStep === 1 ? 'Pick your tool — the setup command connects the MCP server and installs the skills in one copy.'
                       : wizardStep === 2 ? 'Bring your GitHub issues in as Events — optional, do it now or later.'
                       : wizardStep === 3 ? 'Add yourself and your project as the first objects on your graph.'
@@ -2377,11 +2377,6 @@ function claimIntentInFlight() {
                         <strong>tortoise-file-finding</strong>
                         <span className="dim small">the ingest skill — run it to record a research finding: it creates a Point and surfaces related claims to connect.</span>
                       </div>
-                      <p className="dim small" style={{ marginTop: '0.75rem' }}>
-                        The next step sets these up for your agent with the right steps for
-                        the client you pick — and they're open-sourced in the public
-                        <a href="https://github.com/daniel-ospina/tortoise-skills-and-integrations" target="_blank" rel="noreferrer">Tortoise skills repo</a>.
-                      </p>
                       <div className="wizard-nav">
                         <span className="wizard-nav-spacer" />
                         <div className="wizard-nav-actions">
@@ -2655,6 +2650,13 @@ function claimIntentInFlight() {
               </span>
             )}
           </div>
+        )}
+
+        {tab === 'overview' && team && !showReentryCard && (
+          <section className="overview setup-revisit" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem', flexWrap: 'wrap', padding: '0.85rem 1.25rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 10, marginBottom: '1rem' }}>
+            <span className="dim small">Need to change your agent, reconnect, or re-seed? The setup wizard has every step.</span>
+            <button className="ghost" onClick={() => { setWizardStep(0); setWelcomeMode(true) }}>Back to setup →</button>
+          </section>
         )}
 
         {tab === 'overview' && alerts.length > 0 && (
