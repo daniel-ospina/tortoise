@@ -5,6 +5,7 @@ surfaces:
   - test_abuse.py
   - test_abuse_integration.py
   - test_agent_signup.py
+  - test_agent_signup_idempotency.py
   - test_api.py
   - test_audit.py
   - test_battery_arms.py

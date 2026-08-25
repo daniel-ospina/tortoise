@@ -13,6 +13,14 @@ import pytest
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
+# RateLimitMiddleware (100 req/min per path+IP bucket) trips 429 in
+# full-suite runs (>100 points per shared IP bucket — the same documented
+# pattern as tests/test_hosted_api.py:22). Set BEFORE hosted_api imports so
+# the middleware is constructed disabled; per-endpoint limiter tests
+# (signup 2/24h, session 5/hr, recovery) delenv RATE_LIMIT_DISABLED — those
+# read env at CALL time and stay live.
+os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
+
 # #1642 FIX 6: the session-end sweep loops discover->reap until the backlog
 # is cleared or this wall-clock budget is exhausted, at a raised batch size
 # — one completing suite can clear a multi-hundred orphan backlog (the old
@@ -743,18 +751,40 @@ def _reset_ip_rate_limits():
     signup_buckets = getattr(ha_mod, "_SIGNUP_BUCKETS", None)
     if signup_buckets is not None:
         signup_buckets.clear()
+    # #1709: recovery limiter buckets (per-IP + per-token) are in-memory per
+    # process and share the module-scoped TestClient host — reset per test.
+    recover_buckets = getattr(ha_mod, "_RECOVER_BUCKETS", None)
+    if recover_buckets is not None:
+        recover_buckets.clear()
+    recover_token_buckets = getattr(ha_mod, "_RECOVER_TOKEN_BUCKETS", None)
+    if recover_token_buckets is not None:
+        recover_token_buckets.clear()
     try:
         from tortoise.abuse import SIGNUP_TRACKER
         SIGNUP_TRACKER.reset()
+    except (ImportError, AttributeError):
+        pass
+    try:
+        from tortoise.abuse import RECOVERY_TRACKER
+        RECOVERY_TRACKER.reset()
     except (ImportError, AttributeError):
         pass
     yield
     _register_buckets.clear()
     if signup_buckets is not None:
         signup_buckets.clear()
+    if recover_buckets is not None:
+        recover_buckets.clear()
+    if recover_token_buckets is not None:
+        recover_token_buckets.clear()
     try:
         from tortoise.abuse import SIGNUP_TRACKER
         SIGNUP_TRACKER.reset()
+    except (ImportError, AttributeError):
+        pass
+    try:
+        from tortoise.abuse import RECOVERY_TRACKER
+        RECOVERY_TRACKER.reset()
     except (ImportError, AttributeError):
         pass
 

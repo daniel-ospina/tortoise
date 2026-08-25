@@ -38,7 +38,9 @@ KINDS = {"billing_upgrade", "billing_downgrade", "billing_payment_failed", "bill
          # #308: abuse prevention notifications
          "abuse_flag", "abuse_suspended", "abuse_new_ip", "abuse_read_velocity",
          # #1081: R8 signup-velocity (anon signups per IP per window)
-         "abuse_signup_velocity"}
+         "abuse_signup_velocity",
+         # #1709: recovery-velocity (keyless recovery mints per IP per window)
+         "abuse_recovery_velocity"}
 
 _skip_logged: set[str] = set()
 

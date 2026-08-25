@@ -468,6 +468,12 @@ def _raise_update_point_status_error(proj, id: str) -> None:
 
 _logger = logging.getLogger(__name__)
 
+# #1709: process-local serialization for the registry recovery mint (FalkorDB
+# has no transactions; parity with the Supabase lane's FOR UPDATE row lock —
+# concurrent same-token recoveries must not overshoot the non-bootstrap key
+# cap). See TortoiseSDK.signup_token_recover.
+_SIGNUP_TOKEN_RECOVER_LOCK = threading.Lock()
+
 
 def _sanitize_props(props: dict, *, reject_id: bool = False) -> dict:
     """#329: reject server-managed fields on tenant write surfaces.
@@ -1247,6 +1253,7 @@ class TortoiseSDK:
             ("APIKey", "key_prefix"),
             ("Invitation", "team_id"),
             ("Invitation", "token_hash"),
+            ("SignupToken", "lookup_key"),
         ]
         for label, prop in indexes:
             try:
@@ -11310,15 +11317,134 @@ class TortoiseSDK:
 
         Returns {team_id, key_id} if valid, None if not found or revoked.
         Uses salted-hash verification (per-key salt means exact-hash lookup
-        never matches — see #130, #139).
+        never matches — see #130, #139). #1709: expires_at filtering with
+        NULL-as-never-expires semantics (mirrors the REST path #742 + the
+        agent_signup mint, which now writes expires_at:null) — a legacy
+        selfhost key without the prop must keep authenticating.
         """
+        from datetime import datetime, timezone as _tz  # noqa: I001
+        now_iso = datetime.now(_tz.utc).isoformat()  # noqa: UP017
         matches = [
             p for p in self._verify_hashed_lookup("APIKey", "key_hash", key_plaintext)
             if p.get("revoked_at") is None
+            and (p.get("expires_at") is None or p.get("expires_at") > now_iso)
         ]
         if matches:
             return {"team_id": matches[0]["team_id"], "key_id": matches[0]["id"]}
         return None
+
+    # ── Control Plane: Agent signup tokens (#1709, approach C) ────────
+    # The signup token is a server-issued 256-bit st_<64hex> bearer token
+    # stored hash-only (SHA-256(PEPPER + token)) — re-presenting it is the
+    # dedupe check AND the keyless-recovery credential. Token lookup reuses
+    # the hashed-lookup pattern (Invitation precedent); FalkorDB has no
+    # transactions, so the recovery check+mint+revoke is serialized under a
+    # process-local lock (parity with the Supabase lane's FOR UPDATE row
+    # lock — the non-bootstrap key cap cannot overshoot under concurrency).
+
+    def signup_token_lookup(self, token_plaintext: str) -> dict | None:
+        """Resolve a signup token → its node props; None when unknown/revoked.
+
+        Registry parity for resolve_signup_token (Supabase lane). The caller
+        (hosted_api) maps None to the UNIFORM 422 invalid_signup_token.
+        """
+        if not isinstance(token_plaintext, str) or not token_plaintext:
+            # #1709 fixer P2.1: a non-str token must be "unknown" (None →
+            # uniform 422), NEVER an AttributeError from the registry scan
+            # (verify_api_key encodes the plaintext) — defense-in-depth
+            # behind hosted_api's format gate.
+            return None
+        # [SECOND-MODEL-GATE] P2: exact-match on the deterministic lookup_key
+        # (SHA-256+pepper, stored at mint) FIRST — avoids the O(keys) PBKDF2
+        # full-scan per probe (a distributed-IP DoS vector on multi-team
+        # selfhosts). PBKDF2 verify below is defense-in-depth (the minted
+        # node carries both hashes).
+        from tortoise.auth import lookup_hash as _lookup_hash
+        lk = _lookup_hash(token_plaintext)
+        rows = self._get_registry().query(
+            "MATCH (n:SignupToken {lookup_key:$lk}) RETURN properties(n)",
+            params={"lk": lk},
+        ).result_set
+        matches = [r[0] for r in rows if r[0].get("revoked_at") is None]
+        if not matches:
+            matches = [
+                p for p in self._verify_hashed_lookup("SignupToken", "token_hash", token_plaintext)
+                if p.get("revoked_at") is None
+            ]
+        return matches[0] if matches else None
+
+    def signup_token_recover(self, token_plaintext: str) -> dict:
+        """Keyless recovery: mint a NEW key on the token's team.
+
+        Registry parity for recover_team_key (Supabase lane). Cap + revoke-
+        oldest-non-bootstrap (#750.10 semantics) mirror the SQL; created_by
+        is token-attributable ('st_' + left(token_hash, 12)) — never a
+        caller-supplied identity. Returns {api_key, team_id, team_name,
+        tier, graph_name}. Raises ControlPlaneError (→ uniform 422) when the
+        token is unknown/revoked or the team is soft-deleted.
+        """
+        from datetime import datetime, timezone as _tz  # noqa: I001
+        from .exceptions import ControlPlaneError
+
+        node = self.signup_token_lookup(token_plaintext)
+        if node is None:
+            raise ControlPlaneError("signup token not found or revoked")
+        team_id = node.get("team_id") or ""
+        team = self.team_get(team_id)
+        if team is None or team.get("deleted_at"):
+            raise ControlPlaneError("signup token team deleted")
+
+        import uuid  # noqa: I001
+        from tortoise.auth import hash_api_key, lookup_hash
+        api_key = f"tt_{uuid.uuid4().hex}"
+        key_hash = hash_api_key(api_key)
+        now_iso = datetime.now(_tz.utc).isoformat()  # noqa: UP017
+        token_hash = lookup_hash(token_plaintext)
+        reg = self._get_registry()
+        with _SIGNUP_TOKEN_RECOVER_LOCK:
+            # re-verify under the lock (parity with the FOR UPDATE re-check)
+            node = self.signup_token_lookup(token_plaintext)
+            if node is None:
+                raise ControlPlaneError("signup token not found or revoked")
+            if node.get("team_id") != team_id:
+                raise ControlPlaneError("signup token not found or revoked")
+            # cap: active non-bootstrap keys; insert FIRST, re-count AFTER,
+            # revoke-oldest only when genuinely over cap ([SECOND-MODEL-GATE]
+            # P2: mirrors the SQL's self-healing ordering — an unlocked race
+            # still converges to <= cap, unlike count-then-revoke-then-insert).
+            max_keys = int(team.get("max_api_keys")
+                           or self._default_max_api_keys())
+            kid = ulid()
+            reg.query(
+                "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
+                "key_prefix:$kp, created_by:$cb, created_via:'recovery', "
+                "created_at:$now, expires_at:null})",
+                params={"id": kid, "tid": team_id, "kh": key_hash,
+                        "kp": api_key[:10], "cb": "st_" + token_hash[:12],
+                        "now": now_iso},
+            )
+            # re-count AFTER the insert; only revoke when over cap (and a row
+            # genuinely existed to revoke)
+            rows = reg.query(
+                "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL "
+                "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
+                "RETURN k.id, k.created_at ORDER BY k.created_at ASC",
+                params={"tid": team_id},
+            ).result_set
+            if len(rows) > max_keys and rows:
+                reg.query(
+                    "MATCH (k:APIKey {id:$id}) SET k.revoked_at = $now",
+                    params={"id": rows[0][0], "now": now_iso},
+                )
+        self._audit(team_id, "st_" + token_hash[:12], "apikey_create",
+                     resource_type="apikey", resource_id=kid)
+        return {"api_key": api_key, "team_id": team_id,
+                "team_name": team.get("name"), "tier": team.get("tier") or "free",
+                "graph_name": team.get("graph_name") or f"team_{team_id}"}
+
+    def _default_max_api_keys(self) -> int:
+        from tortoise.pricing import tier_limits
+        return int(tier_limits("free").get("max_api_keys", 2))
 
     # ── Control Plane: Invitation CRUD ─────────────────────────────
 

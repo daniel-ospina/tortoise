@@ -2103,6 +2103,67 @@ async def _check_signup_ip_rate_limit(request: Request) -> None:
         retry_after_s=None)  # computed sliding-window remaining (P2-FIX-5)
 
 
+# ── Recovery limiter (#1709, scope §3) ───────────────────────────────────
+# POST /v1/agent/recover AND the token-present signup branch share ONE
+# limiter: a per-IP bucket (default 5/24h) + a per-token attempt cap
+# (default 10/h, keyed on the token HASH — never the raw token). A stolen
+# token must not enable unbounded mint/revoke churn; invalid-token probes
+# burn the per-IP bucket (accepted — the uniform 422 leaks nothing). The
+# mint limiter (2/24h above) bounds MINTING only — a token-present request
+# is possession-authenticated recovery, never a mint, and must neither
+# consume nor be blocked by the signup bucket.
+_RECOVER_BUCKETS: dict[str, list[float]] = defaultdict(list)
+_RECOVER_LOCK = asyncio.Lock()
+_RECOVER_TOKEN_BUCKETS: dict[str, list[float]] = defaultdict(list)
+_RECOVER_TOKEN_LOCK = asyncio.Lock()
+
+
+def _request_ip_key(request: Request) -> str | None:
+    """IP extraction shared by the signup + recovery limiters — the recovery
+    bucket must key IDENTICALLY to the signup bucket (request.state.client_ip
+    fallback chain), or a single client would split into two half-caps
+    (scope Cycle-3 P4; locked by a unit test)."""
+    return (getattr(request.state, "client_ip", None)
+            or (request.client.host if request.client else None))
+
+
+async def _check_recovery_rate_limit(request: Request,
+                                     token_hash: str | None = None) -> None:
+    """Shared recovery-surface limiter: per-IP bucket + per-token attempt cap.
+
+    Env-tunable (read at call time so tests monkeypatch without reload):
+    TORTOISE_RECOVER_IP_LIMIT (default 5), TORTOISE_RECOVER_IP_WINDOW_S
+    (default 86400), TORTOISE_RECOVER_TOKEN_LIMIT (default 10),
+    TORTOISE_RECOVER_TOKEN_WINDOW_S (default 3600). RATE_LIMIT_DISABLED=1
+    opts out (test env, mirror of the signup limiter). ``token_hash`` is
+    the SHA-256 hash of a WELL-FORMED token — malformed strings carry no
+    stable bucket key, so they burn only the per-IP bucket (uniform 422).
+    """
+    await _check_ip_bucket_rate_limit(
+        request, buckets=_RECOVER_BUCKETS, lock=_RECOVER_LOCK,
+        limit=_int_env("TORTOISE_RECOVER_IP_LIMIT", 5),
+        window_s=_int_env("TORTOISE_RECOVER_IP_WINDOW_S", 86400),
+        key=_request_ip_key(request),
+        detail={
+            "error_code": "over_recovery_ip_rate_limit",
+            "message": ("Too many key-recovery attempts from this IP. "
+                        "Try again later or contact support@premiselabs.co."),
+        },
+        retry_after_s=None)
+    if token_hash:
+        await _check_ip_bucket_rate_limit(
+            request, buckets=_RECOVER_TOKEN_BUCKETS, lock=_RECOVER_TOKEN_LOCK,
+            limit=_int_env("TORTOISE_RECOVER_TOKEN_LIMIT", 10),
+            window_s=_int_env("TORTOISE_RECOVER_TOKEN_WINDOW_S", 3600),
+            key=("signup-token", token_hash),
+            detail={
+                "error_code": "over_recovery_token_rate_limit",
+                "message": "Too many recovery attempts for this token. "
+                            "Try again later.",
+            },
+            retry_after_s=None)
+
+
 # ── Claim limiter (#1082, PR1 — P3-FIX-H restated) ────────────────────────
 # POST /v1/claim is an identity-LINKING endpoint (ATO-adjacent): a brute-
 # forced key × JWT pairing must be bounded. Explicit 24h-window bucket
@@ -6956,6 +7017,196 @@ async def reconcile(request: Request):
 # The key is shown once; the anonymous identity can attach an email later
 # (future upgrade path).
 
+# ── Agent signup tokens + keyless recovery (#1709, approach C) ────────────
+# A server-issued 256-bit st_<64hex> token minted at first signup (hash-only
+# at rest). Re-presenting the token IS the dedupe check AND the recovery
+# credential: no-token always mints; bad token → uniform 422 (identical body
+# for malformed/unknown/revoked/soft-deleted-team — no existence oracle); a
+# valid token → keyless recovery on the SAME team (a NEW minted key, never a
+# fabricated/unpersisted key). #741(a) is preserved literally: client
+# identity and x-device-id stay ignored.
+_SIGNUP_TOKEN_RE = re.compile(r"^st_[0-9a-f]{64}$")
+_INVALID_SIGNUP_TOKEN_DETAIL = {
+    "error_code": "invalid_signup_token",
+    "message": "Invalid signup token.",
+}
+
+
+def _hash_signup_token(token: str) -> str:
+    """SHA-256(PEPPER + token) — byte-identical to lookup_hash (auth.py:119);
+    domain separation from api-key lookup hashes is the st_ prefix."""
+    from tortoise.auth import lookup_hash
+    return lookup_hash(token)
+
+
+def _resolve_signup_token(cp, token: str) -> str | None:
+    """Format-validate + resolve a signup token → team_id | None.
+
+    Malformed tokens return None WITHOUT an RPC call (no token-existence
+    signal; the uniform 422 body is identical to not-found/revoked).
+    A control-plane failure RAISES (fail-closed → 500), never 422.
+    """
+    if not isinstance(token, str) or not _SIGNUP_TOKEN_RE.match(token):
+        return None
+    from tortoise.supabase_control import resolve_signup_token as _resolve
+    return _resolve(cp, _hash_signup_token(token))
+
+
+async def _agent_recover_flow(request: Request, signup_token: str) -> dict:
+    """Shared keyless-recovery flow (scope §2-§3).
+
+    Used by BOTH the token-present signup branch (orphan-prevention safety
+    net for legacy/buggy clients that re-signup while holding a token) and
+    POST /v1/agent/recover (canonical). Both call the same RPCs and share
+    the recovery limiter. Outcomes:
+    · valid token + live team → keyless recovery: a NEW key minted on the
+      SAME team via recover_team_key (FOR-UPDATE serialized cap-check + key
+      insert + #750.10 revoke-oldest-non-bootstrap in ONE transaction);
+      response {key, team_id, team_name, graph_name, tier} — the team echo
+      is possession-based (the token proves the team), NOT an oracle.
+    · valid token + SUSPENDED team → 403 _suspended_detail() (platform
+      convention; possession-authenticated so no oracle is added).
+    · malformed / unknown / revoked / soft-deleted → uniform 422
+      invalid_signup_token (a deleted team is indistinguishable from
+      never-existed).
+    Success feed = recovery-velocity (NEVER record_signup — ops metrics
+    must not conflate recoveries with mints).
+    """
+    import uuid as _uuid  # noqa: I001
+    from tortoise import abuse as _abuse
+    from tortoise.auth import lookup_hash as _lookup_hash
+    from tortoise.pricing import tier_limits
+    from tortoise.supabase_control import (
+        get_control_plane, is_supabase_enabled,
+        recover_team_key, SignupTokenRecoveryError,
+        _teams_row_fail_soft, _QUOTA_SELECT,
+        _TEAM_ADDITIVE_IMPORT_TIER, _TEAM_ADDITIVE_DKL_TIER,
+        _TEAM_ADDITIVE_0015_TIER, _TEAM_ADDITIVE_BILLING_TIER,
+    )
+
+    # [SECOND-MODEL-GATE] P2: normalize user-entered case BEFORE the format
+    # gate + hash — a copy-pasted token with uppercase hex must resolve to the
+    # same team (minted tokens are always lowercase; this widens acceptance,
+    # never changes minted values, and prevents the confirm-fresh-mint orphan).
+    if isinstance(signup_token, str):
+        signup_token = signup_token.lower()
+    token_hash = None
+    if isinstance(signup_token, str) and _SIGNUP_TOKEN_RE.match(signup_token):
+        token_hash = _hash_signup_token(signup_token)
+    await _check_recovery_rate_limit(request, token_hash)
+    ip = _request_ip_key(request)
+
+    if is_supabase_enabled():
+        cp = get_control_plane()
+        team_id = _resolve_signup_token(cp, signup_token)
+        if team_id is None:
+            raise HTTPException(status_code=422, detail=_INVALID_SIGNUP_TOKEN_DETAIL)
+        row = _teams_row_fail_soft(
+            cp, team_id, select=_QUOTA_SELECT,
+            # #1709 fixer P2.6: the FULL additive ladder (same as
+            # resolve_api_key) — the recovery emergency path must not 500 on
+            # migration skew (a schema one migration behind the newest
+            # additive drops that tier to safe defaults instead of raising).
+            additive_tiers=[_TEAM_ADDITIVE_IMPORT_TIER, _TEAM_ADDITIVE_DKL_TIER,
+                            _TEAM_ADDITIVE_0015_TIER,
+                            _TEAM_ADDITIVE_BILLING_TIER])
+        if row is None or row.get("deleted_at") is not None:
+            # soft-deleted team → uniform 422 (indistinguishable from
+            # never-existed; the token path never mints on a deleted team).
+            # deleted_at rides _TEAM_BASE_SELECT (review P1) so this check is
+            # REAL, not a dead .get() on an unselected column.
+            raise HTTPException(status_code=422, detail=_INVALID_SIGNUP_TOKEN_DETAIL)
+        if row.get("suspended_at") is not None:
+            raise HTTPException(status_code=403, detail=_suspended_detail())
+        lim = tier_limits(row.get("tier") or "free")
+        api_key = f"tt_{_uuid.uuid4().hex}"
+        lookup_hash = _lookup_hash(api_key)
+        try:
+            recover_team_key(
+                cp,
+                token_hash=token_hash,
+                team_id=team_id,
+                lookup_hash=lookup_hash,
+                key_prefix=api_key[:10],
+                max_api_keys=int(lim.get("max_api_keys", 2)))
+        except SignupTokenRecoveryError as e:
+            # token revoked between resolve and recover (revoke race) or team
+            # soft-deleted concurrently — uniform 422, never a partial mint
+            raise HTTPException(status_code=e.status,
+                                detail=_INVALID_SIGNUP_TOKEN_DETAIL) from e
+        await _async_audit(request, team_id, "agent_signup_recover",
+                           resource_type="team", resource_id=team_id)
+        _retain_feed_task(
+            "recover-" + (ip or "?"),
+            asyncio.create_task(asyncio.to_thread(
+                _abuse.record_recovery, ip, team_id)))
+        # [SECOND-MODEL-GATE] P2 (leak detection parity): a recovery mint is
+        # the surface where the token is the SOLE credential — a stolen-token
+        # recovery from a foreign IP must fire the same new-country ops alert
+        # the key-auth path fires (hosted_api.py check_new_country).
+        _retain_feed_task(
+            "recover-country-" + (ip or "?"),
+            asyncio.create_task(asyncio.to_thread(
+                _abuse.check_new_country, team_id,
+                _abuse.resolve_country(request.headers),
+                _abuse.get_engine().store)))
+        return {"key": api_key, "team_id": team_id,
+                "team_name": row.get("name") or team_id,
+                "graph_name": row.get("graph_name") or f"team_{team_id}",
+                "tier": row.get("tier") or "free"}
+
+    # ── Registry lane (selfhost) ──
+    from tortoise.exceptions import ControlPlaneError
+    if token_hash is None:
+        # #1709 fixer P2.1: format-gate BEFORE any registry scan — mirrors
+        # the Supabase lane's _resolve_signup_token isinstance gate. A body
+        # like {"signup_token": 123} passes the `is not None` signup-branch
+        # gate and would otherwise reach the registry full-scan
+        # (verify_api_key → key.encode()) → AttributeError → 500. The
+        # uniform 422 body is identical to malformed/unknown/revoked — no
+        # existence signal.
+        raise HTTPException(status_code=422, detail=_INVALID_SIGNUP_TOKEN_DETAIL)
+    sdk = _make_sdk(namespace="registry")
+    try:
+        node = sdk.signup_token_lookup(signup_token)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Agent signup failed") from e
+    if node is None:
+        raise HTTPException(status_code=422, detail=_INVALID_SIGNUP_TOKEN_DETAIL)
+    team_id = node.get("team_id") or ""
+    team = sdk.team_get(team_id)
+    if team is None or team.get("deleted_at"):
+        raise HTTPException(status_code=422, detail=_INVALID_SIGNUP_TOKEN_DETAIL)
+    if team.get("suspended_at") is not None:
+        raise HTTPException(status_code=403, detail=_suspended_detail())
+    try:
+        rec = sdk.signup_token_recover(signup_token)
+    except ControlPlaneError as e:
+        # token revoked between lookup and recover, or team deleted
+        # concurrently → uniform 422 (fail closed, never a partial mint)
+        raise HTTPException(status_code=422, detail=_INVALID_SIGNUP_TOKEN_DETAIL) from e
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Agent signup failed") from e
+    await _async_audit(request, team_id, "agent_signup_recover",
+                       resource_type="team", resource_id=team_id)
+    _retain_feed_task(
+        "recover-" + (ip or "?"),
+        asyncio.create_task(asyncio.to_thread(
+            _abuse.record_recovery, ip, team_id)))
+    # [SECOND-MODEL-GATE] P2 (leak detection parity): registry lane — same
+    # new-country alert as the Supabase lane / key-auth path.
+    _retain_feed_task(
+        "recover-country-" + (ip or "?"),
+        asyncio.create_task(asyncio.to_thread(
+            _abuse.check_new_country, team_id,
+            _abuse.resolve_country(request.headers),
+            _abuse.get_engine().store)))
+    return {"key": rec["api_key"], "team_id": team_id,
+            "team_name": rec.get("team_name") or team_id,
+            "graph_name": rec.get("graph_name") or f"team_{team_id}",
+            "tier": rec.get("tier") or "free"}
+
+
 @app.post("/v1/agent/signup")
 async def agent_signup(request: Request):
     """Mint a team + API key for an anonymous device (no email/dashboard).
@@ -6976,6 +7227,20 @@ async def agent_signup(request: Request):
     # x-device-id are ignored (a client-chosen identity trivially bypasses the
     # per-identity rate limit). The CLI generates its own identity server-side.
     from tortoise import abuse as _abuse  # R8 signup-velocity feed (#1081)
+    # #1709: parse the body FIRST — the mint limiter must bound MINTING only.
+    # A token-present request is possession-authenticated recovery, never a
+    # mint: it must neither consume nor be blocked by the 2/24h signup bucket
+    # (it gets the shared recovery limiter instead — compensating control).
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    if not isinstance(body, dict):
+        body = {}
+    signup_token = body.get("signup_token")  # BODY only — never a header (#741(a))
+    if signup_token is not None:
+        # Token-present re-signup = keyless recovery on the SAME team
+        # (orphan-prevention safety net for legacy/buggy clients that
+        # re-signup while holding a token — recover instead of orphaning).
+        return await _agent_recover_flow(request, signup_token)
+
     try:
         await _check_signup_ip_rate_limit(request)
     except HTTPException as exc:
@@ -6994,9 +7259,6 @@ async def agent_signup(request: Request):
     # #741(a): identity is ALWAYS server-side — client-supplied identity and
     # x-device-id are ignored (a client-chosen identity trivially bypasses the
     # per-identity rate limit). The CLI generates its own identity server-side.
-    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
-    if not isinstance(body, dict):
-        body = {}
     import uuid as _uuid
     identity = f"anon-{_uuid.uuid4().hex[:12]}"
 
@@ -7005,8 +7267,14 @@ async def agent_signup(request: Request):
     from tortoise.pricing import tier_limits
     from tortoise.supabase_control import (
         get_control_plane, is_supabase_enabled,
-        provision_team,
+        provision_team_with_token,
     )
+
+    # #1709: a fresh 256-bit st_ token, minted ONLY on the no-token path.
+    # Shown once (the recovery credential); hash-only at rest in both lanes.
+    import secrets as _secrets
+    signup_token = f"st_{_secrets.token_hex(32)}"
+    signup_token_hash = _lookup_hash(signup_token)  # SHA-256(PEPPER + st_...)
 
     # #1081: the per-identity count was removed — #741 makes it dead by
     # construction (server-side identity is fresh per request, count always
@@ -7031,13 +7299,13 @@ async def agent_signup(request: Request):
 
     if is_supabase_enabled():
         try:
-            # Atomic provision (0010): teams + membership (NULL user_id +
-            # identity) + api_keys in ONE transaction — a failure leaves
-            # nothing behind, so no compensating rollback is needed. The
-            # default-graph metadata is NOT written anywhere (no graphs
-            # table in the plan data model — graph_list derives it from
-            # teams.graph_name; see graph_metadata).
-            provision_team(get_control_plane(), **{
+            # Atomic provision (0010 + 20260814000001): teams + membership
+            # (NULL user_id + identity) + api_keys + the signup-token row in
+            # ONE transaction — a failure leaves nothing behind. The wrapper
+            # (provision_team_with_token) is NEW-named: provision_team stays
+            # untouched at 15 args (CREATE OR REPLACE with a trailing param
+            # would create an overload — scope cycle-2 P1).
+            provision_team_with_token(get_control_plane(), **{
                 "p_user_id": None,
                 "p_identity": identity,
                 "p_team_id": team_id,
@@ -7056,6 +7324,7 @@ async def agent_signup(request: Request):
                 "p_max_graphs": mg,
                 "p_ops_allowance": ops,
                 "p_graph_size_cap": nodes,
+                "p_signup_token_hash": signup_token_hash,
             })
         except Exception:
             raise HTTPException(status_code=500, detail="Agent signup failed")
@@ -7068,7 +7337,8 @@ async def agent_signup(request: Request):
                 getattr(request.state, "client_ip", None)
                 or (request.client.host if request.client else None), team_id)))
         return {"key": api_key, "team_id": team_id, "team_name": team_name, "graph_name": graph_name,
-                "identity": identity, "tier": "free"}
+                "identity": identity, "tier": "free",
+                "signup_token": signup_token}
 
     sdk = _make_sdk(namespace="registry")
     reg = sdk._get_registry()
@@ -7080,16 +7350,28 @@ async def agent_signup(request: Request):
             params={"id": team_id, "name": team_name, "now": now,
                     "mu": mu, "mg": mg, "mk": mk, "ops": ops, "nodes": nodes},
         )
-        # APIKey node
+        # APIKey node (#1709: created_via/expires_at prop parity with the
+        # Supabase lane — the dashboard lists both; expires_at:null = never)
         kid = _short_id()
         reg.query(
-            "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, key_prefix:$kp, created_by:$cb, created_at:$now})",
+            "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, key_prefix:$kp, "
+            "created_by:$cb, created_via:'provisioned', created_at:$now, expires_at:null})",
             params={"id": kid, "tid": team_id, "kh": key_hash, "kp": api_key[:10], "cb": identity, "now": now},
         )
         # Anonymous membership (owner)
         reg.query(
             "CREATE (m:Membership {team_id:$tid, user_id:$uid, role:'owner', status:'active', created_at:$now})",
             params={"tid": team_id, "uid": identity, "now": now},
+        )
+        # SignupToken node (#1709): hash-only — salted PBKDF2 (hash_api_key),
+        # the same hashed-lookup format as Invitation token_hash, so
+        # _verify_hashed_lookup("SignupToken", "token_hash", ...) can verify
+        # it at recovery time (sdk.py:11180 pattern).
+        reg.query(
+            "CREATE (s:SignupToken {token_hash:$th, lookup_key:$lk, "
+            "team_id:$tid, created_at:$now})",
+            params={"th": _hash(signup_token), "lk": _lookup_hash(signup_token),
+                    "tid": team_id, "now": now},
         )
         # Default graph node
         sdk._graph_create(team_id, "default", kind="default", namespace=graph_name)
@@ -7106,10 +7388,13 @@ async def agent_signup(request: Request):
         raise
     except Exception:
         # #741(c): rollback on partial failure — mirror register_user: DETACH
-        # DELETE Team + APIKey + Membership, drop the graph namespace.
+        # DELETE Team + APIKey + Membership + SignupToken, drop the graph
+        # namespace. The SignupToken node MUST ride the rollback (a failed
+        # mint must not leave an orphan token pointing at a deleted team).
         reg.query("MATCH (t:Team {id:$id}) DETACH DELETE t", params={"id": team_id})
         reg.query("MATCH (k:APIKey {team_id:$id}) DETACH DELETE k", params={"id": team_id})
         reg.query("MATCH (m:Membership {team_id:$id}) DETACH DELETE m", params={"id": team_id})
+        reg.query("MATCH (s:SignupToken {team_id:$id}) DETACH DELETE s", params={"id": team_id})
         try:
             sdk._get_proj().db.select_graph(graph_name).delete()
         except Exception:
@@ -7117,7 +7402,29 @@ async def agent_signup(request: Request):
         raise HTTPException(status_code=500, detail="Agent signup failed")
 
     return {"key": api_key, "team_id": team_id, "team_name": team_name, "graph_name": graph_name,
-            "identity": identity, "tier": "free"}
+            "identity": identity, "tier": "free",
+            "signup_token": signup_token}
+
+
+@app.post("/v1/agent/recover")
+async def agent_recover(request: Request):
+    """Keyless config-loss recovery (#1709, scope §3).
+
+    Body {signup_token} → verifies the hash → mints a NEW key on the SAME
+    team (data intact) — no support escalation, no 409 dead-end. Shares the
+    recovery limiter + flow with the token-present signup branch: per-IP
+    bucket (5/24h) + per-token attempt cap (10/h) + recovery-velocity feed.
+    Outcomes mirror the signup token branch: uniform 422 invalid_signup_token
+    for malformed/unknown/revoked/soft-deleted; 403 _suspended_detail() for
+    a suspended team (fail-closed — no fresh mint, no orphaning).
+    """
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    if not isinstance(body, dict):
+        body = {}
+    signup_token = body.get("signup_token")
+    if signup_token is None:
+        raise HTTPException(status_code=422, detail=_INVALID_SIGNUP_TOKEN_DETAIL)
+    return await _agent_recover_flow(request, signup_token)
 
 
 # ── Claim path (#1082, PR1 — indicators 1,2,3,5) ───────────────────────────

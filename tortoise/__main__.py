@@ -630,6 +630,127 @@ def _cmd_init(args):
     return 0
 
 
+
+def _read_stored_signup_token() -> str | None:
+    """Stored st_ token from the active configs (#1709).
+
+    cwd/.tortoise first (legacy shape), then the #1708 global
+    ~/.tortoise/credentials.json (the canonical store). The field is
+    additive in either file — the two land compatibly.
+    """
+    import json as _j
+    from pathlib import Path
+    for path in (Path.cwd() / ".tortoise",
+                 Path.home() / ".tortoise" / "credentials.json"):
+        try:
+            cfg = _j.loads(path.read_text())
+        except Exception:
+            continue
+        tok = cfg.get("signup_token") if isinstance(cfg, dict) else None
+        if isinstance(tok, str) and tok:
+            return tok
+    return None
+
+
+def _is_invalid_signup_token(body: str) -> bool:
+    """True when a 422 body is the uniform invalid_signup_token detail (#1709)."""
+    try:
+        import json as _j
+        detail = (_j.loads(body) or {}).get("detail")
+    except Exception:
+        return False
+    return isinstance(detail, dict) and detail.get("error_code") == "invalid_signup_token"
+
+
+def _cmd_recover(args) -> int:
+    """Keyless config-loss recovery (#1709): POST /v1/agent/recover with the
+    saved st_ token → a NEW key on the SAME team; config rewritten, data
+    intact. The token is persisted back into the config — the recover
+    endpoint does NOT re-issue tokens (rotation rejected), so without
+    persistence this surface would be one-shot-only and the NEXT key-loss
+    would silently fresh-mint and orphan the recovered team.
+    """
+    import json, os, sys, time, uuid  # noqa: E401, I001
+    from pathlib import Path
+    from urllib.request import Request, urlopen
+    from urllib.error import URLError, HTTPError
+
+    token = getattr(args, "token", None) or _read_stored_signup_token()
+    if not token:
+        print("No recovery token found. Pass --token st_... or run "
+              "'tortoise signup' first.", file=sys.stderr)
+        return 1
+    api_url = os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
+    print("Recovering your team key with the saved recovery token…")
+    try:
+        req = Request(
+            f"{api_url}/v1/agent/recover",
+            data=json.dumps({"signup_token": token}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+    except HTTPError as e:
+        body = e.read().decode() if e.fp else ""
+        if e.code == 422:
+            print("Recovery failed: invalid signup token. (Truncated or revoked? "
+                  "The old team may still be reachable via its key.)",
+                  file=sys.stderr)
+            return 1
+        if e.code == 403:
+            sus = _suspended_info(body)
+            if sus is not None:
+                print(f"Recovery failed: {sus[0]}", file=sys.stderr)
+                return 1
+            print(f"Recovery failed (403): {body}", file=sys.stderr)
+            return 1
+        print(f"Recovery failed ({e.code}): {body}", file=sys.stderr)
+        return 1
+    except (URLError, ValueError, json.JSONDecodeError) as e:
+        print(f"Cannot reach API at {api_url}: {e}", file=sys.stderr)
+        return 1
+
+    if not (isinstance(data, dict) and "key" in data and "team_id" in data):
+        # #1709 fixer P2.2: a 200 with valid JSON but no key/team_id (proxy/
+        # edge garbage) must not KeyError-traceback on the derefs below —
+        # mirror _cmd_signup's malformed-response guard (fail-soft: the
+        # recovery may have committed server-side, so never blindly retry).
+        print("Recovery may have succeeded but the response was malformed "
+              "(missing 'key' or 'team_id') — check the dashboard or support "
+              "before re-running; do NOT blindly retry.", file=sys.stderr)
+        return 1
+
+    config = {
+        "api_key": data["key"],
+        "api_url": api_url,
+        "team_id": data["team_id"],
+        "team_name": data.get("team_name"),
+        "signup_token": token,  # ⛔ persist — recovery must not be one-shot
+    }
+    # Write to the #1708 global store (0600, dir 0700, atomic) — same shape
+    # _cmd_signup uses, so resolver precedence stays consistent.
+    try:
+        home_dir = Path.home() / ".tortoise"
+        home_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(home_dir, 0o700)
+        config_path = home_dir / "credentials.json"
+        tmp_path = home_dir / f"credentials.json.tmp-{uuid.uuid4().hex}"
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(config, indent=2) + "\n")
+        os.replace(tmp_path, config_path)
+    except OSError as e:
+        print(f"Recovered key could NOT be saved to config: {e}", file=sys.stderr)
+        print(f"   API key (save it now): {data['key']}", file=sys.stderr)
+        return 1
+    print(f"✅ Key recovered on team {data.get('team_name')} (data intact)")
+    print(f"   API key: {data['key']}")
+    print(f"   Config saved to {config_path} (shown once — store it)")
+    print(f"   Recovery token kept: {token[:14]}…")
+    return 0
+
+
 def _cmd_signup(args) -> int:
     """Zero-email signup (issue #663): mint a working tt_ key from the CLI.
 
@@ -816,52 +937,93 @@ def _cmd_signup(args) -> int:
         stored["device_id"] = legacy_device_id
     device_id = stored.get("device_id") or f"anon-{uuid.uuid4().hex[:12]}"
 
-    print(f"Signing up for a free hosted team (anonymous, no email)…")  # noqa: F541
-    try:
-        req = Request(
-            f"{mint_url}/v1/agent/signup",
-            data=json.dumps({"identity": device_id}).encode(),
-            headers={"Content-Type": "application/json", "X-Device-Id": device_id},
-            method="POST",
-        )
-        with urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
-    except HTTPError as e:
-        body = e.read().decode() if e.fp else ""
-        if e.code == 429:
-            # #1081 P3: friendly retry window + support pointer instead of the
-            # raw JSON body. Retry-After is the RFC 7231 contract; tolerate
-            # both seconds and (hypothetically) HTTP-date via isdigit guard.
-            retry = (e.headers.get("Retry-After")
-                     if e.headers and e.headers.get("Retry-After") else None)
-            when = f"{int(retry)}s" if (retry and retry.isdigit()) else "later"
-            if reminting_after_401:
-                # D2: a revoked stored key + exhausted budget — the user must
-                # not be told to "wait" as if nothing else is wrong.
-                print(f"Signup rate limit reached — try again in {when}. "
-                      "Note: your stored key is ALSO invalid — fix or revoke it, "
-                      "or --force a fresh mint after the window. "
-                      "Need more keys? Contact support@premiselabs.co.",
-                      file=sys.stderr)
-            else:
-                print(f"Signup rate limit reached — try again in {when}. "
-                      "Need more keys? Contact support@premiselabs.co.",
-                      file=sys.stderr)
-            return 1
-        print(f"Signup failed ({e.code}): {body}", file=sys.stderr)
-        return 1
-    except URLError as e:
-        print(f"Cannot reach API at {mint_url}: {e}", file=sys.stderr)
-        return 1
-    except (ValueError, json.JSONDecodeError, TimeoutError, OSError):
-        # 200-with-garbage (proxy/mitm) or a stall after the server accepted:
-        # the server DID mint — "Cannot reach API" would mislead the user into
-        # retrying (the double-fire pattern).
-        print("A key may have been minted but the response was unreadable — "
-              "check the dashboard or support before re-running; "
-              "do NOT blindly retry.", file=sys.stderr)
-        return 1
+    # #1709: a stored st_ signup token re-presents the SAME team on re-signup
+    # (keyless recovery — the dedupe check). Read from the active configs.
+    stored_token = _read_stored_signup_token()
+    if force:
+        # #1709 fixer P2.4: --force is the documented escape hatch — a FRESH
+        # mint, never a recovery. Without this the stored token was still
+        # re-presented and --force silently performed a RECOVERY (a suspended
+        # team + dead token could never be escaped). Clearing it here also
+        # makes the recovery/fresh-mint branch distinction below purely
+        # request-shaped (P2.5).
+        stored_token = None
 
+    while True:
+        print(f"Signing up for a free hosted team (anonymous, no email)…")  # noqa: F541
+        payload = {"identity": device_id}
+        if stored_token:
+            # #1709: token possession = the dedupe credential — the server
+            # RECOVERS the same team (new key, no second team).
+            payload["signup_token"] = stored_token
+        try:
+            req = Request(
+                f"{mint_url}/v1/agent/signup",
+                data=json.dumps(payload).encode(),
+                headers={"Content-Type": "application/json", "X-Device-Id": device_id},
+                method="POST",
+            )
+            with urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read())
+        except HTTPError as e:
+            body = e.read().decode() if e.fp else ""
+            if e.code == 429:
+                # #1081 P3: friendly retry window + support pointer instead of the
+                # raw JSON body. Retry-After is the RFC 7231 contract; tolerate
+                # both seconds and (hypothetically) HTTP-date via isdigit guard.
+                retry = (e.headers.get("Retry-After")
+                         if e.headers and e.headers.get("Retry-After") else None)
+                when = f"{int(retry)}s" if (retry and retry.isdigit()) else "later"
+                if reminting_after_401:
+                    # D2: a revoked stored key + exhausted budget — the user must
+                    # not be told to "wait" as if nothing else is wrong.
+                    print(f"Signup rate limit reached — try again in {when}. "
+                          "Note: your stored key is ALSO invalid — fix or revoke it, "
+                          "or --force a fresh mint after the window. "
+                          "Need more keys? Contact support@premiselabs.co.",
+                          file=sys.stderr)
+                else:
+                    print(f"Signup rate limit reached — try again in {when}. "
+                          "Need more keys? Contact support@premiselabs.co.",
+                          file=sys.stderr)
+                return 1
+            if e.code == 422 and stored_token and _is_invalid_signup_token(body):
+                # #1709 P3: a revoked/truncated token must NOT silently orphan the
+                # original team — warn FIRST and require confirmation before
+                # clearing the token + minting a NEW team. Non-interactive runs
+                # fail CLOSED (no mint, no orphan).
+                print("⚠️  Your recovery token is invalid — this will create a NEW "
+                      "team; the old team will be unreachable.", file=sys.stderr)
+                if not sys.stdin.isatty():
+                    print("Non-interactive — aborting. Remove the invalid token from "
+                          "your config and re-run to mint fresh.", file=sys.stderr)
+                    return 1
+                ans = input("Type YES to continue with a fresh team: ")
+                if ans.strip() != "YES":
+                    print("Aborted — no new team created.", file=sys.stderr)
+                    return 1
+                stored_token = None  # cleared; fresh mint below
+                continue
+            if e.code == 403:
+                sus = _suspended_info(body)
+                if sus is not None:
+                    print(f"This team is suspended: {sus[0]}", file=sys.stderr)
+                    return 1
+            print(f"Signup failed ({e.code}): {body}", file=sys.stderr)
+            return 1
+        except URLError as e:
+            print(f"Cannot reach API at {mint_url}: {e}", file=sys.stderr)
+            return 1
+        except (ValueError, json.JSONDecodeError, TimeoutError, OSError):
+            # 200-with-garbage (proxy/mitm) or a stall after the server accepted:
+            # the server DID mint — "Cannot reach API" would mislead the user into
+            # retrying (the double-fire pattern).
+            print("A key may have been minted but the response was unreadable — "
+                  "check the dashboard or support before re-running; "
+                  "do NOT blindly retry.", file=sys.stderr)
+            return 1
+    
+        break
     if not (isinstance(data, dict) and "key" in data):
         # 200 with valid JSON but no `key` (edge/proxy): the server may still
         # have minted — same fail-soft contract as the garbage-200 leg above.
@@ -876,6 +1038,15 @@ def _cmd_signup(args) -> int:
     # (#1708 D4): ~/.tortoise/credentials.json (0600), dir 0700, atomic
     # unique-tmp write — fixes the IsADirectoryError crash when cwd == ~
     # (previously wrote to cwd/.tortoise which IS the data home directory).
+    # #1709: the signup_token is an ADDITIVE field (mint → the fresh token;
+    # recovery → the stored token is kept — the server never re-issues tokens).
+    # #1709 fixer P2.5: a response signup_token is ONLY authoritative on the
+    # fresh-mint branch — distinguish by whether the request PRESENTED a token
+    # (stored_token non-None here ⟺ the successful request was a recovery; the
+    # 422-confirm branch cleared it before continuing). A proxy-injected
+    # signup_token on the recovery branch must never overwrite the real
+    # stored credential.
+    new_token = data.get("signup_token") if not stored_token else None
     config = {
         "api_key": data["key"],
         "api_url": mint_url,
@@ -883,6 +1054,10 @@ def _cmd_signup(args) -> int:
         "team_name": data.get("team_name"),
         "device_id": device_id,
     }
+    if new_token:
+        config["signup_token"] = new_token
+    elif stored_token:
+        config["signup_token"] = stored_token
     try:
         home_dir.mkdir(parents=True, exist_ok=True)
         os.chmod(home_dir, 0o700)
@@ -942,9 +1117,18 @@ def _cmd_signup(args) -> int:
               "this new key at read time — unset/remove it to use the key just minted.",
               file=sys.stderr)
 
-    print(f"✅ Free team created: {data.get('team_name')}")
+    if new_token:
+        print(f"✅ Free team created: {data.get('team_name')}")
+    else:
+        print(f"✅ Key recovered on existing team: {data.get('team_name')} (data intact)")
     print(f"   API key: {data['key']}")
     print(f"   Config saved to {config_path} (shown once — store it)")
+    if new_token:
+        # #1709: the recovery token is the SINGLE save point (the only way
+        # back into this team if the key is lost). Shown once, like the key.
+        print(f"   Recovery token: {new_token}")
+        print("   RECOVERY TOKEN — save this: it is the only way back into "
+              "this team if your key is lost.")
     if getattr(args, "claim", False):
         # #1082: the anonymous team can attach a verified identity (same key,
         # same team, memories intact) — one-time human act, no device flow.
@@ -4317,6 +4501,14 @@ def main(argv: list[str] | None = None) -> int:
              "with GitHub/Google on the dashboard and paste this key to attach "
              "a verified identity to the anonymous team (#1082)",
     )
+    recover_p = sp.add_parser(
+        "recover",
+        help="Keyless team-key recovery with the saved st_ signup token (#1709).",
+    )
+    recover_p.add_argument(
+        "--token", type=str, default=None,
+        help="The st_ signup token (defaults to the stored one).",
+    )
     # tortoise index github <url>
     idx = sp.add_parser("index", help="Index content into the graph")
     idx_sp = idx.add_subparsers(dest="index_cmd")
@@ -4471,6 +4663,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     elif args.cmd == "signup":
         return _cmd_signup(args)
+    elif args.cmd == "recover":
+        return _cmd_recover(args)
     elif args.cmd == "team":
         if args.team_cmd == "info":
             return _cmd_team_info(args)

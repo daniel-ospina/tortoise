@@ -346,21 +346,41 @@ class TestResolveApiKeyFailSoft:
         fake.missing_columns = None
         assert resolve_api_key(fake, TOKEN)["dashboard_key_login"] is False
 
-    def test_resolve_api_key_unaffected_by_deletion_columns_drift(self, fake,
-                                                                 caplog):
-        """#1096: the 20260813000001 class (deleted_at/grace_hours) is NOT in
-        _QUOTA_SELECT — resolve is unaffected (no degrade, no raise, no
-        WARNING, query count unchanged). The discriminating boundary of
-        suspension-fails-soft vs deletion-fails-closed."""
-        fake.missing_columns = {"teams": {"deleted_at", "grace_hours"}}
-        fake.seed("api_keys", [_key_row()])
-        with caplog.at_level("WARNING", logger="tortoise.supabase_control"):
-            team = resolve_api_key(fake, TOKEN)
-        assert team is not None
-        assert team["suspended_at"] is None
-        assert not any("additive" in r.message or "base-only read failed" in r.message
-                       for r in caplog.records)
-        assert fake.query_count == 2  # api_keys + teams (single round-trip)
+    def test_resolve_api_key_deletion_columns_drift_fails_closed(self, caplog):
+        """#1096/#1709-fixer-P1: the 20260813000001 class (deleted_at/
+        grace_hours) now RIDES _TEAM_BASE_SELECT (the #1709 recovery guard
+        reads deleted_at for real) → a schema missing it FAILS CLOSED on
+        resolve — never authenticates a team whose soft-delete state cannot
+        be read (same contract as team_by_id's deletion guard; suspension
+        stays fail-soft, deletion fails-closed)."""
+        fake = FakeControlPlane(
+            {"api_keys": [_key_row()], "team_memberships": [],
+             "teams": [dict(FREE_TEAM)]},
+            missing_columns={"teams": {"deleted_at", "grace_hours"}})
+        with caplog.at_level("WARNING", logger="tortoise.supabase_control"):  # noqa: SIM117
+            with pytest.raises(RuntimeError):
+                resolve_api_key(fake, TOKEN)
+        assert any("base-only read failed" in r.message for r in caplog.records)
+
+    def test_quota_select_reads_deleted_at_and_graph_name(self, fake):
+        """#1709-fixer-P1: deleted_at + graph_name ride _TEAM_BASE_SELECT (so
+        _QUOTA_SELECT) — the app-layer deleted-team check in
+        _agent_recover_flow reads REAL state (previously a dead .get() on an
+        unselected column)."""
+        fake.tables["teams"][0]["deleted_at"] = "2026-01-01T00:00:00Z"
+        fake.tables["teams"][0]["graph_name"] = "team_team-free-001"
+        from tortoise.supabase_control import _QUOTA_SELECT, _teams_row_fail_soft
+
+        row = _teams_row_fail_soft(fake, "team-free-001", select=_QUOTA_SELECT,
+                                   additive_tiers=[])
+        assert row is not None
+        assert row["deleted_at"] == "2026-01-01T00:00:00Z"
+        assert row["graph_name"] == "team_team-free-001"
+        # not-drifted: deleted_at is carried as-is (None when unset)
+        fake.tables["teams"][0]["deleted_at"] = None
+        row = _teams_row_fail_soft(fake, "team-free-001", select=_QUOTA_SELECT,
+                                   additive_tiers=[])
+        assert row["deleted_at"] is None
 
     def test_resolve_api_key_carries_suspension_state(self, fake):
         """O/I/T target 2: with the columns PRESENT, suspension state still
@@ -1450,8 +1470,11 @@ class TestClientConstruction:
             assert cp.rpc("provision_team", {"a": 1}) is None
             assert cp.rpc("provision_team", {"a": 2}) is None
             assert calls["n"] == 2
-            # fail-closed: non-2xx raises RuntimeError
-            with pytest.raises(RuntimeError, match="HTTP 500"):
+            # fail-closed: non-2xx raises RuntimeError with the PostgREST
+            # error body's message embedded (review P1 — the seam used to
+            # discard the body, which killed every caller-side code mapping
+            # like _RECOVER_ERROR_CODES / _CLAIM_ERROR_CODES).
+            with pytest.raises(RuntimeError, match="HTTP 500: boom"):
                 cp.rpc("no_such_fn")
             # and the client still works after the failure
             assert cp.rpc("provision_team", {"a": 3}) is None

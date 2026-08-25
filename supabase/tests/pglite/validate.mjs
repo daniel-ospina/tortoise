@@ -67,6 +67,8 @@ const files = ['0001_user_teams.sql','0002_audit_events.sql','0003_team_membersh
                '20260813000003_audit_ip_time_index.sql',
                '20260813000004_claim_membership.sql',
                '20260813000005_dashboard_login.sql',
+               '20260813000006_inviter_email.sql',
+               '20260814000001_agent_signup_tokens.sql',
                '20260825000001_api_key_names.sql'];
 for (const f of files) {
   const sql = readFileSync(`${MIG_DIR}/${f}`, 'utf8');
@@ -87,6 +89,7 @@ const suites = [
   '0006-0009_schema_rls_constraints.sql',
   '0010_provisioning_rpcs.sql',
   '20260813000004_claim_membership.sql',
+  '20260814000001_agent_signup_tokens.sql',
 ];
 for (const suite of suites) {
   const sql = readFileSync(`${TESTS_DIR}/${suite}`, 'utf8');
@@ -126,8 +129,13 @@ const checks = await db.query(`SELECT
      AND indexname='uq_member_identity_team') AS identity_anchor_index,
   (SELECT count(*) FROM pg_indexes WHERE schemaname='public' AND tablename='teams'
      AND indexname='uq_teams_name') AS teams_name_unique,
-  (SELECT count(*) FROM public.teams WHERE id LIKE '%-770' OR id LIKE '%-769' OR id LIKE 'dup-%') AS leftover_test_teams,
-  (SELECT count(*) FROM public.team_memberships WHERE team_id LIKE '%-770' OR team_id LIKE '%-769') AS leftover_test_memberships;
+  (SELECT count(*) FROM public.teams WHERE id LIKE '%-770' OR id LIKE '%-769' OR id LIKE 'dup-%' OR id LIKE '%-1709') AS leftover_test_teams,
+  (SELECT count(*) FROM public.team_memberships WHERE team_id LIKE '%-770' OR team_id LIKE '%-769' OR team_id LIKE '%-1709') AS leftover_test_memberships,
+  (SELECT count(*) FROM pg_indexes WHERE schemaname='public' AND tablename='agent_signup_tokens'
+     AND indexname='uq_agent_signup_tokens_team') AS signup_tokens_team_unique,
+  (SELECT count(*) FROM pg_proc WHERE proname='recover_team_key') AS recover_team_key,
+  (SELECT count(*) FROM pg_proc WHERE proname='resolve_signup_token') AS resolve_signup_token,
+  (SELECT count(*) FROM pg_proc WHERE proname='provision_team_with_token') AS provision_team_with_token;
 `);
 console.log('spot checks:', JSON.stringify(checks.rows[0]));
 
@@ -135,7 +143,9 @@ const r = checks.rows[0];
 if (!(r.provision_team === 1 && r.update_user_team === 0 && r.reveal_api_key === 1
       && r.identity_anchor_index === 1 && r.teams_name_unique === 1
       && r.leftover_test_teams === 0
-      && r.leftover_test_memberships === 0)) {
+      && r.leftover_test_memberships === 0
+      && r.signup_tokens_team_unique === 1 && r.recover_team_key === 1
+      && r.resolve_signup_token === 1 && r.provision_team_with_token === 1)) {
   console.error('✗ spot checks failed — see JSON above');
   process.exit(1);
 }
