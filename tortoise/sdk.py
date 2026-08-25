@@ -10763,7 +10763,10 @@ class TortoiseSDK:
         Writes to the control_plane registry graph. Creates a tenant
         graph (team_{name}) for Point/Operator storage.
 
-        Returns {name, graph_name, api_key, id}.
+        Returns {name, graph_name, api_key, id} on first creation; on an
+        idempotent re-call (same idempotency_key) returns
+        {name, graph_name, id, existing: True} with NO api_key — the caller
+        already holds the plaintext from the original creation (#1710).
 
         #765 (plan Task 8 — SDK control-plane backend env-gated): the SDK
         control-plane backend stays REGISTRY-BACKED — the
@@ -10789,8 +10792,6 @@ class TortoiseSDK:
                 f"Invalid team name: {name!r}. Use alphanumeric, hyphens, underscores."
             )
 
-        api_key = f"tt_{uuid.uuid4().hex}"
-        key_hash = hash_api_key(api_key)
         graph_name = f"team_{name}"
         proj = self._get_proj()
         reg = self._get_registry()
@@ -10804,9 +10805,17 @@ class TortoiseSDK:
             ).result_set
             if existing:
                 row = existing[0]
+                # #1710: return NO api_key here — a key minted at the top of
+                # the function is never hashed/persisted on this branch, so
+                # returning it handed callers a dead key that fails auth on
+                # first use. The plaintext belongs to the original creation.
                 return {"name": name, "graph_name": graph_name,
-                        "api_key": api_key, "id": row[0],
-                        "existing": True}
+                        "id": row[0], "existing": True}
+
+        # Mint the key only on the CREATE path (after the idempotency check)
+        # so the existing branch never mints or persists anything (#1710).
+        api_key = f"tt_{uuid.uuid4().hex}"
+        key_hash = hash_api_key(api_key)
 
         # Duplicate name check
         dup = reg.query(
