@@ -9724,20 +9724,24 @@ class TortoiseSDK:
             match_source = strat_name
         else:
             ranked_lists = list(raw_results.values())
-            # #1657 weighted RRF: per-strategy fusion weights, default OFF
-            # (byte-identical). The measured fix for fusion dilution — the
-            # burn showed equal-weight RRF costs ~2 nDCG pts when a strong
-            # vector leg is diluted by weak FTS/structural legs. Knob:
-            # TORTOISE_FUSION_WEIGHTS='{"vector": 1.5, "fts": 1.0}' (JSON).
-            # None → all 1.0 → identical to pre-#1657.
-            fusion_weights = None
+            # #1657 weighted RRF: per-strategy fusion weights. The measured
+            # fix for fusion dilution — the burn showed equal-weight RRF
+            # costs ~2 nDCG pts when a strong vector leg is diluted by weak
+            # FTS/structural legs. PRODUCTION DEFAULT (owner decision
+            # 2026-08-25): vector 1.5x — the bge-small vector leg is the
+            # strongest retriever; the HNSW surface shows hybrid > vector-only
+            # (additive value from FTS/structural), so a moderate 1.5x shifts
+            # toward the stronger leg without abandoning the others. Env
+            # override for tuning: TORTOISE_FUSION_WEIGHTS='{"vector": 2.0}'
+            # (JSON; the LongMemEval-S re-burn later will refine this).
+            fusion_weights = {"vector": 1.5}
             _fw = os.environ.get("TORTOISE_FUSION_WEIGHTS")
             if _fw:
                 import json as _json
                 try:
                     fusion_weights = _json.loads(_fw)
                 except (ValueError, TypeError):
-                    fusion_weights = None
+                    fusion_weights = {"vector": 1.5}
             fused = rrf_fusion(
                 ranked_lists,
                 strategy_names=list(raw_results.keys()),
