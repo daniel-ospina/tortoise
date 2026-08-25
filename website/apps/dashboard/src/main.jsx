@@ -2378,7 +2378,7 @@ function claimIntentInFlight() {
                         <span className="dim small">the ingest skill — run it to record a research finding: it creates a Point and surfaces related claims to connect.</span>
                       </div>
                       <div className="wizard-nav">
-                        <span className="wizard-nav-spacer" />
+                        <button type="button" className="ghost" onClick={() => { welcomeKey ? setWelcomeOriented(false) : setWelcomeMode(false) }}>← Back</button>
                         <div className="wizard-nav-actions">
                           <button type="button" className="btn-primary" onClick={() => setWizardStep(1)}>Next</button>
                         </div>
@@ -2464,6 +2464,9 @@ function claimIntentInFlight() {
                   {wizardStep === 4 && (
                     <div className="done">
                       <p className="dim">Welcome to Tortoise — your graph is live, your agent knows how to use it, and your decisions are being recorded.</p>
+                      <div className="wizard-nav">
+                        <button type="button" className="ghost" onClick={() => setWizardStep(3)}>← Back</button>
+                      </div>
                       <div className="wizard-actions">
                         <button type="button" className="btn-primary" onClick={wizardComplete}>Open my dashboard →</button>
                         <a className="ghost" href="https://tortoise.premiselabs.co/docs" target="_blank" rel="noreferrer">Read the docs</a>
@@ -2548,10 +2551,11 @@ function claimIntentInFlight() {
           {/* #1623: Billing — plan, usage, upgrade/portal. Session-gated like
               the rest of the dashboard (anon teams get the Protect screen). */}
           <button className={tab === 'billing' ? 'active' : ''} onClick={() => setTab('billing')}>Billing</button>
-          {/* #1680: the wizard is reachable anytime — advanced users can go
-              back to any onboarding step (skills, harness, GitHub, seed). */}
-          <button className="ghost small" onClick={() => { setWizardStep(0); setWelcomeMode(true) }}>Setup</button>
         </nav>
+        {/* #1689: always-visible — OUTSIDE the nav (which can overflow off
+            narrow windows), fixed in the header's right side, on every tab.
+            Reopens the wizard at step 0 (skills). */}
+        <button className="ghost small setup-header" onClick={() => { setWizardStep(0); setWelcomeMode(true) }}>Setup</button>
         {/* #1148-ux: account blob — GitHub/Vercel/Linear pattern: current
             workspace name + avatar top-right; dropdown switches team and
             signs out. Replaces the bare team <select> (which read as "No
@@ -2650,13 +2654,6 @@ function claimIntentInFlight() {
               </span>
             )}
           </div>
-        )}
-
-        {tab === 'overview' && team && !showReentryCard && (
-          <section className="overview setup-revisit" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '1rem', flexWrap: 'wrap', padding: '0.85rem 1.25rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 10, marginBottom: '1rem' }}>
-            <span className="dim small">Need to change your agent, reconnect, or re-seed? The setup wizard has every step.</span>
-            <button className="ghost" onClick={() => { setWizardStep(0); setWelcomeMode(true) }}>Back to setup →</button>
-          </section>
         )}
 
         {tab === 'overview' && alerts.length > 0 && (
