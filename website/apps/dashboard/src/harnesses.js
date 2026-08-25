@@ -12,11 +12,13 @@ const CURSOR_MCP_CONFIG_ENV = {
   },
 }
 
+// pi's mcp-client expands plain ${VAR} only — an env: prefix would
+// yield an empty Bearer header (verified against the mcp-client extension).
 const PI_MCP_CONFIG_ENV = {
   mcpServers: {
     tortoise: {
       url: MCP_URL,
-      headers: { Authorization: 'Bearer ${env:TORTOISE_API_KEY}' },
+      headers: { Authorization: 'Bearer ${TORTOISE_API_KEY}' },
     },
   },
 }
