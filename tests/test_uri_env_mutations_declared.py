@@ -48,6 +48,7 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_commit_schema.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     "test_embedded_concurrency.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',
                                       r"os\.environ\.pop\(\s*['\"]TORTOISE_DB_URI['\"]"],
+    "test_ep_directed_nand.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],  # MCP-tool + SDK shared-store contract (PR #1684)
     "test_extractor_reliability.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     "test_hard_reject.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     "test_index_cli.py": [r'os\.environ\.pop\(\s*["\']TORTOISE_DB_URI["\']'],  # embedded-file-contract module fixture (PR #1684)
