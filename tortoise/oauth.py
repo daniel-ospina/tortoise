@@ -773,46 +773,46 @@ _CONSENT_HTML = """<!DOCTYPE html>
 <title>Authorize MCP client — Tortoise</title>
 <meta name="theme-color" content="#060b14">
 <style>
-  *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
-  :root {{
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
     --bg: #060b14; --surface: #0d1a2d; --text: #cbd5e1; --text-dim: #94a3b8;
     --accent: #06b6d4; --accent-hover: #0891b2; --green: #4ade80;
     --red: #ef4444; --gold: #f59e0b; --border: #1e293b;
     --mono: 'SF Mono','Cascadia Code','Fira Code','JetBrains Mono',monospace;
     --serif: 'Georgia','Times New Roman',serif;
-  }}
-  body {{ background: var(--bg); color: var(--text); font-family: var(--mono);
+  }
+  body { background: var(--bg); color: var(--text); font-family: var(--mono);
          font-size: 14px; line-height: 1.6; -webkit-font-smoothing: antialiased;
          display: flex; align-items: center; justify-content: center;
-         min-height: 100vh; padding: 24px; }}
-  .card {{ width: 100%; max-width: 460px; background: var(--surface);
-          border: 1px solid var(--border); border-radius: 10px; padding: 2rem; }}
-  .logo {{ font-family: var(--serif); font-size: 1.4rem; margin-bottom: 1.5rem; }}
-  .logo span {{ color: var(--accent); }}
-  h1 {{ font-family: var(--serif); font-size: 1.3rem; font-weight: 400;
-       margin-bottom: .5rem; }}
-  .muted {{ color: var(--text-dim); font-size: 13px; margin-bottom: 1.25rem; }}
-  .row {{ display: flex; justify-content: space-between; padding: .5rem 0;
-         border-bottom: 1px solid var(--border); font-size: 13px; }}
-  .row .k {{ color: var(--text-dim); }}
-  .row .v {{ color: var(--text); word-break: break-all; text-align: right;
-            max-width: 60%; }}
-  .actions {{ display: flex; gap: .75rem; margin-top: 1.5rem; }}
-  button {{ font-family: var(--mono); font-size: 14px; font-weight: 600;
+         min-height: 100vh; padding: 24px; }
+  .card { width: 100%; max-width: 460px; background: var(--surface);
+          border: 1px solid var(--border); border-radius: 10px; padding: 2rem; }
+  .logo { font-family: var(--serif); font-size: 1.4rem; margin-bottom: 1.5rem; }
+  .logo span { color: var(--accent); }
+  h1 { font-family: var(--serif); font-size: 1.3rem; font-weight: 400;
+       margin-bottom: .5rem; }
+  .muted { color: var(--text-dim); font-size: 13px; margin-bottom: 1.25rem; }
+  .row { display: flex; justify-content: space-between; padding: .5rem 0;
+         border-bottom: 1px solid var(--border); font-size: 13px; }
+  .row .k { color: var(--text-dim); }
+  .row .v { color: var(--text); word-break: break-all; text-align: right;
+            max-width: 60%; }
+  .actions { display: flex; gap: .75rem; margin-top: 1.5rem; }
+  button { font-family: var(--mono); font-size: 14px; font-weight: 600;
            padding: .6rem 1rem; border-radius: 6px; border: 1px solid var(--border);
-           cursor: pointer; flex: 1; }}
-  .btn-auth {{ background: var(--accent); color: #04121a; }}
-  .btn-auth:hover {{ background: var(--accent-hover); }}
-  .btn-deny {{ background: transparent; color: var(--text-dim); }}
-  .error {{ display: none; color: var(--red); margin-top: 1rem; font-size: 13px; }}
-  .error.visible {{ display: block; }}
-  input {{ width: 100%; background: var(--bg); border: 1px solid var(--border);
+           cursor: pointer; flex: 1; }
+  .btn-auth { background: var(--accent); color: #04121a; }
+  .btn-auth:hover { background: var(--accent-hover); }
+  .btn-deny { background: transparent; color: var(--text-dim); }
+  .error { display: none; color: var(--red); margin-top: 1rem; font-size: 13px; }
+  .error.visible { display: block; }
+  input { width: 100%; background: var(--bg); border: 1px solid var(--border);
           color: var(--text); border-radius: 6px; padding: .6rem .75rem;
-          font-family: var(--mono); font-size: 14px; margin-bottom: .75rem; }}
-  .providers {{ display: flex; gap: .75rem; margin-bottom: .75rem; }}
-  .btn-provider {{ background: var(--bg); color: var(--text); }}
-  .btn-provider:hover {{ border-color: var(--accent); }}
-  .spinner {{ color: var(--text-dim); font-size: 13px; margin-top: 1rem; }}
+          font-family: var(--mono); font-size: 14px; margin-bottom: .75rem; }
+  .providers { display: flex; gap: .75rem; margin-bottom: .75rem; }
+  .btn-provider { background: var(--bg); color: var(--text); }
+  .btn-provider:hover { border-color: var(--accent); }
+  .spinner { color: var(--text-dim); font-size: 13px; margin-top: 1rem; }
 </style>
 </head>
 <body>
@@ -853,38 +853,38 @@ _CONSENT_HTML = """<!DOCTYPE html>
   const SUPABASE_ANON_KEY = __SUPABASE_ANON_KEY__;
   const AUTHORIZE_PATH = "/oauth/authorize";
   let supabaseClient = null;
-  try {{
-    if (typeof window.supabase !== "undefined") {{
+  try {
+    if (typeof window.supabase !== "undefined") {
       supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-    }} else {{
+    } else {
       showError("Auth is temporarily unavailable (script blocked).");
-    }}
-  }} catch (e) {{ showError("Auth init failed: " + e.message); }}
+    }
+  } catch (e) { showError("Auth init failed: " + e.message); }
 
-  function showError(msg) {{
+  function showError(msg) {
     const el = document.getElementById("error");
     el.textContent = msg; el.classList.add("visible");
-  }}
-  function hideError() {{ document.getElementById("error").classList.remove("visible"); }}
-  function spinner(on) {{ document.getElementById("spinner").style.display = on ? "block" : "none"; }}
-  function redirectBack(params) {{
+  }
+  function hideError() { document.getElementById("error").classList.remove("visible"); }
+  function spinner(on) { document.getElementById("spinner").style.display = on ? "block" : "none"; }
+  function redirectBack(params) {
     const sep = PARAMS.redirect_uri.includes("?") ? "&" : "?";
     window.location.href = PARAMS.redirect_uri + sep + new URLSearchParams(params).toString();
-  }}
+  }
 
-  async function fetchPreview(accessToken) {{
+  async function fetchPreview(accessToken) {
     const res = await fetch("/oauth/consent/preview?resource=" +
-        encodeURIComponent(PARAMS.resource || ""), {{
-      headers: {{ "Authorization": "Bearer " + accessToken }},
-    }});
+        encodeURIComponent(PARAMS.resource || ""), {
+      headers: { "Authorization": "Bearer " + accessToken },
+    });
     if (res.status === 401) return null;
     if (!res.ok) throw new Error("Could not resolve team: " + res.status);
     return res.json();
-  }}
+  }
 
-  async function showConsent() {{
+  async function showConsent() {
     const { data } = await supabaseClient.auth.getSession();
-    if (!data.session) {{ showSignin(); return; }}
+    if (!data.session) { showSignin(); return; }
     document.getElementById("view-consent").style.display = "block";
     document.getElementById("view-signin").style.display = "none";
     document.getElementById("client-line").textContent =
@@ -892,51 +892,51 @@ _CONSENT_HTML = """<!DOCTYPE html>
     document.getElementById("scope-line").textContent = PARAMS.scope || "mcp";
     document.getElementById("resource-line").textContent =
         PARAMS.resource || "default (sole team)";
-    try {{
+    try {
       const preview = await fetchPreview(data.session.access_token);
-      if (!preview) {{ showSignin(); return; }}
+      if (!preview) { showSignin(); return; }
       document.getElementById("team-line").textContent =
           (preview.team_name || preview.team_id) + " (" + preview.team_id + ")";
-    }} catch (e) {{ showError(e.message); }}
-  }}
+    } catch (e) { showError(e.message); }
+  }
 
-  function showSignin() {{
+  function showSignin() {
     document.getElementById("view-consent").style.display = "none";
     document.getElementById("view-signin").style.display = "block";
-  }}
+  }
 
-  async function signInWithProvider(provider) {{
-    const { error } = await supabaseClient.auth.signInWithOAuth({{
+  async function signInWithProvider(provider) {
+    const { error } = await supabaseClient.auth.signInWithOAuth({
       provider: provider,
-      options: {{ redirectTo: window.location.origin + AUTHORIZE_PATH + window.location.search }},
-    }});
+      options: { redirectTo: window.location.origin + AUTHORIZE_PATH + window.location.search },
+    });
     if (error) showError(error.message);
-  }}
+  }
 
   document.getElementById("btn-github").onclick = () => signInWithProvider("github");
   document.getElementById("btn-google").onclick = () => signInWithProvider("google");
-  document.getElementById("btn-email").onclick = async () => {{
+  document.getElementById("btn-email").onclick = async () => {
     hideError();
     const email = document.getElementById("email").value.trim();
     const password = document.getElementById("password").value;
-    if (!email || !password) {{ showError("Enter email and password."); return; }}
-    const { error } = await supabaseClient.auth.signInWithPassword({{ email, password }});
-    if (error) {{ showError(error.message); return; }}
+    if (!email || !password) { showError("Enter email and password."); return; }
+    const { error } = await supabaseClient.auth.signInWithPassword({ email, password });
+    if (error) { showError(error.message); return; }
     showConsent();
-  }};
+  };
 
-  document.getElementById("btn-auth").onclick = async () => {{
+  document.getElementById("btn-auth").onclick = async () => {
     hideError(); spinner(true);
     const { data } = await supabaseClient.auth.getSession();
-    if (!data.session) {{ spinner(false); showSignin(); return; }}
-    try {{
-      const res = await fetch("/oauth/consent", {{
+    if (!data.session) { spinner(false); showSignin(); return; }
+    try {
+      const res = await fetch("/oauth/consent", {
         method: "POST",
-        headers: {{
+        headers: {
           "Content-Type": "application/json",
           "Authorization": "Bearer " + data.session.access_token,
-        }},
-        body: JSON.stringify({{
+        },
+        body: JSON.stringify({
           client_id: PARAMS.client_id,
           redirect_uri: PARAMS.redirect_uri,
           response_type: PARAMS.response_type,
@@ -945,18 +945,18 @@ _CONSENT_HTML = """<!DOCTYPE html>
           state: PARAMS.state,
           scope: PARAMS.scope,
           resource: PARAMS.resource || null,
-        }}),
-      }});
+        }),
+      });
       const payload = await res.json();
       if (!res.ok) throw new Error(payload.error_description || payload.error || "Consent failed");
-      const q = {{ code: payload.code }};
+      const q = { code: payload.code };
       if (payload.state) q.state = payload.state;
       redirectBack(q);
-    }} catch (e) {{ spinner(false); showError(e.message); }}
-  }};
+    } catch (e) { spinner(false); showError(e.message); }
+  };
 
   document.getElementById("btn-deny").onclick = () =>
-      redirectBack({{ error: "access_denied", state: PARAMS.state }});
+      redirectBack({ error: "access_denied", state: PARAMS.state });
 
   if (supabaseClient) showConsent(); else spinner(false);
 </script>

@@ -362,6 +362,12 @@ class TestAuthorizePage:
         assert "text/html" in r.headers["content-type"]
         assert "test-connector" in r.text  # client name embedded
         assert '"/oauth/consent"' in r.text
+        # #1701 regression: the template was written with {{ }} (a .format()
+        # escape) but is served via .replace() — double braces reached the
+        # browser, breaking BOTH the CSS (unstyled page) and the inline JS
+        # (SyntaxError → 'Team resolving…' hangs, Authorize does nothing).
+        assert "{{" not in r.text and "}}" not in r.text
+        assert r.text.count("{") == r.text.count("}")  # no unbalanced braces
 
     def test_consent_page_escapes_script_breakout(self, api_client):
         """P1 (PR #1264 review): a malicious state / client_name containing
