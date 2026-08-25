@@ -1481,11 +1481,13 @@ def team_by_name(cp, name: str) -> dict | None:
 
 def team_api_keys(cp, team_id: str) -> list[dict]:
     """ALL api_keys rows for a team (revoked included — the dashboard lists
-    them with their revoked_at; registry parity), newest first."""
+    them with their revoked_at; registry parity), newest first.
+    #1708 D7: additive created_via/expires_at so the dashboard can classify
+    ephemeral session keys from API data instead of a prefix heuristic."""
     rows = cp.query(
         "api_keys",
         select=["id", "key_prefix", "created_at", "last_used_at",
-                "revoked_at", "enabled", "name"],
+                "revoked_at", "enabled", "name", "created_via", "expires_at"],
         filters=[("team_id", "eq", team_id)],
     )
     rows.sort(key=lambda r: r.get("created_at") or "", reverse=True)

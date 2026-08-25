@@ -3736,7 +3736,10 @@ async def list_api_keys(team: dict = Depends(get_current_team)):
     #765 (plan Task 8 reader inventory): Supabase mode reads api_keys via
     the seam (ALL rows incl. revoked — the dashboard shows revoked keys
     with their revoked_at; registry parity). Registry path stays for
-    selfhost."""
+    selfhost. #1708 D7: additive created_via/expires_at in BOTH lanes
+    (registry lane is None-tolerant for the agent_signup/create_api_key
+    mints that omit the props until #1709; session_key mints already write
+    them)."""
     from tortoise.supabase_control import (
         get_control_plane, is_supabase_enabled, team_api_keys,
     )
@@ -3759,6 +3762,9 @@ async def list_api_keys(team: dict = Depends(get_current_team)):
                     "enabled": row.get("enabled", True),
                     # 20260825000001: optional user-facing label
                     "name": row.get("name"),
+                    # #1708 D7: session-key metadata (additive, non-breaking)
+                    "created_via": row.get("created_via"),
+                    "expires_at": row.get("expires_at"),
                 }
                 for row in keys
             ]
@@ -3767,7 +3773,8 @@ async def list_api_keys(team: dict = Depends(get_current_team)):
     try:
         keys = sdk._get_registry().query(
             "MATCH (k:APIKey {team_id: $tid}) "
-            "RETURN k.id, k.key_prefix, k.created_at, k.last_used_at, k.revoked_at, k.name "
+            "RETURN k.id, k.key_prefix, k.created_at, k.last_used_at, k.revoked_at, "
+            "k.name, k.created_via, k.expires_at "
             "ORDER BY k.created_at DESC",
             params={"tid": team["team_id"]},
         )
@@ -3785,6 +3792,11 @@ async def list_api_keys(team: dict = Depends(get_current_team)):
                 "revoked_at": row[4],
                 # 20260825000001: optional user-facing label
                 "name": row[5],
+                # #1708 D7: None-tolerant — registry nodes minted by
+                # agent_signup/create_api_key lack the props until #1709
+                # writes them at mint time; JSON null is additive-safe.
+                "created_via": row[6],
+                "expires_at": row[7],
             }
             for row in keys.result_set
         ]

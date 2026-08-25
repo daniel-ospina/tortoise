@@ -870,6 +870,107 @@ class TestKeysRename:
         listed = _listed_key(client, kid)
         assert listed.get("name") == "staging"
 
+    # ── #1708 D7: additive created_via/expires_at (registry lane) ───────────
+    def test_list_keys_has_created_via_expires_at_fields(self, client, monkeypatch):
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
+        client.post("/v1/team/keys")
+        r = client.get("/v1/team/keys")
+        for k in r.json()["keys"]:
+            assert "created_via" in k
+            assert "expires_at" in k
+
+    def test_list_keys_agent_signup_registry_none_tolerant(self, client, monkeypatch):
+        """agent_signup-minted registry nodes lack the props until #1709 — the
+        None-tolerant row[5]/row[6] branch must be exercised by THIS mint.
+        The client fixture overrides get_current_team → TEST_TEAM, so re-point
+        the override at the minted team before GET (list_api_keys is team-
+        scoped; the signup key lives under its own fresh team_id)."""
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
+        r = client.post("/v1/agent/signup", json={})
+        assert r.status_code == 200, r.text
+        signup_team = r.json()["team_id"]
+        app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM, team_id=signup_team)
+        r = client.get("/v1/team/keys")
+        keys = r.json()["keys"]
+        assert keys, "signup team should have exactly one key"
+        assert keys[0]["created_via"] is None   # JSON null, no crash on absent props
+        assert keys[0]["expires_at"] is None
+        app.dependency_overrides.clear()
+
+
+class TestListApiKeysSupabase:
+    """#1708 D7: Supabase lane — team_api_keys reads created_via/expires_at
+    through the seam; real-key auth pins the disabled/expired → 401 contract
+    the CLI reuse path (401 → re-mint) depends on. Reuses the client fixture
+    (lifespan/MCP-mount + SDK-init patch + _FALLBACK_KEEPALIVE hygiene)."""
+
+    @pytest.fixture(autouse=True)
+    def _supabase_env(self, client, monkeypatch):
+        import tortoise.supabase_control as sc
+        from tests.fake_control_plane import FakeControlPlane
+
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        monkeypatch.setenv("SUPABASE_URL", "https://listkeys.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-listkeys")
+        fake = FakeControlPlane()
+        fake.seed("api_keys", [{
+            "id": "k1", "team_id": "team-001", "key_prefix": "tt_abcdef1234",
+            "created_at": "2026-08-01T00:00:00Z", "last_used_at": None,
+            "revoked_at": None, "enabled": True,
+            "created_via": "bootstrap", "expires_at": "2026-08-02T00:00:00Z",
+        }])
+        monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+        app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM, team_id="team-001")
+        yield fake
+        app.dependency_overrides.clear()
+
+    def test_list_keys_supabase_round_trips_created_via(self, client):
+        r = client.get("/v1/team/keys")
+        k = r.json()["keys"][0]
+        assert k["created_via"] == "bootstrap"
+        assert k["expires_at"] == "2026-08-02T00:00:00Z"
+
+    def test_disabled_key_401_on_team(self, client, _supabase_env, monkeypatch):
+        """Pins the reuse suite's '401 → re-mint' contract at the server auth
+        boundary: a disabled key must 401 (a fail-open regression here would
+        make reuse silently reuse a disabled key).
+        #1096 residual: while a Supabase schema is one migration behind
+        (enabled column absent), the drift-tolerant seam re-authenticates a
+        disabled key — accepted degrade window, documented in the PR body."""
+        fake = _supabase_env
+        app.dependency_overrides.pop(get_current_team, None)  # real key auth
+        from tortoise.auth import lookup_hash
+        token = "tt_disabled_0000000000000000001"
+        fake.seed("api_keys", [{
+            "id": "k-disabled", "team_id": "team-001",
+            "lookup_hash": lookup_hash(token), "key_prefix": token[:10],
+            "created_at": "2026-08-01T00:00:00Z", "last_used_at": None,
+            "revoked_at": None, "enabled": False,
+            "created_via": "provisioned", "expires_at": None,
+        }])
+        fake.seed("teams", [{"id": "team-001", "name": "T", "tier": "free"}])
+        r = client.get("/v1/team", headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 401, r.text
+
+    def test_expired_key_401_on_team(self, client, _supabase_env, monkeypatch):
+        """Same contract pin for past-expires_at keys (24h bootstrap expiry)."""
+        fake = _supabase_env
+        app.dependency_overrides.pop(get_current_team, None)  # real key auth
+        from tortoise.auth import lookup_hash
+        token = "tt_expired_00000000000000000001"
+        fake.seed("api_keys", [{
+            "id": "k-expired", "team_id": "team-001",
+            "lookup_hash": lookup_hash(token), "key_prefix": token[:10],
+            "created_at": "2026-08-01T00:00:00Z", "last_used_at": None,
+            "revoked_at": None, "enabled": True,
+            "created_via": "bootstrap",
+            "expires_at": "2026-08-02T00:00:00Z",  # in the past
+        }])
+        fake.seed("teams", [{"id": "team-001", "name": "T", "tier": "free"}])
+        r = client.get("/v1/team", headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 401, r.text
+
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Session Endpoints

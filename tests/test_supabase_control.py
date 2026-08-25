@@ -1215,6 +1215,19 @@ class TestTask8Helpers:
         assert {"id", "key_prefix", "created_at", "last_used_at",
                 "revoked_at"} <= set(rows[0])
 
+    def test_team_api_keys_selects_created_via_expires_at(self, fake):
+        fake.seed("api_keys", [_key_row(id="k1", created_via="bootstrap",
+                                        expires_at="2026-08-02T00:00:00Z")])
+        rows = team_api_keys(fake, "team-free-001")
+        assert rows[0]["created_via"] == "bootstrap"
+        assert rows[0]["expires_at"] == "2026-08-02T00:00:00Z"
+
+    def test_team_api_keys_missing_created_via_fails_closed(self, fake):
+        fake.missing_columns = {"api_keys": {"expires_at"}}
+        fake.seed("api_keys", [_key_row()])
+        with pytest.raises(RuntimeError):
+            team_api_keys(fake, "team-free-001")
+
     def test_api_key_by_id(self, fake):
         fake.seed("api_keys", [_key_row()])
         row = api_key_by_id(fake, "key-001")
