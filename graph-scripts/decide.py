@@ -132,6 +132,13 @@ def main():
     from tortoise.projection import FalkorProjection
 
     uri = args.db or os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise")
+    # Pass the resolved URI through the env so TortoiseSDK() never constructs
+    # the DEFAULT embedded store (resolve_db_path) — otherwise the constructor's
+    # cross-process busy probe throws EmbeddedStoreBusyError whenever another
+    # process already holds ~/.tortoise/tortoise.db (order-dependent CI flake in
+    # the decide smoke test; the script only uses the URI projection below).
+    if args.db:
+        os.environ["TORTOISE_DB_URI"] = uri
     sdk = TortoiseSDK()
     sdk._proj = FalkorProjection.from_uri(uri)
 
