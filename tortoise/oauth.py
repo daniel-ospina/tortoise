@@ -852,10 +852,34 @@ _CONSENT_HTML = """<!DOCTYPE html>
   const SUPABASE_URL = __SUPABASE_URL__;
   const SUPABASE_ANON_KEY = __SUPABASE_ANON_KEY__;
   const AUTHORIZE_PATH = "/oauth/authorize";
+  // #1704: reuse the dashboard's parent-domain session cookie
+  // (sb-tortoise-auth-token on .premiselabs.co — main.jsx supabaseStorage).
+  // The user is already signed in on app.premiselabs.co; this page must not
+  // ask for a SECOND login. Read-only storage (no persist/refresh — the
+  // consent POST only needs the access token).
+  const COOKIE_NAME = "sb-tortoise-auth-token";
+  const cookieStorage = {
+    getItem: (key) => {
+      try {
+        const m = document.cookie.match(new RegExp("(?:^|; )" + key + "=([^;]*)"));
+        return m ? decodeURIComponent(m[1]) : null;
+      } catch (e) { return null; }
+    },
+    setItem: () => {},
+    removeItem: () => {},
+  };
   let supabaseClient = null;
   try {
     if (typeof window.supabase !== "undefined") {
-      supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+      supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+        auth: {
+          storage: cookieStorage,
+          storageKey: COOKIE_NAME,
+          persistSession: false,
+          autoRefreshToken: false,
+          detectSessionInUrl: false,
+        },
+      });
     } else {
       showError("Auth is temporarily unavailable (script blocked).");
     }

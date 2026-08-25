@@ -368,6 +368,11 @@ class TestAuthorizePage:
         # (SyntaxError → 'Team resolving…' hangs, Authorize does nothing).
         assert "{{" not in r.text and "}}" not in r.text
         assert r.text.count("{") == r.text.count("}")  # no unbalanced braces
+        # #1704: the page reuses the dashboard's parent-domain cookie session
+        # (sb-tortoise-auth-token) — a signed-in dashboard user must not see a
+        # second login.
+        assert "sb-tortoise-auth-token" in r.text
+        assert "cookieStorage" in r.text
 
     def test_consent_page_escapes_script_breakout(self, api_client):
         """P1 (PR #1264 review): a malicious state / client_name containing
