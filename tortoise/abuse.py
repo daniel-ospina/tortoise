@@ -53,9 +53,10 @@ EVENT_SUSPEND = "suspend"
 EVENT_UNSUSPEND = "unsuspend"
 EVENT_READ_VELOCITY = "read_velocity"
 EVENT_SIGNUP_VELOCITY = "signup_velocity"
+EVENT_RECOVERY_VELOCITY = "recovery_velocity"
 
 ALERT_TYPES = (EVENT_FLAG, EVENT_SUSPEND, EVENT_AUTH_IP, EVENT_READ_VELOCITY,
-               EVENT_SIGNUP_VELOCITY)
+               EVENT_SIGNUP_VELOCITY, EVENT_RECOVERY_VELOCITY)
 
 
 def _int_env(name: str, default: int) -> int:
@@ -808,6 +809,102 @@ def record_signup_block(ip: str | None, team_id: str | None = None,
                         now: float | None = None) -> None:
     """Module-level seam for the 429 path."""
     SIGNUP_TRACKER.record_block(ip, team_id, now)
+
+
+class RecoveryVelocityTracker:
+    """>N keyless recoveries per IP per window → notify ops once per window.
+
+    #1709: the keyless-recovery surface (POST /v1/agent/recover + the
+    token-present signup branch) mints keys WITHOUT an authenticated identity
+    — the signup-velocity feed (record_signup) must not conflate recoveries
+    with mints (ops metrics + alert thresholds differ). This tracker mirrors
+    SignupVelocityTracker: in-memory by design (never suspends — deploy-reset
+    damage bounded to a notify), one notify per (ip, window) on breach.
+
+    Fired on SUCCESSFUL recovery mints only (possession-authenticated); the
+    per-IP + per-token attempt limiters handle the probe case (uniform 422).
+    """
+
+    def __init__(self, threshold: int | None = None, window_s: int | None = None):
+        self.threshold = threshold if threshold is not None else _int_env(
+            "TORTOISE_ABUSE_RECOVER_THRESHOLD",
+            _int_env("TORTOISE_RECOVER_IP_LIMIT", 5))
+        self.window_s = window_s if window_s is not None else _int_env(
+            "TORTOISE_ABUSE_RECOVER_WINDOW_S", 86400)
+        self._by_ip: dict[str, list[float]] = defaultdict(list)
+        self._notified: dict[str, float] = {}  # bare ip -> last notify ts
+        self._lock = threading.Lock()
+
+    def reset(self) -> None:
+        """Test seam: clear per-IP counts and dedup state."""
+        with self._lock:
+            self._by_ip.clear()
+            self._notified.clear()
+
+    def record(self, ip: str | None, team_id: str | None = None,
+               now: float | None = None) -> tuple[str, str] | None:
+        """Success-path feed: count recovery mints per IP per window.
+        Returns ('ip', ip) on breach (len >= threshold), else None."""
+        if abuse_disabled() or not ip:
+            return None
+        now = now if now is not None else time.time()
+        cutoff = now - self.window_s
+        breach: tuple[str, str] | None = None
+        with self._lock:
+            bucket = self._by_ip[ip]
+            bucket[:] = [t for t in bucket if t > cutoff]
+            bucket.append(now)
+            if len(bucket) >= self.threshold:
+                breach = ("ip", ip)
+            if len(self._by_ip) > 10_000:
+                self._by_ip = defaultdict(
+                    list, {k: v for k, v in self._by_ip.items()
+                           if any(t > cutoff for t in v)})
+            self._notified = {k: t for k, t in self._notified.items()
+                              if now - t < self.window_s}
+            if breach is not None:
+                last = self._notified.get(ip)
+                if last is not None and now - last < self.window_s:
+                    return None  # already notified this window
+                self._notified[ip] = now
+        if breach is not None:
+            self._notify("velocity", ip, team_id, {"count": len(bucket)})
+        return breach
+
+    def _notify(self, reason: str, ip: str, team_id: str | None,
+                details: dict) -> None:
+        details = dict(details)
+        details.setdefault("count", 0)
+        store = None
+        try:
+            from tortoise.supabase_control import get_abuse_store
+            store = get_abuse_store()
+            if team_id:
+                store.record_event(
+                    team_id, EVENT_RECOVERY_VELOCITY,
+                    details={"ip": ip, "reason": reason, **details})
+        except Exception:
+            logger.debug("recovery-velocity event record failed (%s)", ip)
+        try:
+            from tortoise.notify import notify_abuse
+            notify_abuse("abuse_recovery_velocity",
+                         {"team_id": team_id, "email": None},
+                         {"ip": ip, "reason": reason,
+                          "count": details.get("count", 0),
+                          "threshold": self.threshold,
+                          "window_s": self.window_s,
+                          "appeal_url": appeal_url()})
+        except Exception:
+            logger.debug("recovery-velocity notify failed (%s)", ip)
+
+
+RECOVERY_TRACKER = RecoveryVelocityTracker()
+
+
+def record_recovery(ip: str | None, team_id: str | None = None,
+                    now: float | None = None) -> tuple[str, str] | None:
+    """Module-level seam (monkeypatchable) over the shared recovery tracker."""
+    return RECOVERY_TRACKER.record(ip, team_id, now)
 
 
 # ── R4: geo (CF-IPCountry header, fail-open) ───────────────────────────────

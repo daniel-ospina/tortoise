@@ -1381,6 +1381,119 @@ def provision_team(cp, **params: object) -> None:
                 team_id, exc_info=True)
 
 
+# ── Agent signup tokens + keyless recovery (#1709, 20260814000001) ─────────
+# Approach C: a server-issued 256-bit st_ token minted at first signup
+# (hash-only at rest — SHA-256(PEPPER + token) via auth.lookup_hash, the
+# pepper NEVER reaches SQL). Re-presenting the token is BOTH the dedupe
+# check AND the keyless-recovery credential. All three RPCs are
+# service_role-only SECURITY DEFINER (grant hygiene asserted in the PGlite
+# suite) — an anon-executable resolve_signup_token would be a
+# token-existence oracle; an anon-executable wrapper an unauthenticated mint.
+
+
+def provision_team_with_token(cp, **params: object) -> None:
+    """Signup mint: provision_team + one token row in ONE transaction.
+
+    NEW-named wrapper (NOT CREATE OR REPLACE on provision_team — a trailing
+    param would create a second OVERLOAD on PG16, see scope cycle-2 P1). The
+    signup path calls this; every other provision_team caller (/v1/register,
+    POST /v1/teams, onboarding) keeps the 15-arg RPC. ``p_signup_token_hash``
+    is the caller-computed SHA-256(PEPPER + st_ token); a failed provision
+    rolls back the token insert (no orphan token). Raises RuntimeError on
+    failure (fail-closed → 500).
+    """
+    cp.rpc("provision_team_with_token", params)
+
+
+def resolve_signup_token(cp, token_hash: str) -> str | None:
+    """Resolve a signup-token hash → team_id; None = unknown/revoked.
+
+    The caller (hosted_api) maps None to the UNIFORM 422 invalid_signup_token
+    (same body for malformed/unknown/revoked/soft-deleted team — no existence
+    signal). PostgREST encodes scalar RPC returns in several shapes
+    (dict {fn: value} with return=representation, a scalar array, or a bare
+    scalar); this parses all three. A control-plane failure raises
+    RuntimeError (fail-closed → 500, never 422).
+    """
+    try:
+        out = cp.rpc("resolve_signup_token", {"p_token_hash": token_hash})
+    except RuntimeError as e:
+        _logger.warning(
+            "resolve_signup_token RPC failed (%s) — fail-closed", e)
+        raise
+    if out is None:
+        return None
+    if isinstance(out, dict):
+        out = next(iter(out.values()), None)
+    elif isinstance(out, (list, tuple)):
+        out = out[0] if out else None
+    return out if isinstance(out, str) and out else None
+
+
+class SignupTokenRecoveryError(Exception):
+    """Semantic rejection of a recovery mint (token invalid/revoked, team
+    deleted). Carries the HTTP status the caller should emit: uniform 422
+    invalid_signup_token (indistinguishable from never-existed) — the RPC
+    itself fails CLOSED on the FOR UPDATE zero-row lock and on soft-deleted
+    teams (never mints on a bad lock)."""
+
+    def __init__(self, message: str, status: int = 422, code: str = ""):
+        super().__init__(message)
+        self.status = status
+        self.code = code
+
+
+_RECOVER_ERROR_CODES = {
+    "token not found or revoked": (422, "invalid_signup_token"),
+    "team deleted": (422, "invalid_signup_token"),
+}
+
+
+def recover_team_key(cp, *, token_hash: str, team_id: str, api_key: str,
+                     key_hash: str, lookup_hash: str,
+                     key_prefix: str, max_api_keys: int) -> str:
+    """Keyless recovery: mint a NEW key on the token's team (one RPC tx).
+
+    The RPC (20260814000001) SELECTs the token row FOR UPDATE (serializes
+    concurrent recoveries so the non-bootstrap cap cannot overshoot),
+    rejects soft-deleted teams, revokes the OLDEST non-bootstrap key at the
+    cap (deterministic, #750.10 semantics), and inserts the new api_keys row
+    with created_via='recovery' and created_by='st_'||left(token_hash,12)
+    (token-attributable — derived inside the RPC, never caller-supplied).
+
+    Raises SignupTokenRecoveryError (→ uniform 422) on semantic rejections;
+    RuntimeError (fail-closed → 500) on control-plane failures. Returns
+    team_id.
+    """
+    try:
+        out = cp.rpc("recover_team_key", {
+            "p_token_hash": token_hash,
+            "p_team_id": team_id,
+            "p_api_key": api_key,
+            "p_key_hash": key_hash,
+            "p_lookup_hash": lookup_hash,
+            "p_key_prefix": key_prefix,
+            "p_max_api_keys": max_api_keys,
+        })
+    except RuntimeError as e:
+        msg = str(e)
+        for code, (status, detail_code) in _RECOVER_ERROR_CODES.items():
+            if code in msg:
+                raise SignupTokenRecoveryError(
+                    msg, status=status, code=detail_code) from e
+        _logger.warning("recover_team_key RPC failed (%s) — fail-closed", e)
+        raise
+    if out is None:
+        raise RuntimeError("recover_team_key returned no team_id")
+    if isinstance(out, dict):
+        out = next(iter(out.values()), None)
+    elif isinstance(out, (list, tuple)):
+        out = out[0] if out else None
+    if not isinstance(out, str) or not out:
+        raise RuntimeError("recover_team_key returned no team_id")
+    return out
+
+
 # ── Claim path (#1082, PR1 — 20260813000004) ────────────────────────────────
 #
 # claim_membership attaches a provider-verified Supabase user to the team
