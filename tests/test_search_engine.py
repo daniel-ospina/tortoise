@@ -617,3 +617,67 @@ class TestR2OrUnionAndSearchKeys:
             assert fts["ran"] is False
         finally:
             reset_circuit_breakers()
+
+
+class TestFusionWeightsProductionDefault:
+    """#1657 (owner decision 2026-08-25): the PRODUCTION fusion default is
+    vector=1.5 (the measured dilution fix, ON by default); env override
+    tunes it. rrf_fusion's own default stays None (= all 1.0) so the
+    function-level contract is byte-identical; the SDK call site supplies
+    the production default."""
+
+    @staticmethod
+    def _spy_and_two_legs(monkeypatch, captured):
+        from tortoise import search_engine as se_mod
+        from tortoise.sdk import TortoiseSDK
+
+        def _spy(ranked_lists, **kwargs):
+            captured["weights"] = kwargs.get("weights")
+            captured["names"] = kwargs.get("strategy_names")
+            fused = {}
+            for rl in ranked_lists:
+                for pid, score in rl:
+                    fused[pid] = fused.get(pid, 0.0) + score
+            return fused
+
+        def _two_legs(*a, **k):
+            return {"fts": [("doc1", 1.0)], "vector": [("doc2", 1.0)]}
+
+        monkeypatch.setattr(se_mod, "rrf_fusion", _spy)
+        monkeypatch.setattr(se_mod, "degradation_chain", _two_legs)
+        return TortoiseSDK
+
+    def test_sdk_passes_vector_15_default(self, monkeypatch):
+        """No env → the fusion weights default to {'vector': 1.5}."""
+        captured = {}
+        TortoiseSDK = self._spy_and_two_legs(monkeypatch, captured)
+        monkeypatch.delenv("TORTOISE_FUSION_WEIGHTS", raising=False)
+        sdk = TortoiseSDK()
+        sdk._proj = _FakeProj2()
+        sdk.tortoise_fts_query("test query", limit=10)
+        assert captured.get("weights") == {"vector": 1.5}, \
+            f"production default must weight vector 1.5, got {captured.get('weights')}"
+        assert captured.get("names") == ["fts", "vector"]
+
+    def test_env_override_replaces_default(self, monkeypatch):
+        """TORTOISE_FUSION_WEIGHTS overrides the production default."""
+        captured = {}
+        TortoiseSDK = self._spy_and_two_legs(monkeypatch, captured)
+        monkeypatch.setenv("TORTOISE_FUSION_WEIGHTS", '{"vector": 2.0}')
+        sdk = TortoiseSDK()
+        sdk._proj = _FakeProj2()
+        sdk.tortoise_fts_query("test query", limit=10)
+        assert captured.get("weights") == {"vector": 2.0}, captured.get("weights")
+
+
+class _FakeProj2:
+    """Minimal projection stub for the fusion-default tests."""
+
+    def __init__(self):
+        class _G:
+            def query(self, *a, **k):
+                class _R:
+                    def __init__(self):
+                        self.result_set = []
+                return _R()
+        self.g = _G()
