@@ -1747,7 +1747,13 @@ def _cleanup_tempdir(dbdir: str | None) -> None:
 # ── CLI + singleton lock + timeout (plan Task 3) ────────────────────
 
 _LOCK_PATH = os.path.join(
-    os.path.expanduser("~"), ".tortoise", ".reaper.lock")
+    # #1658: the lock must be TEMPDIR-scoped, not HOME-scoped. The sweep
+    # target is tempfile.gettempdir() (machine-global on Linux) — a per-HOME
+    # lock means two sweepers with different $HOME (parallel agents/users/
+    # containers on a shared box) each flock a DIFFERENT inode and both run
+    # overlapping sweeps, reaping each other's live sockets. Same convention
+    # as ACTIVE_SUITES_DIR above (both under <tempdir>/.tortoise/).
+    os.path.realpath(tempfile.gettempdir()), ".tortoise", ".reaper.lock")
 TIMEOUT_DEFAULT = 120
 
 

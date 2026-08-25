@@ -1125,7 +1125,9 @@ def test_active_suite_markers_recycled_pid_is_stale(monkeypatch, tmp_path):
     never defer later sweeps to only-safe forever. Markers with the correct
     (pid, start) identity stay live."""
     from tortoise.embedded_reaper import (
-        ACTIVE_SUITES_DIR, active_suite_markers, _process_start_time)
+        _process_start_time,
+        active_suite_markers,
+    )
     marker_dir = tmp_path / "active_suites"
     marker_dir.mkdir(parents=True)
     start = _process_start_time(os.getpid())
@@ -2235,10 +2237,10 @@ def test_reap_only_safe_protects_live_pid_dir_present(monkeypatch):
     concurrency guarantee). Genuine dir-gone orphans have a DEAD pid and go
     through the stale_socket path.
     """
-    from tortoise.embedded_reaper import discover, phase1_probe, reap
-    from tortoise.embedded_reaper import ACTIVE_SUITES_DIR
     import subprocess as sp
     import sys as _sys
+
+    from tortoise.embedded_reaper import ACTIVE_SUITES_DIR, discover, phase1_probe, reap
     monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
     # Register a live suite marker (the conftest writes pid=<os.getpid()>).
     os.makedirs(ACTIVE_SUITES_DIR, exist_ok=True)
@@ -2297,10 +2299,10 @@ def test_reap_only_safe_protects_live_pid_dir_gone(monkeypatch):
     """#1557: only_safe must NOT kill a LIVE-pid server whose dir is
     missing — the test-tempdir lifecycle race. Same protection as the
     dir-present case (any live-pid server while a suite is active)."""
-    from tortoise.embedded_reaper import reap
-    from tortoise.embedded_reaper import ACTIVE_SUITES_DIR
     import subprocess as sp
     import sys as _sys
+
+    from tortoise.embedded_reaper import ACTIVE_SUITES_DIR, reap
     monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
     os.makedirs(ACTIVE_SUITES_DIR, exist_ok=True)
     marker = os.path.join(ACTIVE_SUITES_DIR, f"test-{os.getpid()}-{time.time_ns()}")
@@ -2365,8 +2367,7 @@ def test_mark_orphan_confirmation_two_sweeps(monkeypatch, tmp_path):
     observation (state recorded); after the confirmation window elapses
     with the same (pid, start) identity, it IS confirmed. A recycled pid
     (start mismatch) restarts the window (FIX 5)."""
-    from tortoise.embedded_reaper import (
-        _mark_orphan_confirmation, _process_start_time)
+    from tortoise.embedded_reaper import _mark_orphan_confirmation, _process_start_time
     _markerless_suite(monkeypatch, tmp_path)
     monkeypatch.setattr("tortoise.embedded_reaper.ZERO_CLIENT_CONFIRM_MINUTES",
                         0.0)  # confirm on the SECOND sweep (window elapsed)
@@ -2398,8 +2399,7 @@ def test_mark_orphan_confirmation_no_confirmation_while_suite_active(
     """#1642 FIX 3/4: while ANY live suite marker exists, live servers are
     never orphan-confirmed — a concurrent suite's between-tests idle server
     must not be killable by the cron's only_safe sweep (#1557/#1005)."""
-    from tortoise.embedded_reaper import (
-        ACTIVE_SUITES_DIR, _mark_orphan_confirmation)
+    from tortoise.embedded_reaper import _mark_orphan_confirmation
     marker_dir = tmp_path / "active"
     marker_dir.mkdir()
     (marker_dir / "other-suite").write_text(f"pid={os.getpid()}\n")
@@ -2501,8 +2501,7 @@ def test_lme_prefix_is_ephemeral():
     observed protected on the dev box) are now ephemeral test trees — a
     dead-pid lme- leftover classifies stale_socket (reapable), not
     protected forever."""
-    from tortoise.embedded_reaper import (
-        _is_ephemeral_dir, _real_gettempdir, _classify)
+    from tortoise.embedded_reaper import _classify, _is_ephemeral_dir, _real_gettempdir
     tmp = _real_gettempdir()
     assert _is_ephemeral_dir(os.path.join(tmp, "lme-abc123"), tmp)
     socket_dir = os.path.join(tmp, "lme-abc123")
@@ -2522,8 +2521,12 @@ def test_mark_orphan_confirmation_socketless_server(monkeypatch, tmp_path):
     (274 socket-less orphans observed on the dev box). A probe failure with
     the dir still present stays fail-closed (never confirmed)."""
     import json as _json
+
     from tortoise.embedded_reaper import (
-        _mark_orphan_confirmation, _process_start_time, _socket_dir_missing)
+        _mark_orphan_confirmation,
+        _process_start_time,
+        _socket_dir_missing,
+    )
     _markerless_suite(monkeypatch, tmp_path)
     monkeypatch.setattr("tortoise.embedded_reaper.ZERO_CLIENT_CONFIRM_MINUTES",
                         0.0)
@@ -2586,16 +2589,14 @@ def test_mark_orphan_confirmation_recycled_pid_restarts_window(
     first_seen window. Without this, the new server would be orphan-
     confirmed on its first sweep and killed at 0 clients (the #1557
     live-server hazard)."""
-    from tortoise.embedded_reaper import (
-        _mark_orphan_confirmation, _process_start_time)
+    from tortoise.embedded_reaper import _mark_orphan_confirmation
     _markerless_suite(monkeypatch, tmp_path)
     monkeypatch.setattr("tortoise.embedded_reaper.ZERO_CLIENT_CONFIRM_MINUTES",
                         0.0)  # confirm on the SECOND sweep (window elapsed)
     monkeypatch.setattr("tortoise.embedded_reaper._pid_alive", lambda p: True)
     monkeypatch.setattr("tortoise.embedded_reaper._pid_is_redis",
                         lambda p: True)
-    from tortoise.embedded_reaper import (
-        _zero_client_state_read, _zero_client_state_write)
+    from tortoise.embedded_reaper import _zero_client_state_read, _zero_client_state_write
     sock = "/tmp/fake-orphan-recycled.sock"
     # Sweep 1: first observation -> recorded (window starts).
     _mark_orphan_confirmation([_zero_client_candidate(sock, os.getpid())])
@@ -2610,3 +2611,50 @@ def test_mark_orphan_confirmation_recycled_pid_restarts_window(
     _mark_orphan_confirmation([rec2])
     assert rec2.get("_orphan_confirmed") is not True, \
         "recycled pid must restart the confirmation window, not inherit it"
+
+
+def test_lock_is_tempdir_scoped_not_home_scoped():
+    """#1658: the sweep lock must be TEMPDIR-scoped (machine-global), not
+    HOME-scoped. Two sweepers with different $HOME on a shared box each flock
+    a different inode if the lock lives under ~/.tortoise — both acquire and
+    run overlapping sweeps (reaping each other's live sockets). The lock
+    must live under the real gettempdir, the same convention as
+    ACTIVE_SUITES_DIR."""
+    import tempfile as _tf
+
+    import tortoise.embedded_reaper as er
+
+    lock_path = er._LOCK_PATH
+    # Lock must be under the real tempdir, NOT under $HOME.
+    assert os.path.realpath(_tf.gettempdir()) in lock_path, \
+        f"_LOCK_PATH {lock_path!r} must be tempdir-scoped (was ~/.tortoise)"
+    assert os.path.expanduser("~") not in lock_path, \
+        f"_LOCK_PATH {lock_path!r} must not be HOME-scoped"
+    # It lives in the same <tempdir>/.tortoise/ dir as ACTIVE_SUITES_DIR.
+    assert os.path.dirname(lock_path) == os.path.dirname(er.ACTIVE_SUITES_DIR), \
+        "lock and active-suites dir must share the tempdir/.tortoise root"
+
+
+def test_cross_home_sweepers_share_one_lock():
+    """#1658: two _ReaperLock instances with DIFFERENT $HOME on the SAME
+    tempdir must contend on ONE flock — only one acquires. (Before the fix,
+    a per-HOME lock path meant each got its own inode and both acquired.)"""
+    import tempfile as _tf
+
+    from tortoise.embedded_reaper import _ReaperLock
+
+    # Both locks point at the same tempdir-scoped lock file — exactly what
+    # two different-HOME sweepers on one machine now share.
+    shared = os.path.join(
+        os.path.realpath(_tf.gettempdir()), ".tortoise", ".reaper.lock")
+    lock_a = _ReaperLock(shared)
+    lock_b = _ReaperLock(shared)
+    assert lock_a.acquire(), "first sweeper must acquire"
+    try:
+        assert not lock_b.acquire(), \
+            "second sweeper (same tempdir) must observe the lock held"
+    finally:
+        lock_a.release()
+    # After release, the second can acquire.
+    assert lock_b.acquire(), "second sweeper acquires after release"
+    lock_b.release()
