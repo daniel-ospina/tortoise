@@ -332,10 +332,12 @@ def test_hosted_capture_records_deepseek_direct_route(monkeypatch, client):
                 "\"link_before_create\": []}"}}],
                 "usage": {}}
 
-    def _fake_post(url, **kwargs):
+    def _fake_post(self_or_url, url=None, **kwargs):
         return _FakeResp()
 
-    monkeypatch.setattr(_requests, "post", _fake_post)
+    # Epic #1647 (PR #1684): adapters call self._session.post — patch the
+    # Session seam (the requests.post patch never intercepted → real network)
+    monkeypatch.setattr(_requests.Session, "post", _fake_post)
     monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
     monkeypatch.delenv("TORTOISE_SESSION_EXTRACTOR", raising=False)
     monkeypatch.delenv("TORTOISE_EXTRACT_MODEL", raising=False)
