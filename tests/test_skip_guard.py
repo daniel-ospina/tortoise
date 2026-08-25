@@ -530,3 +530,107 @@ def test_legacy_matcher_exempts_same_families():
         "tests/test_falkordb_compat.py::TestLiveServerCompat::test_full_compat_flow "
         "SKIPPED [ 25%]\n"
     ) == [], "truncated -v line must not red via the filename's FalkorDB substring"
+
+
+# ── --emit-manifest: the coverage-manifest GENERATOR (epic #1647 Task 6) ──
+# Task 3 implemented the consumer (--manifest reconciliation against the
+# junitxml). Task 6 adds the producer: `pytest <files> --collect-only -q
+# -m 'not track_b'` -> one expected nodeid per line. These tests pin the
+# pure filter + the generator's verbatim-file-list contract (plan-review
+# P1-7: the generator must consume the run's file list verbatim, never a
+# re-derived matrix list). No pytest is spawned — the runner is faked.
+
+import importlib.util as _ilu  # noqa: E402
+
+
+def _load_skip_guard():
+    """Load tools/skip-guard.py in-process for the emit-manifest unit tests.
+
+    The file is dash-named (skip-guard.py), so it cannot be imported as a
+    regular module — the existing tests run it via subprocess for that
+    reason. importlib loads it under a valid name; it imports only stdlib
+    (re/subprocess/sys/xml/pathlib), so exec_module is safe.
+    """
+    spec = _ilu.spec_from_file_location("skip_guard_under_test", str(TOOL))
+    mod = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_skip_guard = _load_skip_guard()  # noqa: E402
+
+
+COLLECT_ONLY_SAMPLE = """\
+tests/test_ci_selection.py::test_docs_only_runs_tier1
+tests/test_ci_selection.py::test_split_rejects_non_list
+39 tests collected in 0.02s
+"""
+
+
+def test_collect_only_nodeids_keeps_nodeids_drops_summary():
+    assert _skip_guard.collect_only_nodeids(COLLECT_ONLY_SAMPLE) == [
+        "tests/test_ci_selection.py::test_docs_only_runs_tier1",
+        "tests/test_ci_selection.py::test_split_rejects_non_list",
+    ]
+
+
+def test_collect_only_nodeids_handles_real_pytest_shapes():
+    # Real pytest 9.1.1 outputs (verified 2026-08-24): deselected counts
+    # ride the SUMMARY line only (deselected items are filtered at
+    # collection and never printed as nodeids); warnings/errors during
+    # collection must be dropped too (a stray line would trip the
+    # consumer's invalid-line fail-closed check).
+    sample = (
+        "tests/test_ingest_safety.py::test_e2e8_gated_status_live_violation\n"
+        "tests/test_ingest_safety.py::test_e2e17_read_surfaces_reachable_after_ingest\n"
+        "9/13 tests collected (4 deselected) in 0.03s\n"
+        "tests/test_a.py:12: PytestDeprecationWarning: something\n"
+        "ERROR: cannot collect tests/test_b.py\n"
+        "no tests collected (39 deselected) in 0.02s\n"
+    )
+    assert _skip_guard.collect_only_nodeids(sample) == [
+        "tests/test_ingest_safety.py::test_e2e8_gated_status_live_violation",
+        "tests/test_ingest_safety.py::test_e2e17_read_surfaces_reachable_after_ingest",
+    ]
+
+
+def test_emit_manifest_consumes_verbatim_file_list_and_marker(tmp_path):
+    # plan-review P1-7: the spawned command must carry the run step's file
+    # list VERBATIM (tests/... paths as given) + the same `-m` filter.
+    captured = {}
+
+    def fake_runner(cmd):
+        captured["cmd"] = list(cmd)
+        return 0, "tests/test_a.py::test_x\n1 tests collected in 0.00s\n"
+
+    out = tmp_path / "expected-nodeids.txt"
+    rc = _skip_guard.emit_manifest(
+        ["tests/test_a.py", "tests/test_b.py"], "not track_b", out,
+        runner=fake_runner)
+    assert rc == 0
+    cmd = captured["cmd"]
+    assert cmd[:3] == [_skip_guard.sys.executable, "-m", "pytest"]
+    assert cmd[3:5] == ["tests/test_a.py", "tests/test_b.py"]
+    assert "--collect-only" in cmd and "-q" in cmd
+    assert cmd[cmd.index("-m", 4) + 1] == "not track_b"  # skip `-m pytest`
+    assert "-p" in cmd and cmd[cmd.index("-p") + 1] == "no:cacheprovider"
+    assert out.read_text().startswith("#")
+    assert "tests/test_a.py::test_x" in out.read_text()
+
+
+def test_emit_manifest_empty_files_writes_nothing(tmp_path):
+    out = tmp_path / "expected-nodeids.txt"
+    rc = _skip_guard.emit_manifest([], "not track_b", out,
+                                   runner=lambda cmd: (0, ""))
+    assert rc == 0
+    assert not out.exists(), "empty $FILES must not write a manifest (guard skips)"
+
+
+def test_emit_manifest_collect_failure_writes_no_manifest(tmp_path):
+    # fail-closed: a collect-only failure propagates and writes NO manifest
+    # (a vanished manifest must never vacuous-green — the consumer reds).
+    out = tmp_path / "expected-nodeids.txt"
+    rc = _skip_guard.emit_manifest(["tests/test_a.py"], "not track_b", out,
+                                   runner=lambda cmd: (2, ""))
+    assert rc == 2
+    assert not out.exists()

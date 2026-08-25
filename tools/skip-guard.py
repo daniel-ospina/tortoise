@@ -9,6 +9,21 @@ a matching probe), the run must flip RED — the historical silent-green masked 
 
 Usage:
   python3 tools/skip-guard.py <path-to-pytest.log> [--manifest <expected-nodeids.txt>] [--junitxml <path>]
+  python3 tools/skip-guard.py --emit-manifest "<space-joined $FILES>" [--marker <expr>] [--output <path>]
+
+Manifest GENERATION mode (epic #1647 Task 6 — the coverage-manifest
+producer):
+  --emit-manifest "tests/a.py tests/b.py"  run `pytest <files> --collect-only
+      -q -m <marker> -p no:cacheprovider` (the SAME file list the CI run step
+      passes to pytest, verbatim — plan-review P1-7: never a re-derived
+      matrix list) and write one expected nodeid per line (with a '#' header
+      comment) to --output (default /tmp/expected-nodeids.txt). The -m filter
+      defaults to 'not track_b' — the run step's own marker filter, so a
+      track_b nodeid the run deliberately deselects can never be expected.
+      Empty file list -> exit 0 with NO output (the CI guard step skips the
+      whole manifest mode on empty files); a collect-only failure propagates
+      its rc and writes no manifest (fail-closed: a vanished manifest must
+      never vacuous-green).
 
 Semantics:
   - Log missing/unreadable  -> exit 0 (no evidence, nothing to fail on)
@@ -78,9 +93,23 @@ Coverage-manifest mode (epic #1647 Task 3 — the skip-guard inversion):
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
+
+# The run step's marker filter — the manifest's collect-only MUST use the
+# same expression or it expects nodeids the run deliberately deselects and
+# every run reds on vanished nodeids (Task 6 Step 2, cycle-2 P2-11).
+_MANIFEST_MARKER_DEFAULT = "not track_b"
+
+# A collected nodeid is always <path>::[<Class>::]<name> — starts with a
+# non-space/non-colon path token followed by "::". pytest's collect-only
+# summary lines ("39 tests collected in 0.02s", "no tests collected (4
+# deselected) in 0.03s", "9/13 tests collected (4 deselected)") never
+# contain "::".
+_COLLECT_NODEID_RE = re.compile(r"^[^\s:]+::")
+
 
 # A skip line: "SKIPPED" + a reason mentioning FalkorDB (both formats above).
 _SKIPPED_MARK = "SKIPPED"
@@ -362,12 +391,115 @@ def _report(violations: list[str], falkor_violations: list[str]) -> int:
     return 1
 
 
+def collect_only_nodeids(text: str) -> list[str]:
+    """Filter a `pytest --collect-only -q` output into expected nodeids.
+
+    pytest prints one nodeid per line for the tests that WILL run — the -m
+    filter is applied AT collection, so deselected items never appear as
+    nodeids (verified 2026-08-24: "9/13 tests collected (4 deselected) in
+    0.03s" lists only the 9 selected items) — then a summary line that must
+    be dropped. Warnings/errors emitted during collection never match the
+    leading-path-:: shape either, so they are dropped too (a stray line
+    piped into the manifest would otherwise trip the consumer's
+    invalid-line fail-closed check, redding every run).
+    """
+    out = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if "::" not in stripped:
+            continue
+        if _COLLECT_NODEID_RE.match(stripped):
+            out.append(stripped)
+    return out
+
+
+def emit_manifest(files: list[str], marker: str, output: Path,
+                  runner=None) -> int:
+    """Generate the expected-nodeid manifest for the given file list.
+
+    Spawns `pytest <files> --collect-only -q -m <marker> -p no:cacheprovider`
+    (the same construction the CI run step builds) and writes one expected
+    nodeid per line to ``output``, with a '#' header comment (the consumer's
+    _read_manifest skips comment/blank lines). ``runner`` is injectable for
+    tests: ``runner(cmd) -> (rc, stdout)``; the default spawns pytest.
+
+    Fail-closed corners:
+    - empty files -> exit 0, NO output file (the CI guard skips manifest
+      mode on empty $FILES — a "no selected files" run writes no junitxml,
+      so a manifest would false-red every expected nodeid).
+    - collect-only failure -> propagate rc, NO output file (a vanished
+      manifest must never vacuous-green; the consumer reds on it).
+    """
+    if not files:
+        print("emit-manifest: no files — no manifest written (guard skips)")
+        return 0
+    cmd = [sys.executable, "-m", "pytest", *files, "--collect-only", "-q",
+           "-m", marker, "-p", "no:cacheprovider"]
+    if runner is None:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        rc, collected = proc.returncode, proc.stdout
+    else:
+        rc, collected = runner(cmd)
+    if rc != 0:
+        print(f"emit-manifest: collect-only failed (rc={rc}) — no manifest "
+              f"written (fail-closed)", file=sys.stderr)
+        return rc
+    nodeids = collect_only_nodeids(collected)
+    lines = [
+        f"# expected nodeids — epic #1647 Task 6 coverage manifest "
+        f"(from the run step's verbatim $FILES x `-m {marker}` collect-only)",
+        *nodeids,
+        "",
+    ]
+    output.write_text("\n".join(lines))
+    print(f"emit-manifest: {len(nodeids)} expected nodeids -> {output}")
+    return 0
+
+
+def _main_emit_manifest(argv: list[str]) -> int:
+    """--emit-manifest mode: parse args, generate, write."""
+    files: list[str] = []
+    marker = _MANIFEST_MARKER_DEFAULT
+    output = Path("/tmp/expected-nodeids.txt")
+    i = 1
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--emit-manifest":
+            i += 1
+            continue
+        if arg.startswith("--marker="):
+            marker, i = arg.split("=", 1)[1], i + 1
+        elif arg == "--marker":
+            if i + 1 >= len(argv):
+                print("--marker requires a value", file=sys.stderr)
+                return 2
+            marker, i = argv[i + 1], i + 2
+        elif arg.startswith("--output="):
+            output, i = Path(arg.split("=", 1)[1]), i + 1
+        elif arg == "--output":
+            if i + 1 >= len(argv):
+                print("--output requires a value", file=sys.stderr)
+                return 2
+            output, i = Path(argv[i + 1]), i + 2
+        else:
+            # The space-joined $FILES string the run step passes to pytest
+            # (may arrive as one token or many). Test paths never contain
+            # spaces, so whitespace-splitting is lossless.
+            files += arg.split()
+            i += 1
+    return emit_manifest(files, marker, output)
+
+
 def main(argv: list[str]) -> int:
+    if "--emit-manifest" in argv:
+        return _main_emit_manifest(argv)
     log_path, manifest_path, junit_path = _parse_args(argv)
     if log_path is None:
         print(
             f"usage: {argv[0]} <path-to-pytest.log> "
             "[--manifest <expected-nodeids.txt>] [--junitxml <path>]\n"
+            f"       {argv[0]} --emit-manifest \"<space-joined $FILES>\" "
+            "[--marker <expr>] [--output <path>]\n"
             "exit 0 = no live-FalkorDB skips (or no log / no manifest); "
             "exit 1 = coverage gap or live tests skipped (fail-closed, #1436)",
             file=sys.stderr,

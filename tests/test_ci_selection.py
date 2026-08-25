@@ -499,3 +499,93 @@ def test_duration_integrity():
     assert duration_issues(bad2) != []
 
 
+# ── #1668: the P2 flip's workflow-wiring pins (epic #1647 Task 6) ─────────
+# cycle-7 P2-1 (test_expect_uri_gated_iff_uri) + cycle-8 P2-12
+# (test_live_required_job_runs_only_declared_live_tests): YAML-parsing
+# pins on .github/workflows/python-ci.yml so the flip's invariants cannot
+# silently regress — a half-b URI decoupled from the EXPECT_URI tripwire
+# signal, or a third live test added to test-concurrency-falkor without the
+# audit, reds at PR time.
+
+import re as _re  # noqa: E402
+
+
+def _load_python_ci() -> dict:
+    import yaml
+    wf_path = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "python-ci.yml"
+    return yaml.safe_load(wf_path.read_text())
+
+
+def test_expect_uri_gated_iff_uri():
+    """cycle-7 P2-1: the half-b docker URI and the E2E-6 tripwire signal
+    (TORTOISE_TEST_EXPECT_URI) are set under the SAME gate — full==true &&
+    half==b — and mapped onto the pytest step's env together. A future edit
+    that decouples them (URI without the tripwire signal, or the signal
+    without the URI) reds."""
+    wf = _load_python_ci()
+    steps = wf["jobs"]["test"]["steps"]
+    compute = next(s for s in steps
+                   if "Compute half-b docker URI" in s.get("name", ""))
+    script = compute["run"]
+    # Same gate expression, same branch — both assignments sit inside the
+    # single full==true && half==b guard, and both are echoed to GITHUB_ENV
+    # unconditionally (empty on every other shape).
+    gate = ('if [ "${{ needs.changes.outputs.full }}" = "true" ] '
+            '&& [ "${{ matrix.half }}" = "b" ]; then')
+    assert gate in script, "the half-b gate must be full==true && half==b"
+    then_block = script.split("then", 1)[1].split("fi", 1)[0]
+    assert 'URI="docker://:falkordb@localhost:6379/tortoise_test_matrix"' in then_block
+    assert 'EXPECT_URI="1"' in then_block
+    assert 'echo "URI=$URI" >> "$GITHUB_ENV"' in script
+    assert 'echo "EXPECT_URI=$EXPECT_URI" >> "$GITHUB_ENV"' in script
+    # Iff BOTH directions: the assignments must NOT appear anywhere else in
+    # the script (outside the gate's then-block), so a future edit that sets
+    # URI or EXPECT_URI on any other shape reds.
+    outside_then = script.split("then", 1)[1].split("fi", 1)[1]
+    assert 'URI="' not in outside_then and 'EXPECT_URI="' not in outside_then, \
+        "URI/EXPECT_URI must be set ONLY inside the full==true && half==b gate"
+    # The pytest run step maps BOTH onto its env — iff at the YAML level.
+    run = next(s for s in steps
+               if s.get("name", "").startswith("Run fast test suite"))
+    env = run["env"]
+    assert env["TORTOISE_DB_URI"] == "${{ env.URI }}"
+    assert env["TORTOISE_TEST_EXPECT_URI"] == "${{ env.EXPECT_URI }}"
+    # The skip-guard step's manifest mode is gated on rc==0 AND non-empty
+    # $FILES (plan-review P1-7 — the "no selected files" path writes rc=0
+    # with no junitxml; with a manifest that would false-red).
+    guard = next(s for s in steps
+                 if s.get("name", "").startswith("Skip-fail guard"))
+    assert '-s "${RUNNER_TEMP:-/tmp}/pytest-files"' in guard["run"]
+    assert "--manifest /tmp/expected-nodeids.txt" in guard["run"]
+
+
+def test_live_required_job_runs_only_declared_live_tests():
+    """cycle-8 P2-12: test-concurrency-falkor runs EXACTLY the declared
+    live-test pair — tests/test_event_store.py::test_seq_is_monotonic_under_concurrency_live_falkor
+    and tests/test_embedded_concurrency.py::test_concurrent_writers_live_falkor_no_lost_writes.
+    A third live test added to the job without extending this pin reds (the
+    audit's executable form — the old audit named two test files but grepped
+    only test_embedded_concurrency, so a new live test in test_event_store
+    was invisible)."""
+    wf = _load_python_ci()
+    job = wf["jobs"]["test-concurrency-falkor"]
+    steps = job["steps"]
+    run = next(s for s in steps
+               if s.get("name", "").startswith("Run live concurrency tests"))
+    nodeids = _re.findall(r"tests/[A-Za-z0-9_/.]+\.py::[A-Za-z0-9_]+", run["run"])
+    declared = {
+        "tests/test_event_store.py::test_seq_is_monotonic_under_concurrency_live_falkor",
+        "tests/test_embedded_concurrency.py::test_concurrent_writers_live_falkor_no_lost_writes",
+    }
+    assert set(nodeids) == declared, (
+        f"test-concurrency-falkor must run exactly {sorted(declared)}, got "
+        f"{sorted(set(nodeids))} (a new live test needs the audit + the "
+        "test-prefixed job URI, epic #1647 cycle-8 P2-12)"
+    )
+    # The job-level URI stays the NON-test-prefixed path — inert because
+    # both live tests pass explicit test-prefixed graph names and never
+    # bulk-wipe the URI default (verified test_embedded_concurrency
+    # L111-153 + test_event_store L165-185). If a future test adds a
+    # path=/URI-default DETACH, the job URI must gain the P1-2 test-prefixed
+    # path.
+    assert job["env"]["TORTOISE_DB_URI"] == "docker://:falkordb@localhost:6379/tortoise"
