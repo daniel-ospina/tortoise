@@ -9724,7 +9724,25 @@ class TortoiseSDK:
             match_source = strat_name
         else:
             ranked_lists = list(raw_results.values())
-            fused = rrf_fusion(ranked_lists)
+            # #1657 weighted RRF: per-strategy fusion weights, default OFF
+            # (byte-identical). The measured fix for fusion dilution — the
+            # burn showed equal-weight RRF costs ~2 nDCG pts when a strong
+            # vector leg is diluted by weak FTS/structural legs. Knob:
+            # TORTOISE_FUSION_WEIGHTS='{"vector": 1.5, "fts": 1.0}' (JSON).
+            # None → all 1.0 → identical to pre-#1657.
+            fusion_weights = None
+            _fw = os.environ.get("TORTOISE_FUSION_WEIGHTS")
+            if _fw:
+                import json as _json
+                try:
+                    fusion_weights = _json.loads(_fw)
+                except (ValueError, TypeError):
+                    fusion_weights = None
+            fused = rrf_fusion(
+                ranked_lists,
+                strategy_names=list(raw_results.keys()),
+                weights=fusion_weights,
+            )
             # Apply threshold filter to RRF scores
             if threshold > 0:
                 fused = {pid: score for pid, score in fused.items() if score >= threshold}

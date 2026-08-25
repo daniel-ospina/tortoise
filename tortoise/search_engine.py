@@ -870,16 +870,26 @@ def rrf_fusion(
     ranked_lists: list[list[tuple[str, float]]],
     k: int = 60,
     *,
+    strategy_names: list[str] | None = None,
+    weights: dict[str, float] | None = None,
     recency_weights: dict[str, float] | None = None,
     recency_boost: float = 0.0,
 ) -> dict[str, float]:
     """Reciprocal Rank Fusion — combine multiple ranked lists.
 
-    Formula: RRF(d) = Σ 1/(k + rank_i(d))
+    Formula: RRF(d) = Σ w_i / (k + rank_i(d))
 
     Args:
         ranked_lists: List of strategies, each is [(id, score), ...] ranked desc
         k: RRF constant (default 60 from Cormack et al. 2009)
+        strategy_names (#1657): the per-list strategy label (fts/vector/
+            structural/tfidf) — required to apply ``weights``; optional.
+        weights (#1657): per-strategy multiplier w_i for the fusion term
+            (weighted RRF — the fix for the measured fusion dilution where
+            equal-weight RRF costs ~2 nDCG pts when a strong vector leg is
+            diluted by weak FTS/structural legs). Optional; default None =
+            equal weights (byte-identical to pre-#1657). When weights is
+            None the arithmetic is untouched for all pre-#1657 callers.
         recency_weights (R5 #1544): {id: factor ∈ [0,1]} — rank-based
             recency percentile from ``_recency_factors`` (newest → 1.0,
             oldest → 0.0, undated → 0.0). Optional; default None = off.
@@ -892,9 +902,16 @@ def rrf_fusion(
         {id: combined_rrf_score} sorted by score descending
     """
     scores: dict[str, float] = {}
-    for ranked in ranked_lists:
+    for i, ranked in enumerate(ranked_lists):
+        # #1657 weighted RRF: w_i scales the list's fusion contribution.
+        # Default 1.0 keeps pre-#1657 callers byte-identical. When
+        # strategy_names is provided, the weight is looked up by label
+        # (weights defaults to None → all 1.0).
+        w = 1.0
+        if strategy_names is not None and weights:
+            w = weights.get(strategy_names[i], 1.0)
         for rank, (pid, _score) in enumerate(ranked):
-            rrf_score = 1.0 / (k + rank + 1)
+            rrf_score = w / (k + rank + 1)
             scores[pid] = scores.get(pid, 0.0) + rrf_score
     # R5 (#1544): optional recency multiplier — a multiplier, NOT an additive
     # constant: the RRF score range is ~0.01–0.05 (the SearchScores rrf
