@@ -638,7 +638,6 @@ def _cmd_signup(args) -> int:
     the config to ~/.tortoise/credentials.json (#1708) so `tortoise
     create-point` etc. work immediately.
     """
-    import contextlib
     import json
     import os
     import sys
@@ -691,10 +690,12 @@ def _cmd_signup(args) -> int:
             store = json.loads(config_path.read_text())
         except (json.JSONDecodeError, ValueError, OSError):
             # ValueError: UnicodeDecodeError from read_text (invalid UTF-8) is
-            # a ValueError subclass — treated as "invalid" (no traceback).
-            return "invalid"
+            # a ValueError subclass — a corrupt store is FAIL-CLOSED (D6):
+            # never mint over an unreadable store (the team it belonged to
+            # would be orphaned and its signup budget silently burned).
+            return "unvalidatable"
         if not isinstance(store, dict):
-            return "invalid"
+            return "unvalidatable"
         store_key = store.get("api_key")
         if not isinstance(store_key, str) or not store_key.strip():
             return "invalid"
@@ -904,10 +905,15 @@ def _cmd_signup(args) -> int:
         fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w") as fh:
             fh.write(json.dumps(config, indent=2) + "\n")
-        with contextlib.suppress(FileNotFoundError):
-            # Another writer won the rename race — its complete config stands
-            # (ours is identical in shape). Not an orphan: the key WAS saved.
-            os.replace(tmp_path, config_path)
+        # NO suppress(FileNotFoundError) here: os.replace can never lose a
+        # rename race (POSIX last-writer-wins; the target being absent is
+        # fine). The only way it raises FileNotFoundError is a MISSING SOURCE
+        # — the fresh unique tmp was deleted (e.g. forward clock jump makes
+        # the age-guarded sweep eat it) — which means nothing was saved, and
+        # a silent exit-0 would be a minted-but-lost key with a false
+        # success. Let it fall through to the except OSError orphan handler
+        # (echo key + exit 1) — the correct fail-closed outcome.
+        os.replace(tmp_path, config_path)
     except OSError as e:
         # Orphan class: the key was minted but cannot be saved — echo it and
         # fail closed so the user never loses the key and never silently
@@ -926,7 +932,7 @@ def _cmd_signup(args) -> int:
     # on --force only, so the env-401 remint path exited 0 with NO warning
     # (the dead shadow that re-401s every subsequent run → duplicate mints).
     shadow_srcs = []
-    if os.environ.get("TORTOISE_API_KEY"):
+    if os.environ.get("TORTOISE_API_KEY", "").strip():
         shadow_srcs.append("TORTOISE_API_KEY (env wins)")
     cwd_cfg = Path.cwd() / ".tortoise"
     if cwd_cfg.is_file():

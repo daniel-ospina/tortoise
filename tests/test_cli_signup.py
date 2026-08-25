@@ -599,10 +599,12 @@ class TestReuse:
                        for call in urlopen.call_args_list)  # NO mint on unvalidatable
         assert "--force" in capsys.readouterr().err
 
-    def test_env_401_global_invalid_utf8_mints_over(self, monkeypatch, tmp_path, capsys):
-        """#1708 fixer (P2): env key 401s and the global store is corrupt
-        (invalid UTF-8) — _global_key_status must treat it as invalid (mint +
-        overwrite), never traceback."""
+    def test_env_401_global_corrupt_store_fail_closed(self, monkeypatch, tmp_path, capsys):
+        """#1708 second-model gate (P2): env key 401s and the global store is
+        corrupt (invalid UTF-8) — _global_key_status must fail CLOSED (D6
+        contract: never mint over an unreadable store) with the fix-or-delete
+        hint; the corrupt store's team is never orphaned, and the 2/24h
+        signup budget is never burned."""
         monkeypatch.setenv("TORTOISE_API_KEY", "tt_dead_env")
         monkeypatch.setenv("HOME", str(tmp_path))
         d = tmp_path / ".tortoise"
@@ -613,13 +615,13 @@ class TestReuse:
                         _ok_mint()]
         with mock.patch("urllib.request.urlopen", side_effect=side_effects) as urlopen:
             rc = main._cmd_signup(mock.Mock(force=False))
-        assert rc == 0
-        assert any(call.args[0].full_url.endswith("/v1/agent/signup")
-                   for call in urlopen.call_args_list)  # minted (corrupt store = invalid)
+        assert rc == 1  # fail-closed — no mint
+        assert not any(call.args[0].full_url.endswith("/v1/agent/signup")
+                       for call in urlopen.call_args_list)
         assert "Traceback" not in capsys.readouterr().err
-        # the corrupt store was replaced by the fresh mint
-        cfg = json.loads((tmp_path / ".tortoise" / "credentials.json").read_text())
-        assert cfg["api_key"].startswith("tt_mint_")
+        # the corrupt store was NOT replaced — fail-closed keeps it intact
+        stored = (tmp_path / ".tortoise" / "credentials.json").read_bytes()
+        assert stored == b"\xff\xfe\x00{not json"
 
     def test_reuse_invalid_then_rate_limited(self, monkeypatch, tmp_path, capsys):
         """Revoked key + exhausted 2/24h budget: message must mention BOTH."""
