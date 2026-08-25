@@ -24,6 +24,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 _TESTS_ROOT = Path(__file__).resolve().parent
 
 # ── ROUTED_NAMESPACES (cycle-5 P1-5 + cycle-6 P2-15) ────────────────────────
@@ -247,3 +249,145 @@ def test_select_graph_routing_table_keys_exist():
     for fname in ROUTED_SELECT_GRAPH_SITES:
         assert (_TESTS_ROOT / fname).exists(), \
             f"ROUTED_SELECT_GRAPH_SITES key {fname!r} is not a test module"
+
+
+# ── Epic #1647 Task 5 (#1667): embedded_only marker semantics + stems ─────
+# Task 5 APPENDS below the Task 7 census guards (above) — the D-2 skip
+# mechanism pin + the TEST_NO_REDIRECT_STEMS registry (cycle-2 P2-9).
+
+
+_REPO_ROOT = _TESTS_ROOT.parent
+
+
+def test_embedded_only_marker_skips_when_uri_set(monkeypatch):
+    # Cycle-5 P2-12: the D-2 skip-mechanism pin. The autouse skip is a
+    # conftest hook keyed on the marker; this test drives the hook directly:
+    # with URI set, a request carrying `embedded_only` must call pytest.skip
+    # with the embedded-only reason (the visible-skip contract — never a
+    # silent pass, and never a reason containing the "FalkorDB" substring,
+    # which would trip the Task 3 skip-guard). The hook is a named helper
+    # `_embedded_only_skip` in conftest so it is testable.
+    import types
+
+    from tests._embedded import _embedded_only_skip
+    # Divergence from the plan's literal code (review P0): the plan imports
+    # from tests.conftest — pytest loads conftest as the top-level `conftest`
+    # module, so the namespace-package tests.conftest import is a SECOND
+    # module instance that re-executes conftest's top-level code mid-session
+    # (overwrites TORTOISE_TEST_SESSION, re-points the journal). The helper
+    # lives in tests/_embedded.py — a cached module — so imports resolve
+    # without re-execution.
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379")
+    seen = {}
+    # Divergence from the plan's literal test code: the plan accesses
+    # pytest.skip.Exception AFTER monkeypatching pytest.skip with a fake —
+    # the attribute no longer exists (AttributeError). Capture the exception
+    # class BEFORE the patch; the fake raises the real skip exception so the
+    # hook's contract (pytest.skip is the only skip path) is unchanged.
+    skip_exc = pytest.skip.Exception
+
+    def _fake_skip(reason, **kw):
+        seen["reason"] = reason
+        raise skip_exc(reason)
+
+    monkeypatch.setattr(pytest, "skip", _fake_skip)
+    fake_request = types.SimpleNamespace(node=types.SimpleNamespace(
+        get_closest_marker=lambda name: types.SimpleNamespace()
+        if name == "embedded_only" else None))
+    with pytest.raises(skip_exc):
+        _embedded_only_skip(fake_request)
+    assert "embedded-only" in seen["reason"], \
+        "skip must carry the embedded-only reason (visible-skip contract)"
+    assert "FalkorDB" not in seen["reason"], \
+        "reason must not contain the FalkorDB substring (Task 3 guard trip)"
+
+
+def test_embedded_only_marker_inert_without_uri(monkeypatch):
+    # D-2: URI unset (the embedded lane) → the marker is inert — the hook
+    # returns without skipping even for a marked request.
+    import types
+
+    from tests._embedded import _embedded_only_skip
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    fake_request = types.SimpleNamespace(node=types.SimpleNamespace(
+        get_closest_marker=lambda name: types.SimpleNamespace()
+        if name == "embedded_only" else None))
+    _embedded_only_skip(fake_request)  # must NOT raise / call pytest.skip
+
+
+def test_no_redirect_stems_exist_as_modules():
+    # Cycle-2 P2-9: every TEST_NO_REDIRECT_STEMS entry must resolve to a
+    # real test module — a stale/typo'd stem silently fails to exempt.
+    from tests._embedded import TEST_NO_REDIRECT_STEMS
+    for stem in TEST_NO_REDIRECT_STEMS:
+        hit = list((_REPO_ROOT / "tests").glob(f"{stem}.py")) or \
+              list((_REPO_ROOT / "tests/bench").glob(f"{stem}.py"))
+        assert hit, f"TEST_NO_REDIRECT_STEMS entry {stem!r} is not a test module"
+
+
+def test_no_redirect_stems_registry_exact():
+    # Task 5 pin: the carve-out registry is EXACTLY the 7 plan stems — a
+    # new/excised stem is a deliberate epic change (Task 9's carve-out
+    # expansion updates this list), never an accidental edit. A carve-out
+    # FILE missing its stem silently flips to the server lane at P2.
+    from tests._embedded import TEST_NO_REDIRECT_STEMS
+    expected = frozenset({
+        "test_embedded_lifecycle_fast_close",
+        "test_redis_guard",
+        "test_guard",
+        "test_config",
+        "test_ops_safety",
+        "test_pre_migration_safety",
+        "test_smoke_embedded",
+    })
+    assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
+        "TEST_NO_REDIRECT_STEMS drifted from the 7 plan stems: "
+        f"{sorted(frozenset(TEST_NO_REDIRECT_STEMS) ^ expected)}")
+
+
+def test_no_carve_out_imports_test_helpers():
+    # Cycle-4 P1-4 guard: _caller_test_stem() keys on the NEAREST test_
+    # frame — a carve-out file constructing through tests/test_helpers.py
+    # would resolve to stem "test_helpers" (not its own exempted stem), so
+    # its redirect exemption silently never fires. Assert no carve-out
+    # module (a TEST_NO_REDIRECT_STEMS entry) imports it.
+    from tests._embedded import TEST_NO_REDIRECT_STEMS
+    for stem in TEST_NO_REDIRECT_STEMS:
+        for p in list((_REPO_ROOT / "tests").glob(f"{stem}.py")) \
+                + list((_REPO_ROOT / "tests/bench").glob(f"{stem}.py")):
+            src = p.read_text()
+            assert "test_helpers" not in src, \
+                f"carve-out {stem} imports test_helpers — loses its stem exemption (P1-4)"
+
+
+def test_embedded_only_marked_tests_registered():
+    # D-2=A pin: the 3 busy-error tests carry the embedded_only marker in
+    # their source — a dropped/renamed mark silently runs them on the
+    # server lane where busy-error semantics differ (they would fail, not
+    # skip). test_audit's mark is parametrize-level: only the (d) busy case
+    # skips, the CLI error-path siblings run on both lanes.
+    needles = {
+        "test_audit.py": "pytest.param(\"embedded_busy\", "
+                         "marks=pytest.mark.embedded_only)",
+        "test_pack_state.py": "@pytest.mark.embedded_only",
+        "test_index_directory.py": "@pytest.mark.embedded_only",
+    }
+    for fname, needle in needles.items():
+        src = (_TESTS_ROOT / fname).read_text(encoding="utf-8")
+        assert needle in src, \
+            f"{fname} lost its embedded_only mark (D-2=A)"
+
+
+def test_session_token_present_and_hex12_during_docker_session(monkeypatch):
+    # Cycle-4 P2-14: mid-session TEST_SESSION mutation would strand this
+    # session's graphs (journal filename + derived names key off the ORIGINAL
+    # value; Task 1's no-mutation probe covers drift, this covers presence/
+    # shape on docker lanes). Only asserted when the URI is actually set
+    # (the docker-half session shape) — embedded sessions need no token.
+    # Cycle-5 P2-1: the shape is 12 hex (48 bits), was 8 hex.
+    import os
+    import re
+    if not os.environ.get("TORTOISE_DB_URI"):
+        pytest.skip("no docker session — token not required")
+    assert re.fullmatch(r"[0-9a-f]{12}", os.environ.get("TORTOISE_TEST_SESSION", "")), \
+        "docker session must carry TORTOISE_TEST_SESSION = 12 hex (conftest export)"

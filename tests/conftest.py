@@ -710,3 +710,21 @@ def _reset_ip_rate_limits():
         SIGNUP_TRACKER.reset()
     except (ImportError, AttributeError):
         pass
+
+
+# ── Epic #1647 Task 5 (D-2=A): the embedded_only marker hook ──────────────
+# The named helper lives in tests/_embedded.py (NOT conftest): an import via
+# `tests.conftest` would re-execute conftest's top-level code mid-session
+# (pytest loads conftest as the top-level `conftest` module; the
+# namespace-package tests.conftest import is a SECOND instance that
+# overwrites TORTOISE_TEST_SESSION and re-points the journal — review P0).
+from tests._embedded import _embedded_only_skip  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _embedded_only_skip_hook(request):
+    """Autouse D-2 skip: supported TORTOISE_DB_URI set + `embedded_only`
+    marker present -> visible pytest.skip with the embedded-only reason.
+    Delegates to the named helper `_embedded_only_skip` (cycle-5 P2-12) so
+    the marker-semantics test drives the exact hook."""
+    _embedded_only_skip(request)

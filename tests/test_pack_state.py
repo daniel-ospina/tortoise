@@ -670,6 +670,7 @@ class TestMcpPacksList:
 
 
 class TestBackfillScript:
+    @pytest.mark.embedded_only  # epic #1647 D-2=A: real FalkorDB has no busy concept — this stays embedded
     def test_dry_run_default_makes_no_writes(self, tmp_path, monkeypatch):
         """D5: --dry-run is the default; a run reports without writing.
 

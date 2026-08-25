@@ -33,7 +33,23 @@ from tortoise.projection import FalkorProjection
 # keys on the CALLER test module (frame-identified by _caller_test_stem),
 # NEVER on the DB-file basename. The list is wired in Task 5; empty in P1
 # (URI unset everywhere → the redirect is dormant).
-TEST_NO_REDIRECT_STEMS: tuple[str, ...] = ()
+# Task 5 (D-2/H1): the 7 half-b carve-out TEST-MODULE stems (the 6 from
+# cycle 1 + test_smoke_embedded, cycle-2 P1-1a — tests/bench rides the P2
+# flip via the push_extra distribution, so its URI job must keep the file
+# embedded). Exempting the CALLER TEST MODULE means the carve-out files'
+# constructions stay embedded under the P2 job-level URI — their embedded-
+# specific assertions never flip to the server lane. The 3 busy-error tests
+# are NOT here: they keep running embedded via the embedded_only marker
+# (D-2=A), a separate mechanism from this redirect exemption.
+TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
+    "test_embedded_lifecycle_fast_close",
+    "test_redis_guard",
+    "test_guard",
+    "test_config",
+    "test_ops_safety",
+    "test_pre_migration_safety",
+    "test_smoke_embedded",
+)
 
 _HAS_FALKOR: bool | None = None
 
@@ -151,6 +167,37 @@ class BackendIdentity:
 
 
 BACKEND_IDENTITY = BackendIdentity()
+
+
+# ── Epic #1647 Task 5 (D-2=A): the embedded_only marker hook ──────────────
+def _embedded_only_skip(request: pytest.FixtureRequest) -> None:
+    """D-2 skip hook for the `embedded_only` marker (epic #1647 Task 5).
+
+    The 3 busy-error tests (test_audit (d) case, TestBackfillScript's
+    dry-run test, test_index_directory E2E-9) keep running EMBEDDED because
+    real FalkorDB's busy-error semantics differ — under a supported
+    TORTOISE_DB_URI (the server lane) they SKIP VISIBLY with the
+    embedded-only reason; on the embedded lane (URI unset) the marker is
+    inert. Named + importable so test_markers.py pins the exact skip
+    contract (cycle-5 P2-12): a visible skip whose reason carries
+    "embedded-only" and never the "FalkorDB" substring (Task 3's skip-guard
+    trip). Lives HERE (not conftest) so imports resolve through the cached
+    tests._embedded module — a `from tests.conftest import` re-executes
+    conftest's top-level code mid-session (pytest loads it as the top-level
+    `conftest` module; the namespace-package tests.conftest import is a
+    SECOND instance that overwrites TORTOISE_TEST_SESSION and re-points the
+    journal — review P0). The lane gate is the seam predicate
+    _uri_set_supported() (is_db_uri — the redirect's own gate family,
+    P2-16): a set-but-unsupported URI keeps the marker inert (the redirect
+    would not fire either).
+    """
+    if not _uri_set_supported():
+        return  # embedded lane — the marker is inert
+    if request.node.get_closest_marker("embedded_only") is None:
+        return
+    pytest.skip(
+        "embedded-only: busy-error semantics are embedded-specific — the "
+        "server lane has no cross-process busy concept (epic #1647 D-2)")
 
 _GRAPH_NAME_RE = re.compile(r"[A-Za-z0-9_.\-]+")
 

@@ -462,7 +462,12 @@ def _clear_db_env(monkeypatch):
     "invalid_port",
     "relative_path",
     "unreachable_uri",
-    "embedded_busy",
+    # (d) embedded_busy — epic #1647 D-2=A: real FalkorDB has no busy
+    # concept (cross-process same-path overlap is embedded-only), so this
+    # case keeps running embedded; under a supported TORTOISE_DB_URI the
+    # embedded_only autouse hook skips it visibly. The three CLI error-path
+    # siblings run on both lanes.
+    pytest.param("embedded_busy", marks=pytest.mark.embedded_only),
 ])
 def test_cli_error_paths_clean_one_line(case, capsys, monkeypatch, tmp_path):
     """#1258 review-fix (9daec32e): every _cmd_audit failure path surfaces as
