@@ -19,7 +19,19 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from urllib.error import HTTPError, URLError
 
+import pytest
+
 from tortoise.__main__ import main
+
+
+@pytest.fixture(autouse=True)
+def _home_isolated(monkeypatch, tmp_path):
+    """#1708 D9: never read the developer's real ~/.tortoise credentials, and
+    never resolve a stray ./.tortoise file in the pytest CWD (a repo-root
+    .tortoise would 401→re-mint and break the reuse tests)."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+    monkeypatch.chdir(tmp_path)
 
 CONFIG = (
     '{"api_key": "tt_testkey", "api_url": "https://api.premiselabs.co", "team_id": "team123"}\n'

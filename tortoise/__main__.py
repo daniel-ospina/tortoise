@@ -3,6 +3,7 @@ from __future__ import annotations  # noqa: I001
 
 import argparse
 import sys
+from pathlib import Path
 
 def _cmd_rebuild(args):
     print(f"Rebuilding from {args.dir} → {args.db}")
@@ -634,20 +635,191 @@ def _cmd_signup(args) -> int:
 
     No email, no dashboard, no Supabase account — the agent/CLI equivalent
     of Mem0's 4-command key mint and Hindsight's npx self-install. Saves
-    the config to .tortoise so `tortoise create-point` etc. work immediately.
+    the config to ~/.tortoise/credentials.json (#1708) so `tortoise
+    create-point` etc. work immediately.
     """
-    import json, os, sys, uuid  # noqa: E401, I001
+    import json
+    import os
+    import sys
+    import time
+    import uuid
     from pathlib import Path
+    from urllib.error import HTTPError, URLError
     from urllib.request import Request, urlopen
-    from urllib.error import URLError, HTTPError
 
-    api_url = os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
-    device_id = f"anon-{uuid.uuid4().hex[:12]}"
+    # Normalize once (#1708 fixer, P2): the reuse-GET rstrips its base but the
+    # mint POST used the raw env URL — a trailing-slash TORTOISE_API_URL hit
+    # `//v1/agent/signup` → 404. Both URLs derive from this normalized base.
+    api_url = os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co").rstrip("/")
+    home_dir = Path.home() / ".tortoise"
+    config_path = home_dir / "credentials.json"
+
+    # ── Reuse-before-mint (#1708 D2/D3) ────────────────────────────────────
+    # A stored key (env → cwd/.tortoise → ~/.tortoise/credentials.json per D1)
+    # is validated with the same REQUEST SHAPE _cmd_init uses (GET /v1/team,
+    # Bearer header, timeout=10) — but the error semantics deliberately
+    # diverge: init warns-and-saves offline (an unvalidatable key still gets
+    # written), while signup FAIL-CLOSES on an unvalidatable existing key
+    # (#1708 — the duplicate-mint incident). 200 = reuse, 0 new keys;
+    # 401/non-suspended-403 = re-mint (global-store fallback below);
+    # SUSPENDED-403 and cannot-validate (429/5xx/network/timeout/garbage-200)
+    # = fail-closed exit 1 — never mint on an unvalidatable existing key.
+    force = getattr(args, "force", False)
+    mint_url = api_url  # may be overridden when re-minting after a 401/403
+    reminting_after_401 = False
+    legacy_device_id = None
+
+    def _global_key_status(base: str) -> str:
+        """Validate the key in the GLOBAL store the mint would overwrite
+        (#1708 fixer, P1: env/cwd key-shadow defeats remint idempotency).
+
+        The 401/403 source may be a higher-precedence key (env or a legacy
+        cwd/.tortoise config) that still shadows the global store at read
+        time — re-running would re-validate the dead source and mint ANOTHER
+        team (the exact duplicate-mint incident #1708 fixes). When the
+        shadowing source is rejected, check the store the mint would write:
+
+          "valid"         — GET /v1/team 200 → reuse instead of minting.
+          "invalid"       — no store / no key / 401 / non-SUSPENDED 403 → mint.
+          "suspended"     — SUSPENDED 403 → fail closed, never mint over it.
+          "unvalidatable" — 429/5xx/network/timeout/garbage → fail closed.
+        """
+        if not config_path.is_file():
+            return "invalid"
+        try:
+            store = json.loads(config_path.read_text())
+        except (json.JSONDecodeError, ValueError, OSError):
+            # ValueError: UnicodeDecodeError from read_text (invalid UTF-8) is
+            # a ValueError subclass — a corrupt store is FAIL-CLOSED (D6):
+            # never mint over an unreadable store (the team it belonged to
+            # would be orphaned and its signup budget silently burned).
+            return "unvalidatable"
+        if not isinstance(store, dict):
+            return "unvalidatable"
+        store_key = store.get("api_key")
+        if not isinstance(store_key, str) or not store_key.strip():
+            return "invalid"
+        store_base = (store.get("api_url") or base).rstrip("/")
+        try:
+            req = Request(
+                f"{store_base}/v1/team",
+                headers={"Authorization": f"Bearer {store_key}"},
+            )
+            with urlopen(req, timeout=10) as resp:
+                json.loads(resp.read())
+            return "valid"
+        except HTTPError as e:
+            body = e.read().decode() if e.fp else ""
+            if e.code in (401, 403):
+                if e.code == 403 and _suspended_info(body) is not None:
+                    return "suspended"
+                return "invalid"
+            return "unvalidatable"
+        except (URLError, ValueError, json.JSONDecodeError, TimeoutError, OSError):
+            return "unvalidatable"
+    if not force:
+        try:
+            cfg_path, cfg, existing_key, existing_url = _resolve_config_path()
+        except _ConfigError as e:
+            print(f"Config at {e} is corrupt or unreadable — fix or delete it, "
+                  "or use --force.", file=sys.stderr)
+            return 1  # never mint on a corrupt config (D6)
+        if existing_key:
+            base = (existing_url or api_url).rstrip("/")
+            try:
+                req = Request(
+                    f"{base}/v1/team",
+                    headers={"Authorization": f"Bearer {existing_key}"},
+                )
+                with urlopen(req, timeout=10) as resp:
+                    json.loads(resp.read())
+                src = str(cfg_path) if cfg_path else "TORTOISE_API_KEY"
+                print(f"✅ Already have a Tortoise Cloud key ({src}) — reusing it.")
+                print("   Run 'tortoise team keys' or 'tortoise create-point \"hello\"' to use it.")
+                print("   To mint a fresh key instead: tortoise signup --force")
+                return 0
+            except HTTPError as e:
+                body = e.read().decode() if e.fp else ""
+                if e.code in (401, 403):
+                    # #308: SUSPENDED 403 must NOT mint (mirrors the other
+                    # _cmd_* team handlers — a suspended team must not be
+                    # silently orphaned by a fresh anonymous mint).
+                    sus = _suspended_info(body)
+                    if sus is not None:
+                        print(f"{sus[0]}", file=sys.stderr)
+                        return 1
+                    # #1708 fixer (P1): before minting, check the GLOBAL store
+                    # the mint would write to. When the 401/403 came from a
+                    # higher-precedence source (env/cwd), a valid global key
+                    # must be REUSED — otherwise every re-run re-validates the
+                    # dead source and mints ANOTHER team (the duplicate-mint
+                    # incident). The store's own host is used when it differs.
+                    if cfg_path != config_path:
+                        gs = _global_key_status(base)
+                        if gs == "valid":
+                            shadow_src = ("TORTOISE_API_KEY" if cfg_path is None
+                                          else f"{cfg_path} (cwd config)")
+                            print(f"✅ Reusing your stored key at {config_path} — "
+                                  f"{shadow_src} was rejected ({e.code}) and shadows it.")
+                            print(f"   Unset TORTOISE_API_KEY or remove "
+                                  f"{Path.cwd() / '.tortoise'} to use your stored key.",
+                                  file=sys.stderr)
+                            return 0
+                        if gs == "suspended":
+                            print("The stored key at ~/.tortoise/credentials.json is "
+                                  "SUSPENDED — not minting over it. Resolve the "
+                                  "suspension, delete the file, or use --force.",
+                                  file=sys.stderr)
+                            return 1
+                        if gs == "unvalidatable":
+                            print("Cannot validate the stored key at "
+                                  "~/.tortoise/credentials.json — not minting to "
+                                  "avoid duplicate keys. Retry later or use --force.",
+                                  file=sys.stderr)
+                            return 1
+                    print(f"Stored key is invalid ({e.code}) — minting a fresh one.",
+                          file=sys.stderr)
+                    reminting_after_401 = True
+                    mint_url = base  # re-mint against the validated config's host (D2)
+                    # device_id backfill: a legacy cwd/.tortoise has none —
+                    # persist it so client identity stays anchored (future #1709).
+                    if isinstance(cfg, dict):
+                        legacy_device_id = cfg.get("device_id")
+                else:
+                    print(f"Cannot validate existing key (API error {e.code}) — not "
+                          "minting to avoid duplicate keys. Retry later or use --force.",
+                          file=sys.stderr)
+                    return 1
+            except (URLError, ValueError, json.JSONDecodeError, TimeoutError, OSError) as e:
+                # TimeoutError/OSError: socket.timeout from resp.read() after
+                # headers arrive (flaky proxy/captive-portal stall) is NOT a
+                # URLError — without it the D2 contract degrades into a traceback.
+                print(f"Cannot validate existing key ({e}) — not minting to avoid "
+                      "duplicate keys. Retry later or use --force.", file=sys.stderr)
+                return 1
+
+    # Stable device_id (#1708): reuse a previously stored one (server still
+    # ignores it — #741(a) unchanged; it anchors CLIENT-side reuse and the
+    # future #1709 dedupe). Read from the GLOBAL credentials store, plus the
+    # legacy-config backfill captured above.
+    stored = {}
+    if config_path.is_file():
+        try:
+            stored = json.loads(config_path.read_text())
+        except (json.JSONDecodeError, ValueError, OSError):
+            # ValueError: UnicodeDecodeError (invalid UTF-8) — same as a parse
+            # error: treat the store as absent, never traceback.
+            stored = {}
+        if not isinstance(stored, dict):
+            stored = {}
+    if not stored.get("device_id") and legacy_device_id:
+        stored["device_id"] = legacy_device_id
+    device_id = stored.get("device_id") or f"anon-{uuid.uuid4().hex[:12]}"
 
     print(f"Signing up for a free hosted team (anonymous, no email)…")  # noqa: F541
     try:
         req = Request(
-            f"{api_url}/v1/agent/signup",
+            f"{mint_url}/v1/agent/signup",
             data=json.dumps({"identity": device_id}).encode(),
             headers={"Content-Type": "application/json", "X-Device-Id": device_id},
             method="POST",
@@ -663,28 +835,114 @@ def _cmd_signup(args) -> int:
             retry = (e.headers.get("Retry-After")
                      if e.headers and e.headers.get("Retry-After") else None)
             when = f"{int(retry)}s" if (retry and retry.isdigit()) else "later"
-            print(f"Signup rate limit reached — try again in {when}. "
-                  "Need more keys? Contact support@premiselabs.co.",
-                  file=sys.stderr)
+            if reminting_after_401:
+                # D2: a revoked stored key + exhausted budget — the user must
+                # not be told to "wait" as if nothing else is wrong.
+                print(f"Signup rate limit reached — try again in {when}. "
+                      "Note: your stored key is ALSO invalid — fix or revoke it, "
+                      "or --force a fresh mint after the window. "
+                      "Need more keys? Contact support@premiselabs.co.",
+                      file=sys.stderr)
+            else:
+                print(f"Signup rate limit reached — try again in {when}. "
+                      "Need more keys? Contact support@premiselabs.co.",
+                      file=sys.stderr)
             return 1
         print(f"Signup failed ({e.code}): {body}", file=sys.stderr)
         return 1
-    except (URLError, ValueError, json.JSONDecodeError) as e:
-        print(f"Cannot reach API at {api_url}: {e}", file=sys.stderr)
+    except URLError as e:
+        print(f"Cannot reach API at {mint_url}: {e}", file=sys.stderr)
+        return 1
+    except (ValueError, json.JSONDecodeError, TimeoutError, OSError):
+        # 200-with-garbage (proxy/mitm) or a stall after the server accepted:
+        # the server DID mint — "Cannot reach API" would mislead the user into
+        # retrying (the double-fire pattern).
+        print("A key may have been minted but the response was unreadable — "
+              "check the dashboard or support before re-running; "
+              "do NOT blindly retry.", file=sys.stderr)
         return 1
 
-    # Save config so the key works immediately
-    config_path = Path.cwd() / ".tortoise"
+    if not (isinstance(data, dict) and "key" in data):
+        # 200 with valid JSON but no `key` (edge/proxy): the server may still
+        # have minted — same fail-soft contract as the garbage-200 leg above.
+        # data["key"] must never be dereferenced outside the try (that was an
+        # unhandled KeyError traceback, not the documented fail-soft path).
+        print("A key may have been minted but the response was malformed "
+              "(no 'key' field) — check the dashboard or support before "
+              "re-running; do NOT blindly retry.", file=sys.stderr)
+        return 1
+
+    # Save config so the key works immediately — global credentials store
+    # (#1708 D4): ~/.tortoise/credentials.json (0600), dir 0700, atomic
+    # unique-tmp write — fixes the IsADirectoryError crash when cwd == ~
+    # (previously wrote to cwd/.tortoise which IS the data home directory).
     config = {
         "api_key": data["key"],
-        "api_url": api_url,
-        "team_id": data["team_id"],
-        "team_name": data["team_name"],
+        "api_url": mint_url,
+        "team_id": data.get("team_id"),
+        "team_name": data.get("team_name"),
+        "device_id": device_id,
     }
-    config_path.write_text(json.dumps(config, indent=2) + "\n")
-    os.chmod(config_path, 0o600)
+    try:
+        home_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(home_dir, 0o700)
+        # Sweep stale tmp-* files (a crashed writer leaves one behind — key
+        # material residue; unbounded accumulation is the failure mode).
+        # Age-guarded (#1708 fixer, P2): sweeping FRESH tmps lets concurrent
+        # writers delete each other's in-flight file → FileNotFoundError on
+        # os.replace → a spurious "minted but could NOT be saved" orphan.
+        now = time.time()
+        for stale in home_dir.glob("credentials.json.tmp-*"):
+            try:
+                if now - stale.stat().st_mtime > 3600:
+                    stale.unlink()
+            except OSError:
+                pass
+        # tmp born at 0600 via os.open(O_EXCL) — write_text would create at
+        # umask (0644) with a plaintext-key window before the chmod; the
+        # unique per-writer name prevents concurrent-writer clobbering.
+        tmp_path = home_dir / f"credentials.json.tmp-{uuid.uuid4().hex}"
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(config, indent=2) + "\n")
+        # NO suppress(FileNotFoundError) here: os.replace can never lose a
+        # rename race (POSIX last-writer-wins; the target being absent is
+        # fine). The only way it raises FileNotFoundError is a MISSING SOURCE
+        # — the fresh unique tmp was deleted (e.g. forward clock jump makes
+        # the age-guarded sweep eat it) — which means nothing was saved, and
+        # a silent exit-0 would be a minted-but-lost key with a false
+        # success. Let it fall through to the except OSError orphan handler
+        # (echo key + exit 1) — the correct fail-closed outcome.
+        os.replace(tmp_path, config_path)
+    except OSError as e:
+        # Orphan class: the key was minted but cannot be saved — echo it and
+        # fail closed so the user never loses the key and never silently
+        # re-mints (the incident pattern this issue fixes).
+        print(f"A key was minted but could NOT be saved to {config_path}: {e}",
+              file=sys.stderr)
+        print(f"Your API key (store it manually): {data['key']}", file=sys.stderr)
+        print("Fix the path permissions and re-run, or use the key directly.",
+              file=sys.stderr)
+        return 1
 
-    print(f"✅ Free team created: {data['team_name']}")
+    # D3 (generalized, #1708 fixer P1): whenever a mint happened while a
+    # higher-precedence source (env or a legacy cwd/.tortoise config) still
+    # shadows the global store at read time (env → cwd → global per D1), warn —
+    # the new key won't be used until the shadow is removed. Previously gated
+    # on --force only, so the env-401 remint path exited 0 with NO warning
+    # (the dead shadow that re-401s every subsequent run → duplicate mints).
+    shadow_srcs = []
+    if os.environ.get("TORTOISE_API_KEY", "").strip():
+        shadow_srcs.append("TORTOISE_API_KEY (env wins)")
+    cwd_cfg = Path.cwd() / ".tortoise"
+    if cwd_cfg.is_file():
+        shadow_srcs.append(f"{cwd_cfg} (cwd wins over ~/.tortoise)")
+    if shadow_srcs:
+        print(f"⚠️  {' and '.join(shadow_srcs)} shadow{'s' if len(shadow_srcs) == 1 else ''} "
+              "this new key at read time — unset/remove it to use the key just minted.",
+              file=sys.stderr)
+
+    print(f"✅ Free team created: {data.get('team_name')}")
     print(f"   API key: {data['key']}")
     print(f"   Config saved to {config_path} (shown once — store it)")
     if getattr(args, "claim", False):
@@ -745,30 +1003,82 @@ def _cmd_team_info(args) -> int:
 ONBOARDING_PROMPT_URL = "https://premiselabs.co/onboarding-prompt.md"
 
 
-def _read_config(json_mode: bool = False) -> tuple[dict | None, str | None, str | None]:
-    """Read .tortoise config → (config, api_key, api_url).
+class _ConfigError(Exception):
+    """Candidate config file exists but is corrupt or unreadable."""
 
-    Shared by the hosted-team commands (team info, team keys *). Prints the
-    failure reason to stderr; callers must return 1 when api_key is None.
-    With json_mode, also emits the machine-readable error on stdout so the
-    --json contract holds even for config failures (#875 P2).
+
+def _resolve_config_path(include_env: bool = True) -> tuple[Path | None, dict | None, str | None, str | None]:
+    """Shared config resolver — env → cwd/.tortoise → ~/.tortoise/credentials.json (#1708 D1/D5/D6).
+
+    Returns (config_path, config, api_key, api_url) or (None, None, None, None).
+    INVARIANT: whenever api_key is not None, config is a dict (env candidate is
+    synthesized as {"api_key": key, "api_url": url} — callers like
+    _cmd_team_keys_list do config.get(...) unconditionally and must never see None).
+    - Empty/whitespace env TORTOISE_API_KEY (.strip()) is treated as unset
+      (prevents a lockout shadow where a bad env key beats a good stored one).
+    - A candidate file that exists but fails JSON parse / is unreadable / has a
+      non-string api_key raises _ConfigError(path) (catch (OSError, JSONDecodeError,
+      TypeError)). An empty api_key in a file is treated as "no config here" —
+      the next candidate wins.
+    - A directory at a candidate path (cwd/.tortoise in some repos; the global
+      path's directory is by design) is skipped as "no config here" (D5).
+    - include_env=False: file candidates only (used by _cmd_context, D1b — env
+      alone must never flip the local-memory SessionStart hook to hosted mode).
     """
     import json as _json
     import os as _os
     from pathlib import Path
 
-    config_path = Path.cwd() / ".tortoise"
-    if not config_path.exists():
-        return _cmd_fail(json_mode, "no_config",
-                         "No .tortoise config found. Run 'tortoise init --api-key <key>' first."), None, None
+    if include_env:
+        env_key = _os.environ.get("TORTOISE_API_KEY")
+        if env_key and env_key.strip():
+            env_url = _os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
+            return None, {"api_key": env_key, "api_url": env_url}, env_key, env_url
+
+    candidates = (Path.cwd() / ".tortoise", Path.home() / ".tortoise" / "credentials.json")
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            config = _json.loads(path.read_text())
+        except (OSError, _json.JSONDecodeError, ValueError, TypeError) as e:
+            # ValueError: UnicodeDecodeError from read_text (invalid UTF-8) is
+            # a ValueError subclass — same corrupt-config contract as a parse error.
+            raise _ConfigError(path) from e
+        if not isinstance(config, dict):
+            # Parses but isn't an object ([1,2,3]) — config.get would raise
+            # AttributeError outside the try; the documented contract is
+            # _ConfigError (fixer cycle 1, P2).
+            raise _ConfigError(path)
+        api_key = config.get("api_key")
+        if not isinstance(api_key, str):
+            raise _ConfigError(path)
+        if not api_key.strip():
+            continue
+        api_url = config.get("api_url") or _os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
+        return path, config, api_key, api_url
+    return None, None, None, None
+
+
+def _read_config(json_mode: bool = False) -> tuple[dict | None, str | None, str | None]:
+    """Read the resolved config → (config, api_key, api_url) (env → cwd → global).
+
+    Thin wrapper over _resolve_config_path preserving the legacy 3-tuple +
+    _cmd_fail contract for the hosted-team commands (team info, team keys *).
+    Prints the failure reason to stderr; callers must return 1 when api_key is
+    None. With json_mode, also emits the machine-readable error on stdout so
+    the --json contract holds even for config failures (#875 P2).
+    """
     try:
-        config = _json.loads(config_path.read_text())
-    except _json.JSONDecodeError:
-        return _cmd_fail(json_mode, "no_config", f"Invalid .tortoise config at {config_path}"), None, None
-    api_key = config.get("api_key")
-    api_url = config.get("api_url") or _os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
-    if not api_key:
-        return _cmd_fail(json_mode, "no_config", "No api_key in .tortoise config."), None, None
+        _path, config, api_key, api_url = _resolve_config_path()
+    except _ConfigError as e:
+        reason = str(e.__cause__) if e.__cause__ else "api_key missing or invalid"
+        return (_cmd_fail(json_mode, "no_config",
+                          f"Invalid config at {e}: {reason}"), None, None)
+    if api_key is None:
+        return (_cmd_fail(json_mode, "no_config",
+                          "No .tortoise config found. Run 'tortoise init --api-key <key>' first, "
+                          "or run 'tortoise signup' for a free hosted key."), None, None)
     return config, api_key, api_url
 
 
@@ -1168,27 +1478,19 @@ def _cmd_team_keys_revoke(args) -> int:
 
 def _cmd_create_point(args) -> int:
     """Create a Point via Tortoise Cloud API."""
-    import json as _json, os, sys as _sys  # noqa: E401, I001
-    from pathlib import Path
+    import json as _json, sys as _sys  # noqa: E401, I001
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
 
-    # Read config
-    config_path = Path.cwd() / ".tortoise"
-    if not config_path.exists():
-        print("No .tortoise config found. Run 'tortoise init --api-key <key>' first.", file=_sys.stderr)
-        return 1
-
+    # Shared resolver (#1708 D1): env → cwd/.tortoise → ~/.tortoise/credentials.json
     try:
-        config = _json.loads(config_path.read_text())
-    except _json.JSONDecodeError:
-        print(f"Invalid .tortoise config at {config_path}", file=_sys.stderr)
+        _cfg_path, _config, api_key, api_url = _resolve_config_path()
+    except _ConfigError as e:
+        print(f"Invalid config at {e} — fix or delete it, or run "
+              "'tortoise init --api-key <key>'.", file=_sys.stderr)
         return 1
-
-    api_key = config.get("api_key")
-    api_url = config.get("api_url") or os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
-    if not api_key:
-        print("No api_key in .tortoise config.", file=_sys.stderr)
+    if api_key is None:
+        print("No .tortoise config found. Run 'tortoise init --api-key <key>' first.", file=_sys.stderr)
         return 1
 
     payload = {
@@ -1236,19 +1538,19 @@ def _cmd_context(args) -> int:
     Local mode (embedded/Docker): uses TortoiseSDK.session_context().
     """
     import json as _json, os as _os, sys as _sys  # noqa: E401, I001
-    from pathlib import Path
 
-    config_path = Path.cwd() / ".tortoise"
+    # Shared resolver (#1708 D1b): file candidates only (cwd → global) — a
+    # TORTOISE_API_KEY in dev shells must never silently flip this documented
+    # local-memory SessionStart hook to hosted mode. Global-config presence
+    # still flips it (a machine that ran `signup` has a hosted identity).
     api_key = None
     api_url = _os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
-
-    if config_path.exists():
-        try:
-            cfg = _json.loads(config_path.read_text())
-            api_key = cfg.get("api_key")
-            api_url = cfg.get("api_url") or api_url
-        except _json.JSONDecodeError:
-            pass
+    try:
+        _cfg_path, _cfg, api_key, api_url = _resolve_config_path(include_env=False)
+    except _ConfigError as e:
+        print(f"Warning: config at {e} is corrupt or unreadable — falling back "
+              "to local memory mode.", file=_sys.stderr)
+        api_key = None
 
     if api_key:
         # ── Hosted: query the API ──
@@ -1317,27 +1619,19 @@ def _cmd_context(args) -> int:
 
 def _cmd_session(args) -> int:
     """Manage Tortoise Cloud sessions."""
-    import json, os, sys  # noqa: E401, I001
-    from pathlib import Path
+    import sys  # noqa: I001
     from urllib.request import Request, urlopen  # noqa: F401
     from urllib.error import URLError, HTTPError  # noqa: F401
 
-    # Read config
-    config_path = Path.cwd() / ".tortoise"
-    if not config_path.exists():
-        print("No .tortoise config found. Run 'tortoise init --api-key <key>' first.", file=sys.stderr)
-        return 1
-
+    # Shared resolver (#1708 D1): env → cwd/.tortoise → ~/.tortoise/credentials.json
     try:
-        config = json.loads(config_path.read_text())
-    except json.JSONDecodeError:
-        print(f"Invalid .tortoise config at {config_path}", file=sys.stderr)
+        _cfg_path, _config, api_key, api_url = _resolve_config_path()
+    except _ConfigError as e:
+        print(f"Invalid config at {e} — fix or delete it, or run "
+              "'tortoise init --api-key <key>'.", file=sys.stderr)
         return 1
-
-    api_key = config.get("api_key")
-    api_url = config.get("api_url") or os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
-    if not api_key:
-        print("No api_key in .tortoise config.", file=sys.stderr)
+    if api_key is None:
+        print("No .tortoise config found. Run 'tortoise init --api-key <key>' first.", file=sys.stderr)
         return 1
 
     if args.session_cmd == "capture":
@@ -4013,6 +4307,10 @@ def main(argv: list[str] | None = None) -> int:
     team_keys_revoke_p.add_argument("--force", "-f", action="store_true", help="Skip the confirmation prompt")
     # tortoise signup — zero-email free-team mint (issue #663)
     signup_p = sp.add_parser("signup", help="Mint a free hosted team + API key — no email or dashboard (2 free teams/IP/24h)")
+    signup_p.add_argument(
+        "--force", action="store_true",
+        help="Mint a fresh key even if a stored key exists (#1708)",
+    )
     signup_p.add_argument(
         "--claim", action="store_true",
         help="After minting, print the dashboard claim instructions: sign in "
