@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 // #1623: plan display data (build-time import of product/pricing.json).
 import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
-import { HARNESS_INSTALL, HARNESS_NAMES, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SKILLS, HARNESS_SKILLLESS } from './harnesses.js'
+import { HARNESS_INSTALL, HARNESS_NAMES, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT } from './harnesses.js'
 
 const API_BASE = 'https://api.premiselabs.co'
 const KEY_STORAGE = 'tortoise_api_key'
@@ -257,6 +257,9 @@ function claimIntentInFlight() {
   const [authMode, setAuthMode] = React.useState('session') // 'session' | 'apikey'
   const [checking, setChecking] = React.useState(true)
   const sessionTokenRef = React.useRef(null)
+  // #1680: the session user metadata is captured at mount for component-
+  // scope reads (the seed-step prefill for returning users).
+  const sessionMetaRef = React.useRef(null)
   const [teams, setTeams] = React.useState([])
   const [graphs, setGraphs] = React.useState([])
   const [currentTeamId, setCurrentTeamId] = React.useState(null)
@@ -517,6 +520,21 @@ function claimIntentInFlight() {
       setError((e && e.message) || 'Could not start GitHub connect.')
     }
   }
+
+  // #1680: returning users reopen the wizard via the Setup nav — the seed
+  // inputs aren't prefilled by the first-timer provisioning path, so derive
+  // the defaults from the session when the seed step is first entered
+  // (ONCE — a deliberate clear + Back/Next must not re-populate).
+  const seedPrefilledRef = React.useRef(false)
+  React.useEffect(() => {
+    if (wizardStep === 3 && !seedPrefilledRef.current && !wizardSubject) {
+      seedPrefilledRef.current = true
+      const meta = sessionMetaRef.current || {}
+      const s = meta.display_name || (meta.email ? meta.email.split('@')[0] : '') || 'me'
+      setWizardSubject(s)
+      setWizardProject(welcomeTeamName || currentTeamName || 'my-project')
+    }
+  }, [wizardStep]) // eslint-disable-line react-hooks/exhaustive-deps
 
   async function wizardSeedGraph() {
     setWizardSeeding(true)
@@ -789,6 +807,10 @@ function claimIntentInFlight() {
           setChecking(false); return
         }
         sessionTokenRef.current = session.access_token
+        sessionMetaRef.current = (session && session.user) ? {
+          display_name: (session.user.user_metadata && session.user.user_metadata.display_name) || '',
+          email: session.user.email || '',
+        } : null
         // #1567: the session is valid — render the app chrome NOW and let the
         // mint + loads hydrate in the background (the multi-second
         // "Checking your session…" card is gone for session holders). The
@@ -2326,13 +2348,13 @@ function claimIntentInFlight() {
                       <pre className="snippet" style={{ marginTop: '0.75rem' }}>
                         {HARNESS_INSTALL[wizardHarness](apiKey)}
                         {HARNESS_SKILLS(wizardHarness)}
-                        {welcomeKey && !HARNESS_SKILLLESS.includes(wizardHarness) ? ('\n\n' + HARNESS_PERSIST(apiKey)) : ''}
+                        {welcomeKey && !HARNESS_SKILLLESS.includes(wizardHarness) && !HARNESS_SKILLS_IN_PROMPT.includes(wizardHarness) ? ('\n\n' + HARNESS_PERSIST(apiKey)) : ''}
                       </pre>
                       <div className="wizard-nav">
                         <button type="button" className="ghost" onClick={() => setWizardStep(wizardStep - 1)}>← Back</button>
                         <div className="wizard-nav-actions">
                           <button type="button" className="btn-primary"
-                            onClick={() => wizardCopy(HARNESS_INSTALL[wizardHarness](apiKey) + HARNESS_SKILLS(wizardHarness) + (welcomeKey && !HARNESS_SKILLLESS.includes(wizardHarness) ? ('\n\n' + HARNESS_PERSIST(apiKey)) : ''), 'harness')}>
+                            onClick={() => wizardCopy(HARNESS_INSTALL[wizardHarness](apiKey) + HARNESS_SKILLS(wizardHarness) + (welcomeKey && !HARNESS_SKILLLESS.includes(wizardHarness) && !HARNESS_SKILLS_IN_PROMPT.includes(wizardHarness) ? ('\n\n' + HARNESS_PERSIST(apiKey)) : ''), 'harness')}>
                             {wizardCopied === 'harness' ? 'Copied!' : 'Copy setup'}
                           </button>
                           <button type="button" className="ghost" onClick={() => setWizardStep(2)}>Skip →</button>
@@ -2356,12 +2378,9 @@ function claimIntentInFlight() {
                         <span className="dim small">the ingest skill — run it to record a research finding: it creates a Point and surfaces related claims to connect.</span>
                       </div>
                       <p className="dim small" style={{ marginTop: '0.75rem' }}>
-                        The setup command in the next step installs all three into your
-                        agent's skills directory (project-scoped for Claude Code / Codex /
-                        Cursor; <code>~/.pi/agent/skills</code> for Pi — Claude Desktop and
-                        Claude Web connect from the app/cloud, so they have no local skills).
-                        They're maintained in the public Tortoise skills repo (<a href="https://github.com/daniel-ospina/tortoise-skills-and-integrations" target="_blank" rel="noreferrer">skills-and-integrations</a>)
-                        and the installer is safe to re-run — it updates them in place.
+                        The next step sets these up for your agent with the right steps for
+                        the client you pick — and they're open-sourced in the public
+                        <a href="https://github.com/daniel-ospina/tortoise-skills-and-integrations" target="_blank" rel="noreferrer">Tortoise skills repo</a>.
                       </p>
                       <div className="wizard-nav">
                         <span className="wizard-nav-spacer" />
@@ -2534,6 +2553,9 @@ function claimIntentInFlight() {
           {/* #1623: Billing — plan, usage, upgrade/portal. Session-gated like
               the rest of the dashboard (anon teams get the Protect screen). */}
           <button className={tab === 'billing' ? 'active' : ''} onClick={() => setTab('billing')}>Billing</button>
+          {/* #1680: the wizard is reachable anytime — advanced users can go
+              back to any onboarding step (skills, harness, GitHub, seed). */}
+          <button className="ghost small" onClick={() => { setWizardStep(0); setWelcomeMode(true) }}>Setup</button>
         </nav>
         {/* #1148-ux: account blob — GitHub/Vercel/Linear pattern: current
             workspace name + avatar top-right; dropdown switches team and
