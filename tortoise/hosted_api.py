@@ -7234,7 +7234,14 @@ async def agent_signup(request: Request):
     body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
     if not isinstance(body, dict):
         body = {}
-    signup_token = body.get("signup_token")  # BODY only — never a header (#741(a))
+    signup_token = body.get("signup_token")
+    # #1709 normalization parity ([SECOND-MODEL-GATE] P2): _agent_recover_flow
+    # lowercases user-entered tokens before the format gate — a copy-pasted
+    # token with uppercase hex must resolve on revoke too (the panic surface
+    # where pasted tokens are common), never a silent uniform-422 on a real
+    # token. Minted tokens are already lowercase; this widens acceptance only.
+    if isinstance(signup_token, str):
+        signup_token = signup_token.lower()  # BODY only — never a header (#741(a))
     if signup_token is not None:
         # Token-present re-signup = keyless recovery on the SAME team
         # (orphan-prevention safety net for legacy/buggy clients that
@@ -7422,6 +7429,13 @@ async def agent_recover(request: Request):
     if not isinstance(body, dict):
         body = {}
     signup_token = body.get("signup_token")
+    # #1709 normalization parity ([SECOND-MODEL-GATE] P2): _agent_recover_flow
+    # lowercases user-entered tokens before the format gate — a copy-pasted
+    # token with uppercase hex must resolve on revoke too (the panic surface
+    # where pasted tokens are common), never a silent uniform-422 on a real
+    # token. Minted tokens are already lowercase; this widens acceptance only.
+    if isinstance(signup_token, str):
+        signup_token = signup_token.lower()
     if signup_token is None:
         raise HTTPException(status_code=422, detail=_INVALID_SIGNUP_TOKEN_DETAIL)
     return await _agent_recover_flow(request, signup_token)
@@ -7452,6 +7466,13 @@ async def agent_token_revoke(request: Request, team: dict = Depends(get_current_
     if not isinstance(body, dict):
         body = {}
     signup_token = body.get("signup_token")
+    # #1709 normalization parity ([SECOND-MODEL-GATE] P2): _agent_recover_flow
+    # lowercases user-entered tokens before the format gate — a copy-pasted
+    # token with uppercase hex must resolve on revoke too (the panic surface
+    # where pasted tokens are common), never a silent uniform-422 on a real
+    # token. Minted tokens are already lowercase; this widens acceptance only.
+    if isinstance(signup_token, str):
+        signup_token = signup_token.lower()
     if not isinstance(signup_token, str) or not _SIGNUP_TOKEN_RE.match(signup_token):
         # malformed / missing → uniform 422 (identical to every other
         # invalid-token body — no format oracle on a NEW surface).

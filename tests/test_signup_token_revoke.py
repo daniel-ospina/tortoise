@@ -138,6 +138,24 @@ class TestSupabaseLane:
             assert r.json()["detail"] == {"error_code": "invalid_signup_token",
                                           "message": "Invalid signup token."}
 
+    def test_revoke_uppercase_hex_normalized(self, client):
+        """#1709 normalization parity: a real token copy-pasted with UPPERCASE
+        hex must revoke (never a silent uniform-422 on the panic surface) —
+        mirrors _agent_recover_flow's lower() before the format gate."""
+        data = _mint(client)
+        headers = {"Authorization": f"Bearer {data['key']}"}
+        upper = "st_" + data["signup_token"][3:].upper()  # same token, uppercase
+        assert upper != data["signup_token"]
+        r = client.post("/v1/agent/token/revoke", json={"signup_token": upper},
+                        headers=headers)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["revoked"] is True and body["already"] is False
+        # the (lowercased) token is now revoked → recovery is dead
+        r2 = client.post("/v1/agent/recover", json={"signup_token": upper},
+                         headers=headers)
+        assert r2.status_code == 422, r2.text
+
     def test_revoke_unknown_token_404(self, client):
         data = _mint(client)
         r = client.post("/v1/agent/token/revoke",
