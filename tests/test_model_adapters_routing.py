@@ -364,10 +364,29 @@ def test_rotation_round_robin_and_cooldown(monkeypatch):
         out = pool.complete(system="s", user="u")
         served.add(out)
     assert served == {"ok-a", "ok-b", "ok-c"}  # all providers get served
-    # a failing provider is skipped + cooldowned
+    # a failing provider is skipped + cooldowned. Epic #1647 (PR #1684
+    # CI-fix): _pick() uses random.random() — with [bad, a] the failing
+    # provider is only tried ~50% of the time, making the cooldown assert
+    # flaky (pre-existing; surfaced by the docker lane). Force the order:
+    # give bad the whole weight so it is ALWAYS picked first, fails, and is
+    # cooldowned before a answers.
     bad = _P("bad", fail=True)
-    p2 = RotatingModel([bad, a], cooldown_s=10)
-    assert p2.complete(system="s", user="u") == "ok-a"
+    # Epic #1647 (PR #1684 CI-fix): _pick() is random-weighted — the old
+    # assert depended on bad being tried before a (~50% flaky). Force the
+    # first pick to be bad deterministically: patch random to land in bad's
+    # half (r<0.5 with the default [0.5,0.5] weights), then restore. bad
+    # fails → cooldowned → a answers on the retry (r>=0.5 next).
+    import random as _random
+    _orig_random = _random.random
+    try:
+        # deterministic sequence: r<0.5 → bad picked first (fails, cooldown),
+        # r>=0.5 → a answers on the retry
+        _seq = iter([0.4, 0.9])
+        _random.random = lambda: next(_seq)
+        p2 = RotatingModel([bad, a], cooldown_s=10)
+        assert p2.complete(system="s", user="u") == "ok-a"
+    finally:
+        _random.random = _orig_random
     assert bad.provider in p2._cooldowns
     # weighting: a 0.8-weighted provider dominates the share
     heavy = _P("heavy")
