@@ -253,6 +253,7 @@ def test_default_llm_with_provider_key_422_on_empty(monkeypatch, client):
     assert isinstance(body["warnings"], list)
 
 
+@pytest.mark.embedded_only  # Epic #1647 (PR #1684): TORTOISE_SESSION_LLM_MOCK is an embedded-lane seam — on docker the v2 extractor's S3 stage runs (mode='real') and the mock cannot search, yielding 0 points; file-order flaky (bidirectional pollution). Docker-lane mock extraction = separate divergence.
 def test_default_llm_extracts_points(monkeypatch, client):
     """LLM default actually extracts: the M2 MockModel turns each sentence of
     a dense conversation into a Point (decision/claim regexes are gone)."""
@@ -308,6 +309,7 @@ def test_openai_only_key_v2_503_not_500(monkeypatch, client):
     assert "DEEPSEEK_API_KEY" in detail and "OPENROUTER_API_KEY" in detail
 
 
+@pytest.mark.embedded_only  # Epic #1647 (PR #1684): mock-seam extraction (S3-stage lane divergence) — see test_default_llm_extracts_points
 def test_hosted_capture_records_deepseek_direct_route(monkeypatch, client):
     """The hosted capture response records the resolved v2 route + provider
     (parity with the SDK path by construction, #1530 D8)."""
