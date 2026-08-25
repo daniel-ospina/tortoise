@@ -32,6 +32,21 @@ from tortoise.sdk import TortoiseSDK
 from tortoise.log import EventLog
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _embedded_local_file_lane():
+    """Epic #1647 (PR #1684 CI-fix): this file's tests are a LOCAL-FILE
+    choreography — index into a db file → back up the file + JSONL → restore
+    via rebuild_all from the backup. Under a docker session the redirect
+    would flip the SDK constructions to the server (derived graphs) while
+    the shutil.copy2(db) backup reads the never-created local file. Popping
+    the URI keeps index + backup + restore on the SAME local file on BOTH
+    lanes (same class as test_export_cli/test_index_cli)."""
+    os.environ.pop("TORTOISE_DB_URI", None)
+    os.environ.pop("TORTOISE_TEST_EXPECT_URI", None)
+    yield
+    os.environ.pop("TORTOISE_DB_URI", None)
+
+
 def _db(tmp_path: Path, name: str = "t.db") -> str:
     return os.path.join(str(tmp_path), name)
 
