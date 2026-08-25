@@ -2023,7 +2023,10 @@ function claimIntentInFlight() {
   // fallback when the API fields are absent (stale cached responses / registry
   // lane pre-#1709) so the live session key can never be revoked from the UI.
   function isSessionKey(k) {
-    return isSessionKeyPredicate(k, currentTeamId ? teamKeysRef.current[currentTeamId] : null)
+    // #1708 fixer (P2): fall back to the apiKey state when this team has no
+    // cached key — the live session key must never be revocable even when
+    // teamKeysRef is empty (mirrors the `|| apiKey` pattern at mint/create).
+    return isSessionKeyPredicate(k, currentTeamId ? (teamKeysRef.current[currentTeamId] || apiKey) : apiKey)
   }
 
   function keyIdFromValue(value) {
@@ -2970,7 +2973,7 @@ function claimIntentInFlight() {
                     <td><code>{k.key_prefix || k.id?.slice(0, 12)}</code></td>
                     <td>{fmtTime(k.created_at || k.createdAt)}</td>
                     <td>{k.revoked_at ? <span className="revoked">revoked</span> : isSessionKey(k) ? <span className="live">ephemeral · session</span> : <span className="live">active</span>}</td>
-                    <td>{!k.revoked_at && !isSessionKey(k) && !isActiveKey(k, currentTeamId ? teamKeysRef.current[currentTeamId] : null) && isOwnerAdmin && (
+                    <td>{!k.revoked_at && !isSessionKey(k) && !isActiveKey(k, teamKeysRef.current[currentTeamId] || apiKey) && isOwnerAdmin && (
                       <span className="key-actions">
                         {/* #1148-ux review: on/off toggle (new keys default on) */}
                         <button

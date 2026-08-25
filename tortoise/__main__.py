@@ -642,27 +642,80 @@ def _cmd_signup(args) -> int:
     import json
     import os
     import sys
+    import time
     import uuid
     from pathlib import Path
     from urllib.error import HTTPError, URLError
     from urllib.request import Request, urlopen
 
-    api_url = os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
+    # Normalize once (#1708 fixer, P2): the reuse-GET rstrips its base but the
+    # mint POST used the raw env URL — a trailing-slash TORTOISE_API_URL hit
+    # `//v1/agent/signup` → 404. Both URLs derive from this normalized base.
+    api_url = os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co").rstrip("/")
     home_dir = Path.home() / ".tortoise"
     config_path = home_dir / "credentials.json"
 
     # ── Reuse-before-mint (#1708 D2/D3) ────────────────────────────────────
     # A stored key (env → cwd/.tortoise → ~/.tortoise/credentials.json per D1)
-    # is validated against GET /v1/team — the same lightweight check _cmd_init
-    # uses (the two validation sites must stay in sync). 200 = reuse, 0 new
-    # keys; 401/non-suspended-403 = re-mint; SUSPENDED-403 and
-    # cannot-validate (429/5xx/network/timeout/garbage-200) = fail-closed
-    # exit 1 — never mint on an unvalidatable existing key (the incident
-    # pattern this issue fixes).
+    # is validated with the same REQUEST SHAPE _cmd_init uses (GET /v1/team,
+    # Bearer header, timeout=10) — but the error semantics deliberately
+    # diverge: init warns-and-saves offline (an unvalidatable key still gets
+    # written), while signup FAIL-CLOSES on an unvalidatable existing key
+    # (#1708 — the duplicate-mint incident). 200 = reuse, 0 new keys;
+    # 401/non-suspended-403 = re-mint (global-store fallback below);
+    # SUSPENDED-403 and cannot-validate (429/5xx/network/timeout/garbage-200)
+    # = fail-closed exit 1 — never mint on an unvalidatable existing key.
     force = getattr(args, "force", False)
     mint_url = api_url  # may be overridden when re-minting after a 401/403
     reminting_after_401 = False
     legacy_device_id = None
+
+    def _global_key_status(base: str) -> str:
+        """Validate the key in the GLOBAL store the mint would overwrite
+        (#1708 fixer, P1: env/cwd key-shadow defeats remint idempotency).
+
+        The 401/403 source may be a higher-precedence key (env or a legacy
+        cwd/.tortoise config) that still shadows the global store at read
+        time — re-running would re-validate the dead source and mint ANOTHER
+        team (the exact duplicate-mint incident #1708 fixes). When the
+        shadowing source is rejected, check the store the mint would write:
+
+          "valid"         — GET /v1/team 200 → reuse instead of minting.
+          "invalid"       — no store / no key / 401 / non-SUSPENDED 403 → mint.
+          "suspended"     — SUSPENDED 403 → fail closed, never mint over it.
+          "unvalidatable" — 429/5xx/network/timeout/garbage → fail closed.
+        """
+        if not config_path.is_file():
+            return "invalid"
+        try:
+            store = json.loads(config_path.read_text())
+        except (json.JSONDecodeError, ValueError, OSError):
+            # ValueError: UnicodeDecodeError from read_text (invalid UTF-8) is
+            # a ValueError subclass — treated as "invalid" (no traceback).
+            return "invalid"
+        if not isinstance(store, dict):
+            return "invalid"
+        store_key = store.get("api_key")
+        if not isinstance(store_key, str) or not store_key.strip():
+            return "invalid"
+        store_base = (store.get("api_url") or base).rstrip("/")
+        try:
+            req = Request(
+                f"{store_base}/v1/team",
+                headers={"Authorization": f"Bearer {store_key}"},
+            )
+            with urlopen(req, timeout=10) as resp:
+                json.loads(resp.read())
+            return "valid"
+        except HTTPError as e:
+            body = e.read().decode() if e.fp else ""
+            if e.code in (401, 403):
+                if e.code == 403 and _suspended_info(body) is not None:
+                    return "suspended"
+                return "invalid"
+            return "unvalidatable"
+        except (URLError, ValueError, json.JSONDecodeError, TimeoutError, OSError):
+            return "unvalidatable"
     if not force:
         try:
             cfg_path, cfg, existing_key, existing_url = _resolve_config_path()
@@ -694,6 +747,35 @@ def _cmd_signup(args) -> int:
                     if sus is not None:
                         print(f"{sus[0]}", file=sys.stderr)
                         return 1
+                    # #1708 fixer (P1): before minting, check the GLOBAL store
+                    # the mint would write to. When the 401/403 came from a
+                    # higher-precedence source (env/cwd), a valid global key
+                    # must be REUSED — otherwise every re-run re-validates the
+                    # dead source and mints ANOTHER team (the duplicate-mint
+                    # incident). The store's own host is used when it differs.
+                    if cfg_path != config_path:
+                        gs = _global_key_status(base)
+                        if gs == "valid":
+                            shadow_src = ("TORTOISE_API_KEY" if cfg_path is None
+                                          else f"{cfg_path} (cwd config)")
+                            print(f"✅ Reusing your stored key at {config_path} — "
+                                  f"{shadow_src} was rejected ({e.code}) and shadows it.")
+                            print(f"   Unset TORTOISE_API_KEY or remove "
+                                  f"{Path.cwd() / '.tortoise'} to use your stored key.",
+                                  file=sys.stderr)
+                            return 0
+                        if gs == "suspended":
+                            print("The stored key at ~/.tortoise/credentials.json is "
+                                  "SUSPENDED — not minting over it. Resolve the "
+                                  "suspension, delete the file, or use --force.",
+                                  file=sys.stderr)
+                            return 1
+                        if gs == "unvalidatable":
+                            print("Cannot validate the stored key at "
+                                  "~/.tortoise/credentials.json — not minting to "
+                                  "avoid duplicate keys. Retry later or use --force.",
+                                  file=sys.stderr)
+                            return 1
                     print(f"Stored key is invalid ({e.code}) — minting a fresh one.",
                           file=sys.stderr)
                     reminting_after_401 = True
@@ -723,7 +805,11 @@ def _cmd_signup(args) -> int:
     if config_path.is_file():
         try:
             stored = json.loads(config_path.read_text())
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, ValueError, OSError):
+            # ValueError: UnicodeDecodeError (invalid UTF-8) — same as a parse
+            # error: treat the store as absent, never traceback.
+            stored = {}
+        if not isinstance(stored, dict):
             stored = {}
     if not stored.get("device_id") and legacy_device_id:
         stored["device_id"] = legacy_device_id
@@ -775,6 +861,16 @@ def _cmd_signup(args) -> int:
               "do NOT blindly retry.", file=sys.stderr)
         return 1
 
+    if not (isinstance(data, dict) and "key" in data):
+        # 200 with valid JSON but no `key` (edge/proxy): the server may still
+        # have minted — same fail-soft contract as the garbage-200 leg above.
+        # data["key"] must never be dereferenced outside the try (that was an
+        # unhandled KeyError traceback, not the documented fail-soft path).
+        print("A key may have been minted but the response was malformed "
+              "(no 'key' field) — check the dashboard or support before "
+              "re-running; do NOT blindly retry.", file=sys.stderr)
+        return 1
+
     # Save config so the key works immediately — global credentials store
     # (#1708 D4): ~/.tortoise/credentials.json (0600), dir 0700, atomic
     # unique-tmp write — fixes the IsADirectoryError crash when cwd == ~
@@ -782,8 +878,8 @@ def _cmd_signup(args) -> int:
     config = {
         "api_key": data["key"],
         "api_url": mint_url,
-        "team_id": data["team_id"],
-        "team_name": data["team_name"],
+        "team_id": data.get("team_id"),
+        "team_name": data.get("team_name"),
         "device_id": device_id,
     }
     try:
@@ -791,9 +887,16 @@ def _cmd_signup(args) -> int:
         os.chmod(home_dir, 0o700)
         # Sweep stale tmp-* files (a crashed writer leaves one behind — key
         # material residue; unbounded accumulation is the failure mode).
+        # Age-guarded (#1708 fixer, P2): sweeping FRESH tmps lets concurrent
+        # writers delete each other's in-flight file → FileNotFoundError on
+        # os.replace → a spurious "minted but could NOT be saved" orphan.
+        now = time.time()
         for stale in home_dir.glob("credentials.json.tmp-*"):
-            with contextlib.suppress(OSError):
-                stale.unlink()
+            try:
+                if now - stale.stat().st_mtime > 3600:
+                    stale.unlink()
+            except OSError:
+                pass
         # tmp born at 0600 via os.open(O_EXCL) — write_text would create at
         # umask (0644) with a plaintext-key window before the chmod; the
         # unique per-writer name prevents concurrent-writer clobbering.
@@ -801,7 +904,10 @@ def _cmd_signup(args) -> int:
         fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w") as fh:
             fh.write(json.dumps(config, indent=2) + "\n")
-        os.replace(tmp_path, config_path)
+        with contextlib.suppress(FileNotFoundError):
+            # Another writer won the rename race — its complete config stands
+            # (ours is identical in shape). Not an orphan: the key WAS saved.
+            os.replace(tmp_path, config_path)
     except OSError as e:
         # Orphan class: the key was minted but cannot be saved — echo it and
         # fail closed so the user never loses the key and never silently
@@ -813,13 +919,24 @@ def _cmd_signup(args) -> int:
               file=sys.stderr)
         return 1
 
-    if force and os.environ.get("TORTOISE_API_KEY"):
-        # D3: the env key shadows the fresh key at read time (env wins per D1)
-        # — the user must know why the new key isn't being used.
-        print("⚠️  TORTOISE_API_KEY is set and shadows this new key at read time "
-              "(env wins) — unset it to use the key just minted.", file=sys.stderr)
+    # D3 (generalized, #1708 fixer P1): whenever a mint happened while a
+    # higher-precedence source (env or a legacy cwd/.tortoise config) still
+    # shadows the global store at read time (env → cwd → global per D1), warn —
+    # the new key won't be used until the shadow is removed. Previously gated
+    # on --force only, so the env-401 remint path exited 0 with NO warning
+    # (the dead shadow that re-401s every subsequent run → duplicate mints).
+    shadow_srcs = []
+    if os.environ.get("TORTOISE_API_KEY"):
+        shadow_srcs.append("TORTOISE_API_KEY (env wins)")
+    cwd_cfg = Path.cwd() / ".tortoise"
+    if cwd_cfg.is_file():
+        shadow_srcs.append(f"{cwd_cfg} (cwd wins over ~/.tortoise)")
+    if shadow_srcs:
+        print(f"⚠️  {' and '.join(shadow_srcs)} shadow{'s' if len(shadow_srcs) == 1 else ''} "
+              "this new key at read time — unset/remove it to use the key just minted.",
+              file=sys.stderr)
 
-    print(f"✅ Free team created: {data['team_name']}")
+    print(f"✅ Free team created: {data.get('team_name')}")
     print(f"   API key: {data['key']}")
     print(f"   Config saved to {config_path} (shown once — store it)")
     if getattr(args, "claim", False):
@@ -918,8 +1035,15 @@ def _resolve_config_path(include_env: bool = True) -> tuple[Path | None, dict | 
             continue
         try:
             config = _json.loads(path.read_text())
-        except (OSError, _json.JSONDecodeError, TypeError) as e:
+        except (OSError, _json.JSONDecodeError, ValueError, TypeError) as e:
+            # ValueError: UnicodeDecodeError from read_text (invalid UTF-8) is
+            # a ValueError subclass — same corrupt-config contract as a parse error.
             raise _ConfigError(path) from e
+        if not isinstance(config, dict):
+            # Parses but isn't an object ([1,2,3]) — config.get would raise
+            # AttributeError outside the try; the documented contract is
+            # _ConfigError (fixer cycle 1, P2).
+            raise _ConfigError(path)
         api_key = config.get("api_key")
         if not isinstance(api_key, str):
             raise _ConfigError(path)

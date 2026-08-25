@@ -1,4 +1,6 @@
 """Shared config resolver — env → cwd → global (#1708 D1/D5/D6)."""
+from __future__ import annotations
+
 import json
 
 import pytest
@@ -125,6 +127,32 @@ def test_non_string_api_key_raises_config_error(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     (tmp_path / ".tortoise").mkdir(parents=True, exist_ok=True)
     (tmp_path / ".tortoise" / "credentials.json").write_text(json.dumps({"api_key": 123}))
+    try:
+        main._resolve_config_path()
+        raise AssertionError("expected _ConfigError")
+    except main._ConfigError:
+        pass
+
+
+def test_non_dict_json_raises_config_error(monkeypatch, tmp_path):
+    """#1708 fixer (P2): JSON that parses but isn't an object ([1,2,3]) must
+    be _ConfigError, not an AttributeError from config.get(...)."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".tortoise").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".tortoise" / "credentials.json").write_text("[1, 2, 3]")
+    try:
+        main._resolve_config_path()
+        raise AssertionError("expected _ConfigError")
+    except main._ConfigError:
+        pass
+
+
+def test_invalid_utf8_raises_config_error(monkeypatch, tmp_path):
+    """#1708 fixer (P2): UnicodeDecodeError (invalid UTF-8) is a ValueError
+    subclass — must be wrapped in _ConfigError, not a raw traceback."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".tortoise").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".tortoise" / "credentials.json").write_bytes(b"\xff\xfe\x00{not json")
     try:
         main._resolve_config_path()
         raise AssertionError("expected _ConfigError")

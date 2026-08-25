@@ -1,6 +1,10 @@
 """CLI `tortoise signup` tests (#1081, #1708 reuse-before-mint)."""
+from __future__ import annotations
+
 import io
 import json
+import os
+import time
 from unittest import mock
 from urllib.error import HTTPError, URLError
 
@@ -130,7 +134,8 @@ class TestGlobalWrite:
 
     def test_successful_write_cleans_stale_tmp(self, monkeypatch, tmp_path):
         """A crashed writer leaves credentials.json.tmp-* behind (key material) —
-        the next successful write must sweep them."""
+        the next successful write must sweep them (only tmps older than the 1h
+        age guard — a fresh tmp is a CONCURRENT writer's in-flight file)."""
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
         d = tmp_path / ".tortoise"
@@ -138,9 +143,85 @@ class TestGlobalWrite:
         stale = d / "credentials.json.tmp-deadbeef"
         stale.write_text("partial key material")
         stale.chmod(0o600)
+        old = time.time() - 7200  # older than the 1h sweep threshold
+        os.utime(stale, (old, old))
         with mock.patch("urllib.request.urlopen", return_value=_ok_mint()):
             main._cmd_signup(mock.Mock())
         assert not stale.exists(), "stale tmp must be swept on next successful write"
+
+    def test_fresh_tmp_not_swept(self, monkeypatch, tmp_path):
+        """#1708 fixer (P2): the sweep is age-guarded — a concurrent writer's
+        FRESH tmp must survive (sweeping it deletes their in-flight file →
+        FileNotFoundError on os.replace → spurious 'minted but could NOT be
+        saved' orphan)."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        d = tmp_path / ".tortoise"
+        d.mkdir(parents=True, exist_ok=True)
+        fresh = d / "credentials.json.tmp-concurrent"
+        fresh.write_text("in-flight write")
+        with mock.patch("urllib.request.urlopen", return_value=_ok_mint()):
+            main._cmd_signup(mock.Mock())
+        assert fresh.exists(), "fresh (concurrent) tmp must survive the sweep"
+        assert (tmp_path / ".tortoise" / "credentials.json").is_file()
+
+    def test_mint_200_missing_key_reports_orphan(self, monkeypatch, tmp_path, capsys):
+        """#1708 fixer (P2): mint POST returns 200 with valid JSON but NO key
+        field (edge/proxy) — data['key'] must not KeyError-traceback outside the
+        try; the fail-soft orphan contract applies (the server may have minted)."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        resp = mock.MagicMock()
+        resp.read.return_value = json.dumps({"team_id": "team-x"}).encode()
+        resp.__enter__.return_value = resp
+        with mock.patch("urllib.request.urlopen", return_value=resp):
+            rc = main._cmd_signup(mock.Mock())
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "may have been minted" in err.lower()
+
+    def test_device_id_stored_non_dict_ignored(self, monkeypatch, tmp_path):
+        """#1708 fixer (P2): a non-dict global store ([1,2,3]) must not
+        AttributeError on .get('device_id') on the --force path (the resolver
+        fail-closes non-dict configs on the reuse path; --force skips it)."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        d = tmp_path / ".tortoise"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "credentials.json").write_text("[1, 2, 3]")
+        with mock.patch("urllib.request.urlopen", return_value=_ok_mint()):
+            rc = main._cmd_signup(mock.Mock(force=True))
+        assert rc == 0
+        cfg = json.loads((d / "credentials.json").read_text())
+        assert cfg["device_id"].startswith("anon-")
+
+    def test_device_id_store_invalid_utf8_force_no_traceback(self, monkeypatch, tmp_path, capsys):
+        """#1708 fixer (P2): invalid UTF-8 in the global store is a ValueError
+        (UnicodeDecodeError) — the --force device_id read must treat it as
+        absent, not traceback."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        d = tmp_path / ".tortoise"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "credentials.json").write_bytes(b"\xff\xfe\x00{not json")
+        with mock.patch("urllib.request.urlopen", return_value=_ok_mint()):
+            rc = main._cmd_signup(mock.Mock(force=True))
+        assert rc == 0
+        assert "Traceback" not in capsys.readouterr().err
+
+    def test_trailing_slash_api_url_normalized(self, monkeypatch, tmp_path):
+        """#1708 fixer (P2): TORTOISE_API_URL with a trailing slash must not
+        make the mint POST hit //v1/agent/signup (404). The base is normalized
+        once at the top; the mint URL derives from it."""
+        monkeypatch.setenv("TORTOISE_API_URL", "https://api.premiselabs.co/")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        with mock.patch("urllib.request.urlopen", return_value=_ok_mint()) as urlopen:
+            rc = main._cmd_signup(mock.Mock())
+        assert rc == 0
+        urls = [c.args[0].full_url for c in urlopen.call_args_list]
+        assert any(u.endswith("/v1/agent/signup") for u in urls)
+        assert all("//v1/" not in u for u in urls)
 
     def test_device_id_stable_across_mints(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HOME", str(tmp_path))
@@ -436,6 +517,109 @@ class TestReuse:
         assert rc == 0
         assert any(call.args[0].full_url.startswith("https://staging.example.com/v1/agent/signup")
                    for call in urlopen.call_args_list)
+
+    def test_env_401_valid_global_reused_no_second_mint(self, monkeypatch, tmp_path, capsys):
+        """#1708 fixer (P1): env key 401s but the GLOBAL store holds a valid key —
+        the env shadow defeats remint idempotency (every re-run re-validates the
+        dead env key and mints ANOTHER team). Must reuse the global key, warn
+        about the shadow, and mint ZERO new keys."""
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_dead_env")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        self._global_cfg(tmp_path, api_key="tt_valid_global")  # the store the mint would write
+        side_effects = [HTTPError("https://api.premiselabs.co/v1/team", 401, "u", {},
+                                  io.BytesIO(b'{"detail":"unauthorized"}')),
+                        self._valid_team()]  # the global key validates
+        with mock.patch("urllib.request.urlopen", side_effect=side_effects) as urlopen:
+            rc = main._cmd_signup(mock.Mock(force=False))
+        assert rc == 0
+        assert not any(call.args[0].full_url.endswith("/v1/agent/signup")
+                       for call in urlopen.call_args_list)  # NO second mint
+        # the global store must be untouched (still the valid key)
+        cfg = json.loads((tmp_path / ".tortoise" / "credentials.json").read_text())
+        assert cfg["api_key"] == "tt_valid_global"
+        cap = capsys.readouterr()
+        assert "unset" in (cap.out + cap.err).lower()
+
+    def test_cwd_401_valid_global_reused_no_second_mint(self, monkeypatch, tmp_path, capsys):
+        """#1708 fixer (P1): a legacy cwd/.tortoise key 401s but the global
+        store is valid — reuse the global key instead of minting a duplicate
+        team (the cwd config would shadow the global store on every re-run)."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        (tmp_path / "proj").mkdir()
+        monkeypatch.chdir(tmp_path / "proj")
+        (tmp_path / "proj" / ".tortoise").write_text(json.dumps(
+            {"api_key": "tt_dead_cwd", "api_url": "https://api.premiselabs.co"}))
+        self._global_cfg(tmp_path, api_key="tt_valid_global")
+        side_effects = [HTTPError("https://api.premiselabs.co/v1/team", 401, "u", {},
+                                  io.BytesIO(b'{"detail":"unauthorized"}')),
+                        self._valid_team()]
+        with mock.patch("urllib.request.urlopen", side_effect=side_effects) as urlopen:
+            rc = main._cmd_signup(mock.Mock(force=False))
+        assert rc == 0
+        assert not any(call.args[0].full_url.endswith("/v1/agent/signup")
+                       for call in urlopen.call_args_list)  # NO second mint
+        cfg = json.loads((tmp_path / ".tortoise" / "credentials.json").read_text())
+        assert cfg["api_key"] == "tt_valid_global"
+        cap = capsys.readouterr()
+        assert "remove" in (cap.out + cap.err).lower()
+
+    def test_env_401_remint_warns_shadow_without_force(self, monkeypatch, tmp_path, capsys):
+        """#1708 fixer (P1): env key 401s and there is NO valid global key →
+        mint — but the env shadow persists at read time, so the D3 warning must
+        fire EVEN WITHOUT --force (previously gated on --force only → silent
+        exit 0 → every re-run re-401s and mints another team)."""
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_dead_env")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        side_effects = [HTTPError("https://api.premiselabs.co/v1/team", 401, "u", {},
+                                  io.BytesIO(b'{"detail":"unauthorized"}')),
+                        _ok_mint()]
+        with mock.patch("urllib.request.urlopen", side_effect=side_effects) as urlopen:
+            rc = main._cmd_signup(mock.Mock(force=False))
+        assert rc == 0
+        assert any(call.args[0].full_url.endswith("/v1/agent/signup")
+                   for call in urlopen.call_args_list)  # mint happened
+        err = capsys.readouterr().err
+        assert "TORTOISE_API_KEY" in err and "shadow" in err.lower()
+
+    def test_env_401_global_unvalidatable_fail_closed(self, monkeypatch, tmp_path, capsys):
+        """#1708 fixer (P1): env key 401s, the global key CANNOT be validated
+        (network down) — fail closed rather than mint blind (the global key may
+        be valid; minting would duplicate the team once the env shadow lifts)."""
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_dead_env")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        self._global_cfg(tmp_path, api_key="tt_maybe_valid")
+        side_effects = [HTTPError("https://api.premiselabs.co/v1/team", 401, "u", {},
+                                  io.BytesIO(b'{"detail":"unauthorized"}')),
+                        URLError("connection refused")]
+        with mock.patch("urllib.request.urlopen", side_effect=side_effects) as urlopen:
+            rc = main._cmd_signup(mock.Mock(force=False))
+        assert rc == 1
+        assert not any(call.args[0].full_url.endswith("/v1/agent/signup")
+                       for call in urlopen.call_args_list)  # NO mint on unvalidatable
+        assert "--force" in capsys.readouterr().err
+
+    def test_env_401_global_invalid_utf8_mints_over(self, monkeypatch, tmp_path, capsys):
+        """#1708 fixer (P2): env key 401s and the global store is corrupt
+        (invalid UTF-8) — _global_key_status must treat it as invalid (mint +
+        overwrite), never traceback."""
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_dead_env")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        d = tmp_path / ".tortoise"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "credentials.json").write_bytes(b"\xff\xfe\x00{not json")
+        side_effects = [HTTPError("https://api.premiselabs.co/v1/team", 401, "u", {},
+                                  io.BytesIO(b'{"detail":"unauthorized"}')),
+                        _ok_mint()]
+        with mock.patch("urllib.request.urlopen", side_effect=side_effects) as urlopen:
+            rc = main._cmd_signup(mock.Mock(force=False))
+        assert rc == 0
+        assert any(call.args[0].full_url.endswith("/v1/agent/signup")
+                   for call in urlopen.call_args_list)  # minted (corrupt store = invalid)
+        assert "Traceback" not in capsys.readouterr().err
+        # the corrupt store was replaced by the fresh mint
+        cfg = json.loads((tmp_path / ".tortoise" / "credentials.json").read_text())
+        assert cfg["api_key"].startswith("tt_mint_")
 
     def test_reuse_invalid_then_rate_limited(self, monkeypatch, tmp_path, capsys):
         """Revoked key + exhausted 2/24h budget: message must mention BOTH."""
