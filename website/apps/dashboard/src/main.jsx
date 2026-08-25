@@ -132,6 +132,11 @@ function claimIntentInFlight() {
   const [error, setError] = React.useState('')
   const [busy, setBusy] = React.useState(false)
   const [newKey, setNewKey] = React.useState(null)
+  const [newKeyName, setNewKeyName] = React.useState('') // key-label: label for the next minted key
+  // key-label: inline-rename state (which row is being edited + its draft text)
+  const [editingKeyId, setEditingKeyId] = React.useState(null)
+  const [editingKeyName, setEditingKeyName] = React.useState('')
+  const renameCancelRef = React.useRef(false) // key-label: Escape-in-edit suppresses the blur-save
   const [capNotice, setCapNotice] = React.useState('') // #1147: tier-cap upgrade prompt (keys tab)
   // #1287: welcome-as-dashboard-subpage — first-time users land on
   // /welcome (key reveal + MCP/SDK chooser); returning users get home.
@@ -187,12 +192,13 @@ function claimIntentInFlight() {
   }
 
   // #1147: shared mint — POST /v1/team/keys and return the plaintext key.
-  async function mintKey(activeKey) {
+  // `name` (optional) is the key label — sent only when non-empty.
+  async function mintKey(activeKey, name) {
     const k = await api('/v1/team/keys', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...(activeKey ? { Authorization: `Bearer ${activeKey}` } : {}) },
       useSession: true,  // #1148: management → session JWT when signed in
-      body: '{}',
+      body: name ? JSON.stringify({ name }) : '{}',
     })
     return k.api_key || k.key || k
   }
@@ -1445,6 +1451,9 @@ function claimIntentInFlight() {
     setSessions([])
     setBackupInfo(null)
     setNewKey(null)        // Round-16: the plaintext key card was shown once on the old team
+    setNewKeyName('')      // key-label: a typed label must not leak onto another team's mint
+    setEditingKeyId(null)  // key-label: close any in-flight inline rename across teams
+    renameCancelRef.current = true // key-label: the unmount-blur must not fire a rename for the old team
     setError('')
     setCurrentTeamId(teamId)
     teamIdRef.current = teamId
@@ -1741,7 +1750,7 @@ function claimIntentInFlight() {
       // a key created with it lands on the wrong team.
       const _apiKeyAtCall = apiKey
       const activeKey = _teamAtCall ? (teamKeysRef.current[_teamAtCall] || _apiKeyAtCall) : _apiKeyAtCall
-      const newKeyVal = await mintKey(activeKey)
+      const newKeyVal = await mintKey(activeKey, newKeyName.trim() || undefined)
       // Identity guard BEFORE any UI write: a team switch during the POST must
       // not render this team's plaintext key card or key table under the new
       // team's header (switchTeam's setNewKey(null) already ran for the new team).
@@ -1759,6 +1768,7 @@ function claimIntentInFlight() {
       // from a prior switch).
       if (cachedForTeam ? activeKey !== cachedForTeam : activeKey !== apiKeyRef.current) return
       setNewKey(newKeyVal)
+      setNewKeyName('')
       await loadAll(activeKey)
     } catch (e) {
       // Round-18: a stale request's error must not land under the new team
@@ -1838,6 +1848,43 @@ function claimIntentInFlight() {
     } catch (e) {
       setKeys((prev) => prev.map((k) => k.id === keyId ? { ...k, enabled: currentEnabled } : k))
       setError((e && e.message) || `Couldn't toggle the key — try again.`)
+    }
+  }
+
+  async function renameKey(keyId, name) {
+    // key-label: PATCH the key's name via the same session-authed endpoint as
+    // the enabled toggle (PATCH /v1/team/keys/{id}, body {name}). Optimistic
+    // local update; revert on error. Empty/whitespace → unnamed (server
+    // stores NULL). 64-char cap mirrors the server's KEY_NAME_MAX.
+    // Round-28 (code-review P1): send ONLY {name} — echoing a stale `enabled`
+    // snapshot could silently re-enable a key disabled in another session/
+    // tab (rename must never touch auth state). Round-20: capture the team at
+    // call; a stale rename's error must not land under the new team's header.
+    const _teamAtCall = currentTeamId
+    setEditingKeyId(null)
+    setError('')
+    const next = (name || '').trim().slice(0, 64) || null
+    const cur = keys.find((k) => k.id === keyId)
+    // No-op guard: also dedupes the Enter→blur double-fire (blur after Enter
+    // sees the label already applied via the optimistic update's re-render).
+    if (!cur || (cur.name || null) === next) return
+    const prevName = cur.name || null
+    setKeys((ks) => ks.map((k) => k.id === keyId ? { ...k, name: next } : k))
+    try {
+      const updated = await api(`/v1/team/keys/${keyId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        useSession: true,  // #1148: management → session JWT when signed in
+        body: JSON.stringify({ name: next }),
+      })
+      if (teamIdRef.current !== _teamAtCall) return // stale switch — don't touch the new team's state
+      if (updated && (updated.id || updated.key_id)) {
+        setKeys((ks) => ks.map((k) => k.id === keyId ? { ...k, name: next } : k))
+      }
+    } catch (e) {
+      if (teamIdRef.current !== _teamAtCall) return // stale switch — error belongs to the old team
+      setKeys((ks) => ks.map((k) => k.id === keyId ? { ...k, name: prevName } : k))
+      setError((e && e.message) || `Couldn't rename the key — try again.`)
     }
   }
 
@@ -2849,7 +2896,17 @@ function claimIntentInFlight() {
             )}
             <div className="row">
               <h2>API Keys</h2>
-              <button onClick={createKey} disabled={busy}>+ New key</button>
+              <div className="inline-form">
+                <input
+                  placeholder="Label (e.g. CI, staging)"
+                  aria-label="New key label"
+                  value={newKeyName}
+                  maxLength={64}
+                  onChange={(e) => setNewKeyName(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && createKey()}
+                />
+                <button onClick={createKey} disabled={busy}>+ New key</button>
+              </div>
             </div>
             {/* #1148-ux review: "Lost your key? Generate a new one" removed — the + New key button already covers it. */}
             {capNotice && (
@@ -2872,11 +2929,44 @@ function claimIntentInFlight() {
               </div>
             )}
             <table>
-              <thead><tr><th>Prefix</th><th>Created</th><th>Status</th><th></th></tr></thead>
+              <thead><tr><th>Name</th><th>Prefix</th><th>Created</th><th>Status</th><th></th></tr></thead>
               <tbody>
-                {keys.length === 0 && <tr><td colSpan="4" className="dim">No keys yet.</td></tr>}
+                {keys.length === 0 && <tr><td colSpan="5" className="dim">No keys yet.</td></tr>}
                 {keys.map((k) => (
                   <tr key={k.id}>
+                    <td>
+                      {editingKeyId === k.id ? (
+                        <input
+                          autoFocus
+                          maxLength={64}
+                          className="key-name-input"
+                          value={editingKeyName}
+                          placeholder="Label"
+                          aria-label={`Label for key ${k.key_prefix || k.id?.slice(0, 8)}`}
+                          onChange={(e) => setEditingKeyName(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') { e.preventDefault(); e.target.blur() }
+                            if (e.key === 'Escape') { renameCancelRef.current = true; setEditingKeyId(null); e.target.blur() }
+                          }}
+                          onBlur={() => {
+                            if (renameCancelRef.current) { renameCancelRef.current = false; return }
+                            renameKey(k.id, editingKeyName)
+                          }}
+                        />
+                      ) : (
+                        <span className="key-name">
+                          {k.name ? k.name : <span className="dim">—</span>}
+                          {!k.revoked_at && !isSessionKey(k) && isOwnerAdmin && (
+                            <button
+                              className="ghost small key-rename"
+                              onClick={() => { renameCancelRef.current = false; setEditingKeyId(k.id); setEditingKeyName(k.name || '') }}
+                              aria-label={`Rename key ${k.key_prefix || k.id?.slice(0, 8)}`}
+                              title="Rename key"
+                            >✏️</button>
+                          )}
+                        </span>
+                      )}
+                    </td>
                     <td><code>{k.key_prefix || k.id?.slice(0, 12)}</code></td>
                     <td>{fmtTime(k.created_at || k.createdAt)}</td>
                     <td>{k.revoked_at ? <span className="revoked">revoked</span> : isSessionKey(k) ? <span className="live">ephemeral · session</span> : <span className="live">active</span>}</td>

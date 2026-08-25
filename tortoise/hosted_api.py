@@ -1027,6 +1027,22 @@ def _short_id() -> str:
     return uuid.uuid4().hex[:26]
 
 
+# 20260825000001: API-key label length cap (matches the dashboard input's
+# maxLength). Labels are free-text display metadata — clamp, don't reject.
+KEY_NAME_MAX = 64
+
+
+def _clean_key_label(value: object) -> str | None:
+    """Normalize an optional API-key label: strip whitespace, clamp to
+    KEY_NAME_MAX chars, empty → None (unnamed). Never raises — a label is
+    display metadata, so an invalid value degrades to unnamed rather than
+    failing the mint/rename."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    return s[:KEY_NAME_MAX] if s else None
+
+
 def _probe_db() -> dict:
     """Deep-check the graph DB through the shared/default connection (#1384).
 
@@ -1656,7 +1672,7 @@ async def _check_turnstile(request: Request, body: dict) -> None:
 
 # ── Pydantic Models ───────────────────────────────────────────────
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class CreatePointRequest(BaseModel):
@@ -1760,6 +1776,7 @@ class CreateKeyResponse(BaseModel):
     key: str  # plaintext — shown once
     key_prefix: str
     created_at: str
+    name: str | None = None  # optional user-facing label (20260825000001)
 
 
 class KeyListResponse(BaseModel):
@@ -1768,6 +1785,7 @@ class KeyListResponse(BaseModel):
     created_at: str | None
     last_used_at: str | None
     revoked_at: str | None
+    name: str | None = None  # optional user-facing label (20260825000001)
 
 
 class ErrorResponse(BaseModel):
@@ -3604,8 +3622,21 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
     api_keys.revoked_at — identical response shape to the registry path,
     which stays for selfhost. The registry path is the #767 review note
     (PR #851 P1) surface this migration closes: no production window exists
-    because #765 lands before the single-deploy flip (#771)."""
+    because #765 lands before the single-deploy flip (#771).
+
+    The body is optional and currently carries one field: `name` — an
+    optional user-facing label (migration 20260825000001) so dashboards/CLI
+    can remember which key is which. Bodies default to {} (legacy clients)."""
     _check_team_limit(team, "api_keys")
+    # Key label (optional): read the body defensively — mint bodies are
+    # usually `{}` (dashboard/CLI), so a name is best-effort, never a
+    # failure mode for a mint.
+    name = None
+    try:
+        payload = await request.json()
+        name = _clean_key_label(payload.get("name")) if isinstance(payload, dict) else None
+    except Exception:
+        name = None
     import uuid
     from tortoise.auth import hash_api_key, lookup_hash
     from tortoise.supabase_control import (
@@ -3632,6 +3663,7 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
             "created_at": now,
             "revoked_at": None,
             "expires_at": None,
+            "name": name,  # 20260825000001: optional user-facing label
         })
         # #528 analytics — actor id from the team's active memberships when
         # resolvable (one seam query), else a team_id-prefixed id (request.
@@ -3657,8 +3689,8 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
     else:
         sdk = _make_sdk(namespace="registry")
         sdk._get_registry().query(
-            "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, key_prefix:$kp, created_by:$cb, created_at:$now})",
-            params={"id": kid, "tid": team["team_id"], "kh": key_hash, "kp": key_prefix, "cb": "api", "now": now},
+            "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, key_prefix:$kp, created_by:$cb, created_at:$now, name:$name})",
+            params={"id": kid, "tid": team["team_id"], "kh": key_hash, "kp": key_prefix, "cb": "api", "now": now, "name": name},
         )
         # #528 analytics — actor user id from the team's Membership graph when
         # resolvable (key creation is rare; one extra registry lookup), else a
@@ -3693,6 +3725,7 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
         "key": api_key,
         "key_prefix": key_prefix,
         "created_at": now,
+        "name": name,
     }
 
 
@@ -3724,6 +3757,8 @@ async def list_api_keys(team: dict = Depends(get_current_team)):
                     "revoked_at": row.get("revoked_at"),
                     # #1148: per-key enabled state (UI toggle)
                     "enabled": row.get("enabled", True),
+                    # 20260825000001: optional user-facing label
+                    "name": row.get("name"),
                 }
                 for row in keys
             ]
@@ -3732,7 +3767,7 @@ async def list_api_keys(team: dict = Depends(get_current_team)):
     try:
         keys = sdk._get_registry().query(
             "MATCH (k:APIKey {team_id: $tid}) "
-            "RETURN k.id, k.key_prefix, k.created_at, k.last_used_at, k.revoked_at "
+            "RETURN k.id, k.key_prefix, k.created_at, k.last_used_at, k.revoked_at, k.name "
             "ORDER BY k.created_at DESC",
             params={"tid": team["team_id"]},
         )
@@ -3748,6 +3783,8 @@ async def list_api_keys(team: dict = Depends(get_current_team)):
                 "created_at": row[2],
                 "last_used_at": row[3],
                 "revoked_at": row[4],
+                # 20260825000001: optional user-facing label
+                "name": row[5],
             }
             for row in keys.result_set
         ]
@@ -3860,7 +3897,22 @@ async def toggle_dashboard_login(
 
 
 class KeyEnabledToggle(BaseModel):
-    enabled: bool
+    # Either field may be present; the handler applies whatever is sent
+    # (enabled=on/off toggle, name=rename). `model_fields_set` distinguishes
+    # an explicit JSON null from an absent field — null CLEARS the label
+    # (name) and LEAVES the toggle untouched (enabled: a null must never
+    # re-enable a disabled key, so it is treated as absent there). `enabled`
+    # was previously required — making it optional is backward-compatible
+    # (existing callers still send it). At least one field must be present
+    # (422 on an empty body).
+    enabled: bool | None = None
+    name: str | None = None
+
+    @model_validator(mode="after")
+    def _at_least_one_field(self) -> KeyEnabledToggle:
+        if not self.model_fields_set:
+            raise ValueError("At least one of enabled or name is required")
+        return self
 
 
 @app.patch("/v1/team/keys/{key_id}")
@@ -3870,12 +3922,14 @@ async def toggle_api_key_enabled(
     request: Request,
     user: dict = Depends(get_current_user),
 ):
-    """#1148: enable/disable an API key (per-key toggle). Disabled keys stop
+    """#1148: enable/disable an API key (per-key toggle) and/or rename it
+    (20260825000001, optional user-facing label). Disabled keys stop
     authenticating (resolve_api_key rejects enabled=false) but stay listed —
     re-enable anytime. Session-authed + owner/admin-only. Team-scoped."""
     from tortoise.supabase_control import (
         api_key_by_id, get_control_plane, is_supabase_enabled,
         set_api_key_enabled as _sb_set_enabled,
+        set_api_key_name as _sb_set_name,
     )
     if is_supabase_enabled():
         cp = get_control_plane()
@@ -3885,15 +3939,53 @@ async def toggle_api_key_enabled(
         team_id = row.get("team_id")
         await _require_owner_admin(user["user_id"], team_id)
         if row.get("revoked_at") is not None:
-            raise HTTPException(status_code=409, detail="Cannot toggle a revoked key")
+            raise HTTPException(status_code=409, detail="Cannot modify a revoked key")
         if row.get("created_via") == "bootstrap":
             # P3 (review): session/bootstrap keys are ephemeral — disabling
-            # them mid-session breaks the very credential the owner is using.
-            raise HTTPException(status_code=409, detail="Cannot toggle a session key")
-        _sb_set_enabled(cp, key_id, body.enabled)
-        return {"key_id": key_id, "enabled": body.enabled}
-    # Registry mode: no enabled flag — no-op success (selfhost parity).
-    return {"key_id": key_id, "enabled": True}
+            # or renaming them mid-session breaks the very credential the
+            # owner is using.
+            raise HTTPException(status_code=409, detail="Cannot modify a session key")
+        result = {"key_id": key_id}
+        # Explicit null for enabled is treated as absent (leave untouched) —
+        # `None is not False` would silently RE-ENABLE a disabled key.
+        if "enabled" in body.model_fields_set and body.enabled is not None:
+            _sb_set_enabled(cp, key_id, body.enabled)
+            result["enabled"] = body.enabled
+        # model_fields_set distinguishes explicit null (clear label) from
+        # field-absent (don't touch) — JSON null must clear, not skip.
+        if "name" in body.model_fields_set:
+            cleaned = _clean_key_label(body.name)
+            _sb_set_name(cp, key_id, cleaned)
+            result["name"] = cleaned
+        return result
+    # Registry mode (selfhost): no enabled column — enabled is a no-op echo
+    # (registry keys are always active, preserving the #1148 no-op echo
+    # contract of {"key_id", "enabled": True}); name IS stored on the APIKey
+    # node (parity with supabase mode). The same 404/owner-admin/revoked/
+    # session guards apply as supabase mode (_require_owner_admin resolves
+    # the Membership graph).
+    sdk = _make_sdk(namespace="registry")
+    rows = sdk._get_registry().query(
+        "MATCH (k:APIKey {id: $id}) RETURN k.team_id, k.revoked_at, k.created_via",
+        params={"id": key_id},
+    ).result_set
+    if not rows:
+        raise HTTPException(status_code=404, detail="API key not found")
+    team_id, revoked_at, created_via = rows[0]
+    await _require_owner_admin(user["user_id"], team_id)
+    if revoked_at is not None:
+        raise HTTPException(status_code=409, detail="Cannot modify a revoked key")
+    if created_via == "bootstrap":
+        raise HTTPException(status_code=409, detail="Cannot modify a session key")
+    result = {"key_id": key_id, "enabled": True}
+    if "name" in body.model_fields_set:
+        cleaned = _clean_key_label(body.name)
+        sdk._get_registry().query(
+            "MATCH (k:APIKey {id: $id}) SET k.name = $name",
+            params={"id": key_id, "name": cleaned},
+        )
+        result["name"] = cleaned
+    return result
 
 
 # ── Session Capture ───────────────────────────────────────────────

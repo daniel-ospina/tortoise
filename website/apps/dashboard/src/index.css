@@ -270,6 +270,14 @@ button:focus-visible, select:focus-visible, a:focus-visible, input:focus-visible
 .key-toggle[disabled] { opacity: 0.6; cursor: not-allowed; }
 .key-trash { font-size: 14px; padding: 3px 7px; }
 .key-trash:hover { border-color: var(--red); color: var(--red); }
+/* key labels (20260825000001): name cell + inline rename */
+.key-name {
+  display: inline-flex; align-items: center; gap: 0.4rem; min-height: 24px;
+  max-width: 24ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.key-rename { font-size: 12px; padding: 2px 5px; opacity: 0.55; flex: none; }
+.key-name:hover .key-rename { opacity: 1; }
+.key-name-input { width: 160px; max-width: 100%; padding: 3px 8px; font-size: 13px; }
 
 /* #1148-ux review: combined login/signup card */
 .auth-mode-toggle { display: flex; gap: 4px; margin-bottom: 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 3px; }

@@ -178,7 +178,9 @@ class TestCreateApiKey:
         r = tc.post("/v1/team/keys")
         assert r.status_code == 200, r.text
         body = r.json()
-        assert set(body) == {"id", "key", "key_prefix", "created_at"}
+        # 20260825000001: optional label rides the response (null when unset)
+        assert set(body) == {"id", "key", "key_prefix", "created_at", "name"}
+        assert body["name"] is None
         key = body["key"]
         assert key.startswith("tt_")
 
@@ -196,6 +198,20 @@ class TestCreateApiKey:
         app.dependency_overrides.clear()
         r2 = tc.get("/v1/team", headers={"Authorization": f"Bearer {key}"})
         assert r2.status_code == 200, r2.text
+
+    def test_mint_with_name_writes_row_and_lists(self, team_client):
+        """20260825000001: supabase-mode mint with a label stores name on the
+        row and returns it from GET /v1/team/keys (the production dashboard
+        label input path)."""
+        tc, fake, _ = team_client
+        r = tc.post("/v1/team/keys", json={"name": "CI deploy"})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["name"] == "CI deploy"
+        rows = fake.tables["api_keys"]
+        assert rows[0]["name"] == "CI deploy"
+        listed = tc.get("/v1/team/keys").json()["keys"]
+        assert any(k["id"] == body["id"] and k.get("name") == "CI deploy" for k in listed)
 
     def test_never_touches_registry(self, team_client, spy):
         tc, fake, _ = team_client  # noqa: RUF059

@@ -73,6 +73,26 @@ def _count_stub_nodes() -> int:
     return rows[0][0] if rows else 0
 
 
+def _listed_key(client, kid, timeout: float = 3.0) -> dict:
+    """Return the GET /v1/team/keys row for `kid`, tolerating the embedded
+    lane's write-visibility lag (a just-minted node may not be visible on an
+    immediate read — the #1502-class single-writer race; the canonical docker
+    lane is instant). Bounded retry — a genuinely missing key still fails with
+    a clear message instead of a bare IndexError."""
+    import time
+    deadline = time.monotonic() + timeout
+    while True:
+        keys = client.get("/v1/team/keys").json()["keys"]
+        hit = [k for k in keys if k["id"] == kid]
+        if hit:
+            return hit[0]
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"minted key {kid} missing from list after {timeout:.1f}s: "
+                f"{[k['id'] for k in keys]}")
+        time.sleep(0.15)
+
+
 def _patch_tortoise_sdk_init(db_path: str):
     """Make TortoiseSDK use a temp db_path when constructed without one."""
     import tortoise.hosted_api as ha_mod
@@ -98,6 +118,12 @@ def _restore_tortoise_sdk_init(original_init):
     import tortoise.hosted_api as ha_mod
 
     ha_mod.TortoiseSDK.__init__ = original_init
+    # #1502-class: evict the embedded-fallback anchor created DURING this
+    # test (e.g. by the registry-mode rename helper's _make_sdk). Without
+    # this, a stale anchor bound to this test's temp DB leaks into the next
+    # test file's run (dead socket / stale rows) — the #1497 pattern from
+    # test_writer_inventory.
+    ha_mod._FALLBACK_KEEPALIVE.clear()
 
 
 @pytest.fixture
@@ -682,6 +708,31 @@ class TestKeysCreate:
         assert r1.json()["key"] != r2.json()["key"]
         assert r1.json()["id"] != r2.json()["id"]
 
+    def test_create_key_with_name_roundtrips(self, client):
+        # 20260825000001: optional label rides the mint body and survives.
+        r = client.post("/v1/team/keys", json={"name": "CI deploy"})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["name"] == "CI deploy"
+        # the label appears in the list response
+        assert _listed_key(client, body["id"])["name"] == "CI deploy"
+
+    def test_create_key_name_optional_and_defaults_unnamed(self, client):
+        # no body / empty label → stored unnamed (name null in the list).
+        # Cap is 2 keys/team (TEST_TEAM.max_api_keys), so at most two mints.
+        for body in (None, {"name": "   "}):
+            r = client.post("/v1/team/keys", json=body) if body is not None else client.post("/v1/team/keys")
+            assert r.status_code == 200, r.text
+            kid = r.json()["id"]
+            assert _listed_key(client, kid).get("name") is None, f"body={body!r}"
+
+    def test_create_key_name_clamped_to_64_chars(self, client):
+        long = "x" * 200
+        r = client.post("/v1/team/keys", json={"name": long})
+        assert r.status_code == 200, r.text
+        assert r.json()["name"] == "x" * 64
+        assert _listed_key(client, r.json()["id"])["name"] == "x" * 64
+
 
 class TestKeysList:
     """GET /v1/team/keys — list API keys (hashes only)."""
@@ -718,6 +769,106 @@ class TestKeysList:
             assert "key_prefix" in k
             assert "created_at" in k
             # last_used_at and revoked_at may be None — fine
+
+    def test_list_keys_includes_name_field(self, client):
+        # 20260825000001: every listed key carries the (nullable) label.
+        kid = client.post("/v1/team/keys", json={"name": "ci"}).json()["id"]
+        listed = _listed_key(client, kid)
+        assert "name" in listed
+        assert listed.get("name") == "ci"
+        r = client.get("/v1/team/keys")
+        assert all("name" in k for k in r.json()["keys"])
+
+
+class TestKeysRename:
+    """PATCH /v1/team/keys/{id} — rename (label) / toggle. Registry path.
+
+    The endpoint is session-authed (get_current_user dependency) and enforces
+    owner/admin via _require_owner_admin in BOTH modes — registry mode
+    resolves the Membership graph, so the tests seed an owner membership.
+    Supabase-mode rename/toggle/403 coverage lives in test_dashboard_login.py.
+    """
+
+    def _override_session_user(self):
+        # Stub the session JWT (registry mode skips JWT verification) and
+        # seed an owner Membership so _require_owner_admin passes.
+        app.dependency_overrides[get_current_user] = \
+            lambda: {"user_id": "user-1", "email": "owner@example.com"}
+        import tortoise.hosted_api as ha
+        sdk = ha._make_sdk(namespace="registry")
+        sdk._get_registry().query(
+            "MERGE (m:Membership {user_id:$uid, team_id:$tid, status:'active'}) "
+            "SET m.role='owner'",
+            params={"uid": "user-1", "tid": TEST_TEAM_ID},
+        )
+
+    def _override_non_owner(self):
+        # Session user with NO membership — _require_owner_admin must 403.
+        app.dependency_overrides[get_current_user] = \
+            lambda: {"user_id": "intruder-9", "email": "intruder@example.com"}
+
+    def test_rename_key_updates_label(self, client):
+        self._override_session_user()
+        kid = client.post("/v1/team/keys", json={"name": "staging"}).json()["id"]
+        r = client.patch(f"/v1/team/keys/{kid}", json={"name": "prod"})
+        assert r.status_code == 200, r.text
+        # registry mode has no enabled column — echo preserves the #1148
+        # no-op contract {key_id, enabled: True} alongside the applied name
+        assert r.json() == {"key_id": kid, "enabled": True, "name": "prod"}
+        listed = _listed_key(client, kid)
+        assert listed["name"] == "prod"
+
+    def test_rename_clears_label_with_empty_string(self, client):
+        self._override_session_user()
+        kid = client.post("/v1/team/keys", json={"name": "staging"}).json()["id"]
+        r = client.patch(f"/v1/team/keys/{kid}", json={"name": "   "})
+        assert r.status_code == 200, r.text
+        assert r.json()["name"] is None
+        listed = _listed_key(client, kid)
+        assert listed.get("name") is None
+
+    def test_rename_clears_label_with_null(self, client):
+        # The dashboard sends JSON null to clear a label — null must be
+        # applied (field present), not treated as absent (P1 review fix).
+        self._override_session_user()
+        kid = client.post("/v1/team/keys", json={"name": "staging"}).json()["id"]
+        r = client.patch(f"/v1/team/keys/{kid}", json={"name": None})
+        assert r.status_code == 200, r.text
+        assert r.json()["name"] is None
+        listed = _listed_key(client, kid)
+        assert listed.get("name") is None
+
+    def test_rename_clamps_to_64_chars(self, client):
+        self._override_session_user()
+        kid = client.post("/v1/team/keys").json()["id"]
+        r = client.patch(f"/v1/team/keys/{kid}", json={"name": "x" * 200})
+        assert r.status_code == 200, r.text
+        assert r.json()["name"] == "x" * 64
+
+    def test_rename_and_toggle_in_one_patch(self, client):
+        self._override_session_user()
+        kid = client.post("/v1/team/keys", json={"name": "ci"}).json()["id"]
+        r = client.patch(f"/v1/team/keys/{kid}", json={"enabled": False, "name": "off-ci"})
+        assert r.status_code == 200, r.text
+        # registry mode: enabled is a no-op (no flag column) — name applies
+        assert r.json()["key_id"] == kid
+        assert r.json()["name"] == "off-ci"
+
+    def test_rename_unknown_key_404(self, client):
+        self._override_session_user()
+        r = client.patch("/v1/team/keys/does-not-exist", json={"name": "x"})
+        assert r.status_code == 404, r.text
+
+    def test_rename_non_owner_403(self, client):
+        # Registry mode enforces owner/admin like supabase mode (P2 review
+        # fix) — a user with no membership cannot rename any key by id.
+        self._override_non_owner()
+        kid = client.post("/v1/team/keys", json={"name": "staging"}).json()["id"]
+        r = client.patch(f"/v1/team/keys/{kid}", json={"name": "hijacked"})
+        assert r.status_code == 403, r.text
+        # label unchanged
+        listed = _listed_key(client, kid)
+        assert listed.get("name") == "staging"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

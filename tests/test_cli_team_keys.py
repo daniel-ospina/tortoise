@@ -28,15 +28,15 @@ CONFIG = (
 LIST_BODY = json.dumps({
     "keys": [
         {"id": "k1", "key_prefix": "tt_abc", "created_at": "2026-08-01T12:00:00",
-         "last_used_at": "2026-08-11T09:00:00", "revoked_at": None},
+         "last_used_at": "2026-08-11T09:00:00", "revoked_at": None, "name": "CI"},
         {"id": "k2", "key_prefix": "tt_def", "created_at": "2026-08-02T08:00:00",
-         "last_used_at": None, "revoked_at": "2026-08-03T14:00:00"},
+         "last_used_at": None, "revoked_at": "2026-08-03T14:00:00", "name": None},
     ]
 }).encode()
 
 CREATE_BODY = json.dumps({
     "id": "kid1", "key": "tt_fullkey", "key_prefix": "tt_full",
-    "created_at": "2026-08-11T10:00:00Z",
+    "created_at": "2026-08-11T10:00:00Z", "name": "staging",
 }).encode()
 
 
@@ -65,6 +65,9 @@ class TestTeamKeysList:
         assert out["team_id"] == "team123"  # from .tortoise (API returns keys only)
         assert [k["id"] for k in out["keys"]] == ["k1", "k2"]
         assert out["keys"][1]["revoked_at"]  # revoked key surfaced
+        # 20260825000001: labels ride the list payload (nullable)
+        assert out["keys"][0]["name"] == "CI"
+        assert out["keys"][1]["name"] is None
         req = urlopen.call_args.args[0]
         assert req.full_url == "https://api.premiselabs.co/v1/team/keys"
         assert req.headers["Authorization"] == "Bearer tt_testkey"
@@ -80,6 +83,8 @@ class TestTeamKeysList:
         assert "k1" in out and "tt_abc" in out
         assert "active" in out and "revoked" in out
         assert "never" in out  # last_used_at null → never
+        # 20260825000001: label column — named key shows it, unnamed shows ''
+        assert "CI" in out
 
     def test_list_keys_no_config(self, monkeypatch, tmp_path, capsys):
         monkeypatch.chdir(tmp_path)
@@ -183,9 +188,34 @@ class TestTeamKeysCreate:
         assert out["id"] == "kid1"
         assert out["created_at"] == "2026-08-11T10:00:00Z"
         assert out["team_id"] == "team123"
+        # 20260825000001: the response label is surfaced in JSON output
+        assert out["name"] == "staging"
         req = urlopen.call_args.args[0]
         assert req.get_method() == "POST"
         assert req.full_url == "https://api.premiselabs.co/v1/team/keys"
+        assert json.loads(req.data) == {}  # no --name → empty body
+
+    def test_create_key_with_name_sends_label(self, monkeypatch, tmp_path, capsys):
+        self._cfg(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        with mock.patch("urllib.request.urlopen", return_value=_ok_response(CREATE_BODY)) as urlopen:
+            rc = main(["team", "keys", "create", "--name", "staging"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Name:        staging" in out
+        req = urlopen.call_args.args[0]
+        assert json.loads(req.data) == {"name": "staging"}
+        # urllib normalizes header case (Content-Type → Content-type)
+        assert req.headers["Content-type"] == "application/json"
+
+    def test_create_key_name_clamped_to_64_chars(self, monkeypatch, tmp_path, capsys):
+        self._cfg(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        with mock.patch("urllib.request.urlopen", return_value=_ok_response(CREATE_BODY)) as urlopen:
+            rc = main(["team", "keys", "create", "--name", "x" * 200])
+        assert rc == 0
+        req = urlopen.call_args.args[0]
+        assert len(json.loads(req.data)["name"]) == 64
 
     def test_create_key_human(self, monkeypatch, tmp_path, capsys):
         self._cfg(tmp_path)
