@@ -817,6 +817,8 @@ _INVENTORY_ENDPOINTS = [
     ("post", "/v1/team/keys", None, None, "create_api_key writer"),
     ("get", "/v1/team/keys", None, None, "list_api_keys reader"),
     ("post", "/v1/agent/signup", {}, None, "agent_signup writer"),
+    ("post", "/v1/agent/token/revoke",
+     {"signup_token": "st_" + "ab" * 32}, None, "agent_token_revoke writer"),
     ("post", "/v1/register",
      {"email": "sweep@example.com", "password": "hunter2secret"},
      None, "register writer"),

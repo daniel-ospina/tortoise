@@ -11442,6 +11442,40 @@ class TortoiseSDK:
                 "team_name": team.get("name"), "tier": team.get("tier") or "free",
                 "graph_name": team.get("graph_name") or f"team_{team_id}"}
 
+    def signup_token_revoke(self, token_plaintext: str, team_id: str) -> dict:
+        """Revoke a signup token (set revoked_at) — registry parity (#1715).
+
+        Team-scoped: the SignupToken node's team_id must match ``team_id`` or
+        the revoke is refused (a caller can only kill their own team's
+        token). Idempotent: an unknown / other-team / already-revoked token
+        is a no-op, never an error. Returns
+        ``{"team_id": str, "status": "revoked" | "already" |
+        "not_found" | "not_owned"}`` — the endpoint maps status to
+        200/404/403 (the no-oracle uniform-422 contract is preserved for
+        malformed tokens upstream; an authenticated caller probing a valid
+        token learns only whether it is THEIR team's).
+        """
+        from tortoise.auth import lookup_hash as _lookup_hash
+        lk = _lookup_hash(token_plaintext)
+        rows = self._get_registry().query(
+            "MATCH (n:SignupToken {lookup_key:$lk}) RETURN properties(n)",
+            params={"lk": lk},
+        ).result_set
+        if not rows:
+            return {"team_id": team_id, "status": "not_found"}
+        node = rows[0][0]
+        if node.get("team_id") != team_id:
+            return {"team_id": team_id, "status": "not_owned"}
+        if node.get("revoked_at") is not None:
+            return {"team_id": team_id, "status": "already"}
+        from datetime import datetime, timezone as _tz  # noqa: I001
+        now_iso = datetime.now(_tz.utc).isoformat()  # noqa: UP017
+        self._get_registry().query(
+            "MATCH (n:SignupToken {lookup_key:$lk}) SET n.revoked_at = $now",
+            params={"lk": lk, "now": now_iso},
+        )
+        return {"team_id": team_id, "status": "revoked"}
+
     def _default_max_api_keys(self) -> int:
         from tortoise.pricing import tier_limits
         return int(tier_limits("free").get("max_api_keys", 2))

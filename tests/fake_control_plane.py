@@ -283,6 +283,21 @@ class FakeControlPlane:
                     self._trigger_key_create(tid, f"key_{tid}_{lookup[:12]}",
                                              "recovery")
                 return tid
+        if fn == "revoke_signup_token":
+            # #1715 (20260826000001): user-facing revocation — team-scoped +
+            # idempotent (UPDATE ... WHERE token_hash AND team_id AND
+            # revoked_at IS NULL); unknown/other-team/already-revoked is a
+            # zero-row no-op, never an error.
+            from datetime import datetime, timezone
+            p = body or {}
+            th = p.get("p_token_hash") or ""
+            tid = p.get("p_team_id") or ""
+            row = next((t for t in self.tables.get("agent_signup_tokens", [])
+                        if t.get("token_hash") == th
+                        and t.get("team_id") == tid), None)
+            if row is not None and row.get("revoked_at") is None:
+                row["revoked_at"] = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+            return None
         if fn != "provision_team":
             return None
         return self._provision_team_emulation(body or {})

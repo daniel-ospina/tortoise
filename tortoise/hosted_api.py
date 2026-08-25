@@ -7427,6 +7427,86 @@ async def agent_recover(request: Request):
     return await _agent_recover_flow(request, signup_token)
 
 
+@app.post("/v1/agent/token/revoke")
+async def agent_token_revoke(request: Request, team: dict = Depends(get_current_team_session)):
+    """User-facing signup-token revocation (#1715).
+
+    Body {signup_token} (the plaintext st_ token) → the token's revoked_at
+    is set → token-present signup/recover on that team returns the uniform
+    422 invalid_signup_token (the #1709 recovery backdoor is closed by the
+    user, no support runbook needed). Team-scoped: the caller (dashboard
+    session OR API key — get_current_team_session) can only revoke a token
+    bound to THEIR team; an unknown token is 404, another team's token is
+    403 (mirrors revoke_api_key). Idempotent: an already-revoked token
+    returns {"revoked": true, "already": true} (no double write).
+
+    Oracle contract: the endpoint is AUTH-GATED (unauthenticated → 401,
+    no existence signal) and a malformed/missing token returns the SAME
+    uniform 422 invalid_signup_token body as every other invalid-token
+    surface — the #1709 no-oracle contract is untouched. The mint/recover
+    flows are NOT changed; no rate limiter is weakened (revoke is
+    auth-scoped self-harm only — a caller can only kill their own team's
+    token).
+    """
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    if not isinstance(body, dict):
+        body = {}
+    signup_token = body.get("signup_token")
+    if not isinstance(signup_token, str) or not _SIGNUP_TOKEN_RE.match(signup_token):
+        # malformed / missing → uniform 422 (identical to every other
+        # invalid-token body — no format oracle on a NEW surface).
+        raise HTTPException(status_code=422, detail=_INVALID_SIGNUP_TOKEN_DETAIL)
+    team_id = team["team_id"]
+    token_hash = _hash_signup_token(signup_token)
+
+    from tortoise.supabase_control import is_supabase_enabled
+    if is_supabase_enabled():
+        from tortoise.supabase_control import (
+            get_control_plane, revoke_signup_token as _sb_revoke,
+            signup_token_row,
+        )
+        cp = get_control_plane()
+        row = signup_token_row(cp, token_hash)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Signup token not found")
+        if row.get("team_id") != team_id:
+            raise HTTPException(status_code=403, detail="Not your signup token")
+        if row.get("revoked_at") is not None:
+            return {"revoked": True, "already": True, "team_id": team_id}
+        try:
+            _sb_revoke(cp, token_hash, team_id)
+        except HTTPException:
+            raise
+        except Exception:
+            import logging
+            logging.getLogger("tortoise.api").exception("agent_token_revoke failed")
+            raise HTTPException(status_code=500, detail="Internal server error")
+        await _async_audit(request, team_id, "agent_signup_token_revoke",
+                           resource_type="signup_token", resource_id=team_id,
+                           actor_user_id=team.get("session_user_id"))
+        return {"revoked": True, "already": False, "team_id": team_id}
+
+    # ── Registry lane (selfhost) ──
+    sdk = _make_sdk(namespace="registry")
+    try:
+        out = sdk.signup_token_revoke(signup_token, team_id)
+    except Exception:
+        import logging
+        logging.getLogger("tortoise.api").exception("agent_token_revoke failed")
+        raise HTTPException(status_code=500, detail="Internal server error")
+    status = out.get("status")
+    if status == "not_found":
+        raise HTTPException(status_code=404, detail="Signup token not found")
+    if status == "not_owned":
+        raise HTTPException(status_code=403, detail="Not your signup token")
+    if status == "revoked":
+        await _async_audit(request, team_id, "agent_signup_token_revoke",
+                           resource_type="signup_token", resource_id=team_id,
+                           actor_user_id=team.get("session_user_id"))
+        return {"revoked": True, "already": False, "team_id": team_id}
+    return {"revoked": True, "already": True, "team_id": team_id}
+
+
 # ── Claim path (#1082, PR1 — indicators 1,2,3,5) ───────────────────────────
 #
 # POST /v1/claim attaches a provider-verified Supabase identity to an

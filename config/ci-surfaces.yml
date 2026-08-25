@@ -77,6 +77,7 @@ surfaces:
   - test_session_login.py
   - test_session_login_helpers.py
   - test_session_semantic_search.py
+  - test_signup_token_revoke.py
   - test_subscriptions.py
   - test_telegram_push.py
   - test_turnstile_signup.py
