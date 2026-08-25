@@ -23,7 +23,9 @@ surfaces:
   - test_claim_endpoints.py
   - test_claim_lifecycle.py
   - test_cli_claim.py
+  - test_cli_global_config.py
   - test_cli_context.py
+  - test_cli_resolver.py
   - test_cli_serve.py
   - test_cli_signup.py
   - test_cli_team_keys.py
