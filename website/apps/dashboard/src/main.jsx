@@ -2414,9 +2414,9 @@ function claimIntentInFlight() {
                           </button>
                         ))}
                       </div>
-                      {HARNESS_STEPS(wizardHarness, apiKey) && (
+                      {HARNESS_STEPS(wizardHarness, welcomeKey || apiKey) && (
                         <ol className="harness-steps" style={{ margin: '0.9rem 0 0.25rem 1.1rem', padding: 0, lineHeight: 1.7 }}>
-                          {HARNESS_STEPS(wizardHarness, apiKey).map((s, i) => (
+                          {HARNESS_STEPS(wizardHarness, welcomeKey || apiKey).map((s, i) => (
                             <li key={i} style={{ marginBottom: '0.35rem', fontSize: 14, color: 'var(--text,#e2e8f0)' }}>
                               {typeof s === 'string' ? s : (
                                 <>
@@ -2439,15 +2439,15 @@ function claimIntentInFlight() {
                         </p>
                       )}
                       <pre className="snippet" style={{ marginTop: '0.75rem' }}>
-                        {HARNESS_INSTALL[wizardHarness](apiKey)}
+                        {HARNESS_INSTALL[wizardHarness](welcomeKey || apiKey)}
                         {HARNESS_SKILLS(wizardHarness)}
-                        {welcomeKey && !HARNESS_SKILLLESS.includes(wizardHarness) && !HARNESS_SKILLS_IN_PROMPT.includes(wizardHarness) && !HARNESS_SKILLS_IN_STEPS.includes(wizardHarness) ? ('\n\n' + HARNESS_PERSIST(apiKey)) : ''}
+                        {welcomeKey && !HARNESS_SKILLLESS.includes(wizardHarness) && !HARNESS_SKILLS_IN_PROMPT.includes(wizardHarness) && !HARNESS_SKILLS_IN_STEPS.includes(wizardHarness) ? ('\n\n' + HARNESS_PERSIST(welcomeKey || apiKey)) : ''}
                       </pre>
                       <div className="wizard-nav">
                         <button type="button" className="ghost" onClick={() => setWelcomeOriented(false)}>← Back</button>
                         <div className="wizard-nav-actions">
                           <button type="button" className={wizardCopied === 'harness' ? 'ghost' : 'btn-primary'}
-                            onClick={() => wizardCopy(HARNESS_INSTALL[wizardHarness](apiKey) + HARNESS_SKILLS(wizardHarness) + (welcomeKey && !HARNESS_SKILLLESS.includes(wizardHarness) && !HARNESS_SKILLS_IN_PROMPT.includes(wizardHarness) && !HARNESS_SKILLS_IN_STEPS.includes(wizardHarness) ? ('\n\n' + HARNESS_PERSIST(apiKey)) : ''), 'harness')}>
+                            onClick={() => wizardCopy(HARNESS_INSTALL[wizardHarness](welcomeKey || apiKey) + HARNESS_SKILLS(wizardHarness) + (welcomeKey && !HARNESS_SKILLLESS.includes(wizardHarness) && !HARNESS_SKILLS_IN_PROMPT.includes(wizardHarness) && !HARNESS_SKILLS_IN_STEPS.includes(wizardHarness) ? ('\n\n' + HARNESS_PERSIST(welcomeKey || apiKey)) : ''), 'harness')}>
                             {wizardCopied === 'harness' ? 'Copied ✓' : (HARNESS_COPY_LABEL[wizardHarness] || 'Copy setup')}
                           </button>
                           {wizardCopied === 'harness' && (
