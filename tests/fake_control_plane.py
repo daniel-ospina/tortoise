@@ -13,7 +13,8 @@ removes matching rows (mirrors PostgREST service-role deletes, #302).
 
 ``rpc(fn, body)`` simulates PostgREST RPC calls — ``provision_team``
 (#765 plan Task 8: the atomic teams + team_memberships + api_keys upsert,
-migration 0010) plus the #1709 agent-signup-token trio
+migration 0010; #1716: all-NULL key params → keyless provision, NO
+api_keys row) plus the #1709 agent-signup-token trio
 (``provision_team_with_token`` / ``resolve_signup_token`` /
 ``recover_team_key``, migration 20260814000001 — the recovery mint is
 serialized under a process lock, emulating the RPC's FOR UPDATE row lock),
@@ -308,11 +309,20 @@ class FakeControlPlane:
         team_id = p.get("p_team_id") or ""
         team_name = p.get("p_team_name") or ""
         api_key = p.get("p_api_key") or ""
-        lookup = p.get("p_lookup_hash") or ""
+        lookup = p.get("p_lookup_hash")
         user_id = p.get("p_user_id")
         identity = p.get("p_identity")
-        if not team_id or not team_name or not api_key or not lookup:
+        if not team_id or not team_name:
             raise RuntimeError("provision_team: required parameters missing")
+        # #1716 all-or-none key guard (mirrors the RPC): the three key params
+        # are ALL provided (a minted key) or ALL NULL/empty (keyless — the
+        # onboarding sub-team path) — never a partial set.
+        key_params = [p.get("p_api_key"), p.get("p_key_hash"),
+                      p.get("p_lookup_hash")]
+        if any(key_params) and not all(key_params):
+            raise RuntimeError(
+                "provision_team: p_api_key/p_key_hash/p_lookup_hash must be "
+                "all provided or all NULL (keyless)")
         if (user_id is None) == (identity is None):
             raise RuntimeError(
                 "provision_team: exactly one of p_user_id / p_identity is required")
@@ -368,22 +378,26 @@ class FakeControlPlane:
 
         # api_keys: deterministic id, ON CONFLICT (lookup_hash) DO NOTHING
         # (a re-provision inserts nothing → the 0015 trigger fires nothing —
-        # no duplicate key_create event; cycle-2 test note).
-        key_rows = self.tables.setdefault("api_keys", [])
-        if not any(k.get("lookup_hash") == lookup for k in key_rows):
-            key_rows.append({
-                "id": f"key_{team_id}_{lookup[:12]}",
-                "team_id": team_id,
-                "lookup_hash": lookup,
-                "key_prefix": p.get("p_key_prefix") or team_id[:8],
-                "created_via": "provisioned",
-                "created_by": str(user_id) if user_id is not None else identity,
-                "created_at": None,
-                "expires_at": None,
-                "revoked_at": None,
-            })
-            self._trigger_key_create(team_id, f"key_{team_id}_{lookup[:12]}",
-                                     "provisioned")
+        # no duplicate key_create event; cycle-2 test note). #1716: keyless
+        # provision (all-NULL key params) writes NO api_keys row — the team
+        # stays keyless until a session-key mint (mirrors the RPC's
+        # conditional insert; no api_keys row → no 0015 key_create event).
+        if lookup:
+            key_rows = self.tables.setdefault("api_keys", [])
+            if not any(k.get("lookup_hash") == lookup for k in key_rows):
+                key_rows.append({
+                    "id": f"key_{team_id}_{lookup[:12]}",
+                    "team_id": team_id,
+                    "lookup_hash": lookup,
+                    "key_prefix": p.get("p_key_prefix") or team_id[:8],
+                    "created_via": "provisioned",
+                    "created_by": str(user_id) if user_id is not None else identity,
+                    "created_at": None,
+                    "expires_at": None,
+                    "revoked_at": None,
+                })
+                self._trigger_key_create(team_id, f"key_{team_id}_{lookup[:12]}",
+                                         "provisioned")
         return None
 
     def _claim_set_email(self, team_id: str, email: str) -> None:

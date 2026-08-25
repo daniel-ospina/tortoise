@@ -8229,8 +8229,12 @@ async def create_onboarding_team(body: dict, team: dict = Depends(get_current_te
     routes the write through the atomic provision_team RPC with the
     identity path — a tt_-key request has no JWT user to own the team, and
     the registry path (sdk.team_create) never created an owner membership
-    either (the sub-team is key-less until a session-key mint). The
-    registry path stays for selfhost."""
+    either. #1716: the sub-team is provisioned KEYLESS in BOTH lanes — no
+    tt_ mint, no api_keys row (the old per-call mint was an unrecoverable
+    dead credential: plaintext never returned, hash-only at rest, counted
+    against max_api_keys, unclaimable #1082). The sub-team stays keyless
+    until a session-key mint (POST /v1/session/key writes the row itself).
+    The registry path stays for selfhost."""
     name = (body.get("name") or "").strip()
     if not name or len(name) > 64:
         raise HTTPException(status_code=400, detail="name is required (max 64 chars)")
@@ -8242,19 +8246,21 @@ async def create_onboarding_team(body: dict, team: dict = Depends(get_current_te
     )
     if is_supabase_enabled():
         import uuid as _uuid
-        from tortoise.auth import hash_api_key, lookup_hash
         try:
             team_id = str(_uuid.uuid4().hex[:26])
             graph_name = f"team_{name}"  # sdk.team_create parity
-            api_key = f"tt_{_uuid.uuid4().hex}"
+            # #1716: keyless provisioning — all-NULL key params → the RPC
+            # writes teams + membership but NO api_keys row (all-or-none
+            # guard, migration 20260825214233).
             provision_team(get_control_plane(), **{
                 "p_user_id": None,
                 "p_identity": f"anon-{_uuid.uuid4().hex[:12]}",
                 "p_team_id": team_id,
                 "p_team_name": name,
-                "p_api_key": api_key,
-                "p_key_hash": hash_api_key(api_key),
-                "p_lookup_hash": lookup_hash(api_key),
+                "p_api_key": None,
+                "p_key_hash": None,
+                "p_lookup_hash": None,
+                "p_key_prefix": None,
                 "p_graph_name": graph_name,
                 "p_tier": "free",
             })
@@ -8273,7 +8279,7 @@ async def create_onboarding_team(body: dict, team: dict = Depends(get_current_te
         return {"team_id": team_id, "name": name, "graph_name": graph_name}
     sdk = _make_sdk(namespace=team["team_id"])
     try:
-        result = sdk.team_create(name)
+        result = sdk.team_create(name, mint_key=False)  # #1716 keyless parity
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Team create failed: {e}")
     _update_onboarding_state(team["team_id"], team_created=True)

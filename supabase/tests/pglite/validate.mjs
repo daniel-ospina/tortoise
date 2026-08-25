@@ -1,7 +1,7 @@
 // PGlite harness — validate Supabase control-plane migrations + SQL assertion
 // suites WITHOUT Docker (issue #770). Supabase-local bootstrap (roles,
 // default privileges, auth schema with auth.uid()/auth.jwt() GUC shims),
-// applies migrations 0001–0010 in order, then runs BOTH assertion suites
+// applies migrations 0001-20260825214233 in order, then runs BOTH assertion suites
 // (0006–0009 from #769 and 0010 from #770) with ON_ERROR_STOP semantics.
 //
 // Run:   npm install   (once, in this directory)
@@ -70,6 +70,7 @@ const files = ['0001_user_teams.sql','0002_audit_events.sql','0003_team_membersh
                '20260813000006_inviter_email.sql',
                '20260814000001_agent_signup_tokens.sql',
                '20260825000001_api_key_names.sql',
+               '20260825214233_provision_team_keyless.sql',
                '20260826000001_revoke_signup_token.sql'];
 for (const f of files) {
   const sql = readFileSync(`${MIG_DIR}/${f}`, 'utf8');
@@ -85,7 +86,8 @@ for (const f of files) {
   }
 }
 
-// ── Run the assertion suites (0006–0009 from #769, then 0010 from #770) ──
+// ── Run the assertion suites (0006–0009 from #769, 0010 from #770, then
+// the 0010 suite's #1716 keyless sections against the post-keyless RPC) ──
 const suites = [
   '0006-0009_schema_rls_constraints.sql',
   '0010_provisioning_rpcs.sql',
