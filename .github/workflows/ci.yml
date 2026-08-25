@@ -233,6 +233,10 @@ jobs:
         run: python -m pytest tests/e2e/test_welcome_page.py -q -rs -p no:cacheprovider
         env:
           WELCOME_URL: http://127.0.0.1:8788/welcome
+          # Epic #1647 Task 10 (P4): this job runs pytest URI-less BY DESIGN
+          # (the e2e surface needs no FalkorDB server) — the URI-required
+          # enforcement opt-in.
+          TORTOISE_TEST_CARVE_OUT: "1"
       - name: Run waitlist edge-function behavioral harness (#373)
         run: node --experimental-strip-types tests/test_waitlist_subscribe.mjs
       - name: Run tenant-provision CORS runtime harness (#1110)
@@ -301,6 +305,10 @@ jobs:
           LEGAL_E2E_SKIP_EXTERNAL_CRAWL=1
           python -m pytest tests/e2e/test_legal_pages.py tests/e2e/test_signup_form_safety_e2e.py
           -q -p no:cacheprovider
+        env:
+          # Epic #1647 Task 10 (P4): URI-less e2e surface — the URI-required
+          # enforcement opt-in.
+          TORTOISE_TEST_CARVE_OUT: "1"
       - name: Stop wrangler dev server
         if: always()
         # kill npx + its wrangler/workerd children (each job gets its own
@@ -349,6 +357,12 @@ jobs:
           if ! grep -qE "[1-9][0-9]* passed" /tmp/hosted-e2e.log; then
             echo "::warning::hosted E2E certified NOTHING — no passed tests in the run"
           fi
+        env:
+          # Epic #1647 Task 10 (P4): the hosted-e2e lane runs pytest URI-less
+          # BY DESIGN (it boots embedded selfhost daemons; the docker lane
+          # redirect would void the parity assertions) — the URI-required
+          # enforcement opt-in.
+          TORTOISE_TEST_CARVE_OUT: "1"
 
   flip-gate:
     # #669 pre-deploy cutover gate (plan Task 10.1, issue #771) — the gate
@@ -370,6 +384,12 @@ jobs:
           node-version: '22'   # tenant-provision TS-parse guard (#770)
       - run: pip install -e '.[test]'
       - name: Run the #669 pre-deploy flip gate
+        env:
+          # Epic #1647 P4: the flip-gate pytest legs run URI-less by design
+          # (FalkorDBLite + seam fakes — the pre-flip local/CI equivalence,
+          # documented in verify-cutover's header) — the P4 URI-required
+          # enforcement opt-in, same as hosted-e2e.
+          TORTOISE_TEST_CARVE_OUT: "1"
         run: bash .github/scripts/verify-cutover
 
   agent-infra-ci:

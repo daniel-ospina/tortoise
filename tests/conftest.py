@@ -36,8 +36,73 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tests._embedded import shared_proj  # noqa: F401, I001
 
-from tortoise.sdk import TortoiseSDK
-from tortoise.pricing import tier_limits
+# ── Epic #1647 (D-1=A): the test-session signal + redirect env ────────────
+# Exported at CONFTEST IMPORT so the PRODUCT-side redirect
+# (tortoise/projection/__init__.py) reads them without importing tests/
+# (import cycle). TORTOISE_TEST_MODE is the test-session signal that gates
+# the redirect (plan-review P0-4); TORTOISE_TEST_NO_REDIRECT is the in-repo
+# carve-out exemption list (caller test-module stems, frame-identified);
+# TORTOISE_TEST_SESSION is the session nonce folded into derived graph names.
+from tests._embedded import TEST_NO_REDIRECT_STEMS  # noqa: E402
+
+os.environ.setdefault("TORTOISE_TEST_MODE", "1")
+from tortoise import projection as _projection_mod  # noqa: E402
+_projection_mod._TEST_SESSION_ACTIVE = True
+os.environ.setdefault("TORTOISE_TEST_NO_REDIRECT", ",".join(TEST_NO_REDIRECT_STEMS))
+
+# Cycle-5 P2-1 / cycle-6 P1-5: the session nonce is an OVERWRITE (never
+# setdefault) — a pre-set env value (dev shell, CI wrapper, task runners)
+# would freeze the nonce for every session, so concurrent sessions share one
+# journal filename and session A's end-sweep drops session B's live graphs.
+# 6 bytes = 12 hex = 48 bits (the width matches the derived-name hash
+# guards). The overwrite is paired with a 12-hex shape guard: os.urandom(6)
+# always yields 12 hex chars, so the assert can only fire on a broken
+# platform — fail loudly rather than export a malformed nonce.
+import re as _re  # noqa: I001, E402
+_SESSION_NONCE = os.urandom(6).hex()
+assert _re.fullmatch(r"[0-9a-f]{12}", _SESSION_NONCE), \
+    f"TORTOISE_TEST_SESSION must be 12 hex (48 bits), got {_SESSION_NONCE!r}"
+os.environ["TORTOISE_TEST_SESSION"] = _SESSION_NONCE
+
+# ── Epic #1647 Task 2 Step 7: the session created-graph journal ───────────
+# The journal path is resolved at CONFTEST IMPORT (cycle-4 P2-9) — product-
+# side appends (the redirect + the frame-gated from_uri seam) fire during
+# TEST-MODULE imports and collect-only runs, before any session fixture.
+# The export is URI-GATED (divergence from the plan's unconditional export,
+# documented in the epic changelog): on the embedded lane there is no server
+# to sweep, and leaving the env unset keeps embedded runs from writing
+# journal files that a later docker session's stale sweep would misread as
+# dead sessions' drop sets (their graphs were never minted on the server).
+from tortoise.config import is_db_uri as _is_db_uri_conftest  # noqa: E402, I001
+from tortoise.embedded_reaper import ACTIVE_SUITES_DIR as _ACTIVE_SUITES_DIR  # noqa: E402
+if _is_db_uri_conftest(os.environ.get("TORTOISE_DB_URI")):
+    _JOURNAL_PATH = os.path.join(
+        _ACTIVE_SUITES_DIR, f"{_SESSION_NONCE}.graphs.jsonl")
+    os.environ["TORTOISE_TEST_JOURNAL_FILE"] = _JOURNAL_PATH
+    import tests._embedded as _embedded_mod
+    _embedded_mod._JOURNAL_FILE = _JOURNAL_PATH
+
+from tortoise.pricing import tier_limits  # noqa: E402  (late import: after TEST_MODE env wiring)
+from tortoise.sdk import TortoiseSDK  # noqa: E402
+
+
+# ── Epic #1647 Task 10 Step 1a (P4, plan-review P1-9): URI-required ───────
+# Default pytest requires TORTOISE_DB_URI; the carve-out is the sole embedded
+# surface. Declared FIRST among the session fixtures so the enforcement
+# fails the run before any hygiene/sweep machinery spins up. The named
+# helper lives in tests/_embedded.py (pinned by test_markers.py — the
+# tests.conftest import would re-execute conftest's top-level code).
+from tests._embedded import _assert_p4_uri_required  # noqa: E402
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _p4_uri_required():
+    """Epic #1647 P4: fail the session when TORTOISE_DB_URI is unset UNLESS
+    TORTOISE_TEST_CARVE_OUT=1 is set (the carve-out job / tier-2 URI-less
+    legs / e2e surfaces opt in). A URI-less run that is not the carve-out is
+    the pre-epic shape — migrated files would construct embedded and
+    green-pass on the wrong backend."""
+    _assert_p4_uri_required()
 
 
 @pytest.fixture
@@ -46,7 +111,17 @@ def provision_test_user():
 
     def factory(tier: str = "free", demo_seed: bool = True):
         tmpdir = tempfile.mkdtemp()
-        sdk = TortoiseSDK(os.path.join(tmpdir, "e2e.db"), namespace="e2e-tests")
+        # Epic #1647 (plan-review P1-5): under a supported URI, sweep the
+        # shared non-test "e2e-tests" namespace to a guard-passing per-test
+        # test_e2e_<uuid> (the SDK maps it to test_e2e_<uuid>_tortoise,
+        # sdk.py L1115-1123) — "e2e-tests" would mint the non-test
+        # team_e2e-tests graph on the server, shared by the whole suite.
+        # URI unset → today's namespace unchanged (P1 zero-change).
+        from tortoise.config import is_db_uri as _is_db_uri
+        _ns = "e2e-tests"
+        if _is_db_uri(os.environ.get("TORTOISE_DB_URI")):
+            _ns = f"test_e2e_{os.urandom(4).hex()}"
+        sdk = TortoiseSDK(os.path.join(tmpdir, "e2e.db"), namespace=_ns)
         team = sdk.team_create(f"e2e-{os.urandom(4).hex()}")
         lim = tier_limits(tier)
         # #310 (review fix 16b): mirror production CREATE semantics — write
@@ -109,6 +184,16 @@ def sdk_factory(tmp_path):
     def factory(_tmp_path=None, *, ensure_schema=False, namespace=None):
         base = _tmp_path if _tmp_path is not None else tmp_path
         db_path = os.path.join(str(base), f"evt-{os.urandom(4).hex()}.db")
+        # Epic #1647 (D-1=A): URI-aware seam — under a supported
+        # TORTOISE_DB_URI the redirect flips the SDK's internal path=
+        # construction to the server; pass a guard-passing per-call
+        # namespace so the graph name is the deterministic
+        # test_suite_<uuid>_tortoise (honored verbatim by the redirect)
+        # instead of a path-derived name. URI unset → today's construction
+        # (namespace None) unchanged.
+        from tortoise.config import is_db_uri as _is_db_uri
+        if namespace is None and _is_db_uri(os.environ.get("TORTOISE_DB_URI")):
+            namespace = f"test_suite_{os.urandom(4).hex()}"
         sdk = TortoiseSDK(db_path, namespace=namespace)
         if ensure_schema:
             from tortoise import event_store
@@ -141,6 +226,14 @@ def shared_embedded_db():
     # TortoiseSDK close on GC) + the _redislite_hygiene session sweeps below;
     # kept because the fixture's shared path is still the cheap way for the
     # seven dependent files to share one server.
+    #
+    # Epic #1647 (D-1=A): URI-aware seam — this fixture yields the
+    # session-stable shared PATH; under a supported TORTOISE_DB_URI the
+    # consumers' path= constructions redirect to the server (the redirect
+    # derives a per-session test_shared_<hash12> graph from this same
+    # session-stable path, preserving the shared-tier semantics: one shared
+    # server graph per session, per-test wipes). URI unset → today's
+    # embedded shared server, unchanged.
     """
     import tempfile as _tf
     db_path = os.path.join(_tf.mkdtemp(prefix="tortoise_shared_embedded_"), "shared.db")
@@ -201,7 +294,26 @@ def _redislite_hygiene():
                 pass
         marker_path = None
 
+    # Epic #1647 Task 9 Step 3 (P3 hygiene gating): the sweeps become
+    # no-ops on docker halves — gated on whether ANY embedded redislite
+    # server is actually running (O(servers) pgrep, never the tempdir walk).
+    # Docker halves create no embedded servers by construction (the 17
+    # carve-out files moved to the URI-unset carve-out job; migrated files
+    # redirect), so the gate logs "no hygiene action" (E2E-7) instead of
+    # burning sweep time; a leftover embedded server (carve-out mis-wiring,
+    # an embedded-lane straggler like tests/eval/retrieval/test_oracle)
+    # still gets reaped — the gate is on ACTUAL creation, never a blind
+    # lane assumption.
+    def _embedded_servers_running() -> bool:
+        from tortoise.embedded_reaper import _pgrep_redis_servers
+        try:
+            return bool(_pgrep_redis_servers())
+        except Exception:
+            return True  # probe failure: run the sweep (fail-safe direction)
+
     def _sweep(only_safe: bool) -> dict:
+        if not _embedded_servers_running():
+            return {"no_embedded_servers": True}
         try:
             lock = _ReaperLock()
             if not lock.acquire():
@@ -231,7 +343,14 @@ def _redislite_hygiene():
                     while True:
                         acted = _run_sweep(
                             dry_run=False, batch_size=SWEEP_BATCH_SIZE,
-                            only_safe=only_safe, jobs=8, kill_pacing=0.4)
+                            only_safe=only_safe, jobs=8, kill_pacing=0.4,
+                            # Epic #1647 (PR #1684 CI-fix): the suite is
+                            # ENDING — a server that ignores SIGTERM for 3s
+                            # gets SIGKILL regardless; the default 10s wait ×
+                            # many servers compounds past pytest-timeout under
+                            # CI load (observed: TestMcpHandlers teardown
+                            # timed out at 600s with the reaper in _kill).
+                            sigterm_timeout=3.0)
                         total += len(acted)
                         if not acted or time.monotonic() >= deadline:
                             break
@@ -293,10 +412,21 @@ def _redislite_hygiene():
             os.remove(marker_path)
         except OSError:
             pass
-    others = [t for t in active_suite_tokens() if t != token]
+    others = [t for t in active_suite_tokens()
+              if t != token and t.split('-', 1)[0] != str(os.getpid())]
     foreign_matches: list[dict] = []
     for m in active_suite_markers():
-        if m["token"] != token:
+        # Epic #1647 (cycle-6 P2-16 / cycle-7 P1-2 — branch (a)): own/foreign
+        # is PID-GROUPED, never token-compared. A docker session writes TWO
+        # markers in ACTIVE_SUITES_DIR — its embedded-format marker
+        # ({pid}-{uuid8}) AND the docker-format marker ({pid}-{nonce12}, the
+        # Task 2 Step 7 session-end fixture) — same pid, different tokens. A
+        # token-based predicate counts the session's OWN second marker as a
+        # foreign suite: `others != []` forever → every end-sweep degrades to
+        # only_safe and the 6 P2 carve-out stems' embedded servers leak (the
+        # orphan-survival hazard). PID-grouped: a same-pid marker is OWN
+        # regardless of token fragment — one session, one suite.
+        if m.get("pid") != os.getpid():
             foreign_matches.append({"pid": m["pid"], "token": m["token"]})
     # #1642 FIX 4 review P2: keep the diagnostic signal real (was hardcoded
     # False after the pgrep-based foreign detection was removed).
@@ -325,6 +455,279 @@ def _redislite_hygiene():
         pass
 
 
+# ── Epic #1647 Task 2 Step 7 (P2-14/P0-3/P1-8/P1-9/P2-3/P2-4) ─────────────
+# The docker-lane session journal + stale/session-end/atexit sweeps. Mirrors
+# _redislite_hygiene's active-suite registry + defer-to-last-suite-standing,
+# sharing the SAME marker directory + liveness helpers (active_suite_markers
+# / _process_start_time) so the recycled-pid guard (#1642 FIX 5) applies to
+# docker sessions too. Declared AFTER _redislite_hygiene so its teardown runs
+# BEFORE the reaper's (pytest tears session fixtures down in reverse setup
+# order) — the server sweep completes before the redislite end-sweep.
+_SERVER_SWEEP_GRAPH_LIST_CONSTANT = 20  # E2E-7: absorbs pre-existing/foreign
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _server_graph_hygiene(_redislite_hygiene):
+    """Docker-lane session sweep (URI set only).
+
+    Session start: write this session's docker-format active-suite marker
+    ({pid}-{nonce}, same pid=/start= lines as the embedded format so
+    active_suite_markers() parses it identically — cycle-4 P2-1/P1-6), then
+    run the STALE sweep: drop DEAD sessions' journaled graphs (liveness via
+    active_suite_markers — cycle-8 P2-7; bare marker-file existence is NOT
+    the liveness rule). Session end: drop THIS session's own journaled
+    graphs (file = single source of truth, cycle-8 P1-2) and defer the FULL
+    leftover sweep (scope=None) to the last suite standing (PID-grouped,
+    cycle-6 P2-16). Atexit: repeat the own-journal drop when the session
+    dies abnormally so the next session's stale sweep finds the journal
+    already drained.
+
+    Failure policy (cycle-8 P2-3/P2-4): log-and-continue; the journal file
+    is removed only when every journaled graph dropped (keep-on-partial —
+    the next session's stale sweep retries). Skip-on-non-loopback (cycle-4
+    P1-8): ALLOW_REMOTE sessions end green.
+    """
+    from tortoise.config import is_db_uri as _is_db_uri_srv
+    uri = os.environ.get("TORTOISE_DB_URI", "")
+    if not uri or not _is_db_uri_srv(uri):
+        yield
+        return  # embedded lane — nothing to sweep
+    import atexit
+    import json as _json
+
+    from tests._embedded import (
+        _JOURNAL_FILE,
+        _leftover_sweep,
+        _read_journal,
+        _session_end_own_sweep,
+        _stale_sweep,
+        _sweep_proj,
+    )
+    from tortoise.embedded_reaper import _process_start_time, active_suite_markers
+
+    nonce = os.environ["TORTOISE_TEST_SESSION"]
+    docker_token = f"{os.getpid()}-{nonce}"
+    marker_path = None
+    try:
+        os.makedirs(_ACTIVE_SUITES_DIR, exist_ok=True)
+        marker_path = os.path.join(_ACTIVE_SUITES_DIR, docker_token)
+        start = _process_start_time(os.getpid())
+        with open(marker_path, "w") as fh:
+            fh.write(f"pid={os.getpid()}\n")
+            if start is not None:
+                fh.write(f"start={start}\n")
+    except OSError:
+        marker_path = None  # never fail the suite over marker hygiene
+
+    # Session-start stale sweep — our own marker is live, so our own journal
+    # (possibly holding module-import appends) is never classified dead.
+    try:
+        stale = _stale_sweep(uri, skip_on_non_loopback=True)
+        if stale.get("stale"):
+            print(f"[server-graph-hygiene] stale sweep: "
+                  f"{len(stale['stale'])} dead session journal(s) dropped")
+    except Exception as exc:
+        print(f"[server-graph-hygiene] stale sweep skipped: {exc}")
+
+    _teardown_ran = [False]
+
+    def _atexit_cleanup() -> None:
+        if _teardown_ran[0]:
+            return
+        try:  # noqa: SIM105
+            _session_end_own_sweep(uri, _JOURNAL_FILE, skip_on_non_loopback=True)
+        except Exception:
+            pass  # hygiene never fails the interpreter exit
+        if marker_path:
+            try:  # noqa: SIM105
+                os.remove(marker_path)
+            except OSError:
+                pass
+
+    atexit.register(_atexit_cleanup)
+
+    yield
+
+    _teardown_ran[0] = True
+    # Cycle-5 P2-3: capture the journal size BEFORE the sweep — the sweep
+    # deletes the journal, so "journal size" is unreadable after.
+    journal_size = len(_read_journal())
+    try:
+        own = _session_end_own_sweep(uri, _JOURNAL_FILE, skip_on_non_loopback=True)
+    except Exception as exc:
+        own = {"error": str(exc)}
+        print(f"[server-graph-hygiene] session-end sweep failed: {exc}")
+    # Cycle-6 P2-16: deferral is PID-grouped — same-pid markers (our own
+    # embedded + docker markers) never defer; only a DIFFERENT pid (a
+    # genuinely concurrent suite) defers the FULL leftover sweep.
+    others = [m for m in active_suite_markers()
+              if m.get("pid") != os.getpid()]
+    full = None
+    if not others:
+        try:
+            full = _leftover_sweep(uri, skip_on_non_loopback=True)
+        except Exception as exc:
+            full = {"error": str(exc)}
+            print(f"[server-graph-hygiene] leftover sweep failed: {exc}")
+    if marker_path:
+        try:  # noqa: SIM105
+            os.remove(marker_path)
+        except OSError:
+            pass
+    # E2E-7 bound (cycle-8 P2-11): while last suite standing, post-sweep
+    # GRAPH.LIST must be < journal_size + constant — the sweep's GRAPH.DELETE
+    # leaves only pre-existing/foreign graphs. SOFTENED from a hard assert
+    # (divergence documented in the epic changelog): a pre-existing dev
+    # docker with many non-test graphs must not fail the suite at teardown
+    # (cycle-8 P2-3 — hygiene never fails the suite); a trip is logged loudly
+    # and mirrored to the hygiene log so the E2E-7 leak stays visible.
+    if not others and not own.get("skipped") \
+            and full and full.get("full_sweep", False):
+        try:
+            with _sweep_proj(uri) as probe:
+                graph_count = len(probe.db.list_graphs() or [])
+            bound = journal_size + _SERVER_SWEEP_GRAPH_LIST_CONSTANT
+            if graph_count >= bound:
+                msg = (f"GRAPH.LIST {graph_count} >= journal size {journal_size} "
+                       f"+ constant {_SERVER_SWEEP_GRAPH_LIST_CONSTANT} — "
+                       f"journaled graphs were NOT all deleted (E2E-7 leak)")
+                print(f"[server-graph-hygiene] WARNING: {msg}")
+                try:
+                    log_dir = os.environ.get("RUNNER_TEMP") \
+                        or tempfile.gettempdir()
+                    with open(os.path.join(log_dir, "server-hygiene-end.json"),
+                              "w") as fh:
+                        _json.dump({"graph_list": graph_count,
+                                    "journal_size": journal_size,
+                                    "bound": bound, "violation": msg},
+                                   fh, indent=2)
+                except Exception:
+                    pass
+        except Exception as exc:
+            print(f"[server-graph-hygiene] GRAPH.LIST bound check skipped: {exc}")
+
+
+# ── Epic #1647 Task 4 (P2): session-start backend-identity tripwire ────────
+@pytest.fixture(scope="session", autouse=True)
+def _assert_backend_identity():
+    """Epic #1647 E2E-6 tripwire: on docker-URI sessions, the session must
+    be server mode — a dormant redirect would silently run the migrated
+    suite on embedded and pass green. Cycle-2 P0-2: a non-loopback URI fails
+    here, before ANY test writes. Cycle-2 P2-6: TORTOISE_TEST_EXPECT_URI=1
+    (CI docker halves) fails a URI-less session instead of green-passing on
+    the carve-out shape.
+
+    Cycle-5 P1-4: the probe TRAVERSES THE REDIRECT. `from_uri` builds
+    host-mode DIRECTLY, so `_is_embedded` is False on any reachable server
+    regardless of redirect state: an inert redirect could never be detected
+    (vacuous — the cycle-4 probe). The helper `_tripwire_probe()`
+    (tests/test_tripwire.py) constructs via `path=` from a test_-named
+    frame — `_caller_test_stem()` resolves to the non-exempt stem
+    "test_tripwire", the redirect arms under URI + TEST_MODE, and
+    `_is_embedded is False` IFF the redirect is armed — an inert redirect
+    leaves the probe embedded and this assert fails at session start. An
+    unreachable server raises during probe construction (the server-mode
+    health check fails loud) — also a session failure, never a skip
+    (D-4=A fail-closed).
+
+    Records the observed backend into the session-scoped BackendIdentity
+    record (tests._embedded.BACKEND_IDENTITY) so other conftest machinery
+    (skip-guard, manifest, the Task 5 embedded_only hook) reads the lane
+    without re-probing.
+
+    Divergence note (deep-review Issue 4): the supported-URI gate is
+    `is_db_uri` (scheme split on "://"), while the redirect's own gate is
+    `_is_supported_uri_scheme` (split on ":") — a malformed value like
+    "docker:foo" reads embedded here but the redirect refuses it at every
+    construction (hostless → non-loopback RuntimeError). Fails closed
+    either way (never a vacuous green); the predicate split is left
+    untouched because is_db_uri is the wide seam predicate.
+    """
+    from tortoise.config import is_db_uri, is_loopback_uri  # shared predicates
+    uri = os.environ.get("TORTOISE_DB_URI", "")
+    # VGATE P2-2: EXPECT_URI must fail not only on an UNSET URI but also on
+    # a set-but-unsupported-scheme URI (postgres://... or a bare path) —
+    # either way the session would run the embedded lane and green-pass on
+    # the wrong backend (the exact vacuous-pass class EXPECT_URI exists to
+    # close). is_db_uri() covers both: False for empty and for any
+    # non-supported value.
+    if os.environ.get("TORTOISE_TEST_EXPECT_URI") == "1" and not is_db_uri(uri):
+        if not uri:
+            pytest.fail(
+                "TORTOISE_TEST_EXPECT_URI=1 but TORTOISE_DB_URI unset — the "
+                "docker-half session must run against the server (epic #1647 "
+                "E2E-6)")
+        pytest.fail(
+            f"TORTOISE_TEST_EXPECT_URI=1 but TORTOISE_DB_URI {uri!r} is not "
+            f"a supported connection URI — the docker-half session must run "
+            f"against the server (epic #1647 E2E-6)")
+    if not uri or not is_db_uri(uri):
+        # Embedded session (carve-out) — the tripwire is inert, but the
+        # backend identity is still recorded for conftest machinery.
+        from tests._embedded import BACKEND_IDENTITY
+        BACKEND_IDENTITY.backend = "embedded"
+        BACKEND_IDENTITY.uri = uri
+        yield
+        return
+    if not is_loopback_uri(uri) and os.environ.get("TORTOISE_TEST_ALLOW_REMOTE") != "1":
+        pytest.fail(
+            f"TORTOISE_DB_URI {uri!r} is not loopback — refusing before "
+            f"any test writes (epic #1647 D-4/P0-2); set "
+            f"TORTOISE_TEST_ALLOW_REMOTE=1 to override")
+    from tests._embedded import BACKEND_IDENTITY
+    from tests.test_tripwire import _tripwire_probe
+    try:
+        probe = _tripwire_probe()  # cycle-5 P1-4: through the redirect, not around it
+    except Exception as exc:
+        # Re-review Issue 1: remove the session journal ONLY for
+        # connection-class failures. On a dead/unreachable server the
+        # redirect journaled the probe mint BEFORE the failed connect — the
+        # graph never came to exist, and this session's sweeps cannot
+        # connect to drop the entry (keep-on-partial would retain the
+        # journal in ACTIVE_SUITES_DIR until a later docker session's stale
+        # sweep). Classification note (cycle-3 re-review): the server-mode
+        # health check swallows the raw redis exception and raises the
+        # RuntimeError "DB health check failed...", so refused-connect,
+        # dropped-SYN timeout, and mid-session server death ALL classify as
+        # journal-removal — a graph that did come to exist before the
+        # failure is bounded by the journal-independent last-suite-standing
+        # leftover sweep (test_-prefixed, scope=None), so no leak. Only a
+        # NON-server failure (a redirect bug on a reachable URI) keeps the
+        # journal, letting the session-end/stale sweeps drain real mints.
+        from redis.exceptions import (  # noqa: I001 (late, deliberate)
+            ConnectionError as _RedisConnError,
+            TimeoutError as _RedisTimeoutError,
+        )
+        _conn_class = (_RedisConnError, _RedisTimeoutError, OSError)
+        if isinstance(exc, _conn_class) or (
+                isinstance(exc, RuntimeError)
+                and "health check failed" in str(exc)):
+            from tests._embedded import _remove_journal_file
+            _remove_journal_file(os.environ.get("TORTOISE_TEST_JOURNAL_FILE", ""))
+        raise
+    try:
+        assert probe._is_embedded is False, (
+            "backend-identity tripwire: server session but the probe is "
+            "embedded — the redirect is INERT; the migrated suite would "
+            "green-pass on the wrong backend (epic #1647 E2E-6)")
+    finally:
+        probe.close()
+    BACKEND_IDENTITY.backend = "server"
+    BACKEND_IDENTITY.uri = uri
+    yield
+
+
+@pytest.fixture(scope="session")
+def backend_identity():
+    """The recorded session backend (epic #1647 E2E-6) — which lane this
+    session actually ran on, recorded by the session-start tripwire
+    (_assert_backend_identity). Consumers read this instead of re-probing:
+    backend == "server" when the tripwire's redirect-traversing probe ran
+    server-mode, "embedded" on URI-less sessions. The record is also
+    reachable as tests._embedded.BACKEND_IDENTITY for non-fixture conftest
+    machinery."""
+    from tests._embedded import BACKEND_IDENTITY
+    return BACKEND_IDENTITY
 
 
 @pytest.fixture(autouse=True)
@@ -354,3 +757,21 @@ def _reset_ip_rate_limits():
         SIGNUP_TRACKER.reset()
     except (ImportError, AttributeError):
         pass
+
+
+# ── Epic #1647 Task 5 (D-2=A): the embedded_only marker hook ──────────────
+# The named helper lives in tests/_embedded.py (NOT conftest): an import via
+# `tests.conftest` would re-execute conftest's top-level code mid-session
+# (pytest loads conftest as the top-level `conftest` module; the
+# namespace-package tests.conftest import is a SECOND instance that
+# overwrites TORTOISE_TEST_SESSION and re-points the journal — review P0).
+from tests._embedded import _embedded_only_skip  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _embedded_only_skip_hook(request):
+    """Autouse D-2 skip: supported TORTOISE_DB_URI set + `embedded_only`
+    marker present -> visible pytest.skip with the embedded-only reason.
+    Delegates to the named helper `_embedded_only_skip` (cycle-5 P2-12) so
+    the marker-semantics test drives the exact hook."""
+    _embedded_only_skip(request)

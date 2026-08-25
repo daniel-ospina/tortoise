@@ -3,6 +3,7 @@
 from __future__ import annotations  # noqa: I001
 
 import json
+import os
 import tempfile
 
 import pytest
@@ -19,8 +20,108 @@ from tortoise.backup_sweep import (
     team_graph_name,
 )
 from tortoise.hosted_backup import MemoryStorage
-from tests._embedded import wipe  # noqa: E402, RUF100
+from tests._embedded import _wipe_or as wipe  # noqa: E402, RUF100
 from tortoise.projection import FalkorProjection
+
+# ── Epic #1647 Task 2 Step 6b (cycle-2 P0-1a): per-test config seam ────────
+# The backup fixtures seed non-test-prefixed graphs (registry_control_plane,
+# team_*) on the SHARED projection, relying on per-test wipe() (all-graphs)
+# to clear them. On the docker lane _wipe_or → wipe_server SKIPS non-test_
+# graphs by design (fail-closed) — the seeded nodes would survive into later
+# tests (order-dependent breaks). The seam routes every registry/team graph
+# name through guard-passing per-session-unique test_* names under a URI;
+# the embedded lane keeps the historical literals byte-for-byte (P1
+# zero-change). test_team_graph_name_reads_from_teams keeps real-function
+# semantics: its registry-branch assert (team_graph_name(reg, "team_x") ==
+# "team_team_x") is deterministic team_{id} — lane-independent — and its
+# supabase-branch assert follows the SEAMED row (_BETA_GRAPH), so the row
+# literal is replaced by the constant (a literal would leak a non-test graph
+# on the server).
+from tortoise.config import is_db_uri as _is_db_uri_seam
+
+_DOCKER_LANE = _is_db_uri_seam(os.environ.get("TORTOISE_DB_URI"))
+_REGISTRY_GRAPH = (f"test_registry_{os.urandom(4).hex()}" if _DOCKER_LANE
+                   else "registry_control_plane")
+_TEAM_SEAM_HEX = os.urandom(4).hex() if _DOCKER_LANE else None
+# Supabase-mode graphs: the teams ROW names the graph (the sweep reads
+# teams.graph_name). The rows + seeds + manifest asserts all route through
+# these constants so the docker lane never mints a non-test graph (a literal
+# team_myapp/team_beta would leak across runs — non-test-prefixed graphs are
+# never wiped).
+_MYAPP_GRAPH = (f"test_myapp_{os.urandom(4).hex()}_tortoise" if _DOCKER_LANE
+                else "team_myapp")
+_BETA_GRAPH = (f"test_beta_{os.urandom(4).hex()}_tortoise" if _DOCKER_LANE
+               else "team_beta")
+_GAMMA_GRAPH = (f"test_gamma_{os.urandom(4).hex()}_tortoise" if _DOCKER_LANE
+                else "team_gamma")
+_GHOST_GRAPH = (f"test_ghostapp_{os.urandom(4).hex()}_tortoise" if _DOCKER_LANE
+                else "team_ghost_app")
+
+
+def _team_graph(team_id: str) -> str:
+    """Seam-resolved registry-mode team graph name: team_{id} → a guard-
+    passing per-team test_* name under URI; historical team_{id} embedded."""
+    if _DOCKER_LANE:
+        return f"test_team_{team_id}_{_TEAM_SEAM_HEX}_tortoise"
+    return f"team_{team_id}"
+
+
+@pytest.fixture(autouse=True)
+def _route_sweep_team_graph_consumption(monkeypatch, request):
+    """Cycle-3 P1-1 / cycle-4 P1-5: route registry-mode CONSUMPTION file-
+    wide — run_backup_sweep's internal team_graph_name (backup_sweep.py:514)
+    resolves via the module globals, so patching tortoise.backup_sweep's
+    attribute routes every registry-mode dump to the seam names (seed and
+    consumption agree). FUNCTION-scoped so request.node.name is the TEST
+    function (cycle-5 P1-3: a module-scoped autouse's node is the Module and
+    the exemption below can never fire). URI-gated: on the embedded lane the
+    REAL function stays (seeds + asserts stay real). Exemption: the one test
+    that exercises the REAL function's registry branch keeps it — the real
+    function is deterministic (team_{id}) so its L745 assert
+    (team_graph_name(reg, "team_x") == "team_team_x") holds on both lanes.
+    The file's own direct imports of team_graph_name are unaffected by the
+    module-attr patch (import-time binding), so the real-function tests
+    (test_team_graph_name_reads_from_teams, ..._supabase_fail_closed) keep
+    real semantics without extra exemptions.
+    """
+    if not _DOCKER_LANE:
+        return
+    if request.node.name == "test_team_graph_name_reads_from_teams":
+        return
+    import tortoise.backup_sweep as bs
+    from tortoise.hosted_backup import _is_supabase_source
+    _real_team_graph_name = bs.team_graph_name
+
+    def _seam_team_graph_name(source, team_id):
+        # Supabase-mode consumption reads graph_name from the teams ROW (the
+        # rows are already seamed to _MYAPP_GRAPH etc.) — the real function
+        # must stay for that dialect, or the supabase tests would dump the
+        # registry-mode seam name (empty graph → no_work). Registry-mode
+        # consumption (the deterministic team_{id}) routes to the seam names
+        # so seed and consumption agree.
+        if _is_supabase_source(source):
+            return _real_team_graph_name(source, team_id)
+        return _team_graph(team_id)
+
+    monkeypatch.setattr(bs, "team_graph_name", _seam_team_graph_name)
+
+
+@pytest.fixture(autouse=True)
+def _journal_backup_seam_graphs():
+    """Cycle-2 P0-1a / cycle-8 P2-2: journal the seam graph names so the
+    per-test _wipe_or delta (created-since-last-wipe, FILE journal) includes
+    them — raw select_graph sites are invisible to the session journal
+    otherwise, and the per-test wipe must clear the seam graphs on the server
+    lane (the embedded lane's all-graphs wipe() needs nothing).
+    """
+    if not _DOCKER_LANE:
+        return
+    from tests._embedded import _journal_append
+    _journal_append(_REGISTRY_GRAPH)
+    for _tid in ("team_x", "pro_x", "free_y", "free_a", "free_b", "team_e"):
+        _journal_append(_team_graph(_tid))
+    for _g in (_MYAPP_GRAPH, _BETA_GRAPH, _GAMMA_GRAPH, _GHOST_GRAPH):
+        _journal_append(_g)
 
 _STREAM_KEY = b"r" * 32  # registry_stream_key (Fly-only, #661)
 _BACKUP_KEY = b"k" * 32  # TORTOISE_BACKUP_KEY (GH-secret)
@@ -44,9 +145,9 @@ def _config(**over) -> BackupConfig:
 def _make_env(monkeypatch, proj) -> FalkorProjection:
     """Seed the (shared) projection with a registry Team node + team graph."""
     wipe(proj)
-    registry = proj.db.select_graph("registry_control_plane")
+    registry = proj.db.select_graph(_REGISTRY_GRAPH)
     registry.query("CREATE (t:Team {id:'team_x', tier:'pro'})")
-    team_g = proj.db.select_graph("team_team_x")
+    team_g = proj.db.select_graph(_team_graph("team_x"))
     team_g.query(
         "CREATE (p:Point {id:'pt-0', content:'c', pointKind:'claim'})"
     )
@@ -54,7 +155,7 @@ def _make_env(monkeypatch, proj) -> FalkorProjection:
 
 
 def _seed_team_graph(proj, team_id: str, n: int = 5) -> None:
-    g = proj.db.select_graph(f"team_{team_id}")
+    g = proj.db.select_graph(_team_graph(team_id))
     for i in range(n):
         g.query(
             "CREATE (p:Point {id:$id, content:$c, pointKind:'claim'})",
@@ -68,7 +169,7 @@ def test_enumerate_teams_returns_registry_ids(shared_proj):
         if proj is None:
             return
         wipe(proj)
-        reg = proj.db.select_graph("registry_control_plane")
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
         reg.query("CREATE (t:Team {id:'a'})")
         reg.query("CREATE (t:Team {id:'b'})")
         assert sorted(enumerate_teams(reg)) == ["a", "b"]
@@ -81,7 +182,7 @@ def test_enumerate_teams_fail_closed_on_query_error(shared_proj):
         if proj is None:
             return
         wipe(proj)
-        reg = proj.db.select_graph("registry_control_plane")
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
 
         def _boom(*a, **k):
             raise RuntimeError("connection died")
@@ -97,7 +198,7 @@ def test_sweep_no_teams_is_signal_not_incident(shared_proj):
         if proj is None:
             return
         wipe(proj)
-        reg = proj.db.select_graph("registry_control_plane")
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
         store = MemoryStorage()
         res = run_backup_sweep(
             db=proj.db, registry=reg, storage=store, config=_config(),
@@ -114,7 +215,7 @@ def test_sweep_enum_delta_fires_incident(shared_proj):
         if proj is None:
             return
         wipe(proj)
-        reg = proj.db.select_graph("registry_control_plane")
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
         store = MemoryStorage()
         store.upload(OPS_STATE_KEY, json.dumps({"last_team_count": 3}).encode())
         res = run_backup_sweep(
@@ -136,7 +237,7 @@ def test_sweep_enum_delta_suppressed_during_flip_window(monkeypatch, shared_proj
         if proj is None:
             return
         wipe(proj)
-        reg = proj.db.select_graph("registry_control_plane")
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
         store = MemoryStorage()
         store.upload(OPS_STATE_KEY, json.dumps({"last_team_count": 3}).encode())
         monkeypatch.setenv("TORTOISE_SUPPRESS_ENUM_DELTA", "1")
@@ -160,7 +261,7 @@ def test_sweep_backs_up_team_and_writes_state(shared_proj):
         if shared_proj is None:
             return
         proj = _make_env(None, shared_proj)
-        reg = proj.db.select_graph("registry_control_plane")
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
         store = MemoryStorage()
         res = run_backup_sweep(
             db=proj.db, registry=reg, storage=store, config=_config(),
@@ -174,7 +275,7 @@ def test_sweep_backs_up_team_and_writes_state(shared_proj):
         keys = [k for k in store.list("backups/team_x/") if k.endswith("manifest.json")]
         assert len(keys) == 1
         manifest = json.loads(store.download(keys[0]))
-        assert manifest["graph_name"] == "team_team_x"
+        assert manifest["graph_name"] == _team_graph("team_x")
         assert manifest["node_count"] >= 1
         # Team state persisted for the transition guard.
         state = read_team_state(store, "team_x")
@@ -186,7 +287,7 @@ def test_sweep_size_guard_aborts_before_dump(shared_proj):
         if shared_proj is None:
             return
         proj = _make_env(None, shared_proj)
-        reg = proj.db.select_graph("registry_control_plane")
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
         store = MemoryStorage()
         res = run_backup_sweep(
             db=proj.db, registry=reg, storage=store,
@@ -204,7 +305,7 @@ def test_sweep_data_loss_candidate_on_transition(shared_proj):
         if shared_proj is None:
             return
         proj = _make_env(None, shared_proj)
-        reg = proj.db.select_graph("registry_control_plane")
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
         store = MemoryStorage()
 
         # First sweep: 1 node → backed up, state written.
@@ -212,7 +313,7 @@ def test_sweep_data_loss_candidate_on_transition(shared_proj):
         assert res["results"]["team_x"]["status"] == "backed_up"
 
         # Wipe the graph → second sweep: transition fires, NO state write.
-        proj.db.select_graph("team_team_x").query("MATCH (n) DETACH DELETE n")
+        proj.db.select_graph(_team_graph("team_x")).query("MATCH (n) DETACH DELETE n")
         res2 = run_backup_sweep(db=proj.db, registry=reg, storage=store, config=_config())
         team_res = res2["results"]["team_x"]
         assert team_res["status"] == "data_loss_candidate"
@@ -228,9 +329,9 @@ def test_sweep_steady_zero_never_fires(shared_proj):
         if proj is None:
             return
         wipe(proj)
-        reg = proj.db.select_graph("registry_control_plane")
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
         reg.query("CREATE (t:Team {id:'team_e', tier:'pro'})")
-        proj.db.select_graph("team_team_e")  # exists, empty
+        proj.db.select_graph(_team_graph("team_e"))  # exists, empty
         store = MemoryStorage()
         res = run_backup_sweep(db=proj.db, registry=reg, storage=store, config=_config())
         team_res = res["results"]["team_e"]
@@ -245,7 +346,7 @@ def test_sweep_p0_guard_deletes_wrong_graph_upload(shared_proj):
         if shared_proj is None:
             return
         proj = _make_env(None, shared_proj)
-        reg = proj.db.select_graph("registry_control_plane")
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
         store = MemoryStorage()
         # Force a wrong graph_name via a stub create_backup path: call the sweep
         # against a graph that exists but seed the manifest mismatch by backing
@@ -281,7 +382,7 @@ def test_enumerate_eligible_teams_filters_by_tier_and_backup_enabled(shared_proj
         if proj is None:
             return
         wipe(proj)
-        reg = proj.db.select_graph("registry_control_plane")
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
         # Free team — excluded
         reg.query("CREATE (t:Team {id:'free_a', tier:'free', backup_enabled:false})")
         # Pro tier but backup not enabled — excluded
@@ -301,7 +402,7 @@ def test_enumerate_eligible_teams_empty_when_no_pro_teams(shared_proj):
         if proj is None:
             return
         wipe(proj)
-        reg = proj.db.select_graph("registry_control_plane")
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
         reg.query("CREATE (t:Team {id:'free_a', tier:'free', backup_enabled:false})")
         reg.query("CREATE (t:Team {id:'free_b', tier:'free', backup_enabled:true})")
         reg.query("CREATE (t:Team {id:'pro_disabled', tier:'pro', backup_enabled:false})")
@@ -315,7 +416,7 @@ def test_enumerate_eligible_teams_fail_closed(shared_proj):
         if proj is None:
             return
         wipe(proj)
-        reg = proj.db.select_graph("registry_control_plane")
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
 
         def _boom(*a, **k):
             raise RuntimeError("connection died")
@@ -332,7 +433,7 @@ def test_team_sweep_backs_up_pro_team_and_prunes(shared_proj):
         if proj is None:
             return
         wipe(proj)
-        reg = proj.db.select_graph("registry_control_plane")
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
         # Eligible Pro team
         reg.query(
             "CREATE (t:Team {id:'pro_x', tier:'pro', backup_enabled:true})"
@@ -376,7 +477,7 @@ def test_team_sweep_no_eligible_teams_fires_alert(shared_proj):
         if proj is None:
             return
         wipe(proj)
-        reg = proj.db.select_graph("registry_control_plane")
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
         # Only free teams — none eligible.
         reg.query(
             "CREATE (t:Team {id:'free_a', tier:'free', backup_enabled:false})"
@@ -416,7 +517,7 @@ def test_team_sweep_flag_off_backs_up_all_teams(shared_proj):
         if proj is None:
             return
         wipe(proj)
-        reg = proj.db.select_graph("registry_control_plane")
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
         reg.query(
             "CREATE (t:Team {id:'free_a', tier:'free', backup_enabled:false})"
         )
@@ -449,7 +550,7 @@ def test_team_sweep_enum_failure_when_enabled(shared_proj):
         if proj is None:
             return
         wipe(proj)
-        reg = proj.db.select_graph("registry_control_plane")
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
 
         def _boom(*a, **k):
             raise RuntimeError("connection died")
@@ -472,7 +573,7 @@ def test_sweep_uses_registry_stream_key_not_backup_key(shared_proj):
         if shared_proj is None:
             return
         proj = _make_env(None, shared_proj)
-        reg = proj.db.select_graph("registry_control_plane")
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
         store = MemoryStorage()
 
         import tortoise.backup_sweep as bs
@@ -507,7 +608,7 @@ def test_sweep_missing_registry_stream_key_fail_closed(shared_proj):
         if shared_proj is None:
             return
         proj = _make_env(None, shared_proj)
-        reg = proj.db.select_graph("registry_control_plane")
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
         store = MemoryStorage()
         res = run_backup_sweep(
             db=proj.db, registry=reg, storage=store,
@@ -530,12 +631,12 @@ def test_sweep_per_label_drift_catches_small_label_wipe(shared_proj):
         if shared_proj is None:
             return
         proj = _make_env(None, shared_proj)
-        reg = proj.db.select_graph("registry_control_plane")
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
         store = MemoryStorage()
 
         # Seed a team graph with mixed labels: many Point nodes, a few
         # Invitation nodes. Total count: 50 Point + 5 Invitation = 55.
-        team_g = proj.db.select_graph("team_team_x")
+        team_g = proj.db.select_graph(_team_graph("team_x"))
         # Wipe the default seed (1 Point) and replace with our controlled dataset.
         team_g.query("MATCH (n) DETACH DELETE n")
         for i in range(50):
@@ -600,10 +701,10 @@ def test_sweep_per_label_drift_ignores_steady_labels(shared_proj):
         if shared_proj is None:
             return
         proj = _make_env(None, shared_proj)
-        reg = proj.db.select_graph("registry_control_plane")
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
         store = MemoryStorage()
 
-        team_g = proj.db.select_graph("team_team_x")
+        team_g = proj.db.select_graph(_team_graph("team_x"))
         team_g.query("MATCH (n) DETACH DELETE n")
         # Seed: 20 Point + 5 Invitation = 25.
         for i in range(20):
@@ -702,8 +803,8 @@ from tests.fake_control_plane import ErrorControlPlane, FakeControlPlane  # noqa
 def _fake_teams() -> FakeControlPlane:
     return FakeControlPlane().seed("teams", [
         {"id": "team_a", "graph_name": "team_alpha", "tier": "free", "backup_enabled": False},
-        {"id": "team_b", "graph_name": "team_beta", "tier": "pro", "backup_enabled": True},
-        {"id": "team_c", "graph_name": "team_gamma", "tier": "enterprise", "backup_enabled": True},
+        {"id": "team_b", "graph_name": _BETA_GRAPH, "tier": "pro", "backup_enabled": True},
+        {"id": "team_c", "graph_name": _GAMMA_GRAPH, "tier": "enterprise", "backup_enabled": True},
         {"id": "team_d", "graph_name": "team_delta", "tier": "pro", "backup_enabled": False},
     ])
 
@@ -734,14 +835,14 @@ def test_enumerate_eligible_teams_supabase_fail_closed():
 def test_team_graph_name_reads_from_teams(shared_proj):
     """Sweep reads graph_name from teams (the column is the source of truth)."""
     cp = _fake_teams()
-    assert team_graph_name(cp, "team_b") == "team_beta"
+    assert team_graph_name(cp, "team_b") == _BETA_GRAPH  # the row value, seamed
     # Registry mode: deterministic team_{id} (no graph_name stored there).
     with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         proj = shared_proj
         if proj is None:
             return
         wipe(proj)
-        reg = proj.db.select_graph("registry_control_plane")
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
         assert team_graph_name(reg, "team_x") == "team_team_x"
         pass  # shared session projection — fixture owns close
 
@@ -767,15 +868,15 @@ def test_sweep_supabase_source_backs_up_teams_graph_name(shared_proj):
             return
         wipe(proj)
         # The team's graph is named per teams.graph_name — not team_{id}.
-        g = proj.db.select_graph("team_myapp")
+        g = proj.db.select_graph(_MYAPP_GRAPH)
         g.query("CREATE (p:Point {id:'pt-0', content:'c', pointKind:'claim'})")
         g.query("CREATE (p:Point {id:'pt-1', content:'c2', pointKind:'claim'})")
         cp = FakeControlPlane().seed("teams", [
-            {"id": "team_x", "graph_name": "team_myapp", "tier": "pro",
+            {"id": "team_x", "graph_name": _MYAPP_GRAPH, "tier": "pro",
              "backup_enabled": True},
             # A team whose graph does not exist — the size-guard COUNT fails
             # per-team (isolated), never aborts the sweep.
-            {"id": "team_ghost", "graph_name": "team_ghost_app", "tier": "pro",
+            {"id": "team_ghost", "graph_name": _GHOST_GRAPH, "tier": "pro",
              "backup_enabled": True},
         ])
         store = MemoryStorage()
@@ -789,7 +890,7 @@ def test_sweep_supabase_source_backs_up_teams_graph_name(shared_proj):
         keys = [k for k in store.list("backups/team_x/") if k.endswith("manifest.json")]
         assert len(keys) == 1
         manifest = json.loads(store.download(keys[0]))
-        assert manifest["graph_name"] == "team_myapp"  # from teams, not team_{id}
+        assert manifest["graph_name"] == _MYAPP_GRAPH  # from teams, not team_{id}
         # Stamps land on the team's Supabase row (PATCH via the fake).
         row = cp.query("teams", select=["backup_latest_at"],
                        filters=[("id", "eq", "team_x")])
@@ -813,7 +914,7 @@ def test_team_sweep_supabase_eligible_only(shared_proj):
         wipe(proj)
         # team_b's graph is named per teams.graph_name ("team_beta", not
         # "team_team_b"); team_c is eligible but has no graph → empty_skipped.
-        g = proj.db.select_graph("team_beta")
+        g = proj.db.select_graph(_BETA_GRAPH)
         g.query("CREATE (p:Point {id:'pt-b', pointKind:'claim'})")
         cp = _fake_teams()
         store = MemoryStorage()
@@ -857,7 +958,7 @@ def test_sweep_supabase_resolution_flap_fires_incident(shared_proj):
         if proj is None:
             return
         wipe(proj)
-        proj.db.select_graph("team_myapp")
+        proj.db.select_graph(_MYAPP_GRAPH)
 
         class ResolutionFlap(FakeControlPlane):
             def query(self, table, *args, **kwargs):
@@ -866,7 +967,7 @@ def test_sweep_supabase_resolution_flap_fires_incident(shared_proj):
                 return super().query(table, *args, **kwargs)
 
         cp = ResolutionFlap().seed("teams", [
-            {"id": "team_x", "graph_name": "team_myapp", "tier": "pro",
+            {"id": "team_x", "graph_name": _MYAPP_GRAPH, "tier": "pro",
              "backup_enabled": True},
             {"id": "team_y", "graph_name": "team_yourapp", "tier": "pro",
              "backup_enabled": True},
@@ -895,7 +996,7 @@ def test_sweep_supabase_partial_resolution_failure_is_isolated(shared_proj):
         if proj is None:
             return
         wipe(proj)
-        g = proj.db.select_graph("team_myapp")
+        g = proj.db.select_graph(_MYAPP_GRAPH)
         g.query("CREATE (p:Point {id:'pt-0', content:'c', pointKind:'claim'})")
 
         class ResolutionFlap(FakeControlPlane):
@@ -908,7 +1009,7 @@ def test_sweep_supabase_partial_resolution_failure_is_isolated(shared_proj):
                 return super().query(table, *args, **kwargs)
 
         cp = ResolutionFlap().seed("teams", [
-            {"id": "team_good", "graph_name": "team_myapp", "tier": "pro",
+            {"id": "team_good", "graph_name": _MYAPP_GRAPH, "tier": "pro",
              "backup_enabled": True},
             {"id": "team_bad", "graph_name": "team_yourapp", "tier": "pro",
              "backup_enabled": True},
@@ -935,7 +1036,7 @@ def test_sweep_supabase_stamp_blip_is_best_effort(shared_proj):
         if proj is None:
             return
         wipe(proj)
-        g = proj.db.select_graph("team_myapp")
+        g = proj.db.select_graph(_MYAPP_GRAPH)
         g.query("CREATE (p:Point {id:'pt-0', content:'c', pointKind:'claim'})")
 
         class StampBlip(FakeControlPlane):
@@ -947,7 +1048,7 @@ def test_sweep_supabase_stamp_blip_is_best_effort(shared_proj):
                 return super().query(table, *args, **kwargs)
 
         cp = StampBlip().seed("teams", [
-            {"id": "team_x", "graph_name": "team_myapp", "tier": "pro",
+            {"id": "team_x", "graph_name": _MYAPP_GRAPH, "tier": "pro",
              "backup_enabled": True},
         ])
         store = MemoryStorage()

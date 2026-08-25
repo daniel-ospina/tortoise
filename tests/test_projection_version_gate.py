@@ -11,15 +11,13 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.projection import _apply_one, FalkorProjection  # noqa: E402, F401, I001, RUF100
+import pytest
 
+from tests._embedded import _wipe_or as wipe  # noqa: E402, RUF100
 
 # ── helpers ────────────────────────────────────────────────────────────────
-
-
 from tests._embedded import skip_if_no_falkor as _skip_if_no_falkor  # noqa: E402, RUF100
-from tests._embedded import wipe  # noqa: E402, RUF100
-
+from tortoise.projection import FalkorProjection, _apply_one  # noqa: E402, F401, I001, RUF100
 
 # ═══════════════════════════════════════════════════════════════════════════
 # _apply_one (InMemoryProjection) version gate tests
@@ -130,7 +128,7 @@ def test_apply_one_always_fields_preserved_v2():
 def test_falkor_old_event_no_context_written(shared_proj):
     """P2 #49: context field removed — even old-format events don't write it."""
     if _skip_if_no_falkor():
-        return
+        pytest.skip("embedded FalkorDBLite unavailable")
     proj = shared_proj
     wipe(proj)
     try:
@@ -151,7 +149,7 @@ def test_falkor_old_event_no_context_written(shared_proj):
 def test_falkor_v2_event_discards_context(shared_proj):
     """Event WITH projection_version=2 → context NOT written to graph node."""
     if _skip_if_no_falkor():
-        return
+        pytest.skip("embedded FalkorDBLite unavailable")
     proj = shared_proj
     wipe(proj)
     try:
@@ -173,7 +171,7 @@ def test_falkor_v2_event_discards_context(shared_proj):
 def test_falkor_v2_pointrevised_does_not_mutate_context(shared_proj):
     """PointRevised v2 → content updated, context untouched in graph."""
     if _skip_if_no_falkor():
-        return
+        pytest.skip("embedded FalkorDBLite unavailable")
     proj = shared_proj
     wipe(proj)
     try:
@@ -203,7 +201,7 @@ def test_falkor_v2_pointrevised_does_not_mutate_context(shared_proj):
 def test_falkor_v2_always_fields_still_written(shared_proj):
     """content/pointKind still written to graph regardless of version."""
     if _skip_if_no_falkor():
-        return
+        pytest.skip("embedded FalkorDBLite unavailable")
     proj = shared_proj
     wipe(proj)
     try:
@@ -230,7 +228,7 @@ def test_falkor_v2_always_fields_still_written(shared_proj):
 def test_falkor_v2_operator_no_context(shared_proj):
     """OperatorAdded v2 → no context on operator node."""
     if _skip_if_no_falkor():
-        return
+        pytest.skip("embedded FalkorDBLite unavailable")
     proj = shared_proj
     wipe(proj)
     try:
@@ -272,7 +270,7 @@ def test_falkor_v2_operator_no_context(shared_proj):
 def test_falkor_mixed_old_and_v2_events(shared_proj):
     """Old events keep context, v2 events don't — coexisting in same graph."""
     if _skip_if_no_falkor():
-        return
+        pytest.skip("embedded FalkorDBLite unavailable")
     proj = shared_proj
     wipe(proj)
     try:

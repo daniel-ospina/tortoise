@@ -351,6 +351,91 @@ def test_real_embedder_near_duplicate_above_near_dup_threshold():
     print("PASS test_real_embedder_near_duplicate_above_near_dup_threshold")
 
 
+# ── epic #1647 T8 (D9): docker-calibrated cross-lens band ──────────────
+
+def _docker_uri() -> str | None:
+    """A live docker FalkorDB URI, or None when unreachable (skip reason)."""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(1.0)
+    try:
+        s.connect(("localhost", 6379))
+    except OSError:
+        return None
+    finally:
+        s.close()
+    return os.environ.get("TORTOISE_DB_URI") \
+        or "docker://:falkordb@localhost:6379/tortoise_test_xlens"
+
+
+def test_docker_lane_cross_lens_calibrated(monkeypatch):
+    """Epic #1647 T8 (D9): docker-calibrated cross-lens expectation.
+
+    The SDK-level cross-lens surface (get_cross_lens_candidates) reads stored
+    embeddings through run_vector_query — HNSW on docker/server, brute-force
+    on embedded. The candidate similarity is the exact cosine RECOMPUTE from
+    stored embeddings on BOTH lanes (the ANN only bounds which neighbors are
+    pulled); docker recall ordering CAN differ from brute-force on larger
+    graphs (the D9 divergence class — recorded, not pinned, in the
+    conformance spec). This test pins the docker-calibrated band on a
+    deterministic seed: the cross-vocab in-band pair (p1≈p2, cosine 0.994)
+    must surface above the default band on the SERVER lane.
+
+    The URI is SETENV'd (the conformance leg-fixture pattern) so the SDK
+    constructs server-mode — the lane is guarded by an explicit
+    `_is_embedded is False` assert (a URI-unset run would silently test
+    embedded — review P2).
+    """
+    uri = _docker_uri()
+    if uri is None:
+        pytest.skip("live FalkorDB (localhost:6379) not reachable")
+    from urllib.parse import urlparse
+    if not urlparse(uri).path.lstrip("/").startswith(("test_", "tortoise_test")):
+        pytest.skip(f"resolved URI {uri!r} is not a test graph "
+                    "(graph name must start with 'test_')")
+    monkeypatch.setenv("TORTOISE_DB_URI", uri)
+    monkeypatch.setenv("TORTOISE_TEST_MODE", "1")
+    from tortoise.sdk import TortoiseSDK
+    sdk = TortoiseSDK(namespace=f"test_cross_lens_docker_{os.urandom(4).hex()}")
+    try:
+        proj = sdk._get_proj()
+        assert proj._is_embedded is False, \
+            "lane guard: this test must run server-mode (docker lane)"
+        g = proj.g
+        g.query("MATCH (n) DETACH DELETE n")
+        for pid, vec, ts in (("p1", [1.0, 0.0, 0.0], "2026-08-24T00:00:00+00:00"),
+                             ("p2", [0.9, 0.1, 0.0], "2026-08-24T00:00:01+00:00"),
+                             ("p3", [0.0, 0.0, 1.0], "2026-08-24T00:00:02+00:00")):
+            g.query("CREATE (p:Point {id:$pid, content:'c', is_operator:false, "
+                    "embedding: vecf32($vec), updatedAt:$ts})",
+                    params={"pid": pid, "vec": vec, "ts": ts})
+        g.query("CREATE (s1:Source {id:'http://s1', url:'http://s1', "
+                "sourceKind:'T1'})")
+        g.query("CREATE (s2:Source {id:'http://s2', url:'http://s2', "
+                "sourceKind:'T2'})")
+        g.query("MATCH (p:Point {id:'p1'}), (s:Source {id:'http://s1'}) "
+                "CREATE (p)-[:extractedFrom]->(s)")
+        g.query("MATCH (p:Point {id:'p2'}), (s:Source {id:'http://s2'}) "
+                "CREATE (p)-[:extractedFrom]->(s)")
+        g.query("MATCH (p:Point {id:'p3'}), (s:Source {id:'http://s1'}) "
+                "CREATE (p)-[:extractedFrom]->(s)")
+        res = sdk.get_cross_lens_candidates(threshold=DEFAULT_THRESHOLD, top_k=10)
+        by = {(c["src"], c["dst"]): c for c in res["candidates"]}
+        assert ("p1", "p2") in by, (
+            "docker cross-lens must surface the cross-vocab in-band pair: "
+            f"{res}")
+        assert abs(by[("p1", "p2")]["similarity"] - 0.9939) < 1e-3, (
+            "docker-calibrated similarity drift: "
+            f"{by[('p1', 'p2')]['similarity']}")
+    finally:
+        try:
+            proj = sdk._get_proj()
+            proj.db.select_graph(proj.graph_name).delete()  # tidy (review P2)
+        except Exception:
+            pass
+        sdk.close()
+
+
 # ── runner ────────────────────────────────────────────────────────────
 
 _MODEL_CACHE_DIR = os.path.expanduser(
@@ -373,8 +458,15 @@ def _require_model():
 
 
 def _run_all():
+    import inspect
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
+            if inspect.signature(fn).parameters:
+                # Fixture-taking tests (e.g. the epic #1647 docker-lane test's
+                # monkeypatch) are pytest-only surfaces — skip in the
+                # standalone runner (a no-arg call would TypeError).
+                print(f"SKIP {name} (pytest fixture surface)")
+                continue
             try:
                 fn()
             except pytest.skip.Exception:

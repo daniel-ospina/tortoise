@@ -5,6 +5,8 @@ import os
 import sys
 from unittest import mock
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
@@ -31,6 +33,7 @@ def test_onboard_completion_prints_prompt_url(capsys):
     assert "https://premiselabs.co/onboarding-prompt.md" in captured.out
 
 
+@pytest.mark.embedded_only  # Epic #1647: tests the EMBEDDED install guidance (falkordblite) — under a URI the CLI correctly prefers URI mode and the embedded guidance is unreachable (D14-class)
 def test_init_missing_falkordblite_prints_install_guidance(capsys):
     """`tortoise init` with no embedded backend must print actionable install
     guidance naming falkordblite (anti-regression: #450 fixed it, #442's

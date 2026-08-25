@@ -8,9 +8,11 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import pytest
+
 from tortoise.log import EventLog  # noqa: E402, I001, RUF100
+from tortoise.models import OllamaModel, OpenAICompatModel  # noqa: E402, RUF100
 from tortoise.projection import FalkorProjection  # noqa: E402, RUF100
-from tortoise.models import OpenAICompatModel, OllamaModel  # noqa: E402, RUF100
 
 
 def _tmp(name):
@@ -30,7 +32,7 @@ def _skip_if_no_falkor():
 def test_rebuild_all_with_merges():
     """rebuild_all correctly handles PointsMerged events."""
     if _skip_if_no_falkor():
-        return
+        pytest.skip("embedded FalkorDBLite unavailable")
     d = tempfile.mkdtemp(prefix="tortoise_merge_")
     try:
         # Create a JSONL with PointAdded, then PointsMerged
@@ -74,7 +76,7 @@ def test_rebuild_all_with_merges():
 def test_compute_grounding_no_scipy():
     """compute_grounding raises ImportError when scipy is missing."""
     if _skip_if_no_falkor():
-        return
+        pytest.skip("embedded FalkorDBLite unavailable")
     proj = FalkorProjection(_tmp("g_noscipy.db"), graph_name="test")
     try:
         proj._upsert({"id": "p1", "content": "hello", "context": "ctx"})

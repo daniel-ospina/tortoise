@@ -726,12 +726,12 @@ class _FakeLLMResp:
 
 
 def _install_fake_provider(monkeypatch, requests_log):
-    """Monkeypatch requests.post with the _V2SessionMock response logic so the
-    real adapters (OpenRouterModel / DeepSeekDirectModel) run fully offline;
-    every request URL is appended to ``requests_log``."""
+    """Monkeypatch requests.Session.post with the _V2SessionMock response
+    logic so the real adapters (OpenRouterModel / DeepSeekDirectModel) run
+    fully offline; every request URL is appended to ``requests_log``."""
     import requests as _requests
 
-    def _fake_post(url, **kwargs):
+    def _fake_post(self_or_url, url=None, **kwargs):
         requests_log.append(url)
         system = ((kwargs.get("json") or {}).get("messages") or [{}])[0].get("content", "")
         if "STORY SUMMARIZER" in system:
@@ -740,7 +740,10 @@ def _install_fake_provider(monkeypatch, requests_log):
             content = _V2_EMBED_JSON
         return _FakeLLMResp(content)
 
-    monkeypatch.setattr(_requests, "post", _fake_post)
+    # Epic #1647 (PR #1684): the adapters call self._session.post
+    # (requests.Session) — patching requests.post never intercepted, so
+    # these tests made REAL network calls and 401'd/flaked without keys.
+    monkeypatch.setattr(_requests.Session, "post", _fake_post)
 
 
 def test_capture_session_gate_match_openai_key_alone_rejected(sdk, monkeypatch):

@@ -914,7 +914,7 @@ class TestBackupEndpointsSupabaseGraphName:
         tc, fake, _ = pro_backup_client  # noqa: RUF059
         # Seed the REAL (SDK-created) live graph — named team_myapp per
         # teams.graph_name, NOT team_{id} (#768).
-        sdk = ha_mod._make_sdk(namespace="team-pro-924")
+        sdk = ha_mod._make_sdk(namespace=f"test_writer_team_pro_924_{os.urandom(4).hex()}")
         try:
             live = sdk._get_proj().db.select_graph("team_myapp")
             live.query(

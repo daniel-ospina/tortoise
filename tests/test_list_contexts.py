@@ -21,9 +21,11 @@ from tortoise.sdk import TortoiseSDK
 def _docker_falkor_reachable(port: int = 6379) -> bool:
     """True when a live FalkorDB (Docker) answers on localhost:port.
 
-    These tests target the LIVE FalkorDB (per the module docstring) — in the
-    embedded-only pre-merge CI they self-skip (mirrors the _skip_if_no_falkor
-    convention in test_projection.py / test_event_provenance.py).
+    These tests target the LIVE FalkorDB (per the module docstring) — on the
+    P3 docker lane (fast half) the provisioned passworded service (6379) is
+    up so they RUN; the skip is VISIBLE (never a vacuous return, epic #1647
+    Task 9) and the reason is intentionally NOT guard-exempt — a downed
+    provisioned service flips the guard red (fail-closed, D-4).
     """
     import socket
     try:
@@ -37,7 +39,7 @@ def _docker_falkor_reachable(port: int = 6379) -> bool:
 def sdk():
     """SDK against the live FalkorDB with a unique namespace per test run."""
     if not _docker_falkor_reachable():
-        pytest.skip("live FalkorDB (docker://localhost:6379) not reachable — embedded-only run")
+        pytest.skip("live FalkorDB (docker://localhost:6379) not reachable — provisioned service down (epic #1647)")
     ns = f"test_lc_{uuid.uuid4().hex[:8]}"
     sdk = TortoiseSDK(namespace=ns)
     yield sdk

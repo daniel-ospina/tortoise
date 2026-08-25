@@ -526,7 +526,12 @@ class TestLastDreamedAtIndex:
             pytest.skip(f"resolved URI {uri!r} is not a test graph "
                         "(graph name must start with 'test_')")
         from tortoise.projection import FalkorProjection
-        proj = FalkorProjection.from_uri(uri)
+        # Epic #1647 (T7, cycle-5 P1-6): the env/job URI path is shared across
+        # sessions — bulk-DETACHing it clobbers concurrent writers; per-test
+        # graph. The test-prefix guard above is the URI-path check; the
+        # explicit per-test name is the isolation.
+        proj = FalkorProjection.from_uri(
+            uri, graph_name=f"test_epic903_fts_{os.urandom(4).hex()}")
         try:
             proj.g.query("MATCH (n) DETACH DELETE n")
             proj._ensure_indexes()

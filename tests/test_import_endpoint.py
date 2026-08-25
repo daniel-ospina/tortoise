@@ -65,6 +65,27 @@ from tests.test_supabase_control import (  # noqa: E402
 # Tests opt out of the IP rate limiter; rate-limit tests re-enable it.
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
+
+@pytest.fixture(scope="module", autouse=True)
+def _embedded_local_file_lane():
+    """Epic #1647 P4 (Task 10): this file's harness is a LOCAL-FILE server by
+    design — the sb_client fixture patches TortoiseSDK.__init__ to force every
+    SDK construction onto one temp DB file (the hosted app's store), and the
+    seed/count helpers construct FalkorProjection on that same file. Under a
+    docker session the URI-aware redirect would flip the seed/count
+    constructions to derived SERVER graphs while the patched app keeps
+    reading the local file — the import/swap assertions then compare two
+    different stores (and the GRAPH.COPY swap fails on the server's
+    non-test-prefixed names). Popping the URI for this module keeps the whole
+    harness on one local file on BOTH lanes. Documented divergence from the
+    plan's Task 10 "13 migrate out" list: this is an embedded-file-contract
+    file, not docker-migratable — it stays in RAW_EMBEDDED_ALLOWLIST."""
+    mp = pytest.MonkeyPatch()
+    mp.delenv("TORTOISE_DB_URI", raising=False)
+    yield
+    mp.undo()
+
+
 TEAM_ID = "team-free-001"
 OWNER = "user-1"
 GRAPH_NAME = "team_import_g"  # teams.graph_name in Supabase mode (import target)

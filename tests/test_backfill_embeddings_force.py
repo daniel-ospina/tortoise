@@ -408,9 +408,17 @@ def _run_main(mod, proj, *argv):
     """Drive mod.main() against the embedded DB with the CLI argv.
 
     main(argv) receives flag args only — argparse supplies its own prog name.
+
+    Epic #1647 P4 (Task 10): inject the fixture projection's ACTUAL graph
+    name (--graph) — on the embedded lane it is the literal "tortoise" (the
+    script's default); under a docker session the URI-aware redirect derives
+    per-path names (test_<stem>_<hash12>), so the script's literal default
+    would scan an empty graph while the fixture's data lives on the derived
+    one. The injected name is lane-agnostic and keeps this file docker-able
+    (it leaves the embedded allowlist at P4).
     """
     mod._connect_falkordb = lambda uri: (proj.db, proj.graph_name)
-    return mod.main(list(argv))
+    return mod.main([*argv, "--graph", proj.graph_name])
 
 
 def test_completeness_marker_records_all_six_labels(proj, monkeypatch, capsys):

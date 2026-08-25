@@ -1849,6 +1849,7 @@ def test_e2e9_symlink_pair_concurrency(corpus, lock_dir):
         check.close()
 
 
+@pytest.mark.embedded_only  # epic #1647 D-2=A: real FalkorDB has no busy concept — this stays embedded
 def test_e2e9_cross_process_embedded_overlap(tmp_path):
     """E2E-9(iv) CROSS-PROCESS EMBEDDED OVERLAP (cycle-20/21): two SDK
     subprocesses against ONE embedded DB → the SECOND process's open probe

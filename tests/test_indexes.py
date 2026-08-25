@@ -7,6 +7,7 @@ entity-CRUD / edge / navigation / org-query rewrites preserve behavior.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 import tempfile
@@ -30,6 +31,21 @@ EXPECTED_RANGE_EMBEDDED = {
     "Event": ["eventId"],
     "Source": ["id", "url"],
 }
+
+# ── Epic #1647 T8 (D5/D6): docker sibling expectations ────────────────────
+# D5 (research-brief §2.1): the RANGE sets are IDENTICAL on both engines —
+# point_props (id, pointKind, content_hash) is not mode-split (verified
+# _ensure_indexes L1214-1224). is_operator is deliberately ABSENT from the D5
+# range set on BOTH lanes: on docker it is served by the D6 composite's
+# leftmost prefix, never a standalone D5 single index (the #522 regression
+# guard).
+EXPECTED_RANGE_DOCKER = {k: list(v) for k, v in EXPECTED_RANGE_EMBEDDED.items()}
+
+# D6: the docker-only composite freshness index — created on non-embedded
+# engines only (the #522-safe path; embedded gets the plain (lastDreamedAt)
+# index instead — a composite containing is_operator is #522-unsafe on
+# redislite).
+EXPECTED_POINT_COMPOSITE_DOCKER = ("is_operator", "lastDreamedAt")
 
 
 @pytest.fixture
@@ -193,7 +209,11 @@ def test_get_entity_parity_all_types(sdk):
     rows = proj.g.query(
         "MATCH (n) RETURN n.id, labels(n)[0], n.url, n.eventId").result_set
     assert rows, "no nodes created"
-    INTERNAL = {"GraphEvent", "GraphEventMeta", "EpMeta"}
+    INTERNAL = {"GraphEvent", "GraphEventMeta", "EpMeta", "Meta"}
+    # "Meta" (epic #1541): the FTS migration markers (:Meta {key:
+    # 'point_fts_v2'|'event_fts_v2'}) are internal bookkeeping written by
+    # _ensure_indexes on fresh DBs — same class as EpMeta, never a user
+    # entity. (#647 sweep catch — the test predates the marker.)
     for r in rows:
         label = r[1]
         if label in INTERNAL:
@@ -291,10 +311,15 @@ def test_navigation_parity_real_graph():
     g.query("CREATE (a:Point {id:'p1', content:'c1', pointKind:'statement', is_operator:false})")
     g.query("CREATE (b:Point {id:'p2', content:'c2', pointKind:'statement', is_operator:false})")
     g.query("MATCH (a:Point {id:'p1'}), (b:Point {id:'p2'}) CREATE (a)-[:IMPL]->(b)")
-    prof = entityProfile(p.db, "tortoise", "p1", hops=1)
+    # Epic #1647 P4 (Task 10): query by the projection's ACTUAL graph name —
+    # the literal "tortoise" matched only the embedded default; under a
+    # docker session the redirect derives per-path names
+    # (test_<stem>_<hash12>), so a hardcoded name would look in the wrong
+    # graph (KeyError 'id'). p.graph_name is the truth on both lanes.
+    prof = entityProfile(p.db, p.graph_name, "p1", hops=1)
     assert prof["entity"]["id"] == "p1"
     assert any(n.get("id") == "p2" for n in prof["connected"]["points"])
-    trav = tortoise_traverse(p.db, "tortoise", "p1", max_hops=1)
+    trav = tortoise_traverse(p.db, p.graph_name, "p1", max_hops=1)
     assert trav["entity"]["id"] == "p1" and len(trav["nodes"]) >= 1
     p.close()
 
@@ -373,6 +398,13 @@ def test_resolve_entity_queries_use_index_scans(proj):
 # The is_operator index is therefore non-embedded (docker/server)-only —
 # embedded drops any stale persisted copy on open — see _ensure_indexes.
 
+@pytest.mark.embedded_only
+# Epic #1647 P4 (Task 10): the D7 repair path is embedded-only — the test
+# simulates a PRE-#522 stale embedded index (CREATE INDEX on is_operator),
+# which cannot exist on the docker lane (the D6 composite already indexes
+# is_operator — the CREATE would raise "already indexed"). Marked with the
+# D-2=A mechanism: visible skip on docker sessions, runs embedded in
+# URI-less runs (the marker is the documented embedded-only surface).
 def test_embedded_reopen_false_equality_correct():
     """After close/reopen, non-operator lookups must not silently empty.
 
@@ -447,7 +479,10 @@ def test_non_embedded_is_operator_index_created():
     if not urlparse(uri).path.lstrip("/").startswith(("test_", "tortoise_test")):
         pytest.skip(f"resolved URI {uri!r} is not a test graph "
                     "(graph name must start with 'test_'/'tortoise_test_')")
-    proj = FalkorProjection.from_uri(uri)
+    # Epic #1647 (T7): per-test graph — the env/job URI path is shared and
+    # this fixture bulk-DETACHes its graph on every test.
+    proj = FalkorProjection.from_uri(
+        uri, graph_name=f"test_indexes_range_{os.urandom(4).hex()}")
     try:
         proj.g.query("MATCH (n) DETACH DELETE n")
         proj._ensure_indexes()
@@ -465,4 +500,52 @@ def test_non_embedded_is_operator_index_created():
         assert proj.g.query("MATCH (n:Point) WHERE n.is_operator = false "
                             "RETURN count(n)").result_set[0][0] == 2
     finally:
+        proj.close()
+
+
+@pytest.mark.skipif(not FALKORDB_AVAILABLE,
+                    reason="FalkorDB not available")
+def test_docker_lane_index_shape():
+    """Epic #1647 T8 (D5/D6): docker sibling of test_entity_key_indexes_exist.
+
+    The D5 range sets are IDENTICAL to embedded (EXPECTED_RANGE_DOCKER); the
+    D6 composite (is_operator, lastDreamedAt) is docker-only (the #522-safe
+    path — embedded gets the plain lastDreamedAt index, see
+    test_embedded_reopen_false_equality_correct). is_operator is NOT added to
+    the D5 range set (the #522 regression guard, verified _ensure_indexes
+    L1214-1224) — its RANGE presence on docker comes from the composite's
+    leftmost prefix.
+    """
+    from urllib.parse import urlparse
+    uri = _current_uri()
+    # Round-2 guard (same as test_non_embedded_is_operator_index_created): the
+    # probe may resolve to a LIVE non-test graph — skip rather than DETACH a
+    # real DB (graph name must start with test_/tortoise_test_).
+    if not urlparse(uri).path.lstrip("/").startswith(("test_", "tortoise_test")):
+        pytest.skip(f"resolved URI {uri!r} is not a test graph "
+                    "(graph name must start with 'test_'/'tortoise_test_')")
+    proj = FalkorProjection.from_uri(
+        uri, graph_name=f"test_indexes_docker_{os.urandom(4).hex()}")
+    try:
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        proj._ensure_indexes()
+        idx = _range_indexes(proj)
+        for label, fields in EXPECTED_RANGE_DOCKER.items():
+            assert label in idx, f"no indexes for {label}: {idx}"
+            for f in fields:
+                assert "RANGE" in idx[label].get(f, []), \
+                    f"{label}.{f} index missing: {idx[label]}"
+        rows = proj.g.query("CALL db.indexes()").result_set
+        composite = [
+            r for r in rows if r[0] == "Point"
+            and all(p in str(r[1]) for p in EXPECTED_POINT_COMPOSITE_DOCKER)
+        ]
+        assert composite, (
+            f"docker must create the D6 composite "
+            f"{EXPECTED_POINT_COMPOSITE_DOCKER}, got {rows}")
+    finally:
+        with contextlib.suppress(Exception):  # tidy (epic #1647 review P2):
+            # this from_uri mint is not journaled in URI-unset sessions —
+            # drop it explicitly
+            proj.db.select_graph(proj.graph_name).delete()
         proj.close()

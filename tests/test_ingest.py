@@ -53,12 +53,37 @@ def _tmp(name):
     return os.path.join(tempfile.mkdtemp(prefix="tortoise_"), name)
 
 
+
+def _live_uri(test_graph: str) -> str:
+    """The live backend URI with a per-test test-prefixed graph path.
+
+    Epic #1647 (T7, cycle-5 P1-6): the historical
+    ``os.environ.get("TORTOISE_DB_URI") or docker://.../tortoise_test_ingest125``
+    resolved the SHARED env-URI path (job URI) for every #125/#133 test here —
+    each of these tests bulk-DETACHes the resolved graph, so concurrent
+    sessions clobber each other's live writes (and the DETACH is TEST code,
+    invisible to the per-test wipe scope). The path is now a per-test test_*
+    name; the backend host comes from the env URI when set (the live
+    backend), else the historical probe host.
+    """
+    from urllib.parse import urlsplit, urlunsplit
+    env = os.environ.get("TORTOISE_DB_URI")
+    if env:
+        parts = urlsplit(env)
+        return urlunsplit((parts.scheme, parts.netloc, f"/{test_graph}", "", ""))
+    return f"docker://:@localhost:16379/{test_graph}"
+
+
 def _docker_falkor_reachable() -> bool:
     """Socket probe: is a live Docker FalkorDB reachable?
 
     The #125/#133 capture + upgrade tests need a live FalkorDB on
-    FALKORDB_HOST:PORT (default localhost:16379). Embedded CI has no
-    container — probe before connecting so the suite skips instead of
+    FALKORDB_HOST:PORT (default localhost:16379). On the P3 docker lane
+    (test-slow) the provisioned falkordb-legacy service (16379) is up so
+    these RUN; the skip is VISIBLE (never a vacuous return, epic #1647
+    Task 9) and the reason is intentionally NOT guard-exempt — a downed
+    provisioned service flips the guard red (fail-closed, D-4), never a
+    green-skip. Probe before connecting so the suite skips instead of
     raising redis ConnectionError (Error 111/61).
     """
     import socket
@@ -520,7 +545,7 @@ def test_capture_metadata_creates_document_no_points():
     """#125: --capture-metadata creates Document + sessionCaptured Event,
     ZERO Points, and does NOT block a later full extraction (no begin_ingest)."""
     import json  # noqa: F401
-    uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_ingest125")
+    uri = _live_uri(f"test_ingest125_{os.urandom(4).hex()}")
     db = uri  # live DB URI
     if not _require_live_falkor():
         return
@@ -576,7 +601,7 @@ def test_capture_metadata_creates_document_no_points():
 @_live_db
 def test_full_ingest_unaffected_and_not_blocked_by_capture():
     """#125: full ingest (no flag) extracts Points; a prior capture does NOT block it."""
-    uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_ingest125")
+    uri = _live_uri(f"test_ingest125_{os.urandom(4).hex()}")
     db = uri
     if not _require_live_falkor():
         return
@@ -615,7 +640,7 @@ def test_capture_defaults_doc_status_captured():
     """#133 P0: --capture-metadata with NO doc_status in frontmatter
     must default the Document to doc_status='captured' (not 'draft')."""
     import json  # noqa: F401
-    uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_133")
+    uri = _live_uri(f"test_ingest133_{os.urandom(4).hex()}")
     db = uri
     if not _require_live_falkor():
         return
@@ -650,7 +675,7 @@ def test_needs_extraction_flag_surfaces_and_drives_upgrade_all():
     """#133: needs_extraction frontmatter → Document property → --upgrade-all
     discovers and upgrades the Document (e2e bridge)."""
     import json  # noqa: F401
-    uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_133")
+    uri = _live_uri(f"test_ingest133_{os.urandom(4).hex()}")
     db = uri
     if not _require_live_falkor():
         return
@@ -685,7 +710,7 @@ def test_upgrade_on_already_extracted_is_noop():
     """#133: --upgrade on a Document already doc_status='extracted' → no-op
     'doc already extracted, skipped' (idempotency)."""
     import json  # noqa: F401
-    uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_133")
+    uri = _live_uri(f"test_ingest133_{os.urandom(4).hex()}")
     db = uri
     if not _require_live_falkor():
         return

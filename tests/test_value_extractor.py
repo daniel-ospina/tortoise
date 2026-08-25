@@ -552,7 +552,7 @@ class TestModelAdapterBounds:
             def json(self):
                 return {"choices": [{"message": {"content": "ok"}}]}
 
-        def _fake_post(url, **kwargs):
+        def _fake_post(self_or_url, url=None, **kwargs):
             captured["body"] = kwargs.get("json", {})
             return _FakeResp()
 
@@ -564,7 +564,7 @@ class TestModelAdapterBounds:
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
         monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
         monkeypatch.delenv("TORTOISE_EXTRACTOR_PROVIDER", raising=False)
-        monkeypatch.setattr(_requests, "post", _fake_post)
+        monkeypatch.setattr(_requests.Session, "post", _fake_post)
         adapter = _model_adapter("deepseek/deepseek-v4-flash")
         out = adapter.complete(system="s", user="u")
         assert out == "ok"
@@ -589,11 +589,11 @@ class TestModelAdapterBounds:
             def json(self):
                 return {"choices": [{"message": {"content": "ok"}}]}
 
-        def _fake_post(url, **kwargs):
+        def _fake_post(self_or_url, url=None, **kwargs):
             captured["body"] = kwargs.get("json", {})
             return _FakeResp()
 
-        monkeypatch.setattr(_requests, "post", _fake_post)
+        monkeypatch.setattr(_requests.Session, "post", _fake_post)
         # #1530: no-key lenient path (see test_adapter_body_has_bounds) — the
         # family-prefixed id must survive on the OpenRouter default route.
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)

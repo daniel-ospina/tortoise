@@ -233,6 +233,9 @@ jobs:
         env:
           RUN_LEGAL_E2E: '1'
           ALLOW_PROD: '1'
+          # Epic #1647 Task 10 (P4): URI-less e2e surface — the URI-required
+          # enforcement opt-in.
+          TORTOISE_TEST_CARVE_OUT: '1'
           # #747/#1151: the third-party external-link crawl fetches
           # unauthenticated hrefs (github.com/LICENSE etc.) and 429s from
           # shared runner IPs are flaky — the test's own design contract says

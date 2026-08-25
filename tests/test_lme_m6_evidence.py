@@ -14,6 +14,7 @@ gate with marks (a)+(c) alone.
 """
 from __future__ import annotations
 
+import pytest
 import json
 import os
 import sys
@@ -462,6 +463,7 @@ def test_report_evidence_coverage_zero_when_no_evidence():
 
 # ── OWNER VALIDATION: session_id on both capture paths ─────────────────────
 
+@pytest.mark.embedded_only  # Epic #1647 (PR #1684): the TORTOISE_SESSION_LLM_MOCK seam keys on the EMBEDDED lane — the v2 extractor's S3 stage runs on docker (mode='real') and the mock cannot search, yielding 0 points. Docker-lane mock extraction is a separate divergence (filed).
 def test_session_id_written_by_sdk_capture_path(tmp_path, monkeypatch):
     """The SDK capture path (capture_session → _extract_session_v2) writes
     session_id on the extracted points — source-session attribution (a) is
