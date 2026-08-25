@@ -682,6 +682,35 @@ class TestKeysCreate:
         assert r1.json()["key"] != r2.json()["key"]
         assert r1.json()["id"] != r2.json()["id"]
 
+    def test_create_key_with_name_roundtrips(self, client):
+        # 20260825000001: optional label rides the mint body and survives.
+        r = client.post("/v1/team/keys", json={"name": "CI deploy"})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["name"] == "CI deploy"
+        # the label appears in the list response
+        listed = [k for k in client.get("/v1/team/keys").json()["keys"] if k["id"] == body["id"]]
+        assert len(listed) == 1
+        assert listed[0]["name"] == "CI deploy"
+
+    def test_create_key_name_optional_and_defaults_unnamed(self, client):
+        # no body / empty label → stored unnamed (name null in the list).
+        # Cap is 2 keys/team (TEST_TEAM.max_api_keys), so at most two mints.
+        for body in (None, {"name": "   "}):
+            r = client.post("/v1/team/keys", json=body) if body is not None else client.post("/v1/team/keys")
+            assert r.status_code == 200, r.text
+            kid = r.json()["id"]
+            listed = [k for k in client.get("/v1/team/keys").json()["keys"] if k["id"] == kid]
+            assert listed[0].get("name") is None, f"body={body!r} → {listed[0]}"
+
+    def test_create_key_name_clamped_to_64_chars(self, client):
+        long = "x" * 200
+        r = client.post("/v1/team/keys", json={"name": long})
+        assert r.status_code == 200, r.text
+        assert r.json()["name"] == "x" * 64
+        listed = [k for k in client.get("/v1/team/keys").json()["keys"] if k["id"] == r.json()["id"]]
+        assert listed[0]["name"] == "x" * 64
+
 
 class TestKeysList:
     """GET /v1/team/keys — list API keys (hashes only)."""
@@ -718,6 +747,105 @@ class TestKeysList:
             assert "key_prefix" in k
             assert "created_at" in k
             # last_used_at and revoked_at may be None — fine
+
+    def test_list_keys_includes_name_field(self, client):
+        # 20260825000001: every listed key carries the (nullable) label.
+        client.post("/v1/team/keys", json={"name": "ci"})
+        r = client.get("/v1/team/keys")
+        keys = r.json()["keys"]
+        assert keys
+        for k in keys:
+            assert "name" in k
+        assert any(k.get("name") == "ci" for k in keys)
+
+
+class TestKeysRename:
+    """PATCH /v1/team/keys/{id} — rename (label) / toggle. Registry path.
+
+    The endpoint is session-authed (get_current_user dependency) and enforces
+    owner/admin via _require_owner_admin in BOTH modes — registry mode
+    resolves the Membership graph, so the tests seed an owner membership.
+    Supabase-mode rename/toggle/403 coverage lives in test_dashboard_login.py.
+    """
+
+    def _override_session_user(self):
+        # Stub the session JWT (registry mode skips JWT verification) and
+        # seed an owner Membership so _require_owner_admin passes.
+        app.dependency_overrides[get_current_user] = \
+            lambda: {"user_id": "user-1", "email": "owner@example.com"}
+        import tortoise.hosted_api as ha
+        sdk = ha._make_sdk(namespace="registry")
+        sdk._get_registry().query(
+            "MERGE (m:Membership {user_id:$uid, team_id:$tid, status:'active'}) "
+            "SET m.role='owner'",
+            params={"uid": "user-1", "tid": TEST_TEAM_ID},
+        )
+
+    def _override_non_owner(self):
+        # Session user with NO membership — _require_owner_admin must 403.
+        app.dependency_overrides[get_current_user] = \
+            lambda: {"user_id": "intruder-9", "email": "intruder@example.com"}
+
+    def test_rename_key_updates_label(self, client):
+        self._override_session_user()
+        kid = client.post("/v1/team/keys", json={"name": "staging"}).json()["id"]
+        r = client.patch(f"/v1/team/keys/{kid}", json={"name": "prod"})
+        assert r.status_code == 200, r.text
+        assert r.json() == {"key_id": kid, "name": "prod"}
+        listed = next(k for k in client.get("/v1/team/keys").json()["keys"] if k["id"] == kid)
+        assert listed["name"] == "prod"
+
+    def test_rename_clears_label_with_empty_string(self, client):
+        self._override_session_user()
+        kid = client.post("/v1/team/keys", json={"name": "staging"}).json()["id"]
+        r = client.patch(f"/v1/team/keys/{kid}", json={"name": "   "})
+        assert r.status_code == 200, r.text
+        assert r.json()["name"] is None
+        listed = next(k for k in client.get("/v1/team/keys").json()["keys"] if k["id"] == kid)
+        assert listed.get("name") is None
+
+    def test_rename_clears_label_with_null(self, client):
+        # The dashboard sends JSON null to clear a label — null must be
+        # applied (field present), not treated as absent (P1 review fix).
+        self._override_session_user()
+        kid = client.post("/v1/team/keys", json={"name": "staging"}).json()["id"]
+        r = client.patch(f"/v1/team/keys/{kid}", json={"name": None})
+        assert r.status_code == 200, r.text
+        assert r.json()["name"] is None
+        listed = next(k for k in client.get("/v1/team/keys").json()["keys"] if k["id"] == kid)
+        assert listed.get("name") is None
+
+    def test_rename_clamps_to_64_chars(self, client):
+        self._override_session_user()
+        kid = client.post("/v1/team/keys").json()["id"]
+        r = client.patch(f"/v1/team/keys/{kid}", json={"name": "x" * 200})
+        assert r.status_code == 200, r.text
+        assert r.json()["name"] == "x" * 64
+
+    def test_rename_and_toggle_in_one_patch(self, client):
+        self._override_session_user()
+        kid = client.post("/v1/team/keys", json={"name": "ci"}).json()["id"]
+        r = client.patch(f"/v1/team/keys/{kid}", json={"enabled": False, "name": "off-ci"})
+        assert r.status_code == 200, r.text
+        # registry mode: enabled is a no-op (no flag column) — name applies
+        assert r.json()["key_id"] == kid
+        assert r.json()["name"] == "off-ci"
+
+    def test_rename_unknown_key_404(self, client):
+        self._override_session_user()
+        r = client.patch("/v1/team/keys/does-not-exist", json={"name": "x"})
+        assert r.status_code == 404, r.text
+
+    def test_rename_non_owner_403(self, client):
+        # Registry mode enforces owner/admin like supabase mode (P2 review
+        # fix) — a user with no membership cannot rename any key by id.
+        self._override_non_owner()
+        kid = client.post("/v1/team/keys", json={"name": "staging"}).json()["id"]
+        r = client.patch(f"/v1/team/keys/{kid}", json={"name": "hijacked"})
+        assert r.status_code == 403, r.text
+        # label unchanged
+        listed = next(k for k in client.get("/v1/team/keys").json()["keys"] if k["id"] == kid)
+        assert listed.get("name") == "staging"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

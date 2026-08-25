@@ -66,7 +66,8 @@ const files = ['0001_user_teams.sql','0002_audit_events.sql','0003_team_membersh
                '20260813000002_metering_nodes_written.sql',
                '20260813000003_audit_ip_time_index.sql',
                '20260813000004_claim_membership.sql',
-               '20260813000005_dashboard_login.sql'];
+               '20260813000005_dashboard_login.sql',
+               '20260825000001_api_key_names.sql'];
 for (const f of files) {
   const sql = readFileSync(`${MIG_DIR}/${f}`, 'utf8');
   try {

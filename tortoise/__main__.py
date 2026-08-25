@@ -1006,11 +1006,12 @@ def _cmd_team_keys_list(args) -> int:
 
     team_id = config.get("team_id")
     print(f"API keys for team {team_id}:" if team_id else "API keys:")
-    print(f"  {'ID':<14}{'Prefix':<14}{'Created':<26}{'Last used':<26}Status")
+    print(f"  {'ID':<14}{'Name':<20}{'Prefix':<14}{'Created':<26}{'Last used':<26}Status")
     for k in keys:
         status = "revoked" if k.get("revoked_at") else "active"
         last = k.get("last_used_at") or "never"
-        print(f"  {str(k.get('id') or ''):<14}{str(k.get('key_prefix') or ''):<14}"  # noqa: RUF010
+        name = str(k.get('name') or '')[:18]
+        print(f"  {str(k.get('id') or ''):<14}{name:<20}{str(k.get('key_prefix') or ''):<14}"  # noqa: RUF010
               f"{str(k.get('created_at') or ''):<26}{str(last):<26}{status}")  # noqa: RUF010
     return 0
 
@@ -1026,10 +1027,16 @@ def _cmd_team_keys_create(args) -> int:
     if api_key is None:
         return 1
 
+    # Optional label (20260825000001) — clamp client-side to the same 64-char
+    # cap the API enforces, so a long label is truncated instead of erroring.
+    name = getattr(args, "name", None)
+    body = {}
+    if name:
+        body["name"] = str(name)[:64]
     try:
         req = Request(
             f"{api_url}/v1/team/keys",
-            data=b"{}",
+            data=_json.dumps(body).encode(),
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             method="POST",
         )
@@ -1071,6 +1078,7 @@ def _cmd_team_keys_create(args) -> int:
             "key_prefix": data.get("key_prefix"),
             "id": data.get("id"),
             "created_at": data.get("created_at"),
+            "name": data.get("name"),
             "team_id": config.get("team_id"),
         })
         return 0
@@ -1078,6 +1086,8 @@ def _cmd_team_keys_create(args) -> int:
     print(f"Created new API key: {data.get('key')}")
     print(f"  Key prefix:  {data.get('key_prefix')}")
     print(f"  Key ID:      {data.get('id')}")
+    if data.get("name"):
+        print(f"  Name:        {data.get('name')}")
     print(f"  ⚠️  Store this key — it won't be shown again.")  # noqa: F541
     print(f"  ⚠️  This key has full access to your team's graph.")  # noqa: F541
     return 0
@@ -3995,6 +4005,8 @@ def main(argv: list[str] | None = None) -> int:
     team_keys_list_p.add_argument("--json", action="store_true", help="Machine-readable JSON output")
     team_keys_create_p = team_keys_sp.add_parser("create", help="Create a new API key (shown once)")
     team_keys_create_p.add_argument("--json", action="store_true", help="Machine-readable JSON output")
+    team_keys_create_p.add_argument("--name", metavar="LABEL", default="",
+                                    help="Optional label (max 64 chars) to remember which key is which")
     team_keys_revoke_p = team_keys_sp.add_parser("revoke", help="Revoke an API key")
     team_keys_revoke_p.add_argument("key_id", help="Key ID to revoke")
     team_keys_revoke_p.add_argument("--json", action="store_true", help="Machine-readable JSON output")

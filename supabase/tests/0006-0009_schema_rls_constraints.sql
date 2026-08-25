@@ -75,6 +75,11 @@ DO $$ BEGIN
   PERFORM tests.assert((SELECT column_default FROM information_schema.columns
     WHERE table_schema='public' AND table_name='api_keys' AND column_name='created_via')
     LIKE '%provisioned%', 'api_keys.created_via default provisioned');
+  -- 20260825000001: api_keys.name — nullable user-facing label
+  PERFORM tests.assert((SELECT data_type FROM information_schema.columns
+    WHERE table_schema='public' AND table_name='api_keys' AND column_name='name') = 'text', '20260825000001: api_keys.name text');
+  PERFORM tests.assert((SELECT is_nullable FROM information_schema.columns
+    WHERE table_schema='public' AND table_name='api_keys' AND column_name='name') = 'YES', '20260825000001: api_keys.name nullable');
   -- invitations
   PERFORM tests.assert((SELECT data_type FROM information_schema.columns
     WHERE table_schema='public' AND table_name='invitations' AND column_name='lookup_hash') = 'text', 'invitations.lookup_hash text');

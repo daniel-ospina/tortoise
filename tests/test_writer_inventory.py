@@ -178,7 +178,9 @@ class TestCreateApiKey:
         r = tc.post("/v1/team/keys")
         assert r.status_code == 200, r.text
         body = r.json()
-        assert set(body) == {"id", "key", "key_prefix", "created_at"}
+        # 20260825000001: optional label rides the response (null when unset)
+        assert set(body) == {"id", "key", "key_prefix", "created_at", "name"}
+        assert body["name"] is None
         key = body["key"]
         assert key.startswith("tt_")
 

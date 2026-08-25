@@ -503,13 +503,13 @@ def resolve_api_key(cp, token: str) -> dict | None:
                             "created_by", "expires_at", "revoked_at"]
     try:
         rows = cp.query(
-            "api_keys", select=_API_KEY_BASE_SELECT + ["enabled"],  # noqa: RUF005
+            "api_keys", select=_API_KEY_BASE_SELECT + ["enabled", "name"],  # noqa: RUF005
             filters=[("lookup_hash", "eq", h)],
         )
     except Exception as e:
         _logger.warning(
-            "api_keys read failed — retrying without additive 'enabled'; is "
-            "migration 20260813000005 applied? (%s)", e)
+            "api_keys read failed — retrying without additive 'enabled'/'name'; is "
+            "migration 20260813000005 (enabled) or 20260825000001 (name) applied? (%s)", e)
         try:
             rows = cp.query(
                 "api_keys", select=_API_KEY_BASE_SELECT,
@@ -600,9 +600,11 @@ def resolve_api_key(cp, token: str) -> dict | None:
         "key_prefix": key_prefix,
         "created_via": created_via,
         "created_by": created_by,
-        "dashboard_key_login": True if _dkl is None else _dkl,
         # #1148: per-key enabled state (dashboard toggle)
         "enabled": row.get("enabled", True) if rows else True,
+        # key label (migration 20260825000001) — display metadata only
+        "key_name": row.get("name") if rows else None,
+        "dashboard_key_login": True if _dkl is None else _dkl,
         # #308: enforcement (403 SUSPENDED) + owner notification
         "suspended_at": team_row.get("suspended_at"),
         "flagged_at": team_row.get("flagged_at"),
@@ -755,6 +757,20 @@ def set_api_key_enabled(cp, key_id: str, enabled: bool) -> None:
         method="PATCH",
         filters=[("id", "eq", key_id)],
         json_body={"enabled": bool(enabled)},
+    )
+
+
+def set_api_key_name(cp, key_id: str, name: str | None) -> None:
+    """Rename an API key (user-facing label, PATCH /v1/team/keys/{id}).
+
+    None clears the label back to unnamed. Never part of authentication —
+    display metadata only. Session-authed + owner-only enforced at the
+    endpoint (same guard as set_api_key_enabled)."""
+    cp.query(
+        "api_keys",
+        method="PATCH",
+        filters=[("id", "eq", key_id)],
+        json_body={"name": name},
     )
 
 
@@ -1471,7 +1487,7 @@ def team_api_keys(cp, team_id: str) -> list[dict]:
     rows = cp.query(
         "api_keys",
         select=["id", "key_prefix", "created_at", "last_used_at",
-                "revoked_at", "enabled"],
+                "revoked_at", "enabled", "name"],
         filters=[("team_id", "eq", team_id)],
     )
     rows.sort(key=lambda r: r.get("created_at") or "", reverse=True)
@@ -1482,7 +1498,7 @@ def api_key_by_id(cp, key_id: str) -> dict | None:
     """One api_keys row by id (revoke lookup — team-scoping + already-revoked)."""
     rows = cp.query(
         "api_keys",
-        select=["team_id", "revoked_at", "created_via", "enabled"],
+        select=["team_id", "revoked_at", "created_via", "enabled", "name"],
         filters=[("id", "eq", key_id)],
     )
     return rows[0] if rows else None

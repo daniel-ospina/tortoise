@@ -163,6 +163,116 @@ class TestPerKeyToggle:
         assert r2.status_code == 200, r2.text
 
 
+class TestKeyRenameSupabase:
+    """PATCH /v1/team/keys/{id} — rename (label), Supabase control-plane mode.
+
+    Same session+owner guard as the enabled toggle; the label is display-only
+    (rename must never affect authentication). Registry-mode rename coverage
+    lives in test_hosted_api.py::TestKeysRename.
+    """
+
+    def test_rename_key_persists_label(self, client, fake, monkeypatch):
+        key, team_id = _provision_anon(client, fake)
+        user_id = f"user-{uuid.uuid4().hex[:8]}"
+        _patch_session_user(monkeypatch, user_id)
+        _seed_owner_membership(fake, team_id, user_id)
+        from tortoise.auth import lookup_hash
+        rows = fake.query("api_keys", select=["id"],
+                          filters=[("lookup_hash", "eq", lookup_hash(key))])
+        key_id = rows[0]["id"]
+        r = client.patch(
+            f"/v1/team/keys/{key_id}",
+            headers={"Authorization": "Bearer eyJ.sess"},
+            json={"name": "prod CI"},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["key_id"] == key_id
+        assert r.json()["name"] == "prod CI"
+        # label persisted on the row
+        rows2 = fake.query("api_keys", select=["name"], filters=[("id", "eq", key_id)])
+        assert rows2[0]["name"] == "prod CI"
+        # key still authenticates — name is display metadata only
+        r2 = client.get("/v1/team", headers={"Authorization": f"Bearer {key}"})
+        assert r2.status_code == 200, r2.text
+
+    def test_rename_clears_label_with_empty_string(self, client, fake, monkeypatch):
+        key, team_id = _provision_anon(client, fake)
+        user_id = f"user-{uuid.uuid4().hex[:8]}"
+        _patch_session_user(monkeypatch, user_id)
+        _seed_owner_membership(fake, team_id, user_id)
+        from tortoise.auth import lookup_hash
+        rows = fake.query("api_keys", select=["id"],
+                          filters=[("lookup_hash", "eq", lookup_hash(key))])
+        key_id = rows[0]["id"]
+        client.patch(
+            f"/v1/team/keys/{key_id}",
+            headers={"Authorization": "Bearer eyJ.sess"},
+            json={"name": "temp"},
+        )
+        r = client.patch(
+            f"/v1/team/keys/{key_id}",
+            headers={"Authorization": "Bearer eyJ.sess"},
+            json={"name": "   "},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["name"] is None
+        rows2 = fake.query("api_keys", select=["name"], filters=[("id", "eq", key_id)])
+        assert rows2[0]["name"] is None
+
+    def test_rename_clears_label_with_null(self, client, fake, monkeypatch):
+        # The dashboard sends JSON null to clear a label — null must be
+        # applied (field present), not treated as absent (P1 review fix).
+        key, team_id = _provision_anon(client, fake)
+        user_id = f"user-{uuid.uuid4().hex[:8]}"
+        _patch_session_user(monkeypatch, user_id)
+        _seed_owner_membership(fake, team_id, user_id)
+        from tortoise.auth import lookup_hash
+        rows = fake.query("api_keys", select=["id"],
+                          filters=[("lookup_hash", "eq", lookup_hash(key))])
+        key_id = rows[0]["id"]
+        client.patch(
+            f"/v1/team/keys/{key_id}",
+            headers={"Authorization": "Bearer eyJ.sess"},
+            json={"name": "temp"},
+        )
+        r = client.patch(
+            f"/v1/team/keys/{key_id}",
+            headers={"Authorization": "Bearer eyJ.sess"},
+            json={"name": None},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["name"] is None
+        rows2 = fake.query("api_keys", select=["name"], filters=[("id", "eq", key_id)])
+        assert rows2[0]["name"] is None
+
+    def test_rename_requires_owner(self, client, fake, monkeypatch):
+        key, _ = _provision_anon(client, fake)
+        user_id = f"user-{uuid.uuid4().hex[:8]}"
+        _patch_session_user(monkeypatch, user_id)
+        # NO membership seeded → _require_owner_admin 403s
+        from tortoise.auth import lookup_hash
+        rows = fake.query("api_keys", select=["id"],
+                          filters=[("lookup_hash", "eq", lookup_hash(key))])
+        key_id = rows[0]["id"]
+        r = client.patch(
+            f"/v1/team/keys/{key_id}",
+            headers={"Authorization": "Bearer eyJ.sess"},
+            json={"name": "x"},
+        )
+        assert r.status_code == 403, r.text
+
+    def test_rename_unknown_key_404(self, client, fake, monkeypatch):
+        user_id = f"user-{uuid.uuid4().hex[:8]}"
+        _patch_session_user(monkeypatch, user_id)
+        _seed_owner_membership(fake, "team-404-xyz", user_id)
+        r = client.patch(
+            "/v1/team/keys/does-not-exist",
+            headers={"Authorization": "Bearer eyJ.sess"},
+            json={"name": "x"},
+        )
+        assert r.status_code == 404, r.text
+
+
 class TestDashboardLoginGate:
     def test_key_auth_mgmt_403_when_disabled(self, client, fake, monkeypatch):
         key, team_id = _provision_anon(client, fake)
