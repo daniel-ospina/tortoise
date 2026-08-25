@@ -207,10 +207,13 @@ def test_wizard_harness_configs_are_optimal():
     cursor_cfg = _extract_js_block(html, "CURSOR_MCP_CONFIG_ENV")
     assert "MCP_URL" in cursor_cfg  # url references the shared const
     assert "${env:TORTOISE_API_KEY}" in cursor_cfg
-    # Pi canonical JSON: env expansion too (aligned with the CLI, #1730)
+    # Pi canonical JSON: env-indirection (no literal key); the EXACT pi token
+    # (plain ${TORTOISE_API_KEY} — pi's mcp-client has no env: prefix support)
+    # is pinned by the #1729 harness-copy PR.
     pi_cfg = _extract_js_block(html, "PI_MCP_CONFIG_ENV")
     assert "MCP_URL" in pi_cfg
-    assert "${env:TORTOISE_API_KEY}" in pi_cfg
+    assert "TORTOISE_API_KEY" in pi_cfg
+    assert "tt_" not in pi_cfg
     # The shared const pins the trailing-slash endpoint (load-bearing, #529)
     assert 'const MCP_URL = \'https://api.premiselabs.co/mcp/\'' in html
 
@@ -243,4 +246,6 @@ def test_key_never_interpolated_into_env_blocks():
     for const in ("CURSOR_MCP_CONFIG_ENV", "PI_MCP_CONFIG_ENV"):
         block = _extract_js_block(html, const)
         assert "tt_" not in block, f"{const} must stay key-free"
-        assert "${env:TORTOISE_API_KEY}" in block
+        assert "TORTOISE_API_KEY" in block, f"env token missing from {const}"
+        # cursor pins env: expansion; the EXACT pi token is owned by #1729
+        # (plain form — pi's mcp-client has no env: prefix support).
