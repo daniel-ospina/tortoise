@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 // #1623: plan display data (build-time import of product/pricing.json).
 import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
-import { HARNESS_INSTALL, HARNESS_NAMES, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT } from './harnesses.js'
+import { HARNESS_COPY_LABEL, HARNESS_INSTALL, HARNESS_NAMES, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_STEPS } from './harnesses.js'
 
 const API_BASE = 'https://api.premiselabs.co'
 const KEY_STORAGE = 'tortoise_api_key'
@@ -2358,6 +2358,13 @@ function claimIntentInFlight() {
                           </button>
                         ))}
                       </div>
+                      {HARNESS_STEPS[wizardHarness] && (
+                        <ol className="harness-steps" style={{ margin: '0.9rem 0 0.25rem 1.1rem', padding: 0, lineHeight: 1.7 }}>
+                          {HARNESS_STEPS[wizardHarness].map((s, i) => (
+                            <li key={i} className="dim small">{s}</li>
+                          ))}
+                        </ol>
+                      )}
                       <pre className="snippet" style={{ marginTop: '0.75rem' }}>
                         {HARNESS_INSTALL[wizardHarness](apiKey)}
                         {HARNESS_SKILLS(wizardHarness)}
@@ -2368,7 +2375,7 @@ function claimIntentInFlight() {
                         <div className="wizard-nav-actions">
                           <button type="button" className={wizardCopied === 'harness' ? 'ghost' : 'btn-primary'}
                             onClick={() => wizardCopy(HARNESS_INSTALL[wizardHarness](apiKey) + HARNESS_SKILLS(wizardHarness) + (welcomeKey && !HARNESS_SKILLLESS.includes(wizardHarness) && !HARNESS_SKILLS_IN_PROMPT.includes(wizardHarness) ? ('\n\n' + HARNESS_PERSIST(apiKey)) : ''), 'harness')}>
-                            {wizardCopied === 'harness' ? 'Copied ✓' : 'Copy setup'}
+                            {wizardCopied === 'harness' ? 'Copied ✓' : (HARNESS_COPY_LABEL[wizardHarness] || 'Copy setup')}
                           </button>
                           {wizardCopied === 'harness' && (
                             <button type="button" className="btn-primary" onClick={() => setWizardStep(1)}>I've set it up — Continue →</button>
