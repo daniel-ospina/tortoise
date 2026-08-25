@@ -862,10 +862,14 @@ _CONSENT_HTML = """<!DOCTYPE html>
   // (provider → redirect back with #access_token) still ingests.
   const COOKIE_NAME = "sb-tortoise-auth-token";
   const cookieStorage = {
+    // Full SupportedStorage: getItem/setItem/removeItem — mirror of the
+    // dashboard's supabaseStorage (main.jsx): the parent-domain cookie
+    // on .premiselabs.co is BOTH read (reuse an existing dashboard
+    // session) and written (an OAuth/email sign-in here persists so
+    // getSession() can read it back — read-only storage would never
+    // let the fallback reach the consent view).
     getItem: (key) => {
       try {
-        // split-based cookie read — no regex escaping; parity with the
-        // dashboard's readCookie semantics.
         const parts = document.cookie.split("; ");
         for (const p of parts) {
           const eq = p.indexOf("=");
@@ -874,7 +878,15 @@ _CONSENT_HTML = """<!DOCTYPE html>
         return null;
       } catch (e) { return null; }
     },
-    removeItem: () => {},
+    setItem: (key, value) => {
+      if (!value) { this.removeItem(key); return; }
+      const expires = new Date(Date.now() + 7 * 24 * 3600 * 1000).toUTCString();
+      document.cookie = key + "=" + encodeURIComponent(value) +
+        "; Domain=.premiselabs.co; Path=/; SameSite=Lax; Secure; Expires=" + expires;
+    },
+    removeItem: (key) => {
+      document.cookie = key + "=; Domain=.premiselabs.co; Path=/; SameSite=Lax; Secure; Max-Age=0";
+    },
   };
   let supabaseClient = null;
   try {

@@ -370,9 +370,14 @@ class TestAuthorizePage:
         assert r.text.count("{") == r.text.count("}")  # no unbalanced braces
         # #1704: the page reuses the dashboard's parent-domain cookie session
         # (sb-tortoise-auth-token) — a signed-in dashboard user must not see a
-        # second login.
+        # second login. The storage must declare the FULL SupportedStorage
+        # interface: a missing setItem breaks gotrue's _saveSession (the
+        # OAuth/email fallback would TypeError on every sign-in).
         assert "sb-tortoise-auth-token" in r.text
         assert "cookieStorage" in r.text
+        assert "getItem: (key) => {" in r.text
+        assert "setItem: (key, value) => {" in r.text
+        assert "removeItem: (key) => {" in r.text
 
     def test_consent_page_escapes_script_breakout(self, api_client):
         """P1 (PR #1264 review): a malicious state / client_name containing
