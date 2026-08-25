@@ -81,8 +81,12 @@ def _clean_team_graphs(monkeypatch):
     embedded lane's wipe() clears everything per test; the server lane must
     mirror that by dropping the raw team graphs before each test."""
     yield
-    if os.environ.get("TORTOISE_DB_URI") and not os.environ.get("TORTOISE_TEST_CARVE_OUT"):
+    _uri = os.environ.get("TORTOISE_DB_URI")
+    if _uri and not os.environ.get("TORTOISE_TEST_CARVE_OUT"):
         try:
+            from tortoise.config import is_loopback_uri
+            if not is_loopback_uri(_uri):
+                return  # never drop team_* on a remote/shared server
             import tortoise.hosted_api as _ha
             _sdk = _ha._make_sdk(namespace="registry")
             _db = _sdk._get_proj().db

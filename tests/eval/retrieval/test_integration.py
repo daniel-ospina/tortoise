@@ -139,9 +139,9 @@ def test_baseline_report_carries_embedded_caveats():
         (Path(REPO_ROOT) / "tests/eval/retrieval/baseline"
          / "baseline-embedded-2026-08-17.json").read_text()
     )
-    _expected_mode2 = ("docker-falkordb" if os.environ.get("TORTOISE_DB_URI")
-                       else "embedded-falkordblite")
-    assert baseline["provenance"]["db_mode"] == _expected_mode2
+    # This baseline is a STATIC checked-in embedded artifact (name says so) —
+    # the assertion is about the artifact's own provenance, lane-independent.
+    assert baseline["provenance"]["db_mode"] == "embedded-falkordblite"
     assert "embedded_engine" in baseline["provenance"]
     joined_notes = " ".join(baseline.get("notes", [])).lower()
     for caveat in ("fts", "structural", "brute-force", "synthetic",
