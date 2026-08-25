@@ -43,7 +43,10 @@ services:
     # server-only image (no browser UI surface); honors REDIS_ARGS env
     # Pinned (issue #1146): :latest silently drifts engine versions between
     # runs — benchmark/performance parity needs a reproducible engine.
-    image: falkordb/falkordb-server:v4.16.7
+    # v4.20.4 = what :latest resolved to as of 2026-08-26; the V3 benchmark
+    # ingest (issue #1549) ran on 4.20.4, so the pin now matches the engine
+    # the dataset was built/verified on (issue #1733).
+    image: falkordb/falkordb-server:v4.20.4
     ports:
       - "127.0.0.1:6379:6379"   # loopback only — host-side MCP configs reach the sidecar
     environment:
@@ -59,11 +62,19 @@ services:
     restart: unless-stopped
     # Resource parity for reproducible benchmark runs (issue #1146): bounds
     # the sidecar so prod-like runs don't silently get more/fewer resources.
+    #
+    # memory: 8g — NOT 2g. The V3 benchmark ingest dataset needs 4.2-4.8 GB
+    # heap (RDB header recorded 4824.10 Mb at save time); under 5-worker
+    # ingest (≥10k changes/60s) the 2g cap tripped the cgroup OOM killer on
+    # BGSAVE forks (issue #1733, crash 2026-08-25 18:05 UTC — 30 pilot
+    # questions lost). 8g gives ≥2× headroom over peak heap for BGSAVE
+    # copy-on-write. Keep in sync with any live container:
+    # `docker update --memory 8g falkordb`.
     deploy:
       resources:
         limits:
           cpus: "2"
-          memory: 2g
+          memory: 8g
 
 volumes:
   falkordb-data:
