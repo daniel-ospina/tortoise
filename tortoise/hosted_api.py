@@ -3899,10 +3899,12 @@ async def toggle_dashboard_login(
 class KeyEnabledToggle(BaseModel):
     # Either field may be present; the handler applies whatever is sent
     # (enabled=on/off toggle, name=rename). `model_fields_set` distinguishes
-    # an explicit JSON null (apply it — null clears the label) from an absent
-    # field (leave untouched). `enabled` was previously required — making it
-    # optional is backward-compatible (existing callers still send it). At
-    # least one field must be present (422 on an empty body).
+    # an explicit JSON null from an absent field — null CLEARS the label
+    # (name) and LEAVES the toggle untouched (enabled: a null must never
+    # re-enable a disabled key, so it is treated as absent there). `enabled`
+    # was previously required — making it optional is backward-compatible
+    # (existing callers still send it). At least one field must be present
+    # (422 on an empty body).
     enabled: bool | None = None
     name: str | None = None
 
@@ -3944,9 +3946,11 @@ async def toggle_api_key_enabled(
             # owner is using.
             raise HTTPException(status_code=409, detail="Cannot modify a session key")
         result = {"key_id": key_id}
-        if "enabled" in body.model_fields_set:
-            _sb_set_enabled(cp, key_id, body.enabled is not False)
-            result["enabled"] = body.enabled is not False
+        # Explicit null for enabled is treated as absent (leave untouched) —
+        # `None is not False` would silently RE-ENABLE a disabled key.
+        if "enabled" in body.model_fields_set and body.enabled is not None:
+            _sb_set_enabled(cp, key_id, body.enabled)
+            result["enabled"] = body.enabled
         # model_fields_set distinguishes explicit null (clear label) from
         # field-absent (don't touch) — JSON null must clear, not skip.
         if "name" in body.model_fields_set:
@@ -3955,11 +3959,11 @@ async def toggle_api_key_enabled(
             result["name"] = cleaned
         return result
     # Registry mode (selfhost): no enabled column — enabled is a no-op echo
-    # (registry keys are always active, preserving the pre-#1148 contract of
-    # {"key_id", "enabled": True}); name IS stored on the APIKey node
-    # (parity with supabase mode). The same 404/owner-admin/revoked/session
-    # guards apply as supabase mode (_require_owner_admin resolves the
-    # Membership graph).
+    # (registry keys are always active, preserving the #1148 no-op echo
+    # contract of {"key_id", "enabled": True}); name IS stored on the APIKey
+    # node (parity with supabase mode). The same 404/owner-admin/revoked/
+    # session guards apply as supabase mode (_require_owner_admin resolves
+    # the Membership graph).
     sdk = _make_sdk(namespace="registry")
     rows = sdk._get_registry().query(
         "MATCH (k:APIKey {id: $id}) RETURN k.team_id, k.revoked_at, k.created_via",

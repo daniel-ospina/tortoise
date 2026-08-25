@@ -799,7 +799,7 @@ class TestKeysRename:
         kid = client.post("/v1/team/keys", json={"name": "staging"}).json()["id"]
         r = client.patch(f"/v1/team/keys/{kid}", json={"name": "prod"})
         assert r.status_code == 200, r.text
-        # registry mode has no enabled column — echo preserves the pre-#1148
+        # registry mode has no enabled column — echo preserves the #1148
         # no-op contract {key_id, enabled: True} alongside the applied name
         assert r.json() == {"key_id": kid, "enabled": True, "name": "prod"}
         listed = next(k for k in client.get("/v1/team/keys").json()["keys"] if k["id"] == kid)

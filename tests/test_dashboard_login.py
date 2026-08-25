@@ -341,6 +341,38 @@ class TestKeyRenameSupabase:
         )
         assert r.status_code == 422, r.text
 
+    def test_enabled_null_does_not_reenable(self, client, fake, monkeypatch):
+        # An explicit null for enabled must be treated as absent — it must
+        # never re-enable a disabled key (re-review P2).
+        key, team_id = _provision_anon(client, fake)
+        user_id = f"user-{uuid.uuid4().hex[:8]}"
+        _patch_session_user(monkeypatch, user_id)
+        _seed_owner_membership(fake, team_id, user_id)
+        from tortoise.auth import lookup_hash
+        rows = fake.query("api_keys", select=["id"],
+                          filters=[("lookup_hash", "eq", lookup_hash(key))])
+        key_id = rows[0]["id"]
+        # disable first
+        r = client.patch(
+            f"/v1/team/keys/{key_id}",
+            headers={"Authorization": "Bearer eyJ.sess"},
+            json={"enabled": False},
+        )
+        assert r.status_code == 200, r.text
+        # null must not flip it back
+        r = client.patch(
+            f"/v1/team/keys/{key_id}",
+            headers={"Authorization": "Bearer eyJ.sess"},
+            json={"enabled": None},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json() == {"key_id": key_id}
+        row = fake.query("api_keys", select=["enabled"],
+                         filters=[("id", "eq", key_id)])[0]
+        assert row["enabled"] is False  # still disabled
+        assert client.get("/v1/team",
+                          headers={"Authorization": f"Bearer {key}"}).status_code == 401
+
     def test_rename_unknown_key_404(self, client, fake, monkeypatch):
         user_id = f"user-{uuid.uuid4().hex[:8]}"
         _patch_session_user(monkeypatch, user_id)
