@@ -76,7 +76,7 @@ continues — one transient error never aborts the 500-Q run),
 `--integrity-threshold F` / `--integrity-justification <text>` (M7 #1527 +
 #1747 census-class-aware: override the `integrity.valid` RATE criterion —
 max allowed `invalid_rate` over questions with recoverable-class signals
-(parse_error/truncated/truncated_parse_error/partial_parse/transient_*
+(parse_error/truncated/truncated_parse_error/partial_parse/transient_*/s1_chunk_summary
 census classes, reader/judge/ingest:retries_exhausted eval failures); hard-failure
 questions (fatal_*/ingest/unknown census classes, non-census error strings
 with an empty census, permanent eval failures, malformed inputs — present
@@ -349,7 +349,7 @@ The report is self-explanatory: every run prints and persists
   `n_attempted` / `n_valid` / `n_invalid`, `invalid_rate` (invalid = a
   failed question OR a completed question with error-class/extraction-error
   signals; recoverable classes — parse_error/truncated/
-  truncated_parse_error/partial_parse/transient_*, plus
+  truncated_parse_error/partial_parse/transient_*/s1_chunk_summary, plus
   reader/judge/ingest:retries_exhausted eval failures — are rate-limited, not
   vetoed), the #1747 breakdown `n_hard_invalid` /
   `n_recoverable_invalid` / `recoverable_invalid_rate` /

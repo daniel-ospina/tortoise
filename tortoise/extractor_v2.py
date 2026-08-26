@@ -851,10 +851,14 @@ def _complete_parsed(model, system: str, user: str, *,
         # D2 (#1746) + F4 (#1780): the finish reason is captured race-free
         # in the calling thread by ``_complete`` and recorded into stats —
         # reading the shared adapter attribute here would be a cross-thread
-        # race under ``--workers > 1``. Hold the FIRST parse-failing
+        # race under ``--workers > 1`` (extract_session_v2 always passes
+        # stage_stats). The no-stats public-API path (run_s2/run_s4 default)
+        # falls back to the adapter attribute — preserving the pre-F4 D3
+        # retry-skip for truncated responses. Hold the FIRST parse-failing
         # attempt's value — the class-decision signal for
         # ``_ParseError.truncated``.
-        finish = stats.get("finish_reason") if stats is not None else None
+        finish = stats.get("finish_reason") if stats is not None else (
+            getattr(model, "last_finish_reason", None))
         stage_truncated = stage_truncated or finish == "length"
         if stats is not None:
             stats["truncated"] = stage_truncated
@@ -3544,9 +3548,9 @@ def _repair_candidates(working: str) -> list[str]:
     (``_apply_repair_rule``: a rule that only fires inside a string value
     is never applied — no silent in-string corruption). NO data-dropping
     tail-cuts here (a truncation cut at an item boundary is a recorded
-    ERROR via the caller's cut-accept loop, never a warning-only
-    "repair"). First-valid-wins + schema gate keep it safe; no free-form
-    repair library, no unbounded heuristics."""
+    ERROR via rung 4's partial-accept — ``stats["partial"]``, never a
+    warning-only "repair"). First-valid-wins + schema gate keep it safe;
+    no free-form repair library, no unbounded heuristics."""
     candidates: list[str] = []
     for k in range(1, 9):
         candidates.append(working + "}" * k)
@@ -3676,26 +3680,6 @@ def _parse_json_robust(response: str, *, stats: dict | None = None) -> dict:
         if ok:
             if recovery is not None:
                 recovery["repair"] = recovery.get("repair", 0) + 1
-            return parsed
-    # rung 3b — cut-accept (D4 contract: a schema-validated PARTIAL accept
-    # with a truncated tail dropped is a recorded ERROR, never a
-    # content-preserving "repair"): progressive tail-cuts that land at an
-    # item boundary. ``stats["partial"] = True`` signals the caller to
-    # record the partial_parse census class; ``recovery["repair"]`` is NOT
-    # incremented. The ≥1-non-empty-embed-section guard mirrors rung 4 so a
-    # partial the caller would discard never falsely classes partial_parse.
-    for cut in (-1, -2, -3, -5, -10, -20):
-        if len(working) <= abs(cut):
-            continue
-        try:
-            parsed = _parse_json(working[:cut])
-        except ValueError as e:
-            last_err = e
-            continue
-        ok, _ = _validate_output_shape(parsed)
-        if ok and any(parsed.get(s) for s in _EMBED_SECTIONS):
-            if stats is not None:
-                stats["partial"] = True
             return parsed
     # rung 4 — schema-validated partial-accept (H3 truncation)
     prefix = _longest_valid_prefix(working)

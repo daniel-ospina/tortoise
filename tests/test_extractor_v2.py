@@ -408,61 +408,6 @@ class TestParseLadder:
         assert [p["content"] for p in out["points"]] == ["a}{b", "c"]
         assert stats["recovery"]["repair"] == 1
 
-    def test_cut_accept_records_partial_parse_never_repair(self):
-        """#1780 (F2): a truncated response whose tail-cut would land at an
-        item boundary is a DATA-DROPPING accept — a recorded ERROR
-        (``stats["partial"] = True`` → the ``partial_parse`` census class),
-        NEVER a warning-only ``recovery["repair"]``. The truncated tail
-        item is dropped; the partial list is used."""
-        truncated = ('{"entities": [], "events": [], "operators": [], '
-                     '"points": [{"content": "s4 point 1", '
-                     '"pointKind": "statement"}, {"content": "s4 point 2"')
-
-        class _Trunc:
-            last_finish_reason = "length"
-
-            def __init__(self):
-                self.calls = 0
-
-            def complete(self, *, system, user, max_tokens=None):
-                self.calls += 1
-                return truncated
-
-        stats: dict = {}
-        out = v2.run_s2(_Trunc(), "STORY", stats=stats)
-        # accepted-but-partial: the ladder's data-dropping accept fired.
-        assert stats["partial"] is True
-        # the tail-cut/data-drop is NEVER a content-preserving repair.
-        assert not (stats.get("recovery") or {}).get("repair")
-        assert [p["content"] for p in out["points"]] == ["s4 point 1"]
-        # via extract_session_v2 the partial_parse census class fires.
-        from tests.test_extractor_reliability import _conv
-
-        class _S4Trunc:
-            last_finish_reason = None
-
-            def __init__(self):
-                self.calls = 0
-
-            def complete(self, *, system, user, max_tokens=None):
-                self.calls += 1
-                if "STORY SUMMARIZER" in system:
-                    self.last_finish_reason = "stop"
-                    return "A narrative."
-                if "GAP REVIEWER" in system:
-                    self.last_finish_reason = "length"
-                    return truncated
-                self.last_finish_reason = "stop"
-                return ('{"entities": [], "events": [], "operators": [], '
-                        '"points": [{"content": "s2 base", '
-                        '"pointKind": "statement"}]}')
-
-        out2 = v2.extract_session_v2(_S4Trunc(), _conv())
-        assert out2["error_census"]["partial_parse"] == 1
-        assert any("partial" in e for e in out2["errors"])
-        contents = [p["content"] for p in out2["embed_list"]["points"]]
-        assert "s4 point 1" in contents and "s4 point 2" not in contents
-
     def test_schema_validator_accepts_contract_shape(self):
         """A valid embed-list shape passes; unknown keys, empty arrays and
         extra fields ride through (permissive-on-extras structural gate)."""
@@ -565,8 +510,10 @@ class TestParseLadder:
                 return ('{"entities": [], "events": [], "operators": [], '
                         '"points": [')
 
+        model = _Trunc()
         with pytest.raises(ValueError):
-            v2.run_s2(_Trunc(), "STORY")
+            v2.run_s2(model, "STORY")
+        assert model.calls == 1  # D3 deterministic retry-skip (length)
 
     def test_truncated_skips_same_prompt_retry(self):
         """D3 (#1746): a first parse-failing attempt with finish_reason ==
