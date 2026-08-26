@@ -253,29 +253,39 @@ path via `--data` skips the download. Split S = `longmemeval_s_cleaned.json`
 
 The report is self-explanatory: every run prints and persists
 
-- **`integrity`** — `valid` (#1747 census-class-aware: invalid_rate ≤
-  threshold AND zero hard-failure questions — fatal_*/ingest/unknown/non-
-  census-error-string (empty-census)/permanent-eval-failure questions, and
-  malformed inputs (present non-bool `valid`, non-iterable or non-str
-  `error_classes`, falsy-but-present `error_classes`) fail closed to hard
-  and veto at any threshold; a shape-broken dict outcome excluded from the
-  means still vetoes when it carries a hard census class — malformed shapes
-  cannot launder a fatal class out of the gate),
+- **`integrity`** — `valid` (#1747 census-class-aware:
+  `valid = (n_hard_invalid == 0) AND (n_excluded_hard == 0) AND
+  (invalid_rate ≤ threshold) AND (attempted set non-empty whenever any
+  entry was excluded)` — fatal_*/ingest/unknown/non-census-error-string
+  (empty-census)/permanent-eval-failure questions, and malformed inputs
+  (present non-bool `valid`, non-iterable, non-str or falsy-but-present
+  `error_classes`) fail closed to hard and veto at any threshold; an
+  EXCLUDED outcome (shape-broken dict, or a breaker_open vector-arm drop)
+  still vetoes when it carries a hard census class — malformed shapes
+  cannot launder a fatal class out of the gate (`n_excluded_hard`), and a
+  run whose entire outcome set was excluded never certifies valid (a truly
+  empty report stays vacuously valid)),
   `n_attempted` / `n_valid` / `n_invalid`, `invalid_rate` (invalid = a
   failed question OR a completed question with error-class/extraction-error
   signals; recoverable classes — parse_error/truncated/
   truncated_parse_error/partial_parse/transient_*, plus
   reader/judge:retries_exhausted eval failures — are rate-limited, not
   vetoed), the #1747 breakdown `n_hard_invalid` /
-  `n_recoverable_invalid` / `recoverable_invalid_rate`,
-  `n_excluded` (outcomes dropped by the entry shape filter — malformed
-  checkpoint JSON; the denominator shrink is observable, never silent),
+  `n_recoverable_invalid` / `recoverable_invalid_rate` /
+  `n_excluded_hard`,
+  `n_excluded` (entries dropped by the entry shape filter — malformed
+  checkpoint JSON in outcomes OR failures; the denominator shrink is
+  observable, never silent),
   `error_census`
   (site-prefixed P2-aligned error classes: `reader:retries_exhausted`,
   `judge:fatal`, …), `error_census_malformed` (non-int counts recorded
   verbatim), `criterion` (the applied gate rule, human-readable), `checks`
   (python guard, dataset audited, audit present, fingerprint matched,
-  census computed). Printed BEFORE the score.
+  census computed). The integrity block prints BEFORE the score; the
+  additive breakdown fields (`n_hard_invalid` / `n_excluded` / `criterion`
+  / …) ride the persisted report JSON. NOTE: a failure entry WITHOUT an
+  `error_class` (e.g. the full-context cell producer) grades hard —
+  fail-closed — until the #1746 lane wires site-prefixed classes.
 - **`leg_mix`** — per-leg `match_source` counts over the top_k context the
   reader saw (embedded → `tfidf`; real → `rrf`; never empty).
 - **`pool_size`** — live per-question graph point count (mean/p50/p95) =

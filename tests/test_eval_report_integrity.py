@@ -731,6 +731,13 @@ def test_report_integrity_malformed_dict_outcome_dropped():
             lambda o: o.__setitem__("rerank_pass",
                                     {"applied": True,
                                      "pool_recall@k": {"session": 5.0}}),
+            # round-8 families: bool-is-int admission (a tampered true must
+            # never aggregate as 1.0), rerank_latency_ms crash family
+            lambda o: o["session_recall@k"].__setitem__("5", True),
+            lambda o: o["turn_recall@k"].__setitem__("5", False),
+            lambda o: o.__setitem__("context_tokens", True),
+            lambda o: o.__setitem__("pool_size", True),
+            lambda o: o.__setitem__("rerank_latency_ms", "12ms"),
     ):
         o = _outcome("q0", valid=True)
         mutate(o)
@@ -770,8 +777,52 @@ def test_report_integrity_shape_broken_outcome_with_hard_census_vetoes():
     assert integ["n_excluded"] == 1
     assert integ["n_attempted"] == 1        # excluded from the attempted set
     assert integ["n_hard_invalid"] == 0     # ... yet the hard grade VETOES
+    assert integ["n_excluded_hard"] == 1    # published so the veto is explainable
     assert integ["valid"] is False          # veto fires on the malformed outcome
     assert integ["error_census"]["fatal_402_billing"] == 1  # evidence kept
+
+
+def test_report_integrity_all_excluded_never_certifies():
+    """#1747 (round-8 security review): a run whose ENTIRE outcome set is
+    shape-broken (a wholesale corrupt/version-drifted checkpoint) must never
+    certify valid — n_attempted == 0 with n_excluded > 0 fails closed on the
+    empty denominator (the vacuous-valid hole: invalid_rate 0.0 over zero
+    graded questions). A truly EMPTY report (no outcomes, nothing excluded)
+    stays vacuously valid (test_report_integrity_zero_outcomes)."""
+    o = _outcome("q0", valid=False)
+    o["error_classes"] = {"parse_error": 1}
+    del o["context_tokens"]            # shape-broken → excluded
+    integ = _report([o], threshold=1.0)["integrity"]
+    assert integ["n_attempted"] == 0
+    assert integ["n_excluded"] == 1
+    assert integ["n_excluded_hard"] == 0
+    assert integ["valid"] is False     # never certify an empty attempted set
+    # the empty report stays vacuously valid (nothing was excluded).
+    assert _report([])["integrity"]["valid"] is True
+
+
+def test_report_integrity_breaker_open_hard_census_vetoes():
+    """#1747 (round-8 security review): a breaker_open (vector-arm drop)
+    outcome carrying a HARD census class still vetoes — the breaker flag
+    means "no retrieval ran", never "errors absolved"; a tampered checkpoint
+    cannot launder a fatal class under the dropped marker (n_excluded_hard)."""
+    o = _outcome("q0", valid=False)
+    o["breaker_open"] = True
+    o["dropped_reason"] = "breaker_open"
+    o["error_classes"] = {"fatal_402_billing": 1}
+    integ = _report([o, _outcome("q1", valid=True)],
+                    threshold=1.0)["integrity"]
+    assert integ["n_excluded_hard"] == 1
+    assert integ["valid"] is False
+    assert integ["error_census"]["fatal_402_billing"] == 1
+    # a clean breaker_open drop (no census) does NOT veto.
+    o2 = _outcome("q2", valid=True)
+    o2["breaker_open"] = True
+    o2["dropped_reason"] = "breaker_open"
+    integ = _report([o2, _outcome("q1", valid=True)],
+                    threshold=1.0)["integrity"]
+    assert integ["n_excluded_hard"] == 0
+    assert integ["valid"] is True
 
 
 def test_report_integrity_rerank_run_malformed_pool_recall_no_crash():
@@ -889,10 +940,16 @@ def test_run_protocol_step5_gate_string_pins_criterion():
     gate = STEPS_BY_NUMBER[5].gate
     assert "invalid_rate ≤ threshold" in gate
     assert "n_hard_invalid == 0" in gate
+    assert "n_excluded_hard == 0" in gate       # round-8 veto-escape term
     assert f"{JUSTIFIED_BASELINE_THRESHOLD}" in gate
     # the allowance math is pinned (0.02 × 500 = 10 questions — a regression
     # to percentage formatting fails here).
     assert "≤10 of 500 questions" in gate
+    # round-8 clauses: excluded outcomes still veto; falsy error_classes
+    # fail closed; a fully excluded run never certifies.
+    assert "falsy-but-present" in gate
+    assert "breaker_open" in gate
+    assert "fully excluded run never certifies" in gate
 
     # the executed step-5 command injects the justified threshold AND its
     # recorded justification (M7: a non-default threshold is never silently

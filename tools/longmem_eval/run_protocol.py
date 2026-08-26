@@ -7,7 +7,7 @@ Encodes the 9-step phased protocol from 03-scope §Run/Testing Protocol
     2  micro-tests (R1 sweep + M6)      (gate: knob selected, marking calibrated)
     3  50-Q pilot + full-context cell   (gate: pilot completes, integrity readable)
     4  mechanical + obvious fixes       (gate: pilot findings fixed)
-    5  full 500-Q run — V3 baseline     (gate: integrity.valid=true — invalid_rate ≤ threshold AND zero hard failures; threshold 0.02 justified default at 500-Q scale, #1747)
+    5  full 500-Q run — V3 baseline     (gate: integrity.valid=true — invalid_rate ≤ threshold AND zero hard failures (n_hard_invalid == 0 AND n_excluded_hard == 0 — excluded-outcome hard vetoes count); threshold 0.02 justified default at 500-Q scale, #1747)
     6  mechanical + obvious fixes       (gate: findings fixed)
     7  50-Q confirmation                (gate: delta confirms, direction stated in advance)
     8  1k full benchmark (owner-gated)  (gate: explicit owner decision)
@@ -107,10 +107,14 @@ STEPS: list[Step] = [
     Step(5, "baseline-500q", "Full 500-Q run — the V3 baseline (V4 comparison point)",
          "run",
          "integrity.valid=true — census-class-aware (#1747): invalid_rate ≤ threshold "
-         "AND n_hard_invalid == 0 (fatal_*/ingest/unknown census classes, non-census "
-         "error strings with an EMPTY census, permanent eval failures, malformed "
-         "inputs — present non-bool valid flag / non-iterable or non-str "
-         "error_classes — fail closed to hard, veto at any threshold; recoverable "
+         "AND n_hard_invalid == 0 AND n_excluded_hard == 0 (fatal_*/ingest/unknown "
+         "census classes, non-census error strings with an EMPTY census, permanent "
+         "eval failures, malformed inputs — present non-bool valid flag / non-"
+         "iterable, non-str OR falsy-but-present error_classes — fail closed to "
+         "hard, veto at any threshold; excluded outcomes — shape-broken dicts / "
+         "breaker_open drops — with a hard census still veto via n_excluded_hard; "
+         "a non-empty attempted set is required whenever any entry was excluded — "
+         "a fully excluded run never certifies; recoverable "
          "parse_error/truncated/truncated_parse_error/partial_parse/transient_* "
          "census classes AND reader/judge:retries_exhausted eval failures are "
          "rate-limited, not vetoed); threshold "

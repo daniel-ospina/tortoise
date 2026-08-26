@@ -223,11 +223,13 @@ def test_outcomes_to_report_golden_shape():
     # The regression made this None — a real dict is the whole point (E2E-2).
     assert isinstance(report, dict)
     # Top-level key set is the published report contract (M7 adds the
-    # self-explanatory-report keys).
+    # self-explanatory-report keys; #1747 adds n_excluded so the shape-
+    # filter denominator shrink is observable at top level).
     assert set(report) == {
-        "benchmark", "dataset", "split", "n_questions", "accuracy",
-        "retrieval", "latency_ms", "methodology", "failures", "n_failed",
-        "outcomes", "integrity", "leg_mix", "pool_size", "evidence",
+        "benchmark", "dataset", "split", "n_questions", "n_excluded",
+        "accuracy", "retrieval", "latency_ms", "methodology", "failures",
+        "n_failed", "outcomes", "integrity", "leg_mix", "pool_size",
+        "evidence",
     }
     assert report["benchmark"] == "LongMemEval"
     assert report["dataset"] == "xiaowu0162/longmemeval-cleaned"
