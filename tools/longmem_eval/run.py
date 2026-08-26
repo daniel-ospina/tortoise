@@ -1540,15 +1540,24 @@ def run_evaluation(
     # the evidence_boost tri-state above). retrieve_for_question's own env
     # fallback only fires for DIRECT callers now — the run path always
     # passes the resolved values, so methodology == actual on every path.
+    # C2 off-path hygiene (review P2-2): the multiplier env vars are
+    # resolved/validated ONLY when the boost is actually ON — a boost-off
+    # run must be completely unaffected by a stray TORTOISE_LME_EVIDENCE_BOOST_VERBATIM/_SOURCE
+    # (mirrors the R6 "_resolve_rerank" precedent in this file: a baseline
+    # run never reads the R6 env vars). When off, the multipliers stay
+    # None — the fingerprint's conditional key union drops them (inert
+    # knobs never gate the checkpoint fingerprint) and the methodology
+    # records the default constants.
     if context_item_cap is None:
         context_item_cap = _env_int(
             "TORTOISE_LME_CONTEXT_ITEMS", DEFAULT_CONTEXT_ITEM_CAP)
-    evidence_boost_verbatim = _resolve_boost_float(
-        "TORTOISE_LME_EVIDENCE_BOOST_VERBATIM",
-        DEFAULT_EVIDENCE_BOOST_VERBATIM, evidence_boost_verbatim)
-    evidence_boost_source = _resolve_boost_float(
-        "TORTOISE_LME_EVIDENCE_BOOST_SOURCE",
-        DEFAULT_EVIDENCE_BOOST_SOURCE, evidence_boost_source)
+    if evidence_boost:
+        evidence_boost_verbatim = _resolve_boost_float(
+            "TORTOISE_LME_EVIDENCE_BOOST_VERBATIM",
+            DEFAULT_EVIDENCE_BOOST_VERBATIM, evidence_boost_verbatim)
+        evidence_boost_source = _resolve_boost_float(
+            "TORTOISE_LME_EVIDENCE_BOOST_SOURCE",
+            DEFAULT_EVIDENCE_BOOST_SOURCE, evidence_boost_source)
     # M7 #1739 / #1742: the session-parallel worker factory must serve
     # EXACTLY the fingerprinted config — a programmatic caller passing a
     # spec'd extractor_model with session_workers > 1 but forgetting the
@@ -2777,18 +2786,39 @@ def _run_main(parser: argparse.ArgumentParser, args,
     # TORTOISE_LME_EVIDENCE_BOOST env still applies; OFF by default in
     # code — fail-safe: only 1/true/yes/on enables, mirroring the R6
     # rerank gate). Per-class multipliers default to the retrieve.py
-    # constants (env overrides; CLI beats env; < 1.0 fails loudly).
+    # constants (env overrides; CLI beats env; < 1.0 fails loudly —
+    # resolved ONLY when the boost is on, so a stray multiplier env never
+    # aborts a boost-off run, review P2-2).
     if args.evidence_boost is not None:
         evidence_boost = args.evidence_boost
     else:
         eb_env = (os.environ.get("TORTOISE_LME_EVIDENCE_BOOST") or "")
         evidence_boost = eb_env.strip().lower() in _TRUTHY
-    evidence_boost_verbatim = _resolve_boost_float(
-        "TORTOISE_LME_EVIDENCE_BOOST_VERBATIM",
-        DEFAULT_EVIDENCE_BOOST_VERBATIM, args.evidence_boost_verbatim)
-    evidence_boost_source = _resolve_boost_float(
-        "TORTOISE_LME_EVIDENCE_BOOST_SOURCE",
-        DEFAULT_EVIDENCE_BOOST_SOURCE, args.evidence_boost_source)
+    evidence_boost_verbatim = args.evidence_boost_verbatim
+    evidence_boost_source = args.evidence_boost_source
+    if evidence_boost:
+        evidence_boost_verbatim = _resolve_boost_float(
+            "TORTOISE_LME_EVIDENCE_BOOST_VERBATIM",
+            DEFAULT_EVIDENCE_BOOST_VERBATIM, args.evidence_boost_verbatim)
+        evidence_boost_source = _resolve_boost_float(
+            "TORTOISE_LME_EVIDENCE_BOOST_SOURCE",
+            DEFAULT_EVIDENCE_BOOST_SOURCE, args.evidence_boost_source)
+    else:
+        # Off-path hygiene (review P2-2, mirrors the R6 precedent in this
+        # file): the ambient TORTOISE_LME_EVIDENCE_BOOST_VERBATIM/_SOURCE
+        # env vars are NOT read when the boost is off — a stray/stale
+        # value must never abort a baseline run (or gate its fingerprint).
+        # EXPLICIT CLI args are still validated even on the off path — a
+        # user typo (--evidence-boost-verbatim 0.5 / nan) fails loudly
+        # (test_knob_cli_validation contract).
+        if args.evidence_boost_verbatim is not None:
+            _resolve_boost_float(
+                "TORTOISE_LME_EVIDENCE_BOOST_VERBATIM",
+                DEFAULT_EVIDENCE_BOOST_VERBATIM, args.evidence_boost_verbatim)
+        if args.evidence_boost_source is not None:
+            _resolve_boost_float(
+                "TORTOISE_LME_EVIDENCE_BOOST_SOURCE",
+                DEFAULT_EVIDENCE_BOOST_SOURCE, args.evidence_boost_source)
     # R5 (#1544) TR knobs: argparse defaults (12 / 0.5 / events-on),
     # recorded verbatim in the report methodology (D7).
     tr_top_k = args.tr_top_k

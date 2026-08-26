@@ -1482,7 +1482,10 @@ def build_report(
                                      "context_token_cap tokens AND the "
                                      "context_item_cap items "
                                      "(default 40; TR questions keep the pinned "
-                                     "tr_top_k item cap)",
+                                     "tr_top_k item cap AND render time-ascending "
+                                     "per R5 #1544 — dated first, stable within "
+                                     "a date, i.e. the reader's READING order, "
+                                     "not RRF rank)",
             "extraction_approach": extraction_approach,
             "retriever": retriever,
             "retrieval_arm": (
