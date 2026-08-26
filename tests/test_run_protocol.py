@@ -543,6 +543,81 @@ def test_checkpoint_resume_quality_corrupt_warns_loudly(tmp_path, capsys):
     assert "corrupt" in err.lower() and str(cp) in err
 
 
+def test_checkpoint_resume_quality_lock_busy_warns_accurately(
+        tmp_path, monkeypatch, capsys):
+    """#1764/code-review: flock_exclusive raises TimeoutError (an OSError
+    subclass) when a concurrent writer holds the lock — the scan must NOT
+    swallow it in the corrupt-file clause and misreport a lock-busy as a
+    corrupt checkpoint. Catch it separately and print an accurate lock-busy
+    message (scan skipped — concurrent writer), still returning None."""
+    cp = tmp_path / "busy.json"
+    cp.write_text(json.dumps({"format": "lme-checkpoint-v2",
+                              "outcomes": []}), encoding="utf-8")
+    from tortoise.shared_state import concurrency as _cc
+
+    def _busy(*a, **k):
+        raise TimeoutError("flock timeout on state.json.lock")
+
+    monkeypatch.setattr(_cc, "flock_exclusive", _busy)
+    assert rp.checkpoint_resume_quality(cp) is None
+    err = capsys.readouterr().err
+    assert "lock busy" in err.lower()
+    assert "concurrent writer" in err.lower()
+    assert "corrupt" not in err.lower()  # never misreported as corrupt
+
+
+def test_checkpoint_resume_quality_zero_session_matches_gate(tmp_path):
+    """#1764/code-review: the scan's zero_session count derives from the
+    SAME type-strict predicate as the gate's session_zero signal
+    (run.session_recall_all_zero) — a corrupt bool-False session_recall@k
+    must NOT count as zero_session when the rejection was fts-only (the
+    old looser all(v == 0) predicate drifted from the gate and would
+    miscount it)."""
+    cp = tmp_path / "boolzero.json"
+    cp.write_text(json.dumps({
+        "format": "lme-checkpoint-v2",
+        "run_key": "embedded__hybrid__default__default",
+        "outcomes": [{"question_id": "q-dead",
+                       "session_recall@k": {"20": False},  # corrupt bool
+                       "turn_recall@k": {"20": 0.0},
+                       "legs": [{"leg": "fts", "ran": True,
+                                  "degraded": False,
+                                  "reason": "empty_results", "count": 0}]}],
+    }), encoding="utf-8")
+    scan = rp.checkpoint_resume_quality(cp)
+    assert scan is not None
+    assert scan["rejected"] == 1
+    assert scan["fts_dead"] == 1       # the rejection was fts-only
+    assert scan["zero_session"] == 0   # bool False is NOT an all-zero signal
+
+
+def test_checkpoint_resume_quality_forwarded_retriever_wins(tmp_path):
+    """#1764/code-review: the scan's required-key retriever resolves via
+    the runner's own helper (run._retriever_from_checkpoint) with the
+    forwarded retriever FIRST — a top-level-present/run_key-absent file is
+    scanned per the forwarded retriever (cmd_run forwards the runner
+    command's --retriever, default "hybrid"), never per the top-level
+    field alone (the runner loads with the forwarded retriever's keys)."""
+    cp = tmp_path / "topfield.json"
+    cp.write_text(json.dumps({
+        "format": "lme-checkpoint-v2",
+        "retriever": "vector",  # top-level field, NO run_key segment
+        "outcomes": [{"question_id": "q-hybrid",
+                       "session_recall@k": {"5": 1.0},
+                       "turn_recall@k": {"5": 1.0}}],
+    }), encoding="utf-8")
+    # forwarded hybrid (the runner's effective retriever) → hybrid keys →
+    # the hybrid-keys outcome is gate-eligible, not truncated
+    scan = rp.checkpoint_resume_quality(cp, forwarded="hybrid")
+    assert scan is not None
+    assert scan["checked"] == 1 and scan["truncated"] == 0
+    # no forwarded value (programmatic path) → top-level field wins →
+    # vector keys → the hybrid-keys outcome is truncated
+    scan = rp.checkpoint_resume_quality(cp)
+    assert scan is not None
+    assert scan["truncated"] == 1 and scan["checked"] == 0
+
+
 def test_print_resume_quality_clean_verdict_softened(tmp_path, capsys):
     """#1764/code-review: the clean-path verdict must not bless a file the
     runner would refuse wholesale — the scan only re-checks per-outcome gate

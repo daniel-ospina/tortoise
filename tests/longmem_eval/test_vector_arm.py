@@ -724,6 +724,31 @@ def test_checkpoint_resume_gate_keeps_breaker_open(tmp_path):
       "legs": [{"leg": "fts", "ran": True, "degraded": True,
                  "reason": "query_failed", "count": 0}]},
      "fts.count=0"),
+    # timeout: the strategy deadline expired (R3 #1542 D4 as_completed
+    # merge) — the query never completed, results discarded, genuinely dead
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": True,
+                 "reason": "timeout", "count": 0}]},
+     "fts.count=0"),
+    # timed-out fts leg + HEALTHY session (another leg surfaced the
+    # session) → NOT retrieval-dead — the session positively surfaced
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": True,
+                 "reason": "timeout", "count": 0}],
+      "session_recall@k": {"5": 1.0}},
+     None),
+    # unknown / corrupt reason strings (future vocabulary, hand-edited
+    # files, reason=None) are NOT dead — fail-open (the index_missing
+    # livelock lesson); vocabulary drift is warned about separately
+    # (test_resume_gate_warns_on_unknown_leg_reason)
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": True,
+                 "reason": "some_future_reason", "count": 0}]},
+     None),
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": True,
+                 "reason": None, "count": 0}]},
+     None),
     # R3 (#1542): index_missing is environmental/benign — expected in
     # embedded FalkorDBLite (no FTS index); degrades quietly, does NOT trip
     # the breaker. NOT a dead leg — rejecting it would reject every embedded
@@ -812,6 +837,77 @@ def test_resume_gate_reject_reason_guard_rails(outcome, expect):
         assert reason is None
     else:
         assert reason is not None and reason.startswith(expect)
+
+
+def test_resume_gate_warns_on_unknown_leg_reason(capsys):
+    """#1764/code-review: an fts leg with count==0 and a reason OUTSIDE
+    the known vocabulary (future vocabulary, hand-edited files,
+    reason=None) stays fail-open — NOT dead (the index_missing livelock
+    lesson) — but emits a LOUD stderr warning naming the leg and reason so
+    vocabulary drift is visible (mirrors the corrupt-file warning
+    pattern)."""
+    # unknown future-vocabulary reason → not dead, warning fires
+    reason = runner.resume_gate_reject_reason({
+        "question_id": "q-unknown",
+        "legs": [{"leg": "fts", "ran": True, "degraded": True,
+                   "reason": "some_future_reason", "count": 0}]})
+    assert reason is None
+    err = capsys.readouterr().err
+    assert "unknown" in err.lower()
+    assert "some_future_reason" in err and "q-unknown" in err
+    # reason=None (hand-edited/corrupt) → not dead, warning fires
+    reason = runner.resume_gate_reject_reason({
+        "question_id": "q-none",
+        "legs": [{"leg": "fts", "ran": True, "degraded": True,
+                   "reason": None, "count": 0}]})
+    assert reason is None
+    err = capsys.readouterr().err
+    assert "unknown" in err.lower()
+    assert "None" in err and "q-none" in err
+    # a known benign reason (index_missing) does NOT warn
+    reason = runner.resume_gate_reject_reason({
+        "question_id": "q-benign",
+        "legs": [{"leg": "fts", "ran": True, "degraded": True,
+                   "reason": "index_missing", "count": 0}]})
+    assert reason is None
+    assert "unknown" not in capsys.readouterr().err.lower()
+
+
+def test_checkpoint_top_level_retriever_mismatch_warns(tmp_path, capsys):
+    """#1764/code-review: _load_checkpoint's retriever-mismatch warning
+    covers the checkpoint's first-class top-level ``retriever`` field as
+    well as the run_key segment — a top-level field that disagrees with
+    the forwarded retriever warns loudly, while the required-key set still
+    derives from the forwarded retriever (load behavior unchanged)."""
+    cp = tmp_path / "state.json"
+    outcome = _minimal_outcome("mini_ie_user_001")  # hybrid keys only
+    # top-level field says vector but no run_key claims it — the runner
+    # (forwarded hybrid) loads with hybrid keys; the disagreement warns.
+    cp.write_text(json.dumps({
+        "format": "lme-checkpoint-v2",
+        "run_key": "embedded__hybrid__default__default",
+        "retriever": "vector",
+        "outcomes": [outcome],
+    }), encoding="utf-8")
+    done, _ = runner._load_checkpoint(
+        str(cp), run_key="embedded__hybrid__default__default")
+    err = capsys.readouterr().err
+    assert "retriever" in err and "!=" in err
+    assert "vector" in err
+    assert "mini_ie_user_001" in done  # hybrid keys → resumes
+
+    # matching top-level field → no warning
+    cp2 = tmp_path / "state2.json"
+    cp2.write_text(json.dumps({
+        "format": "lme-checkpoint-v2",
+        "run_key": "embedded__hybrid__default__default",
+        "retriever": "hybrid",
+        "outcomes": [outcome],
+    }), encoding="utf-8")
+    done, _ = runner._load_checkpoint(
+        str(cp2), run_key="embedded__hybrid__default__default")
+    assert "mini_ie_user_001" in done
+    assert "!=" not in capsys.readouterr().err
 
 
 def test_checkpoint_resume_gate_keeps_sessionless_abstention(tmp_path, capsys):

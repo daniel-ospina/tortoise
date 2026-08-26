@@ -892,6 +892,78 @@ def _legit_sessionless(outcome: dict) -> bool:
         v is None for v in tr.values())
 
 
+# ── R3 (#1542) D4 leg-reason vocabulary (tortoise/search_engine.py) ────────
+#: Per-leg trace entries are {"leg", "ran", "degraded", "reason", "count"};
+#: the engine emits ``reason`` from a closed vocabulary. Classification for
+#: the #1764 resume-quality gate:
+#:   DEAD at count==0 (genuinely retrieval-dead):
+#:     ``empty_results`` — FTS ran clean and found nothing (the pilot
+#:         artifact);
+#:     ``query_failed`` — a real driver failure;
+#:     ``timeout`` — the strategy deadline expired (as_completed merge,
+#:         R3 #1542 D4): the query never completed, results discarded;
+#:   BENIGN (environmental/structural — never retrieval-dead):
+#:     ``ok`` — live retrieval;
+#:     ``index_missing`` — embedded FalkorDBLite, no FTS index; degrades
+#:         quietly, never trips the breaker;
+#:     ``no_embeddings`` — vector arm: zero embedded points;
+#:     ``breaker_open`` — the breaker skipped the strategy.
+#: Tuples (not sets) so a corrupt non-string reason (hand-edited files)
+#: compares by equality instead of TypeErroring the gate on hashing.
+DEAD_LEG_REASONS: tuple[str, ...] = (
+    "empty_results", "query_failed", "timeout")
+BENIGN_LEG_REASONS: tuple[str, ...] = (
+    "ok", "index_missing", "no_embeddings", "breaker_open")
+KNOWN_LEG_REASONS: tuple[str, ...] = tuple(
+    sorted(set(DEAD_LEG_REASONS) | set(BENIGN_LEG_REASONS)))
+
+
+def session_recall_all_zero(sr) -> bool:
+    """Type-strict all-zero predicate for a ``session_recall@k`` dict:
+    bool False is an int subclass but is NOT a recorded recall value, so
+    only real int/float zeros count (mirrors session_healthy's bool
+    exclusion). Shared by the resume-quality gate (run.py) and the
+    protocol's pre-resume scan (run_protocol.py) so the predicate can
+    never drift between them."""
+    return (isinstance(sr, dict) and bool(sr)
+            and all(isinstance(v, (int, float))
+                    and not isinstance(v, bool) and v == 0
+                    for v in sr.values()))
+
+
+def _retriever_from_checkpoint(data: dict,
+                               forwarded: str | None = None
+                               ) -> tuple[str, str | None]:
+    """Resolve the retriever whose required-key set applies to a
+    checkpoint — single source for the runner (``_load_checkpoint``) and
+    the protocol's pre-resume scan (run_protocol.checkpoint_resume_quality)
+    so the two can never report per different retrievers.
+
+    Resolution order (first hit wins):
+      - ``forwarded`` — an explicit caller retriever (the runner always
+        forwards run_evaluation's retriever, default "hybrid");
+      - the checkpoint's first-class top-level ``retriever`` field
+        (written by ``_save_checkpoint``), validated against
+        REQUIRED_OUTCOME_KEYS;
+      - the ``run_key`` segment ``{surface}__{retriever}__{model}__
+        {prompt}`` (older files), validated likewise;
+      - "hybrid" (the runner's default).
+
+    Returns (effective retriever, source) with source ∈ {"forwarded",
+    "top-level", "run_key", "default"}."""
+    if forwarded is not None:
+        return forwarded, "forwarded"
+    field = data.get("retriever")
+    if isinstance(field, str) and field in REQUIRED_OUTCOME_KEYS:
+        return field, "top-level"
+    saved_key = data.get("run_key")
+    if isinstance(saved_key, str):
+        parts = saved_key.split("__")
+        if len(parts) >= 2 and parts[1] in REQUIRED_OUTCOME_KEYS:
+            return parts[1], "run_key"
+    return "hybrid", "default"
+
+
 def resume_gate_reject_reason(outcome: dict) -> str | None:
     """#1764 resume-quality gate: why a checkpointed outcome is NOT
     resumable, or None when it passes.
@@ -905,28 +977,40 @@ def resume_gate_reject_reason(outcome: dict) -> str | None:
 
       - the ``legs`` trace (R3 #1542 D4: {"leg", "ran", "degraded",
         "reason", "count"}) shows the FTS leg dead — a genuinely-dead
-        reason (``empty_results`` — the pilot artifact: FTS ran clean and
-        found nothing; or ``query_failed`` — a real driver failure) with
-        ``count == 0`` and no live fts entry (TR questions trace one entry
-        per entity type, so a live point leg rescues a legitimately-empty
-        event leg) AND recall data does not positively show the session
-        surfaced: ``index_missing`` (R3 #1542: environmental/benign —
-        expected in embedded FalkorDBLite with no FTS index; degrades
-        quietly, never trips the breaker) and ``breaker_open`` (the breaker
-        skipped the strategy) are NOT dead legs — treating them as dead
-        would reject every embedded outcome on every resume (livelock). A
-        healthy (non-zero) vector-rescued session (FTS empty but recall > 0)
-        is NOT retrieval-dead — rejecting it would livelock, since the
+        reason with ``count == 0`` and no live fts entry (TR questions
+        trace one entry per entity type, so a live point leg rescues a
+        legitimately-empty event leg) AND recall data does not positively
+        show the session surfaced. The full R3 (#1542) leg-reason
+        vocabulary (tortoise/search_engine.py — see DEAD_LEG_REASONS /
+        BENIGN_LEG_REASONS) classifies: DEAD at count==0 —
+        ``empty_results`` (the pilot artifact: FTS ran clean and found
+        nothing), ``query_failed`` (a real driver failure), ``timeout``
+        (the strategy deadline expired — query never completed, results
+        discarded); BENIGN — ``ok`` (live retrieval), ``index_missing``
+        (environmental: expected in embedded FalkorDBLite with no FTS
+        index; degrades quietly, never trips the breaker),
+        ``no_embeddings`` (vector arm: zero embedded points),
+        ``breaker_open`` (the breaker skipped the strategy). Benign
+        reasons are NOT dead legs — treating them as dead would reject
+        every embedded outcome on every resume (livelock). A healthy
+        (non-zero) vector-rescued session (FTS empty but recall > 0) is
+        NOT retrieval-dead — rejecting it would livelock, since the
         re-encode reproduces the same FTS-empty shape on the next resume;
       - every ``session_recall@k`` value is 0.0 (the session never
         surfaced at any depth).
 
     Signals fire ONLY on positive recorded evidence: an outcome with no
     ``legs`` trace (pre-R3 checkpoint, vector arm) or no fts entry is NOT
-    refused — absent data ≠ dead leg, and an fts entry recording
-    ``index_missing`` (embedded FalkorDBLite — no FTS index) or
-    ``breaker_open`` is benign, not dead. Legitimately session-less
-    outcomes (abstention questions — ``turn_recall@k`` all None per the M6
+    refused BY THE DEAD-FTS SIGNAL (the session-zero signal still applies
+    when ``session_recall@k`` is recorded all-zero) — absent data ≠ dead
+    leg, and an fts entry recording ``index_missing`` (embedded
+    FalkorDBLite — no FTS index) or ``breaker_open`` is benign, not dead.
+    An fts entry with ``count == 0`` and a reason OUTSIDE the known
+    vocabulary (future vocabulary, hand-edited files, reason=None) is NOT
+    treated as dead either (fail-open — the index_missing livelock
+    lesson), but emits a loud stderr warning naming the leg and reason so
+    vocabulary drift is visible. Legitimately session-less outcomes
+    (abstention questions — ``turn_recall@k`` all None per the M6
     N/A-not-0.0 contract) are exempt: their all-zero session recall and
     legitimately empty FTS are the question's shape, not a dead backend.
     breaker_open outcomes are excluded by the caller (kept — a legitimately
@@ -949,11 +1033,10 @@ def resume_gate_reject_reason(outcome: dict) -> str | None:
                                for v in sr.values()))
     # type-strict zero: bool False is an int subclass but is NOT a recorded
     # recall value — a corrupt boolean must not count as "all zeros" (and
-    # sibling session_healthy already excludes bools).
-    session_zero = (isinstance(sr, dict) and bool(sr)
-                    and all(isinstance(v, (int, float))
-                            and not isinstance(v, bool) and v == 0
-                            for v in sr.values()))
+    # sibling session_healthy already excludes bools). Shared predicate
+    # (session_recall_all_zero) — the protocol scan derives its advisory
+    # zero_session count from the same source so it can never drift.
+    session_zero = session_recall_all_zero(sr)
     if isinstance(legs, list):
         # TR questions trace one fts entry PER entity type (point + event
         # share the leg_trace) — the leg is dead only when no fts entry
@@ -963,16 +1046,33 @@ def resume_gate_reject_reason(outcome: dict) -> str | None:
                        if isinstance(leg, dict) and leg.get("leg") == "fts"]
         # R3 (#1542) leg-reason vocabulary: only genuinely-dead reasons
         # mark the leg dead — ``empty_results`` (the pilot artifact: FTS
-        # ran clean and found nothing) and ``query_failed`` (a real driver
-        # failure). ``index_missing`` is environmental/benign (expected in
-        # embedded FalkorDBLite — no FTS index; degrades quietly, does not
-        # trip the breaker) and ``breaker_open`` is the breaker skipping
-        # the strategy — neither is retrieval-dead, or every embedded
-        # outcome would be rejected on every resume (livelock).
-        dead_reasons = {"empty_results", "query_failed"}
+        # ran clean and found nothing), ``query_failed`` (a real driver
+        # failure) and ``timeout`` (the strategy deadline expired — query
+        # never completed, results discarded). ``index_missing`` is
+        # environmental/benign (expected in embedded FalkorDBLite — no FTS
+        # index; degrades quietly, does not trip the breaker),
+        # ``no_embeddings`` (vector arm: zero embedded points) and
+        # ``breaker_open`` (the breaker skipping the strategy) are not
+        # retrieval-dead, or every embedded outcome would be rejected on
+        # every resume (livelock). Tuple membership — a corrupt non-string
+        # reason must compare, not TypeError the gate.
         dead_fts = [leg for leg in fts_entries
-                    if leg.get("reason") in dead_reasons
+                    if leg.get("reason") in DEAD_LEG_REASONS
                     and leg.get("count") == 0]
+        # #1764/code-review: an fts entry with count==0 and a reason
+        # OUTSIDE the known vocabulary (future vocabulary, hand-edited
+        # files, reason=None) is NOT dead (fail-open — the index_missing
+        # livelock lesson) but is warned about LOUDLY so vocabulary drift
+        # is visible (mirrors the corrupt-file warning pattern).
+        for leg in fts_entries:
+            if (leg.get("count") == 0
+                    and leg.get("reason") not in KNOWN_LEG_REASONS):
+                print(f"[longmem_eval] WARNING: outcome "
+                      f"{outcome.get('question_id')!r} fts leg has unknown "
+                      f"reason {leg.get('reason')!r} with count=0 — NOT "
+                      f"treated as dead (fail-open on unknown vocabulary); "
+                      f"known reasons: {KNOWN_LEG_REASONS}",
+                      file=sys.stderr)
         live_fts = any(leg.get("reason") == "ok"
                        and leg.get("count", 0) > 0 for leg in fts_entries)
         # The dead-FTS signal fires only when the session did NOT
@@ -1022,6 +1122,14 @@ def _load_checkpoint(path: str | None,
     try:
         with flock_exclusive(p.with_suffix(p.suffix + ".lock")):
             data = json.loads(p.read_text(encoding="utf-8"))
+    except TimeoutError as e:
+        # D8 flock timeout — a concurrent writer holds the lock. Accurate
+        # message: NOT a corrupt file (TimeoutError subclasses OSError, so
+        # it must be caught BEFORE the corrupt clause or it is misreported).
+        print(f"[longmem_eval] WARNING: checkpoint {p} lock busy ({e!r}) — "
+              f"concurrent writer; ignoring for now — every question "
+              f"re-encodes", file=sys.stderr)
+        return {}, []
     except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
         print(f"[longmem_eval] WARNING: checkpoint {p} is corrupt ({e!r}) — "
               f"ignoring; every question re-encodes", file=sys.stderr)
@@ -1053,18 +1161,20 @@ def _load_checkpoint(path: str | None,
               f"refusing cross-config resume (per-model checkpoint keying); "
               f"every question re-encodes", file=sys.stderr)
         return {}, []
-    # #1764/code-review: cross-check the FORWARDED retriever against the
-    # run_key's retriever segment — a mismatch means the caller's required
-    # key set is derived from a different retriever than the checkpoint's
-    # own. Warn only; load behavior is unchanged (the required-key set comes
-    # from the forwarded retriever, per run_evaluation's call).
-    if run_key is not None and saved_key is not None:
-        saved_parts = saved_key.split("__")
-        if len(saved_parts) >= 2 and saved_parts[1] != retriever:
-            print(f"[longmem_eval] WARNING: checkpoint {p} retriever "
-                  f"{saved_parts[1]!r} != forwarded retriever "
-                  f"{retriever!r} — required-key set derived from "
-                  f"{retriever!r}", file=sys.stderr)
+    # #1764/code-review: cross-check the FILE-DERIVED retriever (top-level
+    # ``retriever`` field → run_key segment — _retriever_from_checkpoint
+    # with no forwarded value) against the FORWARDED retriever — a
+    # disagreement means the caller's required-key set is derived from a
+    # different retriever than the checkpoint's own claim (top-level field
+    # OR run_key segment). Warn only; load behavior is unchanged (the
+    # required-key set comes from the forwarded retriever, per
+    # run_evaluation's call).
+    file_retriever, file_source = _retriever_from_checkpoint(data, None)
+    if file_retriever != retriever and file_source != "default":
+        print(f"[longmem_eval] WARNING: checkpoint {p} retriever "
+              f"{file_retriever!r} (from {file_source}) != forwarded "
+              f"retriever {retriever!r} — required-key set derived from "
+              f"{retriever!r}", file=sys.stderr)
     if expected_fingerprint is not None:
         fp = data.get("fingerprint")
         # #1349 merge: a checkpoint written by the vector-arm path carries
@@ -1081,7 +1191,17 @@ def _load_checkpoint(path: str | None,
                 f"checkpoint {p} is stale: effective run config differs on "
                 f"{sorted(diffs)} ({detail}) — refusing resume (delete the "
                 f"file to re-run the questions)")
-    required = REQUIRED_OUTCOME_KEYS.get(retriever, ("question_id",))
+    # The required-key set derives from the SAME retriever resolution the
+    # protocol scan uses (run_protocol.checkpoint_resume_quality —
+    # _retriever_from_checkpoint, single source) so the two can never
+    # drift apart. The runner always forwards (run_evaluation passes
+    # retriever=retriever, default "hybrid"), so the forwarded value wins
+    # here; the file branches serve callers without a forwarded retriever
+    # (the scan's programmatic path).
+    effective_retriever, _retriever_source = _retriever_from_checkpoint(
+        data, retriever)
+    required = REQUIRED_OUTCOME_KEYS.get(effective_retriever,
+                                         ("question_id",))
     outcomes: dict[str, dict] = {}
     gate_rejected = 0
     for o in data.get("outcomes", []):

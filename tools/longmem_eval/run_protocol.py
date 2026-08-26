@@ -330,7 +330,8 @@ def _report_qids(report_path: Path) -> list[str]:
             if o.get("question_id")]
 
 
-def checkpoint_resume_quality(checkpoint: Path) -> dict | None:
+def checkpoint_resume_quality(checkpoint: Path,
+                              forwarded: str | None = None) -> dict | None:
     """#1764 pre-resume health check: scan a checkpoint for outcomes the
     runner's resume-quality gate will reject at load (dead FTS leg —
     ``fts.count=0`` — or zero session recall). The per-outcome signal is
@@ -338,7 +339,14 @@ def checkpoint_resume_quality(checkpoint: Path) -> dict | None:
     scan mirrors the runner's per-outcome load decision: breaker_open
     outcomes kept (legitimately dropped, never re-run) and outcomes
     missing required keys counted as truncated (the runner re-encodes them
-    via the truncated path, before the gate).
+    via the truncated path, before the gate). The required-key retriever
+    resolves via the runner's own helper (``run._retriever_from_checkpoint``
+    — forwarded → top-level field → run_key segment → hybrid) so the scan
+    can never report per a different retriever than the runner loads;
+    ``forwarded`` carries the runner command's --retriever (cmd_run passes
+    it, default "hybrid"). The zero_session count derives from the runner's
+    own type-strict ``session_recall_all_zero`` predicate (never a looser
+    duplicate).
 
     The scan does NOT re-check the runner's whole-file load gates
     (format / run_key / fingerprint mismatch — the runner refuses or
@@ -352,20 +360,34 @@ def checkpoint_resume_quality(checkpoint: Path) -> dict | None:
     flock the writer uses (D8 — run.py's ``_load_checkpoint`` contract) so
     the scan never sees a mid-merge file; an existing-but-corrupt file
     surfaces a loud stderr warning (mirroring the runner's corrupt-file
-    warning) before returning None. The protocol records this in the run
-    state so a re-validation resume that rejected stale outcomes leaves a
+    warning) before returning None, and a lock-busy (flock TimeoutError —
+    concurrent writer) is reported accurately as a skipped scan, never as
+    a corrupt file. The protocol records this in the run state so a
+    re-validation resume that rejected stale outcomes leaves a
     population-purity note, never a silent blend.
     """
     from tortoise.shared_state.concurrency import flock_exclusive
+
     from .run import (  # lazy — protocol CLI stays light
         REQUIRED_OUTCOME_KEYS,
+        _retriever_from_checkpoint,
         resume_gate_reject_reason,
+        session_recall_all_zero,
     )
     if not checkpoint.is_file():
         return None
     try:
         with flock_exclusive(checkpoint.with_suffix(checkpoint.suffix + ".lock")):
             data = json.loads(checkpoint.read_text(encoding="utf-8"))
+    except TimeoutError as e:
+        # flock timeout — a concurrent writer holds the lock (D8). The
+        # scan is advisory; skip it with an ACCURATE message instead of
+        # swallowing TimeoutError (an OSError subclass) in the corrupt
+        # clause and misreporting a lock-busy as a corrupt checkpoint.
+        print(f"[run_protocol] WARNING: checkpoint {checkpoint} lock busy "
+              f"({e!r}) — resume-quality scan skipped (concurrent writer)",
+              file=sys.stderr)
+        return None
     except (json.JSONDecodeError, UnicodeDecodeError, OSError, ValueError) as e:
         # An existing-but-corrupt checkpoint must NOT degrade silently (the
         # runner itself warns loudly on the same failure) — the scan is a
@@ -381,21 +403,19 @@ def checkpoint_resume_quality(checkpoint: Path) -> dict | None:
     outcomes = data.get("outcomes")
     if not isinstance(outcomes, list):
         return None  # missing / explicit null / malformed — nothing to scan
-    # the runner keys required fields by retriever — the checkpoint writes a
-    # first-class top-level ``retriever`` field (run._save_checkpoint); fall
-    # back to the run_key segment ``{surface}__{retriever}__{model}__
-    # {prompt}`` (older files), then "hybrid".
-    retriever = "hybrid"
-    retriever_field = data.get("retriever")
-    saved_key = data.get("run_key")
-    if (isinstance(retriever_field, str)
-            and retriever_field in REQUIRED_OUTCOME_KEYS):
-        retriever = retriever_field
-    elif isinstance(saved_key, str):
-        parts = saved_key.split("__")
-        if len(parts) >= 2 and parts[1] in REQUIRED_OUTCOME_KEYS:
-            retriever = parts[1]
-    required = REQUIRED_OUTCOME_KEYS.get(retriever, ("question_id",))
+    # the runner keys required fields by retriever — resolve via the SAME
+    # helper the runner uses (run._retriever_from_checkpoint): the
+    # forwarded retriever when the caller has one (cmd_run forwards the
+    # runner command's --retriever, default "hybrid"), else the
+    # checkpoint's first-class top-level ``retriever`` field
+    # (run._save_checkpoint), else the run_key segment
+    # ``{surface}__{retriever}__{model}__{prompt}`` (older files), else
+    # "hybrid". Single source — the scan can never claim per a different
+    # retriever than the runner loads.
+    effective_retriever, _retriever_source = _retriever_from_checkpoint(
+        data, forwarded)
+    required = REQUIRED_OUTCOME_KEYS.get(effective_retriever,
+                                         ("question_id",))
     checked = 0
     truncated = 0
     rejected: list[tuple[str, str, bool]] = []  # (qid, reason, session_all_zero)
@@ -410,9 +430,12 @@ def checkpoint_resume_quality(checkpoint: Path) -> dict | None:
         checked += 1
         reason = resume_gate_reject_reason(o)
         if reason is not None:
+            # zero_session derives from the runner's OWN type-strict
+            # predicate (run.session_recall_all_zero) — a corrupt bool
+            # False must not count as "all zeros" when the rejection was
+            # fts-only (the old looser all(v == 0) drifted from the gate).
             sr = o.get("session_recall@k")
-            session_all_zero = (isinstance(sr, dict) and bool(sr)
-                                and all(v == 0 for v in sr.values()))
+            session_all_zero = session_recall_all_zero(sr)
             rejected.append((o["question_id"], reason, session_all_zero))
     if checked == 0 and truncated == 0:
         return None  # no gate-eligible outcomes — silent (never a false "clean")
@@ -591,7 +614,15 @@ def cmd_run(state: ProtocolState, args: argparse.Namespace) -> None:
         raise SystemExit(
             "internal error: build_command must append a --checkpoint flag "
             "to every run-step command (protocol bug — no flag found)")
-    resume_quality = checkpoint_resume_quality(Path(checkpoint_arg))
+    resume_quality = checkpoint_resume_quality(
+        Path(checkpoint_arg),
+        # the scan must resolve the required-key retriever exactly as the
+        # runner will: the runner command's effective --retriever (last-wins
+        # via _last_flag_value), defaulting to "hybrid" — never the
+        # checkpoint's own claim alone, or a top-level-present/run_key-
+        # absent file would be scanned per one retriever and loaded per
+        # another.
+        forwarded=_last_flag_value(cmd, "--retriever") or "hybrid")
     _print_resume_quality(resume_quality)
     if args.dry_run:
         print("[dry-run] not executing")
