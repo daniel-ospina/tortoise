@@ -188,8 +188,18 @@ def _numeric(v: Any) -> bool:
     """A REAL numeric value for aggregation: int/float, NOT bool (a tampered
     checkpoint true/false must fail closed, never aggregate as 1.0/0.0), and
     FINITE (NaN/Infinity from a malformed checkpoint would poison every mean
-    and serialize as non-strict JSON — round-8/10 security review)."""
+    and serialize as non-strict JSON — round-8/10 security review). Ints are
+    additionally magnitude-bounded (round-17 code-review P1: json.loads
+    produces arbitrary-precision ints, so a tampered/truncated checkpoint
+    with a 309+-digit integer literal in ANY numeric field passes the type /
+    bool / finiteness checks and then ``float(v)`` raises OverflowError
+    mid-report — a multi-hour run aborts before any report is written and
+    every resume crashes on the retained poisoned value; the magnitude bound
+    mirrors the float-finiteness posture: abs(v) > 1e308 (beyond the largest
+    finite float ~1.797e308) is excluded, never converted)."""
     if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return False
+    if isinstance(v, int) and abs(v) > 1e308:
         return False
     return not (isinstance(v, float) and not math.isfinite(v))
 
@@ -557,8 +567,12 @@ def build_report(
       * ``integrity`` — validity + per-question error census (D1/D6): the
         gate criterion is CENSUS-CLASS-AWARE (#1747) — ``valid == True`` iff
         ``n_hard_invalid == 0`` AND ``n_excluded_hard == 0`` AND
-        ``invalid_rate <= threshold`` AND (attempted set non-empty whenever
-        any entry was excluded or dropped);
+        ``invalid_rate <= threshold`` AND (outcome-derived attempted set
+        non-empty whenever any entry was excluded or dropped — a fully
+        excluded/dropped run never certifies; the guard keys off the
+        shape-filtered OUTCOME attempted set, NOT the failure-merged
+        n_attempted — a dropped run plus one recoverable failure entry must
+        not certify);
         recoverable classes (parse_error / truncated / truncated_parse_error
         / partial_parse / transient_*, plus reader/judge:retries_exhausted
         eval failures) are rate-limited (a healthy 500-Q run
@@ -566,9 +580,10 @@ def build_report(
         invalid made ``valid=true`` unreachable at scale); hard classes
         (fatal_* / ingest / unknown census classes, non-census error strings
         with an EMPTY census, permanent eval failures, malformed inputs —
-        a present non-bool valid flag / non-iterable, non-str or falsy-
-        but-present error_classes (incl. a PRESENT null) — fail closed to
-        hard) veto the run at any threshold (a mixed
+        a present non-bool valid flag / non-iterable, non-str, or falsy-
+        but-present NON-CONTAINER error_classes (0/""/False/a PRESENT
+        null; empty dict/list are the legitimate no-census shapes and
+        grade clean) — fail closed to hard) veto the run at any threshold (a mixed
         recoverable+structural shape is rate-limited —
         the #1746 lane); additive breakdown fields ``n_hard_invalid`` /
         ``n_recoverable_invalid`` / ``recoverable_invalid_rate`` /
@@ -900,6 +915,15 @@ def build_report(
     n_valid = sum(1 for g in grade_by_qid.values() if g == "clean")
     n_invalid = n_hard_invalid + n_recoverable_invalid
     n_attempted = len(grade_by_qid)
+    # round-17 (code-review P2): the vacuity guard keys off the OUTCOME-
+    # derived attempted set (shape-filtered graded outcomes BEFORE failures
+    # are merged) — n_attempted itself counts failure qids, so a run whose
+    # ENTIRE outcome set was excluded or breaker-dropped PLUS one failure
+    # entry (e.g. reader:retries_exhausted) would otherwise report
+    # n_attempted=1, invalid_rate=1.0 ≤ threshold and certify valid — the
+    # documented 'a run whose entire outcome set was excluded OR dropped
+    # never certifies' promise (README example is outcome-set-wide) broken.
+    n_attempted_outcomes = sum(1 for o, ok, _ in graded if ok)
     invalid_rate = round(n_invalid / n_attempted, 4) if n_attempted else 0.0
     recoverable_invalid_rate = (
         round(n_recoverable_invalid / n_attempted, 4) if n_attempted else 0.0)
@@ -993,6 +1017,27 @@ def build_report(
         eclass = f.get("error_class")
         if isinstance(eclass, str) and eclass:
             census[eclass] += 1
+        elif eclass is not None and not isinstance(eclass, str):
+            # round-17 (code-review P2): a non-str error_class VALUE
+            # (int/dict/float/bool/list — malformed checkpoint JSON) grades
+            # hard and vetoes via _failure_grade, but used to VANISH from
+            # the record — absent from error_census AND
+            # error_census_malformed — contradicting the round-15/16 'no
+            # malformed evidence vanishes at any level' contract (outcome-
+            # side error_classes shapes are preserved under <legacy-list> /
+            # <malformed-top-level> sentinels). Preserved under the
+            # <failure-class> sentinel key with the SAME distinct-membership
+            # accumulator + non-finite canonicalization as the census
+            # branches. A MISSING error_class (None — the full_context cell
+            # producer's documented shape) is NOT malformed evidence: it is
+            # the deliberate fail-closed deferral to #1746 (grades hard,
+            # never rate-limited) and carries no value to preserve.
+            stored = (None if (isinstance(eclass, float)
+                               and not math.isfinite(eclass)) else eclass)
+            acc = malformed_census.setdefault("<failure-class>", [])
+            if not any(type(s) is type(stored) and s == stored
+                       for s in acc):
+                acc.append(stored)
     error_census = dict(sorted(census.items(), key=lambda kv: str(kv[0])))
     checks = [
         "python >= 3.12 guard enforced at run entry",
@@ -1008,14 +1053,18 @@ def build_report(
         # step-5 gate documents 0.02 as the justified default at 500-Q scale.
         "valid": ((n_hard_invalid == 0) and (n_excluded_hard == 0)
                   and (invalid_rate <= effective_threshold)
-                  # round-8/10 security review: a run whose ENTIRE outcome
-                  # set was excluded OR dropped (n_attempted == 0 with
-                  # n_excluded > 0 or breaker_open drops — a wholesale
+                  # round-8/10/17 security review: a run whose ENTIRE outcome
+                  # set was excluded OR dropped (n_attempted_outcomes == 0
+                  # with n_excluded > 0 or breaker_open drops — a wholesale
                   # corrupt checkpoint, or a vector-arm outage that breaker-
                   # tripped every question) must never certify valid on an
-                  # empty denominator; a truly EMPTY report (nothing
-                  # excluded, nothing dropped) stays vacuously valid.
-                  and not (n_attempted == 0
+                  # empty OUTCOME denominator; failures alone do not count as
+                  # attempts here (round-17: a dropped run + one recoverable
+                  # failure entry must not resurrect the vacuous-valid hole
+                  # via the failure-merged n_attempted); a truly EMPTY
+                  # report (nothing excluded, nothing dropped) stays
+                  # vacuously valid.
+                  and not (n_attempted_outcomes == 0
                            and (n_excluded > 0 or len(dropped) > 0))),
         "threshold": effective_threshold,
         "n_attempted": n_attempted,
@@ -1044,13 +1093,16 @@ def build_report(
         "criterion": (
             "#1747 census-class-aware: valid = (n_hard_invalid == 0) AND "
             "(n_excluded_hard == 0) AND (invalid_rate <= threshold) AND "
-            "(attempted set non-empty whenever any entry was excluded or "
-            "dropped — a fully excluded/dropped run never certifies); "
+            "(outcome-derived attempted set non-empty whenever any entry "
+            "was excluded or dropped — a fully excluded/dropped run never "
+            "certifies; failures do not count as attempts for this guard); "
             "hard = fatal_*/ingest/unknown census classes + non-census error "
             "strings with an EMPTY census (mixed recoverable+structural "
             "grades recoverable — #1746 lane) + permanent eval failures + "
             "malformed inputs (present non-bool valid flag, non-iterable, "
-            "non-str, falsy-but-present or PRESENT-null error_classes) fail "
+            "non-str, or falsy-but-present NON-CONTAINER error_classes — "
+            "0/\"\"/False/PRESENT-null; empty dict/list are the "
+            "legitimate no-census shapes and grade clean) fail "
             "closed to hard + excluded outcomes (shape-broken dicts / "
             "breaker_open drops) with a hard census still veto "
             "(n_excluded_hard); "
@@ -1258,8 +1310,11 @@ def build_report(
         # list, so the divergence is observable here, never silent).
         "n_excluded": n_excluded,
         # #1349: dropped-question accounting — emitted ONLY when a question
-        # was dropped (breaker_open), so the zero-dropped report shape is
-        # byte-identical to origin's published contract (golden-shape pin).
+        # was dropped (breaker_open), so the zero-dropped report carries NO
+        # "dropped"/"n_dropped" keys (round-8/17: the #1747 addition is the
+        # single top-level n_excluded key, pinned in the golden-shape test —
+        # the zero-dropped top-level shape is NOT byte-identical to origin's
+        # published contract anymore, only the dropped keys are).
         **({"dropped": {
                 "n": len(dropped),
                 "breaker_open": sum(1 for o in dropped

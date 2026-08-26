@@ -87,7 +87,14 @@ the CLI default stays 0.0 (strict), but the run-protocol step-5 500-Q
 baseline injects the justified default `JUSTIFIED_BASELINE_THRESHOLD`
 (0.02) — see `run_protocol.py`; an operator override suppresses the
 injected baseline justification (the recorded reason never claims the 0.02
-baseline for a non-baseline threshold).
+baseline for a non-baseline threshold). NOTE (#1747 round-17): the
+step-5 injection is SCOPED to step 5 — the step-8 (1k benchmark) and
+step-9 (R6/E6 follow-up, a full 500-Q run) build commands carry the
+strict 0.0 CLI default, so the owner must pass `--integrity-threshold F`
+with an `--integrity-justification` for those runs (the #1747 failure
+mode — `valid=true` unreachable at scale because any recoverable-class
+blip pushes `invalid_rate > 0` — would otherwise silently recur on the
+follow-up's ~24k session extractions; the step-5 pattern applies).
 
 **R6 rerank (issue #1545, epic #1509) — cross-encoder + MMR, OFF by default:**
 `--rerank` / `--no-rerank` (tri-state; `--no-rerank` beats a leaked env),
@@ -259,13 +266,15 @@ The report is self-explanatory: every run prints and persists
 
 - **`integrity`** — `valid` (#1747 census-class-aware:
   `valid = (n_hard_invalid == 0) AND (n_excluded_hard == 0) AND
-  (invalid_rate ≤ threshold) AND (attempted set non-empty whenever any
-  entry was excluded or dropped — a fully excluded/dropped run never
-  certifies)` — fatal_*/ingest/unknown/non-census-error-string
+  (invalid_rate ≤ threshold) AND (outcome-derived attempted set non-
+  empty whenever any entry was excluded or dropped — a fully
+  excluded/dropped run never certifies; failures do not count as
+  attempts for this guard)` — fatal_*/ingest/unknown/non-census-error-string
   (empty-census)/permanent-eval-failure questions, and malformed inputs
-  (present non-bool `valid`, non-iterable, non-str, falsy-but-present or
-  PRESENT-null `error_classes`) fail closed to hard and veto at any
-  threshold; an
+  (present non-bool `valid`, non-iterable, non-str, or falsy-but-present
+  NON-CONTAINER `error_classes` — 0 / "" / False / a PRESENT null;
+  empty dict/list are the legitimate no-census shapes and grade clean)
+  fail closed to hard and veto at any threshold; an
   EXCLUDED outcome (shape-broken dict, or a breaker_open vector-arm drop)
   still vetoes when it carries a hard census class — malformed shapes
   cannot launder a fatal class out of the gate (`n_excluded_hard`), and a

@@ -9,8 +9,9 @@ extractor model reports its integrity on the same block.
 
 #1747: the ``valid`` VERDICT is now census-class-aware — ``valid == True`` iff
 ``n_hard_invalid == 0`` AND ``n_excluded_hard == 0`` AND
-``invalid_rate <= threshold`` AND (attempted set non-empty whenever any entry
-was excluded or dropped — a fully excluded/dropped run never certifies).
+``invalid_rate <= threshold`` AND (outcome-derived attempted set non-empty
+whenever any entry was excluded or dropped — a fully excluded/dropped run
+never certifies; failures do not count as attempts for this guard).
 Recoverable
 classes (parse_error / truncated / truncated_parse_error / partial_parse /
 transient_* census classes, plus reader/judge:retries_exhausted eval
@@ -327,6 +328,46 @@ def test_print_summary_integrity_before_score(capsys):
     assert "invalid_rate" in captured
     assert "fatal_402_billing" in captured
     assert "n_failed" in captured
+
+
+def test_print_summary_surfaces_invalidity_deciding_terms(capsys):
+    """#1747 (round-17 code-review P2): valid=false is commonly decided by
+    terms NOT in the old one-line summary (n_hard_invalid / n_excluded_hard
+    / n_excluded / vacuity) — an operator can see valid: false with
+    invalid_rate 0.0 where the only printed numbers did NOT decide the
+    verdict. The deciding terms are surfaced when the verdict is false
+    (additive — the valid=true output shape is unchanged)."""
+    report = _report([
+        _outcome("q1", valid=False,
+                 error_classes={"fatal_402_billing": 2}),
+        _outcome("q2", valid=True),
+    ])
+    _print_summary(report)
+    captured = capsys.readouterr().out
+    assert "invalidity decided by:" in captured
+    assert "n_hard_invalid 1" in captured
+    assert "n_excluded_hard 0" in captured
+    assert "n_excluded 0" in captured
+    assert "n_attempted 2" in captured
+    assert "vacuity" in captured
+    # a valid run does NOT print the deciding-terms line (additive-only).
+    _print_summary(_report([_outcome("q1", valid=True)]))
+    captured_ok = capsys.readouterr().out
+    assert "invalidity decided by:" not in captured_ok
+    # round-17 review-fix: a VACUITY-decided verdict (all breaker_open
+    # drops, rate+veto terms all pass) prints the vacuity evidence
+    # (n_attempted / dropped), not a misleading all-zeros line.
+    drops = []
+    for i in range(3):
+        o = _outcome(f"q{i}", valid=True)
+        o["breaker_open"] = True
+        o["dropped_reason"] = "breaker_open"
+        drops.append(o)
+    _print_summary(_report(drops, threshold=1.0))
+    captured_vac = capsys.readouterr().out
+    assert "invalidity decided by:" in captured_vac
+    assert "dropped 3" in captured_vac
+    assert "n_excluded_hard 0" in captured_vac
 
 
 def test_cli_integrity_threshold_flag():
@@ -734,6 +775,103 @@ def test_report_integrity_missing_error_class_fails_closed():
     assert tampered["valid"] is False
 
 
+def test_report_integrity_unclassified_failure_vetoes_at_justified_threshold():
+    """#1747 (round-17 code-review P2): the full-context cell producer
+    (tools/longmem_eval/full_context.py) appends failures WITHOUT an
+    error_class key — _failure_grade(None) grades HARD, so it vetoes at
+    ANY threshold, silently changing integrity.valid semantics vs the old
+    M7 gate (rate-limited) — a deliberate fail-closed flip, deferred to
+    #1746 (documented in the README + the missing-error-class test above,
+    but not exercised at a NONZERO threshold). Pin it at the step-5
+    justified threshold 0.02: 49 clean outcomes + 1 unclassified failure
+    rides the rate exactly (invalid_rate 0.02 ≤ 0.02) yet must NOT
+    certify — the unclassified failure is hard, never rate-limited."""
+    outcomes = [_outcome(f"q{i}", valid=True) for i in range(49)]
+    integ = _report(outcomes, failures=[{
+        # full_context.py's shape: question_id / question_type / error /
+        # failed_at_utc — NO error_class.
+        "question_id": "q-cell", "error": "boom",
+        "failed_at_utc": "2026-08-20T00:00:00Z"}],
+        threshold=0.02)["integrity"]
+    assert integ["n_hard_invalid"] == 1
+    assert integ["invalid_rate"] == round(1 / 50, 4)  # 0.02 — rides the rate
+    assert integ["valid"] is False                    # but hard vetoes
+    # the same shape with a recoverable class does NOT veto at the
+    # boundary — invalid_rate 0.02 ≤ threshold 0.02 passes the rate, so
+    # valid=True (the flip is class-specific, not rate-specific: the
+    # unclassified failure vetoes where the recoverable one rides).
+    recoverable = _report(outcomes, failures=[{
+        "question_id": "q-cell", "error_class": "reader:retries_exhausted",
+        "error": "boom", "failed_at_utc": "2026-08-20T00:00:00Z"}],
+        threshold=0.02)["integrity"]
+    assert recoverable["n_recoverable_invalid"] == 1
+    assert recoverable["invalid_rate"] == round(1 / 50, 4)  # 0.02
+    assert recoverable["valid"] is True    # 0.02 ≤ 0.02 — rate boundary met
+    # just below the boundary the recoverable class flips invalid —
+    # contrasting the unclassified failure that vetoes at ANY threshold.
+    below = _report(outcomes, failures=[{
+        "question_id": "q-cell", "error_class": "reader:retries_exhausted",
+        "error": "boom", "failed_at_utc": "2026-08-20T00:00:00Z"}],
+        threshold=0.0199)["integrity"]
+    assert below["valid"] is False
+
+
+
+def test_report_integrity_non_str_failure_class_preserved_in_census():
+    """#1747 (round-17 code-review P2): a failure with a non-str
+    error_class VALUE (int/dict/float/bool — malformed checkpoint JSON)
+    grades hard and vetoes via _failure_grade, but used to VANISH from the
+    record — absent from error_census AND error_census_malformed —
+    contradicting the round-15/16 'no malformed evidence vanishes at any
+    level' contract (outcome-side shapes are preserved under sentinel
+    keys). It is now preserved under the ``<failure-class>`` sentinel key
+    with the same distinct-membership accumulator + non-finite
+    canonicalization as the census branches."""
+    outcomes = [_outcome("q1", valid=True)]
+    integ = _report(outcomes, threshold=0.5, failures=[
+        {"question_id": "q2", "error_class": 123, "error": "x",
+         "failed_at_utc": "2026-08-20T00:00:00Z"},
+    ])["integrity"]
+    assert integ["n_hard_invalid"] == 1
+    assert integ["valid"] is False                  # still vetoes
+    assert integ["error_census"] == {}              # never into the census
+    assert integ["error_census_malformed"] == {"<failure-class>": [123]}
+    # dict-valued class preserved verbatim; int 123 and float 123.0 stay
+    # DISTINCT JSON tokens (type-exact membership, round-16 discipline).
+    integ = _report(outcomes, threshold=0.5, failures=[
+        {"question_id": "q2", "error_class": {"a": 1}, "error": "x",
+         "failed_at_utc": "2026-08-20T00:00:00Z"},
+        {"question_id": "q3", "error_class": 123, "error": "x",
+         "failed_at_utc": "2026-08-20T00:00:00Z"},
+        {"question_id": "q4", "error_class": 123.0, "error": "x",
+         "failed_at_utc": "2026-08-20T00:00:00Z"},
+        {"question_id": "q5", "error_class": 123, "error": "x",
+         "failed_at_utc": "2026-08-20T00:00:00Z"},   # dup dedupes
+    ])["integrity"]
+    assert integ["error_census_malformed"] == {
+        "<failure-class>": [{"a": 1}, 123, 123.0]}
+    # non-finite class canonicalizes to None (NaN != NaN dedup defeat).
+    integ = _report(outcomes, threshold=0.5, failures=[
+        {"question_id": "q2", "error_class": float("nan"), "error": "x",
+         "failed_at_utc": "2026-08-20T00:00:00Z"},
+        {"question_id": "q3", "error_class": float("nan"), "error": "x",
+         "failed_at_utc": "2026-08-20T00:00:00Z"},
+    ])["integrity"]
+    assert integ["error_census_malformed"] == {"<failure-class>": [None]}
+    # str recoverable classes still ride the census as before (no regression)
+    # and a missing error_class (full-context cell shape) still grades hard
+    # without fabricating malformed evidence.
+    integ = _report(outcomes, threshold=0.5, failures=[
+        {"question_id": "q2", "error_class": "reader:retries_exhausted",
+         "error": "x", "failed_at_utc": "2026-08-20T00:00:00Z"},
+        {"question_id": "q3", "error": "boom",
+         "failed_at_utc": "2026-08-20T00:00:00Z"},
+    ])["integrity"]
+    assert integ["error_census"] == {"reader:retries_exhausted": 1}
+    assert "<failure-class>" not in integ["error_census_malformed"]
+    assert integ["valid"] is False
+
+
 def test_report_integrity_qid_overlap_failure_grade_dominates():
     """#1747 (history-review P1): a qid in BOTH outcomes and failures (the
     concurrent checkpoint-merge shape — one worker completes a question
@@ -894,6 +1032,68 @@ def test_report_integrity_malformed_dict_outcome_dropped():
                     threshold=0.5)["integrity"]
     assert integ["n_excluded"] == 3
     assert integ["n_attempted"] == 1
+
+
+def test_report_integrity_huge_int_magnitude_excluded_no_crash():
+    """#1747 (round-17 code-review P1): json.loads produces arbitrary-
+    precision ints, so a tampered/truncated checkpoint with a 309+-digit
+    integer literal in ANY numeric field (pool_size / evidence_written /
+    evidence_retrieved@k / session_recall@k / ndcg@10 / total_ms /
+    ingest_latency_ms / rerank_pass.max_session_chunks) passes the type /
+    bool / float-finiteness checks and then ``float(v)`` raises
+    OverflowError mid-report — build_report aborts before any report is
+    written and every resume crashes on the retained poisoned value. The
+    magnitude bound mirrors the float-finiteness posture: abs(v) > 1e308 is
+    EXCLUDED (counted in n_excluded), never converted, never crashed on.
+    """
+    # a 400-digit int in pool_size: outcome excluded, report builds, no crash.
+    bad = _outcome("q0", valid=True)
+    bad["pool_size"] = 10 ** 400
+    integ = _report([bad, _outcome("q1", valid=True)],
+                    threshold=1.0)["integrity"]
+    assert integ["n_excluded"] == 1
+    assert integ["n_attempted"] == 1
+    assert integ["n_excluded_hard"] == 0        # clean shape — no veto
+    assert integ["valid"] is True
+    # same guard on a latency field (the _lat aggregation's float() site).
+    bad = _outcome("q0", valid=True)
+    bad["ingest_latency_ms"] = 10 ** 400
+    integ = _report([bad, _outcome("q1", valid=True)],
+                    threshold=1.0)["integrity"]
+    assert integ["n_excluded"] == 1
+    assert integ["valid"] is True
+    # negative magnitude is excluded too (abs() bound).
+    bad = _outcome("q0", valid=True)
+    bad["evidence_written"] = -(10 ** 400)
+    integ = _report([bad, _outcome("q1", valid=True)],
+                    threshold=1.0)["integrity"]
+    assert integ["n_excluded"] == 1
+    assert integ["valid"] is True
+    # a huge int co-occurring with a hard census class still VETOES via
+    # n_excluded_hard (the hard-grade path is unchanged by the exclusion).
+    bad = _outcome("q0", valid=True)
+    bad["pool_size"] = 10 ** 400
+    bad["error_classes"] = {"fatal_402_billing": 1}
+    integ = _report([bad], threshold=1.0)["integrity"]
+    assert integ["n_excluded"] == 1
+    assert integ["n_excluded_hard"] == 1
+    assert integ["valid"] is False
+    # the ONLY outcome carrying a huge int → the entire attempted set is
+    # excluded → the vacuity guard refuses to certify (valid=False), and
+    # build_report still completes.
+    bad = _outcome("q0", valid=True)
+    bad["pool_size"] = 10 ** 400
+    report = _report([bad], threshold=1.0)
+    assert report["n_questions"] == 0
+    assert report["integrity"]["valid"] is False
+    # boundary: 10**308 (≤ the 1e308 bound) still aggregates — no over-zealous
+    # exclusion of legitimate huge-but-convertible ints.
+    ok = _outcome("q0", valid=True)
+    ok["pool_size"] = 10 ** 308
+    integ = _report([ok], threshold=1.0)["integrity"]
+    assert integ["n_excluded"] == 0
+    assert integ["n_attempted"] == 1
+    assert integ["valid"] is True
 
 
 def test_report_integrity_shape_broken_outcome_with_hard_census_vetoes():
@@ -1092,6 +1292,45 @@ def test_report_integrity_all_breaker_open_never_certifies():
     assert integ["valid"] is True
 
 
+def test_report_integrity_dropped_run_plus_failure_never_certifies():
+    """#1747 (round-17 code-review P2): the vacuity guard keys off the
+    OUTCOME-derived attempted set, NOT the failure-merged n_attempted — a
+    run whose entire outcome set was breaker-dropped (a vector-arm outage
+    that tripped every question) PLUS one recoverable failure entry
+    (reader:retries_exhausted) used to report n_attempted=1,
+    invalid_rate=1.0 ≤ threshold, n_hard_invalid=0, n_excluded_hard=0 →
+    valid=True — the README's documented promise ('a run whose entire
+    outcome set was excluded OR dropped never certifies') broken by the
+    failure entry resurrecting the vacuous-valid hole."""
+    drops = []
+    for i in range(3):
+        o = _outcome(f"q{i}", valid=True)
+        o["breaker_open"] = True
+        o["dropped_reason"] = "breaker_open"
+        drops.append(o)
+    integ = _report(drops, threshold=1.0, failures=[
+        {"question_id": "f1", "error_class": "reader:retries_exhausted",
+         "error": "x", "failed_at_utc": "x"},
+    ])["integrity"]
+    assert integ["n_attempted"] == 1        # the failure IS an attempt
+    assert integ["n_recoverable_invalid"] == 1
+    assert integ["invalid_rate"] == 1.0
+    assert integ["n_excluded_hard"] == 0
+    assert integ["valid"] is False          # outcome-derived set is empty
+    # same hole via the excluded lane: all shape-broken + one recoverable
+    # failure must not certify either.
+    bad = _outcome("q0", valid=True)
+    del bad["label"]
+    integ = _report([bad], threshold=1.0, failures=[
+        {"question_id": "f1", "error_class": "reader:retries_exhausted",
+         "error": "x", "failed_at_utc": "x"},
+    ])["integrity"]
+    assert integ["n_excluded"] == 1
+    assert integ["valid"] is False
+    # a truly EMPTY report stays vacuously valid (nothing excluded/dropped).
+    assert _report([])["integrity"]["valid"] is True
+
+
 def test_report_integrity_nonfinite_and_duplicate_malformed_qids():
     """#1747 (round-10 security review): the attempted-set identity is
     canonical — duplicate copies of the same malformed-qid outcome dedupe
@@ -1251,11 +1490,59 @@ def test_run_protocol_step5_gate_string_pins_criterion():
     assert "--integrity-justification" not in overridden_abbr
     assert "--integrity-thres=0.5" in overridden_abbr
     # round-16: a quoted justification VALUE whose text merely CONTAINS the
-    # flag token is NOT a threshold override (argparse consumes it as
-    # --integrity-justification's value) — the baseline injection stays.
+    # flag token is NOT a threshold override (argparse consumes a non-option
+    # value token as --integrity-justification's value) — the baseline
+    # injection stays.
     quoted = build_command(STEPS_BY_NUMBER[5],
                            ["--integrity-justification",
-                            "--integrity-threshold=0.02 (doc per ticket X)"],
+                            "doc: see --integrity-threshold=0.02 in ticket X"],
                            state=state)
     assert "--integrity-justification" in quoted
     assert "step-5 baseline: #1747 justified" in " ".join(quoted)
+    # round-17 (code review): the detector registers --integrity-justification
+    # (same single-value store the runner uses), so an OPTION-LOOKING
+    # justification value token (starting with ``--``) can never be misread
+    # as a REAL threshold override — it raises 'expected one argument' in
+    # BOTH parsers → no-override → the baseline injection stays. The OLD
+    # threshold-only parser parsed the single-token form below as a genuine
+    # 0.02 override, suppressed the baseline injection, and the emitted
+    # command applied the strict 0.0 default while recording the token as
+    # the justification — the M7 'recorded reason never claims a threshold
+    # that wasn't applied' contract violated (and #1747's valid=true
+    # unreachable at 500-Q scale silently recurs).
+    single_tok = build_command(STEPS_BY_NUMBER[5],
+                               ["--integrity-justification",
+                                "--integrity-threshold=0.02"],
+                               state=state)
+    assert "--integrity-threshold" in single_tok          # baseline injected
+    assert "step-5 baseline: #1747 justified" in " ".join(single_tok)
+    # round-17: the pinned scenarios' EMITTED commands must actually parse
+    # under the RUNNER's parser (run.py _build_parser — the detector's
+    # parse semantics must never diverge from the runner's): space/equals/
+    # abbreviation overrides + a well-formed justification all round-trip;
+    # the malformed single-token justification is the RUNNER's loud
+    # rejection (SystemExit 'expected one argument'), never a silently-
+    # wrong threshold.
+    from tools.longmem_eval.run import _build_parser as runner_parser
+
+    def _runner_argv(cmd):
+        # drop the [sys.executable, "-m", "tools.longmem_eval.run"] head.
+        return cmd[3:]
+
+    rp = runner_parser()
+    overridden = build_command(STEPS_BY_NUMBER[5],
+                               ["--integrity-threshold", "0.5"], state=state)
+    ns = rp.parse_args(_runner_argv(overridden))
+    assert ns.integrity_threshold == 0.5
+    overridden_eq = build_command(STEPS_BY_NUMBER[5],
+                                  ["--integrity-threshold=0.5"], state=state)
+    assert rp.parse_args(_runner_argv(overridden_eq)).integrity_threshold == 0.5
+    overridden_abbr = build_command(STEPS_BY_NUMBER[5],
+                                    ["--integrity-thres=0.5"], state=state)
+    assert rp.parse_args(_runner_argv(overridden_abbr)).integrity_threshold == 0.5
+    ns = rp.parse_args(_runner_argv(quoted))
+    assert ns.integrity_threshold == 0.02                 # baseline survives
+    assert "doc: see --integrity-threshold=0.02" in ns.integrity_justification
+    import pytest
+    with pytest.raises(SystemExit):
+        rp.parse_args(_runner_argv(single_tok))  # runner rejects, loudly

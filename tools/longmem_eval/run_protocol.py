@@ -79,13 +79,26 @@ DEFAULT_RUN_DIR = REPO_ROOT / ".longmemeval_cache" / "runs"
 #: threshold carries no recorded reason (documented silent case).
 JUSTIFIED_BASELINE_THRESHOLD = 0.02
 
-#: Round-16: argparse parser used ONLY to detect an operator
+#: Round-16/17: argparse parser used ONLY to detect an operator
 #: ``--integrity-threshold`` override among the extra run flags — mirrors the
-#: runner's own parse semantics (allow_abbrev=True) so space / equals /
-#: abbreviation forms resolve identically while flag VALUES (e.g. a quoted
-#: justification text containing the flag token) are consumed correctly.
+#: runner's own parser (run.py _build_parser) so space / equals /
+#: abbreviation forms resolve identically AND flag VALUES are consumed
+#: identically: ``--integrity-justification`` is registered (single-value
+#: store) so a justification's value token is never misread as a threshold
+#: override — a non-option value is consumed as the justification (the
+#: round-16 quoted case), and an OPTION-LOOKING value token (starting with
+#: ``--``) makes BOTH parsers raise ``expected one argument`` → no-override
+#: → the baseline injection stays and the malformed tokens are the RUNNER's
+#: loud rejection at parse time, never a silently-wrong threshold (round-17
+#: code-review: the round-16 parser registered ONLY the threshold, so a
+#: single flag-like justification token parsed as a REAL override, the
+#: baseline injection was suppressed, and the emitted command applied the
+#: strict 0.0 default while recording the token as the justification — the
+#: M7 'recorded reason never claims a threshold that wasn't applied'
+#: contract violated).
 _EXTRA_ARGS_PARSER = argparse.ArgumentParser(add_help=False)
 _EXTRA_ARGS_PARSER.add_argument("--integrity-threshold", type=float)
+_EXTRA_ARGS_PARSER.add_argument("--integrity-justification")
 
 
 @dataclass(frozen=True)
@@ -120,11 +133,15 @@ STEPS: list[Step] = [
          "AND n_hard_invalid == 0 AND n_excluded_hard == 0 (fatal_*/ingest/unknown "
          "census classes, non-census error strings with an EMPTY census, permanent "
          "eval failures, malformed inputs — present non-bool valid flag / non-"
-         "iterable, non-str, falsy-but-present OR PRESENT-null error_classes — fail "
+         "iterable, non-str, falsy-but-present NON-CONTAINER OR PRESENT-null "
+         "error_classes (empty dict/list are the legitimate no-census shapes) "
+         "— fail "
          "closed to hard, veto at any threshold; excluded outcomes — shape-broken "
          "dicts / breaker_open drops — with a hard census still veto via "
-         "n_excluded_hard; a non-empty attempted set is required whenever any entry "
-         "was excluded or dropped — a fully excluded/dropped run never certifies; "
+         "n_excluded_hard; a non-empty OUTCOME-derived attempted set is "
+         "required whenever any entry was excluded or dropped (failures "
+         "do not count as attempts for this guard) — a fully "
+         "excluded/dropped run never certifies; "
          "recoverable "
          "parse_error/truncated/truncated_parse_error/partial_parse/transient_* "
          "census classes AND reader/judge:retries_exhausted eval failures are "
@@ -138,10 +155,21 @@ STEPS: list[Step] = [
     Step(7, "confirm-50q", "50-Q confirmation (pilot questions ∪ regression sample of 500-Q failures)",
          "run", "50-Q delta confirms the fixes (direction as stated)", runner="confirm"),
     Step(8, "bench-1k", "1k full benchmark — ONLY if needed (statistical significance at V4)",
-         "run", "explicit owner decision; harness supports both sizes",
+         "run", "explicit owner decision; harness supports both sizes. NOTE "
+         "(#1747 round-17): this run carries the strict CLI default "
+         "integrity-threshold 0.0 — the step-5 justified-threshold injection "
+         "is scoped to step 5 — so the owner must pass "
+         "--integrity-threshold with an --integrity-justification when the "
+         "benchmark needs the recoverable-class rate-limit (otherwise any "
+         "recoverable blip makes integrity.valid unreachable at 1k scale)",
          runner="bench1k", owner_gated=True),
     Step(9, "followup-r6e6", "Follow-up run (R6/E6) vs the V3 baseline",
-         "run", "owner decision; delta vs V3 baseline",
+         "run", "owner decision; delta vs V3 baseline. NOTE (#1747 round-17): "
+         "this is a full 500-Q run under the strict CLI default "
+         "integrity-threshold 0.0 — the step-5 justified-threshold injection "
+         "is scoped to step 5 — so the owner must pass --integrity-threshold "
+         "with an --integrity-justification to keep integrity.valid comparable "
+         "to the step-5 V3 baseline (the run most likely compared against it)",
          runner="followup", owner_gated=True),
 ]
 
@@ -318,16 +346,23 @@ def build_command(step: Step, extra: list[str], *, state: ProtocolState,
         # extra flags, the baseline justification is NOT injected — a
         # recorded reason must never claim the 0.02 baseline for a non-
         # baseline threshold (M7: the report records the ACTUAL reason).
-        # round-13/14/15/16: detect the operator override using the SAME
+        # round-13/14/15/16/17: detect the operator override using the SAME
         # argparse semantics the runner uses (allow_abbrev=True) — a
         # parse_known_args round-trip over the extra tokens resolves space /
-        # equals / unambiguous-prefix forms AND correctly consumes flag
-        # VALUES (a quoted justification whose text merely CONTAINS
-        # "--integrity-threshold=..." is parsed as --integrity-
-        # justification's value, not as a threshold flag — a raw
-        # token-prefix scan false-positived on it). Invalid extras
-        # (e.g. a bare flag with no value) are the runner's rejection, not
-        # ours — treat as no-override.
+        # equals / unambiguous-prefix forms AND consumes flag VALUES like
+        # the runner: --integrity-justification is REGISTERED on the
+        # detector (round-17), so (a) a single non-option value token after
+        # --integrity-justification is consumed as the justification, never
+        # parsed as a threshold override (a raw token-prefix scan
+        # false-positived on it); (b) an OPTION-LOOKING value token
+        # (starting with ``--``) raises ``expected one argument`` in BOTH
+        # parsers → no-override → the baseline injection stays, and the
+        # malformed tokens are the RUNNER's loud rejection at parse time
+        # (fail-closed: never a silently-wrong threshold); (c) the bare
+        # prefix ``--integrity`` is 'ambiguous option' in both parsers
+        # (matches threshold AND justification) → no-override → the runner's
+        # own error fires. Invalid extras (e.g. a bare flag with no value)
+        # are the runner's rejection, not ours — treat as no-override.
         try:
             _extra_ns, _ = _EXTRA_ARGS_PARSER.parse_known_args(extra or [])
             has_threshold_override = (_extra_ns.integrity_threshold
