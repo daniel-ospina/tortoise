@@ -18,6 +18,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tools.longmem_eval.reader import (
+    _ABSTRACTION_FRAGMENT,
     READER_MODEL,
     LLMReader,
     build_reader,
@@ -63,7 +64,13 @@ def test_report_methodology_records_prompt_constants(tmp_path):
     assert m["reader_provider"] == "mock"
     assert m["reader_pinned"] is None          # mock: pin N/A
     assert m["reader_system_prompt"] == _SYSTEM_PROMPT
-    assert m["reader_type_fragments"] == _TYPE_FRAGMENTS
+    # #1768: the universal A1 clause is now recorded too (the #1762
+    # calibration is the substance of the prompt change — drift must be
+    # visible); type fragments unchanged
+    assert m["reader_type_fragments"]["abstention"] == _ABSTRACTION_FRAGMENT
+    for t, f in _TYPE_FRAGMENTS.items():
+        assert m["reader_type_fragments"][t] == f
+    assert set(m["reader_type_fragments"]) == set(_TYPE_FRAGMENTS) | {"abstention"}
     # parity unchanged-check input must not move (no-hash-infra boundary)
     assert m["reader_prompt_hash"]  # still present
 

@@ -19,9 +19,11 @@ stamp) found in the retrieved hits — a deterministic stand-in proving the
 retrieval actually delivered the evidence, with zero network and no keys
 (CI smoke).
 
-A1 (#1546): the universal partial-knowledge abstention clause
+A1 (#1546 + #1762): the universal partial-knowledge abstention clause
 (``_ABSTRACTION_FRAGMENT``) lets the reader derive unanswerability from the
-evidence — the ``_abs`` question_id marker never crosses into the reader path.
+evidence — the ``_abs`` question_id marker never crosses into the reader
+path. #1762 tightens the clause so the reader commits whenever the asked
+value is present in context and abstains only on genuine evidence gaps.
 """
 from __future__ import annotations
 
@@ -146,29 +148,62 @@ _MULTI_SESSION_FRAGMENT = (
     "know rather than guessing."
 )
 
-# A1 (#1546): the universal partial-knowledge abstention clause — appended
-# to EVERY question's system prompt (abstention questions are
+# A1 (#1546 + #1762): the universal partial-knowledge abstention clause —
+# appended to EVERY question's system prompt (abstention questions are
 # indistinguishable by question_type: the _abs marker lives only in the
 # question_id, which never reaches the reader). It lets the reader derive
 # unanswerability from the evidence: state what IS present, explicitly
 # state the asked info is absent, never commit to a near-miss decoy. The
-# commit-side guard keeps the #1366 fix (answer directly when the exact
+# commit-side guard keeps the #1366 fix (answer directly when the asked
 # fact IS present — never abstain on present evidence).
+#
+# #1762 (V3 pilot finding #3): the pre-#1762 wording read the commit test
+# as a literal-match requirement ("EXACT information" + "do NOT commit to
+# the closest matching fact"), so a present-but-differently-phrased value
+# was downgraded to "related information" and the reader over-abstained on
+# FULL evidence — 4/4 fresh pilot failures were reader-side (6f9b354f:
+# evidence_recall@20 = 1.0 yet "does not mention repainting…"; 8a137a7f:
+# the gold string "Philips LED bulb" sat inside the hedge). The clause now
+# commits whenever the asked VALUE is stated as the fact in any phrasing,
+# forbids the "mentions X but does not contain the asked information"
+# formulation when X is the answer, and reserves abstention for genuinely
+# absent asked values — empty, unrelated, OR near-miss contexts (code
+# review #1768: the first #1762 draft licensed abstention only for full
+# vacuity, which deadlocked the commit/abstain decision on same-attribute
+# near-miss decoys; the #1546 evidence-backed abstention branch, its
+# 'do not mention the context' override, and its judge-scorable exemplar
+# are restored). Known oscillation risk: three prompt-side re-tunings of
+# this commit/abstain balance in 8 days (#1366 → #1546 → #1762) — a
+# structural two-phase decision is a recognized limitation (follow-up not
+# yet tracked). Run.py-owned recording gap — reader_prompt_source()/hash
+# also do not cover the A1 clause (pre-existing; tracked in #1773).
 _ABSTRACTION_FRAGMENT = (
     "\n\nPARTIAL-KNOWLEDGE ABSTENTION: the context can contain related "
-    "information that does NOT actually answer the question. First check "
-    "whether the context contains the EXACT information the question asks "
-    "for. If it does, answer directly and concretely — do NOT abstain, and "
-    "do not let unrelated material weaken your answer. If the exact "
-    "information is absent, do NOT guess, do NOT infer, and do NOT commit "
-    "to the closest matching fact. Instead, state what related information "
-    "IS present (briefly), then explicitly state that the asked information "
-    "is absent. When you must abstain, you are expected to mention the "
-    "related facts found in the memory — this overrides the 'do not mention "
-    "the context' instruction for abstention answers. If the context "
-    "contains nothing related, simply state that the asked information is "
-    "absent. Example: 'The memory mentions <related fact>, but it does not "
-    "contain the asked information.'"
+    "information that does NOT actually answer the question. First decide "
+    "whether the context contains the asked fact — the concrete value "
+    "the question asks for — not whether it echoes the question's "
+    "wording. If the asked value is stated as the fact the question asks "
+    "about, in any phrasing, it IS the answer: answer directly and "
+    "concretely with it. Do NOT abstain, do not hedge, and do not weaken "
+    "your answer with unrelated material. A mere mention is not the "
+    "answer: a negated, rejected, or hypothetical mention, or a different "
+    "value for the asked attribute, does not answer the question and must "
+    "not be committed to. Abstain when the asked value is genuinely "
+    "absent — whether the context is empty, unrelated, or holds related "
+    "or near-miss information (a different value for the asked attribute "
+    "is not the answer). Then do NOT guess, do NOT infer, and do NOT "
+    "commit to a near-miss decoy; instead state what related information "
+    "IS present (briefly), then explicitly state that the asked "
+    "information is absent. When you must abstain, you are expected to "
+    "mention the related facts found in the memory — this overrides the "
+    "'do not mention the context' instruction for abstention answers. "
+    "Never frame the answer value as merely related information: the "
+    "'mentions X but does not contain the asked information' formulation "
+    "is forbidden when X is the answer. If the context contains nothing "
+    "related, simply state that the asked information is absent. Example "
+    "— here the bicycle is NOT the answer, so this form is correct: "
+    "'The memory mentions a new bicycle, but it does not contain the "
+    "asked favorite color.'"
 )
 
 # question_type → the fragment that unlocks correct reasoning for it.
@@ -182,10 +217,19 @@ _TYPE_FRAGMENTS: dict[str, str] = {
 
 def reader_prompt_constants() -> tuple[str, dict[str, str]]:
     """The run's reader prompt constants (M5): the generic system prompt +
-    type fragments, recorded verbatim in report methodology so prompt drift
-    across run cells is visible in the report. A dict copy keeps future
-    fragment additions (A1 abstention, A2 aggregation — same epic) additive."""
-    return _SYSTEM_PROMPT, dict(_TYPE_FRAGMENTS)
+    the universal A1 abstention clause + type fragments, recorded verbatim
+    in report methodology so prompt drift across run cells is human-visible
+    in the report (#1768: the A1 clause — the substance of the #1762
+    calibration — now joins the recorded dict; the dict copy keeps future
+    fragment additions additive). The automated drift signal
+    (reader_prompt_hash, run.py-owned) does not yet cover the A1 clause —
+    pre-existing gap, tracked in #1773."""
+    return _SYSTEM_PROMPT, {
+        **dict(_TYPE_FRAGMENTS),
+        # the universal clause appended to EVERY question's prompt; keyed
+        # 'abstention' (the A1 name, #1546) — not a question_type
+        "abstention": _ABSTRACTION_FRAGMENT,
+    }
 
 
 def system_prompt_for(question_type: str | None) -> str:
@@ -193,8 +237,9 @@ def system_prompt_for(question_type: str | None) -> str:
 
     Unknown/absent types get the hardened generic prompt; temporal-reasoning,
     single-session-preference (issue #1366), knowledge-update and
-    multi-session (A2 #1547) append their reasoning instructions. A1 (#1546):
-    the partial-knowledge abstention clause is appended UNIVERSALLY —
+    multi-session (A2 #1547) append their reasoning instructions. A1
+    (#1546 + #1762): the partial-knowledge abstention clause is appended
+    UNIVERSALLY —
     abstention questions are indistinguishable by question_type (the _abs
     marker lives only in the question_id, which never reaches the reader), so
     the reader must derive unanswerability from the evidence, never from a
