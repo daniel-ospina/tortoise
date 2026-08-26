@@ -26,6 +26,23 @@ import pytest
 from tortoise.config import is_db_uri
 from tortoise.projection import FalkorProjection
 
+
+# ── Epic #1686: worker-thread probe ───────────────────────────────────────
+def _worker_stem_embedded_probe(results: list, path: str) -> None:
+    """#1686 probe: report (inherited_stem, is_embedded, graph_name) from a
+    WORKER thread. Lives in tests/_embedded.py so the frame sniff skips it
+    (basename does not start with test_) — the construction resolves via the
+    INHERITED stem (conftest hook + patched Thread.start), not the frame
+    path. The target function must be called directly as the Thread target
+    (a lambda/closure wrapper would introduce a test_ frame below it)."""
+    from tortoise.projection import _inherited_test_stem
+    stem = _inherited_test_stem()
+    proj = FalkorProjection(path, skip_health_check=True)
+    try:
+        results.append((stem, proj._is_embedded, proj.graph_name))
+    finally:
+        proj.close()
+
 # Epic #1647 (plan-review P0-1): in-repo carve-out exemption list — the
 # caller TEST-MODULE stems exempted from the URI-aware redirect via
 # TORTOISE_TEST_NO_REDIRECT (conftest exports it from this constant so the
@@ -631,6 +648,12 @@ def _sweep_drop(proj, journal_file: str, *, drop: bool = True,
     keep-on-partial — a crashed/partial sweep cannot lose its own drop-set
     bookkeeping; the next session's stale sweep retries). Returns a summary
     dict {"dropped", "failed", "journal_removed"} or {"skipped": ...}.
+
+    #1686: team_* graphs reach the drop set ONLY via the journal — they are
+    never test-prefixed (hosted parity: team_create + the hosted mint sites
+    append them via _journal_append_product). Raw select_graph team_* mints
+    in test code are journal-blind and are closed by _leftover_sweep's
+    team_* pass instead.
     """
     from tortoise.projection import _is_loopback_host
     host = _projection_host(proj)
@@ -673,10 +696,62 @@ def _session_end_own_sweep(uri: str, journal_file: str, *,
                            skip_on_non_loopback=skip_on_non_loopback)
 
 
+def _team_sweep_allowed(uri: str) -> bool:
+    """#1686 (review P1-1): may the team_* stray pass run against `uri`?
+
+    team_<name> is the PRODUCT's own mint namespace (hosted parity: real
+    tenant graphs are named team_...). A blanket team_* delete on a shared
+    or dev docker would destroy legitimate product data — the pre-#1686
+    design deliberately kept wipes fail-closed to test_/tortoise_test_
+    prefixes. Allowed ONLY on a dedicated test DB (the URI path names one,
+    e.g. .../tortoise_test_matrix — CI) or via an explicit operator opt-in
+    (TORTOISE_TEST_SWEEP_TEAM_STRAYS=1). Journaled team_* graphs are always
+    dropped via _sweep_drop (the journal is the ownership record) — this
+    gate protects only the journal-blind residual pass."""
+    if os.environ.get("TORTOISE_TEST_SWEEP_TEAM_STRAYS") == "1":
+        return True
+    from urllib.parse import urlparse
+    try:
+        path = urlparse(uri).path
+    except Exception:
+        path = ""
+    return "test" in (path or "")
+
+
+def _sweep_team_strays(proj, uri: str) -> list[str]:
+    """Drop journal-blind stray team_* graphs (#1686 closure).
+
+    Guarded by _team_sweep_allowed(uri) — never on a shared/dev docker.
+    DETACH+DELETE per graph, log-and-continue; returns the dropped names.
+    Runs AFTER wipe_server in _leftover_sweep (journaled team_* names were
+    already dropped by _sweep_drop; this closes the raw-select_graph class)."""
+    if not _team_sweep_allowed(uri):
+        logging.getLogger(__name__).info(
+            "leftover team_* pass SKIPPED — %r is not a dedicated test DB "
+            "(set TORTOISE_TEST_SWEEP_TEAM_STRAYS=1 to opt in)", uri)
+        return []
+    dropped: list[str] = []
+    for g in proj.db.list_graphs() or []:
+        if not g.startswith("team_"):
+            continue
+        try:
+            proj.db.select_graph(g).query("MATCH (n) DETACH DELETE n")
+            proj.db.select_graph(g).delete()
+            dropped.append(g)
+        except Exception as e:
+            logging.getLogger(__name__).warning(
+                "leftover team_* drop failed for %r: %r", g, e)
+    return dropped
+
+
 def _leftover_sweep(uri: str, *, skip_on_non_loopback: bool = True) -> dict:
     """LAST-suite-standing FULL sweep: every test-prefixed graph on the
-    server (wipe_server scope=None → global, drop=True). Log-and-continue on
-    errors — hygiene never fails the suite."""
+    server (wipe_server scope=None → global, drop=True) PLUS, since #1686,
+    journal-blind stray team_* graphs — but ONLY when _team_sweep_allowed
+    (a dedicated test DB or an explicit opt-in): team_* is the product's
+    mint namespace and a blanket delete on a shared/dev docker would destroy
+    real tenant data (review P1-1). Log-and-continue on errors — hygiene
+    never fails the suite."""
     with _sweep_proj(uri) as proj:
         from tortoise.projection import _is_loopback_host
         host = _projection_host(proj)
@@ -686,7 +761,8 @@ def _leftover_sweep(uri: str, *, skip_on_non_loopback: bool = True) -> dict:
             return {"skipped": f"non-loopback {host!r}"}
         try:
             wipe_server(proj, scope=None, drop=True)
-            return {"full_sweep": True}
+            dropped_teams = _sweep_team_strays(proj, uri)
+            return {"full_sweep": True, "team_strays_dropped": dropped_teams}
         except Exception as e:
             logging.getLogger(__name__).warning(
                 "leftover sweep failed: %r", e)
