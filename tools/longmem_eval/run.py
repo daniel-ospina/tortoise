@@ -1018,6 +1018,18 @@ def resume_gate_reject_reason(outcome: dict) -> str | None:
     (abstention questions — ``turn_recall@k`` all None per the M6
     N/A-not-0.0 contract) are exempt: their all-zero session recall and
     legitimately empty FTS are the question's shape, not a dead backend.
+    The session-zero signal is an INDEPENDENT rejection trigger per issue
+    #1764 (Indicator 1 requires flagging ``session_recall@k`` all-zero on
+    its own) — it is NOT only a dead-leg detector. A deterministic miss
+    (live retrieval that surfaced the wrong sessions) or a vector-mode
+    miss (no ``legs`` trace at all) with all-zero recall is rejected and
+    re-encodes on every resume until retrieval improves — the checkpoint
+    self-heals only on a successful re-encode. That fail-closed posture is
+    INTENDED (re-verifying beats trusting a session that never surfaced)
+    and is distinct from the abstention exemption above: an abstention is
+    the question's shape (``turn_recall@k`` all None), while an all-zero
+    session signal with real turn evidence means the retriever never
+    surfaced the session.
     breaker_open outcomes are excluded by the caller (kept — a legitimately
     dropped question must never re-run).
     """
@@ -1081,6 +1093,15 @@ def resume_gate_reject_reason(outcome: dict) -> str | None:
         # on the next resume.
         if dead_fts and not live_fts and not session_healthy:
             return "fts.count=0 (dead FTS retrieval leg)"
+    # #1764: the session-zero signal is an INDEPENDENT rejection trigger,
+    # not merely a dead-leg detector — a deterministic miss (live
+    # retrieval surfaced the wrong sessions) or a vector-mode miss (no
+    # legs trace) with all-zero recall is rejected and re-encodes on every
+    # resume until retrieval improves (the checkpoint self-heals only on a
+    # successful re-encode). Intended fail-closed posture — distinct from
+    # the abstention exemption (a legit sessionless outcome has
+    # turn_recall all-None; here real turn evidence exists but the session
+    # never surfaced).
     if session_zero:
         return "session_recall@k all zeros (session never surfaced)"
     return None

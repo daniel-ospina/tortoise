@@ -740,7 +740,7 @@ def test_checkpoint_resume_gate_keeps_breaker_open(tmp_path):
     # unknown / corrupt reason strings (future vocabulary, hand-edited
     # files, reason=None) are NOT dead — fail-open (the index_missing
     # livelock lesson); vocabulary drift is warned about separately
-    # (test_resume_gate_warns_on_unknown_leg_reason)
+    # (test_resume_gate_unknown_leg_reason_pure_and_surfaced)
     ({"question_id": "q",
       "legs": [{"leg": "fts", "ran": True, "degraded": True,
                  "reason": "some_future_reason", "count": 0}]},
