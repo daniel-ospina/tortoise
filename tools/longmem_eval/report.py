@@ -188,28 +188,33 @@ def _numeric(v: Any) -> bool:
     """A REAL numeric value for aggregation: int/float, NOT bool (a tampered
     checkpoint true/false must fail closed, never aggregate as 1.0/0.0), and
     FINITE (NaN/Infinity from a malformed checkpoint would poison every mean
-    and serialize as non-strict JSON — round-8/10 security review). Ints are
-    additionally magnitude-bounded (round-17 code-review P1: json.loads
-    produces arbitrary-precision ints, so a tampered/truncated checkpoint
-    with a 309+-digit integer literal in ANY numeric field passes the type /
-    bool / finiteness checks and then ``float(v)`` raises OverflowError
-    mid-report — a multi-hour run aborts before any report is written and
-    every resume crashes on the retained poisoned value; the magnitude bound
-    mirrors the float-finiteness posture: abs(v) > 1e308 (beyond the largest
-    finite float ~1.797e308) is excluded, never converted). The bound is
-    tightened to 1e300 for SUM-safety (round-18 code-review P2): the 1e308
-    bound prevented the per-value float(v) OverflowError but NOT
-    float-ARITHMETIC overflow at the sum sites — two accepted 10**308 values
-    sum past float max (2e308 > 1.797e308) to inf, which round() propagates
-    and _json_safe SILENTLY nulls in the published mean with valid=True
-    and n_excluded=0 (the PR's own 'never silent' principle). Excluding
-    abs(v) > 1e300 keeps every n-way sum finite (any realistic outcome
-    count: n x 1e300 << 1.797e308), so an accepted value can never overflow
-    an aggregation to inf; values above the bound are excluded, never
-    converted)."""
+    and serialize as non-strict JSON — round-8/10 security review). Values are
+    magnitude-bounded (round-17 code-review P1: json.loads produces
+    arbitrary-precision ints, so a tampered/truncated checkpoint with a
+    309+-digit integer literal in ANY numeric field passes the type / bool /
+    finiteness checks and then ``float(v)`` raises OverflowError mid-report —
+    a multi-hour run aborts before any report is written and every resume
+    crashes on the retained poisoned value; the magnitude bound mirrors the
+    float-finiteness posture). The bound applies to BOTH int and float
+    magnitudes (round-18 gate-review cycle-3 P2): a finite float literal
+    like 1.5e308 is as easy to inject as a 309-digit int, and passed the
+    cycle-2 int-only bound — two such values sum past float max at the sum
+    sites, round() propagates inf, and _json_safe SILENTLY nulls the mean
+    with valid=True and n_excluded=0 (the PR's own 'never silent' principle;
+    no legitimate outcome value exceeds 1e300 — recall is 0-1, counts /
+    latencies / tokens are far below). abs(v) > 1e300 is excluded, never
+    converted. The 1e300 bound is also SUM-safe (round-18 code-review P2):
+    the old 1e308 bound prevented the per-value float(v) OverflowError but
+    NOT float-ARITHMETIC overflow at the sum sites — two accepted 10**308
+    values sum past float max (2e308 > 1.797e308) to inf, which round()
+    propagates and _json_safe SILENTLY nulls in the published mean with
+    valid=True and n_excluded=0. Excluding abs(v) > 1e300 keeps every n-way
+    sum finite (any realistic outcome count: n x 1e300 << 1.797e308), so an
+    accepted value can never overflow an aggregation to inf; values above
+    the bound are excluded, never converted)."""
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         return False
-    if isinstance(v, int) and abs(v) > 1e300:
+    if abs(v) > 1e300:
         return False
     return not (isinstance(v, float) and not math.isfinite(v))
 

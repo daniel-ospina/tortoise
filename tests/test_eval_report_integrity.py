@@ -1087,10 +1087,17 @@ def test_report_integrity_huge_int_magnitude_excluded_no_crash():
     assert integ["n_excluded"] == 1
     assert integ["n_attempted"] == 1
     assert integ["valid"] is True
-    # ... and the published report carries NO answer_string_recall aggregate
-    # (the poisoned outcome was excluded, nothing fabricated).
+    # ... and the published report carries NO answer_string_evidence_recall@k
+    # aggregate under its REAL retrieval keys (the poisoned outcome was
+    # excluded, nothing fabricated). NB: the cycle-2 assertion
+    # ``report.get("answer_string_recall")`` checked a top-level key that
+    # NEVER exists in any report (vacuously true regardless of behavior);
+    # the published keys are retrieval.answer_string_evidence_recall@k /
+    # retrieval.answer_string_evidence_recall_n@k (report.py ~1368) — both
+    # present, null here, and NON-null iff the aggregate were fabricated.
     report = _report([bad, _outcome("q1", valid=True)], threshold=1.0)
-    assert report.get("answer_string_recall") is None
+    assert report["retrieval"]["answer_string_evidence_recall@k"] is None
+    assert report["retrieval"]["answer_string_evidence_recall_n@k"] is None
     # a huge int co-occurring with a hard census class still VETOES via
     # n_excluded_hard (the hard-grade path is unchanged by the exclusion).
     bad = _outcome("q0", valid=True)
@@ -1108,8 +1115,8 @@ def test_report_integrity_huge_int_magnitude_excluded_no_crash():
     report = _report([bad], threshold=1.0)
     assert report["n_questions"] == 0
     assert report["integrity"]["valid"] is False
-    # boundary (round-18 fix, gate review cycle 2): the magnitude bound is
-    # tightened from 1e308 to 1e300 for SUM-safety — 10**308 passes the old
+    # boundary (round-18 fix, gate review cycles 2/3): the magnitude bound is
+    # tightened from 1e308 to 1e300 for SUM-safety — 10**308 passes the OLD
     # per-value check, but TWO such outcomes sum past float max
     # (2e308 > 1.797e308) to inf, which round() propagates and _json_safe
     # SILENTLY nulls (valid=True, n_excluded=0 — the PR's "never silent"
@@ -1121,7 +1128,24 @@ def test_report_integrity_huge_int_magnitude_excluded_no_crash():
     assert integ["n_excluded"] == 0
     assert integ["n_attempted"] == 1
     assert integ["valid"] is True
-    # two outcomes at the new bound edge: the MEAN is finite (not null, not
+    # two outcomes at the OLD 1e308 bound edge: the old code admitted them
+    # and summed 2e308 → inf → _json_safe SILENTLY nulled the mean
+    # (valid=True, n_excluded=0). The new 1e300 bound EXCLUDES both —
+    # n_excluded=2, empty attempted set → the vacuity guard fails closed
+    # (valid=False, mean None — never a null mean with valid=True). This
+    # block FAILS under the old bound, pinning the sum-safety behavior
+    # change (the cycle-2 10**300 pair was finite under EITHER bound and
+    # never executed the overflow path).
+    a, b = _outcome("q0", valid=True), _outcome("q1", valid=True)
+    a["pool_size"] = 10 ** 308
+    b["pool_size"] = 10 ** 308
+    report = _report([a, b], threshold=1.0)
+    integ = report["integrity"]
+    assert integ["n_excluded"] == 2
+    assert integ["n_attempted"] == 0
+    assert integ["valid"] is False
+    assert report["pool_size"] == {}     # no aggregate for an empty attempted set
+    # two outcomes at the NEW bound edge: the MEAN is finite (not null, not
     # inf) — sum-safety is what the tightened bound buys.
     a, b = _outcome("q0", valid=True), _outcome("q1", valid=True)
     a["pool_size"] = 10 ** 300
@@ -1134,6 +1158,63 @@ def test_report_integrity_huge_int_magnitude_excluded_no_crash():
     # a value ABOVE the new bound is still excluded.
     bad = _outcome("q0", valid=True)
     bad["pool_size"] = 10 ** 301
+    integ = _report([bad, _outcome("q1", valid=True)],
+                    threshold=1.0)["integrity"]
+    assert integ["n_excluded"] == 1
+    assert integ["valid"] is True
+
+
+def test_report_integrity_huge_float_magnitude_excluded_no_silent_null():
+    """#1747 (round-18 gate-review cycle-3 P2): the cycle-2 magnitude bound
+    was int-only — a finite float literal like 1.5e308 passed _numeric
+    (finite, no int bound), and TWO such pool_size values summed past float
+    max to inf, which round() propagated and _json_safe SILENTLY nulled the
+    mean (n_excluded=0, valid=True — the exact silent-null failure the int
+    tightening claims to eliminate). A 1.5e308 JSON literal is as easy to
+    inject as a 309-digit int, and the same seam hits latencies,
+    context_tokens, counts, recall values, leg_mix. The bound now applies
+    to BOTH int and float magnitudes: abs(v) > 1e300 is excluded, never
+    converted."""
+    # a single huge float in pool_size: outcome excluded, report builds.
+    bad = _outcome("q0", valid=True)
+    bad["pool_size"] = 1.5e308
+    integ = _report([bad, _outcome("q1", valid=True)],
+                    threshold=1.0)["integrity"]
+    assert integ["n_excluded"] == 1
+    assert integ["n_attempted"] == 1
+    assert integ["valid"] is True
+    # a huge float in a latency field is excluded too (the _lat float() site).
+    bad = _outcome("q0", valid=True)
+    bad["ingest_latency_ms"] = 1.5e308
+    integ = _report([bad, _outcome("q1", valid=True)],
+                    threshold=1.0)["integrity"]
+    assert integ["n_excluded"] == 1
+    assert integ["valid"] is True
+    # TWO huge floats at the old float-finite edge: both EXCLUDED — the old
+    # code admitted them, summed 3e308 → inf, and silently nulled the mean
+    # with valid=True, n_excluded=0. The empty attempted set now fails
+    # closed (valid=False) — never a null mean with valid=True.
+    a, b = _outcome("q0", valid=True), _outcome("q1", valid=True)
+    a["pool_size"] = 1.5e308
+    b["pool_size"] = 1.5e308
+    report = _report([a, b], threshold=1.0)
+    integ = report["integrity"]
+    assert integ["n_excluded"] == 2
+    assert integ["n_attempted"] == 0
+    assert integ["valid"] is False
+    assert report["pool_size"] == {}     # no aggregate for an empty attempted set
+    # the float bound edge: 1e300 (equal to the bound — accepted; the
+    # cycle-2 int-only bound had NO float arm, so the edge float must be
+    # pinned separately).
+    ok = _outcome("q0", valid=True)
+    ok["pool_size"] = 1e300
+    integ = _report([ok], threshold=1.0)["integrity"]
+    assert integ["n_excluded"] == 0
+    assert integ["n_attempted"] == 1
+    assert integ["valid"] is True
+    # and a float ABOVE the bound (1.5e300) is excluded.
+    bad = _outcome("q0", valid=True)
+    bad["pool_size"] = 1.5e300
     integ = _report([bad, _outcome("q1", valid=True)],
                     threshold=1.0)["integrity"]
     assert integ["n_excluded"] == 1
