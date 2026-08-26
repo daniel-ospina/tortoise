@@ -526,7 +526,7 @@ def _model_id(model: Any) -> str | None:
 
     NOTE: wrapper models from ``build_extractor_model()`` (RoutingModel /
     RotatingModel) expose neither attribute and still fall to repr —
-    tracked as follow-up (#1736 review, default CLI path).
+    tracked as follow-up #1739 (default CLI path).
     """
     if model is None:
         return None
