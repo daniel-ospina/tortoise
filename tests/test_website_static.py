@@ -411,11 +411,12 @@ def test_tortoise_decide_skill_ships_the_workflow():
 def test_welcome_provisioning_pipeline_is_dead_since_1566():
     """#1566 (review P2): welcome.html's provisioning pipeline must STAY dead
     — restoring it would recreate the double-provision surface #1082/#1566
-    guard against. The signed-in redirect must precede the pipeline."""
+    guard against. The bridge (runSessionBridge) must contain NO provisioning
+    symbols (the #1730 strip removed them entirely)."""
     src = Path("website/welcome.html").read_text()
-    assert "DEAD SINCE #1566" in src, "dead-pipeline marker missing"
-    prov = src.index("DEAD SINCE #1566")
-    assert prov < src.index("provisionViaEdgeFunction"), \
-        "the pipeline marker must precede the provisioning functions"
+    assert "runSessionBridge" in src, "session bridge missing"
+    for dead in ("provisionViaEdgeFunction", "waitForProvisioning",
+                 "revealKeyOnce", "claimStatusGuard"):
+        assert dead not in src, f"provisioning symbol {dead} must not exist"
 
 

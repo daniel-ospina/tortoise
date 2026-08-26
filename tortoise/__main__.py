@@ -1646,6 +1646,8 @@ def _harness_mcp_config(harness: str, api_key: str, api_url: str) -> dict:
     endpoint = api_url.rstrip("/") + "/mcp/"
     if harness == "codex":
         return {"command": f"codex mcp add tortoise --url {endpoint} --bearer-token-env-var TORTOISE_API_KEY"}
+    # Cursor supports the ${env:VAR} expansion; pi's mcp-client does NOT
+    # (it expands plain ${VAR} only — an env: prefix yields an empty header).
     header = "${env:TORTOISE_API_KEY}" if harness == "cursor" else "${TORTOISE_API_KEY}"
     server: dict = {
         "url": endpoint,

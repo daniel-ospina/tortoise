@@ -101,7 +101,7 @@ _CORS_PREFLIGHT = {
 }
 
 # Browser-level network log noise from deliberately-failed requests (real
-# 401s from the /welcome boot fetches after the mocked sign-in redirect in
+# 401s from the /welcome bridge boot after the mocked sign-in redirect in
 # prod mode — rest/v1/team_memberships, /v1/onboarding/state fire ~100-500ms
 # after commit; review P1 c60) — NOT page JS errors; the zero-console-errors
 # assertion in the mocked-signup test filters it (same filter the signup
