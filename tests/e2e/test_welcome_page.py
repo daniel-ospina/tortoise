@@ -42,28 +42,6 @@ PROMPT_URL = os.environ.get("PROMPT_URL", "https://premiselabs.co/onboarding-pro
 
 
 
-@pytest.fixture(scope="module")
-def browser_context_args(
-    pytestconfig: Any,
-    playwright: Playwright,
-    device: str | None,
-    base_url: str | None,
-    _pw_artifacts_folder: tempfile.TemporaryDirectory,
-) -> dict:
-    context_args = {}
-    if device:
-        context_args.update(playwright.devices[device])
-    if base_url:
-        context_args["base_url"] = base_url
-
-    video_option = pytestconfig.getoption("--video")
-    capture_video = video_option in ["on", "retain-on-failure"]
-    if capture_video:
-        context_args["record_video_dir"] = _pw_artifacts_folder.name
-
-    return context_args
-
-
 # ── Live/static tests (no auth) ─────────────────────────────────────
 
 

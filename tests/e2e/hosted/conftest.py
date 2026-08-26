@@ -403,7 +403,7 @@ def bare_hosted_server(hosted_env):
         shutil.rmtree(d, ignore_errors=True)
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def api(playwright, hosted_env):
     """Playwright APIRequestContext bound to the hosted base URL."""
     # 30s default per request: fail fast when the server degrades instead

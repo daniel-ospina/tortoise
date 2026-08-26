@@ -26,13 +26,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-import tempfile
-import uuid
 from collections.abc import Callable, Generator
 from typing import Any
 
 import pytest
-from playwright.sync_api import Browser, BrowserType, Page, Playwright, sync_playwright
+from playwright.sync_api import Browser, BrowserType, Playwright, sync_playwright
 
 # ── #1721: module-scoped playwright chain (root-cause fix) ─────────────
 # pytest-playwright's `playwright` fixture is SESSION-scoped. Playwright's
@@ -121,3 +119,22 @@ def browser(launch_browser: Callable[..., Browser]) -> Generator[Browser, None, 
     browser = launch_browser()
     yield browser
     browser.close()
+@pytest.fixture(scope="module")
+def browser_context_args(
+    pytestconfig: Any,
+    playwright: Playwright,
+    device: str | None,
+    base_url: str | None,
+    _pw_artifacts_folder: Any,
+) -> dict:
+    # module-scoped mirror of the plugin's session-scoped fixture — a
+    # SESSION-scoped browser_context_args depending on the module-scoped
+    # playwright would ScopeMismatch (#1721 review P0).
+    context_args = {}
+    if device:
+        context_args.update(playwright.devices[device])
+    if base_url:
+        context_args["base_url"] = base_url
+    return context_args
+
+
