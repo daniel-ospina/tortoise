@@ -2922,9 +2922,11 @@ def test_boost_before_recall_metrics(tmp_path, monkeypatch):
 
 
 def test_evidence_boost_rejects_invalid_multipliers():
-    """C2 (review P1-2): a boost factor < 1.0 is rejected at the function
-    boundary — 0.0 would ZeroDivide the rank scaling, a negative factor
-    would silently invert the pool order."""
+    """C2 (review P1-2 + F9): a boost factor < 1.0 or NON-FINITE is
+    rejected at the function boundary — 0.0 would ZeroDivide the rank
+    scaling, a negative factor would silently invert the pool order, and
+    NaN/Inf would poison every sort key (NaN passes the < 1.0 comparison;
+    inf zeroes every key) — review F9 pins the isfinite guard."""
     pool = _boost_pool(5)
     with pytest.raises(ValueError, match=r"must be >= 1.0"):
         _apply_evidence_boost(pool, question=_boost_question(),
@@ -2932,6 +2934,12 @@ def test_evidence_boost_rejects_invalid_multipliers():
     with pytest.raises(ValueError, match=r"must be >= 1.0"):
         _apply_evidence_boost(pool, question=_boost_question(),
                               boost_source=-1.0)
+    with pytest.raises(ValueError, match=r"must be >= 1.0"):
+        _apply_evidence_boost(pool, question=_boost_question(),
+                              boost_verbatim=float("nan"))
+    with pytest.raises(ValueError, match=r"must be >= 1.0"):
+        _apply_evidence_boost(pool, question=_boost_question(),
+                              boost_source=float("inf"))
     # env multipliers outside [0,1] are honored (the rerank._env_float
     # MMR-lambda clamp must NOT swallow the 1.5/1.15 defaults)
     import os as _os
@@ -2945,6 +2953,13 @@ def test_evidence_boost_rejects_invalid_multipliers():
         _os.environ["TORTOISE_LME_EVIDENCE_BOOST_VERBATIM"] = "0.5"
         assert _env_boost_float("TORTOISE_LME_EVIDENCE_BOOST_VERBATIM",
                                 1.5) == 1.5  # < 1.0 -> default
+        # review F9: NaN/Inf fall back to the default (never poisoned keys)
+        _os.environ["TORTOISE_LME_EVIDENCE_BOOST_VERBATIM"] = "nan"
+        assert _env_boost_float("TORTOISE_LME_EVIDENCE_BOOST_VERBATIM",
+                                1.5) == 1.5
+        _os.environ["TORTOISE_LME_EVIDENCE_BOOST_VERBATIM"] = "inf"
+        assert _env_boost_float("TORTOISE_LME_EVIDENCE_BOOST_VERBATIM",
+                                1.5) == 1.5
     finally:
         _os.environ.pop("TORTOISE_LME_EVIDENCE_BOOST_VERBATIM", None)
 
@@ -3264,6 +3279,20 @@ def test_knob_cli_validation():
             cwd=str(Path(__file__).parent.parent))
         assert r.returncode != 0, f"{flag} {bad} must be rejected"
         assert flag in r.stderr, f"{flag} {bad}: missing clear message"
+    # C2 (review F9): boost multipliers < 1.0 OR non-finite (NaN/Inf) are
+    # rejected at the run layer (SystemExit) — 0.0 would ZeroDivide the
+    # rank scaling, a negative would invert the pool, NaN/Inf poison keys.
+    # The fail-loud message names the ENV knob (the run-layer resolver's
+    # contract); the CLI flag itself is argparse-typed float.
+    for flag, bad in (("--evidence-boost-verbatim", "0.5"),
+                      ("--evidence-boost-verbatim", "nan"),
+                      ("--evidence-boost-source", "inf")):
+        r = subprocess.run(
+            [*base, flag, bad], capture_output=True, text=True,
+            cwd=str(Path(__file__).parent.parent))
+        assert r.returncode != 0, f"{flag} {bad} must be rejected"
+        assert "EVIDENCE_BOOST" in r.stderr, \
+            f"{flag} {bad}: missing clear message"
 
 
 def test_report_methodology_records_r1_knobs():

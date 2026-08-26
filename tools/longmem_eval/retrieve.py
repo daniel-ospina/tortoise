@@ -46,8 +46,10 @@ AND the ``context_item_cap`` (default 40, knob
 ``TORTOISE_LME_CONTEXT_ITEMS``); TR questions keep the pinned
 ``tr_top_k``=12 item cap (R5 flood control). Recall@k is computed over
 the DEDUPED pool (``ret["hits"]`` == the pool — the retrieval contract);
-since C1, the pool is an UPPER BOUND on what the reader could actually
-see — ``reader_evidence@k`` (C4) is the reader-surface measure.
+since C1, the pool is an APPROXIMATE upper bound on what the reader
+could actually see (the budget walk's skip-not-starve lets a lower-ranked
+marked item enter the k-prefix, so ``reader_evidence@k`` can exceed it) —
+``reader_evidence@k`` (C4) is the independent reader-surface measure.
 
 C2 (#1745): the evidence-mark boost (``_apply_evidence_boost``) re-ranks
 marked hits up by a stable rank offset BEFORE ``_recall_metrics`` so the
@@ -1049,8 +1051,10 @@ def retrieve_for_question(
     interleaved in true RRF rank order, bounded by ``max_context_tokens``
     AND ``context_item_cap`` (default 40, env
     ``TORTOISE_LME_CONTEXT_ITEMS``); TR keeps the pinned ``tr_top_k`` item
-    cap). Since C1 the pool is an UPPER BOUND on what the reader sees —
-    ``reader_evidence@k`` (C4) is the reader-surface measure.
+    cap). Since C1 the pool is an APPROXIMATE upper bound on what the
+    reader sees (skip-not-starve can admit a lower-ranked marked item
+    into the k-prefix) — ``reader_evidence@k`` (C4) is the independent
+    reader-surface measure.
     C2 (#1745): ``evidence_boost`` (OFF by default in code — env
     ``TORTOISE_LME_EVIDENCE_BOOST`` or the explicit flag enables it)
     re-ranks marked hits by a stable rank offset BEFORE ``_recall_metrics``
@@ -1402,7 +1406,9 @@ def retrieve_for_question(
         "context_point_count": len(context_points),
         # C4 (#1745): the reader-surface evidence metric — fraction of
         # evidence-marked hits present in context_points[:k] / marked total
-        # (the metric C1 actually moves; pool recall is the upper bound).
+        # (the metric C1 actually moves; pool recall is an APPROXIMATE
+        # upper bound — skip-not-starve can admit a lower-ranked marked
+        # item into the k-prefix).
         # N/A (None) on empty denominators, mirroring evidence_recall@k.
         "reader_evidence@k": reader_evidence,
         # Task 0 (#1745): ranked ids + evidence-turn matches populated for
