@@ -256,14 +256,18 @@ The report is self-explanatory: every run prints and persists
 - **`integrity`** — `valid` (#1747 census-class-aware:
   `valid = (n_hard_invalid == 0) AND (n_excluded_hard == 0) AND
   (invalid_rate ≤ threshold) AND (attempted set non-empty whenever any
-  entry was excluded)` — fatal_*/ingest/unknown/non-census-error-string
+  entry was excluded or dropped — a fully excluded/dropped run never
+  certifies)` — fatal_*/ingest/unknown/non-census-error-string
   (empty-census)/permanent-eval-failure questions, and malformed inputs
-  (present non-bool `valid`, non-iterable, non-str or falsy-but-present
-  `error_classes`) fail closed to hard and veto at any threshold; an
+  (present non-bool `valid`, non-iterable, non-str, falsy-but-present or
+  PRESENT-null `error_classes`) fail closed to hard and veto at any
+  threshold; an
   EXCLUDED outcome (shape-broken dict, or a breaker_open vector-arm drop)
   still vetoes when it carries a hard census class — malformed shapes
   cannot launder a fatal class out of the gate (`n_excluded_hard`), and a
-  run whose entire outcome set was excluded never certifies valid (a truly
+  run whose entire outcome set was excluded OR dropped (e.g. a vector-arm
+  outage that breaker-tripped every question) never certifies valid (a
+  truly
   empty report stays vacuously valid)),
   `n_attempted` / `n_valid` / `n_invalid`, `invalid_rate` (invalid = a
   failed question OR a completed question with error-class/extraction-error

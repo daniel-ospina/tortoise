@@ -413,7 +413,7 @@ def test_report_integrity_zero_count_census_semantics():
                     threshold=1.0)["integrity"]
     assert integ["n_hard_invalid"] == 1
     assert integ["valid"] is False
-    assert integ["error_census_malformed"] == {"fatal_402_billing": False}
+    assert integ["error_census_malformed"] == {"fatal_402_billing": [False]}
 
 
 def test_report_integrity_malformed_census_count_fails_closed():
@@ -432,7 +432,7 @@ def test_report_integrity_malformed_census_count_fails_closed():
     assert integ["valid"] is False
     assert integ["n_hard_invalid"] == 1
     assert integ["error_census"] == {}
-    assert integ["error_census_malformed"] == {"fatal_402_billing": "abc"}
+    assert integ["error_census_malformed"] == {"fatal_402_billing": ["abc"]}
     # recoverable class with a malformed count → one recoverable question
     # (rate-limited); the malformed value is still recorded.
     integ = _report([_outcome("q0", valid=False,
@@ -440,7 +440,7 @@ def test_report_integrity_malformed_census_count_fails_closed():
                     threshold=1.0)["integrity"]
     assert integ["valid"] is True
     assert integ["n_recoverable_invalid"] == 1
-    assert integ["error_census_malformed"] == {"parse_error": "abc"}
+    assert integ["error_census_malformed"] == {"parse_error": ["abc"]}
 
 
 def test_report_integrity_mixed_malformed_and_int_census_counts():
@@ -456,7 +456,7 @@ def test_report_integrity_mixed_malformed_and_int_census_counts():
     ]
     integ = _report(outcomes, threshold=0.0)["integrity"]
     assert integ["error_census"] == {"parse_error": 3, "transient_network": 2}
-    assert integ["error_census_malformed"] == {"parse_error": "abc"}
+    assert integ["error_census_malformed"] == {"parse_error": ["abc"]}
     assert integ["n_recoverable_invalid"] == 2
 
 
@@ -472,7 +472,7 @@ def test_report_integrity_bool_and_mixed_key_census_robustness():
     assert integ["valid"] is False
     assert integ["n_hard_invalid"] == 1
     assert integ["error_census"] == {}
-    assert integ["error_census_malformed"] == {"fatal_402_billing": True}
+    assert integ["error_census_malformed"] == {"fatal_402_billing": [True]}
     # mixed-type class keys (programmatic-caller shape) do not crash — and
     # the report SERIALIZES (json.dumps sort_keys with str-coerced keys).
     integ = _report([_outcome("q0", valid=False,
@@ -496,7 +496,7 @@ def test_report_integrity_bool_and_mixed_key_census_robustness():
                     threshold=1.0)["integrity"]
     assert integ["n_recoverable_invalid"] == 1
     assert integ["error_census"] == {}
-    assert integ["error_census_malformed"] == {"parse_error": [1, 2]}
+    assert integ["error_census_malformed"] == {"parse_error": [[1, 2]]}
     # TWO DISTINCT malformed values for one class (the heterogeneous
     # checkpoint-merge shape) accumulate — the second never vanishes.
     integ = _report([_outcome("q0", valid=False,
@@ -521,6 +521,35 @@ def test_report_integrity_bool_and_mixed_key_census_robustness():
                               error_classes=[{"b": 2}])],
                     threshold=1.0)["integrity"]
     assert integ["error_census_malformed"]["<legacy-list>"] == [{"a": 1}, {"b": 2}]
+    # round-11: a LIST-first malformed count (container) is a flat list of
+    # DISTINCT values — an identical container re-occurrence dedupes instead
+    # of nesting ("[1,2] then [1,2]" → [[1, 2]], never [1,2,[1,2]]).
+    integ = _report([_outcome("q0", valid=False,
+                              error_classes={"parse_error": [1, 2]}),
+                     _outcome("q1", valid=False,
+                              error_classes={"parse_error": [1, 2]})],
+                    threshold=1.0)["integrity"]
+    assert integ["error_census_malformed"] == {"parse_error": [[1, 2]]}
+
+
+def test_report_integrity_json_safe_nonfinite_null():
+    """#1747 (round-11 security review): a NaN/Infinity value riding the raw
+    extra[outcomes] projection (excluded from the MEANS but published
+    verbatim) must serialize as STRICT JSON — _json_safe maps non-finite
+    floats to null so json.dumps never emits NaN/Infinity tokens."""
+    import json as _json
+    import tempfile as _tempfile
+
+    from tools.longmem_eval.report import save_report
+    o = _outcome("q0", valid=True)
+    o["session_recall@k"]["5"] = float("nan")  # bypasses the shape filter's
+    # _numeric (the raw projection can still publish it) — save_report must
+    # emit strict JSON regardless.
+    report = _report([o])
+    report["outcomes"] = [o]
+    text = save_report(report, Path(_tempfile.mkdtemp()) / "r.json").read_text()
+    _json.loads(text, parse_constant=lambda c: (_ for _ in ()).throw(
+        ValueError(f"non-strict token {c}")))  # strict parse must succeed
 
 
 def test_report_integrity_non_bool_valid_flag_fails_closed():

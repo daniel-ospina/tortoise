@@ -4038,6 +4038,21 @@ def test_compare_reports_malformed_shapes_never_crash():
     cmp2 = compare_reports(a2, b2)
     assert cmp2["overall"]["shared_n"] == 1
     assert cmp2["overall"]["decomposition"]["reliability_restored"]["count"] == 0
+    # round-11: breaker_open drops and label-less outcomes (excluded from the
+    # report's own aggregates) are SKIPPED from the comparison — never graded
+    # as wrong, never crashing; the skip is surfaced in the header.
+    bo = {"question_id": "dropped1", "question_type": "multi-session",
+          "label": None, "breaker_open": True, "dropped_reason": "breaker_open"}
+    nolab = {"question_id": "nolabel", "question_type": "multi-session"}
+    a3 = _cmp_report([{"question_id": "q1",
+                       "question_type": "single-session-user",
+                       "label": True}, bo, nolab], [], "skip-a")
+    b3 = _cmp_report([{"question_id": "q1",
+                       "question_type": "single-session-user",
+                       "label": True}], [], "skip-b")
+    cmp3 = compare_reports(a3, b3)
+    assert cmp3["header"]["skipped_excluded"] == {"a": 2, "b": 0}
+    assert cmp3["overall"]["shared_n"] == 1      # q1 only — no crash, no wrong-grade
 
 
 def test_compare_reports_comparability_warnings():

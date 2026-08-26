@@ -193,10 +193,12 @@ def _numeric(v: Any) -> bool:
     return not (isinstance(v, float) and not math.isfinite(v))
 
 
-# ── Entry shape-filter helpers (module scope so build_report AND the report
-# consumers — compare_reports — apply the SAME shape predicate; a report's
-# aggregates and its comparison can never disagree on what a valid outcome
-# is, round-10 review). ──
+# ── Entry shape-filter helpers (module scope: build_report's aggregation
+# predicate; the comparison consumer applies its own lighter
+# ``_compare_outcome_ok`` — skip breaker-open/label-less entries — so
+# stripped reports still compare best-effort while never grading an outcome
+# the report's aggregates excluded; the published divergence is surfaced via
+# top-level ``n_excluded`` / the comparison's ``skipped_excluded`` header). ──
 
 def _num(v: Any) -> bool:
     """numeric-or-None — None is safe for float(v or 0.0) / skip-None sites;
@@ -331,6 +333,20 @@ def _outcome_shape_ok(o: dict[str, Any]) -> bool:
             and _rerank_pass_ok(o.get("rerank_pass")))
 
 
+def _compare_outcome_ok(o: dict[str, Any]) -> bool:
+    """compare_reports' join predicate (round-11): an outcome is comparable
+    iff it carries a question identity and a label — breaker_open drops and
+    label-less malformed entries (excluded from the report's own aggregates)
+    are SKIPPED so the comparison never grades an entry the report excluded
+    and never KeyErrors on it. Stripped reports missing only AUX columns
+    (pre-M7) still compare best-effort with honest None aux columns (M8
+    design)."""
+    return (isinstance(o, dict)
+            and o.get("question_id") is not None
+            and "label" in o
+            and not o.get("breaker_open"))
+
+
 def _qid_key(o: dict[str, Any]) -> tuple | str:
     """#1747: collision-proof question-identity key shared by the integrity
     grading map AND compare_reports — str qids key by value; non-str qids
@@ -338,14 +354,17 @@ def _qid_key(o: dict[str, Any]) -> tuple | str:
     question_id can never collide with a sentinel; value-identical
     malformed qids dedupe (NaN/Inf canonicalized, unhashable values keyed by
     repr — round-10 security review: id(o) let duplicate copies inflate
-    n_attempted). A MISSING qid (None) is NOT a shared identity — per-object
-    key so distinct unknown-question entries never undercount (reviewer-
-    pinned, #1747)."""
+    n_attempted). A MISSING qid (None) is NOT a shared identity — a
+    TYPE-TAGGED per-object key (round-11: the bare 2-tuple
+    ``("__anon__", id(o))`` could collide with a numeric qid equal to some
+    live object's id(); the 3-tuple is length-disjoint from the 2-tuple
+    value keys) so distinct unknown-question entries never undercount
+    (reviewer-pinned, #1747)."""
     qid = o.get("question_id")
     if isinstance(qid, str):
         return qid
     if qid is None:
-        return ("__anon__", id(o))
+        return ("__anon__", "<missing>", id(o))
     if isinstance(qid, float) and not math.isfinite(qid):
         return ("__anon__", "<nonfinite>")
     try:
@@ -855,14 +874,16 @@ def build_report(
                 if isinstance(count, int) and not isinstance(count, bool):
                     census[str(cls)] += count
                 else:
+                    # Uniform accumulator (round-11): error_census_malformed[
+                    # class] is ALWAYS a flat list of the DISTINCT malformed
+                    # count values — storing the first value as-is made the
+                    # shape depend on whether that first value was a
+                    # container (a list-first count conflated with the
+                    # accumulator and duplicated on identical re-occurrence).
                     key = str(cls)
-                    if key not in malformed_census:
-                        malformed_census[key] = count
-                    elif isinstance(malformed_census[key], list):
-                        if count not in malformed_census[key]:
-                            malformed_census[key].append(count)
-                    elif malformed_census[key] != count:
-                        malformed_census[key] = [malformed_census[key], count]
+                    acc = malformed_census.setdefault(key, [])
+                    if count not in acc:
+                        acc.append(count)
         else:  # legacy flat-list shape (defensive back-compat): str elements
             # ride the census; non-str elements are evidence-preserved in
             # error_census_malformed (the grader fails the whole shape closed
@@ -1379,9 +1400,15 @@ def _json_safe(obj: Any) -> Any:
     """#1747: recursive JSON-normalization for save_report — dict keys are
     str()-coerced so ``json.dumps(sort_keys=True)`` never TypeErrors on a
     mixed-type key (the programmatic mixed-key census shape, security
-    review), and sets become sorted lists (a malformed checkpoint value can
-    otherwise crash serialization). Identity for well-formed reports (JSON
-    keys are always strings; no sets)."""
+    review), sets become sorted lists (a malformed checkpoint value can
+    otherwise crash serialization), and NON-FINITE floats (NaN/Infinity from
+    the raw extra[outcomes] projection — the shape filter excludes them from
+    the MEANS but the projection can still publish them verbatim) become
+    null so the persisted record is always STRICT JSON (round-11 security
+    review). Identity for well-formed reports (JSON keys are always strings;
+    no sets)."""
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return None
     if isinstance(obj, dict):
         return {str(k): _json_safe(v) for k, v in obj.items()}
     if isinstance(obj, list):
@@ -1478,17 +1505,24 @@ def compare_reports(report_a: dict[str, Any], report_b: dict[str, Any]) -> dict[
         "failed by a run event (network/billing), not by content — they are not "
         "a difficulty sample (validity F5).",
     ]
-    oa = {_qid_key(o): o for o in report_a.get("outcomes", [])}
-    ob = {_qid_key(o): o for o in report_b.get("outcomes", [])}
-    # #1747 (round-9/10 review): reports may carry non-str question_ids
+    oa = {_qid_key(o): o for o in report_a.get("outcomes", [])
+          if _compare_outcome_ok(o)}
+    ob = {_qid_key(o): o for o in report_b.get("outcomes", [])
+          if _compare_outcome_ok(o)}
+    # #1747 (round-9/10/11 review): reports may carry non-str question_ids
     # (graded under collision-proof keys) and failure entries WITHOUT
     # question_id (per-object unknown questions). The join uses the SAME
     # collision-proof `_qid_key` discipline as the grading map (int 1 and str
-    # "1" stay distinct — a raw str() coerced them together). The comparison
-    # reads the PUBLISHED outcomes best-effort (stripped reports compare with
-    # honest None aux columns, M8 design): any divergence from the report's
-    # own aggregates is observable via the top-level n_excluded/n_dropped
-    # fields — never silent.
+    # "1" stay distinct — a raw str() coerced them together), and outcomes
+    # the report's own aggregates EXCLUDED (breaker_open drops, label-less
+    # malformed entries) are skipped from the comparison so it never crashes
+    # on them and never grades an entry the report excluded (round-11).
+    # Stripped reports (missing aux columns but with label) still compare
+    # best-effort with honest None aux columns (M8 design).
+    n_skipped_a = sum(1 for o in report_a.get("outcomes", [])
+                      if not _compare_outcome_ok(o))
+    n_skipped_b = sum(1 for o in report_b.get("outcomes", [])
+                      if not _compare_outcome_ok(o))
     fa = {_qid_key(f) for f in report_a.get("failures", [])
           if isinstance(f, dict) and f.get("question_id") is not None}
     fb = {_qid_key(f) for f in report_b.get("failures", [])
@@ -1645,6 +1679,10 @@ def compare_reports(report_a: dict[str, Any], report_b: dict[str, Any]) -> dict[
                                o.get("question_type")
                                for o in [*oa.values(), *ob.values()]
                                if isinstance(o.get("question_type"), str)})},
+            # round-11: outcomes the report's own aggregates EXCLUDED
+            # (breaker_open drops, label-less malformed entries) are skipped
+            # from the comparison — the skip is observable, never silent.
+            "skipped_excluded": {"a": n_skipped_a, "b": n_skipped_b},
         },
         "overall": {
             "headline_delta_pp": headline_pp,
