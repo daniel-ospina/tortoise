@@ -67,6 +67,25 @@ def _env_float(name: str, default: float) -> float:
     return value
 
 
+def _env_boost_float(name: str, default: float) -> float:
+    """C2 (#1745) retrieve-layer env float for the evidence-mark boost
+    multipliers: domain [1.0, inf) — a boost factor scales ranks UP, so
+    values < 1.0 (including 0.0 — a ZeroDivisionError, and negatives — a
+    silent pool inversion) are rejected and fall back to the default.
+    This is deliberately NOT ``_env_float`` (whose [0, 1] MMR-lambda clamp
+    would silently discard the 1.5/1.15 defaults)."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw.strip())
+    except ValueError:
+        return default
+    if value < 1.0:
+        return default
+    return value
+
+
 def mmr_select(
     scores: dict[int, float],
     sims: dict[tuple[int, int], float],

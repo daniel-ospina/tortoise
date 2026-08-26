@@ -82,9 +82,12 @@ from .report import (
     print_comparison,
     save_report,
 )
-from .rerank import RERANK_MODEL_DEFAULT, rerank_enabled
+from .rerank import _TRUTHY, RERANK_MODEL_DEFAULT, rerank_enabled
 from .retrieve import (
+    DEFAULT_CONTEXT_ITEM_CAP,
     DEFAULT_CONTEXT_TOKEN_CAP,
+    DEFAULT_EVIDENCE_BOOST_SOURCE,
+    DEFAULT_EVIDENCE_BOOST_VERBATIM,
     DEFAULT_MAX_CHUNKS_PER_SESSION,
     DEFAULT_TR_TOP_K,
     MODEL_ENCODE_FAILED_EXIT,
@@ -254,6 +257,30 @@ def _resolve_int_knob(env_name: str, default: int, cli_value: int | None) -> int
             raise SystemExit(f"{env_name} must be >= 1, got {value}")
         return value
     return default
+
+
+def _resolve_boost_float(env_name: str, default: float,
+                         cli_value: float | None) -> float:
+    """C2 (#1745) run-level boost-multiplier resolution (CLI > env >
+    default): a value < 1.0 fails loudly (SystemExit) — the multiplier is
+    a rank-scaling DIVISION, so 0.0 would ZeroDivide and a negative would
+    silently invert the pool order (review P1-2). Mirrors
+    ``_resolve_rerank_env_int``'s fail-fast lo-validation; the
+    retrieve-layer clamp (rerank._env_boost_float) is the per-question
+    safety net."""
+    if cli_value is not None:
+        value = cli_value
+    else:
+        raw = os.environ.get(env_name)
+        if raw is None or not raw.strip():
+            return default
+        try:
+            value = float(raw.strip())
+        except ValueError:
+            return default
+    if value < 1.0:
+        raise SystemExit(f"{env_name} must be >= 1.0, got {value!r}")
+    return value
 
 
 # ── R6 (#1545): effective rerank config resolution ──────────────────────
@@ -1396,6 +1423,15 @@ def run_evaluation(
     chunk_turns: int = DEFAULT_CHUNK_TURNS,
     max_context_tokens: int = DEFAULT_CONTEXT_TOKEN_CAP,
     max_chunks_per_session: int = DEFAULT_MAX_CHUNKS_PER_SESSION,
+    # C1 (#1745): reader-context item cap (default 40; env
+    # TORTOISE_LME_CONTEXT_ITEMS). TR questions ignore it — tr_top_k is the
+    # pinned TR item cap.
+    context_item_cap: int | None = None,
+    # C2 (#1745): evidence-mark boost — OFF by default in code (the plan's
+    # default decision; ON for the re-validation run via env or flag).
+    evidence_boost: bool | None = None,
+    evidence_boost_verbatim: float | None = None,
+    evidence_boost_source: float | None = None,
     # R5 (#1544): TR knobs — temporal-reasoning questions get the events
     # union pool, the engine recency date weight, the TR-constraint window
     # filter, time-ascending rendering, and the tighter tr_top_k cap
@@ -1463,6 +1499,15 @@ def run_evaluation(
     # E2E-3 Precondition 2: the audit is computed from the loaded instances
     # BEFORE anything else — no report can be produced without it.
     dataset_semantics_audit = audit_dataset(instances)
+    # C2 (#1745): resolve the evidence-boost tri-state ONCE, before the
+    # loop — a None with the TORTOISE_LME_EVIDENCE_BOOST env set must not
+    # record `false` in the methodology while the per-question retrieval
+    # boosted (the plan's Task-3 contract: methodology records the knobs
+    # truthfully). Mirrors the retrieve-layer gate (fail-safe OFF: only
+    # 1/true/yes/on enables).
+    if evidence_boost is None:
+        eb_env = (os.environ.get("TORTOISE_LME_EVIDENCE_BOOST") or "")
+        evidence_boost = eb_env.strip().lower() in _TRUTHY
     # M7 #1739 / #1742: the session-parallel worker factory must serve
     # EXACTLY the fingerprinted config — a programmatic caller passing a
     # spec'd extractor_model with session_workers > 1 but forgetting the
@@ -1618,7 +1663,14 @@ def run_evaluation(
                     rerank_model=rr["model"],
                     rerank_pool=rr["rerank_pool"],
                     per_session_cap=rr["per_session_cap"],
-                    mmr_lambda=rr["mmr_lambda"])
+                    mmr_lambda=rr["mmr_lambda"],
+                    # C1/C2 (#1745): reader-context item cap + evidence-
+                    # mark boost (OFF by default; the re-validation run
+                    # enables it via env/flag).
+                    context_item_cap=context_item_cap,
+                    evidence_boost=evidence_boost,
+                    evidence_boost_verbatim=evidence_boost_verbatim,
+                    evidence_boost_source=evidence_boost_source)
 
                 # #1349 retrieval-only: reader/judge never invoked — the
                 # outcome carries retrieval + breaker accounting only.
@@ -1720,6 +1772,19 @@ def run_evaluation(
                 # back to the unfiltered pool (never starve the reader).
                 "tr_constraint": ret.get("tr_constraint"),
                 "tr_window_fallback": ret.get("tr_window_fallback", False),
+                # C4 (#1745): the reader-surface evidence metric
+                # (context-level; the metric C1 actually moves).
+                "reader_evidence@k": ret.get("reader_evidence@k"),
+                # Task 0 (#1745): ranked ids + evidence-turn matches
+                # populated for BOTH arms (the pilot's context composition
+                # was unreconstructable — 0/50); ranked_ids_pre_boost is
+                # the C2 ablation surface (identical when the boost is
+                # off). The #1349 vector-arm gate metrics (ndcg@10/p@10/
+                # p@5) stay conditional on the vector arm's keys.
+                "ranked_ids": ret.get("ranked_ids"),
+                "ranked_ids_pre_boost": ret.get("ranked_ids_pre_boost"),
+                "evidence_turn_matches": ret.get("evidence_turn_matches"),
+                "evidence_boost": ret.get("evidence_boost"),
                 # R6 (#1545): the rerank pass + latency ride the outcome —
                 # they stay ABSENT on baseline outcomes (the projection in
                 # outcomes_to_report adds them conditionally).
@@ -1727,9 +1792,7 @@ def run_evaluation(
                     "rerank_latency_ms": ret.get("rerank_latency_ms", 0.0)}
                    if "rerank_pass" in ret else {}),
                 # #1349 vector arm: gate metrics + breaker-open dropped marker.
-                **({"ranked_ids": ret["ranked_ids"],
-                    "evidence_turn_matches": ret["evidence_turn_matches"],
-                    "ndcg@10": ret["ndcg@10"],
+                **({"ndcg@10": ret["ndcg@10"],
                     "p@10": ret["p@10"],
                     "p@5": ret["p@5"]}
                    if "ndcg@10" in ret else {}),
@@ -1825,11 +1888,25 @@ def run_evaluation(
         preflight=preflight,
         embedder_status=embedder_status,
         # R1 (#1540) D7: knob values recorded verbatim in the methodology
-        # (the run protocol step-2 gate consumes them).
+        # (the run protocol step-2 gate consumes them). C1/C2 (#1745): the
+        # reader-context item cap + evidence-boost knobs ride the same
+        # dict so published numbers carry their methodology.
         r1_knobs={
             "chunk_turns": chunk_turns,
             "context_token_cap": max_context_tokens,
             "max_chunks_per_session": max_chunks_per_session,
+            "context_item_cap": (context_item_cap
+                                 if context_item_cap is not None
+                                 else DEFAULT_CONTEXT_ITEM_CAP),
+            "evidence_boost": bool(evidence_boost),
+            "evidence_boost_verbatim": (
+                evidence_boost_verbatim
+                if evidence_boost_verbatim is not None
+                else DEFAULT_EVIDENCE_BOOST_VERBATIM),
+            "evidence_boost_source": (
+                evidence_boost_source
+                if evidence_boost_source is not None
+                else DEFAULT_EVIDENCE_BOOST_SOURCE),
         },
         # R5 (#1544) D7: TR knob values recorded verbatim in the
         # methodology (the run protocol step-2/6 knob sweeps consume them;
@@ -2242,8 +2319,41 @@ def _build_parser() -> argparse.ArgumentParser:
                         "default 8000 — points first, chunks backfill, R1 #1540)")
     p.add_argument("--max-chunks-per-session", type=_positive_int, default=None,
                    help="per-session raw-chunk cap in the retrieval pool "
-                        "(env TORTOISE_LME_MAX_CHUNKS_PER_SESSION; default 2 — "
-                        "E2E-1 session-dedup, R1 #1540)")
+                        "(env TORTOISE_LME_MAX_CHUNKS_PER_SESSION; default 3 — "
+                        "E2E-1 session-dedup, R1 #1540; C5 #1745 raised the "
+                        "cap 2->3 so the evidence chunk is not capped out)")
+    # C1 (#1745): the reader-context item cap (env first, CLI overrides;
+    # the token budget --context-cap selects within it; TR questions keep
+    # the pinned --tr-top-k item cap).
+    p.add_argument("--context-items", type=_positive_int, default=None,
+                   help="reader context ITEM cap (env TORTOISE_LME_CONTEXT_ITEMS; "
+                        "default 40 — the 8k token budget rarely binds at ~114 "
+                        "tok/item, so the item cap bounds reader flood, C1 #1745)")
+    # C2 (#1745): the evidence-mark boost — tri-state --evidence-boost /
+    # --no-evidence-boost (None default so the TORTOISE_LME_EVIDENCE_BOOST
+    # env still applies; OFF by default in code — ON only for the
+    # re-validation run).
+    eb = p.add_mutually_exclusive_group()
+    eb.add_argument("--evidence-boost", dest="evidence_boost",
+                    action="store_true", default=None,
+                    help="enable the C2 evidence-mark rank boost (marked "
+                         "hits move up by a stable rank offset before "
+                         "evidence_recall@k; default: env "
+                         "TORTOISE_LME_EVIDENCE_BOOST — OFF by default in "
+                         "code, ON for the re-validation run, #1745)")
+    eb.add_argument("--no-evidence-boost", dest="evidence_boost",
+                    action="store_false", default=None,
+                    help="disable the C2 evidence-mark boost even when "
+                         "TORTOISE_LME_EVIDENCE_BOOST is set "
+                         "(tri-state: explicit flags beat the env)")
+    p.add_argument("--evidence-boost-verbatim", type=float, default=None,
+                   help="verbatim/raw-chunk mark rank-offset multiplier "
+                        "(env TORTOISE_LME_EVIDENCE_BOOST_VERBATIM; default "
+                        f"{DEFAULT_EVIDENCE_BOOST_VERBATIM})")
+    p.add_argument("--evidence-boost-source", type=float, default=None,
+                   help="source-session-only mark rank-offset multiplier "
+                        "(env TORTOISE_LME_EVIDENCE_BOOST_SOURCE; default "
+                        f"{DEFAULT_EVIDENCE_BOOST_SOURCE})")
     p.add_argument("--mock", action="store_true",
                    help="offline mode: MockReader + MockJudge, no API keys (CI)")
     p.add_argument("--skip-preflight", action="store_true",
@@ -2598,6 +2708,28 @@ def _run_main(parser: argparse.ArgumentParser, args,
     max_chunks_per_session = _resolve_int_knob(
         "TORTOISE_LME_MAX_CHUNKS_PER_SESSION",
         DEFAULT_MAX_CHUNKS_PER_SESSION, args.max_chunks_per_session)
+    # C1 (#1745): reader-context item cap (env first, CLI overrides;
+    # >= 1 validated). TR questions ignore it — tr_top_k is the pinned TR
+    # item cap.
+    context_item_cap = _resolve_int_knob(
+        "TORTOISE_LME_CONTEXT_ITEMS", DEFAULT_CONTEXT_ITEM_CAP,
+        args.context_items)
+    # C2 (#1745): evidence-mark boost — tri-state (None default so the
+    # TORTOISE_LME_EVIDENCE_BOOST env still applies; OFF by default in
+    # code — fail-safe: only 1/true/yes/on enables, mirroring the R6
+    # rerank gate). Per-class multipliers default to the retrieve.py
+    # constants (env overrides; CLI beats env; < 1.0 fails loudly).
+    if args.evidence_boost is not None:
+        evidence_boost = args.evidence_boost
+    else:
+        eb_env = (os.environ.get("TORTOISE_LME_EVIDENCE_BOOST") or "")
+        evidence_boost = eb_env.strip().lower() in _TRUTHY
+    evidence_boost_verbatim = _resolve_boost_float(
+        "TORTOISE_LME_EVIDENCE_BOOST_VERBATIM",
+        DEFAULT_EVIDENCE_BOOST_VERBATIM, args.evidence_boost_verbatim)
+    evidence_boost_source = _resolve_boost_float(
+        "TORTOISE_LME_EVIDENCE_BOOST_SOURCE",
+        DEFAULT_EVIDENCE_BOOST_SOURCE, args.evidence_boost_source)
     # R5 (#1544) TR knobs: argparse defaults (12 / 0.5 / events-on),
     # recorded verbatim in the report methodology (D7).
     tr_top_k = args.tr_top_k
@@ -2764,6 +2896,13 @@ def _run_main(parser: argparse.ArgumentParser, args,
                 embedder_status=embedder_status,
                 chunk_turns=chunk_turns, max_context_tokens=context_cap,
                 max_chunks_per_session=max_chunks_per_session,
+                # C1/C2 (#1745): reader-context item cap + evidence-mark
+                # boost (OFF by default in code — the re-validation run
+                # enables via env/flag; knobs recorded in the methodology).
+                context_item_cap=context_item_cap,
+                evidence_boost=evidence_boost,
+                evidence_boost_verbatim=evidence_boost_verbatim,
+                evidence_boost_source=evidence_boost_source,
                 tr_top_k=tr_top_k, tr_date_weight=tr_date_weight,
                 tr_events=tr_events,
                 rerank=rr["rerank_on"], rerank_model=rr["model"],

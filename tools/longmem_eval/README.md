@@ -56,8 +56,12 @@ and continue offline (CI smoke stays runnable without the extra).
 | `TORTOISE_LME_JUDGE_MODEL` | judge model spec | `openai:gpt-4o-2024-08-06` (the official judge model) |
 | `TORTOISE_LME_CACHE_DIR` | dataset cache dir (outside the repo) | `~/.cache/tortoise-longmemeval` |
 | `TORTOISE_LME_CHUNK_TURNS` | turns per raw-chunk window (R1 #1540) | `2` (the run protocol step-2 sweep selects the pilot/500-Q value) |
-| `TORTOISE_LME_CONTEXT_CAP` | reader context token budget — points first, chunks backfill (UX decision 3) | `8000` |
-| `TORTOISE_LME_MAX_CHUNKS_PER_SESSION` | per-session raw-chunk cap in the retrieval pool (E2E-1 session dedup) | `2` |
+| `TORTOISE_LME_CONTEXT_CAP` | reader context token budget — rank-interleaved (C1 #1745: points + chunks in true RRF order, the R1 points-first tiering deliberately reversed) bounded by the item cap | `8000` |
+| `TORTOISE_LME_MAX_CHUNKS_PER_SESSION` | per-session raw-chunk cap in the retrieval pool (E2E-1 session dedup; C5 #1745 raised 2→3 so the evidence chunk is not capped out) | `3` |
+| `TORTOISE_LME_CONTEXT_ITEMS` | reader context ITEM cap (C1 #1745 — the token budget rarely binds at ~114 tok/item, so the item cap bounds reader flood; TR questions keep the pinned `--tr-top-k` item cap) | `40` |
+| `TORTOISE_LME_EVIDENCE_BOOST` | C2 evidence-mark rank boost gate (OFF by default in code — ON only for the re-validation run; only `1/true/yes/on` enables; explicit `--evidence-boost`/`--no-evidence-boost` beat it) | unset = OFF |
+| `TORTOISE_LME_EVIDENCE_BOOST_VERBATIM` | verbatim/raw-chunk mark rank-offset multiplier (C2 #1745) | `1.5` |
+| `TORTOISE_LME_EVIDENCE_BOOST_SOURCE` | source-session-only mark rank-offset multiplier (C2 #1745) | `1.15` |
 | `TORTOISE_LME_RERANK` | R6 rerank gate (fail-safe OFF — only `1/true/yes/on` enables; explicit `--rerank`/`--no-rerank` beat it) | unset = OFF |
 | `TORTOISE_LME_RERANK_MODEL` | cross-encoder model name (R6 #1545) | `cross-encoder/ms-marco-MiniLM-L6-v2` |
 | `TORTOISE_LME_RERANK_POOL` | rerank pool depth (R6; applied pool = `max(pool, max(k))`; only read while rerank is on) | `40` |
@@ -71,8 +75,11 @@ CLI flags: `--split s|m|oracle`, `--limit N`, `--data <local json/jsonl>`,
 `--max-retries N` (per-question LLM-call retries with exponential backoff;
 questions that still fail are recorded in `report['failures']` and the run
 continues — one transient error never aborts the 500-Q run),
-`--chunk-turns N`, `--context-cap N`, `--max-chunks-per-session N`
-(R1 #1540 knobs — env-first, CLI overrides, all validated ≥ 1),
+`--chunk-turns N`, `--context-cap N`, `--max-chunks-per-session N`,
+`--context-items N` (C1 #1745), `--evidence-boost`/`--no-evidence-boost`
+`--evidence-boost-verbatim F` `--evidence-boost-source F` (C2 #1745)
+(R1/R1C knobs — env-first, CLI overrides, all validated ≥ 1; the C2 boost
+is OFF by default in code, ON only for the re-validation run),
 `--integrity-threshold F` / `--integrity-justification <text>` (M7 #1527 +
 #1747 census-class-aware: override the `integrity.valid` RATE criterion —
 max allowed `invalid_rate` over questions with recoverable-class signals
