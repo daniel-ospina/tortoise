@@ -221,6 +221,26 @@ class TestSupabaseLane:
         assert ev["team_id"] == data["team_id"]
         assert ev["resource_id"] == data["team_id"]
 
+    def test_fake_recover_mint_writes_iso_created_at(self, client):
+        """#1754 (c): the fake recover_team_key mint writes a REAL ISO
+        created_at (the real RPC defaults to now()) — a None would sort as
+        the OLDEST key in the cap-revoke targeting (min by created_at) and
+        become the cap-revoke target, masking revoke-oldest regressions in
+        the Supabase lane."""
+        data = _mint(client)
+        r = client.post("/v1/agent/recover",
+                        json={"signup_token": data["signup_token"]})
+        assert r.status_code == 200, r.text
+        recovery_keys = [k for k in self.fake.tables.get("api_keys", [])
+                         if k.get("team_id") == data["team_id"]
+                         and k.get("created_via") == "recovery"]
+        assert recovery_keys, "recover should have minted an api_keys row"
+        from datetime import datetime
+        for k in recovery_keys:
+            assert k.get("created_at") is not None, \
+                "recovery mint must write a real timestamp, not None"
+            datetime.fromisoformat(k["created_at"])  # ISO-8601 parseable
+
 
 class TestRegistryLane:
     """Revoke against the REAL FalkorDB registry (docker lane). The mint +
@@ -294,6 +314,67 @@ class TestRegistryLane:
                          json={"signup_token": a["signup_token"]},
                          headers={"Authorization": f"Bearer {a['key']}"})
         assert r5.status_code == 200 and r5.json()["already"] is True
+
+    def test_registry_revoke_pbkdf2_only_node(self, client):
+        """#1754 (b): a SignupToken node carrying only token_hash (no
+        lookup_key — legacy mint) is recoverable via the PBKDF2 fallback AND
+        must be REVOCABLE too (it was: recoverable but unrevocable — the
+        lookup_key-only MATCH could never find it)."""
+        data = _mint(client)
+        token, team_id = data["signup_token"], data["team_id"]
+        sdk = ha_mod._make_sdk(namespace="registry")
+        reg = sdk._get_registry()
+        # simulate a legacy hash-only node: strip the deterministic
+        # lookup_key, leaving only the salted token_hash
+        reg.query(
+            "MATCH (n:SignupToken {team_id:$tid}) REMOVE n.lookup_key",
+            params={"tid": team_id},
+        )
+        # recover still resolves the hash-only node (PBKDF2 fallback in
+        # signup_token_lookup — the pre-existing recoverable half)
+        r = client.post("/v1/agent/recover", json={"signup_token": token})
+        assert r.status_code == 200, r.text
+        assert r.json()["team_id"] == team_id
+        # revoke now works on the hash-only node too
+        r2 = client.post("/v1/agent/token/revoke",
+                         json={"signup_token": token},
+                         headers={"Authorization": f"Bearer {data['key']}"})
+        assert r2.status_code == 200, r2.text
+        assert r2.json() == {"revoked": True, "already": False,
+                             "team_id": team_id}
+        # the node flipped
+        rows = reg.query(
+            "MATCH (n:SignupToken {team_id:$tid}) RETURN n.revoked_at",
+            params={"tid": team_id},
+        ).result_set
+        assert rows and rows[0][0] is not None
+        # revoked hash-only token → uniform 422 on recover (no backdoor)
+        r3 = client.post("/v1/agent/recover", json={"signup_token": token})
+        assert r3.status_code == 422, r3.text
+        assert r3.json()["detail"]["error_code"] == "invalid_signup_token"
+
+    def test_registry_revoke_never_touches_wrong_team_node(self, client):
+        """#1754 (a): a token node with a matching lookup_key but a DIFFERENT
+        team is never revoked — the SDK refuses (not_owned) and the foreign
+        node stays live. The revoke write itself is team-scoped (parity with
+        the SQL lane's AND team_id), so no race can cross teams."""
+        a, b = _mint(client), _mint(client)
+        sdk = ha_mod._make_sdk(namespace="registry")
+        # A attempts to revoke B's token through the same SDK call the
+        # endpoint makes after auth — refused, B's node untouched
+        out = sdk.signup_token_revoke(b["signup_token"], a["team_id"])
+        assert out == {"team_id": a["team_id"], "status": "not_owned"}
+        rows = sdk._get_registry().query(
+            "MATCH (n:SignupToken {team_id:$tid}) RETURN n.revoked_at",
+            params={"tid": b["team_id"]},
+        ).result_set
+        assert rows and rows[0][0] is None
+        # B's token still recovers — the attempted cross-team kill changed
+        # nothing
+        r = client.post("/v1/agent/recover",
+                        json={"signup_token": b["signup_token"]})
+        assert r.status_code == 200, r.text
+        assert r.json()["team_id"] == b["team_id"]
 
 
 class TestCmdTokenRevoke:
