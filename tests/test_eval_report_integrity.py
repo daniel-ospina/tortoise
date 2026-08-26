@@ -464,13 +464,22 @@ def test_report_integrity_bool_and_mixed_key_census_robustness():
     assert integ["n_hard_invalid"] == 1
     assert integ["error_census"] == {}
     assert integ["error_census_malformed"] == {"fatal_402_billing": True}
-    # mixed-type class keys (programmatic-caller shape) do not crash.
+    # mixed-type class keys (programmatic-caller shape) do not crash — and
+    # the report SERIALIZES (json.dumps sort_keys with str-coerced keys).
     integ = _report([_outcome("q0", valid=False,
                               error_classes={5: 1, "parse_error": 2})],
                     threshold=1.0)["integrity"]
     assert integ["valid"] is False
     assert integ["n_hard_invalid"] == 1  # non-str key fails closed
     assert integ["error_census"]["parse_error"] == 2
+    from tools.longmem_eval.report import save_report  # noqa: I001
+    import json as _json
+    import tempfile as _tempfile
+    _json.loads(save_report(
+        _report([_outcome("q0", valid=False,
+                          error_classes={5: 1, "parse_error": 2})],
+                threshold=1.0),
+        Path(_tempfile.mkdtemp()) / "r.json").read_text())
     # container-valued counts (list/dict — tampered JSON) are preserved
     # verbatim in error_census_malformed.
     integ = _report([_outcome("q0", valid=False,
@@ -479,6 +488,15 @@ def test_report_integrity_bool_and_mixed_key_census_robustness():
     assert integ["n_recoverable_invalid"] == 1
     assert integ["error_census"] == {}
     assert integ["error_census_malformed"] == {"parse_error": [1, 2]}
+    # TWO DISTINCT malformed values for one class (the heterogeneous
+    # checkpoint-merge shape) accumulate — the second never vanishes.
+    integ = _report([_outcome("q0", valid=False,
+                              error_classes={"parse_error": "abc"}),
+                     _outcome("q1", valid=False,
+                              error_classes={"parse_error": [1, 2]})],
+                    threshold=1.0)["integrity"]
+    assert integ["error_census"] == {}
+    assert integ["error_census_malformed"]["parse_error"] == ["abc", [1, 2]]
 
 
 def test_report_integrity_non_bool_valid_flag_fails_closed():
@@ -591,21 +609,46 @@ def test_report_integrity_qid_overlap_failure_grade_dominates():
     assert i["n_hard_invalid"] == 0
 
 
-def test_report_integrity_non_str_question_id_skipped():
-    """#1747 (security-review F4): a non-str question_id (malformed
-    checkpoint JSON: a list/dict is truthy and would be indexed) is SKIPPED,
-    not indexed — an unhashable value must not crash build_report; the
-    malformed qid simply does not count toward n_attempted."""
+def test_report_integrity_non_str_question_id_handling():
+    """#1747 (security-review F4): non-dict list entries are excluded at
+    entry (the report always builds — no AttributeError on a bare string);
+    non-str question_ids are graded under a SENTINEL key so a hard census on
+    a malformed-qid outcome still VETOES (no skip-launder), while an
+    unhashable value can never crash the set/dict grades."""
     good = _outcome("q0", valid=True)
-    bad = _outcome("q1", valid=True)
+    bad = _outcome("q1", valid=True)      # non-str qid, clean census
     bad["question_id"] = ["not", "a", "string"]
-    integ = _report([good, bad], failures=[{
-        "question_id": 7, "error_class": "reader:fatal",
-        "error": "x", "failed_at_utc": "2026-08-20T00:00:00Z"}])["integrity"]
-    assert integ["n_attempted"] == 1     # only the str qid counts
+    hard = _outcome("q2", valid=False)    # non-str qid, HARD census
+    hard["question_id"] = 7
+    hard["error_classes"] = {"fatal_402_billing": 1}
+    integ = _report([good, bad, hard, "junk-string-entry"], failures=[
+        {"question_id": 9, "error_class": "reader:fatal",
+         "error": "x", "failed_at_utc": "2026-08-20T00:00:00Z"},
+        "junk-failure-entry",
+    ], threshold=0.5)["integrity"]
+    # 3 str-absent outcomes + 1 failure: all graded under sentinels.
+    assert integ["n_attempted"] == 4
+    assert integ["n_hard_invalid"] == 2   # hard outcome + fatal failure veto
+    assert integ["n_valid"] == 2          # good + clean-sentinel
+    assert integ["valid"] is False        # hard veto fires
+    assert integ["error_census"]["fatal_402_billing"] == 1
+
+
+def test_report_integrity_non_dict_entries_excluded():
+    """#1747 (security-review P1): a non-dict entry in outcomes/failures
+    (malformed checkpoint JSON, e.g. a bare string) is excluded at entry —
+    build_report always builds and serializes; n_attempted counts only the
+    real question dicts."""
+    integ = _report([_outcome("q0", valid=True), "boom", 5, None],
+                    failures=["boom", 7, {"question_id": "f1",
+                                           "error_class": "reader:fatal",
+                                           "error": "x",
+                                           "failed_at_utc": "x"}],
+                    threshold=0.5)["integrity"]
+    assert integ["n_attempted"] == 2      # q0 + the f1 failure
     assert integ["n_valid"] == 1
-    assert integ["n_hard_invalid"] == 0  # the int-qid failure is skipped
-    assert integ["valid"] is True
+    assert integ["n_hard_invalid"] == 1   # reader:fatal vetoes
+    assert integ["valid"] is False
 
 
 def test_run_protocol_step5_gate_string_pins_criterion():

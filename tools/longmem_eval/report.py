@@ -132,10 +132,14 @@ def _outcome_grade(o: dict[str, Any]) -> str:
         classes = set(ec)
     else:  # legacy flat-list shape (defensive back-compat) — non-iterable /
         # unhashable values (malformed checkpoint JSON) fail CLOSED to hard
-        # instead of crashing the report (security review, #1747).
+        # instead of crashing the report; a list carrying ANY non-str element
+        # also fails closed (mirrors the dict branch's non-str-key posture,
+        # security review, #1747).
         if not isinstance(ec, (list, tuple, set, frozenset)):
             return "hard"
-        classes = {c for c in ec if isinstance(c, str) and c}
+        if any(not isinstance(c, str) for c in ec):
+            return "hard"
+        classes = {c for c in ec if c}
     if classes - RECOVERABLE_CENSUS_CLASSES:
         return "hard"
     # The runner's binary ``valid`` flag must be a REAL bool when PRESENT: a
@@ -180,6 +184,10 @@ PAPER_CATEGORY = {
 
 
 def category_of(question: dict) -> str:
+    # #1747: a non-str question_id (malformed checkpoint JSON) categorizes as
+    # "Other" instead of crashing the ``"_abs" in qid`` check.
+    if not isinstance(question.get("question_id"), str):
+        return "Other"
     if "_abs" in question["question_id"]:
         return "Abstention"
     return PAPER_CATEGORY.get(question["question_type"], "Other")
@@ -323,12 +331,12 @@ def build_report(
         are preserved verbatim in ``error_census_malformed`` (never mixed
         into ``error_census``, never crashing the report); the numbers are
         always recorded, so no degraded run can masquerade as clean.
-        Relationship to issue #1746 (its plan docs/plans/2026-08-26-1746-
-        parse-error-robustness.md, D10 — lands with #1746): that plan
-        deliberately does NOT make ``integrity.valid`` its closing condition
-        — the flag's semantics are this issue's lane; the run-protocol
-        step-5 gate string (run_protocol.py) states the justified threshold
-        for the 500-Q baseline.
+        Relationship to issue #1746 (its plan doc, D10 — "the flag's
+        semantics are #1747's lane"; the plan file lands with #1746): that
+        plan deliberately does NOT make ``integrity.valid`` its closing
+        condition — the flag's semantics are this issue's lane; the
+        run-protocol step-5 gate string (run_protocol.py) states the
+        justified threshold for the 500-Q baseline.
       * ``leg_mix`` (D2) — per-leg ``match_source`` counts over the
         top_k context the reader saw + per-k over the deduped pool.
       * ``pool_size`` (D3) — live graph point count per question.
@@ -355,6 +363,22 @@ def build_report(
             "computes it; programmatic callers must pass "
             "audit_dataset(instances)")
     trusted = is_trusted(dataset_semantics_audit)
+    # #1747 entry normalization (security review): a non-dict entry in
+    # outcomes/failures (malformed checkpoint JSON, e.g. a bare string) would
+    # AttributeError on the first .get — exclude it so the report ALWAYS
+    # builds and serializes (the run.py loader filters the same shape; the
+    # full_context loader crash is tracked in #1770). Non-str question_ids
+    # are NOT dropped — they are graded under a sentinel key so a hard census
+    # on a malformed-qid outcome still vetoes. error_classes keys are
+    # str()-coerced on the report's copies so json.dumps(sort_keys=True)
+    # never TypeErrors on a programmatic mixed-type key (JSON checkpoint keys
+    # are always strings; the coercion is identity for them).
+    outcomes = [dict(o) for o in outcomes if isinstance(o, dict)]
+    for o in outcomes:
+        ec = o.get("error_classes")
+        if isinstance(ec, dict):
+            o["error_classes"] = {str(k): v for k, v in ec.items()}
+    failures = [f for f in (failures or []) if isinstance(f, dict)]
     # #1349: questions dropped by the vector arm (breaker_open) are excluded
     # from the means and surfaced in ``dropped`` — never recall 0.
     dropped = [o for o in outcomes if o.get("breaker_open")]
@@ -373,7 +397,9 @@ def build_report(
              "question_type": o.get("question_type", "")}
         by_category.setdefault(category_of(q), []).append(o["label"])
         by_type.setdefault(q["question_type"], []).append(o["label"])
-        if "_abs" in q["question_id"]:
+        # #1747: a non-str question_id (malformed checkpoint JSON) must not
+        # TypeError the abstention filter — guard, don't crash.
+        if isinstance(q["question_id"], str) and "_abs" in q["question_id"]:
             abstention_labels.append(o["label"])
 
     # M8 (#1528) D3: every published accuracy carries its 95% Wilson CI
@@ -450,7 +476,8 @@ def build_report(
     # print_retrieval_metrics.py exclusion). Legacy keys keep the
     # _abs-inclusive definition (back-compat through V3).
     paper_outcomes = [o for o in outcomes
-                      if "_abs" not in o.get("question_id", "")]
+                      if not (isinstance(o.get("question_id"), str)
+                              and "_abs" in o.get("question_id", ""))]
 
     def _paper_agg(key: str, k: int) -> float | None:
         vals = [(o.get(key) or {}).get(str(k)) for o in paper_outcomes]
@@ -505,35 +532,31 @@ def build_report(
     # only the ``valid`` VERDICT gains the hard veto on top of the rate
     # criterion.
     effective_threshold = float(integrity_threshold or 0.0)
-    # qid guards (security review, #1747): a non-str question_id (malformed
-    # checkpoint JSON) is skipped, not indexed — unhashable values would
-    # otherwise crash the set/dict grades (the run.py loader crash for the
-    # same shape is tracked in #1770).
-    failure_qids = {f.get("question_id")
-                    for f in (failures or [])
-                    if isinstance(f.get("question_id"), str)}
-    attempted_qids = ({o["question_id"] for o in outcomes
-                       if isinstance(o.get("question_id"), str)}
-                      | failure_qids)
-    n_attempted = len(attempted_qids)
+    # #1747 grading: each qid is graded ONCE under a stable key — str qids
+    # keyed by value; non-str qids (malformed checkpoint JSON) keyed by a
+    # sentinel so a hard census on a malformed-qid outcome still VETOES
+    # (security review; unhashable values can never be set/dict keys).
+    def _qid_key(o: dict[str, Any], idx: int) -> str:
+        qid = o.get("question_id")
+        return qid if isinstance(qid, str) else f"<anon:{idx}>"
+
     grade_by_qid: dict[str, str] = {}
-    for o in outcomes:
-        if isinstance(o.get("question_id"), str):
-            grade_by_qid[o["question_id"]] = _outcome_grade(o)
+    for idx, o in enumerate(outcomes):
+        grade_by_qid[_qid_key(o, idx)] = _outcome_grade(o)
     for f in (failures or []):
         qid = f.get("question_id")
-        if not isinstance(qid, str):
-            continue
         fg = _failure_grade(f.get("error_class"))
-        prev = grade_by_qid.get(qid)
+        key = qid if isinstance(qid, str) else f"<anon-f:{id(f)}"
+        prev = grade_by_qid.get(key)
         # failure grade dominates; hard beats recoverable/clean.
         if prev is None or fg == "hard" or prev == "clean":
-            grade_by_qid[qid] = fg
+            grade_by_qid[key] = fg
     n_hard_invalid = sum(1 for g in grade_by_qid.values() if g == "hard")
     n_recoverable_invalid = sum(
         1 for g in grade_by_qid.values() if g == "recoverable")
     n_valid = sum(1 for g in grade_by_qid.values() if g == "clean")
     n_invalid = n_hard_invalid + n_recoverable_invalid
+    n_attempted = len(grade_by_qid)
     invalid_rate = round(n_invalid / n_attempted, 4) if n_attempted else 0.0
     recoverable_invalid_rate = (
         round(n_recoverable_invalid / n_attempted, 4) if n_attempted else 0.0)
@@ -544,25 +567,36 @@ def build_report(
         if isinstance(ec, dict):
             for cls, count in ec.items():
                 # Collision-safe roll-up (reviewer-pinned, #1747): an int
-                # count sums into the typed accumulator; EVERY other count
-                # value (None / str / float / bool / list / dict — malformed
-                # JSON from a schema-less checkpoint) is recorded in the
-                # SEPARATE ``error_census_malformed`` field, so the
-                # "malformed evidence never vanishes" promise holds for every
-                # shape and a verbatim value can never TypeError a later int
-                # sum for the same class. Grading is presence-by-key and
-                # independent of these fields (the veto cannot be laundered
-                # through them).
+                # count sums into the typed accumulator under its str() key
+                # (JSON keys are always strings — str()-coercion keeps the
+                # published census and json.dumps(sort_keys=True) consistent
+                # for programmatic non-str keys, security review); EVERY
+                # other count value (None / str / float / bool / list /
+                # dict — malformed JSON) is preserved in the separate
+                # ``error_census_malformed`` field (accumulated per class so
+                # no malformed evidence vanishes). Grading is presence-by-key
+                # and independent of these fields (the veto cannot be
+                # laundered through them).
                 if isinstance(count, int) and not isinstance(count, bool):
-                    census[cls] += count
+                    census[str(cls)] += count
                 else:
-                    malformed_census.setdefault(cls, count)
-        else:  # legacy flat-list shape (defensive back-compat) — non-iterable
-            # values (malformed checkpoint JSON) are skipped here (the grader
-            # already grades them hard; the roll-up must not crash).
-            census.update(
-                [c for c in ec if isinstance(c, str) and c]
-                if isinstance(ec, (list, tuple, set, frozenset)) else [])
+                    prev = malformed_census.get(str(cls))
+                    if prev is None:
+                        malformed_census[str(cls)] = count
+                    elif isinstance(prev, list):
+                        if count not in prev:
+                            prev.append(count)
+                    elif prev != count:
+                        malformed_census[str(cls)] = [prev, count]
+        else:  # legacy flat-list shape (defensive back-compat): str elements
+            # ride the census; non-str elements are evidence-preserved in
+            # error_census_malformed (the grader fails the whole shape closed
+            # to hard — mirroring the dict branch's non-str-key posture).
+            if isinstance(ec, (list, tuple, set, frozenset)):
+                census.update([str(c) for c in ec if isinstance(c, str) and c])
+                junk = [c for c in ec if not isinstance(c, str)]
+                if junk:
+                    malformed_census["<legacy-list>"] = junk
     for f in (failures or []):
         eclass = f.get("error_class")
         if isinstance(eclass, str) and eclass:
@@ -602,7 +636,9 @@ def build_report(
             "(invalid_rate <= threshold); "
             "hard = fatal_*/ingest/unknown census classes + non-census error "
             "strings with an EMPTY census (mixed recoverable+structural "
-            "grades recoverable — #1746 lane) + permanent eval failures; "
+            "grades recoverable — #1746 lane) + permanent eval failures + "
+            "malformed inputs (present non-bool valid flag, non-iterable or "
+            "non-str error_classes) fail closed to hard; "
             "recoverable = parse_error/truncated/truncated_parse_error/"
             "partial_parse/transient_* census classes + "
             "reader/judge:retries_exhausted eval failures (rate-limited, "
