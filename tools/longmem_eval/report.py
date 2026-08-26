@@ -389,8 +389,11 @@ def _qid_key(o: dict[str, Any]) -> tuple | str:
     # equality would otherwise merge DISTINCT JSON tokens (true vs 1 vs 1.0
     # — a tampered checkpoint) into one attempted question; the type-name
     # tag keeps them distinct while value-identical same-type qids still
-    # dedupe. Length-disjoint from the missing/unhashable 3-tuples (their
-    # middle tags differ).
+    # dedupe. Collision-proof: the type-name tag is never a sentinel
+    # (JSON-native type names like int/float/bool/tuple can never equal
+    # "<missing>"/"<unhashable>") and is length-disjoint from the 2-tuple
+    # `<nonfinite>` key, so a crafted value can never collide with a
+    # sentinel.
     return ("__anon__", type(qid).__name__, qid)
 
 
@@ -875,17 +878,21 @@ def build_report(
     # mirror — a tampered checkpoint cannot hide a fatal class from the
     # record by also breaking the shape or setting the breaker flag).
     for o in all_outcomes:
+        has_ec = "error_classes" in o
         ec = o.get("error_classes")
-        if ec is None:
-            ec = {}  # falsy-but-present values (0/""/False) are malformed
-            # → fail closed in the grader; the roll-up treats them as absent.
+        if not has_ec:
+            ec = {}  # a MISSING key means "no census".
         if isinstance(ec, dict):
             for cls, count in ec.items():
                 # Collision-safe roll-up (reviewer-pinned, #1747): an int
                 # count sums into the typed accumulator under its str() key
                 # (JSON keys are always strings — str()-coercion keeps the
                 # published census and json.dumps(sort_keys=True) consistent
-                # for programmatic non-str keys, security review); EVERY
+                # for programmatic non-str keys; the round-15 note: distinct
+                # programmatic tokens like {1:1, "1":2} collapse in this
+                # EVIDENCE-ONLY field — the grader fails non-str keys closed
+                # to hard and the verdict never reads the census, so the
+                # collapse is intentional); EVERY
                 # other count value (None / str / float / bool / list /
                 # dict — malformed JSON) is preserved in the separate
                 # ``error_census_malformed`` field (accumulated per class so
@@ -928,6 +935,19 @@ def build_report(
                                            and not math.isfinite(c)) else c)
                         if stored not in prev:
                             prev.append(stored)
+            else:
+                # MALFORMED TOP-LEVEL shape — a PRESENT falsy/null value
+                # (0 / "" / False / None) or a non-iterable / non-list
+                # value (5 / "abc" — malformed checkpoint JSON): the grader
+                # fails it CLOSED to hard, and the value is preserved as
+                # evidence under a sentinel key so "no malformed evidence
+                # vanishes" holds for top-level shapes too, not just count
+                # values (round-15 review).
+                stored = (None if (isinstance(ec, float)
+                                   and not math.isfinite(ec)) else ec)
+                acc = malformed_census.setdefault("<malformed-top-level>", [])
+                if stored not in acc:
+                    acc.append(stored)
     for f in (failures or []):
         eclass = f.get("error_class")
         if isinstance(eclass, str) and eclass:
@@ -1448,11 +1468,14 @@ def _json_safe(obj: Any) -> Any:
     expected JSON-derived (json.loads output + JSON-native programmatic
     values)."""
     if isinstance(obj, Decimal):
-        # Decimal is not JSON-native; a FINITE value converts to float (data
-        # preserved), a non-finite one becomes null — round-12/13/14: nulling
-        # every Decimal silently destroyed finite values, and the converted
-        # float must be RE-CHECKED for finiteness (float(Decimal("1e400"))
-        # overflows to inf — a strict-JSON leak).
+        # Decimal is not JSON-native; a non-finite value (NaN/Inf/sNaN —
+        # finiteness checked BEFORE converting, since float(Decimal("sNaN"))
+        # raises ValueError) becomes null; a finite value converts to float,
+        # RE-CHECKED for finiteness (float(Decimal("1e400")) overflows to
+        # inf — a strict-JSON leak). Round-14 moved the conversion ahead of
+        # the check and silently regressed sNaN; this ordering fixes both.
+        if not obj.is_finite():
+            return None
         f = float(obj)
         return None if not math.isfinite(f) else f
     if isinstance(obj, float) and not math.isfinite(obj):

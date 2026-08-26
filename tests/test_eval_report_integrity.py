@@ -616,6 +616,11 @@ def test_report_integrity_json_safe_decimal_and_in_memory_strict():
     p3 = Path(_tempfile.mkdtemp()) / "r3.json"
     save_report({"v": _Decimal("1e400")}, p3)
     assert _json.loads(p3.read_text())["v"] is None
+    # round-15: a signaling NaN Decimal is nulled too (float(sNaN) raises
+    # ValueError — the finiteness check runs BEFORE converting).
+    p4 = Path(_tempfile.mkdtemp()) / "r4.json"
+    save_report({"v": _Decimal("sNaN")}, p4)
+    assert _json.loads(p4.read_text())["v"] is None
     o = _outcome("q0", valid=True)
     o["session_recall@k"]["5"] = float("nan")
     r = build_report(
@@ -1012,6 +1017,23 @@ def test_report_integrity_falsy_error_classes_fail_closed():
     integ = _report([o], threshold=1.0)["integrity"]
     assert integ["n_hard_invalid"] == 0
     assert integ["valid"] is True
+    # round-15: the malformed TOP-LEVEL value is preserved as evidence under
+    # the sentinel key (0 / "" / False / None / 5 / "abc") — "no malformed
+    # evidence vanishes" holds for top-level shapes too, not just count
+    # values; the grader still fails closed to hard.
+    for bad in (0, "", False, None, 5, "abc"):
+        o = _outcome("q0", valid=True)
+        o["error_classes"] = bad
+        integ = _report([o], threshold=1.0)["integrity"]
+        assert integ["n_hard_invalid"] == 1
+        assert integ["error_census_malformed"]["<malformed-top-level>"] == [bad]
+    # distinct top-level shapes accumulate as distinct evidence.
+    o1 = _outcome("q0", valid=True)
+    o1["error_classes"] = 0
+    o2 = _outcome("q1", valid=True)
+    o2["error_classes"] = "abc"
+    integ = _report([o1, o2], threshold=1.0)["integrity"]
+    assert integ["error_census_malformed"]["<malformed-top-level>"] == [0, "abc"]
 
 
 def test_report_integrity_all_breaker_open_never_certifies():
@@ -1189,3 +1211,11 @@ def test_run_protocol_step5_gate_string_pins_criterion():
                                   ["--integrity-threshold=0.5"], state=state)
     assert "--integrity-justification" not in overridden_eq
     assert "--integrity-threshold=0.5" in overridden_eq
+    # round-15: argparse prefix abbreviations (--integrity-thres /
+    # --integrity-t) are accepted by the runner — detected too, no injected
+    # justification (the recorded reason never claims the 0.02 baseline for
+    # a non-baseline threshold).
+    overridden_abbr = build_command(STEPS_BY_NUMBER[5],
+                                    ["--integrity-thres=0.5"], state=state)
+    assert "--integrity-justification" not in overridden_abbr
+    assert "--integrity-thres=0.5" in overridden_abbr

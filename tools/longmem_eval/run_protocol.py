@@ -7,7 +7,7 @@ Encodes the 9-step phased protocol from 03-scope §Run/Testing Protocol
     2  micro-tests (R1 sweep + M6)      (gate: knob selected, marking calibrated)
     3  50-Q pilot + full-context cell   (gate: pilot completes, integrity readable)
     4  mechanical + obvious fixes       (gate: pilot findings fixed)
-    5  full 500-Q run — V3 baseline     (gate: integrity.valid=true — invalid_rate ≤ threshold AND zero hard failures (n_hard_invalid == 0 AND n_excluded_hard == 0 — excluded-outcome hard vetoes count) AND non-empty attempted set whenever any entry was excluded or dropped; threshold 0.02 justified default at 500-Q scale, #1747)
+    5  full 500-Q run — V3 baseline     (gate: integrity.valid=true — invalid_rate ≤ threshold AND zero hard failures (n_hard_invalid == 0 AND n_excluded_hard == 0 — excluded-outcome hard vetoes count) AND non-empty attempted set whenever any entry was excluded or dropped; threshold = JUSTIFIED_BASELINE_THRESHOLD (the module constant, interpolated everywhere — never a hardcoded literal) justified default at 500-Q scale, #1747)
     6  mechanical + obvious fixes       (gate: findings fixed)
     7  50-Q confirmation                (gate: delta confirms, direction stated in advance)
     8  1k full benchmark (owner-gated)  (gate: explicit owner decision)
@@ -301,8 +301,14 @@ def build_command(step: Step, extra: list[str], *, state: ProtocolState,
         # extra flags, the baseline justification is NOT injected — a
         # recorded reason must never claim the 0.02 baseline for a non-
         # baseline threshold (M7: the report records the ACTUAL reason).
+        # round-13/14/15: detect the operator override in ANY argparse form
+        # the runner accepts — space ("--integrity-threshold 0.5"), equals
+        # ("--integrity-threshold=0.5") and unambiguous-prefix abbreviations
+        # ("--integrity-t 0.5"; the shortest unambiguous prefix is
+        # "--integrity-t" — "--integrity-justification" diverges at
+        # "--integrity-j", so the prefix match cannot false-positive).
         has_threshold_override = any(
-            a.split("=", 1)[0] == "--integrity-threshold"
+            a.split("=", 1)[0].startswith("--integrity-t")
             for a in (extra or []))
         if has_threshold_override:
             return _run_cmd(["--split", "s", "--ingest-mode", "v2",
