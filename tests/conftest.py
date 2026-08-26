@@ -358,7 +358,15 @@ def _redislite_hygiene():
                             # many servers compounds past pytest-timeout under
                             # CI load (observed: TestMcpHandlers teardown
                             # timed out at 600s with the reaper in _kill).
-                            sigterm_timeout=3.0)
+                            sigterm_timeout=3.0,
+                            # deadline is now threaded INTO reap(): the
+                            # eager pre-probe cache is skipped and the record
+                            # loop aborts once the budget is spent — the
+                            # end-sweep can never run past pytest-timeout on
+                            # a large stale backlog (observed: >300s teardown
+                            # timeout redding the leg with the reaper in
+                            # _kill/probe).
+                            deadline=deadline)
                         total += len(acted)
                         if not acted or time.monotonic() >= deadline:
                             break
