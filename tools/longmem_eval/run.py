@@ -672,13 +672,18 @@ def _build_cli_extractor_model(*, spec: str | None,
     an explicit ``spec`` stays a MODELS registry lookup (M5 pinning, registry
     tuning applies); unset delegates to the production router
     (``build_extractor_model``, uncapped — the #1350 owner decision).
-    ``session_workers > 1``: each worker builds its OWN fresh model via the
-    ingest_v2 factory, so the run-level model — and the fingerprint — is
+    ``session_workers > 1``: requests per-worker models via the ingest_v2
+    ``model_factory``, so the run-level model — and the fingerprint — is
     built the SAME way the factory does (``_session_worker_spec_tuning``
     resolves the registry entry's real wire id + expressible tuning; the
     unset case stays UNCAPPED, matching the session_workers=1 owner
-    decision). A spec'd run therefore fingerprints identically across a
-    session-workers toggle only when the router resolves a SINGLE lane
+    decision). NOTE: the live ``ingest_haystack_v2`` on main currently
+    shadows the parallel factory path with a sequential copy (pre-existing
+    duplicate, tracked separately — #1752), so workers fall back to the
+    shared ``extractor_model``; the fingerprint-vs-served guard remains the
+    safety invariant and records the serving config either way. A spec'd
+    run therefore fingerprints identically across a session-workers toggle
+    only when the router resolves a SINGLE lane
     matching the registry adapter (the same effective config — resume
     accepted); in multi-lane environments the sw>1 path is provider-routed
     (RoutingModel/RotatingModel composition) and a toggle is REFUSED —
@@ -799,11 +804,16 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
     (``provider:wire-id`` + tuning; single-lane wrappers emit the bare
     member fingerprint; multi-lane wrappers are shape-prefixed routing:/rotating:)
     — never an address-bearing repr. SESSION_WORKERS: ``--session-workers
-    > 1`` runs session-parallel extraction — each worker builds a FRESH
-    model via the ingest_v2 factory. ``_build_cli_extractor_model`` builds
-    the fingerprinted model and run_main threads the resolved spec + tuning
-    into the factory so the workers serve EXACTLY what the fingerprint
-    records (a spec'd run fingerprints identically across a session-workers
+    > 1`` requests per-worker models via the ingest_v2 ``model_factory``
+    (note: the live ``ingest_haystack_v2`` on main currently shadows the
+    parallel factory path with a sequential copy — pre-existing duplicate,
+    tracked separately (#1752) — so workers fall back to the shared
+    ``extractor_model``; the fingerprint-vs-served guard remains the safety
+    invariant and records the serving config either way).
+    ``_build_cli_extractor_model`` builds the fingerprinted model and
+    run_main threads the resolved spec + tuning into the factory so the
+    workers serve EXACTLY what the fingerprint records (a spec'd run
+    fingerprints identically across a session-workers
     toggle only in single-lane environments — the same effective config,
     resume accepted; multi-lane envs are provider-routed at sw>1 and the
     toggle is REFUSED, safe direction; the unset run stays UNCAPPED,
@@ -1220,8 +1230,12 @@ def run_evaluation(
                         chunk_turns=chunk_turns,
                         # Pilot #1549: session-parallel extraction within a
                         # question (the LLM phase is the wall-clock dominant
-                        # cost; each worker gets a fresh model from the same
-                        # build path — no shared RoutingModel state).
+                        # cost). NOTE: the live ingest_haystack_v2 on main
+                        # shadows the parallel worker-factory path with a
+                        # sequential copy (pre-existing duplicate, tracked
+                        # separately — #1752), so workers currently fall
+                        # back to the shared extractor_model — which is
+                        # exactly what the fingerprint records.
                         session_workers=session_workers,
                         # M7 #1739 / #1742: the factory spec + tuning are
                         # threaded in (never the run_main-local ``args``
@@ -2313,9 +2327,11 @@ def _run_main(parser: argparse.ArgumentParser, args,
     # extractor_model (built above) is closed on EVERY exit path via the
     # try/finally — the CLI previously leaked its session. requests.Session
     # is reusable after close(), so no double-close hazard with the
-    # fingerprint guard's served model. (The per-worker model_factory models
-    # are built inside ingest_v2.py's worker threads — out of run.py's reach
-    # and out of PR scope.)
+    # fingerprint guard's served model. (Per-worker model_factory models are
+    # built inside ingest_v2.py's worker threads when the parallel path is
+    # live — out of run.py's reach and out of PR scope; on main the
+    # sequential copy shadows that path (pre-existing duplicate, tracked
+    # separately), so the shared extractor_model extracts instead.)
     try:
         # M2 (#1523): the pre-flight gate runs AFTER reader/judge/extractor_model
         # are built and BEFORE anything in the question loop starts. --mock skips

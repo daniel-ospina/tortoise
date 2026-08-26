@@ -628,12 +628,13 @@ def test_checkpoint_key_shape():
 
 def test_model_id_precedence_ladder():
     """The ``_model_id`` attr-resolution ladder: None → None; a truthy
-    ``.model_id`` beats ``.id``; falsy attributes never win (fall through);
-    a whitespace-only id is DEGENERATE — it falls through to the loud repr
-    fallback (review #1742: ``if mid is not None and str(mid).strip()``)
-    instead of becoming a fingerprint literal; repr is the last resort —
-    pinned as repr, not str, via sentinels. Case names ride the assertion
-    messages for failure attribution."""
+    ``.model_id`` beats ``.id``; None/empty/whitespace-only ids never win
+    (fall through to the loud repr fallback); any non-blank id wins,
+    string-coerced (review #1742: ``if mid is not None and
+    str(mid).strip()`` — so a falsy NON-string id like 0 or False now wins
+    as "0"/"False"); repr is the last resort — pinned as repr, not str,
+    via sentinels. Case names ride the assertion messages for failure
+    attribution."""
     from types import SimpleNamespace as _NS
 
     class _SentinelRepr:
