@@ -201,17 +201,26 @@ class TestS2:
 
     def test_rejects_unparseable(self):
         # S2 retries once on parse failure (pilot #1549 fix) then raises.
+        # #1746 (D3): the retry is ERROR-INFORMED — the attempt-2 user
+        # message carries the parse-error block ("did not parse" + the
+        # offending region), never a same-prompt echo.
         model = MockModel(["no json here", "no json here"])
         with pytest.raises(ValueError):
             v2.run_s2(model, "STORY")
         assert len(model.calls) == 2  # one parse-retry happened before raising
+        user2 = model.calls[1][1]
+        assert "did not parse" in user2
+        assert "no json here" in user2  # the offending region rides along
 
     def test_parse_retry_recovers(self):
-        """Parse-retry (pilot #1549): an unparseable first output is re-prompted
-        and a valid second output succeeds."""
+        """Parse-retry (pilot #1549 + #1746 D3): an unparseable first output
+        is re-prompted ERROR-INFORMED and a valid second output succeeds."""
         model = MockModel(["not json", json.dumps(S2_FIXTURE)])
         out = v2.run_s2(model, "STORY")
         assert out  # recovered after the parse retry
+        user2 = model.calls[1][1]
+        assert "did not parse" in user2
+        assert "not json" in user2  # the offending region rides along
 
     def test_prompt_contains_master_and_chains(self):
         model = MockModel([json.dumps(S2_FIXTURE)])
@@ -303,6 +312,223 @@ class TestS2:
 
 
 # ── S3 graph search ────────────────────────────────────────────────────────
+
+class TestParseLadder:
+    """#1746 (D4/D5): the parse-boundary recovery ladder — sanitize (H2
+    control-char contamination) → bounded repair → schema-validated
+    partial-accept (H3 truncation) → error-informed re-prompt; every
+    recovery is a recorded event, failures keep their mechanism class."""
+
+    def test_sanitize_rung_recovers_control_chars(self):
+        """A raw newline INSIDE a string value (H2 output-side
+        contamination) breaks json.loads; the string-aware sanitize escapes
+        it → parses; the value round-trips (newline preserved); the
+        recovery is recorded in stats["recovery"]["sanitize"] == 1."""
+        contaminated = ('{"entities": [{"name": "gym' + chr(10) +
+                        'maintenance", "kind": "core:plan", '
+                        '"lifecycle": "created", "supersedes": null, '
+                        '"note": null}], "events": [], "operators": [], '
+                        '"points": []}')
+        stats: dict = {}
+        out = v2.run_s2(MockModel([contaminated]), "STORY", stats=stats)
+        assert out["entities"][0]["name"] == "gym\nmaintenance"
+        assert out["entities"][0]["kind"] == "core:plan"
+        assert stats["recovery"]["sanitize"] == 1
+
+    def test_sanitize_preserves_structural_whitespace(self):
+        """Control chars BETWEEN tokens (pretty-printed structural
+        whitespace) are untouched — rung 1 parses directly, no sanitize
+        fires; recovery stays empty."""
+        pretty = ('{\n  "entities": [],\n  "events": [],\n  '
+                  '"operators": [],\n  "points": []\n}')
+        stats: dict = {}
+        out = v2.run_s2(MockModel([pretty]), "STORY", stats=stats)
+        assert out == {"entities": [], "events": [], "operators": [],
+                       "points": []}
+        assert stats.get("recovery") in (None, {})
+
+    def test_sanitize_insufficient_counts_contamination_gap(self):
+        """Sanitize that alters but cannot fully repair (a contaminated
+        string cut mid-item — no complete embed item boundary exists after
+        it) records ``sanitize_insufficient`` and falls through to raise —
+        never corrupting (the D5 schema gate backstops any mis-tracked
+        scan). A length-finish model skips the deterministic retry (D3),
+        keeping this to one call."""
+        class _Bad:
+            last_finish_reason = "length"
+
+            def __init__(self):
+                self.calls = 0
+
+            def complete(self, *, system, user, max_tokens=None):
+                self.calls += 1
+                return ('{"entities": [], "events": [], "operators": [], '
+                        '"points": [{"content": "x' + chr(10) + 'y", '
+                        '"pointKind": "statement"')
+
+        stats: dict = {}
+        with pytest.raises(ValueError):
+            v2.run_s2(_Bad(), "STORY", stats=stats)
+        assert stats["recovery"]["sanitize_insufficient"] == 1
+
+    def test_repair_rung_missing_comma(self):
+        """A missing comma at a boundary join (`}"{`) is repaired by the
+        bounded rule list → the FULL output is recovered (schema-validated),
+        recovery["repair"] == 1."""
+        missing = ('{"entities": [], "events": [], "operators": [], '
+                   '"points": [{"content": "a", "pointKind": "statement"}'
+                   '{"content": "b", "pointKind": "statement"}]}')
+        stats: dict = {}
+        out = v2.run_s2(MockModel([missing]), "STORY", stats=stats)
+        assert [p["content"] for p in out["points"]] == ["a", "b"]
+        assert stats["recovery"]["repair"] == 1
+
+    def test_repair_rung_trailing_brace(self):
+        """An unterminated object (missing top-level closers — H3
+        truncation) is recovered by the bounded closer append →
+        recovery["repair"] == 1; the output is schema-valid."""
+        unterminated = ('{"entities": [], "events": [], "operators": [], '
+                        '"points": [{"content": "a", '
+                        '"pointKind": "statement"}]')
+        stats: dict = {}
+        out = v2.run_s2(MockModel([unterminated]), "STORY", stats=stats)
+        assert [p["content"] for p in out["points"]] == ["a"]
+        assert stats["recovery"]["repair"] == 1
+
+    def test_schema_validator_accepts_contract_shape(self):
+        """A valid embed-list shape passes; unknown keys, empty arrays and
+        extra fields ride through (permissive-on-extras structural gate)."""
+        ok, issues = v2._validate_output_shape({
+            "entities": [{"name": "x", "kind": "y",
+                           "lifecycle": "created"}],
+            "events": [],
+            "points": [{"content": "p", "pointKind": "statement"}],
+            "operators": [{"src": "a", "dst": "b", "op_type": "IMPL"}],
+            "chain_notes": [{"chain": "c", "finding": "f",
+                              "action": "warned", "note": "n"}],
+            "link_before_create": [{"searched_for": "s", "found": True}],
+            "retractions": [{"id": "r1"}],  # content | id
+            "unknown_section": [1, 2],
+        })
+        assert ok is True and issues == []
+
+    def test_schema_validator_rejects_shape_mismatch(self):
+        """A section as a dict (not a list), a missing required key, and a
+        non-primitive value all fail the structural gate."""
+        ok, issues = v2._validate_output_shape(
+            {"points": {"content": "dict-not-list"}})
+        assert ok is False
+        assert any("points" in i for i in issues)
+
+        ok2, issues2 = v2._validate_output_shape(
+            {"entities": [{"name": "x"}]})  # missing kind
+        assert ok2 is False
+        assert any("kind" in i for i in issues2)
+
+        ok3, _ = v2._validate_output_shape(
+            {"points": [{"content": ["non-primitive"]}]})
+        assert ok3 is False
+
+        ok4, _ = v2._validate_output_shape("not-an-object")
+        assert ok4 is False
+
+        ok5, issues5 = v2._validate_output_shape(
+            {"retractions": [{"note": "neither content nor id"}]})
+        assert ok5 is False
+        assert any("content or id" in i for i in issues5)
+
+        ok6, issues6 = v2._validate_output_shape(
+            {"link_before_create": [{"searched_for": "s", "found": "yes"}]})
+        assert ok6 is False  # found is declared bool (per-key type gate)
+        assert any("found" in i for i in issues6)
+
+    def test_partial_accept_recovers_truncated_list(self):
+        """D4 rung 4: an S4 output cut mid-points-item is recovered as the
+        longest schema-valid prefix → ``partial_parse`` in census + error
+        string; the partial list IS used (merged over the S2 base)."""
+        from tests.test_extractor_reliability import _conv
+
+        class _Model:
+            last_finish_reason = None
+
+            def __init__(self):
+                self.calls = 0
+
+            def complete(self, *, system, user, max_tokens=None):
+                self.calls += 1
+                if "STORY SUMMARIZER" in system:
+                    self.last_finish_reason = "stop"
+                    return "A narrative."
+                if "GAP REVIEWER" in system:
+                    self.last_finish_reason = "length"
+                    # S4: cut mid-`points`-item-2 — the ladder's rung 4
+                    # recovers item 1 as the longest valid prefix.
+                    return ('{"entities": [], "events": [], "operators": [], '
+                            '"points": [{"content": "s4 point 1", '
+                            '"pointKind": "statement"}, {"content": "s4 point 2"')
+                # S2 (GRAPH MAPPER): the S2 base with one point.
+                self.last_finish_reason = "stop"
+                return ('{"entities": [], "events": [], "operators": [], '
+                        '"points": [{"content": "s2 base", '
+                        '"pointKind": "statement"}]}')
+
+        out = v2.extract_session_v2(_Model(), _conv())
+        assert out["error_census"]["partial_parse"] == 1  # S4 partial
+        assert any("partial" in e for e in out["errors"])
+        # the partial list IS used — merged over the S2 base (never replaced)
+        contents = [p["content"] for p in out["embed_list"]["points"]]
+        assert "s2 base" in contents and "s4 point 1" in contents
+        assert "s4 point 2" not in contents  # the truncated tail was dropped
+        assert out["stats"]["llm"]["truncated"] == 1  # S4 truncated
+
+    def test_partial_accept_rejects_empty_prefix(self):
+        """Truncation before any item (no complete embed item exists) →
+        failure, never a partial — a truncated-to-empty prefix never counts.
+        Uses a length-finish model so the deterministic retry-skip applies
+        (one call only)."""
+        class _Trunc:
+            last_finish_reason = "length"
+
+            def __init__(self):
+                self.calls = 0
+
+            def complete(self, *, system, user, max_tokens=None):
+                self.calls += 1
+                return ('{"entities": [], "events": [], "operators": [], '
+                        '"points": [')
+
+        with pytest.raises(ValueError):
+            v2.run_s2(_Trunc(), "STORY")
+
+    def test_truncated_skips_same_prompt_retry(self):
+        """D3 (#1746): a first parse-failing attempt with finish_reason ==
+        "length" SKIPS the same-prompt retry (deterministic failure) →
+        exactly ONE call, census ``truncated_parse_error``."""
+        class _Trunc:
+            last_finish_reason = "length"
+
+            def __init__(self):
+                self.calls = 0
+
+            def complete(self, *, system, user, max_tokens=None):
+                self.calls += 1
+                return "this is not JSON at all"
+
+        model = _Trunc()
+        stats: dict = {}
+        with pytest.raises(ValueError):
+            v2.run_s2(model, "STORY", stats=stats)
+        assert model.calls == 1  # no same-prompt retry
+        assert stats["truncated"] is True
+
+    def test_parse_error_with_stop_still_retries(self):
+        """D3 (#1746): a stop-class parse failure STILL gets the single
+        error-informed re-prompt — only the truncation class skips."""
+        model = MockModel(["no json here", "no json here"])
+        with pytest.raises(ValueError):
+            v2.run_s2(model, "STORY")
+        assert len(model.calls) == 2
+
 
 class TestS3:
     def test_backend_mode_embedded_when_unset(self, monkeypatch):

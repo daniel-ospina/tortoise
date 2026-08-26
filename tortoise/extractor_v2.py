@@ -818,16 +818,23 @@ def _error_excerpt(response: str, err: BaseException) -> str:
 
 def _complete_parsed(model, system: str, user: str, *,
                      max_tokens: int | None, stats: dict | None) -> dict:
-    """``_complete`` + ``_parse_json`` with one re-prompt on parse failure.
+    """``_complete`` + the parse-recovery ladder with one error-informed
+    re-prompt on parse failure (pilot #1549 + #1746 D3/D4).
 
     Transient/fatal classification lives in the ``_complete`` retry loop
     (M3); this layer adds the parse-retry the pilot census demanded: a
     parse_error is usually LLM sloppiness and the model self-corrects on
-    the same prompt. Retries are counted in ``stats["llm"]["retries"]``
-    (D3) and the census records the final failure as ``parse_error`` /
-    ``truncated_parse_error`` (#1746 D2: the FIRST parse-failing attempt's
-    ``finish_reason`` decides the class — ``length`` → the truncation
-    hypothesis, else sloppiness/contamination)."""
+    an ERROR-INFORMED re-prompt. Retries are counted in
+    ``stats["llm"]["retries"]`` (D3) and the census records the final
+    failure as ``parse_error`` / ``truncated_parse_error`` (#1746 D2: the
+    FIRST parse-failing attempt's ``finish_reason`` decides the class —
+    ``length`` → the truncation hypothesis, else sloppiness/contamination).
+
+    Retry policy (#1746 D3): a first parse-failing attempt with
+    ``finish_reason == "length"`` SKIPS the retry — same prompt + same cap
+    is deterministic failure (the ladder's rung-4 partial-accept already
+    ran in-process on attempt 1); a ``stop``/``None`` failure re-prompts
+    with the bounded parse-error block (``_error_informed_reprompt``)."""
     attempts = 0
     last: Exception | None = None
     first_truncated = False
@@ -836,9 +843,10 @@ def _complete_parsed(model, system: str, user: str, *,
     # a truncated first attempt whose retry recovers must still record the
     # truncation (criterion 3: no UNRECORDED truncation with valid=true).
     stage_truncated = False
+    user_msg = user
     while attempts <= _PARSE_RETRIES:
         attempts += 1
-        response = _complete(model, system, user,
+        response = _complete(model, system, user_msg,
                              max_tokens=max_tokens, stats=stats)
         # D2 (#1746): read the finish reason IMMEDIATELY after the call;
         # hold the FIRST parse-failing attempt's value — the class-decision
@@ -848,17 +856,43 @@ def _complete_parsed(model, system: str, user: str, *,
         if stats is not None:
             stats["truncated"] = stage_truncated
         try:
-            return _parse_json(response)
+            return _parse_json_robust(response, stats=stats)
         except ValueError as e:
+            # _ParseError IS a ValueError subclass — the only ValueError
+            # source in the ladder; a raw adapter ValueError keeps the
+            # historical parse-retry path (max back-compat).
             last = e
             if attempts == 1:
+                # D2 (#1746): the FIRST parse-failing attempt's finish
+                # reason decides the class (a raw adapter ValueError has no
+                # truncated attr — getattr-safe for the final raise).
                 first_truncated = finish == "length"
-            if stats is not None:
-                stats.setdefault("llm", {}).setdefault("retries", 0)
-                stats["llm"]["retries"] += 1
+            if finish == "length":
+                # D3 (#1746): deterministic failure — same prompt + same cap
+                # re-fails identically; the ladder's partial-accept already
+                # recovered what it could in-process.
+                break
+            if attempts <= _PARSE_RETRIES:
+                if stats is not None:
+                    stats.setdefault("llm", {}).setdefault("retries", 0)
+                    stats["llm"]["retries"] += 1
+                user_msg = _error_informed_reprompt(user, response, e)
     raise _ParseError(str(last), truncated=first_truncated,
                       attempt=attempts,
-                      excerpt=_error_excerpt(response, last)) from last
+                      excerpt=(getattr(last, "excerpt", None)
+                               or _error_excerpt(response, last))) from last
+
+
+def _error_informed_reprompt(user: str, response: str,
+                             err: _ParseError) -> str:
+    """D3 (#1746): the attempt-2 user message — the original prompt plus the
+    bounded parse-error block (message ≤ 300 chars + excerpt ≤ 500)."""
+    msg = str(err.args[0] if err.args else err)[:300]
+    excerpt = getattr(err, "excerpt", None) or _error_excerpt(response, err)
+    return (user + "\n\nYour previous response did not parse as the required "
+            "JSON.\nParse error: " + msg +
+            "\nOffending region: " + excerpt +
+            "\nRespond with ONLY the JSON object, no explanation.")
 
 
 def run_s2(model, story: str, master: dict | None = None, *,
@@ -2851,6 +2885,13 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
         except Exception as e:
             errors.append(f"S2 failed: {type(e).__name__}: {e}")
             _bump_census(error_census, e)
+        # D4 (#1746): a schema-validated PARTIAL accept (truncated tail
+        # dropped) is a recorded ERROR — the embed list is incomplete
+        # (valid=false), never a clean outcome. The partial list IS used.
+        if stage_stats.get("partial"):
+            errors.append("S2 output partial — truncated tail dropped "
+                          "(embed list incomplete)")
+            _bump_census_class(error_census, "partial_parse")
         _rollup_llm(llm_stats, stage_stats)
         _rollup_recovery(recovery_stats, stage_stats)
 
@@ -2877,6 +2918,13 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
         except Exception as e:
             errors.append(f"S4 failed: {type(e).__name__}: {e} — kept S2 output")
             _bump_census(error_census, e)
+        # D4 (#1746): a schema-validated PARTIAL S4 accept is a recorded
+        # ERROR (same contract as the S2 partial above) — the partial IS
+        # merged over the S2 base (merge_embed_lists preserves S2 intact).
+        if stage_stats.get("partial"):
+            errors.append("S4 output partial — truncated tail dropped "
+                          "(embed list incomplete)")
+            _bump_census_class(error_census, "partial_parse")
         _rollup_llm(llm_stats, stage_stats)
         _rollup_recovery(recovery_stats, stage_stats)
 
@@ -3297,6 +3345,295 @@ def _parse_json(response: str) -> dict:
         except json.JSONDecodeError:
             continue
     raise ValueError("unparseable JSON")
+
+
+# ══ #1746 (D4/D5): the parse-boundary recovery ladder ════════════════════
+#
+# ``_parse_json_robust`` replaces the binary parse-or-fail at the S2/S4 seam:
+# rung 1 canonical → rung 2 sanitize (H2 control-char contamination) → rung 3
+# bounded repair → rung 4 schema-validated partial-accept (H3 truncation) →
+# rung 5 raise. Every recovery is a recorded event (``stats["recovery"]`` /
+# ``stats["partial"]``); failures keep their mechanism class via
+# ``_ParseError.truncated`` (D2).
+
+#: D5: the structural output-shape schema, hand-derived from OUTPUT_CONTRACT
+#: (kept adjacent — a contract edit → schema edit is a NEW coupling, tracked
+#: in the plan's Open questions). Each present section must be a LIST of
+#: dicts; each item must carry its required keys (primitive-typed); unknown
+#: keys and empty arrays ride through (valid).
+_OUTPUT_SCHEMA: dict[str, tuple[str, ...]] = {
+    "entities": ("name", "kind"),
+    "events": ("content", "eventKind"),
+    "points": ("content",),
+    "operators": ("src", "dst", "op_type"),
+    "chain_notes": ("chain", "finding", "action"),
+    "link_before_create": ("searched_for", "found"),
+    "retractions": ("content", "id"),  # content | id — either satisfies
+}
+
+#: D5: primitive types for the required keys (structural strictness only).
+_SCHEMA_PRIMITIVES: dict[str, tuple[type, ...]] = {
+    "name": (str,), "kind": (str,), "content": (str,),
+    "eventKind": (str,), "src": (str,), "dst": (str,),
+    "op_type": (str,), "chain": (str,), "finding": (str,),
+    "action": (str,), "searched_for": (str,), "found": (bool,),
+    "id": (str,),
+}
+
+
+def _is_primitive(v) -> bool:
+    return not isinstance(v, (dict, list, tuple)) and v is not None
+
+
+def _validate_output_shape(parsed) -> tuple[bool, list[str]]:
+    """D5 (#1746): structural-only output-shape validation — a schema gate
+    for the ladder's rungs 3-4 (a mis-tracked sanitize/repair scan can never
+    corrupt: junk output fails schema and falls through). Top-level must be
+    a dict; each PRESENT contract section must be a LIST of dicts; each item
+    must carry its required keys with primitive values; unknown keys and
+    empty arrays are VALID (fields ride through by reference — S5's
+    execution validation owns semantic repair). ``retractions`` items need
+    ``content`` OR ``id`` (the contract's ``content|id``)."""
+    issues: list[str] = []
+    if not isinstance(parsed, dict):
+        return False, [f"top-level output is {type(parsed).__name__}, not an object"]
+    for section, required in _OUTPUT_SCHEMA.items():
+        if section not in parsed:
+            continue
+        items = parsed[section]
+        if not isinstance(items, list):
+            issues.append(f"section {section!r} is {type(items).__name__}, not a list")
+            continue
+        for idx, item in enumerate(items):
+            if not isinstance(item, dict):
+                issues.append(f"{section}[{idx}] is {type(item).__name__}, not an object")
+                continue
+            if section == "retractions" and not (
+                    "content" in item or "id" in item):
+                issues.append(f"retractions[{idx}] needs content or id")
+            for key in required:
+                if key not in item:
+                    if section == "retractions":
+                        continue  # content | id — the disjunction is above
+                    issues.append(f"{section}[{idx}] missing required key {key!r}")
+                    continue
+                if not _is_primitive(item[key]):
+                    issues.append(
+                        f"{section}[{idx}].{key} is a non-primitive value")
+                    continue
+                expect = _SCHEMA_PRIMITIVES.get(key)
+                if expect and not isinstance(item[key], expect):
+                    issues.append(
+                        f"{section}[{idx}].{key} has the wrong type "
+                        f"(expected {expect[0].__name__})")
+    return (not issues), issues
+
+
+#: C0 control chars (0x00-0x1F) — escaped inside string literals by the
+#: sanitize rung (H2 output-side contamination, #1746 D4).
+_C0_CONTROL = frozenset(chr(c) for c in range(0x20))
+
+
+_SANITIZE_ESCAPES = {
+    "\n": "\\n", "\t": "\\t", "\r": "\\r",
+    "\b": "\\b", "\f": "\\f", "\"": "\\\"", "\\": "\\\\",
+}
+
+
+def _sanitize_control_chars(response: str) -> str:
+    """D4 rung 2 (#1746): string-aware scan — escape raw C0 control chars
+    (0x00-0x1F, incl. raw newlines/tabs) INSIDE string literals as their
+    JSON escapes; structural whitespace is untouched. Returns the original
+    string unchanged when nothing was altered (so callers can detect
+    whether the rung did work)."""
+    out: list[str] = []
+    in_str = False
+    esc = False
+    changed = False
+    for c in response:
+        if in_str:
+            if esc:
+                out.append(c)  # part of an escape sequence — leave as-is
+                esc = False
+                continue
+            if c == "\\":
+                out.append(c)
+                esc = True
+                continue
+            if c == '"':
+                in_str = False
+                out.append(c)
+                continue
+            if c in _C0_CONTROL:
+                out.append(_SANITIZE_ESCAPES.get(c, f"\\u{ord(c):04x}"))
+                changed = True
+                continue
+            out.append(c)
+            continue
+        if c == '"':
+            in_str = True
+        out.append(c)
+    return "".join(out) if changed else response
+
+
+#: D4 rung 3: bounded missing-comma repairs at boundary joins (first-valid-
+#: wins; the schema gate backstops a mis-targeted substitution).
+_REPAIR_RULES: tuple[tuple[str, str], ...] = (
+    ('}"{', '}", "{'),
+    (']"{"', ']", "{'),
+    ('}"[', '}", "['),
+    (']"["', ']", "['),
+    ('}{', '},{'),
+    ('][', '],['),
+    ('}"', '},"'),  # dict value object → next key (bounded, gated)
+)
+
+
+def _repair_candidates(working: str) -> list[str]:
+    """D4 rung 3 (#1746): bounded repair candidates on the working text —
+    (a) unterminated object → append up to 8 closers; (b) the bounded
+    missing-comma rule list; (c) the canonical tail-cuts re-run on the
+    working text (a sanitize may have altered lengths the rung-1 cuts
+    never saw). First-valid-wins + schema gate keep it safe; no free-form
+    repair library, no unbounded heuristics."""
+    candidates: list[str] = []
+    for k in range(1, 9):
+        candidates.append(working + "}" * k)
+    for find, repl in _REPAIR_RULES:
+        if find in working:
+            candidates.append(working.replace(find, repl))
+    for cut in (-1, -2, -3, -5, -10, -20):
+        if len(working) > abs(cut):
+            candidates.append(working[:cut])
+    return candidates
+
+
+_EMBED_SECTIONS = ("entities", "points", "events", "operators")
+
+
+def _close_balanced(text: str) -> str | None:
+    """D4 rung 4 helper (#1746): append the minimal closing brackets that
+    make a JSON prefix balanced (the truncation cut lands mid-structure, so
+    a strict ``json.loads(prefix)`` can never be valid — the recovered
+    prefix is CLOSED before parsing). Returns None when the prefix cannot
+    be closed safely (an unterminated string/escape at the cut, or a
+    mismatched close — a mis-tracked cut must never corrupt)."""
+    stack: list[str] = []
+    in_str = False
+    esc = False
+    for c in text:
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            continue
+        if c == '"':
+            in_str = True
+        elif c in "[{":
+            stack.append("]" if c == "[" else "}")
+        elif c in "]}":
+            if not stack:
+                return None
+            if stack[-1] != ("]" if c == "]" else "}"):
+                return None
+            stack.pop()
+    if in_str or esc:
+        return None
+    return text + "".join(reversed(stack))
+
+
+def _longest_valid_prefix(text: str) -> dict | None:
+    """D4 rung 4 (#1746): schema-validated partial-accept — progressive
+    prefix cuts at item boundaries (``}``/``]`` positions from the tail,
+    bounded ≤ 200 candidates), each closed to balance (``_close_balanced``)
+    and parsed; the LONGEST prefix that parses AND passes the schema gate
+    with ≥ 1 non-empty embed section (entities/points/events/operators —
+    mirroring the S4 caller's merge condition, so a partial the caller
+    would discard can never be falsely classed ``partial_parse``) is
+    accepted. A truncated-to-empty prefix never counts; a prefix with only
+    chain_notes/link_before_create/retractions non-empty falls through
+    (returns None → the caller raises)."""
+    positions = sorted((i for i, c in enumerate(text) if c in "}]"),
+                       reverse=True)
+    for i in positions[:200]:
+        closed = _close_balanced(text[:i + 1])
+        if closed is None:
+            continue
+        try:
+            parsed = json.loads(closed)
+        except json.JSONDecodeError:
+            continue
+        ok, _ = _validate_output_shape(parsed)
+        if not ok:
+            continue
+        if not any(parsed.get(s) for s in _EMBED_SECTIONS):
+            continue
+        return parsed
+    return None
+
+
+def _parse_json_robust(response: str, *, stats: dict | None = None) -> dict:
+    """D4 (#1746): the parse-boundary recovery ladder — raises
+    ``_ParseError`` on final failure.
+
+    Rungs per attempt: 1 canonical ``_parse_json``; 2 string-aware sanitize
+    (raw C0 control chars inside string literals → JSON escapes; success →
+    ``stats["recovery"]["sanitize"] += 1``; altered-but-unparseable → the
+    sanitized text becomes the ``working`` input for rungs 3-4 +
+    ``sanitize_insufficient += 1``); 3 bounded repair on ``working``
+    (schema-gated, first-valid-wins; success → ``recovery["repair"] += 1``);
+    4 schema-validated partial-accept on ``working`` (success →
+    ``stats["partial"] = True`` — the caller appends the ``partial_parse``
+    error class); 5 raise. The D5 schema gate backstops a mis-tracked scan
+    before any rung-3/4 output is accepted — worst case it fails schema and
+    falls through, never corrupting."""
+    last_err: ValueError | None = None
+    # rung 1 — canonical (fences, brace-balance, tail-cuts)
+    try:
+        return _parse_json(response)
+    except ValueError as e:
+        last_err = e
+    recovery = (stats.setdefault("recovery", {})
+                if stats is not None else None)
+    # rung 2 — sanitize (H2 output-side contamination)
+    sanitized = _sanitize_control_chars(response)
+    altered = sanitized != response
+    if altered:
+        try:
+            parsed = _parse_json(sanitized)
+            if recovery is not None:
+                recovery["sanitize"] = recovery.get("sanitize", 0) + 1
+            return parsed
+        except ValueError as e:
+            last_err = e
+            if recovery is not None:
+                recovery["sanitize_insufficient"] = (
+                    recovery.get("sanitize_insufficient", 0) + 1)
+    working = sanitized if altered else response
+    # rung 3 — bounded repair (schema-gated, first-valid-wins)
+    for candidate in _repair_candidates(working):
+        try:
+            parsed = _parse_json(candidate)
+        except ValueError as e:
+            last_err = e
+            continue
+        ok, _ = _validate_output_shape(parsed)
+        if ok:
+            if recovery is not None:
+                recovery["repair"] = recovery.get("repair", 0) + 1
+            return parsed
+    # rung 4 — schema-validated partial-accept (H3 truncation)
+    prefix = _longest_valid_prefix(working)
+    if prefix is not None:
+        if stats is not None:
+            stats["partial"] = True
+        return prefix
+    # rung 5 — raise (the deepest failure's message + bounded excerpt)
+    raise _ParseError(str(last_err or ValueError("unparseable JSON")),
+                      excerpt=_error_excerpt(response, last_err))
 
 
 __all__ = [  # noqa: RUF022
