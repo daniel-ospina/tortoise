@@ -214,7 +214,7 @@ def active_suite_markers() -> list[dict]:
             # opportunistically so it can never pin suites_active=True and
             # silently disable live-orphan kills (the #1642 recurrence).
             if now - mpath.stat().st_mtime > MARKER_MAX_AGE_S:
-                try:
+                try:  # noqa: SIM105
                     mpath.unlink()
                 except OSError:
                     pass
@@ -1207,7 +1207,7 @@ def _is_path_based(registry: dict | None, dbdir_real: str,
     if db_filename and db_filename != "redis.db" \
             and not _is_ephemeral_dir(reg_dbdir_real, tmpdir_real):
         return True  # Signal 2: user db filename
-    if "dbfilename" in registry and registry.get("dbfilename") is None:
+    if "dbfilename" in registry and registry.get("dbfilename") is None:  # noqa: SIM102
         if _dir_has_db_file(dbdir_real) \
                 and not _is_ephemeral_dir(dbdir_real, tmpdir_real):
             return True  # old-format path-based
@@ -1497,7 +1497,7 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
         #     markers guard distinguishes them).
         #   - path_based (user-data) server: confirmation required in EVERY
         #     mode — its data outlives the test tree.
-        if record.get("pid") and _pid_alive(record["pid"]):
+        if record.get("pid") and _pid_alive(record["pid"]):  # noqa: SIM102
             if not record.get("_orphan_confirmed"):
                 if only_safe:
                     logger.info(

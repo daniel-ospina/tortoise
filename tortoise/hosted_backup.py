@@ -280,7 +280,7 @@ def restore_graph(g, dump: dict) -> dict:
     from tortoise.hosted_api import _is_export_skip_node
     actual_nodes = 0
     for row in g.query("MATCH (n) RETURN labels(n), properties(n)").result_set:
-        labels = [str(l) for l in (row[0] or [])]
+        labels = [str(l) for l in (row[0] or [])]  # noqa: E741
         if not _is_export_skip_node(labels, dict(row[1] or {})):
             actual_nodes += 1
     return {"nodes": int(actual_nodes), "edges": int(actual_edges)}
@@ -735,7 +735,7 @@ def _restore_into_temp_verify_swap(
         live_nodes = sum(
             1 for row in _live_rows
             if not _is_export_skip_node(
-                [str(l) for l in (row[0] or [])], dict(row[1] or {}))
+                [str(l) for l in (row[0] or [])], dict(row[1] or {}))  # noqa: E741
         )
     except Exception:
         # Fail closed: only a CONFIRMED-absent graph (via GRAPH.LIST) is safe to

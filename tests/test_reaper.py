@@ -670,7 +670,7 @@ def test_reap_kill_removes_socket_dir_and_ephemeral_data_dir(monkeypatch):
             "dbdir": str(sock_dir), "path_based": False,
             "settings": {"dir": str(data_dir), "dbfilename": "redis.db"},
         }
-        acted = reap([rec], dry_run=False, only_safe=False)
+        acted = reap([rec], dry_run=False, only_safe=False)  # noqa: F841
         assert killed == [os.getpid()]
         assert not sock_dir.exists(), "socket dir not cleaned after kill"
         assert not data_dir.exists(), \
@@ -711,7 +711,7 @@ def test_reap_kill_preserves_non_ephemeral_data_dir(monkeypatch):
                 "dbdir": str(sock_dir), "path_based": False,
                 "settings": {"dir": str(user_dir), "dbfilename": "user.db"},
             }
-            acted = reap([rec], dry_run=False, only_safe=False)
+            acted = reap([rec], dry_run=False, only_safe=False)  # noqa: F841
             assert killed == [os.getpid()]
             assert not sock_dir.exists(), "socket dir should be cleaned"
             assert user_dir.exists(), \
@@ -2374,7 +2374,7 @@ def test_mark_orphan_confirmation_two_sweeps(monkeypatch, tmp_path):
     monkeypatch.setattr("tortoise.embedded_reaper._pid_alive", lambda p: True)
     monkeypatch.setattr("tortoise.embedded_reaper._pid_is_redis",
                         lambda p: True)
-    start = _process_start_time(os.getpid())
+    start = _process_start_time(os.getpid())  # noqa: F841
     rec = _zero_client_candidate("/tmp/fake-orphan.sock", os.getpid())
     # Sweep 1: first observation -> recorded, NOT confirmed.
     _mark_orphan_confirmation([rec])
@@ -2490,7 +2490,7 @@ def test_reap_ephemeral_full_sweep_kills_without_confirmation(monkeypatch):
     rec = {"classification": "candidate", "dir_missing": False,
            "socket_path": "/tmp/eph", "pid": os.getpid(),
            "path_based": False}
-    acted = reap([rec], dry_run=False, only_safe=False)
+    acted = reap([rec], dry_run=False, only_safe=False)  # noqa: F841
     assert killed == [os.getpid()]
 
 
@@ -2542,7 +2542,7 @@ def test_mark_orphan_confirmation_socketless_server(monkeypatch, tmp_path):
     _json.dump({sock_path: {"pid": os.getpid(),
                             "start": _process_start_time(os.getpid()),
                             "first_seen": time.time() - 600}},
-               open(state_path, "w"))
+               open(state_path, "w"))  # noqa: SIM115
     rec = _zero_client_candidate(sock_path, os.getpid())
     rec["client_count"] = None  # probe cannot succeed (no socket)
     _mark_orphan_confirmation([rec])

@@ -1667,7 +1667,9 @@ def test_register_journals_minted_team_graph(tmp_path, monkeypatch):
     TORTOISE_DB_PATH → the register handler constructs embedded; a temp
     journal env makes the membership assertion exact. No docker needed."""
     import os as _os
+
     from fastapi.testclient import TestClient
+
     from tests._embedded import _read_journal_file
     from tortoise.hosted_api import app
 
@@ -3011,7 +3013,7 @@ def test_make_sdk_reuses_healthy_anchor(monkeypatch):
         with tempfile.TemporaryDirectory() as td:
             db = os.path.join(td, "test.db")
             monkeypatch.setenv("TORTOISE_DB_PATH", db)
-            sdk1 = ha._make_sdk(namespace=ns)
+            sdk1 = ha._make_sdk(namespace=ns)  # noqa: F841
             anchor1 = ha._FALLBACK_KEEPALIVE.get(ns)
             assert anchor1 is not None, "anchor not stored"
             assert anchor1._proj is not None, "anchor not connected"
@@ -3046,7 +3048,7 @@ def test_make_sdk_rebinds_stale_anchor(monkeypatch):
         with tempfile.TemporaryDirectory() as td1:
             db1 = os.path.join(td1, "a.db")
             monkeypatch.setenv("TORTOISE_DB_PATH", db1)
-            sdk1 = ha._make_sdk(namespace=ns)
+            sdk1 = ha._make_sdk(namespace=ns)  # noqa: F841
             anchor1 = ha._FALLBACK_KEEPALIVE.get(ns)
             assert anchor1 is not None, "anchor not stored"
             assert anchor1._proj is not None

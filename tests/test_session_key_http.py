@@ -88,7 +88,7 @@ def client():
             _restore_tortoise_sdk_init(_orig_init)
             app.dependency_overrides.clear()
             while _REG_SDKS:
-                try:
+                try:  # noqa: SIM105
                     _REG_SDKS.pop().close()
                 except Exception:
                     pass

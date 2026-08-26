@@ -445,6 +445,7 @@ def test_worker_thread_carve_out_stays_embedded(monkeypatch):
     EMBEDDED under a URI-set process, exactly as the frame gate holds for
     the main thread."""
     import threading
+
     from tests._embedded import _worker_stem_embedded_probe
 
     monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379")
@@ -470,6 +471,7 @@ def test_worker_thread_non_exempt_redirects(monkeypatch):
     the process flag fires exactly as it did pre-#1686 for worker threads."""
     import threading
     import types
+
     from tests._embedded import _worker_stem_embedded_probe
 
     monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379")
@@ -517,6 +519,7 @@ def test_stem_registry_prod_parity_and_patch_idempotence(monkeypatch):
     idempotent, so it cannot double-wrap even if re-invoked after a
     reload)."""
     import threading
+
     from tortoise import projection as proj_mod
 
     # (a) clear the conftest hook's main-thread record FIRST (it ran at
