@@ -443,19 +443,47 @@ class TestReuse:
             # NB: urlopen(req, timeout=15) passes a kwarg — the side_effect
             # must accept it (plan-verbatim `_self/_args` signature would
             # TypeError; intent unchanged).
-            barrier.wait()  # both writers hit the write block concurrently
+            # The barrier wait has a timeout (5s) so a missed partner fails
+            # FAST (BrokenBarrierError) instead of hanging the thread inside
+            # the patched block — a hung thread NEVER exits its `with
+            # mock.patch(...)`, leaking the urlopen mock process-wide and
+            # deadlocking every later urlopen (observed on the tier-2 (b)
+            # leg: the selfhost health check + slack webhook tests blocked
+            # on the stale barrier for 300s each).
+            barrier.wait(timeout=5)  # both writers hit the write block concurrently
             return _ok_mint()
 
-        def _run():
-            with mock.patch("urllib.request.urlopen", side_effect=_mint):
-                results.append(main._cmd_signup(mock.Mock()))
+        def _reuse_or_mint(*_args, **_kwargs):
+            # The reuse-GET must NOT return 200: a 200 short-circuits
+            # _cmd_signup into the reuse path with NO mint POST — the other
+            # thread's POST then waits on the barrier alone forever (the
+            # same leak above). 401 on the GET forces BOTH threads onto the
+            # mint POST deterministically (the file's established pattern:
+            # HTTPError(401) then _ok_mint()).
+            try:
+                if _args and "v1/team" in _args[0].full_url:
+                    return _http_error(401)
+            except Exception:
+                pass
+            return _mint(*_args, **_kwargs)
 
-        t1 = threading.Thread(target=_run)
-        t2 = threading.Thread(target=_run)
-        t1.start()
-        t2.start()
-        t1.join()
-        t2.join()
+        # ONE shared patch around both writers (a per-thread `with
+        # mock.patch(...)` double-patches the same attribute: the second
+        # thread's patcher saves the first thread's MagicMock as its
+        # "original", and whoever exits LAST restores the OTHER's Mock —
+        # urlopen then leaks as a MagicMock process-wide and every later
+        # urlopen (selfhost /health, slack webhook) fires the stale _mint
+        # side_effect → barrier (observed on the tier-2 (b) leg).
+        def _run():
+            results.append(main._cmd_signup(mock.Mock()))
+
+        with mock.patch("urllib.request.urlopen", side_effect=_reuse_or_mint):
+            t1 = threading.Thread(target=_run)
+            t2 = threading.Thread(target=_run)
+            t1.start()
+            t2.start()
+            t1.join()
+            t2.join()
         cfg = json.loads((tmp_path / ".tortoise" / "credentials.json").read_text())
         assert cfg["api_key"].startswith("tt_mint_")
         assert len(list((tmp_path / ".tortoise").glob("credentials.json.tmp-*"))) <= 1
