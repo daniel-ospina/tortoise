@@ -174,9 +174,9 @@ _MULTI_SESSION_FRAGMENT = (
 # 'do not mention the context' override, and its judge-scorable exemplar
 # are restored). Known oscillation risk: three prompt-side re-tunings of
 # this commit/abstain balance in 8 days (#1366 → #1546 → #1762) — a
-# structural two-phase decision is a recognized limitation; follow-up not
-# yet tracked (noted for the run.py owner: reader_prompt_source()/hash
-# also do not cover the A1 clause — pre-existing recording gap).
+# structural two-phase decision is a recognized limitation (follow-up not
+# yet tracked). Run.py-owned recording gap — reader_prompt_source()/hash
+# also do not cover the A1 clause (pre-existing; tracked in #1773).
 _ABSTRACTION_FRAGMENT = (
     "\n\nPARTIAL-KNOWLEDGE ABSTENTION: the context can contain related "
     "information that does NOT actually answer the question. First decide "
@@ -218,10 +218,12 @@ _TYPE_FRAGMENTS: dict[str, str] = {
 def reader_prompt_constants() -> tuple[str, dict[str, str]]:
     """The run's reader prompt constants (M5): the generic system prompt +
     the universal A1 abstention clause + type fragments, recorded verbatim
-    in report methodology so prompt drift across run cells is visible in
-    the report (#1768: the A1 clause — the substance of the #1762
+    in report methodology so prompt drift across run cells is human-visible
+    in the report (#1768: the A1 clause — the substance of the #1762
     calibration — now joins the recorded dict; the dict copy keeps future
-    fragment additions additive)."""
+    fragment additions additive). The automated drift signal
+    (reader_prompt_hash, run.py-owned) does not yet cover the A1 clause —
+    pre-existing gap, tracked in #1773."""
     return _SYSTEM_PROMPT, {
         **dict(_TYPE_FRAGMENTS),
         # the universal clause appended to EVERY question's prompt; keyed
