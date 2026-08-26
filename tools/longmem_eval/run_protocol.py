@@ -293,12 +293,23 @@ def build_command(step: Step, extra: list[str], *, state: ProtocolState,
         # #1747: inject the justified threshold + its recorded justification
         # so the EXECUTED run matches the documented gate and the M7
         # contract (a non-default threshold is never silently applied — the
-        # report records the reason).
+        # report records the reason). The justification INTERPOLATES the
+        # constant so it can never drift from the injected threshold
+        # (round-13 review); when the operator overrides the threshold via
+        # extra flags, the baseline justification is NOT injected — a
+        # recorded reason must never claim the 0.02 baseline for a non-
+        # baseline threshold (M7: the report records the ACTUAL reason).
+        has_threshold_override = any(
+            a == "--integrity-threshold" for a in (extra or []))
+        if has_threshold_override:
+            return _run_cmd(["--split", "s", "--ingest-mode", "v2",
+                             *common])
         return _run_cmd(["--split", "s", "--ingest-mode", "v2",
                          "--integrity-threshold",
                          f"{JUSTIFIED_BASELINE_THRESHOLD}",
                          "--integrity-justification",
-                         "step-5 baseline: #1747 justified 0.02 default at "
+                         f"step-5 baseline: #1747 justified "
+                         f"{JUSTIFIED_BASELINE_THRESHOLD} default at "
                          "500-Q scale", *common])
     if step.runner == "confirm":        # step 7: confirmation set (subset file)
         if not expected_direction:

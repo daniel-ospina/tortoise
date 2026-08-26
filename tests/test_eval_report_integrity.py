@@ -547,6 +547,15 @@ def test_report_integrity_bool_and_mixed_key_census_robustness():
                               error_classes=[{"a": 1}])],
                     threshold=1.0)["integrity"]
     assert integ["error_census_malformed"]["<legacy-list>"] == [{"a": 1}]
+    # round-13: legacy flat-list NaN junk dedupes too (canonicalized to None,
+    # mirroring the dict branch — NaN != NaN would defeat the membership
+    # check).
+    integ = _report([_outcome("q0", valid=False,
+                              error_classes=["parse_error", float("nan")]),
+                     _outcome("q1", valid=False,
+                              error_classes=["parse_error", float("nan")])],
+                    threshold=1.0)["integrity"]
+    assert integ["error_census_malformed"]["<legacy-list>"] == [None]
 
 
 def test_report_integrity_label_null_excluded_and_retrieval_only_carveout():
@@ -597,6 +606,11 @@ def test_report_integrity_json_safe_decimal_and_in_memory_strict():
     p = Path(_tempfile.mkdtemp()) / "r.json"
     save_report({"v": _Decimal("NaN")}, p)
     _json.loads(p.read_text())                     # no TypeError, strict
+    # round-13: a FINITE Decimal is preserved as a number (nulling every
+    # Decimal silently destroyed finite values).
+    p2 = Path(_tempfile.mkdtemp()) / "r2.json"
+    save_report({"v": _Decimal("3.14")}, p2)
+    assert _json.loads(p2.read_text())["v"] == 3.14
     o = _outcome("q0", valid=True)
     o["session_recall@k"]["5"] = float("nan")
     r = build_report(
@@ -1142,3 +1156,17 @@ def test_run_protocol_step5_gate_string_pins_criterion():
     assert f"{JUSTIFIED_BASELINE_THRESHOLD}" in cmd
     assert "--integrity-justification" in cmd
     assert "#1747 justified" in " ".join(cmd)
+    # round-13: the justification INTERPOLATES the constant (no hardcoded
+    # "0.02" drift) and an OPERATOR OVERRIDE of the threshold suppresses the
+    # baseline justification — a recorded reason never claims the 0.02
+    # baseline for a non-baseline threshold (M7: the report records the
+    # ACTUAL reason).
+    cmd = build_command(STEPS_BY_NUMBER[5], [], state=state)
+    assert (f"step-5 baseline: #1747 justified "
+            f"{JUSTIFIED_BASELINE_THRESHOLD} default at 500-Q scale"
+            in " ".join(cmd))
+    overridden = build_command(STEPS_BY_NUMBER[5],
+                               ["--integrity-threshold", "0.5"], state=state)
+    assert "--integrity-justification" not in overridden
+    assert "--integrity-threshold" in overridden       # operator flag passes
+    assert "0.5" in overridden

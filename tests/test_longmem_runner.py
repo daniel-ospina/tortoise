@@ -4067,6 +4067,20 @@ def test_compare_reports_malformed_shapes_never_crash():
     cmp4 = compare_reports(a4, b4)
     assert cmp4["header"]["skipped_excluded"] == {"a": 1, "b": 0}
     assert cmp4["overall"]["shared_n"] == 1
+    # round-13: a tampered NON-BOOL label (0 / "" / "true" / 1) is excluded
+    # from the report's aggregates (real-bool policy) — the comparison must
+    # skip it too, never grade it as correct/wrong.
+    badlab = {"question_id": "badlab", "question_type": "multi-session",
+              "label": "true", "context_tokens": 100}
+    a5 = _cmp_report([{"question_id": "q1",
+                       "question_type": "single-session-user",
+                       "label": True}, badlab], [], "badlab-a")
+    b5 = _cmp_report([{"question_id": "q1",
+                       "question_type": "single-session-user",
+                       "label": True}], [], "badlab-b")
+    cmp5 = compare_reports(a5, b5)
+    assert cmp5["header"]["skipped_excluded"] == {"a": 1, "b": 0}
+    assert cmp5["overall"]["shared_n"] == 1
 
 
 def test_compare_reports_comparability_warnings():

@@ -345,18 +345,19 @@ def _outcome_shape_ok(o: dict[str, Any], *,
 
 
 def _compare_outcome_ok(o: dict[str, Any]) -> bool:
-    """compare_reports' join predicate (round-11/12): an outcome is
-    comparable iff it carries a question identity and a REAL label (bool, or
-    any non-None value — the runner's Layer-1 projection materializes a
-    missing label as ``label: None``, which must be SKIPPED, not graded
-    wrong) — breaker_open drops and label-less entries (excluded from the
-    report's own aggregates) are skipped so the comparison never grades an
-    entry the report excluded and never KeyErrors on it. Stripped reports
-    missing only AUX columns (pre-M7) still compare best-effort with honest
-    None aux columns (M8 design)."""
+    """compare_reports' join predicate (round-11/12/13): an outcome is
+    comparable iff it carries a question identity and a REAL BOOL label —
+    the runner's Layer-1 projection materializes a missing label as
+    ``label: None`` and build_report's shape filter requires a real bool on
+    non-retrieval runs, so the comparison mirrors that policy exactly: a
+    projected label:None OR a tampered non-bool label (0/""/"true"/1 —
+    excluded from the report's aggregates) is SKIPPED, never graded as
+    wrong/correct, never hidden from skipped_excluded. Stripped pre-M7
+    reports carry real bools (best-effort M8 design); retrieval-only
+    reports' label:None outcomes are skipped (honest empty shared set)."""
     return (isinstance(o, dict)
             and o.get("question_id") is not None
-            and o.get("label") is not None
+            and isinstance(o.get("label"), bool)
             and not o.get("breaker_open"))
 
 
@@ -910,14 +911,17 @@ def build_report(
                 census.update([str(c) for c in ec if isinstance(c, str) and c])
                 junk = [c for c in ec if not isinstance(c, str)]
                 if junk:
-                    # accumulate DISTINCT junk across outcomes (round-12:
-                    # mirror the dict branch's membership dedup — a
-                    # value-identical junk element re-occurring must not
-                    # duplicate in the published evidence).
+                    # accumulate DISTINCT junk across outcomes (round-12/13:
+                    # mirror the dict branch's membership dedup AND its
+                    # non-finite canonicalization — NaN != NaN would defeat
+                    # the membership check, so non-finite junk stores as
+                    # None, matching the serialized null).
                     prev = malformed_census.setdefault("<legacy-list>", [])
                     for c in junk:
-                        if c not in prev:
-                            prev.append(c)
+                        stored = (None if (isinstance(c, float)
+                                           and not math.isfinite(c)) else c)
+                        if stored not in prev:
+                            prev.append(stored)
     for f in (failures or []):
         eclass = f.get("error_class")
         if isinstance(eclass, str) and eclass:
@@ -1437,8 +1441,12 @@ def _json_safe(obj: Any) -> Any:
     record is always STRICT JSON (round-11/12 security review). Values are
     expected JSON-derived (json.loads output + JSON-native programmatic
     values)."""
-    if isinstance(obj, Decimal) or (
-            isinstance(obj, float) and not math.isfinite(obj)):
+    if isinstance(obj, Decimal):
+        # Decimal is not JSON-native; a FINITE value converts to float (data
+        # preserved), a non-finite one becomes null — round-12/13: nulling
+        # every Decimal silently destroyed finite values.
+        return None if not obj.is_finite() else float(obj)
+    if isinstance(obj, float) and not math.isfinite(obj):
         return None
     if isinstance(obj, dict):
         return {str(k): _json_safe(v) for k, v in obj.items()}
