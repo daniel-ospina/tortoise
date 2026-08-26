@@ -996,6 +996,65 @@ class TestSignup403Suspended:
         assert "appeal" in err
 
 
+class TestSignupRecoverHint:
+    """#1756: a config that parses with a signup_token but NO api_key is the
+    exact state `tortoise recover` exists for — signup must point there, not
+    brand the config 'corrupt — delete it' (destructive: deleting destroys
+    the recovery token) or suggest --force (mints a NEW team, orphaning the
+    old one). No mint may happen on this shape: exit 1 without network."""
+
+    def test_token_only_global_config_prints_recover_hint_no_mint(
+            self, monkeypatch, tmp_path, capsys):
+        """Global store with a signup_token but no api_key: the resolver's
+        api_key invariant trips _ConfigError — signup must print the recover
+        hint naming the file and exit 1 WITHOUT minting (urlopen never
+        called)."""
+        gdir = tmp_path / ".tortoise"
+        gdir.mkdir(parents=True, exist_ok=True)
+        (gdir / "credentials.json").write_text(json.dumps({
+            "signup_token": "st_" + "ef" * 32}))  # no api_key
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            rc = main._cmd_signup(mock.Mock(force=False))
+        err = capsys.readouterr().err
+        assert rc == 1
+        assert "tortoise recover" in err
+        assert str(gdir / "credentials.json") in err
+        assert "Do NOT delete this file" in err
+        assert "do NOT use --force" in err
+        assert "corrupt or unreadable" not in err
+        assert "fix or delete" not in err
+        urlopen.assert_not_called()  # no mint, no reuse GET — exit before network
+
+    def test_token_only_cwd_config_prints_recover_hint(self, monkeypatch, tmp_path, capsys):
+        """Legacy cwd/.tortoise token-only shape — the candidate scan (cwd
+        first, then global) must find it and point at recover."""
+        (tmp_path / ".tortoise").write_text(json.dumps({
+            "api_url": "http://localhost:8010",
+            "signup_token": "st_" + "ef" * 32}))  # no api_key
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            rc = main._cmd_signup(mock.Mock(force=False))
+        err = capsys.readouterr().err
+        assert rc == 1
+        assert "tortoise recover" in err
+        assert str(tmp_path / ".tortoise") in err
+        urlopen.assert_not_called()
+
+    def test_corrupt_config_keeps_corrupt_message(self, monkeypatch, tmp_path, capsys):
+        """Genuinely corrupt config (invalid JSON / invalid UTF-8) must keep
+        the existing corrupt-config guidance — the recover hint is only for
+        the token-only shape, not for unparseable files."""
+        gdir = tmp_path / ".tortoise"
+        gdir.mkdir(parents=True, exist_ok=True)
+        (gdir / "credentials.json").write_bytes(b"\xff\xfe\x00{not json")
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            rc = main._cmd_signup(mock.Mock(force=False))
+        err = capsys.readouterr().err
+        assert rc == 1
+        assert "corrupt or unreadable" in err
+        assert "tortoise recover" not in err
+        urlopen.assert_not_called()
+
+
 class TestCmdRecover:
     """tortoise recover --token st_... → POST /v1/agent/recover → config
     rewritten; the token is PERSISTED back (recovery must not be one-shot)."""
