@@ -652,6 +652,29 @@ def _read_stored_signup_token() -> str | None:
     return None
 
 
+def _read_stored_config_api_url() -> str | None:
+    """Stored api_url from the active configs (#1749 token-only fallback).
+
+    Same candidates as _read_stored_signup_token (cwd/.tortoise legacy
+    shape, then the #1708 global ~/.tortoise/credentials.json). Used when
+    _resolve_config_path raises _ConfigError on a config that parses but
+    carries no api_key — recover authenticates with the signup token and
+    only needs the URL, so a keyless config must not block recovery.
+    """
+    import json as _j
+    from pathlib import Path
+    for path in (Path.cwd() / ".tortoise",
+                 Path.home() / ".tortoise" / "credentials.json"):
+        try:
+            cfg = _j.loads(path.read_text())
+        except Exception:
+            continue
+        url = cfg.get("api_url") if isinstance(cfg, dict) else None
+        if isinstance(url, str) and url.strip():
+            return url.strip()
+    return None
+
+
 def _is_invalid_signup_token(body: str) -> bool:
     """True when a 422 body is the uniform invalid_signup_token detail (#1709)."""
     try:
@@ -670,7 +693,7 @@ def _cmd_recover(args) -> int:
     persistence this surface would be one-shot-only and the NEXT key-loss
     would silently fresh-mint and orphan the recovered team.
     """
-    import json, os, sys, time, uuid  # noqa: E401, I001
+    import json, os, sys, uuid  # noqa: E401, I001
     from pathlib import Path
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
@@ -680,11 +703,28 @@ def _cmd_recover(args) -> int:
         print("No recovery token found. Pass --token st_... or run "
               "'tortoise signup' first.", file=sys.stderr)
         return 1
+    # API host via the #1708 resolver chain (env → cwd → global), mirroring
+    # _cmd_token_revoke — the stored config's api_url must beat the default
+    # host (#1749: env-only resolution made recovery dead on any non-default
+    # host — it POSTed to prod and 422'd with a misleading message).
     api_url = os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
+    try:
+        _cfg_path, _cfg, _api_key, resolved_url = _resolve_config_path()
+        if resolved_url:
+            api_url = resolved_url
+    except _ConfigError:
+        # A token-only config (valid JSON, no api_key) trips the resolver's
+        # api_key invariant — recover authenticates with the signup token
+        # (no key needed), so read the stored api_url directly instead of
+        # failing on the recover surface (#1749).
+        stored_url = _read_stored_config_api_url()
+        if stored_url:
+            api_url = stored_url
+    base = api_url.rstrip("/")
     print("Recovering your team key with the saved recovery token…")
     try:
         req = Request(
-            f"{api_url}/v1/agent/recover",
+            f"{base}/v1/agent/recover",
             data=json.dumps({"signup_token": token}).encode(),
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -708,7 +748,7 @@ def _cmd_recover(args) -> int:
         print(f"Recovery failed ({e.code}): {body}", file=sys.stderr)
         return 1
     except (URLError, ValueError, json.JSONDecodeError) as e:
-        print(f"Cannot reach API at {api_url}: {e}", file=sys.stderr)
+        print(f"Cannot reach API at {base}: {e}", file=sys.stderr)
         return 1
 
     if not (isinstance(data, dict) and "key" in data and "team_id" in data):
@@ -761,7 +801,7 @@ def _cmd_token_revoke(args) -> int:
     it is noticed. Prints confirmation; the stored config is left intact
     (the revoked token simply 422s on any later recover).
     """
-    import json, os, sys  # noqa: E401, I001
+    import json, sys  # noqa: E401, I001
     from urllib.error import HTTPError, URLError
     from urllib.request import Request, urlopen
 
