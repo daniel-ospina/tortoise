@@ -385,7 +385,13 @@ def _qid_key(o: dict[str, Any]) -> tuple | str:
         hash(qid)
     except TypeError:  # unhashable (list/dict) — canonical repr key
         return ("__anon__", "<unhashable>", repr(qid))
-    return ("__anon__", qid)
+    # hashable non-str value — TYPE-TAGGED (round-14): Python bool/int/float
+    # equality would otherwise merge DISTINCT JSON tokens (true vs 1 vs 1.0
+    # — a tampered checkpoint) into one attempted question; the type-name
+    # tag keeps them distinct while value-identical same-type qids still
+    # dedupe. Length-disjoint from the missing/unhashable 3-tuples (their
+    # middle tags differ).
+    return ("__anon__", type(qid).__name__, qid)
 
 
 PAPER_CATEGORY = {
@@ -1443,9 +1449,12 @@ def _json_safe(obj: Any) -> Any:
     values)."""
     if isinstance(obj, Decimal):
         # Decimal is not JSON-native; a FINITE value converts to float (data
-        # preserved), a non-finite one becomes null — round-12/13: nulling
-        # every Decimal silently destroyed finite values.
-        return None if not obj.is_finite() else float(obj)
+        # preserved), a non-finite one becomes null — round-12/13/14: nulling
+        # every Decimal silently destroyed finite values, and the converted
+        # float must be RE-CHECKED for finiteness (float(Decimal("1e400"))
+        # overflows to inf — a strict-JSON leak).
+        f = float(obj)
+        return None if not math.isfinite(f) else f
     if isinstance(obj, float) and not math.isfinite(obj):
         return None
     if isinstance(obj, dict):

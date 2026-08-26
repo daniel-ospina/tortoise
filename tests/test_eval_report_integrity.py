@@ -611,6 +611,11 @@ def test_report_integrity_json_safe_decimal_and_in_memory_strict():
     p2 = Path(_tempfile.mkdtemp()) / "r2.json"
     save_report({"v": _Decimal("3.14")}, p2)
     assert _json.loads(p2.read_text())["v"] == 3.14
+    # round-14: a huge-but-finite Decimal (float() overflows to inf) is
+    # nulled — the strict-JSON boundary never leaks an Infinity token.
+    p3 = Path(_tempfile.mkdtemp()) / "r3.json"
+    save_report({"v": _Decimal("1e400")}, p3)
+    assert _json.loads(p3.read_text())["v"] is None
     o = _outcome("q0", valid=True)
     o["session_recall@k"]["5"] = float("nan")
     r = build_report(
@@ -1062,6 +1067,14 @@ def test_report_integrity_nonfinite_and_duplicate_malformed_qids():
     o6["question_id"] = "1"
     integ = _report([o5, o6], threshold=1.0)["integrity"]
     assert integ["n_attempted"] == 2
+    # round-14: bool true vs int 1 vs float 1.0 are DISTINCT JSON tokens —
+    # the type-tagged key keeps them separate (Python == would merge them).
+    ob_, oi, of = (_outcome("q0", valid=True) for _ in range(3))
+    ob_["question_id"] = True
+    oi["question_id"] = 1
+    of["question_id"] = 1.0
+    integ = _report([ob_, oi, of], threshold=1.0)["integrity"]
+    assert integ["n_attempted"] == 3
     # distinct MISSING-qid failures stay distinct (pinned per-object).
     integ = _report([_outcome("q0", valid=True)], failures=[
         {"error_class": "reader:retries_exhausted", "error": "x",
@@ -1170,3 +1183,9 @@ def test_run_protocol_step5_gate_string_pins_criterion():
     assert "--integrity-justification" not in overridden
     assert "--integrity-threshold" in overridden       # operator flag passes
     assert "0.5" in overridden
+    # round-14: the `=` (argparse) form is detected too — same suppression,
+    # so the recorded reason never claims the 0.02 baseline for 0.5.
+    overridden_eq = build_command(STEPS_BY_NUMBER[5],
+                                  ["--integrity-threshold=0.5"], state=state)
+    assert "--integrity-justification" not in overridden_eq
+    assert "--integrity-threshold=0.5" in overridden_eq

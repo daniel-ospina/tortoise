@@ -71,10 +71,12 @@ DEFAULT_RUN_DIR = REPO_ROOT / ".longmemeval_cache" / "runs"
 #: ANY threshold (report.py). Injected into the step-5 command by
 #: ``build_command`` so the executed run matches the documented gate — the
 #: operator never has to remember the flag. An operator override via extra
-#: flags (`run 5 -- --integrity-threshold 0.5`) still wins — argparse
-#: last-occurrence-wins — but they should pair it with their own
-#: ``--integrity-justification``: the injected text records the BASELINE
-#: default, so an overridden threshold keeps a visible (not silent) reason.
+#: flags (`run 5 -- --integrity-threshold 0.5` — space or ``=`` form) still
+#: wins — argparse last-occurrence-wins — and SUPPRESSES the injected
+#: baseline justification (round-13/14): a recorded reason must never claim
+#: the 0.02 baseline for a non-baseline threshold, so an overriding operator
+#: must pair their own ``--integrity-justification`` or the applied
+#: threshold carries no recorded reason (documented silent case).
 JUSTIFIED_BASELINE_THRESHOLD = 0.02
 
 
@@ -300,7 +302,8 @@ def build_command(step: Step, extra: list[str], *, state: ProtocolState,
         # recorded reason must never claim the 0.02 baseline for a non-
         # baseline threshold (M7: the report records the ACTUAL reason).
         has_threshold_override = any(
-            a == "--integrity-threshold" for a in (extra or []))
+            a.split("=", 1)[0] == "--integrity-threshold"
+            for a in (extra or []))
         if has_threshold_override:
             return _run_cmd(["--split", "s", "--ingest-mode", "v2",
                              *common])
