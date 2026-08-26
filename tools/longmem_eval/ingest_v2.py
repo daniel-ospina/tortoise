@@ -60,7 +60,7 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
                    si: int, evidence_turns: list[str],
                    session_date: str | None = None,
                    turns: list[dict], ev_sessions: set[str],
-                   n_turns: int = 0) -> dict:
+                   gold_answer: str = "", n_turns: int = 0) -> dict:
     """Write a v2 Layer-1 payload into the eval graph. Idempotent per point
     (explicit deterministic ids + _point_exists guard). Returns stats.
 
@@ -68,13 +68,18 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
     (source-session attribution / verbatim quote anchor / raw-chunk
     containment) and a D3-deterministically-anchored quote (the extractor
     emits an empty quote; gate 2: consume a non-empty payload quote
-    instead). The per-mark breakdown is counted in
+    instead). #1763: the answer-string mark (d) is computed from
+    ``gold_answer`` (the dataset question's gold answer — known to the eval
+    harness, never the extractor) and recorded SEPARATELY: it is
+    census-counted and written as the durable ``answer_string_mark`` point
+    property, but NOT OR'd into ``has_answer`` (the legacy denominator must
+    not move — D5 #1540 comparability). The per-mark breakdown is counted in
     ``stats["evidence_marks"]`` so the report can say WHY evidence exists."""
     stats = {"entities": 0, "points": 0, "events": 0, "operators": 0,
              "evidence_points": 0, "minted_kinds": 0,
              "supersessions_written": 0,
              "evidence_marks": {"source_session": 0, "verbatim": 0,
-                                "raw_chunk": 0}}
+                                "raw_chunk": 0, "answer_string": 0}}
     proj = sdk._get_proj()
     # R5 (#1544): points in a dated session carry the session date as their
     # creation time; undated sessions get the explicit sentinel (never the
@@ -129,15 +134,21 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
             quote = anchor_quote(content, turns)
         mark = mark_for({**p, "content": content, "quote": quote},
                         session_id=sid, evidence_sessions=ev_sessions,
-                        answer_turn_contents=evidence_turns)
+                        answer_turn_contents=evidence_turns,
+                        gold_answer=gold_answer)
         if pid in existing:
             # #1369 review P2: content-addressed collision across sessions —
             # OR-in this session's evidence marking (M6: never overwrite a
             # True with False on collision; first-writer props keep the
             # session id; the raw-transcript leg mitigates attribution).
+            # #1763: the answer-string mark ORs in the same never-False way.
             if mark["has_answer"]:
                 proj.g.query(
                     "MATCH (p:Point {id:$id}) SET p.has_answer = true",
+                    params={"id": pid})
+            if mark["marks"]["answer_string"]:
+                proj.g.query(
+                    "MATCH (p:Point {id:$id}) SET p.answer_string_mark = true",
                     params={"id": pid})
             continue
         try:
@@ -161,6 +172,12 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
                 EXTRACTION_POINT_KIND, content, id=pid, session_id=sid,
                 lme_question_id=qid, lme_session_index=si,
                 is_episodic=True, has_answer=mark["has_answer"],
+                # #1763: the durable answer-string mark (d) — written as its
+                # own property (NOT folded into has_answer) for forensic /
+                # denominator queries on EXTRACTED points. The re-baselined
+                # recall numerator must use evidence.answer_string_recall_at_k
+                # (content-based — raw chunks never carry this property).
+                answer_string_mark=mark["marks"]["answer_string"],
                 quote=quote, status="draft",
                 search_keys=p.get("search_keys") or None,
                 source_turn_id=turn_ref,
@@ -183,9 +200,13 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
             created_point_ids.add(pid)
             if mark["has_answer"]:
                 stats["evidence_points"] += 1
-                for mk, fired in mark["marks"].items():
-                    if fired:
-                        stats["evidence_marks"][mk] += 1
+            # the per-mark census counts EVERY mark class independently (not
+            # gated on the legacy has_answer OR) — #1763: mark (d) answer-
+            # string fires on points the legacy marks miss (a foreign-session
+            # point carrying the gold answer), and it must still be counted.
+            for mk, fired in mark["marks"].items():
+                if fired:
+                    stats["evidence_marks"][mk] += 1
         except Exception as ex:  # noqa: BLE001, RUF100
             logger.warning("v2 ingest point %r failed: %s", pid, ex)
 
@@ -388,7 +409,7 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
              "supersessions_written": 0,
              "noops_applied": 0, "deletions_applied": 0,
              "evidence_marks": {"source_session": 0, "verbatim": 0,
-                                "raw_chunk": 0}, "errors": [],
+                                "raw_chunk": 0, "answer_string": 0}, "errors": [],
              # M4 (#1524, D4): the per-question error census — rolled up from
              # each session's extractor ``error_census`` + the session-level
              # exception class; feeds outcome ``valid``/``error_classes``.
@@ -400,6 +421,12 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
     all_evidence_turns = [
         str(t.get("content") or "")
         for session in sessions for t in session if t.get("has_answer")]
+    # #1763: the GOLD ANSWER STRING (mark (d)) — a benchmark truth the eval
+    # harness holds via the question dict (the extractor LLM never sees it),
+    # so answer-string marks are computed at eval-ingest time, never at
+    # extraction. (Duplicate ingest_haystack_v2 — the live sequential copy
+    # below shadows this parallel one, tracked as #1744; kept in sync.)
+    gold_answer = str(question.get("answer") or "")
 
     # ── Phase A (sequential, fast): session nodes + turn/chunk raw leg for
     # ALL sessions — written BEFORE any extraction so verbatim retention +
@@ -553,12 +580,14 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
                                  evidence_turns=all_evidence_turns,
                                  turns=turns, ev_sessions=ev_sessions,
                                  session_date=session_date or None,
+                                 gold_answer=gold_answer,
                                  n_turns=len(session))
         for k in ("points", "events", "entities", "operators",
                   "evidence_points"):
             stats[k] += written.get(k, 0)
         stats["supersessions_written"] += written.get("supersessions_written", 0)
-        for mk in ("source_session", "verbatim", "raw_chunk"):
+        for mk in ("source_session", "verbatim", "raw_chunk",
+                   "answer_string"):
             stats["evidence_marks"][mk] = (
                 stats["evidence_marks"].get(mk, 0)
                 + written.get("evidence_marks", {}).get(mk, 0))
@@ -685,7 +714,7 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
              "supersessions_written": 0,
              "noops_applied": 0, "deletions_applied": 0,
              "evidence_marks": {"source_session": 0, "verbatim": 0,
-                                "raw_chunk": 0}, "errors": [],
+                                "raw_chunk": 0, "answer_string": 0}, "errors": [],
              # M4 (#1524, D4): the per-question error census — rolled up from
              # each session's extractor ``error_census`` + the session-level
              # exception class; feeds outcome ``valid``/``error_classes``.
@@ -697,6 +726,11 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
     all_evidence_turns = [
         str(t.get("content") or "")
         for session in sessions for t in session if t.get("has_answer")]
+    # #1763: the GOLD ANSWER STRING (mark (d)) — a benchmark truth the eval
+    # harness holds via the question dict (the extractor LLM never sees it),
+    # so answer-string marks are computed at eval-ingest time, never at
+    # extraction.
+    gold_answer = str(question.get("answer") or "")
 
     for si, session in enumerate(sessions):
         sid = ids[si] if si < len(ids) else f"{qid}-s{si}"
@@ -811,12 +845,14 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
                                  evidence_turns=all_evidence_turns,
                                  turns=turns, ev_sessions=ev_sessions,
                                  session_date=session_date or None,
+                                 gold_answer=gold_answer,
                                  n_turns=len(session))
         for k in ("points", "events", "entities", "operators",
                   "evidence_points"):
             stats[k] += written.get(k, 0)
         stats["supersessions_written"] += written.get("supersessions_written", 0)
-        for mk in ("source_session", "verbatim", "raw_chunk"):
+        for mk in ("source_session", "verbatim", "raw_chunk",
+                   "answer_string"):
             stats["evidence_marks"][mk] = (
                 stats["evidence_marks"].get(mk, 0)
                 + written.get("evidence_marks", {}).get(mk, 0))
