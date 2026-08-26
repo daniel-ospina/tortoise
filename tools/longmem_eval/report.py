@@ -28,6 +28,7 @@ import os  # noqa: F401
 import subprocess
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -196,9 +197,11 @@ def _numeric(v: Any) -> bool:
 # ── Entry shape-filter helpers (module scope: build_report's aggregation
 # predicate; the comparison consumer applies its own lighter
 # ``_compare_outcome_ok`` — skip breaker-open/label-less entries — so
-# stripped reports still compare best-effort while never grading an outcome
-# the report's aggregates excluded; the published divergence is surfaced via
-# top-level ``n_excluded`` / the comparison's ``skipped_excluded`` header). ──
+# stripped reports still compare best-effort while never grading the
+# breaker-open/label-less outcomes the report's aggregates excluded;
+# shape-broken-but-label-bearing outcomes still compare BY LABEL
+# (defensive reads prevent crashes; the divergence is surfaced via
+# top-level ``n_excluded`` / the comparison's ``skipped_excluded``). ──
 
 def _num(v: Any) -> bool:
     """numeric-or-None — None is safe for float(v or 0.0) / skip-None sites;
@@ -300,7 +303,8 @@ def _rerank_pass_ok(v: Any) -> bool:
     return True
 
 
-def _outcome_shape_ok(o: dict[str, Any]) -> bool:
+def _outcome_shape_ok(o: dict[str, Any], *,
+                      retrieval_only: bool = False) -> bool:
     """Every key the aggregation dereferences directly must be present
     with a coercible type — a malformed checkpoint outcome that passes
     run.py's presence-only loader gate is EXCLUDED here instead of
@@ -309,9 +313,16 @@ def _outcome_shape_ok(o: dict[str, Any]) -> bool:
     asymmetry: session_recall@k VALUES are summed directly (no N/A), so
     None values are excluded; turn/evidence recall values are dropped
     when None (M6 N/A semantics), so None values are allowed; context
-    keys are dereferenced via o[...] and must be PRESENT and numeric."""
+    keys are dereferenced via o[...] and must be PRESENT and numeric.
+    ``label`` must be a REAL bool (round-12: a tampered label:null would
+    otherwise be silently counted as an incorrect answer instead of
+    excluded) — EXCEPT on retrieval-only runs, where the runner emits
+    ``label: None`` by design and the accuracy block is not published
+    (the label check is carved out so retrieval-only outcomes still
+    occupy the attempted set)."""
     return (o.get("question_id") is not None
             and "label" in o
+            and (retrieval_only or isinstance(o.get("label"), bool))
             and isinstance(o.get("question_type", ""), str)
             and _recall_dict_present(o, "session_recall@k")
             and _recall_dict_present(o, "turn_recall@k",
@@ -334,16 +345,18 @@ def _outcome_shape_ok(o: dict[str, Any]) -> bool:
 
 
 def _compare_outcome_ok(o: dict[str, Any]) -> bool:
-    """compare_reports' join predicate (round-11): an outcome is comparable
-    iff it carries a question identity and a label — breaker_open drops and
-    label-less malformed entries (excluded from the report's own aggregates)
-    are SKIPPED so the comparison never grades an entry the report excluded
-    and never KeyErrors on it. Stripped reports missing only AUX columns
-    (pre-M7) still compare best-effort with honest None aux columns (M8
-    design)."""
+    """compare_reports' join predicate (round-11/12): an outcome is
+    comparable iff it carries a question identity and a REAL label (bool, or
+    any non-None value — the runner's Layer-1 projection materializes a
+    missing label as ``label: None``, which must be SKIPPED, not graded
+    wrong) — breaker_open drops and label-less entries (excluded from the
+    report's own aggregates) are skipped so the comparison never grades an
+    entry the report excluded and never KeyErrors on it. Stripped reports
+    missing only AUX columns (pre-M7) still compare best-effort with honest
+    None aux columns (M8 design)."""
     return (isinstance(o, dict)
             and o.get("question_id") is not None
-            and "label" in o
+            and o.get("label") is not None
             and not o.get("breaker_open"))
 
 
@@ -624,7 +637,8 @@ def build_report(
     # single-pass grading (round-8 architecture review): shape + grade are
     # computed ONCE per outcome so the shape filter and the veto scan can
     # never disagree on a stale second evaluation.
-    graded = [(o, _outcome_shape_ok(o), _outcome_grade(o)) for o in gradable]
+    graded = [(o, _outcome_shape_ok(o, retrieval_only=retrieval_only),
+               _outcome_grade(o)) for o in gradable]
     shape_ok = [o for o, ok, _ in graded if ok]
     n_excluded = raw_n - len(dropped) - len(shape_ok) + n_failure_junk
     outcomes = [dict(o) for o in shape_ok]
@@ -874,16 +888,20 @@ def build_report(
                 if isinstance(count, int) and not isinstance(count, bool):
                     census[str(cls)] += count
                 else:
-                    # Uniform accumulator (round-11): error_census_malformed[
+                    # Uniform accumulator (round-11/12): error_census_malformed[
                     # class] is ALWAYS a flat list of the DISTINCT malformed
                     # count values — storing the first value as-is made the
                     # shape depend on whether that first value was a
-                    # container (a list-first count conflated with the
-                    # accumulator and duplicated on identical re-occurrence).
+                    # container. Non-finite counts are canonicalized to None
+                    # (NaN != NaN would defeat the membership dedup, and
+                    # None matches the serialized null).
                     key = str(cls)
                     acc = malformed_census.setdefault(key, [])
-                    if count not in acc:
-                        acc.append(count)
+                    stored = (None if (isinstance(count, float)
+                                       and not math.isfinite(count))
+                              else count)
+                    if stored not in acc:
+                        acc.append(stored)
         else:  # legacy flat-list shape (defensive back-compat): str elements
             # ride the census; non-str elements are evidence-preserved in
             # error_census_malformed (the grader fails the whole shape closed
@@ -892,14 +910,14 @@ def build_report(
                 census.update([str(c) for c in ec if isinstance(c, str) and c])
                 junk = [c for c in ec if not isinstance(c, str)]
                 if junk:
-                    # accumulate across outcomes (the dict branch's merge
-                    # logic) — a later outcome's junk must not overwrite an
-                    # earlier one's.
-                    prev = malformed_census.get("<legacy-list>")
-                    if prev is None:
-                        malformed_census["<legacy-list>"] = junk
-                    elif isinstance(prev, list) and isinstance(junk, list):
-                        prev.extend(junk)
+                    # accumulate DISTINCT junk across outcomes (round-12:
+                    # mirror the dict branch's membership dedup — a
+                    # value-identical junk element re-occurring must not
+                    # duplicate in the published evidence).
+                    prev = malformed_census.setdefault("<legacy-list>", [])
+                    for c in junk:
+                        if c not in prev:
+                            prev.append(c)
     for f in (failures or []):
         eclass = f.get("error_class")
         if isinstance(eclass, str) and eclass:
@@ -1156,7 +1174,7 @@ def build_report(
     def _gated(value):
         return value if trusted else None
 
-    return {
+    report = {
         "benchmark": "LongMemEval",
         "dataset": dataset_id,
         "split": split,
@@ -1389,25 +1407,38 @@ def build_report(
         # Layer-1 projection), the ``**(extra or {})`` spread below
         # OVERRIDES this raw list with the projected one — which carries the
         # same per-question keys plus the validity/leg-mix/evidence
-        # instrumentation the gate's extract_report also reads.
+        # instrumentation the gate's extract_report also reads (and may
+        # carry raw shape-broken/NaN values the shape filter excluded from
+        # the MEANS — the divergence is observable via top-level
+        # ``n_excluded`` and sanitized to strict JSON at the return
+        # boundary, round-12).
         "outcomes": outcomes,
         **(rerank_report_block if rerank_report_block is not None else {}),
         **(extra or {}),
     }
+    # Round-12 security review: the returned report is strict JSON BY
+    # CONTRACT — _json_safe nulls non-finite projection values, str()-coerces
+    # mixed keys and normalizes sets, so every consumer (run.py compare /
+    # spot-check, save_report, tests) sees the same sanitized shape the file
+    # path gets.
+    return _json_safe(report)
 
 
 def _json_safe(obj: Any) -> Any:
-    """#1747: recursive JSON-normalization for save_report — dict keys are
-    str()-coerced so ``json.dumps(sort_keys=True)`` never TypeErrors on a
-    mixed-type key (the programmatic mixed-key census shape, security
-    review), sets become sorted lists (a malformed checkpoint value can
-    otherwise crash serialization), and NON-FINITE floats (NaN/Infinity from
-    the raw extra[outcomes] projection — the shape filter excludes them from
-    the MEANS but the projection can still publish them verbatim) become
-    null so the persisted record is always STRICT JSON (round-11 security
-    review). Identity for well-formed reports (JSON keys are always strings;
-    no sets)."""
-    if isinstance(obj, float) and not math.isfinite(obj):
+    """#1747: recursive JSON-normalization for save_report (and the report
+    returned by build_report, round-12 — the in-memory dict is strict JSON
+    by contract) — dict keys are str()-coerced so ``json.dumps
+    (sort_keys=True)`` never TypeErrors on a mixed-type key (the programmatic
+    mixed-key census shape, security review), sets become sorted lists (a
+    malformed checkpoint value can otherwise crash serialization), and
+    NON-FINITE floats/Decimals (NaN/Infinity from the raw extra[outcomes]
+    projection — the shape filter excludes them from the MEANS but the
+    projection can still publish them verbatim) become null so the persisted
+    record is always STRICT JSON (round-11/12 security review). Values are
+    expected JSON-derived (json.loads output + JSON-native programmatic
+    values)."""
+    if isinstance(obj, Decimal) or (
+            isinstance(obj, float) and not math.isfinite(obj)):
         return None
     if isinstance(obj, dict):
         return {str(k): _json_safe(v) for k, v in obj.items()}

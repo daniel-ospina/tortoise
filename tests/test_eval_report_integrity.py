@@ -530,6 +530,82 @@ def test_report_integrity_bool_and_mixed_key_census_robustness():
                               error_classes={"parse_error": [1, 2]})],
                     threshold=1.0)["integrity"]
     assert integ["error_census_malformed"] == {"parse_error": [[1, 2]]}
+    # round-12: NaN counts dedupe (NaN != NaN would defeat the membership
+    # check) — canonicalized to None, matching the serialized null.
+    integ = _report([_outcome("q0", valid=False,
+                              error_classes={"parse_error": float("nan")}),
+                     _outcome("q1", valid=False,
+                              error_classes={"parse_error": float("nan")})],
+                    threshold=1.0)["integrity"]
+    assert integ["error_census_malformed"] == {"parse_error": [None]}
+    # round-12: legacy flat-list junk dedupes across outcomes (mirror of the
+    # dict branch) — a value-identical junk element re-occurring never
+    # duplicates in the published evidence.
+    integ = _report([_outcome("q0", valid=False,
+                              error_classes=[{"a": 1}]),
+                     _outcome("q1", valid=False,
+                              error_classes=[{"a": 1}])],
+                    threshold=1.0)["integrity"]
+    assert integ["error_census_malformed"]["<legacy-list>"] == [{"a": 1}]
+
+
+def test_report_integrity_label_null_excluded_and_retrieval_only_carveout():
+    """#1747 (round-12 review): a tampered label:null outcome (non-bool) is
+    excluded into n_excluded — never silently counted as an incorrect answer
+    (the accuracy numerator only ever sees real bools). EXCEPT on
+    retrieval-only runs, where the runner emits label: None by design and
+    the accuracy block is not published — those outcomes still occupy the
+    attempted set (the vector-arm retrieval-only report shape)."""
+    # label: null (tampered) on a normal run → excluded, never wrong-graded.
+    o = _outcome("q0", valid=True)
+    o["label"] = None
+    integ = _report([o, _outcome("q1", valid=True)])["integrity"]
+    assert integ["n_excluded"] == 1
+    assert integ["n_attempted"] == 1
+    # label: "true" (stringified) → excluded too (real bool required).
+    o = _outcome("q0", valid=True)
+    o["label"] = "true"
+    integ = _report([o, _outcome("q1", valid=True)])["integrity"]
+    assert integ["n_excluded"] == 1
+    # retrieval-only carve-out: label None is admitted, attempted set intact.
+    o = _outcome("q0", valid=True)
+    o["label"] = None  # the runner emits label: None on retrieval-only runs
+    integ2 = build_report(
+        [o],
+        dataset_id="xiaowu0162/longmemeval-cleaned", split="s",
+        reader_model="mock-reader", judge_model="mock-judge",
+        extraction_approach="deterministic session ingestion",
+        ingest_mode="deterministic", ks=(5,), top_k=5,
+        dataset_semantics_audit=_audit(), integrity_threshold=0.0,
+        retrieval_only=True)["integrity"]
+    assert integ2["n_attempted"] == 1
+    assert integ2["valid"] is True
+
+
+def test_report_integrity_json_safe_decimal_and_in_memory_strict():
+    """#1747 (round-12 security review): (1) _json_safe handles Decimal
+    non-finite (save_report never TypeErrors on it — strict JSON null);
+    (2) the report RETURNED by build_report is strict JSON by contract — a
+    NaN riding the raw extra[outcomes] projection serializes as null even
+    before save_report (json.dumps with allow_nan=False succeeds on the
+    in-memory dict)."""
+    import json as _json
+    import tempfile as _tempfile
+    from decimal import Decimal as _Decimal
+
+    from tools.longmem_eval.report import save_report
+    p = Path(_tempfile.mkdtemp()) / "r.json"
+    save_report({"v": _Decimal("NaN")}, p)
+    _json.loads(p.read_text())                     # no TypeError, strict
+    o = _outcome("q0", valid=True)
+    o["session_recall@k"]["5"] = float("nan")
+    r = build_report(
+        [o], dataset_id="xiaowu0162/longmemeval-cleaned", split="s",
+        reader_model="mock-reader", judge_model="mock-judge",
+        extraction_approach="deterministic session ingestion",
+        ingest_mode="deterministic", ks=(5,), top_k=5,
+        dataset_semantics_audit=_audit(), integrity_threshold=0.5)
+    _json.dumps(r, allow_nan=False)                # in-memory dict is strict
 
 
 def test_report_integrity_json_safe_nonfinite_null():

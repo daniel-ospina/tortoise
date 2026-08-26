@@ -4053,6 +4053,20 @@ def test_compare_reports_malformed_shapes_never_crash():
     cmp3 = compare_reports(a3, b3)
     assert cmp3["header"]["skipped_excluded"] == {"a": 2, "b": 0}
     assert cmp3["overall"]["shared_n"] == 1      # q1 only — no crash, no wrong-grade
+    # round-12: the runner's Layer-1 projection materializes a missing label
+    # as `label: None` (key PRESENT) — that projected entry must be SKIPPED
+    # too (never graded as an incorrect answer, never in skipped_excluded=0).
+    proj_nolab = {"question_id": "proj", "question_type": "multi-session",
+                  "label": None, "context_tokens": 100}
+    a4 = _cmp_report([{"question_id": "q1",
+                       "question_type": "single-session-user",
+                       "label": True}, proj_nolab], [], "proj-a")
+    b4 = _cmp_report([{"question_id": "q1",
+                       "question_type": "single-session-user",
+                       "label": True}], [], "proj-b")
+    cmp4 = compare_reports(a4, b4)
+    assert cmp4["header"]["skipped_excluded"] == {"a": 1, "b": 0}
+    assert cmp4["overall"]["shared_n"] == 1
 
 
 def test_compare_reports_comparability_warnings():
