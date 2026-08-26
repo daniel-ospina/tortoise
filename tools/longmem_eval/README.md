@@ -82,8 +82,12 @@ questions (fatal_*/ingest/unknown census classes, non-census error strings
 with an empty census, permanent eval failures, malformed inputs — present
 non-bool `valid` / non-iterable or non-str `error_classes`) VETO at any
 threshold — no override admits them; the override is recorded with its
-justification and a *violated* override still yields `valid=false`; default
-0.0 = any failed/error-signal question marks the run invalid).
+justification, and a *violated* override still yields `valid=false`. NOTE:
+the CLI default stays 0.0 (strict), but the run-protocol step-5 500-Q
+baseline injects the justified default `JUSTIFIED_BASELINE_THRESHOLD`
+(0.02) — see `run_protocol.py`; an operator override suppresses the
+injected baseline justification (the recorded reason never claims the 0.02
+baseline for a non-baseline threshold).
 
 **R6 rerank (issue #1545, epic #1509) — cross-encoder + MMR, OFF by default:**
 `--rerank` / `--no-rerank` (tri-state; `--no-rerank` beats a leaked env),
@@ -283,7 +287,11 @@ The report is self-explanatory: every run prints and persists
   `error_census`
   (site-prefixed P2-aligned error classes: `reader:retries_exhausted`,
   `judge:fatal`, …), `error_census_malformed` (non-int counts recorded
-  verbatim), `criterion` (the applied gate rule, human-readable), `checks`
+  verbatim per class; non-str legacy flat-list junk under the
+  `<legacy-list>` sentinel key; a PRESENT malformed top-level
+  `error_classes` shape under `<malformed-top-level>` — no malformed
+  evidence vanishes at any level), `criterion` (the applied gate rule,
+  human-readable), `checks`
   (python guard, dataset audited, audit present, fingerprint matched,
   census computed). The integrity block prints BEFORE the score; the
   additive breakdown fields (`n_hard_invalid` / `n_excluded` / `criterion`

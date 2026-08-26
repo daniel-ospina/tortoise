@@ -79,6 +79,14 @@ DEFAULT_RUN_DIR = REPO_ROOT / ".longmemeval_cache" / "runs"
 #: threshold carries no recorded reason (documented silent case).
 JUSTIFIED_BASELINE_THRESHOLD = 0.02
 
+#: Round-16: argparse parser used ONLY to detect an operator
+#: ``--integrity-threshold`` override among the extra run flags — mirrors the
+#: runner's own parse semantics (allow_abbrev=True) so space / equals /
+#: abbreviation forms resolve identically while flag VALUES (e.g. a quoted
+#: justification text containing the flag token) are consumed correctly.
+_EXTRA_ARGS_PARSER = argparse.ArgumentParser(add_help=False)
+_EXTRA_ARGS_PARSER.add_argument("--integrity-threshold", type=float)
+
 
 @dataclass(frozen=True)
 class Step:
@@ -301,15 +309,22 @@ def build_command(step: Step, extra: list[str], *, state: ProtocolState,
         # extra flags, the baseline justification is NOT injected — a
         # recorded reason must never claim the 0.02 baseline for a non-
         # baseline threshold (M7: the report records the ACTUAL reason).
-        # round-13/14/15: detect the operator override in ANY argparse form
-        # the runner accepts — space ("--integrity-threshold 0.5"), equals
-        # ("--integrity-threshold=0.5") and unambiguous-prefix abbreviations
-        # ("--integrity-t 0.5"; the shortest unambiguous prefix is
-        # "--integrity-t" — "--integrity-justification" diverges at
-        # "--integrity-j", so the prefix match cannot false-positive).
-        has_threshold_override = any(
-            a.split("=", 1)[0].startswith("--integrity-t")
-            for a in (extra or []))
+        # round-13/14/15/16: detect the operator override using the SAME
+        # argparse semantics the runner uses (allow_abbrev=True) — a
+        # parse_known_args round-trip over the extra tokens resolves space /
+        # equals / unambiguous-prefix forms AND correctly consumes flag
+        # VALUES (a quoted justification whose text merely CONTAINS
+        # "--integrity-threshold=..." is parsed as --integrity-
+        # justification's value, not as a threshold flag — a raw
+        # token-prefix scan false-positived on it). Invalid extras
+        # (e.g. a bare flag with no value) are the runner's rejection, not
+        # ours — treat as no-override.
+        try:
+            _extra_ns, _ = _EXTRA_ARGS_PARSER.parse_known_args(extra or [])
+            has_threshold_override = (_extra_ns.integrity_threshold
+                                      is not None)
+        except SystemExit:
+            has_threshold_override = False
         if has_threshold_override:
             return _run_cmd(["--split", "s", "--ingest-mode", "v2",
                              *common])

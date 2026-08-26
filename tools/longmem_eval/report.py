@@ -371,9 +371,15 @@ def _qid_key(o: dict[str, Any]) -> tuple | str:
     n_attempted). A MISSING qid (None) is NOT a shared identity — a
     TYPE-TAGGED per-object key (round-11: the bare 2-tuple
     ``("__anon__", id(o))`` could collide with a numeric qid equal to some
-    live object's id(); the 3-tuple is length-disjoint from the 2-tuple
-    value keys) so distinct unknown-question entries never undercount
-    (reviewer-pinned, #1747)."""
+    live object's id(); the missing key now carries a ``<missing>`` tag that
+    no JSON-native type name can equal) so distinct unknown-question
+    entries never undercount (reviewer-pinned, #1747). NOTE (round-16
+    doc-precision): ALL NON-FINITE qids (NaN/Inf) collapse into ONE shared
+    ``<nonfinite>`` bucket — NaN identity is undecidable, so duplicate
+    copies AND genuinely distinct corrupted qids are indistinguishable and
+    merge (fail-safe against copy-inflation of n_attempted, at the cost of
+    undercounting distinct corrupted questions within the documented
+    checkpoint trust model)."""
     qid = o.get("question_id")
     if isinstance(qid, str):
         return qid
@@ -572,8 +578,14 @@ def build_report(
         ``n_excluded_hard`` (hard grades on excluded/dropped outcomes that
         still veto) /
         ``criterion`` ride the block, and malformed non-int census counts
-        are preserved verbatim in ``error_census_malformed`` (never mixed
-        into ``error_census``, never crashing the report); the numbers are
+        are preserved verbatim in ``error_census_malformed`` (per class,
+        distinct values — never mixed
+        into ``error_census``, never crashing the report); the same field
+        also preserves non-str legacy flat-list junk under the
+        ``<legacy-list>`` sentinel key and a PRESENT malformed top-level
+        ``error_classes`` shape (0 / "" / False / null / non-iterable)
+        under the ``<malformed-top-level>`` sentinel key (round-15/16: no
+        malformed evidence vanishes at any level); the numbers are
         always recorded, so no degraded run can masquerade as clean.
         Relationship to issue #1746 (its plan doc, D10 — "the flag's
         semantics are #1747's lane"; the plan file lands with #1746): that
@@ -914,7 +926,13 @@ def build_report(
                     stored = (None if (isinstance(count, float)
                                        and not math.isfinite(count))
                               else count)
-                    if stored not in acc:
+                    # round-16: membership is TYPE-EXACT — Python == would
+                    # collapse distinct JSON tokens (0 vs False, 1 vs 1.0,
+                    # True vs 1) and "no malformed evidence vanishes" would
+                    # silently drop the equal-valued cross-type token
+                    # (mirrors the round-14 _qid_key type-tag discipline).
+                    if not any(type(s) is type(stored) and s == stored
+                               for s in acc):
                         acc.append(stored)
         else:  # legacy flat-list shape (defensive back-compat): str elements
             # ride the census; non-str elements are evidence-preserved in
@@ -933,7 +951,8 @@ def build_report(
                     for c in junk:
                         stored = (None if (isinstance(c, float)
                                            and not math.isfinite(c)) else c)
-                        if stored not in prev:
+                        if not any(type(s) is type(stored) and s == stored
+                                   for s in prev):
                             prev.append(stored)
             else:
                 # MALFORMED TOP-LEVEL shape — a PRESENT falsy/null value
@@ -946,7 +965,8 @@ def build_report(
                 stored = (None if (isinstance(ec, float)
                                    and not math.isfinite(ec)) else ec)
                 acc = malformed_census.setdefault("<malformed-top-level>", [])
-                if stored not in acc:
+                if not any(type(s) is type(stored) and s == stored
+                           for s in acc):
                     acc.append(stored)
     for f in (failures or []):
         eclass = f.get("error_class")

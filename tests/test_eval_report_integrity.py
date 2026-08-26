@@ -1034,6 +1034,37 @@ def test_report_integrity_falsy_error_classes_fail_closed():
     o2["error_classes"] = "abc"
     integ = _report([o1, o2], threshold=1.0)["integrity"]
     assert integ["error_census_malformed"]["<malformed-top-level>"] == [0, "abc"]
+    # round-16: evidence membership is TYPE-EXACT — Python-equal but
+    # JSON-DISTINCT tokens (0 vs False, 1 vs 1.0, True vs 1) stay distinct
+    # records; no malformed evidence vanishes.
+    o3 = _outcome("q2", valid=True)
+    o3["error_classes"] = False
+    o4 = _outcome("q3", valid=True)
+    o4["error_classes"] = 1
+    o5 = _outcome("q4", valid=True)
+    o5["error_classes"] = 1.0
+    o6 = _outcome("q5", valid=True)
+    o6["error_classes"] = True
+    integ = _report([o1, o2, o3, o4, o5, o6], threshold=1.0)["integrity"]
+    assert integ["error_census_malformed"]["<malformed-top-level>"] == [
+        0, "abc", False, 1, 1.0, True]
+    # dict-count values: bool True and float 1.0 both ride the malformed
+    # accumulator (int counts ride the typed census) and stay DISTINCT
+    # evidence — Python-equal but JSON-distinct tokens never collapse.
+    integ = _report([_outcome("q0", valid=False,
+                              error_classes={"parse_error": True}),
+                     _outcome("q1", valid=False,
+                              error_classes={"parse_error": 1.0})],
+                    threshold=1.0)["integrity"]
+    assert integ["error_census_malformed"]["parse_error"] == [True, 1.0]
+    assert integ["error_census"] == {}
+    # legacy junk: bool True and int 1 stay distinct evidence.
+    integ = _report([_outcome("q0", valid=False,
+                              error_classes=[True]),
+                     _outcome("q1", valid=False,
+                              error_classes=[1])],
+                    threshold=1.0)["integrity"]
+    assert integ["error_census_malformed"]["<legacy-list>"] == [True, 1]
 
 
 def test_report_integrity_all_breaker_open_never_certifies():
@@ -1219,3 +1250,12 @@ def test_run_protocol_step5_gate_string_pins_criterion():
                                     ["--integrity-thres=0.5"], state=state)
     assert "--integrity-justification" not in overridden_abbr
     assert "--integrity-thres=0.5" in overridden_abbr
+    # round-16: a quoted justification VALUE whose text merely CONTAINS the
+    # flag token is NOT a threshold override (argparse consumes it as
+    # --integrity-justification's value) — the baseline injection stays.
+    quoted = build_command(STEPS_BY_NUMBER[5],
+                           ["--integrity-justification",
+                            "--integrity-threshold=0.02 (doc per ticket X)"],
+                           state=state)
+    assert "--integrity-justification" in quoted
+    assert "step-5 baseline: #1747 justified" in " ".join(quoted)
