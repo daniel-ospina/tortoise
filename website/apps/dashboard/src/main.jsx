@@ -3,11 +3,11 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 // #1623: plan display data (build-time import of product/pricing.json).
 import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
-import { HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_INSTALL, HARNESS_NAMES, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_STEPS } from './harnesses.js'
+import { HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS } from './harnesses.js'
 // #1708 D8: pure session-key predicate extracted to sessionKey.js (node --test
 // unit-tested); imported under an alias to avoid an ESM redeclaration collision
 // with the local isSessionKey wrapper below.
-import { isSessionKey as isSessionKeyPredicate, isActiveKey } from './sessionKey.js'
+import { isSessionKey as isSessionKeyPredicate, isActiveKey } from './sessionKey.js' 
 
 const API_BASE = 'https://api.premiselabs.co'
 const KEY_STORAGE = 'tortoise_api_key'
@@ -2414,9 +2414,9 @@ function claimIntentInFlight() {
                           </button>
                         ))}
                       </div>
-                      {HARNESS_STEPS[wizardHarness] && (
+                      {HARNESS_STEPS(wizardHarness, welcomeKey || apiKey) && (
                         <ol className="harness-steps" style={{ margin: '0.9rem 0 0.25rem 1.1rem', padding: 0, lineHeight: 1.7 }}>
-                          {HARNESS_STEPS[wizardHarness].map((s, i) => (
+                          {HARNESS_STEPS(wizardHarness, welcomeKey || apiKey).map((s, i) => (
                             <li key={i} style={{ marginBottom: '0.35rem', fontSize: 14, color: 'var(--text,#e2e8f0)' }}>
                               {typeof s === 'string' ? s : (
                                 <>
@@ -2433,16 +2433,21 @@ function claimIntentInFlight() {
                           ))}
                         </ol>
                       )}
+                      {HARNESS_INTRO[wizardHarness] && (
+                        <p className="dim small" style={{ margin: '0.9rem 0 0', lineHeight: 1.6 }}>
+                          {HARNESS_INTRO[wizardHarness]}
+                        </p>
+                      )}
                       <pre className="snippet" style={{ marginTop: '0.75rem' }}>
-                        {HARNESS_INSTALL[wizardHarness](apiKey)}
+                        {HARNESS_INSTALL[wizardHarness](welcomeKey || apiKey)}
                         {HARNESS_SKILLS(wizardHarness)}
-                        {welcomeKey && !HARNESS_SKILLLESS.includes(wizardHarness) && !HARNESS_SKILLS_IN_PROMPT.includes(wizardHarness) ? ('\n\n' + HARNESS_PERSIST(apiKey)) : ''}
+                        {welcomeKey && !HARNESS_SKILLLESS.includes(wizardHarness) && !HARNESS_SKILLS_IN_PROMPT.includes(wizardHarness) && !HARNESS_SKILLS_IN_STEPS.includes(wizardHarness) ? ('\n\n' + HARNESS_PERSIST(welcomeKey || apiKey)) : ''}
                       </pre>
                       <div className="wizard-nav">
                         <button type="button" className="ghost" onClick={() => setWelcomeOriented(false)}>← Back</button>
                         <div className="wizard-nav-actions">
                           <button type="button" className={wizardCopied === 'harness' ? 'ghost' : 'btn-primary'}
-                            onClick={() => wizardCopy(HARNESS_INSTALL[wizardHarness](apiKey) + HARNESS_SKILLS(wizardHarness) + (welcomeKey && !HARNESS_SKILLLESS.includes(wizardHarness) && !HARNESS_SKILLS_IN_PROMPT.includes(wizardHarness) ? ('\n\n' + HARNESS_PERSIST(apiKey)) : ''), 'harness')}>
+                            onClick={() => wizardCopy(HARNESS_INSTALL[wizardHarness](welcomeKey || apiKey) + HARNESS_SKILLS(wizardHarness) + (welcomeKey && !HARNESS_SKILLLESS.includes(wizardHarness) && !HARNESS_SKILLS_IN_PROMPT.includes(wizardHarness) && !HARNESS_SKILLS_IN_STEPS.includes(wizardHarness) ? ('\n\n' + HARNESS_PERSIST(welcomeKey || apiKey)) : ''), 'harness')}>
                             {wizardCopied === 'harness' ? 'Copied ✓' : (HARNESS_COPY_LABEL[wizardHarness] || 'Copy setup')}
                           </button>
                           {wizardCopied === 'harness' && (
