@@ -747,6 +747,11 @@ def build_report(
     evidence_vacuity_rate: dict[str, float] = {}
     chunk_evidence_recall: dict[str, float] = {}
     chunk_evidence_recall_n: dict[str, int] = {}
+    # #1745 (C4): the reader-surface evidence metric — aggregated parallel
+    # to evidence_recall@k (same D5 denominator) so the pool->context drop
+    # is directly measurable (pool recall is the upper bound since C1).
+    reader_evidence_recall: dict[str, float] = {}
+    reader_evidence_recall_n: dict[str, int] = {}
     # #1763: the re-baselined point-level answer-availability view (mark (d)
     # answer_string) — aggregated parallel to evidence_recall@k so the legacy
     # source-session-dominated metric stays byte-identical (D5 #1540
@@ -785,6 +790,15 @@ def build_report(
         if real_chunks:
             chunk_evidence_recall[str(k)] = _mean(real_chunks)
             chunk_evidence_recall_n[str(k)] = len(real_chunks)
+        # #1745 (C4): reader_evidence@k — evidence-marked hits actually
+        # present in context_points[:k] / marked total. The metric C1
+        # moves; N/A on empty denominators like evidence_recall@k.
+        rre = [(o.get("reader_evidence@k") or {}).get(str(k), None)
+               for o in outcomes]
+        real_rre = [v for v in rre if v is not None]
+        if real_rre:
+            reader_evidence_recall[str(k)] = _mean(real_rre)
+            reader_evidence_recall_n[str(k)] = len(real_rre)
         # #1763: the answer-string re-baselined view — point-level answer
         # availability (mark (d), gold answer string in the point's
         # content/quote/search_keys). Aggregated parallel to
@@ -1209,6 +1223,24 @@ def build_report(
         "vacuity_rate": (round(
             sum(1.0 for v in retrieved_bearing if v == 0.0)
             / len(retrieved_bearing), 4) if retrieved_bearing else 0.0),
+        # #1745 (C4): the per-mark-type breakdown aggregated from the
+        # checkpoint's per-question ``ingest.evidence_marks`` census
+        # (M6 #1526: source_session / verbatim / raw_chunk / answer_string
+        # — written by the v2 ingest leg (ingest_v2.py); the deterministic
+        # leg (ingest.py) records no per-mark census — ``marks`` stays
+        # absent on deterministic runs, never fabricated). The pilot
+        # census was 98.5%
+        # source-session (472/479), which is why the legacy
+        # evidence_recall@k denominator is mark-inflated; this aggregate
+        # makes the WHY observable at report level. Absent when outcomes
+        # carry no census (never fabricated).
+        "marks": {
+            mk: sum((((o.get("ingest") or {}).get("evidence_marks") or {})
+                     .get(mk, 0) or 0) for o in outcomes)
+            for mk in ("source_session", "verbatim", "raw_chunk",
+                       "answer_string")
+        } if any((o.get("ingest") or {}).get("evidence_marks")
+                 for o in outcomes) else {},
     }
 
     # ── context tokens ──
@@ -1361,6 +1393,13 @@ def build_report(
             "evidence_coverage": evidence_coverage,
             "chunk_evidence_recall@k": _gated(chunk_evidence_recall or None),
             "chunk_evidence_recall_n@k": _gated(chunk_evidence_recall_n or None),
+            # #1745 (C4): the reader-surface evidence metric — the honest
+            # measure of "evidence the reader could see" (pool recall is
+            # the upper bound since C1's rank-interleaved assembly).
+            # Absent on outcomes without the key (stays None — never
+            # fabricated).
+            "reader_evidence@k": _gated(reader_evidence_recall or None),
+            "reader_evidence_n@k": _gated(reader_evidence_recall_n or None),
             # #1763: the re-baselined point-level answer-availability view
             # (mark (d) answer_string). The pilot census is 98.5%
             # source-session (472/479 marks), so the legacy evidence_recall@k
@@ -1434,11 +1473,19 @@ def build_report(
                                      "date annotation on every retrieved chunk "
                                      "(question_date + haystack_dates surfaced — "
                                      "temporal-reasoning questions are "
-                                     "answerable); points-first budget-capped "
-                                     "context (UX decision 3, R1 #1540): "
-                                     "extracted points render in rank order, raw "
-                                     "turn-granular chunks backfill the remaining "
-                                     "context_token_cap tokens",
+                                     "answerable); rank-interleaved budget-capped "
+                                     "context (C1 #1745): extracted points and "
+                                     "raw turn-granular chunks render in TRUE "
+                                     "RRF rank order (the R1 point-then- "
+                                     "chunk tiering is deliberately reversed — "
+                                     "it starved the chunk leg), bounded by "
+                                     "context_token_cap tokens AND the "
+                                     "context_item_cap items "
+                                     "(default 40; TR questions keep the pinned "
+                                     "tr_top_k item cap AND render time-ascending "
+                                     "per R5 #1544 — dated first, stable within "
+                                     "a date, i.e. the reader's READING order, "
+                                     "not RRF rank)",
             "extraction_approach": extraction_approach,
             "retriever": retriever,
             "retrieval_arm": (
@@ -1470,7 +1517,11 @@ def build_report(
                 "turns per non-overlapping window; candidates fetched "
                 "at max(k)*3 depth, deduped per-session to "
                 "max_chunks_per_session raw chunks in rank order, R1 "
-                "#1540)"
+                "#1540; #1745 C1: reader context is rank-interleaved "
+                "(points+chunks in true RRF order) bounded by "
+                "context_item_cap items + the token budget, C2: optional "
+                "evidence-mark rank boost, C5: max_chunks_per_session "
+                "default 3)"
                 + (f" + R6 rerank stage (cross-encoder + MMR, pool "
                    f"{rerank_config['pool_size']} — post-fusion "
                    "precision+diversity, #1545)"
@@ -1498,7 +1549,24 @@ def build_report(
                                  "graph has no marks; evidence_recall@k = marked "
                                  "extracted points surfaced / marked extracted "
                                  "points total, N/A (None) on empty denominators "
-                                 "(M6 #1526 — never forced 0.0); chunk containment "
+                                 "(M6 #1526 — never forced 0.0); #1745 (C2): when "
+                                 "the evidence-mark boost is enabled "
+                                 "(TORTOISE_LME_EVIDENCE_BOOST — OFF by default "
+                                 "in code, ON for the re-validation run) "
+                                 "evidence_recall@k is measured over the boosted "
+                                 "pool (marked hits re-ranked up by a stable rank "
+                                 "offset before the metric; the pre-boost ranking "
+                                 "is preserved in the per-question "
+                                 "ranked_ids_pre_boost ablation); reader_evidence@k "
+                                 "(C4 #1745) = the same fraction over "
+                                 "context_points[:k] (the independent "
+                                 "reader-surface measure — pool recall is an "
+                                 "APPROXIMATE upper bound: the budget walk's "
+                                 "skip-not-starve lets a lower-ranked marked "
+                                 "item enter the k-prefix, so reader_evidence@k "
+                                 "can exceed evidence_recall@k); with C2 on it is "
+                                 "the BOOSTED-pool reader surface — the boost-off "
+                                 "ablation arm isolates C1; chunk containment "
                                  "is reported separately as chunk_evidence_recall@k "
                                  "(containment-marked raw chunks surfaced / marked "
                                  "raw chunks total); #1763 answer-string re-baseline: "
