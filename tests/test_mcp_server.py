@@ -12,15 +12,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 # import cycle can never be masked).
 import tortoise.mcp_server as mcp_mod
 
-# Check if FalkorDB is available for integration tests
-try:
-    from tortoise.sdk import TortoiseSDK
-    sdk = TortoiseSDK()
-    sdk.status()
-    FALKORDB_AVAILABLE = True
-except Exception:
-    FALKORDB_AVAILABLE = False
-
 
 @pytest.fixture(autouse=True)
 def _transport_context():
@@ -414,9 +405,19 @@ class TestToolFunctions:
         assert result == {"error": "No team context (HTTP mode required)"}
 
 
-@pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="FalkorDB not available")
 class TestToolIntegration:
     """Integration tests that require FalkorDB."""
+
+    @pytest.fixture(autouse=True)
+    def _require_live_uri(self):
+        """TestToolIntegration needs a REAL FalkorDB server (its tools construct
+        bare SDKs against the URI) — skip visibly on URI-less lanes via the
+        _live_utils gate, whose reason family is exempt from the #1436
+        skip-guard ("requires TORTOISE_DB_URI"). A probe-based skipif (bare
+        TortoiseSDK against the default embedded store) instead flips by LPT
+        order and reds the guard on tier-2 PR legs."""
+        from tests._live_utils import _skip_unless_live_uri
+        _skip_unless_live_uri()
     def test_status_returns_dict(self):
         from tortoise.mcp_server import tortoise_status
         result = tortoise_status()
