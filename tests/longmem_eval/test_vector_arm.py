@@ -846,9 +846,9 @@ def test_model_id_wrapper_path_stable_no_address(monkeypatch):
                        "+venice:deepseek-v4-flash")),
         # tuning rides the wrapper composition too (member suffixes) — a
         # tuned run-level build (any non-default max_tokens/temperature)
-        # must fingerprint differently from the uncapped one; the ingest_v2
-        # session-worker factory builds at max_tokens=4000 (see the
-        # session_workers caveat in _build_fingerprint)
+        # must fingerprint differently from the uncapped one (the ingest_v2
+        # session-worker factory forwards the resolved max_tokens/
+        # temperature; the unset path is UNCAPPED — see _build_cli_extractor_model)
         dict(keys=(), max_tokens=500, temperature=0.0, cls=RoutingModel,
              expected="deepseek/deepseek-v4-flash|max_tokens=500"),
         dict(keys=(), max_tokens=500, temperature=0.5, cls=RoutingModel,
@@ -928,19 +928,39 @@ def test_build_cli_extractor_model_fingerprints_serving_config(monkeypatch):
             spec=None, session_workers=4))
         assert runner._model_id(adapters[-1]) == "deepseek/deepseek-v4-flash"
         assert runner._model_id(adapters[-1]) == runner._model_id(adapters[1])
-        # session_workers>1 + direct spec: the RESOLVED wire id is used (the
-        # registry key is never a valid wire id — 'deepseek-flash-direct'
-        # → 'deepseek-chat'; 'solar-pro4' → 'upstage/solar-pro4'), with the
-        # entry's expressible tuning — identical to session_workers=1
+        # session_workers>1 + direct spec: the RESOLVED wire id is used — the
+        # registry key is never a valid wire id; the _REGISTRY_KEY_TO_ID remap
+        # gives every lane a valid id ('deepseek-flash-direct' →
+        # 'deepseek/deepseek-chat' — the OpenRouter lane needs the prefixed
+        # id; bare ids 404 there; 'solar-pro4' → its entry id
+        # 'upstage/solar-pro4'). The lane set differs from session_workers=1
+        # (direct-only DeepSeekDirectModel vs the router wrapper), so the
+        # fingerprints legitimately DIFFER — a toggle is REFUSED (safe).
         adapters.append(runner._build_cli_extractor_model(
             spec="deepseek-flash-direct", session_workers=4))
-        assert runner._model_id(adapters[-1]) == "deepseek-chat"
+        assert runner._model_id(adapters[-1]) == "deepseek/deepseek-chat"
         adapters.append(runner._build_cli_extractor_model(
             spec="deepseek-flash-direct", session_workers=1))
-        assert runner._model_id(adapters[-2]) == runner._model_id(adapters[-1])
+        assert runner._model_id(adapters[-1]) == "deepseek-chat"
+        assert runner._model_id(adapters[-2]) != runner._model_id(adapters[-1])
         adapters.append(runner._build_cli_extractor_model(
             spec="solar-pro4", session_workers=4))
         assert runner._model_id(adapters[-1]) == "upstage/solar-pro4"
+        # MULTI-LANE env: a spec'd sw toggle is provider-routed at sw>1 (the
+        # router composition) vs the bare registry adapter at sw=1 → the
+        # fingerprints differ → the toggle is REFUSED (documented safe
+        # direction; the fingerprint records what each path serves)
+        _pin_extractor_env(monkeypatch, keys=("deepseek", "openrouter"))
+        adapters.append(runner._build_cli_extractor_model(
+            spec="deepseek-v4-pro", session_workers=1))
+        assert runner._model_id(adapters[-1]) == (
+            "deepseek/deepseek-v4-pro|max_tokens=500")
+        adapters.append(runner._build_cli_extractor_model(
+            spec="deepseek-v4-pro", session_workers=4))
+        assert runner._model_id(adapters[-1]) == (
+            "routing:deepseek-direct:deepseek-v4-pro|max_tokens=500"
+            "+openrouter:deepseek/deepseek-v4-pro|max_tokens=500")
+        assert runner._model_id(adapters[-2]) != runner._model_id(adapters[-1])
         # the M5 pinning guard applies on BOTH paths (fail fast, never a
         # garbage wire id in the checkpoint)
         with pytest.raises(SystemExit):

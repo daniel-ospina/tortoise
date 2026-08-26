@@ -577,11 +577,16 @@ def _session_worker_spec_tuning(spec: str) -> tuple[str, int | None, float]:
     session-parallel worker path (M7 #1739 / review #1742):
     ``(wire id, max_tokens, temperature)`` — the registry entry's REAL wire
     id (never the registry key — ``solar-pro4``/``claude-opus-5`` are not
-    valid wire ids) and its expressible tuning. REFUSES entries the
-    ingest_v2 factory cannot express (``thinking_budget`` /
-    ``disable_reasoning`` — ``_build_single`` forwards only
-    max_tokens/temperature): loud, never a silent reasoning flip."""
+    valid wire ids) resolved through the ``_REGISTRY_KEY_TO_ID`` remap so
+    every lane gets a valid id (``deepseek-flash-direct`` →
+    ``deepseek/deepseek-chat``: the direct lane strips to the non-reasoning
+    ``deepseek-chat``, the OpenRouter lane keeps the prefixed id — bare ids
+    404 there). REFUSES entries the ingest_v2 factory cannot express
+    (``thinking_budget`` / ``disable_reasoning`` — ``_build_single``
+    forwards only max_tokens/temperature): loud, never a silent reasoning
+    flip."""
     from tests.model_adapters import MODELS
+    from tortoise.model_adapters import _REGISTRY_KEY_TO_ID
     if spec not in MODELS:
         raise SystemExit(f"unknown extractor model {spec!r}; "
                          f"known: {sorted(MODELS)}")
@@ -595,7 +600,8 @@ def _session_worker_spec_tuning(spec: str) -> tuple[str, int | None, float]:
                 "thinking_budget/disable_reasoning tuning (it would silently "
                 "flip to defaults) — drop --session-workers or use the "
                 "default extractor path")
-        return entry.id, entry.max_tokens, entry.temperature
+        return _REGISTRY_KEY_TO_ID.get(spec, entry.id), \
+            entry.max_tokens, entry.temperature
     finally:
         entry.close()
 
@@ -615,9 +621,12 @@ def _build_cli_extractor_model(*, spec: str | None,
     built the SAME way the factory does (``_session_worker_spec_tuning``
     resolves the registry entry's real wire id + expressible tuning; the
     unset case stays UNCAPPED, matching the session_workers=1 owner
-    decision). A spec'd run therefore fingerprints IDENTICALLY across a
-    session-workers toggle (the same effective config — resume accepted);
-    an unset run too."""
+    decision). A spec'd run therefore fingerprints identically across a
+    session-workers toggle only when the router resolves a SINGLE lane
+    matching the registry adapter (the same effective config — resume
+    accepted); in multi-lane environments the sw>1 path is provider-routed
+    (RoutingModel/RotatingModel composition) and a toggle is REFUSED —
+    safe direction, the fingerprint records what each path serves."""
     if session_workers > 1:
         from tests.model_adapters import build_extractor_model
         if spec is not None:
@@ -735,11 +744,13 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
     model via the ingest_v2 factory. ``_build_cli_extractor_model`` builds
     the fingerprinted model and run_main threads the resolved spec + tuning
     into the factory so the workers serve EXACTLY what the fingerprint
-    records (a spec'd run is identical across a session-workers toggle —
-    same effective config; the unset run stays UNCAPPED, matching the
-    session_workers=1 owner decision). Registry entries the factory cannot
-    express (thinking_budget/disable_reasoning) are refused loudly at
-    session_workers>1. WIRE-ID
+    records (a spec'd run fingerprints identically across a session-workers
+    toggle only in single-lane environments — the same effective config,
+    resume accepted; multi-lane envs are provider-routed at sw>1 and the
+    toggle is REFUSED, safe direction; the unset run stays UNCAPPED,
+    matching the session_workers=1 owner decision). Registry entries the
+    factory cannot express (thinking_budget/disable_reasoning) are refused
+    loudly at session_workers>1. WIRE-ID
     MUTABILITY: wire ids are API-facing and mutable (e.g. #1706 renamed
     deepseek-v4-flash → deepseek-chat) — a rename loudly invalidates every
     existing checkpoint (CheckpointStaleError on ``extractor_model``): safe
