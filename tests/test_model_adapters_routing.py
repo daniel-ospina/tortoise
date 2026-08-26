@@ -392,7 +392,11 @@ def test_rotation_round_robin_and_cooldown(monkeypatch):
     a, b, c = _P("a"), _P("b"), _P("c")
     pool = RotatingModel([a, b, c], cooldown_s=0)  # weighted rotation
     served = set()
-    for _ in range(12):
+    # 48 rounds, not 12: _pick() is a weighted random draw, so a short
+    # sequence can skip a bucket (~2.2% of the time with 12) — the tier-2
+    # (b) leg hit it twice. 48 rounds keep the rotation intent while making
+    # the all-providers-served assert deterministic (P(miss) ~1e-8).
+    for _ in range(48):
         out = pool.complete(system="s", user="u")
         served.add(out)
     assert served == {"ok-a", "ok-b", "ok-c"}  # all providers get served

@@ -1385,7 +1385,8 @@ def phase1_probe(record: dict) -> dict:
 
 def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = None,
          sigterm_timeout: float = 10.0, kill_pacing: float = KILL_PACING_DEFAULT,
-         only_safe: bool = False, jobs: int = 8) -> list[dict]:
+         only_safe: bool = False, jobs: int = 8,
+         deadline: float | None = None) -> list[dict]:
     """Reap records safely (#1383: the two-verb action engine).
 
     Returns acted-upon list.
@@ -1432,7 +1433,14 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
     candidate_records = [r for r in records
                          if r.get("classification") == "candidate"
                          and r.get("socket_path")]
-    if candidate_records and len(candidate_records) > 1:
+    # The eager parallel pre-probe is skipped for a DEADLINE-bound sweep:
+    # it submits CLIENT LIST probes for the ENTIRE candidate list before
+    # joining — with a large backlog (stale records + a suite's live
+    # servers on a shared runner) that join alone can run past pytest-
+    # timeout (observed: >300s in the conftest session-end sweep, killing
+    # the leg mid-reap). The per-record probes in the loop below are gated
+    # by the deadline and abort instead.
+    if deadline is None and candidate_records and len(candidate_records) > 1:
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(
                 max_workers=min(jobs, len(candidate_records))) as pool:
@@ -1441,6 +1449,11 @@ def reap(records: list[dict], dry_run: bool = True, batch_size: int | None = Non
                        for r in candidate_records]
             _client_before_cache = {rid: f.result() for rid, f in futures}
     for record in records:
+        if deadline is not None and time.monotonic() >= deadline:
+            logger.info("sweep deadline hit (%.1fs elapsed) — %d acted, "
+                        "stopping; cron sweeps clear the remainder",
+                        time.monotonic(), len(acted))
+            break
         classification = record.get("classification")
         if classification == "stale_socket":
             if stale_removed >= STALE_SWEEP_BUDGET:
@@ -1977,12 +1990,25 @@ def _sweep_quarantine_dirs(dry_run: bool = False,
 
 def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
                jobs: int = 8, kill_pacing: float = KILL_PACING_DEFAULT,
-               sweep_pid_files: bool = True) -> list[dict]:
+               sweep_pid_files: bool = True,
+               sigterm_timeout: float = 10.0,
+               deadline: float | None = None) -> list[dict]:
     """Discover + classify + reap; return acted-upon records.
+
+    deadline: optional monotonic-clock cutoff threaded into reap() — a
+    bounded sweep aborts mid-call once hit (the pre-probe cache is also
+    skipped), so the suite-end sweep can never run past pytest-timeout no
+    matter how large the discovered backlog is.
 
     jobs>1 parallelizes the per-candidate CLIENT LIST probes (the dominant
     cost at hundreds of leaked servers — issue #1005); kills stay serial
-    with pacing.
+    with pacing. sigterm_timeout threads into reap()/_kill(): the suite-end
+    sweep (conftest) lowers it to 3.0 so a server ignoring SIGTERM gets
+    SIGKILL quickly — the default 10s wait × many servers compounds past
+    pytest-timeout under CI load (epic #1647 PR #1684 CI-fix; the param was
+    missing from _run_sweep's signature, so the conftest kwarg raised
+    TypeError and the end-sweep silently no-oped — observed as the 104-
+    orphan leak on the tier-2 leg).
 
     NOTE: the reaper singleton lock is held by main() (CLI); direct callers
     (tests, conftest session hygiene) run unlocked — pre-existing contract,
@@ -2004,7 +2030,8 @@ def _run_sweep(dry_run: bool, batch_size: int | None, only_safe: bool = False,
                  if r["classification"] in ("candidate", "stale_socket")]
     resolved = [phase1_probe(r) for r in reapables]
     acted = reap(resolved, dry_run=dry_run, batch_size=batch_size,
-                 kill_pacing=kill_pacing, only_safe=only_safe)
+                 kill_pacing=kill_pacing, only_safe=only_safe,
+                 sigterm_timeout=sigterm_timeout, deadline=deadline)
     # #1383: quarantine convergence (partial-rmtree/respawn leftovers)
     try:
         for q in _sweep_quarantine_dirs(dry_run=dry_run):

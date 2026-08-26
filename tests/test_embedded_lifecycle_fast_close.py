@@ -42,9 +42,19 @@ def _pid_alive(pid):
 
 @pytest.fixture(autouse=True)
 def _fast_flag():
+    # Restore the PREVIOUS value on teardown (never pop): conftest / the CI
+    # job set TORTOISE_FAST_ATEXIT=1 for the whole suite — popping here
+    # silently disabled the fast-close gate for every LATER test in the
+    # process (the tier-2 (b) leg exposed it: test_divergence_conformance
+    # D15's atexit_fast_close returned False -> "must take the fast-close
+    # path"). The explicit unset tests below pop within their own bodies.
+    prev = os.environ.get("TORTOISE_FAST_ATEXIT")
     os.environ["TORTOISE_FAST_ATEXIT"] = "1"
     yield
-    os.environ.pop("TORTOISE_FAST_ATEXIT", None)
+    if prev is None:
+        os.environ.pop("TORTOISE_FAST_ATEXIT", None)
+    else:
+        os.environ["TORTOISE_FAST_ATEXIT"] = prev
 
 
 def test_fast_close_ephemeral_flag_stops_server():
