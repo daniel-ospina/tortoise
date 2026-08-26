@@ -403,7 +403,7 @@ def bare_hosted_server(hosted_env):
         shutil.rmtree(d, ignore_errors=True)
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def api(playwright, hosted_env):
     """Playwright APIRequestContext bound to the hosted base URL."""
     # 30s default per request: fail fast when the server degrades instead
@@ -429,8 +429,14 @@ def session_jwt(hosted_env):
     return _mint
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def tenant_factory(api, hosted_env):
+    # module scope (was session): a module-scoped `api` cannot feed a
+    # session-scoped fixture (ScopeMismatch, #1721 review P0). Remote-mode
+    # (E2E_BASE_URL + ALLOW_PROD=1) note: the 3/hr/IP register-limit pool is
+    # now per-module instead of per-session — local hermetic mode (CI
+    # default, limiter disabled) is unaffected; remote runs may need the
+    # pool shared via a module-scoped hosted_env-only cache.
     """Disposable tenants via the public /v1/register surface.
 
     Local mode: fresh tenant per call (register limiter disabled). Remote
