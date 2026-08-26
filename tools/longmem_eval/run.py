@@ -516,12 +516,17 @@ class CheckpointStaleError(RuntimeError):
 def _model_id(model: Any) -> str | None:
     """A stable fingerprint string for a model object (None → None).
 
-    PILOT #1549 (M4 fix): adapters expose ``.id`` (the API-facing wire id),
-    not ``.model_id`` — the old fallback returned ``repr(model)`` which embeds
-    a memory address (``<DeepSeekDirectModel object at 0x...>``), making the
-    fingerprint NON-deterministic across processes and refusing every resume
-    (CheckpointStaleError on ``extractor_model`` even with identical git_sha).
-    Prefer ``.model_id`` then ``.id``; only fall back to repr as a last resort.
+    M4 #1732 fix (PILOT #1549 context): adapters expose ``.id`` (the
+    API-facing wire id), not ``.model_id`` — the old fallback returned
+    ``repr(model)`` which embeds a memory address (``<DeepSeekDirectModel
+    object at 0x...>``), making the fingerprint NON-deterministic across
+    processes and refusing every resume (CheckpointStaleError on
+    ``extractor_model`` even with identical git_sha). Prefer ``.model_id``
+    then ``.id``; only fall back to repr as a last resort.
+
+    NOTE: wrapper models from ``build_extractor_model()`` (RoutingModel /
+    RotatingModel) expose neither attribute and still fall to repr —
+    tracked as follow-up (#1736 review, default CLI path).
     """
     if model is None:
         return None
