@@ -7,8 +7,9 @@ knowledge updates, abstention), per-type accuracy (the six raw dataset
 types), retrieval recall@k (session- and turn-level; paper-aligned _paper@k
 keys over non-_abs questions, M7), context tokens, latency (incl. the
 isolated ingest write-path cost, M7), an integrity block with the per-
-question error census (M7), leg-mix / pool-size / evidence written-·retrieved
-aggregates (M7) — together with a full methodology block (dataset id, split,
+question error census (M7) + a census-class-aware gate criterion (#1747),
+leg-mix / pool-size / evidence written-·retrieved aggregates (M7) —
+together with a full methodology block (dataset id, split,
 reader model, judge model, extraction approach, k values, token estimator,
 git sha, python version, workers, dataset fingerprint, the dataset recall-
 semantics audit record, run date) so numbers are honestly contextualized
@@ -49,6 +50,77 @@ DEFAULT_EMBEDDER_STATUS = {
 
 # question_type → paper category (the five abilities from the LongMemEval
 # paper; abstention is signalled by the ``_abs`` suffix, not a type).
+#: #1747: census classes that are RECOVERABLE (rate-limited) — self-
+#: correcting parse/truncation (the #1746 ladder) or transient provider
+#: conditions (retry with backoff). A question whose ONLY error-class signals
+#: are recoverable is still INVALID (it had extraction errors) but is
+#: rate-limited by ``integrity.threshold`` instead of vetoing the run — this
+#: is what makes ``valid=true`` reachable at 500-Q scale (≈24k session
+#: extractions guarantee a handful of transient/parse blips even on a
+#: healthy run). EVERYTHING not in this allowlist fails CLOSED: a fatal_*
+#: class, a bare ``ingest`` class, or an unknown class from a future
+#: extractor vocabulary vetoes the run rather than silently passing.
+RECOVERABLE_CENSUS_CLASSES = frozenset({
+    "parse_error",             # S2/S4 unparseable output (re-prompt ladder)
+    "truncated",               # stage cap hit (raise-the-cap triage)
+    "truncated_parse_error",   # #1746: truncated + unparseable after ladder
+    "partial_parse",           # #1746: accepted-but-partial (invalid-but-embedded)
+    "transient_429_rate_limit",  # provider rate limit (backoff, retry)
+    "transient_5xx",           # provider 5xx (backoff, retry)
+    "transient_timeout",       # call timeout (retry)
+    "transient_network",       # connection/network error (retry)
+    "transient_unknown",       # unclassified transient (retry-safe)
+})
+
+#: #1747: eval-failure classes (site-prefixed ``<site>:<class>`` from
+#: errors.py, or bare ``ingest``) that are transient-safe — the retry budget
+#: was BURNED (``retries_exhausted``), so the question failed, but the cause
+#: is recoverable → rate-limited like the census recoverable classes, not
+#: vetoed. Everything else (``:fatal`` / ``:fatal_config`` / ``:parse`` — a
+#: local decode bug — / bare ``ingest`` — extractor-internal / unclassified)
+#: is PERMANENT → hard veto.
+RECOVERABLE_EVAL_FAILURE_CLASSES = frozenset({"retries_exhausted"})
+
+
+def _outcome_grade(o: dict[str, Any]) -> str:
+    """#1747: grade one COMPLETED outcome for the integrity gate.
+
+    Returns ``"clean"`` / ``"recoverable"`` / ``"hard"``:
+
+    * ``"hard"`` — a census class outside ``RECOVERABLE_CENSUS_CLASSES``
+      (fatal_* / ingest / unknown — fail-closed), OR a NON-census error
+      string (``valid=False`` with an EMPTY census: no-embed-list / S5
+      failure / entity-resolution failure — structural degradation that no
+      retry or ladder can recover, so it must not ride the rate threshold).
+    * ``"recoverable"`` — only recoverable census classes and the runner's
+      own flag agrees the question is invalid (``valid=False``).
+    * ``"clean"`` — no error signal; a recoverable-only census with the
+      runner's flag ``valid=True`` is also clean (the runner's binary flag
+      is the authority on whether error strings exist).
+    """
+    ec = o.get("error_classes") or {}
+    if isinstance(ec, dict):
+        classes = {c for c, n in ec.items() if n and int(n or 0) > 0}
+    else:  # legacy flat-list shape (defensive back-compat)
+        classes = {c for c in ec if c}
+    if classes - RECOVERABLE_CENSUS_CLASSES:
+        return "hard"
+    if classes:
+        return "recoverable" if not o.get("valid", True) else "clean"
+    # census empty — the runner's binary flag is the only error signal.
+    return "hard" if not o.get("valid", True) else "clean"
+
+
+def _failure_grade(error_class: str | None) -> str:
+    """#1747: grade one eval ``failures`` entry (``"recoverable"`` iff its
+    class is transient-safe ``retries_exhausted``; everything else —
+    permanent classes, bare ``ingest``, or a missing class — is ``"hard"``,
+    fail-closed)."""
+    if error_class and error_class.split(":", 1)[-1] in RECOVERABLE_EVAL_FAILURE_CLASSES:
+        return "recoverable"
+    return "hard"
+
+
 PAPER_CATEGORY = {
     "single-session-user": "Information Extraction",
     "single-session-assistant": "Information Extraction",
@@ -187,11 +259,21 @@ def build_report(
     on one question must not abort the run or skew the aggregates).
 
     M7 (#1527) contract additions (additive-only; D11):
-      * ``integrity`` — validity + per-question error census (D1/D6): a run
-        with any failed question or ingest-error question is ``valid=false``
-        unless an override threshold (+ recorded justification) admits it;
-        the numbers are always recorded, so no degraded run can masquerade
-        as clean.
+      * ``integrity`` — validity + per-question error census (D1/D6): the
+        gate criterion is CENSUS-CLASS-AWARE (#1747) — ``valid == True`` iff
+        ``invalid_rate <= threshold`` AND zero hard-failure questions;
+        recoverable classes (parse_error / truncated / partial_parse /
+        transient_*) are rate-limited (a healthy 500-Q run admits a handful
+        — the OLD binary ``len(errors)==0`` per-question invalid made
+        ``valid=true`` unreachable at scale); hard classes (fatal_* /
+        unknown / non-census error strings / permanent eval failures) veto
+        the run at any threshold; the numbers are always recorded, so no
+        degraded run can masquerade as clean. Relationship to #1746
+        (docs/plans/2026-08-26-1746-parse-error-robustness.md, D10): that
+        plan deliberately does NOT make ``integrity.valid`` its closing
+        condition — the flag's semantics are this issue's lane; the
+        run-protocol step-5 gate string (run_protocol.py) states the
+        justified threshold for the 500-Q baseline.
       * ``leg_mix`` (D2) — per-leg ``match_source`` counts over the
         top_k context the reader saw + per-k over the deduped pool.
       * ``pool_size`` (D3) — live graph point count per question.
@@ -335,22 +417,49 @@ def build_report(
     p10 = _vmean("p@10")
     p5 = _vmean("p@5")
 
-    # ── M7 (D1): integrity — validity + per-question error census ──
-    # invalid = a failed question OR a completed question with
-    # n_ingest_errors > 0; n_attempted dedups by qid across outcomes+failures.
-    # M4 (#1524, D4/D5): the per-question ``error_classes`` is now the
-    # extractor's granular class→count census (fatal_402_billing /
-    # transient_429_rate_limit / parse_error / truncated / …) — rolled up
-    # here by exact count. ``failures`` keep their site-prefixed eval classes
-    # (errors.py: reader:retries_exhausted / judge:fatal / ingest) so the
-    # census still answers "where did failures come from" at a glance.
+    # ── M7 (D1) + #1747: integrity — census-class-aware gate criterion ──
+    # n_attempted dedups by qid across outcomes+failures. Each completed
+    # outcome is graded from its ``error_classes`` census (+ the runner's
+    # binary ``valid`` flag as the authority when the census is empty):
+    #   hard       — fatal_*/ingest/unknown census classes OR a non-census
+    #                error string (structural degradation) → VETOES the run
+    #   recoverable — only parse_error/truncated/partial_parse/transient_*
+    #                classes → INVALID but rate-limited (threshold)
+    #   clean      — no error signal
+    # Eval ``failures`` are graded by their site-prefixed class: permanent
+    # (fatal/fatal_config/parse/ingest) → hard veto; transient-safe
+    # (retries_exhausted) → recoverable (rate-limited). ``n_valid`` /
+    # ``n_invalid`` / ``invalid_rate`` keep their EXACT previous semantics
+    # for the production shape (n_invalid = every error-carrying or failed
+    # question), so existing consumers are untouched; only the ``valid``
+    # VERDICT gains the hard veto on top of the rate criterion.
+    #
+    # Disjointness precondition (reviewer-pinned, #1747): outcome qids and
+    # failure qids never overlap in production — the runner guarantees a
+    # question either COMPLETES (→ outcome) or FAILS (→ failure entry), and
+    # the checkpoint resume skips failed qids (verified against run.py's
+    # exception path + _merge_checkpoint). ``n_invalid`` is therefore
+    # computed as n_hard_invalid + n_recoverable_invalid (the invariant
+    # holds BY CONSTRUCTION); under a hypothetical overlap the failure grade
+    # dominates (a question with a failure entry is invalid).
     effective_threshold = float(integrity_threshold or 0.0)
     failure_qids = {f.get("question_id") for f in (failures or [])}
     attempted_qids = {o["question_id"] for o in outcomes} | failure_qids
     n_attempted = len(attempted_qids)
-    n_valid = sum(1 for o in outcomes if o.get("valid", True))
-    n_invalid = n_attempted - n_valid
+    grades = [_outcome_grade(o) for o in outcomes]
+    n_valid = sum(1 for g in grades if g == "clean")
+    n_hard_invalid = sum(1 for g in grades if g == "hard")
+    n_recoverable_invalid = sum(1 for g in grades if g == "recoverable")
+    n_hard_invalid += sum(1 for f in (failures or [])
+                          if _failure_grade(f.get("error_class")) == "hard")
+    n_recoverable_invalid += sum(
+        1 for f in (failures or [])
+        if _failure_grade(f.get("error_class")) == "recoverable")
+    n_invalid = n_hard_invalid + n_recoverable_invalid
+    n_valid = n_attempted - n_invalid
     invalid_rate = round(n_invalid / n_attempted, 4) if n_attempted else 0.0
+    recoverable_invalid_rate = (
+        round(n_recoverable_invalid / n_attempted, 4) if n_attempted else 0.0)
     census: Counter = Counter()
     for o in outcomes:
         ec = o.get("error_classes") or {}
@@ -372,14 +481,32 @@ def build_report(
         "per-question error census computed",
     ]
     integrity: dict[str, Any] = {
-        "valid": invalid_rate <= effective_threshold,
+        # #1747: hard failures VETO at any threshold; the recoverable-class /
+        # structural error RATE then rides the declared threshold. Threshold
+        # 0.0 = a fully clean run (the strict default); the run-protocol
+        # step-5 gate documents 0.02 as the justified default at 500-Q scale.
+        "valid": (n_hard_invalid == 0) and (invalid_rate <= effective_threshold),
         "threshold": effective_threshold,
         "n_attempted": n_attempted,
         "n_valid": n_valid,
         "n_invalid": n_invalid,
         "n_failed": len(failures or []),  # M4 #1524 (D5): cross-ref
         "invalid_rate": invalid_rate,
+        # #1747 additive breakdown: hard-invalid questions (veto) vs
+        # recoverable-class questions (rate-limited) — the two never overlap;
+        # n_hard_invalid + n_recoverable_invalid == n_invalid.
+        "n_hard_invalid": n_hard_invalid,
+        "n_recoverable_invalid": n_recoverable_invalid,
+        "recoverable_invalid_rate": recoverable_invalid_rate,
         "error_census": error_census,
+        "criterion": (
+            "#1747 census-class-aware: valid = (n_hard_invalid == 0) AND "
+            "(invalid_rate <= threshold); "
+            "hard = fatal_*/ingest/unknown census classes + non-census error "
+            "strings + permanent eval failures; recoverable = parse_error/"
+            "truncated/partial_parse/transient_* census classes + "
+            "retries_exhausted eval failures (rate-limited, not vetoed)"
+        ),
         "checks": checks,
     }
     if integrity_justification:

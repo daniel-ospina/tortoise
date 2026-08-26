@@ -7,7 +7,7 @@ Encodes the 9-step phased protocol from 03-scope §Run/Testing Protocol
     2  micro-tests (R1 sweep + M6)      (gate: knob selected, marking calibrated)
     3  50-Q pilot + full-context cell   (gate: pilot completes, integrity readable)
     4  mechanical + obvious fixes       (gate: pilot findings fixed)
-    5  full 500-Q run — V3 baseline     (gate: integrity.valid=true, error rate ≤ threshold)
+    5  full 500-Q run — V3 baseline     (gate: integrity.valid=true — invalid_rate ≤ threshold AND zero hard failures; threshold 0.02 justified default at 500-Q scale, #1747)
     6  mechanical + obvious fixes       (gate: findings fixed)
     7  50-Q confirmation                (gate: delta confirms, direction stated in advance)
     8  1k full benchmark (owner-gated)  (gate: explicit owner decision)
@@ -86,7 +86,12 @@ STEPS: list[Step] = [
     Step(4, "fix-pilot", "Mechanical + obvious fixes from the pilot",
          "gate", "pilot findings fixed"),
     Step(5, "baseline-500q", "Full 500-Q run — the V3 baseline (V4 comparison point)",
-         "run", "integrity.valid=true, error rate ≤ threshold", runner="baseline"),
+         "run",
+         "integrity.valid=true — census-class-aware (#1747): invalid_rate ≤ threshold "
+         "AND n_hard_invalid == 0 (fatal_*/ingest/non-census-error-string/permanent-"
+         "eval-failure questions veto at any threshold); threshold 0.02 justified "
+         "default at 500-Q scale — run with --integrity-threshold 0.02",
+         runner="baseline"),
     Step(6, "fix-500", "Mechanical + obvious fixes from the 500",
          "gate", "findings fixed"),
     Step(7, "confirm-50q", "50-Q confirmation (pilot questions ∪ regression sample of 500-Q failures)",
