@@ -145,6 +145,31 @@ class TestGlobalWrite:
         assert "could NOT be saved" in err
         assert "tt_mint_" in err  # the minted key is echoed so it isn't lost
 
+    def test_mint_write_failure_echoes_recovery_token(self, monkeypatch, tmp_path, capsys):
+        """#1750: the orphan path (mint OK, save fails) must echo the recovery
+        token like the key — previously it was silently destroyed, and the
+        'fix perms and re-run' guidance minted a SECOND team, permanently
+        orphaning the first (whose token was never shown)."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        orphan_token = "st_" + "de" * 32
+        body = {"key": "tt_orphan_000000000000000000000000000000000000000000",
+                "team_id": "team-orphan", "team_name": "agent-orphan",
+                "graph_name": "team_team-orphan", "identity": "anon-orphan",
+                "tier": "free", "signup_token": orphan_token}
+        with mock.patch("urllib.request.urlopen", return_value=_ok_mint(body)), \
+             mock.patch("os.replace", side_effect=OSError("read-only fs")):
+            rc = main._cmd_signup(mock.Mock())
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "could NOT be saved" in err
+        assert orphan_token in err  # the recovery token is echoed, not destroyed
+        assert "Recovery token" in err
+        # guidance warns against a blind re-run (it would mint a NEW team and
+        # the first team's key+token above are the only access to it)
+        assert "do NOT re-run blindly" in err
+        assert "NEW team" in err
+
     def test_mint_mkdir_failure_exits_1(self, monkeypatch, tmp_path, capsys):
         """The mkdir/chmod legs of the write-failure handler (not just os.replace)."""
         monkeypatch.setenv("HOME", str(tmp_path))
@@ -745,7 +770,7 @@ class TestSignupTokenPersistence:
         body = json.loads(requests[1].data)
         assert body["signup_token"] == "st_" + "cd" * 32  # re-presented
 
-    def test_recovery_response_keeps_stored_token(self, monkeypatch, tmp_path):
+    def test_recovery_response_keeps_stored_token(self, monkeypatch, tmp_path, capsys):
         """A token-present re-signup that RECOVERS (no signup_token in the
         response) must keep the stored token — rotation is rejected server-
         side, so without persistence recovery would be one-shot-only."""
@@ -772,6 +797,35 @@ class TestSignupTokenPersistence:
         cfg = json.loads((tmp_path / ".tortoise" / "credentials.json").read_text())
         assert cfg["signup_token"] == stored  # kept
         assert cfg["api_key"].startswith("tt_recovered")
+        # #1751: the branch keys off whether a token was PRESENTED, not whether
+        # the response carried one — this recovery still says 'Key recovered'
+        cap = capsys.readouterr()
+        assert "Key recovered on existing team" in cap.out
+        assert "Free team created" not in cap.out
+
+    def test_fresh_mint_missing_signup_token_warns(self, monkeypatch, tmp_path, capsys):
+        """#1751: a fresh mint whose response lacks signup_token (server
+        version skew / a field-stripping proxy) must NOT print the false
+        'Key recovered on existing team' — say 'Free team created' and warn
+        the recovery backdoor was not issued (`tortoise recover` won't work)."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        body = {"key": "tt_notok_000000000000000000000000000000000000000000",
+                "team_id": "team-notok", "team_name": "agent-notok",
+                "graph_name": "team_team-notok", "identity": "anon-notok",
+                "tier": "free"}  # NO signup_token field
+        with mock.patch("urllib.request.urlopen", return_value=_ok_mint(body)):
+            rc = main._cmd_signup(mock.Mock(force=False))
+        assert rc == 0
+        cap = capsys.readouterr()
+        assert "Free team created" in cap.out
+        assert "Key recovered" not in cap.out  # the false message must not appear
+        assert "Recovery backdoor NOT created" in cap.err  # #1751 warning
+        assert "signup token" in cap.err.lower()
+        assert "tortoise recover" in cap.err  # user is told recovery won't work
+        cfg = json.loads((tmp_path / ".tortoise" / "credentials.json").read_text())
+        assert "signup_token" not in cfg  # nothing silently persisted
 
     def test_recovery_response_injected_token_ignored(self, monkeypatch, tmp_path):
         """#1709 fixer P2.5: on the RECOVERY branch (a token was presented)
