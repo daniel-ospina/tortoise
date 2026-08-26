@@ -380,7 +380,7 @@ class TestAgentSignup:
         identity is fresh per request) and has been REMOVED. The per-IP
         signup limiter (2/24h) is the compensating control; the 3rd mint
         from one IP 429s in Supabase mode too (mode-independent store)."""
-        tc, fake, _ = client
+        tc, fake, _ = client  # noqa: RUF059
         monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
         for _ in range(2):
             r = tc.post("/v1/agent/signup", json={"identity": "anon-client-chosen"})

@@ -415,6 +415,14 @@ jobs:
     #                           check .` passes green and stays active for new
     #                           code. Previously narrowed to the syntax class
     #                           (E9/F63/F7) because no config existed.
+    #   #1685: the baseline DRIFTED — the `pip install ruff` in the agent-infra
+    #                           job is unpinned (drift vector); the baseline
+    #                           never held at merge #1504 (369 violations hid
+    #                           behind the narrowed lint), +104 drifted over 319
+    #                           commits. Refreshed to 0 on 2026-08-25 (230 fixed
+    #                           / 242 noqa'd under 0.16.4) AND pinned here:
+    #                           the explicit-version pip install overrides the
+    #                           unpinned job install in both directions.
     #   typecheck-command: full — [tool.mypy] in pyproject.toml (baseline via
     #                           disable_error_code, #1503); the command is
     #                           explicit because the workflow's package
@@ -426,6 +434,6 @@ jobs:
     with:
       python-version: '3.12'
       test-command: ''
-      lint-command: 'ruff check .'
+      lint-command: 'pip install ruff==0.16.4 && ruff check .'
       typecheck-command: 'mypy tortoise/'
     secrets: inherit

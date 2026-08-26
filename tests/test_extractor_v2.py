@@ -1205,7 +1205,7 @@ class TestE3SourceTranscript:
 class TestE3Resolution:
     # The quote anchors on a NON-first turn (index 1) so a degenerate
     # first-turn-default resolver cannot pass the resolution tests.
-    EDUS = [{"index": 0, "role": "assistant", "text": "maybe try intervals for speed"},
+    EDUS = [{"index": 0, "role": "assistant", "text": "maybe try intervals for speed"},  # noqa: RUF012
             {"index": 1, "role": "user", "text": "my 5K best is 27:12"}]
 
     def _embed(self, **point_kwargs):
@@ -1779,7 +1779,7 @@ def test_parse_json_handles_markdown_fences():
     list in ```json code fences — the v2 strict regex reported 'no JSON block
     in output' for PERFECT JSON, driving the 666-parse_error census. The
     robust parser strips the fences."""
-    import json
+
     from tortoise.extractor_v2 import _parse_json
     fenced = '```json\n{"entities": [], "points": [{"content": "x"}]}\n```'
     r = _parse_json(fenced)

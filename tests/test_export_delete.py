@@ -274,7 +274,7 @@ class TestExportSupabase:
         monkeypatch.setattr(ha_mod, "_EXPORT_MAX_EVENTS", 3)
         tc, fake, db_path = sb_client
         _seed_supabase_team(fake)
-        seed_sdk = _seed_graph(db_path, n_events=5)
+        seed_sdk = _seed_graph(db_path, n_events=5)  # noqa: F841
         as_user()
         r = tc.get(f"/v1/teams/{TEAM_ID}/export")
         assert r.status_code == 200, r.text
@@ -289,7 +289,7 @@ class TestExportSupabase:
     def test_export_happy_path(self, sb_client, as_user):
         tc, fake, db_path = sb_client
         _seed_supabase_team(fake)
-        seed_sdk = _seed_graph(db_path)
+        seed_sdk = _seed_graph(db_path)  # noqa: F841
         as_user()
         r = tc.get(f"/v1/teams/{TEAM_ID}/export")
         assert r.status_code == 200, r.text
@@ -329,7 +329,7 @@ class TestExportSupabase:
     def test_export_audited(self, sb_client, as_user, capture_audit):
         tc, fake, db_path = sb_client
         _seed_supabase_team(fake)
-        seed_sdk = _seed_graph(db_path)
+        seed_sdk = _seed_graph(db_path)  # noqa: F841
         as_user()
         r = tc.get(f"/v1/teams/{TEAM_ID}/export")
         assert r.status_code == 200
@@ -444,7 +444,7 @@ class TestExportDeleteRegistry:
     def test_export_happy_path_registry(self, reg_client, as_user):
         tc, db_path = reg_client
         _seed_registry(db_path)
-        seed_sdk = _seed_graph(db_path, team_id="reg-team-1")
+        seed_sdk = _seed_graph(db_path, team_id="reg-team-1")  # noqa: F841
         as_user(user_id="u-owner")
         r = tc.get("/v1/teams/reg-team-1/export")
         assert r.status_code == 200, r.text
@@ -474,7 +474,7 @@ class TestExportDeleteRegistry:
             "CREATE (m:Membership {id:'m-2', user_id:'u-owner', "
             "team_id:'reg-named', role:'owner', status:'active'})"
         )
-        seed_sdk = _seed_graph(db_path, team_id="Acme", n_points=1, n_events=0)
+        seed_sdk = _seed_graph(db_path, team_id="Acme", n_points=1, n_events=0)  # noqa: F841
         as_user(user_id="u-owner")
         r = tc.get("/v1/teams/reg-named/export")
         assert r.status_code == 200, r.text

@@ -14,7 +14,7 @@ os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 import pytest  # noqa: I001
 from fastapi.testclient import TestClient
 
-from tortoise.hosted_api import app, _make_sdk  # noqa: F401
+from tortoise.hosted_api import app, _make_sdk
 from tortoise.sdk import TortoiseSDK
 
 

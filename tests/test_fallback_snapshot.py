@@ -143,9 +143,9 @@ def test_fallback_snapshot_supersede_decoration(sdk):
     machinery the full path uses) so [SUPERSEDED BY] renders in embedded
     mode. A superseded hit (include_terminal=True) carries status + the
     superseding claim; undecorated hits stay byte-identical."""
-    a = sdk.create_point("statement", "espresso preferred in the morning",
+    a = sdk.create_point("statement", "espresso preferred in the morning",  # noqa: F841
                          id="ku_old", status="live")
-    b = sdk.create_point("statement", "drip coffee preferred now",
+    b = sdk.create_point("statement", "drip coffee preferred now",  # noqa: F841
                          id="ku_new", status="live")
     sdk.supersede_point("ku_old", "ku_new")
 

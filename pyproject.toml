@@ -63,6 +63,8 @@ dev = [
     "jax>=0.4",
     "playwright>=1.40",
     "pytest-playwright>=0.5",
+    "ruff==0.16.4",  # #1685: pin ruff (CI lint-command + local `uv run ruff`
+    # align — the unpinned agent-infra job install was the drift vector).
 ]
 
 [tool.setuptools.packages.find]
@@ -84,6 +86,17 @@ tortoise = ["config/routing.yaml"]
 #   ruff  — 3,753 violations across 534 files (select below, line-length 100)
 #   mypy  — 406 errors in 58 files (123 checked, per-code counts in
 #           docs/lint-baseline-1503.md)
+#
+# #1685 (2026-08-25): the ruff baseline DRIFTED — verified root cause was NOT
+# a 0.16.3→0.16.4 behavior change (both report byte-identical locations): the
+# baseline NEVER held at merge #1504 (369 violations; hosted_api.py + ~20
+# files uncovered; the CI lint was narrowed to the syntax class E9/F63/F7 so
+# the red passed silently), and +104 more drifted over 319 commits. Refreshed
+# to 0 errors on 2026-08-25 with ruff 0.16.4 (473 violations: 230 safe-fixed
+# by `--fix`, 242 `# noqa` directives added) AND pinned: the CI lint-command
+# prefixes `pip install ruff==0.16.4` (ci.yml) and the dev group carries
+# ruff==0.16.4 (pyproject.toml) so the unpinned agent-infra job install
+# cannot drift again. Counts: docs/lint-baseline-1503.md.
 #
 # The baseline makes the full pass run green WITHOUT a code refactor:
 #   ruff — the 3,753 existing violations are recorded as per-line `# noqa`

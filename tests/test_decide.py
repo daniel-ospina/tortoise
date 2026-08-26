@@ -75,7 +75,8 @@ class TestDecideScriptSmoke:
     the live FalkorDB and asserts a clean run (ticks + EP, no ⚠ failures)."""
 
     def test_script_runs_clean(self):
-        import subprocess, sys
+        import subprocess
+        import sys
         import uuid as _uuid
         graph = f"test_decide_smoke_{_uuid.uuid4().hex[:8]}"
         uri = f"docker://:@localhost:16379/{graph}"
