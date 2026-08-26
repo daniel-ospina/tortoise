@@ -1558,6 +1558,15 @@ def run_evaluation(
         evidence_boost_source = _resolve_boost_float(
             "TORTOISE_LME_EVIDENCE_BOOST_SOURCE",
             DEFAULT_EVIDENCE_BOOST_SOURCE, evidence_boost_source)
+    else:
+        # Off-path: never record/fingerprint inert multipliers — an
+        # explicitly-passed programmatic value is dropped (the CLI layer
+        # is the user-facing validation surface; here the knob has no
+        # effect on the run, so it must not gate the checkpoint or the
+        # methodology). The fingerprint's conditional key union drops
+        # None, and the methodology falls back to the default constants.
+        evidence_boost_verbatim = None
+        evidence_boost_source = None
     # M7 #1739 / #1742: the session-parallel worker factory must serve
     # EXACTLY the fingerprinted config — a programmatic caller passing a
     # spec'd extractor_model with session_workers > 1 but forgetting the
@@ -2810,7 +2819,11 @@ def _run_main(parser: argparse.ArgumentParser, args,
         # value must never abort a baseline run (or gate its fingerprint).
         # EXPLICIT CLI args are still validated even on the off path — a
         # user typo (--evidence-boost-verbatim 0.5 / nan) fails loudly
-        # (test_knob_cli_validation contract).
+        # (test_knob_cli_validation contract). After validation the values
+        # are DROPPED (set to None) so the inert knobs never ride the
+        # fingerprint or the methodology on a boost-off run (review
+        # re-check: a checkpoint must not become sensitive to a knob that
+        # never affected the results).
         if args.evidence_boost_verbatim is not None:
             _resolve_boost_float(
                 "TORTOISE_LME_EVIDENCE_BOOST_VERBATIM",
@@ -2819,6 +2832,8 @@ def _run_main(parser: argparse.ArgumentParser, args,
             _resolve_boost_float(
                 "TORTOISE_LME_EVIDENCE_BOOST_SOURCE",
                 DEFAULT_EVIDENCE_BOOST_SOURCE, args.evidence_boost_source)
+        evidence_boost_verbatim = None
+        evidence_boost_source = None
     # R5 (#1544) TR knobs: argparse defaults (12 / 0.5 / events-on),
     # recorded verbatim in the report methodology (D7).
     tr_top_k = args.tr_top_k
