@@ -409,7 +409,7 @@ class TestRegistryLegacyNode:
         import tortoise.sdk as sdk_mod
         from tortoise.auth import hash_api_key
 
-        sdk = sdk_mod.TortoiseSDK(namespace="registry-legacy-test")
+        sdk = sdk_mod.TortoiseSDK(namespace="test_registry_legacy_test")
         reg = sdk._get_registry()
         team_id = f"legacy-team-{uuid.uuid4().hex[:10]}"
         api_key = f"tt_{uuid.uuid4().hex}"
