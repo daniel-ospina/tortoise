@@ -416,6 +416,10 @@ def test_abstention_clause_commits_on_present_value_any_phrasing():
     # answer when the context states it as the fact — negated/rejected/
     # hypothetical mentions must not be committed to
     assert "negated, rejected, or hypothetical" in low
+    # the OPERATIVE guard verb — the phrase _NonAnswerMentionModel gates
+    # its abstention branch on (#1768 second-model: pinned so a reword
+    # fails here instead of silently flipping the fake's branch)
+    assert "must not be committed to" in low
     assert "do not weaken your answer" in low
 
 
@@ -693,37 +697,6 @@ def test_non_answer_mention_not_committed(tmp_path, turn):
     assert "gray" not in hyp.lower()      # no commit to the non-answer
 
 
-def test_fake_commit_branch_keys_on_operative_rule():
-    """Test-sensitivity guard (#1762 review): the fake's commit branch must
-    key on the OPERATIVE rule, not mere marker presence. Mutating the rule
-    (removing the hedge ban) while keeping the rest of the clause flips the
-    fake to its pre-#1762 hedge branch — so a semantic regression that
-    preserves the pinned phrases would be caught by the e2e tests."""
-    user = ("[user] I painted the walls a lighter shade of gray for a "
-            "calming effect.")
-    mutated = system_prompt_for("single-session-user").replace(
-        "forbidden when X is the answer", "allowed when X is the answer")
-    assert "does not contain" in _CommitOnPresentValueModel().complete(
-        system=mutated, user=user)             # rule removed → hedges
-    assert "a lighter shade of gray" in _CommitOnPresentValueModel().complete(
-        system=system_prompt_for("single-session-user"), user=user)
-
-
-def test_guard_branch_keys_on_operative_rule():
-    """Test-sensitivity guard (#1762 review): the overshoot-guard fake must
-    key on the operative rule ('must not be committed to'), not the topic
-    phrase — mutating the rule flips the fake to its pre-guard commit, so a
-    rule-weakening regression fails loudly instead of passing."""
-    user = ("[user] I never painted the walls gray — that color was never "
-            "part of the plan.")
-    mutated = system_prompt_for("single-session-user").replace(
-        "must not be committed to.", "may be committed to.")
-    assert "gray" in _NonAnswerMentionModel().complete(
-        system=mutated, user=user)             # rule weakened → commits
-    assert "does not mention" in _NonAnswerMentionModel().complete(
-        system=system_prompt_for("single-session-user"), user=user)
-
-
 def _vacuity_question() -> dict:
     """Terminal vacuity branch (#1762 review finding): the context
     contains NOTHING related to the asked attribute — the reader must
@@ -906,22 +879,73 @@ def _mixed_mention_question() -> dict:
     }
 
 
+class _NegationAwareCommitModel:
+    """Commit + overshoot-guard interaction fake (#1768 second-model
+    gate): the negation is NOT invisible to the decision. The fake gates
+    on the operative commit rule, reads the affirmative fact from the
+    rendered context, and commits ONLY when the fact is present — with
+    the commit-on-fact behavior stripped (``commit_on_fact=False``), the
+    same mixed context flips to evidence-backed abstention, proving the
+    green leg's commit is conditional on the affirmative fact rather
+    than vacuous."""
+
+    _AFFIRMATIVE = re.compile(r"painted the walls (.+?) for ")
+    _NEGATION = re.compile(
+        r"never painted the walls|ruled out for the walls|"
+        r"If I ever painted the walls")
+
+    def __init__(self, *, commit_on_fact: bool = True):
+        self._commit_on_fact = commit_on_fact
+
+    def complete(self, *, system: str, user: str) -> str:
+        aff = self._AFFIRMATIVE.search(user)
+        if self._commit_on_fact and aff:
+            # gate on the operative commit rule: a rule-weakening that
+            # keeps the pinned topic phrases must flip this branch red
+            if "in any phrasing, it IS the answer" not in system:
+                return ("The memory mentions lighter gray walls, but it "
+                        "does not contain the asked information.")
+            return aff.group(1).strip()
+        if self._NEGATION.search(user):
+            # negation present and no fact committed → evidence-backed
+            # abstention (the over-abstention class when the fact WAS in
+            # the context but the reader let the negation dominate)
+            return ("The memory does not mention repainting the bedroom "
+                    "walls.")
+        return ("The memory mentions lighter gray walls, but it does not "
+                "contain the asked information.")
+
+
 def test_mixed_negated_and_affirmative_commits(tmp_path):
     """#1762: when the context carries BOTH a negated mention and the
     affirmative fact, the reader commits to the fact — the negation must
-    not trigger abstention. Uses the context-reading
-    _CommitOnPresentValueModel: its regex matches the affirmative 'painted
-    the walls <value> for ' phrase, so the hypothesis is the value read
-    from the rendered context."""
-    reader = LLMReader(_CommitOnPresentValueModel(), model_id="commit")
-    outcomes, _ = run_evaluation(
-        [_mixed_mention_question()], reader=reader, judge=MockJudge(),
-        ks=(5,), top_k=20, split="s", work_dir=str(tmp_path))
-    assert outcomes[0]["label"] is True
-    hyp = outcomes[0]["hypothesis"]
+    not trigger abstention (the over-abstention class this issue fixes).
+    #1768 second-model: the fake is negation-AWARE; the red leg strips
+    commit-on-fact so the same context abstains, proving the green leg's
+    commit is conditional on the affirmative fact (a reader that abstains
+    on any negation fails red, not green)."""
+    green = run_evaluation(
+        [_mixed_mention_question()],
+        reader=LLMReader(_NegationAwareCommitModel(commit_on_fact=True),
+                         model_id="mixed-commit"),
+        judge=MockJudge(), ks=(5,), top_k=20, split="s",
+        work_dir=str(tmp_path))
+    assert green[0][0]["label"] is True
+    hyp = green[0][0]["hypothesis"]
     assert hyp == "a lighter shade of gray"
     assert "does not contain" not in hyp
     assert "does not mention" not in hyp
+    # red: commit-on-fact stripped — the negation now drives abstention
+    # despite the affirmative fact being in the same context; MockJudge
+    # (non-abstention question, containment rule) scores it wrong
+    red = run_evaluation(
+        [_mixed_mention_question()],
+        reader=LLMReader(_NegationAwareCommitModel(commit_on_fact=False),
+                         model_id="mixed-abstain"),
+        judge=MockJudge(), ks=(5,), top_k=20, split="s",
+        work_dir=str(tmp_path))
+    assert red[0][0]["label"] is False
+    assert "does not mention" in red[0][0]["hypothesis"]
 
 
 def _hedge_embedding_question() -> dict:
