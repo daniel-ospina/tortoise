@@ -10,7 +10,8 @@ extractor model reports its integrity on the same block.
 #1747: the ``valid`` VERDICT is now census-class-aware — ``valid == True`` iff
 ``invalid_rate <= threshold`` AND zero hard-failure questions. Recoverable
 classes (parse_error / truncated / truncated_parse_error / partial_parse /
-transient_*) are rate-limited (a healthy run at 500-Q scale admits a handful
+transient_* census classes, plus reader/judge:retries_exhausted eval
+failures) are rate-limited (a healthy run at 500-Q scale admits a handful
 — the old binary ``len(errors)==0`` invalidity made ``valid=true``
 unreachable); hard classes (fatal_* / ingest / unknown census classes /
 non-census error strings with an EMPTY census / permanent eval failures /
@@ -22,7 +23,7 @@ concurrent-checkpoint robustness); ``n_valid`` /
 ``n_invalid`` / ``invalid_rate`` keep their previous semantics for the
 production shape; the breakdown rides in the additive ``n_hard_invalid`` /
 ``n_recoverable_invalid`` / ``recoverable_invalid_rate`` / ``criterion`` /
-``error_census_malformed`` fields.
+``error_census_malformed`` / ``n_excluded`` fields.
 """
 from __future__ import annotations
 
@@ -219,7 +220,8 @@ def test_report_integrity_recoverable_census_with_runner_clean_is_valid():
     already declared clean (valid=True) grades clean — the binary flag is
     the authority on whether error strings exist. This shape is UNREACHABLE
     with the current runner (every census bump pairs an errors.append, so
-    non-empty census ⟹ valid=False — extractor_v2/run.py lockstep), but the
+    non-empty census ⟹ valid=False — tortoise/extractor_v2.py +
+    tools/longmem_eval/run.py lockstep), but the
     grader's default is pinned so a future producer split cannot silently
     downgrade clean questions."""
     integ = _report([_outcome("q0", valid=True,
@@ -693,6 +695,66 @@ def test_report_integrity_malformed_dict_outcome_dropped():
     integ = _report([bad, _outcome("q1", valid=True)], threshold=0.5)["integrity"]
     assert integ["n_attempted"] == 1
     assert integ["valid"] is True
+    # extended shape whitelist (security-review P1, 14 crash shapes):
+    # non-numeric latency / pool_size / ndcg, non-dict leg_mix, list
+    # question_type, non-numeric recall values, None/missing context and
+    # recall dicts — all excluded, never crash.
+    for mutate in (
+            lambda o: o.__setitem__("retrieval_latency_ms", "slow"),
+            lambda o: o.__setitem__("pool_size", "big"),
+            lambda o: o.__setitem__("ndcg@10", "high"),
+            lambda o: o.__setitem__("leg_mix", "oops"),
+            lambda o: o.__setitem__("question_type", ["a", "b"]),
+            lambda o: o["session_recall@k"].__setitem__("5", "oops"),
+            lambda o: o.__setitem__("evidence_recall@k", "oops"),
+            lambda o: o.__setitem__("ingest", {"evidence_turns": "many"}),
+            lambda o: o.__setitem__("evidence_retrieved@k", {"5": "oops"}),
+            # None/missing shapes (VGATE-pinned): o[...]-dereferenced keys
+            lambda o: o.__setitem__("session_recall@k", None),
+            lambda o: o.__setitem__("turn_recall@k", None),
+            lambda o: o.__setitem__("context_tokens", None),
+            lambda o: o.pop("context_tokens"),
+            lambda o: o.pop("context_point_count"),
+            lambda o: o["session_recall@k"].__setitem__("5", None),
+    ):
+        o = _outcome("q0", valid=True)
+        mutate(o)
+        integ = _report([o, _outcome("q1", valid=True)],
+                        threshold=0.5)["integrity"]
+        assert integ["n_attempted"] == 1, f"shape not excluded: {o!r}"
+        assert integ["valid"] is True
+    # M6 N/A semantics are preserved: None TURN-recall values are LEGITIMATE
+    # (dropped from the mean), so an outcome with them is NOT excluded.
+    o = _outcome("q0", valid=True)
+    o["turn_recall@k"] = {"5": None}
+    integ = _report([o, _outcome("q1", valid=True)],
+                    threshold=0.5)["integrity"]
+    assert integ["n_attempted"] == 2
+    assert integ["valid"] is True
+    # n_excluded surfaces the shape-filter drops (never a silent shrink).
+    bad = _outcome("q0", valid=True)
+    bad["pool_size"] = "big"
+    integ = _report([bad, _outcome("q1", valid=True)],
+                    threshold=0.5)["integrity"]
+    assert integ["n_excluded"] == 1
+    assert integ["n_attempted"] == 1
+
+
+def test_report_integrity_missing_qid_failures_not_merged():
+    """#1747 (reviewer-pinned): failure entries with NO question_id are
+    distinct unknown questions — per-object keys, never merged into one
+    undercounted entry."""
+    integ = _report([_outcome(f"q{i}", valid=True) for i in range(49)],
+                    failures=[
+                        {"error_class": "reader:retries_exhausted",
+                         "error": "x", "failed_at_utc": "x"},
+                        {"error_class": "reader:retries_exhausted",
+                         "error": "y", "failed_at_utc": "y"},
+                    ], threshold=0.02)["integrity"]
+    assert integ["n_attempted"] == 51
+    assert integ["n_recoverable_invalid"] == 2
+    assert integ["invalid_rate"] == round(2 / 51, 4)
+    assert integ["valid"] is False   # 0.039 > 0.02 — no undercount flip
 
 
 def test_report_integrity_sentinel_qid_collision_impossible():

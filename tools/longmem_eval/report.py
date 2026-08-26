@@ -380,15 +380,78 @@ def build_report(
     # strings). Non-str question_ids are NOT dropped — they are graded under
     # collision-proof tuple keys so a hard census on a malformed-qid outcome
     # still VETOES.
+    def _num(v: Any) -> bool:
+        """numeric-or-None — safe for float(v or 0.0) / skip-None sites."""
+        return v is None or isinstance(v, (int, float))
+
+    def _recall_dict(v: Any, *, allow_none_values: bool = True) -> bool:
+        """recall dicts: dict with numeric values; None values are allowed
+        where the aggregation drops them (turn/evidence N/A semantics),
+        disallowed where they are summed directly (session recall)."""
+        if v is None:
+            return True
+        if not isinstance(v, dict):
+            return False
+        for x in v.values():
+            if allow_none_values and x is None:
+                continue
+            if not isinstance(x, (int, float)):
+                return False
+        return True
+
+    def _recall_dict_present(o: dict[str, Any], key: str,
+                             *, allow_none_values: bool = False) -> bool:
+        """session/turn recall are dereferenced via o[...] (no or-{}
+        fallback) — the key must be a PRESENT dict. Session values are summed
+        directly (no N/A → numeric only); turn values may be None (M6 N/A,
+        dropped from the mean)."""
+        v = o.get(key)
+        if not isinstance(v, dict):
+            return False
+        for x in v.values():
+            if allow_none_values and x is None:
+                continue
+            if not isinstance(x, (int, float)):
+                return False
+        return True
+
     def _outcome_shape_ok(o: dict[str, Any]) -> bool:
-        return (all(k in o for k in (
-                    "question_id", "label", "session_recall@k",
-                    "turn_recall@k", "context_tokens",
-                    "context_point_count"))
-                and isinstance(o.get("session_recall@k"), dict)
-                and isinstance(o.get("turn_recall@k"), dict)
+        """Every key the aggregation dereferences directly must be present
+        with a coercible type — a malformed checkpoint outcome that passes
+        run.py's presence-only loader gate is EXCLUDED here instead of
+        crashing mid-report (security-review P1; the loader-side
+        REQUIRED_OUTCOME_KEYS type-hardening is tracked in #1770). Note the
+        asymmetry: session_recall@k VALUES are summed directly (no N/A), so
+        None values are excluded; turn/evidence recall values are dropped
+        when None (M6 N/A semantics), so None values are allowed; context
+        keys are dereferenced via o[...] and must be PRESENT and numeric."""
+        return ("label" in o
+                and isinstance(o.get("question_type", ""), str)
+                and _recall_dict_present(o, "session_recall@k")
+                and _recall_dict_present(o, "turn_recall@k",
+                                         allow_none_values=True)
+                and _recall_dict(o.get("evidence_recall@k"))
+                and _recall_dict(o.get("chunk_evidence_recall@k"))
+                and _recall_dict(o.get("evidence_retrieved@k"))
                 and isinstance(o.get("context_tokens"), (int, float))
-                and isinstance(o.get("context_point_count"), (int, float)))
+                and isinstance(o.get("context_point_count"), (int, float))
+                and all(_num(o.get(k)) for k in (
+                    "pool_size", "evidence_written", "retrieval_latency_ms",
+                    "reader_latency_ms", "judge_latency_ms",
+                    "ingest_latency_ms", "total_ms"))
+                and all(_num(o.get(k)) for k in ("ndcg@10", "p@10", "p@5"))
+                and (o.get("leg_mix") is None
+                     or (isinstance(o["leg_mix"], dict)
+                         and all(_num(v) for v in o["leg_mix"].values())))
+                and (o.get("ingest") is None
+                     or (isinstance(o["ingest"], dict)
+                         and all(_num(v) for k, v in o["ingest"].items()
+                                if k in ("evidence_turns", "evidence_points"))))
+                and (o.get("rerank_pass") is None
+                     or (isinstance(o["rerank_pass"], dict)
+                         and (o["rerank_pass"].get("pool_recall@k") is None
+                              or isinstance(o["rerank_pass"]["pool_recall@k"],
+                                            dict)))))
 
     outcomes = [o for o in outcomes if isinstance(o, dict)]
     # #1349: questions dropped by the vector arm (breaker_open) are excluded
@@ -397,8 +460,10 @@ def build_report(
     # legitimately lack retrieval keys (no retrieval was run) and never reach
     # the aggregations.
     dropped = [o for o in outcomes if o.get("breaker_open")]
-    outcomes = [dict(o) for o in outcomes
+    shape_ok = [o for o in outcomes
                 if not o.get("breaker_open") and _outcome_shape_ok(o)]
+    n_excluded = len(outcomes) - len(dropped) - len(shape_ok)
+    outcomes = [dict(o) for o in shape_ok]
     for o in outcomes:
         ec = o.get("error_classes")
         if isinstance(ec, dict):
@@ -570,6 +635,11 @@ def build_report(
         qid = o.get("question_id")
         if isinstance(qid, str):
             return qid
+        if qid is None:
+            # a MISSING qid is not a shared identity — per-object key so
+            # distinct unknown-question entries never undercount (reviewer-
+            # pinned, #1747).
+            return ("__anon__", id(o))
         try:
             hash(qid)
         except TypeError:  # unhashable (list/dict) — per-object key
@@ -664,6 +734,9 @@ def build_report(
         "valid": (n_hard_invalid == 0) and (invalid_rate <= effective_threshold),
         "threshold": effective_threshold,
         "n_attempted": n_attempted,
+        "n_excluded": n_excluded,  # #1747: outcomes dropped by the entry
+        # shape filter (malformed checkpoint JSON) — the denominator shrink
+        # is observable, never silent (history-review P2).
         "n_valid": n_valid,
         "n_invalid": n_invalid,
         "n_failed": len(failures or []),  # M4 #1524 (D5): cross-ref
@@ -1111,7 +1184,9 @@ def _json_safe(obj: Any) -> Any:
     if isinstance(obj, tuple):
         return [_json_safe(v) for v in obj]
     if isinstance(obj, (set, frozenset)):
-        return sorted(_json_safe(v) for v in obj)
+        # repr-key sort so a mixed-type set can never TypeError (security
+        # review, #1747).
+        return sorted((_json_safe(v) for v in obj), key=repr)
     return obj
 
 

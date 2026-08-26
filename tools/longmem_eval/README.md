@@ -264,7 +264,10 @@ The report is self-explanatory: every run prints and persists
   truncated_parse_error/partial_parse/transient_*, plus
   reader/judge:retries_exhausted eval failures — are rate-limited, not
   vetoed), the #1747 breakdown `n_hard_invalid` /
-  `n_recoverable_invalid` / `recoverable_invalid_rate`, `error_census`
+  `n_recoverable_invalid` / `recoverable_invalid_rate`,
+  `n_excluded` (outcomes dropped by the entry shape filter — malformed
+  checkpoint JSON; the denominator shrink is observable, never silent),
+  `error_census`
   (site-prefixed P2-aligned error classes: `reader:retries_exhausted`,
   `judge:fatal`, …), `error_census_malformed` (non-int counts recorded
   verbatim), `criterion` (the applied gate rule, human-readable), `checks`

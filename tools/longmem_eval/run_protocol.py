@@ -91,7 +91,9 @@ class Step:
     owner_gated: bool = False
 
 
-#: The 9-step protocol, verbatim from 03-scope §Run/Testing Protocol.
+#: The 9-step protocol from 03-scope §Run/Testing Protocol (step-5 gate
+#: amended per #1747: census-class-aware criterion + justified 0.02
+#: threshold).
 STEPS: list[Step] = [
     Step(1, "code-review", "Code review + bug pass", "gate",
          "clean review (code-review skill), no known bugs in code"),
