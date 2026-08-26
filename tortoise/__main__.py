@@ -631,12 +631,15 @@ def _cmd_init(args):
 
 
 
-def _read_stored_signup_token() -> str | None:
-    """Stored st_ token from the active configs (#1709).
+def _read_stored_signup_token_with_source() -> tuple[str | None, Path | None]:
+    """Stored st_ token from the active configs (#1709), WITH its source.
 
     cwd/.tortoise first (legacy shape), then the #1708 global
     ~/.tortoise/credentials.json (the canonical store). The field is
-    additive in either file — the two land compatibly.
+    additive in either file — the two land compatibly. Returns
+    (token, source_path); #1752 needs the path to warn about source
+    divergence (revoke/recover read the token from a DIFFERENT config
+    than the auth key).
     """
     import json as _j
     from pathlib import Path
@@ -648,7 +651,78 @@ def _read_stored_signup_token() -> str | None:
             continue
         tok = cfg.get("signup_token") if isinstance(cfg, dict) else None
         if isinstance(tok, str) and tok:
+            return tok, path
+    return None, None
+
+
+def _read_stored_signup_token() -> str | None:
+    """Stored st_ token from the active configs (#1709) — token only.
+
+    Thin wrapper over _read_stored_signup_token_with_source preserving the
+    pre-#1752 single-value contract for _cmd_signup.
+    """
+    return _read_stored_signup_token_with_source()[0]
+
+
+def _resolve_same_source_token(args, cfg_path, cfg, surface: str = "revoke") -> str | None:
+    """#1752: signup token for revoke/recover resolved from the SAME
+    config the auth key came from (the #1708 env → cwd → global resolver).
+
+    --token wins (the user's explicit choice — used as-is, silently); else
+    the resolved config's OWN signup_token (same file as the key → no
+    divergence); else the cwd→global stored read — with a stderr warning
+    naming BOTH sources when they diverge (mirrors the #1708 env-shadow
+    warning style). An env key has NO token, so any stored token is
+    necessarily a different source → always warned. With no key source at
+    all (keyless `recover`) the stored token is used silently — there is
+    nothing to diverge from.
+    """
+    import os as _os
+    import sys as _sys
+    token = getattr(args, "token", None)
+    if token:
+        return token
+    if isinstance(cfg, dict):
+        tok = cfg.get("signup_token")
+        if isinstance(tok, str) and tok:
             return tok
+    stored_token, stored_src = _read_stored_signup_token_with_source()
+    if stored_token is None:
+        return None
+    if stored_src == cfg_path:
+        return stored_token  # defensive — same file, nothing to warn about
+    if cfg_path is not None:
+        key_src = str(cfg_path)
+    elif _os.environ.get("TORTOISE_API_KEY", "").strip():
+        key_src = "TORTOISE_API_KEY (env)"
+    else:
+        return stored_token  # no key source at all (keyless recover)
+    print(f"⚠️  note: your recovery token comes from {stored_src}, but your "
+          f"API key comes from {key_src} — if they are different teams, "
+          "revoke/recover will fail with 403.", file=_sys.stderr)
+    return stored_token
+
+
+def _read_stored_config_api_url() -> str | None:
+    """Stored api_url from the active configs (#1749 token-only fallback).
+
+    Same candidates as _read_stored_signup_token (cwd/.tortoise legacy
+    shape, then the #1708 global ~/.tortoise/credentials.json). Used when
+    _resolve_config_path raises _ConfigError on a config that parses but
+    carries no api_key — recover authenticates with the signup token and
+    only needs the URL, so a keyless config must not block recovery.
+    """
+    import json as _j
+    from pathlib import Path
+    for path in (Path.cwd() / ".tortoise",
+                 Path.home() / ".tortoise" / "credentials.json"):
+        try:
+            cfg = _j.loads(path.read_text())
+        except Exception:
+            continue
+        url = cfg.get("api_url") if isinstance(cfg, dict) else None
+        if isinstance(url, str) and url.strip():
+            return url.strip()
     return None
 
 
@@ -670,21 +744,46 @@ def _cmd_recover(args) -> int:
     persistence this surface would be one-shot-only and the NEXT key-loss
     would silently fresh-mint and orphan the recovered team.
     """
-    import json, os, sys, time, uuid  # noqa: E401, I001
+    import json, os, sys, uuid  # noqa: E401, I001
     from pathlib import Path
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
 
-    token = getattr(args, "token", None) or _read_stored_signup_token()
+    # #1752: resolve the token from the SAME config the auth key comes from
+    # (env → cwd → global). A corrupt config must NOT block keyless
+    # recovery via --token — fall back to the stored-token read with no
+    # key source, which prints no divergence warning (nothing to diverge).
+    try:
+        _cfg_path, _cfg, _api_key, _api_url = _resolve_config_path()
+    except _ConfigError:
+        _cfg_path, _cfg = None, None
+    token = _resolve_same_source_token(args, _cfg_path, _cfg, surface="recover")
     if not token:
         print("No recovery token found. Pass --token st_... or run "
               "'tortoise signup' first.", file=sys.stderr)
         return 1
+    # API host via the #1708 resolver chain (env → cwd → global), mirroring
+    # _cmd_token_revoke — the stored config's api_url must beat the default
+    # host (#1749: env-only resolution made recovery dead on any non-default
+    # host — it POSTed to prod and 422'd with a misleading message).
     api_url = os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
+    try:
+        _cfg_path, _cfg, _api_key, resolved_url = _resolve_config_path()
+        if resolved_url:
+            api_url = resolved_url
+    except _ConfigError:
+        # A token-only config (valid JSON, no api_key) trips the resolver's
+        # api_key invariant — recover authenticates with the signup token
+        # (no key needed), so read the stored api_url directly instead of
+        # failing on the recover surface (#1749).
+        stored_url = _read_stored_config_api_url()
+        if stored_url:
+            api_url = stored_url
+    base = api_url.rstrip("/")
     print("Recovering your team key with the saved recovery token…")
     try:
         req = Request(
-            f"{api_url}/v1/agent/recover",
+            f"{base}/v1/agent/recover",
             data=json.dumps({"signup_token": token}).encode(),
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -708,7 +807,7 @@ def _cmd_recover(args) -> int:
         print(f"Recovery failed ({e.code}): {body}", file=sys.stderr)
         return 1
     except (URLError, ValueError, json.JSONDecodeError) as e:
-        print(f"Cannot reach API at {api_url}: {e}", file=sys.stderr)
+        print(f"Cannot reach API at {base}: {e}", file=sys.stderr)
         return 1
 
     if not (isinstance(data, dict) and "key" in data and "team_id" in data):
@@ -761,15 +860,10 @@ def _cmd_token_revoke(args) -> int:
     it is noticed. Prints confirmation; the stored config is left intact
     (the revoked token simply 422s on any later recover).
     """
-    import json, os, sys  # noqa: E401, I001
+    import json, sys  # noqa: E401, I001
     from urllib.error import HTTPError, URLError
     from urllib.request import Request, urlopen
 
-    token = getattr(args, "token", None) or _read_stored_signup_token()
-    if not token:
-        print("No recovery token found. Pass --token st_... or run "
-              "'tortoise signup' first.", file=sys.stderr)
-        return 1
     try:
         _cfg_path, _cfg, api_key, api_url = _resolve_config_path()
     except _ConfigError as e:
@@ -780,6 +874,15 @@ def _cmd_token_revoke(args) -> int:
         print("No stored API key found. Run 'tortoise signup' or "
               "'tortoise init --api-key <key>' first — the revoke request "
               "must be authenticated by the team's key.", file=sys.stderr)
+        return 1
+    # #1752: the token must come from the SAME config the auth key came
+    # from — an env key has no token, so a stored token from another source
+    # is used only with a warning naming the shadow source (no silent 403
+    # "Not your signup token" dead-end when the sources are different teams).
+    token = _resolve_same_source_token(args, _cfg_path, _cfg)
+    if not token:
+        print("No recovery token found. Pass --token st_... or run "
+              "'tortoise signup' first.", file=sys.stderr)
         return 1
     base = (api_url or "https://api.premiselabs.co").rstrip("/")
     print("Revoking the signup token — it can no longer recover keys on this team…")
@@ -1176,14 +1279,38 @@ def _cmd_signup(args) -> int:
         # (echo key + exit 1) — the correct fail-closed outcome.
         os.replace(tmp_path, config_path)
     except OSError as e:
-        # Orphan class: the key was minted but cannot be saved — echo it and
-        # fail closed so the user never loses the key and never silently
-        # re-mints (the incident pattern this issue fixes).
+        # Orphan class: the key was minted but cannot be saved — echo it AND
+        # the recovery token (the success-path shown-once contract) and fail
+        # closed so the user never loses either and never silently re-mints
+        # (the incident pattern #1750 fixes: a re-run minted a SECOND team
+        # and the first's token was never shown).
         print(f"A key was minted but could NOT be saved to {config_path}: {e}",
               file=sys.stderr)
         print(f"Your API key (store it manually): {data['key']}", file=sys.stderr)
-        print("Fix the path permissions and re-run, or use the key directly.",
-              file=sys.stderr)
+        orphan_token = config.get("signup_token")
+        if orphan_token:
+            print(f"   Recovery token (save it now): {orphan_token}", file=sys.stderr)
+            print("   RECOVERY TOKEN — save this: it is the only way back into "
+                  "this team if your key is lost.", file=sys.stderr)
+        if stored_token:
+            # recovery-orphan leg: the server recovered the SAME team, only the
+            # save failed — re-running re-presents the token and re-recovers
+            # the SAME team; no new team is created (review P2, #1750).
+            print("Fix the path permissions and re-run — recovery is re-attempted "
+                  "on the SAME team (no new team is created). "
+                  "The key+token above are your only access until then.",
+                  file=sys.stderr)
+        elif orphan_token:
+            # fresh-mint-orphan leg: a re-run with no stored key mints a SECOND
+            # team and orphans the first — warn hard (the incident pattern).
+            print("Fix the path permissions and re-run, or use the key directly — "
+                  "but do NOT re-run blindly: this creates a NEW team; the old "
+                  "team's key+token above are your only access.", file=sys.stderr)
+        else:
+            # fresh mint returned no token — only the key exists above.
+            print("Fix the path permissions and re-run, or use the key directly — "
+                  "but do NOT re-run blindly: this creates a NEW team; the API "
+                  "key above is your only access.", file=sys.stderr)
         return 1
 
     # D3 (generalized, #1708 fixer P1): whenever a mint happened while a
@@ -1203,10 +1330,22 @@ def _cmd_signup(args) -> int:
               "this new key at read time — unset/remove it to use the key just minted.",
               file=sys.stderr)
 
-    if new_token:
-        print(f"✅ Free team created: {data.get('team_name')}")
-    else:
+    # #1751: the success message must key off whether a token was PRESENTED
+    # (stored_token — a recovery) vs whether the mint RETURNED one (new_token —
+    # a fresh mint). A fresh mint whose response lacks signup_token (server
+    # version skew / a field-stripping proxy) is NOT a recovery — "data intact"
+    # would be false — so say "Free team created" and warn the recovery
+    # backdoor was not issued (the same fail-soft contract as the missing-key
+    # leg: never misreport, never silently drop a credential).
+    if stored_token:
         print(f"✅ Key recovered on existing team: {data.get('team_name')} (data intact)")
+    else:
+        print(f"✅ Free team created: {data.get('team_name')}")
+        if not new_token:
+            print("⚠️  Recovery backdoor NOT created — the server did not return "
+                  "a signup token; you cannot use `tortoise recover` for this "
+                  "team. The API key above is your only access — store it safely.",
+                  file=sys.stderr)
     print(f"   API key: {data['key']}")
     print(f"   Config saved to {config_path} (shown once — store it)")
     if new_token:

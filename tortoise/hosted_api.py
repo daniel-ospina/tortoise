@@ -1329,6 +1329,12 @@ async def get_current_team(request: Request) -> dict:
                 "max_points": int(mp) if mp is not None else lim["max_graph_nodes"],
                 "max_api_keys": int(mak) if mak is not None else lim["max_api_keys"],
                 "max_sessions": int(ms) if ms is not None else DEFAULT_MAX_SESSIONS,
+                # #1748: key creator's user UUID rides the team dict (Supabase
+                # resolve_api_key parity) so session-user-owned endpoints can
+                # identify the owner from a key-auth request (onboarding
+                # sub-team provisioning). None for legacy keys that predate
+                # created_by.
+                "created_by": created_by,
                 # #308 additive: enforcement state + owner email
                 "suspended_at": t_suspended, "flagged_at": t_flagged,
                 "email": t_email,
@@ -3749,8 +3755,13 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
         )
     else:
         sdk = _make_sdk(namespace="registry")
+        # #1753: created_via/expires_at prop parity with agent_signup + the
+        # Supabase lane (like the #1709 mint at ~7365) — without them the
+        # selfhost dashboard lists durable keys as "ephemeral · session"
+        # and hides rename. expires_at:null = never (durable key).
         sdk._get_registry().query(
-            "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, key_prefix:$kp, created_by:$cb, created_at:$now, name:$name})",
+            "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, key_prefix:$kp, "
+            "created_by:$cb, created_via:'provisioned', created_at:$now, expires_at:null, name:$name})",
             params={"id": kid, "tid": team["team_id"], "kh": key_hash, "kp": key_prefix, "cb": "api", "now": now, "name": name},
         )
         # #528 analytics — actor user id from the team's Membership graph when
@@ -3798,9 +3809,9 @@ async def list_api_keys(team: dict = Depends(get_current_team)):
     the seam (ALL rows incl. revoked — the dashboard shows revoked keys
     with their revoked_at; registry parity). Registry path stays for
     selfhost. #1708 D7: additive created_via/expires_at in BOTH lanes
-    (registry lane is None-tolerant for the agent_signup/create_api_key
-    mints that omit the props until #1709; session_key mints already write
-    them)."""
+    (agent_signup #1709, create_api_key #1753 and session_key mints all
+    write them at mint time; the registry list stays None-tolerant for
+    LEGACY nodes minted before those fixes)."""
     from tortoise.supabase_control import (
         get_control_plane, is_supabase_enabled, team_api_keys,
     )
@@ -3853,9 +3864,10 @@ async def list_api_keys(team: dict = Depends(get_current_team)):
                 "revoked_at": row[4],
                 # 20260825000001: optional user-facing label
                 "name": row[5],
-                # #1708 D7: None-tolerant — registry nodes minted by
-                # agent_signup/create_api_key lack the props until #1709
-                # writes them at mint time; JSON null is additive-safe.
+                # #1708 D7: None-tolerant — LEGACY registry nodes minted
+                # before #1709 (agent_signup) / #1753 (create_api_key) wrote
+                # the props at mint time lack them; JSON null is
+                # additive-safe.
                 "created_via": row[6],
                 "expires_at": row[7],
             }
@@ -8222,25 +8234,43 @@ async def set_session_recording(body: dict, team: dict = Depends(get_current_tea
 
 
 @app.post("/v1/onboarding/team")
-async def create_onboarding_team(body: dict, team: dict = Depends(get_current_team)):
+async def create_onboarding_team(body: dict,
+                               team: dict = Depends(get_current_team_session)):
     """Create a sub-team for the user (Q5 hosted equivalent of tortoise_team_create).
 
     #765 (plan Task 8 writer inventory: demo/onboarding): Supabase mode
-    routes the write through the atomic provision_team RPC with the
-    identity path — a tt_-key request has no JWT user to own the team, and
-    the registry path (sdk.team_create) never created an owner membership
-    either. #1716: the sub-team is provisioned KEYLESS in BOTH lanes — no
-    tt_ mint, no api_keys row (the old per-call mint was an unrecoverable
-    dead credential: plaintext never returned, hash-only at rest, counted
+    routes the write through the atomic provision_team RPC. #1716: the
+    sub-team is provisioned KEYLESS in BOTH lanes — no tt_ mint, no
+    api_keys row (the old per-call mint was an unrecoverable dead
+    credential: plaintext never returned, hash-only at rest, counted
     against max_api_keys, unclaimable #1082). The sub-team stays keyless
     until a session-key mint (POST /v1/session/key writes the row itself).
-    The registry path stays for selfhost."""
+    #1748: the sub-team is provisioned on the USER path — the session user
+    becomes the OWNER member (p_user_id=<session user>, p_identity=None;
+    registry lane: owner Membership for the same user). The old
+    anon-{uuid} identity was a permanent dead end: session-key mint
+    resolves memberships by the session user's user_id, which the
+    NULL-user identity row never matched — no key, no claim, no list, no
+    delete. The registry path stays for selfhost."""
     name = (body.get("name") or "").strip()
     if not name or len(name) > 64:
         raise HTTPException(status_code=400, detail="name is required (max 64 chars)")
     import re
     if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$", name):
         raise HTTPException(status_code=400, detail="Invalid team name")
+    # #1748: the session user owns the sub-team. Session JWT →
+    # session_user_id (get_current_team_session); key-auth → created_by
+    # (the key creator's user UUID — session-minted bootstrap/recovery
+    # keys carry it; the dashboard onboarding wizard authenticates with
+    # exactly such a key). "api" / None → no real user → fail loudly
+    # rather than provision an owner-less orphan (the #1716 dead end).
+    owner_user_id = team.get("session_user_id") or team.get("created_by")
+    if not owner_user_id or owner_user_id == "api":
+        raise HTTPException(
+            status_code=403,
+            detail="A session user is required to create a sub-team — "
+                   "sign in or mint a session key first",
+        )
     from tortoise.supabase_control import (
         get_control_plane, is_supabase_enabled, provision_team,
     )
@@ -8251,10 +8281,12 @@ async def create_onboarding_team(body: dict, team: dict = Depends(get_current_te
             graph_name = f"team_{name}"  # sdk.team_create parity
             # #1716: keyless provisioning — all-NULL key params → the RPC
             # writes teams + membership but NO api_keys row (all-or-none
-            # guard, migration 20260825214233).
+            # guard, migration 20260825214233). #1748: USER path — the
+            # session user is the owner member (p_user_id, identity NULL),
+            # mirroring POST /v1/teams (create_team).
             provision_team(get_control_plane(), **{
-                "p_user_id": None,
-                "p_identity": f"anon-{_uuid.uuid4().hex[:12]}",
+                "p_user_id": owner_user_id,
+                "p_identity": None,
                 "p_team_id": team_id,
                 "p_team_name": name,
                 "p_api_key": None,
@@ -8277,9 +8309,20 @@ async def create_onboarding_team(body: dict, team: dict = Depends(get_current_te
         _track_onboarding_event(team, "question_answered",
                                 question_id="create_team", answer="yes")
         return {"team_id": team_id, "name": name, "graph_name": graph_name}
-    sdk = _make_sdk(namespace=team["team_id"])
+    # #1748: the registry-lane SDK must be the CANONICAL control plane
+    # (namespace="registry" → registry_control_plane). The old
+    # namespace=team_id built a {team_id}_control_plane graph that NO other
+    # registry path reads — the mint/list/delete/claim surfaces all read
+    # registry_control_plane, so the sub-team's Team + Membership nodes were
+    # invisible to them (orphan at the graph level, on top of the missing
+    # membership).
+    sdk = _make_sdk(namespace="registry")
     try:
-        result = sdk.team_create(name, mint_key=False)  # #1716 keyless parity
+        # #1716 keyless parity + #1748 owner Membership for the session
+        # user (team_create now creates it — without it the keyless
+        # sub-team is an unmintable orphan).
+        result = sdk.team_create(name, mint_key=False,
+                                 owner_user_id=owner_user_id)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Team create failed: {e}")
     _update_onboarding_state(team["team_id"], team_created=True)

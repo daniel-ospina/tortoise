@@ -277,7 +277,12 @@ class FakeControlPlane:
                         "key_prefix": p.get("p_key_prefix") or tid[:8],
                         "created_via": "recovery",
                         "created_by": "st_" + th[:12],
-                        "created_at": None,
+                        # #1754 (c): the real RPC's created_at defaults to
+                        # now() — a None here sorts as the OLDEST key in the
+                        # cap-revoke targeting (min by created_at) and would
+                        # be the cap-revoke target, masking revoke-oldest
+                        # regressions in the Supabase lane.
+                        "created_at": now_iso,
                         "expires_at": None,
                         "revoked_at": None,
                     })
