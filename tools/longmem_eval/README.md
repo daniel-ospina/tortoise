@@ -122,6 +122,67 @@ stale resume — different config, or a pre-fingerprint v1 checkpoint — is
 refused with the differing fields named; concurrent run processes sharing
 one checkpoint merge under an exclusive flock (no lost updates).
 
+## Parse-error robustness (#1746) — census, readout, probe, JSON-mode parity
+
+**Error census vocabulary (D1, extractor side — every class appends an
+`errors` string AND bumps `error_census[class]`, 1:1 enforced):**
+
+| Class | Meaning |
+|---|---|
+| `parse_error` | S2/S4 final parse failure, first parse-failing attempt `finish_reason != "length"` (sloppiness/contamination) |
+| `truncated_parse_error` | S2/S4 final parse failure, first parse-failing attempt `finish_reason == "length"` (truncation) |
+| `partial_parse` | schema-validated partial-accept applied (truncated tail dropped — the embed list is INCOMPLETE; `valid=false`) |
+| `empty_embed_list` | no embed list produced (S2/S4 empty) |
+| `s5_failed` | S5 (embed execution) exception |
+| `entity_resolution_failed` | entity-resolution exception |
+| `s1_chunk_summary` | the "N/M S1 chunks failed" summary line (one bump per summary event) |
+
+The invariant `len(errors) == sum(error_census.values())` holds structurally
+(criterion 2) — every `errors.append` site pairs exactly one census class.
+
+**Warning-only telemetry (D7 — NEVER error strings, NEVER in
+`error_census`, `valid` unaffected):** `llm_calls` / `llm_retries` /
+`llm_truncated` / `recovery` ride each outcome and the Layer-1 projection.
+The report's `integrity.truncated_valid_qids` lists every question with
+`llm_truncated > 0` AND no error classes — the silent-truncation success
+class is now RECORDED (criterion 3 structural: no UNRECORDED truncation
+with `valid=true`). `recovery` counts the parse-ladder's
+`sanitize` / `sanitize_insufficient` / `repair` events.
+
+**Recovery ladder (D4, extractor side):** S2/S4 output is parsed through a
+bounded ladder — canonical `_parse_json` → string-aware sanitize (raw C0
+control chars inside strings; H2) → bounded repair (≤8 closer appends +
+bounded missing-comma rules, schema-gated; H3/H2 intersection) →
+schema-validated partial-accept (longest valid prefix ≥ 1 non-empty embed
+section; H3) → error-informed re-prompt. A first parse-failing attempt with
+`finish_reason == "length"` SKIPS the deterministic same-prompt retry;
+stop-class failures get ONE error-informed re-prompt carrying the bounded
+parse-error block.
+
+**JSON-mode parity (D6):** `DeepSeekDirectModel.complete` now sends
+`response_format: {"type": "json_object"}` when `TORTOISE_JSON_MODE=1`
+(the default, read at call time) — mirroring `OpenRouterModel`; the pilot's
+direct route previously ran WITHOUT JSON mode (H1, the untested lever).
+`TORTOISE_JSON_MODE=0` is the documented escape. JSON mode does NOT fix
+truncation (it breaks at `max_tokens`) — the recovery ladder is the
+truncation pairing; no cap raise in #1746.
+
+**Pre-flight probe (D6):** before trusting JSON mode in a run, test the
+provider for pennies:
+
+```bash
+python tools/longmem_eval/probe_json_mode.py --n 10 \
+  [--model deepseek/deepseek-v4-flash] [--out /tmp/probe.json] [--dry-run]
+```
+
+The verdict JSON (`verdict` ∈ {honored, ignored, rejected, inconclusive} +
+per-mode malformed-rate/finish_reason blocks + `mode_delta`) lands in the
+closing-run record (Task 5 of the #1746 plan). `rejected` (any HTTP
+400/404) → abort the run pre-flight or re-run with `TORTOISE_JSON_MODE=0`;
+`inconclusive` → re-probe at `--n 20`; `honored`/`ignored` → proceed with
+the verdict noted. The probe exercises the PILOT's path (the same
+`build_extractor_model` resolution the eval run uses).
+
 ### #1349 embedder-selection flags
 
 - `--retriever {hybrid,vector}` (default `hybrid`) — the retrieval arm.
