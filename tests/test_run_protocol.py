@@ -356,6 +356,60 @@ def test_cmd_run_requires_real_backend_env(tmp_path, monkeypatch):
         expected_direction=None))
 
 
+def test_cmd_run_records_resume_quality_scan(tmp_path, monkeypatch, capsys):
+    """#1764: the `run` path runs a pre-resume health check on the checkpoint
+    (when one exists) — outcomes the runner's resume-quality gate will reject
+    (dead FTS leg / zero session recall) are counted, surfaced loudly, and
+    recorded in the run state (population-purity note); a clean checkpoint
+    records a clean scan. The scan mirrors the runner's own gate signal
+    (run.resume_gate_reject_reason — single source of truth)."""
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379")
+    state = _fresh_state(tmp_path)
+    for n in range(1, 8):
+        state.pass_gate(n, f"step {n} done")
+    run_dir = tmp_path / "runs"
+    run_dir.mkdir()
+    # run steps write their checkpoint under DEFAULT_RUN_DIR (module-level)
+    monkeypatch.setattr(rp, "DEFAULT_RUN_DIR", run_dir)
+
+    # a checkpoint with one dead-FTS outcome + one healthy outcome
+    cp = run_dir / "pilot.checkpoint.json"
+    cp.write_text(json.dumps({
+        "format": "lme-checkpoint-v2",
+        "outcomes": [
+            {"question_id": "q-dead", "session_recall@k": {"20": 0.0},
+             "turn_recall@k": {"20": 0.0},
+             "legs": [{"leg": "fts", "ran": True, "degraded": False,
+                        "reason": "empty_results", "count": 0}]},
+            {"question_id": "q-healthy", "session_recall@k": {"20": 1.0},
+             "turn_recall@k": {"20": 1.0},
+             "legs": [{"leg": "fts", "ran": True, "degraded": False,
+                        "reason": "ok", "count": 7}]},
+        ],
+    }), encoding="utf-8")
+
+    # dry-run surfaces the scan without executing or recording
+    rp.cmd_run(state, argparse_namespace(
+        step="3", owner_approve=None, dry_run=True, extra=[],
+        expected_direction=None))
+    err = capsys.readouterr().err
+    assert "q-dead" in err and "resume-quality gate" in err
+    assert "3" not in state.data["runs"]  # dry-run records nothing
+
+    # real run records the scan in the run state (no subprocess side effects)
+    monkeypatch.setattr(rp.subprocess, "run", lambda cmd, env: type(
+        "R", (), {"returncode": 0})())
+    rp.cmd_run(state, argparse_namespace(
+        step="3", owner_approve=None, dry_run=False, extra=[],
+        expected_direction=None))
+    run = state.data["runs"]["3"]
+    assert run["resume_quality"]["rejected"] == 1
+    assert run["resume_quality"]["fts_dead"] == 1
+    assert run["resume_quality"]["zero_session"] == 0
+    assert run["resume_quality"]["qids"] == ["q-dead"]
+    assert run["resume_quality"]["checked"] == 2
+
+
 def test_cmd_run_step7_requires_expected_direction(tmp_path, monkeypatch, capsys):
     """Step 7 via `run` needs the pre-stated expected-delta direction AND
     the recorded step-3/5 reports before building the confirmation set."""

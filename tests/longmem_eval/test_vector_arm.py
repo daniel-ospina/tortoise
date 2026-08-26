@@ -563,6 +563,224 @@ def test_checkpoint_truncated_outcome_reruns_just_that_question(tmp_path, capsys
         "corrupt" in capsys.readouterr().err.lower()
 
 
+def test_checkpoint_resume_gate_rejects_zero_session_recall(tmp_path, capsys):
+    """#1764 resume-quality gate: an outcome whose session_recall@k is all
+    zeros (the session never surfaced — dead-retrieval artifact) is rejected
+    at load and the question re-encodes; the healthy sibling resumes as-is
+    (single-population discipline — no stale outcomes in baselines)."""
+    cp = tmp_path / "state.json"
+    key = "embedded__hybrid__default__default"
+    healthy = _minimal_outcome("mini_ie_user_001", MARKER="keep-me")
+    dead = _minimal_outcome(
+        "mini_msr_002",
+        **{"session_recall@k": {"5": 0.0}, "turn_recall@k": {"5": 0.0}})
+    runner._save_checkpoint(str(cp), [healthy, dead], [],
+                            run_key=key, surface="embedded", retriever="hybrid",
+                            model=None, prompt=None)
+
+    outcomes, _report = runner.run_evaluation(
+        _mini()[:2], reader=MockReader(), judge=MockJudge(),
+        ks=(5,), top_k=5, split="s", work_dir=str(tmp_path), checkpoint=str(cp),
+    )
+    by_id = {o["question_id"]: o for o in outcomes}
+    # healthy outcome resumed untouched; the zero-recall one re-encoded
+    # (live mini retrieval is healthy — session_recall@5 == 1.0, no MARKER)
+    assert by_id["mini_ie_user_001"]["MARKER"] == "keep-me"
+    assert by_id["mini_msr_002"].get("MARKER") is None
+    assert by_id["mini_msr_002"]["session_recall@k"] == {"5": 1.0}
+    assert "resume-quality gate" in capsys.readouterr().err.lower()
+
+
+def test_checkpoint_resume_gate_rejects_dead_fts_leg(tmp_path, capsys):
+    """#1764: an outcome whose legs trace records fts.count=0 (the pilot's
+    crash artifact — FTS ran but returned no hits) is rejected at load and
+    re-encodes; the healthy sibling resumes untouched."""
+    cp = tmp_path / "state.json"
+    key = "embedded__hybrid__default__default"
+    healthy = _minimal_outcome("mini_ie_user_001", MARKER="keep-me",
+                               legs=[{"leg": "fts", "ran": True,
+                                      "degraded": False, "reason": "ok",
+                                      "count": 4}])
+    dead = _minimal_outcome(
+        "mini_msr_002",
+        legs=[{"leg": "fts", "ran": True, "degraded": False,
+               "reason": "empty_results", "count": 0},
+              {"leg": "vector", "ran": True, "degraded": False,
+               "reason": "ok", "count": 120}])
+    runner._save_checkpoint(str(cp), [healthy, dead], [],
+                            run_key=key, surface="embedded", retriever="hybrid",
+                            model=None, prompt=None)
+
+    outcomes, _report = runner.run_evaluation(
+        _mini()[:2], reader=MockReader(), judge=MockJudge(),
+        ks=(5,), top_k=5, split="s", work_dir=str(tmp_path), checkpoint=str(cp),
+    )
+    by_id = {o["question_id"]: o for o in outcomes}
+    assert by_id["mini_ie_user_001"]["MARKER"] == "keep-me"
+    assert by_id["mini_msr_002"].get("MARKER") is None
+    # the re-encoded outcome carries a healthy fts leg (live retrieval)
+    fts = next(leg for leg in by_id["mini_msr_002"]["legs"]
+               if leg["leg"] == "fts")
+    assert fts["count"] > 0
+    assert "resume-quality gate" in capsys.readouterr().err.lower()
+
+
+def test_checkpoint_resume_gate_keeps_healthy_outcome(tmp_path):
+    """#1764: a healthy outcome (fts leg with count > 0, non-zero session
+    recall) resumes as-is — the reader is NOT invoked for it again."""
+    cp = tmp_path / "state.json"
+    key = "embedded__hybrid__default__default"
+    healthy = _minimal_outcome("mini_ie_user_001", MARKER="keep-me",
+                               legs=[{"leg": "fts", "ran": True,
+                                      "degraded": False, "reason": "ok",
+                                      "count": 4}])
+    runner._save_checkpoint(str(cp), [healthy], [],
+                            run_key=key, surface="embedded", retriever="hybrid",
+                            model=None, prompt=None)
+
+    reader_calls = {"n": 0}
+
+    class _CountingReader(MockReader):
+        def answer(self, *args, **kwargs):
+            reader_calls["n"] += 1
+            return super().answer(*args, **kwargs)
+
+    outcomes, _report = runner.run_evaluation(
+        _mini()[:2], reader=_CountingReader(), judge=MockJudge(),
+        ks=(5,), top_k=5, split="s", work_dir=str(tmp_path), checkpoint=str(cp),
+    )
+    by_id = {o["question_id"]: o for o in outcomes}
+    assert by_id["mini_ie_user_001"]["MARKER"] == "keep-me"  # reused
+    assert reader_calls["n"] == 1  # only the non-checkpointed qid ran
+
+
+def test_checkpoint_resume_gate_keeps_breaker_open(tmp_path):
+    """#1764: breaker_open outcomes are LEGITIMATELY dropped — they must NOT
+    be re-run, even though their recorded session_recall@k is all zeros (the
+    breaker-open drop shape). The gate exempts them at load."""
+    cp = tmp_path / "state.json"
+    key = "embedded__hybrid__default__default"
+    dropped = {
+        "question_id": "mini_ie_user_001",
+        "question_type": "single-session-user",
+        "breaker_open": True,
+        "dropped_reason": "breaker_open",
+        "label": None, "hypothesis": None,
+        "session_recall@k": {"5": 0.0},
+        "turn_recall@k": {"5": 0.0},
+        "ndcg@10": None, "p@10": None, "p@5": None,
+    }
+    runner._save_checkpoint(str(cp), [dropped], [],
+                            run_key=key, surface="embedded", retriever="hybrid",
+                            model=None, prompt=None)
+
+    done, _ = runner._load_checkpoint(str(cp), run_key=key)
+    assert "mini_ie_user_001" in done  # kept — never re-run
+    assert done["mini_ie_user_001"]["breaker_open"] is True
+
+    # end-to-end: the breaker-open question stays dropped (reader untouched)
+    reader_calls = {"n": 0}
+
+    class _CountingReader(MockReader):
+        def answer(self, *args, **kwargs):
+            reader_calls["n"] += 1
+            return super().answer(*args, **kwargs)
+
+    outcomes, _report = runner.run_evaluation(
+        _mini()[:2], reader=_CountingReader(), judge=MockJudge(),
+        ks=(5,), top_k=5, split="s", work_dir=str(tmp_path), checkpoint=str(cp),
+    )
+    by_id = {o["question_id"]: o for o in outcomes}
+    assert by_id["mini_ie_user_001"].get("breaker_open") is True
+    assert reader_calls["n"] == 1  # mini_msr_002 only — breaker-open not re-run
+
+
+@pytest.mark.parametrize("outcome,expect", [
+    # guard rails: signals fire only on positive recorded evidence
+    (None, None),
+    ("not-a-dict", None),
+    ({}, None),
+    ({"question_id": "q"}, None),  # no legs, no recall keys
+    ({"question_id": "q", "legs": "not-a-list"}, None),
+    ({"question_id": "q", "legs": []}, None),
+    ({"question_id": "q", "legs": [{"leg": "vector", "count": 5}]}, None),
+    ({"question_id": "q", "legs": [{"leg": "fts"}]}, None),  # no count
+    ({"question_id": "q", "legs": [{"leg": "fts", "count": "0"}]},
+     None),  # non-numeric count is not evidence
+    ({"question_id": "q", "session_recall@k": {}}, None),
+    ({"question_id": "q", "session_recall@k": "x"}, None),
+    ({"question_id": "q", "session_recall@k": {"5": None}}, None),
+    # dead-FTS signal (single fts leg)
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": False,
+                 "reason": "empty_results", "count": 0}]},
+     "fts.count=0"),
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": False, "degraded": True,
+                 "reason": "breaker_open", "count": 0}]},
+     "fts.count=0"),
+    # TR dual-entity-type trace: a live point leg rescues the event leg
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": False,
+                 "reason": "ok", "count": 2},
+                {"leg": "fts", "ran": True, "degraded": False,
+                 "reason": "empty_results", "count": 0}]},
+     None),
+    # zero-session signal
+    ({"question_id": "q", "turn_recall@k": {"5": 0.0},
+      "session_recall@k": {"5": 0.0}},
+     "session_recall@k all zeros"),
+    # legit sessionless (M6 N/A: turn_recall None) is exempt even when
+    # session_recall is all-zero and FTS is empty
+    ({"question_id": "q", "turn_recall@k": {"5": None},
+      "session_recall@k": {"5": 0.0},
+      "legs": [{"leg": "fts", "ran": True, "degraded": False,
+                 "reason": "empty_results", "count": 0}]},
+     None),
+])
+def test_resume_gate_reject_reason_guard_rails(outcome, expect):
+    """#1764: the gate fires only on positive recorded evidence — absent /
+    malformed data never rejects; a healthy fts entry or a legitimately
+    session-less outcome (M6 N/A-not-0.0) always passes."""
+    reason = runner.resume_gate_reject_reason(outcome)
+    if expect is None:
+        assert reason is None
+    else:
+        assert reason is not None and reason.startswith(expect)
+
+
+def test_checkpoint_resume_gate_keeps_sessionless_abstention(tmp_path, capsys):
+    """#1764: a legitimately session-less outcome (abstention question —
+    turn_recall@k all None per the M6 N/A-not-0.0 contract, session_recall
+    all zeros, FTS legitimately empty) resumes as-is — it is NOT a dead-leg
+    artifact and must not re-encode on every resume forever."""
+    cp = tmp_path / "state.json"
+    key = "embedded__hybrid__default__default"
+    abstention = _minimal_outcome(
+        "mini_abs_005_abs", MARKER="keep-me", label=False,
+        **{"session_recall@k": {"5": 0.0}, "turn_recall@k": {"5": None}},
+        legs=[{"leg": "fts", "ran": True, "degraded": False,
+               "reason": "empty_results", "count": 0}])
+    runner._save_checkpoint(str(cp), [abstention], [],
+                            run_key=key, surface="embedded", retriever="hybrid",
+                            model=None, prompt=None)
+
+    reader_calls = {"n": 0}
+
+    class _CountingReader(MockReader):
+        def answer(self, *args, **kwargs):
+            reader_calls["n"] += 1
+            return super().answer(*args, **kwargs)
+
+    outcomes, _report = runner.run_evaluation(
+        _mini()[:5], reader=_CountingReader(), judge=MockJudge(),
+        ks=(5,), top_k=5, split="s", work_dir=str(tmp_path), checkpoint=str(cp),
+    )
+    by_id = {o["question_id"]: o for o in outcomes}
+    assert by_id["mini_abs_005_abs"]["MARKER"] == "keep-me"  # reused
+    assert reader_calls["n"] == 4  # only the 4 non-checkpointed qids ran
+
+
 def test_checkpoint_write_failure_surfaces_error(tmp_path, monkeypatch):
     """An ENOSPC/OSError on the atomic checkpoint rename must surface as an
     error — never silently drop the question from the denominator."""

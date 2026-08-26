@@ -198,10 +198,17 @@ class ProtocolState:
         self.save()
 
     def record_run(self, number: int, *, report: str, checkpoint: str,
-                   command: list[str], expected_direction: str | None = None) -> None:
+                   command: list[str], expected_direction: str | None = None,
+                   resume_quality: dict | None = None) -> None:
         """Record the artifacts of an executed run step (the protocol-level
         checkpoint: report + per-question checkpoint paths + the exact command
-        + the pre-stated expected delta direction for the confirmation)."""
+        + the pre-stated expected delta direction for the confirmation).
+
+        ``resume_quality`` (#1764) — the pre-run scan of the checkpoint's
+        outcomes against the resume-quality gate — is recorded so the state
+        file documents when a resume rejected stale/dead-retrieval outcomes
+        (population-purity note for the re-validation discipline).
+        """
         self.data["runs"][str(number)] = {
             "report": report,
             "checkpoint": checkpoint,
@@ -210,6 +217,8 @@ class ProtocolState:
         }
         if expected_direction:
             self.data["runs"][str(number)]["expected_direction"] = expected_direction
+        if resume_quality is not None:
+            self.data["runs"][str(number)]["resume_quality"] = resume_quality
         self.save()
 
 
@@ -321,6 +330,70 @@ def _report_qids(report_path: Path) -> list[str]:
             if o.get("question_id")]
 
 
+def checkpoint_resume_quality(checkpoint: Path) -> dict | None:
+    """#1764 pre-resume health check: scan a checkpoint for outcomes the
+    runner's resume-quality gate will reject at load (dead FTS leg —
+    ``fts.count=0`` — or zero session recall). The per-outcome signal is
+    ``run.resume_gate_reject_reason`` (single source of truth), and the
+    scan mirrors the runner's caller-level exemptions (breaker_open
+    outcomes kept — legitimately dropped, never re-run).
+
+    Returns a summary dict, or None when there is nothing to scan (no
+    checkpoint file / unreadable / non-dict / no outcomes). The protocol
+    records this in the run state so a re-validation resume that rejected
+    stale outcomes leaves a population-purity note, never a silent blend.
+    """
+    if not checkpoint.is_file():
+        return None
+    try:
+        data = json.loads(checkpoint.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    from .run import resume_gate_reject_reason  # lazy — protocol CLI stays light
+    checked = 0
+    rejected: list[tuple[str, str]] = []
+    for o in data.get("outcomes", []):
+        if not isinstance(o, dict) or not o.get("question_id"):
+            continue
+        if o.get("breaker_open"):
+            continue  # mirror the runner: legitimately dropped — kept
+        checked += 1
+        reason = resume_gate_reject_reason(o)
+        if reason is not None:
+            rejected.append((o["question_id"], reason))
+    fts_dead = sum(1 for _, r in rejected if r.startswith("fts.count"))
+    return {
+        "checked": checked,
+        "rejected": len(rejected),
+        "fts_dead": fts_dead,
+        "zero_session": len(rejected) - fts_dead,
+        "qids": sorted(qid for qid, _ in rejected),
+    }
+
+
+def _print_resume_quality(resume_quality: dict | None) -> None:
+    """Loudly surface the #1764 pre-resume health check result (the run log
+    notes gate rejections — the operator must see population-purity events)."""
+    if resume_quality is None:
+        return
+    if resume_quality["rejected"]:
+        print(
+            f"[run_protocol] resume-quality gate: "
+            f"{resume_quality['rejected']}/{resume_quality['checked']} "
+            f"checkpointed outcomes REJECTED and will re-encode "
+            f"(fts_dead={resume_quality['fts_dead']}, "
+            f"zero_session={resume_quality['zero_session']}): "
+            f"{', '.join(resume_quality['qids'])}",
+            file=sys.stderr)
+    else:
+        print(
+            f"[run_protocol] resume-quality gate: checkpoint clean — "
+            f"all {resume_quality['checked']} outcomes pass the gate",
+            file=sys.stderr)
+
+
 # ── CLI ─────────────────────────────────────────────────────────────────────
 
 def _resolve_step(raw: str) -> Step:
@@ -421,6 +494,13 @@ def cmd_run(state: ProtocolState, args: argparse.Namespace) -> None:
             f"embedded FalkorDBLite without it (E2E-1). Set TORTOISE_DB_URI "
             f"or run the smoke/--mock wiring check instead.")
     print(f"$ {' '.join(cmd)}")
+    # #1764: pre-resume health check — scan the checkpoint (when it exists)
+    # for outcomes the resume-quality gate will reject; surface loudly and
+    # record the scan in the run state so the protocol documents when a
+    # resume dropped stale/dead-retrieval outcomes (population purity).
+    checkpoint_arg = cmd[cmd.index("--checkpoint") + 1]
+    resume_quality = checkpoint_resume_quality(Path(checkpoint_arg))
+    _print_resume_quality(resume_quality)
     if args.dry_run:
         print("[dry-run] not executing")
         return
@@ -429,9 +509,10 @@ def cmd_run(state: ProtocolState, args: argparse.Namespace) -> None:
     state.record_run(
         step.number,
         report=str(Path(cmd[cmd.index("--output") + 1])),
-        checkpoint=str(Path(cmd[cmd.index("--checkpoint") + 1])),
+        checkpoint=checkpoint_arg,
         command=cmd,
         expected_direction=args.expected_direction if step.runner == "confirm" else None,
+        resume_quality=resume_quality,
     )
     rc = subprocess.run(cmd, env=os.environ.copy())
     if rc.returncode != 0:

@@ -871,6 +871,69 @@ def _dataset_fingerprint(path: Path) -> str:
         return "unknown"
 
 
+def _legit_sessionless(outcome: dict) -> bool:
+    """Outcome whose question has no answer session / evidence turns to
+    recall (M6 #1526 N/A-not-0.0): ``turn_recall@k`` records None — never a
+    forced 0.0 — because ``evidence_turn_ids`` (dataset-derived) is empty.
+    Such outcomes are legitimately all-zero on session recall (abstention
+    questions — the answer IS "not mentioned") and must NOT be treated as
+    retrieval-dead, or they would re-encode on every resume forever."""
+    tr = outcome.get("turn_recall@k")
+    return isinstance(tr, dict) and bool(tr) and all(
+        v is None for v in tr.values())
+
+
+def resume_gate_reject_reason(outcome: dict) -> str | None:
+    """#1764 resume-quality gate: why a checkpointed outcome is NOT
+    resumable, or None when it passes.
+
+    The pilot's 0.74 baseline was a two-population blend: 20 outcomes
+    resumed byte-identical from a pre-crash run (accuracy 0.55; 13/20 ran
+    with a dead FTS retrieval leg — fts.count=0, ``empty_results``) + 30
+    fresh (0.867). FTS-empty predicts failure almost perfectly within the
+    resumed set (0.31 vs 1.00). Two recorded signals mark an outcome as
+    retrieval-dead:
+
+      - the ``legs`` trace (R3 #1542 D4: {"leg", "ran", "degraded",
+        "reason", "count"}) shows the FTS leg dead — every fts entry has
+        ``count == 0`` (empty_results / index_missing / breaker_open — all
+        dead legs; TR questions trace one entry per entity type, so a live
+        point leg rescues a legitimately-empty event leg);
+      - every ``session_recall@k`` value is 0.0 (the session never
+        surfaced at any depth).
+
+    Signals fire ONLY on positive recorded evidence: an outcome with no
+    ``legs`` trace (pre-R3 checkpoint, vector arm) or no fts entry is NOT
+    refused — absent data ≠ dead leg (embedded-mode checkpoints whose
+    vector leg records no_embedder legitimately still pass via their
+    healthy fts leg). Legitimately session-less outcomes (abstention
+    questions — ``turn_recall@k`` all None per the M6 N/A-not-0.0
+    contract) are exempt: their all-zero session recall and legitimately
+    empty FTS are the question's shape, not a dead backend. breaker_open
+    outcomes are excluded by the caller (kept — a legitimately dropped
+    question must never re-run).
+    """
+    if not isinstance(outcome, dict):
+        return None
+    if _legit_sessionless(outcome):
+        return None  # N/A — no answer session to recall, never a dead leg
+    legs = outcome.get("legs")
+    if isinstance(legs, list):
+        # TR questions trace one fts entry PER entity type (point + event
+        # share the leg_trace) — the leg is dead only when EVERY fts entry
+        # has count 0 (a live point leg rescues a legitimately-empty event
+        # leg).
+        fts_entries = [leg for leg in legs
+                       if isinstance(leg, dict) and leg.get("leg") == "fts"]
+        if fts_entries and all(leg.get("count") == 0
+                               for leg in fts_entries):
+            return "fts.count=0 (dead FTS retrieval leg)"
+    sr = outcome.get("session_recall@k")
+    if isinstance(sr, dict) and sr and all(v == 0 for v in sr.values()):
+        return "session_recall@k all zeros (session never surfaced)"
+    return None
+
+
 def _load_checkpoint(path: str | None,
                      expected_fingerprint: dict | None = None,
                      *, run_key: str | None = None,
@@ -886,6 +949,13 @@ def _load_checkpoint(path: str | None,
     {prompt}``) — a cross-surface (embedded↔hnsw) or cross-model resume is
     impossible by construction. The read happens under an exclusive flock
     (D8) so a reader never sees a mid-merge file.
+
+    #1764: the resume-quality gate runs per outcome — a completed record
+    whose recorded retrieval shows a dead FTS leg (``fts.count=0``) or zero
+    session recall is REJECTED (dropped from the completed set so the
+    question re-encodes, mirroring the truncated-outcome path) instead of
+    silently contaminating the baseline with a stale outcome. breaker_open
+    outcomes are exempt (legitimately dropped — never re-run).
     """
     if not path:
         return {}, []
@@ -944,6 +1014,7 @@ def _load_checkpoint(path: str | None,
                 f"file to re-run the questions)")
     required = REQUIRED_OUTCOME_KEYS.get(retriever, ("question_id",))
     outcomes: dict[str, dict] = {}
+    gate_rejected = 0
     for o in data.get("outcomes", []):
         if not isinstance(o, dict) or not o.get("question_id"):
             continue
@@ -957,11 +1028,24 @@ def _load_checkpoint(path: str | None,
                   f"{missing}) — re-encoding just this question",
                   file=sys.stderr)
             continue
+        # #1764: refuse resume of retrieval-dead outcomes — drop from the
+        # completed set so the question re-encodes (single-population
+        # discipline: no stale dead-leg outcomes in baselines).
+        reason = resume_gate_reject_reason(o)
+        if reason is not None:
+            gate_rejected += 1
+            print(f"[longmem_eval] WARNING: checkpoint outcome "
+                  f"{o.get('question_id')!r} rejected by the resume-quality "
+                  f"gate ({reason}) — re-encoding just this question",
+                  file=sys.stderr)
+            continue
         outcomes[o["question_id"]] = o
     failures = [f for f in data.get("failures", [])
                 if isinstance(f, dict) and f.get("question_id")]
     print(f"[longmem_eval] resumed checkpoint {p}: {len(outcomes)} completed, "
-          f"{len(failures)} failed (skipping both)", file=sys.stderr)
+          f"{len(failures)} failed (skipping both)"
+          + (f"; {gate_rejected} rejected by the resume-quality gate "
+             f"(re-encoding)" if gate_rejected else ""), file=sys.stderr)
     return outcomes, failures
 
 

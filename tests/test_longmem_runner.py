@@ -1450,6 +1450,35 @@ def test_checkpoint_resume_skips_completed_questions(tmp_path):
     assert report4["n_failed"] == 2
 
 
+def test_checkpoint_resume_gate_rejects_dead_fts_leg(tmp_path, capsys):
+    """#1764, M7-path end-to-end: a checkpoint whose completed outcomes ran
+    with a dead FTS leg (fts.count=0 — the pilot's crash artifact) is
+    rejected at resume and every question re-encodes; the checkpoint
+    self-heals (fresh healthy outcomes overwrite the stale records)."""
+    cp = tmp_path / "lme-state.json"
+    kwargs = dict(reader=MockReader(), judge=MockJudge(), ks=(5,), top_k=5,
+                  split="s", work_dir=str(tmp_path), checkpoint=str(cp))
+    run_evaluation(_mini()[:2], **kwargs)
+    # simulate the pre-crash artifact: record a dead FTS leg on every outcome
+    saved = json.loads(cp.read_text(encoding="utf-8"))
+    for o in saved["outcomes"]:
+        o["legs"] = [{"leg": "fts", "ran": True, "degraded": False,
+                       "reason": "empty_results", "count": 0}]
+    Path(cp).write_text(json.dumps(saved), encoding="utf-8")
+
+    outcomes, _report = run_evaluation(_mini()[:2], **kwargs)
+    assert len(outcomes) == 2
+    # both re-encoded fresh — live mini retrieval has a healthy FTS leg
+    assert all(any(leg.get("leg") == "fts" and leg.get("count", 0) > 0
+                   for leg in (o.get("legs") or [])) for o in outcomes)
+    assert "resume-quality gate" in capsys.readouterr().err.lower()
+    # the checkpoint self-heals: on-disk outcomes carry healthy fts legs now
+    healed = json.loads(cp.read_text(encoding="utf-8"))
+    assert all(any(leg.get("leg") == "fts" and leg.get("count", 0) > 0
+                   for leg in (o.get("legs") or []))
+               for o in healed["outcomes"])
+
+
 # ── Dataset download atomicity (P2: corrupt cache) ─────────────────────────
 
 
