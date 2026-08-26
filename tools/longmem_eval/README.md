@@ -247,10 +247,16 @@ path via `--data` skips the download. Split S = `longmemeval_s_cleaned.json`
 
 The report is self-explanatory: every run prints and persists
 
-- **`integrity`** — `valid` (invalid_rate ≤ threshold), `n_attempted` /
-  `n_valid` / `n_invalid`, `invalid_rate` (invalid = failed question OR
-  completed question with ingest errors), `error_census` (site-prefixed
-  P2-aligned error classes: `reader:retries_exhausted`, `judge:fatal`, …),
+- **`integrity`** — `valid` (#1747 census-class-aware: invalid_rate ≤
+  threshold AND zero hard-failure questions — fatal_*/ingest/non-census-
+  error-string/permanent-eval-failure questions veto at any threshold),
+  `n_attempted` / `n_valid` / `n_invalid`, `invalid_rate` (invalid = a
+  failed question OR a completed question with error-class/extraction-error
+  signals; recoverable classes — parse_error/truncated/partial_parse/
+  transient_* — are rate-limited), the #1747 breakdown `n_hard_invalid` /
+  `n_recoverable_invalid` / `recoverable_invalid_rate`, `error_census`
+  (site-prefixed P2-aligned error classes: `reader:retries_exhausted`,
+  `judge:fatal`, …), `criterion` (the applied gate rule, human-readable),
   `checks` (python guard, dataset audited, audit present, fingerprint
   matched, census computed). Printed BEFORE the score.
 - **`leg_mix`** — per-leg `match_source` counts over the top_k context the

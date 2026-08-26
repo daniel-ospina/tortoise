@@ -9,14 +9,17 @@ extractor model reports its integrity on the same block.
 
 #1747: the ``valid`` VERDICT is now census-class-aware — ``valid == True`` iff
 ``invalid_rate <= threshold`` AND zero hard-failure questions. Recoverable
-classes (parse_error / truncated / partial_parse / transient_*) are
-rate-limited (a healthy run at 500-Q scale admits a handful — the old binary
-``len(errors)==0`` invalidity made ``valid=true`` unreachable); hard classes
-(fatal_* / unknown census classes / non-census error strings / permanent eval
-failures) veto the run at any threshold. ``n_valid`` / ``n_invalid`` /
-``invalid_rate`` keep their previous semantics; the breakdown rides in the
-additive ``n_hard_invalid`` / ``n_recoverable_invalid`` /
-``recoverable_invalid_rate`` / ``criterion`` fields.
+classes (parse_error / truncated / truncated_parse_error / partial_parse /
+transient_*) are rate-limited (a healthy run at 500-Q scale admits a handful
+— the old binary ``len(errors)==0`` invalidity made ``valid=true``
+unreachable); hard classes (fatal_* / unknown census classes / non-census
+error strings / permanent eval failures) veto the run at any threshold.
+Each qid is graded ONCE (failure-grade dominance on qid overlap —
+concurrent-checkpoint robustness); ``n_valid`` / ``n_invalid`` /
+``invalid_rate`` keep their previous semantics for the production shape; the
+breakdown rides in the additive ``n_hard_invalid`` /
+``n_recoverable_invalid`` / ``recoverable_invalid_rate`` / ``criterion``
+fields.
 """
 from __future__ import annotations
 
@@ -73,34 +76,37 @@ def _report(outcomes: list[dict], *, threshold: float = 0.0,
 def test_report_integrity_block_shape():
     """Mixed error classes → correct census / counts; the #1747 verdict is
     FALSE because q2 carries a HARD class (fatal_402_billing) — the hard veto
-    fires regardless of rate. q1's recoverable-only census with the runner
-    flag ``valid=True`` grades CLEAN (the runner's binary flag is the
-    authority on whether error strings exist)."""
+    fires even at threshold 0.5 where the 0.5 rate alone would pass (veto
+    isolation). q1's recoverable-only census with the runner flag
+    ``valid=True`` grades CLEAN (the runner's binary flag is the authority on
+    whether error strings exist — the shape is a pinned drift guard, not a
+    production shape)."""
     outcomes = [
         _outcome("q1", valid=True,
                  error_classes={"transient_429_rate_limit": 2}),
         _outcome("q2", valid=False,
                  error_classes={"fatal_402_billing": 1, "parse_error": 1}),
     ]
-    integ = _report(outcomes)["integrity"]
+    integ = _report(outcomes, threshold=0.5)["integrity"]
     assert integ["valid"] is False       # hard class (fatal_402) vetoes
-    assert integ["invalid_rate"] == 0.5
+    assert integ["invalid_rate"] == 0.5  # rate alone would PASS at 0.5
     assert integ["n_attempted"] == 2
     assert integ["n_valid"] == 1
     assert integ["n_invalid"] == 1
     assert integ["n_failed"] == 0
-    assert integ["threshold"] == 0.0
+    assert integ["threshold"] == 0.5
     assert integ["error_census"] == {
         "transient_429_rate_limit": 2,
         "fatal_402_billing": 1,
         "parse_error": 1,
     }
-    # #1747 additive breakdown: q1 grades clean, q2 grades hard.
+    # #1747 additive breakdown: q1 grades clean, q2 grades hard (the
+    # recoverable parse_error in the same outcome does NOT soften it).
     assert integ["n_hard_invalid"] == 1
     assert integ["n_recoverable_invalid"] == 0
     assert integ["recoverable_invalid_rate"] == 0.0
     assert "criterion" in integ
-    assert "#1747" in integ["criterion"]
+    assert "census-class-aware" in integ["criterion"]
 
 
 def test_report_integrity_zero_outcomes():
@@ -130,35 +136,31 @@ def test_report_integrity_threshold():
     assert _report(outcomes, threshold=0.2)["integrity"]["valid"] is True
 
 
-def test_report_integrity_recoverable_rate_below_threshold_is_valid():
+def test_report_integrity_recoverable_rate_at_threshold_is_valid():
     """#1747 (a): a run whose only error signals are RECOVERABLE classes at a
     rate within the declared threshold is valid=true — the gate criterion is
     reachable at scale (the old binary any-error-string invalidity made
-    valid=true unreachable even for a healthy 500-Q run). Includes the #1746
-    parse-family classes (truncated_parse_error / partial_parse) pinned in
-    the recoverable allowlist — when #1746's ladder lands with these census
-    keys they must stay rate-limited, not vetoed."""
-    outcomes = [_outcome(f"q{i}", valid=True) for i in range(94)]
-    # 6/100 questions with recoverable-only census classes → 6% rate.
-    outcomes.append(_outcome("q94", valid=False,
-                             error_classes={"parse_error": 1}))
-    outcomes.append(_outcome("q95", valid=False,
-                             error_classes={"transient_429_rate_limit": 1}))
-    outcomes.append(_outcome("q96", valid=False,
-                             error_classes={"transient_network": 1}))
-    outcomes.append(_outcome("q97", valid=False,
-                             error_classes={"truncated": 1}))
-    outcomes.append(_outcome("q98", valid=False,
-                             error_classes={"truncated_parse_error": 1}))
-    outcomes.append(_outcome("q99", valid=False,
-                             error_classes={"partial_parse": 1}))
-    integ = _report(outcomes, threshold=0.06)["integrity"]
+    valid=true unreachable even for a healthy 500-Q run). Pins the INCLUSIVE
+    ``<=`` boundary (9/100 = 9% == threshold 0.09 → valid) — a regression to
+    strict ``<`` fails this test. Exercises ALL NINE recoverable allowlist
+    classes, including the #1746 parse family (truncated_parse_error /
+    partial_parse) — if any class drops out of the allowlist it hard-vetoes
+    healthy runs with no other test catching it."""
+    outcomes = [_outcome(f"q{i}", valid=True) for i in range(91)]
+    # 9/100 questions, one per recoverable allowlist class → 9% rate.
+    for i, cls in enumerate((
+            "parse_error", "truncated", "truncated_parse_error",
+            "partial_parse", "transient_429_rate_limit", "transient_5xx",
+            "transient_timeout", "transient_network", "transient_unknown")):
+        outcomes.append(_outcome(f"r{i}", valid=False,
+                                 error_classes={cls: 1}))
+    integ = _report(outcomes, threshold=0.09)["integrity"]
     assert integ["valid"] is True
     assert integ["n_hard_invalid"] == 0
-    assert integ["n_recoverable_invalid"] == 6
-    assert integ["n_invalid"] == 6
-    assert integ["invalid_rate"] == 0.06
-    assert integ["recoverable_invalid_rate"] == 0.06
+    assert integ["n_recoverable_invalid"] == 9
+    assert integ["n_invalid"] == 9
+    assert integ["invalid_rate"] == 0.09
+    assert integ["recoverable_invalid_rate"] == 0.09
 
 
 def test_report_integrity_recoverable_rate_above_threshold_is_invalid():
@@ -210,10 +212,13 @@ def test_report_integrity_non_census_error_string_is_structural_hard():
 
 
 def test_report_integrity_recoverable_census_with_runner_clean_is_valid():
-    """#1747: a recoverable-only census on a question the RUNNER already
-    declared clean (valid=True) grades clean — the binary flag is the
-    authority on whether error strings exist; the census alone never
-    downgrades a clean question."""
+    """#1747 drift-pin: a recoverable-only census on a question the RUNNER
+    already declared clean (valid=True) grades clean — the binary flag is
+    the authority on whether error strings exist. This shape is UNREACHABLE
+    with the current runner (every census bump pairs an errors.append, so
+    non-empty census ⟹ valid=False — extractor_v2/run.py lockstep), but the
+    grader's default is pinned so a future producer split cannot silently
+    downgrade clean questions."""
     integ = _report([_outcome("q0", valid=True,
                               error_classes={"transient_network": 3})],
                     threshold=0.0)["integrity"]
@@ -274,6 +279,7 @@ def test_report_integrity_failed_questions_cross_ref():
     # retries_exhausted is transient-safe → recoverable, not a hard veto.
     assert integ["n_hard_invalid"] == 0
     assert integ["n_recoverable_invalid"] == 1
+    assert integ["valid"] is False   # 0.5 > threshold 0.0 (rate criterion)
 
 
 def test_report_integrity_permanent_eval_failure_vetoes():
@@ -320,3 +326,191 @@ def test_cli_integrity_threshold_flag():
                               "0.05"]).integrity_threshold == 0.05
     assert parser.parse_args(["--integrity-threshold",
                               "1"]).integrity_threshold == 1.0
+    # wiring pin: the CLI-parsed value is what build_report records as the
+    # effective threshold the verdict is gated on (run_evaluation forwards it
+    # verbatim — test_longmem_runner pins that hop end-to-end).
+    integ = _report([_outcome("q0", valid=False,
+                              error_classes={"parse_error": 1})],
+                    threshold=parser.parse_args(
+                        ["--integrity-threshold", "0.05"]).integrity_threshold)["integrity"]
+    assert integ["threshold"] == 0.05
+    assert integ["valid"] is False  # 1/1 > 0.05
+
+
+def test_report_integrity_mixed_hard_and_recoverable_run():
+    """#1747 (reviewer-pinned): the realistic 500-Q production shape — clean
+    majority + a handful of recoverable blips + ONE hard question. The hard
+    veto — not the rate — is what flips the verdict, and the additive
+    breakdown reports both buckets."""
+    outcomes = [_outcome(f"q{i}", valid=True) for i in range(95)]
+    for i in range(4):
+        outcomes.append(_outcome(f"t{i}", valid=False,
+                                 error_classes={"transient_network": 1}))
+    outcomes.append(_outcome("hard", valid=False,
+                             error_classes={"fatal_402_billing": 1}))
+    integ = _report(outcomes, threshold=0.06)["integrity"]
+    assert integ["valid"] is False        # hard veto fires
+    assert integ["n_hard_invalid"] == 1
+    assert integ["n_recoverable_invalid"] == 4
+    assert integ["recoverable_invalid_rate"] == 0.04  # within threshold
+    assert integ["n_invalid"] == 5
+    assert integ["invalid_rate"] == 0.05
+
+
+def test_report_integrity_all_clean_nonempty_run():
+    """#1747: a non-empty all-clean run → valid=true with the full zeroed
+    breakdown (the surface-map happy path: clean run → valid=true)."""
+    integ = _report([_outcome(f"q{i}") for i in range(3)])["integrity"]
+    assert integ["valid"] is True
+    assert integ["n_attempted"] == 3
+    assert integ["n_valid"] == 3
+    assert integ["n_invalid"] == 0
+    assert integ["invalid_rate"] == 0.0
+    assert integ["recoverable_invalid_rate"] == 0.0
+    assert integ["n_hard_invalid"] == 0
+    assert integ["n_recoverable_invalid"] == 0
+    assert integ["error_census"] == {}
+
+
+def test_report_integrity_zero_count_census_semantics():
+    """#1747 (reviewer-pinned): zero-count census entries are artifacts (the
+    extractor emits only positive counts) — they are ABSENT from the graded
+    class set but still recorded in the published census."""
+    # zero-count recoverable + valid=False → the census is effectively empty
+    # → the invalidity is non-census/structural → HARD (empty-census branch).
+    integ = _report([_outcome("q0", valid=False,
+                              error_classes={"parse_error": 0})],
+                    threshold=1.0)["integrity"]
+    assert integ["n_hard_invalid"] == 1
+    assert integ["valid"] is False
+    assert integ["error_census"] == {"parse_error": 0}
+    # zero-count HARD class does NOT veto (no actual errors of that class),
+    # but a positive recoverable class in the same census still grades
+    # recoverable (rate-limited).
+    integ = _report([_outcome("q0", valid=False,
+                              error_classes={"fatal_402_billing": 0,
+                                              "parse_error": 1})],
+                    threshold=1.0)["integrity"]
+    assert integ["n_hard_invalid"] == 0
+    assert integ["n_recoverable_invalid"] == 1
+    assert integ["valid"] is True
+    assert integ["error_census"] == {"fatal_402_billing": 0, "parse_error": 1}
+
+
+def test_report_integrity_malformed_census_count_fails_closed():
+    """#1747 (security review): a non-int census count (malformed JSON from a
+    schema-less checkpoint merge) must not crash build_report NOR silently
+    drop the class: the class stays PRESENT in the graded set (a HARD class
+    with a malformed count still vetoes — no fail-open), the malformed value
+    is recorded VERBATIM in the published census (never vanishes), and the
+    verdict counts QUESTIONS not census entries (a recoverable class with a
+    malformed count is one rate-limited question)."""
+    # hard class with a malformed count → veto (fail-closed).
+    integ = _report([_outcome("q0", valid=False,
+                              error_classes={"fatal_402_billing": "abc"})],
+                    threshold=1.0)["integrity"]
+    assert integ["valid"] is False
+    assert integ["n_hard_invalid"] == 1
+    assert integ["error_census"] == {"fatal_402_billing": "abc"}
+    # recoverable class with a malformed count → one recoverable question
+    # (rate-limited); the malformed value is still recorded verbatim.
+    integ = _report([_outcome("q0", valid=False,
+                              error_classes={"parse_error": "abc"})],
+                    threshold=1.0)["integrity"]
+    assert integ["valid"] is True
+    assert integ["n_recoverable_invalid"] == 1
+    assert integ["error_census"] == {"parse_error": "abc"}
+
+
+def test_report_integrity_mixed_failure_grades():
+    """#1747 (reviewer-pinned): a failure list with BOTH a transient-safe
+    (reader:retries_exhausted) and a permanent (reader:fatal) entry — the
+    invariant n_hard_invalid + n_recoverable_invalid == n_invalid is
+    asserted against both grades coexisting, and both criteria (rate + veto)
+    are exercised simultaneously."""
+    outcomes = [_outcome("q1", valid=True)]
+    failures = [
+        {"question_id": "q2", "error_class": "reader:retries_exhausted",
+         "error": "x", "failed_at_utc": "2026-08-20T00:00:00Z"},
+        {"question_id": "q3", "error_class": "reader:fatal",
+         "error": "x", "failed_at_utc": "2026-08-20T00:00:00Z"},
+    ]
+    integ = _report(outcomes, failures=failures, threshold=0.5)["integrity"]
+    assert integ["n_hard_invalid"] == 1
+    assert integ["n_recoverable_invalid"] == 1
+    assert integ["n_invalid"] == 2
+    assert integ["n_attempted"] == 3
+    assert integ["invalid_rate"] == round(2 / 3, 4)
+    assert integ["valid"] is False       # rate 0.667 > 0.5 AND hard veto
+
+
+def test_report_integrity_missing_error_class_fails_closed():
+    """#1747 (reviewer-pinned): a failure entry with NO error_class (the
+    full_context cell producer's shape) grades HARD — fail-closed; a
+    question that died with no recorded class cannot ride the rate
+    threshold."""
+    outcomes = [_outcome("q1", valid=True)]
+    failures = [{"question_id": "q2", "error": "boom",
+                 "failed_at_utc": "2026-08-20T00:00:00Z"}]
+    integ = _report(outcomes, failures=failures, threshold=0.5)["integrity"]
+    assert integ["n_hard_invalid"] == 1
+    assert integ["valid"] is False
+    # tampered suffix must NOT match the recoverable allowlist (fail-closed).
+    tampered = _report(outcomes, failures=[{
+        "question_id": "q2", "error_class": "evil:retries_exhausted",
+        "error": "x", "failed_at_utc": "2026-08-20T00:00:00Z"}],
+        threshold=0.5)["integrity"]
+    assert tampered["n_hard_invalid"] == 1
+    assert tampered["valid"] is False
+
+
+def test_report_integrity_qid_overlap_failure_grade_dominates():
+    """#1747 (history-review P1): a qid in BOTH outcomes and failures (the
+    concurrent checkpoint-merge shape — one worker completes a question
+    another failed) is graded ONCE with the failure grade dominating; the
+    invariants n_valid + n_invalid == n_attempted and n_hard + n_recoverable
+    == n_invalid hold without any double count or negative n_valid."""
+    integ = _report([_outcome("a", valid=True)], failures=[{
+        "question_id": "a", "error_class": "reader:fatal",
+        "error": "x", "failed_at_utc": "2026-08-20T00:00:00Z"}])
+    i = integ["integrity"]
+    assert i["n_attempted"] == 1
+    assert i["n_valid"] == 0            # failure grade dominates clean
+    assert i["n_invalid"] == 1
+    assert i["n_hard_invalid"] == 1
+    assert i["n_recoverable_invalid"] == 0
+    assert i["invalid_rate"] == 1.0
+    assert i["valid"] is False
+
+    # recoverable failure over a clean outcome → recoverable (rate-limited).
+    i = _report([_outcome("a", valid=True)], failures=[{
+        "question_id": "a", "error_class": "reader:retries_exhausted",
+        "error": "x", "failed_at_utc": "2026-08-20T00:00:00Z"}])["integrity"]
+    assert i["n_valid"] == 0
+    assert i["n_recoverable_invalid"] == 1
+    assert i["n_invalid"] == 1
+    assert i["n_hard_invalid"] == 0
+
+
+def test_run_protocol_step5_gate_string_pins_criterion():
+    """#1747 verification-checklist (3): the run-protocol step-5 gate string
+    (and the executed step-5 command) must reflect the approved criterion —
+    the hard veto + the justified 0.02 threshold injected by `run 5`."""
+    from tools.longmem_eval.run_protocol import (  # noqa: I001
+        STEPS_BY_NUMBER, build_command, JUSTIFIED_BASELINE_THRESHOLD,
+    )
+    from tools.longmem_eval.run_protocol import ProtocolState
+    from pathlib import Path
+    import tempfile
+
+    gate = STEPS_BY_NUMBER[5].gate
+    assert "invalid_rate ≤ threshold" in gate
+    assert "n_hard_invalid == 0" in gate
+    assert f"{JUSTIFIED_BASELINE_THRESHOLD}" in gate
+
+    # the executed step-5 command injects the justified threshold (the
+    # operator never has to remember the flag — the run matches the gate).
+    state = ProtocolState(Path(tempfile.mkdtemp()) / "state.json")
+    cmd = build_command(STEPS_BY_NUMBER[5], [], state=state)
+    assert "--integrity-threshold" in cmd
+    assert f"{JUSTIFIED_BASELINE_THRESHOLD}" in cmd

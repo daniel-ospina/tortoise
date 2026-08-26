@@ -60,6 +60,19 @@ DEFAULT_STATE = REPO_ROOT / ".longmemeval_cache" / "run_protocol_state.json"
 #: Default artifacts dir for reports/checkpoints (gitignored).
 DEFAULT_RUN_DIR = REPO_ROOT / ".longmemeval_cache" / "runs"
 
+#: #1747: the justified integrity-threshold default for the step-5 500-Q
+#: baseline run. A healthy run at 500-Q scale (~24k session extractions)
+#: carries a handful of recoverable-class error strings (parse_error /
+#: truncated / transient_* — the census allowlist in report.py) even with a
+#: flawless extractor; the strict 0.0 default would make ``integrity.valid
+#: == true`` unreachable and the V3 baseline unconfirmable. 0.02 = at most
+#: 10 of 500 questions with recoverable errors. Hard failures (fatal_* /
+#: structural non-census strings / permanent eval failures) still veto at
+#: ANY threshold (report.py). Injected into the step-5 command by
+#: ``build_command`` so the executed run matches the documented gate — the
+#: operator never has to remember the flag.
+JUSTIFIED_BASELINE_THRESHOLD = 0.02
+
 
 @dataclass(frozen=True)
 class Step:
@@ -89,8 +102,10 @@ STEPS: list[Step] = [
          "run",
          "integrity.valid=true — census-class-aware (#1747): invalid_rate ≤ threshold "
          "AND n_hard_invalid == 0 (fatal_*/ingest/non-census-error-string/permanent-"
-         "eval-failure questions veto at any threshold); threshold 0.02 justified "
-         "default at 500-Q scale — run with --integrity-threshold 0.02",
+         "eval-failure questions veto at any threshold); threshold "
+         f"{JUSTIFIED_BASELINE_THRESHOLD} justified default at 500-Q scale "
+         f"(≤{JUSTIFIED_BASELINE_THRESHOLD * 100:.0f} of 500 questions with recoverable "
+         "errors) — injected by `run 5`",
          runner="baseline"),
     Step(6, "fix-500", "Mechanical + obvious fixes from the 500",
          "gate", "findings fixed"),
@@ -259,7 +274,9 @@ def build_command(step: Step, extra: list[str], *, state: ProtocolState,
         return _run_cmd(["--split", "s", "--limit", "50",
                          "--ingest-mode", "v2", *common])
     if step.runner == "baseline":       # step 5: full 500-Q run (V3 baseline)
-        return _run_cmd(["--split", "s", "--ingest-mode", "v2", *common])
+        return _run_cmd(["--split", "s", "--ingest-mode", "v2",
+                         "--integrity-threshold",
+                         f"{JUSTIFIED_BASELINE_THRESHOLD}", *common])
     if step.runner == "confirm":        # step 7: confirmation set (subset file)
         if not expected_direction:
             raise SystemExit(
