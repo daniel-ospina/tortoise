@@ -200,7 +200,7 @@ def _record_current_test_stem(stem: str | None) -> None:
         return  # prod parity: no attribution outside a test session
     cur = threading.current_thread()
     if stem is None:
-        try:
+        try:  # noqa: SIM105
             del cur._tortoise_test_stem
         except AttributeError:
             pass
@@ -225,7 +225,7 @@ def _thread_start_inherit_stem(self, *args, **kwargs):
     stamp (AttributeError swallowed) and fall back to frame resolution."""
     parent_stem = _inherited_test_stem()
     if parent_stem is not None and _TEST_SESSION_ACTIVE:
-        try:
+        try:  # noqa: SIM105
             self._tortoise_test_stem = parent_stem
         except AttributeError:
             pass
@@ -1709,7 +1709,7 @@ class FalkorProjection(
                 # not be dropped/recreated on every reopen (churn).
                 try:
                     for _single in ("is_operator", "lastDreamedAt"):
-                        try:
+                        try:  # noqa: SIM105
                             self.g.query(f"DROP INDEX ON :Point({_single})")
                         except Exception:
                             pass  # no such single index — fine
@@ -1831,7 +1831,7 @@ class FalkorProjection(
                         # index directly — mark the migration done so a later
                         # boot (create → "already") never re-enters the
                         # drop→recreate path (marker guards churn).
-                        try:
+                        try:  # noqa: SIM105
                             self.g.query(
                                 "MERGE (m:Meta {key:'point_fts_v2'}) SET m.v = true"
                             )

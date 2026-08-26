@@ -46,10 +46,10 @@ os.environ.setdefault("TORTOISE_FAST_ATEXIT", "1")
 # tests/ is a namespace package (no __init__.py): resolve it via the repo
 # root so conftest loads under `uv run pytest tests/` too (python -m pytest
 # adds cwd, but uv run does not — CI uv-lock-check, issue #1012).
-import sys  # noqa: I001
-from pathlib import Path
+import sys  # noqa: E402, I001
+from pathlib import Path  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from tests._embedded import shared_proj  # noqa: F401, I001
+from tests._embedded import shared_proj  # noqa: E402, F401, I001
 
 # ── Epic #1647 (D-1=A): the test-session signal + redirect env ────────────
 # Exported at CONFTEST IMPORT so the PRODUCT-side redirect
@@ -64,6 +64,7 @@ from tests._embedded import TEST_NO_REDIRECT_STEMS  # noqa: E402
 # import — so projection's module-body Thread.start stamp install sees it;
 # the call-time redirect checks read the env at construction regardless.)
 from tortoise import projection as _projection_mod  # noqa: E402
+
 _projection_mod._TEST_SESSION_ACTIVE = True
 # #1686: install the Thread.start test-stem stamp AFTER the session flag is
 # live (prod can never satisfy the flag, so even a leaked TEST_MODE=1 env
@@ -129,10 +130,6 @@ if _is_db_uri_conftest(os.environ.get("TORTOISE_DB_URI")):
     import tests._embedded as _embedded_mod
     _embedded_mod._JOURNAL_FILE = _JOURNAL_PATH
 
-from tortoise.pricing import tier_limits  # noqa: E402  (late import: after TEST_MODE env wiring)
-from tortoise.sdk import TortoiseSDK  # noqa: E402
-
-
 # ── Epic #1647 Task 10 Step 1a (P4, plan-review P1-9): URI-required ───────
 # Default pytest requires TORTOISE_DB_URI; the carve-out is the sole embedded
 # surface. Declared FIRST among the session fixtures so the enforcement
@@ -140,6 +137,8 @@ from tortoise.sdk import TortoiseSDK  # noqa: E402
 # helper lives in tests/_embedded.py (pinned by test_markers.py — the
 # tests.conftest import would re-execute conftest's top-level code).
 from tests._embedded import _assert_p4_uri_required  # noqa: E402
+from tortoise.pricing import tier_limits  # noqa: E402  (late import: after TEST_MODE env wiring)
+from tortoise.sdk import TortoiseSDK  # noqa: E402
 
 
 @pytest.fixture(scope="session", autouse=True)

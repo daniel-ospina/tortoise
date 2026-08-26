@@ -55,7 +55,7 @@ def test_report_methodology_records_prompt_constants(tmp_path):
     from tools.longmem_eval.run import run_evaluation
     MINI = Path(__file__).parent / "fixtures" / "longmemeval_mini.json"
     instances = json.loads(MINI.read_text(encoding="utf-8"))
-    _outcomes, report = run_evaluation(
+    outcomes, report = run_evaluation(  # noqa: RUF059
         instances, reader=MockReader(), judge=MockJudge(),
         ks=(5, 10, 20), top_k=20, split="s", work_dir=str(tmp_path))
     m = report["methodology"]
@@ -117,7 +117,7 @@ def test_cross_cell_reader_pin_is_stable(tmp_path):
     instances = json.loads(MINI.read_text(encoding="utf-8"))
 
     def _run():
-        _outcomes, report = run_evaluation(
+        outcomes, report = run_evaluation(  # noqa: RUF059
             instances, reader=MockReader(), judge=MockJudge(),
             ks=(5,), top_k=20, split="s", work_dir=str(tmp_path))
         m = report["methodology"]

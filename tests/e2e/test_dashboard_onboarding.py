@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import time
 import urllib.parse
 
@@ -19,7 +18,7 @@ from playwright.sync_api import Page, expect
 if not os.environ.get("RUN_DASHBOARD_E2E"):
     pytest.skip("dashboard e2e: opt-in via RUN_DASHBOARD_E2E=1", allow_module_level=True)
 
-from tests.e2e.test_session_login_flow import AUTH_HOST, APP_HOST, DASHBOARD_URL
+from tests.e2e.test_session_login_flow import APP_HOST, AUTH_HOST, DASHBOARD_URL
 
 
 def _session(user_id: str) -> dict:
@@ -36,7 +35,7 @@ def _seed_cookie(page: Page, user_id: str) -> None:
                                "domain": ".premiselabs.co", "path": "/"}])
 
 
-def _wire(page: Page, *, provision: bool, seed_objects: list = None, onboarding_state: dict | None = None) -> dict:
+def _wire(page: Page, *, provision: bool, seed_objects: list = None, onboarding_state: dict | None = None) -> dict:  # noqa: RUF013
     """Route harness: the API mocks for the wizard journey. Returns the
     capture dict ({objects, points, state_patches})."""
     cap = {"objects": [], "points": [], "state": []}

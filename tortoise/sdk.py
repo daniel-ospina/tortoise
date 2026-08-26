@@ -9826,7 +9826,7 @@ class TortoiseSDK:
                                     key=lambda x: (x[1], weights.get(x[0], 0.0)),
                                     reverse=True))
                 result_ids = list(fused.keys())
-            except Exception as e:  # noqa: BLE001 — degrade, never crash
+            except Exception as e:
                 _logger.warning("recency weighting failed (%s) — plain RRF", e)
 
         if kind and query is not None and result_ids:
@@ -10200,7 +10200,7 @@ class TortoiseSDK:
                     return {"found": False, "point_id": point_id,
                             "at_date": at_date, "chain": []}
                 break
-            content, vf, vt, created = rows[0]
+            content, vf, vt, created = rows[0]  # noqa: RUF059
             chain.append({"id": cur, "content": content,
                           "valid_from": vf, "valid_to": vt})
             older = proj.g.query(
@@ -10222,7 +10222,7 @@ class TortoiseSDK:
             """Window coverage with IS-NULL open ends + mixed-format keys."""
             if vf is not None and _created_sort_key(vf) > t_key:
                 return False
-            if vt is not None and _created_sort_key(vt) < t_key:
+            if vt is not None and _created_sort_key(vt) < t_key:  # noqa: SIM103
                 return False
             return True
 

@@ -84,7 +84,7 @@ def _require_key(authorization: str | None = Header(default=None)) -> None:
 # threaded into the request SDK too — see _sdk) because selfhost tests
 # reload the module per-test with a fresh path; a single "selfhost" key
 # would pin the FIRST test's server and orphan every later one.
-_SELFHOST_KEEPALIVE: dict[str, "TortoiseSDK"] = {}
+_SELFHOST_KEEPALIVE: dict[str, TortoiseSDK] = {}  # noqa: F821
 
 
 def _resolve_embedded_db_path() -> str:
@@ -111,7 +111,7 @@ def _sdk():
         anchor = _SELFHOST_KEEPALIVE.get(db_path)
         if anchor is None:
             anchor = TortoiseSDK(db_path=db_path, namespace="selfhost")
-            try:
+            try:  # noqa: SIM105
                 anchor._get_proj()  # eager: hold the connection so the server survives
             except Exception:
                 pass
@@ -120,7 +120,7 @@ def _sdk():
             # Self-heal (mirrors hosted_api): anchor stored unconnected
             # (transient failure) — retry once so keepalive is not off
             # permanently for this path.
-            try:
+            try:  # noqa: SIM105
                 anchor._get_proj()
             except Exception:
                 pass

@@ -196,7 +196,7 @@ def _close_seed_projs():
     """Close held seeded projections at session end (see _SEED_PROJS)."""
     yield
     while _SEED_PROJS:
-        try:
+        try:  # noqa: SIM105
             _SEED_PROJS.pop().close()
         except Exception:
             pass
