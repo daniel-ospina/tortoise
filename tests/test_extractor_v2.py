@@ -493,6 +493,9 @@ class TestParseLadder:
         assert "s2 base" in contents and "s4 point 1" in contents
         assert "s4 point 2" not in contents  # the truncated tail was dropped
         assert out["stats"]["llm"]["truncated"] == 1  # S4 truncated
+        # the partial-accept never credits the repair rung (review-fix pin:
+        # a data-dropping accept is partial_parse, never recovery["repair"]).
+        assert out["stats"]["recovery"].get("repair", 0) == 0
 
     def test_partial_accept_rejects_empty_prefix(self):
         """Truncation before any item (no complete embed item exists) →

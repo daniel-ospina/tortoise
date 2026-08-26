@@ -599,7 +599,8 @@ def build_report(
         n_attempted — a dropped run plus one recoverable failure entry must
         not certify);
         recoverable classes (parse_error / truncated / truncated_parse_error
-        / partial_parse / transient_*, plus reader/judge/ingest:
+        / partial_parse / transient_* / s1_chunk_summary, plus
+        reader/judge/ingest:
         retries_exhausted eval failures) are rate-limited (a healthy 500-Q run
         admits a handful — the OLD binary ``len(errors)==0`` per-question
         invalid made ``valid=true`` unreachable at scale); hard classes
@@ -860,7 +861,8 @@ def build_report(
     #                error string with an empty census (structural
     #                degradation) → VETOES the run at any threshold
     #   recoverable — only parse_error/truncated/truncated_parse_error/
-    #                partial_parse/transient_* classes with the runner flag
+    #                partial_parse/transient_*/s1_chunk_summary classes with
+    #                the runner flag
     #                valid=False → INVALID but rate-limited (threshold)
     #   clean      — no error signal; a recoverable-only census with the
     #                runner flag valid=True also grades clean (drift-pin:
@@ -1150,7 +1152,7 @@ def build_report(
             "breaker_open drops) with a hard census still veto "
             "(n_excluded_hard); "
             "recoverable = parse_error/truncated/truncated_parse_error/"
-            "partial_parse/transient_* census classes + "
+            "partial_parse/transient_*/s1_chunk_summary census classes + "
             "reader/judge/ingest:retries_exhausted eval failures "
             "(rate-limited, not vetoed)"
         ),
