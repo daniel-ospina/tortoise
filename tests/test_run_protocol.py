@@ -405,9 +405,107 @@ def test_cmd_run_records_resume_quality_scan(tmp_path, monkeypatch, capsys):
     run = state.data["runs"]["3"]
     assert run["resume_quality"]["rejected"] == 1
     assert run["resume_quality"]["fts_dead"] == 1
-    assert run["resume_quality"]["zero_session"] == 0
+    # per-signal PRESENCE: q-dead carries BOTH dead-FTS and all-zero
+    # session recall (the pilot's artifact shape) — counts in both fields
+    assert run["resume_quality"]["zero_session"] == 1
+    assert run["resume_quality"]["truncated"] == 0
     assert run["resume_quality"]["qids"] == ["q-dead"]
     assert run["resume_quality"]["checked"] == 2
+
+
+def test_checkpoint_resume_quality_guard_rails(tmp_path):
+    """#1764: the pre-resume scan returns None (nothing to scan) for empty,
+    null, or missing outcomes — never crashes and never prints a false
+    'clean' claim; a truncated outcome (missing required keys) is counted
+    separately — the runner re-encodes it via the truncated path, not the
+    gate; a breaker_open-only checkpoint has nothing gate-eligible."""
+    # empty outcomes list → None (nothing to scan)
+    cp = tmp_path / "empty.json"
+    cp.write_text(json.dumps({"format": "lme-checkpoint-v2",
+                              "outcomes": []}), encoding="utf-8")
+    assert rp.checkpoint_resume_quality(cp) is None
+    # explicit null outcomes → None (no TypeError on iteration)
+    cp = tmp_path / "null.json"
+    cp.write_text(json.dumps({"format": "lme-checkpoint-v2",
+                              "outcomes": None}), encoding="utf-8")
+    assert rp.checkpoint_resume_quality(cp) is None
+    # missing outcomes key → None
+    cp = tmp_path / "missing.json"
+    cp.write_text(json.dumps({"format": "lme-checkpoint-v2"}),
+                  encoding="utf-8")
+    assert rp.checkpoint_resume_quality(cp) is None
+    # truncated outcome (missing hybrid required keys) → truncated count
+    cp = tmp_path / "truncated.json"
+    cp.write_text(json.dumps({
+        "format": "lme-checkpoint-v2",
+        "run_key": "embedded__hybrid__default__default",
+        "outcomes": [{"question_id": "q-trunc"}],
+    }), encoding="utf-8")
+    scan = rp.checkpoint_resume_quality(cp)
+    assert scan is not None
+    assert scan["truncated"] == 1
+    assert scan["rejected"] == 0 and scan["checked"] == 0
+    # breaker_open-only checkpoint → no gate-eligible outcomes → None
+    cp = tmp_path / "breaker.json"
+    cp.write_text(json.dumps({
+        "format": "lme-checkpoint-v2",
+        "run_key": "embedded__hybrid__default__default",
+        "outcomes": [{"question_id": "q-drop", "breaker_open": True,
+                       "dropped_reason": "breaker_open",
+                       "session_recall@k": {"20": 0.0},
+                       "turn_recall@k": {"20": 0.0}}],
+    }), encoding="utf-8")
+    assert rp.checkpoint_resume_quality(cp) is None
+
+
+def test_cmd_run_scan_uses_last_checkpoint_flag(tmp_path, monkeypatch):
+    """#1764: the pre-resume scan resolves the LAST --checkpoint occurrence —
+    build_command prepends the operator's extra flags and appends the
+    protocol's own --checkpoint after them, and the runner's argparse is
+    last-wins — so the scan and the recorded state describe the file the
+    runner actually uses."""
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379")
+    state = _fresh_state(tmp_path)
+    for n in range(1, 8):
+        state.pass_gate(n, f"step {n} done")
+    run_dir = tmp_path / "runs"
+    run_dir.mkdir()
+    monkeypatch.setattr(rp, "DEFAULT_RUN_DIR", run_dir)
+    # the operator's extra --checkpoint points at a CLEAN file...
+    extra_cp = tmp_path / "extra.json"
+    extra_cp.write_text(json.dumps({
+        "format": "lme-checkpoint-v2",
+        "run_key": "embedded__hybrid__default__default",
+        "outcomes": [{"question_id": "q-clean",
+                       "session_recall@k": {"20": 1.0},
+                       "turn_recall@k": {"20": 1.0},
+                       "legs": [{"leg": "fts", "ran": True,
+                                  "degraded": False, "reason": "ok",
+                                  "count": 7}]}],
+    }), encoding="utf-8")
+    # ...while the protocol-default checkpoint (what the runner will use,
+    # argparse last-wins) is dirty
+    cp = run_dir / "pilot.checkpoint.json"
+    cp.write_text(json.dumps({
+        "format": "lme-checkpoint-v2",
+        "run_key": "embedded__hybrid__default__default",
+        "outcomes": [{"question_id": "q-dead",
+                       "session_recall@k": {"20": 0.0},
+                       "turn_recall@k": {"20": 0.0},
+                       "legs": [{"leg": "fts", "ran": True,
+                                  "degraded": False,
+                                  "reason": "empty_results",
+                                  "count": 0}]}],
+    }), encoding="utf-8")
+    monkeypatch.setattr(rp.subprocess, "run", lambda cmd, env: type(
+        "R", (), {"returncode": 0})())
+    rp.cmd_run(state, argparse_namespace(
+        step="3", owner_approve=None, dry_run=False,
+        extra=["--checkpoint", str(extra_cp)], expected_direction=None))
+    run = state.data["runs"]["3"]
+    assert run["checkpoint"] == str(cp)  # protocol-default, not the extra
+    assert run["resume_quality"]["qids"] == ["q-dead"]
+    assert run["resume_quality"]["rejected"] == 1
 
 
 def test_cmd_run_step7_requires_expected_direction(tmp_path, monkeypatch, capsys):

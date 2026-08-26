@@ -877,7 +877,14 @@ def _legit_sessionless(outcome: dict) -> bool:
     forced 0.0 — because ``evidence_turn_ids`` (dataset-derived) is empty.
     Such outcomes are legitimately all-zero on session recall (abstention
     questions — the answer IS "not mentioned") and must NOT be treated as
-    retrieval-dead, or they would re-encode on every resume forever."""
+    retrieval-dead, or they would re-encode on every resume forever.
+
+    Known limitation: the vector arm (#1349) records ``turn_recall@k`` as a
+    forced 0.0 for empty evidence (an M6 divergence from the hybrid path),
+    so a vector-mode abstention is not recognized as sessionless here and
+    is re-encoded per resume. The M6 fix belongs in retrieve.py (vector
+    arm); tracked with the retrieve-leg issue (#1745).
+    """
     tr = outcome.get("turn_recall@k")
     return isinstance(tr, dict) and bool(tr) and all(
         v is None for v in tr.values())
@@ -918,6 +925,9 @@ def resume_gate_reject_reason(outcome: dict) -> str | None:
     if _legit_sessionless(outcome):
         return None  # N/A — no answer session to recall, never a dead leg
     legs = outcome.get("legs")
+    sr = outcome.get("session_recall@k")
+    session_zero = (isinstance(sr, dict) and bool(sr)
+                    and all(v == 0 for v in sr.values()))
     if isinstance(legs, list):
         # TR questions trace one fts entry PER entity type (point + event
         # share the leg_trace) — the leg is dead only when EVERY fts entry
@@ -925,11 +935,16 @@ def resume_gate_reject_reason(outcome: dict) -> str | None:
         # leg).
         fts_entries = [leg for leg in legs
                        if isinstance(leg, dict) and leg.get("leg") == "fts"]
-        if fts_entries and all(leg.get("count") == 0
-                               for leg in fts_entries):
+        # The dead-FTS signal fires only when the session is ALSO
+        # un-surfaced (or recall data is absent): a healthy vector leg that
+        # rescued the session (session_recall > 0) is NOT retrieval-dead —
+        # rejecting it would livelock, since the re-encode reproduces the
+        # same FTS-empty shape on the next resume.
+        if (fts_entries and all(leg.get("count") == 0
+                                for leg in fts_entries)
+                and (session_zero or not isinstance(sr, dict) or not sr)):
             return "fts.count=0 (dead FTS retrieval leg)"
-    sr = outcome.get("session_recall@k")
-    if isinstance(sr, dict) and sr and all(v == 0 for v in sr.values()):
+    if session_zero:
         return "session_recall@k all zeros (session never surfaced)"
     return None
 
@@ -955,7 +970,11 @@ def _load_checkpoint(path: str | None,
     session recall is REJECTED (dropped from the completed set so the
     question re-encodes, mirroring the truncated-outcome path) instead of
     silently contaminating the baseline with a stale outcome. breaker_open
-    outcomes are exempt (legitimately dropped — never re-run).
+    outcomes are exempt (legitimately dropped — never re-run). The
+    checkpoint self-heals only when the re-encode succeeds: a still-dead
+    backend (or a failed re-encode) keeps the outcome rejected on every
+    resume — surfaced via the run log / protocol resume-quality note so
+    the dead backend is seen, never silently converged.
     """
     if not path:
         return {}, []

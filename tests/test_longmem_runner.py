@@ -1459,11 +1459,15 @@ def test_checkpoint_resume_gate_rejects_dead_fts_leg(tmp_path, capsys):
     kwargs = dict(reader=MockReader(), judge=MockJudge(), ks=(5,), top_k=5,
                   split="s", work_dir=str(tmp_path), checkpoint=str(cp))
     run_evaluation(_mini()[:2], **kwargs)
-    # simulate the pre-crash artifact: record a dead FTS leg on every outcome
+    # simulate the pre-crash artifact: a dead FTS leg AND zero session
+    # recall on every outcome (the pilot's stale shape — the session never
+    # surfaced, so no recall could be recorded)
     saved = json.loads(cp.read_text(encoding="utf-8"))
     for o in saved["outcomes"]:
         o["legs"] = [{"leg": "fts", "ran": True, "degraded": False,
                        "reason": "empty_results", "count": 0}]
+        o["session_recall@k"] = {k: 0.0 for k in o.get("session_recall@k", {})}
+        o["turn_recall@k"] = {k: 0.0 for k in o.get("turn_recall@k", {})}
     Path(cp).write_text(json.dumps(saved), encoding="utf-8")
 
     outcomes, _report = run_evaluation(_mini()[:2], **kwargs)

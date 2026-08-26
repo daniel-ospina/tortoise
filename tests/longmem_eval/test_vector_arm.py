@@ -601,8 +601,13 @@ def test_checkpoint_resume_gate_rejects_dead_fts_leg(tmp_path, capsys):
                                legs=[{"leg": "fts", "ran": True,
                                       "degraded": False, "reason": "ok",
                                       "count": 4}])
+    # the dead outcome carries the FULL dead shape — a dead FTS leg AND
+    # zero session recall (the session never surfaced). A healthy vector
+    # leg with non-zero session recall is NOT retrieval-dead (see the
+    # guard-rail matrix) — the pilot's artifact had both signals dead.
     dead = _minimal_outcome(
         "mini_msr_002",
+        **{"session_recall@k": {"5": 0.0}, "turn_recall@k": {"5": 0.0}},
         legs=[{"leg": "fts", "ran": True, "degraded": False,
                "reason": "empty_results", "count": 0},
               {"leg": "vector", "ran": True, "degraded": False,
@@ -710,7 +715,7 @@ def test_checkpoint_resume_gate_keeps_breaker_open(tmp_path):
     ({"question_id": "q", "session_recall@k": {}}, None),
     ({"question_id": "q", "session_recall@k": "x"}, None),
     ({"question_id": "q", "session_recall@k": {"5": None}}, None),
-    # dead-FTS signal (single fts leg)
+    # dead-FTS signal (single fts leg, no recall data recorded)
     ({"question_id": "q",
       "legs": [{"leg": "fts", "ran": True, "degraded": False,
                  "reason": "empty_results", "count": 0}]},
@@ -719,6 +724,21 @@ def test_checkpoint_resume_gate_keeps_breaker_open(tmp_path):
       "legs": [{"leg": "fts", "ran": False, "degraded": True,
                  "reason": "breaker_open", "count": 0}]},
      "fts.count=0"),
+    # dead-FTS + zero session recall (the pilot's artifact shape) — FTS
+    # reason surfaces first (both signals present)
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": False,
+                 "reason": "empty_results", "count": 0}],
+      "session_recall@k": {"5": 0.0}},
+     "fts.count=0"),
+    # dead FTS leg + HEALTHY session (a vector leg rescued the session) →
+    # NOT retrieval-dead — rejecting it would livelock (the re-encode
+    # reproduces the same FTS-empty shape on the next resume)
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": False,
+                 "reason": "empty_results", "count": 0}],
+      "session_recall@k": {"5": 1.0}},
+     None),
     # TR dual-entity-type trace: a live point leg rescues the event leg
     ({"question_id": "q",
       "legs": [{"leg": "fts", "ran": True, "degraded": False,

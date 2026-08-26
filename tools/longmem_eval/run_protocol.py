@@ -124,7 +124,7 @@ class ProtocolState:
                 "protocol": "1509-run-protocol",
                 "created_at_utc": _utc(),
                 "steps": {},
-                "runs": {},        # step_number → {report, checkpoint, command, expected_direction}
+                "runs": {},        # step_number → {report, checkpoint, command, expected_direction, resume_quality}
                 "notes": {},       # step_number → operator notes
             }
             for s in STEPS:
@@ -335,13 +335,22 @@ def checkpoint_resume_quality(checkpoint: Path) -> dict | None:
     runner's resume-quality gate will reject at load (dead FTS leg —
     ``fts.count=0`` — or zero session recall). The per-outcome signal is
     ``run.resume_gate_reject_reason`` (single source of truth), and the
-    scan mirrors the runner's caller-level exemptions (breaker_open
-    outcomes kept — legitimately dropped, never re-run).
+    scan mirrors the runner's per-outcome load decision: breaker_open
+    outcomes kept (legitimately dropped, never re-run) and outcomes
+    missing required keys counted as truncated (the runner re-encodes them
+    via the truncated path, before the gate).
+
+    The scan does NOT re-check the runner's whole-file load gates
+    (format / run_key / fingerprint mismatch — the runner refuses or
+    ignores the file wholesale there) nor the failures-list skip: those
+    are the runner's own load semantics and can only be resolved with the
+    effective run config.
 
     Returns a summary dict, or None when there is nothing to scan (no
-    checkpoint file / unreadable / non-dict / no outcomes). The protocol
-    records this in the run state so a re-validation resume that rejected
-    stale outcomes leaves a population-purity note, never a silent blend.
+    checkpoint file / unreadable / non-dict / missing or empty ``outcomes``
+    / no gate-eligible outcomes). The protocol records this in the run
+    state so a re-validation resume that rejected stale outcomes leaves a
+    population-purity note, never a silent blend.
     """
     if not checkpoint.is_file():
         return None
@@ -351,25 +360,53 @@ def checkpoint_resume_quality(checkpoint: Path) -> dict | None:
         return None
     if not isinstance(data, dict):
         return None
-    from .run import resume_gate_reject_reason  # lazy — protocol CLI stays light
+    outcomes = data.get("outcomes")
+    if not isinstance(outcomes, list):
+        return None  # missing / explicit null / malformed — nothing to scan
+    from .run import (  # lazy — protocol CLI stays light
+        REQUIRED_OUTCOME_KEYS,
+        resume_gate_reject_reason,
+    )
+    # the runner keys required fields by retriever (from the run's own
+    # run_key ``{surface}__{retriever}__{model}__{prompt}`` when present).
+    retriever = "hybrid"
+    saved_key = data.get("run_key")
+    if isinstance(saved_key, str):
+        parts = saved_key.split("__")
+        if len(parts) >= 2 and parts[1] in REQUIRED_OUTCOME_KEYS:
+            retriever = parts[1]
+    required = REQUIRED_OUTCOME_KEYS.get(retriever, ("question_id",))
     checked = 0
-    rejected: list[tuple[str, str]] = []
-    for o in data.get("outcomes", []):
+    truncated = 0
+    rejected: list[tuple[str, str, bool]] = []  # (qid, reason, session_all_zero)
+    for o in outcomes:
         if not isinstance(o, dict) or not o.get("question_id"):
             continue
         if o.get("breaker_open"):
             continue  # mirror the runner: legitimately dropped — kept
+        if any(k not in o for k in required):
+            truncated += 1  # runner re-encodes via the truncated path
+            continue
         checked += 1
         reason = resume_gate_reject_reason(o)
         if reason is not None:
-            rejected.append((o["question_id"], reason))
-    fts_dead = sum(1 for _, r in rejected if r.startswith("fts.count"))
+            sr = o.get("session_recall@k")
+            session_all_zero = (isinstance(sr, dict) and bool(sr)
+                                and all(v == 0 for v in sr.values()))
+            rejected.append((o["question_id"], reason, session_all_zero))
+    if checked == 0 and truncated == 0:
+        return None  # no gate-eligible outcomes — silent (never a false "clean")
+    fts_dead = sum(1 for _, r, _ in rejected if r.startswith("fts.count"))
+    # per-signal PRESENCE counts: an outcome carrying both signals (the
+    # pilot's dead-FTS + zero-session artifact shape) counts in both fields.
+    zero_session = sum(1 for _, _, z in rejected if z)
     return {
         "checked": checked,
         "rejected": len(rejected),
         "fts_dead": fts_dead,
-        "zero_session": len(rejected) - fts_dead,
-        "qids": sorted(qid for qid, _ in rejected),
+        "zero_session": zero_session,
+        "truncated": truncated,
+        "qids": sorted(qid for qid, _, _ in rejected),
     }
 
 
@@ -387,7 +424,13 @@ def _print_resume_quality(resume_quality: dict | None) -> None:
             f"zero_session={resume_quality['zero_session']}): "
             f"{', '.join(resume_quality['qids'])}",
             file=sys.stderr)
-    else:
+    if resume_quality["truncated"]:
+        print(
+            f"[run_protocol] resume-quality gate: "
+            f"{resume_quality['truncated']} truncated/corrupt outcomes "
+            f"(missing required keys) will also re-encode",
+            file=sys.stderr)
+    if not resume_quality["rejected"] and not resume_quality["truncated"]:
         print(
             f"[run_protocol] resume-quality gate: checkpoint clean — "
             f"all {resume_quality['checked']} outcomes pass the gate",
@@ -498,7 +541,12 @@ def cmd_run(state: ProtocolState, args: argparse.Namespace) -> None:
     # for outcomes the resume-quality gate will reject; surface loudly and
     # record the scan in the run state so the protocol documents when a
     # resume dropped stale/dead-retrieval outcomes (population purity).
-    checkpoint_arg = cmd[cmd.index("--checkpoint") + 1]
+    # Resolve the LAST --checkpoint occurrence: build_command prepends the
+    # operator's extra flags and appends the protocol's own --checkpoint
+    # AFTER them, and the runner's argparse is last-wins — so the scan and
+    # the recorded state must describe the file the runner actually uses.
+    last_idx = len(cmd) - 1 - cmd[::-1].index("--checkpoint")
+    checkpoint_arg = cmd[last_idx + 1]
     resume_quality = checkpoint_resume_quality(Path(checkpoint_arg))
     _print_resume_quality(resume_quality)
     if args.dry_run:
