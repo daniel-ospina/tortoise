@@ -53,6 +53,7 @@ _TESTS_ROOT = Path(__file__).resolve().parent
 # guard passes on their own — the table documents the residual declarations.
 ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_agent_signup.py": {"registry": "prod-coupled"},
+    "test_agent_signup_idempotency.py": {"registry": "prod-coupled"},
     "test_billing.py": {"registry": "prod-coupled"},
     "test_cli_serve.py": {"registry": "prod-coupled"},
     "test_commit_endpoint.py": {"registry": "prod-coupled"},
@@ -76,7 +77,9 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     },
     "test_quota.py": {"registry": "prod-coupled"},
     "test_sdk_legacy_coverage.py": {"team-beta": "assertion"},
+    "test_writer_inventory.py": {"registry": "prod-coupled"},
     "test_session_key_http.py": {"registry": "prod-coupled"},
+    "test_signup_token_revoke.py": {"registry": "prod-coupled"},
     "test_billing_upgrade.py": {"registry": "prod-coupled"},
     # e2e-900 (cycle-4 P2-7 / cycle-5 P1-5): the SHARED non-test team_e2e-900
     # graph of the index suite — routed by REDIRECT DERIVATION, not rename:
