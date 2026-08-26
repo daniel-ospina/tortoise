@@ -12,6 +12,7 @@ hard per-session cap (E2E-10: one session can't monopolize the context).
 from __future__ import annotations
 
 import logging
+import math
 import os
 import threading
 import time
@@ -72,6 +73,8 @@ def _env_boost_float(name: str, default: float) -> float:
     multipliers: domain [1.0, inf) — a boost factor scales ranks UP, so
     values < 1.0 (including 0.0 — a ZeroDivisionError, and negatives — a
     silent pool inversion) are rejected and fall back to the default.
+    Non-finite values (NaN/Inf — a NaN passes the < 1.0 comparison and
+    would poison every sort key) are rejected the same way (review F9).
     This is deliberately NOT ``_env_float`` (whose [0, 1] MMR-lambda clamp
     would silently discard the 1.5/1.15 defaults)."""
     raw = os.environ.get(name)
@@ -81,7 +84,7 @@ def _env_boost_float(name: str, default: float) -> float:
         value = float(raw.strip())
     except ValueError:
         return default
-    if value < 1.0:
+    if not (math.isfinite(value) and value >= 1.0):
         return default
     return value
 

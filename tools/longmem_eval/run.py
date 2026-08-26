@@ -82,7 +82,7 @@ from .report import (
     print_comparison,
     save_report,
 )
-from .rerank import _TRUTHY, RERANK_MODEL_DEFAULT, rerank_enabled
+from .rerank import _TRUTHY, RERANK_MODEL_DEFAULT, _env_int, rerank_enabled
 from .retrieve import (
     DEFAULT_CONTEXT_ITEM_CAP,
     DEFAULT_CONTEXT_TOKEN_CAP,
@@ -264,7 +264,11 @@ def _resolve_boost_float(env_name: str, default: float,
     """C2 (#1745) run-level boost-multiplier resolution (CLI > env >
     default): a value < 1.0 fails loudly (SystemExit) — the multiplier is
     a rank-scaling DIVISION, so 0.0 would ZeroDivide and a negative would
-    silently invert the pool order (review P1-2). Mirrors
+    silently invert the pool order (review P1-2). Non-finite values
+    (NaN/Inf) fail the same way (review F9 — a NaN passes the < 1.0
+    comparison and would poison every sort key; inf would zero every key
+    and make the boost a silent no-op while methodology records it).
+    Mirrors
     ``_resolve_rerank_env_int``'s fail-fast lo-validation; the
     retrieve-layer clamp (rerank._env_boost_float) is the per-question
     safety net."""
@@ -278,7 +282,7 @@ def _resolve_boost_float(env_name: str, default: float,
             value = float(raw.strip())
         except ValueError:
             return default
-    if value < 1.0:
+    if not (math.isfinite(value) and value >= 1.0):
         raise SystemExit(f"{env_name} must be >= 1.0, got {value!r}")
     return value
 
@@ -814,7 +818,12 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
                        ks: tuple[int, ...], top_k: int, split: str,
                        ingest_mode: str, extractor_model: Any,
                        max_retries: int, dataset_fingerprint: str,
-                       rerank_config: dict) -> dict:
+                       rerank_config: dict,
+                       context_item_cap: int | None = None,
+                       evidence_boost: bool | None = None,
+                       evidence_boost_verbatim: float | None = None,
+                       evidence_boost_source: float | None = None,
+                       max_chunks_per_session: int | None = None) -> dict:
     """The effective-run-config fingerprint (M7 #1527, D7 schema).
 
     ``workers`` is deliberately EXCLUDED (per-question isolation makes
@@ -877,6 +886,23 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
         "reader_prompt_hash": _sha16(reader_prompt_source()),
         "judge_rubric_id_hash": _sha16(JUDGE_RUBRIC_ID),
         "rerank": rerank_config,
+    } | {
+        # C1/C2/C5 (#1745): the effective reader-context + evidence-boost
+        # knobs ride the fingerprint (present only when the caller passes
+        # them — defaults keep the fingerprint byte-identical for existing
+        # callers/tests). A config-mismatched resume (e.g. an unboosted
+        # checkpoint resumed with TORTOISE_LME_EVIDENCE_BOOST=1, or a
+        # context-item-cap change) is refused by the existing fingerprint
+        # gate. ``_fingerprint_diffs`` key-unions, so a None value here vs
+        # an absent key in the checkpoint would mismatch — hence the
+        # conditional presence.
+        **({k: v for k, v in (
+            ("context_item_cap", context_item_cap),
+            ("evidence_boost", evidence_boost),
+            ("evidence_boost_verbatim", evidence_boost_verbatim),
+            ("evidence_boost_source", evidence_boost_source),
+            ("max_chunks_per_session", max_chunks_per_session),
+        ) if v is not None}),
     }
 
 
@@ -1508,6 +1534,21 @@ def run_evaluation(
     if evidence_boost is None:
         eb_env = (os.environ.get("TORTOISE_LME_EVIDENCE_BOOST") or "")
         evidence_boost = eb_env.strip().lower() in _TRUTHY
+    # C1/C2 (#1745): resolve the remaining boost knobs ONCE, before the
+    # loop — the methodology and the fingerprint must record EXACTLY what
+    # the per-question retrieval serves (CLI > env > default, mirroring
+    # the evidence_boost tri-state above). retrieve_for_question's own env
+    # fallback only fires for DIRECT callers now — the run path always
+    # passes the resolved values, so methodology == actual on every path.
+    if context_item_cap is None:
+        context_item_cap = _env_int(
+            "TORTOISE_LME_CONTEXT_ITEMS", DEFAULT_CONTEXT_ITEM_CAP)
+    evidence_boost_verbatim = _resolve_boost_float(
+        "TORTOISE_LME_EVIDENCE_BOOST_VERBATIM",
+        DEFAULT_EVIDENCE_BOOST_VERBATIM, evidence_boost_verbatim)
+    evidence_boost_source = _resolve_boost_float(
+        "TORTOISE_LME_EVIDENCE_BOOST_SOURCE",
+        DEFAULT_EVIDENCE_BOOST_SOURCE, evidence_boost_source)
     # M7 #1739 / #1742: the session-parallel worker factory must serve
     # EXACTLY the fingerprinted config — a programmatic caller passing a
     # spec'd extractor_model with session_workers > 1 but forgetting the
@@ -1567,6 +1608,13 @@ def run_evaluation(
         extractor_model=extractor_model, max_retries=max_retries,
         dataset_fingerprint=dataset_fingerprint,
         rerank_config=rr["config"],
+        # C1/C2/C5 (#1745): the RESOLVED knob values ride the fingerprint
+        # (F4 resolved them above — methodology == actual == fingerprint).
+        context_item_cap=context_item_cap,
+        evidence_boost=bool(evidence_boost),
+        evidence_boost_verbatim=evidence_boost_verbatim,
+        evidence_boost_source=evidence_boost_source,
+        max_chunks_per_session=max_chunks_per_session,
     )
     done, prior_failures = _load_checkpoint(checkpoint, fingerprint,
                                             run_key=run_key,
@@ -1690,7 +1738,7 @@ def run_evaluation(
                     hypothesis = _call_with_backoff(
                         lambda: reader.answer(
                             # R1 (#1540) D6: the reader consumes EXACTLY the
-                            # budget-capped points-first context the token
+                            # budget-capped rank-interleaved context the token
                             # metric reports (was the full uncapped pool).
                             context_hits=ret["context_points"],
                             question=question["question"],
@@ -2002,6 +2050,13 @@ def outcomes_to_report(
                 # markers (dropped-question accounting, never recall 0).
                 "ndcg@10", "p@10", "p@5", "ranked_ids",
                 "evidence_turn_matches", "breaker_open", "dropped_reason",
+                # C4 (#1745): the reader-surface evidence metric + the C2
+                # pre/post ablation + the boost block ride the projection
+                # (read via o.get so a pre-#1745 checkpoint resumes without
+                # KeyError — the keys stay absent until the outcome carries
+                # them).
+                "reader_evidence@k", "ranked_ids_pre_boost",
+                "evidence_boost",
                 # M8 (#1528, D6): the live graph point count rides the
                 # projection — the flip-list zero-point flag consumes it.
                 "context_point_count",
@@ -2125,18 +2180,20 @@ def reader_prompt_source() -> str:
     longmem_eval reader prompt; must be kept in sync with
     battery.parity.runner (the unchanged-check compares both sides).
 
-    R1 (#1540) D6/D7: the reader consumes the budget-capped points-first
-    context (UX decision 3) — the parity hash changes; the #1144 baseline
-    record is refreshed at the next parity run (a run-time action — no
-    committed baseline exists).
+    R1 (#1540) D6/D7 + C1 (#1745): the reader consumes the budget-capped
+    RANK-INTERLEAVED context (points + raw chunks in true RRF rank order,
+    bounded by the token budget AND the context item cap) — the parity
+    hash changes; the #1144 baseline record is refreshed at the next
+    parity run (a run-time action — no committed baseline exists).
     """
     return (
         "Current Date: {question_date} header + per-session date annotation "
         "on every retrieved chunk (question_date + haystack_dates surfaced — "
-        "temporal-reasoning questions are answerable); points-first "
-        "budget-capped context (UX-3 #1540): extracted points render in "
-        "rank order, raw turn-granular chunks backfill the remaining "
-        "context_token_cap tokens; type-fragments: temporal (date math), "
+        "temporal-reasoning questions are answerable); rank-interleaved "
+        "budget-capped context (C1 #1745, replaces R1's points-first "
+        "UX-3 #1540): extracted points AND raw turn-granular chunks render "
+        "in true RRF rank order bounded by the token budget and the "
+        "context_item_cap; type-fragments: temporal (date math), "
         "preference (option commitment), knowledge-update (answer-from-newer, "
         "date-conditional: current-value → newest/superseding point, "
         "point-in-time → chain-walk by session date — E5 CORRECTS markers + "
@@ -2316,7 +2373,9 @@ def _build_parser() -> argparse.ArgumentParser:
                         "the value for the pilot + 500-Q run, R1 #1540)")
     p.add_argument("--context-cap", type=_positive_int, default=None,
                    help="reader context token budget (env TORTOISE_LME_CONTEXT_CAP; "
-                        "default 8000 — points first, chunks backfill, R1 #1540)")
+                        "default 8000 — rank-interleaved, C1 #1745: points + chunks "
+                        "in true RRF order bounded by the token budget and the "
+                        "context item cap)")
     p.add_argument("--max-chunks-per-session", type=_positive_int, default=None,
                    help="per-session raw-chunk cap in the retrieval pool "
                         "(env TORTOISE_LME_MAX_CHUNKS_PER_SESSION; default 3 — "

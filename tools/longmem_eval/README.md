@@ -209,9 +209,10 @@ path via `--data` skips the download. Split S = `longmemeval_s_cleaned.json`
    automatically, Docker/HNSW uses the full stack). Candidates are fetched
    at `max(k)*3` depth (pool-depth headroom), the pool is deduped per-session
    to `max_chunks_per_session` raw chunks (E2E-1), and the reader's context
-   is **budget-capped and points-first** (UX decision 3): extracted points
-   render in rank order, raw chunks backfill the remaining
-   `context_token_cap` tokens. Reports session-level recall@k (fraction of
+   is **budget-capped and rank-interleaved** (C1 #1745, replacing R1's
+   points-first UX decision 3): extracted points and raw turn-granular
+   chunks render in true RRF rank order, bounded by the token budget
+   and the `context_item_cap`. Reports session-level recall@k (fraction of
    `answer_session_ids` in top-k), turn/evidence recall@k (extracted points
    only — the D5 denominator split), chunk-evidence recall@k (the raw-chunk
    containment view), and the exact context handed to the reader

@@ -385,6 +385,13 @@ def test_outcomes_to_report_golden_shape():
         "p@5": None,
         "ranked_ids": None,
         "evidence_turn_matches": None,
+        # C4 (#1745): the reader-surface evidence metric + the C2 pre/post
+        # ablation + the boost block ride the projection (None on golden
+        # outcomes — read via o.get so pre-#1745 checkpoints render,
+        # never KeyError).
+        "reader_evidence@k": None,
+        "ranked_ids_pre_boost": None,
+        "evidence_boost": None,
         "breaker_open": None,
         "dropped_reason": None,
     }
@@ -2757,6 +2764,100 @@ def test_evidence_boost_no_marked_point_displacement():
     assert all(f"mark-pt{i}" in top20 for i in range(15))
     # the verbatim chunks DID move up (the boost is not a no-op)
     assert "ev-chunk0" in top20
+
+
+def test_evidence_boost_boundary_point_not_displaced():
+    """Review F2 (C2 #1745) boundary fixture: the reproduced cross-class
+    displacement — 19 unmarked fillers + a source-marked point at index 19
+    (in top-20 pre-boost) + 5 verbatim chunks at indices 20-24 (higher
+    factor). The OLD plain ascending sort demoted the point 19 -> 22 (out
+    of top-20, evidence_recall@20 dropped 1 -> 0 with the boost ON); the
+    position-ceiling promotion must keep the point at a position <= 19
+    while STILL surfacing at least one verbatim chunk into top-20 (the
+    boost is not a no-op)."""
+    question = _boost_question()
+    pool = [
+        {"id": f"fill{i}", "content": f"unrelated filler chat {i}",
+         "session_id": "b-s0", "point_kind": "statement",
+         "lme_session_index": 0, "session_date": "2025-06-10",
+         "quote": "", "has_answer": False}
+        for i in range(19)
+    ]
+    # source-marked point at index 19 (evidence session, no quote)
+    pool.append({"id": "source-pt",
+                 "content": "The wall painting took all day",
+                 "session_id": "b-s1", "point_kind": "statement",
+                 "lme_session_index": 1, "session_date": "2025-06-14",
+                 "quote": "", "has_answer": True})
+    # 5 verbatim-marked chunks at indices 20-24 (full boost)
+    for i in range(5):
+        pool.append({"id": f"chunk{20 + i}",
+                     "content": "I painted the wall a light gray",
+                     "session_id": "b-s1",
+                     "point_kind": "session-transcript",
+                     "lme_session_index": 1, "session_date": "2025-06-14",
+                     "quote": "I painted the wall a light gray",
+                     "has_answer": True})
+    # pre-boost: the source point IS in top-20 (index 19)
+    assert pool[19]["id"] == "source-pt"
+    boosted, stats = _apply_evidence_boost(pool, question=question)
+    assert stats["marks_census"]["verbatim"] == 5
+    assert stats["marks_census"]["source_session"] == 6
+    ids = [h["id"] for h in boosted]
+    pos = ids.index("source-pt")
+    # (a) the point is never demoted below its original pool index
+    assert pos <= 19
+    assert "source-pt" in ids[:20]
+    # (b) the boost is not a no-op: at least one chunk entered top-20
+    assert any(f"chunk{20 + i}" in ids[:20] for i in range(5))
+
+
+def test_evidence_boost_stored_mark_fallback_source_class():
+    """Review F11 (C2 #1745): a hit with a STORED ``has_answer=True`` but
+    NO read-time marks (content/quote don't match any answer turn AND its
+    session is not an evidence session at read time — ``mark_for`` returns
+    all-False) falls back to the SOURCE-class factor — never verbatim
+    (no full boost on ambiguous provenance), never unboosted (the stored
+    mark is still evidence the extractor wrote). The stored-mark hit must
+    move up past an identical unmarked control hit below it that does not
+    move."""
+    question = _boost_question()
+    pool = [
+        {"id": f"fill{i}", "content": f"unrelated filler chat {i}",
+         "session_id": "b-s0", "point_kind": "statement",
+         "lme_session_index": 0, "session_date": "2025-06-10",
+         "quote": "", "has_answer": False}
+        for i in range(20)
+    ]
+    # stored-mark hit at index 20: b-s0 (NOT an evidence session), no
+    # quote, content does not contain the answer turn — all-False marks
+    # at read time, but the STORED has_answer=True survives.
+    pool.append({"id": "stored-pt",
+                 "content": "unrelated filler chat stored",
+                 "session_id": "b-s0", "point_kind": "statement",
+                 "lme_session_index": 0, "session_date": "2025-06-10",
+                 "quote": "", "has_answer": True})
+    # identical unmarked control hit BELOW it (index 21)
+    pool.append({"id": "control-pt",
+                 "content": "unrelated filler chat control",
+                 "session_id": "b-s0", "point_kind": "statement",
+                 "lme_session_index": 0, "session_date": "2025-06-10",
+                 "quote": "", "has_answer": False})
+    boosted, stats = _apply_evidence_boost(pool, question=question)
+    # read-time recompute found NOTHING (b-s0 is not an evidence session;
+    # no quote; content does not contain the answer turn)
+    assert stats["marks_census"] == {"source_session": 0, "verbatim": 0,
+                                      "raw_chunk": 0}
+    ids = [h["id"] for h in boosted]
+    stored_pos, control_pos = ids.index("stored-pt"), ids.index("control-pt")
+    # source-class fallback: the stored-mark hit moved UP by the source
+    # factor (never demoted below its original pool index — the
+    # position-ceiling property), and outranks the identical unmarked
+    # control that started BELOW it and does not move.
+    assert stored_pos <= 20
+    assert stored_pos < 20  # moved up, not just held
+    assert control_pos == 21  # unmarked control did not move
+    assert stored_pos < control_pos
 
 
 def test_boost_before_recall_metrics(tmp_path, monkeypatch):

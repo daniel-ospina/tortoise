@@ -1226,7 +1226,10 @@ def build_report(
         # #1745 (C4): the per-mark-type breakdown aggregated from the
         # checkpoint's per-question ``ingest.evidence_marks`` census
         # (M6 #1526: source_session / verbatim / raw_chunk / answer_string
-        # — written by both ingest legs). The pilot census was 98.5%
+        # — written by the v2 ingest leg (ingest_v2.py); the deterministic
+        # leg (ingest.py) records no per-mark census — ``marks`` stays
+        # absent on deterministic runs, never fabricated). The pilot
+        # census was 98.5%
         # source-session (472/479), which is why the legacy
         # evidence_recall@k denominator is mark-inflated; this aggregate
         # makes the WHY observable at report level. Absent when outcomes
@@ -1553,9 +1556,14 @@ def build_report(
                                  "is preserved in the per-question "
                                  "ranked_ids_pre_boost ablation); reader_evidence@k "
                                  "(C4 #1745) = the same fraction over "
-                                 "context_points[:k] (the reader-surface measure — "
-                                 "pool recall is the upper bound since C1's "
-                                 "rank-interleaved assembly); chunk containment "
+                                 "context_points[:k] (the independent "
+                                 "reader-surface measure — pool recall is an "
+                                 "APPROXIMATE upper bound: the budget walk's "
+                                 "skip-not-starve lets a lower-ranked marked "
+                                 "item enter the k-prefix, so reader_evidence@k "
+                                 "can exceed evidence_recall@k); with C2 on it is "
+                                 "the BOOSTED-pool reader surface — the boost-off "
+                                 "ablation arm isolates C1; chunk containment "
                                  "is reported separately as chunk_evidence_recall@k "
                                  "(containment-marked raw chunks surfaced / marked "
                                  "raw chunks total); #1763 answer-string re-baseline: "

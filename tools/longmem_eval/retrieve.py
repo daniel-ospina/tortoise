@@ -27,7 +27,7 @@ Reported per question:
     #1540): containment-marked raw chunks surfaced / marked chunks total;
     granularity-aware by construction,
   * context tokens           — estimated LLM tokens of the budget-capped
-    points-first context handed to the reader (whitespace tokens + 10%
+    rank-interleaved context handed to the reader (whitespace tokens + 10%
     markup allowance; the estimator is recorded in report provenance),
   * retrieval latency ms.
 
@@ -498,11 +498,17 @@ def _apply_evidence_boost(
     ``scores.rrf`` — there is no score to multiply): ``scaled_rank =
     original_index / factor`` with factor 1.0 unmarked, ``boost_source``
     for source-session-only marks, ``boost_verbatim`` for verbatim /
-    raw-chunk marks. Properties:
-      * never demotes unmarked hits below their RELATIVE order (their
-        original index is monotonic),
-      * never reorders within a boost class (same factor -> monotonic),
-      * bounded — no negative ranks, no marked-hit swap below the pool.
+    raw-chunk marks. Placement is position-ceiling promotion (Horn's
+    greedy, review F2): hits are processed in descending scaled-priority
+    order and each takes the LARGEST free position <= its ceiling, where
+    the ceiling is the ORIGINAL pool index for marked hits and
+    unconstrained for unmarked hits. Properties:
+      * position-ceiling — never demotes a marked hit below its original
+        pool index (a dense run of higher-factor marked hits cannot push
+        a lower-factor marked hit out of the top-k it occupied pre-boost),
+      * never reorders within a boost class (same factor -> monotonic)
+        and never reorders unmarked hits (relative order preserved),
+      * bounded — no negative ranks, every hit lands in [0, n).
 
     The verbatim-vs-source split is recomputed at READ TIME via
     ``evidence.mark_for`` (verifier P1-4: the OR'd ``has_answer`` prop
@@ -522,14 +528,18 @@ def _apply_evidence_boost(
     multiplier, the read-time mark census and the pre-boost id order.
     """
     from . import evidence as ev
-    # factor domain guard (review P1-2): a boost factor < 1.0 is a rank
+    # factor domain guard (review P1-2 + F9): a boost factor < 1.0 is a rank
     # DIVISION — 0.0 is a ZeroDivisionError and a negative factor silently
-    # inverts the pool order. Reject loudly at the function boundary (the
+    # inverts the pool order. Non-finite values (NaN/Inf) are rejected the
+    # same way (a NaN passes the < 1.0 comparison and would poison every
+    # sort key; inf would zero every key and make the boost a silent
+    # no-op). Reject loudly at the function boundary (the
     # env/CLI layers clamp >= 1.0 independently; this is the last line).
-    if boost_verbatim < 1.0 or boost_source < 1.0:
+    if not (math.isfinite(boost_verbatim) and boost_verbatim >= 1.0) \
+            or not (math.isfinite(boost_source) and boost_source >= 1.0):
         raise ValueError(
-            "evidence-boost multipliers must be >= 1.0 (a rank-scaling "
-            "division), got verbatim="
+            "evidence-boost multipliers must be >= 1.0 and finite (a "
+            "rank-scaling division), got verbatim="
             f"{boost_verbatim!r} source={boost_source!r}")
     if evidence_sessions is None:
         evidence_sessions = (ev.evidence_sessions(question)
@@ -542,6 +552,7 @@ def _apply_evidence_boost(
         ]
     census = {"source_session": 0, "verbatim": 0, "raw_chunk": 0}
     scored: list[tuple[dict, float, int]] = []
+    marked_by_idx: dict[int, bool] = {}
     for i, h in enumerate(pool):
         marks = ev.mark_for(
             h, session_id=h.get("session_id"),
@@ -557,7 +568,31 @@ def _apply_evidence_boost(
         else:
             factor = 1.0
         scored.append((h, i / factor, i))
-    scored.sort(key=lambda x: (x[1], x[2]))
+        marked_by_idx[i] = factor > 1.0
+    # Position-ceiling promotion (review F2): the plain ascending sort let a
+    # dense run of higher-factor marked hits (verbatim chunks, x1.5) pass a
+    # lower-factor marked hit (source point, x1.15) and DEMOTE it below its
+    # original pool index — the reproduced counter-example moved the point
+    # 19 -> 22, out of top-20 (evidence_recall@20 dropped 1 -> 0 with the
+    # boost ON). Horn's greedy: process hits in DESCENDING scaled-priority
+    # order (for unmarked hits the scaled key IS the pool index, so they
+    # run in descending index order) and assign each hit the LARGEST free
+    # position <= its ceiling — original index for marked hits,
+    # unconstrained for unmarked. Properties (verified by brute force):
+    #   (a) marked hits never land below their original index;
+    #   (b) unmarked relative order preserved (descending processing +
+    #       largest-free assignment = strictly decreasing slots);
+    #   (c) order within a boost class preserved (same argument).
+    n = len(pool)
+    free = list(range(n))
+    placement: dict[int, tuple[dict, float, int]] = {}
+    for h, key, i in sorted(
+            scored, key=lambda x: (-x[1], -x[2])):
+        ceiling = i if marked_by_idx[i] else n  # +inf ~ n: always satisfiable
+        pos = max(p for p in free if p <= ceiling)
+        free.remove(pos)
+        placement[pos] = (h, key, i)
+    scored = [placement[p] for p in range(n)]
     stats: dict[str, Any] = {
         "applied": True,
         "boost_verbatim": boost_verbatim,
@@ -1323,10 +1358,16 @@ def retrieve_for_question(
     # ── C4 (#1745): reader_evidence@k — the honest reader-surface measure.
     # Fraction of evidence-marked hits actually present in
     # context_points[:k] / marked total (the SAME D5 denominator as the
-    # pool-based evidence_recall@k, so the pool->context drop is directly
-    # measurable: ~0 after C1 when the boost is off). The pool-based
-    # evidence_recall@k is the secondary record (with the C2 pre/post
-    # ablation via ``evidence_boost.pre_boost_ranked_ids``). ──
+    # pool-based evidence_recall@k). The pool-based evidence_recall@k is
+    # NOT a strict upper bound on it: the budget walk's skip-not-starve
+    # lets a lower-ranked marked item enter context_points[:k] (an
+    # oversized higher-ranked hit is skipped, not dropped), so
+    # reader_evidence@k is an INDEPENDENT reader-surface measure — pool
+    # recall is an APPROXIMATE upper bound up to budget-skip effects. For
+    # TR questions the k-prefix follows the R5 time-ascending render
+    # (session_date order, stable within a date = retrieval order) — the
+    # reader's READING order, not RRF rank. The C2 pre/post ablation rides
+    # ``evidence_boost.pre_boost_ranked_ids``. ──
     reader_evidence: dict[str, float | None] = {}
     for k in ks:
         ctx_top = context_points[:k]
@@ -1369,7 +1410,9 @@ def retrieve_for_question(
         # unreconstructable — 0/50). ``ranked_ids`` is the effective pool
         # order (post-boost when C2 is on); ``ranked_ids_pre_boost`` is the
         # raw retrieval order for the C4 pre/post ablation (identical when
-        # the boost is off).
+        # both the boost and the R6 rerank stage are off; on the rerank
+        # path it is the pre-boost but PRE-RERANK order — the ablation
+        # compares rerank(boost(pool)) vs rerank(pool)).
         "ranked_ids": [h["id"] for h in pool],
         "ranked_ids_pre_boost": evidence_boost_stats.get(
             "pre_boost_ranked_ids", [h["id"] for h in pool]),
