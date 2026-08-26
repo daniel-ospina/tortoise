@@ -380,7 +380,7 @@ class TestAgentSignup:
         identity is fresh per request) and has been REMOVED. The per-IP
         signup limiter (2/24h) is the compensating control; the 3rd mint
         from one IP 429s in Supabase mode too (mode-independent store)."""
-        tc, fake, _ = client
+        tc, fake, _ = client  # noqa: RUF059
         monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
         for _ in range(2):
             r = tc.post("/v1/agent/signup", json={"identity": "anon-client-chosen"})
@@ -789,6 +789,10 @@ class TestInternalProvisionDisabled:
 class TestOnboardingTeam:
     def test_subteam_provisions_via_rpc(self, team_client):
         tc, fake, _ = team_client
+        # #1748: seed the session-user context (get_current_team_session
+        # carries session_user_id for JWT auth; tests override the dep).
+        app.dependency_overrides[get_current_team] = lambda: dict(
+            TEST_TEAM, session_user_id="user-1")
         r = tc.post("/v1/onboarding/team", json={"name": "subteam"})
         assert r.status_code == 200, r.text
         body = r.json()
@@ -796,8 +800,10 @@ class TestOnboardingTeam:
         assert "key" not in body  # #1716: the response never carries a key
         fn, p = fake.rpc_calls[0]
         assert fn == "provision_team"
-        assert p["p_user_id"] is None
-        assert p["p_identity"].startswith("anon-")
+        # #1748: USER path — the session user is the owner member (no
+        # throwaway anon-{uuid} identity).
+        assert p["p_user_id"] == "user-1"
+        assert p["p_identity"] is None
         assert p["p_team_id"] == body["team_id"]
         # #1716: keyless provisioning — all-NULL key params → NO api_keys row
         # attributable to the sub-team (the old per-call tt_ mint was an
@@ -810,17 +816,72 @@ class TestOnboardingTeam:
         keys = [k for k in fake.tables["api_keys"]
                 if k["team_id"] == body["team_id"]]
         assert keys == []
+        # the session user is a REAL owner member (role owner, status active,
+        # user_id set, identity NULL) — the RPC's membership upsert, NOT a
+        # hand-inserted row.
+        mem = [m for m in fake.tables["team_memberships"]
+               if m["team_id"] == body["team_id"]]
+        assert len(mem) == 1
+        assert mem[0]["user_id"] == "user-1"
+        assert mem[0].get("identity") is None
+        assert mem[0]["role"] == "owner"
+        assert mem[0]["status"] == "active"
         # onboarding state write went to the seam too (teams row)
         state = next(t for t in fake.tables["teams"]
                      if t["id"] == TEST_TEAM["team_id"])["onboarding_state"]
         assert state["team_created"] is True
 
-    def test_keyless_subteam_session_key_mint_still_works(self, team_client):
-        """#1716: a keyless onboarding sub-team has NO api_keys row
-        attributable to it, and a session-key mint (POST /v1/session/key)
-        still works — the mint writes the api_keys row itself, so keyless
-        provisioning must never block the recovery/claim path."""
+    def test_subteam_requires_session_user(self, team_client):
+        """#1748: no session user on the team context (session_user_id or
+        key created_by) → 403 — never a throwaway-identity orphan team."""
         tc, fake, _ = team_client
+        app.dependency_overrides[get_current_team] = lambda: dict(
+            TEST_TEAM, session_user_id=None)
+        r = tc.post("/v1/onboarding/team", json={"name": "orphan"})
+        assert r.status_code == 403, r.text
+        assert fake.rpc_calls == []  # no provision attempted
+        assert all(t["id"] != "orphan" for t in fake.tables["teams"])
+
+    def test_key_auth_owner_from_key_creator(self, client):
+        """#1748 key-auth branch: a real Bearer tt_ key (no session JWT —
+        the dashboard wizard authenticates with a session-minted bootstrap/
+        recovery key) provisions the sub-team for the key's CREATOR
+        (api_keys.created_by = the user UUID — team dicts from
+        resolve_api_key carry it). The created_by='api' sentinel (a key
+        minted by create_api_key's key-auth/override path, #1511) is NOT a
+        real user → 403, never an owner-less orphan."""
+        tc, fake, _ = client
+        # a session-minted key: created_by = the session user's UUID
+        key = "tt_" + "ab" * 16
+        fake.seed("api_keys", [_key_row(
+            id="k-user", created_by="user-1",
+            lookup_hash=lookup_hash(key), key_prefix=key[:10])])
+        r = tc.post("/v1/onboarding/team", json={"name": "keyowner"},
+                    headers={"Authorization": f"Bearer {key}"})
+        assert r.status_code == 200, r.text
+        fn, p = fake.rpc_calls[0]
+        assert fn == "provision_team"
+        assert p["p_user_id"] == "user-1"
+        assert p["p_identity"] is None
+        # the 'api' sentinel creator → 403
+        key2 = "tt_" + "cd" * 16
+        fake.seed("api_keys", [_key_row(
+            id="k-api", created_by="api",
+            lookup_hash=lookup_hash(key2), key_prefix=key2[:10])])
+        r2 = tc.post("/v1/onboarding/team", json={"name": "apikey"},
+                     headers={"Authorization": f"Bearer {key2}"})
+        assert r2.status_code == 403, r2.text
+    def test_keyless_subteam_session_key_mint_still_works(self, team_client):
+        """#1748: a keyless onboarding sub-team has NO api_keys row
+        attributable to it, yet the REAL journey works — the session user is
+        the owner member (provisioned on the USER path, NOT hand-inserted),
+        so a session-key mint (POST /v1/session/key) resolves the
+        membership, writes the api_keys row itself, and the minted key
+        resolves on REST. The sub-team is listable and deletable by its
+        owner — the full #1716 escape hatch, now actually reachable."""
+        tc, fake, _ = team_client
+        app.dependency_overrides[get_current_team] = lambda: dict(
+            TEST_TEAM, session_user_id="user-1")
         app.dependency_overrides[get_current_user] = lambda: {
             "user_id": "user-1", "email": "user-1@example.com"}
         r = tc.post("/v1/onboarding/team", json={"name": "subteam"})
@@ -828,12 +889,14 @@ class TestOnboardingTeam:
         sub_team_id = r.json()["team_id"]
         assert [k for k in fake.tables["api_keys"]
                 if k["team_id"] == sub_team_id] == []
-        # session user gains an owner membership (the claim path) → mint
-        fake.tables.setdefault("team_memberships", []).append({
-            "id": "mem-sub-1", "user_id": "user-1", "team_id": sub_team_id,
-            "role": "owner", "status": "active", "identity": None,
-            "lookup_hash": None,
-        })
+        # REAL membership grant from provisioning — no hand-inserted row:
+        # the fake's provision_team emulation wrote it via p_user_id.
+        assert any(m["team_id"] == sub_team_id
+                   and m["user_id"] == "user-1"
+                   and m["role"] == "owner"
+                   and m["status"] == "active"
+                   for m in fake.tables["team_memberships"])
+        # session-key mint resolves the owner membership → 200
         r2 = tc.post("/v1/session/key", json={"purpose": "recovery"})
         assert r2.status_code == 200, r2.text
         key = r2.json()["key"]
@@ -847,9 +910,27 @@ class TestOnboardingTeam:
         app.dependency_overrides.clear()
         r3 = tc.get("/v1/team", headers={"Authorization": f"Bearer {key}"})
         assert r3.status_code == 200, r3.text
+        assert r3.json()["team_id"] == sub_team_id
+        # the sub-team is LISTABLE by the owner (GET /v1/teams)
+        app.dependency_overrides[get_current_user] = lambda: {
+            "user_id": "user-1", "email": "user-1@example.com"}
+        r4 = tc.get("/v1/teams")
+        assert r4.status_code == 200, r4.text
+        assert any(t["team_id"] == sub_team_id for t in r4.json())
+        # and DELETABLE by the owner (DELETE /v1/teams/{id})
+        r5 = tc.delete(f"/v1/teams/{sub_team_id}")
+        assert r5.status_code in (200, 202), r5.text
+        # the key is revoked by the delete cascade → auth fails closed
+        app.dependency_overrides.clear()
+        r6 = tc.get("/v1/team", headers={"Authorization": f"Bearer {key}"})
+        assert r6.status_code == 401, r6.text
 
     def test_never_touches_registry(self, team_client, spy):
         tc, _, _ = team_client
+        # #1748: the onboarding sub-team is provisioned on the USER path —
+        # seed the session-user context so the write takes the RPC path.
+        app.dependency_overrides[get_current_team] = lambda: dict(
+            TEST_TEAM, session_user_id="user-1")
         r = tc.post("/v1/onboarding/team", json={"name": "subteam"})
         assert r.status_code == 200, r.text
         spy.assert_clean()
@@ -888,7 +969,11 @@ class TestZeroRegistryInventory:
         tc, fake, _ = client
         app.dependency_overrides[get_current_user] = lambda: {
             "user_id": "user-1", "email": "user-1@example.com"}
-        app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM)
+        # #1748: seed the session user on the team context (onboarding
+        # sub-team provisioning takes the USER path → the sweep exercises
+        # the real RPC write, not a 403 short-circuit).
+        app.dependency_overrides[get_current_team] = lambda: dict(
+            TEST_TEAM, session_user_id="user-1")
         fake.seed("team_memberships", [
             _owner_membership(),
             {"id": "mem-2", "user_id": "user-2", "team_id": "team-free-001",

@@ -3,7 +3,7 @@
 Replaces the miscalibrated ``>=0.4`` content-overlap evidence predicate
 (fired **1/12,085** on the v2 52-healthy run — 51/52 healthy questions with
 zero evidence marks; v2 points are PARAPHRASED, so token overlap against the
-verbatim answer turn almost never fires) with THREE independent marks:
+verbatim answer turn almost never fires) with FOUR independent marks:
 
   (a) **source-session attribution** — the point's ``session_id`` is an
       evidence session (a haystack session containing ``>=1`` ``has_answer``
@@ -19,12 +19,31 @@ verbatim answer turn almost never fires) with THREE independent marks:
       (normalized-verbatim substring). Today the raw chunk is the per-session
       raw-transcript Point; later R1 turn-granular chunks are marked by the
       same predicate (chunk-agnostic).
+  (d) **answer-string containment** — the point's ``content`` (or ``quote`` /
+      any ``search_key``) contains the GOLD ANSWER string for its question
+      (normalized-verbatim substring, analogous to mark (c)). This is the
+      #1763 re-baselining mark: ``source_session`` (a) marks EVERY point from
+      the answer session (472/479 of the pilot census), so the legacy
+      ``evidence_recall@k`` measures "fraction of the answer session's points
+      surfaced", NOT answer availability. Mark (d) is answer-precise. The
+      gold answer is ONLY known to the eval harness (the dataset question's
+      ``answer`` field — the extractor LLM never sees it), so mark (d) is
+      computed at eval-ingest time (the ingest legs receive the full
+      question dict) and counted into the census; the per-outcome recall
+      numerator over it is computed at retrieval time
+      (``answer_string_recall_at_k`` — the seam where ``chunk_evidence_recall@k``
+      is computed, retrieve.py ``_recall_metrics``).
 
 Marks are **eval-instrumentation only** (never a production ontology
-concept); they are OR-combined at write time into the existing eval
-``has_answer`` point property by both ingest legs (``ingest.py``
-deterministic + ``ingest_v2.py`` extractor). This module is the single
-source of truth so the fixture calibration test
+concept); marks (a)+(b)+(c) are OR-combined at write time into the existing
+eval ``has_answer`` point property by both ingest legs (``ingest.py``
+deterministic + ``ingest_v2.py`` extractor). Mark (d) is recorded separately
+(``marks["answer_string"]`` + the durable ``answer_string_mark`` point
+property) and is deliberately NOT OR'd into ``has_answer`` — adding it would
+change the legacy ``evidence_recall@k`` denominator and break the D5 #1540
+comparability contract; the re-baselined metric is reported alongside it
+under ``answer_string_evidence_recall@k`` (report.py, #1763). This module is
+the single source of truth so the fixture calibration test
 (``tests/test_lme_m6_evidence.py``) runs the identical logic offline — no
 graph, no LLM keys.
 """
@@ -138,16 +157,96 @@ def chunk_mark(chunk_text: str, answer_turn_contents: list[str]) -> bool:
                for turn in answer_turn_contents)
 
 
+def answer_string_mark(point: dict, gold_answer: str) -> bool:
+    """Mark (d): the point carries the question's GOLD ANSWER STRING
+    (normalized-verbatim substring containment in ``content``, ``quote`` or
+    any ``search_key``). Analogous to mark (c)'s containment semantics —
+    answer-precise where (a) is session-wide: the pilot census is 98.5%
+    source-session (472/479), so the legacy metric understates answer
+    availability; mark (d) is the re-baselining denominator (#1763).
+
+    The gold answer is a benchmark truth only the EVAL HARNESS holds (the
+    dataset question's ``answer`` field — never an extractor input), so this
+    predicate is computed at eval-ingest/retrieve time, never at extraction.
+    Empty gold answers mark nothing (no answer, no availability claim).
+
+    Semantics note: containment is a normalized SUBSTRING match (no word-
+    boundary guard), deliberately identical to ``chunk_mark`` (c) — the
+    issue's stated analog. A short/single-token gold answer therefore marks
+    every point that mentions that token (e.g. gold "key" marks "monkey"):
+    that is the defined containment semantics, and it is the honest "the
+    answer string is available in this point" reading. Multi-word gold
+    answers (the pilot norm — e.g. "Business Administration") are safe.
+    """
+    gold = _normalize(gold_answer)
+    if not gold:
+        return False
+    if gold in _normalize(str(point.get("content") or "")):
+        return True
+    if gold in _normalize(str(point.get("quote") or "")):
+        return True
+    for key in (point.get("search_keys") or []) if isinstance(
+            point.get("search_keys"), list) else []:
+        if gold in _normalize(str(key)):
+            return True
+    return False
+
+
+def answer_string_recall_at_k(hits: list[dict], gold_answer: str,
+                              k: int) -> float | None:
+    """The #1763 re-baselined point-level recall: fraction of answer-string-
+    marked points (mark (d)) surfaced in the top-k hits.
+
+    Mirrors the chunk_evidence_recall@k shape (N/A-not-0.0): None when no
+    answer-string-marked point exists in ``hits`` (the deduped pool — the
+    same surface the legacy ``evidence_recall@k`` is computed over), so
+    "the answer never entered the pool" stays distinguishable from "it
+    entered but ranked below k". ``hits`` are the annotated pool hits
+    (``content`` / ``quote`` / ``search_keys`` consumed — same fields the
+    ingest-leg mark (d) marks from).
+
+    ⚠ Seam: this is the eval-time numerator the retrieval leg computes per
+    outcome (the same seam where ``chunk_evidence_recall@k`` is computed —
+    retrieve.py ``_recall_metrics``); report.py aggregates the per-outcome
+    value as ``answer_string_evidence_recall@k``. Keeping the math here
+    (evidence.py — the M6 single source of truth) lets the report's
+    synthetic-outcome tests run the IDENTICAL logic offline.
+
+    ⚠ The retrieval leg MUST use THIS content-based helper (not the durable
+    ``answer_string_mark`` point property, which the ingest leg writes for
+    EXTRACTED points only): raw chunks never carry the property, so a
+    property-keyed numerator would silently diverge from the canonical
+    pool-scoped count below. The ingest census ``answer_string`` likewise
+    counts extracted points only (D5 hygiene — the raw-chunk leg is
+    represented here by content matching, exactly like mark (c)).
+    """
+    marked = [h for h in hits if answer_string_mark(h, gold_answer)]
+    if not marked:
+        return None
+    top = [h for h in hits[:k] if answer_string_mark(h, gold_answer)]
+    return len(top) / len(marked)
+
+
 def mark_for(point: dict, *, session_id: Any,
              evidence_sessions: set[str],
-             answer_turn_contents: list[str]) -> dict:
-    """The three marks OR'd, with the per-mark breakdown for stats.
+             answer_turn_contents: list[str],
+             gold_answer: str = "") -> dict:
+    """The four marks, with the per-mark breakdown for stats.
 
-    ``point`` is the point dict (``content`` + ``quote`` consumed); the
-    passed ``session_id`` is the point's session (its existing prop — M6
-    mark (a) never adds a new point property). Returns
-    ``{"has_answer": bool, "marks": {"source_session": bool, "verbatim":
-    bool, "raw_chunk": bool}}``.
+    ``point`` is the point dict (``content`` + ``quote`` + ``search_keys``
+    consumed); the passed ``session_id`` is the point's session (its
+    existing prop — M6 mark (a) never adds a new point property).
+    ``gold_answer`` (the dataset question's ``answer`` — #1763 mark (d),
+    empty when the caller has no gold answer) is NOT OR'd into
+    ``has_answer``: ``has_answer`` stays the legacy (a)|(b)|(c) OR so the
+    existing ``evidence_recall@k`` denominator is byte-identical (D5 #1540
+    comparability); the re-baselined view reads ``marks["answer_string"]``.
+    NOTE (scope): mark (d) is computed on the v2 extracted-point leg only —
+    the deterministic leg (ingest.py) marks its turn points directly and
+    carries no answer-string census (#1763 re-baseline targets the v2
+    pilot's source-session inflation).
+    Returns ``{"has_answer": bool, "marks": {"source_session": bool,
+    "verbatim": bool, "raw_chunk": bool, "answer_string": bool}}``.
     """
     marks = {
         "source_session": source_session_mark(session_id, evidence_sessions),
@@ -155,8 +254,13 @@ def mark_for(point: dict, *, session_id: Any,
                                answer_turn_contents),
         "raw_chunk": chunk_mark(str(point.get("content") or ""),
                                 answer_turn_contents),
+        # #1763: answer-precise mark — recorded + census-counted, NEVER
+        # OR'd into has_answer (legacy denominator must not move).
+        "answer_string": answer_string_mark(point, gold_answer),
     }
-    return {"has_answer": any(marks.values()), "marks": marks}
+    return {"has_answer": any(
+        marks[m] for m in ("source_session", "verbatim", "raw_chunk")),
+        "marks": marks}
 
 
 def anchor_quote(point_content: str, turns: list[Any]) -> str:

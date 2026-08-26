@@ -378,7 +378,7 @@ def test_supersede_window_stamps_additive(sdk):
         "MATCH (n:Point {id:$id}) RETURN n.validTo, n.expiredAt, n.validFrom",
         params={"id": claim_a["id"]},
     ).result_set
-    valid_to, expired_at, valid_from = row[0]
+    valid_to, expired_at, valid_from = row[0]  # noqa: RUF059
     assert valid_to, "validTo must be stamped (fallback chain)"
     assert expired_at, "expiredAt must be stamped"
     # window end == successor's validFrom (absent) → createdAt fallback

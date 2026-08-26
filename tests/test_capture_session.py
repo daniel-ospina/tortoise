@@ -1036,7 +1036,7 @@ def test_extract_session_v2_counts_point_write_skips(sdk, monkeypatch):
     _real_create_point = sdk.create_point
 
     def _boom_point(*args, **kwargs):
-        if args and args[1] == "we decided Y" or kwargs.get("content") == "we decided Y":
+        if (args and args[1] == "we decided Y") or kwargs.get("content") == "we decided Y":
             raise RuntimeError("point write failed")
         return _real_create_point(*args, **kwargs)
 
@@ -1571,8 +1571,7 @@ def test_extraction_estimate_default_is_v2(sdk, monkeypatch):
 def test_extraction_estimate_legacy_alias(sdk, monkeypatch):
     """#1532 D4: the deprecated-compat name resolves to the same v2-aware
     estimator — pre-migration callers keep working."""
-    from tortoise.sdk import _session_extraction_estimate, \
-        _session_llm_extraction_estimate
+    from tortoise.sdk import _session_extraction_estimate, _session_llm_extraction_estimate
     conv = [{"role": "user", "content": "one. two. three."}]
     assert _session_llm_extraction_estimate(conv) == \
         _session_extraction_estimate(conv)

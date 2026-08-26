@@ -1841,6 +1841,7 @@ def fallback_tfidf(query: str, points: list[dict], limit: int = 10) -> list[dict
     """
     try:
         from tortoise.embeddings import search_points
+
         from .sparse import index_text
         meta = {p["id"]: p for p in points if p.get("id")}
         # R2: alias text is index-only — restore the real content on the

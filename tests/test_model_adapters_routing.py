@@ -126,7 +126,7 @@ def _fake_post_logger():
                     "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
 
     def _fake_post(self_or_url, *args, **kwargs):
-        if args:
+        if args:  # noqa: SIM108
             url = args[0]
         else:
             url = self_or_url
@@ -359,7 +359,7 @@ def test_three_provider_rotation_pool(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "or")
     monkeypatch.setenv("VENICE_API_KEY", "vz")
     m = build_extractor_model("deepseek-flash-direct")
-    from tortoise.model_adapters import RotatingModel, DeepSeekDirectModel, VeniceModel
+    from tortoise.model_adapters import DeepSeekDirectModel, RotatingModel, VeniceModel
     assert isinstance(m, RotatingModel)
     # Scale-optimized order (pilot #1549 research): venice (1000 RPM backbone)
     # first, openrouter (cheapest lane), deepseek-direct (spare).
@@ -380,7 +380,7 @@ def test_rotation_round_robin_and_cooldown(monkeypatch):
 
     class _P:
         def __init__(self, name, fail=False):
-            self.provider = name; self.fail = fail; self.last_finish_reason = None
+            self.provider = name; self.fail = fail; self.last_finish_reason = None  # noqa: E702
             self.calls = 0
         def complete(self, **kw):
             self.calls += 1

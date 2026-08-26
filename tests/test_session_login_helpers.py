@@ -15,7 +15,6 @@ sys.path.insert(0, str(ROOT))
 
 from tests.fake_control_plane import FakeControlPlane  # noqa: E402
 
-
 # ── mint_target_user_for_key (supabase_control.py) ──────────────────────────
 
 def _cp_with_members(rows: list[dict]) -> FakeControlPlane:

@@ -211,10 +211,11 @@ def test_oserror_branch_classification():
     stays hung); ConnectionRefusedError and socket.gaierror (DNS) ARE the
     transient connect class the retry targets (a startup DNS race)."""
     import socket
+
     from tortoise.monitoring import _is_transient_connect_error
 
     assert _is_transient_connect_error(ConnectionRefusedError()) is True
     assert _is_transient_connect_error(socket.gaierror()) is True
     assert _is_transient_connect_error(TimeoutError()) is False
-    assert _is_transient_connect_error(socket.timeout()) is False
+    assert _is_transient_connect_error(TimeoutError()) is False
     assert _is_transient_connect_error(RuntimeError()) is False

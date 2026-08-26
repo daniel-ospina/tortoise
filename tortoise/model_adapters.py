@@ -79,7 +79,7 @@ class OpenRouterModel:
         extractor's deadline when a call exceeds its wall-clock bound — the
         hung socket read raises and the daemon thread dies instead of
         leaking + billing forever)."""
-        try:
+        try:  # noqa: SIM105
             self._session.close()
         except Exception:
             pass
@@ -576,7 +576,7 @@ class RotatingModel:
                 self.route = p.provider
                 self.last_finish_reason = getattr(p, "last_finish_reason", None)
                 return out
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 last_err = e
                 if is_fatal(e):
                     raise  # never rotate on auth/billing/config failures
@@ -603,7 +603,7 @@ class RotatingModel:
         for p in self.providers:
             close = getattr(p, "close", None)
             if close is not None:
-                try:
+                try:  # noqa: SIM105
                     close()
                 except Exception:
                     pass
@@ -668,7 +668,7 @@ def build_extractor_model(model_id: str | None = None, *,
     # Registry-key normalization (pilot #1549 fix) — unknown strings pass
     # through untouched (raw specs stay valid).
     model_id = _REGISTRY_KEY_TO_ID.get(model_id, model_id)
-    primary_name, pool_names = resolve_extractor_provider()
+    primary_name, pool_names = resolve_extractor_provider()  # noqa: RUF059
     if not pool_names:
         pool_names = ["openrouter"]  # lenient no-key default (D3)
     providers = [_build_single(p, model_id, max_tokens=max_tokens,

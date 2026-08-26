@@ -240,7 +240,7 @@ def _seed_parity_source_graph(db_path: str) -> dict:
         nodes = sum(
             1 for row in _rows
             if not _is_export_skip_node(
-                [str(l) for l in (row[0] or [])], dict(row[1] or {})))
+                [str(l) for l in (row[0] or [])], dict(row[1] or {})))  # noqa: E741
         edges = int(g.query("MATCH ()-[r]->() RETURN count(r)").result_set[0][0])
         ids = sorted(str(r[0]) for r in g.query(
             "MATCH (n:Point) RETURN coalesce(n.id, '')").result_set)
