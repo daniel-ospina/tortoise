@@ -306,6 +306,11 @@ class TestRecoveryRateLimiting:
         monkeypatch.setattr("tortoise.abuse.record_signup",
                             lambda ip, team_id=None, now=None: minted.append(team_id))
         data = _mint(client)
+        # The mint fires record_signup via asyncio.to_thread on the
+        # TestClient loop — its append can land AFTER this clear, which
+        # would trip the recovery≠mint assertion below. Wait for the mint
+        # feed to land, THEN zero it (deterministic race-free ordering).
+        _wait_for(lambda: len(minted) == 1)
         minted.clear()  # the mint legitimately fires record_signup — zero it
         r = client.post("/v1/agent/signup",
                         json={"signup_token": data["signup_token"]})
