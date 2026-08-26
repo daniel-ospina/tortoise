@@ -895,10 +895,12 @@ def test_build_cli_extractor_model_fingerprints_serving_config(monkeypatch):
     contract holds on every CLI path shape: explicit registry model at
     session_workers=1 (registry tuning applies), unset → the uncapped
     router wrapper at session_workers=1, and the worker-FACTORY config at
-    session_workers>1 (max_tokens=4000 wrapper — the factory cannot express
-    registry tuning; the fingerprint records what the workers serve, so a
-    session-workers toggle refuses resume instead of silently reusing a
-    different extraction cap)."""
+    session_workers>1. The factory can express only max_tokens/temperature
+    — expressible tuning is passed THROUGH (a spec'd run at sw>1
+    fingerprints identically to sw=1: the same effective config), entries
+    with inexpressible knobs (thinking_budget/disable_reasoning) are
+    REFUSED loudly, and the M5 unknown-spec gate applies on both paths
+    (a typo at sw>1 fails fast instead of passing a garbage wire id)."""
     _pin_extractor_env(monkeypatch, keys=())
     adapters = []
     try:
@@ -911,21 +913,32 @@ def test_build_cli_extractor_model_fingerprints_serving_config(monkeypatch):
         adapters.append(runner._build_cli_extractor_model(
             spec=None, session_workers=1))
         assert runner._model_id(adapters[-1]) == "deepseek/deepseek-v4-flash"
-        # session_workers>1 → the worker-factory config (max_tokens=4000):
-        # differs from the session_workers=1 fingerprint for the SAME spec
-        # (a session-workers toggle is an effective-cap change → refused)
+        # session_workers>1 + spec: expressible tuning is served THROUGH the
+        # factory — identical fingerprint to session_workers=1 (the same
+        # effective config, so a sw toggle resumes cleanly)
         adapters.append(runner._build_cli_extractor_model(
             spec="deepseek-v4-pro", session_workers=4))
         assert runner._model_id(adapters[-1]) == (
-            "deepseek/deepseek-v4-pro|max_tokens=4000")
-        assert runner._model_id(adapters[-1]) != runner._model_id(adapters[0])
+            "deepseek/deepseek-v4-pro|max_tokens=500")
+        assert runner._model_id(adapters[-1]) == runner._model_id(adapters[0])
+        # session_workers>1 + unset → the worker-factory config
+        # (max_tokens=4000): differs from the session_workers=1 uncapped
+        # fingerprint (a sw toggle is an effective-cap change → refused)
         adapters.append(runner._build_cli_extractor_model(
             spec=None, session_workers=4))
         assert runner._model_id(adapters[-1]) == (
             "deepseek/deepseek-v4-flash|max_tokens=4000")
-        # unknown spec → SystemExit (the M5 pinning guard, preserved)
+        # the M5 pinning guard applies on BOTH paths (fail fast, never a
+        # garbage wire id in the checkpoint)
         with pytest.raises(SystemExit):
             runner._build_cli_extractor_model(spec="nope", session_workers=1)
+        with pytest.raises(SystemExit):
+            runner._build_cli_extractor_model(spec="nope", session_workers=4)
+        # inexpressible tuning at session_workers>1 → loud refusal (never a
+        # silent reasoning-on flip)
+        with pytest.raises(SystemExit):
+            runner._build_cli_extractor_model(
+                spec="deepseek-v4-pro-noreason", session_workers=4)
     finally:
         for m in adapters:
             close = getattr(m, "close", None)

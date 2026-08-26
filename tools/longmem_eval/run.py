@@ -583,15 +583,39 @@ def _build_cli_extractor_model(*, spec: str | None,
     tuning like disable_reasoning applies); unset delegates to the
     production router (``build_extractor_model``, uncapped — the #1350 owner
     decision). ``session_workers > 1``: each worker builds its OWN fresh
-    model via the ingest_v2 factory (``build_extractor_model(spec or None)``
-    — factory-default max_tokens=4000; ``_build_single`` forwards only
-    max_tokens/temperature, so registry tuning is not expressible on this
-    path — a pre-existing factory limitation, NOT a fingerprint bug), so the
-    run-level model — and the fingerprint — is built the SAME way the
-    factory does."""
+    model via the ingest_v2 factory, so the run-level model — and the
+    fingerprint — is built the SAME way the factory does. The factory can
+    express only max_tokens/temperature (``_build_single``), so: a registry
+    spec whose entry carries inexpressible knobs (thinking_budget /
+    disable_reasoning) is REFUSED loudly (never silently flip reasoning),
+    and expressible tuning (max_tokens/temperature) is passed THROUGH so
+    the workers honor the registry entry (a spec'd run at sw>1 then
+    fingerprints identically to sw=1 — the same effective config). The M5
+    unknown-spec gate applies on BOTH paths."""
     if session_workers > 1:
-        from tests.model_adapters import build_extractor_model
-        return build_extractor_model(spec or None)
+        from tests.model_adapters import MODELS, build_extractor_model
+        if spec is not None:
+            if spec not in MODELS:
+                raise SystemExit(f"unknown extractor model {spec!r}; "
+                                 f"known: {sorted(MODELS)}")
+            entry = MODELS[spec]()
+            try:
+                if (getattr(entry, "thinking_budget", 0)
+                        or getattr(entry, "disable_reasoning", False)):
+                    raise SystemExit(
+                        f"--extractor-model {spec!r} with --session-workers "
+                        "> 1 is refused: the session-parallel factory cannot "
+                        "express its thinking_budget/disable_reasoning tuning "
+                        "(it would silently flip to defaults) — drop "
+                        "--session-workers or use the default extractor path")
+                # Express the registry entry's max_tokens/temperature through
+                # the factory so the workers actually serve the entry.
+                return build_extractor_model(
+                    spec, max_tokens=entry.max_tokens,
+                    temperature=entry.temperature)
+            finally:
+                entry.close()
+        return build_extractor_model(None)  # default path: factory config
     if spec:
         # M5 pinning: an explicit --extractor-model stays a registry lookup.
         from tests.model_adapters import MODELS
