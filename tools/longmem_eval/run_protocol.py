@@ -554,9 +554,10 @@ def cmd_run(state: ProtocolState, args: argparse.Namespace) -> None:
         return
     # The confirmation's expected-delta direction is recorded BEFORE the run
     # (pre-stated in advance — 03-scope step 7).
+    out_idx = len(cmd) - 1 - cmd[::-1].index("--output")
     state.record_run(
         step.number,
-        report=str(Path(cmd[cmd.index("--output") + 1])),
+        report=str(Path(cmd[out_idx + 1])),
         checkpoint=checkpoint_arg,
         command=cmd,
         expected_direction=args.expected_direction if step.runner == "confirm" else None,

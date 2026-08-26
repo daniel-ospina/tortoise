@@ -905,7 +905,13 @@ def resume_gate_reject_reason(outcome: dict) -> str | None:
         "reason", "count"}) shows the FTS leg dead — every fts entry has
         ``count == 0`` (empty_results / index_missing / breaker_open — all
         dead legs; TR questions trace one entry per entity type, so a live
-        point leg rescues a legitimately-empty event leg);
+        point leg rescues a legitimately-empty event leg) AND recall data
+        does not positively show the session surfaced: the dead-FTS signal
+        fires only when ``session_recall@k`` is all-zero or
+        absent/unrecorded. A healthy (non-zero) vector-rescued session
+        (FTS empty but recall > 0) is NOT retrieval-dead — rejecting it
+        would livelock, since the re-encode reproduces the same FTS-empty
+        shape on the next resume;
       - every ``session_recall@k`` value is 0.0 (the session never
         surfaced at any depth).
 
@@ -926,6 +932,14 @@ def resume_gate_reject_reason(outcome: dict) -> str | None:
         return None  # N/A — no answer session to recall, never a dead leg
     legs = outcome.get("legs")
     sr = outcome.get("session_recall@k")
+    # a recall dict with any positive numeric value proves the session
+    # surfaced (a live leg produced it) — corrupt values (strings/None)
+    # do NOT count as surfaced, so a dead FTS leg is still rejected on
+    # corrupt recall data instead of being silently resumed.
+    session_healthy = (isinstance(sr, dict) and bool(sr)
+                       and any(isinstance(v, (int, float))
+                               and not isinstance(v, bool) and v > 0
+                               for v in sr.values()))
     session_zero = (isinstance(sr, dict) and bool(sr)
                     and all(v == 0 for v in sr.values()))
     if isinstance(legs, list):
@@ -935,14 +949,14 @@ def resume_gate_reject_reason(outcome: dict) -> str | None:
         # leg).
         fts_entries = [leg for leg in legs
                        if isinstance(leg, dict) and leg.get("leg") == "fts"]
-        # The dead-FTS signal fires only when the session is ALSO
-        # un-surfaced (or recall data is absent): a healthy vector leg that
-        # rescued the session (session_recall > 0) is NOT retrieval-dead —
-        # rejecting it would livelock, since the re-encode reproduces the
-        # same FTS-empty shape on the next resume.
+        # The dead-FTS signal fires only when the session did NOT
+        # positively surface: a healthy vector leg that rescued the session
+        # (session_recall > 0) is NOT retrieval-dead — rejecting it would
+        # livelock, since the re-encode reproduces the same FTS-empty shape
+        # on the next resume.
         if (fts_entries and all(leg.get("count") == 0
                                 for leg in fts_entries)
-                and (session_zero or not isinstance(sr, dict) or not sr)):
+                and not session_healthy):
             return "fts.count=0 (dead FTS retrieval leg)"
     if session_zero:
         return "session_recall@k all zeros (session never surfaced)"
@@ -1283,7 +1297,8 @@ def run_evaluation(
         rerank_config=rr["config"],
     )
     done, prior_failures = _load_checkpoint(checkpoint, fingerprint,
-                                            run_key=run_key)
+                                            run_key=run_key,
+                                            retriever=retriever)
     outcomes: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = list(prior_failures)
     import threading

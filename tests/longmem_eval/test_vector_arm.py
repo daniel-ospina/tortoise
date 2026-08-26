@@ -739,6 +739,19 @@ def test_checkpoint_resume_gate_keeps_breaker_open(tmp_path):
                  "reason": "empty_results", "count": 0}],
       "session_recall@k": {"5": 1.0}},
      None),
+    # corrupt recall values (strings/None) do NOT prove the session
+    # surfaced — a dead FTS leg is still rejected on corrupt data instead
+    # of being silently resumed
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": False,
+                 "reason": "empty_results", "count": 0}],
+      "session_recall@k": {"5": "0.0"}},
+     "fts.count=0"),
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": False,
+                 "reason": "empty_results", "count": 0}],
+      "session_recall@k": {"5": None}},
+     "fts.count=0"),
     # TR dual-entity-type trace: a live point leg rescues the event leg
     ({"question_id": "q",
       "legs": [{"leg": "fts", "ran": True, "degraded": False,
@@ -799,6 +812,31 @@ def test_checkpoint_resume_gate_keeps_sessionless_abstention(tmp_path, capsys):
     by_id = {o["question_id"]: o for o in outcomes}
     assert by_id["mini_abs_005_abs"]["MARKER"] == "keep-me"  # reused
     assert reader_calls["n"] == 4  # only the 4 non-checkpointed qids ran
+
+
+def test_checkpoint_vector_truncation_requires_vector_keys(tmp_path, capsys):
+    """#1764/code-review: _load_checkpoint honors the retriever's required
+    key set (forwarded from run_evaluation) — a vector-mode outcome missing
+    vector-specific keys (ndcg@10/p@10/p@5/ranked_ids) is truncated and
+    re-encoded, mirroring the protocol scan's vector-key truncation."""
+    cp = tmp_path / "state.json"
+    outcome = _minimal_outcome("mini_ie_user_001")  # hybrid keys only
+    runner._save_checkpoint(
+        str(cp), [outcome], [],
+        run_key="embedded__vector__minilm__default", surface="embedded",
+        retriever="vector", model="minilm", prompt=None)
+
+    # same key, retriever-aware load → truncated (missing vector keys)
+    done, _ = runner._load_checkpoint(
+        str(cp), run_key="embedded__vector__minilm__default",
+        retriever="vector")
+    assert "mini_ie_user_001" not in done
+    assert "truncated/corrupt" in capsys.readouterr().err.lower()
+
+    # the default (hybrid) load still sees the hybrid keys → resumes
+    done, _ = runner._load_checkpoint(
+        str(cp), run_key="embedded__vector__minilm__default")
+    assert "mini_ie_user_001" in done
 
 
 def test_checkpoint_write_failure_surfaces_error(tmp_path, monkeypatch):

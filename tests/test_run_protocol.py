@@ -456,6 +456,21 @@ def test_checkpoint_resume_quality_guard_rails(tmp_path):
                        "turn_recall@k": {"20": 0.0}}],
     }), encoding="utf-8")
     assert rp.checkpoint_resume_quality(cp) is None
+    # vector checkpoint (run_key carries the retriever): the scan mirrors
+    # the runner's vector key set (run_evaluation forwards the retriever to
+    # _load_checkpoint) — an outcome missing vector-specific keys is
+    # truncated, not gate-checked
+    cp = tmp_path / "vector-trunc.json"
+    cp.write_text(json.dumps({
+        "format": "lme-checkpoint-v2",
+        "run_key": "embedded__vector__minilm__default",
+        "outcomes": [{"question_id": "q-vec",
+                       "session_recall@k": {"5": 1.0},
+                       "turn_recall@k": {"5": 1.0}}],
+    }), encoding="utf-8")
+    scan = rp.checkpoint_resume_quality(cp)
+    assert scan is not None
+    assert scan["truncated"] == 1 and scan["checked"] == 0
 
 
 def test_cmd_run_scan_uses_last_checkpoint_flag(tmp_path, monkeypatch):
