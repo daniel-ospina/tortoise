@@ -176,11 +176,17 @@ def probe_json_mode(adapter, *, n: int = 10, dry_run: bool = False) -> dict:
         else:
             os.environ["TORTOISE_JSON_MODE"] = prev
     verdict, mode_delta = verdict_for(on, off)
+    # resolve the model identity across the adapter shapes the eval can
+    # return (plain adapter .id / RoutingModel wrapper's active provider).
+    model_id = (getattr(adapter, "id", None)
+                or getattr(adapter, "model_id", None)
+                or getattr(getattr(adapter, "primary", None), "id", None)
+                or "?")
     return {
         "verdict": verdict,
         "mode_delta": mode_delta,
         "adapter": getattr(adapter, "provider", type(adapter).__name__),
-        "model": getattr(adapter, "id", getattr(adapter, "model_id", "?")),
+        "model": model_id,
         "effective_torto_json_mode": os.environ.get("TORTOISE_JSON_MODE", "1"),
         "probe_date": datetime.now(UTC).isoformat(),
         "mode_on": on,
