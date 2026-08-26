@@ -3575,10 +3575,12 @@ def test_ingest_over_mixed_blob_chunk_graph(tmp_path):
         assert rows[0][0] == 1  # stale blob untouched (defensive)
         ret = retrieve_for_question(sdk, q, ks=(5, 10, 20), top_k=20)
         # the stale blob is deduped WITH the fresh chunks (same session —
-        # kind-based detection, no double representation beyond the cap)
+        # kind-based detection, no double representation beyond the cap).
+        # C5 (#1745): the default per-session cap is 3 (was 2) — the
+        # assertion tracks the DEFAULT, not a hardcoded legacy value.
         s0_chunks = [h for h in ret["hits"]
                      if _is_raw_chunk(h) and h["session_id"] == "mini-s0"]
-        assert len(s0_chunks) <= 2
+        assert len(s0_chunks) <= 3
     finally:
         sdk.close()
 
