@@ -152,6 +152,31 @@ def test_direct_route_sends_nonreasoning_model_id(monkeypatch):
     assert body["max_tokens"] == 4000
 
 
+def test_deepseek_direct_json_mode_default_on(monkeypatch):
+    """#1746 (D6): JSON-mode parity on the direct path — the request body
+    carries ``response_format`` under the default TORTOISE_JSON_MODE=1
+    (mirrors OpenRouterModel; the pilot's direct route ran WITHOUT it — H1)."""
+    log, fake = _fake_post_logger()
+    monkeypatch.setattr(requests.sessions.Session, "post", fake)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
+    monkeypatch.delenv("TORTOISE_JSON_MODE", raising=False)
+    model = build_extractor_model("deepseek/deepseek-v4-flash")
+    model.complete(system="s", user="u")
+    assert log[0][1]["response_format"] == {"type": "json_object"}
+
+
+def test_deepseek_direct_json_mode_disabled(monkeypatch):
+    """#1746 (D6): TORTOISE_JSON_MODE=0 omits ``response_format`` entirely
+    (the documented escape hatch)."""
+    log, fake = _fake_post_logger()
+    monkeypatch.setattr(requests.sessions.Session, "post", fake)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
+    monkeypatch.setenv("TORTOISE_JSON_MODE", "0")
+    model = build_extractor_model("deepseek/deepseek-v4-flash")
+    model.complete(system="s", user="u")
+    assert "response_format" not in log[0][1]
+
+
 def test_openrouter_route_sends_family_prefixed_model_id(monkeypatch):
     log, fake = _fake_post_logger()
     monkeypatch.setattr(requests.sessions.Session, "post", fake)
