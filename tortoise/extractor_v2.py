@@ -801,6 +801,21 @@ _PARSE_RETRIES = 1  # re-prompt once on unparseable S2/S4 output (pilot #1549 fi
 # parse_error dominated the pilot census 18-31/qid — LLM sloppiness, self-corrects)
 
 
+def _error_excerpt(response: str, err: BaseException) -> str:
+    """Bounded error region for the error-informed re-prompt (D3, #1746):
+    the region around the JSONDecodeError position (±150 chars) when the
+    error exposes one, else the last 400 chars of the response; the excerpt
+    is bounded at 500 chars total. ``None`` responses are tolerated
+    (``_parse_json`` already treats them as empty)."""
+    resp = response or ""
+    pos = getattr(err, "pos", None)
+    if isinstance(pos, int) and 0 <= pos < len(resp):
+        excerpt = resp[max(0, pos - 150):pos + 150]
+    else:
+        excerpt = resp[-400:]
+    return excerpt[:500]
+
+
 def _complete_parsed(model, system: str, user: str, *,
                      max_tokens: int | None, stats: dict | None) -> dict:
     """``_complete`` + ``_parse_json`` with one re-prompt on parse failure.
@@ -809,20 +824,41 @@ def _complete_parsed(model, system: str, user: str, *,
     (M3); this layer adds the parse-retry the pilot census demanded: a
     parse_error is usually LLM sloppiness and the model self-corrects on
     the same prompt. Retries are counted in ``stats["llm"]["retries"]``
-    (D3) and the census still records the final failure as ``parse_error``."""
+    (D3) and the census records the final failure as ``parse_error`` /
+    ``truncated_parse_error`` (#1746 D2: the FIRST parse-failing attempt's
+    ``finish_reason`` decides the class — ``length`` → the truncation
+    hypothesis, else sloppiness/contamination)."""
     attempts = 0
     last: Exception | None = None
+    first_truncated = False
+    # D7 (#1746): the stage-level truncated flag ORs over ALL calls of the
+    # stage (``_complete`` overwrites ``stats["truncated"]`` per attempt) —
+    # a truncated first attempt whose retry recovers must still record the
+    # truncation (criterion 3: no UNRECORDED truncation with valid=true).
+    stage_truncated = False
     while attempts <= _PARSE_RETRIES:
         attempts += 1
+        response = _complete(model, system, user,
+                             max_tokens=max_tokens, stats=stats)
+        # D2 (#1746): read the finish reason IMMEDIATELY after the call;
+        # hold the FIRST parse-failing attempt's value — the class-decision
+        # signal for ``_ParseError.truncated``.
+        finish = getattr(model, "last_finish_reason", None)
+        stage_truncated = stage_truncated or finish == "length"
+        if stats is not None:
+            stats["truncated"] = stage_truncated
         try:
-            return _parse_json(_complete(model, system, user,
-                                         max_tokens=max_tokens, stats=stats))
+            return _parse_json(response)
         except ValueError as e:
             last = e
+            if attempts == 1:
+                first_truncated = finish == "length"
             if stats is not None:
                 stats.setdefault("llm", {}).setdefault("retries", 0)
                 stats["llm"]["retries"] += 1
-    raise _ParseError(str(last)) from last
+    raise _ParseError(str(last), truncated=first_truncated,
+                      attempt=attempts,
+                      excerpt=_error_excerpt(response, last)) from last
 
 
 def run_s2(model, story: str, master: dict | None = None, *,
@@ -2758,7 +2794,10 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # M3 (#1524, D3): per-session LLM roll-up + granular error census (class →
     # count across S1/S2/S4 failures). ``errors`` (strings) stays unchanged —
     # the additive keys feed the harness's per-question integrity (M4).
+    # #1746 (D1/D7): the recovery counters roll per-stage (the ladder's
+    # sanitize/repair events — never error strings, never census entries).
     llm_stats: dict = {"calls": 0, "retries": 0, "truncated": 0}
+    recovery_stats: dict[str, int] = {}
     error_census: dict[str, int] = {}
     edus = _edus_from_conversation(conversation)
     if not edus:
@@ -2768,7 +2807,8 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 "payload": None, "chain_notes": [], "link_before_create": [],
                 "supersessions": [],
                 "warnings": ["empty conversation — nothing extracted"],
-                "minted_kinds": [], "stats": {"llm": llm_stats},
+                "minted_kinds": [], "stats": {"llm": llm_stats,
+                                                "recovery": recovery_stats},
                 "errors": errors, "error_census": error_census}
 
     t0 = time.time()
@@ -2790,8 +2830,13 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             errors.append(f"S1 chunk failed: {type(e).__name__}: {e}")
             _bump_census(error_census, e)
         _rollup_llm(llm_stats, stage_stats)
+        _rollup_recovery(recovery_stats, stage_stats)
     if failed_chunks:
         errors.append(f"{failed_chunks}/{len(chunks)} S1 chunks failed")
+        # D1 (#1746): deterministic class for the summary line — one bump per
+        # summary event, fired under the SAME condition as the append, so a
+        # clean run has no stray bump.
+        _bump_census_class(error_census, "s1_chunk_summary")
     story = compile_stories(chunk_stories)
     story_arc = story
 
@@ -2807,6 +2852,7 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             errors.append(f"S2 failed: {type(e).__name__}: {e}")
             _bump_census(error_census, e)
         _rollup_llm(llm_stats, stage_stats)
+        _rollup_recovery(recovery_stats, stage_stats)
 
     # ── S3: search the graph (real backend, graceful degradation) ──────────
     search = search_graph(sdk, embed_list, story)
@@ -2832,6 +2878,7 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             errors.append(f"S4 failed: {type(e).__name__}: {e} — kept S2 output")
             _bump_census(error_census, e)
         _rollup_llm(llm_stats, stage_stats)
+        _rollup_recovery(recovery_stats, stage_stats)
 
     # ── entity resolution (D3): deterministic-first, bounded LLM fallback.
     # Runs BETWEEN S4 and S5; rewrites the embed list's entity names +
@@ -2858,16 +2905,25 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 # guarded internally, but the orchestrator never dies on
                 # resolution (P1: degrade to phase-1/ADD semantics)
                 errors.append(f"entity resolution failed: {type(e).__name__}: {e}")
+                # D1 (#1746): deterministic class for the previously-
+                # uncensused resolution failure path.
+                _bump_census_class(error_census, "entity_resolution_failed")
 
     # ── S5: embed execution (deterministic) ────────────────────────────────
     if not complete_list:
         errors.append("no embed list produced (S2/S4 empty) — nothing to embed")
+        # D1 (#1746): deterministic class for the previously-uncensused
+        # empty-embed-list path.
+        _bump_census_class(error_census, "empty_embed_list")
     try:
         result = execute_embed(complete_list, search, session_id=session_id,
                                story_arc=story_arc, master=master,
                                session_date=session_date, edus=edus)
     except Exception as e:  # S5 must NEVER block the pipeline (design §7.4)
         errors.append(f"S5 failed: {type(e).__name__}: {e}")
+        # D1 (#1746): deterministic class for the previously-uncensused S5
+        # failure path.
+        _bump_census_class(error_census, "s5_failed")
         result = {"payload": None, "chain_notes": [], "link_before_create": [],
                   "supersessions": [], "noops": [], "deletions": [],
                   "warnings": [f"S5 embed execution failed: {e}"],
@@ -2900,6 +2956,7 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # real value (previously always 0).
     result["error_census"] = error_census
     result["stats"]["llm"] = llm_stats
+    result["stats"]["recovery"] = recovery_stats  # #1746 (D7): ladder events
     if result.get("payload"):
         result["payload"]["telemetry"]["retry_count"] = llm_stats["retries"]
     return result
@@ -3050,15 +3107,42 @@ def _is_fatal_error(e: BaseException) -> bool:
 
 
 class _ParseError(ValueError):
-    """S2/S4 output that fails ``_parse_json`` — census class ``parse_error``
-    (a prompt/OUTPUT_CONTRACT regression, not a provider condition; the D6
-    triage treats a ``parse_error`` spike as a fix-the-prompt, not a
-    retry-harder)."""
+    """S2/S4 output that fails the parse-recovery ladder — census class
+    ``parse_error`` / ``truncated_parse_error`` (D2, #1746).
+
+    Carries the class-decision signal: ``truncated`` = the FIRST
+    parse-failing attempt's ``finish_reason`` was ``"length"`` (the
+    truncation hypothesis — H3) vs ``parse_error`` (contamination /
+    sloppiness — H2); ``attempt`` = which completion attempt failed;
+    ``excerpt`` = a bounded error region for the error-informed re-prompt
+    (D3)."""
+
+    def __init__(self, message: str, *, truncated: bool = False,
+                 attempt: int = 0, excerpt: str = ""):
+        super().__init__(message)
+        self.truncated = truncated
+        self.attempt = attempt
+        self.excerpt = excerpt
 
 
 def _bump_census(error_census: dict[str, int], e: BaseException) -> None:
-    """Record one stage-failure in the per-session census (D3)."""
-    cls = "parse_error" if isinstance(e, _ParseError) else _classify_error(e)
+    """Record one stage-failure in the per-session census (D3, #1746).
+
+    ``_ParseError`` is class-decided on its ``truncated`` flag (D2):
+    ``truncated_parse_error`` vs ``parse_error``; every other exception
+    keeps ``_classify_error`` (P2 delegation preserved)."""
+    if isinstance(e, _ParseError):
+        cls = "truncated_parse_error" if e.truncated else "parse_error"
+    else:
+        cls = _classify_error(e)
+    error_census[cls] = error_census.get(cls, 0) + 1
+
+
+def _bump_census_class(error_census: dict[str, int], cls: str) -> None:
+    """Class-explicit census bump (D1, #1746) — the deterministic-append
+    rule: every ``errors.append`` site in ``extract_session_v2`` pairs
+    exactly ONE census class, so ``len(errors) == sum(error_census)`` holds
+    structurally (criterion 2; the pilot's 16-vs-14 drift is gone)."""
     error_census[cls] = error_census.get(cls, 0) + 1
 
 
@@ -3068,6 +3152,14 @@ def _rollup_llm(llm_stats: dict, stage_stats: dict) -> None:
     llm_stats["calls"] += stage_stats.get("attempts", 0)
     llm_stats["retries"] += stage_stats.get("retries", 0)
     llm_stats["truncated"] += int(bool(stage_stats.get("truncated")))
+
+
+def _rollup_recovery(recovery_stats: dict, stage_stats: dict) -> None:
+    """Roll one stage's recovery counters into the per-session recovery
+    roll-up (#1746, D4/D7: the ladder's sanitize / sanitize_insufficient /
+    repair events — warning-only, never error strings, never census)."""
+    for k, v in (stage_stats.get("recovery") or {}).items():
+        recovery_stats[k] = recovery_stats.get(k, 0) + v
 
 
 def _call_once(model, system: str, user: str, *, deadline_s: int,
