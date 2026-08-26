@@ -921,13 +921,26 @@ def test_build_cli_extractor_model_fingerprints_serving_config(monkeypatch):
         assert runner._model_id(adapters[-1]) == (
             "deepseek/deepseek-v4-pro|max_tokens=500")
         assert runner._model_id(adapters[-1]) == runner._model_id(adapters[0])
-        # session_workers>1 + unset → the worker-factory config
-        # (max_tokens=4000): differs from the session_workers=1 uncapped
-        # fingerprint (a sw toggle is an effective-cap change → refused)
+        # session_workers>1 + unset → the worker-factory config: UNCAPPED,
+        # matching the session_workers=1 owner decision — the SAME
+        # fingerprint (an unset sw toggle keeps the same effective config)
         adapters.append(runner._build_cli_extractor_model(
             spec=None, session_workers=4))
-        assert runner._model_id(adapters[-1]) == (
-            "deepseek/deepseek-v4-flash|max_tokens=4000")
+        assert runner._model_id(adapters[-1]) == "deepseek/deepseek-v4-flash"
+        assert runner._model_id(adapters[-1]) == runner._model_id(adapters[1])
+        # session_workers>1 + direct spec: the RESOLVED wire id is used (the
+        # registry key is never a valid wire id — 'deepseek-flash-direct'
+        # → 'deepseek-chat'; 'solar-pro4' → 'upstage/solar-pro4'), with the
+        # entry's expressible tuning — identical to session_workers=1
+        adapters.append(runner._build_cli_extractor_model(
+            spec="deepseek-flash-direct", session_workers=4))
+        assert runner._model_id(adapters[-1]) == "deepseek-chat"
+        adapters.append(runner._build_cli_extractor_model(
+            spec="deepseek-flash-direct", session_workers=1))
+        assert runner._model_id(adapters[-2]) == runner._model_id(adapters[-1])
+        adapters.append(runner._build_cli_extractor_model(
+            spec="solar-pro4", session_workers=4))
+        assert runner._model_id(adapters[-1]) == "upstage/solar-pro4"
         # the M5 pinning guard applies on BOTH paths (fail fast, never a
         # garbage wire id in the checkpoint)
         with pytest.raises(SystemExit):

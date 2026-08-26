@@ -572,6 +572,34 @@ def _adapter_fingerprint(model: Any) -> str:
     return "|".join(parts)
 
 
+def _session_worker_spec_tuning(spec: str) -> tuple[str, int | None, float]:
+    """M5-gated resolution of an explicit ``--extractor-model`` for the
+    session-parallel worker path (M7 #1739 / review #1742):
+    ``(wire id, max_tokens, temperature)`` — the registry entry's REAL wire
+    id (never the registry key — ``solar-pro4``/``claude-opus-5`` are not
+    valid wire ids) and its expressible tuning. REFUSES entries the
+    ingest_v2 factory cannot express (``thinking_budget`` /
+    ``disable_reasoning`` — ``_build_single`` forwards only
+    max_tokens/temperature): loud, never a silent reasoning flip."""
+    from tests.model_adapters import MODELS
+    if spec not in MODELS:
+        raise SystemExit(f"unknown extractor model {spec!r}; "
+                         f"known: {sorted(MODELS)}")
+    entry = MODELS[spec]()
+    try:
+        if (getattr(entry, "thinking_budget", 0)
+                or getattr(entry, "disable_reasoning", False)):
+            raise SystemExit(
+                f"--extractor-model {spec!r} with --session-workers > 1 is "
+                "refused: the session-parallel factory cannot express its "
+                "thinking_budget/disable_reasoning tuning (it would silently "
+                "flip to defaults) — drop --session-workers or use the "
+                "default extractor path")
+        return entry.id, entry.max_tokens, entry.temperature
+    finally:
+        entry.close()
+
+
 def _build_cli_extractor_model(*, spec: str | None,
                                session_workers: int):
     """Build the extractor model a CLI run will actually serve AND
@@ -580,42 +608,23 @@ def _build_cli_extractor_model(*, spec: str | None,
 
     ``session_workers == 1``: the run-level model IS the extracting model —
     an explicit ``spec`` stays a MODELS registry lookup (M5 pinning, registry
-    tuning like disable_reasoning applies); unset delegates to the
-    production router (``build_extractor_model``, uncapped — the #1350 owner
-    decision). ``session_workers > 1``: each worker builds its OWN fresh
-    model via the ingest_v2 factory, so the run-level model — and the
-    fingerprint — is built the SAME way the factory does. The factory can
-    express only max_tokens/temperature (``_build_single``), so: a registry
-    spec whose entry carries inexpressible knobs (thinking_budget /
-    disable_reasoning) is REFUSED loudly (never silently flip reasoning),
-    and expressible tuning (max_tokens/temperature) is passed THROUGH so
-    the workers honor the registry entry (a spec'd run at sw>1 then
-    fingerprints identically to sw=1 — the same effective config). The M5
-    unknown-spec gate applies on BOTH paths."""
+    tuning applies); unset delegates to the production router
+    (``build_extractor_model``, uncapped — the #1350 owner decision).
+    ``session_workers > 1``: each worker builds its OWN fresh model via the
+    ingest_v2 factory, so the run-level model — and the fingerprint — is
+    built the SAME way the factory does (``_session_worker_spec_tuning``
+    resolves the registry entry's real wire id + expressible tuning; the
+    unset case stays UNCAPPED, matching the session_workers=1 owner
+    decision). A spec'd run therefore fingerprints IDENTICALLY across a
+    session-workers toggle (the same effective config — resume accepted);
+    an unset run too."""
     if session_workers > 1:
-        from tests.model_adapters import MODELS, build_extractor_model
+        from tests.model_adapters import build_extractor_model
         if spec is not None:
-            if spec not in MODELS:
-                raise SystemExit(f"unknown extractor model {spec!r}; "
-                                 f"known: {sorted(MODELS)}")
-            entry = MODELS[spec]()
-            try:
-                if (getattr(entry, "thinking_budget", 0)
-                        or getattr(entry, "disable_reasoning", False)):
-                    raise SystemExit(
-                        f"--extractor-model {spec!r} with --session-workers "
-                        "> 1 is refused: the session-parallel factory cannot "
-                        "express its thinking_budget/disable_reasoning tuning "
-                        "(it would silently flip to defaults) — drop "
-                        "--session-workers or use the default extractor path")
-                # Express the registry entry's max_tokens/temperature through
-                # the factory so the workers actually serve the entry.
-                return build_extractor_model(
-                    spec, max_tokens=entry.max_tokens,
-                    temperature=entry.temperature)
-            finally:
-                entry.close()
-        return build_extractor_model(None)  # default path: factory config
+            wire_id, max_tokens, temperature = _session_worker_spec_tuning(spec)
+            return build_extractor_model(
+                wire_id, max_tokens=max_tokens, temperature=temperature)
+        return build_extractor_model(max_tokens=None, temperature=0.0)
     if spec:
         # M5 pinning: an explicit --extractor-model stays a registry lookup.
         from tests.model_adapters import MODELS
@@ -723,14 +732,14 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
     member fingerprint; multi-lane wrappers are shape-prefixed routing:/rotating:)
     — never an address-bearing repr. SESSION_WORKERS: ``--session-workers
     > 1`` runs session-parallel extraction — each worker builds a FRESH
-    model via the ingest_v2 factory (``build_extractor_model(spec or None)``
-    at the factory-default max_tokens=4000; ``_build_single`` forwards only
-    max_tokens/temperature, so registry tuning is not expressible there —
-    pre-existing factory limitation). ``_build_cli_extractor_model`` builds
-    the fingerprinted model the SAME way the workers serve (registry model
-    at session_workers=1, factory config at >1), so the fingerprint records
-    the extracting config on every path and a session-workers toggle (an
-    effective-cap change) refuses resume. WIRE-ID
+    model via the ingest_v2 factory. ``_build_cli_extractor_model`` builds
+    the fingerprinted model and run_main threads the resolved spec + tuning
+    into the factory so the workers serve EXACTLY what the fingerprint
+    records (a spec'd run is identical across a session-workers toggle —
+    same effective config; the unset run stays UNCAPPED, matching the
+    session_workers=1 owner decision). Registry entries the factory cannot
+    express (thinking_budget/disable_reasoning) are refused loudly at
+    session_workers>1. WIRE-ID
     MUTABILITY: wire ids are API-facing and mutable (e.g. #1706 renamed
     deepseek-v4-flash → deepseek-chat) — a rename loudly invalidates every
     existing checkpoint (CheckpointStaleError on ``extractor_model``): safe
@@ -938,11 +947,13 @@ def run_evaluation(
     workers: int = 1,
     session_workers: int = 1,
     # M7 #1739 / #1742: the CLI extractor spec for the session-parallel
-    # worker factory (build_extractor_model(spec or None) per worker, at the
-    # factory-default max_tokens=4000). Threaded from run_main — the old
-    # free ``args`` closure was a latent NameError. Mirrors what
-    # _build_cli_extractor_model fingerprints for session_workers > 1.
+    # worker factory — the RESOLVED wire id (never the registry key) plus
+    # the registry entry's expressible tuning, so the workers serve EXACTLY
+    # what _build_cli_extractor_model fingerprints. Threaded from run_main —
+    # the old free ``args`` closure was a latent NameError.
     session_worker_model_spec: str | None = None,
+    session_worker_max_tokens: int | None = None,
+    session_worker_temperature: float = 0.0,
     preflight: dict | None = None,
     # R3 (#1542) D2: the embedder pre-flight status (from _preflight_embedder
     # in run_main) — forwarded to the report methodology (D5: embedder +
@@ -1084,15 +1095,17 @@ def run_evaluation(
                         # cost; each worker gets a fresh model from the same
                         # build path — no shared RoutingModel state).
                         session_workers=session_workers,
-                        # M7 #1739 / #1742: the factory spec is threaded in
-                        # (never the run_main-local ``args`` closure — that
-                        # was a latent NameError); the factory builds at the
-                        # function-default max_tokens=4000, matching what
-                        # _build_cli_extractor_model fingerprints for
-                        # session_workers > 1.
+                        # M7 #1739 / #1742: the factory spec + tuning are
+                        # threaded in (never the run_main-local ``args``
+                        # closure — that was a latent NameError) and mirror
+                        # exactly what _build_cli_extractor_model
+                        # fingerprints: the workers serve the SAME config
+                        # the checkpoint records.
                         model_factory=(
                             (lambda: build_extractor_model(
-                                session_worker_model_spec or None))
+                                session_worker_model_spec or None,
+                                max_tokens=session_worker_max_tokens,
+                                temperature=session_worker_temperature))
                             if session_workers > 1 else None))
                 else:
                     ingest_stats = ingest_haystack(
@@ -2141,10 +2154,18 @@ def _run_main(parser: argparse.ArgumentParser, args,
     judge = build_judge(args.judge_model, mock=args.mock)
 
     extractor_model = None
+    sw_model_spec = None
+    sw_max_tokens = None
+    sw_temperature = 0.0
     if args.ingest_mode == "v2":
         # M7 #1739 / #1742: the fingerprinted model must match what actually
         # extracts — session_workers>1 fingerprints the worker-factory config
-        # (see _build_cli_extractor_model).
+        # (see _build_cli_extractor_model); the factory's spec + tuning are
+        # resolved once and threaded into run_evaluation so the workers
+        # serve EXACTLY the fingerprinted config.
+        if args.session_workers > 1 and args.extractor_model:
+            (sw_model_spec, sw_max_tokens,
+             sw_temperature) = _session_worker_spec_tuning(args.extractor_model)
         extractor_model = _build_cli_extractor_model(
             spec=args.extractor_model, session_workers=args.session_workers)
 
@@ -2178,10 +2199,12 @@ def _run_main(parser: argparse.ArgumentParser, args,
             workers=max(1, args.workers), preflight=preflight,
             # M7 #1739 / #1742: wire the session-parallel path (the flag was
             # parsed but never threaded — a silent no-op) and give the worker
-            # factory its spec so the fingerprint matches what the workers
-            # serve.
+            # factory the resolved spec + tuning so the workers serve exactly
+            # what the fingerprint records.
             session_workers=args.session_workers,
-            session_worker_model_spec=args.extractor_model,
+            session_worker_model_spec=sw_model_spec,
+            session_worker_max_tokens=sw_max_tokens,
+            session_worker_temperature=sw_temperature,
             embedder_status=embedder_status,
             chunk_turns=chunk_turns, max_context_tokens=context_cap,
             max_chunks_per_session=max_chunks_per_session,
