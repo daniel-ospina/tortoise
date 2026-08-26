@@ -629,8 +629,11 @@ def test_checkpoint_key_shape():
 def test_model_id_precedence_ladder():
     """The ``_model_id`` attr-resolution ladder: None → None; a truthy
     ``.model_id`` beats ``.id``; falsy attributes never win (fall through);
-    repr is the last resort — pinned as repr, not str, via sentinels. Case
-    names ride the assertion messages for failure attribution."""
+    a whitespace-only id is DEGENERATE — it falls through to the loud repr
+    fallback (review #1742: ``if mid is not None and str(mid).strip()``)
+    instead of becoming a fingerprint literal; repr is the last resort —
+    pinned as repr, not str, via sentinels. Case names ride the assertion
+    messages for failure attribution."""
     from types import SimpleNamespace as _NS
 
     class _SentinelRepr:
@@ -668,8 +671,10 @@ def test_model_id_precedence_ladder():
          "registry/win"),
         ("model_id-beats-none-id", _NS(model_id="registry/win", id=None),
          "registry/win"),
-        ("whitespace-model_id-is-truthy", _NS(model_id=" "), " "),
-        ("whitespace-id-is-truthy", _NS(model_id="", id=" "), " "),
+        ("whitespace-model_id-is-truthy", _SentinelRepr(model_id=" "),
+         "<REPR-sentinel>"),
+        ("whitespace-id-is-truthy", _SentinelRepr(model_id="", id=" "),
+         "<REPR-sentinel>"),
         ("falsy-model_id-absent-id-repr", _SentinelRepr(model_id=""),
          "<REPR-sentinel>"),
         ("none-model_id-absent-id-repr", _SentinelRepr(model_id=None),
@@ -879,14 +884,7 @@ def test_model_id_wrapper_path_stable_no_address(monkeypatch):
                 f"keys={shape['keys']}: {fp_a!r}")
         finally:
             for m in adapters:
-                close = getattr(m, "close", None)
-                if close is not None:
-                    close()
-                else:  # RoutingModel has no close — close the inner adapters
-                    for inner in (getattr(m, "primary", None),
-                                  getattr(m, "fallback", None)):
-                        if inner is not None:
-                            inner.close()
+                m.close()  # every build-path model (OpenRouterModel subclasses, RoutingModel, RotatingModel) has close()
 
 
 def test_build_cli_extractor_model_fingerprints_serving_config(monkeypatch):
@@ -974,14 +972,7 @@ def test_build_cli_extractor_model_fingerprints_serving_config(monkeypatch):
                 spec="deepseek-v4-pro-noreason", session_workers=4)
     finally:
         for m in adapters:
-            close = getattr(m, "close", None)
-            if close is not None:
-                close()
-            else:  # RoutingModel has no close — close the inner adapters
-                for inner in (getattr(m, "primary", None),
-                              getattr(m, "fallback", None)):
-                    if inner is not None:
-                        inner.close()
+            m.close()  # RoutingModel.close() exists since #1742 — plain close suffices
 
 
 def test_run_main_rejects_session_workers_without_v2(capsys):
@@ -1017,6 +1008,76 @@ def test_run_evaluation_refuses_fingerprint_served_mismatch_at_session_workers(
                 session_workers=2)
     finally:
         extractor.close()
+
+
+def test_run_main_v2_session_workers_threads_trio_guard_silent(monkeypatch,
+                                                               tmp_path):
+    """M7 #1739 / #1742: the legitimate CLI path — ``--ingest-mode v2
+    --session-workers N --extractor-model <spec>`` in a single-lane env —
+    reaches the question loop WITHOUT the fingerprint-vs-served ValueError:
+    run_main resolves the spec+tuning trio (``_session_worker_spec_tuning``),
+    builds the fingerprinted extractor_model the SAME way the worker factory
+    does, and threads the trio into run_evaluation — the guard compares
+    equal fingerprints and stays silent (a regression here would break every
+    real sw>1 CLI run). Offline: mocked reader/judge (--mock) + a
+    monkeypatched extract_session_v2 (no API)."""
+    import tortoise.extractor_v2 as ev2
+    _pin_extractor_env(monkeypatch, keys=())  # single-lane (lenient OpenRouter)
+    payload = {"entities": [], "events": [], "points": [
+        {"id": "pt_cli", "content": "the answer to the question",
+         "pointKind": "statement"}], "operators": []}
+
+    def _fake(model, conversation, **kw):
+        return {"payload": payload, "minted_kinds": [], "supersessions": [],
+                "errors": [], "warnings": []}
+
+    monkeypatch.setattr(ev2, "extract_session_v2", _fake)
+    out = tmp_path / "report.json"
+    report = runner.run_main(["--data", str(MINI), "--limit", "1",
+                              "--split", "s", "--ingest-mode", "v2",
+                              "--session-workers", "2",
+                              "--extractor-model", "deepseek-v4-pro",
+                              "--mock", "--output", str(out)])
+    # reached the question loop: 1 outcome, no ValueError from the guard
+    assert len(report["outcomes"]) == 1
+    assert report["methodology"]["ingest_mode"] == "v2"
+    assert out.is_file()
+
+
+def test_run_main_v2_session_workers_guard_fires_on_config_divergence(
+        monkeypatch, tmp_path):
+    """M7 #1739 / #1742 negative: when the run-level extractor_model
+    fingerprints DIFFERENTLY from the threaded worker-factory config, the
+    run is REFUSED pre-loop with the guard's ValueError (the safety net for
+    programmatic/regression cases — a misbehaving build path cannot silently
+    fingerprint one config while the workers serve another). Forced by
+    monkeypatching ``_build_cli_extractor_model`` to return a different
+    max_tokens than the resolved trio (the real build path stays
+    consistent); the diagnostic names the worker-factory config fix."""
+    import tortoise.extractor_v2 as ev2
+    _pin_extractor_env(monkeypatch, keys=())
+
+    def _fake(model, conversation, **kw):
+        return {"payload": {"entities": [], "events": [], "points": [],
+                             "operators": []},
+                "minted_kinds": [], "supersessions": [],
+                "errors": [], "warnings": []}
+
+    monkeypatch.setattr(ev2, "extract_session_v2", _fake)
+
+    def _mismatched(*, spec, session_workers):
+        # deliberately diverge from the resolved trio (max_tokens=500): the
+        # guard must catch fingerprint-vs-served divergence pre-loop
+        return OpenRouterModel("deepseek/deepseek-v4-pro",
+                               max_tokens=8000, temperature=0.0)
+
+    monkeypatch.setattr(runner, "_build_cli_extractor_model", _mismatched)
+    with pytest.raises(ValueError, match="worker-factory config"):
+        runner.run_main(["--data", str(MINI), "--limit", "1",
+                         "--split", "s", "--ingest-mode", "v2",
+                         "--session-workers", "2",
+                         "--extractor-model", "deepseek-v4-pro",
+                         "--mock"])
 
 
 def test_model_id_wrapper_shape_discriminates_routing_vs_rotating():
@@ -1071,19 +1132,20 @@ def test_model_id_wrapper_shape_discriminates_routing_vs_rotating():
 
 def test_model_id_tuning_variants_discriminate():
     """M7 #1739, Gap 2: three MODELS registry entries construct the SAME
-    wire id (``deepseek/deepseek-v4-pro``) with DIFFERENT tuning:
-    ``deepseek-v4-pro`` (max_tokens=500), ``deepseek-v4-pro-xhigh``
-    (max_tokens=500, temperature=0.0), ``deepseek-v4-pro-noreason``
-    (max_tokens=8000, disable_reasoning=True — reasoning OFF). The pre-fix
-    fingerprint was wire-id-only: identical fingerprints → a reasoning-ON
-    checkpoint silently resumed by reasoning-OFF ``-noreason`` — the "wrong
-    fix silently reuses mismatched-config results" hazard. Post-fix:
-    non-default tuning rides the fingerprint, so ``-xhigh`` and
-    ``-noreason`` differ; identical tuning (base vs ``-xhigh`` are the same
-    effective config) stays equal. Also pins the THIRD tuning knob
-    (``thinking_budget`` — deepseek-r1-xhigh) and the default-tuning
-    omission branch for the pro wire-id family (bare id, no suffix — the
-    #1732 bare-wire-id contract)."""
+    wire id (``deepseek/deepseek-v4-pro``): ``deepseek-v4-pro``
+    (max_tokens=500), ``deepseek-v4-pro-xhigh`` (max_tokens=500,
+    temperature=0.0) and ``deepseek-v4-pro-noreason`` (max_tokens=8000,
+    disable_reasoning=True — reasoning OFF). -pro ≡ -xhigh are BYTE-IDENTICAL
+    configs (same fingerprint — correct, nothing differs); only -noreason is
+    the discriminating variant. The pre-fix fingerprint was wire-id-only:
+    identical fingerprints → a reasoning-ON checkpoint silently resumed by
+    reasoning-OFF ``-noreason`` — the "wrong fix silently reuses
+    mismatched-config results" hazard. Post-fix: non-default tuning rides
+    the fingerprint, so ``-noreason`` differs; identical tuning (base vs
+    ``-xhigh`` are the same effective config) stays equal. Also pins the
+    THIRD tuning knob (``thinking_budget`` — deepseek-r1-xhigh) and the
+    default-tuning omission branch for the pro wire-id family (bare id, no
+    suffix — the #1732 bare-wire-id contract)."""
     adapters = []
     try:
         adapters.append(MODELS["deepseek-v4-pro-xhigh"]())
@@ -1330,14 +1392,7 @@ def test_checkpoint_wrapper_path_resume_same_config(tmp_path, monkeypatch):
                         extractor_model=c, **kw))
         finally:
             for m in adapters:
-                close = getattr(m, "close", None)
-                if close is not None:
-                    close()
-                else:  # RoutingModel has no close — close the inner adapters
-                    for inner in (getattr(m, "primary", None),
-                                  getattr(m, "fallback", None)):
-                        if inner is not None:
-                            inner.close()
+                m.close()
     # wrapper cross-tuning: same wire id + provider set, different max_tokens
     # → refused (only the member tuning suffix discriminates)
     _pin_extractor_env(monkeypatch, keys=())
@@ -1367,14 +1422,7 @@ def test_checkpoint_wrapper_path_resume_same_config(tmp_path, monkeypatch):
                     extractor_model=c, **kw))
     finally:
         for m in adapters:
-            close = getattr(m, "close", None)
-            if close is not None:
-                close()
-            else:  # RoutingModel has no close — close the inner adapters
-                for inner in (getattr(m, "primary", None),
-                              getattr(m, "fallback", None)):
-                    if inner is not None:
-                        inner.close()
+            m.close()
 
 
 def test_run_evaluation_resume_accepts_fresh_same_model_extractor(tmp_path):

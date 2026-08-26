@@ -642,6 +642,11 @@ _REGISTRY_KEY_TO_ID = {
 }
 
 
+# Public alias — the eval harness (tools/longmem_eval/run.py) imports the
+# registry-key remap as a stable contract; keep this name public.
+REGISTRY_KEY_TO_ID = _REGISTRY_KEY_TO_ID
+
+
 def build_extractor_model(model_id: str | None = None, *,
                           max_tokens: int | None = 4000,
                           temperature: float = 0.0) -> RoutingModel:
