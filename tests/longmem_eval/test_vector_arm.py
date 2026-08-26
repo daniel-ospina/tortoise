@@ -45,6 +45,7 @@ from tools.longmem_eval.ingest import ingest_haystack
 from tools.longmem_eval.judge import MockJudge
 from tools.longmem_eval.reader import MockReader
 from tools.longmem_eval.retrieve import retrieve_for_question
+from tortoise.model_adapters import DeepSeekDirectModel, OpenRouterModel, VeniceModel
 from tortoise.sdk import TortoiseSDK
 
 MINI = Path(__file__).parent.parent / "fixtures" / "longmemeval_mini.json"
@@ -615,6 +616,319 @@ def test_checkpoint_key_shape():
         "hnsw__vector__arctic-s__query"
     assert runner.checkpoint_key("embedded", "hybrid", None, None) == \
         "embedded__hybrid__default__default"
+
+
+def test_model_id_precedence_ladder():
+    """The ``_model_id`` attr-resolution ladder: None → None; a truthy
+    ``.model_id`` beats ``.id``; falsy attributes never win (fall through);
+    repr is the last resort — pinned as repr, not str, via sentinels. Case
+    names ride the assertion messages for failure attribution."""
+    from types import SimpleNamespace as _NS
+
+    class _SentinelRepr:
+        """repr-fallback probe: distinct ``__str__``/``__repr__`` sentinels so
+        a str fallback (or a bare ``object()`` oracle that re-derives the same
+        0x... address) cannot false-pass."""
+
+        def __init__(self, **attrs):
+            self.__dict__.update(attrs)
+
+        def __str__(self):
+            return "STR-sentinel"
+
+        def __repr__(self):
+            return "<REPR-sentinel>"
+
+    # One named case per attr-resolution clause of ``_model_id``. Attr-only
+    # stubs are data (SimpleNamespace); repr-fallback probes are sentinel
+    # instances so the last resort is pinned as repr, not str.
+    cases = [
+        ("no-model", None, None),
+        ("model_id-attr-wins", _NS(model_id="registry/deepseek-v4-flash"),
+         "registry/deepseek-v4-flash"),
+        ("id-only-falls-through", _NS(id="deepseek/deepseek-v4-flash"),
+         "deepseek/deepseek-v4-flash"),
+        ("model_id-beats-id", _NS(model_id="registry/win", id="loser"),
+         "registry/win"),
+        ("falsy-model_id-falls-to-id",
+         _NS(model_id="", id="deepseek/deepseek-v4-flash"),
+         "deepseek/deepseek-v4-flash"),
+        ("none-model_id-falls-to-id",
+         _NS(model_id=None, id="deepseek/deepseek-v4-flash"),
+         "deepseek/deepseek-v4-flash"),
+        ("model_id-beats-empty-id", _NS(model_id="registry/win", id=""),
+         "registry/win"),
+        ("model_id-beats-none-id", _NS(model_id="registry/win", id=None),
+         "registry/win"),
+        ("whitespace-model_id-is-truthy", _NS(model_id=" "), " "),
+        ("whitespace-id-is-truthy", _NS(model_id="", id=" "), " "),
+        ("falsy-model_id-absent-id-repr", _SentinelRepr(model_id=""),
+         "<REPR-sentinel>"),
+        ("none-model_id-absent-id-repr", _SentinelRepr(model_id=None),
+         "<REPR-sentinel>"),
+        ("no-attrs-repr-fallback", _SentinelRepr(), "<REPR-sentinel>"),
+        ("none-id-repr-fallback", _SentinelRepr(id=None), "<REPR-sentinel>"),
+        ("empty-id-repr-fallback", _SentinelRepr(id=""), "<REPR-sentinel>"),
+        ("both-falsy-none-empty-repr", _SentinelRepr(model_id=None, id=""),
+         "<REPR-sentinel>"),
+        ("both-falsy-empty-none-repr", _SentinelRepr(model_id="", id=None),
+         "<REPR-sentinel>"),
+        ("both-empty-empty-repr", _SentinelRepr(model_id="", id=""),
+         "<REPR-sentinel>"),
+        ("both-none-none-repr", _SentinelRepr(model_id=None, id=None),
+         "<REPR-sentinel>"),
+    ]
+    for name, model, expected in cases:
+        assert runner._model_id(model) == expected, f"case [{name}]"
+
+
+def test_model_id_fingerprint_uses_wire_id_not_repr():
+    """M4 #1732: model adapters expose ``.id`` (the API-facing wire id), not
+    ``.model_id`` — the old repr fallback embedded a memory address
+    (``<DeepSeekDirectModel object at 0x...>``), making the fingerprint
+    non-deterministic across processes and refusing every checkpoint resume
+    (CheckpointStaleError on ``extractor_model`` even with identical git_sha).
+
+    The literal wire-id equality is the #1732 guard: an address-bearing repr
+    can never equal the stable wire id. Because two fresh instances of the
+    same model are pinned to the SAME literal, identical fingerprints across
+    instances/runs follow — the resume-determinism contract.
+
+    Construction is offline (requests.Session() only, no API calls); built
+    inside the try so every constructed session is closed in the finally even
+    if a later constructor raises."""
+    specs = [
+        (OpenRouterModel, "deepseek/deepseek-v4-flash"),
+        (DeepSeekDirectModel, "deepseek-chat"),
+        (VeniceModel, "deepseek-v4-flash"),
+    ]
+    adapters: list = []
+    expected: list = []
+    try:
+        for cls, wire_id in specs:
+            adapters.append(cls(wire_id))
+            adapters.append(cls(wire_id))  # determinism twin
+            expected += [wire_id, wire_id]
+        for model, wire_id in zip(adapters, expected, strict=True):
+            assert runner._model_id(model) == wire_id
+    finally:
+        for model in adapters:
+            model.close()
+
+
+def test_model_id_fingerprint_deterministic_at_composition_layer():
+    """M4 #1732, composition layer: ``_build_fingerprint`` embeds
+    ``_model_id(extractor_model)`` in the dict that is serialized to the
+    checkpoint and compared on resume (CheckpointStaleError on mismatch).
+    Fresh instances of the same model must produce IDENTICAL fingerprints (a
+    repr fallback embedding a per-instance 0x... address would differ and
+    refuse the resume); the field must also discriminate between models (the
+    cross-model resume refusal) and propagate None for retrieval-only runs."""
+    kw = dict(
+        reader_model="r", judge_model="j", ks=(5,), top_k=5, split="s",
+        ingest_mode="embedded", max_retries=1, dataset_fingerprint="x",
+        rerank_config={},
+    )
+
+    # retrieval-only runs carry no extractor → None propagates as None
+    assert runner._build_fingerprint(extractor_model=None, **kw)["extractor_model"] is None
+
+    adapters: list = []
+    try:
+        adapters.append(OpenRouterModel("deepseek/deepseek-v4-flash"))
+        adapters.append(OpenRouterModel("deepseek/deepseek-v4-flash"))  # determinism twin
+        adapters.append(OpenRouterModel("deepseek/deepseek-v4-pro"))  # same class, different id
+        adapters.append(DeepSeekDirectModel("deepseek-chat"))  # different class
+        adapters.append(DeepSeekDirectModel("deepseek/deepseek-v4-flash"))  # diff class, SAME wire id
+
+        fp1 = runner._build_fingerprint(extractor_model=adapters[0], **kw)
+        fp2 = runner._build_fingerprint(extractor_model=adapters[1], **kw)
+        assert fp1 == fp2
+        assert fp1["extractor_model"] == "deepseek/deepseek-v4-flash"
+
+        # the discriminator must discriminate at both granularities — same
+        # class with a different wire id, and a different class — and
+        # ``extractor_model`` must be the ONLY differing field (no unrelated
+        # nondeterminism leaks into the fingerprint)
+        fp3 = runner._build_fingerprint(extractor_model=adapters[2], **kw)
+        fp4 = runner._build_fingerprint(extractor_model=adapters[3], **kw)
+        assert fp3["extractor_model"] == "deepseek/deepseek-v4-pro"
+        assert fp4["extractor_model"] == "deepseek-chat"
+        assert runner._fingerprint_diffs(fp1, fp3) == ["extractor_model"]
+        assert runner._fingerprint_diffs(fp1, fp4) == ["extractor_model"]
+
+        # The fingerprint identity is wire-id-only by design (the #1732 fix):
+        # the SAME wire id across provider classes yields the same fingerprint
+        # — the provider is a routing detail, not part of the effective run
+        # config, so a cross-provider resume is deliberately accepted. Pin the
+        # contract so a future change to class-based identity is explicit.
+        fp5 = runner._build_fingerprint(extractor_model=adapters[4], **kw)
+        assert fp5 == fp1
+    finally:
+        for model in adapters:
+            model.close()
+
+
+def test_checkpoint_resume_gate_accepts_same_model_fresh_instance(tmp_path):
+    """M4 #1732, end-to-end: the checkpoint resume gate must accept a fresh
+    instance of the SAME extractor model (identical fingerprint) and refuse
+    a different model — CheckpointStaleError naming ``extractor_model``. This
+    is the outcome the bug actually broke: every resume was refused even with
+    identical git_sha because the fingerprint embedded a per-instance
+    0x... address."""
+    kw = dict(
+        reader_model="r", judge_model="j", ks=(5,), top_k=5, split="s",
+        ingest_mode="embedded", max_retries=1, dataset_fingerprint="x",
+        rerank_config={},
+    )
+    cp = tmp_path / "state.json"
+    adapters: list = []
+    try:
+        adapters.append(OpenRouterModel("deepseek/deepseek-v4-flash"))  # a
+        adapters.append(OpenRouterModel("deepseek/deepseek-v4-flash"))  # b: fresh, same model
+        adapters.append(DeepSeekDirectModel("deepseek-chat"))  # c: different class
+        adapters.append(OpenRouterModel("deepseek/deepseek-v4-pro"))  # d: same class, diff id
+        adapters.append(DeepSeekDirectModel("deepseek/deepseek-v4-flash"))  # e: diff class, SAME wire id
+        a, b, c, d, e = adapters
+        runner._save_checkpoint(
+            str(cp), [_minimal_outcome("q1")], [],
+            fingerprint=runner._build_fingerprint(extractor_model=a, **kw))
+        # resume with a fresh instance of the same model → accepted
+        done, _ = runner._load_checkpoint(
+            str(cp),
+            expected_fingerprint=runner._build_fingerprint(
+                extractor_model=b, **kw))
+        assert "q1" in done
+        # a different model is refused, naming extractor_model as the ONLY
+        # differing field (a superset diff list fails the exact-match regex)
+        with pytest.raises(runner.CheckpointStaleError,
+                           match=r"differs on \['extractor_model'\]"):
+            runner._load_checkpoint(
+                str(cp),
+                expected_fingerprint=runner._build_fingerprint(
+                    extractor_model=c, **kw))
+        # same class but different wire id → also refused, same field
+        with pytest.raises(runner.CheckpointStaleError,
+                           match=r"differs on \['extractor_model'\]"):
+            runner._load_checkpoint(
+                str(cp),
+                expected_fingerprint=runner._build_fingerprint(
+                    extractor_model=d, **kw))
+        # multi-field drift → the gate names ALL differing fields (proves the
+        # exact-match superset guard: a second differing field must surface)
+        multi = runner._build_fingerprint(
+            extractor_model=c, **dict(kw, reader_model="other-reader"))
+        with pytest.raises(runner.CheckpointStaleError,
+                           match=r"differs on \['extractor_model', 'reader_model'\]"):
+            runner._load_checkpoint(str(cp), expected_fingerprint=multi)
+        # extractor ↔ None crossover: the checkpoint run_key does not encode
+        # extractor_model, so the fingerprint gate alone guards these — both
+        # directions must be refused
+        with pytest.raises(runner.CheckpointStaleError,
+                           match=r"differs on \['extractor_model'\]"):
+            runner._load_checkpoint(
+                str(cp),
+                expected_fingerprint=runner._build_fingerprint(
+                    extractor_model=None, **kw))
+        # the historical #1732 residue: a checkpoint written by the broken
+        # binary whose stored extractor_model is an address-bearing repr must
+        # be refused against a fresh wire-id fingerprint (the migration path)
+        cp_residue = tmp_path / "residue.json"
+        residue_fp = dict(runner._build_fingerprint(extractor_model=a, **kw))
+        residue_fp["extractor_model"] = "<OpenRouterModel object at 0x7f1234abcd>"
+        runner._save_checkpoint(
+            str(cp_residue), [_minimal_outcome("q1")], [],
+            fingerprint=residue_fp)
+        with pytest.raises(runner.CheckpointStaleError,
+                           match=r"differs on \['extractor_model'\]"):
+            runner._load_checkpoint(
+                str(cp_residue),
+                expected_fingerprint=runner._build_fingerprint(
+                    extractor_model=b, **kw))
+        # deliberate cross-provider acceptance (wire-id-only identity): the
+        # SAME wire id across provider classes resumes — provider is not part
+        # of the effective-config contract (pinned at composition in
+        # test_model_id_fingerprint_deterministic_at_composition_layer)
+        done, _ = runner._load_checkpoint(
+            str(cp),
+            expected_fingerprint=runner._build_fingerprint(
+                extractor_model=e, **kw))
+        assert "q1" in done
+        # retrieval-only (None↔None) resume path: accepted, not refused
+        cp_none = tmp_path / "none.json"
+        runner._save_checkpoint(
+            str(cp_none), [_minimal_outcome("q2")], [],
+            fingerprint=runner._build_fingerprint(extractor_model=None, **kw))
+        done, _ = runner._load_checkpoint(
+            str(cp_none),
+            expected_fingerprint=runner._build_fingerprint(
+                extractor_model=None, **kw))
+        assert "q2" in done
+        with pytest.raises(runner.CheckpointStaleError,
+                           match=r"differs on \['extractor_model'\]"):
+            runner._load_checkpoint(
+                str(cp_none),
+                expected_fingerprint=runner._build_fingerprint(
+                    extractor_model=a, **kw))
+    finally:
+        for model in adapters:
+            model.close()
+
+
+def test_run_evaluation_resume_accepts_fresh_same_model_extractor(tmp_path):
+    """M4 #1732, runner seam: ``run_evaluation`` wires
+    ``_build_fingerprint(extractor_model=...)`` → ``_load_checkpoint(
+    checkpoint, fingerprint, run_key=...)`` → ``_save_checkpoint(...,
+    fingerprint)`` (run.py 824-834/1081). A second invocation with a FRESH
+    instance of the same extractor model must resume — the checkpointed qid
+    is skipped in ``_run_one`` (reader NOT called again) and no
+    CheckpointStaleError raised; a different model must be refused at the
+    gate. ``extractor_model`` feeds only the fingerprint inside
+    ``run_evaluation`` — no API calls — so the real adapter is offline-safe."""
+    cp = tmp_path / "state.json"
+    reader_calls = {"n": 0}
+
+    class _CountingReader(MockReader):
+        def answer(self, *args, **kwargs):
+            reader_calls["n"] += 1
+            return super().answer(*args, **kwargs)
+
+    reader = _CountingReader()
+    adapters: list = []
+    try:
+        adapters.append(OpenRouterModel("deepseek/deepseek-v4-flash"))
+        adapters.append(OpenRouterModel("deepseek/deepseek-v4-flash"))  # fresh, same model
+        adapters.append(DeepSeekDirectModel("deepseek-chat"))  # different model
+        a, b, c = adapters
+
+        out1, _ = runner.run_evaluation(
+            _mini()[:1], reader=reader, judge=MockJudge(),
+            ks=(5,), top_k=5, split="s", work_dir=str(tmp_path),
+            checkpoint=str(cp), extractor_model=a)
+        assert len(out1) == 1
+        assert reader_calls["n"] == 1  # run 1 processed q1
+
+        # fresh instance of the same model → resume accepted: q1 is reused
+        # from the checkpoint, so the reader is NOT invoked again (a silent
+        # re-run would push the count to 2 and fail this)
+        out2, _ = runner.run_evaluation(
+            _mini()[:1], reader=reader, judge=MockJudge(),
+            ks=(5,), top_k=5, split="s", work_dir=str(tmp_path),
+            checkpoint=str(cp), extractor_model=b)
+        assert [o["question_id"] for o in out2] == \
+            [o["question_id"] for o in out1]
+        assert reader_calls["n"] == 1  # no re-run — q1 came from the checkpoint
+
+        # different model → refused at the gate, naming the field
+        with pytest.raises(runner.CheckpointStaleError,
+                           match=r"differs on \['extractor_model'\]"):
+            runner.run_evaluation(
+                _mini()[:1], reader=reader, judge=MockJudge(),
+                ks=(5,), top_k=5, split="s", work_dir=str(tmp_path),
+                checkpoint=str(cp), extractor_model=c)
+    finally:
+        for model in adapters:
+            model.close()
 
 
 # ── retrieval-only report shape ─────────────────────────────────────────────
