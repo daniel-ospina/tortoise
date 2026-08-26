@@ -38,7 +38,7 @@ from tools.longmem_eval.run import (
     outcomes_to_report, run_evaluation, run_main,
 )
 from tools.longmem_eval.report import (
-    compare_reports, mcnemar_exact, wilson_ci,
+    _outcome_grade, compare_reports, mcnemar_exact, wilson_ci,
 )
 
 MINI = Path(__file__).parent / "fixtures" / "longmemeval_mini.json"
@@ -223,11 +223,13 @@ def test_outcomes_to_report_golden_shape():
     # The regression made this None — a real dict is the whole point (E2E-2).
     assert isinstance(report, dict)
     # Top-level key set is the published report contract (M7 adds the
-    # self-explanatory-report keys).
+    # self-explanatory-report keys; #1747 adds n_excluded so the shape-
+    # filter denominator shrink is observable at top level).
     assert set(report) == {
-        "benchmark", "dataset", "split", "n_questions", "accuracy",
-        "retrieval", "latency_ms", "methodology", "failures", "n_failed",
-        "outcomes", "integrity", "leg_mix", "pool_size", "evidence",
+        "benchmark", "dataset", "split", "n_questions", "n_excluded",
+        "accuracy", "retrieval", "latency_ms", "methodology", "failures",
+        "n_failed", "outcomes", "integrity", "leg_mix", "pool_size",
+        "evidence",
     }
     assert report["benchmark"] == "LongMemEval"
     assert report["dataset"] == "xiaowu0162/longmemeval-cleaned"
@@ -367,6 +369,125 @@ def test_outcomes_to_report_golden_shape():
     }
     assert report["failures"] == []
     assert report["n_failed"] == 0
+
+
+def test_breaker_drop_published_outcomes_grade_clean():
+    """#1747 (round-17 code review P2): the runner's published Layer-1
+    projection must match what the integrity grader consumed for
+    breaker_open outcomes. The raw dropped outcome (run.py breaker
+    construction) carries NO valid/error_classes keys — build_report
+    grades it clean (n_excluded_hard == 0, valid True) — but the
+    projection's key selector materialized them as null, and a PRESENT-null
+    error_classes re-grades HARD (round-10 fail-closed shape): every
+    persisted vector-arm report with a breaker drop self-contradicted its
+    own verdict. The projection now emits the honest clean shape
+    (valid: True, error_classes: {}) for breaker_open outcomes without an
+    error_classes key; a TAMPERED breaker outcome that DOES carry a hard
+    census is NOT laundered — it stays in the published record and still
+    vetoes via n_excluded_hard."""
+    dropped = {
+        "question_id": "q-drop", "question_type": "single-session-user",
+        "breaker_open": True, "dropped_reason": "breaker_open",
+        "label": None, "hypothesis": None,
+        "session_recall@k": {"5": 0.0}, "turn_recall@k": {"5": 0.0},
+        "ndcg@10": None, "p@10": None, "p@5": None,
+    }
+    ok = {
+        "question_id": "q-ok", "question_type": "single-session-user",
+        "question_date": "2024-01-15", "label": True, "hypothesis": "h",
+        "session_recall@k": {"5": 1.0}, "turn_recall@k": {"5": 1.0},
+        "evidence_recall@k": {"5": 1.0},
+        "chunk_evidence_recall@k": {"5": 0.5},
+        "n_ingest_errors": 0, "context_tokens": 100,
+        "context_point_count": 2,
+        "retrieval_latency_ms": 1.0, "reader_latency_ms": 2.0,
+        "judge_latency_ms": 3.0, "total_ms": 6.0,
+        "valid": True, "error_classes": {},
+        "leg_mix": {"tfidf": 2}, "leg_mix@k": {"5": {"tfidf": 2}},
+        "pool_size": 5, "evidence_written": 1,
+        "evidence_retrieved@k": {"5": 1}, "ingest_latency_ms": 1.0,
+    }
+    report = outcomes_to_report(
+        [dropped, ok], reader_model="golden-reader", judge_model="golden-judge",
+        ks=(5,), top_k=5, split="s", retriever="vector", retrieval_only=True,
+        dataset_semantics_audit=_trusted_audit(), integrity_threshold=1.0)
+    integ = report["integrity"]
+    assert integ["valid"] is True
+    assert integ["n_excluded_hard"] == 0
+    # the PUBLISHED outcomes re-grade clean — consistent with the verdict.
+    for o in report["outcomes"]:
+        assert _outcome_grade(o) == "clean"
+    dropped_pub = next(o for o in report["outcomes"]
+                       if o.get("breaker_open"))
+    assert dropped_pub["valid"] is True
+    assert dropped_pub["error_classes"] == {}
+    # a TAMPERED breaker outcome carrying a hard census is NOT laundered:
+    # it stays in the published record and still vetoes (n_excluded_hard).
+    tampered = dict(ok)
+    tampered["question_id"] = "q-tamper"
+    tampered["breaker_open"] = True
+    tampered["dropped_reason"] = "breaker_open"
+    tampered["error_classes"] = {"fatal_402_billing": 1}
+    report2 = outcomes_to_report(
+        [tampered, ok], reader_model="golden-reader",
+        judge_model="golden-judge", ks=(5,), top_k=5, split="s",
+        retriever="vector", retrieval_only=True,
+        dataset_semantics_audit=_trusted_audit(), integrity_threshold=1.0)
+    assert report2["integrity"]["valid"] is False
+    assert report2["integrity"]["n_excluded_hard"] == 1
+    tampered_pub = next(o for o in report2["outcomes"]
+                        if o.get("breaker_open"))
+    assert tampered_pub["error_classes"] == {"fatal_402_billing": 1}
+    assert _outcome_grade(tampered_pub) == "hard"
+    # round-17 review-fix: a tampered breaker outcome carrying a PRESENT
+    # valid flag (valid: False, no error_classes — an empty-census hard
+    # grade) is NOT laundered to valid: True either — the clean-shape
+    # override requires NEITHER key present on the raw outcome.
+    tampered_v = dict(ok)
+    tampered_v["question_id"] = "q-tamper-v"
+    del tampered_v["error_classes"]
+    tampered_v["valid"] = False
+    tampered_v["breaker_open"] = True
+    tampered_v["dropped_reason"] = "breaker_open"
+    report3 = outcomes_to_report(
+        [tampered_v, ok], reader_model="golden-reader",
+        judge_model="golden-judge", ks=(5,), top_k=5, split="s",
+        retriever="vector", retrieval_only=True,
+        dataset_semantics_audit=_trusted_audit(), integrity_threshold=1.0)
+    assert report3["integrity"]["valid"] is False
+    assert report3["integrity"]["n_excluded_hard"] == 1
+    tampered_v_pub = next(o for o in report3["outcomes"]
+                          if o.get("breaker_open"))
+    assert tampered_v_pub["valid"] is False
+    assert _outcome_grade(tampered_v_pub) == "hard"  # published == graded
+    # round-17 review-fix (P3 hybrids): one-key-present breaker shapes whose
+    # RAW grade is clean are published clean too — the override keys off the
+    # raw grade (published == graded, exactly), never a stale key-presence
+    # rule. (valid present, error_classes absent; and error_classes
+    # present, valid absent.)
+    hybrid_a = dict(ok)
+    hybrid_a["question_id"] = "q-hybrid-a"
+    del hybrid_a["error_classes"]
+    hybrid_a["valid"] = True
+    hybrid_a["breaker_open"] = True
+    hybrid_a["dropped_reason"] = "breaker_open"
+    hybrid_b = dict(ok)
+    hybrid_b["question_id"] = "q-hybrid-b"
+    del hybrid_b["valid"]
+    hybrid_b["breaker_open"] = True
+    hybrid_b["dropped_reason"] = "breaker_open"
+    report4 = outcomes_to_report(
+        [hybrid_a, hybrid_b, ok], reader_model="golden-reader",
+        judge_model="golden-judge", ks=(5,), top_k=5, split="s",
+        retriever="vector", retrieval_only=True,
+        dataset_semantics_audit=_trusted_audit(), integrity_threshold=1.0)
+    assert report4["integrity"]["valid"] is True
+    assert report4["integrity"]["n_excluded_hard"] == 0
+    for o in report4["outcomes"]:
+        if o.get("breaker_open"):
+            assert o["valid"] is True
+            assert o["error_classes"] == {}
+            assert _outcome_grade(o) == "clean"
 
 
 def test_cli_smoke(tmp_path):
@@ -4024,6 +4145,94 @@ def test_compare_reports_stripped_outcomes_graceful():
     f = next(iter(cmp["flip_lists"].values()))[0]
     assert f["sr20_a"] is None and f["zero_point_a"] is None
     assert f["context_tokens_b"] is None and f["error_count_b"] is None
+
+
+def test_compare_reports_malformed_shapes_never_crash():
+    """#1747 (round-10 review): compare_reports must not crash on the
+    malformed-but-publishable shapes build_report now tolerates — a non-str
+    question_type (list — unhashable in the per_type set / category lookup),
+    mixed-type question_ids (int 1 vs str "1" stay DISTINCT — the join uses
+    the same collision-proof key discipline as the grading map), and failure
+    entries without question_id (per-object unknown questions)."""
+    from tools.longmem_eval.report import _qid_key
+    assert _qid_key({"question_id": 1}) != _qid_key({"question_id": "1"})
+    # non-str question_type outcome in BOTH reports → no crash, no merge
+    a = _cmp_report([
+        {"question_id": 1, "question_type": "multi-session",
+         "label": True, "context_tokens": 100},
+        {"question_id": "1", "question_type": ["a", "b"],
+         "label": False, "context_tokens": 100},
+    ], [], "mix-a")
+    b = _cmp_report([
+        {"question_id": 1, "question_type": "multi-session",
+         "label": False, "context_tokens": 100},
+        {"question_id": "1", "question_type": "multi-session",
+         "label": True, "context_tokens": 100},
+    ], [], "mix-b")
+    cmp = compare_reports(a, b)
+    # int 1 and str "1" are TWO distinct questions: qid 1 flips a→b
+    # (True→False), qid "1" flips b→a (False→True) → 1 b-win, 1 a-win.
+    ov = cmp["overall"]
+    assert ov["shared_n"] == 2
+    assert ov["decomposition"]["b_wins"] == 1
+    assert ov["decomposition"]["a_wins"] == 1
+    assert cmp["header"]["per_type_n"] != {}
+    # failure entries without question_id → no KeyError (skipped from the
+    # restored/lost sets; they can never join an outcome qid).
+    a2 = _cmp_report([{"question_id": "q1",
+                       "question_type": "single-session-user",
+                       "label": True}],
+                     [{"error": "reader:retries_exhausted",
+                       "failed_at_utc": "x"}], "noqid-a")
+    b2 = _cmp_report([{"question_id": "q1",
+                       "question_type": "single-session-user",
+                       "label": True}], [], "noqid-b")
+    cmp2 = compare_reports(a2, b2)
+    assert cmp2["overall"]["shared_n"] == 1
+    assert cmp2["overall"]["decomposition"]["reliability_restored"]["count"] == 0
+    # round-11: breaker_open drops and label-less outcomes (excluded from the
+    # report's own aggregates) are SKIPPED from the comparison — never graded
+    # as wrong, never crashing; the skip is surfaced in the header.
+    bo = {"question_id": "dropped1", "question_type": "multi-session",
+          "label": None, "breaker_open": True, "dropped_reason": "breaker_open"}
+    nolab = {"question_id": "nolabel", "question_type": "multi-session"}
+    a3 = _cmp_report([{"question_id": "q1",
+                       "question_type": "single-session-user",
+                       "label": True}, bo, nolab], [], "skip-a")
+    b3 = _cmp_report([{"question_id": "q1",
+                       "question_type": "single-session-user",
+                       "label": True}], [], "skip-b")
+    cmp3 = compare_reports(a3, b3)
+    assert cmp3["header"]["skipped_excluded"] == {"a": 2, "b": 0}
+    assert cmp3["overall"]["shared_n"] == 1      # q1 only — no crash, no wrong-grade
+    # round-12: the runner's Layer-1 projection materializes a missing label
+    # as `label: None` (key PRESENT) — that projected entry must be SKIPPED
+    # too (never graded as an incorrect answer, never in skipped_excluded=0).
+    proj_nolab = {"question_id": "proj", "question_type": "multi-session",
+                  "label": None, "context_tokens": 100}
+    a4 = _cmp_report([{"question_id": "q1",
+                       "question_type": "single-session-user",
+                       "label": True}, proj_nolab], [], "proj-a")
+    b4 = _cmp_report([{"question_id": "q1",
+                       "question_type": "single-session-user",
+                       "label": True}], [], "proj-b")
+    cmp4 = compare_reports(a4, b4)
+    assert cmp4["header"]["skipped_excluded"] == {"a": 1, "b": 0}
+    assert cmp4["overall"]["shared_n"] == 1
+    # round-13: a tampered NON-BOOL label (0 / "" / "true" / 1) is excluded
+    # from the report's aggregates (real-bool policy) — the comparison must
+    # skip it too, never grade it as correct/wrong.
+    badlab = {"question_id": "badlab", "question_type": "multi-session",
+              "label": "true", "context_tokens": 100}
+    a5 = _cmp_report([{"question_id": "q1",
+                       "question_type": "single-session-user",
+                       "label": True}, badlab], [], "badlab-a")
+    b5 = _cmp_report([{"question_id": "q1",
+                       "question_type": "single-session-user",
+                       "label": True}], [], "badlab-b")
+    cmp5 = compare_reports(a5, b5)
+    assert cmp5["header"]["skipped_excluded"] == {"a": 1, "b": 0}
+    assert cmp5["overall"]["shared_n"] == 1
 
 
 def test_compare_reports_comparability_warnings():

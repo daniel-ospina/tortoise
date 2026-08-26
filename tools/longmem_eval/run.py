@@ -74,6 +74,7 @@ from .judge import build_judge, is_abstention
 from .preflight import FatalProviderError, PreflightError, run_preflight
 from .reader import build_reader, reader_prompt_constants
 from .report import (
+    _outcome_grade,
     build_report,
     compare_reports,
     default_report_path,
@@ -1953,7 +1954,33 @@ def outcomes_to_report(
                   # condition and read via .get() so they can't KeyError).
                   **({"rerank_pass": o["rerank_pass"],
                       "rerank_latency_ms": o.get("rerank_latency_ms", 0.0)}
-                     if o.get("rerank_pass") is not None else {})}
+                     if o.get("rerank_pass") is not None else {}),
+                  # #1747 (round-17 code review): breaker_open outcomes are
+                  # published with the SAME no-error-signal shape the grader
+                  # consumed — the runner's raw dropped outcome (run.py
+                  # breaker construction) carries NO valid/error_classes
+                  # keys, so build_report grades it clean (n_excluded_hard
+                  # == 0, valid True), but this selector materialized them
+                  # as null, and a PRESENT-null error_classes re-grades HARD
+                  # (round-10 fail-closed shape) — every persisted
+                  # vector-arm report with a breaker drop self-contradicted
+                  # its own verdict. Emit the shape the GRADER actually
+                  # consumed for the breaker outcome: when the raw grade is
+                  # CLEAN, publish valid/error_classes exactly as graded
+                  # (missing → the clean defaults True/{}); when the raw
+                  # grade is hard/recoverable (a TAMPERED breaker outcome
+                  # carrying a hard census, a present non-bool/falsy valid
+                  # flag, or a recoverable-only census), the selector's
+                  # materialization stands — the published record re-grades
+                  # identically to what the verdict read (round-17 review-
+                  # fix: the earlier key-presence-only override stomped a
+                  # present valid: False to True, and left one-key-present
+                  # hybrid shapes (valid present / error_classes absent and
+                  # vice versa) publishing a clean-shape contradiction).
+                  **({"valid": o.get("valid", True),
+                      "error_classes": o.get("error_classes", {})}
+                     if o.get("breaker_open") and _outcome_grade(o) == "clean"
+                     else {})}
             for o in outcomes
         ]
     }
@@ -2052,6 +2079,27 @@ def _print_summary(report: dict[str, Any]) -> None:
           f"{integ.get('n_valid')}, n_invalid {integ.get('n_invalid')}, "
           f"n_failed {integ.get('n_failed')}, "
           f"invalid_rate {integ.get('invalid_rate')})")
+    # #1747 (round-17 code-review P2): valid=false is commonly decided by
+    # terms NOT in the line above (the hard veto, the excluded-outcome
+    # veto, or the vacuity guard — an operator can see valid: false with
+    # invalid_rate 0.0 where the only printed numbers did NOT decide the
+    # verdict). Surface the deciding terms when the verdict is false —
+    # including the vacuity evidence (n_attempted + dropped + n_excluded:
+    # when the rate and veto terms all pass, a false verdict means the
+    # outcome-derived attempted set was empty — round-17 review-fix: the
+    # line used to omit those, reading "decided by 0/0/0" for an all-
+    # dropped run).
+    if integ.get("valid") is False:
+        print(f"  invalidity decided by: n_hard_invalid "
+              f"{integ.get('n_hard_invalid')}, n_excluded_hard "
+              f"{integ.get('n_excluded_hard')}, n_excluded "
+              f"{integ.get('n_excluded')}, n_attempted "
+              f"{integ.get('n_attempted')} (invalid_rate "
+              f"{integ.get('invalid_rate')} vs threshold "
+              f"{integ.get('threshold')}; dropped "
+              f"{report.get('n_dropped', 0)}; vacuity = all "
+              "non-veto/rate terms pass with an empty outcome-derived "
+              "attempted set)")
     if integ.get("justified"):
         print(f"  justified override: "
               f"{integ.get('threshold_violation_justification')}")

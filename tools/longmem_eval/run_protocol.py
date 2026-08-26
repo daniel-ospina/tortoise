@@ -7,7 +7,7 @@ Encodes the 9-step phased protocol from 03-scope §Run/Testing Protocol
     2  micro-tests (R1 sweep + M6)      (gate: knob selected, marking calibrated)
     3  50-Q pilot + full-context cell   (gate: pilot completes, integrity readable)
     4  mechanical + obvious fixes       (gate: pilot findings fixed)
-    5  full 500-Q run — V3 baseline     (gate: integrity.valid=true, error rate ≤ threshold)
+    5  full 500-Q run — V3 baseline     (gate: integrity.valid=true — invalid_rate ≤ threshold AND zero hard failures (n_hard_invalid == 0 AND n_excluded_hard == 0 — excluded-outcome hard vetoes count) AND non-empty attempted set whenever any entry was excluded or dropped; threshold = JUSTIFIED_BASELINE_THRESHOLD (the module constant, interpolated everywhere — never a hardcoded literal) justified default at 500-Q scale, #1747)
     6  mechanical + obvious fixes       (gate: findings fixed)
     7  50-Q confirmation                (gate: delta confirms, direction stated in advance)
     8  1k full benchmark (owner-gated)  (gate: explicit owner decision)
@@ -60,6 +60,46 @@ DEFAULT_STATE = REPO_ROOT / ".longmemeval_cache" / "run_protocol_state.json"
 #: Default artifacts dir for reports/checkpoints (gitignored).
 DEFAULT_RUN_DIR = REPO_ROOT / ".longmemeval_cache" / "runs"
 
+#: #1747: the justified integrity-threshold default for the step-5 500-Q
+#: baseline run. A healthy run at 500-Q scale (~24k session extractions)
+#: carries a handful of recoverable-class error strings (parse_error /
+#: truncated / transient_* — the census allowlist in report.py) even with a
+#: flawless extractor; the strict 0.0 default would make ``integrity.valid
+#: == true`` unreachable and the V3 baseline unconfirmable. 0.02 = at most
+#: 10 of 500 questions with recoverable errors. Hard failures (fatal_* /
+#: structural non-census strings / permanent eval failures) still veto at
+#: ANY threshold (report.py). Injected into the step-5 command by
+#: ``build_command`` so the executed run matches the documented gate — the
+#: operator never has to remember the flag. An operator override via extra
+#: flags (`run 5 -- --integrity-threshold 0.5` — space or ``=`` form) still
+#: wins — argparse last-occurrence-wins — and SUPPRESSES the injected
+#: baseline justification (round-13/14): a recorded reason must never claim
+#: the 0.02 baseline for a non-baseline threshold, so an overriding operator
+#: must pair their own ``--integrity-justification`` or the applied
+#: threshold carries no recorded reason (documented silent case).
+JUSTIFIED_BASELINE_THRESHOLD = 0.02
+
+#: Round-16/17: argparse parser used ONLY to detect an operator
+#: ``--integrity-threshold`` override among the extra run flags — mirrors the
+#: runner's own parser (run.py _build_parser) so space / equals /
+#: abbreviation forms resolve identically AND flag VALUES are consumed
+#: identically: ``--integrity-justification`` is registered (single-value
+#: store) so a justification's value token is never misread as a threshold
+#: override — a non-option value is consumed as the justification (the
+#: round-16 quoted case), and an OPTION-LOOKING value token (starting with
+#: ``--``) makes BOTH parsers raise ``expected one argument`` → no-override
+#: → the baseline injection stays and the malformed tokens are the RUNNER's
+#: loud rejection at parse time, never a silently-wrong threshold (round-17
+#: code-review: the round-16 parser registered ONLY the threshold, so a
+#: single flag-like justification token parsed as a REAL override, the
+#: baseline injection was suppressed, and the emitted command applied the
+#: strict 0.0 default while recording the token as the justification — the
+#: M7 'recorded reason never claims a threshold that wasn't applied'
+#: contract violated).
+_EXTRA_ARGS_PARSER = argparse.ArgumentParser(add_help=False)
+_EXTRA_ARGS_PARSER.add_argument("--integrity-threshold", type=float)
+_EXTRA_ARGS_PARSER.add_argument("--integrity-justification")
+
 
 @dataclass(frozen=True)
 class Step:
@@ -74,7 +114,9 @@ class Step:
     owner_gated: bool = False
 
 
-#: The 9-step protocol, verbatim from 03-scope §Run/Testing Protocol.
+#: The 9-step protocol from 03-scope §Run/Testing Protocol (step-5 gate
+#: amended per #1747: census-class-aware criterion + justified 0.02
+#: threshold).
 STEPS: list[Step] = [
     Step(1, "code-review", "Code review + bug pass", "gate",
          "clean review (code-review skill), no known bugs in code"),
@@ -86,16 +128,48 @@ STEPS: list[Step] = [
     Step(4, "fix-pilot", "Mechanical + obvious fixes from the pilot",
          "gate", "pilot findings fixed"),
     Step(5, "baseline-500q", "Full 500-Q run — the V3 baseline (V4 comparison point)",
-         "run", "integrity.valid=true, error rate ≤ threshold", runner="baseline"),
+         "run",
+         "integrity.valid=true — census-class-aware (#1747): invalid_rate ≤ threshold "
+         "AND n_hard_invalid == 0 AND n_excluded_hard == 0 (fatal_*/ingest/unknown "
+         "census classes, non-census error strings with an EMPTY census, permanent "
+         "eval failures, malformed inputs — present non-bool valid flag / non-"
+         "iterable, non-str, falsy-but-present NON-CONTAINER OR PRESENT-null "
+         "error_classes (empty dict/list are the legitimate no-census shapes) "
+         "— fail "
+         "closed to hard, veto at any threshold; excluded outcomes — shape-broken "
+         "dicts / breaker_open drops — with a hard census still veto via "
+         "n_excluded_hard; a non-empty OUTCOME-derived attempted set is "
+         "required whenever any entry was excluded or dropped (failures "
+         "do not count as attempts for this guard) — a fully "
+         "excluded/dropped run never certifies; "
+         "recoverable "
+         "parse_error/truncated/truncated_parse_error/partial_parse/transient_* "
+         "census classes AND reader/judge:retries_exhausted eval failures are "
+         "rate-limited, not vetoed); threshold "
+         f"{JUSTIFIED_BASELINE_THRESHOLD} justified default at 500-Q scale "
+         f"(≤{JUSTIFIED_BASELINE_THRESHOLD * 500:.0f} of 500 questions with "
+         "recoverable errors) — injected by `run 5`",
+         runner="baseline"),
     Step(6, "fix-500", "Mechanical + obvious fixes from the 500",
          "gate", "findings fixed"),
     Step(7, "confirm-50q", "50-Q confirmation (pilot questions ∪ regression sample of 500-Q failures)",
          "run", "50-Q delta confirms the fixes (direction as stated)", runner="confirm"),
     Step(8, "bench-1k", "1k full benchmark — ONLY if needed (statistical significance at V4)",
-         "run", "explicit owner decision; harness supports both sizes",
+         "run", "explicit owner decision; harness supports both sizes. NOTE "
+         "(#1747 round-17): this run carries the strict CLI default "
+         "integrity-threshold 0.0 — the step-5 justified-threshold injection "
+         "is scoped to step 5 — so the owner must pass "
+         "--integrity-threshold with an --integrity-justification when the "
+         "benchmark needs the recoverable-class rate-limit (otherwise any "
+         "recoverable blip makes integrity.valid unreachable at 1k scale)",
          runner="bench1k", owner_gated=True),
     Step(9, "followup-r6e6", "Follow-up run (R6/E6) vs the V3 baseline",
-         "run", "owner decision; delta vs V3 baseline",
+         "run", "owner decision; delta vs V3 baseline. NOTE (#1747 round-17): "
+         "this is a full 500-Q run under the strict CLI default "
+         "integrity-threshold 0.0 — the step-5 justified-threshold injection "
+         "is scoped to step 5 — so the owner must pass --integrity-threshold "
+         "with an --integrity-justification to keep integrity.valid comparable "
+         "to the step-5 V3 baseline (the run most likely compared against it)",
          runner="followup", owner_gated=True),
 ]
 
@@ -263,7 +337,48 @@ def build_command(step: Step, extra: list[str], *, state: ProtocolState,
         return _run_cmd(["--split", "s", "--limit", "50",
                          "--ingest-mode", "v2", *common])
     if step.runner == "baseline":       # step 5: full 500-Q run (V3 baseline)
-        return _run_cmd(["--split", "s", "--ingest-mode", "v2", *common])
+        # #1747: inject the justified threshold + its recorded justification
+        # so the EXECUTED run matches the documented gate and the M7
+        # contract (a non-default threshold is never silently applied — the
+        # report records the reason). The justification INTERPOLATES the
+        # constant so it can never drift from the injected threshold
+        # (round-13 review); when the operator overrides the threshold via
+        # extra flags, the baseline justification is NOT injected — a
+        # recorded reason must never claim the 0.02 baseline for a non-
+        # baseline threshold (M7: the report records the ACTUAL reason).
+        # round-13/14/15/16/17: detect the operator override using the SAME
+        # argparse semantics the runner uses (allow_abbrev=True) — a
+        # parse_known_args round-trip over the extra tokens resolves space /
+        # equals / unambiguous-prefix forms AND consumes flag VALUES like
+        # the runner: --integrity-justification is REGISTERED on the
+        # detector (round-17), so (a) a single non-option value token after
+        # --integrity-justification is consumed as the justification, never
+        # parsed as a threshold override (a raw token-prefix scan
+        # false-positived on it); (b) an OPTION-LOOKING value token
+        # (starting with ``--``) raises ``expected one argument`` in BOTH
+        # parsers → no-override → the baseline injection stays, and the
+        # malformed tokens are the RUNNER's loud rejection at parse time
+        # (fail-closed: never a silently-wrong threshold); (c) the bare
+        # prefix ``--integrity`` is 'ambiguous option' in both parsers
+        # (matches threshold AND justification) → no-override → the runner's
+        # own error fires. Invalid extras (e.g. a bare flag with no value)
+        # are the runner's rejection, not ours — treat as no-override.
+        try:
+            _extra_ns, _ = _EXTRA_ARGS_PARSER.parse_known_args(extra or [])
+            has_threshold_override = (_extra_ns.integrity_threshold
+                                      is not None)
+        except SystemExit:
+            has_threshold_override = False
+        if has_threshold_override:
+            return _run_cmd(["--split", "s", "--ingest-mode", "v2",
+                             *common])
+        return _run_cmd(["--split", "s", "--ingest-mode", "v2",
+                         "--integrity-threshold",
+                         f"{JUSTIFIED_BASELINE_THRESHOLD}",
+                         "--integrity-justification",
+                         f"step-5 baseline: #1747 justified "
+                         f"{JUSTIFIED_BASELINE_THRESHOLD} default at "
+                         "500-Q scale", *common])
     if step.runner == "confirm":        # step 7: confirmation set (subset file)
         if not expected_direction:
             raise SystemExit(

@@ -73,11 +73,28 @@ questions that still fail are recorded in `report['failures']` and the run
 continues — one transient error never aborts the 500-Q run),
 `--chunk-turns N`, `--context-cap N`, `--max-chunks-per-session N`
 (R1 #1540 knobs — env-first, CLI overrides, all validated ≥ 1),
-`--integrity-threshold F` / `--integrity-justification <text>` (M7 #1527:
-override the `integrity.valid` gate — max allowed `invalid_rate`; the
-override is recorded with its justification and a *violated* override still
-yields `valid=false`; default 0.0 = any failed/ingest-error question marks
-the run invalid).
+`--integrity-threshold F` / `--integrity-justification <text>` (M7 #1527 +
+#1747 census-class-aware: override the `integrity.valid` RATE criterion —
+max allowed `invalid_rate` over questions with recoverable-class signals
+(parse_error/truncated/truncated_parse_error/partial_parse/transient_*
+census classes, reader/judge:retries_exhausted eval failures); hard-failure
+questions (fatal_*/ingest/unknown census classes, non-census error strings
+with an empty census, permanent eval failures, malformed inputs — present
+non-bool `valid` / non-iterable or non-str `error_classes`) VETO at any
+threshold — no override admits them; the override is recorded with its
+justification, and a *violated* override still yields `valid=false`. NOTE:
+the CLI default stays 0.0 (strict), but the run-protocol step-5 500-Q
+baseline injects the justified default `JUSTIFIED_BASELINE_THRESHOLD`
+(0.02) — see `run_protocol.py`; an operator override suppresses the
+injected baseline justification (the recorded reason never claims the 0.02
+baseline for a non-baseline threshold). NOTE (#1747 round-17): the
+step-5 injection is SCOPED to step 5 — the step-8 (1k benchmark) and
+step-9 (R6/E6 follow-up, a full 500-Q run) build commands carry the
+strict 0.0 CLI default, so the owner must pass `--integrity-threshold F`
+with an `--integrity-justification` for those runs (the #1747 failure
+mode — `valid=true` unreachable at scale because any recoverable-class
+blip pushes `invalid_rate > 0` — would otherwise silently recur on the
+follow-up's ~24k session extractions; the step-5 pattern applies).
 
 **R6 rerank (issue #1545, epic #1509) — cross-encoder + MMR, OFF by default:**
 `--rerank` / `--no-rerank` (tri-state; `--no-rerank` beats a leaked env),
@@ -247,12 +264,49 @@ path via `--data` skips the download. Split S = `longmemeval_s_cleaned.json`
 
 The report is self-explanatory: every run prints and persists
 
-- **`integrity`** — `valid` (invalid_rate ≤ threshold), `n_attempted` /
-  `n_valid` / `n_invalid`, `invalid_rate` (invalid = failed question OR
-  completed question with ingest errors), `error_census` (site-prefixed
-  P2-aligned error classes: `reader:retries_exhausted`, `judge:fatal`, …),
-  `checks` (python guard, dataset audited, audit present, fingerprint
-  matched, census computed). Printed BEFORE the score.
+- **`integrity`** — `valid` (#1747 census-class-aware:
+  `valid = (n_hard_invalid == 0) AND (n_excluded_hard == 0) AND
+  (invalid_rate ≤ threshold) AND (outcome-derived attempted set non-
+  empty whenever any entry was excluded or dropped — a fully
+  excluded/dropped run never certifies; failures do not count as
+  attempts for this guard)` — fatal_*/ingest/unknown/non-census-error-string
+  (empty-census)/permanent-eval-failure questions, and malformed inputs
+  (present non-bool `valid`, non-iterable, non-str, or falsy-but-present
+  NON-CONTAINER `error_classes` — 0 / "" / False / a PRESENT null;
+  empty dict/list are the legitimate no-census shapes and grade clean)
+  fail closed to hard and veto at any threshold; an
+  EXCLUDED outcome (shape-broken dict, or a breaker_open vector-arm drop)
+  still vetoes when it carries a hard census class — malformed shapes
+  cannot launder a fatal class out of the gate (`n_excluded_hard`), and a
+  run whose entire outcome set was excluded OR dropped (e.g. a vector-arm
+  outage that breaker-tripped every question) never certifies valid (a
+  truly
+  empty report stays vacuously valid)),
+  `n_attempted` / `n_valid` / `n_invalid`, `invalid_rate` (invalid = a
+  failed question OR a completed question with error-class/extraction-error
+  signals; recoverable classes — parse_error/truncated/
+  truncated_parse_error/partial_parse/transient_*, plus
+  reader/judge:retries_exhausted eval failures — are rate-limited, not
+  vetoed), the #1747 breakdown `n_hard_invalid` /
+  `n_recoverable_invalid` / `recoverable_invalid_rate` /
+  `n_excluded_hard`,
+  `n_excluded` (entries dropped by the entry shape filter — malformed
+  checkpoint JSON in outcomes OR failures; the denominator shrink is
+  observable, never silent),
+  `error_census`
+  (site-prefixed P2-aligned error classes: `reader:retries_exhausted`,
+  `judge:fatal`, …), `error_census_malformed` (non-int counts recorded
+  verbatim per class; non-str legacy flat-list junk under the
+  `<legacy-list>` sentinel key; a PRESENT malformed top-level
+  `error_classes` shape under `<malformed-top-level>` — no malformed
+  evidence vanishes at any level), `criterion` (the applied gate rule,
+  human-readable), `checks`
+  (python guard, dataset audited, audit present, fingerprint matched,
+  census computed). The integrity block prints BEFORE the score; the
+  additive breakdown fields (`n_hard_invalid` / `n_excluded` / `criterion`
+  / …) ride the persisted report JSON. NOTE: a failure entry WITHOUT an
+  `error_class` (e.g. the full-context cell producer) grades hard —
+  fail-closed — until the #1746 lane wires site-prefixed classes.
 - **`leg_mix`** — per-leg `match_source` counts over the top_k context the
   reader saw (embedded → `tfidf`; real → `rrf`; never empty).
 - **`pool_size`** — live per-question graph point count (mean/p50/p95) =
