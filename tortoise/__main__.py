@@ -1216,14 +1216,38 @@ def _cmd_signup(args) -> int:
         # (echo key + exit 1) — the correct fail-closed outcome.
         os.replace(tmp_path, config_path)
     except OSError as e:
-        # Orphan class: the key was minted but cannot be saved — echo it and
-        # fail closed so the user never loses the key and never silently
-        # re-mints (the incident pattern this issue fixes).
+        # Orphan class: the key was minted but cannot be saved — echo it AND
+        # the recovery token (the success-path shown-once contract) and fail
+        # closed so the user never loses either and never silently re-mints
+        # (the incident pattern #1750 fixes: a re-run minted a SECOND team
+        # and the first's token was never shown).
         print(f"A key was minted but could NOT be saved to {config_path}: {e}",
               file=sys.stderr)
         print(f"Your API key (store it manually): {data['key']}", file=sys.stderr)
-        print("Fix the path permissions and re-run, or use the key directly.",
-              file=sys.stderr)
+        orphan_token = config.get("signup_token")
+        if orphan_token:
+            print(f"   Recovery token (save it now): {orphan_token}", file=sys.stderr)
+            print("   RECOVERY TOKEN — save this: it is the only way back into "
+                  "this team if your key is lost.", file=sys.stderr)
+        if stored_token:
+            # recovery-orphan leg: the server recovered the SAME team, only the
+            # save failed — re-running re-presents the token and re-recovers
+            # the SAME team; no new team is created (review P2, #1750).
+            print("Fix the path permissions and re-run — recovery is re-attempted "
+                  "on the SAME team (no new team is created). "
+                  "The key+token above are your only access until then.",
+                  file=sys.stderr)
+        elif orphan_token:
+            # fresh-mint-orphan leg: a re-run with no stored key mints a SECOND
+            # team and orphans the first — warn hard (the incident pattern).
+            print("Fix the path permissions and re-run, or use the key directly — "
+                  "but do NOT re-run blindly: this creates a NEW team; the old "
+                  "team's key+token above are your only access.", file=sys.stderr)
+        else:
+            # fresh mint returned no token — only the key exists above.
+            print("Fix the path permissions and re-run, or use the key directly — "
+                  "but do NOT re-run blindly: this creates a NEW team; the API "
+                  "key above is your only access.", file=sys.stderr)
         return 1
 
     # D3 (generalized, #1708 fixer P1): whenever a mint happened while a
@@ -1243,10 +1267,22 @@ def _cmd_signup(args) -> int:
               "this new key at read time — unset/remove it to use the key just minted.",
               file=sys.stderr)
 
-    if new_token:
-        print(f"✅ Free team created: {data.get('team_name')}")
-    else:
+    # #1751: the success message must key off whether a token was PRESENTED
+    # (stored_token — a recovery) vs whether the mint RETURNED one (new_token —
+    # a fresh mint). A fresh mint whose response lacks signup_token (server
+    # version skew / a field-stripping proxy) is NOT a recovery — "data intact"
+    # would be false — so say "Free team created" and warn the recovery
+    # backdoor was not issued (the same fail-soft contract as the missing-key
+    # leg: never misreport, never silently drop a credential).
+    if stored_token:
         print(f"✅ Key recovered on existing team: {data.get('team_name')} (data intact)")
+    else:
+        print(f"✅ Free team created: {data.get('team_name')}")
+        if not new_token:
+            print("⚠️  Recovery backdoor NOT created — the server did not return "
+                  "a signup token; you cannot use `tortoise recover` for this "
+                  "team. The API key above is your only access — store it safely.",
+                  file=sys.stderr)
     print(f"   API key: {data['key']}")
     print(f"   Config saved to {config_path} (shown once — store it)")
     if new_token:
