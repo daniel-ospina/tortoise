@@ -859,6 +859,11 @@ def _cmd_token_revoke(args) -> int:
     the endpoint is team-scoped, so a leaked token is killable the moment
     it is noticed. Prints confirmation; the stored config is left intact
     (the revoked token simply 422s on any later recover).
+
+    #1755 UX gate: revocation is PERMANENT (no un-revoke RPC exists) — a
+    stray invocation permanently destroys the team's only keyless-recovery
+    path. Requires explicit [y/N] confirmation unless --force, mirroring
+    _cmd_team_keys_revoke; non-interactive runs fail closed (no revoke).
     """
     import json, sys  # noqa: E401, I001
     from urllib.error import HTTPError, URLError
@@ -884,6 +889,27 @@ def _cmd_token_revoke(args) -> int:
         print("No recovery token found. Pass --token st_... or run "
               "'tortoise signup' first.", file=sys.stderr)
         return 1
+    # #1755 confirmation gate — revoke is PERMANENT (no un-revoke RPC
+    # exists) and removes the team's only keyless-recovery path. Only an
+    # explicit yes proceeds; --force skips the prompt for scripts; a
+    # non-interactive run without --force fails CLOSED (no revoke).
+    if not getattr(args, "force", False):
+        abort_msg = ("Revoke aborted — no changes made. The recovery token "
+                     "is PERMANENT once revoked (no undo); use --force to "
+                     "revoke anyway.")
+        print("⚠️  Revoking the recovery token is PERMANENT — it removes your "
+              "team's only keyless-recovery path and there is NO undo.",
+              file=sys.stderr)
+        if not sys.stdin.isatty():
+            print(abort_msg, file=sys.stderr)
+            return 1
+        try:
+            answer = input("Revoke the signup token anyway? [y/N]: ")
+        except EOFError:
+            answer = "n"
+        if answer.strip().lower() not in ("y", "yes"):
+            print(abort_msg, file=sys.stderr)
+            return 1
     base = (api_url or "https://api.premiselabs.co").rstrip("/")
     print("Revoking the signup token — it can no longer recover keys on this team…")
     try:
@@ -4742,6 +4768,10 @@ def main(argv: list[str] | None = None) -> int:
     token_revoke_p.add_argument(
         "--token", type=str, default=None,
         help="The st_ signup token (defaults to the stored one).",
+    )
+    token_revoke_p.add_argument(
+        "--force", "-f", action="store_true",
+        help="Skip the confirmation prompt (revoke is permanent — no undo).",
     )
     # tortoise index github <url>
     idx = sp.add_parser("index", help="Index content into the graph")
