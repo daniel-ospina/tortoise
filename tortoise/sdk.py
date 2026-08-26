@@ -10764,7 +10764,8 @@ class TortoiseSDK:
 
     # ── Control Plane: Team CRUD ───────────────────────────────────
 
-    def team_create(self, name: str, *, idempotency_key: str | None = None) -> dict:
+    def team_create(self, name: str, *, idempotency_key: str | None = None,
+                    mint_key: bool = True) -> dict:
         """Create a team with its own graph namespace.
 
         Writes to the control_plane registry graph. Creates a tenant
@@ -10774,6 +10775,12 @@ class TortoiseSDK:
         idempotent re-call (same idempotency_key) returns
         {name, graph_name, id, existing: True} with NO api_key — the caller
         already holds the plaintext from the original creation (#1710).
+        mint_key=False (#1716, onboarding sub-team parity) provisions a
+        KEYLESS team: no tt_ mint and no api_key hash on the Team node — the
+        return dict omits api_key entirely. The team stays keyless until a
+        session-key mint (apikey_create / POST /v1/session/key). A minted
+        key whose plaintext is never returned is an unrecoverable dead
+        credential.
 
         #765 (plan Task 8 — SDK control-plane backend env-gated): the SDK
         control-plane backend stays REGISTRY-BACKED — the
@@ -10821,8 +10828,14 @@ class TortoiseSDK:
 
         # Mint the key only on the CREATE path (after the idempotency check)
         # so the existing branch never mints or persists anything (#1710).
-        api_key = f"tt_{uuid.uuid4().hex}"
-        key_hash = hash_api_key(api_key)
+        # #1716: mint_key=False provisions a KEYLESS team — no tt_ mint and
+        # no api_key hash on the Team node (the onboarding sub-team path: a
+        # minted key whose plaintext is never returned is an unrecoverable
+        # dead credential). The team stays keyless until a session-key mint.
+        api_key = key_hash = None
+        if mint_key:
+            api_key = f"tt_{uuid.uuid4().hex}"
+            key_hash = hash_api_key(api_key)
 
         # Duplicate name check
         dup = reg.query(
@@ -10837,18 +10850,26 @@ class TortoiseSDK:
         # field: multi-team is a user-level capability, NOT a tier limit.
         from tortoise.pricing import tier_limits
         lim = tier_limits("free")  # provision defaults to Free; upgrades = billing epic
+        # #1716 keyless: the api_key property is omitted from the Team node
+        # (a NULL property is a delete in redisgraph semantics; omitting the
+        # attribute + param is the unambiguous keyless shape).
+        key_attr = "api_key:$key, " if mint_key else ""
+        team_params = {"id": tid, "name": name, "gn": graph_name,
+                       "now": now,
+                       "max_graphs": lim["max_graphs_per_team"],
+                       "max_users": lim["max_users_per_team"],
+                       "max_keys": lim["max_api_keys"],
+                       "ops": lim["included_write_ops_per_month"],
+                       "nodes": lim["max_graph_nodes"]}
+        if mint_key:
+            team_params["key"] = key_hash
         reg.query(
-            "CREATE (t:Team {id:$id, name:$name, api_key:$key, "
-            "graph_name:$gn, createdAt:$now, tier:'free', "
-            "max_graphs:$max_graphs, max_users:$max_users, "
-            "max_api_keys:$max_keys, ops_allowance:$ops, graph_size_cap:$nodes})",
-            params={"id": tid, "name": name, "key": key_hash,
-                    "gn": graph_name, "now": now,
-                    "max_graphs": lim["max_graphs_per_team"],
-                    "max_users": lim["max_users_per_team"],
-                    "max_keys": lim["max_api_keys"],
-                    "ops": lim["included_write_ops_per_month"],
-                    "nodes": lim["max_graph_nodes"]},
+            "CREATE (t:Team {id:$id, name:$name, " + key_attr
+            + "graph_name:$gn, createdAt:$now, tier:'free', "
+            + "max_graphs:$max_graphs, max_users:$max_users, "
+            + "max_api_keys:$max_keys, ops_allowance:$ops, "
+            + "graph_size_cap:$nodes})",
+            params=team_params,
         )
         if idempotency_key:
             reg.query(
@@ -10872,7 +10893,10 @@ class TortoiseSDK:
             raise
 
         self._audit(tid, None, "team_create", resource_type="team", resource_id=tid)
-        return {"name": name, "graph_name": graph_name, "api_key": api_key, "id": tid}
+        result = {"name": name, "graph_name": graph_name, "id": tid}
+        if mint_key:
+            result["api_key"] = api_key  # plaintext delivered exactly once
+        return result
 
     def _graph_create(self, team_id: str, name: str, *, kind: str = "custom",
                       namespace: str | None = None) -> dict:

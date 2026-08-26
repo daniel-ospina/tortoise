@@ -793,15 +793,60 @@ class TestOnboardingTeam:
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["graph_name"] == "team_subteam"
+        assert "key" not in body  # #1716: the response never carries a key
         fn, p = fake.rpc_calls[0]
         assert fn == "provision_team"
         assert p["p_user_id"] is None
         assert p["p_identity"].startswith("anon-")
         assert p["p_team_id"] == body["team_id"]
+        # #1716: keyless provisioning — all-NULL key params → NO api_keys row
+        # attributable to the sub-team (the old per-call tt_ mint was an
+        # unrecoverable dead credential: plaintext never returned, hash-only
+        # at rest, counted against max_api_keys, unclaimable #1082).
+        assert p["p_api_key"] is None
+        assert p["p_key_hash"] is None
+        assert p["p_lookup_hash"] is None
+        assert p["p_key_prefix"] is None
+        keys = [k for k in fake.tables["api_keys"]
+                if k["team_id"] == body["team_id"]]
+        assert keys == []
         # onboarding state write went to the seam too (teams row)
         state = next(t for t in fake.tables["teams"]
                      if t["id"] == TEST_TEAM["team_id"])["onboarding_state"]
         assert state["team_created"] is True
+
+    def test_keyless_subteam_session_key_mint_still_works(self, team_client):
+        """#1716: a keyless onboarding sub-team has NO api_keys row
+        attributable to it, and a session-key mint (POST /v1/session/key)
+        still works — the mint writes the api_keys row itself, so keyless
+        provisioning must never block the recovery/claim path."""
+        tc, fake, _ = team_client
+        app.dependency_overrides[get_current_user] = lambda: {
+            "user_id": "user-1", "email": "user-1@example.com"}
+        r = tc.post("/v1/onboarding/team", json={"name": "subteam"})
+        assert r.status_code == 200, r.text
+        sub_team_id = r.json()["team_id"]
+        assert [k for k in fake.tables["api_keys"]
+                if k["team_id"] == sub_team_id] == []
+        # session user gains an owner membership (the claim path) → mint
+        fake.tables.setdefault("team_memberships", []).append({
+            "id": "mem-sub-1", "user_id": "user-1", "team_id": sub_team_id,
+            "role": "owner", "status": "active", "identity": None,
+            "lookup_hash": None,
+        })
+        r2 = tc.post("/v1/session/key", json={"purpose": "recovery"})
+        assert r2.status_code == 200, r2.text
+        key = r2.json()["key"]
+        assert key.startswith("tt_")
+        rows = [k for k in fake.tables["api_keys"]
+                if k["team_id"] == sub_team_id]
+        assert len(rows) == 1
+        assert rows[0]["lookup_hash"] == lookup_hash(key)
+        assert rows[0]["created_via"] == "recovery"
+        # the minted key resolves on REST (api_keys.lookup_hash path)
+        app.dependency_overrides.clear()
+        r3 = tc.get("/v1/team", headers={"Authorization": f"Bearer {key}"})
+        assert r3.status_code == 200, r3.text
 
     def test_never_touches_registry(self, team_client, spy):
         tc, _, _ = team_client

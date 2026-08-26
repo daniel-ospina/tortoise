@@ -138,6 +138,33 @@ class TestOnboardingTeam:
         body = r.json()
         assert body.get("team_id") or body.get("id")
         assert body.get("name") == "acme"
+        assert "key" not in body  # #1716: the response never carries a key
+
+    def test_create_team_keyless_registry(self, client):
+        """#1716 registry-lane parity: the sub-team is provisioned KEYLESS —
+        no tt_ mint, no api_key hash on the Team node, no APIKey node (a
+        minted key whose plaintext is never returned is an unrecoverable
+        dead credential; the sub-team stays keyless until a session-key
+        mint)."""
+        r = client.post("/v1/onboarding/team", json={"name": "keyless"})
+        assert r.status_code == 200
+        body = r.json()
+        assert "key" not in body
+        # the registry-lane SDK is namespace-scoped to the session team
+        # (create_onboarding_team uses _make_sdk(namespace=team_id)) — query
+        # the same graph the endpoint wrote to.
+        reg = _make_sdk(namespace="test-team-1")._get_registry()
+        rows = reg.query(
+            "MATCH (t:Team {name:'keyless'}) RETURN t.id, t.api_key",
+        ).result_set
+        assert len(rows) == 1
+        tid, team_key_hash = rows[0]
+        assert team_key_hash is None  # no dead key hash on the Team node
+        n_keys = reg.query(
+            "MATCH (k:APIKey {team_id:$tid}) RETURN count(k)",
+            params={"tid": tid},
+        ).result_set[0][0]
+        assert n_keys == 0  # no APIKey node minted for the sub-team
 
     def test_team_name_validation(self, client):
         r = client.post("/v1/onboarding/team", json={"name": ""})

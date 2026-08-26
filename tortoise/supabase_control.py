@@ -1374,9 +1374,13 @@ def provision_team(cp, **params: object) -> None:
 
     Exactly one of ``user_id`` / ``identity`` is required (the RPC enforces
     it too); key hashes are computed by the caller (the pepper lives in app
-    code, never the DB — plan P1-1). Raises RuntimeError on failure
-    (fail-closed): a failed provision surfaces as a 500, and the caller
-    cleans up any data-plane graph it created first.
+    code, never the DB — plan P1-1). #1716: key material is OPTIONAL — pass
+    ``p_api_key``/``p_key_hash``/``p_lookup_hash`` all NULL to provision a
+    KEYLESS team (teams + membership only, NO api_keys row; the RPC's
+    all-or-none guard rejects a partial set). The onboarding sub-team path
+    uses keyless; a session-key mint writes the api_keys row later. Raises
+    RuntimeError on failure (fail-closed): a failed provision surfaces as a
+    500, and the caller cleans up any data-plane graph it created first.
     """
     cp.rpc("provision_team", params)
 

@@ -3,7 +3,10 @@
 -- Provisioning rewrite: atomic provision_team RPC (teams + team_memberships +
 -- api_keys in ONE transaction), handle_new_user placeholder reconciliation,
 -- reveal_api_key lookup_hash retention, update_user_team removal, and the
--- agent-signup identity path (NULL user_id + identity).
+-- agent-signup identity path (NULL user_id + identity). Section 5b adds the
+-- #1716 keyless sections (all-NULL key params → NO api_keys row; partial key
+-- set rejected) — they run against the post-20260825214233 RPC (the harness
+-- applies every migration before the suites).
 --
 -- HOW TO RUN (no Docker — PGlite harness):
 --   npm --prefix supabase/tests/pglite run validate
@@ -389,6 +392,88 @@ DO $$ BEGIN
       p_key_hash => 'h', p_lookup_hash => 'l', p_graph_name => 'g');
     RAISE EXCEPTION 'FAIL: provision_team must reject all-NULL anchors';
   EXCEPTION WHEN others THEN NULL; END;
+END $$;
+
+-- ============================================================================
+-- SECTION 5b — keyless provisioning (#1716): all-NULL key params
+-- ============================================================================
+-- POST /v1/onboarding/team provisions a sub-team with NO api_keys row — the
+-- old per-call tt_ mint was an unrecoverable dead credential (plaintext never
+-- returned, hash-only at rest). Keyless = teams + membership, zero api_keys;
+-- the team stays keyless until a session-key mint (POST /v1/session/key).
+SELECT public.provision_team(
+  p_user_id     => NULL,
+  p_identity    => 'agent:anon-1716-1',
+  p_team_id     => 'team-k-770',
+  p_team_name   => 'Team Keyless 770',
+  p_api_key     => NULL,
+  p_key_hash    => NULL,
+  p_lookup_hash => NULL,
+  p_graph_name  => 'team_team-k-770'
+);
+
+DO $$ BEGIN
+  PERFORM tests.assert(
+    (SELECT count(*) FROM public.teams WHERE id='team-k-770') = 1,
+    'keyless: teams row created');
+  PERFORM tests.assert(
+    (SELECT count(*) FROM public.team_memberships
+      WHERE team_id='team-k-770' AND user_id IS NULL
+        AND identity='agent:anon-1716-1') = 1,
+    'keyless: identity-path membership row created');
+  PERFORM tests.assert(
+    (SELECT count(*) FROM public.api_keys WHERE team_id='team-k-770') = 0,
+    'keyless: NO api_keys row attributable to the team (#1716)');
+END $$;
+
+-- keyless re-invocation stays idempotent and still writes no api_keys row
+SELECT public.provision_team(
+  p_user_id     => NULL,
+  p_identity    => 'agent:anon-1716-1',
+  p_team_id     => 'team-k-770',
+  p_team_name   => 'Team Keyless 770',
+  p_api_key     => NULL,
+  p_key_hash    => NULL,
+  p_lookup_hash => NULL,
+  p_graph_name  => 'team_team-k-770'
+);
+
+DO $$ BEGIN
+  PERFORM tests.assert(
+    (SELECT count(*) FROM public.team_memberships
+      WHERE team_id='team-k-770' AND user_id IS NULL
+        AND identity='agent:anon-1716-1') = 1,
+    'keyless re-invocation: exactly one membership row');
+  PERFORM tests.assert(
+    (SELECT count(*) FROM public.api_keys WHERE team_id='team-k-770') = 0,
+    'keyless re-invocation: still no api_keys row');
+END $$;
+
+-- PARTIAL key set → rejected (all-or-none guard, #1716). Flag pattern so the
+-- test actually fails if provision_team stops raising (the swallow-anything
+-- pattern above cannot detect that).
+DO $$ DECLARE
+  _raised boolean := false;
+BEGIN
+  BEGIN
+    PERFORM public.provision_team(
+      p_user_id     => NULL,
+      p_identity    => 'agent:anon-1716-2',
+      p_team_id     => 'team-p-770',
+      p_team_name   => 'Partial 770',
+      p_api_key     => 'tt_partial_770',
+      p_key_hash    => NULL,
+      p_lookup_hash => 'lkp-partial-770',
+      p_graph_name  => 'team_team-p-770'
+    );
+  EXCEPTION WHEN others THEN
+    _raised := true;
+  END;
+  PERFORM tests.assert(_raised,
+    'keyless: provision_team must reject a PARTIAL key set (all-or-none)');
+  PERFORM tests.assert(
+    NOT EXISTS (SELECT 1 FROM public.teams WHERE id='team-p-770'),
+    'keyless: rejected partial provision persisted nothing (subtransaction rollback)');
 END $$;
 
 -- ============================================================================
