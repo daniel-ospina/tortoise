@@ -9,14 +9,19 @@ Soft pin only — record + warn; hard enforcement is M7's checkpoint
 fingerprint.
 """
 from __future__ import annotations
+
 import sys
 from pathlib import Path
+
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tools.longmem_eval.reader import (  # noqa: E402
-    LLMReader, READER_MODEL, build_reader, reader_prompt_constants,
+from tools.longmem_eval.reader import (
+    _ABSTRACTION_FRAGMENT,
+    READER_MODEL,
+    LLMReader,
+    build_reader,
 )
 
 
@@ -44,12 +49,13 @@ def test_override_is_not_pinned_and_warns(monkeypatch, capsys):
 
 def test_report_methodology_records_prompt_constants(tmp_path):
     import json
+
     from tools.longmem_eval.judge import MockJudge
-    from tools.longmem_eval.reader import MockReader, _SYSTEM_PROMPT, _TYPE_FRAGMENTS
+    from tools.longmem_eval.reader import _SYSTEM_PROMPT, _TYPE_FRAGMENTS, MockReader
     from tools.longmem_eval.run import run_evaluation
     MINI = Path(__file__).parent / "fixtures" / "longmemeval_mini.json"
     instances = json.loads(MINI.read_text(encoding="utf-8"))
-    outcomes, report = run_evaluation(
+    _outcomes, report = run_evaluation(
         instances, reader=MockReader(), judge=MockJudge(),
         ks=(5, 10, 20), top_k=20, split="s", work_dir=str(tmp_path))
     m = report["methodology"]
@@ -58,7 +64,13 @@ def test_report_methodology_records_prompt_constants(tmp_path):
     assert m["reader_provider"] == "mock"
     assert m["reader_pinned"] is None          # mock: pin N/A
     assert m["reader_system_prompt"] == _SYSTEM_PROMPT
-    assert m["reader_type_fragments"] == _TYPE_FRAGMENTS
+    # #1768: the universal A1 clause is now recorded too (the #1762
+    # calibration is the substance of the prompt change — drift must be
+    # visible); type fragments unchanged
+    assert m["reader_type_fragments"]["abstention"] == _ABSTRACTION_FRAGMENT
+    for t, f in _TYPE_FRAGMENTS.items():
+        assert m["reader_type_fragments"][t] == f
+    assert set(m["reader_type_fragments"]) == set(_TYPE_FRAGMENTS) | {"abstention"}
     # parity unchanged-check input must not move (no-hash-infra boundary)
     assert m["reader_prompt_hash"]  # still present
 
@@ -96,6 +108,7 @@ def test_cross_cell_reader_pin_is_stable(tmp_path):
     a divergent reader is recorded with its real spec — drift visible, never
     silent (the run protocol's cross-cell comparability contract)."""
     import json
+
     from tools.longmem_eval.dataset_audit import audit_dataset
     from tools.longmem_eval.judge import MockJudge
     from tools.longmem_eval.reader import MockReader
@@ -104,7 +117,7 @@ def test_cross_cell_reader_pin_is_stable(tmp_path):
     instances = json.loads(MINI.read_text(encoding="utf-8"))
 
     def _run():
-        outcomes, report = run_evaluation(
+        _outcomes, report = run_evaluation(
             instances, reader=MockReader(), judge=MockJudge(),
             ks=(5,), top_k=20, split="s", work_dir=str(tmp_path))
         m = report["methodology"]

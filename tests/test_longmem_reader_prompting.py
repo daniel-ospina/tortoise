@@ -1,5 +1,6 @@
-"""Reader prompting tests for the LongMemEval weak categories — preference
-(single-session-preference) and temporal (temporal-reasoning) (#1366).
+"""Reader prompting tests for the LongMemEval reader prompts — the #1366
+weak categories (preference / temporal) plus the A1 universal
+partial-knowledge abstention clause (#1546, tightened #1762).
 
 The categories fail at the READER, not retrieval (recall@10 0.86): the
 generic system prompt licenses hedging ("say that you do not know") and
@@ -7,11 +8,19 @@ carries zero per-question-type guidance. These tests lock:
 
   1. the plumbing — question_type reaches the reader (was: never forwarded),
   2. the prompt content — temporal/preference instructions are present in
-     the system prompt exactly for their question types,
+     the system prompt exactly for their question types; the A1 abstention
+     clause is universal and its #1762 calibration (commit on present
+     value in any phrasing, overshoot guard, near-miss/vacuity abstention)
+     is phrase-pinned,
   3. the behavior — a prompt-faithful reader computes "N days ago" from the
-     rendered dates (temporal) and commits to the user's stated option
-     (preference) instead of hedging — mirroring the issue's documented
-     failure mode, judged by MockJudge.
+     rendered dates (temporal), commits to the user's stated option
+     (preference), commits on full evidence (pilot 6f9b354f), abstains
+     evidence-backed on absent asked values (decoy, near-miss, negated /
+     rejected / hypothetical mentions, empty context) — mirroring the
+     issues' documented failure modes, judged by MockJudge (abstention
+     scored on marker phrases; the clause's literal 'is absent' phrasing
+     is not marker-scorable, so fakes emit marker-compatible 'does not
+     mention' / 'does not contain' formulations).
 
 Fully offline: embedded FalkorDBLite, mock judge, fake recording models, no
 API keys, no dataset download.
@@ -411,11 +420,15 @@ def test_abstention_clause_commits_on_present_value_any_phrasing():
 
 
 def test_abstention_clause_scopes_abstention_to_true_gaps():
-    """#1762: abstention is reserved for genuine evidence gaps (vacuity) —
-    the decoy guard and the evidence-backed abstention branch stay intact."""
+    """#1762 (+ #1768 review): abstention is licensed when the asked value
+    is genuinely absent — empty, unrelated, OR near-miss contexts (the
+    near-miss license restored by code review; NOT vacuity-only) — while
+    the decoy guard and evidence-backed branch stay intact."""
     clause = _ABSTRACTION_FRAGMENT
     low = clause.lower()
-    assert "genuinely absent" in low          # vacuity-only abstention
+    assert "genuinely absent" in low     # abstention: asked value absent
+    assert "empty, unrelated, or holds related or near-miss" in low
+    assert "different value for the asked attribute is not the answer" in low
     assert "do not commit to a near-miss decoy" in low
     assert "explicitly state that the asked information is absent" in low
     assert "is present" in low                # states what IS present
@@ -778,12 +791,14 @@ def test_empty_context_abstains_not_fabricates(tmp_path):
 
 
 def _near_miss_question() -> dict:
-    """Same-attribute near-miss (E2E-7 intent, code review #1768): the
-    context ADDRESSES the asked attribute with a DIFFERENT value ('muted
-    blue') — the asked value is absent, so the reader must abstain
-    evidence-backed, never commit the near-miss. The vacuity-only license
-    ('nothing addresses the attribute') would deadlock the commit/abstain
-    decision and push a commit of the near-miss value."""
+    """Near-miss decoy (E2E-7 intent, code review #1768): the context
+    addresses a DIFFERENT instance of the asked attribute ('kitchen walls'
+    vs the question's 'bedroom walls') — decidable from the context alone,
+    with a coherent abstention golden. The reader must abstain
+    evidence-backed, never commit the near-miss value. (The first draft
+    used a same-attribute different-value context, which is undecidable
+    without the gold and whose golden contradicted its own context —
+    replaced per review.)"""
     return {
         "question_id": "pt_commit_006_abs",
         "question_type": "single-session-user",
@@ -794,30 +809,38 @@ def _near_miss_question() -> dict:
         "haystack_dates": ["2025-06-10"],
         "answer_session_ids": [],
         "haystack_sessions": [[
-            {"role": "user", "content": "I painted the walls muted blue "
-             "— a calming tone.", "has_answer": False},
+            {"role": "user", "content": "I painted the kitchen walls "
+             "muted blue — a calming tone.", "has_answer": False},
         ]],
     }
 
 
 class _NearMissModel:
-    """Near-miss license fake: with the corrected license (near-miss
-    information is abstention-licensed) the reader abstains on a
-    same-attribute different-value context; with the vacuity-only license
-    it commits the near-miss value (the confident-wrong class)."""
+    """Near-miss license fake — CONTEXT-READING: parses which room the
+    context addresses from the rendered text. With the corrected license
+    (near-miss information is abstention-licensed) it abstains on a
+    non-bedroom room; with the vacuity-only license it commits the
+    near-miss value (the confident-wrong class). Loud-failing fallback:
+    if the context stops carrying the turn, the fake commits and the
+    assertions fail."""
 
     def complete(self, *, system: str, user: str) -> str:
-        del user
-        if "holds related or near-miss information" in system:
+        if "holds related or near-miss information" not in system:
+            return "muted blue"  # vacuity-only license: commits near-miss
+        m = re.search(r"painted the ([a-z]+) walls", user)
+        room = m.group(1) if m else ""
+        if room != "bedroom":
+            # asked value (bedroom color) genuinely absent; related
+            # information (kitchen walls) present → evidence-backed abstain
             return ("The memory mentions muted blue walls, but it does not "
                     "contain the asked information.")
-        return "muted blue"  # vacuity-only license: commits the near-miss
+        return "muted blue"  # bedroom addressed → would commit the value
 
 
-def test_near_miss_same_attribute_abstains(tmp_path):
-    """#1762 review (E2E-7 intent): a DIFFERENT value for the asked
-    attribute in context is not the answer — the reader abstains
-    evidence-backed, never commits the near-miss."""
+def test_near_miss_other_attribute_abstains(tmp_path):
+    """#1768 review (E2E-7 intent): a near-miss value for a DIFFERENT
+    instance of the asked attribute is not the answer — the reader
+    abstains evidence-backed, never commits the near-miss."""
     class _PreLicenseModel(_NearMissModel):
         def complete(self, *, system, user):
             # strip the corrected license so the fake takes the
@@ -843,6 +866,13 @@ def test_near_miss_same_attribute_abstains(tmp_path):
     hyp = post[0][0]["hypothesis"]           # abstention
     assert "muted blue" in hyp               # states what IS present
     assert "does not contain" in hyp         # … and that asked is absent
+    # control: the fake is not unconditionally abstaining — with the
+    # BEDROOM addressed it would commit the value (the license decides,
+    # not the marker alone)
+    ctrl = _NearMissModel().complete(
+        system=system_prompt_for("single-session-user"),
+        user="[user] I painted the bedroom walls muted blue.")
+    assert ctrl == "muted blue"
 
 
 def _mixed_mention_question() -> dict:

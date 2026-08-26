@@ -154,7 +154,7 @@ _MULTI_SESSION_FRAGMENT = (
 # question_id, which never reaches the reader). It lets the reader derive
 # unanswerability from the evidence: state what IS present, explicitly
 # state the asked info is absent, never commit to a near-miss decoy. The
-# commit-side guard keeps the #1366 fix (answer directly when the exact
+# commit-side guard keeps the #1366 fix (answer directly when the asked
 # fact IS present — never abstain on present evidence).
 #
 # #1762 (V3 pilot finding #3): the pre-#1762 wording read the commit test
@@ -174,7 +174,9 @@ _MULTI_SESSION_FRAGMENT = (
 # 'do not mention the context' override, and its judge-scorable exemplar
 # are restored). Known oscillation risk: three prompt-side re-tunings of
 # this commit/abstain balance in 8 days (#1366 → #1546 → #1762) — a
-# structural two-phase decision is a tracked follow-up, not this fix.
+# structural two-phase decision is a recognized limitation; follow-up not
+# yet tracked (noted for the run.py owner: reader_prompt_source()/hash
+# also do not cover the A1 clause — pre-existing recording gap).
 _ABSTRACTION_FRAGMENT = (
     "\n\nPARTIAL-KNOWLEDGE ABSTENTION: the context can contain related "
     "information that does NOT actually answer the question. First decide "
@@ -214,10 +216,17 @@ _TYPE_FRAGMENTS: dict[str, str] = {
 
 def reader_prompt_constants() -> tuple[str, dict[str, str]]:
     """The run's reader prompt constants (M5): the generic system prompt +
-    type fragments, recorded verbatim in report methodology so prompt drift
-    across run cells is visible in the report. A dict copy keeps future
-    fragment additions (A1 abstention, A2 aggregation — same epic) additive."""
-    return _SYSTEM_PROMPT, dict(_TYPE_FRAGMENTS)
+    the universal A1 abstention clause + type fragments, recorded verbatim
+    in report methodology so prompt drift across run cells is visible in
+    the report (#1768: the A1 clause — the substance of the #1762
+    calibration — now joins the recorded dict; the dict copy keeps future
+    fragment additions additive)."""
+    return _SYSTEM_PROMPT, {
+        **dict(_TYPE_FRAGMENTS),
+        # the universal clause appended to EVERY question's prompt; keyed
+        # 'abstention' (the A1 name, #1546) — not a question_type
+        "abstention": _ABSTRACTION_FRAGMENT,
+    }
 
 
 def system_prompt_for(question_type: str | None) -> str:
