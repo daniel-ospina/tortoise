@@ -120,6 +120,12 @@ def _outcome_grade(o: dict[str, Any]) -> str:
       ``errors.append`` — and is pinned as a drift guard).
     """
     ec = o.get("error_classes")
+    if "error_classes" in o and ec is None:
+        # PRESENT null (JSON null — malformed checkpoint merge) fails CLOSED
+        # to hard like the other falsy-but-present shapes (0/""/False); only
+        # a MISSING key means "no census" (round-10 review: get() conflated
+        # the two, certifying error_classes:null as clean).
+        return "hard"
     if ec is None:
         ec = {}  # distinguish MISSING from falsy-but-present (0/""/False):
     # a falsy present value is malformed and must fail CLOSED to hard, not
@@ -177,6 +183,178 @@ def _failure_grade(error_class: Any) -> str:
     return "hard"
 
 
+def _numeric(v: Any) -> bool:
+    """A REAL numeric value for aggregation: int/float, NOT bool (a tampered
+    checkpoint true/false must fail closed, never aggregate as 1.0/0.0), and
+    FINITE (NaN/Infinity from a malformed checkpoint would poison every mean
+    and serialize as non-strict JSON — round-8/10 security review)."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return False
+    return not (isinstance(v, float) and not math.isfinite(v))
+
+
+# ── Entry shape-filter helpers (module scope so build_report AND the report
+# consumers — compare_reports — apply the SAME shape predicate; a report's
+# aggregates and its comparison can never disagree on what a valid outcome
+# is, round-10 review). ──
+
+def _num(v: Any) -> bool:
+    """numeric-or-None — None is safe for float(v or 0.0) / skip-None sites;
+    bool and non-finite floats are excluded (fail-closed, security review)."""
+    return v is None or _numeric(v)
+
+
+def _recall_dict(v: Any, *, allow_none_values: bool = True) -> bool:
+    """recall dicts: dict with numeric values; None values are allowed
+    where the aggregation drops them (turn/evidence N/A semantics),
+    disallowed where they are summed directly (session recall). A None
+    VALUE (missing key) is admitted ONLY for keys the aggregation
+    dereferences via ``or {}`` (evidence/chunk — genuinely None-safe);
+    the keys dereferenced via ``o[...]`` (session/turn/context) use the
+    REAL-dict check ``_recall_dict_present`` below — never this
+    None-tolerant guard (round-7 root cause)."""
+    if v is None:
+        return True
+    if not isinstance(v, dict):
+        return False
+    for x in v.values():
+        if allow_none_values and x is None:
+            continue
+        if not _numeric(x):
+            return False
+    return True
+
+
+def _recall_dict_present(o: dict[str, Any], key: str,
+                         *, allow_none_values: bool = False) -> bool:
+    """session/turn recall are dereferenced via o[...] (no or-{}
+    fallback) — the key must be a PRESENT dict. Session values are summed
+    directly (no N/A → numeric only); turn values may be None (M6 N/A,
+    dropped from the mean). bools/non-finite are excluded everywhere
+    (security review)."""
+    v = o.get(key)
+    if not isinstance(v, dict):
+        return False
+    for x in v.values():
+        if allow_none_values and x is None:
+            continue
+        if not _numeric(x):
+            return False
+    return True
+
+
+def _leg_mix_ok(v: Any) -> bool:
+    """leg_mix: dict of NUMERIC (non-None) values with str keys — the
+    aggregation sums the values directly and sorts the keys, so None
+    values or non-str keys (programmatic mixed-type) must be excluded."""
+    if v is None:
+        return True
+    return (isinstance(v, dict)
+            and all(isinstance(k, str) for k in v)
+            and all(_numeric(x) for x in v.values()))
+
+
+def _ingest_ok(v: Any) -> bool:
+    """ingest stats: dict-or-None; evidence_turns / evidence_points are
+    compared with > 0, so when PRESENT they must be numeric (not None, not
+    bool, not NaN — security review)."""
+    if v is None:
+        return True
+    return (isinstance(v, dict)
+            and all(_numeric(v.get(k))
+                    for k in ("evidence_turns", "evidence_points")
+                    if k in v))
+
+
+def _rerank_pass_ok(v: Any) -> bool:
+    """rerank_pass (rerank runs only): every field the aggregation
+    dereferences must be coercible — degrade_reason str-or-None;
+    max_session_chunks/moved/dropped/selected_count numeric-or-None;
+    pool_recall@k None or a dict whose per-level values are dicts of
+    numeric-or-None (security review P1, rerank crash family)."""
+    if v is None:
+        return True
+    if not isinstance(v, dict):
+        return False
+    if (v.get("degrade_reason") is not None
+            and not isinstance(v["degrade_reason"], str)):
+        return False
+    for k in ("max_session_chunks", "moved", "dropped", "selected_count"):
+        x = v.get(k)
+        if x is not None and not _numeric(x):
+            return False
+    pr = v.get("pool_recall@k")
+    if pr is None:
+        return True
+    if not isinstance(pr, dict):
+        return False
+    for lvl in pr.values():
+        if lvl is None:
+            continue
+        if not isinstance(lvl, dict):
+            return False
+        if not all(x is None or _numeric(x) for x in lvl.values()):
+            return False
+    return True
+
+
+def _outcome_shape_ok(o: dict[str, Any]) -> bool:
+    """Every key the aggregation dereferences directly must be present
+    with a coercible type — a malformed checkpoint outcome that passes
+    run.py's presence-only loader gate is EXCLUDED here instead of
+    crashing mid-report (security-review P1; the loader-side
+    REQUIRED_OUTCOME_KEYS type-hardening is tracked in #1770). Note the
+    asymmetry: session_recall@k VALUES are summed directly (no N/A), so
+    None values are excluded; turn/evidence recall values are dropped
+    when None (M6 N/A semantics), so None values are allowed; context
+    keys are dereferenced via o[...] and must be PRESENT and numeric."""
+    return (o.get("question_id") is not None
+            and "label" in o
+            and isinstance(o.get("question_type", ""), str)
+            and _recall_dict_present(o, "session_recall@k")
+            and _recall_dict_present(o, "turn_recall@k",
+                                     allow_none_values=True)
+            and _recall_dict(o.get("evidence_recall@k"))
+            and _recall_dict(o.get("chunk_evidence_recall@k"))
+            and _recall_dict(o.get("evidence_retrieved@k"))
+            and (o.get("context_tokens") is not None
+                 and _num(o.get("context_tokens")))
+            and (o.get("context_point_count") is not None
+                 and _num(o.get("context_point_count")))
+            and all(_num(o.get(k)) for k in (
+                "pool_size", "evidence_written", "retrieval_latency_ms",
+                "rerank_latency_ms", "reader_latency_ms",
+                "judge_latency_ms", "ingest_latency_ms", "total_ms"))
+            and all(_num(o.get(k)) for k in ("ndcg@10", "p@10", "p@5"))
+            and _leg_mix_ok(o.get("leg_mix"))
+            and _ingest_ok(o.get("ingest"))
+            and _rerank_pass_ok(o.get("rerank_pass")))
+
+
+def _qid_key(o: dict[str, Any]) -> tuple | str:
+    """#1747: collision-proof question-identity key shared by the integrity
+    grading map AND compare_reports — str qids key by value; non-str qids
+    (malformed checkpoint JSON) key under a tuple so a crafted string
+    question_id can never collide with a sentinel; value-identical
+    malformed qids dedupe (NaN/Inf canonicalized, unhashable values keyed by
+    repr — round-10 security review: id(o) let duplicate copies inflate
+    n_attempted). A MISSING qid (None) is NOT a shared identity — per-object
+    key so distinct unknown-question entries never undercount (reviewer-
+    pinned, #1747)."""
+    qid = o.get("question_id")
+    if isinstance(qid, str):
+        return qid
+    if qid is None:
+        return ("__anon__", id(o))
+    if isinstance(qid, float) and not math.isfinite(qid):
+        return ("__anon__", "<nonfinite>")
+    try:
+        hash(qid)
+    except TypeError:  # unhashable (list/dict) — canonical repr key
+        return ("__anon__", "<unhashable>", repr(qid))
+    return ("__anon__", qid)
+
+
 PAPER_CATEGORY = {
     "single-session-user": "Information Extraction",
     "single-session-assistant": "Information Extraction",
@@ -194,6 +372,11 @@ def category_of(question: dict) -> str:
         return "Other"
     if "_abs" in question["question_id"]:
         return "Abstention"
+    # round-10 review: a non-str question_type is unhashable (list) and would
+    # TypeError the PAPER_CATEGORY.get — malformed input categorizes as
+    # "Other" (compare_reports can then never crash on it).
+    if not isinstance(question.get("question_type"), str):
+        return "Other"
     return PAPER_CATEGORY.get(question["question_type"], "Other")
 
 
@@ -325,7 +508,9 @@ def build_report(
     M7 (#1527) contract additions (additive-only; D11):
       * ``integrity`` — validity + per-question error census (D1/D6): the
         gate criterion is CENSUS-CLASS-AWARE (#1747) — ``valid == True`` iff
-        ``invalid_rate <= threshold`` AND zero hard-failure questions;
+        ``n_hard_invalid == 0`` AND ``n_excluded_hard == 0`` AND
+        ``invalid_rate <= threshold`` AND (attempted set non-empty whenever
+        any entry was excluded or dropped);
         recoverable classes (parse_error / truncated / truncated_parse_error
         / partial_parse / transient_*, plus reader/judge:retries_exhausted
         eval failures) are rate-limited (a healthy 500-Q run
@@ -333,13 +518,17 @@ def build_report(
         invalid made ``valid=true`` unreachable at scale); hard classes
         (fatal_* / ingest / unknown census classes, non-census error strings
         with an EMPTY census, permanent eval failures, malformed inputs —
-        a present non-bool valid flag / non-iterable or non-str error_classes
-        — fail closed to hard) veto the run at any threshold (a mixed
+        a present non-bool valid flag / non-iterable, non-str or falsy-
+        but-present error_classes (incl. a PRESENT null) — fail closed to
+        hard) veto the run at any threshold (a mixed
         recoverable+structural shape is rate-limited —
         the #1746 lane); additive breakdown fields ``n_hard_invalid`` /
         ``n_recoverable_invalid`` / ``recoverable_invalid_rate`` /
-        ``n_excluded`` (outcomes dropped by the entry shape filter — the
+        ``n_excluded`` (entries dropped by the entry shape filter — non-dict
+        junk + shape-broken dicts, outcomes AND failures; the
         denominator shrink is observable, never silent) /
+        ``n_excluded_hard`` (hard grades on excluded/dropped outcomes that
+        still veto) /
         ``criterion`` ride the block, and malformed non-int census counts
         are preserved verbatim in ``error_census_malformed`` (never mixed
         into ``error_census``, never crashing the report); the numbers are
@@ -390,139 +579,9 @@ def build_report(
     # strings). Non-str question_ids are NOT dropped — they are graded under
     # collision-proof tuple keys so a hard census on a malformed-qid outcome
     # still VETOES.
-    def _num(v: Any) -> bool:
-        """numeric-or-None (bool EXCLUDED — a tampered checkpoint true/false
-        must fail closed, never aggregate as 1.0/0.0; round-8 security
-        review) — safe for float(v or 0.0) / skip-None sites."""
-        return v is None or (isinstance(v, (int, float))
-                             and not isinstance(v, bool))
-
-    def _recall_dict(v: Any, *, allow_none_values: bool = True) -> bool:
-        """recall dicts: dict with numeric values; None values are allowed
-        where the aggregation drops them (turn/evidence N/A semantics),
-        disallowed where they are summed directly (session recall). A None
-        VALUE (missing key) is admitted ONLY for keys the aggregation
-        dereferences via ``or {}`` (evidence/chunk — genuinely None-safe);
-        the keys dereferenced via ``o[...]`` (session/turn/context) use the
-        REAL-dict check ``_recall_dict_present`` below — never this
-        None-tolerant guard (round-7 root cause)."""
-        if v is None:
-            return True
-        if not isinstance(v, dict):
-            return False
-        for x in v.values():
-            if allow_none_values and x is None:
-                continue
-            if not isinstance(x, (int, float)) or isinstance(x, bool):
-                return False
-        return True
-
-    def _recall_dict_present(o: dict[str, Any], key: str,
-                             *, allow_none_values: bool = False) -> bool:
-        """session/turn recall are dereferenced via o[...] (no or-{}
-        fallback) — the key must be a PRESENT dict. Session values are summed
-        directly (no N/A → numeric only); turn values may be None (M6 N/A,
-        dropped from the mean). bools are excluded everywhere (round-8
-        security review: a tampered true must never aggregate as 1.0)."""
-        v = o.get(key)
-        if not isinstance(v, dict):
-            return False
-        for x in v.values():
-            if allow_none_values and x is None:
-                continue
-            if not isinstance(x, (int, float)) or isinstance(x, bool):
-                return False
-        return True
-
-    def _leg_mix_ok(v: Any) -> bool:
-        """leg_mix: dict of NUMERIC (non-None) values with str keys — the
-        aggregation sums the values directly and sorts the keys, so None
-        values or non-str keys (programmatic mixed-type) must be excluded."""
-        if v is None:
-            return True
-        return (isinstance(v, dict)
-                and all(isinstance(k, str) for k in v)
-                and all(isinstance(x, (int, float)) and not isinstance(x, bool)
-                        for x in v.values()))
-
-    def _ingest_ok(v: Any) -> bool:
-        """ingest stats: dict-or-None; evidence_turns / evidence_points are
-        compared with > 0, so when PRESENT they must be numeric (not None,
-        not bool — round-8 security review)."""
-        if v is None:
-            return True
-        return (isinstance(v, dict)
-                and all(isinstance(v.get(k), (int, float))
-                        and not isinstance(v.get(k), bool)
-                        for k in ("evidence_turns", "evidence_points")
-                        if k in v))
-
-    def _rerank_pass_ok(v: Any) -> bool:
-        """rerank_pass (rerank runs only): every field the aggregation
-        dereferences must be coercible — degrade_reason str-or-None;
-        max_session_chunks/moved/dropped/selected_count numeric-or-None;
-        pool_recall@k None or a dict whose per-level values are dicts of
-        numeric-or-None (security review P1, rerank crash family)."""
-        if v is None:
-            return True
-        if not isinstance(v, dict):
-            return False
-        if (v.get("degrade_reason") is not None
-                and not isinstance(v["degrade_reason"], str)):
-            return False
-        for k in ("max_session_chunks", "moved", "dropped", "selected_count"):
-            x = v.get(k)
-            if x is not None and (not isinstance(x, (int, float))
-                                  or isinstance(x, bool)):
-                return False
-        pr = v.get("pool_recall@k")
-        if pr is None:
-            return True
-        if not isinstance(pr, dict):
-            return False
-        for lvl in pr.values():
-            if lvl is None:
-                continue
-            if not isinstance(lvl, dict):
-                return False
-            if not all(x is None
-                       or (isinstance(x, (int, float)) and not isinstance(x, bool))
-                       for x in lvl.values()):
-                return False
-        return True
-
-    def _outcome_shape_ok(o: dict[str, Any]) -> bool:
-        """Every key the aggregation dereferences directly must be present
-        with a coercible type — a malformed checkpoint outcome that passes
-        run.py's presence-only loader gate is EXCLUDED here instead of
-        crashing mid-report (security-review P1; the loader-side
-        REQUIRED_OUTCOME_KEYS type-hardening is tracked in #1770). Note the
-        asymmetry: session_recall@k VALUES are summed directly (no N/A), so
-        None values are excluded; turn/evidence recall values are dropped
-        when None (M6 N/A semantics), so None values are allowed; context
-        keys are dereferenced via o[...] and must be PRESENT and numeric."""
-        return ("question_id" in o
-                and "label" in o
-                and isinstance(o.get("question_type", ""), str)
-                and _recall_dict_present(o, "session_recall@k")
-                and _recall_dict_present(o, "turn_recall@k",
-                                         allow_none_values=True)
-                and _recall_dict(o.get("evidence_recall@k"))
-                and _recall_dict(o.get("chunk_evidence_recall@k"))
-                and _recall_dict(o.get("evidence_retrieved@k"))
-                and (o.get("context_tokens") is not None
-                     and _num(o.get("context_tokens")))
-                and (o.get("context_point_count") is not None
-                     and _num(o.get("context_point_count")))
-                and all(_num(o.get(k)) for k in (
-                    "pool_size", "evidence_written", "retrieval_latency_ms",
-                    "rerank_latency_ms", "reader_latency_ms",
-                    "judge_latency_ms", "ingest_latency_ms", "total_ms"))
-                and all(_num(o.get(k)) for k in ("ndcg@10", "p@10", "p@5"))
-                and _leg_mix_ok(o.get("leg_mix"))
-                and _ingest_ok(o.get("ingest"))
-                and _rerank_pass_ok(o.get("rerank_pass")))
-
+    # The shape-predicate helpers (_outcome_shape_ok + friends) live at
+    # module scope so the report consumers (compare_reports) apply the SAME
+    # shape filter the aggregates used.
     raw_n = len(outcomes)
     # #1747 (round-8 review): non-dict failure entries are junk too — they
     # count into n_excluded (the same "never silent" observability as
@@ -722,23 +781,6 @@ def build_report(
     # overwritten by a weaker one.
     _SEV = {"clean": 0, "recoverable": 1, "hard": 2}
 
-    def _qid_key(o: dict[str, Any]) -> tuple | str:
-        qid = o.get("question_id")
-        if isinstance(qid, str):
-            return qid
-        if qid is None:
-            # a MISSING qid is not a shared identity — per-object key so
-            # distinct unknown-question entries never undercount (reviewer-
-            # pinned, #1747).
-            return ("__anon__", id(o))
-        try:
-            hash(qid)
-        except TypeError:  # unhashable (list/dict) — per-object key
-            return ("__anon__", id(o))
-        # value-identical malformed qids share a key across outcomes AND
-        # failures so failure-grade dominance applies to them too.
-        return ("__anon__", qid)
-
     def _merge_grade(prev: str | None, grade: str) -> str:
         if prev is None or _SEV[grade] >= _SEV[prev]:
             return grade
@@ -856,12 +898,15 @@ def build_report(
         # step-5 gate documents 0.02 as the justified default at 500-Q scale.
         "valid": ((n_hard_invalid == 0) and (n_excluded_hard == 0)
                   and (invalid_rate <= effective_threshold)
-                  # round-8 security review: a run whose ENTIRE outcome set
-                  # was excluded (n_attempted == 0 with n_excluded > 0 — a
-                  # wholesale corrupt/version-drifted checkpoint) must never
-                  # certify valid on an empty denominator; a truly EMPTY
-                  # report (nothing excluded) stays vacuously valid.
-                  and not (n_attempted == 0 and n_excluded > 0)),
+                  # round-8/10 security review: a run whose ENTIRE outcome
+                  # set was excluded OR dropped (n_attempted == 0 with
+                  # n_excluded > 0 or breaker_open drops — a wholesale
+                  # corrupt checkpoint, or a vector-arm outage that breaker-
+                  # tripped every question) must never certify valid on an
+                  # empty denominator; a truly EMPTY report (nothing
+                  # excluded, nothing dropped) stays vacuously valid.
+                  and not (n_attempted == 0
+                           and (n_excluded > 0 or len(dropped) > 0))),
         "threshold": effective_threshold,
         "n_attempted": n_attempted,
         "n_excluded": n_excluded,  # #1747: entries dropped by the entry
@@ -889,12 +934,13 @@ def build_report(
         "criterion": (
             "#1747 census-class-aware: valid = (n_hard_invalid == 0) AND "
             "(n_excluded_hard == 0) AND (invalid_rate <= threshold) AND "
-            "(attempted set non-empty whenever any entry was excluded); "
+            "(attempted set non-empty whenever any entry was excluded or "
+            "dropped — a fully excluded/dropped run never certifies); "
             "hard = fatal_*/ingest/unknown census classes + non-census error "
             "strings with an EMPTY census (mixed recoverable+structural "
             "grades recoverable — #1746 lane) + permanent eval failures + "
-            "malformed inputs (present non-bool valid flag, non-iterable or "
-            "non-str error_classes, falsy-but-present error_classes) fail "
+            "malformed inputs (present non-bool valid flag, non-iterable, "
+            "non-str, falsy-but-present or PRESENT-null error_classes) fail "
             "closed to hard + excluded outcomes (shape-broken dicts / "
             "breaker_open drops) with a hard census still veto "
             "(n_excluded_hard); "
@@ -1432,21 +1478,28 @@ def compare_reports(report_a: dict[str, Any], report_b: dict[str, Any]) -> dict[
         "failed by a run event (network/billing), not by content — they are not "
         "a difficulty sample (validity F5).",
     ]
-    oa = {str(o["question_id"]): o for o in report_a.get("outcomes", [])
-          if o.get("question_id") is not None}
-    ob = {str(o["question_id"]): o for o in report_b.get("outcomes", [])
-          if o.get("question_id") is not None}
-    # #1747 (round-8 review): reports may carry non-str question_ids (graded
-    # under collision-proof sentinel keys) and failure entries WITHOUT
-    # question_id (per-object unknown questions) — the join keys must be
-    # hashable + sortable, so str()-coerce outcome qids and skip qid-less
-    # failures (they can never join an outcome qid).
-    fa = {str(f["question_id"]) for f in report_a.get("failures", [])
-          if f.get("question_id") is not None}
-    fb = {str(f["question_id"]) for f in report_b.get("failures", [])
-          if f.get("question_id") is not None}
-    shared = sorted(oa.keys() & ob.keys())
-    only_a, only_b = sorted(set(oa) - set(ob)), sorted(set(ob) - set(oa))
+    oa = {_qid_key(o): o for o in report_a.get("outcomes", [])}
+    ob = {_qid_key(o): o for o in report_b.get("outcomes", [])}
+    # #1747 (round-9/10 review): reports may carry non-str question_ids
+    # (graded under collision-proof keys) and failure entries WITHOUT
+    # question_id (per-object unknown questions). The join uses the SAME
+    # collision-proof `_qid_key` discipline as the grading map (int 1 and str
+    # "1" stay distinct — a raw str() coerced them together). The comparison
+    # reads the PUBLISHED outcomes best-effort (stripped reports compare with
+    # honest None aux columns, M8 design): any divergence from the report's
+    # own aggregates is observable via the top-level n_excluded/n_dropped
+    # fields — never silent.
+    fa = {_qid_key(f) for f in report_a.get("failures", [])
+          if isinstance(f, dict) and f.get("question_id") is not None}
+    fb = {_qid_key(f) for f in report_b.get("failures", [])
+          if isinstance(f, dict) and f.get("question_id") is not None}
+    # Mixed str/tuple keys are not mutually sortable — sort by a canonical
+    # repr so a report with both str and non-str qids never TypeErrors.
+    def _sorted_qids(keys):
+        return sorted(keys, key=repr)
+    shared = _sorted_qids(oa.keys() & ob.keys())
+    only_a, only_b = (_sorted_qids(set(oa) - set(ob)),
+                      _sorted_qids(set(ob) - set(oa)))
     n_a, n_b = len(oa), len(ob)
     acc_a, acc_b = (sum(1 for o in oa.values() if o["label"]) / n_a if n_a else 0.0,
                     sum(1 for o in ob.values() if o["label"]) / n_b if n_b else 0.0)
@@ -1501,7 +1554,7 @@ def compare_reports(report_a: dict[str, Any], report_b: dict[str, Any]) -> dict[
         flip_lists[c] = sorted(
             (_flip_row(q, c, oa[q], ob[q], q in fa, q in fb)
              for q in blk["shared"] if oa[q]["label"] != ob[q]["label"]),
-            key=lambda r: r["question_id"])
+            key=lambda r: repr(r["question_id"]))
 
     # overall decomposition (MSR-pinned: headline = shared + reliability + residual)
     n_shared = len(shared)
@@ -1585,8 +1638,13 @@ def compare_reports(report_a: dict[str, Any], report_b: dict[str, Any]) -> dict[
                                         if o.get("question_type") == t),
                                "shared": sum(1 for q in shared
                                              if oa[q].get("question_type") == t)}
-                           for t in sorted({o.get("question_type", "")
-                                            for o in [*oa.values(), *ob.values()]})},
+                           # round-10 review: a non-str question_type (list)
+                           # is unhashable — guard the set comprehension so
+                           # compare_reports never TypeErrors on it.
+                           for t in sorted({
+                               o.get("question_type")
+                               for o in [*oa.values(), *ob.values()]
+                               if isinstance(o.get("question_type"), str)})},
         },
         "overall": {
             "headline_delta_pp": headline_pp,

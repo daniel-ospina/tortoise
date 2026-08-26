@@ -3995,6 +3995,51 @@ def test_compare_reports_stripped_outcomes_graceful():
     assert f["context_tokens_b"] is None and f["error_count_b"] is None
 
 
+def test_compare_reports_malformed_shapes_never_crash():
+    """#1747 (round-10 review): compare_reports must not crash on the
+    malformed-but-publishable shapes build_report now tolerates — a non-str
+    question_type (list — unhashable in the per_type set / category lookup),
+    mixed-type question_ids (int 1 vs str "1" stay DISTINCT — the join uses
+    the same collision-proof key discipline as the grading map), and failure
+    entries without question_id (per-object unknown questions)."""
+    from tools.longmem_eval.report import _qid_key
+    assert _qid_key({"question_id": 1}) != _qid_key({"question_id": "1"})
+    # non-str question_type outcome in BOTH reports → no crash, no merge
+    a = _cmp_report([
+        {"question_id": 1, "question_type": "multi-session",
+         "label": True, "context_tokens": 100},
+        {"question_id": "1", "question_type": ["a", "b"],
+         "label": False, "context_tokens": 100},
+    ], [], "mix-a")
+    b = _cmp_report([
+        {"question_id": 1, "question_type": "multi-session",
+         "label": False, "context_tokens": 100},
+        {"question_id": "1", "question_type": "multi-session",
+         "label": True, "context_tokens": 100},
+    ], [], "mix-b")
+    cmp = compare_reports(a, b)
+    # int 1 and str "1" are TWO distinct questions: qid 1 flips a→b
+    # (True→False), qid "1" flips b→a (False→True) → 1 b-win, 1 a-win.
+    ov = cmp["overall"]
+    assert ov["shared_n"] == 2
+    assert ov["decomposition"]["b_wins"] == 1
+    assert ov["decomposition"]["a_wins"] == 1
+    assert cmp["header"]["per_type_n"] != {}
+    # failure entries without question_id → no KeyError (skipped from the
+    # restored/lost sets; they can never join an outcome qid).
+    a2 = _cmp_report([{"question_id": "q1",
+                       "question_type": "single-session-user",
+                       "label": True}],
+                     [{"error": "reader:retries_exhausted",
+                       "failed_at_utc": "x"}], "noqid-a")
+    b2 = _cmp_report([{"question_id": "q1",
+                       "question_type": "single-session-user",
+                       "label": True}], [], "noqid-b")
+    cmp2 = compare_reports(a2, b2)
+    assert cmp2["overall"]["shared_n"] == 1
+    assert cmp2["overall"]["decomposition"]["reliability_restored"]["count"] == 0
+
+
 def test_compare_reports_comparability_warnings():
     a, b = _msr_reports()
     a["methodology"]["reader_model"] = "deepseek/deepseek-chat"

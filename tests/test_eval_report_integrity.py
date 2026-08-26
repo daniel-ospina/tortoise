@@ -8,22 +8,27 @@ refuse-to-publish). E2E-2's offline analog: a mini pipeline with a flaky
 extractor model reports its integrity on the same block.
 
 #1747: the ``valid`` VERDICT is now census-class-aware — ``valid == True`` iff
-``invalid_rate <= threshold`` AND zero hard-failure questions. Recoverable
+``n_hard_invalid == 0`` AND ``n_excluded_hard == 0`` AND
+``invalid_rate <= threshold`` AND (attempted set non-empty whenever any entry
+was excluded or dropped — a fully excluded/dropped run never certifies).
+Recoverable
 classes (parse_error / truncated / truncated_parse_error / partial_parse /
 transient_* census classes, plus reader/judge:retries_exhausted eval
 failures) are rate-limited (a healthy run at 500-Q scale admits a handful
 — the old binary ``len(errors)==0`` invalidity made ``valid=true``
 unreachable); hard classes (fatal_* / ingest / unknown census classes /
 non-census error strings with an EMPTY census / permanent eval failures /
-malformed inputs — present non-bool `valid` / non-iterable or non-str
-`error_classes` — fail closed to hard) veto the run at any threshold (a
+malformed inputs — present non-bool `valid` / non-iterable, non-str,
+falsy-but-present or PRESENT-null `error_classes` — fail closed to hard,
+and a shape-broken / breaker_open outcome with a hard census still vetoes
+via ``n_excluded_hard``) veto the run at any threshold (a
 mixed recoverable+structural shape is rate-limited — the #1746 lane). Each
 qid is graded ONCE (failure-grade dominance on qid overlap —
 concurrent-checkpoint robustness); ``n_valid`` /
 ``n_invalid`` / ``invalid_rate`` keep their previous semantics for the
 production shape; the breakdown rides in the additive ``n_hard_invalid`` /
 ``n_recoverable_invalid`` / ``recoverable_invalid_rate`` / ``criterion`` /
-``error_census_malformed`` / ``n_excluded`` fields.
+``error_census_malformed`` / ``n_excluded`` / ``n_excluded_hard`` fields.
 """
 from __future__ import annotations
 
@@ -867,14 +872,85 @@ def test_report_integrity_rerank_run_malformed_pool_recall_no_crash():
 def test_report_integrity_falsy_error_classes_fail_closed():
     """#1747 (security review): a PRESENT but falsy error_classes value
     (0 / "" / False — malformed checkpoint JSON) fails CLOSED to hard like
-    any other non-dict/non-list shape — only a MISSING key (None) means
-    "no census"."""
-    for bad in (0, "", False):
+    any other non-dict/non-list shape — only a MISSING key means
+    "no census". A PRESENT null (JSON null — Python None) is also malformed
+    and fails closed (round-10 review: get() conflated missing with
+    present-null, certifying error_classes:null as clean)."""
+    for bad in (0, "", False, None):
         o = _outcome("q0", valid=True)
         o["error_classes"] = bad  # bypass the helper's `or {}` collapse
         integ = _report([o], threshold=1.0)["integrity"]
         assert integ["n_hard_invalid"] == 1, f"{bad!r} not graded hard"
         assert integ["valid"] is False
+    # a MISSING error_classes key still means "no census" (clean).
+    o = _outcome("q0", valid=True)
+    del o["error_classes"]
+    integ = _report([o], threshold=1.0)["integrity"]
+    assert integ["n_hard_invalid"] == 0
+    assert integ["valid"] is True
+
+
+def test_report_integrity_all_breaker_open_never_certifies():
+    """#1747 (round-10 security review): a run whose ENTIRE outcome set is
+    breaker_open (a vector-arm outage that tripped every question — or a
+    tampered checkpoint marking everything dropped) measures ZERO questions:
+    n_attempted == 0 with dropped > 0 must fail closed, exactly like the
+    all-excluded case (the breaker lane reopened the vacuous-valid hole the
+    all-excluded floor closed). A clean drop mixed with a real attempt still
+    rides the rate/veto criteria."""
+    os_ = []
+    for i in range(3):
+        o = _outcome(f"q{i}", valid=True)
+        o["breaker_open"] = True
+        o["dropped_reason"] = "breaker_open"
+        os_.append(o)
+    integ = _report(os_, threshold=1.0)["integrity"]
+    assert integ["n_attempted"] == 0
+    assert integ["n_excluded"] == 0
+    assert integ["valid"] is False       # zero measured questions, never valid
+    # one real attempt + one clean drop → rides the rate/veto criteria.
+    integ = _report([*os_, _outcome("real", valid=True)],
+                    threshold=1.0)["integrity"]
+    assert integ["n_attempted"] == 1
+    assert integ["valid"] is True
+
+
+def test_report_integrity_nonfinite_and_duplicate_malformed_qids():
+    """#1747 (round-10 security review): the attempted-set identity is
+    canonical — duplicate copies of the same malformed-qid outcome dedupe
+    (NaN qids canonicalized, unhashable list qids keyed by repr) so they can
+    never inflate n_attempted and dilute invalid_rate; distinct unknown
+    entries still count individually (reviewer-pinned per-object semantics
+    for MISSING qids)."""
+    # NaN qids: value-identical copies dedupe to ONE attempted question.
+    o1 = _outcome("q0", valid=True)
+    o1["question_id"] = float("nan")
+    o2 = _outcome("q0", valid=True)
+    o2["question_id"] = float("nan")
+    integ = _report([o1, o2], threshold=1.0)["integrity"]
+    assert integ["n_attempted"] == 1
+    # unhashable list qids: value-identical copies dedupe too.
+    o3 = _outcome("q0", valid=True)
+    o3["question_id"] = ["a", "b"]
+    o4 = _outcome("q0", valid=True)
+    o4["question_id"] = ["a", "b"]
+    integ = _report([o3, o4], threshold=1.0)["integrity"]
+    assert integ["n_attempted"] == 1
+    # int 1 and str "1" stay DISTINCT questions (collision-proof keys).
+    o5 = _outcome("q0", valid=True)
+    o5["question_id"] = 1
+    o6 = _outcome("q0", valid=True)
+    o6["question_id"] = "1"
+    integ = _report([o5, o6], threshold=1.0)["integrity"]
+    assert integ["n_attempted"] == 2
+    # distinct MISSING-qid failures stay distinct (pinned per-object).
+    integ = _report([_outcome("q0", valid=True)], failures=[
+        {"error_class": "reader:retries_exhausted", "error": "x",
+         "failed_at_utc": "x"},
+        {"error_class": "reader:retries_exhausted", "error": "y",
+         "failed_at_utc": "y"},
+    ], threshold=0.5)["integrity"]
+    assert integ["n_attempted"] == 3
 
 
 def test_report_integrity_missing_qid_failures_not_merged():
@@ -945,11 +1021,12 @@ def test_run_protocol_step5_gate_string_pins_criterion():
     # the allowance math is pinned (0.02 × 500 = 10 questions — a regression
     # to percentage formatting fails here).
     assert "≤10 of 500 questions" in gate
-    # round-8 clauses: excluded outcomes still veto; falsy error_classes
-    # fail closed; a fully excluded run never certifies.
+    # round-8/10 clauses: excluded outcomes still veto; falsy error_classes
+    # fail closed; a fully excluded/dropped run never certifies.
     assert "falsy-but-present" in gate
     assert "breaker_open" in gate
-    assert "fully excluded run never certifies" in gate
+    assert "fully excluded/dropped run never certifies" in gate
+    assert "PRESENT-null" in gate
 
     # the executed step-5 command injects the justified threshold AND its
     # recorded justification (M7: a non-default threshold is never silently
