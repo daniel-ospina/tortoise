@@ -17,6 +17,7 @@ import re
 import os
 import shutil
 import logging
+import threading
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -158,6 +159,134 @@ def _caller_test_stem() -> str | None:
         del frame
 
 
+# ── Epic #1686: worker-thread test-module attribution ────────────────────
+# The frame-keyed carve-out exemption (TORTOISE_TEST_NO_REDIRECT) cannot
+# see worker threads (TestClient portals, background threads): their stacks
+# have no test_ module, so _caller_test_stem() returns None and the process
+# flag (_TEST_SESSION_ACTIVE) fires the redirect even for carve-out files.
+# This per-thread registry records the test module the CURRENT thread is
+# executing under (populated by conftest's pytest_runtest_setup hook via
+# _record_current_test_stem) and INHERITS it into spawned threads: the
+# patched Thread.start stamps the spawner's stem on the new Thread instance
+# BEFORE the original start() runs — the child reads it at bootstrap
+# (threading.current_thread() IS the Thread object; the attribute write
+# happens-before _start_new_thread, so there is no race). anyio's
+# WorkerThread overrides run() WITHOUT calling super(), so patching run
+# would be bypassed — start is the correct seam (starlette's portal thread
+# is a plain Thread(target=...)). Installation is a CONFTEST-INVOKED
+# function (install_thread_stamp) — never module-body: prod processes never
+# call it, so even a leaked TORTOISE_TEST_MODE=1 env cannot patch stdlib
+# (review P2-1); _record_current_test_stem additionally refuses records
+# outside an active session (prod parity).
+_ORIG_THREAD_START = threading.Thread.start
+
+
+# Module-load install gate (review P2-1): TORTOISE_TEST_MODE=1 alone is NOT
+# sufficient — it can leak into a prod process via env inheritance (shared
+# .env / test-spawned subprocess promoted to prod). The patch therefore
+# installs only via install_thread_stamp(), which conftest calls AFTER
+# _TEST_SESSION_ACTIVE=True (the flag is always False at first import, so
+# module-body install could not see it anyway). See install_thread_stamp.
+
+def _record_current_test_stem(stem: str | None) -> None:
+    """Record (or clear) the CURRENT thread's test-module stem (#1686).
+
+    Called by conftest's pytest_runtest_setup/teardown with the running
+    test module's stem (and None at teardown). Stored on the current
+    Thread instance so spawned threads inherit it via the patched
+    Thread.start. Prod parity: records are refused outside an active test
+    session (conftest only runs in tests, so this is never called there)."""
+    if stem is not None and not _TEST_SESSION_ACTIVE:
+        return  # prod parity: no attribution outside a test session
+    cur = threading.current_thread()
+    if stem is None:
+        try:
+            del cur._tortoise_test_stem
+        except AttributeError:
+            pass
+    else:
+        cur._tortoise_test_stem = stem
+
+
+def _inherited_test_stem() -> str | None:
+    """The test module this thread inherited from its spawner (#1686).
+
+    None in prod processes and subprocess CLI children (never recorded /
+    never inherited) — matching the frame gate's None semantics."""
+    return getattr(threading.current_thread(), "_tortoise_test_stem", None)
+
+
+def _thread_start_inherit_stem(self, *args, **kwargs):
+    """Thread.start wrapper: stamp the spawner's stem on the new thread.
+
+    Written on the Thread instance BEFORE the original start() — the child
+    reads it at bootstrap with no race (the attribute set happens-before
+    _start_new_thread). __slots__-restricted Thread subclasses get no
+    stamp (AttributeError swallowed) and fall back to frame resolution."""
+    parent_stem = _inherited_test_stem()
+    if parent_stem is not None and _TEST_SESSION_ACTIVE:
+        try:
+            self._tortoise_test_stem = parent_stem
+        except AttributeError:
+            pass
+    return _ORIG_THREAD_START(self, *args, **kwargs)
+
+
+def install_thread_stamp() -> None:
+    """Install the Thread.start test-stem stamp (#1686).
+
+    Called by conftest AFTER _TEST_SESSION_ACTIVE=True — a prod process can
+    never satisfy that (it never runs conftest), so even a leaked
+    TORTOISE_TEST_MODE=1 cannot patch stdlib. Idempotent via the
+    class-attribute marker: it survives importlib.reload (module state
+    resets, the marker does not), so a reload cannot double-wrap start."""
+    if os.environ.get("TORTOISE_TEST_MODE") == "1" \
+            and _TEST_SESSION_ACTIVE \
+            and not getattr(threading.Thread, "_tortoise_stamp_installed", False):
+        threading.Thread.start = _thread_start_inherit_stem
+        threading.Thread._tortoise_stamp_installed = True
+
+
+def _resolve_caller_stem() -> str | None:
+    """Worker-thread-aware caller test stem (#1686).
+
+    Stack-walk first (nearest test_ frame — the historical semantics,
+    pinned by test_caller_test_stem_nearest_frame_semantics); falls back
+    to the per-thread inherited stem for worker threads whose stack has no
+    test_ module. None in prod and in subprocess CLI children — the frame
+    gate's None semantics, preserved. Pure resolver (no side effects — a
+    recording fallback here could clobber the conftest hook's main-thread
+    stem when resolution passes through a test_-prefixed helper).
+
+    Currency (review P2-3): the inherited stem is honored ONLY while the
+    main thread's CURRENT recorded stem matches it — a long-lived worker
+    spawned under a carve-out module and later reused by a non-exempt test
+    would otherwise leak the stale exemption (its stack has no test_ frame,
+    so the frame walk cannot catch it). Stale → None → redirect fires
+    (fail-closed; conftest records land on the main thread, see
+    pytest_runtest_setup)."""
+    stem = _caller_test_stem()
+    if stem is not None:
+        return stem
+    inherited = _inherited_test_stem()
+    if inherited is None:
+        return None
+    if _main_thread_current_stem() == inherited:
+        return inherited
+    return None
+
+
+def _main_thread_current_stem() -> str | None:
+    """The CURRENT test stem recorded on the main thread (#1686).
+
+    conftest's pytest_runtest_setup/teardown record on
+    threading.current_thread(), which is the main thread for pytest-run
+    tests; a worker thread never records (only inherits), so comparing the
+    inherited stamp against THIS value is the currency check — a stamp
+    from a test that is no longer running resolves as stale → None."""
+    return getattr(threading.main_thread(), "_tortoise_test_stem", None)
+
+
 def _is_loopback_host(host: str | None) -> bool:
     """Shared loopback predicate (cycle-2 P0-2).
 
@@ -196,9 +325,17 @@ def _journal_file_path() -> str | None:
 # gate wrongly suppresses the redirect there and the fixture-patched db_path
 # SDK constructs embedded → write/read split). With the flag, the redirect
 # fires in the whole test process (worker threads included); the carve-out
-# exemption is still frame-keyed (worker-thread constructions in carve-out
-# files are only exercised in the URI-unset carve-out job, where no redirect
-# fires at all).
+# exemption is frame-keyed AND, since #1686, thread-inherited: conftest's
+# pytest_runtest_setup records the running module's stem per-thread and the
+# patched Thread.start stamps it onto spawned threads, so worker-thread
+# constructions in carve-out files resolve their own stem and stay embedded.
+# The inheritance is spawn-time: module-scoped portals spawned before the
+# first runtest_setup still resolve None → redirect (unchanged from today;
+# test_flip_gate.py's TestClient portals are function-scoped and construct
+# inside a running test — verified #1686). Long-lived workers keep their
+# spawn-time stem, but _resolve_caller_stem's currency check (main thread's
+# CURRENT stem must match) fails them closed once the spawning test is no
+# longer current.
 _TEST_SESSION_ACTIVE = False
 
 
@@ -218,6 +355,12 @@ def _journal_append_product(graph_name: str) -> None:
     (the specified fallback)."""
     path = _journal_file_path()
     if not path:
+        return
+    if not _TEST_SESSION_ACTIVE:
+        # review P2-1: env leakage alone (TORTOISE_TEST_JOURNAL_FILE inherited
+        # by a prod process) must never journal — the journal is a TEST-SESSION
+        # artifact; prod mints are unjournaled by design (their sweeps only
+        # run in tests).
         return
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -489,13 +632,15 @@ class FalkorProjection(
                 s.strip() for s in
                 os.environ.get("TORTOISE_TEST_NO_REDIRECT", "").split(",") if s.strip()
             }
-            _caller_stem = _caller_test_stem()  # None = no test frame
+            _caller_stem = _resolve_caller_stem()  # None = no test frame
             # CI P2 fix: the process flag (conftest-set) fires the redirect
             # in TestClient worker threads where the frame gate sees no test_
-            # module; a None stem is still exempt-free (worker threads have no
-            # frame to exempt — carve-out HTTP paths run only in the carve-out
-            # job, URI unset). Subprocess children keep the embedded lane via
-            # the flag (False — conftest never imported there).
+            # module. Since #1686 the carve-out exemption is thread-inherited
+            # (conftest records the running module's stem; the patched
+            # Thread.start stamps it onto spawned threads), so worker threads
+            # in carve-out files DO resolve their own exempt stem. A None
+            # stem is still exempt-free (subprocess CLI children: no conftest,
+            # no record, no inheritance).
             if ((_caller_stem is not None and _caller_stem not in _no_redirect)
                     or (_caller_stem is None and _TEST_SESSION_ACTIVE)):
                 from urllib.parse import urlparse
@@ -843,22 +988,23 @@ class FalkorProjection(
         password = parsed.password or None
         if graph_name is None:
             graph_name = parsed.path.lstrip('/') or "tortoise"
-        # Epic #1647 (cycle-4 P2-2 / cycle-6 P2-13 / cycle-7 P2-9): in a TEST
-        # SESSION with a calling test frame (TORTOISE_TEST_MODE=1 AND
-        # _caller_test_stem() is not None — the SAME predicate as the
-        # redirect), append the resolved graph name (URI-path default OR
-        # explicit) to the session journal — the single seam point, so every
-        # from_uri-minted graph is owned by its session's journal (the
-        # per-test wipe delta + the session-end/stale sweep drop sets both
-        # derive from the FILE journal). TEST_MODE alone is NOT the gate:
-        # frame-less subprocess CLI children inherit TEST_MODE via
-        # os.environ.copy() and would become CONCURRENT WRITERS to the
-        # parent's journal (torn-line hazard) while journaling non-test
-        # CLI-lane graphs (cycle-7 P2-9 — pinned by
+        # Epic #1647 (cycle-4 P2-2 / cycle-6 P2-13 / cycle-7 P2-9 / #1686): in
+        # a TEST SESSION with a calling test frame (TORTOISE_TEST_MODE=1 AND
+        # _resolve_caller_stem() is not None — the SAME predicate as the
+        # redirect, now worker-thread-aware: worker-thread from_uri mints in
+        # carve-out files resolve their inherited stem), append the resolved
+        # graph name (URI-path default OR explicit) to the session journal —
+        # the single seam point, so every from_uri-minted graph is owned by
+        # its session's journal (the per-test wipe delta + the session-end/
+        # stale sweep drop sets both derive from the FILE journal). TEST_MODE
+        # alone is NOT the gate: frame-less subprocess CLI children inherit
+        # TEST_MODE via os.environ.copy() and would become CONCURRENT
+        # WRITERS to the parent's journal (torn-line hazard) while journaling
+        # non-test CLI-lane graphs (cycle-7 P2-9 — pinned by
         # test_from_uri_append_gated_on_test_frame). The append is a NO-OP
         # when the journal env var is absent (P1 window / non-test process).
         if os.environ.get("TORTOISE_TEST_MODE") == "1" \
-                and _caller_test_stem() is not None:
+                and _resolve_caller_stem() is not None:
             _journal_append_product(graph_name)
         return cls(host=parsed.hostname or "localhost",
                    port=parsed.port or 16379,

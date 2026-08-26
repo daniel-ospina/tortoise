@@ -752,3 +752,78 @@ def test_allow_remote_session_teardown_green(tmp_path):
     assert "skipped" in res
     assert res["journal_removed"] is False
     assert journal.exists()
+
+
+def test_session_end_sweep_drops_journaled_team_graph(uri_env, monkeypatch, tmp_path):
+    """#1686: team_* graphs (hosted parity — NEVER test-prefixed) reach the
+    sweep ONLY via the journal: _sweep_drop drops any journaled name except
+    the URI-default, so a journaled team_<name> is deleted at session end
+    (this is the mechanism that stops team_* accumulation on the docker)."""
+    from tests._embedded import _session_end_own_sweep
+    from tortoise.projection import FalkorProjection, _journal_append_product
+
+    journal = tmp_path / "session.graphs.jsonl"
+    monkeypatch.setattr("tests._embedded._JOURNAL_FILE", str(journal))
+    monkeypatch.setenv("TORTOISE_TEST_JOURNAL_FILE", str(journal))
+    team_name = "team_ws_journal_drop"
+    _journal_append_product(team_name)  # the #1686 mint-site seam
+    proj = FalkorProjection.from_uri(
+        "docker://:falkordb@localhost:6379", graph_name="test_ws_team_probe")
+    try:
+        proj.db.select_graph(team_name).query("CREATE (:TeamMeta {name:'x'})")
+        res = _session_end_own_sweep(os.environ["TORTOISE_DB_URI"], str(journal))
+        assert res["journal_removed"] is True
+        assert not journal.exists()
+        remaining = proj.db.list_graphs() or []
+        assert team_name not in remaining
+    finally:
+        proj.close()
+
+
+def test_leftover_team_strays_dropped_when_opted_in(uri_env, monkeypatch):
+    """#1686 closure (review P1-1 fix): the journal-blind team_* residual
+    class is closed by _sweep_team_strays, but ONLY when allowed — a
+    dedicated test DB in the URI path, or an explicit
+    TORTOISE_TEST_SWEEP_TEAM_STRAYS=1 opt-in (a pathless shared/dev docker
+    never triggers it). The helper is exercised DIRECTLY (no mid-suite
+    global wipe — the last-suite-standing gate is conftest's, not this
+    helper's; review P1-2)."""
+    from tests._embedded import _sweep_team_strays
+    from tortoise.projection import FalkorProjection
+
+    monkeypatch.setenv("TORTOISE_TEST_SWEEP_TEAM_STRAYS", "1")
+    stray = "team_ws_stray_8f3a"
+    proj = FalkorProjection.from_uri(
+        "docker://:falkordb@localhost:6379", graph_name="test_ws_leftover_probe")
+    try:
+        proj.db.select_graph(stray).query("CREATE (:TeamMeta {name:'stray'})")
+        dropped = _sweep_team_strays(proj, os.environ["TORTOISE_DB_URI"])
+        assert stray in dropped, f"expected {stray} dropped, got {dropped!r}"
+        remaining = proj.db.list_graphs() or []
+        assert stray not in remaining
+    finally:
+        proj.close()
+
+
+def test_leftover_team_strays_refused_on_shared_docker(uri_env, monkeypatch):
+    """#1686 default-fail-safe (review P1-1): a pathless shared/dev URI does
+    NOT trigger the team_* pass without the explicit opt-in — team_<name> is
+    the product's mint namespace and real tenant graphs must survive on a
+    shared docker. The stray is cleaned up directly by the test itself."""
+    from tests._embedded import _sweep_team_strays
+    from tortoise.projection import FalkorProjection
+
+    monkeypatch.delenv("TORTOISE_TEST_SWEEP_TEAM_STRAYS", raising=False)
+    stray = "team_ws_stray_keep"
+    proj = FalkorProjection.from_uri(
+        "docker://:falkordb@localhost:6379", graph_name="test_ws_leftover_probe")
+    try:
+        proj.db.select_graph(stray).query("CREATE (:TeamMeta {name:'keep'})")
+        dropped = _sweep_team_strays(proj, "docker://:falkordb@localhost:6379")
+        assert dropped == [], f"shared-docker sweep must refuse, got {dropped!r}"
+        remaining = proj.db.list_graphs() or []
+        assert stray in remaining, "product-named graph must survive"
+    finally:
+        proj.db.select_graph(stray).query("MATCH (n) DETACH DELETE n")
+        proj.db.select_graph(stray).delete()
+        proj.close()

@@ -414,3 +414,126 @@ def test_loopback_predicate_single_source():
     assert _is_loopback_host(None) is False, \
         "None host is not loopback — the redirect's hostless path must refuse"
     assert is_loopback_uri("docker://:falkordb@localhost:6379") is True
+
+
+# ── Epic #1686: worker-thread carve-out attribution ─────────────────────
+# The frame-keyed exemption cannot see worker-thread stacks (TestClient
+# portals, background threads): with _TEST_SESSION_ACTIVE they'd redirect
+# even for carve-out files. conftest's pytest_runtest_setup records the
+# running module's stem per-thread; projection's patched Thread.start
+# stamps it onto spawned threads; _resolve_caller_stem() falls back to the
+# inherited stem when the stack walk finds no test_ frame. These tests
+# pin the inheritance + redirect behavior with self-contained env
+# (no live FalkorDB contact: the carve-out case constructs embedded, the
+# non-exempt case stubs falkordb.FalkorDB).
+
+
+def _assert_probe(results: list, expected_stem: str | None, embedded: bool) -> None:
+    """Shared probe assertion: exactly one probe result with the expected
+    inherited stem + embedded flag + a graph name."""
+    assert len(results) == 1, f"expected one probe result, got {results!r}"
+    stem, is_embedded, graph_name = results[0]
+    assert stem == expected_stem
+    assert is_embedded is embedded
+    return graph_name
+
+
+def test_worker_thread_carve_out_stays_embedded(monkeypatch):
+    """#1686: a worker thread spawned by a carve-out test resolves the test
+    module INHERITED from its spawner (conftest's runtest hook recorded the
+    stem; the patched Thread.start stamped it) — the construction stays
+    EMBEDDED under a URI-set process, exactly as the frame gate holds for
+    the main thread."""
+    import threading
+    from tests._embedded import _worker_stem_embedded_probe
+
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379")
+    monkeypatch.setenv("TORTOISE_TEST_NO_REDIRECT", "test_redirect_seam")
+    # conftest's pytest_runtest_setup recorded this module's stem on the
+    # main thread before the test body ran — sanity-check the hook is live.
+    from tortoise.projection import _inherited_test_stem
+    assert _inherited_test_stem() == "test_redirect_seam", \
+        "conftest stem hook not active for this module"
+
+    results: list = []
+    t = threading.Thread(
+        target=_worker_stem_embedded_probe, args=(results, "/tmp/seam-worker-a.db"))
+    t.start()
+    t.join(timeout=20)
+    assert not t.is_alive(), "worker thread hung — stamp/construction deadlock"
+    _assert_probe(results, "test_redirect_seam", embedded=True)
+
+
+def test_worker_thread_non_exempt_redirects(monkeypatch):
+    """#1686: a worker thread spawned by a NON-exempt test still REDIRECTS —
+    the inherited stem resolves (it just isn't in the exemption list), so
+    the process flag fires exactly as it did pre-#1686 for worker threads."""
+    import threading
+    import types
+    from tests._embedded import _worker_stem_embedded_probe
+
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379")
+    monkeypatch.setenv("TORTOISE_TEST_NO_REDIRECT", "some_other_stem")
+    # Host-branch stub (same surface as test_allow_remote_escape above):
+    # the redirect's host branch constructs falkordb.FalkorDB, whose real
+    # __init__ round-trips to the server — stub select_graph/close only.
+    class _GraphStub:
+        def query(self, *a, **k):
+            return types.SimpleNamespace(result_set=[])
+
+    class _DbStub:
+        def select_graph(self, name):
+            return _GraphStub()
+        def close(self):
+            pass
+
+    class _FakeFalkorDB:
+        def __init__(self, **kw):
+            self._graph = _GraphStub()
+        def select_graph(self, name):
+            return self._graph
+        def close(self):
+            pass
+
+    monkeypatch.setattr("falkordb.FalkorDB", _FakeFalkorDB)
+
+    results: list = []
+    t = threading.Thread(
+        target=_worker_stem_embedded_probe, args=(results, "/tmp/seam-worker-b.db"))
+    t.start()
+    t.join(timeout=20)
+    assert not t.is_alive(), "worker thread hung"
+    graph_name = _assert_probe(results, "test_redirect_seam", embedded=False)
+    assert graph_name.startswith("test_seam_worker_b_"), graph_name
+
+
+def test_stem_registry_prod_parity_and_patch_idempotence(monkeypatch):
+    """#1686 prod parity + install idempotence: (a) outside an active
+    session the registry REFUSES records (no inheritance → None, the frame
+    gate's None semantics — subprocess CLI children), and (b) the Thread.start
+    stamp is installed exactly once and only by conftest's installer
+    (install_thread_stamp — never module-body, so a leaked TEST_MODE env
+    cannot patch stdlib; the class-attribute marker makes the installer
+    idempotent, so it cannot double-wrap even if re-invoked after a
+    reload)."""
+    import threading
+    from tortoise import projection as proj_mod
+
+    # (a) clear the conftest hook's main-thread record FIRST (it ran at
+    # setup), then deactivate the session — records must be refused.
+    proj_mod._record_current_test_stem(None)
+    monkeypatch.setattr(proj_mod, "_TEST_SESSION_ACTIVE", False)
+    proj_mod._record_current_test_stem("test_redirect_seam")  # refused
+    assert proj_mod._inherited_test_stem() is None, \
+        "prod parity broken: record accepted outside an active session"
+
+    # (b) install idempotence: conftest installed the wrapper at session
+    # start (install_thread_stamp called after _TEST_SESSION_ACTIVE=True),
+    # the marker is set, and re-invoking the installer is a no-op.
+    assert getattr(threading.Thread, "_tortoise_stamp_installed", False) is True, \
+        "Thread.start stamp not installed in the test session"
+    assert threading.Thread.start is proj_mod._thread_start_inherit_stem, \
+        "Thread.start was double-wrapped (installer re-ran without the marker guard)"
+    proj_mod.install_thread_stamp()  # re-invocation → no-op (marker)
+    assert threading.Thread.start is proj_mod._thread_start_inherit_stem, \
+        "re-invoked installer double-wrapped Thread.start"
