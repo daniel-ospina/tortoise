@@ -1660,6 +1660,36 @@ def internal_client():
             os.environ["FASTAPI_INTERNAL_KEY"] = old_key
 
 
+def test_register_journals_minted_team_graph(tmp_path, monkeypatch):
+    """#1686: /v1/register's team_* mint is journaled (registry branch —
+    the direct select_graph mint, not team_create) so the session sweep
+    drops it. Mirrors the billing_client embedded pattern: delenv URI +
+    TORTOISE_DB_PATH → the register handler constructs embedded; a temp
+    journal env makes the membership assertion exact. No docker needed."""
+    import os as _os
+    from fastapi.testclient import TestClient
+    from tests._embedded import _read_journal_file
+    from tortoise.hosted_api import app
+
+    db = _os.path.join(tmp_path, "register_api.db")
+    journal = tmp_path / "register.graphs.jsonl"
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.setenv("TORTOISE_DB_PATH", db)
+    monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
+    monkeypatch.setenv("TORTOISE_TEST_JOURNAL_FILE", str(journal))
+    with TestClient(app) as tc:
+        r = tc.post("/v1/register", json={
+            "email": "journal-owner@example.com",
+            "password": "supersecret1",
+        })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    gn = body["graph_name"]
+    assert gn.startswith("team_")
+    assert gn in _read_journal_file(str(journal)), \
+        "register_user mint must be journaled (#1686)"
+
+
 class TestInternalProvision:
     """POST /internal/provision — tenant provisioning."""
 
@@ -1678,6 +1708,28 @@ class TestInternalProvision:
         assert body["status"] == "provisioned"
         assert body["team_id"] == "provisioned-team-1"
         assert "graph_name" in body
+
+
+    def test_provision_journals_minted_graph(self, internal_client, monkeypatch, tmp_path):
+        """#1686: /internal/provision's team_* mint (tenant_provision) is
+        journaled via the product-side seam so the session sweep drops it."""
+        from tests._embedded import _read_journal_file
+
+        journal = tmp_path / "provision.graphs.jsonl"
+        monkeypatch.setenv("TORTOISE_TEST_JOURNAL_FILE", str(journal))
+        payload = {
+            "team_id": "provisioned-team-9",
+            "team_name": "Provisioned Team 9",
+            "api_key_hash": "abc123hash",
+            "created_by": "user-009",
+        }
+        r = internal_client.post("/internal/provision", json=payload,
+                                 headers=self.INTERNAL_HEADERS)
+        assert r.status_code == 200, r.text
+        gn = r.json()["graph_name"]
+        assert gn.startswith("team_")
+        assert gn in _read_journal_file(str(journal)), \
+            "tenant_provision mint must be journaled (#1686)"
 
     def test_provision_missing_fields_returns_400(self, internal_client):
         r = internal_client.post("/internal/provision", json={}, headers=self.INTERNAL_HEADERS)
