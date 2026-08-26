@@ -719,7 +719,13 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,  # noqa: F811
              # M4 (#1524, D4): the per-question error census — rolled up from
              # each session's extractor ``error_census`` + the session-level
              # exception class; feeds outcome ``valid``/``error_classes``.
-             "error_census": {}}
+             "error_census": {},
+             # #1746 (D7): the per-question LLM telemetry + recovery counters
+             # rolled from each session's extractor result — feeds the
+             # report's warning-only truncation readout (criterion 3: no
+             # UNRECORDED truncation with valid=true).
+             "llm": {"calls": 0, "retries": 0, "truncated": 0},
+             "recovery": {}}
     # M6: the evidence-session id set (haystack sessions containing >=1
     # has_answer turn) + ALL answer-turn contents (question-wide — marks
     # (b)/(c) match against every answer turn, wherever it lives).
@@ -831,6 +837,9 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,  # noqa: F811
             # out["error_census"]).
             _class = _classify_error(ex)
             stats["error_census"][_class] = stats["error_census"].get(_class, 0) + 1
+            # #1746 (D7): the session-level exception path contributes one
+            # call / zero truncations to the llm roll-up.
+            stats["llm"]["calls"] += 1
             continue
         payload = out.get("payload") or {}
         stats["turns"] += len(session)
@@ -839,6 +848,14 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,  # noqa: F811
         stats["errors"].extend(out.get("errors", []) or [])
         for _class, count in (out.get("error_census") or {}).items():
             stats["error_census"][_class] = stats["error_census"].get(_class, 0) + count
+        # #1746 (D7): thread the extractor's llm telemetry + recovery counters
+        # through the ingest stats — the report's warning-only truncation
+        # readout + recovery observability.
+        _llm = (out.get("stats") or {}).get("llm") or {}
+        for _k in ("calls", "retries", "truncated"):
+            stats["llm"][_k] += _llm.get(_k, 0)
+        for _k, _v in ((out.get("stats") or {}).get("recovery") or {}).items():
+            stats["recovery"][_k] = stats["recovery"].get(_k, 0) + _v
 
         # the ACTUAL writes (the _write_payload stats are authoritative —
         # they skip duplicates, so payload-len double-counts)

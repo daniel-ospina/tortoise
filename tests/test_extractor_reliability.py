@@ -74,6 +74,13 @@ def _model(fn) -> _Recorder:
     return _M()
 
 
+def _fresh_sdk(tmp_path):
+    """Embedded FalkorDBLite SDK for the ingest roll-up integration test
+    (no docker dependency — the harness's S3 is monkeypatched non-degraded)."""
+    from tortoise.sdk import TortoiseSDK
+    return TortoiseSDK(str(tmp_path / "lme.db"))
+
+
 # ── Task 1: retry/backoff + classification core ───────────────────────────
 
 def test_complete_retries_transient_429_then_succeeds(monkeypatch):
@@ -254,7 +261,8 @@ def test_extract_census_aggregates_stage_failures(monkeypatch):
 
 def test_extract_census_parse_error(monkeypatch):
     """Unparseable S2/S4 JSON → census parse_error (not a transient class);
-    S2/S4 outputs are not used."""
+    S2/S4 outputs are not used. #1746 (D2): with finish_reason None/"stop"
+    the class stays ``parse_error`` — truncation is NOT assumed."""
     monkeypatch.setattr(v2.time, "sleep", lambda _: None)
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     monkeypatch.delenv("TORTOISE_API_URL", raising=False)
@@ -268,6 +276,254 @@ def test_extract_census_parse_error(monkeypatch):
     assert out["error_census"]["parse_error"] == 2  # S2 + S4
     assert any("S2 failed" in e for e in out["errors"])
     assert out["embed_list"] == {}
+
+
+def test_extract_census_truncated_parse_error(monkeypatch):
+    """#1746 (D2): S2/S4 final parse failure with a TRUNCATED first attempt
+    (finish_reason == "length") → census ``truncated_parse_error``, NOT the
+    plain ``parse_error`` class; the stage's truncated flag reaches the
+    session llm roll-up (the D7 warning-only readout's source)."""
+    monkeypatch.setattr(v2.time, "sleep", lambda _: None)
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+
+    class _TruncGarbage:
+        last_finish_reason = None
+
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, *, system, user, max_tokens=None):
+            self.calls += 1
+            if "STORY SUMMARIZER" in system:
+                self.last_finish_reason = "stop"
+                return "A narrative."
+            self.last_finish_reason = "length"
+            return "this is not JSON at all"
+
+    out = v2.extract_session_v2(_TruncGarbage(), _conv())
+    assert out["error_census"]["truncated_parse_error"] == 2  # S2 + S4
+    assert "parse_error" not in out["error_census"]
+    assert out["stats"]["llm"]["truncated"] == 2
+
+
+def test_census_equality_mixed_errors(monkeypatch):
+    """D1 invariant (#1746, criterion 2): every ``errors.append`` pairs
+    exactly one census class — ``len(errors) == sum(error_census.values())``
+    holds even on a mixed-error session, and the four previously-uncensused
+    deterministic classes (s1_chunk_summary / empty_embed_list /
+    entity_resolution_failed / s5_failed) are all present."""
+    monkeypatch.setattr(v2.time, "sleep", lambda _: None)
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+
+    # ── scenario 1: S1 chunk failure (fatal, one attempt) + S2 parse
+    # failure + S4 truncation → complete_list empty → the empty-embed-list
+    # class. 51 turns → 2 chunks: chunk 1 fails, chunk 2 succeeds so the
+    # story is non-empty and S2/S4 actually run. ──
+    big_conv = [{"role": "user", "content": f"turn {i}"}
+                for i in range(51)]
+
+    class _S1Boom:
+        last_finish_reason = None
+
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, *, system, user, max_tokens=None):
+            self.calls += 1
+            if self.calls == 1:  # chunk 1's S1 — fatal 4xx, no retry
+                raise _HTTPError(400)
+            if "STORY SUMMARIZER" in system:
+                return "A narrative for chunk 2."
+            return "not json"
+
+    out1 = v2.extract_session_v2(_S1Boom(), big_conv)
+    assert len(out1["errors"]) == sum(out1["error_census"].values())
+    assert out1["error_census"]["s1_chunk_summary"] == 1
+    assert out1["error_census"]["empty_embed_list"] == 1
+    assert out1["error_census"]["parse_error"] == 2
+    assert any("S1 chunks failed" in e for e in out1["errors"])
+
+    # ── scenario 2: S2 + S4 succeed → entity resolution + S5 both raise
+    # (the previously-uncensused resolution/S5 classes). ──
+    good = ('{"entities": [{"name": "gym", "kind": "core:plan", '
+            '"lifecycle": "created", "supersedes": null, "note": null}], '
+            '"events": [], "operators": [], '
+            '"points": [{"content": "gym at 6pm", '
+            '"pointKind": "statement"}]}')
+
+    class _S2S4Good:
+        last_finish_reason = "stop"
+
+        def complete(self, *, system, user, max_tokens=None):
+            if "STORY SUMMARIZER" in system:
+                return "A narrative."
+            return good
+
+    monkeypatch.setattr(v2, "search_graph", lambda *a, **k: {
+        "mode": "real", "degraded": False, "reason": None,
+        "entities": [{"id": "e1", "name": "gym", "kind": "core:plan"}],
+        "points": [], "events": [], "queries_run": 1})
+
+    def _boom_resolve(*a, **k):
+        raise RuntimeError("resolution boom")
+
+    def _boom_embed(*a, **k):
+        raise RuntimeError("embed boom")
+
+    monkeypatch.setattr(v2, "resolve_entities", _boom_resolve)
+    monkeypatch.setattr(v2, "execute_embed", _boom_embed)
+    out2 = v2.extract_session_v2(_S2S4Good(), _conv())
+    assert len(out2["errors"]) == sum(out2["error_census"].values())
+    assert out2["error_census"]["entity_resolution_failed"] == 1
+    assert out2["error_census"]["s5_failed"] == 1
+    assert any("entity resolution failed" in e for e in out2["errors"])
+    assert any("S5 failed" in e for e in out2["errors"])
+
+    # the four deterministic classes all present across the two sessions
+    all_classes = set(out1["error_census"]) | set(out2["error_census"])
+    for cls in ("s1_chunk_summary", "empty_embed_list",
+                "entity_resolution_failed", "s5_failed"):
+        assert cls in all_classes
+
+
+def test_llm_truncated_warning_only_not_error(monkeypatch):
+    """#1746 (D7): a truncated S2/S4 output that still parses cleanly (the
+    canonical tail-cut tolerance) is NOT an error class — errors stay empty
+    — but the truncation IS recorded in ``llm_stats["truncated"]``: the
+    warning-only readout (criterion 3's structural guard: no UNRECORDED
+    truncation with valid=true)."""
+    monkeypatch.setattr(v2.time, "sleep", lambda _: None)
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+
+    class _TruncatedClean:
+        last_finish_reason = None
+
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, *, system, user, max_tokens=None):
+            self.calls += 1
+            if "STORY SUMMARIZER" in system:
+                self.last_finish_reason = "stop"
+                return "A narrative."
+            self.last_finish_reason = "length"
+            return '{"points": [], "entities": [], "events": [], ' \
+                   '"operators": []}'
+
+    out = v2.extract_session_v2(_TruncatedClean(), _conv())
+    assert out["errors"] == []
+    assert out["error_census"] == {}
+    assert out["stats"]["llm"]["truncated"] == 2  # S2 + S4 (per-STAGE flag)
+
+
+def test_recovered_retry_records_truncation_flag(monkeypatch):
+    """D7 (#1746, review-fix): the stage-level ``truncated`` flag ORs over
+    ALL calls of the stage — a first attempt that parse-fails (stop) and a
+    RECOVERED retry that is truncated (length) must still record the
+    truncation (``_complete`` overwrites the flag per attempt; losing it
+    would produce an UNRECORDED truncation with valid=true)."""
+    monkeypatch.setattr(v2.time, "sleep", lambda _: None)
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+
+    class _RetryTruncated:
+        last_finish_reason = None
+
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, *, system, user, max_tokens=None):
+            self.calls += 1
+            if "STORY SUMMARIZER" in system:
+                self.last_finish_reason = "stop"
+                return "A narrative."
+            if self.calls % 2 == 1:  # retry attempt: valid JSON, truncated
+                self.last_finish_reason = "length"
+                return ('{"points": [], "entities": [], "events": [], '
+                        '"operators": []}')
+            self.last_finish_reason = "stop"
+            return "not json"   # first attempt: garbage, stop
+
+    out = v2.extract_session_v2(_RetryTruncated(), _conv())
+    assert out["errors"] == []
+    assert out["error_census"] == {}
+    # S2 + S4 both recovered via a TRUNCATED retry → the truncation survives
+    # (llm calls/retries are documented not-load-bearing — the parse-retry
+    # lands in the nested stats["llm"]["retries"] counter, distinct from the
+    # session roll-up; D2 #1746).
+    assert out["stats"]["llm"]["truncated"] == 2
+
+
+def test_ingest_v2_llm_and_recovery_rollup(tmp_path, monkeypatch):
+    """#1746 (D7): the LIVE ``ingest_haystack_v2`` rolls each session's
+    extractor ``stats["llm"]`` (calls/retries/truncated) and
+    ``stats["recovery"]`` into its per-question stats — a recovering-then-
+    failing session mix sums across sessions; the session-level exception
+    path contributes one call."""
+    import tortoise.extractor_v2 as ev2
+    from tools.longmem_eval.ingest_v2 import ingest_haystack_v2
+
+    class _Model:
+        last_finish_reason = None
+
+        def __init__(self, responses):
+            self._responses = responses
+            self.calls = 0
+
+        def complete(self, *, system, user, max_tokens=None):
+            self.calls += 1
+            return self._responses(self.calls, system)
+
+    def _resp(call: int, system: str) -> str:
+        if "STORY SUMMARIZER" in system:
+            return "A narrative."
+        return ('{"points": [], "entities": [], "events": [], '
+                '"operators": []}')
+
+    monkeypatch.setattr(ev2, "search_graph", lambda *a, **k: {
+        "mode": "real", "degraded": False, "reason": None,
+        "entities": [], "points": [], "events": [], "queries_run": 0})
+
+    # Session 1's extraction raises a SESSION-LEVEL exception (the
+    # orchestrator normally swallows stage failures, so the only way to
+    # exercise the ingest catch path is at the extract boundary itself).
+    # ingest_v2's function-local import picks the patched name up at call
+    # time, so patching ev2.extract_session_v2 is sufficient.
+    real_extract = ev2.extract_session_v2
+    extract_calls = {"n": 0}
+
+    def _flaky_extract(*a, **k):
+        extract_calls["n"] += 1
+        if extract_calls["n"] == 2:
+            raise RuntimeError("session-1 extraction boom")
+        return real_extract(*a, **k)
+
+    monkeypatch.setattr(ev2, "extract_session_v2", _flaky_extract)
+
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        question = {
+            "question_id": "q_llm_roll",
+            "haystack_session_ids": ["s0", "s1"],
+            "haystack_dates": ["2026-06-02", "2026-06-16"],
+            "haystack_sessions": [
+                [{"role": "user", "content": "t0"}],
+                [{"role": "user", "content": "t1"}],
+            ],
+        }
+        stats = ingest_haystack_v2(sdk, question, model=_Model(_resp))
+        # session 0: S1(1) + S2(1) + S4(1) = 3 extractor calls rolled from
+        # out["stats"]["llm"]; session 1: the session-level exception path
+        # contributes exactly 1 call / 0 truncated (D7).
+        assert stats["llm"] == {"calls": 4, "retries": 0, "truncated": 0}
+        assert stats["recovery"] == {}
+        assert len(stats["errors"]) == 1
+        assert stats["error_census"] == {"transient_unknown": 1}
+    finally:
+        sdk.close()
 
 
 def test_extract_stats_llm_rollup(monkeypatch):

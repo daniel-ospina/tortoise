@@ -71,6 +71,10 @@ RECOVERABLE_CENSUS_CLASSES = frozenset({
     "transient_timeout",       # call timeout (retry)
     "transient_network",       # connection/network error (retry)
     "transient_unknown",       # unclassified transient (retry-safe)
+    "s1_chunk_summary",        # #1780: co-occurs with the per-chunk
+    # exception-class bumps (transient_* → recoverable; fatal_* → still
+    # hard) — the S1-chunk summary duplicate must not flip a transient
+    # chunk failure to hard.
 })
 
 #: #1747: eval-failure classes that are transient-safe — the retry budget
@@ -79,12 +83,17 @@ RECOVERABLE_CENSUS_CLASSES = frozenset({
 #: vetoed. EXACT site-prefixed strings (errors.py emits
 #: ``<site>:retries_exhausted`` for transient/unknown burns; ``ingest`` is
 #: bare and permanent): a tampered suffix (``evil:retries_exhausted``) must
-#: NOT match (fail-closed, security review). Everything else (``:fatal`` /
+#: NOT match (fail-closed, security review). #1776: ingest-site transients
+#: grade ``ingest:retries_exhausted`` (recoverable — a single FalkorDB/
+#: network blip during ingest must not veto the whole run at any
+#: threshold), while structurally-fatal/parse ingest failures stay bare
+#: ``ingest`` (hard veto, excluded here). Everything else (``:fatal`` /
 #: ``:fatal_config`` / ``:parse`` — a local decode bug — / bare ``ingest`` /
 #: unclassified) is PERMANENT → hard veto.
 RECOVERABLE_EVAL_FAILURE_CLASSES = frozenset({
     "reader:retries_exhausted",
     "judge:retries_exhausted",
+    "ingest:retries_exhausted",  # #1776: transient-class ingest failures
 })
 
 
@@ -590,8 +599,9 @@ def build_report(
         n_attempted — a dropped run plus one recoverable failure entry must
         not certify);
         recoverable classes (parse_error / truncated / truncated_parse_error
-        / partial_parse / transient_*, plus reader/judge:retries_exhausted
-        eval failures) are rate-limited (a healthy 500-Q run
+        / partial_parse / transient_* / s1_chunk_summary, plus
+        reader/judge/ingest:
+        retries_exhausted eval failures) are rate-limited (a healthy 500-Q run
         admits a handful — the OLD binary ``len(errors)==0`` per-question
         invalid made ``valid=true`` unreachable at scale); hard classes
         (fatal_* / ingest / unknown census classes, non-census error strings
@@ -865,7 +875,8 @@ def build_report(
     #                error string with an empty census (structural
     #                degradation) → VETOES the run at any threshold
     #   recoverable — only parse_error/truncated/truncated_parse_error/
-    #                partial_parse/transient_* classes with the runner flag
+    #                partial_parse/transient_*/s1_chunk_summary classes with
+    #                the runner flag
     #                valid=False → INVALID but rate-limited (threshold)
     #   clean      — no error signal; a recoverable-only census with the
     #                runner flag valid=True also grades clean (drift-pin:
@@ -874,7 +885,7 @@ def build_report(
     #                authority on whether error strings exist)
     # Eval ``failures`` are graded by their exact site-prefixed class:
     # permanent (fatal/fatal_config/parse/ingest) → hard veto;
-    # transient-safe (reader/judge:retries_exhausted) → recoverable.
+    # transient-safe (reader/judge/ingest:retries_exhausted) → recoverable.
     # Grading by qid (not per-entry) makes the invariant
     # n_hard_invalid + n_recoverable_invalid == n_invalid hold BY
     # CONSTRUCTION for every input — including the concurrent
@@ -1069,6 +1080,17 @@ def build_report(
                        for s in acc):
                 acc.append(stored)
     error_census = dict(sorted(census.items(), key=lambda kv: str(kv[0])))
+    # #1746 (D7): the warning-only truncation readout — every truncated
+    # question is either in an error class (invalid) or listed here
+    # (criterion 3 structural: no UNRECORDED truncation with valid=true).
+    # Grade-based (``_outcome_grade == "clean"``) so the readout agrees
+    # with the report's own verdict semantics (a malformed valid flag never
+    # launders a question into the list); legacy checkpoints without llm
+    # telemetry project None → ``or 0`` keeps them excluded.
+    truncated_valid_qids = [
+        o.get("question_id") for o in outcomes
+        if (o.get("llm_truncated") or 0) > 0 and _outcome_grade(o) == "clean"
+    ]
     checks = [
         "python >= 3.12 guard enforced at run entry",
         "dataset loaded and recall-semantics audited",
@@ -1120,6 +1142,13 @@ def build_report(
         "error_census_malformed": (dict(sorted(malformed_census.items(),
                                                 key=lambda kv: str(kv[0])))
                                     if malformed_census else {}),
+        # #1746 (D7): warning-only — a truncated question with no error
+        # classes is LISTED here (never in ``error_census``; ``valid``
+        # unaffected). A non-empty list is a #1747-flagged observation
+        # (benign truncation recovered by the ladder is legitimate), never
+        # a close-blocker by itself.
+        "truncated_valid_qids": truncated_valid_qids,
+        "n_truncated_valid": len(truncated_valid_qids),
         "criterion": (
             "#1747 census-class-aware: valid = (n_hard_invalid == 0) AND "
             "(n_excluded_hard == 0) AND (invalid_rate <= threshold) AND "
@@ -1137,9 +1166,9 @@ def build_report(
             "breaker_open drops) with a hard census still veto "
             "(n_excluded_hard); "
             "recoverable = parse_error/truncated/truncated_parse_error/"
-            "partial_parse/transient_* census classes + "
-            "reader/judge:retries_exhausted eval failures (rate-limited, "
-            "not vetoed)"
+            "partial_parse/transient_*/s1_chunk_summary census classes + "
+            "reader/judge/ingest:retries_exhausted eval failures "
+            "(rate-limited, not vetoed)"
         ),
         "checks": checks,
     }

@@ -183,6 +183,15 @@ class DeepSeekDirectModel(OpenRouterModel):
         cap = self.max_tokens if max_tokens is None else max_tokens
         if cap is not None:
             body["max_tokens"] = cap
+        # #1746 (D6): JSON-mode parity on the DIRECT path — mirrors
+        # OpenRouterModel (the pilot's direct route ran WITHOUT it — H1, the
+        # untested lever). Toggle: TORTOISE_JSON_MODE=0 disables. DeepSeek's
+        # "json"+example requirement is already satisfied by the S2/S4
+        # prompts ("JSON object" + OUTPUT_CONTRACT example). NOTE: JSON mode
+        # does NOT fix truncation (breaks at max_tokens) — the parse ladder
+        # is the truncation pairing; no cap raise in #1746.
+        if os.environ.get("TORTOISE_JSON_MODE", "1") == "1":
+            body["response_format"] = {"type": "json_object"}
         r = self._session.post(
             self.base_url,
             headers={"Authorization": f"Bearer {self.api_key}",
