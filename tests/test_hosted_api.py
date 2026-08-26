@@ -1667,7 +1667,9 @@ def test_register_journals_minted_team_graph(tmp_path, monkeypatch):
     TORTOISE_DB_PATH → the register handler constructs embedded; a temp
     journal env makes the membership assertion exact. No docker needed."""
     import os as _os
+
     from fastapi.testclient import TestClient
+
     from tests._embedded import _read_journal_file
     from tortoise.hosted_api import app
 

@@ -200,7 +200,7 @@ def _record_current_test_stem(stem: str | None) -> None:
         return  # prod parity: no attribution outside a test session
     cur = threading.current_thread()
     if stem is None:
-        try:
+        try:  # noqa: SIM105
             del cur._tortoise_test_stem
         except AttributeError:
             pass
@@ -225,7 +225,7 @@ def _thread_start_inherit_stem(self, *args, **kwargs):
     stamp (AttributeError swallowed) and fall back to frame resolution."""
     parent_stem = _inherited_test_stem()
     if parent_stem is not None and _TEST_SESSION_ACTIVE:
-        try:
+        try:  # noqa: SIM105
             self._tortoise_test_stem = parent_stem
         except AttributeError:
             pass
