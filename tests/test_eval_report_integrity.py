@@ -34,6 +34,7 @@ production shape; the breakdown rides in the additive ``n_hard_invalid`` /
 from __future__ import annotations
 
 import sys
+import math
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -1043,8 +1044,13 @@ def test_report_integrity_huge_int_magnitude_excluded_no_crash():
     bool / float-finiteness checks and then ``float(v)`` raises
     OverflowError mid-report — build_report aborts before any report is
     written and every resume crashes on the retained poisoned value. The
-    magnitude bound mirrors the float-finiteness posture: abs(v) > 1e308 is
-    EXCLUDED (counted in n_excluded), never converted, never crashed on.
+    magnitude bound mirrors the float-finiteness posture: abs(v) > 1e300 is
+    EXCLUDED (counted in n_excluded), never converted, never crashed on
+    (round-18: tightened from 1e308 to 1e300 so an n-way sum of accepted
+    values stays finite — 10**308 passes the per-value check but two such
+    outcomes sum past float max and _json_safe SILENTLY nulls the mean).
+    answer_string_evidence_recall@k is covered too (round-18 gate review
+    fix — previously an uncovered aggregation seam).
     """
     # a 400-digit int in pool_size: outcome excluded, report builds, no crash.
     bad = _outcome("q0", valid=True)
@@ -1069,6 +1075,22 @@ def test_report_integrity_huge_int_magnitude_excluded_no_crash():
                     threshold=1.0)["integrity"]
     assert integ["n_excluded"] == 1
     assert integ["valid"] is True
+    # round-18 fix (gate review cycle 2): answer_string_evidence_recall@k was
+    # NOT covered by the shape filter — a 400-digit int in it passed and
+    # OverflowError'd the aggregation (build_report aborts; every resume
+    # re-crashes on the retained poisoned value). Now excluded like the other
+    # recall dicts.
+    bad = _outcome("q0", valid=True)
+    bad["answer_string_evidence_recall@k"] = {"5": 10 ** 400}
+    integ = _report([bad, _outcome("q1", valid=True)],
+                    threshold=1.0)["integrity"]
+    assert integ["n_excluded"] == 1
+    assert integ["n_attempted"] == 1
+    assert integ["valid"] is True
+    # ... and the published report carries NO answer_string_recall aggregate
+    # (the poisoned outcome was excluded, nothing fabricated).
+    report = _report([bad, _outcome("q1", valid=True)], threshold=1.0)
+    assert report.get("answer_string_recall") is None
     # a huge int co-occurring with a hard census class still VETOES via
     # n_excluded_hard (the hard-grade path is unchanged by the exclusion).
     bad = _outcome("q0", valid=True)
@@ -1086,13 +1108,35 @@ def test_report_integrity_huge_int_magnitude_excluded_no_crash():
     report = _report([bad], threshold=1.0)
     assert report["n_questions"] == 0
     assert report["integrity"]["valid"] is False
-    # boundary: 10**308 (≤ the 1e308 bound) still aggregates — no over-zealous
-    # exclusion of legitimate huge-but-convertible ints.
+    # boundary (round-18 fix, gate review cycle 2): the magnitude bound is
+    # tightened from 1e308 to 1e300 for SUM-safety — 10**308 passes the old
+    # per-value check, but TWO such outcomes sum past float max
+    # (2e308 > 1.797e308) to inf, which round() propagates and _json_safe
+    # SILENTLY nulls (valid=True, n_excluded=0 — the PR's "never silent"
+    # principle). 10**300 (the new edge) still aggregates, and any n-way sum
+    # of accepted values stays finite.
     ok = _outcome("q0", valid=True)
-    ok["pool_size"] = 10 ** 308
+    ok["pool_size"] = 10 ** 300
     integ = _report([ok], threshold=1.0)["integrity"]
     assert integ["n_excluded"] == 0
     assert integ["n_attempted"] == 1
+    assert integ["valid"] is True
+    # two outcomes at the new bound edge: the MEAN is finite (not null, not
+    # inf) — sum-safety is what the tightened bound buys.
+    a, b = _outcome("q0", valid=True), _outcome("q1", valid=True)
+    a["pool_size"] = 10 ** 300
+    b["pool_size"] = 10 ** 300
+    report = _report([a, b], threshold=1.0)
+    mean = report["pool_size"]["mean"]
+    assert mean is not None and not math.isinf(mean) and not math.isnan(mean)
+    assert report["integrity"]["n_excluded"] == 0
+    assert report["integrity"]["valid"] is True
+    # a value ABOVE the new bound is still excluded.
+    bad = _outcome("q0", valid=True)
+    bad["pool_size"] = 10 ** 301
+    integ = _report([bad, _outcome("q1", valid=True)],
+                    threshold=1.0)["integrity"]
+    assert integ["n_excluded"] == 1
     assert integ["valid"] is True
 
 

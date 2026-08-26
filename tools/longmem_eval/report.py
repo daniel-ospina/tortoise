@@ -196,10 +196,20 @@ def _numeric(v: Any) -> bool:
     mid-report — a multi-hour run aborts before any report is written and
     every resume crashes on the retained poisoned value; the magnitude bound
     mirrors the float-finiteness posture: abs(v) > 1e308 (beyond the largest
-    finite float ~1.797e308) is excluded, never converted)."""
+    finite float ~1.797e308) is excluded, never converted). The bound is
+    tightened to 1e300 for SUM-safety (round-18 code-review P2): the 1e308
+    bound prevented the per-value float(v) OverflowError but NOT
+    float-ARITHMETIC overflow at the sum sites — two accepted 10**308 values
+    sum past float max (2e308 > 1.797e308) to inf, which round() propagates
+    and _json_safe SILENTLY nulls in the published mean with valid=True
+    and n_excluded=0 (the PR's own 'never silent' principle). Excluding
+    abs(v) > 1e300 keeps every n-way sum finite (any realistic outcome
+    count: n x 1e300 << 1.797e308), so an accepted value can never overflow
+    an aggregation to inf; values above the bound are excluded, never
+    converted)."""
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         return False
-    if isinstance(v, int) and abs(v) > 1e308:
+    if isinstance(v, int) and abs(v) > 1e300:
         return False
     return not (isinstance(v, float) and not math.isfinite(v))
 
@@ -340,6 +350,7 @@ def _outcome_shape_ok(o: dict[str, Any], *,
             and _recall_dict(o.get("evidence_recall@k"))
             and _recall_dict(o.get("chunk_evidence_recall@k"))
             and _recall_dict(o.get("evidence_retrieved@k"))
+            and _recall_dict(o.get("answer_string_evidence_recall@k"))
             and (o.get("context_tokens") is not None
                  and _num(o.get("context_tokens")))
             and (o.get("context_point_count") is not None
