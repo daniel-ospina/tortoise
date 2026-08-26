@@ -10765,7 +10765,7 @@ class TortoiseSDK:
     # ── Control Plane: Team CRUD ───────────────────────────────────
 
     def team_create(self, name: str, *, idempotency_key: str | None = None,
-                    mint_key: bool = True) -> dict:
+                    mint_key: bool = True, owner_user_id: str | None = None) -> dict:
         """Create a team with its own graph namespace.
 
         Writes to the control_plane registry graph. Creates a tenant
@@ -10781,6 +10781,14 @@ class TortoiseSDK:
         session-key mint (apikey_create / POST /v1/session/key). A minted
         key whose plaintext is never returned is an unrecoverable dead
         credential.
+
+        owner_user_id (#1748, onboarding sub-team parity): when set, the
+        user becomes an OWNER member (Membership role=owner/status=active,
+        the registry twin of provision_team's membership upsert) so the
+        keyless team is reachable by session-key mint / team list / owner
+        delete. Without it a keyless team has NO membership — an unmintable,
+        undeletable orphan. Default None = no membership (back-compat for
+        CLI/MCP/embedded callers with no user context).
 
         #765 (plan Task 8 — SDK control-plane backend env-gated): the SDK
         control-plane backend stays REGISTRY-BACKED — the
@@ -10884,6 +10892,14 @@ class TortoiseSDK:
             )
             # Graph node (team→graph 1:N, product ontology): the default graph
             self._graph_create(tid, "default", kind="default", namespace=graph_name)
+            # #1748: the owner Membership for the session user — INSIDE the
+            # rollback-protected try so a membership failure tears the Team
+            # node down (a keyless team with no membership is an unmintable,
+            # undeletable orphan). Mirrors the Supabase provision_team
+            # membership upsert (role=owner, status=active, user_id=session
+            # user) and membership_create (BELONGS_TO edge).
+            if owner_user_id:
+                self.membership_create(tid, owner_user_id, "owner")
         except Exception:
             try:  # noqa: SIM105
                 reg.query("MATCH (t:Team {id:$id}) DETACH DELETE t",
