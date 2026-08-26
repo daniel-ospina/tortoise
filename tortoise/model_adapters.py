@@ -34,6 +34,7 @@ Taxonomy contract (M2/M3 import these — do not fork):
 """
 from __future__ import annotations
 
+import contextlib
 import enum
 import errno
 import os
@@ -471,6 +472,17 @@ class RoutingModel:
             self.route = adapter.provider
             self.failover_used = True
         return out
+
+    def close(self) -> None:
+        """Close the inner adapters (deadline interrupt — mirrors
+        RotatingModel.close; RoutingModel was missed by the #1655 fix)."""
+        for adapter in (self.primary, self.fallback):
+            if adapter is None:
+                continue
+            close = getattr(adapter, "close", None)
+            if close is not None:
+                with contextlib.suppress(Exception):
+                    close()
 
 
 def _strip_family_prefix(model_id: str) -> str:

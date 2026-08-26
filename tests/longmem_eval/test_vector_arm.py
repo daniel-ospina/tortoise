@@ -984,6 +984,28 @@ def test_build_cli_extractor_model_fingerprints_serving_config(monkeypatch):
                         inner.close()
 
 
+def test_run_evaluation_refuses_fingerprint_served_mismatch_at_session_workers(
+        tmp_path, monkeypatch):
+    """M7 #1739 / #1742: with ``session_workers > 1``, run_evaluation
+    refuses a spec'd extractor_model whose fingerprint does not match the
+    worker-factory config (a programmatic caller forgetting the resolved
+    session_worker_* trio would otherwise fingerprint one config and serve
+    another — a checkpoint accepted on resume over results produced by a
+    different model). The guard fires BEFORE the question loop (no
+    network)."""
+    _pin_extractor_env(monkeypatch, keys=())
+    extractor = MODELS["deepseek-v4-pro"]()
+    try:
+        with pytest.raises(ValueError, match="worker-factory config"):
+            runner.run_evaluation(
+                _mini()[:1], reader=MockReader(), judge=MockJudge(),
+                ks=(5,), top_k=5, split="s", work_dir=str(tmp_path),
+                ingest_mode="v2", extractor_model=extractor,
+                session_workers=2)
+    finally:
+        extractor.close()
+
+
 def test_model_id_wrapper_shape_discriminates_routing_vs_rotating():
     """M7 #1739 (code-review hardening): a failover RoutingModel and a
     rotation pool over the SAME members are different effective configs —

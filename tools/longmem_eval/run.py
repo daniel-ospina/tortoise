@@ -1029,6 +1029,29 @@ def run_evaluation(
     # E2E-3 Precondition 2: the audit is computed from the loaded instances
     # BEFORE anything else — no report can be produced without it.
     dataset_semantics_audit = audit_dataset(instances)
+    # M7 #1739 / #1742: the session-parallel worker factory must serve
+    # EXACTLY the fingerprinted config — a programmatic caller passing a
+    # spec'd extractor_model with session_workers > 1 but forgetting the
+    # resolved session_worker_* trio would fingerprint one config while the
+    # workers served another (the checkpoint would be accepted on resume
+    # over results produced by a different model). Fail loud on mismatch.
+    if session_workers > 1:
+        from tests.model_adapters import build_extractor_model
+        served = build_extractor_model(
+            session_worker_model_spec or None,
+            max_tokens=session_worker_max_tokens,
+            temperature=session_worker_temperature)
+        try:
+            if _model_id(extractor_model) != _model_id(served):
+                raise ValueError(
+                    "session_workers > 1 requires the worker-factory config "
+                    "(session_worker_model_spec / max_tokens / temperature) "
+                    "to match the fingerprinted extractor_model — pass the "
+                    "resolved session_worker_* args (see "
+                    "_build_cli_extractor_model); refusing fingerprint- vs "
+                    "served-config divergence")
+        finally:
+            served.close()
     # R6 (#1545) D9: the effective rerank config resolves once, before the
     # loop — the fingerprint records it and refuses config-mismatched
     # resumes (three-valued resume: equal → allowed; different → refused;
