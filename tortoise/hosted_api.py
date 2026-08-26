@@ -4882,8 +4882,8 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             "RETURN o.id, o.name LIMIT 1",
             params={"ref": sr.superseded}).result_set
         if not rows:
-            logger.warning("supersession ref %r not found in the graph — "  # noqa: F821
-                           "skipped (fail-open)", sr.superseded)
+            _logger.warning("supersession ref %r not found in the graph — "
+                            "skipped (fail-open)", sr.superseded)
             continue
         obj_id, obj_name = rows[0]
         try:
@@ -4901,8 +4901,8 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 "id": obj_id, "name": obj_name,
                 "supersedes_by": sr.supersedes_by})
         except Exception as e:
-            logger.warning("ObjectSuperseded emit failed for %r: %s",  # noqa: F821
-                           obj_name, e)
+            _logger.warning("ObjectSuperseded emit failed for %r: %s",
+                            obj_name, e)
 
     for pr in reconcile.points:
         pid = pr.point.id if pr.action != "supersede" else pr.supersede_id
