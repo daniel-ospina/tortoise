@@ -813,41 +813,46 @@ def test_model_id_wrapper_path_stable_no_address(monkeypatch):
     Post-fix ``_model_id`` composes the member adapters structurally
     (``provider:wire-id``, joined by ``+``): deterministic, never
     address-bearing, IDENTICAL across fresh instances. Pinned: 1-provider
-    RoutingModel (no keys), 2-provider RoutingModel (deepseek+openrouter:
-    primary deepseek-direct + openrouter fallback) AND its non-alphabetical
-    mirror (explicit openrouter primary — discriminates the (primary,
-    fallback) join order from a sorted join), 3-provider RotatingModel
-    (members SORTED by provider — pool order is a routing detail, so the
-    joined literal is exact-pinnable), plus tuned wrappers (max_tokens,
-    temperature) proving the member tuning suffix rides the wrapper
-    composition. Constructing adapters is offline (requests.Session only)."""
+    RoutingModel (no keys — emits the BARE member fingerprint, comparable
+    to the equivalent bare MODELS entry), 2-provider RoutingModel
+    (deepseek+openrouter: primary deepseek-direct + openrouter fallback,
+    shape-prefixed ``routing:``) AND its non-alphabetical mirror (explicit
+    openrouter primary — discriminates the (primary, fallback) join order
+    from a sorted join), 3-provider RotatingModel (members SORTED by
+    provider, shape-prefixed ``rotating:`` — pool order is a routing
+    detail, so the joined literal is exact-pinnable), plus tuned wrappers
+    (max_tokens, temperature) proving the member tuning suffix rides the
+    wrapper composition. Constructing adapters is offline
+    (requests.Session only)."""
     shapes = [
         dict(keys=(), max_tokens=None, temperature=0.0,
              cls=RoutingModel,
-             expected="openrouter:deepseek/deepseek-v4-flash"),
+             expected="deepseek/deepseek-v4-flash"),
         dict(keys=("deepseek", "openrouter"), max_tokens=None,
              temperature=0.0, cls=RoutingModel,
-             expected=("deepseek-direct:deepseek-chat"
+             expected=("routing:deepseek-direct:deepseek-chat"
                        "+openrouter:deepseek/deepseek-v4-flash")),
         dict(provider="openrouter", keys=("deepseek", "openrouter"),
              max_tokens=None, temperature=0.0, cls=RoutingModel,
              # non-alphabetical primary: a sorted-join regression would flip
              # the members (deepseek-direct < openrouter), changing this
              # literal — order IS effective config for RoutingModel
-             expected=("openrouter:deepseek/deepseek-v4-flash"
+             expected=("routing:openrouter:deepseek/deepseek-v4-flash"
                        "+deepseek-direct:deepseek-chat")),
         dict(keys=("deepseek", "openrouter", "venice"), max_tokens=None,
              temperature=0.0, cls=RotatingModel,
-             expected=("deepseek-direct:deepseek-chat"
+             expected=("rotating:deepseek-direct:deepseek-chat"
                        "+openrouter:deepseek/deepseek-v4-flash"
                        "+venice:deepseek-v4-flash")),
-        # tuning rides the wrapper composition too (member suffixes) — the
-        # ingest_v2 session-worker model_factory builds wrappers at
-        # max_tokens=4000, so real wrapper fingerprints carry the suffix
+        # tuning rides the wrapper composition too (member suffixes) — a
+        # tuned run-level build (any non-default max_tokens/temperature)
+        # must fingerprint differently from the uncapped one; the ingest_v2
+        # session-worker factory builds at max_tokens=4000 (see the
+        # session_workers caveat in _build_fingerprint)
         dict(keys=(), max_tokens=500, temperature=0.0, cls=RoutingModel,
-             expected="openrouter:deepseek/deepseek-v4-flash|max_tokens=500"),
+             expected="deepseek/deepseek-v4-flash|max_tokens=500"),
         dict(keys=(), max_tokens=500, temperature=0.5, cls=RoutingModel,
-             expected=("openrouter:deepseek/deepseek-v4-flash"
+             expected=("deepseek/deepseek-v4-flash"
                        "|max_tokens=500|temperature=0.5")),
     ]
     for shape in shapes:
@@ -882,6 +887,40 @@ def test_model_id_wrapper_path_stable_no_address(monkeypatch):
                                   getattr(m, "fallback", None)):
                         if inner is not None:
                             inner.close()
+
+
+def test_model_id_wrapper_shape_discriminates_routing_vs_rotating():
+    """M7 #1739 (code-review hardening): a failover RoutingModel and a
+    rotation pool over the SAME members are different effective configs —
+    the shape-prefixed composition (``routing:`` vs ``rotating:``) must
+    keep them apart (a plain ``provider:wire-id`` join would fingerprint
+    them identically and silently accept a cross-shape resume). Also pins
+    the single-lane rule: a 1-member wrapper emits the bare member
+    fingerprint, so the default path compares against the equivalent bare
+    MODELS entry (the #1732 single-adapter contract)."""
+    adapters = []
+    try:
+        adapters.append(OpenRouterModel("deepseek/deepseek-v4-flash"))
+        adapters.append(DeepSeekDirectModel("deepseek-chat"))
+        a, b = adapters
+        routing = RoutingModel(a, b)
+        rotating = RotatingModel([a, b])
+        fp_routing = runner._model_id(routing)
+        fp_rotating = runner._model_id(rotating)
+        assert fp_routing == (
+            "routing:openrouter:deepseek/deepseek-v4-flash"
+            "+deepseek-direct:deepseek-chat")
+        assert fp_rotating == (
+            "rotating:deepseek-direct:deepseek-chat"
+            "+openrouter:deepseek/deepseek-v4-flash")
+        assert fp_routing != fp_rotating
+        # single-lane wrapper → bare member fingerprint
+        single = RoutingModel(a, None)
+        assert runner._model_id(single) == "deepseek/deepseek-v4-flash"
+        assert runner._model_id(single) == runner._model_id(a)
+    finally:
+        for m in adapters:
+            m.close()
 
 
 def test_model_id_tuning_variants_discriminate():
