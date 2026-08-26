@@ -257,7 +257,10 @@ The report is self-explanatory: every run prints and persists
   threshold AND zero hard-failure questions — fatal_*/ingest/unknown/non-
   census-error-string (empty-census)/permanent-eval-failure questions, and
   malformed inputs (present non-bool `valid`, non-iterable or non-str
-  `error_classes`) fail closed to hard and veto at any threshold),
+  `error_classes`, falsy-but-present `error_classes`) fail closed to hard
+  and veto at any threshold; a shape-broken dict outcome excluded from the
+  means still vetoes when it carries a hard census class — malformed shapes
+  cannot launder a fatal class out of the gate),
   `n_attempted` / `n_valid` / `n_invalid`, `invalid_rate` (invalid = a
   failed question OR a completed question with error-class/extraction-error
   signals; recoverable classes — parse_error/truncated/

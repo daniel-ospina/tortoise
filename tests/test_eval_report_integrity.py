@@ -695,10 +695,11 @@ def test_report_integrity_malformed_dict_outcome_dropped():
     integ = _report([bad, _outcome("q1", valid=True)], threshold=0.5)["integrity"]
     assert integ["n_attempted"] == 1
     assert integ["valid"] is True
-    # extended shape whitelist (security-review P1, 14 crash shapes):
-    # non-numeric latency / pool_size / ndcg, non-dict leg_mix, list
-    # question_type, non-numeric recall values, None/missing context and
-    # recall dicts — all excluded, never crash.
+    # extended shape whitelist (security-review P1): non-numeric latency /
+    # pool_size / ndcg, non-dict leg_mix, list question_type, non-numeric
+    # recall values, None/missing context and recall dicts, None leg_mix
+    # values, None ingest evidence keys, malformed rerank_pass fields — all
+    # excluded, never crash.
     for mutate in (
             lambda o: o.__setitem__("retrieval_latency_ms", "slow"),
             lambda o: o.__setitem__("pool_size", "big"),
@@ -715,7 +716,21 @@ def test_report_integrity_malformed_dict_outcome_dropped():
             lambda o: o.__setitem__("context_tokens", None),
             lambda o: o.pop("context_tokens"),
             lambda o: o.pop("context_point_count"),
+            lambda o: o.pop("question_id"),
             lambda o: o["session_recall@k"].__setitem__("5", None),
+            # round-7 families: None leg_mix value, None ingest evidence
+            lambda o: o.__setitem__("leg_mix", {"tfidf": None}),
+            lambda o: o.__setitem__("ingest", {"evidence_turns": None,
+                                               "evidence_points": 5}),
+            lambda o: o.__setitem__("rerank_pass",
+                                    {"applied": True,
+                                     "max_session_chunks": "abc"}),
+            lambda o: o.__setitem__("rerank_pass",
+                                    {"applied": False,
+                                     "degrade_reason": ["x"]}),
+            lambda o: o.__setitem__("rerank_pass",
+                                    {"applied": True,
+                                     "pool_recall@k": {"session": 5.0}}),
     ):
         o = _outcome("q0", valid=True)
         mutate(o)
@@ -731,13 +746,84 @@ def test_report_integrity_malformed_dict_outcome_dropped():
                     threshold=0.5)["integrity"]
     assert integ["n_attempted"] == 2
     assert integ["valid"] is True
-    # n_excluded surfaces the shape-filter drops (never a silent shrink).
+    # n_excluded counts BOTH non-dict junk AND shape-broken dicts.
     bad = _outcome("q0", valid=True)
     bad["pool_size"] = "big"
-    integ = _report([bad, _outcome("q1", valid=True)],
+    integ = _report([bad, _outcome("q1", valid=True), "junk", 42],
                     threshold=0.5)["integrity"]
-    assert integ["n_excluded"] == 1
+    assert integ["n_excluded"] == 3
     assert integ["n_attempted"] == 1
+
+
+def test_report_integrity_shape_broken_outcome_with_hard_census_vetoes():
+    """#1747 (security-review P1, veto-escape): a shape-broken outcome (e.g.
+    a truncated checkpoint that lost a recall/context key) carrying a HARD
+    census class is excluded from the means AND the attempted set (its shape
+    is untrusted — n_excluded surfaces the shrink), but its hard grade still
+    VETOES the run: malformed shapes cannot launder a fatal class out of the
+    gate. The census still records the fatal class as evidence."""
+    o = _outcome("q0", valid=False)
+    o["error_classes"] = {"fatal_402_billing": 1}
+    del o["context_tokens"]
+    integ = _report([o, _outcome("q1", valid=True)],
+                    threshold=1.0)["integrity"]
+    assert integ["n_excluded"] == 1
+    assert integ["n_attempted"] == 1        # excluded from the attempted set
+    assert integ["n_hard_invalid"] == 0     # ... yet the hard grade VETOES
+    assert integ["valid"] is False          # veto fires on the malformed outcome
+    assert integ["error_census"]["fatal_402_billing"] == 1  # evidence kept
+
+
+def test_report_integrity_rerank_run_malformed_pool_recall_no_crash():
+    """#1747 (round-7 finding 5): on a RERANK run (rerank_config set), a
+    malformed rerank_pass.pool_recall@k — non-dict per-level values, a list,
+    or a string (truncated checkpoint) — must be excluded, never crash the
+    rerank aggregation (`cr.get(level).items()` on a float/list = the round-7
+    AttributeError). A well-formed pool_recall@k still aggregates."""
+    rerank_config = {"enabled": True, "model": "x", "lambda_": 0.7,
+                     "per_session_cap": 2, "pool_size": 40, "prewarmed": True}
+    for pr in ({"session": 5.0}, {"session": [1, 2]}, [1, 2], "oops"):
+        o = _outcome("q0", valid=True)
+        o["rerank_pass"] = {"applied": True, "pool_recall@k": pr}
+        integ = build_report(
+            [o, _outcome("q1", valid=True)],
+            dataset_id="xiaowu0162/longmemeval-cleaned", split="s",
+            reader_model="mock-reader", judge_model="mock-judge",
+            extraction_approach="deterministic session ingestion",
+            ingest_mode="deterministic", ks=(5,), top_k=5,
+            dataset_semantics_audit=_audit(), integrity_threshold=0.5,
+            rerank_config=rerank_config)["integrity"]
+        assert integ["n_attempted"] == 1, f"shape not excluded: {pr!r}"
+        assert integ["n_excluded"] == 1
+        assert integ["valid"] is True
+    # well-formed pool_recall@k on a rerank run still aggregates (no exclusion)
+    o = _outcome("q0", valid=True)
+    o["rerank_pass"] = {"applied": True,
+                         "pool_recall@k": {"session": {"5": 1.0},
+                                            "turn": {"5": 0.5}}}
+    r = build_report(
+        [o, _outcome("q1", valid=True)],
+        dataset_id="xiaowu0162/longmemeval-cleaned", split="s",
+        reader_model="mock-reader", judge_model="mock-judge",
+        extraction_approach="deterministic session ingestion",
+        ingest_mode="deterministic", ks=(5,), top_k=5,
+        dataset_semantics_audit=_audit(), integrity_threshold=0.5,
+        rerank_config=rerank_config)
+    assert r["retrieval"]["rerank"]["pool_recall_mean@k"]["session"]["5"] == 1.0
+    assert r["retrieval"]["rerank"]["pool_recall_mean@k"]["turn"]["5"] == 0.5
+
+
+def test_report_integrity_falsy_error_classes_fail_closed():
+    """#1747 (security review): a PRESENT but falsy error_classes value
+    (0 / "" / False — malformed checkpoint JSON) fails CLOSED to hard like
+    any other non-dict/non-list shape — only a MISSING key (None) means
+    "no census"."""
+    for bad in (0, "", False):
+        o = _outcome("q0", valid=True)
+        o["error_classes"] = bad  # bypass the helper's `or {}` collapse
+        integ = _report([o], threshold=1.0)["integrity"]
+        assert integ["n_hard_invalid"] == 1, f"{bad!r} not graded hard"
+        assert integ["valid"] is False
 
 
 def test_report_integrity_missing_qid_failures_not_merged():
