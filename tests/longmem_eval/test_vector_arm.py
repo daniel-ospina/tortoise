@@ -918,6 +918,22 @@ def test_model_id_wrapper_shape_discriminates_routing_vs_rotating():
         single = RoutingModel(a, None)
         assert runner._model_id(single) == "deepseek/deepseek-v4-flash"
         assert runner._model_id(single) == runner._model_id(a)
+        # max_tokens=0 is a REAL cap (not the uncapped None default) — it
+        # must ride the fingerprint (pins the is-not-None omission rule)
+        capped = OpenRouterModel("deepseek/deepseek-v4-flash", max_tokens=0)
+        uncapped = OpenRouterModel("deepseek/deepseek-v4-flash")
+        assert runner._model_id(capped) == (
+            "deepseek/deepseek-v4-flash|max_tokens=0")
+        assert runner._model_id(uncapped) == "deepseek/deepseek-v4-flash"
+        assert runner._model_id(capped) != runner._model_id(uncapped)
+        # memberless wrapper (defensive guard) → None, never an empty string
+        empty_routing = object.__new__(RoutingModel)
+        empty_routing.primary = None
+        empty_routing.fallback = None
+        empty_rotating = object.__new__(RotatingModel)
+        empty_rotating.providers = []
+        assert runner._model_id(empty_routing) is None
+        assert runner._model_id(empty_rotating) is None
     finally:
         for m in adapters:
             m.close()

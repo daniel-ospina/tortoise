@@ -555,10 +555,11 @@ def _adapter_fingerprint(model: Any) -> str:
             break
     else:
         warnings.warn(
-            f"_model_id: {type(model).__name__} has neither .model_id nor "
-            ".id — fingerprint falls back to repr(model) (address-bearing, "
-            "non-deterministic across processes); give the adapter a stable "
-            "id to keep the checkpoint-resume contract", stacklevel=2)
+            f"model fingerprint: {type(model).__name__} has neither "
+            ".model_id nor .id — fingerprint falls back to repr(model) "
+            "(address-bearing, non-deterministic across processes); give "
+            "the adapter a stable id to keep the checkpoint-resume "
+            "contract", stacklevel=2)
         return repr(model)  # last resort (never for production adapters)
     parts = [mid]
     for attr in _TUNING_FINGERPRINT_ATTRS:
