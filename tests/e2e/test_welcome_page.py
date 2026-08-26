@@ -17,22 +17,150 @@ Run:  python -m pytest tests/e2e/ -q
 Env:   WELCOME_URL overrides the target (default https://tortoise.premiselabs.co/welcome)
        SUPABASE_URL/SUPABASE_SERVICE_KEY enable the live no-429 signup smoke
        (skipped by default — no creds in CI; see #801).
+
+#1721: the playwright fixtures are re-declared here at MODULE scope (they
+# override pytest-playwright's session-scoped ones for this file only) — the
+# root-cause fix for the full-suite asyncio event-loop cascade (see the
+# "module-scoped playwright chain" block below).
 """
+
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
+import tempfile
 import time
 import uuid
+from collections.abc import Callable, Generator
+from typing import Any
 
 import pytest
-from playwright.sync_api import Page, expect
+from playwright.sync_api import (
+    Browser,
+    BrowserType,
+    Page,
+    Playwright,
+    expect,
+    sync_playwright,
+)
 
 # Canonical host for the auth surface is tortoise.premiselabs.co (host
 # consolidation 2026-08-17: premiselabs.co 301s /welcome → the tortoise host).
 WELCOME_URL = os.environ.get("WELCOME_URL", "https://tortoise.premiselabs.co/welcome")
 PROMPT_URL = os.environ.get("PROMPT_URL", "https://premiselabs.co/onboarding-prompt.md")
+
+# ── #1721: module-scoped playwright chain (root-cause fix) ─────────────
+# pytest-playwright's `playwright` fixture is SESSION-scoped. Playwright's
+# sync API (playwright/sync_api/_context_manager.py __enter__) owns a private
+# asyncio loop and parks its dispatcher greenlet mid-run_until_complete; while
+# parked, `loop._running` stays True and asyncio._set_running_loop(loop) is
+# live on the main thread's thread-local. With a session-scoped fixture the
+# loop stays "running" from this module's first page use until SESSION end —
+# so in a full-suite run (`pytest tests/`, which collects tests/e2e/ early)
+# every later test that calls asyncio.run() (test_abuse TestTurnstile,
+# test_agent_signup, ...) dies with "asyncio.run() cannot be called from a
+# running event loop" and every @pytest.mark.asyncio test (test_client_ip_
+# middleware, ...) dies with "Runner.run() cannot be called from a running
+# event loop" — the order-dependent cascade of #1721.
+#
+# sync_playwright().stop() (__exit__) closes the loop and clears the
+# thread-local running loop, so owning playwright per MODULE bounds the parked
+# loop to this file: after the module finishes, the main thread is clean and
+# the rest of the suite runs without the cascade. Fixtures defined in a test
+# module override plugin fixtures with the same name for that module only —
+# the hosted / legal / signup-form e2e suites keep the plugin's session scope.
+# The mirrors below match pytest_playwright's definitions 1:1 (scope module).
+
+
+@pytest.fixture(scope="module")
+def playwright() -> Generator[Playwright, None, None]:
+    # Guard (review P1, #1721): if an EARLIER opt-in e2e module
+    # (legal/signup/dashboard/hosted with RUN_LEGAL_E2E=1 etc.) already
+    # parked its SESSION-scoped playwright loop in this thread, the sync
+    # API's __enter__ would raise "Playwright Sync API inside the asyncio
+    # loop" — skip instead of erroring. In the default suite welcome is the
+    # only playwright user and runs first, so the normal path is taken.
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pw = sync_playwright().start()
+        yield pw
+        pw.stop()
+        return
+    pytest.skip(
+        "a session-scoped playwright loop is already parked in this thread "
+        "(combined opt-in e2e run) — run tests/e2e/test_welcome_page.py "
+        "separately (#1721)"
+    )
+
+
+@pytest.fixture(scope="module")
+def browser_type(playwright: Playwright, browser_name: str) -> BrowserType:
+    return getattr(playwright, browser_name)
+
+
+@pytest.fixture(scope="module")
+def connect_options() -> dict | None:
+    return None
+
+
+@pytest.fixture(scope="module")
+def launch_browser(
+    browser_type_launch_args: dict[str, Any],
+    browser_type: BrowserType,
+    connect_options: dict | None,
+) -> Callable[..., Browser]:
+    def launch(**kwargs: dict[str, Any]) -> Browser:
+        launch_options = {**browser_type_launch_args, **kwargs}
+        if connect_options:
+            browser = browser_type.connect(
+                **(
+                    {
+                        **connect_options,
+                        "headers": {
+                            "x-playwright-launch-options": json.dumps(launch_options),
+                            **(connect_options.get("headers") or {}),
+                        },
+                    }
+                )
+            )
+        else:
+            browser = browser_type.launch(**launch_options)
+        return browser
+
+    return launch
+
+
+@pytest.fixture(scope="module")
+def browser(launch_browser: Callable[..., Browser]) -> Generator[Browser, None, None]:
+    browser = launch_browser()
+    yield browser
+    browser.close()
+
+
+@pytest.fixture(scope="module")
+def browser_context_args(
+    pytestconfig: Any,
+    playwright: Playwright,
+    device: str | None,
+    base_url: str | None,
+    _pw_artifacts_folder: tempfile.TemporaryDirectory,
+) -> dict:
+    context_args = {}
+    if device:
+        context_args.update(playwright.devices[device])
+    if base_url:
+        context_args["base_url"] = base_url
+
+    video_option = pytestconfig.getoption("--video")
+    capture_video = video_option in ["on", "retain-on-failure"]
+    if capture_video:
+        context_args["record_video_dir"] = _pw_artifacts_folder.name
+
+    return context_args
+
 
 # ── Live/static tests (no auth) ─────────────────────────────────────
 
@@ -61,8 +189,10 @@ def test_mcp_endpoint_rejects_unauthenticated(page: Page) -> None:
     regression guard for the deploy pipeline fixes (#545/#609/#610)."""
     resp = page.request.post(
         "https://api.premiselabs.co/mcp/",
-        headers={"Content-Type": "application/json",
-                 "Accept": "application/json, text/event-stream"},
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        },
         data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
         timeout=15_000,
     )
@@ -83,11 +213,18 @@ def test_welcome_signed_in_redirects_to_app(page: Page) -> None:
     no longer provisions (except recovery mode)."""
     user_id = _fake_user_id()
     _seed_local_session(page, user_id)
-    page.route("**://app.premiselabs.co/**", lambda r: r.fulfill(
-        status=200, content_type="text/html",
-        body="<html><body>APP-WELCOME</body></html>"))
-    page.goto(WELCOME_URL + "#access_token=fake-at&refresh_token=fake-rt&expires_in=3600&token_type=bearer",
-              wait_until="domcontentloaded", timeout=30_000)
+    page.route(
+        "**://app.premiselabs.co/**",
+        lambda r: r.fulfill(
+            status=200, content_type="text/html", body="<html><body>APP-WELCOME</body></html>"
+        ),
+    )
+    page.goto(
+        WELCOME_URL
+        + "#access_token=fake-at&refresh_token=fake-rt&expires_in=3600&token_type=bearer",
+        wait_until="domcontentloaded",
+        timeout=30_000,
+    )
     expect(page).to_have_url(re.compile(r"^https://app\.premiselabs\.co"), timeout=20_000)
 
 
@@ -112,20 +249,6 @@ def _seed_local_session(page: Page, user_id: str) -> None:
       localStorage.setItem("sb-ybetwichurajbfswfeqa-auth-token", session);
       localStorage.setItem("sb-127-auth-token", session);
     """)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 # ── Live signup E2E (requires real Supabase creds + session) ────────
@@ -167,13 +290,18 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
     page.on("response", _on_response)
     # #801: the account is created pre-confirmed, so the page redirects to
     # /welcome — block it so the welcome page's provisioning never runs.
-    page.route("**/welcome*", lambda route: route.fulfill(
-        status=200, content_type="text/html", body="<html><body>ok</body></html>"
-    ))
+    page.route(
+        "**/welcome*",
+        lambda route: route.fulfill(
+            status=200, content_type="text/html", body="<html><body>ok</body></html>"
+        ),
+    )
     email = f"e2e-live-{uuid.uuid4().hex[:8]}@premise-labs.dev"
     password = f"E2eLivePass-{uuid.uuid4().hex[:8]}!"
     try:
-        page.goto("https://tortoise.premiselabs.co/signup", wait_until="domcontentloaded", timeout=30_000)
+        page.goto(
+            "https://tortoise.premiselabs.co/signup", wait_until="domcontentloaded", timeout=30_000
+        )
         page.locator("#email").fill(email)
         page.locator("#password").fill(password)
         page.locator("#btn-submit").click()
@@ -185,7 +313,8 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
             page.wait_for_timeout(250)
         assert signup["status"] is not None, "no /v1/signup/email response observed"
         assert signup["status"] == 200, (
-            f"live signup returned {signup['status']} — rate-limited or error: {signup['body']!r}")
+            f"live signup returned {signup['status']} — rate-limited or error: {signup['body']!r}"
+        )
         # #801: created pre-confirmed → the page auto-signs-in.
         deadline = time.time() + 30
         while token["status"] is None and time.time() < deadline:
@@ -195,10 +324,10 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
         # The flow redirects to /welcome (route-blocked stub above) — the
         # redirect itself is the user-visible success state of #801.
         page.wait_for_url("**/welcome*", timeout=15_000)
-        assert "email=" not in page.url and "password=" not in page.url, \
+        assert "email=" not in page.url and "password=" not in page.url, (
             f"credentials echoed into URL: {page.url}"
+        )
     finally:
         from supabase_admin import delete_user_by_email
-        delete_user_by_email(os.environ["SUPABASE_URL"],
-                             os.environ["SUPABASE_SERVICE_KEY"], email)
 
+        delete_user_by_email(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_KEY"], email)
