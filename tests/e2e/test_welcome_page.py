@@ -18,126 +18,28 @@ Env:   WELCOME_URL overrides the target (default https://tortoise.premiselabs.co
        SUPABASE_URL/SUPABASE_SERVICE_KEY enable the live no-429 signup smoke
        (skipped by default — no creds in CI; see #801).
 
-#1721: the playwright fixtures are re-declared here at MODULE scope (they
-# override pytest-playwright's session-scoped ones for this file only) — the
-# root-cause fix for the full-suite asyncio event-loop cascade (see the
-# "module-scoped playwright chain" block below).
+#1721: the playwright chain is module-scoped in tests/e2e/conftest.py (the
+# root-cause fix for the full-suite asyncio event-loop cascade — a
+# session-scoped playwright loop parked in the main thread poisoned every
+# later asyncio.run()/@pytest.mark.asyncio test).
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import re
-import tempfile
 import time
 import uuid
-from collections.abc import Callable, Generator
-from typing import Any
 
 import pytest
-from playwright.sync_api import (
-    Browser,
-    BrowserType,
-    Page,
-    Playwright,
-    expect,
-    sync_playwright,
-)
+from playwright.sync_api import Page, expect
 
 # Canonical host for the auth surface is tortoise.premiselabs.co (host
 # consolidation 2026-08-17: premiselabs.co 301s /welcome → the tortoise host).
 WELCOME_URL = os.environ.get("WELCOME_URL", "https://tortoise.premiselabs.co/welcome")
 PROMPT_URL = os.environ.get("PROMPT_URL", "https://premiselabs.co/onboarding-prompt.md")
 
-# ── #1721: module-scoped playwright chain (root-cause fix) ─────────────
-# pytest-playwright's `playwright` fixture is SESSION-scoped. Playwright's
-# sync API (playwright/sync_api/_context_manager.py __enter__) owns a private
-# asyncio loop and parks its dispatcher greenlet mid-run_until_complete; while
-# parked, `loop._running` stays True and asyncio._set_running_loop(loop) is
-# live on the main thread's thread-local. With a session-scoped fixture the
-# loop stays "running" from this module's first page use until SESSION end —
-# so in a full-suite run (`pytest tests/`, which collects tests/e2e/ early)
-# every later test that calls asyncio.run() (test_abuse TestTurnstile,
-# test_agent_signup, ...) dies with "asyncio.run() cannot be called from a
-# running event loop" and every @pytest.mark.asyncio test (test_client_ip_
-# middleware, ...) dies with "Runner.run() cannot be called from a running
-# event loop" — the order-dependent cascade of #1721.
-#
-# sync_playwright().stop() (__exit__) closes the loop and clears the
-# thread-local running loop, so owning playwright per MODULE bounds the parked
-# loop to this file: after the module finishes, the main thread is clean and
-# the rest of the suite runs without the cascade. Fixtures defined in a test
-# module override plugin fixtures with the same name for that module only —
-# the hosted / legal / signup-form e2e suites keep the plugin's session scope.
-# The mirrors below match pytest_playwright's definitions 1:1 (scope module).
-
-
-@pytest.fixture(scope="module")
-def playwright() -> Generator[Playwright, None, None]:
-    # Guard (review P1, #1721): if an EARLIER opt-in e2e module
-    # (legal/signup/dashboard/hosted with RUN_LEGAL_E2E=1 etc.) already
-    # parked its SESSION-scoped playwright loop in this thread, the sync
-    # API's __enter__ would raise "Playwright Sync API inside the asyncio
-    # loop" — skip instead of erroring. In the default suite welcome is the
-    # only playwright user and runs first, so the normal path is taken.
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        pw = sync_playwright().start()
-        yield pw
-        pw.stop()
-        return
-    pytest.skip(
-        "a session-scoped playwright loop is already parked in this thread "
-        "(combined opt-in e2e run) — run tests/e2e/test_welcome_page.py "
-        "separately (#1721)"
-    )
-
-
-@pytest.fixture(scope="module")
-def browser_type(playwright: Playwright, browser_name: str) -> BrowserType:
-    return getattr(playwright, browser_name)
-
-
-@pytest.fixture(scope="module")
-def connect_options() -> dict | None:
-    return None
-
-
-@pytest.fixture(scope="module")
-def launch_browser(
-    browser_type_launch_args: dict[str, Any],
-    browser_type: BrowserType,
-    connect_options: dict | None,
-) -> Callable[..., Browser]:
-    def launch(**kwargs: dict[str, Any]) -> Browser:
-        launch_options = {**browser_type_launch_args, **kwargs}
-        if connect_options:
-            browser = browser_type.connect(
-                **(
-                    {
-                        **connect_options,
-                        "headers": {
-                            "x-playwright-launch-options": json.dumps(launch_options),
-                            **(connect_options.get("headers") or {}),
-                        },
-                    }
-                )
-            )
-        else:
-            browser = browser_type.launch(**launch_options)
-        return browser
-
-    return launch
-
-
-@pytest.fixture(scope="module")
-def browser(launch_browser: Callable[..., Browser]) -> Generator[Browser, None, None]:
-    browser = launch_browser()
-    yield browser
-    browser.close()
 
 
 @pytest.fixture(scope="module")
