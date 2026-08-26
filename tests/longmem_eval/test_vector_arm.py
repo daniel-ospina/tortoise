@@ -889,6 +889,55 @@ def test_model_id_wrapper_path_stable_no_address(monkeypatch):
                             inner.close()
 
 
+def test_build_cli_extractor_model_fingerprints_serving_config(monkeypatch):
+    """M7 #1739 / #1742: ``_build_cli_extractor_model`` builds the model a
+    CLI run will actually serve AND fingerprint — the effective-config
+    contract holds on every CLI path shape: explicit registry model at
+    session_workers=1 (registry tuning applies), unset → the uncapped
+    router wrapper at session_workers=1, and the worker-FACTORY config at
+    session_workers>1 (max_tokens=4000 wrapper — the factory cannot express
+    registry tuning; the fingerprint records what the workers serve, so a
+    session-workers toggle refuses resume instead of silently reusing a
+    different extraction cap)."""
+    _pin_extractor_env(monkeypatch, keys=())
+    adapters = []
+    try:
+        # session_workers=1 + explicit spec → registry model (tuning applies)
+        adapters.append(runner._build_cli_extractor_model(
+            spec="deepseek-v4-pro", session_workers=1))
+        assert runner._model_id(adapters[-1]) == (
+            "deepseek/deepseek-v4-pro|max_tokens=500")
+        # session_workers=1 + unset → uncapped router wrapper (1-lane bare)
+        adapters.append(runner._build_cli_extractor_model(
+            spec=None, session_workers=1))
+        assert runner._model_id(adapters[-1]) == "deepseek/deepseek-v4-flash"
+        # session_workers>1 → the worker-factory config (max_tokens=4000):
+        # differs from the session_workers=1 fingerprint for the SAME spec
+        # (a session-workers toggle is an effective-cap change → refused)
+        adapters.append(runner._build_cli_extractor_model(
+            spec="deepseek-v4-pro", session_workers=4))
+        assert runner._model_id(adapters[-1]) == (
+            "deepseek/deepseek-v4-pro|max_tokens=4000")
+        assert runner._model_id(adapters[-1]) != runner._model_id(adapters[0])
+        adapters.append(runner._build_cli_extractor_model(
+            spec=None, session_workers=4))
+        assert runner._model_id(adapters[-1]) == (
+            "deepseek/deepseek-v4-flash|max_tokens=4000")
+        # unknown spec → SystemExit (the M5 pinning guard, preserved)
+        with pytest.raises(SystemExit):
+            runner._build_cli_extractor_model(spec="nope", session_workers=1)
+    finally:
+        for m in adapters:
+            close = getattr(m, "close", None)
+            if close is not None:
+                close()
+            else:  # RoutingModel has no close — close the inner adapters
+                for inner in (getattr(m, "primary", None),
+                              getattr(m, "fallback", None)):
+                    if inner is not None:
+                        inner.close()
+
+
 def test_model_id_wrapper_shape_discriminates_routing_vs_rotating():
     """M7 #1739 (code-review hardening): a failover RoutingModel and a
     rotation pool over the SAME members are different effective configs —

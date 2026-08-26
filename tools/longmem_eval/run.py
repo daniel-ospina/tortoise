@@ -572,6 +572,42 @@ def _adapter_fingerprint(model: Any) -> str:
     return "|".join(parts)
 
 
+def _build_cli_extractor_model(*, spec: str | None,
+                               session_workers: int):
+    """Build the extractor model a CLI run will actually serve AND
+    fingerprint (M7 #1739 / review #1742): the fingerprint must record the
+    EXTRACTING model, so the build mirrors the serving path.
+
+    ``session_workers == 1``: the run-level model IS the extracting model —
+    an explicit ``spec`` stays a MODELS registry lookup (M5 pinning, registry
+    tuning like disable_reasoning applies); unset delegates to the
+    production router (``build_extractor_model``, uncapped — the #1350 owner
+    decision). ``session_workers > 1``: each worker builds its OWN fresh
+    model via the ingest_v2 factory (``build_extractor_model(spec or None)``
+    — factory-default max_tokens=4000; ``_build_single`` forwards only
+    max_tokens/temperature, so registry tuning is not expressible on this
+    path — a pre-existing factory limitation, NOT a fingerprint bug), so the
+    run-level model — and the fingerprint — is built the SAME way the
+    factory does."""
+    if session_workers > 1:
+        from tests.model_adapters import build_extractor_model
+        return build_extractor_model(spec or None)
+    if spec:
+        # M5 pinning: an explicit --extractor-model stays a registry lookup.
+        from tests.model_adapters import MODELS
+        if spec not in MODELS:
+            raise SystemExit(f"unknown extractor model {spec!r}; "
+                             f"known: {sorted(MODELS)}")
+        return MODELS[spec]()
+    # #1530 D9: the unset case delegates to the production router via the
+    # shim — single source of truth (removed the bespoke env branch). Same
+    # decision surface: TORTOISE_EXTRACTOR_PROVIDER picks the primary;
+    # DEEPSEEK_API_KEY alone → deepseek-direct; else OpenRouter. Uncapped
+    # (the #1350 owner decision).
+    from tests.model_adapters import build_extractor_model
+    return build_extractor_model(max_tokens=None, temperature=0.0)
+
+
 def _model_id(model: Any) -> str | None:
     """A stable fingerprint string for a model object (None → None).
 
@@ -611,6 +647,13 @@ def _model_id(model: Any) -> str | None:
     """
     if model is None:
         return None
+    # NOTE (fingerprint charset invariant): the composed literals use ``+``
+    # (member separator), ``:`` (provider separator) and ``|`` (tuning
+    # separator) — collision-free ONLY because wire ids are alphanumeric
+    # with ``/ - .`` (the MODELS registry and _REGISTRY_KEY_TO_ID remaps
+    # enforce this; no id contains a separator). A future wire id carrying
+    # a separator must be rejected/escaped at the adapter boundary, not
+    # here.
     if isinstance(model, RoutingModel):
         members = [m for m in (model.primary, model.fallback)
                    if m is not None]
@@ -654,15 +697,16 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
     wrapper path (RoutingModel/RotatingModel) composes its member adapters
     (``provider:wire-id`` + tuning; single-lane wrappers emit the bare
     member fingerprint; multi-lane wrappers are shape-prefixed routing:/rotating:)
-    — never an address-bearing repr. SESSION_WORKERS caveat (pre-existing
-    factory divergence): with ``--session-workers > 1`` ingest_v2 builds a
-    per-worker wrapper via ``build_extractor_model(args.extractor_model or
-    None)`` (function-default max_tokens=4000, no registry tuning —
-    ``_build_single`` forwards only max_tokens/temperature). The fingerprint
-    records the RUN-LEVEL model — the extracting model on the
-    ``session_workers=1`` path — so a session-workers toggle is NOT
-    discriminated by the gate (pre-existing; tracking the factory's
-    effective tuning in the fingerprint is out of #1739 scope). WIRE-ID
+    — never an address-bearing repr. SESSION_WORKERS: ``--session-workers
+    > 1`` runs session-parallel extraction — each worker builds a FRESH
+    model via the ingest_v2 factory (``build_extractor_model(spec or None)``
+    at the factory-default max_tokens=4000; ``_build_single`` forwards only
+    max_tokens/temperature, so registry tuning is not expressible there —
+    pre-existing factory limitation). ``_build_cli_extractor_model`` builds
+    the fingerprinted model the SAME way the workers serve (registry model
+    at session_workers=1, factory config at >1), so the fingerprint records
+    the extracting config on every path and a session-workers toggle (an
+    effective-cap change) refuses resume. WIRE-ID
     MUTABILITY: wire ids are API-facing and mutable (e.g. #1706 renamed
     deepseek-v4-flash → deepseek-chat) — a rename loudly invalidates every
     existing checkpoint (CheckpointStaleError on ``extractor_model``): safe
@@ -869,6 +913,12 @@ def run_evaluation(
     extractor_model=None,
     workers: int = 1,
     session_workers: int = 1,
+    # M7 #1739 / #1742: the CLI extractor spec for the session-parallel
+    # worker factory (build_extractor_model(spec or None) per worker, at the
+    # factory-default max_tokens=4000). Threaded from run_main — the old
+    # free ``args`` closure was a latent NameError. Mirrors what
+    # _build_cli_extractor_model fingerprints for session_workers > 1.
+    session_worker_model_spec: str | None = None,
     preflight: dict | None = None,
     # R3 (#1542) D2: the embedder pre-flight status (from _preflight_embedder
     # in run_main) — forwarded to the report methodology (D5: embedder +
@@ -999,6 +1049,8 @@ def run_evaluation(
                 # reader vs judge attribution).
                 t_ingest = time.monotonic()
                 if ingest_mode == "v2":
+                    from tests.model_adapters import build_extractor_model
+
                     from .ingest_v2 import ingest_haystack_v2
                     ingest_stats = ingest_haystack_v2(
                         sdk, question, extractor_model,
@@ -1008,9 +1060,15 @@ def run_evaluation(
                         # cost; each worker gets a fresh model from the same
                         # build path — no shared RoutingModel state).
                         session_workers=session_workers,
+                        # M7 #1739 / #1742: the factory spec is threaded in
+                        # (never the run_main-local ``args`` closure — that
+                        # was a latent NameError); the factory builds at the
+                        # function-default max_tokens=4000, matching what
+                        # _build_cli_extractor_model fingerprints for
+                        # session_workers > 1.
                         model_factory=(
-                            lambda: build_extractor_model(
-                                args.extractor_model or None)
+                            (lambda: build_extractor_model(
+                                session_worker_model_spec or None))
                             if session_workers > 1 else None))
                 else:
                     ingest_stats = ingest_haystack(
@@ -2060,22 +2118,11 @@ def _run_main(parser: argparse.ArgumentParser, args,
 
     extractor_model = None
     if args.ingest_mode == "v2":
-        if args.extractor_model:
-            # M5 pinning: an explicit --extractor-model stays a registry lookup.
-            from tests.model_adapters import MODELS
-            if args.extractor_model not in MODELS:
-                raise SystemExit(f"unknown extractor model {args.extractor_model!r}; "
-                                 f"known: {sorted(MODELS)}")
-            extractor_model = MODELS[args.extractor_model]()
-        else:
-            # #1530 D9: the unset case delegates to the production router via
-            # the shim — single source of truth (removed the bespoke env
-            # branch). Same decision surface: TORTOISE_EXTRACTOR_PROVIDER
-            # picks the primary; DEEPSEEK_API_KEY alone → deepseek-direct;
-            # else OpenRouter. Uncapped (the #1350 owner decision).
-            from tests.model_adapters import build_extractor_model
-            extractor_model = build_extractor_model(
-                max_tokens=None, temperature=0.0)
+        # M7 #1739 / #1742: the fingerprinted model must match what actually
+        # extracts — session_workers>1 fingerprints the worker-factory config
+        # (see _build_cli_extractor_model).
+        extractor_model = _build_cli_extractor_model(
+            spec=args.extractor_model, session_workers=args.session_workers)
 
     # M2 (#1523): the pre-flight gate runs AFTER reader/judge/extractor_model
     # are built and BEFORE anything in the question loop starts. --mock skips
@@ -2105,6 +2152,12 @@ def _run_main(parser: argparse.ArgumentParser, args,
             checkpoint=args.checkpoint, max_retries=args.max_retries,
             ingest_mode=args.ingest_mode, extractor_model=extractor_model,
             workers=max(1, args.workers), preflight=preflight,
+            # M7 #1739 / #1742: wire the session-parallel path (the flag was
+            # parsed but never threaded — a silent no-op) and give the worker
+            # factory its spec so the fingerprint matches what the workers
+            # serve.
+            session_workers=args.session_workers,
+            session_worker_model_spec=args.extractor_model,
             embedder_status=embedder_status,
             chunk_turns=chunk_turns, max_context_tokens=context_cap,
             max_chunks_per_session=max_chunks_per_session,
