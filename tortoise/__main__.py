@@ -664,7 +664,7 @@ def _read_stored_signup_token() -> str | None:
     return _read_stored_signup_token_with_source()[0]
 
 
-def _resolve_same_source_token(args, cfg_path, cfg) -> str | None:
+def _resolve_same_source_token(args, cfg_path, cfg, surface: str = "revoke") -> str | None:
     """#1752: signup token for revoke/recover resolved from the SAME
     config the auth key came from (the #1708 env → cwd → global resolver).
 
@@ -734,7 +734,7 @@ def _cmd_recover(args) -> int:
         _cfg_path, _cfg, _api_key, _api_url = _resolve_config_path()
     except _ConfigError:
         _cfg_path, _cfg = None, None
-    token = _resolve_same_source_token(args, _cfg_path, _cfg)
+    token = _resolve_same_source_token(args, _cfg_path, _cfg, surface="recover")
     if not token:
         print("No recovery token found. Pass --token st_... or run "
               "'tortoise signup' first.", file=sys.stderr)
