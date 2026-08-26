@@ -433,6 +433,14 @@ def test_abstention_clause_scopes_abstention_to_true_gaps():
     assert "explicitly state that the asked information is absent" in low
     assert "is present" in low                # states what IS present
     assert "contains nothing related" in low  # terminal vacuity branch
+    # the evidence-backed contract restored by code review #1768 — pinned
+    # so a future edit cannot silently drop them again:
+    # the 'do not mention the context' override (resolves the generic
+    # prompt's blanket instruction) and the judge-scorable exemplar
+    assert "overrides the 'do not mention the context' instruction for " \
+        "abstention answers" in low
+    assert "mentions a new bicycle, but it does not contain the asked " \
+        "favorite color" in low
 
 
 def test_abstention_clause_never_keyed_on_abs():

@@ -200,7 +200,8 @@ _ABSTRACTION_FRAGMENT = (
     "Never frame the answer value as merely related information: the "
     "'mentions X but does not contain the asked information' formulation "
     "is forbidden when X is the answer. If the context contains nothing "
-    "related, simply state that the asked information is absent. Example: "
+    "related, simply state that the asked information is absent. Example "
+    "— here the bicycle is NOT the answer, so this form is correct: "
     "'The memory mentions a new bicycle, but it does not contain the "
     "asked favorite color.'"
 )
