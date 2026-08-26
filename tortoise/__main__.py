@@ -1189,9 +1189,25 @@ def _cmd_signup(args) -> int:
             print(f"   Recovery token (save it now): {orphan_token}", file=sys.stderr)
             print("   RECOVERY TOKEN — save this: it is the only way back into "
                   "this team if your key is lost.", file=sys.stderr)
-        print("Fix the path permissions and re-run, or use the key directly — "
-              "but do NOT re-run blindly: this creates a NEW team; the old "
-              "team's key+token above are your only access.", file=sys.stderr)
+        if stored_token:
+            # recovery-orphan leg: the server recovered the SAME team, only the
+            # save failed — re-running re-presents the token and re-recovers
+            # the SAME team; no new team is created (review P2, #1750).
+            print("Fix the path permissions and re-run — recovery is re-attempted "
+                  "on the SAME team (no new team is created). "
+                  "The key+token above are your only access until then.",
+                  file=sys.stderr)
+        elif orphan_token:
+            # fresh-mint-orphan leg: a re-run with no stored key mints a SECOND
+            # team and orphans the first — warn hard (the incident pattern).
+            print("Fix the path permissions and re-run, or use the key directly — "
+                  "but do NOT re-run blindly: this creates a NEW team; the old "
+                  "team's key+token above are your only access.", file=sys.stderr)
+        else:
+            # fresh mint returned no token — only the key exists above.
+            print("Fix the path permissions and re-run, or use the key directly — "
+                  "but do NOT re-run blindly: this creates a NEW team; the API "
+                  "key above is your only access.", file=sys.stderr)
         return 1
 
     # D3 (generalized, #1708 fixer P1): whenever a mint happened while a
