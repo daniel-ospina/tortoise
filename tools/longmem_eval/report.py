@@ -267,6 +267,12 @@ def build_report(
     evidence_vacuity_rate: dict[str, float] = {}
     chunk_evidence_recall: dict[str, float] = {}
     chunk_evidence_recall_n: dict[str, int] = {}
+    # #1763: the re-baselined point-level answer-availability view (mark (d)
+    # answer_string) — aggregated parallel to evidence_recall@k so the legacy
+    # source-session-dominated metric stays byte-identical (D5 #1540
+    # comparability).
+    answer_string_recall: dict[str, float] = {}
+    answer_string_recall_n: dict[str, int] = {}
     for k in ks:
         sr = [o["session_recall@k"].get(str(k), 0.0) for o in outcomes]
         session_recall[str(k)] = _mean(sr)
@@ -294,6 +300,21 @@ def build_report(
         if real_chunks:
             chunk_evidence_recall[str(k)] = _mean(real_chunks)
             chunk_evidence_recall_n[str(k)] = len(real_chunks)
+        # #1763: the answer-string re-baselined view — point-level answer
+        # availability (mark (d), gold answer string in the point's
+        # content/quote/search_keys). Aggregated parallel to
+        # evidence_recall@k. The per-outcome key is produced by the
+        # retrieval leg (the SAME seam chunk_evidence_recall@k is computed
+        # on — retrieve.py _recall_metrics, via evidence.answer_string_recall_at_k,
+        # which holds both the pool and the gold answer). Absent per-outcome
+        # keys → the aggregate stays absent (never fabricated from the
+        # ingest census — the numerator is a retrieval-time fact).
+        aas = [(o.get("answer_string_evidence_recall@k") or {})
+               .get(str(k), None) for o in outcomes]
+        real_as = [v for v in aas if v is not None]
+        if real_as:
+            answer_string_recall[str(k)] = _mean(real_as)
+            answer_string_recall_n[str(k)] = len(real_as)
 
     # M6 (D6): evidence_coverage — fraction of evidence-bearing questions
     # (dataset has >=1 evidence turn) whose ingest wrote evidence points
@@ -592,6 +613,19 @@ def build_report(
             "evidence_coverage": evidence_coverage,
             "chunk_evidence_recall@k": _gated(chunk_evidence_recall or None),
             "chunk_evidence_recall_n@k": _gated(chunk_evidence_recall_n or None),
+            # #1763: the re-baselined point-level answer-availability view
+            # (mark (d) answer_string). The pilot census is 98.5%
+            # source-session (472/479 marks), so the legacy evidence_recall@k
+            # measures "fraction of the answer session's points surfaced",
+            # NOT answer availability; the answer-string view re-baselines
+            # it. BOTH are emitted: the old metric is UNCHANGED (D5 #1540
+            # comparability). Populated per-outcome by the retrieval leg
+            # (answer_string_recall_at_k); absent on outcomes without the
+            # key (stays None — never fabricated).
+            "answer_string_evidence_recall@k": _gated(
+                answer_string_recall or None),
+            "answer_string_evidence_recall_n@k": _gated(
+                answer_string_recall_n or None),
             # M7 (D10): paper-aligned aggregates over non-_abs only.
             "session_recall_paper@k": _gated(session_recall_paper),
             "turn_recall_paper@k": _gated(turn_recall_paper),
@@ -718,7 +752,20 @@ def build_report(
                                  "(M6 #1526 — never forced 0.0); chunk containment "
                                  "is reported separately as chunk_evidence_recall@k "
                                  "(containment-marked raw chunks surfaced / marked "
-                                 "raw chunks total); evidence_recall_n@k = "
+                                 "raw chunks total); #1763 answer-string re-baseline: "
+                                 "answer_string_evidence_recall@k = answer-string-marked "
+                                 "points (gold answer string contained in content/quote/"
+                                 "search_keys — mark (d), computed at eval time since the "
+                                 "extractor never sees the gold answer) surfaced / "
+                                 "answer-string-marked points total, the point-level "
+                                 "answer-availability measure replacing the "
+                                 "source-session-dominated denominator; the legacy "
+                                 "evidence_recall@k denominator is UNCHANGED (D5 #1540 "
+                                 "comparability); the per-outcome re-baselined key is "
+                                 "produced by the retrieval leg (evidence.answer_string_recall_at_k "
+                                 "— the chunk_evidence_recall@k seam) and stays ABSENT from "
+                                 "the aggregate when outcomes carry no such key (never "
+                                 "fabricated); evidence_recall_n@k = "
                                  "evidence-bearing outcomes in the mean; "
                                  "evidence_vacuity_rate@k = fraction of "
                                  "evidence-bearing outcomes with 0.0 while "
