@@ -898,6 +898,20 @@ class TestKeysRename:
         assert keys[0]["expires_at"] is None            # durable key — no expiry
         app.dependency_overrides.clear()
 
+    def test_list_keys_create_api_key_registry_writes_props(self, client, monkeypatch):
+        """#1753: the registry-lane create_api_key mint writes created_via/
+        expires_at props too (parity with the agent_signup + Supabase lanes) —
+        without them the selfhost dashboard lists durable keys as
+        'ephemeral · session' and hides rename. Mint via POST /v1/team/keys
+        (TEST_TEAM), then the list round-trips the props."""
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
+        r = client.post("/v1/team/keys", json={"name": "ci"})
+        assert r.status_code == 200, r.text
+        kid = r.json()["id"]
+        listed = _listed_key(client, kid)
+        assert listed["created_via"] == "provisioned"  # #1753 registry parity
+        assert listed["expires_at"] is None            # durable key — no expiry
+
 
 class TestListApiKeysSupabase:
     """#1708 D7: Supabase lane — team_api_keys reads created_via/expires_at

@@ -3749,8 +3749,13 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
         )
     else:
         sdk = _make_sdk(namespace="registry")
+        # #1753: created_via/expires_at prop parity with agent_signup + the
+        # Supabase lane (like the #1709 mint at ~7365) — without them the
+        # selfhost dashboard lists durable keys as "ephemeral · session"
+        # and hides rename. expires_at:null = never (durable key).
         sdk._get_registry().query(
-            "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, key_prefix:$kp, created_by:$cb, created_at:$now, name:$name})",
+            "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, key_prefix:$kp, "
+            "created_by:$cb, created_via:'provisioned', created_at:$now, expires_at:null, name:$name})",
             params={"id": kid, "tid": team["team_id"], "kh": key_hash, "kp": key_prefix, "cb": "api", "now": now, "name": name},
         )
         # #528 analytics — actor user id from the team's Membership graph when
@@ -3798,9 +3803,9 @@ async def list_api_keys(team: dict = Depends(get_current_team)):
     the seam (ALL rows incl. revoked — the dashboard shows revoked keys
     with their revoked_at; registry parity). Registry path stays for
     selfhost. #1708 D7: additive created_via/expires_at in BOTH lanes
-    (registry lane is None-tolerant for the agent_signup/create_api_key
-    mints that omit the props until #1709; session_key mints already write
-    them)."""
+    (agent_signup #1709, create_api_key #1753 and session_key mints all
+    write them at mint time; the registry list stays None-tolerant for
+    LEGACY nodes minted before those fixes)."""
     from tortoise.supabase_control import (
         get_control_plane, is_supabase_enabled, team_api_keys,
     )
@@ -3853,9 +3858,10 @@ async def list_api_keys(team: dict = Depends(get_current_team)):
                 "revoked_at": row[4],
                 # 20260825000001: optional user-facing label
                 "name": row[5],
-                # #1708 D7: None-tolerant — registry nodes minted by
-                # agent_signup/create_api_key lack the props until #1709
-                # writes them at mint time; JSON null is additive-safe.
+                # #1708 D7: None-tolerant — LEGACY registry nodes minted
+                # before #1709 (agent_signup) / #1753 (create_api_key) wrote
+                # the props at mint time lack them; JSON null is
+                # additive-safe.
                 "created_via": row[6],
                 "expires_at": row[7],
             }

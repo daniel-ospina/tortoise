@@ -11478,6 +11478,12 @@ class TortoiseSDK:
         200/404/403 (the no-oracle uniform-422 contract is preserved for
         malformed tokens upstream; an authenticated caller probing a valid
         token learns only whether it is THEIR team's).
+
+        #1754: (a) the revoke WRITE is atomically team-scoped (parity with
+        the SQL lane's UPDATE ... AND team_id = p_team_id) — the pre-read
+        can never be raced by a foreign-team node; (b) a node carrying only
+        token_hash (no lookup_key) is found via the PBKDF2 fallback (mirror
+        signup_token_lookup) so it is REVOCABLE, not just recoverable.
         """
         from tortoise.auth import lookup_hash as _lookup_hash
         lk = _lookup_hash(token_plaintext)
@@ -11485,19 +11491,40 @@ class TortoiseSDK:
             "MATCH (n:SignupToken {lookup_key:$lk}) RETURN properties(n)",
             params={"lk": lk},
         ).result_set
-        if not rows:
+        matches = [r[0] for r in rows]
+        if not matches:
+            # #1754 (b): PBKDF2 fallback parity with signup_token_lookup — a
+            # node carrying only the salted token_hash (minted before
+            # lookup_key, or a legacy row) resolves here, so it can be
+            # revoked instead of silently no-op'ing as "not_found".
+            matches = list(self._verify_hashed_lookup(
+                "SignupToken", "token_hash", token_plaintext))
+        if not matches:
             return {"team_id": team_id, "status": "not_found"}
-        node = rows[0][0]
+        node = matches[0]
         if node.get("team_id") != team_id:
             return {"team_id": team_id, "status": "not_owned"}
         if node.get("revoked_at") is not None:
             return {"team_id": team_id, "status": "already"}
         from datetime import datetime, timezone as _tz  # noqa: I001
         now_iso = datetime.now(_tz.utc).isoformat()  # noqa: UP017
-        self._get_registry().query(
-            "MATCH (n:SignupToken {lookup_key:$lk}) SET n.revoked_at = $now",
-            params={"lk": lk, "now": now_iso},
-        )
+        # #1754 (a): the MATCH is team-scoped so the write itself can never
+        # revoke a foreign team's node. Hash-only fallback nodes (no
+        # lookup_key) are targeted by their stored salted hash — unique per
+        # token (random salt per mint) and team-scoped.
+        if node.get("lookup_key"):
+            self._get_registry().query(
+                "MATCH (n:SignupToken {lookup_key:$lk, team_id:$tid}) "
+                "SET n.revoked_at = $now",
+                params={"lk": lk, "tid": team_id, "now": now_iso},
+            )
+        else:
+            self._get_registry().query(
+                "MATCH (n:SignupToken {token_hash:$th, team_id:$tid}) "
+                "SET n.revoked_at = $now",
+                params={"th": node["token_hash"], "tid": team_id,
+                        "now": now_iso},
+            )
         return {"team_id": team_id, "status": "revoked"}
 
     def _default_max_api_keys(self) -> int:
