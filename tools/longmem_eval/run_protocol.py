@@ -101,9 +101,10 @@ STEPS: list[Step] = [
     Step(5, "baseline-500q", "Full 500-Q run — the V3 baseline (V4 comparison point)",
          "run",
          "integrity.valid=true — census-class-aware (#1747): invalid_rate ≤ threshold "
-         "AND n_hard_invalid == 0 (fatal_*/ingest/non-census-error-string/permanent-"
-         "eval-failure questions veto at any threshold; recoverable parse/truncated/"
-         "transient_* census classes AND reader/judge:retries_exhausted eval "
+         "AND n_hard_invalid == 0 (fatal_*/ingest/unknown census classes, non-census "
+         "error strings with an EMPTY census, permanent eval failures veto at any "
+         "threshold; recoverable parse_error/truncated/truncated_parse_error/partial_"
+         "parse/transient_* census classes AND reader/judge:retries_exhausted eval "
          "failures are rate-limited, not vetoed); threshold "
          f"{JUSTIFIED_BASELINE_THRESHOLD} justified default at 500-Q scale "
          f"(≤{JUSTIFIED_BASELINE_THRESHOLD * 500:.0f} of 500 questions with "

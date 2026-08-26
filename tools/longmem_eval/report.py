@@ -137,10 +137,18 @@ def _outcome_grade(o: dict[str, Any]) -> str:
         classes = {c for c in ec if isinstance(c, str) and c}
     if classes - RECOVERABLE_CENSUS_CLASSES:
         return "hard"
+    # The runner's binary ``valid`` flag must be a REAL bool: a missing or
+    # non-bool flag (``"valid": "false"`` from a schema-less checkpoint) is
+    # malformed input and fails CLOSED to hard — truthiness coercion would
+    # fail OPEN and certify a structurally-degraded run as clean (security
+    # review, #1747).
+    flag = o.get("valid", True)
+    if not isinstance(flag, bool):
+        return "hard"
     if classes:
-        return "recoverable" if not o.get("valid", True) else "clean"
+        return "recoverable" if not flag else "clean"
     # census empty — the runner's binary flag is the only error signal.
-    return "hard" if not o.get("valid", True) else "clean"
+    return "hard" if not flag else "clean"
 
 
 def _failure_grade(error_class: Any) -> str:
@@ -302,15 +310,21 @@ def build_report(
         / partial_parse / transient_*) are rate-limited (a healthy 500-Q run
         admits a handful — the OLD binary ``len(errors)==0`` per-question
         invalid made ``valid=true`` unreachable at scale); hard classes
-        (fatal_* / unknown / non-census error strings / permanent eval
-        failures) veto the run at any threshold; the numbers are always
-        recorded, so no degraded run can masquerade as clean. Relationship
-        to issue #1746 (its plan docs/plans/2026-08-26-1746-parse-error-
-        robustness.md, D10 — lands with #1746): that plan deliberately does
-        NOT make ``integrity.valid`` its closing condition — the flag's
-        semantics are this issue's lane; the run-protocol step-5 gate string
-        (run_protocol.py) states the justified threshold for the 500-Q
-        baseline.
+        (fatal_* / ingest / unknown census classes, non-census error strings
+        with an EMPTY census, permanent eval failures) veto the run at any
+        threshold (a mixed recoverable+structural shape is rate-limited —
+        the #1746 lane); additive breakdown fields ``n_hard_invalid`` /
+        ``n_recoverable_invalid`` / ``recoverable_invalid_rate`` /
+        ``criterion`` ride the block, and malformed non-int census counts
+        are preserved verbatim in ``error_census_malformed`` (never mixed
+        into ``error_census``, never crashing the report); the numbers are
+        always recorded, so no degraded run can masquerade as clean.
+        Relationship to issue #1746 (its plan docs/plans/2026-08-26-1746-
+        parse-error-robustness.md, D10 — lands with #1746): that plan
+        deliberately does NOT make ``integrity.valid`` its closing condition
+        — the flag's semantics are this issue's lane; the run-protocol
+        step-5 gate string (run_protocol.py) states the justified threshold
+        for the 500-Q baseline.
       * ``leg_mix`` (D2) — per-leg ``match_source`` counts over the
         top_k context the reader saw + per-k over the deduped pool.
       * ``pool_size`` (D3) — live graph point count per question.
@@ -520,7 +534,10 @@ def build_report(
                 # crash the report nor vanish from the published record.
                 if isinstance(count, int) and not isinstance(count, bool):
                     census[cls] += count
-                elif count is None or isinstance(count, (str, float)):
+                elif count is None or isinstance(count, (str, float, bool)):
+                    # bool counts (JSON true/false) and other malformed
+                    # values are recorded in the separate field — the "never
+                    # vanishes" promise covers every malformed shape.
                     malformed_census.setdefault(cls, count)
         else:  # legacy flat-list shape (defensive back-compat) — non-iterable
             # values (malformed checkpoint JSON) are skipped here (the grader
@@ -532,7 +549,7 @@ def build_report(
         eclass = f.get("error_class")
         if isinstance(eclass, str) and eclass:
             census[eclass] += 1
-    error_census = dict(sorted(census.items()))
+    error_census = dict(sorted(census.items(), key=lambda kv: str(kv[0])))
     checks = [
         "python >= 3.12 guard enforced at run entry",
         "dataset loaded and recall-semantics audited",
@@ -559,7 +576,8 @@ def build_report(
         "n_recoverable_invalid": n_recoverable_invalid,
         "recoverable_invalid_rate": recoverable_invalid_rate,
         "error_census": error_census,
-        "error_census_malformed": (dict(sorted(malformed_census.items()))
+        "error_census_malformed": (dict(sorted(malformed_census.items(),
+                                                key=lambda kv: str(kv[0])))
                                     if malformed_census else {}),
         "criterion": (
             "#1747 census-class-aware: valid = (n_hard_invalid == 0) AND "

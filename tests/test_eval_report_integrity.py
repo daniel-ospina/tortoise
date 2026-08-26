@@ -12,14 +12,15 @@ extractor model reports its integrity on the same block.
 classes (parse_error / truncated / truncated_parse_error / partial_parse /
 transient_*) are rate-limited (a healthy run at 500-Q scale admits a handful
 — the old binary ``len(errors)==0`` invalidity made ``valid=true``
-unreachable); hard classes (fatal_* / unknown census classes / non-census
-error strings / permanent eval failures) veto the run at any threshold.
-Each qid is graded ONCE (failure-grade dominance on qid overlap —
-concurrent-checkpoint robustness); ``n_valid`` / ``n_invalid`` /
-``invalid_rate`` keep their previous semantics for the production shape; the
-breakdown rides in the additive ``n_hard_invalid`` /
-``n_recoverable_invalid`` / ``recoverable_invalid_rate`` / ``criterion``
-fields.
+unreachable); hard classes (fatal_* / ingest / unknown census classes /
+non-census error strings with an EMPTY census / permanent eval failures)
+veto the run at any threshold (a mixed recoverable+structural shape is
+rate-limited — the #1746 lane). Each qid is graded ONCE (failure-grade
+dominance on qid overlap — concurrent-checkpoint robustness); ``n_valid`` /
+``n_invalid`` / ``invalid_rate`` keep their previous semantics for the
+production shape; the breakdown rides in the additive ``n_hard_invalid`` /
+``n_recoverable_invalid`` / ``recoverable_invalid_rate`` / ``criterion`` /
+``error_census_malformed`` fields.
 """
 from __future__ import annotations
 
@@ -439,6 +440,56 @@ def test_report_integrity_mixed_malformed_and_int_census_counts():
     assert integ["error_census"] == {"parse_error": 3, "transient_network": 2}
     assert integ["error_census_malformed"] == {"parse_error": "abc"}
     assert integ["n_recoverable_invalid"] == 2
+
+
+def test_report_integrity_bool_and_mixed_key_census_robustness():
+    """#1747 (reviewer-pinned): bool counts (JSON true/false) are recorded in
+    error_census_malformed (never vanish from the record); mixed-type class
+    keys never crash the sorted() roll-up."""
+    # bool count on a hard class → veto fires AND the evidence is preserved.
+    integ = _report([_outcome("q0", valid=False,
+                              error_classes={"fatal_402_billing": True})],
+                    threshold=1.0)["integrity"]
+    assert integ["valid"] is False
+    assert integ["n_hard_invalid"] == 1
+    assert integ["error_census"] == {}
+    assert integ["error_census_malformed"] == {"fatal_402_billing": True}
+    # mixed-type class keys (programmatic-caller shape) do not crash.
+    integ = _report([_outcome("q0", valid=False,
+                              error_classes={5: 1, "parse_error": 2})],
+                    threshold=1.0)["integrity"]
+    assert integ["valid"] is False
+    assert integ["n_hard_invalid"] == 1  # non-str key fails closed
+    assert integ["error_census"]["parse_error"] == 2
+
+
+def test_report_integrity_non_bool_valid_flag_fails_closed():
+    """#1747 (security review): a PRESENT but non-bool ``valid`` flag
+    (``"valid": "false"`` from a schema-less checkpoint) is malformed input
+    — truthiness coercion would fail OPEN (certifying a structurally-degraded
+    run as clean), so the grader fails CLOSED to hard. A MISSING flag keeps
+    the historical back-compat default True (legacy pre-M7 checkpoints have
+    no flag at all — they are graded by their census)."""
+    outcomes = [_outcome("q0", valid=False, error_classes={})]
+    outcomes[0]["valid"] = "false"  # stringified flag — malformed
+    integ = _report(outcomes, threshold=1.0)["integrity"]
+    assert integ["valid"] is False
+    assert integ["n_hard_invalid"] == 1
+    # present non-bool flag with a recoverable census → also fail-closed.
+    outcomes = [_outcome("q0", valid=False,
+                         error_classes={"parse_error": 1})]
+    outcomes[0]["valid"] = "false"
+    integ = _report(outcomes, threshold=1.0)["integrity"]
+    assert integ["n_hard_invalid"] == 1
+    assert integ["valid"] is False
+    # missing flag → back-compat default True: graded by the census (a
+    # legacy pre-M7 checkpoint without the flag is clean when the census is
+    # empty — the historical n_valid behavior).
+    outcomes = [_outcome("q0", valid=True, error_classes={})]
+    del outcomes[0]["valid"]
+    integ = _report(outcomes, threshold=1.0)["integrity"]
+    assert integ["n_valid"] == 1
+    assert integ["valid"] is True
 
 
 def test_report_integrity_non_iterable_error_classes_fails_closed():
