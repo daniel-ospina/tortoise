@@ -458,6 +458,44 @@ class TestCmdTokenRevoke:
         assert json.loads(urlopen.call_args.args[0].data) == {
             "signup_token": token}
 
+
+    def test_token_revoke_confirm_case_variants(self, monkeypatch, tmp_path):
+        """#1755 review P2: case-insensitive y/yes (with whitespace) all
+        proceed — the prompt accepts any affirmative spelling."""
+        import tortoise.__main__ as main
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        for answer in ("Y", "YES", " y ", "yEs"):
+            token = "st_" + "ab" * 32
+            self._stored_cfg(tmp_path, signup_token=token)
+            with mock.patch("sys.stdin.isatty", return_value=True):
+                with mock.patch("builtins.input", return_value=answer):
+                    with mock.patch("urllib.request.urlopen",
+                                    return_value=_ok_json(
+                                        {"revoked": True, "already": False,
+                                         "team_id": "team-9"})) as urlopen:
+                        rc = main._cmd_token_revoke(mock.Mock(token=token, force=False))
+            assert rc == 0, f"answer {answer!r} should revoke"
+            assert urlopen.called, f"answer {answer!r} should send the request"
+
+    def test_token_revoke_confirm_eof_fails_closed(self, monkeypatch, tmp_path, capsys):
+        """#1755 review P2: stdin EOF at the prompt (isatty True but no
+        input) is treated as 'n' — abort, no revoke, no network."""
+        import tortoise.__main__ as main
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        token = "st_" + "cd" * 32
+        self._stored_cfg(tmp_path, signup_token=token)
+        with mock.patch("sys.stdin.isatty", return_value=True):
+            with mock.patch("builtins.input", side_effect=EOFError):
+                with mock.patch("urllib.request.urlopen") as urlopen:
+                    rc = main._cmd_token_revoke(mock.Mock(token=token, force=False))
+        assert rc == 1
+        urlopen.assert_not_called()
+        assert "Revoke aborted" in capsys.readouterr().err
+
     def test_token_revoke_force_skips_prompt(self, monkeypatch, tmp_path,
                                              capsys):
         """--force → revoked WITHOUT any prompt (input never called) — the
